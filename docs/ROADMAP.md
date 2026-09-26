@@ -1711,8 +1711,9 @@ would otherwise silently shrink into looking like nothing was ever found.
   `effective_caller` now REFUSES a `NET_TASK` request that states no identity
   rather than falling back to netd's root, and `netd`'s `AsUser::enter` makes a
   `cpu` child inherit the mapped user, so both doors below are shut. The
-  residual — an authorized *machine* may still claim any of its own users'
-  names — is frontier item 1 above, not this entry. The finding as originally
+  residual, that an authorized *machine* may still claim any user with an
+  account on the export, root included, is frontier item 1 above, not this
+  entry. The finding as originally
   recorded, left in present tense rather than rewritten:
 
   `netd` relays a remote

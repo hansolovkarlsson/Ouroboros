@@ -50,8 +50,9 @@ defence: one compromised node is root everywhere.
 
 **Closes:** a compromised node can no longer act as a user who has not logged
 in on it. The user's key exists only while that user is logged in on a node,
-derived from the password they type, and held by `accountd`. At rest there is
-nothing on the node to steal but a public key.
+derived from the password they type, and held by `netd` (Decision 4). At
+rest there is nothing on the node to steal but public keys and slow password
+hashes.
 
 **And, first, root:** a claimed root is refused unless the export explicitly
 trusts that peer with root, or (once step 7 lands) root's own credential
@@ -68,9 +69,11 @@ verifies.
   but a weak password stays weak. The slow derivation is only worth its login
   cost if nothing faster sits beside it, and today something does:
   `/etc/shadow` holds one SHA-256 of salt and password, a guess per hash, on
-  every node. So `/etc/shadow` moves onto the same derivation (Decision 10);
-  until it does, the public keys add no resistance the shadow file does not
-  already give away.
+  every node. So `/etc/shadow` moves to the same slow function, keeping its
+  random per-account salt (Decision 10). The cluster key's salt cannot be
+  random (it must be the same on every node), so a precomputed dictionary
+  for one realm serves every node in it: the realm must be unique per cluster
+  (Decision 2), and the dev realm is public on purpose.
 - **One-shot requests stay replayable**, as they are today. This plan changes
   who a request can claim to be, not whether it can be sent twice.
 - **Onward delegation.** A `cpu` command running on another node holds no
@@ -87,7 +90,9 @@ HMAC-SHA-512, which `ed25519/` already has. One PBKDF2 iteration is two
 SHA-512 compressions once the HMAC pads are precomputed. From step 2 of the
 session-auth arc (a MAC over a ~2 KB message, about 17 blocks, took 120 to
 160 µs under TCG) that is an **estimate** of 15 to 20 µs an iteration on the
-QEMU guest, so 100,000 iterations would be 1.5 to 2 s at login. That is an
+QEMU guest, so 100,000 iterations would be 1.5 to 2 s for one derivation, and
+a login on a node with a realm pays **two** (the shadow check and the cluster
+key, Decision 10), so 3 to 4 s. That is an
 estimate from a different measurement, and the iteration count is a wire
 constant every node must agree on forever (Decision 3), so it is measured, not
 assumed: `/bin/edtest` times the HMAC compression pair on the guest, and the
@@ -148,8 +153,16 @@ len(name):1 ‖ name` (each variable field length-prefixed, so no realm and
 name can concatenate to another pair's bytes: without the prefixes realm
 `ouroboros-dev` with user `x` and realm `ouroboros-de` with user `vx` would
 share a salt), where the
-**realm** is a per-cluster string staged at image build
-(`/etc/cluster/realm`, dev value `ouroboros-dev`). No node identity is in the
+**realm** is a per-cluster string (`/etc/cluster/realm`, at most 32 bytes)
+staged on every node of a cluster, the same everywhere. It must be **unique to
+the cluster**, because a dictionary precomputed for one realm serves every node
+in it: `clusterkey realm new` generates one from `RANDOM` on a node that has
+entropy (refusing without it, as `clusterkey new` does), and the administrator
+copies it to the others, as `authorized` lines are copied today. The dev value,
+`ouroboros-dev`, is public and fine for dev rigs only. A node with **no** realm
+file derives no cluster key and sends no credential; local login does not read
+the realm at all (Decision 10), so a missing, unreadable or edited realm can
+cost remote access and never a login. No node identity is in the
 derivation, so the same user with the same password has the same key on every
 node, which is what lets any node the user logs in on sign for them, and what
 an auth server would need. The realm keeps two clusters with the same user
@@ -157,63 +170,82 @@ name and password from sharing a key.
 
 **Decision 3: PBKDF2-HMAC-SHA-512, iteration count fixed on the wire.** The
 output's first 32 bytes are the Ed25519 seed. PBKDF2 needs nothing but the
-HMAC the tree has; scrypt and Argon2 would need memory `accountd` does not
+HMAC the tree has; scrypt and Argon2 would need memory the shell does not
 have and code nobody here has written. The iteration count is a normative
 constant in `ninep-abi` (all nodes must derive the same key), checked across
 all implementations by `scripts/check-wire-constants.py`, and chosen in step 0
-as the largest count that keeps a login on the QEMU guest at about one second.
+as the largest count that keeps a login on the QEMU guest, **two** derivations
+(Decision 10), within about three seconds.
 Raising it later changes every user's key, so it is chosen once, carefully.
 (OWASP's current figure for PBKDF2-HMAC-SHA-512 is 210,000; if the guest
 cannot afford that, the plan says so and records the gap rather than quietly
 picking a smaller number.)
 
-**Decision 4: `accountd` is the agent, and the only holder of a user key.**
-Plan 9's `factotum`, in the server that already owns the credential store:
+**Decision 4: `login` derives the key, and `netd` holds it.** *(Rewritten
+after the plan's second review, which found eight of its ten defects in the
+first review's repairs, six of them in an earlier version of this decision
+that made `accountd` the key holder. That version needed a lock notice from
+`accountd` to `netd`, capabilities in both directions, a blocking sign call
+from `netd`'s event loop, and a password oracle open to every task; each was a
+new way to fail. This version removes those parts rather than guarding them.)*
 
-- `ACCTOP_UNLOCK(name, password) -> handle`: `accountd` checks the password
-  itself (with Decision 10, by deriving the key and comparing it with the
-  stored public key, so a login pays one derivation, not two), and records a
-  **login handle**: the uid, the key, and the unlocking task's **packed task
-  identity** (slot and generation, the kernel's recycled-slot check from the
-  async arc's step 0). `login` calls it; `login` never sees the key.
-- `ACCTOP_LOCK(handle)`: ends that login. **Only the task that unlocked it may
-  lock it** (matched by packed identity), or root; anyone else is refused, so
-  no task can log another user out of the cluster.
-- `ACCTOP_USERSIGN(uid, nonce, name, machine pubkey, message digest)`: **Only
-  `netd` may ask**, checked by the sending task, not by a uid. `accountd`
-  builds the signed input itself, exactly Decision 8's, from these fixed-width
-  fields, and refuses unless `name` is the name of the uid's held key. `netd`
-  supplies the fields and never the bytes to be signed, so it cannot use the
-  agent to sign anything that is not a credential for a user who is logged in.
+- **`login` derives the key.** It already reads the password, so keeping the
+  key from it protected nothing. After checking the password against
+  `/etc/shadow` as it does today (Decision 10), and while the shell is still
+  root, `login` derives the user's key (Decisions 2, 3) if the node has a realm
+  (`/etc/cluster/realm`), hands it to `netd`, and wipes its own copy. No realm,
+  no key: a node that is not in a cluster logs in exactly as it does today.
+- **`NETOP_KEY_HOLD(uid, seed)`**: `netd` records a **held key**: the uid, the
+  seed, and the sender's **packed task identity** (slot and generation, the
+  kernel's recycled-slot check from the async arc's step 0). **Accepted only
+  from a sender whose `SENDER_ID` is uid 0**, so only a root task (in practice
+  `login`, before it drops privileges) can give `netd` a key. Nothing else in
+  the system can fill the table, so a full table (`MAX_HELD`, 4) refuses the
+  hold, never evicts, and `login` still succeeds, saying the cluster key is not
+  held.
+- **`NETOP_KEY_DROP`**: the shell sends it at logout, after restoring root.
+  Accepted from the task that held the key (packed identity) or from root;
+  anyone else is refused. It wipes the entry.
+- **A dead login's key goes too.** `netd` checks every held key's owner for
+  liveness in its idle pass, beside the idle reap it already runs, and wipes
+  the key of an owner that is gone. So a shell that crashes or is killed loses
+  its key within one idle period, not at some later operation. (If the kernel
+  has no read-only liveness query on a packed identity, step 4 adds one; the
+  recycled-slot check the async arc built answers the same question for a
+  send.)
+- **A session never outlives the keys that attest it.** When the last held
+  key for a uid is dropped or wiped, `netd` closes (FIN) every client session
+  it opened attested for that uid, in the same pass, before serving anything
+  else. It is the same task holding the keys and the sessions, so there is no
+  message to lose, spoof or reorder. The next request from that uid opens a new
+  session, which needs a credential.
+- **Signing is `netd`'s own.** `sign_parked` signs the credential with the held
+  key directly, as it signs with the machine key, so no call leaves `netd`'s
+  event loop. The uid a request is signed for is **captured when the request
+  is parked and stored in the parked request** beside the name, never read
+  from `SENDER_ID` at sign time, because `sign_parked` runs in the service pass
+  after other receives have replaced the captured credential (`caller_name`'s
+  doc says so).
 
-**Keys are held per login, not per uid.** The same user logged in twice (a
-nested shell) has two handles and one key, and the key is wiped when the
-**last** handle for its uid is locked. `su` asks for no password, so it unlocks
-nothing: a shell that became `user` through `su` has no key, and a remote
-request from it goes out uncredentialed, which an export where `user` is
-registered refuses. That is the intended reading of `su` here, and step 4's
-checks cover it.
+**What a key held here means, stated plainly.** Keys are held per login and
+used per uid: while `user` is logged in on a node, anything running there as
+uid 1000 can use the key, a shell that became `user` by `su` included. That is
+no more than root on that node can already do, and the threat this plan closes
+is a node acting as users who are **not** logged in on it. Two logins of one
+user hold the key twice; it stays usable until both are dropped. A `netd`
+restart loses every held key and every session with them, consistently: users
+log in again to make credentialed requests.
 
-**A login that ends without logging out** (a shell that crashes, a task killed)
-leaves a handle whose owner is gone. `accountd` drops every such handle at the
-start of each operation, checked through the packed identity, so a dead
-login's key does not outlive the next thing `accountd` is asked. The table is
-fixed-size (`MAX_HELD`, 4 handles); an unlock into a full table of live handles
-is **refused, never evicting**, and `login` still succeeds, says the cluster
-key is not held, and the user's remote requests go out uncredentialed.
-
-**A session never outlives the key that opened it.** A keyed session attested
-by a user credential carries no name after its `NP_SESSION`, so it would
-otherwise keep acting as the user after logout, until the idle reap. So when a
-uid's last handle is locked or dropped, `accountd` sends `netd` a
-`NETOP_USER_LOCKED(uid)`, and `netd` closes (FIN) every client session attested
-for that uid before it answers anything else. The export sees the connection
-end, and the next request from that uid opens a new session, which needs a
-credential.
-
-`netd` holds no user key at any time. The kernel grants `netd` `TO_ACCT` and
-`accountd` `TO_NET`, neither of which exists today (`tasks.rs`: `NET_TASK`
-holds `TO_FSD | TO_CON | CAP_NET`, `ACCT_TASK` holds `TO_FSD | TO_CON`).
+**Why `netd` and not `accountd`.** `netd` is the network-facing server, and
+holding user keys there means a code-execution bug in it can read the keys of
+users logged in at that moment. But it already reads files as `FirstParty`,
+its own credential, which is root's (that is how it reads the 0600
+`/etc/cluster/id`), so it can already read `/etc/shadow` and anything else,
+and it holds the machine key; a compromise of `netd` is already close to a
+compromise of the node, which is the case this plan states it does not cover.
+Against that small loss, putting the keys where they are used removes every
+cross-server mechanism the earlier version needed. `accountd` keeps one new
+job, below, and no key.
 
 **Decision 5: the credential is required per user, not per node.** A user
 **with a registered public key** at an export cannot be claimed there without a
@@ -261,11 +293,12 @@ is never a way around the squash. Step 7 tests both halves.
 NP message. Kind 1 is a user signature: Ed25519 by the user's key over
 `SIG_DOMAIN_USER ‖ nonce:16 ‖ name:32 ‖ calling machine's public key:32 ‖
 SHA-512(NP message):64`, every field fixed-width (the name NUL-padded, as in
-`AUTHNP03`). This is the one definition: `accountd` builds exactly these bytes
-from the fields `netd` passes (Decision 4), `netd`'s export and
-`np9p_server.py` verify exactly these bytes, and `np9p_client.py` signs them.
-Who hashes what is fixed too: the client's `netd` computes the SHA-512 of the
-NP message it is about to send and passes the digest; nobody else hashes it. The machine key is inside it, so a credential lifted off
+`AUTHNP03`). This is the one definition: the client's `netd` builds and signs
+exactly these bytes with the held key (Decision 4), `netd`'s export and
+`np9p_server.py` verify exactly these bytes, and `np9p_client.py` builds and
+signs them the same way. Each side computes the SHA-512 of the NP message
+itself, the signer over what it sends and the verifier over what it received.
+The machine key is inside it, so a credential lifted off
 the wire cannot be replayed from another machine, and the nonce and message
 hash bind it to this request. **A future ticket is kind 2**, a new kind and
 not a new format, which is the whole of "not blocking future features" for
@@ -285,29 +318,36 @@ local users do not get to read them). Its size is a stack budget like
 line to add; putting it on the other nodes is by hand, as `authorized` lines
 are today. That is the N² cost Decision 1 accepts.
 
-**Decision 10: `/etc/shadow` moves onto the same derivation.** Today a shadow
-line is `name:salt:SHA-256(salt ‖ password)`, one fast hash, readable by root
-on every node, so an attacker who reaches root anywhere guesses at the speed of
-SHA-256 and the slow derivation of Decision 3 buys nothing. A **version-2**
-shadow line is `name:2:<pubkey-hex>`: the public half of the user's key under
-Decisions 2 and 3. Checking a password is deriving the key and comparing the
-public key, so a login pays one derivation, the stored secret is as slow to
-attack as the registry, and there is no second, faster copy of the same
-password anywhere. A version-1 line still verifies the old way and is rewritten
-as version 2 by `accountd` at that user's next successful unlock (`accountd`
-is already the shadow file's writer). `useradd`, `passwd` and `mkpasswd.py`
-write version 2 only.
+**Decision 10: `/etc/shadow` moves to the same slow function, with its own
+random salt.** Today a shadow line is `name:salt:SHA-256(salt ‖ password)`,
+one fast hash, readable by root on every node, so an attacker who reaches root
+anywhere guesses at the speed of SHA-256 and the slow derivation of Decision 3
+buys nothing. A **version-2** shadow line is `name:2:<salt-hex>:<hash-hex>`,
+where the hash is PBKDF2-HMAC-SHA-512 of the password over the line's own
+**random per-account salt**, with Decision 3's iteration count. It is
+independent of the realm and of the cluster key on purpose: local login never
+reads a cluster file, so no cluster misconfiguration can lock anyone out, and
+a random salt keeps the shadow file safe from a dictionary precomputed for a
+realm. The cost is that a login on a node with a realm pays two derivations,
+which step 0's measurement budgets.
 
-The shadow file and the registry stay **two files** even though, for a user
-whose password is the same everywhere, they hold the same public key. They
-answer different questions: shadow says whether this person can log in here,
+A version-1 line still verifies the old way. After a successful version-1
+login, `login` asks `accountd` to upgrade it (`ACCTOP_UPGRADE(name,
+password)`, **root-only**, re-verifying the version-1 hash before writing), so
+`accountd` stays the shadow file's only writer, and the slow derivation it
+does there blocks nothing but that login: no other server calls `accountd`
+synchronously. `useradd`, `passwd` and `mkpasswd.py` write version 2 only.
+Salts come from `RANDOM` where there is one and from today's documented weak
+fallback where there is not, which is unchanged by this plan.
+
+The shadow file and the registry stay **two files**, and now hold different
+things (a salted hash here, a public key there). They answer different
+questions: shadow says whether this person can log in here,
 the registry says whether a remote machine's claim of this person needs their
 credential here (Decision 5). Registering is a deliberate act by the export's
 administrator; merging the two would turn attestation on implicitly for every
 local account, and would make a local password change silently change what
-remote claims need. The duplication is checked, not trusted: `clusterkey`
-gains a `users` subcommand that reports every registry line whose name has a
-version-2 shadow line with a different key.
+remote claims need.
 
 ### Alternatives rejected
 
@@ -360,33 +400,41 @@ itself.
    a foreign implementation, generated by a script checked in beside them.
    *Control:* a flipped bit in a vector's password, salt or output fails its
    test; an off-by-one iteration count fails.
-3. **The user key, the registry and version-2 shadow** (Decisions 2, 3, 9,
-   10). `clusterkeys` parses and formats `/etc/cluster/users` and derives a
-   user key from name, realm and password, with the length-prefixed salt;
-   `accounts` parses and formats a version-2 shadow line and still verifies a
-   version-1 one. `scripts/mkclusterkeys.py` derives the dev users' keys
-   (`root`/`root`, `user`/`user`, realm `ouroboros-dev`) **independently**, not
-   through a shared helper, and stages the registry and the realm;
-   `mkpasswd.py` writes version-2 shadow. *Check:* the Rust and Python
-   derivations agree for every dev user, and a version-2 line verifies the
-   right password and refuses a wrong one. *Controls:* reorder the salt in
-   one of them and they disagree; drop the length prefixes and the
-   `ouroboros-dev`/`x` and `ouroboros-de`/`vx` pair derive the same key, which
-   a test asserts they must not.
-4. **`accountd` as the agent** (Decisions 4 and 10), and `netd`'s `TO_ACCT`
-   and `accountd`'s `TO_NET` in the kernel. `login` unlocks and keeps the
-   handle; logout locks it. `accountd` upgrades a version-1 shadow line at the
-   next unlock. *Check:* after a login, a probe task standing in for `netd`
-   gets a signature over Decision 8's bytes that verifies under the registered
-   key. *Controls:* a signature request from any task but `netd` is refused
-   (removing the check makes the probe's refusal test fail); a sign request
-   naming another user than the held key's is refused; a wrong password holds
-   nothing; a lock from a task that did not unlock is refused; two logins of
-   one user, one logs out, and the other still gets signatures; the last
-   logout wipes, so the next sign request is refused; a login shell killed
-   without logging out loses its key at `accountd`'s next operation; a fifth
-   unlock with four live handles is refused, not evicting; a shell that became
-   `user` by `su` gets no signature.
+3. **The user key, the registry, the realm and version-2 shadow** (Decisions
+   2, 3, 9, 10). `clusterkeys` parses and formats `/etc/cluster/users` and the
+   realm, and derives a user key from name, realm and password, with the
+   length-prefixed salt; `clusterkey realm new` generates a realm and refuses
+   without entropy. `accounts` parses, formats and verifies a version-2 shadow
+   line (random salt, PBKDF2) and still verifies a version-1 one.
+   `scripts/mkclusterkeys.py` derives the dev users' keys (`root`/`root`,
+   `user`/`user`, realm `ouroboros-dev`) **independently**, not through a
+   shared helper, and stages the registry and the realm; `mkpasswd.py` writes
+   version-2 shadow. *Check:* the Rust and Python derivations agree for every
+   dev user, and a version-2 line verifies the right password and refuses a
+   wrong one. *Controls:* reorder the salt in one of them and they disagree;
+   drop the length prefixes and the `ouroboros-dev`/`x` and `ouroboros-de`/`vx`
+   pair derive the same key, which a test asserts they must not; a
+   version-2 shadow line verifies identically with the realm file present,
+   absent and edited, which a test asserts, so local login cannot depend on it.
+4. **Holding keys: `login`, the shell and `netd`** (Decisions 4 and 10).
+   `login` checks the password as today (version 1 or 2), asks `accountd` to
+   upgrade a version-1 line, derives the cluster key when there is a realm,
+   and sends `NETOP_KEY_HOLD` before dropping to the user; the shell sends
+   `NETOP_KEY_DROP` at logout. `netd` keeps the held-key table, checks owners'
+   liveness in its idle pass, and closes a uid's attested sessions when its last
+   key goes (step 8 has sessions to close; this step exercises the table).
+   *Check:* after a login, a probe asking `netd` what it holds (a
+   diagnostic-only verb, root-only) sees the uid; after logout it does not.
+   *Controls:* a `KEY_HOLD` from a non-root task is refused (removing the check
+   lets a user's probe fill the table, which the check then sees); a
+   `KEY_DROP` from a task that did not hold the key and is not root is refused;
+   two logins of one user, one logs out, and the key is still held; a login
+   shell killed without logging out loses its key within one idle period
+   (removing the liveness check keeps it, which the check sees); a fifth hold
+   with four live keys is refused, not evicting, and that login still
+   succeeds; a node with no realm holds nothing and logs in normally;
+   `ACCTOP_UPGRADE` from a non-root task is refused, and a version-1 line reads
+   as version 2 after one login.
 5. **The wire, in `ninep-abi`** (Decision 8). `AUTHNP05`, the credential
    block, kind 1, the new domain tags, the iteration count and the realm rule,
    all in the normative block; `SIG_DOMAIN_MAX` recomputed. The wire check
@@ -413,8 +461,9 @@ itself.
    against the squash, as checks, not mutations: a `cpu` run as root from an
    unflagged machine gets its `/host` reads refused, from a flagged one
    served. Stack measured at the new peak, against `STACK_PAGES` 14.
-8. **The client, in `netd`.** For a caller whose uid has a key held in
-   `accountd`, `sign_parked` asks for a user signature and frames `AUTHNP05`;
+8. **The client, in `netd`.** Every park captures the caller's uid and stores
+   it beside the name. For a parked request whose uid has a held key,
+   `sign_parked` signs the credential itself and frames `AUTHNP05`;
    a keyed session asks once, at its `NP_SESSION`. A caller with no key held
    sends `AUTHNP03` as today. *Check:* on the two-node ext2 rig, `user` logs
    in on B and reads a `user`-only file on A through a keyed session and a path
@@ -422,13 +471,18 @@ itself.
    misbehaving mode from step 6 aimed at `netd`'s export; `user` logged out on
    B (key locked) is refused at A. **The session case explicitly:** `user`
    opens a keyed session to A, logs out on B, and a request from uid 1000 on B
-   (another shell, or root after `su user`) must not ride the old session: the
-   capture shows B's FIN on it at the logout, and the request opens a new
-   session, uncredentialed, which A refuses. Without `NETOP_USER_LOCKED` it
-   would be served as the attested user, which is the control. The census
+   (another shell, or root after `su user` once `user` has logged out) must
+   not ride the old session: the capture shows B's FIN on it at the logout,
+   and the request opens a new session, uncredentialed, which A refuses.
+   Removing the close on the last drop lets it be served as the attested user,
+   which is the control. The same with the login shell killed instead of
+   logged out: the FIN comes within one idle period. And a request parked for
+   uid 1000 while other callers' messages arrive before `sign_parked` runs is
+   signed for uid 1000, which a mutation reading `SENDER_ID` at sign time
+   fails. The census
    learns `AUTHNP05` **before** the
    measurement. *Measured:* the added cost per one-shot request and per session
-   open (an IPC round trip to `accountd` plus a sign and a verify), in absolute
+   open (a sign on the client and a verify on the export), in absolute
    µs, from the capture as well as a probe.
 9. **Docs, rigs and the release.** The normative block, `manual.md`'s cluster
    section and its trust paragraph, `architecture.md` (the agent), the man
@@ -444,27 +498,27 @@ itself.
    requests claim root. Step 1 counts them before changing the rule, and flags
    exactly the dev peers they need. A rig that goes red for this reason is the
    squash working, and has to be told apart from a regression.
-3. **`netd`'s stack.** The client adds an IPC round trip in `sign_parked` and
-   the export a second verify beside the machine signature, and the registry is
-   resident like `authorized`. `sign_parked` has about 10 KB of headroom; the
+3. **`netd`'s stack.** The client adds a second Ed25519 sign in `sign_parked`
+   and the export a second verify beside the machine signature. The registry
+   is resident like `authorized`, and so is the held-key table (`MAX_HELD` ×
+   about 48 bytes on `serve`'s frame, the session-auth arc's resident-state
+   lesson again), so both are counted, not assumed. `sign_parked` has about 10 KB of headroom; the
    export's peak is the keyed `NP_SESSION`. Measured in steps 7 and 8, with the
    session-auth arc's lesson that a second caller can un-inline a frame.
-4. **`accountd` grows from one op to four,** and becomes a secret holder. It
-   is small on purpose. The key table is fixed-size, the sign op signs only
-   under its own domain tag (so `netd` cannot turn it into a general signing
-   oracle), and a review at high effort is part of step 4.
+4. **`netd` becomes a user-key holder.** A code-execution bug in `netd`
+   would expose the keys of the users logged in at that moment. Decision 4
+   states why that is accepted (`netd` is already root-equivalent in what it
+   can read, and holds the machine key). The table is small and fixed, only a
+   root sender can fill it, keys are wiped on drop, on an owner's death and on
+   `Drop`, and a review at high effort is part of step 4.
 5. **Three implementations of a key derivation.** Rust, `mkclusterkeys.py` and
    `np9p_client.py` must agree byte for byte, and a mismatch reads as a wrong
    password. The vectors come from a foreign implementation, and step 3's
    control is the independence of the two derivations.
-6. **Two servers that now call each other.** `netd` calls `accountd` to sign,
-   and `accountd` tells `netd` a key is locked. If either did so with a
-   blocking `MSG_CALL` while the other was blocked calling it, both would
-   hang. So `NETOP_USER_LOCKED` is a one-way `MSG_SEND` that `accountd` never
-   waits on, `netd` handles it from its mailbox pass like any other request,
-   and `netd` never calls `accountd` from inside that handler. Step 4 states
-   the rule where the two message kinds are defined, and step 8's logout check
-   exercises it with a sign request in flight.
+6. **Login gets slower.** Two derivations at a login on a node with a realm
+   (Decision 10), so the iteration count trades login time against guessing
+   cost. Step 0 measures it, and the count is recorded with the login time it
+   costs on the QEMU guest, the slowest platform, so the trade is visible.
 7. **Firmware and hardware.** The Pi 4 has no cluster networking yet, so the
    arc is QEMU-only, like the rest of the cluster. Login does run on the Pi, and
    the KDF's cost there is recorded when it can be booted.

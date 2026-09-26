@@ -108,7 +108,7 @@ isolated, comprehensible microkernel you can read in an afternoon.
 | You gain | You give up |
 |---|---|
 | **Rust** memory safety (Plan 9 is C). | **Completeness and coherence** — Plan 9 is a finished OS: 9P everywhere, a real window system (rio/acme), a full toolchain, self-hosting, multiple architectures. |
-| **MMU-enforced isolation + supervision/self-heal** across process boundaries, plus a **capability send-mask** governing who-may-call-whom. | Per-user **keyed** authentication (factotum/secstore) — Ouroboros has the user model (accounts, groups, enforced modes, and a remote request that carries who is asking), but the *key* is per-machine, so an authorized machine can claim any user with an account on the export, root included; no on-the-wire encryption, trusted-LAN by design. |
+| **MMU-enforced isolation + supervision/self-heal** across process boundaries, plus a **capability send-mask** governing who-may-call-whom. | Per-user **keyed** authentication (factotum/secstore). Ouroboros has the user model (accounts, groups, enforced modes, and a remote request that carries who is asking), but the *key* is per-machine, so an authorized machine can claim any user with an account on the export, root included; no on-the-wire encryption, trusted-LAN by design. |
 | Runs on **modern ARM64/UEFI/Apple Silicon** and real hardware, actively built. | The **finished namespace model** — Plan 9 has fids, union mounts, and full per-process namespaces; Ouroboros **deferred fids** (path-per-op) and has a subset. |
 
 *In one line:* Ouroboros has the *shape* of Plan 9 with a fraction of its
