@@ -892,7 +892,11 @@ def do_keyed_gate(host, port, data_path, low_user):
         detail = (f"as {low_user} -> {status_name(st_lo) if not served(st_lo) else 'SERVED'}, "
                   f"as root -> {status_name(st_hi) if not served(st_hi) else 'served'}")
         if served(st_lo) and served(st_hi):
-            detail += " (both served: a FAT32 image enforces no modes; run this on the ext2 image)"
+            # Two causes, and the gate cannot tell them apart, so it names
+            # both: a mutation that ran every verb as root read exactly like
+            # this on the ext2 image, under a hint that blamed FAT32.
+            detail += (" (both served: the export ran the verb as someone other than the"
+                       " session's user, or the image is FAT32, which enforces no modes)")
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
     check("a path verb on a keyed session runs as the session's user", ok, detail)
