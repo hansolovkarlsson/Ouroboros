@@ -3142,7 +3142,16 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         // export gateway (cluster Phase 1). Both stage a response in `c.prefix`
         // for pump_send to stream.
         if c.local_port == ninep_abi::NP_NET_PORT {
-            if handle_9p(c, request, dials, mac, auth, sessions) {
+            // A keyed connection is dispatched HERE, beside handle_9p and not
+            // under it: called from inside handle_9p, every keyed verb ran with
+            // that frame beneath it as well as its own, and peaked 1,520 bytes
+            // deeper than the same verb signed (step 6's probe, per verb).
+            let abort = if c.keyed.is_some() {
+                serve_keyed(c, request, dials, mac)
+            } else {
+                handle_9p(c, request, dials, mac, auth, sessions)
+            };
+            if abort {
                 // An authentication failure on a keyed session, or a key
                 // offered where none may be: close with NO reply (ninep-abi,
                 // "Keyed sessions"). An RST rather than a FIN, so the client's
@@ -3407,15 +3416,13 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// authentication failure on a keyed session, or a key offered anywhere but a
 /// fresh connection's first frame (docs/roadmap/roadmap-session-auth.md,
 /// Decision 4). Nothing is staged then; the caller sends the RST.
+///
+/// Never reached on a KEYED connection: the caller sends those to
+/// [`serve_keyed`], which takes `AUTHNP04` and nothing else, so an `AUTHNP03`
+/// frame there is not a request to authenticate, it is a refusal.
 fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth, sessions: usize) -> bool {
     let first = !c.carried;
     c.carried = true;
-    // A keyed connection takes AUTHNP04 and nothing else, so it is decided
-    // before any signed-frame parsing: an AUTHNP03 frame here is not a request
-    // to authenticate, it is a refusal.
-    if c.keyed.is_some() {
-        return serve_keyed(c, request, dials, mac);
-    }
     // Authenticate first: verify the client's Ed25519 signature over the request
     // and recover the bare NP message. A failure (an unauthorized key, a bad
     // signature, or an unconfigured export) is refused before any verb runs -
@@ -3679,7 +3686,7 @@ fn keyed_tag(key: &[u8; ninep_abi::NP_SESSION_KEY_LEN], seq: u64, data: &[u8]) -
 #[inline(never)]
 fn serve_keyed(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6]) -> bool {
     let Some(k) = c.keyed.as_mut() else {
-        return true; // unreachable: the caller checked; closing is the safe answer
+        return true; // unreachable: the caller dispatches only a keyed connection here; closing is the safe answer
     };
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     let need = p + ninep_abi::NP_AUTH_HDR_KEYED;
