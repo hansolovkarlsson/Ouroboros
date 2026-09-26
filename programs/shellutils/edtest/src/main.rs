@@ -308,7 +308,9 @@ const PBKDF2_V210: [u8; 64] = [
 
 /// The count every node derives with (Decision 3; a wire constant in
 /// `ninep-abi` from step 5, when this should read it from there).
-const PBKDF2_COUNT: u32 = 210_000;
+/// `PBKDF2_V210` is `hashlib`'s answer at THIS count, which
+/// `scripts/gen-pbkdf2-vectors.py --check` holds true on every `make test`.
+const PBKDF2_COUNT: NonZeroU32 = nonzero(210_000);
 
 /// Iterations in the shorter timed PBKDF2 run; the longer is twice this, so
 /// the calibration can ask whether the time doubled.
@@ -333,36 +335,46 @@ const PBKDF2_CANDIDATES: [u64; 2] = [100_000, 210_000];
 /// plan this timed a copy of the pad priming written here, because the crate
 /// had no PBKDF2; the copy is gone.)
 #[inline(never)]
-fn time_pbkdf2(n: u32) -> u64 {
+fn time_pbkdf2(n: NonZeroU32) -> u64 {
     let mut out = [0u8; 64];
     let t0 = ulib::monotonic_us();
-    pbkdf2_hmac_sha512(b"user", b"a salt", nonzero(n), &mut out);
+    pbkdf2_hmac_sha512(b"user", b"a salt", n, &mut out);
     let t1 = ulib::monotonic_us();
     core::hint::black_box(out);
     t1 - t0
 }
 
-/// `n` as the crate's iteration type. Every caller here passes a positive
-/// constant, so a zero is this file's bug.
-fn nonzero(n: u32) -> NonZeroU32 {
-    NonZeroU32::new(n).unwrap_or(NonZeroU32::MIN)
+/// `n` as the crate's iteration type, for CONSTANTS ONLY: evaluated in a
+/// `const`, a zero fails the build. It used to run at runtime and turn a zero
+/// into 1 without a word, bringing back the count the crate's `NonZeroU32`
+/// exists to make unspellable.
+const fn nonzero(n: u32) -> NonZeroU32 {
+    match NonZeroU32::new(n) {
+        Some(n) => n,
+        None => panic!("a PBKDF2 iteration count must be positive"),
+    }
 }
+
+/// The two timed runs' counts, the second twice the first.
+const PBKDF2_N1: NonZeroU32 = nonzero(PBKDF2_N);
+const PBKDF2_N2: NonZeroU32 = nonzero(PBKDF2_N * 2);
 
 /// Whether the crate's PBKDF2 gives `hashlib`'s answer on this machine, for
 /// the two vectors above, and the microseconds the 210,000 one took.
 #[inline(never)]
 fn pbkdf2_vectors() -> (bool, bool, u64) {
     let mut out = [0u8; 64];
-    pbkdf2_hmac_sha512(b"password", b"salt", nonzero(2), &mut out);
-    let two = out == PBKDF2_V2;
+    const TWO: NonZeroU32 = nonzero(2);
+    pbkdf2_hmac_sha512(b"password", b"salt", TWO, &mut out);
+    let v2_ok = out == PBKDF2_V2;
     let t0 = ulib::monotonic_us();
-    pbkdf2_hmac_sha512(b"user", b"ouroboros-dev", nonzero(PBKDF2_COUNT), &mut out);
+    pbkdf2_hmac_sha512(b"user", b"ouroboros-dev", PBKDF2_COUNT, &mut out);
     let t1 = ulib::monotonic_us();
-    (two, out == PBKDF2_V210, t1 - t0)
+    (v2_ok, out == PBKDF2_V210, t1 - t0)
 }
 
 /// The fastest of three timed runs of `n` iterations.
-fn fastest_pbkdf2(n: u32) -> u64 {
+fn fastest_pbkdf2(n: NonZeroU32) -> u64 {
     let mut best = u64::MAX;
     for _ in 0..3 {
         best = best.min(time_pbkdf2(n));
@@ -376,8 +388,8 @@ fn fastest_pbkdf2(n: u32) -> u64 {
 ///
 /// TWO CHECKS BEFORE THE NUMBER IS BELIEVED. The derivation must match
 /// `hashlib` on this machine (`pbkdf2_vectors`), and the time must SCALE:
-/// twice the iterations has to take about twice as long, or the loop was optimised away, the clock is
-/// too coarse, or a stall dominated the run. The band is wide (1.6 to 3.0)
+/// twice the iterations has to take about twice as long, or the loop was
+/// optimised away, the clock is too coarse, or a stall dominated the run. The band is wide (1.6 to 3.0)
 /// because other tasks' ticks land inside a run: boots have read 1.8 to 2.4.
 /// It has refused twice already, for the two causes described at
 /// `PBKDF2_N` and in the body below.
@@ -388,19 +400,26 @@ fn fastest_pbkdf2(n: u32) -> u64 {
 #[inline(never)]
 fn report_pbkdf2(target: u64) -> u32 {
     let mut failures = 0u32;
-    let (two, full, full_us) = pbkdf2_vectors();
-    if two {
+    let (v2_ok, v210_ok, v210_us) = pbkdf2_vectors();
+    if v2_ok {
         out(target, b"  [ok]   PBKDF2 matches hashlib at 2 iterations\r\n");
     } else {
         out(target, b"  [FAIL] PBKDF2 differs from hashlib at 2 iterations\r\n");
         failures += 1;
     }
-    if full {
-        out(target, b"  [ok]   PBKDF2 matches hashlib at 210000 iterations, in ");
-        put_dec(target, full_us / 1000);
-        out(target, b" ms (one derivation)\r\n");
+    // The time is ONE run, printed as such: it follows printed lines, so it
+    // can carry the transient the fastest-of-three below exists to drop. The
+    // calibrated figure is the per-iteration one.
+    if v210_ok {
+        out(target, b"  [ok]   PBKDF2 matches hashlib at ");
+        put_dec(target, PBKDF2_COUNT.get() as u64);
+        out(target, b" iterations, in ");
+        put_dec(target, v210_us / 1000);
+        out(target, b" ms (one derivation, a single run)\r\n");
     } else {
-        out(target, b"  [FAIL] PBKDF2 differs from hashlib at 210000 iterations\r\n");
+        out(target, b"  [FAIL] PBKDF2 differs from hashlib at ");
+        put_dec(target, PBKDF2_COUNT.get() as u64);
+        out(target, b" iterations\r\n");
         failures += 1;
     }
     // The FASTEST of three runs at each size. A single run carried about
@@ -408,10 +427,10 @@ fn report_pbkdf2(target: u64) -> u32 {
     // of three dropped the 5,000-iteration figure from 38.8 ms to 13.4 ms. The
     // likely cause, not proven: the run starts right after a line is printed,
     // and the console server renders it on the same CPU. Another task can only
-    // make a run slower, so the minimum drops that. It does not drop the tick losses `PBKDF2_N`
-    // describes, which every run of this length pays alike.
-    let one = fastest_pbkdf2(PBKDF2_N);
-    let two = fastest_pbkdf2(PBKDF2_N * 2);
+    // make a run slower, so the minimum drops that. It does not drop the tick
+    // losses `PBKDF2_N` describes, which every run of this length pays alike.
+    let one = fastest_pbkdf2(PBKDF2_N1);
+    let two = fastest_pbkdf2(PBKDF2_N2);
     out(target, b"    PBKDF2 x");
     put_dec(target, PBKDF2_N as u64);
     out(target, b" = ");
@@ -603,7 +622,8 @@ fn work(secret: &[u8; 32], op: Op) {
 #[inline(never)]
 fn work_pbkdf2(secret: &[u8; 32]) {
     let mut out = [0u8; 64];
-    pbkdf2_hmac_sha512(secret, b"stack measurement", nonzero(3), &mut out);
+    const THREE: NonZeroU32 = nonzero(3);
+    pbkdf2_hmac_sha512(secret, b"stack measurement", THREE, &mut out);
     core::hint::black_box(out);
 }
 

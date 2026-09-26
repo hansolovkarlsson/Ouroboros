@@ -48,12 +48,20 @@ fn mac(inner: &Sha512, outer: &Sha512, parts: &[&[u8]]) -> [u8; HMAC_LEN] {
 ///
 /// A password longer than 128 bytes is hashed first, as HMAC requires, so
 /// every length is accepted.
+///
+/// # Panics
+///
+/// On an output longer than `(2^32 - 1) * 64` bytes, which RFC 8018 section
+/// 5.2 step 1 makes an error ("derived key too long"): past it the 32-bit block
+/// index would wrap and the output would repeat. No caller comes near it; the
+/// assert states the precondition rather than a comment.
 pub fn pbkdf2_hmac_sha512(password: &[u8], salt: &[u8], iterations: NonZeroU32, out: &mut [u8]) {
+    assert!(out.len() / HMAC_LEN < u32::MAX as usize, "PBKDF2: derived key too long");
     let (inner, outer) = primed_pads(password);
     for (i, chunk) in out.chunks_mut(HMAC_LEN).enumerate() {
-        // INT(i): the block index, 32-bit big-endian, from 1. A caller would
-        // need 2^32 blocks (256 GiB of output) to wrap it.
-        let index = (i as u32).wrapping_add(1).to_be_bytes();
+        // INT(i): the block index, 32-bit big-endian, from 1. The assert
+        // above keeps it below 2^32.
+        let index = (i as u32 + 1).to_be_bytes();
         let mut u = mac(&inner, &outer, &[salt, &index]);
         let mut t = u;
         for _ in 1..iterations.get() {
@@ -120,14 +128,13 @@ mod tests {
     /// The step's controls, as a test: each vector must SEE a flipped bit in
     /// its password and in its salt, and an iteration count one either side.
     /// A table whose rows all passed with any of those changed would be a check
-    /// that cannot fail. The 210,000 row is left out of the ±1 runs only for
-    /// time; its ±1 is the same code as every other row's.
+    /// that cannot fail. The 210,000 row, the count every node derives with,
+    /// takes the password and salt flips like every other row; it skips only
+    /// the ±1 runs, for time, since its ±1 is the same code as every other
+    /// row's and they run it.
     #[test]
     fn every_vector_discriminates() {
         for &(name, pw, salt, c, dk) in VECTORS {
-            if c > 10_000 {
-                continue;
-            }
             let (mut pb, mut sb, mut db) = ([0u8; 256], [0u8; 256], [0u8; 256]);
             let (pw, salt, dk) = (unhex(pw, &mut pb), unhex(salt, &mut sb), unhex(dk, &mut db));
             let n = dk.len();
@@ -142,6 +149,9 @@ mod tests {
                 s2[..salt.len()].copy_from_slice(salt);
                 s2[salt.len() - 1] ^= 0x80;
                 assert_ne!(&derive(pw, &s2[..salt.len()], c, n)[..n], dk, "{name}: a flipped salt bit");
+            }
+            if c > 10_000 {
+                continue;
             }
             assert_ne!(&derive(pw, salt, c + 1, n)[..n], dk, "{name}: one iteration more");
             if c > 1 {

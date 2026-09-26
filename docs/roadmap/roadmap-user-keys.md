@@ -244,25 +244,46 @@ this half.
 ### Step 2's results (2026-09-26): PBKDF2 in `ed25519/`
 
 `pbkdf2_hmac_sha512(password, salt, iterations: NonZeroU32, out)`, RFC 8018
-over the crate's HMAC, sharing its key handling (`key_block`, factored out of
-`HmacSha512::new`) and priming both pads once. Twelve vectors from
+over the crate's HMAC, sharing its key handling and pad construction with
+`HmacSha512` and priming both pads once. An output past RFC 8018's limit
+(`(2^32 - 1) * 64` bytes) panics rather than wrapping the block index. Twelve vectors from
 `scripts/gen-pbkdf2-vectors.py` (Python's `hashlib`, OpenSSL underneath):
 iterations 1, 2, 3, 4,096 and **210,000**, outputs of 32, 64, 65 and 128
 bytes, an empty password and salt, a 128-byte password and a 129-byte one that
 must be hashed first, and binary bytes. All matched on the first run.
 
 **Controls, measured.** A test asserts every vector sees a flipped password
-bit, a flipped salt bit, and one iteration more or fewer. Against the code: one
-extra iteration, the block index counted from 0, and a long password used
-without hashing each fail the vector test.
+bit and a flipped salt bit, the 210,000 row included, and every row but that
+one an iteration more or fewer (its ±1 is skipped for time only). Against the
+code: one extra iteration, the block index counted from 0, and a long password
+used without hashing each fail the vector test. `gen-pbkdf2-vectors.py --check`,
+run by `make test`, recomputes the crate's table and `edtest`'s two copies with
+`hashlib` (shown failing on an edited table row, an edited `edtest` byte, and
+`edtest`'s count changed without its vector).
 
 **On the target.** `/bin/edtest` now times the crate's function (step 0's copy
 is deleted) and checks two of the vectors on the guest, the 210,000 one
-included: **one real derivation takes 0.97 to 0.98 s**, 4.2 µs an iteration,
-faster than step 0's 5.2 µs because the crate's loop is tighter than the copy
-was. A login's two derivations are therefore about 2 s. PBKDF2's peak stack is
-4,480 bytes of 57,344, calibrated like the others, which is what step 4's
-`login` adds to the shell.
+included. PBKDF2's peak stack is 4,480 bytes of 57,344, calibrated like the
+others, which is what step 4's `login` adds to the shell.
+
+**The per-iteration figure moves with code placement, not code: 3.9 to 6.2 µs
+under TCG.** The first build read 4.2 µs (0.97 s a derivation); a later
+`edtest` build read 6.0 to 6.2 µs, steadily, over five boots. An A/B on one
+host showed the crate was not the cause (the new crate under the old `edtest`
+read 3.9 µs), and the disassembly settled it: `pbkdf2_hmac_sha512` is the same
+1,598 instructions in both binaries, byte for byte, at `0x6cac` in one and
+`0x6d48` in the other. Only the address differs. The likely mechanism, not
+proven, is QEMU's translation blocks, which do not span a 4 KB page, meeting
+the hot loop differently. Two consequences:
+
+- **The count still holds at the worst reading.** At 6.2 µs a login's two
+  derivations are about 2.6 s, inside Decision 3's budget of about three
+  seconds with less to spare than the quarter step 0 estimated. At 3.9 µs they
+  are 1.6 s.
+- **A TCG timing is a band, not a number, and no single build's reading should
+  be quoted as the cost.** Step 0's figures (5.1 to 5.7 µs, a copy of the loop
+  at another address) sit inside the same band. The Pi 4 runs natively and
+  will settle the real-hardware figure when it can boot the arc.
 
 ## Decisions
 
