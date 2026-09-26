@@ -537,7 +537,7 @@
         <div class="ribbon">
           <div class="rstep"><div class="rn">01</div><div class="rt">UEFI init</div><div class="rd">Logging, allocator, protocols — all still firmware-backed.</div></div>
           <div class="rstep"><div class="rn">02</div><div class="rt">Find console</div><div class="rd">Devicetree → ACPI → PCI → framebuffer.</div></div>
-          <div class="rstep"><div class="rn">03</div><div class="rt">Load programs</div><div class="rd">The shell and the four servers, off the ESP.</div></div>
+          <div class="rstep"><div class="rn">03</div><div class="rt">Load programs</div><div class="rd">The shell and the four servers, off the ESP; then the boot identity, a persisted per-boot counter and firmware entropy that session keys are made from.</div></div>
           <div class="rstep mark"><div class="rn">04</div><div class="rt">Exit boot services</div><div class="rd">Firmware left behind, permanently.</div></div>
           <div class="rstep"><div class="rn">05</div><div class="rt">Install vectors</div><div class="rd"><code class="inline">VBAR_EL1</code>, before anything can fault.</div></div>
           <div class="rstep"><div class="rn">06</div><div class="rt">Own the MMU</div><div class="rd">Swap in the kernel's own page tables.</div></div>

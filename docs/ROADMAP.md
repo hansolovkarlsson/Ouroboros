@@ -20,23 +20,17 @@ This document is the one to update first when direction changes.
 
 ## What's next (the current frontier)
 
-> **In progress 2026-09-22: session-scoped authentication**, planned in
-> [`roadmap-session-auth.md`](roadmap/roadmap-session-auth.md). On a held
-> session the four Ed25519 operations are 2,926 µs of every fid verb, so the
-> plan replaces them with a session key (X25519 inside `NP_SESSION`, then an
-> HMAC and a sequence number per message). It sits beside item 1 below, not in
-> it: it changes how a session proves each message, not whose keys exist.
-> **Step 1 done 2026-09-23** (X25519, 236 µs and 2,944 bytes on the guest);
-> its stack gate failed at `park_session`, 80 bytes from the guard page on
-> `main`, which #159 fixed by moving every park's signing into the service
-> pass. **Step 2 done 2026-09-23** (HMAC-SHA-512: 120 to 160 µs over a full
-> `NP_NET_MAX` message against 536 µs for a sign). **Step 3 done 2026-09-23**
-> on QEMU (a persisted boot counter, the ESP file serving since edk2 keeps
-> variables in RAM, and 32 bytes of `EFI_RNG_PROTOCOL` entropy); the Pi 4 and
-> Parallels measurements are owed. **Step 4 done 2026-09-23** (the keyed wire in
-> `ninep-abi`'s normative block, pinned across Rust and both Python peers).
-> **Step 5 done 2026-09-23** (a keyed session host to host between the two
-> Python peers, checked by `make test`). Step 6, the export in `netd`, is next.
+> **Done 2026-09-26: session-scoped authentication**
+> ([`roadmap-session-auth.md`](roadmap/roadmap-session-auth.md), moved to
+> [`roadmap-completed.md`](roadmap-completed.md)). A held session is keyed: an
+> X25519 exchange inside the signed `NP_SESSION`, then an HMAC and a strict
+> sequence number per message. The four crypto operations per fid verb fell
+> from 2,926 µs to 169 µs, and the median verb cycle from 7.50 ms to 4.53 ms.
+> **Still owed from it:** the boot identity measured on the Pi 4 (checkpoint 9
+> of `testing-pi4.md`) and on Parallels (A6 of `testing-parallels.md`): which
+> store serves the counter there, and whether the firmware offers
+> `EFI_RNG_PROTOCOL`. A node without entropy keys its sessions with no forward
+> secrecy, which the plan states rather than claims.
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as

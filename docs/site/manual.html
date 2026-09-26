@@ -196,10 +196,17 @@ $ unmount                    # drop the mounted filesystem</code></pre></div>
     <em>for the address it dialled</em>.
   </p>
   <p>
+    A <strong>held session is keyed</strong> (since v0.21.0): its first request
+    carries an X25519 key inside the signature, and every later message on that
+    connection carries an HMAC tag and a sequence number instead, about a
+    seventeenth of the crypto cost and not replayable. An older node answers
+    without a key and the session stays signed, so a mixed cluster works.
+  </p>
+  <p>
     It is <strong>integrity, not secrecy</strong> — bytes cross the wire in
-    cleartext, so a passive sniffer reads your files and can replay a request.
-    Encryption, replay protection and per-user keys are gated behind a "leaving
-    a trusted network" trigger. <strong>Do not expose an Ouroboros export to a
+    cleartext, so a passive sniffer reads your files and can replay a one-shot
+    request. Encryption, replay protection for one-shot requests and per-user
+    keys are gated behind a "leaving a trusted network" trigger. <strong>Do not expose an Ouroboros export to a
     hostile network yet.</strong>
   </p>
 </blockquote>

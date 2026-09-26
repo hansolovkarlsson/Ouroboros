@@ -508,6 +508,21 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 // and closes. A keyed connection accepts no `AUTHNP03` frame and no second
 // `NP_SESSION` offering a key. One-shot connections and `NP_RUN` stay
 // `AUTHNP03`, unchanged.
+//
+// Three rules the two `netd` ends settled while implementing this (steps 6
+// and 7), each one a place two implementations could otherwise differ:
+//
+// - A keyed request is bounded by its DECLARED length (`len`), not by the
+//   bytes that happened to arrive with it: bytes past it are not part of the
+//   request and are not tagged, and a `len` the received bytes do not hold is
+//   refused like a bad tag.
+// - A client that offered a key and receives, in the verified `NP_SESSION`
+//   reply, a result that is neither empty nor [`NP_EPHEMERAL_LEN`] bytes, or
+//   a key it never offered, reports `FS_ERR_AUTH` and closes; it never guesses
+//   which session it has.
+// - A client binds a session to the name its `NP_SESSION` was signed as, and
+//   refuses to send a later verb for a caller who now resolves to another
+//   name, rather than run it as the opener: a keyed frame carries no name.
 // ---------------------------------------------------------------------------
 
 

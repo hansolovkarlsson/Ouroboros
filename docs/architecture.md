@@ -42,7 +42,13 @@ in `kernel/src/main.rs` runs the following, in order:
    binary off the ESP via UEFI's own filesystem protocol, into a freshly
    allocated, page-aligned buffer. Still boot-services-only; see
    [`processes.md`](processes.md) for why this happens here rather than
-   after boot.
+   after boot. Then the **boot identity** (`bootid.rs`, `bootid::establish`):
+   a per-boot counter read from a UEFI variable and an ESP file, trusted only
+   if a store held it from before this boot, raised and written back to every
+   store; and up to 32 bytes of `EFI_RNG_PROTOCOL` entropy. It must happen
+   here because both need boot services. The `BOOT_ID` syscall (69) hands it
+   out afterwards, and `netd` derives every keyed session's ephemeral from
+   it; no trusted counter means no keyed sessions.
 4. **`exit_boot_services`**. The UEFI memory map is captured (not
    discarded — `mmu.rs` uses it) and permanently leaves the boot-services
    world. Nothing after this point may use `log::*`, `alloc`, or any UEFI

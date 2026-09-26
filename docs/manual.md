@@ -285,6 +285,19 @@ key. Every request is signed, and so is every reply, so the exchange is
 expects *for the address it dialled*, not against any key it happens to
 authorize.
 
+**A held session is keyed** (since v0.21.0). A C program's open file on a
+remote mount rides one held connection, a *session*, for its whole life, and
+signing every message on it was the largest single cost of each read. So the
+first request on a session also carries a fresh X25519 key, the far side answers
+with its own inside its signed reply, and both derive a pair of session keys.
+Every later message on that connection carries an HMAC tag and a sequence number
+instead of a signature: the same integrity, about a seventeenth of the crypto
+cost, and a captured message cannot be replayed on it, since its sequence number
+is spent. An older node that does not key answers the first request with no key,
+and the session simply stays signed; a mixed cluster works. A node whose boot
+counter could not be persisted (`/bin/bootid` says so) keys nothing. One-shot
+requests (a shell `cat` over a mount, `cpu`) are still signed one by one.
+
 This replaced a **shared** secret (`\CLUSTER.KEY`, v0.10.0–v0.15.0). The
 difference that matters is **revocation**: with one secret every member was
 interchangeable and removing one meant re-keying all of them, whereas now you
@@ -315,8 +328,9 @@ This is still auth at the **machine** level: a machine the cluster authorizes
 can claim any of its own users' names, so this protects you from the *users* of a
 machine you trust, not from a machine you don't. It assumes a **trusted LAN** for the
 parts still deferred (a passive sniffer reads your files and can replay an
-observed request; encryption, replay protection and per-user *keys* are gated
-behind a "leaving a trusted network" trigger on the roadmap). Don't expose an
+observed one-shot request; encryption, replay protection for one-shot requests
+and per-user *keys* are gated behind a "leaving a trusted network" trigger on
+the roadmap). Don't expose an
 Ouroboros export to a genuinely hostile network yet.
 
 **The built-in HTTP server is anonymous, and unprivileged.** `netd` also serves

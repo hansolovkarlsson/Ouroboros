@@ -7,10 +7,12 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## Unreleased
+## v0.21.0: held sessions are keyed, a boot identity, and a park that never signs (2026-09-26)
 
-**Not yet released.** Changes since v0.20.0, drafted as they land; cutting a
-version is held for a go-ahead.
+The session-scoped authentication arc, `roadmap-session-auth.md`, all eight
+steps: eleven pull requests (#157 to #167). **No wire flag day:** a keyed
+session is offered, never required, so a v0.20.0 node and a v0.21.0 node
+authenticate and serve each other, signed, exactly as before.
 
 **The client keys a session, session-auth step 7.** `netd`'s held client
 sessions now offer an ephemeral key in their `NP_SESSION`, derive the session
