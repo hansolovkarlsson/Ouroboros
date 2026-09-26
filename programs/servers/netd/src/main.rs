@@ -553,6 +553,50 @@ fn load_auth() -> Auth {
 /// health-ping (its reply, addressed to the kernel's sentinel, is intercepted
 /// as the ack) - and staying `Blocked` in `NET_WAIT` between bursts is what
 /// keeps the passive heartbeat seeing a healthy server.
+// MEASUREMENT ONLY (branch measure/keyed-client-cost, never merged).
+mod tm {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static CMAC: AtomicU64 = AtomicU64::new(0);
+    pub static CMAC_N: AtomicU64 = AtomicU64::new(0);
+    pub static CVER: AtomicU64 = AtomicU64::new(0);
+    pub static CVER_N: AtomicU64 = AtomicU64::new(0);
+    pub static XVER: AtomicU64 = AtomicU64::new(0);
+    pub static XVER_N: AtomicU64 = AtomicU64::new(0);
+    pub static XMAC: AtomicU64 = AtomicU64::new(0);
+    pub static XMAC_N: AtomicU64 = AtomicU64::new(0);
+    pub static TOT: AtomicU64 = AtomicU64::new(0);
+    pub static TOT_N: AtomicU64 = AtomicU64::new(0);
+    pub static HSC: AtomicU64 = AtomicU64::new(0);
+    pub static HSC_N: AtomicU64 = AtomicU64::new(0);
+    pub static HSX: AtomicU64 = AtomicU64::new(0);
+    pub static HSX_N: AtomicU64 = AtomicU64::new(0);
+    pub static SHOWN: AtomicU64 = AtomicU64::new(0);
+    pub fn add(sum: &AtomicU64, n: &AtomicU64, d: u64) {
+        sum.store(sum.load(Relaxed) + d, Relaxed);
+        n.store(n.load(Relaxed) + 1, Relaxed);
+    }
+    pub fn get(a: &AtomicU64) -> u64 { a.load(Relaxed) }
+    pub fn set(a: &AtomicU64, v: u64) { a.store(v, Relaxed) }
+}
+
+#[inline(never)]
+fn tm_dump() {
+    use tm::*;
+    let events = get(&CMAC_N) + get(&CVER_N) + get(&XVER_N) + get(&XMAC_N) + get(&TOT_N) + get(&HSC_N) + get(&HSX_N);
+    if events == get(&SHOWN) {
+        return;
+    }
+    set(&SHOWN, events);
+    log(b"TM cmac "); log_dec(get(&CMAC)); log(b"/"); log_dec(get(&CMAC_N));
+    log(b" cver "); log_dec(get(&CVER)); log(b"/"); log_dec(get(&CVER_N));
+    log(b" xver "); log_dec(get(&XVER)); log(b"/"); log_dec(get(&XVER_N));
+    log(b" xmac "); log_dec(get(&XMAC)); log(b"/"); log_dec(get(&XMAC_N));
+    log(b" tot "); log_dec(get(&TOT)); log(b"/"); log_dec(get(&TOT_N));
+    log(b" hsc "); log_dec(get(&HSC)); log(b"/"); log_dec(get(&HSC_N));
+    log(b" hsx "); log_dec(get(&HSX)); log(b"/"); log_dec(get(&HSX_N));
+    log(b"\r\n");
+}
+
 fn serve(packed_mac: u64) -> ! {
     let mac = if packed_mac == syscall_abi::NET_ERROR {
         [0u8; 6]
@@ -588,6 +632,7 @@ fn serve(packed_mac: u64) -> ! {
     let mut remotes: [Option<RemoteConn>; MAX_REMOTE] = core::array::from_fn(|_| None);
     let mut pending = PendingRun::new();
     loop {
+        tm_dump();
         // Block until a client message or an incoming frame is pending (or
         // return immediately if either already is). While *any* connection has
         // data unacked (server or dial), use a timeout so we still wake to
@@ -2581,6 +2626,13 @@ fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c
 /// on the signature `sign_parked` runs next.
 #[inline(never)]
 fn offer_key(ks: &mut SessionKeys, id: &Identity, boot: u64, payload: &mut [u8]) {
+    let tm0 = now_us();
+    offer_key_inner(ks, id, boot, payload);
+    tm::add(&tm::HSC, &tm::HSC_N, now_us() - tm0);
+}
+
+#[inline(never)]
+fn offer_key_inner(ks: &mut SessionKeys, id: &Identity, boot: u64, payload: &mut [u8]) {
     ks.eph = ephemeral_secret(ninep_abi::SIG_DOMAIN_EPHEMERAL_C, &id.seed, boot, &[]);
     ks.eph_pub = ed25519::x25519_public(&ks.eph);
     ks.offered = true;
@@ -2598,6 +2650,15 @@ const NP_KEYED_NP_OFF: usize = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH
 /// framed length, or 0 when it does not fit. Its own frame, for the MAC.
 #[inline(never)]
 fn frame_keyed_in_place(ks: &mut SessionKeys, np_len: usize, out: &mut [u8]) -> usize {
+    let tm0 = now_us();
+    ks.tm_t0 = tm0;
+    let r = frame_keyed_in_place_inner(ks, np_len, out);
+    tm::add(&tm::CMAC, &tm::CMAC_N, now_us() - tm0);
+    r
+}
+
+#[inline(never)]
+fn frame_keyed_in_place_inner(ks: &mut SessionKeys, np_len: usize, out: &mut [u8]) -> usize {
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     if NP_SIGNED_NP_OFF + np_len > out.len() || np_len > ninep_abi::NP_NET_MAX {
         return 0;
@@ -2628,6 +2689,18 @@ fn frame_keyed_in_place(ks: &mut SessionKeys, np_len: usize, out: &mut [u8]) -> 
 /// MAC: `service_remotes` is inlined into `serve`.
 #[inline(never)]
 fn verify_keyed_reply(resp: &[u8], got: usize, ks: &SessionKeys) -> Option<(usize, usize)> {
+    let tm0 = now_us();
+    let r = verify_keyed_reply_inner(resp, got, ks);
+    let tm1 = now_us();
+    tm::add(&tm::CVER, &tm::CVER_N, tm1 - tm0);
+    if r.is_some() && ks.tm_t0 != 0 {
+        tm::add(&tm::TOT, &tm::TOT_N, tm1 - ks.tm_t0);
+    }
+    r
+}
+
+#[inline(never)]
+fn verify_keyed_reply_inner(resp: &[u8], got: usize, ks: &SessionKeys) -> Option<(usize, usize)> {
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     if got < p {
         return None;
@@ -2689,7 +2762,9 @@ fn phase_two<const S: usize, const R: usize, const H: usize, const K: usize>(
             }
             let mut eph_export = [0u8; ninep_abi::NP_EPHEMERAL_LEN];
             eph_export.copy_from_slice(result);
+            let tm0 = now_us();
             let shared = ed25519::x25519_shared(&ks.eph, &eph_export);
+            tm::add(&tm::HSC, &tm::HSC_N, now_us() - tm0);
             ks.drop_eph();
             let Some(mut shared) = shared else {
                 return Err(syscall_abi::FS_ERR_AUTH);
@@ -2882,6 +2957,7 @@ struct SessionKeys {
     /// a session has one verb in flight at a time, so the reply is checked
     /// against exactly this.
     seq: u64,
+    tm_t0: u64,
 }
 
 impl SessionKeys {
@@ -2893,6 +2969,7 @@ impl SessionKeys {
         k_c2s: [0; ninep_abi::NP_SESSION_KEY_LEN],
         k_s2c: [0; ninep_abi::NP_SESSION_KEY_LEN],
         seq: 0,
+        tm_t0: 0,
     };
 
     /// Forget the ephemeral secret: its job ends when phase two has used it,
@@ -3909,6 +3986,21 @@ fn key_session(
     user: Proxy,
     out: &mut Option<KeyedSession>,
 ) -> Option<[u8; ninep_abi::NP_EPHEMERAL_LEN]> {
+    let tm0 = now_us();
+    let r = key_session_inner(id, boot, nonce, eph_client, user, out);
+    tm::add(&tm::HSX, &tm::HSX_N, now_us() - tm0);
+    r
+}
+
+#[inline(never)]
+fn key_session_inner(
+    id: &Identity,
+    boot: u64,
+    nonce: &[u8; ninep_abi::NP_NONCE_LEN],
+    eph_client: &[u8; ninep_abi::NP_EPHEMERAL_LEN],
+    user: Proxy,
+    out: &mut Option<KeyedSession>,
+) -> Option<[u8; ninep_abi::NP_EPHEMERAL_LEN]> {
     let mut secret = ephemeral_secret(ninep_abi::SIG_DOMAIN_EPHEMERAL_E, &id.seed, boot, nonce);
     let eph_export = ed25519::x25519_public(&secret);
     let shared = ed25519::x25519_shared(&secret, eph_client);
@@ -4043,6 +4135,14 @@ fn close_keyed(why: &[u8]) -> bool {
 /// is gone before the dispatch runs.
 #[inline(never)]
 fn verify_keyed(k: &mut KeyedSession, request: &[u8]) -> Result<(u64, usize), &'static [u8]> {
+    let tm0 = now_us();
+    let r = verify_keyed_inner(k, request);
+    tm::add(&tm::XVER, &tm::XVER_N, now_us() - tm0);
+    r
+}
+
+#[inline(never)]
+fn verify_keyed_inner(k: &mut KeyedSession, request: &[u8]) -> Result<(u64, usize), &'static [u8]> {
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     let need = p + ninep_abi::NP_AUTH_HDR_KEYED;
     if request.len() < need || read_u64(request, p) != ninep_abi::NP_AUTH_MAGIC_KEYED {
@@ -4078,6 +4178,14 @@ fn verify_keyed(k: &mut KeyedSession, request: &[u8]) -> Result<(u64, usize), &'
 /// [`verify_keyed`].
 #[inline(never)]
 fn seal_keyed(c: &mut TcpConn, seq: u64, n: usize) -> usize {
+    let tm0 = now_us();
+    let r = seal_keyed_inner(c, seq, n);
+    tm::add(&tm::XMAC, &tm::XMAC_N, now_us() - tm0);
+    r
+}
+
+#[inline(never)]
+fn seal_keyed_inner(c: &mut TcpConn, seq: u64, n: usize) -> usize {
     let tl = ninep_abi::NP_KEYED_TAG_LEN;
     let body_start = ninep_abi::NP_NET_LEN_PREFIX;
     let n = if n < body_start || n + tl > c.prefix.len() {
