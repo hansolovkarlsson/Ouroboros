@@ -50,7 +50,7 @@
 mod users;
 pub use users::{
     derive_user_seed, derive_user_seed_with, format_user_line, lookup_user, parse_realm, userkey_salt,
-    UserLookup, USERKEY_SALT_MAX, USERS_MAX,
+    UserLookup, REALM_FILE_MAX, USERKEY_SALT_MAX, USERS_MAX,
 };
 
 /// Bytes in an Ed25519 public or private key.

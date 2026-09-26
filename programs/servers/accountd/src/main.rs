@@ -221,15 +221,26 @@ fn change_password(caller_uid: u32, name: &[u8], old: &[u8], new: &[u8]) -> u64 
         // ...and must prove they know the current one. An account with no
         // secret recorded at all cannot be changed this way: "no password" must
         // not read as "any password will do".
-        let ok = match accounts::find_secret_by_name(&sbuf[..slen], target_name) {
-            Some(secret) => secret.verify(old),
+        //
+        // WITHOUT DERIVING. A version-2 secret's check is a PBKDF2 derivation,
+        // about a second on the guest, and this server is supervised: queued
+        // requests would keep it Runnable past the 2.56 s watchdog, and three
+        // restarts leave it dead for the boot. So a version-2 account is
+        // refused here rather than checked (which also keeps this path from
+        // rewriting it with the fast version-1 hash). Step 4 of
+        // docs/roadmap/roadmap-user-keys.md replaces this: `passwd` derives,
+        // and this server only compares.
+        let checked = match accounts::find_secret_by_name(&sbuf[..slen], target_name) {
+            Some(secret) => secret.verify_without_deriving(old),
             None => match legacy_secret {
-                Some(secret) => secret.verify(old),
-                None => false,
+                Some(secret) => secret.verify_without_deriving(old),
+                None => Some(false),
             },
         };
-        if !ok {
-            return syscall_abi::ACCT_ERR_WRONG_PASSWORD;
+        match checked {
+            Some(true) => {}
+            Some(false) => return syscall_abi::ACCT_ERR_WRONG_PASSWORD,
+            None => return syscall_abi::ACCT_ERR_BAD_REQUEST,
         }
     }
 

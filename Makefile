@@ -721,7 +721,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	# /etc/passwd + /etc/group: the account database the shell's login gate and
 	# the /bin account tools (id/su/passwd/useradd/groupadd/usermod) use
 	# (name:uid:gid:home:salt:hash / name:gid:members, hashes precomputed - see
-	# scripts/mkpasswd.py + scripts/mkgroup.py; DEV creds root/root + user/user).
+	# scripts/mkpasswd.py + scripts/mkgroup.py; DEV creds root/root, user/user, guest/guest).
 	# Absent -> login falls back to root.
 	python3 scripts/mkpasswd.py > $(ESP_DIR)/etc/passwd
 	python3 scripts/mkpasswd.py --shadow > $(ESP_DIR)/etc/shadow

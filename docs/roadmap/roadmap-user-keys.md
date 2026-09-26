@@ -346,6 +346,27 @@ images are owned by the building host's uid (501 on this machine), not root,
 bypass, so nothing fails, but a non-root account with uid 501 would own them.
 Not this arc's; recorded here for the roadmap.
 
+**The review of step 3 (ten findings, nine acted on).** Two were real
+defects in this step's own work. **A registry that did not fit its reader
+failed open**: a user whose line lay past `USERS_MAX` read as unregistered,
+served without a credential; `lookup_user` now takes a required `whole`, and a
+registry that did not fit is `Broken` for every name. And **`accountd` could
+still be made to derive** from any version-2 line, however written, and then
+rewrote the line as version 1; it now calls `verify_without_deriving`, which
+declines version 2, and refuses. Shown on the guest with a `hashlib` version-2
+line staged for `guest`: `guest` logs in (the first version-2 login on the
+target, `login` deriving in the shell), `passwd` is refused, the line is
+unchanged and `accountd` did not restart; with `accountd` put back on `verify`,
+the same boot's `passwd` succeeds and the line comes back as version 1, the
+downgrade the fix prevents. The rest: `--random` now deletes a dev realm and
+registry left in a reused directory; the realm has one file-size rule every
+reader shares (`REALM_FILE_MAX`), and an empty realm file reads as none, so
+`realm new -f` can replace it; the dev passwords come from `mkpasswd.py`'s
+table rather than a copy; the count is converted once (`USERKEY_COUNT`).
+**Deferred to step 4:** `useradd` accepts names up to 64 bytes and a user key
+takes at most 32, so such an account can never have one; step 4, which changes
+`useradd` anyway, refuses or warns there.
+
 **Still open from step 1:** the gid 0 half of root squash, unobserved for want
 of a dev account with primary gid 0. `guest` is not one; it is row 5's subject.
 
@@ -715,7 +736,8 @@ itself.
 4. **Holding keys: `login`, the shell and `netd`** (Decisions 4 and 10).
    **Also, moved here from step 3:** `mkpasswd.py` and `useradd` write
    version-2 shadow, once `passwd` derives and `accountd` only compares (step
-   3's results say why).
+   3's results say why); and `useradd` refuses, or warns on, a name longer
+   than a user key can carry (32 bytes, against its own 64).
    `login` checks the password as today (version 1 or 2), computes a
    version-2 line and sends `ACCTOP_UPGRADE` after a version-1 login, derives
    the cluster key when there is a realm, and sends `NETOP_KEY_HOLD` before

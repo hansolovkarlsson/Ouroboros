@@ -3,7 +3,7 @@
 //!
 //! A user's cluster key is derived from their password, so it exists only while
 //! they are logged in somewhere: PBKDF2-HMAC-SHA-512 at
-//! [`ninep_abi::USERKEY_ITERATIONS`] over a salt of
+//! [`ninep_abi::USERKEY_COUNT`] iterations over a salt of
 //!
 //! ```text
 //! SIG_DOMAIN_USERKEY ‖ len(realm):1 ‖ realm ‖ len(name):1 ‖ name
@@ -24,7 +24,7 @@
 
 use core::num::NonZeroU32;
 
-use ninep_abi::{NP_NAME_LEN, REALM_MAX, SIG_DOMAIN_USERKEY, USERKEY_ITERATIONS};
+use ninep_abi::{NP_NAME_LEN, REALM_MAX, SIG_DOMAIN_USERKEY, USERKEY_COUNT};
 
 use crate::{contains_space, decode_key, encode_key, split_field, trim, KEY_HEX_LEN, KEY_LEN};
 
@@ -38,14 +38,26 @@ pub const USERS_MAX: usize = 1024;
 /// the longest name.
 pub const USERKEY_SALT_MAX: usize = SIG_DOMAIN_USERKEY.len() + 1 + REALM_MAX + 1 + NP_NAME_LEN;
 
+/// The most bytes of `/etc/cluster/realm` a realm file may hold: the realm and
+/// room for surrounding whitespace. EVERY READER reads `REALM_FILE_MAX + 1`
+/// bytes and hands [`parse_realm`] what it got, so a longer file arrives as
+/// `REALM_FILE_MAX + 1` bytes and is refused the same way by all of them. A
+/// reader with a smaller buffer would see a valid-looking prefix of a file the
+/// others refuse, and a diagnostic tool would call a broken setup fine.
+pub const REALM_FILE_MAX: usize = 64;
+
 /// The realm in `/etc/cluster/realm`'s contents, or `None` if there is none.
 ///
-/// Surrounding whitespace (a trailing newline) is ignored. The realm itself is
+/// Surrounding whitespace (a trailing newline) is ignored. Contents longer than
+/// [`REALM_FILE_MAX`] are refused whatever they start with. The realm itself is
 /// one word of 1 to [`REALM_MAX`] printable, non-space ASCII bytes; anything
 /// else is `None`, which a node treats as having no realm: it derives no key
 /// and sends no credential. Never a login failure (Decision 10): the password
 /// check does not read this file.
 pub fn parse_realm(contents: &[u8]) -> Option<&[u8]> {
+    if contents.len() > REALM_FILE_MAX {
+        return None;
+    }
     let realm = trim(contents);
     if realm.is_empty() || realm.len() > REALM_MAX {
         return None;
@@ -77,11 +89,7 @@ pub fn userkey_salt(realm: &[u8], name: &[u8], out: &mut [u8; USERKEY_SALT_MAX])
 /// About one second on the QEMU guest. It belongs in a program that has the
 /// password and is not supervised (`login`, `passwd`), never in a server.
 pub fn derive_user_seed(name: &[u8], realm: &[u8], password: &[u8]) -> Option<[u8; KEY_LEN]> {
-    const COUNT: NonZeroU32 = match NonZeroU32::new(USERKEY_ITERATIONS) {
-        Some(n) => n,
-        None => panic!("USERKEY_ITERATIONS must be positive"),
-    };
-    derive_user_seed_with(name, realm, password, COUNT)
+    derive_user_seed_with(name, realm, password, USERKEY_COUNT)
 }
 
 /// [`derive_user_seed`] at another iteration count: for tests of the salt,
@@ -120,7 +128,17 @@ pub enum UserLookup {
 /// Look `name` up in a registry buffer. Blank lines and `#` comments are
 /// skipped; so is a line whose first field is another user's name, whatever
 /// the rest of it says.
-pub fn lookup_user(users: &[u8], name: &[u8]) -> UserLookup {
+///
+/// `whole` is REQUIRED: whether `users` is the entire file. A reader fills at
+/// most [`USERS_MAX`] bytes, and a user whose line lies past the cut would
+/// otherwise read as `Unregistered`, served without a credential: attestation
+/// switched off for exactly the users who registered. So a registry that did
+/// not fit answers [`UserLookup::Broken`] for every name, found or not (a
+/// later line could also contradict a found one), and the caller refuses.
+pub fn lookup_user(users: &[u8], name: &[u8], whole: bool) -> UserLookup {
+    if !whole {
+        return UserLookup::Broken;
+    }
     let mut found: Option<[u8; KEY_LEN]> = None;
     for raw in users.split(|&c| c == b'\n') {
         let line = trim(raw);
@@ -265,6 +283,27 @@ mod tests {
         assert!(parse_realm(&[b'r'; REALM_MAX]).is_some());
     }
 
+    fn lookup_user_whole(users: &[u8], name: &[u8]) -> UserLookup {
+        lookup_user(users, name, true)
+    }
+
+    /// FAIL-CLOSED on a registry that did not fit: every name is Broken, the
+    /// registered one included, never Unregistered.
+    #[test]
+    fn a_registry_that_did_not_fit_is_broken_for_everyone() {
+        let (buf, n) = registry(&[&["user ", KEY_HEX].concat()]);
+        assert_eq!(lookup_user(&buf[..n], b"user", false), UserLookup::Broken);
+        assert_eq!(lookup_user(&buf[..n], b"guest", false), UserLookup::Broken);
+    }
+
+    #[test]
+    fn a_realm_file_longer_than_the_limit_is_refused_whatever_it_starts_with() {
+        let mut long = [b'\n'; REALM_FILE_MAX + 1];
+        long[..3].copy_from_slice(b"abc");
+        assert_eq!(parse_realm(&long), None);
+        assert_eq!(parse_realm(&long[..REALM_FILE_MAX]), Some(&b"abc"[..]));
+    }
+
     const KEY_HEX: &str = "e9da28586b272bf011df63d204692079a1920d5b128706f2bc6d1fc87886490f";
     const OTHER_HEX: &str = "04138f721e53b358a9ed4ae05636ab114ad9534ccdfd0fe55116372613dab9ef";
 
@@ -288,12 +327,12 @@ mod tests {
     fn a_registered_user_is_found_and_others_are_not() {
         let line = ["user ", KEY_HEX, "  # alice's laptop"].concat();
         let (buf, n) = registry(&["# the registry", "", &line]);
-        assert_eq!(lookup_user(&buf[..n], b"user"), UserLookup::Registered(key(KEY_HEX)));
-        assert_eq!(lookup_user(&buf[..n], b"guest"), UserLookup::Unregistered);
-        assert_eq!(lookup_user(&buf[..n], b"use"), UserLookup::Unregistered);
+        assert_eq!(lookup_user_whole(&buf[..n], b"user"), UserLookup::Registered(key(KEY_HEX)));
+        assert_eq!(lookup_user_whole(&buf[..n], b"guest"), UserLookup::Unregistered);
+        assert_eq!(lookup_user_whole(&buf[..n], b"use"), UserLookup::Unregistered);
         // A commented-out line is a revocation, not a registration.
         let (buf, n) = registry(&[&["#user ", KEY_HEX].concat()]);
-        assert_eq!(lookup_user(&buf[..n], b"user"), UserLookup::Unregistered);
+        assert_eq!(lookup_user_whole(&buf[..n], b"user"), UserLookup::Unregistered);
     }
 
     /// FAIL-CLOSED: a line that names the user and cannot be read, or two
@@ -307,23 +346,23 @@ mod tests {
             ["user ", &KEY_HEX[..62], "zz"].concat(),
         ] {
             let (buf, n) = registry(&[&bad]);
-            assert_eq!(lookup_user(&buf[..n], b"user"), UserLookup::Broken, "{bad:?}");
+            assert_eq!(lookup_user_whole(&buf[..n], b"user"), UserLookup::Broken, "{bad:?}");
         }
         let (buf, n) = registry(&[&["user ", KEY_HEX].concat(), &["user ", OTHER_HEX].concat()]);
-        assert_eq!(lookup_user(&buf[..n], b"user"), UserLookup::Broken, "two keys disagree");
+        assert_eq!(lookup_user_whole(&buf[..n], b"user"), UserLookup::Broken, "two keys disagree");
         // The same key twice is one registration, not a conflict.
         let (buf, n) = registry(&[&["user ", KEY_HEX].concat(), &["user ", KEY_HEX].concat()]);
-        assert_eq!(lookup_user(&buf[..n], b"user"), UserLookup::Registered(key(KEY_HEX)));
+        assert_eq!(lookup_user_whole(&buf[..n], b"user"), UserLookup::Registered(key(KEY_HEX)));
         // Another user's broken line does not break this one.
         let (buf, n) = registry(&["guest nonsense", &["user ", KEY_HEX].concat()]);
-        assert_eq!(lookup_user(&buf[..n], b"user"), UserLookup::Registered(key(KEY_HEX)));
+        assert_eq!(lookup_user_whole(&buf[..n], b"user"), UserLookup::Registered(key(KEY_HEX)));
     }
 
     #[test]
     fn a_formatted_line_reads_back() {
         let mut out = [0u8; 128];
         let n = format_user_line(&mut out, b"user", &key(KEY_HEX)).expect("format");
-        assert_eq!(lookup_user(&out[..n], b"user"), UserLookup::Registered(key(KEY_HEX)));
+        assert_eq!(lookup_user_whole(&out[..n], b"user"), UserLookup::Registered(key(KEY_HEX)));
         for bad in [&b""[..], b"two words", b"#user", &[b'n'; NP_NAME_LEN + 1]] {
             assert!(format_user_line(&mut out, bad, &key(KEY_HEX)).is_none(), "{bad:?}");
         }

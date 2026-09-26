@@ -191,8 +191,10 @@ fn generate(target: u64) -> u64 {
 fn realm(target: u64) -> u64 {
     let mut word = [0u8; 8];
     let wn = ulib::arg(2, &mut word).unwrap_or(0);
-    let mut buf = [0u8; 64];
-    let current = read_file(REALM_PATH, &mut buf);
+    // REALM_FILE_MAX + 1, the size every reader uses, so a longer file is
+    // refused here exactly as `login` will refuse it (see parse_realm).
+    let mut buf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
+    let current = read_realm_file(&mut buf);
     if wn == 0 {
         return match current {
             FileRead::Bytes(n) => match clusterkeys::parse_realm(&buf[..n]) {
@@ -203,7 +205,8 @@ fn realm(target: u64) -> u64 {
                 }
                 None => {
                     out(target, b"clusterkey: /etc/cluster/realm is not a realm (one word, at most 32\r\n");
-                    out(target, b"  printable bytes), so this machine derives no user keys.\r\n");
+                    out(target, b"  printable bytes; empty counts as none), so this machine derives\r\n");
+                    out(target, b"  no user keys. 'clusterkey realm new -f' replaces it.\r\n");
                     1
                 }
             },
@@ -276,6 +279,21 @@ fn realm(target: u64) -> u64 {
     out(target, b"\r\n  Copy /etc/cluster/realm to every node of this cluster. A node with\r\n");
     out(target, b"  another realm derives different user keys and its users' claims fail.\r\n");
     0
+}
+
+/// Read `/etc/cluster/realm`. Unlike [`read_file`], an EMPTY file is its own
+/// answer, `Bytes(0)`, which parses as no realm: a truncate-then-write cut
+/// short by an `fsd` restart leaves exactly that, and folding it into
+/// `Unreadable` made `realm new -f` refuse to replace it for good.
+fn read_realm_file(buf: &mut [u8]) -> FileRead {
+    let r = ulib::fs_read_bulk(REALM_PATH, 0, buf);
+    if r == syscall_abi::FS_ERR_NOT_FOUND {
+        FileRead::Absent
+    } else if ulib::is_fs_error(r) {
+        FileRead::Unreadable
+    } else {
+        FileRead::Bytes((r as usize).min(buf.len()))
+    }
 }
 
 /// List the peers this machine accepts, and say so when a line is broken.

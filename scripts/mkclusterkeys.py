@@ -82,14 +82,20 @@ DEV_PEERS = [
 DEV_REALM = b"ouroboros-dev"
 USERKEY_DOMAIN = b"ouroboros-cluster-userkey-v1\0"
 USERKEY_ITERATIONS = 210_000
-# (name, password, registered). Passwords match mkpasswd.py's dev accounts.
-# The registry lists `user` only (Decision 6): a root claim is decided by the
-# `root` flag, and `guest` is the gate's row 5, a name with no registered key.
-DEV_USERS = [
-    ("root", b"root", False),
-    ("user", b"user", True),
-    ("guest", b"guest", False),
-]
+# The dev users are mkpasswd.py's accounts, passwords included, READ FROM ITS
+# TABLE rather than copied: a copy could keep an old password after the account
+# changed, and both sides of the Rust/Python agreement check would then agree
+# on a key nobody can derive at login. The registry lists `user` only
+# (Decision 6): a root claim is decided by the `root` flag, and `guest` is the
+# gate's row 5, a name with no registered key.
+REGISTERED = {"user"}
+
+
+def dev_users():
+    """(name, password, registered) for every dev account."""
+    sys.path.insert(0, _HERE)
+    import mkpasswd
+    return [(n, pw.encode(), n in REGISTERED) for n, _uid, _gid, _home, pw in mkpasswd.ACCOUNTS]
 
 
 def user_seed(name, password, realm=DEV_REALM):
@@ -102,7 +108,7 @@ def user_seed(name, password, realm=DEV_REALM):
 
 def dev_user_keys():
     """(name, public key) for every dev user, registered or not."""
-    return [(n, edref.public_key(user_seed(n, pw))) for n, pw, _ in DEV_USERS]
+    return [(n, edref.public_key(user_seed(n, pw))) for n, pw, _ in dev_users()]
 
 
 def seed_from(label):
@@ -190,8 +196,15 @@ def main():
     # The realm and the registry, for dev builds only. A --random identity is a
     # real node's: its realm comes from `clusterkey realm new` on a machine
     # with entropy and is copied to the others, and a dev registry would name
-    # dev keys a real cluster must not accept.
-    if not random_keys:
+    # dev keys a real cluster must not accept. So a --random run also DELETES
+    # any left by an earlier dev build of the same directory: skipping the
+    # write alone left the public dev realm and registry beside a real key.
+    if random_keys:
+        for stale in ("realm", "users"):
+            path = os.path.join(out_dir, stale)
+            if os.path.exists(path):
+                os.unlink(path)
+    else:
         with open(os.path.join(out_dir, "realm"), "w") as f:
             f.write(DEV_REALM.decode() + "\n")
         users_path = os.path.join(out_dir, "users")
@@ -203,9 +216,8 @@ def main():
             f.write("# per user: <name> <public-key-hex>. A user not listed is served as\n")
             f.write("# today, on the machine's word. DEV KEYS: derived from the public dev\n")
             f.write("# passwords and realm. Not for real use.\n")
-            registered = {n for n, _, r in DEV_USERS if r}
             for name, pub in dev_user_keys():
-                if name in registered:
+                if name in REGISTERED:
                     f.write(f"{name} {pub.hex()}\n")
 
     print(f"mkclusterkeys: {out_dir} identity={me} peers={len(keys)}"

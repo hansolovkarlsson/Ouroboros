@@ -108,16 +108,25 @@ impl Secret {
         };
         digest_eq(&digest, &self.hash)
     }
+
+    /// The check for a SUPERVISED SERVER: `Some(ok)` for a version-1 secret,
+    /// and `None` for version 2, which would need a derivation, about a second
+    /// on the guest, inside a server the watchdog restarts after 2.56 s. A
+    /// caller that gets `None` refuses; it never falls back to [`Self::verify`].
+    /// `accountd` uses this and only this, so a version-2 line cannot make it
+    /// derive, whoever wrote the line.
+    pub fn verify_without_deriving(&self, password: &[u8]) -> Option<bool> {
+        match self.version {
+            SecretVersion::V1 => Some(digest_eq(&sha256_two(&self.salt[..self.salt_len], password), &self.hash)),
+            SecretVersion::V2 => None,
+        }
+    }
 }
 
 /// The version-2 hash of `password` over `salt`.
 fn v2_hash(salt: &[u8], password: &[u8]) -> [u8; DIGEST] {
-    const COUNT: core::num::NonZeroU32 = match core::num::NonZeroU32::new(ninep_abi::USERKEY_ITERATIONS) {
-        Some(n) => n,
-        None => panic!("USERKEY_ITERATIONS must be positive"),
-    };
     let mut out = [0u8; 64];
-    ed25519::pbkdf2_hmac_sha512(password, salt, COUNT, &mut out);
+    ed25519::pbkdf2_hmac_sha512(password, salt, ninep_abi::USERKEY_COUNT, &mut out);
     let mut hash = [0u8; DIGEST];
     hash.copy_from_slice(&out[..DIGEST]);
     hash
@@ -1176,6 +1185,15 @@ mod tests {
             }
             assert!(find_secret_by_name(&line[..n], b"user").is_none(), "{field:?}");
         }
+    }
+
+    #[test]
+    fn the_servers_check_answers_version_1_and_declines_version_2() {
+        let v1 = find_secret_by_name(V1_LINE, b"user").expect("v1");
+        assert_eq!(v1.verify_without_deriving(b"user"), Some(true));
+        assert_eq!(v1.verify_without_deriving(b"User"), Some(false));
+        let v2 = find_secret_by_name(V2_LINE, b"user").expect("v2");
+        assert_eq!(v2.verify_without_deriving(b"user"), None, "a server must not derive");
     }
 
     #[test]

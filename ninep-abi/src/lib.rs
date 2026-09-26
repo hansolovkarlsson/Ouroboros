@@ -666,6 +666,15 @@ pub const SIG_DOMAIN_USERKEY: &[u8] = b"ouroboros-cluster-userkey-v1\0";
 /// 2 s a login, which pays two derivations.
 pub const USERKEY_ITERATIONS: u32 = 210_000;
 
+/// [`USERKEY_ITERATIONS`] as the PBKDF2 function's own type, converted ONCE,
+/// so the user key and the version-2 shadow hash take the same value by
+/// construction rather than by two identical conversions. A zero here fails
+/// the build.
+pub const USERKEY_COUNT: core::num::NonZeroU32 = match core::num::NonZeroU32::new(USERKEY_ITERATIONS) {
+    Some(n) => n,
+    None => panic!("USERKEY_ITERATIONS must be positive"),
+};
+
 /// Longest cluster realm, `/etc/cluster/realm` (Decision 2). One length byte
 /// in the salt carries it, and 32 matches [`NP_NAME_LEN`].
 pub const REALM_MAX: usize = 32;
