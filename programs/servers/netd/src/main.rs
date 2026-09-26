@@ -553,6 +553,43 @@ fn load_auth() -> Auth {
 /// health-ping (its reply, addressed to the kernel's sentinel, is intercepted
 /// as the ack) - and staying `Blocked` in `NET_WAIT` between bursts is what
 /// keeps the passive heartbeat seeing a healthy server.
+// MEASUREMENT ONLY (never merged): the whole-run stack low-water mark.
+#[inline(never)]
+fn sg_paint_all() -> (usize, usize) {
+    let lo = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_STACK_BASE) as usize;
+    let probe = 0u64;
+    let sp = core::hint::black_box(&probe) as *const u64 as usize;
+    let hi = sp - 512;
+    // SAFETY: [lo, hi) is this task's own stack, below the live frame.
+    unsafe {
+        let mut q = lo;
+        while q < hi {
+            core::ptr::write_volatile(q as *mut u8, 0xA5);
+            q += 1;
+        }
+    }
+    (lo, hi)
+}
+
+#[inline(never)]
+fn sg_check(lo: usize, hi: usize, min: &mut usize) {
+    let mut q = lo;
+    while q < hi {
+        // SAFETY: the window painted at start.
+        if unsafe { core::ptr::read_volatile(q as *const u8) } != 0xA5 {
+            break;
+        }
+        q += 1;
+    }
+    let headroom = q - lo;
+    if headroom < *min {
+        *min = headroom;
+        log(b"SG low-water headroom=");
+        log_dec(headroom as u64);
+        log(b"\r\n");
+    }
+}
+
 fn serve(packed_mac: u64) -> ! {
     let mac = if packed_mac == syscall_abi::NET_ERROR {
         [0u8; 6]
@@ -587,7 +624,10 @@ fn serve(packed_mac: u64) -> ! {
     // `service_remotes` answers it. On this frame like the tables above.
     let mut remotes: [Option<RemoteConn>; MAX_REMOTE] = core::array::from_fn(|_| None);
     let mut pending = PendingRun::new();
+    let (sg_lo, sg_hi) = sg_paint_all();
+    let mut sg_min = usize::MAX;
     loop {
+        sg_check(sg_lo, sg_hi, &mut sg_min);
         // Block until a client message or an incoming frame is pending (or
         // return immediately if either already is). While *any* connection has
         // data unacked (server or dial), use a timeout so we still wake to
