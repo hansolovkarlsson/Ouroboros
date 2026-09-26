@@ -711,6 +711,18 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **Files `mke2fs -d` stages on the ext2 images belong to the building host's
+  uid, not root (found 2026-09-26).** `ls -l /etc/cluster` on the ext2 image
+  shows owner 501 (the macOS uid that ran `make`) for `id`, `authorized`,
+  `realm` and `users`, and the rest of the staged tree is the same apart from
+  the two directories the Makefile `chown`s with `debugfs`. Root reads them
+  through its bypass, so nothing fails today, but the modes mean "owner and
+  nobody else" and the owner is a uid no dev account has; an account created
+  with uid 501 would own the machine's private key. The fix is to stage as root
+  (`mke2fs -d` takes ownership from the source tree, so a root-owned copy, or a
+  `debugfs` pass over what was staged); its check is `ls -l /etc/cluster` and
+  `/etc/shadow` showing uid 0 on a fresh image.
+
 - ~~**libc's `MSG_CALL` does not ride out the delegation window (found
   2026-09-23).**~~ **FIXED 2026-09-23**: `np_request` now retries a
   `MSG_ERR_DENIED` from `netd` for the same 150 ticks as

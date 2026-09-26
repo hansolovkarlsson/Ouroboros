@@ -14,6 +14,10 @@ dependencies = [
 [[package]]
 name = "accounts"
 version = "0.1.0"
+dependencies = [
+ "ed25519",
+ "ninep-abi",
+]
 
 [[package]]
 name = "args"
@@ -96,6 +100,10 @@ dependencies = [
 [[package]]
 name = "clusterkeys"
 version = "0.1.0"
+dependencies = [
+ "ed25519",
+ "ninep-abi",
+]
 
 [[package]]
 name = "cond"

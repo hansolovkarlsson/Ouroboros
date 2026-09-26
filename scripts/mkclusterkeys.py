@@ -6,6 +6,8 @@ Writes, into a directory given on the command line:
     id           this machine's PRIVATE key, 64 hex characters (mode 0600)
     id.pub       its public key
     authorized   one line per peer: <name> <ipv4> <pubkey-hex> [root]
+    realm        the cluster's realm (dev builds only: the public `ouroboros-dev`)
+    users        the user-key registry: <name> <pubkey-hex> (mode 0600)
 
 THE DEV KEYS ARE DETERMINISTIC, AND THAT IS DELIBERATE. `make image-ext2` builds
 node A's disk and node B's disk in separate invocations, and both must end up
@@ -67,6 +69,42 @@ DEV_PEERS = [
 ]
 
 
+# THE DEV USERS' KEYS (step 3 of docs/roadmap/roadmap-user-keys.md): derived
+# from each dev account's password and the dev realm, exactly as a node derives
+# them at login, and written HERE INDEPENDENTLY of the Rust in
+# clusterkeys/src/users.rs rather than through a shared helper. The two agree
+# only if both follow Decision 2; a Rust host test pins the keys this prints
+# (`--dev-user-keys`), and check-wire-constants.py holds that fixture equal to
+# this script's output, so a disagreement surfaces on `make test`.
+#
+# The realm is PUBLIC and for dev rigs only: a realm must be unique to a cluster,
+# because a dictionary precomputed for one serves every node in it.
+DEV_REALM = b"ouroboros-dev"
+USERKEY_DOMAIN = b"ouroboros-cluster-userkey-v1\0"
+USERKEY_ITERATIONS = 210_000
+# (name, password, registered). Passwords match mkpasswd.py's dev accounts.
+# The registry lists `user` only (Decision 6): a root claim is decided by the
+# `root` flag, and `guest` is the gate's row 5, a name with no registered key.
+DEV_USERS = [
+    ("root", b"root", False),
+    ("user", b"user", True),
+    ("guest", b"guest", False),
+]
+
+
+def user_seed(name, password, realm=DEV_REALM):
+    """Decision 2: PBKDF2-HMAC-SHA-512 over the length-prefixed salt; the
+    first 32 bytes are the Ed25519 seed."""
+    n = name.encode()
+    salt = USERKEY_DOMAIN + bytes([len(realm)]) + realm + bytes([len(n)]) + n
+    return hashlib.pbkdf2_hmac("sha512", password, salt, USERKEY_ITERATIONS, 64)[:32]
+
+
+def dev_user_keys():
+    """(name, public key) for every dev user, registered or not."""
+    return [(n, edref.public_key(user_seed(n, pw))) for n, pw, _ in DEV_USERS]
+
+
 def seed_from(label):
     """A fixed 32-byte seed for a dev identity, from a printable label."""
     return hashlib.sha256(label.encode()).digest()
@@ -78,6 +116,12 @@ def keypair(seed):
 
 def main():
     args = sys.argv[1:]
+    if args == ["--dev-user-keys"]:
+        # The fixture clusterkeys' host test pins, and check-wire-constants.py
+        # compares against it: every dev user's public key, one per line.
+        for name, pub in dev_user_keys():
+            print(f"{name} {pub.hex()}")
+        return
     random_keys = "--random" in args
     if random_keys:
         args.remove("--random")
@@ -142,6 +186,27 @@ def main():
             f.write("# DEV KEYS: derived from fixed seeds, so they are public. Not for real use.\n")
         for name, (_seed, pub, ip, root) in keys.items():
             f.write(f"{name} {ip} {pub.hex()}{' root' if root else ''}\n")
+
+    # The realm and the registry, for dev builds only. A --random identity is a
+    # real node's: its realm comes from `clusterkey realm new` on a machine
+    # with entropy and is copied to the others, and a dev registry would name
+    # dev keys a real cluster must not accept.
+    if not random_keys:
+        with open(os.path.join(out_dir, "realm"), "w") as f:
+            f.write(DEV_REALM.decode() + "\n")
+        users_path = os.path.join(out_dir, "users")
+        if os.path.exists(users_path):
+            os.unlink(users_path)
+        fd = os.open(users_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write("# Users whose remote claims need their own credential here. One line\n")
+            f.write("# per user: <name> <public-key-hex>. A user not listed is served as\n")
+            f.write("# today, on the machine's word. DEV KEYS: derived from the public dev\n")
+            f.write("# passwords and realm. Not for real use.\n")
+            registered = {n for n, _, r in DEV_USERS if r}
+            for name, pub in dev_user_keys():
+                if name in registered:
+                    f.write(f"{name} {pub.hex()}\n")
 
     print(f"mkclusterkeys: {out_dir} identity={me} peers={len(keys)}"
           f"{' (RANDOM keys)' if random_keys else ' (fixed dev keys)'}")

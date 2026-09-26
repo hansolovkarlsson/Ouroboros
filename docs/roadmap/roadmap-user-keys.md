@@ -285,6 +285,70 @@ the hot loop differently. Two consequences:
   at another address) sit inside the same band. The Pi 4 runs natively and
   will settle the real-hardware figure when it can boot the arc.
 
+### Step 3's results (2026-09-26): the user key, the realm, the registry, version-2 shadow
+
+**Built.** `ninep-abi` gains `SIG_DOMAIN_USERKEY` (29 bytes, so
+`SIG_DOMAIN_MAX` did not grow), `USERKEY_ITERATIONS` (210,000) and
+`REALM_MAX` (32); step 5 writes the normative prose around them. `clusterkeys`
+parses the realm, builds the length-prefixed salt, derives a user's seed, and
+reads and writes the registry, whose lookup is **fail-closed**: a line that
+names the user but cannot be read, or two lines with different keys, is
+`Broken`, never `Unregistered`, since an unregistered name is served without a
+credential and a typo must not switch attestation off. `accounts` reads,
+writes and verifies version-2 shadow lines (`2$` and 14 hex digits of salt,
+exactly as wide as version 1's 8-byte salt), and `Secret` carries its version,
+so `usermod`, which copies a secret into a new line, now keeps a version-2
+marker instead of dropping it. `clusterkey realm` shows the realm and
+`clusterkey realm new [-f]` generates one from the entropy device. Every image
+stages the dev realm and a registry (0600) listing `user` only, and a third dev
+account, `guest` (1001), the name with no registered key that the gate's row 5
+will claim.
+
+**The check.** The Rust derivation at the full count agrees with
+`mkclusterkeys.py`'s independent Python for `root`, `user` and `guest`: a
+host test pins the Python's keys and derives them in Rust, and
+`check-wire-constants.py` holds that fixture equal to what the Python derives
+now. A version-2 line made by `hashlib` verifies the right password in Rust and
+refuses a wrong one, and a version-1 line still verifies.
+
+**The controls, measured.** The salt's fields reordered in the Rust fail the
+host test (and the documented-bytes test); reordered in the Python, they fail
+`make test`'s agreement check. The length prefixes dropped fail four tests,
+among them the one asserting the `ouroboros-dev`/`x` and `ouroboros-de`/`vx`
+pair derive different keys. A version-1 line with an 8-byte salt and its
+version-2 replacement are the same length, asserted for names of 1, 4 and 32
+bytes. On the guest: the registry is refused to `guest` (0600), `realm new`
+refuses an existing realm without `-f`, generates one with it, and **refuses
+without an entropy device** (booted without `virtio-rng`, the existing realm
+left untouched), and only root may run it.
+
+**Local login cannot depend on the realm, by construction rather than by test
+here.** `Secret::verify` takes the secret and the password and nothing else,
+and the version-2 fixture was made by `hashlib` from the salt and the password
+alone. The plan's control (a version-2 line verifies identically with the
+realm file present, absent and edited) is a property of `login`, which is the
+code that reads the realm; step 4 tests it there.
+
+**A deviation from the plan: no image writes version-2 shadow yet.** The plan
+had `mkpasswd.py` write version 2 in this step. But `accountd` still verifies
+a user's old password itself on `passwd` (`ACCTOP_PASSWD`), and a version-2
+verify is a derivation, about a second on the guest, inside a supervised
+server: the thing Decision 10 exists to prevent, and the watchdog is 2.56 s.
+Step 4 is where `passwd` computes both hashes and `accountd` only compares. So
+`mkpasswd.py` and `useradd` switch to version 2 **in step 4**, together with
+the change that makes it safe, and every image stays on version 1 until then.
+
+**Found while here.** The site's manual page had not taken step 1's `[root]`
+in its `/etc/cluster` table (step 1 updated the page's prose only and
+re-stamped it); fixed in this step. And files `mke2fs -d` stages on the ext2
+images are owned by the building host's uid (501 on this machine), not root,
+`/etc/cluster/id` included since it was added; root reads them through its
+bypass, so nothing fails, but a non-root account with uid 501 would own them.
+Not this arc's; recorded here for the roadmap.
+
+**Still open from step 1:** the gid 0 half of root squash, unobserved for want
+of a dev account with primary gid 0. `guest` is not one; it is row 5's subject.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking
@@ -649,6 +713,9 @@ itself.
    a version-1 line with an 8-byte salt and its version-2 replacement have the
    same length, which a test asserts, since the upgrade's safety rests on it.
 4. **Holding keys: `login`, the shell and `netd`** (Decisions 4 and 10).
+   **Also, moved here from step 3:** `mkpasswd.py` and `useradd` write
+   version-2 shadow, once `passwd` derives and `accountd` only compares (step
+   3's results say why).
    `login` checks the password as today (version 1 or 2), computes a
    version-2 line and sends `ACCTOP_UPGRADE` after a version-1 login, derives
    the cluster key when there is a realm, and sends `NETOP_KEY_HOLD` before

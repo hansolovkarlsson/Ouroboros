@@ -651,6 +651,25 @@ pub const SIG_DOMAIN_EPHEMERAL_C: &[u8] = b"ouroboros-cluster-eph-c-v1\0";
 /// same secret for both roles from the same inputs.
 pub const SIG_DOMAIN_EPHEMERAL_E: &[u8] = b"ouroboros-cluster-eph-e-v1\0";
 
+/// Domain tag at the head of a **user key's PBKDF2 salt**:
+/// `SIG_DOMAIN_USERKEY ‖ len(realm):1 ‖ realm ‖ len(name):1 ‖ name`
+/// (docs/roadmap/roadmap-user-keys.md, Decision 2). A key-derivation input,
+/// not a signature's, but it lives with the others so that [`SIG_DOMAIN_MAX`]
+/// and the no-prefix test cover it. Step 5 writes it into the normative block
+/// with the rest of the credential.
+pub const SIG_DOMAIN_USERKEY: &[u8] = b"ouroboros-cluster-userkey-v1\0";
+
+/// PBKDF2-HMAC-SHA-512 iterations for a user key (Decision 3), and for a
+/// version-2 `/etc/shadow` hash (Decision 10). **Permanent**: every user's
+/// key depends on it, so a change is a new derivation version, never an edit.
+/// Chosen from a measurement on the slowest guest (step 0 of the plan): about
+/// 2 s a login, which pays two derivations.
+pub const USERKEY_ITERATIONS: u32 = 210_000;
+
+/// Longest cluster realm, `/etc/cluster/realm` (Decision 2). One length byte
+/// in the salt carries it, and 32 matches [`NP_NAME_LEN`].
+pub const REALM_MAX: usize = 32;
+
 /// The longest domain tag, so a caller can size a buffer for either.
 ///
 /// COMPUTED, NOT TRANSCRIBED. This was the literal `29`, tied to the tags it
@@ -678,6 +697,7 @@ pub const SIG_DOMAIN_MAX: usize = max_len(&[
     SIG_DOMAIN_SESSION,
     SIG_DOMAIN_EPHEMERAL_C,
     SIG_DOMAIN_EPHEMERAL_E,
+    SIG_DOMAIN_USERKEY,
 ]);
 
 /// The longest of `tags`, at compile time.
@@ -702,6 +722,7 @@ const _: () = {
     assert!(SIG_DOMAIN_SESSION.len() <= SIG_DOMAIN_MAX);
     assert!(SIG_DOMAIN_EPHEMERAL_C.len() <= SIG_DOMAIN_MAX);
     assert!(SIG_DOMAIN_EPHEMERAL_E.len() <= SIG_DOMAIN_MAX);
+    assert!(SIG_DOMAIN_USERKEY.len() <= SIG_DOMAIN_MAX);
 };
 
 /// The bytes an Ed25519 **signature** covers before the NP message:
@@ -1027,7 +1048,7 @@ mod tests {
         assert!(SIG_DOMAIN_REPLY.len() <= SIG_DOMAIN_MAX);
     }
 
-    /// All five tags, pinned as literals (the same reasoning as the two above),
+    /// All six tags, pinned as literals (the same reasoning as the two above),
     /// pairwise distinct and none a prefix of another: a tag that prefixes
     /// another lets an input made under one be read as made under the other.
     #[test]
@@ -1035,7 +1056,15 @@ mod tests {
         assert_eq!(SIG_DOMAIN_SESSION, b"ouroboros-cluster-session-v1\0");
         assert_eq!(SIG_DOMAIN_EPHEMERAL_C, b"ouroboros-cluster-eph-c-v1\0");
         assert_eq!(SIG_DOMAIN_EPHEMERAL_E, b"ouroboros-cluster-eph-e-v1\0");
-        let tags = [SIG_DOMAIN_REQUEST, SIG_DOMAIN_REPLY, SIG_DOMAIN_SESSION, SIG_DOMAIN_EPHEMERAL_C, SIG_DOMAIN_EPHEMERAL_E];
+        assert_eq!(SIG_DOMAIN_USERKEY, b"ouroboros-cluster-userkey-v1\0");
+        let tags = [
+            SIG_DOMAIN_REQUEST,
+            SIG_DOMAIN_REPLY,
+            SIG_DOMAIN_SESSION,
+            SIG_DOMAIN_EPHEMERAL_C,
+            SIG_DOMAIN_EPHEMERAL_E,
+            SIG_DOMAIN_USERKEY,
+        ];
         for (i, a) in tags.iter().enumerate() {
             assert_eq!(*a.last().expect("non-empty"), 0);
             assert!(a.len() <= SIG_DOMAIN_MAX);

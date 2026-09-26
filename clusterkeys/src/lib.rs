@@ -11,6 +11,8 @@
 //! | `id` | 0600 | this machine's **private** key, 64 hex characters |
 //! | `id.pub` | 0644 | this machine's public key, 64 hex characters |
 //! | `authorized` | 0644 | one line per peer: `<name> <ipv4> <pubkey-hex> [root]` |
+//! | `realm` | 0644 | the cluster's realm, one word of at most 32 bytes (`users.rs`) |
+//! | `users` | 0600 | the user-key registry: `<name> <pubkey-hex>` per line (`users.rs`) |
 //!
 //! ## The `root` flag
 //!
@@ -43,7 +45,13 @@
 //! `R_AARCH64_ABS64` relocations this project's loader cannot process — a trap
 //! this codebase has hit repeatedly. See `docs/processes.md`.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
+
+mod users;
+pub use users::{
+    derive_user_seed, derive_user_seed_with, format_user_line, lookup_user, parse_realm, userkey_salt,
+    UserLookup, USERKEY_SALT_MAX, USERS_MAX,
+};
 
 /// Bytes in an Ed25519 public or private key.
 pub const KEY_LEN: usize = 32;
@@ -377,11 +385,11 @@ pub fn parse_key_file(contents: &[u8]) -> Option<[u8; KEY_LEN]> {
     decode_key(trim(contents))
 }
 
-fn contains_space(s: &[u8]) -> bool {
+pub(crate) fn contains_space(s: &[u8]) -> bool {
     s.iter().any(|&c| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n')
 }
 
-fn trim(s: &[u8]) -> &[u8] {
+pub(crate) fn trim(s: &[u8]) -> &[u8] {
     let mut a = 0;
     let mut b = s.len();
     while a < b && is_space(s[a]) {
@@ -408,7 +416,7 @@ fn is_space(c: u8) -> bool {
 }
 
 /// Split off the first whitespace-delimited field, returning it and the rest.
-fn split_field(s: &[u8]) -> Option<(&[u8], &[u8])> {
+pub(crate) fn split_field(s: &[u8]) -> Option<(&[u8], &[u8])> {
     let s = trim_start(s);
     if s.is_empty() {
         return None;

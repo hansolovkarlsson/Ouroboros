@@ -161,9 +161,10 @@ fn migrate_secret(name: &[u8], secret: &accounts::Secret) -> bool {
         return true; // already migrated; the inline copy is redundant
     }
     let mut line = [0u8; 256];
-    let Some(llen) =
-        accounts::format_shadow_line(&mut line, name, &secret.salt[..secret.salt_len], &secret.hash)
-    else {
+    // By the secret's own version: rebuilding from its salt and hash would drop
+    // a version-2 marker. An inline secret is always version 1 today, but the
+    // formatter that cannot get this wrong costs nothing.
+    let Some(llen) = accounts::format_secret_line(&mut line, name, secret) else {
         return false;
     };
     let mut out = [0u8; BUF];

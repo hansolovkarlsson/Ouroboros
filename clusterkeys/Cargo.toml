@@ -13,3 +13,8 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+# PBKDF2 and Ed25519 for the user key (docs/roadmap/roadmap-user-keys.md,
+# step 3); the domain tag, the iteration count and the realm limit are
+# cross-node constants and live in ninep-abi.
+ed25519 = { path = "../ed25519" }
+ninep-abi = { path = "../ninep-abi" }
