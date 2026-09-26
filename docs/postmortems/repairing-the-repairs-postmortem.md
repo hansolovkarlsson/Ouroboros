@@ -382,3 +382,48 @@ patching Decision 6 finding by finding. After it, the decision was rewritten
 whole around the new choice (a kernel boot ID through UEFI), and the next two
 rounds found smaller things in it. A repair that touches one mechanism three
 ways is a redesign of that mechanism, and it is cheaper to review as one.
+
+## A second plan reviewed four times, and what the rounds cannot find (2026-09-26)
+
+*Added from the per-user keys plan,
+[`roadmap-user-keys.md`](../roadmap/roadmap-user-keys.md), #169. A document
+again, so review was again its only instrument.*
+
+| round | findings | the one that mattered | in a previous round's repair? |
+| --- | --- | --- | --- |
+| 1 (high) | 10 | logging out left the user's keyed session attested | no: the original design |
+| 2 (high) | 10 | the lock notice from the key holder could be lost, spoofed or never sent | **yes, 8 of 10**, six in one mechanism |
+| 3 (medium) | 6 | a derivation inside `accountd` trips the supervisor's `WEDGE_TICKS`; an upgrade that changes a line's length can empty `/etc/shadow` | **yes, 5 of 6** |
+| 4 (medium) | 7 | every credential lets a wire observer guess the password offline | **no: the original design**, read past three times |
+
+**The spine held, and the 09-22 section's remedy worked a second time.** Round
+1's repairs piled into one mechanism (`accountd` as the key holder, which grew
+login handles, a cross-server lock notice and capabilities in both
+directions), and round 2 found six defects there. The mechanism was rewritten
+whole instead of patched again: keys moved to `netd`, where they are used,
+which deleted the notice, the capabilities and a blocking call rather than
+guarding them. Round 3's count fell to six. A repair that keeps drawing
+findings is a mechanism asking to be redesigned, and deleting parts beats
+guarding them.
+
+**Round 3 found what no reading of the plan's own logic could.** Both serious
+findings were constraints of the system that the plan never mentioned: the
+supervisor restarts a server that stays `Runnable` for 2.56 s, and `accountd`'s
+safe shadow write depends on the file keeping its length. The round-2 rewrite
+had put a 1.5 s derivation inside a supervised server, and a length-changing
+rewrite inside the shadow file, without checking either against the code that
+governs them. A repair that adds work to an existing component inherits that
+component's unwritten limits, and those limits live in other files.
+
+**The lesson this section adds: the rounds are a sample, and the repairs
+attract it.** The most important finding of the four, that the design adds an
+offline-guessing exposure to anyone on the wire, was in the original design,
+and three rounds had read past it. Two of them were spent mostly on the
+previous round's repairs. That is
+[`review-and-split-postmortem.md`](review-and-split-postmortem.md)'s "past a
+size, findings are a sample, not an inventory" meeting this file's spine: once
+repairs start, they draw the reviewer's attention, because they are new and
+visibly fragile, and the unchanged core gets less of it. The practical form is
+cheap. After a round whose findings are mostly in repairs, the next review
+should be told to read the parts that have **not** moved as well; they are no
+safer for having survived, only less looked at.
