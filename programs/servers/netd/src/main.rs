@@ -3650,12 +3650,6 @@ fn export_ephemeral(auth: &Auth, boot: u64, nonce: &[u8; ninep_abi::NP_NONCE_LEN
 
 /// The truncated keyed tag: `HMAC-SHA-512(key, seq ‖ data)`, its first
 /// `NP_KEYED_TAG_LEN` bytes (RFC 4868).
-///
-/// Never inlined, and that is measured, not style: inlined into `serve_keyed`,
-/// the MAC's state stayed in that frame under the whole of `build_9p_reply`,
-/// and a keyed verb peaked 1.6 KB deeper than the signed verb it replaces
-/// (8,048 bytes of headroom against 9,632, step 6's probe).
-#[inline(never)]
 fn keyed_tag(key: &[u8; ninep_abi::NP_SESSION_KEY_LEN], seq: u64, data: &[u8]) -> [u8; ninep_abi::NP_KEYED_TAG_LEN] {
     let mut m = ed25519::HmacSha512::new(key);
     m.update(&seq.to_le_bytes());
