@@ -44,7 +44,10 @@ cluster key entirely. What is left is the tier below: keys are per-*machine*,
 not per-*user*, which is item 1. In rough order of value (2 and 3 are what
 the microkernel arc itself still leaves open):
 
-1. **Per-user keys for the cluster.** Per-user cluster *identity* shipped
+1. **Per-user keys for the cluster.** **Planned 2026-09-26:
+   [`roadmap-user-keys.md`](roadmap/roadmap-user-keys.md)** (password-derived
+   keys held by `netd` while the user is logged in, root squash first, shaped as the foundation for the
+   auth server below). Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)): a remote request
    carries the requesting user's **name** inside the signature, the far side resolves
@@ -54,11 +57,14 @@ the microkernel arc itself still leaves open):
    mapped user's identity for the spawn, so a remote command inherits it.
 
    **What is left is the tier below it: keys are per-machine, not per-user.**
-   The shared secret is gone — each machine has its own Ed25519 keypair and
-   authorizes peers by public key, so a member can be revoked by deleting a line
-   — but an authorized *machine* can still claim any of its own users' names. So
-   the model defends against the users of a trusted node — the real exposure —
-   but not against a compromised node. Per-user keys would close that, and the design forks are
+   The shared secret is gone: each machine has its own Ed25519 keypair and
+   authorizes peers by public key, so a member can be revoked by deleting a
+   line. But an authorized *machine* can still claim any user who has an account
+   on the export, **root included** (the export checks only that the name exists
+   there; `map_user` has no uid-0 case, and `fsd`'s root bypass applies). So the
+   model defends against the users of a trusted node, which is the real
+   exposure, but not against a compromised node: one is root on every export
+   that lists it. Per-user keys would close that, and the design forks are
    real: whether each user gets a key or the machine key signs a per-user
    credential; where those live (`/etc/cluster/keys/<name>`? a factotum-style
    agent, as Plan 9 does it?); how a node learns a peer user's key without a
@@ -138,8 +144,10 @@ the microkernel arc itself still leaves open):
    cost to learn.
 
    It killed "one shared secret = interchangeable members" and gave per-peer
-   revocation — the largest single weakness of what shipped in v0.15.0. It
-   deliberately left **"B can claim any of its own users"** open, which is
+   revocation, the largest single weakness of what shipped in v0.15.0. It
+   deliberately left **"B can claim any user"** open (recorded then as "any of
+   its own users"; the export checks only that the name exists there, root
+   included, see above), which is
    exactly the residual a master exists to close: that is now a *measured*
    remainder rather than an assumed one, which was the point of building this
    first. Two costs it introduced, worth weighing against a master: a peer list
@@ -1090,9 +1098,10 @@ crate, plus creator-owned new inodes.
   promoted to "What's next" above on 2026-08-30** once `accountd` gave the hole
   a privileged writer on the far end. **Shipped 2026-08-31**: the export now
   carries the requesting user's name inside the signature and resolves it
-  through the far side's own `/etc/passwd`. What remains is the tier below —
+  through the far side's own `/etc/passwd`. What remains is the tier below:
   the export authenticates the *machine* (its keypair), so an authorized
-  machine can still claim any of its own users' names; see item 1 above.
+  machine can still claim any user with an account on the export, root
+  included; see item 1 above.
 - ~~**Symbolic-mode `chmod`** (`u+x`)~~ — **shipped 2026-08-29** (`u+x`, `go-w`,
   `a=rx`, `u+rw,go+r`, copy-source `g=u`, conditional `X`, `s`/`t`; octal still
   works and stays absolute). A real `/etc/skel` for `useradd` **also shipped
@@ -1704,8 +1713,9 @@ would otherwise silently shrink into looking like nothing was ever found.
   `effective_caller` now REFUSES a `NET_TASK` request that states no identity
   rather than falling back to netd's root, and `netd`'s `AsUser::enter` makes a
   `cpu` child inherit the mapped user, so both doors below are shut. The
-  residual — an authorized *machine* may still claim any of its own users'
-  names — is frontier item 1 above, not this entry. The finding as originally
+  residual, that an authorized *machine* may still claim any user with an
+  account on the export, root included, is frontier item 1 above, not this
+  entry. The finding as originally
   recorded, left in present tense rather than rewritten:
 
   `netd` relays a remote

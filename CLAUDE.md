@@ -597,7 +597,7 @@ docs/                every document is annotated in full in `docs/README.md` - r
   CHANGELOG.md       the milestone record, phase 0 to the present, newest first - what was built, and why it works the way it does
   ROADMAP.md         the forward-looking plan (finished arcs live in roadmap-completed.md; the cluster direction in roadmap-cluster.md)
   roadmap/           the sub-plans: the seven cluster documents (roadmap-cluster*.md), roadmap-fid-verbs.md,
-                     roadmap-async-rmount.md and roadmap-session-auth.md
+                     roadmap-async-rmount.md, roadmap-session-auth.md and roadmap-user-keys.md
   work-journal/      chronological dev-log, one file per day plus an index README - a lighter companion to CHANGELOG.md
   testing/           testing-qemu.md (every `make run-*` target, the test images, the 9P host peers, the two-node
                      cluster rig), testing-parallels.md and testing-pi4.md (the real-hardware guides, sharing one
