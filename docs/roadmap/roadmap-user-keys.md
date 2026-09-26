@@ -190,13 +190,13 @@ What the figure is, since it is the input to a permanent constant:
 - It is **an idle guest's figure**. A busy guest (a `cpu` job, a transfer)
   makes a login slower, not the constant wrong.
 
-**The count, recommended: 210,000**, OWASP's current figure for
+**The count: 210,000** (chosen by Hans, 2026-09-26), OWASP's current figure for
 PBKDF2-HMAC-SHA-512. At about 2.2 s a login it is inside Decision 3's budget of
 about three seconds with a quarter to spare for a busier guest, so the plan has
 no gap against OWASP to record. The literal reading of Decision 3, the largest
 count inside three seconds, is about 290,000; it buys a third more guessing
-cost for a login at the edge of the budget on an idle guest. The number is
-Hans's to fix, since it is permanent, and step 5 writes it into `ninep-abi`.
+cost for a login at the edge of the budget on an idle guest, and was not
+taken. Step 5 writes the count into `ninep-abi`.
 
 ## Decisions
 
