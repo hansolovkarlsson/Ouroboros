@@ -3142,7 +3142,11 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         // export gateway (cluster Phase 1). Both stage a response in `c.prefix`
         // for pump_send to stream.
         if c.local_port == ninep_abi::NP_NET_PORT {
-            if handle_9p(c, request, dials, mac, auth, sessions) {
+            let sg = sg_paint();
+            let keyed_before = c.keyed.is_some();
+            let abort = handle_9p(c, request, dials, mac, auth, sessions);
+            sg_report(sg, keyed_before, c.keyed.is_some(), request);
+            if abort {
                 // An authentication failure on a keyed session, or a key
                 // offered where none may be: close with NO reply (ninep-abi,
                 // "Keyed sessions"). An RST rather than a FIN, so the client's
@@ -3572,6 +3576,49 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     c.prefix_off = 0;
     c.file = false;
     false
+}
+
+// MEASUREMENT ONLY (never merged): the stack peak one handle_9p call reaches.
+#[inline(never)]
+fn sg_paint() -> (usize, usize, usize) {
+    let lo = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_STACK_BASE) as usize;
+    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_STACK_SIZE) as usize;
+    let probe = 0u64;
+    let sp = core::hint::black_box(&probe) as *const u64 as usize;
+    let paint_hi = sp - 256;
+    // SAFETY: [lo, paint_hi) is this task's own stack, below the live frame.
+    unsafe {
+        let mut q = lo;
+        while q < paint_hi {
+            core::ptr::write_volatile(q as *mut u8, 0xA5);
+            q += 1;
+        }
+    }
+    (lo, size, paint_hi)
+}
+
+#[inline(never)]
+fn sg_report(sg: (usize, usize, usize), keyed_before: bool, keyed_after: bool, request: &[u8]) {
+    let (lo, size, paint_hi) = sg;
+    let mut lowest = paint_hi;
+    let mut q = lo;
+    while q < paint_hi {
+        // SAFETY: the window just painted.
+        if unsafe { core::ptr::read_volatile(q as *const u8) } != 0xA5 {
+            lowest = q;
+            break;
+        }
+        q += 1;
+    }
+    log(if keyed_before { b"SG keyed-frame " } else if keyed_after { b"SG keyed-open  " } else { b"SG signed      " });
+    log(b" peak=");
+    log_dec((lo + size - lowest) as u64);
+    log(b" headroom=");
+    log_dec((lowest - lo) as u64);
+    let voff = ninep_abi::NP_NET_LEN_PREFIX + if keyed_before { ninep_abi::NP_AUTH_HDR_KEYED } else { ninep_abi::NP_AUTH_HDR_SIGNED };
+    log(b" verb=");
+    log_dec(if request.len() >= voff + 8 { read_u64(request, voff) } else { 0 });
+    log(b"\r\n");
 }
 
 /// This boot's counter, or `None` when the kernel could not vouch for one (no
