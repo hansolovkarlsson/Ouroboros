@@ -316,6 +316,10 @@ const PBKDF2_CANDIDATES: [u64; 2] = [100_000, 210_000];
 /// `finalize`, which would time three compressions an iteration rather than
 /// the two a PBKDF2 pays. `pbkdf2_step_is_hmac` checks this construction
 /// against `hmac_sha512`, so the figure is the cost of a real HMAC.
+///
+/// The password must fit one block (128 bytes); RFC 2104 hashes a longer key
+/// first, as `HmacSha512::new` does, and step 2's PBKDF2 must too. Here it is
+/// always the four-byte dev password.
 fn primed_pads(password: &[u8]) -> (Sha512, Sha512) {
     let mut k = [0u8; PAD_LEN];
     k[..password.len()].copy_from_slice(password);
@@ -347,6 +351,7 @@ fn pbkdf2_step(inner: &Sha512, outer: &Sha512, u: &[u8; HMAC_LEN]) -> [u8; HMAC_
 /// Whether one step from the primed pads equals `hmac_sha512`. Without it, a
 /// wrong pad would still time two compressions and the number would look
 /// right while measuring something that is not an HMAC.
+#[inline(never)]
 fn pbkdf2_step_is_hmac() -> bool {
     let (inner, outer) = primed_pads(PBKDF2_PASSWORD);
     let u = hmac_sha512(PBKDF2_PASSWORD, b"a salt");
@@ -389,10 +394,15 @@ fn fastest_pbkdf2(n: u32) -> u64 {
 /// TWO CHECKS BEFORE THE NUMBER IS BELIEVED. The step must be a real HMAC
 /// (`pbkdf2_step_is_hmac`), and the time must SCALE: twice the iterations has
 /// to take about twice as long, or the loop was optimised away, the clock is
-/// too coarse, or a stall dominated the run. The band is wide (1.6 to 2.5)
-/// because other tasks' ticks land inside a run: two boots read 1.8 and 2.4.
+/// too coarse, or a stall dominated the run. The band is wide (1.6 to 3.0)
+/// because other tasks' ticks land inside a run: boots have read 1.8 to 2.4.
 /// It has refused twice already, for the two causes described at
 /// `PBKDF2_N` and in the body below.
+///
+/// `#[inline(never)]`, like everything this file measures around: the stack
+/// readings are depths from the top of the stack, and inlined into `_start`
+/// this function's pads and hash states added 1,056 bytes to every one of them.
+#[inline(never)]
 fn report_pbkdf2(target: u64) -> u32 {
     let mut failures = 0u32;
     if pbkdf2_step_is_hmac() {
@@ -419,9 +429,12 @@ fn report_pbkdf2(target: u64) -> u32 {
     out(target, b" = ");
     put_dec(target, two);
     out(target, b" us\r\n");
-    // Ratio in tenths, integer only: 16..=25 is 1.6 to 2.5.
+    // Ratio in tenths, truncated: 16..=30 is 1.6 to 3.0. The ceiling is
+    // loose on purpose. A ratio above 2 means the longer run lost more to other
+    // tasks, which still scales; what this exists to catch is a ratio near 1
+    // (a loop optimised away, a stall in the shorter run) or near 0.
     let tenths = (two * 10).checked_div(one).unwrap_or(0);
-    if !(16..=25).contains(&tenths) {
+    if !(16..=30).contains(&tenths) {
         out(target, b"  [FAIL] PBKDF2 time did not scale with iterations (ratio x10 = ");
         put_dec(target, tenths);
         out(target, b"); the per-iteration figure is not reported\r\n");

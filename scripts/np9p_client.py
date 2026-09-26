@@ -1832,6 +1832,13 @@ IMPERSONATE_PUBLIC = "/HELLO.TXT"
 # gate that already passes on the code it is meant to catch proves nothing.
 # Stage 1 is root squash: the root claim is refused, and `user` is still
 # claimable by anyone until the credential lands (step 7).
+#
+# A REFUSAL MEANS ONE OF THESE, not any status above the error band. A row that
+# expects refused and passed on FS_ERR_NOT_FOUND or FS_ERR_BUSY would report the
+# squash working because path resolution broke or the budget ran out. These two
+# are the export's answers about WHO is asking: the name or key is refused
+# (FS_ERR_AUTH), or the resolved user may not (FS_ERR_PERM).
+IMPERSONATE_REFUSALS = (FS_ERR_AUTH, FS_ERR_PERM)
 IMPERSONATE_STAGES = {
     0: {"row 1": True, "row 2": True},
     1: {"row 1": False, "row 2": True},
@@ -1943,8 +1950,10 @@ def do_impersonate_gate(host, port, stage):
         if got and not good_data(data):
             check(f"{label}: {text}", False, f"served, but not the expected bytes: {data[:40]!r}")
             return
-        check(f"{label}: {text}", got == expect,
-              f"{outcome(st, data)}; stage {stage} expects {'served' if expect else 'refused'}")
+        ok = got if expect else st in IMPERSONATE_REFUSALS
+        check(f"{label}: {text}", ok,
+              f"{outcome(st, data)}; stage {stage} expects "
+              f"{'served' if expect else 'refused FS_ERR_AUTH or FS_ERR_PERM'}")
 
     st, data = read("/etc/shadow", intruder, "root")
     row("row 1", "intruder claims root, reads /etc/shadow", st, data,
@@ -2292,7 +2301,10 @@ def main():
         sys.exit(min(do_path_gate(host, port), 125))
 
     if op == "impersonate-gate":
-        stage = int(args[3]) if len(args) > 3 else 0
+        try:
+            stage = int(args[3]) if len(args) > 3 else 0
+        except ValueError:
+            sys.exit(f"impersonate-gate: the stage is a number, not {args[3]!r}")
         sys.exit(min(do_impersonate_gate(host, port, stage), 125))
 
     if op == "session-gate":

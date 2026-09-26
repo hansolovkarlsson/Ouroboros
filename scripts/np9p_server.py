@@ -244,8 +244,10 @@ _AUTHORIZED = None
 
 
 def dev_authorized():
-    """The dev peers' public keys, as bytes. Memoized: deriving them is three
-    scalar multiplications in a naive pure-Python reference, and doing that per
+    """The dev peers' public keys, as bytes, one per DEV_PEER_LABELS entry
+    (`intruder` included: every dev key is public-seeded, so authorizing it
+    here grants nothing a `host` signature does not). Memoized: deriving them is
+    a scalar multiplication each in a naive pure-Python reference, and doing that per
     request sits squarely inside the ~1s budget the guest allows for a reply -
     the budget this rig was just found to be marginal against."""
     global _AUTHORIZED
