@@ -205,12 +205,33 @@ python3 scripts/np9p_client.py localhost 5640 keyed /EFI/ORBS        # the same,
 ```
 
 `keyed` offers an ephemeral X25519 key in its `NP_SESSION` (session-auth step
-5). Against an export that keys (the host peer now; `netd` from step 6) every
+5). Against an export that keys (the host peer, and `netd` since step 6) every
 later request is `AUTHNP04`, MACed rather than signed; against one that does
 not, the answer is an empty result and the session stays signed, which the
 command prints. Host to host it runs today:
 `python3 scripts/np9p_server.py 5791 &` then
 `python3 scripts/np9p_client.py 127.0.0.1 5791 keyed /HELLO.TXT --peer=host`.
+
+**The keyed gate** (session-auth step 6, 2026-09-26): `keyed-gate [data_path]
+[user]` runs eleven checks against a live export, PASS/FAIL each: a keyed
+`cbig`-shaped run (open, `NP_PREAD` to EOF, clunk, byte-compared against a
+path-based read), a fresh export key per handshake, the old-style session
+unchanged, seven refusals that must each close the connection with no reply
+(flipped tag, replayed and skipped `seq`, `AUTHNP03` on a keyed session, a
+second key, a low-order key, a key offered mid-stream), and a path verb
+running as the session's user. That last one needs the **ext2 image**, where
+modes are enforced; on FAT32 it fails and says why:
+
+```sh
+make image-ext2
+IMAGE=build/espext2.img NO_BUILD=1 scripts/run-guest.sh -- \
+    python3 scripts/np9p_client.py localhost 5640 keyed-gate /man/grep user
+# expected: 11 PASS, "keyed-gate: 0 check(s) failed", guest alive, 0 restarts
+```
+
+Each refusal also leaves one `netd: 9p: ...; closing` line on the guest
+console naming the reason, which is where an operator finds it: the client
+only sees the connection end.
 
 **The session gate** (step 4 of `docs/roadmap/roadmap-fid-verbs.md`, 2026-09-07):
 `session-gate` runs the plan's checks and negative controls against the live

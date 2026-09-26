@@ -545,7 +545,7 @@ the client, so each side is tested against something that is not itself.
    dropped (the session breaks on its first keyed verb), the client not
    checking reply tags (all four misbehaving replies accepted), and the server
    not checking `seq` (a skipped `seq` answered).
-6. **The export, in `netd`.** Key a session on an `NP_SESSION` with a payload;
+6. ✅ **2026-09-26.** **The export, in `netd`.** Key a session on an `NP_SESSION` with a payload;
    accept only `AUTHNP04` on it after that. Checked from the host with
    `np9p_client.py`: a keyed `cbig`-shaped run (open, preads, close) is served.
    *Controls, each run:* a tag with one bit flipped is refused and the session
@@ -556,6 +556,47 @@ the client, so each side is tested against something that is not itself.
    user, not a name of its own. An old-style `NP_SESSION` (no payload) still
    gets today's session, and a node whose boot counter is unusable keys
    nothing. Stack measured at the new peak.
+
+   **What it did.** `handle_9p` keys a session on a fresh connection's first
+   frame when it is an `NP_SESSION` whose payload is exactly 32 bytes and this
+   boot's counter is usable: `key_session` (its own frame) derives the export
+   ephemeral, answers with its public half in the ordinary signed reply, and
+   runs the key schedule; the ephemeral, the shared secret and `K` are wiped,
+   and the two keys are wiped when the connection goes (`Drop`). After that the
+   connection takes `AUTHNP04` only (`verify_keyed`: shape, then `seq`, then a
+   `ct_eq` tag), every verb runs as the user who signed the `NP_SESSION`, and
+   replies are tagged (`seal_keyed`). Every auth failure closes with an RST and
+   no reply, logged through a cold `close_keyed`. The check is a new
+   `np9p_client.py keyed-gate`: eleven checks, the plan's controls among them,
+   PASS/FAIL each, and all eleven pass on the ext2 image. Its controls are
+   mutations of `netd`, three builds, and each failed exactly the checks it
+   should: seq check off, verbs run as root and the small-order check off
+   (replay, skip, user and low-order FAIL); tag check off, mid-stream and
+   re-key checks off (flipped tag, mid-stream and second key FAIL); the boot
+   counter reported unusable (nothing keys: nine FAIL, the old-style session
+   and the mid-stream refusal still PASS). The `AUTHNP03`-on-a-keyed-session
+   check has no single mutation that isolates it, since a misread frame also
+   fails the `seq` check; it is a refusal either way.
+
+   **The stack, and what measuring it found.** A probe paints the stack below
+   the 9P dispatch and reports each frame's peak and verb; a 4 KB pad in
+   `key_session` moved the keyed handshake's peak by +4,144, so it sees that
+   depth. The first build put every keyed verb **1,520 bytes deeper** than the
+   same verb signed. Two guesses were wrong (the HMAC state; the call site),
+   and the disassembly found it: `log` inlined into the keyed dispatch with its
+   552- and 768-byte console buffers. Fixing that exposed the second cost
+   against `main`: a second caller made `build_9p_reply` stop being inlined, and
+   **every export verb, signed ones included, peaked 1,760 bytes deeper than on
+   `main`**. So `handle_9p` has one dispatch now: it authenticates by the
+   connection's format, makes the one `build_9p_reply` call and seals in the
+   same format. Measured per verb on the same image and gates (headroom, bytes):
+   `main` 11,392 for every verb; this step 10,864 for a signed verb, 10,960 for
+   a keyed one, and **10,736 for the keyed `NP_SESSION`, the new peak** (two
+   ladders). The 528 a signed verb lost is the resident keyed state,
+   `MAX_CONNS` × `Option<KeyedSession>` in `serve`'s frame: Risk 2, counted.
+   `serve` is under the client too, so step 7 starts 528 bytes shorter than
+   step 1 measured. Branches `measure/keyed-export-stack` and
+   `measure/keyed-export-stack-main`, never merged.
 7. **The client, in `netd`.** The service pass (`sign_parked`, before it signs
    the raw `NP_SESSION`) computes the ephemeral and sends its public half, phase two derives the keys from the export's signed reply
    and zeroes the private scalar, and later verbs frame `AUTHNP04` into the

@@ -283,7 +283,7 @@ impl Auth {
 /// hands netd the boot entropy, which it hands to nobody else (`/bin/bootid`
 /// checks the refusal; this line is the other half of that gate). The bytes are
 /// read and dropped here: each keyed-session handshake reads them afresh
-/// (`boot_identity_into`), so no copy of them stays resident between handshakes.
+/// (`export_ephemeral`), so no copy of them stays resident between handshakes.
 fn report_boot_identity() {
     let c = syscall(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_COUNTER);
     if c == syscall_abi::BOOT_ID_NONE {
@@ -2182,7 +2182,7 @@ struct TcpConn {
     fids: [SessionFid; SESSION_FIDS],
     /// The session's keys, once its `NP_SESSION` was keyed (step 6 of
     /// docs/roadmap/roadmap-session-auth.md). While `Some`, every frame on this
-    /// connection must be `AUTHNP04` and is served by [`serve_keyed`]; `None`
+    /// connection must be `AUTHNP04`, verified by [`verify_keyed`]; `None`
     /// is today's session or a one-shot, signed per request. Set once, never
     /// cleared while the connection lives, and wiped by `Drop`.
     keyed: Option<KeyedSession>,
