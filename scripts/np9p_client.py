@@ -17,6 +17,7 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> session-gate [hold_s]  # the step-4 checks, PASS/FAIL each
     python3 scripts/np9p_client.py <host> <port> fid-gate [path] [data_path]  # the step-5/6 checks: open/fstat/clunk, and pread to EOF, on a session
     python3 scripts/np9p_client.py <host> <port> path-gate              # the path verbs end to end on a scratch file, plus the console and /net arms
+    python3 scripts/np9p_client.py <host> <port> keyed-gate [data_path] [user]  # session-auth step 6: the export keys a session, and refuses every forgery by closing
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
 `[magic:8][nonce:16][name:32][pubkey:32][sig:64]` in front of the NP message,
@@ -548,7 +549,7 @@ class Session:
         self.sock.sendall(frame)
         return recv_reply(self.sock, nonce, peer_key=peer_key())
 
-    def open(self, keyed=False):
+    def open(self, keyed=False, user=None):
         """Send NP_SESSION. With `keyed`, offer an ephemeral X25519 key as its
         payload: an export that keys answers with its own in the SIGNED reply,
         and every later op is AUTHNP04; one that does not answers an empty
@@ -556,10 +557,10 @@ class Session:
         answer came in a reply whose signature was checked, so an attacker
         cannot strip the offer or swap a key."""
         if not keyed:
-            return self.op(build_frame(NP_SESSION, 0, [], b""))
+            return self.op(build_frame(NP_SESSION, 0, [], b""), user=user)
         secret = client_ephemeral(SIGN_KEY)
         eph_client = x25519_ref.public(secret)
-        frame, nonce = request_frame(build_frame(NP_SESSION, 0, [], eph_client))
+        frame, nonce = request_frame(build_frame(NP_SESSION, 0, [], eph_client), user=user)
         self.sock.sendall(frame)
         status, data = recv_reply(self.sock, nonce, peer_key=peer_key())
         if status != 0 or not data:
@@ -574,6 +575,35 @@ class Session:
             return FS_ERR_AUTH, b""
         self.keys = derive_session_keys(shared, nonce, eph_client, data)
         return 0, data
+
+    def send_keyed_raw(self, np_msg, seq=None, magic=NP_AUTH_MAGIC_KEYED, flip_tag=False,
+                       trailing=b"", declare_extra=0):
+        """Send one keyed-shaped frame with a chosen `seq`, magic or a flipped
+        tag bit, and read nothing: the keyed gate's controls, each of which a
+        correct export answers by closing. Advances `self.seq` only for a
+        well-formed frame, as `_keyed_op` does."""
+        k_c2s, _ = self.keys
+        if seq is None:
+            self.seq += 1
+            seq = self.seq
+        tag = bytearray(tag_of(k_c2s, seq, np_msg))
+        if flip_tag:
+            tag[0] ^= 1
+        body = struct.pack("<QQ", magic, seq) + bytes(tag) + np_msg
+        # `trailing`: bytes after the frame, outside its declared length.
+        # `declare_extra`: a declared length longer than the bytes sent.
+        self.sock.sendall(struct.pack("<I", len(body) + declare_extra) + body + trailing)
+
+    def closed_without_reply(self):
+        """Whether the export ended the connection (an RST or a FIN) without
+        sending a single byte: the one answer an auth failure on a keyed
+        session may have. A reply, of any shape, is the failure."""
+        try:
+            return self.sock.recv(1) == b""
+        except ConnectionResetError:
+            return True
+        except socket.timeout:
+            return False
 
     def _keyed_op(self, np_msg):
         """One AUTHNP04 request and its reply. A reply whose tag does not
@@ -675,6 +705,246 @@ def do_keyed(host, port, path):
         print(f"[{'keyed' if s.keys else 'signed'}] {label:7} -> {shown}")
     s.close()
 
+
+def do_keyed_gate(host, port, data_path, low_user):
+    """Step 6 of docs/roadmap/roadmap-session-auth.md: the guest export keys a
+    session, checked from the host, one PASS/FAIL line per check, exit status
+    the number that failed:
+
+      1. a KEYED session serves a `cbig`-shaped run: open a fid on
+         `data_path`, NP_PREAD it to EOF in NP_REMOTE_CHUNK pieces, clunk, and
+         the bytes equal the same file read path-based over one-shot signed
+         connections (which must be longer than one chunk, or the check fails);
+         and on the same session a payload-less NP_SESSION answers 0 under a
+         valid tag, and NP_RUN answers FS_ERR_NO_SUCH_VERB under one;
+      2. two keyed sessions get two different export keys (the ephemeral is
+         derived per handshake, never stored);
+      3. an old-style NP_SESSION (no payload) still gets today's unkeyed,
+         signed session;
+      4. the refusals, each on a fresh keyed session, each answered by closing
+         with NO reply: a tag with one bit flipped, a replayed seq, a skipped
+         seq, an AUTHNP03 frame, a second NP_SESSION offering a key; and on
+         the handshake itself a low-order ephemeral (u = 0) and a key offered
+         mid-stream on an unkeyed session; after each the export must still
+         serve a one-shot request (the refusal closed ONE connection); and
+         the declared length bounds a keyed frame both ways: trailing bytes
+         past it are ignored and the request served, a length longer than
+         the segment closes;
+      5. a path verb on a keyed session runs as the session's user: `/etc/shadow`
+         read on a session keyed as `low_user` is refused FS_ERR_PERM, and read
+         on one keyed as root is served. ext2 only: FAT32 records no modes, so
+         there every read is served and this check FAILS, and says why.
+
+    Against an export that does not key (v0.20.0, or a node whose boot counter
+    is unusable), check 1 fails at the open with "not keyed", and every check
+    that needs a keyed session fails with it.
+    """
+    failed = 0
+
+    def check(name, ok, detail):
+        nonlocal failed
+        close_all()  # whatever the check opened, before the next one runs
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}", flush=True)
+        if not ok:
+            failed += 1
+
+    root = build_frame(NP_READDIR, 0, [1, 4096], b"/")
+
+    # EVERY session this gate opens is closed on every path, a raise included:
+    # the export has three session slots, so one leaked by an early check
+    # would turn a later check's open into FS_ERR_BUSY, reported as "not
+    # keyed", blaming keying for a budget the gate spent (review of step 6).
+    opened = []
+
+    def keyed_session(user=None):
+        s = Session(host, port)
+        opened.append(s)
+        st, eph = s.open(keyed=True, user=user)
+        if st != 0 or s.keys is None:
+            raise RuntimeError(f"not keyed (NP_SESSION -> {status_name(st)}, "
+                               f"{len(eph)}-byte result)")
+        return s, eph
+
+    def plain_session():
+        s = Session(host, port)
+        opened.append(s)
+        return s
+
+    def close_all():
+        while opened:
+            try:
+                opened.pop().close()
+            except OSError:
+                pass
+
+    def still_serves():
+        try:
+            st, _ = one_op(host, port, root)
+            return served(st), status_name(st) if not served(st) else "served"
+        except (RuntimeError, OSError) as exc:
+            return False, f"no reply ({exc.__class__.__name__})"
+
+    # 1. the cbig-shaped run
+    db = data_path.encode()
+
+    def read_to_eof(fetch):
+        got = b""
+        for _ in range(64):
+            st, chunk = fetch(len(got))
+            if not served(st) or st != len(chunk):
+                return got, f"at {len(got)} -> {status_name(st)}"
+            if st == 0:
+                return got, ""
+            got += chunk
+        return got, "no EOF within 64 chunks"
+
+    try:
+        s, _ = keyed_session()
+        st, data = s.op(open_frame(db))
+        if not served(st):
+            raise RuntimeError(f"open {data_path} -> {status_name(st)}")
+        fid = st
+        via_fid, stop = read_to_eof(lambda off: s.op(build_frame(NP_PREAD, 0, [fid, off, NP_REMOTE_CHUNK], b"")))
+        st_c, _ = s.op(build_frame(NP_CLUNK, 0, [fid], b""))
+        st_again, res_again = s.op(build_frame(NP_SESSION, 0, [], b""))
+        st_run, _ = s.op(build_frame(NP_RUN, 0, [2, 0, 0, 0], b"id"))
+        s.close()
+        via_path, stop_p = read_to_eof(lambda off: one_op(host, port, read_at_frame(db, off, NP_REMOTE_CHUNK)))
+        ok = (not stop and not stop_p and via_fid == via_path and len(via_fid) > NP_REMOTE_CHUNK
+              and st_c == 0 and st_again == 0 and res_again == b"" and st_run == FS_ERR_NO_SUCH_VERB)
+        detail = (f"{len(via_fid)} bytes via the fid, {len(via_path)} path-based, "
+                  f"{'equal' if via_fid == via_path else 'DIFFER'}"
+                  f"{'' if len(via_fid) > NP_REMOTE_CHUNK else ', NOT longer than one chunk'}; "
+                  f"clunk -> {status_name(st_c)}, bare NP_SESSION -> {status_name(st_again)}, "
+                  f"NP_RUN -> {status_name(st_run)}" + (f" ({stop or stop_p})" if stop or stop_p else ""))
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("a keyed session serves open, pread to EOF and clunk, all tagged", ok, detail)
+
+    # 2. a fresh export key per handshake
+    try:
+        a, eph_a = keyed_session()
+        a.close()
+        b, eph_b = keyed_session()
+        b.close()
+        ok, detail = eph_a != eph_b, f"{eph_a.hex()[:16]}... then {eph_b.hex()[:16]}..."
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("two keyed sessions get two different export keys", ok, detail)
+
+    # 3. the old-style session
+    try:
+        s = plain_session()
+        st, res = s.open()
+        st2, _ = s.op(root)
+        s.close()
+        ok = st == 0 and res == b"" and s.keys is None and served(st2)
+        detail = f"NP_SESSION -> {status_name(st)}, {len(res)}-byte result, then a signed readdir -> {status_name(st2) if not served(st2) else 'served'}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("an NP_SESSION with no payload still gets today's signed session", ok, detail)
+
+    # 4. the refusals
+    def refusal(name, act):
+        try:
+            closed, how = act()
+        except (RuntimeError, OSError) as exc:
+            closed, how = False, f"{exc}"
+        close_all()  # before the liveness probe, which needs a free slot too
+        alive, after = still_serves()
+        check(name, closed and alive,
+              f"{'closed without a reply' if closed else 'NOT closed: ' + how}; a one-shot after -> {after}")
+
+    def on_keyed(send):
+        s, _ = keyed_session()
+        s.sock.settimeout(10)
+        send(s)
+        closed = s.closed_without_reply()
+        s.close()
+        return closed, "a reply arrived"
+
+    refusal("a request tag with one bit flipped", lambda: on_keyed(
+        lambda s: s.send_keyed_raw(root, flip_tag=True)))
+
+    def replay(s):
+        st, _ = s.op(root)
+        if not served(st):
+            raise RuntimeError(f"seq 1 -> {status_name(st)}")
+        s.send_keyed_raw(root, seq=1)
+    refusal("a replayed seq", lambda: on_keyed(replay))
+    refusal("a skipped seq (2 first)", lambda: on_keyed(lambda s: s.send_keyed_raw(root, seq=2)))
+
+    def signed_on_keyed(s):
+        frame, _ = request_frame(root)
+        s.sock.sendall(frame)
+    refusal("an AUTHNP03 frame on a keyed session", lambda: on_keyed(signed_on_keyed))
+    refusal("a second NP_SESSION offering a key", lambda: on_keyed(
+        lambda s: s.send_keyed_raw(build_frame(NP_SESSION, 0, [], x25519_ref.public(os.urandom(32))))))
+
+    def low_order():
+        # u = 0 is of small order: every scalar maps it to the all-zero secret.
+        s = plain_session()
+        s.sock.settimeout(10)
+        frame, _ = request_frame(build_frame(NP_SESSION, 0, [], b"\0" * NP_EPHEMERAL_LEN))
+        s.sock.sendall(frame)
+        closed = s.closed_without_reply()
+        s.close()
+        return closed, "a reply arrived"
+    refusal("a low-order ephemeral key closes the handshake", low_order)
+
+    def mid_stream():
+        s = plain_session()
+        s.sock.settimeout(10)
+        st, _ = s.open()
+        if st != 0:
+            raise RuntimeError(f"unkeyed NP_SESSION -> {status_name(st)}")
+        frame, _ = request_frame(build_frame(NP_SESSION, 0, [], x25519_ref.public(os.urandom(32))))
+        s.sock.sendall(frame)
+        closed = s.closed_without_reply()
+        s.close()
+        return closed, "a reply arrived"
+    refusal("a key offered mid-stream on an unkeyed session", mid_stream)
+
+    # 4b. the declared length bounds the request, both ways
+    try:
+        s, _ = keyed_session()
+        s.send_keyed_raw(root, trailing=b"\xa5" * 16)
+        (flen,) = struct.unpack("<I", s._read(4))
+        framed = s._read(flen)
+        k_s2c = s.keys[1]
+        tag_ok = hmac.compare_digest(framed[:NP_KEYED_TAG_LEN], tag_of(k_s2c, s.seq, framed[NP_KEYED_TAG_LEN:]))
+        (st,) = struct.unpack("<Q", framed[NP_KEYED_TAG_LEN:NP_KEYED_TAG_LEN + 8])
+        ok, detail = tag_ok and served(st), f"readdir with 16 trailing bytes -> {status_name(st) if not served(st) else 'served'}, tag {'verifies' if tag_ok else 'DOES NOT verify'}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("bytes past a keyed frame's declared length are not part of it", ok, detail)
+    refusal("a keyed frame declaring more than its segment holds", lambda: on_keyed(
+        lambda s: s.send_keyed_raw(root, declare_extra=64)))
+
+    # 5. the session's user, not a name of the frame's own
+    shadow = b"/etc/shadow"
+    try:
+        lo, _ = keyed_session(user=low_user.encode())
+        st_lo, _ = lo.op(read_at_frame(shadow, 0, 64))
+        lo.close()
+        hi, _ = keyed_session(user=b"root")
+        st_hi, _ = hi.op(read_at_frame(shadow, 0, 64))
+        hi.close()
+        ok = st_lo == FS_ERR_PERM and served(st_hi)
+        detail = (f"as {low_user} -> {status_name(st_lo) if not served(st_lo) else 'SERVED'}, "
+                  f"as root -> {status_name(st_hi) if not served(st_hi) else 'served'}")
+        if served(st_lo) and served(st_hi):
+            # Two causes, and the gate cannot tell them apart, so it names
+            # both: a mutation that ran every verb as root read exactly like
+            # this on the ext2 image, under a hint that blamed FAT32.
+            detail += (" (both served: the export ran the verb as someone other than the"
+                       " session's user, or the image is FAT32, which enforces no modes)")
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("a path verb on a keyed session runs as the session's user", ok, detail)
+
+    print(f"keyed-gate: {failed} check(s) failed", flush=True)
+    return failed
 
 def do_session_gate(host, port, hold_s=10):
     """The step-4 session gate (docs/roadmap/roadmap-fid-verbs.md), run end to
@@ -1861,6 +2131,13 @@ def main():
         # fails, rather than passes, on one that is not (see do_fid_gate).
         data_path = args[4] if len(args) > 4 else "/man/grep"
         sys.exit(min(do_fid_gate(host, port, fid_path, data_path), 125))
+
+    if op == "keyed-gate":
+        # A file LONGER than NP_REMOTE_CHUNK, and a non-root account the
+        # image's /etc/passwd has (the ext2 image's is `user`).
+        data_path = args[3] if len(args) > 3 else "/man/grep"
+        low_user = args[4] if len(args) > 4 else "user"
+        sys.exit(min(do_keyed_gate(host, port, data_path, low_user), 125))
 
     if op == "path-gate":
         sys.exit(min(do_path_gate(host, port), 125))

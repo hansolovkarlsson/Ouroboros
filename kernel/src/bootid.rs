@@ -54,8 +54,9 @@ const RECORD_LEN: usize = 21;
 /// The variable's name, under this project's own vendor GUID.
 const VAR_NAME: &CStr16 = cstr16!("OuroborosBootId");
 const VAR_VENDOR: VariableVendor = VariableVendor(guid!("0217fcbd-c3fa-42d4-b027-51903f6a7f6c"));
-/// Bytes of boot entropy asked of `EFI_RNG_PROTOCOL`.
-pub(crate) const ENTROPY_MAX: usize = 32;
+/// Bytes of boot entropy asked of `EFI_RNG_PROTOCOL`: the ABI's bound, so a
+/// userland buffer sized by it always fits.
+pub(crate) const ENTROPY_MAX: usize = syscall_abi::BOOT_ID_ENTROPY_MAX;
 
 /// What this boot established, read by the `BOOT_ID` syscall.
 pub(crate) struct BootIdentity {

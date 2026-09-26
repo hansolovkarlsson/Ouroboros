@@ -12,6 +12,20 @@ here actually works today, see [`architecture.md`](architecture.md) and
 **Not yet released.** Changes since v0.20.0, drafted as they land; cutting a
 version is held for a go-ahead.
 
+**The export keys a session, session-auth step 6.** An `NP_SESSION` whose
+payload is an ephemeral X25519 key, sent as a fresh connection's first frame,
+now gets a keyed session from `netd`: the export answers with its own
+ephemeral in the signed reply, both sides derive the two session keys, and the
+connection then takes `AUTHNP04` only. The frames carry a strict `seq`, a
+constant-time tag compare, every verb running as the user who signed the
+`NP_SESSION`, and tagged replies. Any auth failure closes the connection with
+an RST and no reply. A node whose boot counter is unusable keys nothing.
+`np9p_client.py keyed-gate` checks it with thirteen checks, the plan's
+controls among them. Measuring the stack found two costs a keyed dispatch had
+added, one of them to every signed verb as well (1,760 bytes against `main`).
+`handle_9p` now has one dispatch for both formats, and the keyed handshake is
+the new peak at 10,736 bytes of headroom (`main`: 11,392).
+
 **Keyed sessions between the host peers, session-auth step 5.**
 `np9p_server.py` keys a session when a client offers an ephemeral key and
 serves `AUTHNP04` frames on it; `np9p_client.py` gains `keyed <path>`. Each

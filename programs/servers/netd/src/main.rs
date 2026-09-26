@@ -222,21 +222,34 @@ struct Auth {
     /// The no-exec lever: a machine may share its disk (mounts allowed) while
     /// refusing remote code execution (`NP_RUN`). Set by a `\NOEXEC` flag file.
     noexec: bool,
-    /// This machine's own signing key, expanded once at boot.
-    ///
-    /// `SigningKey` rather than the raw seed: expanding derives the public key
-    /// with a scalar multiplication, and doing that per frame would double the
-    /// cost of every signature for a value that never changes. `None` means this
-    /// machine has no identity, and since the flag day there is no second format
-    /// to fall back to: it can neither sign an outbound request nor sign a reply,
-    /// so it neither dials nor serves.
-    signing: Option<ed25519::SigningKey>,
+    /// This machine's own identity, its signing key expanded once at boot.
+    /// `None` means this machine has no identity, and since the flag day there
+    /// is no second format to fall back to: it can neither sign an outbound
+    /// request nor sign a reply, so it neither dials nor serves.
+    signing: Option<Identity>,
     /// `/etc/cluster/authorized`: the peers this machine accepts, by public key.
     /// Empty means no peer can be verified at all, which closes the export -
     /// fail-closed, and with the MAC'd format gone there is nothing it leaves
     /// unaffected.
     authorized: [u8; AUTHORIZED_MAX],
     authorized_len: usize,
+}
+
+/// A machine identity: the expanded signing key, and the seed it came from.
+///
+/// `SigningKey` for signing: expanding derives the public key with a scalar
+/// multiplication, and doing that per frame would double the cost of every
+/// signature for a value that never changes. The SEED is kept beside it for one
+/// purpose: it is the secret input of every ephemeral X25519 key this machine
+/// derives for a keyed session (Decision 6 of
+/// docs/roadmap/roadmap-session-auth.md, the "machine private key" in
+/// `SIG_DOMAIN_EPHEMERAL_*`'s hash). The two live in ONE `Option` so that "a key
+/// but no seed", or the reverse, cannot be written: a separate seed field was
+/// all zero on a machine with no key, and a caller that forgot to check would
+/// have derived ephemerals from a public value (review of step 6).
+struct Identity {
+    key: ed25519::SigningKey,
+    seed: [u8; ed25519::SECRET_LEN],
 }
 
 impl Auth {
@@ -275,20 +288,22 @@ impl Auth {
 /// docs/roadmap/roadmap-session-auth.md): the counter, and whether the kernel
 /// hands netd the boot entropy, which it hands to nobody else (`/bin/bootid`
 /// checks the refusal; this line is the other half of that gate). The bytes are
-/// read and dropped here; the session handshake (step 7) is their consumer.
+/// read and dropped here: each keyed-session handshake reads them afresh
+/// (`export_ephemeral`), so no copy of them stays resident between handshakes.
 fn report_boot_identity() {
-    let c = syscall(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_COUNTER);
-    if c == syscall_abi::BOOT_ID_NONE {
-        log(b"netd: boot identity: no counter this boot; sessions will not be keyed\r\n");
-    } else {
-        log(b"netd: boot identity: boot ");
-        log_dec(c);
-        log(b"\r\n");
+    // The same reader the handshake keys on, so this line and that decision
+    // cannot disagree about whether this boot has a counter.
+    match boot_counter() {
+        None => log(b"netd: boot identity: no counter this boot; sessions will not be keyed\r\n"),
+        Some(c) => {
+            log(b"netd: boot identity: boot ");
+            log_dec(c);
+            log(b"\r\n");
+        }
     }
-    let mut e = [0u8; 64];
+    let mut e = [0u8; syscall_abi::BOOT_ID_ENTROPY_MAX];
     let n = syscall4(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_ENTROPY, e.as_mut_ptr() as u64, e.len() as u64, 0);
-    e = [0u8; 64];
-    core::hint::black_box(&e);
+    wipe(&mut e);
     if n == syscall_abi::BOOT_ID_NONE {
         log(b"netd: boot entropy: REFUSED by the kernel\r\n");
     } else if n == syscall_abi::BOOT_ID_BAD_BUFFER {
@@ -439,12 +454,13 @@ fn load_auth() -> Auth {
     if idn < syscall_abi::FS_ERR_MIN && idn > 0 {
         let len = (idn as usize).min(idbuf.len());
         match clusterkeys::parse_key_file(&idbuf[..len]) {
-            Some(seed) => {
+            Some(mut seed) => {
                 let key = ed25519::SigningKey::from_secret(&seed);
                 log(b"netd: cluster identity: signing as ");
                 log_hex(&key.public());
                 log(b"\r\n");
-                auth.signing = Some(key);
+                auth.signing = Some(Identity { key, seed });
+                wipe(&mut seed);
             }
             // A key file that exists and is not a key is a mistake worth
             // naming: the machine ends up with no identity at all, and so
@@ -452,6 +468,8 @@ fn load_auth() -> Auth {
             None => log(b"netd: WARNING /etc/cluster/id is not a key; not signing\r\n"),
         }
     }
+    // The key file's text is the seed in hex: a copy of the long-term secret.
+    wipe(&mut idbuf);
 
     report_boot_identity();
 
@@ -2170,6 +2188,20 @@ struct TcpConn {
     /// the whole table is clunked when the connection goes (`Drop`). Only a
     /// session ever fills it; `build_9p_reply` refuses a one-shot.
     fids: [SessionFid; SESSION_FIDS],
+    /// The session's keys, once its `NP_SESSION` was keyed (step 6 of
+    /// docs/roadmap/roadmap-session-auth.md). While `Some`, every frame on this
+    /// connection must be `AUTHNP04`, verified by [`verify_keyed`]; `None`
+    /// is today's session or a one-shot, signed per request. Set once, never
+    /// cleared while the connection lives, and wiped by `Drop`.
+    keyed: Option<KeyedSession>,
+    /// Whether a frame has already been dispatched on this connection. A key is
+    /// accepted only on the FIRST (ninep-abi, "Keyed sessions"): an offer on a
+    /// connection that has carried anything, signed or keyed, is refused and
+    /// the connection closed, since keying mid-stream would leave the two ends
+    /// disagreeing about the format of the next frame. A field rather than
+    /// `!session`, which happens to coincide today only because a one-shot
+    /// connection never dispatches a second frame.
+    carried: bool,
     /// The tick (`now()`) of the last segment from the peer; `reap_idle` reads
     /// it.
     last_rx: u64,
@@ -2280,7 +2312,44 @@ impl Drop for TcpConn {
             }
             *f = SessionFid::NONE;
         }
+        // The session keys die with the connection too, and are OVERWRITTEN,
+        // not merely dropped: the slot's bytes stay on `serve`'s stack until a
+        // SYN rebuilds it, and a key left there authenticates the session's
+        // traffic to anyone who later reads that memory.
+        if let Some(k) = self.keyed.as_mut() {
+            wipe(&mut k.k_c2s);
+            wipe(&mut k.k_s2c);
+        }
     }
+}
+
+/// A keyed session's state on the export: the two directions' keys, the last
+/// request `seq` accepted, and WHO every verb on it runs as. The user is the
+/// one who signed the `NP_SESSION`, resolved there once; a keyed frame carries
+/// no name (Decision 4 of docs/roadmap/roadmap-session-auth.md). That is a
+/// change and not a preservation: on an unkeyed session a path verb runs as
+/// whatever name its own request signs.
+struct KeyedSession {
+    /// Verifies requests: `HMAC-SHA-512(k_c2s, seq ‖ NP message)`.
+    k_c2s: [u8; ninep_abi::NP_SESSION_KEY_LEN],
+    /// Tags replies: `HMAC-SHA-512(k_s2c, seq ‖ status ‖ result)`.
+    k_s2c: [u8; ninep_abi::NP_SESSION_KEY_LEN],
+    /// The last `seq` accepted; the next must be exactly one more. Starts at
+    /// 0, so the first keyed request is 1.
+    seq: u64,
+    /// The session's user, mapped onto this machine's accounts.
+    user: Proxy,
+}
+
+/// Overwrite a secret with zeros in a way the optimiser may not elide: the
+/// buffer is about to be dropped or reused, which is exactly when a plain
+/// store is dead and removed.
+fn wipe(b: &mut [u8]) {
+    for x in b.iter_mut() {
+        // SAFETY: `x` is a valid, aligned, exclusive reference.
+        unsafe { core::ptr::write_volatile(x, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------
@@ -2887,6 +2956,8 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             cpu_child: CPU_NONE,
             session: false,
             fids: [SessionFid::NONE; SESSION_FIDS],
+            keyed: None,
+            carried: false,
             last_rx: now(),
             data_base: SERVER_ISN.wrapping_add(1),
         };
@@ -3079,7 +3150,16 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         // export gateway (cluster Phase 1). Both stage a response in `c.prefix`
         // for pump_send to stream.
         if c.local_port == ninep_abi::NP_NET_PORT {
-            handle_9p(c, request, dials, mac, auth, sessions);
+            if handle_9p(c, request, dials, mac, auth, sessions) {
+                // An authentication failure on a keyed session, or a key
+                // offered where none may be: close with NO reply (ninep-abi,
+                // "Keyed sessions"). An RST rather than a FIN, so the client's
+                // parked verb ends now instead of waiting on a reply that will
+                // never come; the slot, and with it every fid and the session
+                // keys, is freed by the caller.
+                send_seg(mac, c, TCP_RST | TCP_ACK, false, &[]);
+                return true;
+            }
         } else {
             start_response(c, request);
         }
@@ -3316,6 +3396,15 @@ const _: () = assert!(
     ninep_abi::NP_NET_LEN_PREFIX + 8 + EXPORT_CHUNK + ninep_abi::NP_SIG_LEN <= PREFIX_MAX,
     "PREFIX_MAX cannot hold a full EXPORT_CHUNK reply plus its signature"
 );
+/// The same margin for a KEYED reply's tag, pinned on its own rather than
+/// inherited from the signature's: were the signed format ever to shrink, the
+/// assertion above would stop covering the tag, and `seal_keyed` would turn a
+/// reply to a verb that already ran into a tagged `FS_ERR_AUTH` (review of
+/// step 6).
+const _: () = assert!(
+    ninep_abi::NP_NET_LEN_PREFIX + 8 + EXPORT_CHUNK + ninep_abi::NP_KEYED_TAG_LEN <= PREFIX_MAX,
+    "PREFIX_MAX cannot hold a full EXPORT_CHUNK reply plus its keyed tag"
+);
 
 /// The inline-reply cap fsd enforces on `readdir`/`read_file` (`FS_DATA_MAX`);
 /// a larger `want` is rejected, so the export clamps to it for those verbs.
@@ -3330,7 +3419,33 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// each relayed to the local `fsd`. The request's `tree` field is ignored - the
 /// export serves the local boot mount (tree 0). Single-writer, trusted-LAN (see
 /// docs/roadmap/roadmap-cluster-phase2.md).
-fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth, sessions: usize) {
+///
+/// Returns `true` when the connection must be CLOSED WITHOUT A REPLY: an
+/// authentication failure on a keyed session, or a key offered anywhere but a
+/// fresh connection's first frame (docs/roadmap/roadmap-session-auth.md,
+/// Decision 4). Nothing is staged then; the caller sends the RST.
+///
+/// TWO FORMATS, ONE DISPATCH. A frame is authenticated by its connection's
+/// format (a tag on a keyed session, a signature everywhere else), then every
+/// verb goes through the ONE `build_9p_reply` call below, then the reply is
+/// sealed in the same format. The single call site is measured, not style:
+/// with a second caller for the keyed format, `build_9p_reply` stopped being
+/// inlined here and every export verb, signed ones included, peaked 1,760
+/// bytes deeper than on `main` (step 6's probe, per verb).
+fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth, sessions: usize) -> bool {
+    let first = !c.carried;
+    c.carried = true;
+    let (msg, proxy, seal) = if let Some(k) = c.keyed.as_mut() {
+        // A KEYED session takes AUTHNP04 and nothing else: an AUTHNP03 frame
+        // here is not a request to authenticate, it is a refusal. Every
+        // failure closes with no reply (see `verify_keyed`), and every verb
+        // runs as the session's user, since the frame carries no name.
+        let (seq, end) = match verify_keyed(k, request) {
+            Ok(v) => v,
+            Err(why) => return close_keyed(why),
+        };
+        (&request[ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_KEYED..end], k.user, Seal::Keyed(seq))
+    } else {
     // Authenticate first: verify the client's Ed25519 signature over the request
     // and recover the bare NP message. A failure (an unauthorized key, a bad
     // signature, or an unconfigured export) is refused before any verb runs -
@@ -3352,11 +3467,11 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
         // is emitted at boot instead (see load_auth), where the machine says its
         // own state without anyone else being able to ask.
         deny_9p(c, request);
-        return;
+        return false;
     }
     let Some((msg, nonce, name)) = authenticate(auth, request) else {
         deny_9p(c, request);
-        return;
+        return false;
     };
     // WHO is asking, mapped onto THIS machine's accounts - resolved BEFORE the
     // routing decision below, so that `cpu` (NP_RUN) cannot slip past it the way
@@ -3382,8 +3497,10 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
             // the pre-auth path stays deliberately ambiguous so an
             // unauthenticated stranger cannot enumerate accounts.
             deny_unknown_user(c, request, cause, auth, &nonce);
-            return;
+            return false;
         }
+    };
+    (msg, proxy, Seal::Signed(nonce))
     };
     // Route: a remote-run request (cluster Phase 4a) vs a normal fs verb. `msg`
     // is the NP message (verb at offset 0), framing + auth already stripped.
@@ -3395,31 +3512,323 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // connection", which is exactly true.
     if verb == ninep_abi::NP_RUN && !c.session {
         handle_cpu_run(c, msg, auth, proxy);
-        return;
+        return false;
     }
     // Open a session (Decision 3): budgeted against the whole table, and never
     // by evicting a live one. Idempotent on a connection that already is one.
-    let n = if verb == ninep_abi::NP_SESSION {
-        let status = if c.session {
-            0
-        } else if sessions >= SESSION_MAX {
-            syscall_abi::FS_ERR_BUSY
-        } else {
-            c.session = true;
-            0
-        };
-        frame_reply(&mut c.prefix, status, &[])
-    } else {
+    //
+    // KEYED when the request offers an ephemeral key (step 6 of
+    // docs/roadmap/roadmap-session-auth.md): exactly `NP_EPHEMERAL_LEN` bytes
+    // of payload on a signed frame. What a payload means is decided in ONE
+    // match, by the connection's format and whether this is its first frame
+    // (review of step 6: spread over three statements, relaxing one condition
+    // silently changed which offers keyed).
+    let hdr = ninep_abi::NP_REQ_PAYLOAD as usize;
+    let payload = verb == ninep_abi::NP_SESSION && msg.len() > hdr;
+    let offer = payload && msg.len() == hdr + ninep_abi::NP_EPHEMERAL_LEN;
+    let n = match seal {
+        // Any payload on a session already keyed: a key offered again, or
+        // anything shaped like one. No re-keying, and no guessing which.
+        Seal::Keyed(_) if payload => {
+            return close_keyed(b"netd: 9p: keyed session: a second key offered; closing\r\n");
+        }
+        // Mid-stream: on an unkeyed session that has carried signed frames.
+        // Refused by closing, never by answering: a signed "no" would leave the
+        // client unsure which format we now expect, and there is no re-keying
+        // to offer instead.
+        Seal::Signed(_) if offer && !first => {
+            return close_keyed(b"netd: 9p: a key offered mid-stream; closing the connection\r\n");
+        }
+        // A fresh connection's offer, within the budget: keyed, if this boot's
+        // counter is usable. `None` is a node that keys NOTHING this boot and
+        // answers today's session, which is fail-safe (Decision 6).
+        // (The identity is matched here too, though `accepts_signed` already
+        // required one to reach this far: the seed then cannot be read on a
+        // path that did not check.)
+        Seal::Signed(nonce) if offer && sessions < SESSION_MAX => match (boot_counter(), auth.signing.as_ref()) {
+            (Some(boot), Some(id)) => {
+                let mut eph_client = [0u8; ninep_abi::NP_EPHEMERAL_LEN];
+                eph_client.copy_from_slice(&msg[hdr..]);
+                let Some(eph_export) = key_session(id, boot, &nonce, &eph_client, proxy, &mut c.keyed) else {
+                    // An all-zero shared secret: the offered key was of small
+                    // order, so the session keys would be a function of public
+                    // values alone. No fallback to an unkeyed session.
+                    return close_keyed(b"netd: 9p: a small-order session key offered; closing the connection\r\n");
+                };
+                c.session = true;
+                // The export's ephemeral public key as the result, in an
+                // ordinary SIGNED reply (sealed below): the signature over it
+                // is what stops a man in the middle substituting his own or
+                // stripping it to force an unkeyed session.
+                frame_reply(&mut c.prefix, 0, &eph_export)
+            }
+            _ => open_session(c, sessions),
+        },
+        // Today's session, with or without a payload: an offer over budget
+        // lands here and is answered FS_ERR_BUSY (the client stays
+        // per-request), and on a keyed session a payload-less NP_SESSION is
+        // the idempotent 0, under a valid tag.
+        _ if verb == ninep_abi::NP_SESSION => open_session(c, sessions),
         // One dispatch for the path verbs and the fid verbs: the connection's
         // own fid table and whether it is a session go in with the request.
-        build_9p_reply(msg, &mut c.prefix, &mut c.fids, c.session, dials, mac, proxy)
+        _ => build_9p_reply(msg, &mut c.prefix, &mut c.fids, c.session, dials, mac, proxy),
     };
-    // Reply-auth (mutual authentication): sign the reply against the request
-    // nonce, so the client can prove it came from the machine it dialled.
-    let n = seal_reply(c, auth, &nonce, n);
+    // Reply-auth (mutual authentication), in the request's format: sign the
+    // reply against the request nonce, or tag it under k_s2c over the
+    // request's seq, so the client can prove it came from the machine it
+    // dialled and answers the request it sent.
+    let n = match seal {
+        Seal::Signed(nonce) => seal_reply(c, auth, &nonce, n),
+        Seal::Keyed(seq) => seal_keyed(c, seq, n),
+    };
     c.prefix_len = n;
     c.prefix_off = 0;
     c.file = false;
+    false
+}
+
+/// Answer an `NP_SESSION` with today's (unkeyed) session: `0`, idempotent on a
+/// connection that already is one, or `FS_ERR_BUSY` when the budget is spent.
+/// Returns the framed reply's length in `c.prefix`, unsealed.
+fn open_session(c: &mut TcpConn, sessions: usize) -> usize {
+    let status = if c.session {
+        0
+    } else if sessions >= SESSION_MAX {
+        syscall_abi::FS_ERR_BUSY
+    } else {
+        c.session = true;
+        0
+    };
+    frame_reply(&mut c.prefix, status, &[])
+}
+
+/// This boot's counter, or `None` when the kernel could not vouch for one (no
+/// store held a counter from before this boot). A node with none keys no
+/// sessions (Decision 6 of docs/roadmap/roadmap-session-auth.md).
+fn boot_counter() -> Option<u64> {
+    let c = syscall(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_COUNTER);
+    if c == syscall_abi::BOOT_ID_NONE {
+        None
+    } else {
+        Some(c)
+    }
+}
+
+/// The export's side of a keyed `NP_SESSION`: derive this handshake's ephemeral
+/// secret, answer the client's public key with our own, and run the key
+/// schedule, writing the session's keys straight into `out` (the connection's
+/// `keyed` slot) rather than returning them, which would leave one more copy in
+/// the caller's frame. Returns `eph_export`, or `None` for an all-zero shared
+/// secret (a small-order `eph_client`), which the caller answers by closing;
+/// `out` is untouched then.
+///
+/// Its own frame, never inlined, for the stack: two X25519 ladders and three
+/// SHA-512s run here, under `handle_9p`, which sits under the export's
+/// connection pump. Step 1's gate measured this arm at 10,560 bytes of headroom
+/// with one ladder; step 6 re-measures it with both.
+///
+/// WHAT IS WIPED, AND WHAT CANNOT BE PROMISED. The ephemeral secret is used
+/// here and never stored (Decision 6); the named buffers holding it, the shared
+/// secret and `K` are wiped before returning, and the session keys are wiped
+/// with the connection (`Drop`). That is the whole of the claim. Copies the
+/// code does not name are not reachable from Rust and are not wiped: the hash
+/// and HMAC states inside `ed25519` (this one, and each keyed request's in
+/// `keyed_tag`), a moved `Option`'s old slot, and whatever the compiler spills.
+/// They lie in frames below `serve`'s, which the next deep call overwrites. A
+/// stronger promise needs the crate to wipe its own state, which is its own
+/// change; an earlier version of this comment claimed more than this (review
+/// of step 6).
+#[inline(never)]
+fn key_session(
+    id: &Identity,
+    boot: u64,
+    nonce: &[u8; ninep_abi::NP_NONCE_LEN],
+    eph_client: &[u8; ninep_abi::NP_EPHEMERAL_LEN],
+    user: Proxy,
+    out: &mut Option<KeyedSession>,
+) -> Option<[u8; ninep_abi::NP_EPHEMERAL_LEN]> {
+    let mut secret = export_ephemeral(&id.seed, boot, nonce);
+    let eph_export = ed25519::x25519_public(&secret);
+    let shared = ed25519::x25519_shared(&secret, eph_client);
+    wipe(&mut secret);
+    let mut shared = shared?;
+    // K = SHA-512(SIG_DOMAIN_SESSION ‖ shared ‖ request_nonce ‖ eph_client ‖
+    // eph_export): the nonce and both public keys bind the keys to THIS
+    // handshake. k_c2s is the first half, k_s2c the second.
+    let mut h = ed25519::Sha512::new();
+    h.update(ninep_abi::SIG_DOMAIN_SESSION);
+    h.update(&shared);
+    h.update(nonce);
+    h.update(eph_client);
+    h.update(&eph_export);
+    let mut k = h.finalize();
+    wipe(&mut shared);
+    let kl = ninep_abi::NP_SESSION_KEY_LEN;
+    let ks = out.insert(KeyedSession {
+        k_c2s: [0u8; ninep_abi::NP_SESSION_KEY_LEN],
+        k_s2c: [0u8; ninep_abi::NP_SESSION_KEY_LEN],
+        seq: 0,
+        user,
+    });
+    ks.k_c2s.copy_from_slice(&k[..kl]);
+    ks.k_s2c.copy_from_slice(&k[kl..2 * kl]);
+    wipe(&mut k);
+    Some(eph_export)
+}
+
+/// The export's ephemeral X25519 secret for one handshake:
+/// `SHA-512(SIG_DOMAIN_EPHEMERAL_E ‖ machine private key ‖ boot ID ‖
+/// request_nonce ‖ MONOTONIC_US ‖ boot entropy ‖ RANDOM bytes)`, its first 32
+/// bytes (X25519 clamps them). EVERY input is load-bearing and none is on the
+/// wire, so leaving one out passes every check the peer can make: the key makes
+/// it secret, the boot ID and the clock keep it from repeating across reboots
+/// and across a restarted `netd` (which reads the same boot entropy as its
+/// previous life, step 3's review), and the two entropy sources are what give
+/// forward secrecy where the platform has them. Either is empty where it has
+/// none. Both are read here, per handshake, and wiped, so no copy stays
+/// resident between one session and the next.
+fn export_ephemeral(seed: &[u8; ed25519::SECRET_LEN], boot: u64, nonce: &[u8; ninep_abi::NP_NONCE_LEN]) -> [u8; ed25519::X25519_LEN] {
+    let mut h = ed25519::Sha512::new();
+    h.update(ninep_abi::SIG_DOMAIN_EPHEMERAL_E);
+    h.update(seed);
+    h.update(&boot.to_le_bytes());
+    h.update(nonce);
+    h.update(&now_us().to_le_bytes());
+    // Boot entropy: `CAP_NET` alone may read it. Sized by the ABI's bound, so
+    // the kernel never answers BAD_BUFFER; a refusal contributes nothing, and
+    // says so once, at boot (`report_boot_identity`), not per handshake.
+    let mut e = [0u8; syscall_abi::BOOT_ID_ENTROPY_MAX];
+    let n = syscall4(syscall_abi::BOOT_ID, syscall_abi::BOOT_ID_ENTROPY, e.as_mut_ptr() as u64, e.len() as u64, 0);
+    if n != syscall_abi::BOOT_ID_NONE && n != syscall_abi::BOOT_ID_BAD_BUFFER {
+        h.update(&e[..(n as usize).min(e.len())]);
+    }
+    wipe(&mut e);
+    // Hardware entropy, absent on Parallels and the Pi: a short read is used
+    // for what it is, since every byte the device gave is still entropy.
+    let mut r = [0u8; 32];
+    let n = syscall4(syscall_abi::RANDOM, r.as_mut_ptr() as u64, r.len() as u64, 0, 0);
+    if n != syscall_abi::RANDOM_UNAVAILABLE {
+        h.update(&r[..(n as usize).min(r.len())]);
+    }
+    wipe(&mut r);
+    let mut d = h.finalize();
+    let mut secret = [0u8; ed25519::X25519_LEN];
+    secret.copy_from_slice(&d[..ed25519::X25519_LEN]);
+    wipe(&mut d);
+    secret
+}
+
+/// The truncated keyed tag: `HMAC-SHA-512(key, seq ‖ data)`, its first
+/// `NP_KEYED_TAG_LEN` bytes (RFC 4868).
+fn keyed_tag(key: &[u8; ninep_abi::NP_SESSION_KEY_LEN], seq: u64, data: &[u8]) -> [u8; ninep_abi::NP_KEYED_TAG_LEN] {
+    let mut m = ed25519::HmacSha512::new(key);
+    m.update(&seq.to_le_bytes());
+    m.update(data);
+    let full = m.finalize();
+    let mut t = [0u8; ninep_abi::NP_KEYED_TAG_LEN];
+    t.copy_from_slice(&full[..ninep_abi::NP_KEYED_TAG_LEN]);
+    t
+}
+
+/// How a reply is sealed: in the format its request was authenticated in.
+#[derive(Clone, Copy)]
+enum Seal {
+    /// Signed with this machine's key over the request's nonce.
+    Signed([u8; ninep_abi::NP_NONCE_LEN]),
+    /// Tagged under the session's `k_s2c` over the request's `seq`.
+    Keyed(u64),
+}
+
+/// Log why a connection is being closed without a reply, and say to close it.
+/// Its own cold frame, so that `log`'s console buffers (552 bytes out, 768
+/// back) are never inlined into `handle_9p`'s host frame, which the whole
+/// dispatch runs under: inlined into the first keyed dispatch, they made
+/// every keyed verb 1.5 KB deeper, found in the disassembly after two wrong
+/// guesses (step 6).
+#[cold]
+#[inline(never)]
+fn close_keyed(why: &[u8]) -> bool {
+    log(why);
+    true
+}
+
+/// Verify one keyed request against the session and spend its `seq`: the
+/// header's shape, then `seq`, then the tag, and only then is `seq` recorded.
+/// Returns the `seq` and where the NP message ends, or the log line naming why
+/// the connection closes.
+///
+/// The message is bounded by the frame's DECLARED length, not the segment's:
+/// trailing bytes are not part of the request, and a declared length the
+/// segment does not hold is a request split across segments. This export takes
+/// ONE SEGMENT PER REQUEST and does not reassemble (`handle_conn_segment`), so
+/// that closes the session here, where on a signed connection it drew an
+/// `FS_ERR_AUTH` reply. Every request the in-tree client sends fits one
+/// segment; a larger one is the pre-existing reassembly gap, not a new one
+/// (review of step 6).
+///
+/// Every failure closes the connection with NO reply: a frame that is not
+/// `AUTHNP04` (an `AUTHNP03` included: one connection, one format), a `seq`
+/// that is not exactly one more than the last, a tag that does not verify. An
+/// unauthenticated "auth failed" is what an attacker would forge to kill
+/// sessions, and an authenticated one is impossible once we no longer know
+/// who we are talking to, so the reason goes to the log and the peer sees the
+/// connection end. The tag is compared with `ct_eq`, every byte and no early
+/// exit; no test vector can tell an early exit apart, so that property is
+/// checked by reading, here and in `ct_eq`. Its own frame, so the MAC's state
+/// is gone before the dispatch runs.
+#[inline(never)]
+fn verify_keyed(k: &mut KeyedSession, request: &[u8]) -> Result<(u64, usize), &'static [u8]> {
+    let p = ninep_abi::NP_NET_LEN_PREFIX;
+    let need = p + ninep_abi::NP_AUTH_HDR_KEYED;
+    if request.len() < need || read_u64(request, p) != ninep_abi::NP_AUTH_MAGIC_KEYED {
+        return Err(b"netd: 9p: keyed session: a frame that is not AUTHNP04; closing\r\n");
+    }
+    let end = p + u32::from_le_bytes([request[0], request[1], request[2], request[3]]) as usize;
+    if end < need || end > request.len() {
+        return Err(b"netd: 9p: keyed session: a frame whose length its segment does not hold; closing\r\n");
+    }
+    let request = &request[..end];
+    let seq = read_u64(request, p + ninep_abi::NP_KEYED_SEQ_OFF);
+    if Some(seq) != k.seq.checked_add(1) {
+        return Err(b"netd: 9p: keyed session: seq out of order (a replay or an injection); closing\r\n");
+    }
+    let toff = p + ninep_abi::NP_KEYED_TAG_OFF;
+    let expect = keyed_tag(&k.k_c2s, seq, &request[need..]);
+    if !ed25519::ct_eq(&request[toff..toff + ninep_abi::NP_KEYED_TAG_LEN], &expect) {
+        return Err(b"netd: 9p: keyed session: a request tag did not verify; closing\r\n");
+    }
+    k.seq = seq;
+    Ok((seq, end))
+}
+
+/// Tag a framed keyed reply in place: `c.prefix[..n]` holds `[len][status]
+/// [result]`, rewritten to `[len'][tag:32][status][result]` with
+/// `tag = HMAC-SHA-512(k_s2c, seq ‖ status ‖ result)`, where `seq` is the
+/// request's and is not sent again. Returns the new framed length.
+///
+/// NO ROOM is answered with a TAGGED `FS_ERR_AUTH`, not an untagged body and
+/// not a bare status: every reply on a keyed session carries a tag, and an
+/// untagged one would read to the client as an injection. Unreachable today by
+/// the keyed margin pinned beside `EXPORT_CHUNK`. Its own frame, like
+/// [`verify_keyed`].
+#[inline(never)]
+fn seal_keyed(c: &mut TcpConn, seq: u64, n: usize) -> usize {
+    let tl = ninep_abi::NP_KEYED_TAG_LEN;
+    let body_start = ninep_abi::NP_NET_LEN_PREFIX;
+    let n = if n < body_start || n + tl > c.prefix.len() {
+        frame_reply(&mut c.prefix, syscall_abi::FS_ERR_AUTH, &[])
+    } else {
+        n
+    };
+    let Some(k) = c.keyed.as_ref() else {
+        return frame_reply(&mut c.prefix, syscall_abi::FS_ERR_AUTH, &[]); // unreachable
+    };
+    let tag = keyed_tag(&k.k_s2c, seq, &c.prefix[body_start..n]);
+    c.prefix.copy_within(body_start..n, body_start + tl);
+    c.prefix[body_start..body_start + tl].copy_from_slice(&tag);
+    let new_body = n - body_start + tl;
+    c.prefix[0..4].copy_from_slice(&(new_body as u32).to_le_bytes());
+    body_start + new_body
 }
 
 /// Whether a refusal of `request` goes out as RAW TEXT (the `cpu` client reads
@@ -3611,7 +4020,7 @@ fn authenticate_signed<'a>(
 /// follow.
 fn seal_reply(c: &mut TcpConn, auth: &Auth, nonce: &[u8], n: usize) -> usize {
     match auth.signing.as_ref() {
-        Some(key) => seal_reply_signed(c, key, nonce, n),
+        Some(id) => seal_reply_signed(c, &id.key, nonce, n),
         // Unreachable in practice: `accepts_signed` requires a signing key, so
         // a request that authenticated implies one exists. Left as a refusal
         // rather than an `expect` because an unsealed reply must never go out -
@@ -3832,7 +4241,7 @@ fn frame_signed_in_place(
     // fall back to now, and a request this machine cannot authenticate must not
     // be sent at all - see the gate above.
     match auth.signing.as_ref() {
-        Some(key) => frame_signed_ed25519(key, who, np_len, out),
+        Some(id) => frame_signed_ed25519(&id.key, who, np_len, out),
         None => (0, zero_nonce),
     }
 }

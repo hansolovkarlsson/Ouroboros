@@ -900,6 +900,11 @@ pub const BOOT_ID_STORES: u64 = 1;
 pub const BOOT_ID_ENTROPY_LEN: u64 = 2;
 /// [`BOOT_ID`] selector: copy the boot entropy (network server only).
 pub const BOOT_ID_ENTROPY: u64 = 3;
+/// The most boot entropy the kernel ever holds, so a caller can size the buffer
+/// [`BOOT_ID_ENTROPY`] copies into. One constant for both sides: a reader sized
+/// by its own copy would, once the kernel's grew, be answered
+/// [`BOOT_ID_BAD_BUFFER`] and quietly hash no entropy at all.
+pub const BOOT_ID_ENTROPY_MAX: usize = 32;
 /// [`BOOT_ID_STORES`] bit: the UEFI non-volatile variable.
 pub const BOOT_ID_STORE_VARIABLE: u64 = 1;
 /// [`BOOT_ID_STORES`] bit: the counter file on the ESP.
