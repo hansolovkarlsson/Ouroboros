@@ -198,6 +198,48 @@ count inside three seconds, is about 290,000; it buys a third more guessing
 cost for a login at the edge of the budget on an idle guest, and was not
 taken. Step 5 writes the count into `ninep-abi`.
 
+### Step 1's results (2026-09-26): root squash
+
+**Built.** An `authorized` line takes an optional trailing `root`
+(`clusterkeys`, host-tested: a round trip with and without it, and `ROOT`,
+`rooted`, `roo`, `root root` and `root extra` each make the line malformed
+rather than a peer without root). `netd`'s `map_user` takes the signing peer's
+flag as a **required parameter** and refuses a claim resolving to uid 0 or
+gid 0 without it (`FS_ERR_AUTH`, signed), with its own `cpu` line ("this host
+does not trust yours with root"). The Python export computes the root-equivalent
+names from `mkpasswd.py`'s account table and keeps the dev flags as
+`DEV_ROOT_PEERS`, which `check-wire-constants.py` holds equal to
+`mkclusterkeys.py`'s (shown failing on a dropped flag and on a flag spelt `1`).
+`clusterkey peers` shows the flag; `clusterkey line` never writes it, since
+trusting a peer with root is the receiving machine's decision. The two
+`ninep-abi` comments are corrected.
+
+**The count, all green after the change:** `make test` (the keyed self-test
+claims root as `host`), the keyed, path, fid and session gates on their
+documented images, `test-async-rmount` (six checks, the guest signing as
+`node-a` against the host peer), `test-reentrant-session` (three `cpu` recipes
+as root between the nodes), and by hand the two-node `cwrite` as root and the
+`/host` callback as root.
+
+**The gate at stage 1:** row 1 refused `FS_ERR_AUTH`, row 2 still served (step
+7 closes it), all four controls passing. Beyond the gate, on the guest: a `cpu`
+run as `intruder` claiming root gets the squash line while `host` gets
+`uid=0(root)` and `intruder` claiming `user` gets `uid=1000(user)`, and a keyed
+session opened as `intruder` claiming root is refused while `host`'s keys and
+serves. So a keyed session cannot carry root past the check.
+
+**Both controls the step names, measured.** With the refusal mutated out of
+`map_user`, the gate's row 1 is served again and it fails. With `host` unflagged
+in the Python server, `make test`'s keyed self-test fails with `FS_ERR_AUTH`,
+which is the evidence the count found it.
+
+**Not observed: the gid 0 half.** No dev account has primary gid 0 without
+uid 0, so a mutation dropping `|| p.gid == 0` would pass every check above. It
+is one condition beside the uid test, stated in `map_user`'s doc, and the
+Python side computes it from the same account table. Step 3 adds dev accounts
+anyway (row 5 needs one); a gid-0 account beside it would let the gate observe
+this half.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking

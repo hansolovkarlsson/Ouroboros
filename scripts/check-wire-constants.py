@@ -440,11 +440,34 @@ def check_dev_peer_labels(problems):
     if not block:
         problems.append("mkclusterkeys.py: DEV_PEERS not found (renamed?)")
         return
-    want = {n: l for n, _ip, l in re.findall(
-        r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', block.group(1))}
+    rows = re.findall(
+        r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*(True|False)\s*\)', block.group(1))
+    want = {n: l for n, _ip, l, _root in rows}
     if not want:
         problems.append("mkclusterkeys.py: DEV_PEERS parsed empty - a check over nothing")
         return
+    # EVERY ROW, not just the ones that parse: a row the pattern cannot read
+    # (a flag spelt `1`, a fifth field) would drop out of `want` silently, and
+    # its peer would then be compared by nobody.
+    written = block.group(1).count("(")
+    if written != len(rows):
+        problems.append(f"mkclusterkeys.py: DEV_PEERS has {written} row(s), {len(rows)} parse "
+                        f"as (name, ip, label, root)")
+
+    # The ROOT FLAGS, against the one other place that holds them. The host
+    # server has no `authorized` file, so it keeps the dev flags as a set; a
+    # peer flagged in one and not the other is a rig that goes red (or a gate
+    # that goes green) on one side of the cluster only.
+    root_want = {n for n, _ip, _l, root in rows if root == "True"}
+    server = open(os.path.join(HERE, "np9p_server.py")).read()
+    rb = re.search(r"^DEV_ROOT_PEERS = \{(.*?)\}", server, re.S | re.M)
+    if not rb:
+        problems.append("np9p_server.py: DEV_ROOT_PEERS not found (renamed?)")
+    else:
+        root_got = set(re.findall(r'"([^"]+)"', rb.group(1)))
+        if root_got != root_want:
+            problems.append(f"dev root flags disagree: mkclusterkeys.py flags {sorted(root_want)}, "
+                            f"np9p_server.py DEV_ROOT_PEERS has {sorted(root_got)}")
 
     # BOTH peers, not one. This compared only the client, so renaming a dev
     # identity passed the check and broke the SERVER silently - the half that
@@ -610,7 +633,7 @@ def main():
     # same restatement-goes-stale shape this file warns about twice already.
     print(f"check-wire-constants: {compared} constant(s) agree across Rust and "
           f"{len(peers)} peer(s) ({', '.join(sorted(peers))}), "
-          "and the dev peer labels agree, and the fid gate's budget exceeds MAX_FIDS")
+          "and the dev peer labels and root flags agree, and the fid gate's budget exceeds MAX_FIDS")
     return 0
 
 
