@@ -799,7 +799,8 @@ def self_test(quiet=True):
     print(f"np9p_server: {len(SELF_TEST_VERBS)} verb(s) dispatch as documented, "
           f"and a fid round trip reads the file back byte-for-byte; a KEYED "
           f"session with np9p_client.py serves every verb, the client refuses "
-          f"all {len(MISBEHAVE_MODES)} misbehaving replies, and the export "
+          f"all {len(MISBEHAVE_MODES)} misbehaving replies, a key offered to an "
+          f"unkeyed export falls back to a signed session, and the export "
           f"closes on a skipped seq and a tampered tag")
     return 0
 
@@ -917,6 +918,35 @@ def keyed_self_test(quiet=True):
             shown = got if isinstance(got, str) else classify(got)
             bad.append(f"  - keyed: the client did not refuse a '{mode}' reply ({shown})")
 
+    # 2b. An export that predates keying (`--unkeyed`, a v0.20.0 shape): the
+    # client's offer is ignored, the answer is the empty result, and the
+    # session stays SIGNED and serves. The fallback both ends promise, and the
+    # one case no other check here reaches (review of step 7).
+    def unkeyed(port):
+        s = c.Session("127.0.0.1", port)
+        try:
+            st, eph = s.open(keyed=True)
+            if st != 0:
+                return f"NP_SESSION -> {classify(st)}"
+            if s.keys is not None or eph:
+                return f"keyed anyway ({len(eph)}-byte result)"
+            st, _ = s.op(_frame(NP_BASE + 12, ("PLEN", 0, 0), b"/HELLO.TXT", 0))
+            return "ok" if st < (1 << 64) - 64 else f"a signed stat after it -> {classify(st)}"
+        except (RuntimeError, OSError) as e:
+            return f"broke: {e}"
+        finally:
+            s.close()
+    global UNKEYED
+    UNKEYED = True
+    try:
+        got, ended = run(None, unkeyed)
+    finally:
+        UNKEYED = False
+    if ended.startswith("CRASHED"):
+        bad.append(f"  - unkeyed export: the server {ended}")
+    if got != "ok":
+        bad.append(f"  - a key offer to an unkeyed export did not fall back to a signed session: {got}")
+
     # 3. The export must close, with no reply, on a request it cannot trust.
     for label, tamper in (("a skipped request seq", "seq"), ("a tampered request tag", "tag")):
         def refused(port, tamper=tamper):
@@ -967,6 +997,10 @@ HOST_BOOT_ID = struct.pack("<Q", time.time_ns()) + os.urandom(8)
 #   skip-seq    tagged over seq + 1, a reply from the future
 MISBEHAVE_MODES = ("bad-tag", "wrong-key", "replay-seq", "skip-seq")
 MISBEHAVE = None
+# `--unkeyed`: behave as an export that PREDATES keying (v0.20.0): ignore a key
+# offer and answer the NP_SESSION 0 with an empty result, so a new client's
+# fallback to today's signed session can be checked (step 7).
+UNKEYED = False
 
 
 def export_ephemeral(request_nonce):
@@ -1101,7 +1135,7 @@ def serve_connection(conn, addr, delay=0.0):
             elif len(body) >= 8 and struct.unpack("<Q", body[:8])[0] == NP_AUTH_MAGIC_KEYED:
                 # AUTHNP04 on a connection that was never keyed.
                 reply = frame_reply(FS_ERR_AUTH)
-            elif offers_key(body):
+            elif offers_key(body) and not UNKEYED:
                 if not first:
                     # Keying happens only on a fresh connection's first frame.
                     print(f"  [conn {addr}] key offered mid-stream: closing with RST", flush=True)
@@ -1184,6 +1218,11 @@ def main():
         MISBEHAVE = args[mi + 1]
         args = args[:mi] + args[mi + 2:]
         print(f"np9p_server: MISBEHAVING on keyed replies: {MISBEHAVE}")
+    global UNKEYED
+    if "--unkeyed" in args:
+        UNKEYED = True
+        args = [a for a in args if a != "--unkeyed"]
+        print("np9p_server: UNKEYED, a v0.20.0-shaped export: key offers are ignored")
     port = int(args[0]) if args else 5641
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

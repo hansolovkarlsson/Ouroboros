@@ -609,7 +609,7 @@ the client, so each side is tested against something that is not itself.
    exactly those two). The boot-entropy bound moved into `syscall-abi`
    (`BOOT_ID_ENTROPY_MAX`) so `netd` and the kernel cannot drift. The stack was
    not re-measured after these; none adds a frame under the dispatch.
-7. **The client, in `netd`.** The service pass (`sign_parked`, before it signs
+7. ✅ **2026-09-26.** **The client, in `netd`.** The service pass (`sign_parked`, before it signs
    the raw `NP_SESSION`) computes the ephemeral and sends its public half, phase two derives the keys from the export's signed reply
    and zeroes the private scalar, and later verbs frame `AUTHNP04` into the
    slot. Checked on the two-node ext2 rig: `cbig` and `cwrite` pass over a
@@ -646,6 +646,98 @@ the client, so each side is tested against something that is not itself.
    the X25519 and the key derivation, so this step moves that work into its own
    non-inlined function, as `sign_parked` is, rather than growing `serve`'s
    frame under every chain.
+   **What it did.** The keyed state lives only in the session table:
+   `Wire` gained a fourth const parameter, `keys: [SessionKeys; K]`, 1 on
+   `SessionConn` and 0 on the dial and path slots, so Risk 2's "a field for
+   sessions lands in every slot" costs nothing where it is not used.
+   `sign_parked` offers the key on an opening `NP_SESSION` (`offer_key`, its
+   own frame) when this boot's counter is usable, and frames `AUTHNP04` on a
+   keyed session (`frame_keyed_in_place`). Phase two is `phase_two`, its own
+   frame, which is note (c) paid: the ladder, the key schedule and the held
+   verb's MAC or signature no longer run in `serve`'s frame. An empty result
+   is an export that does not key; any other length, a key never offered, or
+   an all-zero shared secret is `FS_ERR_AUTH`. Replies on a keyed session are
+   checked by `verify_keyed_reply` against `k_s2c` and the `seq` in flight.
+   `SessionKeys`' `Drop` wipes the ephemeral and both keys wherever the slot
+   goes. libc learned `FS_ERR_AUTH`'s name (it printed "failed"), and
+   `sys.h` now declares it, so the wire check pins it (137 constants).
+
+   **Checked.** Against the host peer (`cremote`, which opens
+   `/mnt/a/HELLO.TXT` through a fid): honest, two keyed sessions and every
+   check passes; `--unkeyed` (new, a v0.20.0-shaped export), the client falls
+   back to a signed session and passes; each of the four `--misbehave` modes
+   ends the open with "authentication failed" and no fault. On the two-node
+   ext2 rig `cbig` and `cwrite` pass over keyed sessions, and the census reads
+   3 signed and 21 keyed frames on each node (`drive-2vm.py` learned
+   `AUTHNP04` first). *Controls:* the client not checking reply tags accepts
+   the `bad-tag` peer ("all checks passed"); the key schedule without the
+   request nonce breaks the honest session at its first keyed frame (the peer
+   RSTs it). `make test-async-rmount` and the export's keyed gate pass.
+
+   **The stack.** A whole-run low-water mark on both nodes (`cbig` and
+   `cwrite`): the client's peak is the park path during `cbig`, as step 1
+   found, at **3,840 bytes of headroom on `main` and 3,504 here**. The
+   difference is exactly 3 × 112, the three slots' `SessionAuth`, resident
+   (the first cut read 3,408, exactly 3 × 144, before the review made the
+   state an enum); a 4 KB pad in `phase_two` did not move the mark, since
+   phase two runs from the service pass ~10 KB above that peak. Step 7's
+   crypto is nowhere near the deepest point; its resident state is what it
+   costs. Branches `measure/keyed-client-stack` and
+   `measure/keyed-client-stack-main`.
+
+   **The measurement, re-run** (`measure/keyed-client-cost`, step 0's counters
+   around the four keyed operations, `cbig` three times). Each count is 39 on
+   its side, against a census of 3 signed and 39 keyed frames per node:
+
+   | per keyed verb | step 0, signed | step 7, keyed |
+   |---|---|---|
+   | client: request | 521 µs (sign) | 39 µs (MAC) |
+   | export: verify the request | 943 µs | 47 µs |
+   | export: reply | 523 µs (sign) | 42 µs (MAC) |
+   | client: verify the reply | 939 µs | 41 µs |
+   | **all four** | **2,926 µs** | **169 µs** |
+
+   **Done by the plan's own test: 169 µs is well below 2,926 µs.** The
+   handshake is paid once per session: 466 µs per client ladder (two per
+   session) and 981 µs for the export's whole `key_session` (two ladders and
+   the schedule). The round-trip counter is the one figure this probe got
+   wrong: it read an 18 ms median, while the capture of the same kind of run
+   showed replies in ~1.4 ms. Its dump is a blocking console write at the top
+   of `serve`'s loop, which falls between framing a request and sending it.
+   So the verb time comes from the capture instead, the same statistic on
+   both trees, non-probed builds, B's pcap, 42 requests:
+
+   | B's capture | `main` (signed) | step 7 (keyed) |
+   |---|---|---|
+   | request to reply, median | 3.59 ms | 1.41 ms |
+   | verb cycle (request to next request), median | 7.50 ms | 4.53 ms |
+   | verb cycle, mean | 19.93 ms | 11.86 ms |
+
+   The crypto share of a verb falls from 39% of the median cycle to 3.7%, and
+   from 15% of the mean to 1.4%. (Step 0's 44% and 26% were against its
+   probe's sign-to-verified figure; that counter cannot be trusted on the
+   keyed tree, so these shares are the capture's, on both sides.) Step 0's
+   own probe, re-run today on this host, gave a 5.9 ms median against its
+   recorded 6.65, so the host is not what moved.
+
+   **The review** (`/code-review`, nine findings, all acted on). The
+   handshake's secret and the session's keys became one enum (`KeyState`),
+   since they are never live together, and the struct records the name the
+   session was opened as (`SessionAuth::opener`). A verb whose caller now
+   resolves to another name is refused (`FS_ERR_AUTH`) rather than run as
+   the opener. That can only happen when the uid's `/etc/passwd` line changes
+   while a session is held, and it is checked by reading: no rig changes an
+   account under a live C program's fid. The ephemeral secret is now forgotten on
+   every refusal of the opening, not left for the reap. `phase_two` is one
+   match on (offered, result length), and the held verb is copied once. The
+   fallback to an unkeyed export is in `make test` now (the peer self-test
+   runs a key offer against `--unkeyed`; making the server ignore the flag
+   fails it). `sys.h`'s floor rose to 38, so `FS_ERR_AUTH` is pinned
+   (deleting it fails the wire check). A stray empty `qemu-int.log`, written
+   at the root by a `drive-qemu.py --help` that took `--help` for an image,
+   is gone and ignored. Every guest check was re-run on the rewritten client
+   and passes.
+
 8. **Docs, rigs and the release.** The normative block, `docs/architecture.md`
    (the new syscall and the boot identity), `docs/manual.md`'s cluster section,
    `testing-qemu.md`'s session recipes, `roadmap-cluster.md`'s replay item

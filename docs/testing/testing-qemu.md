@@ -422,9 +422,29 @@ make run-image-9p-client                            # a NIC, no hostfwd needed
 python3 scripts/np9p_server.py 5641                 # on the host; serves a small tree
 python3 scripts/np9p_server.py 5641 --misbehave bad-tag   # keyed replies a correct client must refuse
 #   (modes: bad-tag, wrong-key, replay-seq, skip-seq; for step 7's guest-client controls)
+python3 scripts/np9p_server.py 5641 --unkeyed       # a v0.20.0-shaped export: ignores a key offer
 #   ...then in the guest shell:
 #   mount -r 10.0.2.2:5641 /mnt/a ; ls /mnt/a ; cat /mnt/a/HELLO.TXT
 ```
+
+**The keyed client** (session-auth step 7, 2026-09-26). Only a C program
+opens a fid, so only a C program holds a session, and `cremote` is the one
+that reads a file this peer serves (`/mnt/a/HELLO.TXT`, through a fid):
+
+```sh
+python3 scripts/np9p_server.py 5641 [--unkeyed | --misbehave <mode>] &
+python3 scripts/drive-qemu.py --slirp build/esp.img 'login:@@root' 'assword@@root' \
+  '# @@mount -r 10.0.2.2:5641 /mnt/a' '# @@cremote' '# @@'
+# honest: "cremote: all checks passed", and the peer logs "[keyed session
+#   opened on this connection]"
+# --unkeyed: the same pass, with no keyed session (the fallback)
+# --misbehave <each mode>: "/mnt/a/HELLO.TXT: open failed: authentication
+#   failed (...)", 0 fault lines
+```
+
+The two-node ext2 rig's `cbig` and `cwrite` recipes (below) run keyed with no
+change, and `drive-2vm.py`'s last lines count the formats: a keyed run reads
+`3 signed, 21 keyed frame(s)` for one `cbig` and one `cwrite`.
 
 **Run at least one of these PIPED, and one under `exec`.** Unattended:
 

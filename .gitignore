@@ -15,3 +15,7 @@
 /third_party/pico-install/
 /third_party/picolibc-cross.resolved.txt
 __pycache__/
+
+# drive-qemu.py writes its interrupt log beside the image; a bad image
+# argument puts it at the root (review of session-auth step 7)
+/qemu-int.log

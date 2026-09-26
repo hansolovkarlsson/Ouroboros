@@ -1630,6 +1630,16 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
         if s.parked.is_some() || s.slen != 0 {
             return Err(syscall_abi::FS_ERR_BUSY);
         }
+        // The caller's uid now resolves to another name than the one this
+        // session was opened as (its /etc/passwd line changed meanwhile).
+        // Refused, not run as the opener: on a keyed session the frame carries
+        // no name, so the far side would serve it as whoever signed the
+        // NP_SESSION (review of step 7). The session and its fids are left to
+        // their holder; the refused caller can open a fresh one under the new
+        // name once they are closed.
+        if s.keys[0].opener != *who {
+            return Err(syscall_abi::FS_ERR_AUTH);
+        }
         let Some(raw) = park_raw(&mut s.sbuf, np) else {
             return Err(syscall_abi::FS_ERR_AUTH);
         };
@@ -1662,6 +1672,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
     s.held[..np.len()].copy_from_slice(np);
     s.held_len = np.len();
     s.uid = uid;
+    s.keys[0].opener = *who;
     s.fids = 0;
     s.peer_ip = ip;
     s.peer_mac = *dst_mac;
@@ -1856,7 +1867,7 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
 /// here is affordable because this runs at the top level of `serve`, never
 /// from the re-entrant drain (the depth that made parking there over-reach,
 /// see the plan's ledger).
-fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOTE_RBUF, H>>], auth: &Auth, dead: u64, mut pending: Option<&mut PendingRun>) {
+fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOTE_RBUF, H, K>>], auth: &Auth, dead: u64, mut pending: Option<&mut PendingRun>) {
     let t = now();
     // ONE reply buffer for the whole pass, shared by the run arm and the
     // framed-reply arm below. Two arrays here cost ~768 bytes on `serve`'s own
@@ -1874,8 +1885,10 @@ fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOT
         // below, which answer its caller as a dead peer.
         if c.parked.as_ref().unwrap().raw != 0 && c.state != DialState::Closed {
             if !sign_parked(c, auth) {
-                // Only a request too large to frame; `can_send` was asked at
-                // the park. Answered as the park would have answered it.
+                // A request too large to frame, or on a keyed session one
+                // `frame_keyed_in_place` refused (too large, or `seq` would
+                // overflow); `can_send` was asked at the park. Answered as the
+                // park would have answered it: FS_ERR_AUTH.
                 let parked = c.parked.take().unwrap();
                 let n = if parked.verb == ninep_abi::NP_RUN {
                     let msg = b"cpu: cannot authenticate (no /etc/cluster/id to sign with, or the request does not fit)\r\n";
@@ -1968,8 +1981,16 @@ fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOT
         // `verified` is the one outcome that leaves a session open: a reply
         // that failed its signature is fail-dead like a dead connection.
         let mut verified = false;
+        // A keyed session's reply carries a tag under k_s2c over the seq in
+        // flight; everything else, the keyed session's own opening reply
+        // included, is signed. The session is keyed only once phase two has
+        // derived its keys, which is after that reply was verified.
         let n = if complete && !too_big {
-            match verify_sealed(&c.rbuf, c.rlen, &parked.nonce, &parked.expect_key) {
+            let checked = match c.keys.first().map(|a| &a.state) {
+                Some(KeyState::Keyed { k_s2c, seq, .. }) => verify_keyed_reply(&c.rbuf, c.rlen, k_s2c, *seq),
+                _ => verify_sealed(&c.rbuf, c.rlen, &parked.nonce, &parked.expect_key),
+            };
+            match checked {
                 Some((start, len)) => {
                     verified = true;
                     let n = len.min(r.len());
@@ -1992,19 +2013,23 @@ fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOT
         if parked.opening && verified && np_status == 0 && c.slen == 0 {
             // Phase two. The `slen == 0` guard: the reply's ACK has cleared
             // our NP_SESSION from the send buffer (TCP acks what it answers),
-            // so signing over it cannot corrupt a request still in flight; a
+            // so framing over it cannot corrupt a request still in flight; a
             // peer that answered without acking is refused below, not trusted.
-            let (total, nonce) = frame_signed(auth, &parked.who, &c.held[..c.held_len], &mut c.sbuf);
-            c.held_len = 0;
-            if total > 0 {
-                c.slen = total;
-                c.last_activity = t;
-                c.parked = Some(Parked { nonce, since: 0, opening: false, ..parked });
-                continue;
+            // The keys, if the export keyed the session, come from this
+            // reply's result (`r[8..n]`, after the status).
+            match phase_two(c, auth, &parked.who, &parked.nonce, &r[8..n]) {
+                Ok((total, nonce)) => {
+                    c.slen = total;
+                    c.last_activity = t;
+                    c.parked = Some(Parked { nonce, since: 0, opening: false, ..parked });
+                    continue;
+                }
+                Err(st) => {
+                    // The caller hears so, and the session closes below.
+                    let n = status_only(&mut r, st);
+                    reply(parked.caller, &r[..n]);
+                }
             }
-            // Could not sign: the caller hears so, the session closes below.
-            let n = status_only(&mut r, syscall_abi::FS_ERR_AUTH);
-            reply(parked.caller, &r[..n]);
         } else if parked.opening {
             // The far side refused the session, or could not be reached, or
             // accepted it on a segment that did not ack our request (the
@@ -2014,8 +2039,13 @@ fn service_remotes<const H: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOT
             // leaving a C program to use a fid that was never issued. The
             // guard's comment said such a peer is refused; this is where it is
             // refused (review of #152). No slot is kept either way, and a
-            // still-open connection is closed politely.
+            // still-open connection is closed politely. The ephemeral secret
+            // goes NOW, not at the reap: this is a refusal path, exactly where
+            // a resident secret would go unwatched (review of step 7).
             c.held_len = 0;
+            if let Some(ka) = c.keys.first_mut() {
+                ka.forget();
+            }
             let n = if verified && np_status == 0 { status_only(&mut r, syscall_abi::FS_ERROR) } else { n };
             reply(parked.caller, &r[..n]);
         } else {
@@ -2519,9 +2549,37 @@ fn park_raw(sbuf: &mut [u8], np: &[u8]) -> Option<u16> {
 /// leaves to the service pass (see `Parked::raw`). Its own frame, never
 /// `serve`'s: `service_remotes` is inlined into `serve`, beneath every chain.
 /// `false` if the request could not be signed.
+///
+/// On a KEYED session the request is framed `AUTHNP04` instead, MACed rather
+/// than signed. On a session slot's opening `NP_SESSION`, a key is OFFERED
+/// first (step 7 of docs/roadmap/roadmap-session-auth.md): the client's
+/// ephemeral public key is written as the payload before the frame is signed,
+/// so the signature covers it, and the secret is kept in the slot for phase
+/// two. No offer where this boot's counter is unusable: that node keys
+/// nothing, and its sessions stay signed (Decision 6).
 #[inline(never)]
-fn sign_parked<const S: usize, const R: usize, const H: usize>(c: &mut Wire<S, R, H>, auth: &Auth) -> bool {
+fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c: &mut Wire<S, R, H, K>, auth: &Auth) -> bool {
     let pk = c.parked.as_mut().unwrap();
+    if let Some(ka) = c.keys.first_mut() {
+        if let KeyState::Keyed { k_c2s, seq, .. } = &mut ka.state {
+            let total = frame_keyed_in_place(k_c2s, seq, NP_SIGNED_NP_OFF, pk.raw as usize, &mut c.sbuf);
+            pk.raw = 0;
+            if total == 0 {
+                return false;
+            }
+            c.slen = total;
+            return true;
+        }
+        if pk.opening {
+            if let (Some(id), Some(boot)) = (auth.signing.as_ref(), boot_counter()) {
+                let at = NP_SIGNED_NP_OFF + pk.raw as usize;
+                if at + ninep_abi::NP_EPHEMERAL_LEN <= c.sbuf.len() {
+                    offer_key(ka, id, boot, &mut c.sbuf[at..at + ninep_abi::NP_EPHEMERAL_LEN]);
+                    pk.raw += ninep_abi::NP_EPHEMERAL_LEN as u16;
+                }
+            }
+        }
+    }
     let (total, nonce) = frame_signed_in_place(auth, &pk.who, pk.raw as usize, &mut c.sbuf);
     pk.raw = 0;
     if total == 0 {
@@ -2532,15 +2590,195 @@ fn sign_parked<const S: usize, const R: usize, const H: usize>(c: &mut Wire<S, R
     true
 }
 
+/// Derive this session's client ephemeral and write its public half into
+/// `payload`, the raw `NP_SESSION`'s payload (step 7): `SIG_DOMAIN_EPHEMERAL_C
+/// ‖ machine private key ‖ boot ID ‖ MONOTONIC_US ‖ boot entropy ‖ RANDOM
+/// bytes`. The secret stays in `ks` until phase two, and `Drop` wipes it
+/// wherever the slot goes first. Its own frame, so the ladder is not stacked
+/// on the signature `sign_parked` runs next.
+#[inline(never)]
+fn offer_key(ka: &mut SessionAuth, id: &Identity, boot: u64, payload: &mut [u8]) {
+    ka.forget();
+    let eph = ephemeral_secret(ninep_abi::SIG_DOMAIN_EPHEMERAL_C, &id.seed, boot, &[]);
+    let eph_pub = ed25519::x25519_public(&eph);
+    payload.copy_from_slice(&eph_pub);
+    ka.state = KeyState::Offered { eph, eph_pub };
+}
+
+/// Where the NP message sits in a keyed frame, `[len][magic][seq][tag][np]`.
+const NP_KEYED_NP_OFF: usize = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_KEYED;
+
+/// Frame a raw NP request `AUTHNP04` in place: the request sits at `src` (a
+/// parked one at `NP_SIGNED_NP_OFF`, the layout `park_raw` writes; phase two's
+/// held verb already at `NP_KEYED_NP_OFF`), and moves to `NP_KEYED_NP_OFF` if
+/// it is not there, with the header written in front of it. Spends the next `seq`, which is
+/// exactly one more than the last (ninep-abi's sequence rule), and returns the
+/// framed length, or 0 when it does not fit. Its own frame, for the MAC.
+#[inline(never)]
+fn frame_keyed_in_place(k_c2s: &[u8; ninep_abi::NP_SESSION_KEY_LEN], last_seq: &mut u64, src: usize, np_len: usize, out: &mut [u8]) -> usize {
+    let p = ninep_abi::NP_NET_LEN_PREFIX;
+    if src.max(NP_KEYED_NP_OFF) + np_len > out.len() || np_len > ninep_abi::NP_NET_MAX {
+        return 0;
+    }
+    let Some(seq) = last_seq.checked_add(1) else {
+        return 0;
+    };
+    if src != NP_KEYED_NP_OFF {
+        out.copy_within(src..src + np_len, NP_KEYED_NP_OFF);
+    }
+    let tag = keyed_tag(k_c2s, seq, &out[NP_KEYED_NP_OFF..NP_KEYED_NP_OFF + np_len]);
+    let body = ninep_abi::NP_AUTH_HDR_KEYED + np_len;
+    out[0..4].copy_from_slice(&(body as u32).to_le_bytes());
+    out[p..p + 8].copy_from_slice(&ninep_abi::NP_AUTH_MAGIC_KEYED.to_le_bytes());
+    let so = p + ninep_abi::NP_KEYED_SEQ_OFF;
+    out[so..so + ninep_abi::NP_SEQ_LEN].copy_from_slice(&seq.to_le_bytes());
+    let to = p + ninep_abi::NP_KEYED_TAG_OFF;
+    out[to..to + ninep_abi::NP_KEYED_TAG_LEN].copy_from_slice(&tag);
+    *last_seq = seq;
+    p + body
+}
+
+/// Verify a keyed reply, `[u32 len][tag:32][status][result]`, against the
+/// session's `k_s2c` and the `seq` of the request it answers (the one in
+/// flight), and return the `(start, len)` of `[status][result]` within
+/// `resp`, or `None`. A reply tagged for any other `seq` (a replay, or one
+/// from the future) or with the other direction's key fails here, which is
+/// the whole of what the sequence rule asks of a client: the seq is implicit
+/// in the tag. Constant-time compare, as on the export. Its own frame, for the
+/// MAC: `service_remotes` is inlined into `serve`.
+#[inline(never)]
+fn verify_keyed_reply(resp: &[u8], got: usize, k_s2c: &[u8; ninep_abi::NP_SESSION_KEY_LEN], seq: u64) -> Option<(usize, usize)> {
+    let p = ninep_abi::NP_NET_LEN_PREFIX;
+    if got < p {
+        return None;
+    }
+    let body_len = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
+    let tl = ninep_abi::NP_KEYED_TAG_LEN;
+    if body_len < tl + 8 || p + body_len > got {
+        return None;
+    }
+    let body = &resp[p..p + body_len];
+    let expect = keyed_tag(k_s2c, seq, &body[tl..]);
+    if !ed25519::ct_eq(&body[..tl], &expect) {
+        return None;
+    }
+    Some((p + tl, body_len - tl))
+}
+
+/// Phase two of a keyed client session (step 7): the export has accepted the
+/// `NP_SESSION` in a reply whose signature `verify_sealed` checked, and
+/// `result` is that reply's result. Derive the session keys from it, or learn
+/// that the session is unkeyed, then frame the verb held in `c.held` in the
+/// session's format. Returns `(framed length, nonce)` (the nonce is zero on a
+/// keyed frame, whose reply is checked by `seq`), or the status to fail the
+/// caller with:
+///
+/// - `eph_export` (`NP_EPHEMERAL_LEN` bytes) after our offer: keyed. An
+///   all-zero shared secret (a small-order key) is `FS_ERR_AUTH`, and the
+///   session closes: never a fallback to unkeyed (ninep-abi, "Keyed sessions").
+/// - An empty result: an export that does not key (v0.20.0, a spent budget
+///   there, or a node with no boot counter). Today's signed session, and the
+///   ephemeral secret is dropped now rather than kept for nothing.
+/// - Anything else, including a key we never offered: `FS_ERR_AUTH`.
+///
+/// The ephemeral secret is gone on every path out of here. Never inlined: the
+/// ladder, the key schedule and a signature or a MAC run in this frame, not in
+/// `serve`'s (the plan's step 7 note (c): phase two's sign was the one signing
+/// site left in `serve`'s own frame, until this).
+#[inline(never)]
+fn phase_two<const S: usize, const R: usize, const H: usize, const K: usize>(
+    c: &mut Wire<S, R, H, K>,
+    auth: &Auth,
+    who: &[u8; ninep_abi::NP_NAME_LEN],
+    nonce: &[u8; ninep_abi::NP_NONCE_LEN],
+    result: &[u8],
+) -> Result<(usize, [u8; ninep_abi::NP_NONCE_LEN]), u64> {
+    let held_len = c.held_len;
+    c.held_len = 0;
+    // The four outcomes in ONE match, on what we offered and what came back
+    // (review of step 7: spread over three conditions, relaxing one silently
+    // changed which answers key; the export was reshaped the same way).
+    let offered = c.keys.first().is_some_and(|a| matches!(a.state, KeyState::Offered { .. }));
+    match (offered, result.len()) {
+        // Nothing offered, nothing answered: a signed session, as before.
+        (false, 0) => {}
+        // A key we never offered, or an answer the wrong size for one.
+        (false, _) => return Err(syscall_abi::FS_ERR_AUTH),
+        (true, n) if n != 0 && n != ninep_abi::NP_EPHEMERAL_LEN => {
+            if let Some(ka) = c.keys.first_mut() {
+                ka.forget();
+            }
+            return Err(syscall_abi::FS_ERR_AUTH);
+        }
+        // Offered, and the export does not key: signed, and the secret goes now.
+        (true, 0) => {
+            if let Some(ka) = c.keys.first_mut() {
+                ka.forget();
+            }
+        }
+        // Offered, and answered with `eph_export`: keyed.
+        (true, _) => {
+            let Some(ka) = c.keys.first_mut() else {
+                return Err(syscall_abi::FS_ERR_AUTH);
+            };
+            let KeyState::Offered { eph, eph_pub } = &ka.state else {
+                return Err(syscall_abi::FS_ERR_AUTH);
+            };
+            let eph_pub = *eph_pub;
+            let mut eph_export = [0u8; ninep_abi::NP_EPHEMERAL_LEN];
+            eph_export.copy_from_slice(result);
+            let shared = ed25519::x25519_shared(eph, &eph_export);
+            ka.forget();
+            let Some(mut shared) = shared else {
+                return Err(syscall_abi::FS_ERR_AUTH);
+            };
+            // K = SHA-512(SIG_DOMAIN_SESSION ‖ shared ‖ request_nonce ‖
+            // eph_client ‖ eph_export), the export's schedule exactly;
+            // `request_nonce` is our NP_SESSION's.
+            let mut h = ed25519::Sha512::new();
+            h.update(ninep_abi::SIG_DOMAIN_SESSION);
+            h.update(&shared);
+            h.update(nonce);
+            h.update(&eph_pub);
+            h.update(&eph_export);
+            let mut k = h.finalize();
+            wipe(&mut shared);
+            let kl = ninep_abi::NP_SESSION_KEY_LEN;
+            ka.state = KeyState::Keyed { k_c2s: [0; ninep_abi::NP_SESSION_KEY_LEN], k_s2c: [0; ninep_abi::NP_SESSION_KEY_LEN], seq: 0 };
+            let KeyState::Keyed { k_c2s, k_s2c, seq } = &mut ka.state else {
+                unreachable!()
+            };
+            k_c2s.copy_from_slice(&k[..kl]);
+            k_s2c.copy_from_slice(&k[kl..2 * kl]);
+            wipe(&mut k);
+            // The held verb, keyed: copied once, straight to where the keyed
+            // frame carries it, and framed in place.
+            if NP_KEYED_NP_OFF + held_len > c.sbuf.len() {
+                return Err(syscall_abi::FS_ERR_AUTH);
+            }
+            c.sbuf[NP_KEYED_NP_OFF..NP_KEYED_NP_OFF + held_len].copy_from_slice(&c.held[..held_len]);
+            let total = frame_keyed_in_place(k_c2s, seq, NP_KEYED_NP_OFF, held_len, &mut c.sbuf);
+            return if total == 0 { Err(syscall_abi::FS_ERR_AUTH) } else { Ok((total, [0; ninep_abi::NP_NONCE_LEN])) };
+        }
+    }
+    let (total, nonce) = frame_signed(auth, who, &c.held[..held_len], &mut c.sbuf);
+    if total == 0 {
+        return Err(syscall_abi::FS_ERR_AUTH);
+    }
+    Ok((total, nonce))
+}
+
 /// A `/net/tcp` dial connection: the engine at its original sizes.
-type DialConn = Wire<DIAL_SBUF, DIAL_RBUF, 0>;
+type DialConn = Wire<DIAL_SBUF, DIAL_RBUF, 0, 0>;
 /// A remote-mount client connection: the same engine, sized for NP frames.
-type RemoteConn = Wire<REMOTE_SBUF, REMOTE_RBUF, 0>;
+type RemoteConn = Wire<REMOTE_SBUF, REMOTE_RBUF, 0, 0>;
 /// A held client session (Decision 4 of docs/roadmap/roadmap-fid-verbs.md):
 /// the same engine again, kept `Established` between the fid verbs of one
 /// remote fid's life, plus the room to hold a verb while its `NP_SESSION`
-/// opens (step 2 of docs/roadmap/roadmap-async-rmount.md).
-type SessionConn = Wire<REMOTE_SBUF, REMOTE_RBUF, REMOTE_NP_MAX>;
+/// opens (step 2 of docs/roadmap/roadmap-async-rmount.md), and the one slot of
+/// session keys (step 7 of docs/roadmap/roadmap-session-auth.md) that no other
+/// table carries.
+type SessionConn = Wire<REMOTE_SBUF, REMOTE_RBUF, REMOTE_NP_MAX, 1>;
 
 #[derive(Clone, Copy, PartialEq)]
 enum DialState {
@@ -2575,8 +2813,8 @@ enum DialState {
 /// (no file serving, no congestion control) - stop-and-wait reliability with a
 /// send and a receive buffer, whose sizes `S` and `R`, and the size `H` of the
 /// buffer a session holds its first verb in, are the only thing the three uses
-/// differ in.
-struct Wire<const S: usize, const R: usize, const H: usize> {
+/// differ in; `K` is 1 on a session, 0 elsewhere (see `Wire::keys`).
+struct Wire<const S: usize, const R: usize, const H: usize, const K: usize> {
     state: DialState,
     peer_ip: [u8; 4],
     peer_mac: [u8; 6],
@@ -2648,6 +2886,81 @@ struct Wire<const S: usize, const R: usize, const H: usize> {
     /// `held[..held_len]`; `H` is 0 on every slot that is not a session.
     held: [u8; H],
     held_len: usize,
+    /// A session slot's keyed-session state (step 7 of
+    /// docs/roadmap/roadmap-session-auth.md): `keys[0]` on a session, and no
+    /// bytes at all on a dial or a path slot. An array of `K` rather than a
+    /// field because this engine is shared by all three tables, and a plain
+    /// field would sit in every `MAX_DIAL` and `MAX_REMOTE` slot as well, on
+    /// `serve`'s frame, where resident bytes are what the stack is short of
+    /// (the plan's Risk 2). Read through `keys.first_mut()`, which is `None`
+    /// wherever the table carries none.
+    keys: [SessionAuth; K],
+}
+
+/// One client session's authentication: the name it was opened as, and where
+/// its keying stands. Wiped by `Drop`, which runs wherever the slot is released
+/// (a refused or empty answer, an unreachable peer, a low-order close, a
+/// reap), because zeroing on the success path alone would leave a secret
+/// resident on exactly the paths nobody watches (Decision 6).
+struct SessionAuth {
+    /// The name the session's `NP_SESSION` was signed as, and so the far-side
+    /// identity EVERY verb on it runs as once it is keyed (a keyed frame carries
+    /// no name). A verb whose caller now resolves to another name (the uid's
+    /// `/etc/passwd` line changed while the session was held) is refused rather
+    /// than run as the opener: sessions are looked up by uid, the far side
+    /// authorizes by name, and the two must not drift apart (review of step 7).
+    opener: [u8; ninep_abi::NP_NAME_LEN],
+    state: KeyState,
+}
+
+/// Where a client session's keying stands. One enum rather than a struct of
+/// every field, because the handshake's state and the session's keys are
+/// never live together: an enum holds the larger of the two, where fields
+/// held both for the session's whole life, on `serve`'s frame, at the
+/// client's deepest point (review of step 7: 144 bytes a slot, now ~80).
+enum KeyState {
+    /// No key offered, or the session is unkeyed: signed per request.
+    None,
+    /// The `NP_SESSION` in flight offered `eph_pub`; `eph` is its secret, kept
+    /// until phase two derives the keys or the session is refused.
+    Offered {
+        eph: [u8; ed25519::X25519_LEN],
+        eph_pub: [u8; ninep_abi::NP_EPHEMERAL_LEN],
+    },
+    /// Keyed: every request is `AUTHNP04` under `k_c2s`, every reply must carry
+    /// a tag under `k_s2c`. `seq` is the last request's, which is the one in
+    /// flight: a session has one verb in flight at a time, so a reply is
+    /// checked against exactly this.
+    Keyed {
+        k_c2s: [u8; ninep_abi::NP_SESSION_KEY_LEN],
+        k_s2c: [u8; ninep_abi::NP_SESSION_KEY_LEN],
+        seq: u64,
+    },
+}
+
+impl SessionAuth {
+    const NONE: SessionAuth = SessionAuth { opener: [0; ninep_abi::NP_NAME_LEN], state: KeyState::None };
+
+    /// Wipe whatever secret the state holds and return to `None`: at phase two
+    /// once the ephemeral is spent, on every refusal of the opening, and in
+    /// `Drop`.
+    fn forget(&mut self) {
+        match &mut self.state {
+            KeyState::None => {}
+            KeyState::Offered { eph, .. } => wipe(eph),
+            KeyState::Keyed { k_c2s, k_s2c, .. } => {
+                wipe(k_c2s);
+                wipe(k_s2c);
+            }
+        }
+        self.state = KeyState::None;
+    }
+}
+
+impl Drop for SessionAuth {
+    fn drop(&mut self) {
+        self.forget();
+    }
 }
 
 /// `DialConn::parent` sentinel: this conn is not a passively-accepted one.
@@ -2656,7 +2969,7 @@ const DIAL_NO_PARENT: u8 = 0xFF;
 /// A fresh `Idle` connection with the given local (source) port. Shared by the
 /// `clone` allocation and the passive `dial_accept` path (which then fill in
 /// the peer + sequence state) and by the remote-mount and session parks.
-fn new_wire<const S: usize, const R: usize, const H: usize>(src_port: u16) -> Wire<S, R, H> {
+fn new_wire<const S: usize, const R: usize, const H: usize, const K: usize>(src_port: u16) -> Wire<S, R, H, K> {
     Wire {
         state: DialState::Idle,
         peer_ip: [0; 4],
@@ -2685,6 +2998,7 @@ fn new_wire<const S: usize, const R: usize, const H: usize>(src_port: u16) -> Wi
         fids: 0,
         held: [0; H],
         held_len: 0,
+        keys: [SessionAuth::NONE; K],
     }
 }
 
@@ -3647,7 +3961,7 @@ fn key_session(
     user: Proxy,
     out: &mut Option<KeyedSession>,
 ) -> Option<[u8; ninep_abi::NP_EPHEMERAL_LEN]> {
-    let mut secret = export_ephemeral(&id.seed, boot, nonce);
+    let mut secret = ephemeral_secret(ninep_abi::SIG_DOMAIN_EPHEMERAL_E, &id.seed, boot, nonce);
     let eph_export = ed25519::x25519_public(&secret);
     let shared = ed25519::x25519_shared(&secret, eph_client);
     wipe(&mut secret);
@@ -3676,10 +3990,13 @@ fn key_session(
     Some(eph_export)
 }
 
-/// The export's ephemeral X25519 secret for one handshake:
-/// `SHA-512(SIG_DOMAIN_EPHEMERAL_E ‖ machine private key ‖ boot ID ‖
-/// request_nonce ‖ MONOTONIC_US ‖ boot entropy ‖ RANDOM bytes)`, its first 32
-/// bytes (X25519 clamps them). EVERY input is load-bearing and none is on the
+/// An ephemeral X25519 secret for one handshake, either side's:
+/// `SHA-512(domain ‖ machine private key ‖ boot ID ‖ nonce ‖ MONOTONIC_US ‖
+/// boot entropy ‖ RANDOM bytes)`, its first 32 bytes (X25519 clamps them). The
+/// export passes `SIG_DOMAIN_EPHEMERAL_E` and the request's nonce; the client
+/// passes `SIG_DOMAIN_EPHEMERAL_C` and no nonce, since it derives its key
+/// before the nonce of the request carrying it exists (ninep-abi, "Keyed
+/// sessions"). EVERY input is load-bearing and none is on the
 /// wire, so leaving one out passes every check the peer can make: the key makes
 /// it secret, the boot ID and the clock keep it from repeating across reboots
 /// and across a restarted `netd` (which reads the same boot entropy as its
@@ -3687,9 +4004,9 @@ fn key_session(
 /// forward secrecy where the platform has them. Either is empty where it has
 /// none. Both are read here, per handshake, and wiped, so no copy stays
 /// resident between one session and the next.
-fn export_ephemeral(seed: &[u8; ed25519::SECRET_LEN], boot: u64, nonce: &[u8; ninep_abi::NP_NONCE_LEN]) -> [u8; ed25519::X25519_LEN] {
+fn ephemeral_secret(domain: &[u8], seed: &[u8; ed25519::SECRET_LEN], boot: u64, nonce: &[u8]) -> [u8; ed25519::X25519_LEN] {
     let mut h = ed25519::Sha512::new();
-    h.update(ninep_abi::SIG_DOMAIN_EPHEMERAL_E);
+    h.update(domain);
     h.update(seed);
     h.update(&boot.to_le_bytes());
     h.update(nonce);
@@ -4829,7 +5146,7 @@ fn dial_file_op(
 /// dial or a parked path verb, `CLIENT_SESSION_IDLE_TICKS` for a held session,
 /// which must outlive the far side's own reap (see there).
 #[allow(clippy::needless_range_loop)] // index needed for the reap re-borrow
-fn pump_dials<const S: usize, const R: usize, const H: usize>(mac: &[u8; 6], dials: &mut [Option<Wire<S, R, H>>], idle_ticks: u64) {
+fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(mac: &[u8; 6], dials: &mut [Option<Wire<S, R, H, K>>], idle_ticks: u64) {
     let mut frame = [0u8; 1600];
     let t = now();
     for i in 0..dials.len() {
@@ -4965,7 +5282,7 @@ fn pump_dials<const S: usize, const R: usize, const H: usize>(mac: &[u8; 6], dia
 /// data + our ACK, or the peer's FIN). Called from `on_frame` before the
 /// server-connection path.
 #[allow(clippy::needless_range_loop)] // index needed for as_ref/as_mut re-borrow
-fn dial_on_segment<const S: usize, const R: usize, const H: usize>(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<Wire<S, R, H>>]) -> bool {
+fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usize>(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<Wire<S, R, H, K>>]) -> bool {
     let mut out = [0u8; 1600];
     let t = now();
     for i in 0..dials.len() {

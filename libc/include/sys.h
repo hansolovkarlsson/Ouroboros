@@ -105,6 +105,11 @@
 #define NO_FS (~0UL - 1UL)
 #define FS_ERR_NOT_FOUND (~0UL - 2UL)
 #define FS_ERR_PERM (~0UL - 32UL)
+/* A request or reply that did not authenticate: no key for the peer, a reply
+ * signature or keyed tag that did not verify. Named so a C caller can tell it
+ * from a dead peer, which is the distinction the cluster auth design promises
+ * (session-auth step 7: without it every keyed refusal printed "failed"). */
+#define FS_ERR_AUTH (~0UL - 30UL)
 #define FS_ERR_NO_SUCH_VERB (~0UL - 39UL)
 /* A resource of the server is fully used for now (a session slot, or netd's
  * stack while it runs a cpu command, during which it refuses another local
