@@ -8,7 +8,7 @@ generated from the markdown and could not easily be: the pages are curated
 ABRIDGEMENTS, not renderings. `architecture-overview.html` is a sixth of
 `architecture.md` and a different document with a different job;
 `changelog.html` was half the words of `CHANGELOG.md` before it was deleted
-(see the MANIFEST note below); the site carries 10 of the 30 postmortems;
+(see the MANIFEST note below); the site carries 10 of the 31 postmortems;
 `glossary.html` has no markdown source at all; and the slugs are not derivable
 from the filenames (`capability-and-hardening-postmortem.md` ->
 `postmortem-capability-hardening.html`).

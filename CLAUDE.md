@@ -42,7 +42,7 @@ are the ones worth having in mind before you open it:
 - **`docs/roadmap-completed.md`** — the finished arcs that used to live in
   `ROADMAP.md`, moved out so the roadmap stays forward-looking (the
   *plan-shaped* companion to `CHANGELOG.md`'s condensed milestone log).
-- **The postmortems under `docs/postmortems/`** (thirty of them) — the design, bug
+- **The postmortems under `docs/postmortems/`** (thirty-one of them) — the design, bug
   and process retrospectives: *the traps already hit and the lessons
   learned*. Read the relevant one before reworking a subsystem.
   `docs/README.md` indexes all of them with a full annotation each, and every
@@ -604,7 +604,7 @@ docs/                every document is annotated in full in `docs/README.md` - r
                      caveat: NO NETWORKING, so the whole cluster is QEMU-only), testing-exfat.md
   gap-analysis.md    per-subsystem have/partial/don't inventory vs mainstream Unixes, capped by a ranked list of the biggest gaps
   archive/           contemporaneous build logs, kept for archaeology only - not the reference
-  postmortems/       the thirty design/bug/process retrospectives, one file each (see the section above, and docs/README.md)
+  postmortems/       the thirty-one design/bug/process retrospectives, one file each (see the section above, and docs/README.md)
   research/          synthesis notes on MINIX/Plan 9/Helix/Redox, the GUI stack, and where the design should go next
 
 kernel/              every file annotated in full in `docs/source-map.md`; each also carries its own `//!`
