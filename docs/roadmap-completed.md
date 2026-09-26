@@ -20,6 +20,49 @@ a **DONE** marker or ~~strikethrough~~ is finished.
 
 ---
 
+## Session-scoped authentication ✅ DONE (2026-09-26)
+
+The plan, its eight steps and every measurement are in
+[`roadmap-session-auth.md`](roadmap/roadmap-session-auth.md). The frontier
+entry, moved verbatim:
+
+> **In progress 2026-09-22: session-scoped authentication**, planned in
+> [`roadmap-session-auth.md`](roadmap/roadmap-session-auth.md). On a held
+> session the four Ed25519 operations are 2,926 µs of every fid verb, so the
+> plan replaces them with a session key (X25519 inside `NP_SESSION`, then an
+> HMAC and a sequence number per message). It sits beside item 1 below, not in
+> it: it changes how a session proves each message, not whose keys exist.
+> **Step 1 done 2026-09-23** (X25519, 236 µs and 2,944 bytes on the guest);
+> its stack gate failed at `park_session`, 80 bytes from the guard page on
+> `main`, which #159 fixed by moving every park's signing into the service
+> pass. **Step 2 done 2026-09-23** (HMAC-SHA-512: 120 to 160 µs over a full
+> `NP_NET_MAX` message against 536 µs for a sign). **Step 3 done 2026-09-23**
+> on QEMU (a persisted boot counter, the ESP file serving since edk2 keeps
+> variables in RAM, and 32 bytes of `EFI_RNG_PROTOCOL` entropy); the Pi 4 and
+> Parallels measurements are owed. **Step 4 done 2026-09-23** (the keyed wire in
+> `ninep-abi`'s normative block, pinned across Rust and both Python peers).
+> **Step 5 done 2026-09-23** (a keyed session host to host between the two
+> Python peers, checked by `make test`). Step 6, the export in `netd`, is next.
+> **Step 6 done 2026-09-26** (the export in `netd`, #166) and **step 7 done
+> 2026-09-26** (the client, #167); step 8 (docs and the release) closed it.
+
+**What it came to.** On a held session the four Ed25519 operations per fid
+verb (2,926 µs, 44% of a median verb on the step 0 probe) became four
+HMAC-SHA-512 operations (169 µs), and the median verb cycle on the wire fell
+from 7.50 ms to 4.53 ms. A captured keyed message cannot be replayed, since
+its `seq` is spent; one-shot requests still can, so the cluster roadmap's
+replay item is closed only for sessions. Nothing on the wire forces an
+upgrade: an export that predates keying answers without a key and the session
+stays signed. Three things measuring found along the way are the arc's
+lasting lessons: a park that signed within 80 bytes of the guard page on
+`main` (#159), a `log` call inlined into the keyed dispatch that cost every
+export verb 1,760 bytes (found in the disassembly after two wrong guesses),
+and a timing probe whose own console dump inflated the round trip it was
+measuring (the packet capture, which shares no code with `netd`, is what
+caught it).
+
+---
+
 ## The published website, and the nine pages behind it ✅ DONE (2026-09-05)
 
 `docs/` is served live by GitHub Pages

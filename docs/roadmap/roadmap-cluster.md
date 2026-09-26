@@ -345,9 +345,16 @@ netd holding the run's output in a `PendingRun` buffer), lifting the cap to ~2 K
     concrete "expose the cluster across a semi-trusted or hostile segment"
     scenario; until then, building these is a mechanism ahead of its threat model.
     When the trigger fires:
-    - **Replay protection** — a captured request can be replayed verbatim today
-      (forgery of a *new* one cannot). Fix: a server nonce (costs a per-op round
-      trip) or a bounded seen-nonce cache (needs bounded state under no-heap).
+    - **Replay protection**: **closed for held sessions, open for one-shot
+      requests** (2026-09-26, [`roadmap-session-auth.md`](roadmap-session-auth.md)).
+      A keyed session's messages carry a strict sequence number under a
+      session key, so a captured one cannot be replayed on that session, and a
+      replayed `NP_SESSION` meets a fresh export ephemeral and derives nothing
+      (except after a snapshot rollback on a node with no entropy, which the
+      plan states). A one-shot request (a path verb, `NP_RUN`) can still be
+      replayed verbatim (forgery of a *new* one cannot). Fix for that half: a
+      server nonce (costs a per-op round trip) or a bounded seen-nonce cache
+      (needs bounded state under no-heap).
     - **Per-user keys** — the per-machine half **shipped 2026-08-31** (Ed25519
       per machine, peers authorized by public key, revocation by deleting a
       line), so "interchangeable members" and "no key rotation" are closed. What

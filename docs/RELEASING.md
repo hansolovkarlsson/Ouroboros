@@ -58,6 +58,8 @@ is `0.5.0`.
 | `0.18.0` | 2026-09-03 | correctness: cross-mount `mv` refused (was a silent local rename), `ls` reports the real error, host peer serves `NP_STAT` |
 | `0.18.1` | 2026-09-03 | patch — the remote-read flake closed (supervisor no longer restarts `netd` mid-read; delegation race), `ls` exits non-zero on failure |
 | `0.19.0` | 2026-09-07 | delegation reworked (grants accumulate, one-step-down rule, `SENDER_TASK`/`TASK_IDENTITY`), network programs in pipelines, C `open()` on a remote mount, `FS_ERR_NO_SUCH_VERB` (floor to `MAX-39`), MIT licence, `docs/` folders |
+| `0.20.0` | 2026-09-22 | the fid verbs reach the export (C `open()`/`read()`/`write()` on a remote file), the keyboard follows a chain, the remote mount goes asynchronous; error floor to `MAX-43` |
+| `0.21.0` | 2026-09-26 | held sessions keyed (X25519 + HMAC-SHA-512, `AUTHNP04`, offered not required: no flag day), the kernel boot identity (`BOOT_ID`), a park never signs |
 
 ## Four things that have bitten, and how to avoid them
 

@@ -6,7 +6,10 @@ closed in v0.20.0. This is the plan for the other half, written before any
 code. Its first step was a measurement, because whether this arc is worth doing
 was a question the tree could answer and nobody had asked it.
 
-Grounded in the code at `3e59cec` (2026-09-22).
+Grounded in the code at `3e59cec` (2026-09-22). **Done 2026-09-26**: all
+eight steps; the arc's summary is in
+[`roadmap-completed.md`](../roadmap-completed.md), and its release is the
+minor version after v0.20.0.
 
 ## What "sign once per session" would have meant, and why not that
 
@@ -738,10 +741,23 @@ the client, so each side is tested against something that is not itself.
    is gone and ignored. Every guest check was re-run on the rewritten client
    and passes.
 
-8. **Docs, rigs and the release.** The normative block, `docs/architecture.md`
+8. ✅ **2026-09-26.** **Docs, rigs and the release.** The normative block, `docs/architecture.md`
    (the new syscall and the boot identity), `docs/manual.md`'s cluster section,
    `testing-qemu.md`'s session recipes, `roadmap-cluster.md`'s replay item
    (partly closed, and saying which part), the changelog, and a minor version.
+
+   **What it did.** The normative block gained the three rules the two `netd`
+   ends settled while implementing (a keyed request bounded by its declared
+   length; a client's answer to a result that is neither empty nor a key; a
+   session bound to its opener's name). `architecture.md`'s boot flow names
+   the boot identity (the syscall table already had `BOOT_ID` from step 3).
+   `manual.md` explains keyed sessions to a user, and its trust paragraph no
+   longer says every observed request can be replayed. `roadmap-cluster.md`'s
+   replay item says which half closed. The session recipes went into
+   `testing-qemu.md` with steps 6 and 7. The arc moved from `ROADMAP.md` to
+   `roadmap-completed.md`, leaving the owed Pi 4 and Parallels measurements on
+   the frontier, and the two site pages abridging the manual and
+   `architecture.md` were brought up to them.
 
 ## Risks, named in advance
 
