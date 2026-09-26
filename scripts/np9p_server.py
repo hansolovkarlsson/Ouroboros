@@ -1022,6 +1022,53 @@ def keyed_self_test(quiet=True):
         if got != "closed" or ended != "refused":
             bad.append(f"  - keyed: the export did not refuse {label} "
                        f"(client saw: {got}; server: {ended})")
+
+    # 4. ROOT SQUASH, both ways in, from a peer with no `root` flag (`intruder`):
+    # a signed request claiming root is refused FS_ERR_AUTH, a keyed session
+    # opened as root is refused and never keyed, and the same peer claiming
+    # `user` is served - so the refusals are about the claim, not the key.
+    # Everything above signs as `host`, which is flagged, so without this the
+    # squash could be deleted from this server and `make test` stay green.
+    intruder = c.dev_seed(c.DEV_PEER_LABELS["intruder"])
+    stat = _frame(NP_BASE + 12, ("PLEN", 0, 0), b"/HELLO.TXT", 0)
+
+    def one_op_as(user):
+        def go(port):
+            s = c.Session("127.0.0.1", port)
+            try:
+                st, _ = s.op(stat, user=user, seed=intruder)
+                return st
+            except (RuntimeError, OSError) as e:
+                return f"broke: {e}"
+            finally:
+                s.close()
+        return go
+
+    def keyed_as_root(port):
+        s = c.Session("127.0.0.1", port)
+        saved = c.SIGN_KEY
+        c.SIGN_KEY = intruder
+        try:
+            st, _ = s.open(keyed=True, user=b"root")
+            return (st, s.keys is not None)
+        except (RuntimeError, OSError) as e:
+            return f"broke: {e}"
+        finally:
+            c.SIGN_KEY = saved
+            s.close()
+
+    for label, fn, want in (
+        ("a signed request from an unflagged peer claiming root", one_op_as(b"root"), FS_ERR_AUTH),
+        ("a keyed session from an unflagged peer claiming root", keyed_as_root, (FS_ERR_AUTH, False)),
+    ):
+        got, ended = run(None, fn)
+        if got != want or ended.startswith("CRASHED"):
+            shown = got if isinstance(got, (str, tuple)) else classify(got)
+            bad.append(f"  - root squash: {label} was not refused FS_ERR_AUTH ({shown}; server: {ended})")
+    got, ended = run(None, one_op_as(b"user"))
+    if isinstance(got, str) or got >= (1 << 64) - 64:
+        shown = got if isinstance(got, str) else classify(got)
+        bad.append(f"  - root squash control: the unflagged peer claiming `user` was not served ({shown})")
     return bad
 
 

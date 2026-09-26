@@ -449,7 +449,7 @@ def check_dev_peer_labels(problems):
     # EVERY ROW, not just the ones that parse: a row the pattern cannot read
     # (a flag spelt `1`, a fifth field) would drop out of `want` silently, and
     # its peer would then be compared by nobody.
-    written = block.group(1).count("(")
+    written = sum(1 for ln in block.group(1).splitlines() if ln.split("#", 1)[0].strip().startswith("("))
     if written != len(rows):
         problems.append(f"mkclusterkeys.py: DEV_PEERS has {written} row(s), {len(rows)} parse "
                         f"as (name, ip, label, root)")

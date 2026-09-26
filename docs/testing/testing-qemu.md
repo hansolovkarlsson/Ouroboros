@@ -236,7 +236,7 @@ console naming the reason, which is where an operator finds it: the client
 only sees the connection end.
 
 **The impersonation gate** (user-keys step 0, 2026-09-26): `impersonate-gate
-[stage]` signs as `intruder`, a dev identity every image authorizes and no
+<stage>` signs as `intruder`, a dev identity every image authorizes and no
 machine holds, and claims users it has no credential for: row 1 claims root
 and reads `/etc/shadow`, row 2 claims `user` and reads
 `/Users/user/PRIVATE.TXT` (0600, `user`'s). Four controls run first (modes are

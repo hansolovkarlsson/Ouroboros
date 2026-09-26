@@ -4494,7 +4494,9 @@ fn deny_claim(c: &mut TcpConn, request: &[u8], cause: Refused, auth: &Auth, nonc
         let m: &[u8] = match cause {
             Refused::Scan(LineScan::Unreadable) => b"cpu: this host cannot read its account database right now\r\n",
             Refused::Scan(LineScan::NoDatabase) => b"cpu: this host has no readable account database\r\n",
-            Refused::Scan(_) => b"cpu: no account of that name on this host (the signature was accepted)\r\n",
+            Refused::Scan(LineScan::NotFound | LineScan::Found) => {
+                b"cpu: no account of that name on this host (the signature was accepted)\r\n"
+            }
             Refused::RootSquash => {
                 b"cpu: this host does not trust yours with root (no `root` flag on its authorized line)\r\n"
             }
@@ -4509,7 +4511,7 @@ fn deny_claim(c: &mut TcpConn, request: &[u8], cause: Refused, auth: &Auth, nonc
         let status = match cause {
             Refused::Scan(LineScan::Unreadable) => syscall_abi::NO_FS,
             Refused::Scan(LineScan::NoDatabase) => syscall_abi::FS_ERR_NOT_FOUND,
-            Refused::Scan(_) | Refused::RootSquash => syscall_abi::FS_ERR_AUTH,
+            Refused::Scan(LineScan::NotFound | LineScan::Found) | Refused::RootSquash => syscall_abi::FS_ERR_AUTH,
         };
         // SEALED, or the three statuses above are a distinction no client can
         // observe. An unsealed refusal is 12 bytes - `[len][status]` - and every

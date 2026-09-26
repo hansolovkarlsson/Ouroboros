@@ -249,15 +249,27 @@ fn parse_peer(line: &[u8]) -> Option<Peer<'_>> {
 
 /// The peer whose **public key** matches — what an exporter asks when a client
 /// offers a key.
+///
+/// **ROOT ONLY IF EVERY LINE FOR THE KEY SAYS SO.** The peer returned is the
+/// first line holding the key, but its `root` is true only when no other line
+/// holding that key lacks the flag. Taking the first line's flag meant that an
+/// operator withdrawing root by appending an unflagged line, and leaving the
+/// old one, went on granting root: the "append and leave the old line" mistake
+/// [`find_by_ip`] refuses for addresses. Disagreeing lines resolve to the less
+/// trusted reading rather than the first one.
 pub fn find_by_key<'a>(authorized: &'a [u8], key: &[u8; KEY_LEN]) -> Option<Peer<'a>> {
+    let mut hit: Option<Peer<'a>> = None;
     for line in authorized.split(|&c| c == b'\n') {
         if let Some(p) = parse_line(line) {
             if &p.key == key {
-                return Some(p);
+                match hit.as_mut() {
+                    Some(first) => first.root &= p.root,
+                    None => hit = Some(p),
+                }
             }
         }
     }
-    None
+    hit
 }
 
 /// The peer expected at an **address** — what a client asks before trusting a
@@ -648,6 +660,34 @@ mod tests {
             assert_eq!(p.key, KEY_B);
             assert_eq!(p.root, root, "the flag must survive a round trip");
         }
+    }
+
+    #[test]
+    fn root_needs_every_line_for_the_key_to_say_so() {
+        const K: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        // Two lines for one key, with the given tails, in a fixed buffer.
+        let file = |tails: [&str; 2]| {
+            let mut buf = [0u8; 256];
+            let mut n = 0;
+            for t in tails {
+                for part in [&b"node-a 10.0.2.10 "[..], K.as_bytes(), t.as_bytes(), b"\n"] {
+                    buf[n..n + part.len()].copy_from_slice(part);
+                    n += part.len();
+                }
+            }
+            (buf, n)
+        };
+        let root_of = |tails: [&str; 2]| {
+            let (buf, n) = file(tails);
+            find_by_key(&buf[..n], &KEY_A).expect("still authorized").root
+        };
+        // Root withdrawn by appending an unflagged line, the old one left in
+        // place: not root, in either order.
+        assert!(!root_of([" root", ""]), "disagreeing lines must not grant root");
+        assert!(!root_of(["", " root"]), "disagreeing lines must not grant root");
+        // Agreeing lines keep what they agree on.
+        assert!(root_of([" root", " root"]));
+        assert!(!root_of(["", ""]));
     }
 
     #[test]
