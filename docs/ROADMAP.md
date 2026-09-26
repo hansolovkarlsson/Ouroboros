@@ -46,7 +46,7 @@ the microkernel arc itself still leaves open):
 
 1. **Per-user keys for the cluster.** **Planned 2026-09-26:
    [`roadmap-user-keys.md`](roadmap/roadmap-user-keys.md)** (password-derived
-   keys held by `accountd`, root squash first, shaped as the foundation for the
+   keys held by `netd` while the user is logged in, root squash first, shaped as the foundation for the
    auth server below). Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)): a remote request

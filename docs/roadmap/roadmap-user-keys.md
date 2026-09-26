@@ -161,8 +161,9 @@ entropy (refusing without it, as `clusterkey new` does), and the administrator
 copies it to the others, as `authorized` lines are copied today. The dev value,
 `ouroboros-dev`, is public and fine for dev rigs only. A node with **no** realm
 file derives no cluster key and sends no credential; local login does not read
-the realm at all (Decision 10), so a missing, unreadable or edited realm can
-cost remote access and never a login. No node identity is in the
+the realm to check a password (Decision 10); it reads it only afterwards,
+to decide whether to derive a cluster key. So a missing, unreadable or edited
+realm can cost remote access and never a login. No node identity is in the
 derivation, so the same user with the same password has the same key on every
 node, which is what lets any node the user logs in on sign for them, and what
 an auth server would need. The realm keeps two clusters with the same user
@@ -195,7 +196,8 @@ new way to fail. This version removes those parts rather than guarding them.)*
   root, `login` derives the user's key (Decisions 2, 3) if the node has a realm
   (`/etc/cluster/realm`), hands it to `netd`, and wipes its own copy. No realm,
   no key: a node that is not in a cluster logs in exactly as it does today.
-- **`NETOP_KEY_HOLD(uid, seed)`**: `netd` records a **held key**: the uid, the
+- **`NETOP_KEY_HOLD(uid, seed) -> handle`**: `netd` records a **held key**,
+  returns its slot as a handle, and stores the uid, the
   seed, and the sender's **packed task identity** (slot and generation, the
   kernel's recycled-slot check from the async arc's step 0). **Accepted only
   from a sender whose `SENDER_ID` is uid 0**, so only a root task (in practice
@@ -203,9 +205,10 @@ new way to fail. This version removes those parts rather than guarding them.)*
   the system can fill the table, so a full table (`MAX_HELD`, 4) refuses the
   hold, never evicts, and `login` still succeeds, saying the cluster key is not
   held.
-- **`NETOP_KEY_DROP`**: the shell sends it at logout, after restoring root.
-  Accepted from the task that held the key (packed identity) or from root;
-  anyone else is refused. It wipes the entry.
+- **`NETOP_KEY_DROP(handle)`**: the shell sends it at logout, after restoring
+  root, with the handle `login` kept. It wipes exactly that entry, so a second
+  login of the same user keeps its own. Accepted from the task that held the
+  key (packed identity) or from root; anyone else is refused.
 - **A dead login's key goes too.** `netd` checks every held key's owner for
   liveness in its idle pass, beside the idle reap it already runs, and wipes
   the key of an owner that is gone. So a shell that crashes or is killed loses
@@ -264,6 +267,17 @@ primary gid is the only group to check) unless the export's
 `authorized` line for that peer carries an explicit `root` flag, or (after step
 7) the claimed user has a registered key and the request carries that user's
 valid credential.
+
+**The `root` flag outranks the registry for root.** A claim resolving to uid 0
+or gid 0 from a root-flagged peer is served **without** a credential even if
+root is registered at the export: the flag is the explicit statement "this
+machine is trusted with root", and Decision 5's per-user rule applies to every
+other claim. So registering root at an export changes nothing for flagged
+peers and lets an unflagged one in only with root's credential. The dev
+registry lists `user` and not `root`, so every root-driven rig step 1 kept
+green stays green through step 7; step 7 tests root's credential against a
+registry that does list it.
+
 This is step 1 and ships before any key code, because it closes the worst of
 the gap with no new crypto. It applies to every verb, `NP_RUN` included, and on
 both `netd` and the Python export.
@@ -322,23 +336,54 @@ are today. That is the N² cost Decision 1 accepts.
 random salt.** Today a shadow line is `name:salt:SHA-256(salt ‖ password)`,
 one fast hash, readable by root on every node, so an attacker who reaches root
 anywhere guesses at the speed of SHA-256 and the slow derivation of Decision 3
-buys nothing. A **version-2** shadow line is `name:2:<salt-hex>:<hash-hex>`,
-where the hash is PBKDF2-HMAC-SHA-512 of the password over the line's own
-**random per-account salt**, with Decision 3's iteration count. It is
-independent of the realm and of the cluster key on purpose: local login never
-reads a cluster file, so no cluster misconfiguration can lock anyone out, and
-a random salt keeps the shadow file safe from a dictionary precomputed for a
-realm. The cost is that a login on a node with a realm pays two derivations,
-which step 0's measurement budgets.
+buys nothing. A **version-2** line keeps the version-1 shape and widths
+exactly: `name:<salt-field>:<hash-hex>`, where a version-1 salt field is 16
+hex digits (8 bytes) and a version-2 one is `2$` and 14 hex digits (a 7-byte
+random salt; `$` is never hex, so the two cannot be confused), and the hash is
+64 hex digits in both: SHA-256 in version 1, the first 32 bytes of
+PBKDF2-HMAC-SHA-512 over the salt with Decision 3's iteration count in
+version 2. It is independent of the realm and of the cluster key on purpose:
+the password check never reads a cluster file, so no cluster misconfiguration
+can lock anyone out, and a random salt keeps the shadow file safe from a
+dictionary precomputed for a realm. The cost is that a login on a node with a
+realm pays two derivations, which step 0 budgets.
 
-A version-1 line still verifies the old way. After a successful version-1
-login, `login` asks `accountd` to upgrade it (`ACCTOP_UPGRADE(name,
-password)`, **root-only**, re-verifying the version-1 hash before writing), so
-`accountd` stays the shadow file's only writer, and the slow derivation it
-does there blocks nothing but that login: no other server calls `accountd`
-synchronously. `useradd`, `passwd` and `mkpasswd.py` write version 2 only.
-Salts come from `RANDOM` where there is one and from today's documented weak
-fallback where there is not, which is unchanged by this plan.
+**The same width is what makes the upgrade safe.** `accountd` rewrites a
+shadow line in place when the file keeps its length (`changed_span`), and
+otherwise falls back to a whole-file truncate-then-write, the window
+`source-map.md` warns can leave `/etc/shadow` empty on an `fsd` restart or a
+power loss, which locks out every account, root included. A version-1 line
+with an 8-byte salt and its version-2 replacement are the same length, so the
+upgrade is always the in-place path. A version-1 line of any other width
+(`SALT_MAX` allows up to 16 bytes, though nothing here has written one) is
+**not** upgraded; it keeps verifying the old way, and `useradd`'s and
+`passwd`'s own writes are unchanged by this plan.
+
+**No supervised server ever derives a key.** The supervisor declares a server
+wedged after `WEDGE_TICKS` (128 ticks, about 2.56 s) of continuous
+`Runnable`, and one derivation is about 1.5 s under TCG, two for a password
+change, before time-slicing stretches either. So every derivation runs in the
+program that has the password (`login`, `passwd`, `useradd`), none of which is
+supervised, and `accountd` only compares and writes:
+
+- **Upgrade.** After a successful version-1 login, `login` computes the
+  version-2 line itself (fresh salt, one derivation) and sends
+  `ACCTOP_UPGRADE(name, password, line)`. It is **root-only**; `accountd`
+  checks the password against the version-1 line (one fast SHA-256), checks
+  the new line's widths, and writes it in place. It cannot check that the new
+  hash matches the password without deriving, and it does not need to: root
+  may already set any password.
+- **`passwd` as a user.** `passwd` asks `accountd` for the line's salt
+  (`ACCTOP_SALT(name)`; a salt is not secret), derives the old password's hash
+  over it and the new password's hash over a fresh salt, and sends both.
+  `accountd` compares the old hash with the stored one in constant time (fast)
+  and writes the new line in place. Presenting the stored hash proves as much
+  as presenting the password would to anyone who cannot read `/etc/shadow`,
+  and whoever can read it is root, who may set any password anyway.
+
+`useradd` and `mkpasswd.py` write version 2 only. Salts come from `RANDOM`
+where there is one and from today's documented weak fallback where there is
+not, which is unchanged by this plan.
 
 The shadow file and the registry stay **two files**, and now hold different
 things (a salted hash here, a public key there). They answer different
@@ -408,19 +453,25 @@ itself.
    line (random salt, PBKDF2) and still verifies a version-1 one.
    `scripts/mkclusterkeys.py` derives the dev users' keys (`root`/`root`,
    `user`/`user`, realm `ouroboros-dev`) **independently**, not through a
-   shared helper, and stages the registry and the realm; `mkpasswd.py` writes
+   shared helper, and stages the realm and a registry listing `user` only
+   (Decision 6); `mkpasswd.py` writes
    version-2 shadow. *Check:* the Rust and Python derivations agree for every
    dev user, and a version-2 line verifies the right password and refuses a
    wrong one. *Controls:* reorder the salt in one of them and they disagree;
    drop the length prefixes and the `ouroboros-dev`/`x` and `ouroboros-de`/`vx`
    pair derive the same key, which a test asserts they must not; a
    version-2 shadow line verifies identically with the realm file present,
-   absent and edited, which a test asserts, so local login cannot depend on it.
+   absent and edited, which a test asserts, so local login cannot depend on it;
+   a version-1 line with an 8-byte salt and its version-2 replacement have the
+   same length, which a test asserts, since the upgrade's safety rests on it.
 4. **Holding keys: `login`, the shell and `netd`** (Decisions 4 and 10).
-   `login` checks the password as today (version 1 or 2), asks `accountd` to
-   upgrade a version-1 line, derives the cluster key when there is a realm,
-   and sends `NETOP_KEY_HOLD` before dropping to the user; the shell sends
-   `NETOP_KEY_DROP` at logout. `netd` keeps the held-key table, checks owners'
+   `login` checks the password as today (version 1 or 2), computes a
+   version-2 line and sends `ACCTOP_UPGRADE` after a version-1 login, derives
+   the cluster key when there is a realm, and sends `NETOP_KEY_HOLD` before
+   dropping to the user, keeping the handle; the shell sends
+   `NETOP_KEY_DROP(handle)` at logout. `passwd` derives both hashes itself
+   (`ACCTOP_SALT`, then the old and the new) and `accountd` only compares and
+   writes. `netd` keeps the held-key table, checks owners'
    liveness in its idle pass, and closes a uid's attested sessions when its last
    key goes (step 8 has sessions to close; this step exercises the table).
    *Check:* after a login, a probe asking `netd` what it holds (a
@@ -434,7 +485,13 @@ itself.
    with four live keys is refused, not evicting, and that login still
    succeeds; a node with no realm holds nothing and logs in normally;
    `ACCTOP_UPGRADE` from a non-root task is refused, and a version-1 line reads
-   as version 2 after one login.
+   as version 2 after one login **with `/etc/shadow`'s length unchanged** (the
+   in-place path; a mutation that pads the new line makes the check see the
+   length move); `passwd` with a wrong old password is refused; and
+   `accountd` stays below the wedge threshold through a login, an upgrade and
+   a password change, which the supervisor's restart line would show (a
+   mutation that derives inside `accountd` produces that line, which is the
+   control).
 5. **The wire, in `ninep-abi`** (Decision 8). `AUTHNP05`, the credential
    block, kind 1, the new domain tags, the iteration count and the realm rule,
    all in the normative block; `SIG_DOMAIN_MAX` recomputed. The wire check
@@ -515,10 +572,13 @@ itself.
    `np9p_client.py` must agree byte for byte, and a mismatch reads as a wrong
    password. The vectors come from a foreign implementation, and step 3's
    control is the independence of the two derivations.
-6. **Login gets slower.** Two derivations at a login on a node with a realm
+6. **Login gets slower, and the slow part must stay out of servers.** Two derivations at a login on a node with a realm
    (Decision 10), so the iteration count trades login time against guessing
    cost. Step 0 measures it, and the count is recorded with the login time it
-   costs on the QEMU guest, the slowest platform, so the trade is visible.
+   costs on the QEMU guest, the slowest platform, so the trade is visible. A
+   derivation inside any supervised server would trip `WEDGE_TICKS`
+   (Decision 10), so the rule that none derives is checked in step 4, not
+   assumed.
 7. **Firmware and hardware.** The Pi 4 has no cluster networking yet, so the
    arc is QEMU-only, like the rest of the cluster. Login does run on the Pi, and
    the KDF's cost there is recorded when it can be booted.
