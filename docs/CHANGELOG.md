@@ -12,6 +12,18 @@ here actually works today, see [`architecture.md`](architecture.md) and
 **Not yet released.** Changes since v0.20.0, drafted as they land; cutting a
 version is held for a go-ahead.
 
+**The client keys a session, session-auth step 7.** `netd`'s held client
+sessions now offer an ephemeral key in their `NP_SESSION`, derive the session
+keys from the export's signed answer, and send every later verb as
+`AUTHNP04`, checking each reply's tag and `seq`. An export that does not key
+(an older node, or one with no boot counter) answers with an empty result and
+the session stays signed. A reply that does not verify fails the verb with
+`FS_ERR_AUTH`, which libc now names ("authentication failed") instead of
+printing "failed". Measured on the two-node rig: **the four crypto operations
+per verb fall from 2,926 µs to 169 µs**, and the median verb cycle from 7.50 ms
+to 4.53 ms. `np9p_server.py --unkeyed` plays an older export, and
+`drive-2vm.py` counts `AUTHNP04` frames.
+
 **The export keys a session, session-auth step 6.** An `NP_SESSION` whose
 payload is an ephemeral X25519 key, sent as a fresh connection's first frame,
 now gets a keyed session from `netd`: the export answers with its own
