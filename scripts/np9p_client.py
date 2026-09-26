@@ -576,7 +576,8 @@ class Session:
         self.keys = derive_session_keys(shared, nonce, eph_client, data)
         return 0, data
 
-    def send_keyed_raw(self, np_msg, seq=None, magic=NP_AUTH_MAGIC_KEYED, flip_tag=False):
+    def send_keyed_raw(self, np_msg, seq=None, magic=NP_AUTH_MAGIC_KEYED, flip_tag=False,
+                       trailing=b"", declare_extra=0):
         """Send one keyed-shaped frame with a chosen `seq`, magic or a flipped
         tag bit, and read nothing: the keyed gate's controls, each of which a
         correct export answers by closing. Advances `self.seq` only for a
@@ -589,7 +590,9 @@ class Session:
         if flip_tag:
             tag[0] ^= 1
         body = struct.pack("<QQ", magic, seq) + bytes(tag) + np_msg
-        self.sock.sendall(struct.pack("<I", len(body)) + body)
+        # `trailing`: bytes after the frame, outside its declared length.
+        # `declare_extra`: a declared length longer than the bytes sent.
+        self.sock.sendall(struct.pack("<I", len(body) + declare_extra) + body + trailing)
 
     def closed_without_reply(self):
         """Whether the export ended the connection (an RST or a FIN) without
@@ -723,7 +726,10 @@ def do_keyed_gate(host, port, data_path, low_user):
          seq, an AUTHNP03 frame, a second NP_SESSION offering a key; and on
          the handshake itself a low-order ephemeral (u = 0) and a key offered
          mid-stream on an unkeyed session; after each the export must still
-         serve a one-shot request (the refusal closed ONE connection);
+         serve a one-shot request (the refusal closed ONE connection); and
+         the declared length bounds a keyed frame both ways: trailing bytes
+         past it are ignored and the request served, a length longer than
+         the segment closes;
       5. a path verb on a keyed session runs as the session's user: `/etc/shadow`
          read on a session keyed as `low_user` is refused FS_ERR_PERM, and read
          on one keyed as root is served. ext2 only: FAT32 records no modes, so
@@ -898,6 +904,22 @@ def do_keyed_gate(host, port, data_path, low_user):
         s.close()
         return closed, "a reply arrived"
     refusal("a key offered mid-stream on an unkeyed session", mid_stream)
+
+    # 4b. the declared length bounds the request, both ways
+    try:
+        s, _ = keyed_session()
+        s.send_keyed_raw(root, trailing=b"\xa5" * 16)
+        (flen,) = struct.unpack("<I", s._read(4))
+        framed = s._read(flen)
+        k_s2c = s.keys[1]
+        tag_ok = hmac.compare_digest(framed[:NP_KEYED_TAG_LEN], tag_of(k_s2c, s.seq, framed[NP_KEYED_TAG_LEN:]))
+        (st,) = struct.unpack("<Q", framed[NP_KEYED_TAG_LEN:NP_KEYED_TAG_LEN + 8])
+        ok, detail = tag_ok and served(st), f"readdir with 16 trailing bytes -> {status_name(st) if not served(st) else 'served'}, tag {'verifies' if tag_ok else 'DOES NOT verify'}"
+    except (RuntimeError, OSError) as exc:
+        ok, detail = False, f"{exc}"
+    check("bytes past a keyed frame's declared length are not part of it", ok, detail)
+    refusal("a keyed frame declaring more than its segment holds", lambda: on_keyed(
+        lambda s: s.send_keyed_raw(root, declare_extra=64)))
 
     # 5. the session's user, not a name of the frame's own
     shadow = b"/etc/shadow"
