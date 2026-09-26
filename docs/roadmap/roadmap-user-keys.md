@@ -64,17 +64,33 @@ verifies.
 - **A user who logs in on a compromised node is exposed.** The node sees the
   password as it is typed. No design without a trusted terminal can prevent
   that; an auth server does not either.
-- **Offline guessing.** A user's public key is a function of their password,
-  so whoever holds it can test guesses against it. The key derivation is
-  deliberately slow (Decision 3), and the public keys are root-readable only,
-  but a weak password stays weak. The slow derivation is only worth its login
-  cost if nothing faster sits beside it, and today something does:
-  `/etc/shadow` holds one SHA-256 of salt and password, a guess per hash, on
-  every node. So `/etc/shadow` moves to the same slow function, keeping its
-  random per-account salt (Decision 10). The cluster key's salt cannot be
-  random (it must be the same on every node), so a precomputed dictionary
-  for one realm serves every node in it: the realm must be unique per cluster
-  (Decision 2), and the dev realm is public on purpose.
+- **Offline guessing, by anyone who can see the wire.** A user's key is a
+  function of their password, and every credential is a signature by that key
+  over bytes that cross the network in cleartext (the link carries integrity,
+  not confidentiality). So anyone who captures **one** credentialed request,
+  on any segment it crosses, can test password guesses offline: derive a key
+  from each guess and check it against the signature. Nothing about the
+  registry's file mode changes that; the public keys are effectively public.
+  Today no user secret crosses the wire at all, so **this is an exposure the
+  plan adds**, knowingly, and the same one Kerberos has. What a guessed
+  password gives an outsider is the user's console login on nodes where the
+  password is used, not cluster access (a request also needs an authorized
+  machine's key); what it gives a compromised node is the user's cluster
+  identity, which is the threat this plan exists to shrink, so **strong
+  passwords are part of the model**, and `manual.md` says so in step 9. The
+  defences are the slow derivation (Decision 3) and a realm unique to the
+  cluster (Decision 2; a precomputed dictionary for one realm serves every
+  node in it, and the dev realm is public on purpose). **The cure is the
+  trigger-gated encryption tier**, which would carry the credential
+  encrypted; it is recorded there as a reason that tier's trigger now matters
+  more (step 9). Masking the credential inside keyed sessions alone was
+  considered and not taken: one-shot requests (path verbs, `cpu`) have no
+  session key, so it would close half the exposure with new mechanism.
+
+  The slow derivation is only worth its login cost if nothing faster sits
+  beside it, and today something does: `/etc/shadow` holds one SHA-256 of salt
+  and password, a guess per hash, on every node. So `/etc/shadow` moves to the
+  same slow function, keeping its random per-account salt (Decision 10).
 - **One-shot requests stay replayable**, as they are today. This plan changes
   who a request can claim to be, not whether it can be sent twice.
 - **Onward delegation.** A `cpu` command running on another node holds no
@@ -336,8 +352,8 @@ step 8's measurement.
 
 **Decision 9: the registry.** `/etc/cluster/users`, one line per user:
 `<name> <pubkey-hex>`, parsed by `clusterkeys` (a pure crate, host-tested),
-mode 0600 on ext2 (the public keys are what offline guessing works from, so
-local users do not get to read them). Its size is a stack budget like
+mode 0600 on ext2 (the same keys are recoverable from any captured
+credential, above, so this is tidiness, not a defence). Its size is a stack budget like
 `AUTHORIZED_MAX`, measured, not assumed. `useradd` and `passwd` print the
 line to add; putting it on the other nodes is by hand, as `authorized` lines
 are today. That is the N² cost Decision 1 accepts.
@@ -575,7 +591,10 @@ itself.
 9. **Docs, rigs and the release.** The normative block, `manual.md`'s cluster
    section and its trust paragraph, `architecture.md` (the agent), the man
    pages for `useradd` and `passwd` (and the version-2 shadow line), `testing-qemu.md`'s recipes, the cluster
-   roadmap's security tier, the changelog, and a minor version.
+   roadmap's security tier (its encryption item gains the offline-guessing
+   exposure as a reason its trigger matters more), `manual.md`'s advice that
+   strong passwords are now part of the cluster's model, the changelog, and a
+   minor version.
 
 ## Risks, named in advance
 
