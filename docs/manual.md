@@ -325,8 +325,11 @@ root. Two consequences worth knowing:
   refused remotely and allowed locally.
 
 This is still auth at the **machine** level: a machine the cluster authorizes
-can claim any of its own users' names, so this protects you from the *users* of a
-machine you trust, not from a machine you don't. It assumes a **trusted LAN** for the
+can claim any user who has an account on the exporting machine, **root
+included**, so this protects you from the *users* of a machine you trust, not
+from a machine you don't. One compromised authorized machine is root on every
+export that lists it. Root squash and per-user keys are planned in
+`docs/roadmap/roadmap-user-keys.md`. It assumes a **trusted LAN** for the
 parts still deferred (a passive sniffer reads your files and can replay an
 observed one-shot request; encryption, replay protection for one-shot requests
 and per-user *keys* are gated behind a "leaving a trusted network" trigger on

@@ -57,11 +57,14 @@ the microkernel arc itself still leaves open):
    mapped user's identity for the spawn, so a remote command inherits it.
 
    **What is left is the tier below it: keys are per-machine, not per-user.**
-   The shared secret is gone — each machine has its own Ed25519 keypair and
-   authorizes peers by public key, so a member can be revoked by deleting a line
-   — but an authorized *machine* can still claim any of its own users' names. So
-   the model defends against the users of a trusted node — the real exposure —
-   but not against a compromised node. Per-user keys would close that, and the design forks are
+   The shared secret is gone: each machine has its own Ed25519 keypair and
+   authorizes peers by public key, so a member can be revoked by deleting a
+   line. But an authorized *machine* can still claim any user who has an account
+   on the export, **root included** (the export checks only that the name exists
+   there; `map_user` has no uid-0 case, and `fsd`'s root bypass applies). So the
+   model defends against the users of a trusted node, which is the real
+   exposure, but not against a compromised node: one is root on every export
+   that lists it. Per-user keys would close that, and the design forks are
    real: whether each user gets a key or the machine key signs a per-user
    credential; where those live (`/etc/cluster/keys/<name>`? a factotum-style
    agent, as Plan 9 does it?); how a node learns a peer user's key without a
@@ -1093,9 +1096,10 @@ crate, plus creator-owned new inodes.
   promoted to "What's next" above on 2026-08-30** once `accountd` gave the hole
   a privileged writer on the far end. **Shipped 2026-08-31**: the export now
   carries the requesting user's name inside the signature and resolves it
-  through the far side's own `/etc/passwd`. What remains is the tier below —
+  through the far side's own `/etc/passwd`. What remains is the tier below:
   the export authenticates the *machine* (its keypair), so an authorized
-  machine can still claim any of its own users' names; see item 1 above.
+  machine can still claim any user with an account on the export, root
+  included; see item 1 above.
 - ~~**Symbolic-mode `chmod`** (`u+x`)~~ — **shipped 2026-08-29** (`u+x`, `go-w`,
   `a=rx`, `u+rw,go+r`, copy-source `g=u`, conditional `X`, `s`/`t`; octal still
   works and stays absolute). A real `/etc/skel` for `useradd` **also shipped
