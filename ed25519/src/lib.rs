@@ -30,6 +30,9 @@
 //!   on `field.rs`, with an all-zero shared secret refused rather than returned.
 //! - **HMAC-SHA-512** (step 2 of the same plan). RFC 2104 over `sha512.rs`,
 //!   streaming, with a constant-time compare for tags.
+//! - **PBKDF2-HMAC-SHA-512** (step 2 of `docs/roadmap/roadmap-user-keys.md`).
+//!   RFC 8018 over that HMAC, from pads primed once, for keys derived from
+//!   passwords. Vectors from Python's `hashlib`.
 //!
 //! ## House rules for this crate
 //!
@@ -49,6 +52,7 @@
 mod curve;
 mod field;
 mod hmac;
+mod pbkdf2;
 mod scalar;
 mod sign;
 mod sha512;
@@ -57,6 +61,7 @@ mod x25519;
 pub use curve::{Point, POINT_LEN};
 pub use field::{Fe, ELEM_LEN};
 pub use hmac::{ct_eq, hmac_sha512, HmacSha512, HMAC_LEN};
+pub use pbkdf2::pbkdf2_hmac_sha512;
 pub use scalar::{Scalar, SCALAR_LEN};
 pub use sign::{
     public_key, sign, sign_prefixed, verify, verify_prefixed, SigningKey, PUBLIC_LEN,

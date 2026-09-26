@@ -241,6 +241,29 @@ Python side computes it from the same account table. Step 3 adds dev accounts
 anyway (row 5 needs one); a gid-0 account beside it would let the gate observe
 this half.
 
+### Step 2's results (2026-09-26): PBKDF2 in `ed25519/`
+
+`pbkdf2_hmac_sha512(password, salt, iterations: NonZeroU32, out)`, RFC 8018
+over the crate's HMAC, sharing its key handling (`key_block`, factored out of
+`HmacSha512::new`) and priming both pads once. Twelve vectors from
+`scripts/gen-pbkdf2-vectors.py` (Python's `hashlib`, OpenSSL underneath):
+iterations 1, 2, 3, 4,096 and **210,000**, outputs of 32, 64, 65 and 128
+bytes, an empty password and salt, a 128-byte password and a 129-byte one that
+must be hashed first, and binary bytes. All matched on the first run.
+
+**Controls, measured.** A test asserts every vector sees a flipped password
+bit, a flipped salt bit, and one iteration more or fewer. Against the code: one
+extra iteration, the block index counted from 0, and a long password used
+without hashing each fail the vector test.
+
+**On the target.** `/bin/edtest` now times the crate's function (step 0's copy
+is deleted) and checks two of the vectors on the guest, the 210,000 one
+included: **one real derivation takes 0.97 to 0.98 s**, 4.2 µs an iteration,
+faster than step 0's 5.2 µs because the crate's loop is tighter than the copy
+was. A login's two derivations are therefore about 2 s. PBKDF2's peak stack is
+4,480 bytes of 57,344, calibrated like the others, which is what step 4's
+`login` adds to the shell.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking
