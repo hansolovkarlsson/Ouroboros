@@ -42,10 +42,21 @@ _spec.loader.exec_module(edref)  # this ASSERTS the reference against RFC 8032
 # The dev cluster: the two nodes the two-VM rigs boot, plus the host-side Python
 # peer that `run-image-9p` talks to. Addresses match netd's MAC-derived scheme
 # (…:0a -> .10, …:0b -> .11) and SLIRP's fixed host address.
+#
+# `intruder` is NOT a machine. It is the authorized-but-hostile node that
+# `np9p_client.py impersonate-gate` signs as (step 0 of
+# docs/roadmap/roadmap-user-keys.md), kept apart from the identities the rigs
+# use so that step 1 can trust those with root and leave this one untrusted,
+# and the gate still sees the difference. Its address is one no dev machine
+# holds: an export finds a peer by KEY and never reads the address, and a
+# client looks one up only for a host it dials, which nobody dials this one.
+# Sharing an address with a real peer would make that peer's lookup ambiguous,
+# which `find_by_ip` refuses.
 DEV_PEERS = [
     ("node-a", "10.0.2.10", "ouroboros-dev-node-a"),
     ("node-b", "10.0.2.11", "ouroboros-dev-node-b"),
     ("host", "10.0.2.2", "ouroboros-dev-host-peer"),
+    ("intruder", "10.0.2.20", "ouroboros-dev-intruder"),
 ]
 
 

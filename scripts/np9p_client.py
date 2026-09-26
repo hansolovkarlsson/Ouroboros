@@ -18,6 +18,7 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> fid-gate [path] [data_path]  # the step-5/6 checks: open/fstat/clunk, and pread to EOF, on a session
     python3 scripts/np9p_client.py <host> <port> path-gate              # the path verbs end to end on a scratch file, plus the console and /net arms
     python3 scripts/np9p_client.py <host> <port> keyed-gate [data_path] [user]  # session-auth step 6: the export keys a session, and refuses every forgery by closing
+    python3 scripts/np9p_client.py <host> <port> impersonate-gate [stage]  # user-keys step 0: an authorized peer claims users it has no credential for (ext2 image)
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
 `[magic:8][nonce:16][name:32][pubkey:32][sig:64]` in front of the NP message,
@@ -174,6 +175,7 @@ DEV_PEER_LABELS = {
     "node-a": "ouroboros-dev-node-a",
     "node-b": "ouroboros-dev-node-b",
     "host": "ouroboros-dev-host-peer",
+    "intruder": "ouroboros-dev-intruder",  # impersonate-gate's hostile peer; no machine
 }
 
 SIGN_LABEL = DEV_PEER_LABELS["host"]
@@ -1817,6 +1819,161 @@ def do_path_gate(host, port):
     print(f"path-gate: {failed} check(s) failed", flush=True)
     return failed
 
+# The impersonation gate's fixtures on the ext2 image (the Makefile stages
+# both). PRIVATE is 0600 and owned by `user`, so only `user` (and root) may read
+# it; its content is compared, so a served row is shown to have read THAT file.
+IMPERSONATE_PRIVATE = "/Users/user/PRIVATE.TXT"
+IMPERSONATE_PRIVATE_TEXT = b"only user may read this\n"
+IMPERSONATE_PUBLIC = "/HELLO.TXT"
+
+# What each row must answer, by stage of docs/roadmap/roadmap-user-keys.md.
+# True is served, False refused. Stage 0 is `main` before the arc, where the gap
+# is open: the gate's own control is that both rows are SERVED there, because a
+# gate that already passes on the code it is meant to catch proves nothing.
+# Stage 1 is root squash: the root claim is refused, and `user` is still
+# claimable by anyone until the credential lands (step 7).
+#
+# A REFUSAL MEANS ONE OF THESE, not any status above the error band. A row that
+# expects refused and passed on FS_ERR_NOT_FOUND or FS_ERR_BUSY would report the
+# squash working because path resolution broke or the budget ran out. These two
+# are the export's answers about WHO is asking: the name or key is refused
+# (FS_ERR_AUTH), or the resolved user may not (FS_ERR_PERM).
+IMPERSONATE_REFUSALS = (FS_ERR_AUTH, FS_ERR_PERM)
+IMPERSONATE_STAGES = {
+    0: {"row 1": True, "row 2": True},
+    1: {"row 1": False, "row 2": True},
+}
+
+
+def do_impersonate_gate(host, port, stage):
+    """The impersonation gate: step 0 of docs/roadmap/roadmap-user-keys.md.
+
+    Signs as `intruder`, an AUTHORIZED machine that nobody logged in on, and
+    CLAIMS users: row 1 claims root and reads /etc/shadow, row 2 claims `user`
+    and reads a file only `user` may read. Today both are served, which is the
+    gap the plan closes; the stage argument says which answers are expected.
+
+    Needs the ext2 image, the only one where fsd enforces modes. Four controls
+    run first, because each way the rows could read "served" or "refused" for
+    the wrong reason has one:
+
+    - the export enforces modes at all (`user` claiming /etc/shadow is refused),
+      or served rows would only show a disk that checks nothing;
+    - the intruder key is authorized on this image (a public file is served),
+      or every row would read refused and look like a squash;
+    - an UNAUTHORIZED key is refused, so it is the intruder's line, not a
+      permissive export, that lets the rows in;
+    - the private file is 0600 and owned by uid 1000, observed through the
+      `host` identity claiming root, so row 2 reads a file that really is
+      `user`'s alone.
+
+    Rows 3 to 5 of the plan's table need a credential or a registry, neither of
+    which exists yet, and are printed as n/a with the step that adds them.
+    """
+    want = IMPERSONATE_STAGES.get(stage)
+    if want is None:
+        sys.exit(f"impersonate-gate: unknown stage {stage} "
+                 f"(known: {', '.join(str(k) for k in sorted(IMPERSONATE_STAGES))})")
+    failed = 0
+    intruder = dev_seed(DEV_PEER_LABELS["intruder"])
+    trusted = dev_seed(DEV_PEER_LABELS["host"])
+    nobody = dev_seed("impersonate-gate-unauthorized")
+
+    def check(name, ok, detail):
+        nonlocal failed
+        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}", flush=True)
+        if not ok:
+            failed += 1
+
+    def op(np_msg, seed, user):
+        """One signed request as `user`, signed by `seed`. The exception is
+        returned rather than raised, so a dead connection reads as its own
+        outcome and never as a refusal."""
+        frame, nonce = signed_frame(np_msg, seed, user=user.encode())
+        try:
+            with socket.create_connection((host, port), timeout=10) as s:
+                s.sendall(frame)
+                return recv_reply(s, nonce, peer_key=peer_key())
+        except (RuntimeError, OSError) as exc:
+            return None, f"{exc.__class__.__name__}: {exc}"
+
+    def read(path, seed, user):
+        pb = path.encode()
+        return op(build_frame(NP_READ, 0, [len(pb), 0, 4096], pb), seed, user)
+
+    def outcome(status, data):
+        if status is None:
+            return f"no reply ({data})"
+        if served(status):
+            return f"served, {len(data)} bytes"
+        return f"refused {status_name(status)}"
+
+    print(f"impersonate-gate: stage {stage}, signing as `intruder`", flush=True)
+
+    st, data = read("/etc/shadow", intruder, "user")
+    check("control: the export enforces modes (`user` claiming /etc/shadow is refused)",
+          st == FS_ERR_PERM,
+          outcome(st, data) + ("" if st == FS_ERR_PERM else
+                               " - an export that serves this enforces nothing, so rows 1 and 2 "
+                               "would prove nothing (FAT32 image? this gate needs ext2)"))
+
+    st, data = read(IMPERSONATE_PUBLIC, intruder, "user")
+    check("control: the intruder key is authorized here (a public file is served)",
+          st is not None and served(st),
+          outcome(st, data) + ("" if st != FS_ERR_AUTH else
+                               " - an image built before `intruder` was added to "
+                               "mkclusterkeys.py refuses every row, which would read as a squash"))
+
+    st, data = read("/etc/shadow", nobody, "root")
+    check("control: an unauthorized key claiming root is refused",
+          st == FS_ERR_AUTH, outcome(st, data))
+
+    pb = IMPERSONATE_PRIVATE.encode()
+    st, rec = op(stat_frame(pb), trusted, "root")
+    if st == STAT_INFO_LEN and len(rec) >= STAT_INFO_LEN and rec[26]:
+        mode = int.from_bytes(rec[20:22], "little") & 0o7777
+        uid = int.from_bytes(rec[22:24], "little")
+        gid = int.from_bytes(rec[24:26], "little")
+        ok = mode == 0o600 and uid == 1000
+        detail = f"mode={mode:04o} uid={uid} gid={gid}"
+    else:
+        ok, detail = False, f"no mode record: {outcome(st, rec)}"
+    check(f"control: {IMPERSONATE_PRIVATE} is `user`'s alone (0600, uid 1000, seen as host/root)",
+          ok, detail)
+
+    def row(label, text, st, data, good_data):
+        expect = want[label]
+        if st is None:
+            check(f"{label}: {text}", False, outcome(st, data))
+            return
+        got = served(st)
+        if got and not good_data(data):
+            check(f"{label}: {text}", False, f"served, but not the expected bytes: {data[:40]!r}")
+            return
+        ok = got if expect else st in IMPERSONATE_REFUSALS
+        check(f"{label}: {text}", ok,
+              f"{outcome(st, data)}; stage {stage} expects "
+              f"{'served' if expect else 'refused FS_ERR_AUTH or FS_ERR_PERM'}")
+
+    st, data = read("/etc/shadow", intruder, "root")
+    row("row 1", "intruder claims root, reads /etc/shadow", st, data,
+        lambda d: d.startswith(b"root:"))
+
+    st, data = read(IMPERSONATE_PRIVATE, intruder, "user")
+    row("row 2", f"intruder claims `user`, reads {IMPERSONATE_PRIVATE}", st, data,
+        lambda d: d == IMPERSONATE_PRIVATE_TEXT)
+
+    print("[n/a ] row 3: `user` with a credential from the wrong password - no credential "
+          "kind exists until step 7", flush=True)
+    print("[n/a ] row 4: `user` with a valid credential - no credential kind exists until "
+          "step 7", flush=True)
+    print("[n/a ] row 5: a name with no registered key - there is no registry until step 3, "
+          "so every name is unregistered today, which rows 1 and 2 already show", flush=True)
+
+    print(f"impersonate-gate: {failed} check(s) failed", flush=True)
+    return failed
+
+
 def np_readfile(host, port, path, want=512):
     pb = path.encode()
     return one_op(host, port, build_frame(NP_READ_FILE, 0, [len(pb), want], pb))
@@ -2051,7 +2208,8 @@ def main():
     leftover = [a for a in checked if a.startswith("--")]
     if leftover:
         sys.exit(f"unknown or repeated option(s): {' '.join(leftover)}")
-    if len(args) < 4 and not (len(args) == 3 and args[2] in ("session-gate", "fid-gate", "path-gate")):
+    if len(args) < 4 and not (len(args) == 3 and args[2] in ("session-gate", "fid-gate", "path-gate",
+                                                           "impersonate-gate")):
         print(__doc__)
         sys.exit(2)
     host, port, op = args[0], int(args[1]), args[2]
@@ -2141,6 +2299,13 @@ def main():
 
     if op == "path-gate":
         sys.exit(min(do_path_gate(host, port), 125))
+
+    if op == "impersonate-gate":
+        try:
+            stage = int(args[3]) if len(args) > 3 else 0
+        except ValueError:
+            sys.exit(f"impersonate-gate: the stage is a number, not {args[3]!r}")
+        sys.exit(min(do_impersonate_gate(host, port, stage), 125))
 
     if op == "session-gate":
         hold = int(args[3]) if len(args) > 3 else 10
