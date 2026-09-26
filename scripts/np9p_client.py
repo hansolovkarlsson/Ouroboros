@@ -737,20 +737,39 @@ def do_keyed_gate(host, port, data_path, low_user):
 
     def check(name, ok, detail):
         nonlocal failed
+        close_all()  # whatever the check opened, before the next one runs
         print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}", flush=True)
         if not ok:
             failed += 1
 
     root = build_frame(NP_READDIR, 0, [1, 4096], b"/")
 
+    # EVERY session this gate opens is closed on every path, a raise included:
+    # the export has three session slots, so one leaked by an early check
+    # would turn a later check's open into FS_ERR_BUSY, reported as "not
+    # keyed", blaming keying for a budget the gate spent (review of step 6).
+    opened = []
+
     def keyed_session(user=None):
         s = Session(host, port)
+        opened.append(s)
         st, eph = s.open(keyed=True, user=user)
         if st != 0 or s.keys is None:
-            s.close()
             raise RuntimeError(f"not keyed (NP_SESSION -> {status_name(st)}, "
                                f"{len(eph)}-byte result)")
         return s, eph
+
+    def plain_session():
+        s = Session(host, port)
+        opened.append(s)
+        return s
+
+    def close_all():
+        while opened:
+            try:
+                opened.pop().close()
+            except OSError:
+                pass
 
     def still_serves():
         try:
@@ -809,7 +828,7 @@ def do_keyed_gate(host, port, data_path, low_user):
 
     # 3. the old-style session
     try:
-        s = Session(host, port)
+        s = plain_session()
         st, res = s.open()
         st2, _ = s.op(root)
         s.close()
@@ -825,6 +844,7 @@ def do_keyed_gate(host, port, data_path, low_user):
             closed, how = act()
         except (RuntimeError, OSError) as exc:
             closed, how = False, f"{exc}"
+        close_all()  # before the liveness probe, which needs a free slot too
         alive, after = still_serves()
         check(name, closed and alive,
               f"{'closed without a reply' if closed else 'NOT closed: ' + how}; a one-shot after -> {after}")
@@ -857,7 +877,7 @@ def do_keyed_gate(host, port, data_path, low_user):
 
     def low_order():
         # u = 0 is of small order: every scalar maps it to the all-zero secret.
-        s = Session(host, port)
+        s = plain_session()
         s.sock.settimeout(10)
         frame, _ = request_frame(build_frame(NP_SESSION, 0, [], b"\0" * NP_EPHEMERAL_LEN))
         s.sock.sendall(frame)
@@ -867,7 +887,7 @@ def do_keyed_gate(host, port, data_path, low_user):
     refusal("a low-order ephemeral key closes the handshake", low_order)
 
     def mid_stream():
-        s = Session(host, port)
+        s = plain_session()
         s.sock.settimeout(10)
         st, _ = s.open()
         if st != 0:
