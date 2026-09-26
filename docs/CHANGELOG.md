@@ -20,7 +20,7 @@ connection then takes `AUTHNP04` only. The frames carry a strict `seq`, a
 constant-time tag compare, every verb running as the user who signed the
 `NP_SESSION`, and tagged replies. Any auth failure closes the connection with
 an RST and no reply. A node whose boot counter is unusable keys nothing.
-`np9p_client.py keyed-gate` checks it with eleven checks, the plan's
+`np9p_client.py keyed-gate` checks it with thirteen checks, the plan's
 controls among them. Measuring the stack found two costs a keyed dispatch had
 added, one of them to every signed verb as well (1,760 bytes against `main`).
 `handle_9p` now has one dispatch for both formats, and the keyed handshake is

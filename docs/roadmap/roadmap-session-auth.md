@@ -567,8 +567,8 @@ the client, so each side is tested against something that is not itself.
    `ct_eq` tag), every verb runs as the user who signed the `NP_SESSION`, and
    replies are tagged (`seal_keyed`). Every auth failure closes with an RST and
    no reply, logged through a cold `close_keyed`. The check is a new
-   `np9p_client.py keyed-gate`: eleven checks, the plan's controls among them,
-   PASS/FAIL each, and all eleven pass on the ext2 image. Its controls are
+   `np9p_client.py keyed-gate`: thirteen checks, the plan's controls among
+   them, PASS/FAIL each, and all thirteen pass on the ext2 image. Its controls are
    mutations of `netd`, three builds, and each failed exactly the checks it
    should: seq check off, verbs run as root and the small-order check off
    (replay, skip, user and low-order FAIL); tag check off, mid-stream and
@@ -597,6 +597,18 @@ the client, so each side is tested against something that is not itself.
    `serve` is under the client too, so step 7 starts 528 bytes shorter than
    step 1 measured. Branches `measure/keyed-export-stack` and
    `measure/keyed-export-stack-main`, never merged.
+
+   **The review** (`/code-review`, eight findings, all acted on). The two that
+   mattered: the machine seed now lives inside the identity's `Option`, so a
+   node with no key has no all-zero seed a careless caller could hash; and
+   `key_session`'s comment claimed more wiping than Rust can promise, so it
+   now names what is wiped and what is not (the crate's hash and HMAC states,
+   moved slots, spills), and the keys go straight into the connection. A keyed
+   request is bounded by its declared length, which the gate now checks both
+   ways (the two checks that made eleven thirteen; ignoring the length fails
+   exactly those two). The boot-entropy bound moved into `syscall-abi`
+   (`BOOT_ID_ENTROPY_MAX`) so `netd` and the kernel cannot drift. The stack was
+   not re-measured after these; none adds a frame under the dispatch.
 7. **The client, in `netd`.** The service pass (`sign_parked`, before it signs
    the raw `NP_SESSION`) computes the ephemeral and sends its public half, phase two derives the keys from the export's signed reply
    and zeroes the private scalar, and later verbs frame `AUTHNP04` into the

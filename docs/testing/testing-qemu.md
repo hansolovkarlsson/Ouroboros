@@ -213,12 +213,14 @@ command prints. Host to host it runs today:
 `python3 scripts/np9p_client.py 127.0.0.1 5791 keyed /HELLO.TXT --peer=host`.
 
 **The keyed gate** (session-auth step 6, 2026-09-26): `keyed-gate [data_path]
-[user]` runs eleven checks against a live export, PASS/FAIL each: a keyed
+[user]` runs thirteen checks against a live export, PASS/FAIL each: a keyed
 `cbig`-shaped run (open, `NP_PREAD` to EOF, clunk, byte-compared against a
 path-based read), a fresh export key per handshake, the old-style session
 unchanged, seven refusals that must each close the connection with no reply
 (flipped tag, replayed and skipped `seq`, `AUTHNP03` on a keyed session, a
-second key, a low-order key, a key offered mid-stream), and a path verb
+second key, a low-order key, a key offered mid-stream), the declared frame
+length both ways (trailing bytes ignored, a length the segment does not hold
+closes), and a path verb
 running as the session's user. That last one needs the **ext2 image**, where
 modes are enforced; on FAT32 it fails and says why:
 
@@ -226,7 +228,7 @@ modes are enforced; on FAT32 it fails and says why:
 make image-ext2
 IMAGE=build/espext2.img NO_BUILD=1 scripts/run-guest.sh -- \
     python3 scripts/np9p_client.py localhost 5640 keyed-gate /man/grep user
-# expected: 11 PASS, "keyed-gate: 0 check(s) failed", guest alive, 0 restarts
+# expected: 13 PASS, "keyed-gate: 0 check(s) failed", guest alive, 0 restarts
 ```
 
 Each refusal also leaves one `netd: 9p: ...; closing` line on the guest
