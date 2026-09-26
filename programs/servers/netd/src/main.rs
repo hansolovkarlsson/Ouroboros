@@ -3683,37 +3683,31 @@ fn keyed_tag(key: &[u8; ninep_abi::NP_SESSION_KEY_LEN], seq: u64, data: &[u8]) -
 ///
 /// A VERB that fails is not an auth failure: it is an ordinary keyed reply, a
 /// status under a valid tag, exactly as a success is.
+///
+/// NOTHING BUT THE DISPATCH IN THIS FRAME, because this frame is under the
+/// whole of `build_9p_reply`. The first version was 1,472 bytes, and every
+/// keyed verb peaked 1,520 bytes deeper than the same verb signed (step 6's
+/// probe, per verb). Two guesses were wrong (the HMAC state, then the call
+/// site); the disassembly said it was `log`, inlined here with its 552-byte
+/// request and 768-byte reply to the console. So the refusals log through
+/// [`close_keyed`], and the MACs run in [`verify_keyed`] and [`seal_keyed`],
+/// each in a frame of its own that is gone before or after the dispatch.
 #[inline(never)]
 fn serve_keyed(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6]) -> bool {
     let Some(k) = c.keyed.as_mut() else {
         return true; // unreachable: the caller dispatches only a keyed connection here; closing is the safe answer
     };
-    let p = ninep_abi::NP_NET_LEN_PREFIX;
-    let need = p + ninep_abi::NP_AUTH_HDR_KEYED;
-    if request.len() < need || read_u64(request, p) != ninep_abi::NP_AUTH_MAGIC_KEYED {
-        log(b"netd: 9p: keyed session: a frame that is not AUTHNP04; closing\r\n");
-        return true;
-    }
-    let seq = read_u64(request, p + ninep_abi::NP_KEYED_SEQ_OFF);
-    if Some(seq) != k.seq.checked_add(1) {
-        log(b"netd: 9p: keyed session: seq out of order (a replay or an injection); closing\r\n");
-        return true;
-    }
-    let msg = &request[need..];
-    let toff = p + ninep_abi::NP_KEYED_TAG_OFF;
-    let expect = keyed_tag(&k.k_c2s, seq, msg);
-    if !ed25519::ct_eq(&request[toff..toff + ninep_abi::NP_KEYED_TAG_LEN], &expect) {
-        log(b"netd: 9p: keyed session: a request tag did not verify; closing\r\n");
-        return true;
-    }
-    k.seq = seq;
+    let seq = match verify_keyed(k, request) {
+        Ok(seq) => seq,
+        Err(why) => return close_keyed(why),
+    };
     let user = k.user;
+    let msg = &request[ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_KEYED..];
     let verb = if msg.len() >= 8 { read_u64(msg, 0) } else { 0 };
     let n = if verb == ninep_abi::NP_SESSION {
         if msg.len() > ninep_abi::NP_REQ_PAYLOAD as usize {
             // A key offered again: there is no re-keying.
-            log(b"netd: 9p: keyed session: a second key offered; closing\r\n");
-            return true;
+            return close_keyed(b"netd: 9p: keyed session: a second key offered; closing\r\n");
         }
         // No payload: today's idempotent 0, under a valid tag.
         frame_reply(&mut c.prefix, 0, &[])
@@ -3730,6 +3724,39 @@ fn serve_keyed(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; M
     false
 }
 
+/// Log why a keyed session is being closed, and say to close it. Its own cold
+/// frame so that `log`'s console buffers are never inlined into
+/// [`serve_keyed`], which the whole dispatch runs under.
+#[cold]
+#[inline(never)]
+fn close_keyed(why: &[u8]) -> bool {
+    log(why);
+    true
+}
+
+/// Verify one keyed request against the session and spend its `seq`: the
+/// header's shape, then `seq`, then the tag, and only then is `seq` recorded.
+/// Returns the `seq`, or the log line naming why the connection closes.
+#[inline(never)]
+fn verify_keyed(k: &mut KeyedSession, request: &[u8]) -> Result<u64, &'static [u8]> {
+    let p = ninep_abi::NP_NET_LEN_PREFIX;
+    let need = p + ninep_abi::NP_AUTH_HDR_KEYED;
+    if request.len() < need || read_u64(request, p) != ninep_abi::NP_AUTH_MAGIC_KEYED {
+        return Err(b"netd: 9p: keyed session: a frame that is not AUTHNP04; closing\r\n");
+    }
+    let seq = read_u64(request, p + ninep_abi::NP_KEYED_SEQ_OFF);
+    if Some(seq) != k.seq.checked_add(1) {
+        return Err(b"netd: 9p: keyed session: seq out of order (a replay or an injection); closing\r\n");
+    }
+    let toff = p + ninep_abi::NP_KEYED_TAG_OFF;
+    let expect = keyed_tag(&k.k_c2s, seq, &request[need..]);
+    if !ed25519::ct_eq(&request[toff..toff + ninep_abi::NP_KEYED_TAG_LEN], &expect) {
+        return Err(b"netd: 9p: keyed session: a request tag did not verify; closing\r\n");
+    }
+    k.seq = seq;
+    Ok(seq)
+}
+
 /// Tag a framed keyed reply in place: `c.prefix[..n]` holds `[len][status]
 /// [result]`, rewritten to `[len'][tag:32][status][result]` with
 /// `tag = HMAC-SHA-512(k_s2c, seq ‖ status ‖ result)`, where `seq` is the
@@ -3739,7 +3766,8 @@ fn serve_keyed(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; M
 /// not a bare status: every reply on a keyed session carries a tag, and an
 /// untagged one would read to the client as an injection. Unreachable today by
 /// the margin pinned beside `EXPORT_CHUNK` (a 64-byte signature fits; a 32-byte
-/// tag fits with room to spare).
+/// tag fits with room to spare). Its own frame, like [`verify_keyed`].
+#[inline(never)]
 fn seal_keyed(c: &mut TcpConn, seq: u64, n: usize) -> usize {
     let tl = ninep_abi::NP_KEYED_TAG_LEN;
     let body_start = ninep_abi::NP_NET_LEN_PREFIX;
