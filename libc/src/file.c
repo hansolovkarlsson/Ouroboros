@@ -84,6 +84,7 @@ const char *ouro_fs_strerror(void) {
     if (s == NO_FS) return "no filesystem there, or the peer cannot be reached";
     if (s == FS_ERR_NOT_FOUND) return "no such file or directory";
     if (s == FS_ERR_PERM) return "permission denied";
+    if (s == FS_ERR_AUTH) return "authentication failed (no key for that peer, or its reply did not verify)";
     if (s == FS_ERR_NO_SUCH_VERB) return "that server does not implement this request, or not on this kind of connection";
     if (s == MSG_ERR_DENIED) return "not allowed to reach that server (capability)";
     if (s == FS_ERR_BUSY) return "that server is out of room for this right now (try again later)";
