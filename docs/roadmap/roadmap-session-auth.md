@@ -676,12 +676,14 @@ the client, so each side is tested against something that is not itself.
 
    **The stack.** A whole-run low-water mark on both nodes (`cbig` and
    `cwrite`): the client's peak is the park path during `cbig`, as step 1
-   found, at **3,840 bytes of headroom on `main` and 3,408 here**. The
-   difference is exactly 3 × 144, the three slots' `SessionKeys`, resident;
-   a 4 KB pad in `phase_two` did not move the mark, since phase two runs from
-   the service pass ~10 KB above that peak. Step 7's crypto is nowhere near
-   the deepest point; its resident state is what it costs. Branches
-   `measure/keyed-client-stack` and `measure/keyed-client-stack-main`.
+   found, at **3,840 bytes of headroom on `main` and 3,504 here**. The
+   difference is exactly 3 × 112, the three slots' `SessionAuth`, resident
+   (the first cut read 3,408, exactly 3 × 144, before the review made the
+   state an enum); a 4 KB pad in `phase_two` did not move the mark, since
+   phase two runs from the service pass ~10 KB above that peak. Step 7's
+   crypto is nowhere near the deepest point; its resident state is what it
+   costs. Branches `measure/keyed-client-stack` and
+   `measure/keyed-client-stack-main`.
 
    **The measurement, re-run** (`measure/keyed-client-cost`, step 0's counters
    around the four keyed operations, `cbig` three times). Each count is 39 on
@@ -717,6 +719,24 @@ the client, so each side is tested against something that is not itself.
    keyed tree, so these shares are the capture's, on both sides.) Step 0's
    own probe, re-run today on this host, gave a 5.9 ms median against its
    recorded 6.65, so the host is not what moved.
+
+   **The review** (`/code-review`, nine findings, all acted on). The
+   handshake's secret and the session's keys became one enum (`KeyState`),
+   since they are never live together, and the struct records the name the
+   session was opened as (`SessionAuth::opener`). A verb whose caller now
+   resolves to another name is refused (`FS_ERR_AUTH`) rather than run as
+   the opener. That can only happen when the uid's `/etc/passwd` line changes
+   while a session is held, and it is checked by reading: no rig changes an
+   account under a live C program's fid. The ephemeral secret is now forgotten on
+   every refusal of the opening, not left for the reap. `phase_two` is one
+   match on (offered, result length), and the held verb is copied once. The
+   fallback to an unkeyed export is in `make test` now (the peer self-test
+   runs a key offer against `--unkeyed`; making the server ignore the flag
+   fails it). `sys.h`'s floor rose to 38, so `FS_ERR_AUTH` is pinned
+   (deleting it fails the wire check). A stray empty `qemu-int.log`, written
+   at the root by a `drive-qemu.py --help` that took `--help` for an image,
+   is gone and ignored. Every guest check was re-run on the rewritten client
+   and passes.
 
 8. **Docs, rigs and the release.** The normative block, `docs/architecture.md`
    (the new syscall and the boot identity), `docs/manual.md`'s cluster section,
