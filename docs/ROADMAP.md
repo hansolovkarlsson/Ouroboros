@@ -144,8 +144,10 @@ the microkernel arc itself still leaves open):
    cost to learn.
 
    It killed "one shared secret = interchangeable members" and gave per-peer
-   revocation — the largest single weakness of what shipped in v0.15.0. It
-   deliberately left **"B can claim any of its own users"** open, which is
+   revocation, the largest single weakness of what shipped in v0.15.0. It
+   deliberately left **"B can claim any user"** open (recorded then as "any of
+   its own users"; the export checks only that the name exists there, root
+   included, see above), which is
    exactly the residual a master exists to close: that is now a *measured*
    remainder rather than an assumed one, which was the point of building this
    first. Two costs it introduced, worth weighing against a master: a peer list

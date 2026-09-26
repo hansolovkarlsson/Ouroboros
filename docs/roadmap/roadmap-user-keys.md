@@ -39,8 +39,9 @@ Two consequences, one worse than the roadmap states:
 The published docs said "any of its own users' names" until this plan
 corrected them (`manual.md`, `ROADMAP.md`, `gap-analysis.md`,
 `comparison.md` and the site's manual page, in the same PR). Two code comments
-say it too, `ninep-abi`'s normative block and `netd` at `map_user`'s call
-site; they are corrected in step 1, which edits both places anyway.
+say it too, both in `ninep-abi` (the normative block's trust paragraph and the
+`NP_NAME_LEN` doc); step 1 corrects them, since it edits that block anyway.
+(`netd`'s comment at `map_user`'s call site already says "ANY name".)
 
 The defence today is that every authorized machine is trusted. That is
 proportionate for two QEMU VMs and a home network, and it is the whole of the
@@ -209,7 +210,16 @@ new way to fail. This version removes those parts rather than guarding them.)*
   root, with the handle `login` kept. It wipes exactly that entry, so a second
   login of the same user keeps its own. Accepted from the task that held the
   key (packed identity) or from root; anyone else is refused.
-- **A dead login's key goes too.** `netd` checks every held key's owner for
+- **The boot shell logs in and out in one task.** Login runs in the boot
+  shell, slot 0, which loops login and logout without ever exiting and which
+  `KILL` refuses, so its packed identity is the same for every session and no
+  liveness check ever fires for it. So **a hold replaces any key the same
+  owner already holds**, and the login loop sends `NETOP_KEY_DROP_MINE` (every
+  entry the sender holds) **before every login prompt**, not only at logout.
+  A logout whose drop was lost therefore cannot carry a key into the next
+  session: the next prompt drops it before anyone types a name.
+- **A dead login's key goes too.** For every other shell (a nested one started
+  with `exec`, which can be killed), `netd` checks every held key's owner for
   liveness in its idle pass, beside the idle reap it already runs, and wipes
   the key of an owner that is gone. So a shell that crashes or is killed loses
   its key within one idle period, not at some later operation. (If the kernel
@@ -356,8 +366,9 @@ power loss, which locks out every account, root included. A version-1 line
 with an 8-byte salt and its version-2 replacement are the same length, so the
 upgrade is always the in-place path. A version-1 line of any other width
 (`SALT_MAX` allows up to 16 bytes, though nothing here has written one) is
-**not** upgraded; it keeps verifying the old way, and `useradd`'s and
-`passwd`'s own writes are unchanged by this plan.
+**not** upgraded by `login`; it keeps verifying the old way until its owner
+or root sets a new password, which writes version 2 like every other password
+set (below).
 
 **No supervised server ever derives a key.** The supervisor declares a server
 wedged after `WEDGE_TICKS` (128 ticks, about 2.56 s) of continuous
@@ -373,11 +384,19 @@ supervised, and `accountd` only compares and writes:
   the new line's widths, and writes it in place. It cannot check that the new
   hash matches the password without deriving, and it does not need to: root
   may already set any password.
-- **`passwd` as a user.** `passwd` asks `accountd` for the line's salt
-  (`ACCTOP_SALT(name)`; a salt is not secret), derives the old password's hash
-  over it and the new password's hash over a fresh salt, and sends both.
+- **`passwd` as a user.** `passwd` asks `accountd` for the account's current
+  secret's **version and salt** (`ACCTOP_SALT(name)`; neither is secret),
+  computes the old password's hash the way that version does (one SHA-256 for
+  version 1, whatever its salt width, and for a legacy secret still inline in
+  `/etc/passwd`, which `accountd` already falls back to today; PBKDF2 for
+  version 2), computes the new password's version-2 hash over a fresh salt,
+  and sends both.
   `accountd` compares the old hash with the stored one in constant time (fast)
-  and writes the new line in place. Presenting the stored hash proves as much
+  and writes the new line: in place when the width is unchanged, which is
+  every version-1 line with an 8-byte salt and every version-2 line, and
+  otherwise through the whole-file path `accountd` already takes today for a
+  length change (a legacy inline secret, a non-standard salt width), a risk
+  this plan does not add to. Presenting the stored hash proves as much
   as presenting the password would to anyone who cannot read `/etc/shadow`,
   and whoever can read it is root, who may set any password anyway.
 
@@ -429,9 +448,8 @@ itself.
    host server serves the dev cluster alone), rather than an all-or-nothing
    squash that could not express "flag exactly the peers the rigs need".
    `netd`'s export and `np9p_server.py` refuse a claim resolving to uid 0 or
-   gid 0 from an unflagged peer. The two code comments that state the old
-   claim (`ninep-abi`'s normative block, `netd` at `map_user`) are corrected
-   here. **Before changing anything, count every check that drives the cluster
+   gid 0 from an unflagged peer. The two `ninep-abi` comments that state the
+   old claim are corrected here. **Before changing anything, count every check that drives the cluster
    as root**: `drive-2vm.py`'s root rerun, `test-async-rmount`, the `cpu`
    recipes, the host-driven recipes in `testing-qemu.md` (`np9p_client.py`
    claims root by default), and the keyed self-test inside `make test`, which
@@ -469,7 +487,8 @@ itself.
    version-2 line and sends `ACCTOP_UPGRADE` after a version-1 login, derives
    the cluster key when there is a realm, and sends `NETOP_KEY_HOLD` before
    dropping to the user, keeping the handle; the shell sends
-   `NETOP_KEY_DROP(handle)` at logout. `passwd` derives both hashes itself
+   `NETOP_KEY_DROP(handle)` at logout and `NETOP_KEY_DROP_MINE` before every
+   login prompt. `passwd` derives both hashes itself
    (`ACCTOP_SALT`, then the old and the new) and `accountd` only compares and
    writes. `netd` keeps the held-key table, checks owners'
    liveness in its idle pass, and closes a uid's attested sessions when its last
@@ -479,9 +498,12 @@ itself.
    *Controls:* a `KEY_HOLD` from a non-root task is refused (removing the check
    lets a user's probe fill the table, which the check then sees); a
    `KEY_DROP` from a task that did not hold the key and is not root is refused;
-   two logins of one user, one logs out, and the key is still held; a login
-   shell killed without logging out loses its key within one idle period
-   (removing the liveness check keeps it, which the check sees); a fifth hold
+   two logins of one user, one logs out, and the key is still held; a
+   **nested** login shell killed without logging out loses its key within one
+   idle period (removing the liveness check keeps it, which the check sees);
+   for the **boot** shell, which cannot be killed, a mutation that skips the
+   logout drop still leaves nothing held once the next login prompt appears
+   (removing the prompt's `DROP_MINE` as well keeps it, which is the control); a fifth hold
    with four live keys is refused, not evicting, and that login still
    succeeds; a node with no realm holds nothing and logs in normally;
    `ACCTOP_UPGRADE` from a non-root task is refused, and a version-1 line reads
@@ -499,7 +521,9 @@ itself.
    one peer and the check fails, named.
 6. **Both Python peers.** `np9p_client.py` makes a credential from
    `--password`; `np9p_server.py` verifies one against a users file and applies
-   Decisions 5, 6 and 7. Misbehaving modes for step 8 to aim at, on the client
+   Decisions 5 and 6. Not Decision 7: the Python server only serves and never
+   dispatches an `NP_RUN`, so it has no run in flight to accept a callback
+   against. Decision 7 is `netd`'s alone and is tested in steps 7 and 8. Misbehaving modes for step 8 to aim at, on the client
    side of the export: a credential under the wrong key, one for another name,
    one bound to another machine's key, one lifted from another request.
    *Check:* the peer self-test (in `make test`) runs each. *Control:* a server
@@ -512,9 +536,16 @@ itself.
    check (rows 2 and 3 served); accept an unknown credential kind (a request
    with kind 9 is served); remove Decision 7's rule entirely (a `cpu` run by a
    registered user loses its `/host` reads, which the rig's `/host` check
-   catches); widen it by dropping its bounds, so a registered user is accepted
-   uncredentialed from any authorized machine rather than only the one running
-   that user's `NP_RUN` (the gate's row 2 is served again). And Decision 7
+   catches); widen it, in two separate mutations, by dropping each bound. The
+   gate has no run in flight, so it cannot see either, and these two are
+   driven on the two-node rig with the host peer as a third machine: while `B`
+   has a `cpu` run in flight to `A` as `user`, the host (`intruder`) claims
+   `user` at `B` uncredentialed, which must be refused (**the machine bound**;
+   the mutation that accepts any machine while some run is in flight serves
+   it); and after that run ends, the host, signing with `A`'s dev key (the dev
+   seeds are public, `np9p_client.py --sign`), claims `user` at `B`
+   uncredentialed, which must be refused (**the time bound**; the mutation that remembers a
+   finished run serves it). And Decision 7
    against the squash, as checks, not mutations: a `cpu` run as root from an
    unflagged machine gets its `/host` reads refused, from a flagged one
    served. Stack measured at the new peak, against `STACK_PAGES` 14.
@@ -532,7 +563,7 @@ itself.
    not ride the old session: the capture shows B's FIN on it at the logout,
    and the request opens a new session, uncredentialed, which A refuses.
    Removing the close on the last drop lets it be served as the attested user,
-   which is the control. The same with the login shell killed instead of
+   which is the control. The same with a nested login shell killed instead of
    logged out: the FIN comes within one idle period. And a request parked for
    uid 1000 while other callers' messages arrive before `sign_parked` runs is
    signed for uid 1000, which a mutation reading `SENDER_ID` at sign time
