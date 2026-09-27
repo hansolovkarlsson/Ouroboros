@@ -552,3 +552,55 @@ that ran every keyed verb as root, on the ext2 image, it printed exactly that
 hint. The check failed correctly and then sent the reader to the image. It names
 both causes now. A diagnostic written for the likely failure is read during the
 unlikely one, which is when it is needed.
+
+## Six more, from one evening of the per-user keys arc (2026-09-26, later)
+
+*Added from steps 0 to 4 of
+[`roadmap-user-keys.md`](../roadmap/roadmap-user-keys.md), built the same
+evening on stacked branches.* Every one of these was an instrument I had just
+written, which is the case this document keeps finding.
+
+**A timing that moved with the code.** `edtest`'s PBKDF2 figure read 4.2 µs an
+iteration on one build and 6.2 µs, steadily, on the next. The next build had a
+review's fixes in it, so the obvious reading was a regression. An A/B on one
+host put the new crate under the old `edtest` at 3.9, and the disassembly
+showed `pbkdf2_hmac_sha512` was the same 1,598 instructions in both binaries,
+at `0x6cac` and `0x6d48`. Under TCG the address alone moved the figure by half.
+The instrument's own scaling check had refused two earlier versions of the
+measurement for real causes, which made its later readings easy to trust. What
+settled this one was the disassembly, an observer the timing could not
+influence.
+
+**A diagnostic that changed what it diagnosed.** A `netd` wedge came about one
+run in four. I added a kernel line naming what a wedged server was blocked on,
+and it caught one: `netd` in a `MSG_CALL` to `fsd`, no reply. Extending it to
+print `fsd`'s state stopped the wedge: 42 runs, none. The observer is part of
+the timing it observes, on an emulator where placement changes timing.
+
+**The gate's hint, again.** `impersonate-gate`'s check that the intruder key is
+authorized failed on FAT32 because `/HELLO.TXT` is not on that image, and its
+hint said the image predated the `intruder` line. It is the same fault
+`keyed-gate` had this morning (a hint written for the likely cause, read during
+another), made again by the same hand the same day. The hint now fires only on
+the status it describes.
+
+**A check that passed over its own failures.** The held-key rig's `keyprobe`
+check asked whether the probe reached its last line. Under two mutations it
+printed `[FAIL]` lines and reached its last line, and the scenario still failed,
+but only through a separate check of the table. Found by reading the transcript
+of a mutation run. It checks the probe's exit code now, which is its failure
+count.
+
+**Scenarios that shared a disk.** The same rig booted one image for every
+scenario, and a guest writes to the image it boots. `no-realm` deletes
+`/etc/cluster/realm`, so `full-table`, running after it, held no keys and
+failed for a reason that had nothing to do with full tables. Each scenario now
+boots its own copy. The first full run looked like a regression in the table.
+
+**A batch of gates that ran nothing.** Four host gates were run in one loop that
+word-split a variable, and zsh does not word-split. Three gates received one
+argument and printed their usage. My filter matched the usage line's own
+`PASS/FAIL` and the guest's "alive" line, so the batch read as three quiet
+passes. The fourth, a single word, ran, and failed because it stats a FAT32
+path on the ext2 image. Each gate re-run on its documented image, with its
+arguments as separate words, passed. A loop that runs checks is a check.
