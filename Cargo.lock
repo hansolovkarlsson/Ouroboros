@@ -218,6 +218,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyprobe"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -466,6 +474,7 @@ name = "shell"
 version = "0.1.0"
 dependencies = [
  "accounts",
+ "clusterkeys",
  "ninep-abi",
  "syscall-abi",
 ]
@@ -623,6 +632,7 @@ name = "useradd"
 version = "0.1.0"
 dependencies = [
  "accounts",
+ "ninep-abi",
  "syscall-abi",
  "ulib",
 ]

@@ -101,6 +101,13 @@ pub extern "C" fn _start() -> ! {
     if name_len == 0 {
         die(b"usage: useradd <name> [-u <uid>] [-g <group|gid>]\r\n");
     }
+    // At most NP_NAME_LEN (32). `login` reads a name into 32 bytes, so a
+    // longer one could never log in, and a user's cluster key and its claim on
+    // the wire carry at most 32 (docs/roadmap/roadmap-user-keys.md, step 4):
+    // refused here, before anything is written, rather than created unusable.
+    if name_len > ninep_abi::NP_NAME_LEN {
+        die(b"useradd: a user name is at most 32 bytes (login and the cluster carry no more)\r\n");
+    }
     let name = &namebuf[..name_len];
 
     // Home path: /Users/<name>.
@@ -124,8 +131,7 @@ pub extern "C" fn _start() -> ! {
     let primary;
     // The password secret goes to /etc/shadow, written as the last prep step
     // before the /etc/passwd commit - see the ordering note above.
-    let secret_salt;
-    let secret_hash;
+    let secret;
     {
         let mut pbuf = [0u8; BUF];
         // Checked: `out` is built from this and written back over /etc/passwd, so
@@ -178,11 +184,17 @@ pub extern "C" fn _start() -> ! {
 
         // Hardware entropy if this machine has an RNG; the clock fallback
         // otherwise, said out loud rather than stored quietly (salt_from).
-        let (salt, strong) = accounts::salt_from(ulib::random_bytes8(), ulib::monotonic_us());
+        let (salt8, strong) = accounts::salt_from(ulib::random_bytes8(), ulib::monotonic_us());
         if !strong {
             ulib::con_write(b"useradd: no hardware RNG - using a weaker clock-derived salt\r\n");
         }
-        let hash = accounts::hash_password(&salt, &pw[..pwl]);
+        // VERSION 2 (docs/roadmap/roadmap-user-keys.md, Decision 10): PBKDF2,
+        // about a second on the guest, which is why it is derived here and not
+        // in a server.
+        let mut salt = [0u8; accounts::SALT_V2];
+        salt.copy_from_slice(&salt8[..accounts::SALT_V2]);
+        ulib::con_write(b"useradd: deriving the password's hash...\r\n");
+        let new_secret = accounts::secret_v2(salt, &pw[..pwl]);
 
         let mut line = [0u8; 256];
         let Some(llen) =
@@ -194,8 +206,7 @@ pub extern "C" fn _start() -> ! {
             die(b"useradd: /etc/passwd full (raise the account-file cap)\r\n");
         };
         olen = n;
-        secret_salt = salt;
-        secret_hash = hash;
+        secret = new_secret;
     }
     let gid = match primary {
         Primary::Existing(g) | Primary::Create(g) => g,
@@ -225,7 +236,7 @@ pub extern "C" fn _start() -> ! {
     // --- Prep step 3: the password secret ----------------------------------
     // /etc/shadow before /etc/passwd, so the account never exists without a
     // secret - which would be an account nobody can log into.
-    if let Err(code) = add_secret(name, &secret_salt, &secret_hash) {
+    if let Err(code) = add_secret(name, &secret) {
         if made_home {
             let _ = ulib::fs_op_path(syscall_abi::FSOP_RMDIR, home_str);
         }
@@ -415,7 +426,7 @@ fn add_group(name: &[u8], gid: u32) -> Result<(), u64> {
     Ok(())
 }
 
-/// Write the account's `name:salt:hash` line into `/etc/shadow`, replacing any
+/// Write the account's shadow line into `/etc/shadow`, replacing any
 /// stale entry for the same name.
 ///
 /// REPLACE-then-append, not append: every reader ([`accounts::find_secret_by_name`])
@@ -424,13 +435,13 @@ fn add_group(name: &[u8], gid: u32) -> Result<(), u64> {
 /// outrank the one being written. The new password would be rejected and the old
 /// one would still work.
 #[inline(never)]
-fn add_secret(name: &[u8], salt: &[u8], hash: &[u8]) -> Result<(), u64> {
+fn add_secret(name: &[u8], secret: &accounts::Secret) -> Result<(), u64> {
     let mut cur = [0u8; BUF];
     let Some(clen) = ulib::read_file_checked(SHADOW_FILE, &mut cur) else {
         return Err(syscall_abi::FS_ERR_IO);
     };
     let mut line = [0u8; 256];
-    let Some(llen) = accounts::format_shadow_line(&mut line, name, salt, hash) else {
+    let Some(llen) = accounts::format_secret_line(&mut line, name, secret) else {
         return Err(syscall_abi::FS_ERROR);
     };
     let mut out = [0u8; BUF];

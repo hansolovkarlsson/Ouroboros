@@ -10,6 +10,7 @@
 //!                         (never root-flagged: that is the other machine's call)
 //! clusterkey realm        show the cluster's realm
 //! clusterkey realm new [-f]  generate a realm (refuses without real entropy)
+//! clusterkey held         the uids netd holds a user key for (root only; a diagnostic)
 //! ```
 //!
 //! ## Why generation refuses rather than degrades
@@ -56,8 +57,10 @@ pub extern "C" fn _start() -> ! {
         line(target)
     } else if cmd == b"realm" {
         realm(target)
+    } else if cmd == b"held" {
+        held(target)
     } else {
-        out(target, b"usage: clusterkey [new [-f] | peers | line <name> <ip> | realm [new [-f]]]\r\n");
+        out(target, b"usage: clusterkey [new [-f] | peers | line <name> <ip> | realm [new [-f]] | held]\r\n");
         2
     };
     ulib::end_of_stream(target);
@@ -278,6 +281,45 @@ fn realm(target: u64) -> u64 {
     out(target, &text[..32]);
     out(target, b"\r\n  Copy /etc/cluster/realm to every node of this cluster. A node with\r\n");
     out(target, b"  another realm derives different user keys and its users' claims fail.\r\n");
+    0
+}
+
+/// List the uids `netd` holds a user key for (`NETOP_KEY_LIST`): the check that
+/// a login held one and a logout dropped it (step 4 of
+/// docs/roadmap/roadmap-user-keys.md). `netd` answers root only and names
+/// uids, never keys.
+fn held(target: u64) -> u64 {
+    let req = syscall_abi::NETOP_KEY_LIST.to_le_bytes();
+    // MSG_MAX_LEN, as MSG_CALL requires of every reply buffer.
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    // ulib::net_call, which rides out the window between the shell's spawn and
+    // its TO_NET delegation, as every spawned command's call to netd must.
+    let packed = ulib::net_call(&req, &mut reply);
+    let len = (packed & 0xffff_ffff) as usize;
+    if packed >= syscall_abi::FS_ERR_MIN || len < 8 {
+        out(target, b"clusterkey: the network server did not answer\r\n");
+        return 1;
+    }
+    let word = |i: usize| u64::from_le_bytes(reply[i..i + 8].try_into().unwrap_or([0; 8]));
+    if word(0) == syscall_abi::NET_KEY_DENIED {
+        out(target, b"clusterkey: only root may list held keys\r\n");
+        return 1;
+    }
+    if word(0) != syscall_abi::NET_KEY_OK || len < 16 {
+        out(target, b"clusterkey: the network server refused the request\r\n");
+        return 1;
+    }
+    let n = (word(8) as usize).min(syscall_abi::NET_KEY_MAX);
+    out(target, b"held keys: ");
+    put_dec(target, n as u64);
+    for i in 0..n {
+        if 16 + i * 8 + 8 > len {
+            break;
+        }
+        out(target, if i == 0 { b" (uid " } else { b", uid " });
+        put_dec(target, word(16 + i * 8));
+    }
+    out(target, if n > 0 { b")\r\n" } else { b"\r\n" });
     0
 }
 

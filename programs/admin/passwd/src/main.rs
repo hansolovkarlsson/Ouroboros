@@ -14,6 +14,14 @@
 //! With no argument, changes the calling user's own password (resolved by uid
 //! on the server side, so no name has to be guessed here).
 //!
+//! **It derives; the server compares.** Since step 4 of
+//! `docs/roadmap/roadmap-user-keys.md` no password leaves this process: it asks
+//! the server for the current secret's version and salt (`ACCTOP_SALT`),
+//! hashes the old password the way that version does, derives a version-2
+//! secret for the new one over a fresh salt, and sends hashes. A version-2
+//! hash is PBKDF2, about a second on the guest, and `accountd` is supervised,
+//! so the slow part has to be here.
+//!
 //! Byte-only handling (PIE-safe); the password never touches the console (echo
 //! off) and never reaches a file from this process.
 
@@ -61,24 +69,76 @@ pub extern "C" fn _start() -> ! {
         die(b"passwd: password may not be empty\r\n");
     }
 
-    // ACCTOP_PASSWD: (name len, old len, new len), payload name || old || new.
+    // The old password's hash, the way the stored secret's version makes it.
+    // Root proves nothing, so sends none.
+    let mut old_hash = [0u8; syscall_abi::ACCT_HASH_LEN];
+    let old_hash_len = if am_root {
+        0
+    } else {
+        let mut q = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+        write_u64(&mut q, 0, syscall_abi::ACCTOP_SALT);
+        write_u64(&mut q, 8, name_len as u64);
+        q[REQ_HDR..REQ_HDR + name_len].copy_from_slice(name);
+        let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+        let n = call(&q[..REQ_HDR + name_len], &mut r);
+        let st = read_u64(&r, 0);
+        if st != 0 {
+            report(st);
+        }
+        let (version, salt_len) = (r[8], r[9] as usize);
+        if n < 10 + salt_len || salt_len > accounts::SALT_MAX {
+            die(b"passwd: the account server sent a malformed salt\r\n");
+        }
+        let salt = &r[10..10 + salt_len];
+        old_hash = match version {
+            1 => accounts::hash_password(salt, &old[..old_len]),
+            2 if salt_len == accounts::SALT_V2 => {
+                ulib::con_write(b"passwd: checking the current password...\r\n");
+                let mut s7 = [0u8; accounts::SALT_V2];
+                s7.copy_from_slice(salt);
+                accounts::secret_v2(s7, &old[..old_len]).hash
+            }
+            _ => die(b"passwd: the account server sent an unknown secret version\r\n"),
+        };
+        syscall_abi::ACCT_HASH_LEN
+    };
+
+    // The new secret: version 2, over a fresh salt. Hardware entropy where the
+    // machine has it; the documented clock fallback otherwise, said out loud.
+    let (salt8, strong) = accounts::salt_from(ulib::random_bytes8(), ulib::monotonic_us());
+    if !strong {
+        ulib::con_write(b"passwd: no hardware RNG - using a weaker clock-derived salt\r\n");
+    }
+    let mut salt = [0u8; accounts::SALT_V2];
+    salt.copy_from_slice(&salt8[..accounts::SALT_V2]);
+    ulib::con_write(b"passwd: deriving the new password's hash...\r\n");
+    let secret = accounts::secret_v2(salt, &pw[..pwl]);
+
+    // ACCTOP_PASSWD: (name len, old-hash len), payload name || old_hash ||
+    // new_salt || new_hash.
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     write_u64(&mut req, 0, syscall_abi::ACCTOP_PASSWD);
     write_u64(&mut req, 8, name_len as u64);
-    write_u64(&mut req, 16, old_len as u64);
-    write_u64(&mut req, 24, pwl as u64);
+    write_u64(&mut req, 16, old_hash_len as u64);
     let mut w = REQ_HDR;
-    for src in [name, &old[..old_len], &pw[..pwl]] {
+    for src in [name, &old_hash[..old_hash_len], &salt[..], &secret.hash[..]] {
         req[w..w + src.len()].copy_from_slice(src);
         w += src.len();
     }
-
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    call(&req[..w], &mut reply);
+    let status = read_u64(&reply, 0);
+    report(status)
+}
+
+/// Send one request to `accountd` and return the reply's length. Dies if
+/// there is no server or no status word.
+fn call(req: &[u8], reply: &mut [u8]) -> usize {
     let packed = ulib::syscall4(
         syscall_abi::MSG_CALL,
         syscall_abi::ACCT_TASK,
         req.as_ptr() as u64,
-        w as u64,
+        req.len() as u64,
         reply.as_mut_ptr() as u64,
     );
     if packed >= syscall_abi::FS_ERR_MIN {
@@ -89,10 +149,15 @@ pub extern "C" fn _start() -> ! {
     // that never happened. MSG_CALL returns `(sender << 32) | len`, so the length
     // is the LOW half - testing the packed word (as this did on its first
     // attempt) compares the sender too and can never fire.
-    if (packed & 0xffff_ffff) < 8 {
+    let n = (packed & 0xffff_ffff) as usize;
+    if n < 8 {
         die(b"passwd: the account server sent no answer\r\n");
     }
-    let status = read_u64(&reply, 0);
+    n
+}
+
+/// Report a final status and exit.
+fn report(status: u64) -> ! {
     match status {
         0 => {
             ulib::con_write(b"passwd: password updated\r\n");

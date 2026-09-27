@@ -497,6 +497,7 @@ make run-image-ext2          # build build/espext2.img (two-partition MBR: ext2 
 make parallels-hdd          # wrap build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk
 make test-parallels          # scripted real-hardware round trip via prlctl - see below
 make test-async-rmount       # rebuilds the image, then three driven QEMU boots against host-run 9P peers (scripts/test-async-rmount.sh): the parked remote mount is served, a parked reply never reaches a recycled slot, and a live peer is served while a silent one is parked - run it whenever netd's client paths or the kernel's MSG_SEND arm change
+make test-held-keys          # rebuilds the image, then five driven QEMU boots of the held user keys (scripts/test-held-keys.py): login holds, logout and a killed shell drop, an ordinary user is refused; minutes, so not in `make test` - run it whenever login, the shell's session loop or netd's held-key table changes
 make test-keyboard-chain     # rebuilds the image, then four driven QEMU boots through the nested-shell keyboard-chain recipes (scripts/test-keyboard-chain.sh); minutes, so not in `make test` - run it whenever tasks.rs's keyboard ownership changes
 make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi) + the cross-language wire-constant check
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary

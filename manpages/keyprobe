@@ -1,0 +1,29 @@
+KEYPROBE(1)
+
+NAME
+    keyprobe - check that netd refuses an ordinary user's key operations
+
+SYNOPSIS
+    keyprobe
+
+DESCRIPTION
+    netd holds the cluster keys of the users logged in on this machine
+    (login hands each one over and logout drops it). Every program can
+    send to netd, so the table is only as safe as netd's own checks.
+    keyprobe tries each key operation as the user running it and prints
+    one [ok] or [FAIL] line per check:
+
+      a hold is refused        (only root may give netd a key)
+      a list is refused        (only root may see which users are held)
+      a drop of each handle is refused or finds nothing
+                               (only the holder or root may drop a key)
+      a drop of "mine" drops nothing
+
+    It refuses to run as root, where every one of these may succeed and a
+    drop would destroy real state.
+
+EXIT STATUS
+    The number of failed checks; 2 when run as root.
+
+SEE ALSO
+    clusterkey(1) (clusterkey held lists the table, as root), login(1)

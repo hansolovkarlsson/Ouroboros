@@ -711,6 +711,16 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **`netd` blocked on an `fsd` reply that never came (found 2026-09-26,
+  OPEN).** Intermittent, timing-sensitive, and so far seen only in
+  `make test-held-keys` (user-keys step 4): the supervisor restarts `netd` for
+  a ping timeout, and the kernel's wedge report (which since then names what a
+  wedged server was blocked on, and the state of the task it waits for) read
+  `netd` in a `MSG_CALL` to slot 2. Full account in
+  `docs/roadmap/roadmap-user-keys.md`, step 4's results. When it recurs, the
+  second diagnostic line says whether `fsd` was waiting on someone, runnable,
+  or idle with the request unread.
+
 - **Files `mke2fs -d` stages on the ext2 images belong to the building host's
   uid, not root (found 2026-09-26).** `ls -l /etc/cluster` on the ext2 image
   shows owner 501 (the macOS uid that ran `make`) for `id`, `authorized`,

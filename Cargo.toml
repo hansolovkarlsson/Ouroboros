@@ -26,6 +26,7 @@ members = [
     "programs/shellutils/send", "programs/shellutils/recv", "programs/shellutils/selftest", "programs/shellutils/bootid",
     "programs/shellutils/man", "programs/shellutils/printenv", "programs/shellutils/id",
     "programs/shellutils/edtest",
+    "programs/shellutils/keyprobe",
     "programs/admin/passwd", "programs/admin/useradd",
     "programs/admin/groupadd", "programs/admin/usermod",
     "programs/admin/clusterkey",

@@ -6,6 +6,8 @@ SYNOPSIS
     clusterkey new [-f]
     clusterkey peers
     clusterkey line <name> <ip>
+    clusterkey realm [new [-f]]
+    clusterkey held
 
 DESCRIPTION
     Shows, generates and inspects the Ed25519 identity a machine uses to
@@ -30,7 +32,21 @@ DESCRIPTION
     looks correct.
 
     line prints the authorized line another machine should hold for this one,
-    ready to paste into its /etc/cluster/authorized.
+    ready to paste into its /etc/cluster/authorized. It never adds the root
+    flag: whether that machine trusts this one with root is its own decision,
+    made by appending " root" to the line there.
+
+    realm prints the cluster's realm, /etc/cluster/realm: one word, the same
+    on every node of a cluster and unique to it, which every user's cluster
+    key is derived with. realm new generates one from the entropy device,
+    refusing without one, and refuses to replace an existing realm unless
+    given -f, since a new realm changes every user's key. Copy the file to the
+    other nodes. A node with no realm derives no user keys, and logs in as it
+    always did.
+
+    held (root only) lists the users whose cluster keys netd holds right now:
+    login derives a user's key and hands it over, and logout drops it. It
+    names uids, never keys.
 
 EXIT STATUS
     0   success

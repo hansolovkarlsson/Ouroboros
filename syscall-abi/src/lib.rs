@@ -939,26 +939,69 @@ pub const SENDER_GROUPS: u64 = 66;
 
 // --- The account server's request protocol (`ACCTOP_*`) -------------------
 //
-// One op today. The shape follows `NETOP_*` (a small numbered op set with inline
+// Three ops since step 4 of docs/roadmap/roadmap-user-keys.md. The shape follows `NETOP_*` (a small numbered op set with inline
 // payloads) rather than the `NP_*` file verbs, because this is not a filesystem:
 // there is no path, and the interesting argument is *who is asking*, which the
 // kernel supplies rather than the message.
 
-/// **Change a password.** params: `(name len, old len, new len)`; payload:
-/// `name || old_password || new_password`, in that order.
+/// **Change a password.** params: `(name len, old-hash len, 0)`; payload:
+/// `name || old_hash || new_salt || new_hash`, where `old_hash` is empty or
+/// [`ACCT_HASH_LEN`] bytes, `new_salt` is [`ACCT_V2_SALT_LEN`] bytes and
+/// `new_hash` [`ACCT_HASH_LEN`]: the new secret, already a VERSION-2 one.
+///
+/// **No password crosses.** `passwd` derives both hashes itself (the old the
+/// way the stored secret's version needs, from [`ACCTOP_SALT`]'s answer; the
+/// new with PBKDF2 over a fresh salt), because a version-2 hash is a derivation,
+/// about a second on the guest, and this server is supervised: it only
+/// compares, in constant time, and writes (docs/roadmap/roadmap-user-keys.md,
+/// Decision 10). Presenting the stored hash proves as much as the password
+/// would to anyone who cannot read `/etc/shadow`, and whoever can is root.
 ///
 /// An empty `name` means "my own account", resolved from the caller's uid.
 ///
-/// Policy, enforced by the server against [`GET_ID`] of the *sender* (which the
-/// kernel binds, so it cannot be spoofed):
-/// - **root** may set anyone's password and need not supply the old one.
-/// - **anyone else** may change only their own, and must supply the correct
-///   current password. That last check is what makes the server safe to expose
-///   to every spawnable slot: holding the right to *ask* is not permission to
-///   succeed.
+/// Policy, enforced by the server against the sender's kernel-bound identity
+/// (`SENDER_ID`), so it cannot be spoofed:
+/// - **root** may set anyone's password and need not supply the old hash.
+/// - **anyone else** may change only their own, and must supply the old hash.
 ///
 /// Replies `0`, or one of the `ACCT_ERR_*` codes.
 pub const ACCTOP_PASSWD: u64 = 1;
+
+/// **An account's secret version and salt** (neither is secret, so the salt
+/// may be handed out; the hash is not). params: `(name len, 0, 0)`; payload
+/// `name`, empty for "my own". A non-root caller may ask only about their own
+/// account, the same rule as [`ACCTOP_PASSWD`].
+///
+/// Replies `[status u64][version u8][salt len u8][salt: salt len bytes]`, the
+/// version `1` or `2` as in `accounts::SecretVersion` (a legacy secret inline
+/// in `/etc/passwd` is version 1). An account with no secret at all answers
+/// [`ACCT_ERR_WRONG_PASSWORD`]: no old hash can match it, so the caller learns
+/// it now rather than after deriving one.
+pub const ACCTOP_SALT: u64 = 2;
+
+/// **Upgrade a version-1 secret to version 2 in place**, after a login.
+/// params: `(name len, password len, 0)`; payload `name || password ||
+/// new_salt || new_hash`. ROOT ONLY: `login` sends it while the shell is still
+/// root, after the password verified against the version-1 line.
+///
+/// The server checks the password against the stored version-1 secret (one
+/// SHA-256), checks that secret has the standard 8-byte salt, so the version-2
+/// line is exactly as long, and writes it IN PLACE. Anything that would change
+/// `/etc/shadow`'s length is refused rather than taken through the whole-file
+/// rewrite, whose interrupted form leaves the file empty and every account
+/// locked out. It cannot check that the new hash matches the password without
+/// deriving, and need not: root may set any password already.
+///
+/// Replies `0`, or `ACCT_ERR_*` ([`ACCT_ERR_BAD_REQUEST`] for a secret that is
+/// not an upgradable version-1 one).
+pub const ACCTOP_UPGRADE: u64 = 3;
+
+/// Bytes of a password hash in an `ACCTOP_*` payload: SHA-256's for version 1,
+/// PBKDF2's first 32 for version 2.
+pub const ACCT_HASH_LEN: usize = 32;
+
+/// Bytes of a version-2 salt (`accounts::SALT_V2`).
+pub const ACCT_V2_SALT_LEN: usize = 7;
 
 // The account server's error codes sit at the BOTTOM of the reserved error
 // band. Their obvious home (`MAX - 1` downwards) is already occupied by
@@ -1115,6 +1158,48 @@ pub const NETOP_RUN: u64 = 5;
 /// (the remote sending as it produces) is a later refinement - see
 /// `docs/roadmap/roadmap-cluster.md`.
 pub const NETOP_RUN_MORE: u64 = 6;
+
+// --- Held user keys (step 4 of docs/roadmap/roadmap-user-keys.md, Decision 4) --
+//
+// `login` derives a user's cluster key from the password and hands it to `netd`,
+// which holds it while the user is logged in and (from step 7) signs that
+// user's credentials with it. The key never leaves `netd` again. Replies are a
+// status word, one of the small `NET_KEY_*` values below (never a code from the
+// reserved error band: these answers stay on this machine), then any result.
+
+/// **Hold a key.** Request `[op][uid: u64][seed: 32 bytes]`; reply
+/// `[status][handle: u64]`. Accepted ONLY from a sender whose kernel-bound
+/// uid (`SENDER_ID`) is 0, so only a root task (`login`, before it drops
+/// privileges) can fill the table. A hold REPLACES any key the same task
+/// already holds (the boot shell logs in and out in one task, so its owner
+/// identity is the same every session), and a full table ([`NET_KEY_MAX`])
+/// refuses, never evicts.
+pub const NETOP_KEY_HOLD: u64 = 7;
+/// **Drop a key by handle.** Request `[op][handle: u64]`; reply `[status]`.
+/// Accepted from the task that held it (its packed identity) or from root;
+/// anyone else is [`NET_KEY_DENIED`]. The shell sends it at logout.
+pub const NETOP_KEY_DROP: u64 = 8;
+/// **Drop every key the sender holds.** Request `[op]`; reply
+/// `[status][count: u64]`. The login loop sends it before every login prompt,
+/// so a logout whose drop was lost cannot carry a key into the next session.
+pub const NETOP_KEY_DROP_MINE: u64 = 9;
+/// **What is held (diagnostic).** Request `[op]`; reply `[status][n: u64]`
+/// then `n` uids as `u64`s. ROOT ONLY. Names uids, never keys; it exists so a
+/// test can see the table (`clusterkey held`).
+pub const NETOP_KEY_LIST: u64 = 10;
+
+/// Most keys `netd` holds at once. Four logged-in users (or logins) per node.
+pub const NET_KEY_MAX: usize = 4;
+/// A key-op reply: done.
+pub const NET_KEY_OK: u64 = 0;
+/// A key-op reply: the sender may not do that (not root, or not the holder).
+pub const NET_KEY_DENIED: u64 = 1;
+/// [`NETOP_KEY_HOLD`] reply: every slot is taken by a live login.
+pub const NET_KEY_FULL: u64 = 2;
+/// [`NETOP_KEY_DROP`] reply: no key under that handle.
+pub const NET_KEY_NOT_HELD: u64 = 3;
+/// A key-op reply: the request was malformed.
+pub const NET_KEY_BAD_REQUEST: u64 = 4;
 
 /// [`CON_INFO`] field: the backend kind ([`CON_KIND_*`]).
 pub const CON_INFO_KIND: u64 = 0;

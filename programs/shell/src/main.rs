@@ -692,6 +692,12 @@ fn main() -> ! {
         // because the shell never dies, so nothing else would clear them before
         // the next user logs in.
         syscall4(syscall_abi::SET_ID, 0, 0, 0, 0);
+        // The session's cluster key goes with it (docs/roadmap/roadmap-user-keys.md,
+        // Decision 4). Sent as root, after the SET_ID above; the next login
+        // prompt's DROP_MINE catches it if this one is lost.
+        if let Some(handle) = session.key {
+            login::drop_key(handle);
+        }
         print_line("logout");
     }
 }

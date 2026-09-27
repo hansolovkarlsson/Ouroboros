@@ -41,11 +41,17 @@ def passwd_entry(name, uid, gid, home, password):
     return f"{name}:{uid}:{gid}:{home}"
 
 
+# VERSION 2 (docs/roadmap/roadmap-user-keys.md, Decision 10): PBKDF2-HMAC-SHA-512
+# at the cluster's iteration count over a 7-byte salt, the first 32 bytes kept,
+# the salt field marked `2$`. The same width as the version-1 line it replaces.
+V2_ITERATIONS = 210_000
+
+
 def shadow_entry(name, uid, gid, home, password):
     """The private half, for /etc/shadow (mode 0600, root-owned)."""
-    salt = os.urandom(8)
-    digest = hashlib.sha256(salt + password.encode()).digest()
-    return f"{name}:{salt.hex()}:{digest.hex()}"
+    salt = os.urandom(7)
+    digest = hashlib.pbkdf2_hmac("sha512", password.encode(), salt, V2_ITERATIONS, 64)[:32]
+    return f"{name}:2${salt.hex()}:{digest.hex()}"
 
 
 def main():
