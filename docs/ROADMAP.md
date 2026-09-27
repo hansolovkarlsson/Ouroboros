@@ -890,6 +890,32 @@ The small open tails those arcs deliberately left:
 > BCM2711 facts (peripheral base `0xFE00_0000`, GIC-400 at GICD `0xFF84_1000`/
 > GICC `0xFF84_2000`, PL011-not-mini-UART, GPIO14/15 = ALT0, the serial rig:
 > USB-serial to TX/RX/GND, **not** VCC). See [[project-physical-hardware-target]].
+>
+> **Pi 400 desk check (2026-09-27), three findings made without a board**,
+> written up in [`testing-pi4.md`](testing/testing-pi4.md) §1b, checkpoint 4 and
+> Risk 6:
+>
+> - [ ] **xHCI hub support.** Every USB 2.0 device on a BCM2711 board, the Pi
+>       400's built-in keyboard included, sits behind the on-board VIA hub, and
+>       `xhci.rs` reaches only root-port devices: **no keyboard on the Pi at
+>       all** until this lands. Buildable on QEMU with `usb-hub`; the
+>       transaction-translator fields (a full-speed keyboard below a
+>       high-speed hub) get their first test on the board. The first new
+>       driver work the Pi needs, ahead of any NIC.
+> - [x] **Open the xHCI's own `PciIo` exclusively, not the whole root
+>       bridge.** The root-bridge open was refused (`ACCESS_DENIED`) when any
+>       firmware driver on the bus would not stop. On QEMU that had been true
+>       since `virtio-rng` joined every disk target on 2026-08-29: with the RNG
+>       and the default NIC, `make run-usb-kbd` found no controller. Found
+>       by running it, one variable at a time; fixed on branch
+>       `pi400/bar-translation` and checked on QEMU with both present.
+>       Parallels not rechecked.
+> - [ ] **The xHCI BAR is a bus address; use firmware's CPU address.** On
+>       the Pi the CPU sees it at `0x6_0000_0000`. Branch
+>       `pi400/bar-translation` takes it from `PciIo.GetBarAttributes` and
+>       refuses the controller unless it reproduces the BAR (a refusal checked
+>       on QEMU by mutation). Open until the board shows a nonzero
+>       translation working: QEMU's is 0.
 
 Every real-hardware bug in `xhci-keyboard-postmortem.md` and
 `boot-bringup-postmortem.md` cost a manual round trip: rebuild, re-image,

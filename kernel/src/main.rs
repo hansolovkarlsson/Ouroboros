@@ -172,29 +172,6 @@ fn main() -> Status {
         }
     };
 
-    // xHCI controller discovery (kernel/src/xhci.rs) - also boot-services-only
-    // (PCI config-space reads via PciRootBridgeIo), so has to happen here
-    // too. Unlike virtio-mmio's fixed QEMU-shaped addresses, this one
-    // is genuinely discovered (a PCI BAR, read directly out of the
-    // controller's own configuration space) rather than guessed - see
-    // xhci.rs's module doc comment for why that makes it safe to actually
-    // use later regardless of `virtio_mmio_probe_safe`.
-    let xhci_info = match pci::discover_xhci() {
-        Ok(info) => {
-            log::info!(
-                "Ouroboros kernel: xHCI controller @ {:#x}, PCI command register {:#06x} -> {:#06x}",
-                info.base,
-                info.command_before,
-                info.command_after
-            );
-            Some(info)
-        }
-        Err(e) => {
-            log::warn!("Ouroboros kernel: xHCI discovery failed ({e})");
-            None
-        }
-    };
-
     // MADT (GIC version/address) discovery - see madt.rs's module doc
     // comment for why this replaces `qemu_device_region_safe` for GIC/timer
     // setup specifically, rather than continuing to rely on the "an early
@@ -322,8 +299,40 @@ fn main() -> Status {
     // The boot identity (step 3 of docs/roadmap/roadmap-session-auth.md):
     // the counter's stores are a UEFI variable and an ESP file, and the
     // entropy is EFI_RNG_PROTOCOL, all boot services, so it is established
-    // here, last, and read by the BOOT_ID syscall afterwards.
+    // here, after the loader and before the xHCI takeover below (the counter
+    // file is on the ESP, which may be on USB), and read by the BOOT_ID
+    // syscall afterwards.
     bootid::establish();
+
+    // xHCI controller discovery (kernel/src/xhci.rs) - boot-services-only
+    // (PciRootBridgeIo and the controller's own PciIo), so it happens before
+    // the exit, and it happens LAST: taking the controller stops firmware's
+    // USB stack on it, and the boot disk may be a USB stick (a Pi 4/400
+    // booted from USB). Every read of the ESP - the loader's programs above,
+    // the boot identity's counter file - must be done by now. Unlike
+    // virtio-mmio's fixed QEMU-shaped addresses, this one is genuinely
+    // discovered: firmware's own CPU address for the controller's BAR,
+    // checked against the BAR itself (`pci::bar0_address`; they differ on
+    // the Pi, whose PCIe window is translated), rather than guessed - see
+    // xhci.rs's module doc comment for why that makes it safe to actually
+    // use later regardless of `virtio_mmio_probe_safe`.
+    let xhci_info = match pci::discover_xhci() {
+        Ok(info) => {
+            log::info!(
+                "Ouroboros kernel: xHCI controller @ {:#x} (BAR {:#x}, translation {:#x}), PCI command register {:#06x} -> {:#06x}",
+                info.base,
+                info.bus,
+                info.translation,
+                info.command_before,
+                info.command_after
+            );
+            Some(info)
+        }
+        Err(e) => {
+            log::warn!("Ouroboros kernel: xHCI discovery failed ({e})");
+            None
+        }
+    };
 
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
@@ -484,9 +493,10 @@ fn main() -> Status {
 
     // USB HID keyboard (kernel/src/xhci.rs) - the first keyboard input
     // path this kernel has ever had. Deliberately NOT gated on
-    // `virtio_mmio_probe_safe`: unlike virtio-mmio, the xHCI BAR is a
-    // genuinely discovered address (PCI config space), not a guessed
-    // QEMU-shaped convention - see xhci.rs's module doc comment. Not
+    // `virtio_mmio_probe_safe`: unlike virtio-mmio, the xHCI address is
+    // genuinely discovered (firmware's own address for the BAR, checked
+    // against config space), not a guessed QEMU-shaped convention - see
+    // xhci.rs's module doc comment. Not
     // fatal if it fails (no controller found, no device connected, ...) -
     // xhci::init logs and leaves the keyboard uninstalled, same
     // best-effort posture as virtio-blk/virtio-console/the framebuffer
@@ -500,8 +510,10 @@ fn main() -> Status {
         // whose only console is the write-only framebuffer this same
         // boot already had to fall back to.
         console::println!(
-            "Ouroboros kernel: xhci: BAR {:#x}, PCI command register {:#06x} -> {:#06x}",
+            "Ouroboros kernel: xhci: CPU {:#x} (BAR {:#x}, translation {:#x}), PCI command register {:#06x} -> {:#06x}",
             info.base,
+            info.bus,
+            info.translation,
             info.command_before,
             info.command_after
         );
