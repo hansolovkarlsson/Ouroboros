@@ -711,15 +711,14 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
-- **`netd` blocked on an `fsd` reply that never came (found 2026-09-26,
-  OPEN).** Intermittent, timing-sensitive, and so far seen only in
-  `make test-held-keys` (user-keys step 4): the supervisor restarts `netd` for
-  a ping timeout, and the kernel's wedge report (which since then names what a
-  wedged server was blocked on, and the state of the task it waits for) read
-  `netd` in a `MSG_CALL` to slot 2. Full account in
-  `docs/roadmap/roadmap-user-keys.md`, step 4's results. When it recurs, the
-  second diagnostic line says whether `fsd` was waiting on someone, runnable,
-  or idle with the request unread.
+- ~~**`netd` blocked on an `fsd` reply that never came (found 2026-09-26).**~~
+  **FIXED 2026-09-27 on `main` (#175).** Not a lost reply: `fsd` was busy on
+  it, and the supervisor restarted a healthy `netd` because a `cpu` spawn's 98
+  chunk reads keep it out of the loop that acks a ping. `cpu_spawn` now beats
+  after each chunk. Full account in `docs/roadmap/roadmap-user-keys.md`, step
+  4's results; the follow-ups it left (the quadratic spawn read, pings piling
+  up behind a long loop's acks, a kernel-side rule) are on `main`'s
+  `ROADMAP.md`. This branch reaches the fix when its base becomes `main`.
 
 - **Files `mke2fs -d` stages on the ext2 images belong to the building host's
   uid, not root (found 2026-09-26).** `ls -l /etc/cluster` on the ext2 image

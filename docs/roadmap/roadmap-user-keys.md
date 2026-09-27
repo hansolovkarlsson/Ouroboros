@@ -429,26 +429,35 @@ prompt's `DROP_MINE` catches it.
   `WEDGE_TICKS`" is too strong; the rule stands for a server whose requests can
   queue (the review of step 3's case), and the restart line is observable, which
   is what the control needed.
-- **`netd` wedges intermittently in the held-key rig, blocked on `fsd`.
-  OPEN.** In `make test-held-keys`'s `login-logout` scenario the supervisor
-  sometimes declares `netd` unresponsive (ping timeout) and restarts it, which
-  loses every held key: 2 runs in 8 on one build, about 1 in 4 over the day's
-  runs, always at the same point, the first `cpu` run from the host after the
-  boot shell logs out; that run's child never exits. The wedge report now says
-  what the server was blocked on (a kernel diagnostic added for this, kept), and
-  the one wedge caught with it read **`netd` blocked in a `MSG_CALL` to `fsd`
-  (slot 2), waiting for a reply that never came**, with `fsd` itself answering
-  the supervisor. `MSG_CALL` sends and blocks in one masked syscall and the
-  reply is delivered straight into the caller, so either `fsd` never replied
-  or it replied to something else; the diagnostic was then extended to print
-  `fsd`'s own state and mailbox, but no wedge has occurred in the 42 runs
-  since (the kernel's code moved, and the rate with it), so which it is is
-  not known. It needs the cpu child's call back into `netd` or the logout's key
-  drops to appear at all (neither `run "id"` nor `clusterkey held` in a
-  hand-driven copy of the same steps reproduced it in twelve runs), so it may
-  be an older race that this step's traffic uncovers rather than a defect in
-  the table. **Step 4 should not merge until it is understood**: a `netd`
-  restart drops every logged-in user's key.
+- ~~**`netd` wedges intermittently in the held-key rig, blocked on `fsd`.**~~
+  **FIXED 2026-09-27 on `main` (#175), and not this step's code.** In
+  `make test-held-keys`'s `login-logout` the supervisor declared `netd`
+  unresponsive (ping timeout) and restarted it, dropping every held key: 12
+  runs in 135 on 2026-09-27. The cause was a false positive, not a deadlock.
+  A `cpu` run makes `netd` read the binary from `fsd` as one path-based call
+  per 512-byte chunk (98 for `clusterkey`, each re-walking the FAT chain from
+  the start, about 4,800 disk reads in all), and a server acks a ping only
+  from its main loop. The supervisor samples at ticks and never saw `netd`
+  run between calls, so a ping landing with more than 8 ticks of spawn left
+  timed out. `cpu_spawn` now sends `netd`'s existing `heartbeat()` after each
+  chunk: 0 wedges in 100 runs of this rig with it cherry-picked, against 10
+  in 100 without.
+
+  **Two claims this entry made on 2026-09-26 were wrong.** It was not tied to
+  logout: one of the twelve came at the check right after login, and "the
+  first `cpu` run after logout" was only the check after the longest idle
+  stretch. And `fsd` was not idle and answering: the wedge report extended
+  with its PC (a temporary line, reverted) showed it `Runnable` in
+  `fat32::Fs::find` on a FAT-sector read, working on `netd`'s request, in all
+  ten wedges where the live PC was recorded (the other two predate that line:
+  one printed no PC, one a saved context that is stale for the running
+  task). The 42 quiet runs after the kernel moved were the placement band
+  again, not a change of cause.
+
+  **This branch still wedges** about one run in ten: #175 is on `main`, and
+  this step reaches it when the stack is merged bottom-up and its base
+  becomes `main`. Run the rig after that before merging. The kernel's
+  blocked-on report stays.
 
 **Deferred to step 8:** closing a uid's attested sessions when its last key
 goes. There are no attested sessions until step 8, so there is nothing to
