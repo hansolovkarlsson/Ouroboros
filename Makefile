@@ -95,6 +95,8 @@ RECV_ELF     := target/$(USER_TARGET)/release/recv
 RECV_BIN     := target/$(USER_TARGET)/release/recv.bin
 EDTEST_ELF   := target/$(USER_TARGET)/release/edtest
 EDTEST_BIN   := target/$(USER_TARGET)/release/edtest.bin
+KEYPROBE_ELF := target/$(USER_TARGET)/release/keyprobe
+KEYPROBE_BIN := target/$(USER_TARGET)/release/keyprobe.bin
 SELFTEST_ELF := target/$(USER_TARGET)/release/selftest
 SELFTEST_BIN := target/$(USER_TARGET)/release/selftest.bin
 BOOTID_ELF   := target/$(USER_TARGET)/release/bootid
@@ -223,7 +225,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels test-keyboard-chain test-reentrant-session test-async-rmount clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels test-keyboard-chain test-reentrant-session test-async-rmount test-held-keys clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -528,6 +530,10 @@ edtest-bin:
 	cargo build -p edtest --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(EDTEST_ELF) $(EDTEST_BIN)
 
+keyprobe-bin:
+	cargo build -p keyprobe --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(KEYPROBE_ELF) $(KEYPROBE_BIN)
+
 man-bin:
 	cargo build -p man --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(MAN_ELF) $(MAN_BIN)
@@ -624,7 +630,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -696,6 +702,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(SELFTEST_BIN) $(ESP_DIR)/bin/SELFTEST
 	cp $(BOOTID_BIN) $(ESP_DIR)/bin/BOOTID
 	cp $(EDTEST_BIN) $(ESP_DIR)/bin/EDTEST
+	cp $(KEYPROBE_BIN) $(ESP_DIR)/bin/KEYPROBE
 	cp $(MAN_BIN) $(ESP_DIR)/bin/MAN
 	cp $(PING_BIN) $(ESP_DIR)/bin/PING
 	cp $(RESOLVE_BIN) $(ESP_DIR)/bin/RESOLVE
@@ -1384,6 +1391,15 @@ test-reentrant-session: images-2vm-ext2
 # with a measured negative control. Three boots, minutes; not in `make test`.
 test-async-rmount: image
 	./scripts/test-async-rmount.sh
+
+# The held-key checks (step 4 of docs/roadmap/roadmap-user-keys.md): a login
+# holds its user's cluster key in netd, a logout or a killed login shell drops
+# it, and an ordinary user can neither fill, list nor empty the table. Five
+# driven boots of the FAT32 image, the table read from the host through the
+# export; minutes, so not in `make test`. Run it whenever login, the shell's
+# session loop or netd's held-key table changes.
+test-held-keys: image
+	python3 scripts/test-held-keys.py
 
 # Host unit tests for the PURE crates - the ones with no I/O, no syscalls and no
 # target dependency, so they run natively on the build machine. This exists

@@ -1,14 +1,14 @@
 [package]
-name = "useradd"
+name = "keyprobe"
 version = "0.1.0"
 edition = "2021"
 
+# The non-root side of netd's held-key policy, tried from an ordinary task:
+# step 4 of docs/roadmap/roadmap-user-keys.md.
 [dependencies]
 syscall-abi = { path = "../../../syscall-abi" }
 ulib = { path = "../../../ulib" }
-accounts = { path = "../../../accounts" }
-ninep-abi = { path = "../../../ninep-abi" }
 
 [[bin]]
-name = "useradd"
+name = "keyprobe"
 path = "src/main.rs"

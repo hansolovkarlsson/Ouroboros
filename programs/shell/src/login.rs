@@ -29,6 +29,9 @@ const PASSWD_PATH: &str = "/etc/passwd";
 /// wants do not.
 const SHADOW_PATH: &str = "/etc/shadow";
 const GROUP_PATH: &str = "/etc/group";
+/// The cluster's realm: present, this node derives a cluster key at login;
+/// absent or not a realm, it derives none and logs in as it always has.
+const REALM_PATH: &str = "/etc/cluster/realm";
 /// Read cap for `/etc/passwd`, matching the account tools' write cap
 /// ([`accounts`]/`useradd` bound writes to `SAFECOPY_MAX`). fsd caps a single
 /// inline read at `FS_DATA_MAX` (512), so the shared `read_account_file` loops
@@ -88,6 +91,11 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
     let passwd = &pbuf[..plen];
 
     loop {
+        // Before EVERY prompt: drop any key this task still holds. The boot
+        // shell logs in and out in one task, so a logout whose drop was lost
+        // would otherwise carry the last user's key into the next session; this
+        // makes that impossible rather than unlikely (Decision 4).
+        drop_my_keys();
         crate::print_str("\r\nlogin: ");
         let mut ubuf = [0u8; 32];
         let ulen = read_field(&mut ubuf, true);
@@ -103,7 +111,17 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
             // root, before the SET_ID below, which is exactly why it can read it
             // at all. A legacy passwd line with the hash inline still verifies,
             // so a disk written before /etc/shadow still logs in.
-            if verify_password(&acct, &ubuf[..ulen], &wbuf[..wlen]) {
+            if let Some(upgradable) = verify_password(&acct, &ubuf[..ulen], &wbuf[..wlen]) {
+                // A version-1 secret becomes version 2 at its first login,
+                // while this task is still root (ACCTOP_UPGRADE is root-only).
+                if upgradable {
+                    upgrade_secret(&ubuf[..ulen], &wbuf[..wlen]);
+                }
+                // The cluster key, while this task is still root (netd accepts
+                // a hold only from uid 0). Derived here because the password is
+                // here; the seed goes to netd and is wiped. Logout drops it by
+                // task (drop_my_keys), never by handle: see that function.
+                hold_cluster_key(&ubuf[..ulen], &wbuf[..wlen], acct.uid);
                 // Drop from root to the user. The kernel saves root as this
                 // task's saved identity, so logout can restore it.
                 // Identity and memberships in ONE call: the group half of
@@ -161,20 +179,155 @@ pub(crate) fn supplementary_groups(name: &[u8], primary_gid: u32, out: &mut [u32
 /// else against a legacy inline secret in the passwd line. An account with
 /// neither never verifies - "no password recorded" must not mean "any password".
 ///
+/// `Some(upgradable)` on success, where `upgradable` says the secret is a
+/// version-1 shadow entry with the standard 8-byte salt, which `accountd` can
+/// rewrite as version 2 in place. `None` when the password is wrong.
+///
+/// A version-2 check is a PBKDF2 derivation, about a second on the guest: it
+/// runs HERE, in the shell, which is not supervised, never in a server. It
+/// reads the secret and nothing else, so no cluster file can refuse a login.
+///
 /// `#[inline(never)]`: the shadow file is a 2 KB stack buffer, kept out of the
 /// caller's frame.
 #[inline(never)]
-fn verify_password(acct: &accounts::Account<'_>, name: &[u8], password: &[u8]) -> bool {
+fn verify_password(acct: &accounts::Account<'_>, name: &[u8], password: &[u8]) -> Option<bool> {
     // ONE line, streamed off the disk rather than the whole file into a buffer:
     // the size of /etc/shadow must not decide whether anyone can log in. See
     // find_account_line for the lockout that a whole-file read caused here.
     let mut sline = [0u8; SHADOW_LINE_MAX];
     if let Some(n) = crate::find_account_line(SHADOW_PATH, name, &mut sline) {
         if let Some(secret) = accounts::find_secret_by_name(&sline[..n], name) {
-            return secret.verify(password);
+            let upgradable = secret.version == accounts::SecretVersion::V1 && secret.salt_len == 8;
+            return secret.verify(password).then_some(upgradable);
         }
     }
-    acct.verify(password) // legacy inline secret, or false when there is none
+    // A legacy inline secret, or false when there is none. Never upgraded here:
+    // moving it into /etc/shadow changes the file's length.
+    acct.verify(password).then_some(false)
+}
+
+/// Derive `name`'s cluster key from `password` and hand it to `netd` to hold,
+/// returning the handle. `None`, and a normal login, when the node has no realm
+/// (it is not in a cluster) or `netd` does not hold it; a full table says so
+/// in one line. About a second on the guest, which is the login's second
+/// derivation (docs/roadmap/roadmap-user-keys.md, step 0 budgets both).
+///
+/// Nothing here can REFUSE a local login: the password was already checked.
+/// But the hold is a blocking `MSG_CALL`, so a login does WAIT on `netd`: a
+/// busy `netd` delays it, and a wedged one delays it until the supervisor
+/// restarts it (or, past its cap, tears it down), when the call fails and the
+/// login goes on. Bounded, not a hang; a timed call is a recorded follow-up.
+#[inline(never)]
+fn hold_cluster_key(name: &[u8], password: &[u8], uid: u32) -> Option<u64> {
+    let mut rbuf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
+    let rlen = crate::read_account_file(REALM_PATH, &mut rbuf);
+    let realm = clusterkeys::parse_realm(&rbuf[..rlen])?;
+    let mut seed = clusterkeys::derive_user_seed(name, realm, password)?;
+
+    // NETOP_KEY_HOLD: [op][uid][seed].
+    let mut req = [0u8; 48];
+    req[..8].copy_from_slice(&syscall_abi::NETOP_KEY_HOLD.to_le_bytes());
+    req[8..16].copy_from_slice(&(uid as u64).to_le_bytes());
+    req[16..48].copy_from_slice(&seed);
+    // MSG_MAX_LEN, as MSG_CALL requires of every reply buffer: a short one is
+    // refused outright, or accepted only where the next 768 bytes happen to
+    // be mapped, which is how the first version of this passed.
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = crate::syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::NET_TASK,
+        req.as_ptr() as u64,
+        req.len() as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    // Our copies go whatever netd said: volatile, so they are not optimised
+    // away as dead stores.
+    for b in seed.iter_mut().chain(req[16..48].iter_mut()) {
+        // SAFETY: a byte of a local array.
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
+    if packed >= syscall_abi::FS_ERR_MIN || (packed & 0xffff_ffff) < 8 {
+        return None; // no network server this boot: nothing to hold
+    }
+    let status = u64::from_le_bytes(reply[..8].try_into().ok()?);
+    if status == syscall_abi::NET_KEY_FULL {
+        crate::print_line("login: note: the cluster key is not held (every slot is in use)");
+    }
+    if status != syscall_abi::NET_KEY_OK || (packed & 0xffff_ffff) < 16 {
+        return None;
+    }
+    Some(u64::from_le_bytes(reply[8..16].try_into().ok()?))
+}
+
+/// Ask `netd` to drop every key this task holds (`NETOP_KEY_DROP_MINE`), before
+/// every login prompt and at logout. Best effort: with no network server there
+/// is nothing held.
+///
+/// BY TASK, NEVER BY HANDLE. `netd` keys this on the kernel's packed task
+/// identity of the sender, so it can only ever drop this task's own keys. A
+/// logout used to drop by handle, sent as root (after the `SET_ID` back), and
+/// root passes `drop_handle`'s owner check: a handle gone stale across a `netd`
+/// restart named whichever login's key had taken that slot since, and logout
+/// wiped it (review of step 4). Handles are bare slot numbers until step 7.
+pub fn drop_my_keys() {
+    let req = syscall_abi::NETOP_KEY_DROP_MINE.to_le_bytes();
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    crate::syscall4(syscall_abi::MSG_CALL, syscall_abi::NET_TASK, req.as_ptr() as u64, 8, reply.as_mut_ptr() as u64);
+}
+
+/// Upgrade `name`'s version-1 secret to version 2 (docs/roadmap/roadmap-user-keys.md,
+/// Decision 10): derive the new secret here, where the password is, and ask
+/// `accountd` to write it in place. Best effort: any failure leaves the
+/// version-1 line, which still verifies, and says so in one line; a login is
+/// never refused for it.
+#[inline(never)]
+fn upgrade_secret(name: &[u8], password: &[u8]) {
+    let mut raw = [0u8; 8];
+    let got = crate::syscall4(syscall_abi::RANDOM, raw.as_mut_ptr() as u64, raw.len() as u64, 0, 0);
+    let random = (got == raw.len() as u64).then_some(raw);
+    let clock = crate::syscall4(syscall_abi::MONOTONIC_US, 0, 0, 0, 0);
+    let (salt8, strong) = accounts::salt_from(random, clock);
+    // Said out loud, as passwd and useradd do: a clock salt is weaker, and this
+    // path writes it into /etc/shadow without anyone having asked for a change.
+    if !strong {
+        crate::print_line("login: no hardware RNG - using a weaker clock-derived salt");
+    }
+    let mut salt = [0u8; accounts::SALT_V2];
+    salt.copy_from_slice(&salt8[..accounts::SALT_V2]);
+    let secret = accounts::secret_v2(salt, password);
+
+    // ACCTOP_UPGRADE: (name len, password len), payload name || password ||
+    // new_salt || new_hash.
+    const HDR: usize = 40;
+    let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    req[..8].copy_from_slice(&syscall_abi::ACCTOP_UPGRADE.to_le_bytes());
+    req[8..16].copy_from_slice(&(name.len() as u64).to_le_bytes());
+    req[16..24].copy_from_slice(&(password.len() as u64).to_le_bytes());
+    let mut w = HDR;
+    for part in [name, password, &salt[..], &secret.hash[..]] {
+        req[w..w + part.len()].copy_from_slice(part);
+        w += part.len();
+    }
+    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+    let packed = crate::syscall4(
+        syscall_abi::MSG_CALL,
+        syscall_abi::ACCT_TASK,
+        req.as_ptr() as u64,
+        w as u64,
+        reply.as_mut_ptr() as u64,
+    );
+    // The request carries the plaintext password: wipe it, as hold_cluster_key
+    // wipes its seed (volatile, so it is not optimised away as a dead store).
+    for b in req[..w].iter_mut() {
+        // SAFETY: a byte of a local array.
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
+    let ok = packed < syscall_abi::FS_ERR_MIN
+        && (packed & 0xffff_ffff) >= 8
+        && reply[..8] == 0u64.to_le_bytes();
+    if !ok {
+        crate::print_line("login: note: the stored password could not be upgraded; it still works");
+    }
 }
 
 /// Say so when the filesystem holding the account database cannot protect it.

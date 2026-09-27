@@ -7,6 +7,8 @@ edition = "2021"
 syscall-abi = { path = "../../syscall-abi" }
 ninep-abi = { path = "../../ninep-abi" }
 accounts = { path = "../../accounts" }
+# The realm and the user-key derivation `login` runs (docs/roadmap/roadmap-user-keys.md, step 4).
+clusterkeys = { path = "../../clusterkeys" }
 
 [[bin]]
 name = "shell"

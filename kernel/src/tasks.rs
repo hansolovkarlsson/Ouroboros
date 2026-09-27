@@ -251,9 +251,13 @@ const TO_SPAWNABLE: u32 = ((1u32 << NUM_TASKS) - 1) & !((1u32 << FIRST_SPAWNABLE
 /// in [`may_send`], so only *unsolicited* sends need a mask bit.
 fn caps_for_slot(slot: usize) -> u32 {
     match slot as u64 {
-        // Shell: calls the filesystem, console, and network servers, and
-        // sends pipe input to its spawned children.
-        0 => TO_FSD | TO_CON | TO_NET | TO_SPAWNABLE,
+        // Shell: calls the filesystem, console, network and account servers,
+        // and sends pipe input to its spawned children. TO_ACCT since step 4
+        // of docs/roadmap/roadmap-user-keys.md: the boot shell's `login` sends
+        // ACCTOP_UPGRADE after a version-1 login, the one request a login makes
+        // of the account server. Every spawnable slot (a nested login shell
+        // included) already held it.
+        0 => TO_FSD | TO_CON | TO_NET | TO_ACCT | TO_SPAWNABLE,
         // Idle: never sends.
         1 => 0,
         // Filesystem server: logs to the console server; owns the disk.
@@ -2708,6 +2712,43 @@ pub unsafe fn on_tick(frame: *mut Context) {
         if runnable_wedge || blocked_wedge {
             let why = if blocked_wedge { "unresponsive (ping timeout)" } else { "no progress (runnable)" };
             crate::console::println!("Ouroboros kernel: server slot {slot} wedged - {why} - restarting");
+            // WHAT IT WAS BLOCKED ON, which "unresponsive" alone does not say:
+            // the difference between a server waiting on a reply from another
+            // server, on a task's exit, and on input decides where to look.
+            // Added for an intermittent netd wedge (docs/roadmap/roadmap-user-keys.md,
+            // step 4's results), whose report named no cause.
+            // SAFETY: IRQs masked for the whole tick, single core.
+            match unsafe { *STATES[slot].get() } {
+                TaskState::Blocked(WaitReason::Message { from, .. }) => {
+                    crate::console::println!("Ouroboros kernel:   it was blocked receiving (from {from:?})");
+                    // And the task it waits on: a partner that is itself
+                    // waiting, and on whom, is the other half of a deadlock.
+                    if let Some(f) = from {
+                        if f < STATES.len() {
+                            // SAFETY: as above.
+                            let (state, queued) = unsafe { (*STATES[f].get(), (*MAILBOXES[f].get()).count) };
+                            match state {
+                                TaskState::Blocked(WaitReason::Message { from: ff, .. }) => crate::console::println!(
+                                    "Ouroboros kernel:   task {f} is blocked receiving (from {ff:?}), {queued} queued"
+                                ),
+                                TaskState::Blocked(_) => crate::console::println!("Ouroboros kernel:   task {f} is blocked (not on a message), {queued} queued"),
+                                TaskState::Runnable => crate::console::println!("Ouroboros kernel:   task {f} is runnable, {queued} queued"),
+                                _ => crate::console::println!("Ouroboros kernel:   task {f} is neither runnable nor blocked"),
+                            }
+                        }
+                    }
+                }
+                TaskState::Blocked(WaitReason::TaskExit(t)) => {
+                    crate::console::println!("Ouroboros kernel:   it was blocked waiting for task {t} to exit")
+                }
+                TaskState::Blocked(WaitReason::NetInput { deadline }) => {
+                    crate::console::println!("Ouroboros kernel:   it was blocked on network input (deadline {deadline})")
+                }
+                TaskState::Blocked(WaitReason::Keyboard) => {
+                    crate::console::println!("Ouroboros kernel:   it was blocked on the keyboard")
+                }
+                _ => {}
+            }
             if server == current {
                 // The wedged server is the interrupted task: discard its
                 // frame and switch away, exactly like the fault handler.

@@ -235,6 +235,19 @@ Each refusal also leaves one `netd: 9p: ...; closing` line on the guest
 console naming the reason, which is where an operator finds it: the client
 only sees the connection end.
 
+**The held keys** (user-keys step 4, 2026-09-26): `make test-held-keys` boots
+the FAT32 image once per scenario, drives the console, and reads `netd`'s
+table of held user keys FROM THE HOST between steps, with
+`np9p_client.py run "clusterkey held"` (the diagnostic runs on the guest as
+root through the export, so it needs no keyboard and can look while the boot
+shell sits at a login prompt). Five scenarios: a login holds the user's key and
+a logout drops it; two logins of one user, one logs out and the other's key is
+still held, then that shell is killed and its key goes; `keyprobe` (an ordinary
+user's hold, list and drops, each refused) and a nested login started by a
+non-root shell, whose hold is refused; a fifth hold with four live keys is
+refused and that login still succeeds; and a node with no realm holds nothing.
+Transcripts land in `build/held-<scenario>.txt`.
+
 **The impersonation gate** (user-keys step 0, 2026-09-26): `impersonate-gate
 <stage>` signs as `intruder`, a dev identity every image authorizes and no
 machine holds, and claims users it has no credential for: row 1 claims root

@@ -370,6 +370,127 @@ takes at most 32, so such an account can never have one; step 4, which changes
 **Still open from step 1:** the gid 0 half of root squash, unobserved for want
 of a dev account with primary gid 0. `guest` is not one; it is row 5's subject.
 
+### Step 4's results (2026-09-26): passwords derived where they are typed, keys held by `netd`
+
+**Passwords (4a).** `accountd` never derives. `ACCTOP_SALT` answers a
+secret's version and salt (a non-root caller, only their own); `ACCTOP_PASSWD`
+now carries the old hash, which `passwd` computes the way the stored version
+needs, and the new version-2 salt and hash, so no password crosses and the
+server only compares in constant time and writes; `ACCTOP_UPGRADE` (root only)
+carries the password and a version-2 line, checks the password against a
+version-1 secret with one SHA-256, and writes in place or refuses, never the
+whole-file path (`write_secret` takes the length rule as a required
+parameter). `login` upgrades a version-1 line at its first login, best effort;
+`mkpasswd.py` and `useradd` write version 2; `useradd` refuses a name over 32
+bytes. The boot shell gained `TO_ACCT` (every spawnable slot had it), since its
+`login` sends the upgrade. On the guest: a version-2 login, `passwd` refused
+with a wrong old password and working with the right one, `useradd` creating a
+version-2 account that logs in, and a staged version-1 `/etc/shadow` upgraded
+at first login **at the same 262 bytes**, both lines verifying after. Controls:
+the upgrade sent after dropping to the user is refused and the line stays
+version 1; `accountd` padding the new line by one byte is refused and the size
+does not move.
+
+**Keys (4b).** `NETOP_KEY_HOLD`/`DROP`/`DROP_MINE`/`LIST` in `netd`
+(`held.rs`): only root fills or lists the table, a hold replaces the same
+owner's key, a full table (4) refuses and never evicts, a drop is the holder's
+or root's, and every seed is wiped (volatile) whichever way it goes. An owner
+is alive while its slot still holds the same packed identity and is not a
+zombie (`TASK_STATE`, then `TASK_IDENTITY`, so a recycled slot fails the
+comparison); no new kernel query was needed. Dead owners are reaped on every
+wake of the loop and before a hold or a list. `login` derives the key after the
+password is checked, holds it, and wipes its copy; the session loop drops it
+at logout and `DROP_MINE` runs before every login prompt. `clusterkey held`
+(root) lists the uids; `keyprobe` tries every op as an ordinary user.
+
+**The check and its controls, measured** by `make test-held-keys`, five driven
+boots that read the table from the host. All pass. Mutations, each caught:
+`netd` accepting a non-root hold (a nested login started by a user then holds
+a key, and `keyprobe` fails); `netd` letting anyone drop (`keyprobe` drops the
+logged-in user's key); every owner treated as alive (a killed shell keeps its
+key); the logout drop AND the prompt's `DROP_MINE` skipped (the key survives
+logout). The logout drop skipped ALONE still passes, as the design says: the
+prompt's `DROP_MINE` catches it.
+
+**Found, and corrected in the plan's claims.**
+
+- **`MSG_CALL` needs a full-size reply buffer.** Four of this step's calls
+  passed 8 to 48 bytes; the kernel validates 768 (`MSG_MAX_LEN`) before
+  delivering anything, so `keyprobe` failed every call with `0xffff...` and the
+  shell's calls worked only where 768 bytes past the buffer happened to be
+  mapped. All four now pass `MSG_MAX_LEN`. The ABI says so; nothing enforces it
+  at compile time.
+- **A spawned command reaching `netd` must use `ulib::net_call`** (the
+  delegation race), which `keyprobe` and `clusterkey held` first did not.
+- **One or two derivations inside `accountd` do NOT trip the watchdog; four
+  do.** Measured by mutation: two derivations per upgrade, no restart; four,
+  `server slot 5 wedged - no progress (runnable)`, and the login survived with
+  its note. Decision 10's "a derivation inside any supervised server would trip
+  `WEDGE_TICKS`" is too strong; the rule stands for a server whose requests can
+  queue (the review of step 3's case), and the restart line is observable, which
+  is what the control needed.
+- ~~**`netd` wedges intermittently in the held-key rig, blocked on `fsd`.**~~
+  **FIXED 2026-09-27 on `main` (#175), and not this step's code.** In
+  `make test-held-keys`'s `login-logout` the supervisor declared `netd`
+  unresponsive (ping timeout) and restarted it, dropping every held key: 12
+  runs in 135 on 2026-09-27. The cause was a false positive, not a deadlock.
+  A `cpu` run makes `netd` read the binary from `fsd` as one path-based call
+  per 512-byte chunk (98 for `clusterkey`, each re-walking the FAT chain from
+  the start, about 4,800 disk reads in all), and a server acks a ping only
+  from its main loop. The supervisor samples at ticks and never saw `netd`
+  run between calls, so a ping landing with more than 8 ticks of spawn left
+  timed out. `cpu_spawn` now sends `netd`'s existing `heartbeat()` after each
+  chunk: 0 wedges in 100 runs of this rig with it cherry-picked, against 10
+  in 100 without.
+
+  **Two claims this entry made on 2026-09-26 were wrong.** It was not tied to
+  logout: one of the twelve came at the check right after login, and "the
+  first `cpu` run after logout" was only the check after the longest idle
+  stretch. And `fsd` was not idle and answering: the wedge report extended
+  with its PC (a temporary line, reverted) showed it `Runnable` in
+  `fat32::Fs::find` on a FAT-sector read, working on `netd`'s request, in all
+  ten wedges where the live PC was recorded (the other two predate that line:
+  one printed no PC, one a saved context that is stale for the running
+  task). The 42 quiet runs after the kernel moved were the placement band
+  again, not a change of cause.
+
+  **This branch still wedges** about one run in ten: #175 is on `main`, and
+  this step reaches it when the stack is merged bottom-up and its base
+  becomes `main`. Run the rig after that before merging. The kernel's
+  blocked-on report stays.
+
+**The review of step 4 (ten findings, six acted on, four recorded).** One
+was a real defect in this step's own work. **Logout dropped a key by handle,
+as root**: the shell restores uid 0 before the drop, root passes
+`drop_handle`'s owner check, and a handle is a bare slot number, so after a
+`netd` restart a stale handle named whichever login's key had taken that slot
+since, and logging out wiped it. Logout now sends `NETOP_KEY_DROP_MINE`, which
+`netd` keys on the sender's packed task identity and so can only drop the
+shell's own keys; the handle and `Session.key` are gone from the shell. The
+rest acted on: `netd` wipes its receive buffer after a `HOLD` (the seed stayed
+there, since the buffer is never cleared between messages), `accountd` wipes
+its receive buffer after every request, and `login` its request, both of
+which held the plaintext password of an upgrade; a first-login upgrade with no
+hardware RNG says it used a clock salt, as `passwd` and `useradd` do; and the
+"larger than this shell can read" warning names the file, since the realm is
+read through it too. `hold_cluster_key`'s "local login never depends on this"
+is corrected: nothing there can refuse a login, but it does wait on `netd`,
+bounded by the supervisor.
+**Recorded, not acted on:** handles carry no generation. Nothing in the tree
+names a key by handle now except `keyprobe`'s refusal check, and step 8 finds a
+key by uid, not handle; **if a later step comes to name a key by handle, pack a
+generation into it first**, as task identities do. And **`accountd` no longer
+refuses an empty new password**: `passwd` sends a hash, so the server cannot
+tell. The policy now lives in the `passwd` client, and a crafted program can
+set its own account's password to empty (or to bytes that lock it); that is
+the caller's own account, not an escalation. The login's blocking call, the
+per-wake reap's cost and three copies of the version-2 salt code are follow-ups
+in `ROADMAP.md`.
+
+**Deferred to step 8:** closing a uid's attested sessions when its last key
+goes. There are no attested sessions until step 8, so there is nothing to
+close yet; the table is exercised here, as the step says.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking

@@ -24,6 +24,8 @@
 #![no_std]
 #![no_main]
 
+mod held;
+
 use core::arch::asm;
 use core::panic::PanicInfo;
 
@@ -587,6 +589,9 @@ fn serve(packed_mac: u64) -> ! {
     // `service_remotes` answers it. On this frame like the tables above.
     let mut remotes: [Option<RemoteConn>; MAX_REMOTE] = core::array::from_fn(|_| None);
     let mut pending = PendingRun::new();
+    // Held user keys (step 4 of docs/roadmap/roadmap-user-keys.md): the seeds
+    // `login` hands over, on this frame like the tables above. See held.rs.
+    let mut held = held::Held::new();
     loop {
         // Block until a client message or an incoming frame is pending (or
         // return immediately if either already is). While *any* connection has
@@ -609,7 +614,13 @@ fn serve(packed_mac: u64) -> ! {
         // handled synchronously; the supervisor health-ping is acked here too
         // (any reply acks it). Also where a cpu child's output is captured
         // (cluster Phase 4a) - routed to its connection by drain_client_messages.
-        drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &mut pending);
+        drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &mut pending, &mut held);
+
+        // A held key whose login is gone goes now: a killed nested shell loses
+        // its key within one wake of this loop, the health ping bounding how
+        // long that can be. Outside the NIC block below, since a node with no
+        // NIC still has logins.
+        held.reap_dead();
 
         // 2. Incoming frames: ARP replies, parked remote mounts, dial-out
         // connections, and the TCP server.
@@ -657,7 +668,7 @@ fn serve(packed_mac: u64) -> ! {
                     }
                     let before = c.snd_nxt;
                     pump_send(&mac, c); // `c` borrow ends here
-                    drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &mut pending);
+                    drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &mut pending, &mut held);
                     match conns[i].as_ref() {
                         Some(c) if c.snd_nxt != before => {} // progress - continue
                         _ => break,
@@ -674,7 +685,7 @@ fn serve(packed_mac: u64) -> ! {
 /// stdout we capture) is routed to *its* connection's output buffer instead of
 /// the normal client dispatch; everything else is a client request.
 #[allow(clippy::too_many_arguments)]
-fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun) {
+fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) {
     loop {
         let packed =
             syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
@@ -715,14 +726,32 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             // blocking `tcp_run` did not drive. Nothing blocks now, so the
             // serve loop drives every parked slot and there is no chained case
             // left to name.
-            let is_request = len >= 8 && read_u64(buf, 0) == syscall_abi::NETOP_RMOUNT;
+            // The held-key ops too (step 4 of docs/roadmap/roadmap-user-keys.md):
+            // `clusterkey held` run through `cpu` is how a test sees the table
+            // while the keyboard is at a login prompt, and captured as output
+            // its MSG_CALL would wait for a reply forever. Each op checks the
+            // child's own identity, as for any caller.
+            let op = if len >= 8 { read_u64(buf, 0) } else { 0 };
+            let is_request = op == syscall_abi::NETOP_RMOUNT
+                || (syscall_abi::NETOP_KEY_HOLD..=syscall_abi::NETOP_KEY_LIST).contains(&op);
             if is_request {
-                handle_client(packed_mac, sender, buf, len, dials, remotes, sessions, auth, pending);
+                handle_client(packed_mac, sender, buf, len, dials, remotes, sessions, auth, pending, held);
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
             }
         } else {
-            handle_client(packed_mac, sender, buf, len, dials, remotes, sessions, auth, pending);
+            handle_client(packed_mac, sender, buf, len, dials, remotes, sessions, auth, pending, held);
+        }
+        // A HOLD carried a user's seed, and `buf` is never cleared between
+        // messages: a shorter one leaves bytes 16..48 as they were. key_op
+        // wipes its own copy; this wipes the one the kernel delivered into
+        // (review of step 4). Volatile, so it is not dropped as a dead store.
+        if len >= 8 && read_u64(buf, 0) == syscall_abi::NETOP_KEY_HOLD {
+            let n = len.min(buf.len());
+            for b in buf[..n].iter_mut() {
+                // SAFETY: a byte of netd's own receive buffer.
+                unsafe { core::ptr::write_volatile(b, 0) };
+            }
         }
     }
 }
@@ -747,10 +776,101 @@ fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
     }
 }
 
+/// The held-key ops (step 4 of docs/roadmap/roadmap-user-keys.md; the rules
+/// are in held.rs). Writes `[status][result]` into `r`, returning its length.
+///
+/// WHO IS ASKING comes from the kernel, read here, in the handler of the
+/// message it describes: `SENDER_ID` for the uid (root fills and lists the
+/// table) and `SENDER_TASK` for the packed identity a key is held under. A
+/// message with no identity (`GET_ID_ERR`) is treated as neither root nor any
+/// holder, so it can fill, drop and list nothing.
+fn key_op(req: &[u8], held: &mut held::Held, r: &mut [u8]) -> usize {
+    let put = |r: &mut [u8], off: usize, v: u64| r[off..off + 8].copy_from_slice(&v.to_le_bytes());
+    let id = syscall4(syscall_abi::SENDER_ID, 0, 0, 0, 0);
+    let is_root = id != syscall_abi::GET_ID_ERR && (id & 0xffff_ffff) == 0;
+    let task = syscall(syscall_abi::SENDER_TASK, 0);
+    let has_task = task != syscall_abi::GET_ID_ERR;
+    let uid = if id == syscall_abi::GET_ID_ERR { u32::MAX } else { (id & 0xffff_ffff) as u32 };
+    let op = read_u64(req, 0);
+    // Reap dead owners FIRST for a hold and a list: a list answered in the same
+    // wake as a kill must not show the dead login's key, and a table full of
+    // dead owners' keys must not refuse a live login.
+    if op == syscall_abi::NETOP_KEY_HOLD || op == syscall_abi::NETOP_KEY_LIST {
+        held.reap_dead();
+    }
+    match op {
+        syscall_abi::NETOP_KEY_HOLD => {
+            if !is_root || !has_task {
+                put(r, 0, syscall_abi::NET_KEY_DENIED);
+                return 8;
+            }
+            if req.len() < 16 + 32 {
+                put(r, 0, syscall_abi::NET_KEY_BAD_REQUEST);
+                return 8;
+            }
+            let who = read_u64(req, 8);
+            let Ok(who) = u32::try_from(who) else {
+                put(r, 0, syscall_abi::NET_KEY_BAD_REQUEST);
+                return 8;
+            };
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&req[16..48]);
+            let got = held.hold(who, &seed, task);
+            // The request buffer is reused for the next message, but this copy
+            // is ours: wipe it as held.rs wipes an entry.
+            for b in seed.iter_mut() {
+                // SAFETY: a byte of a local array.
+                unsafe { core::ptr::write_volatile(b, 0) };
+            }
+            match got {
+                Some(h) => {
+                    put(r, 0, syscall_abi::NET_KEY_OK);
+                    put(r, 8, h as u64);
+                    16
+                }
+                None => {
+                    put(r, 0, syscall_abi::NET_KEY_FULL);
+                    8
+                }
+            }
+        }
+        syscall_abi::NETOP_KEY_DROP => {
+            if req.len() < 16 {
+                put(r, 0, syscall_abi::NET_KEY_BAD_REQUEST);
+                return 8;
+            }
+            let owner = if has_task { task } else { 0 };
+            put(r, 0, held.drop_handle(read_u64(req, 8), owner, uid));
+            8
+        }
+        syscall_abi::NETOP_KEY_DROP_MINE => {
+            let n = if has_task { held.drop_mine(task) } else { 0 };
+            put(r, 0, syscall_abi::NET_KEY_OK);
+            put(r, 8, n as u64);
+            16
+        }
+        _ => {
+            // NETOP_KEY_LIST: root only, and names uids, never keys.
+            if !is_root {
+                put(r, 0, syscall_abi::NET_KEY_DENIED);
+                return 8;
+            }
+            let mut uids = [0u32; syscall_abi::NET_KEY_MAX];
+            let n = held.uids(&mut uids);
+            put(r, 0, syscall_abi::NET_KEY_OK);
+            put(r, 8, n as u64);
+            for (i, u) in uids[..n].iter().enumerate() {
+                put(r, 16 + i * 8, *u as u64);
+            }
+            16 + n * 8
+        }
+    }
+}
+
 /// Dispatch one client request (a `MSG_CALL` from the shell) by op, replying
 /// with the op's status. The unknown-op arm also acks the supervisor ping.
 #[allow(clippy::too_many_arguments)]
-fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun) {
+fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) {
     // Too short to carry an op: `buf` is never cleared between messages, so
     // decoding a short one would dispatch the PREVIOUS request's bytes as this
     // sender's. Reachable since 2026-09-06: a remote-exec child orphaned by a
@@ -819,6 +939,14 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &m
             if let Some(rlen) = park_run(packed_mac, buf, len, &mut r, remotes, auth, pending) {
                 reply(sender, &r[..rlen]);
             }
+        }
+        syscall_abi::NETOP_KEY_HOLD
+        | syscall_abi::NETOP_KEY_DROP
+        | syscall_abi::NETOP_KEY_DROP_MINE
+        | syscall_abi::NETOP_KEY_LIST => {
+            let mut r = [0u8; 8 + 8 + 8 * syscall_abi::NET_KEY_MAX];
+            let rlen = key_op(&buf[..len.min(buf.len())], held, &mut r);
+            reply(sender, &r[..rlen]);
         }
         syscall_abi::NETOP_RUN_MORE => {
             // The shell pulls the next chunk of its last cpu run's output; an

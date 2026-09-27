@@ -449,6 +449,30 @@ def check_dev_user_keys(problems):
                         f"mkclusterkeys.py derives {py}")
 
 
+def check_userkey_count(problems):
+    """The PBKDF2 count, spelled in Rust once and in two Python generators.
+
+    `ninep_abi::USERKEY_ITERATIONS` is the count every node derives user keys
+    and version-2 shadow hashes with, permanently. `mkclusterkeys.py` derives
+    the dev users' keys with it and `mkpasswd.py` the dev shadow lines; a
+    generator with another count stages keys nobody derives and a shadow no
+    one can log in with, and neither fails anything until a boot.
+    """
+    src = open(os.path.join(ROOT, "ninep-abi", "src", "lib.rs")).read()
+    m = re.search(r"pub const USERKEY_ITERATIONS: u32 = ([0-9_]+);", src)
+    if not m:
+        problems.append("ninep-abi: USERKEY_ITERATIONS not found (renamed?)")
+        return
+    want = int(m.group(1).replace("_", ""))
+    for script, name in (("mkclusterkeys.py", "USERKEY_ITERATIONS"), ("mkpasswd.py", "V2_ITERATIONS")):
+        text = open(os.path.join(HERE, script)).read()
+        g = re.search(rf"^{name} = ([0-9_]+)$", text, re.M)
+        if not g:
+            problems.append(f"{script}: {name} not found (renamed?)")
+        elif int(g.group(1).replace("_", "")) != want:
+            problems.append(f"{script}: {name} is {g.group(1)}, ninep-abi's USERKEY_ITERATIONS is {want}")
+
+
 def check_dev_peer_labels(problems):
     """BOTH peers' short-name maps must match `mkclusterkeys.py`'s dev peers.
 
@@ -654,6 +678,7 @@ def main():
 
     check_dev_peer_labels(problems)
     check_dev_user_keys(problems)
+    check_userkey_count(problems)
     check_fid_gate_budget(problems, rust)
 
     if problems:
