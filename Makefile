@@ -1052,6 +1052,8 @@ $(EXT2_PART): esp
 	mkdir -p $(BUILD_DIR)/ext2-src/etc/cluster
 	python3 scripts/mkclusterkeys.py $(BUILD_DIR)/ext2-src/etc/cluster $(CLUSTER_NODE)
 	mkdir -p $(BUILD_DIR)/ext2-src/Users/user
+	printf 'only user may read this\n' > $(BUILD_DIR)/ext2-src/Users/user/PRIVATE.TXT
+	chmod 600 $(BUILD_DIR)/ext2-src/Users/user/PRIVATE.TXT
 	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT
 	printf 'line one\nline two has several words\nthird and final line\n' > $(BUILD_DIR)/ext2-src/README.TXT
 	mkdir -p $(BUILD_DIR)/ext2-src/sub
@@ -1065,6 +1067,12 @@ $(EXT2_PART): esp
 	# record an owner). debugfs ships with e2fsprogs alongside mke2fs.
 	"$(DEBUGFS)" -w -R "sif /Users/user uid 1000" $(EXT2_PART) 2>/dev/null
 	"$(DEBUGFS)" -w -R "sif /Users/user gid 1000" $(EXT2_PART) 2>/dev/null
+	# /Users/user/PRIVATE.TXT: a file only `user` may read (0600, uid/gid 1000).
+	# The impersonation gate's row 2 reads it while CLAIMING to be `user` from a
+	# peer `user` never logged in on (docs/roadmap/roadmap-user-keys.md, step 0).
+	# The mode is carried by mke2fs -d; the owner has to be set here.
+	"$(DEBUGFS)" -w -R "sif /Users/user/PRIVATE.TXT uid 1000" $(EXT2_PART) 2>/dev/null
+	"$(DEBUGFS)" -w -R "sif /Users/user/PRIVATE.TXT gid 1000" $(EXT2_PART) 2>/dev/null
 	rm -rf $(BUILD_DIR)/ext2-src
 
 # build/espext2.img: a two-partition MBR disk - partition 1 ext2 (fsd mounts it),

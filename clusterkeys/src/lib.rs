@@ -706,7 +706,7 @@ mod generator_agreement {
     //! becoming a guest that silently authorizes nobody.
     use super::*;
 
-    const GENERATED_AUTHORIZED: &str = "# Peers this machine accepts. One line per peer:\n#   <name> <ipv4> <public-key-hex>\n# Delete or comment out a line to revoke that peer.\n# DEV KEYS: derived from fixed seeds, so they are public. Not for real use.\nnode-a 10.0.2.10 de5317f86f9d763d9fc5c4589a85dda15d136d5c31d4c7d6bba980dfca37d4e6\nnode-b 10.0.2.11 e9e1630da4a29b961703d42eb3300448078ff0f1c1c7d37dde269f132d53b81d\nhost 10.0.2.2 3e71226a69d738c5921acfcad1e823d28c1d3e0b047b0af245b220b436bee964\n";
+    const GENERATED_AUTHORIZED: &str = "# Peers this machine accepts. One line per peer:\n#   <name> <ipv4> <public-key-hex>\n# Delete or comment out a line to revoke that peer.\n# DEV KEYS: derived from fixed seeds, so they are public. Not for real use.\nnode-a 10.0.2.10 de5317f86f9d763d9fc5c4589a85dda15d136d5c31d4c7d6bba980dfca37d4e6\nnode-b 10.0.2.11 e9e1630da4a29b961703d42eb3300448078ff0f1c1c7d37dde269f132d53b81d\nhost 10.0.2.2 3e71226a69d738c5921acfcad1e823d28c1d3e0b047b0af245b220b436bee964\nintruder 10.0.2.20 11ffb4857fd1afb89cccc048526a2d15e60b57ff8e6ffc9c5c00da07647cbbc6\n";
     const GENERATED_ID: &str = "92c8e58c772b748688638ab47c61185a8aaa12ff690c61caeab9e98ca44f9e9f\n";
     const GENERATED_ID_PUB: &str = "de5317f86f9d763d9fc5c4589a85dda15d136d5c31d4c7d6bba980dfca37d4e6\n";
 
@@ -719,7 +719,7 @@ mod generator_agreement {
                 found += 1;
             }
         }
-        assert_eq!(found, 3, "the generator writes three dev peers; parsed {found}");
+        assert_eq!(found, 4, "the generator writes four dev peers; parsed {found}");
     }
 
     #[test]
@@ -729,6 +729,7 @@ mod generator_agreement {
             (&b"node-a"[..], [10u8, 0, 2, 10]),
             (&b"node-b"[..], [10, 0, 2, 11]),
             (&b"host"[..], [10, 0, 2, 2]),
+            (&b"intruder"[..], [10, 0, 2, 20]),
         ] {
             let by_ip = find_by_ip(bytes, &ip).unwrap_or_else(|| panic!("{name:?} by address"));
             assert_eq!(by_ip.name, name);

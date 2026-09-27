@@ -235,6 +235,23 @@ Each refusal also leaves one `netd: 9p: ...; closing` line on the guest
 console naming the reason, which is where an operator finds it: the client
 only sees the connection end.
 
+**The impersonation gate** (user-keys step 0, 2026-09-26): `impersonate-gate
+[stage]` signs as `intruder`, a dev identity every image authorizes and no
+machine holds, and claims users it has no credential for: row 1 claims root
+and reads `/etc/shadow`, row 2 claims `user` and reads
+`/Users/user/PRIVATE.TXT` (0600, `user`'s). Four controls run first (modes are
+enforced, the intruder key is authorized, an unauthorized key is refused, the
+private file's mode and owner). Stage `0` expects both rows **served**, which
+is the gap today; stage `1` (root squash) expects row 1 refused. It needs the
+**ext2 image**; against FAT32 the mode control fails and says why:
+
+```sh
+make image-ext2
+IMAGE=build/espext2.img NO_BUILD=1 scripts/run-guest.sh -- \
+    python3 scripts/np9p_client.py localhost 5640 impersonate-gate 0
+# expected on main before root squash: 6 PASS, 3 n/a, "impersonate-gate: 0 check(s) failed"
+```
+
 **The session gate** (step 4 of `docs/roadmap/roadmap-fid-verbs.md`, 2026-09-07):
 `session-gate` runs the plan's checks and negative controls against the live
 export and prints one PASS/FAIL line each (idle hold, the budget of three, a

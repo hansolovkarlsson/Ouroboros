@@ -139,6 +139,65 @@ the attacker apart from the identities the existing rigs use, so step 1 can
 flag those for root and leave `intruder` unflagged, and the gate still sees the
 squash.
 
+### Step 0's results (2026-09-26)
+
+**The gate reports rows 1 and 2 served on `main`**, against the ext2 image,
+with the guest alive and no restarts: `intruder` claiming root read
+`/etc/shadow` (174 bytes, beginning `root:`), and claiming `user` read
+`/Users/user/PRIVATE.TXT` (0600, owned by uid 1000, staged by the Makefile for
+this gate). That is the gap, observed from outside the code rather than read
+from it. Four controls run before the rows, one for each way a row could read
+right for the wrong reason: the export enforces modes (`user` claiming
+`/etc/shadow` is refused `FS_ERR_PERM`), the intruder key is authorized on the
+image (a public file is served), an unauthorized key is refused
+(`FS_ERR_AUTH`), and the private file really is `user`'s alone (its mode and
+owner, seen through `host` claiming root). The gate takes a stage (`0` today,
+`1` for root squash) and checks each row against it. Shown failing both ways:
+at stage 1 on `main` it fails row 1, since the root claim is still served, and
+against the FAT32 image it fails the mode control, since that disk enforces
+nothing.
+
+Rows 3 to 5 print as n/a. Rows 3 and 4 need the credential (step 7). **Row 5
+needs an account the dev images do not have**: a non-root name with no
+registered key. The registry will list `user` only (Decision 6) and a root
+claim is decided by the `root` flag, so neither dev account can be that row's
+subject. Step 3, which stages the registry, adds a third dev account for it.
+
+**The iteration costs 5.2 µs of wall time on the QEMU guest**, measured by
+`/bin/edtest`: 5,167 to 5,216 ns an iteration over three boots (5,292 and
+5,711 on two earlier boots of the same code). That is about **1.09 s a
+derivation and 2.2 s a login at 210,000 iterations**, and 0.52 s and 1.04 s at
+100,000. The estimate above was 15 to 20 µs, three to four times too
+pessimistic: it came from a one-shot HMAC timing that included the first
+execution's cost.
+
+What the figure is, since it is the input to a permanent constant:
+
+- It is **wall time with the scheduler included**. An iteration is about
+  2.7 µs of CPU (5,000 iterations fitted between two ticks in 13.4 ms), and a
+  run long enough to cross ticks loses the CPU at each one, which roughly
+  doubles it. A derivation crosses hundreds of ticks, so the wall figure is the
+  one a login pays. The runs are 25,000 and 50,000 iterations for that reason.
+- It is **checked before it is believed**. The timed step must equal
+  `hmac_sha512` (shown failing with a wrong inner pad), and twice the
+  iterations must take 1.6 to 2.5 times as long. That check refused the first
+  two versions of the measurement. First, a single run carried about 25 ms of
+  something that was not iterations; a warm-up did not remove it and the
+  fastest of three runs did, so it was transient (the console drawing the line
+  just printed is the likely cause, not proven). Second, runs of 5,000 and
+  10,000 iterations straddled the tick boundary, so only the shorter one
+  fitted between ticks.
+- It is **an idle guest's figure**. A busy guest (a `cpu` job, a transfer)
+  makes a login slower, not the constant wrong.
+
+**The count: 210,000** (chosen by Hans, 2026-09-26), OWASP's current figure for
+PBKDF2-HMAC-SHA-512. At about 2.2 s a login it is inside Decision 3's budget of
+about three seconds with a quarter to spare for a busier guest, so the plan has
+no gap against OWASP to record. The literal reading of Decision 3, the largest
+count inside three seconds, is about 290,000; it buys a third more guessing
+cost for a login at the edge of the budget on an idle guest, and was not
+taken. Step 5 writes the count into `ninep-abi`.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking
