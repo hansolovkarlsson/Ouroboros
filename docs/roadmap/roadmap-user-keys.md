@@ -454,10 +454,9 @@ prompt's `DROP_MINE` catches it.
   task). The 42 quiet runs after the kernel moved were the placement band
   again, not a change of cause.
 
-  **This branch still wedges** about one run in ten: #175 is on `main`, and
-  this step reaches it when the stack is merged bottom-up and its base
-  becomes `main`. Run the rig after that before merging. The kernel's
-  blocked-on report stays.
+  With `main` (and #175) merged under this step, the rig ran 5 of 5
+  scenarios and `login-logout` 30 of 30 with no wedge, and the step merged
+  (#174). The kernel's blocked-on report stays.
 
 **The review of step 4 (ten findings, six acted on, four recorded).** One
 was a real defect in this step's own work. **Logout dropped a key by handle,

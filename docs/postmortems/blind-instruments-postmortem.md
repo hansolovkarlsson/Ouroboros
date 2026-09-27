@@ -604,3 +604,56 @@ argument and printed their usage. My filter matched the usage line's own
 passes. The fourth, a single word, ran, and failed because it stats a FAT32
 path on the ext2 image. Each gate re-run on its documented image, with its
 arguments as separate words, passed. A loop that runs checks is a check.
+
+## Six more, from the day the wedge was found (2026-09-27)
+
+*Added from the hunt for step 4's `netd` wedge and its fix (#175), recorded in
+[`2026-09-27.md`](../work-journal/2026-09-27.md).* The wedge itself turned out
+to be the supervisor's instrument misreading a busy server as a dead one, which
+is this document's subject in the kernel's own voice. The rest were mine.
+
+**A saved context read as a live one.** To see what `fsd` was doing when
+`netd` wedged, I printed its PC from `TASKS[f]`, and two wedges running put it
+right after the `svc` of `MSG_RECV`: "woken and never scheduled", a
+starvation. But `TASKS[f]` is the context saved when the task was last
+switched out, and when the task is the one running at the tick it is stale: a
+task that blocked in `MSG_RECV` and has run since always shows exactly that PC.
+The instrument could only ever print one answer for a running server. The
+version that read the live frame and the runnable set put `fsd` in
+`fat32::Fs::find` ten times out of ten.
+
+**A batch whose rig left with the branch.** A hundred-run batch on a scratch
+branch ran `scripts/test-held-keys.py` from the working tree. I switched the
+tree to the fix branch to edit a document, the script did not exist there, and
+99 runs "failed" in no time. The wrapper counted a missing file as a failing
+test. It stops now when the script is gone, and the rule is to stay on a
+batch's branch until it ends. The same wrapper's first "answered" check would
+have counted a Python traceback as an answer; it was tightened to the node's
+64-hex key before it was used.
+
+**A forcing mutation that forced one time in ten.** To show the wedge on
+demand I set `PING_INTERVAL` to 2, so a ping lands in every spawn, and got one
+wedge in ten. The mutation was right about the ping and wrong about the spawn,
+which usually finishes inside the 8-tick timeout; only `PING_TIMEOUT` at 3 made
+it four in four. A control that fires one time in ten is not a control, and it
+was measured before it was trusted, which is the only reason that is known.
+
+**A control chosen by the fix's author.** The kernel rule paused a server's
+ping while its partner ran, and my control for "a busy partner that is really
+stuck" was an `fsd` that spins forever. It passed. The review found the case it
+could not show: a partner that never replies but blocks briefly now and then
+resets its own heartbeat, so neither detector fires. A spin never blocks. The
+control tested the shape the fix handled, not the one it broke, and the fix was
+replaced.
+
+**A page name the checker prints and refuses.** `check-site-freshness.py`
+reports a stale page as `docs/site/<page>` and tells you to re-stamp it with
+`--update <page>`, but its manifest keys pages as `site/<page>`, and the name
+it printed was refused as "not currently reported stale". Found by following
+its own instructions. Not fixed yet.
+
+**A description that said every one.** #175's description said all twelve
+wedges showed `fsd` in `find`. Ten had been measured; the first printed no PC
+and the second printed the stale one above. Corrected after merge, and marked
+as corrected. The count was right and the claim about it was wider than the
+instrument that produced it.

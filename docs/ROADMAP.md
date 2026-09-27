@@ -47,7 +47,9 @@ the microkernel arc itself still leaves open):
 1. **Per-user keys for the cluster.** **Planned 2026-09-26:
    [`roadmap-user-keys.md`](roadmap/roadmap-user-keys.md)** (password-derived
    keys held by `netd` while the user is logged in, root squash first, shaped as the foundation for the
-   auth server below). Per-user cluster *identity* shipped
+   auth server below). **Steps 0 to 4 on `main` 2026-09-27** (#170 to #174:
+   the impersonation gate, root squash, PBKDF2, the user key and realm, and
+   keys held by `netd` from login to logout); step 5, the wire, is next. Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)): a remote request
    carries the requesting user's **name** inside the signature, the far side resolves
@@ -717,8 +719,7 @@ The small open tails those arcs deliberately left:
   chunk reads keep it out of the loop that acks a ping. `cpu_spawn` now beats
   after each chunk. Full account in `docs/roadmap/roadmap-user-keys.md`, step
   4's results; the follow-ups it left (the quadratic spawn read, pings piling
-  up behind a long loop's acks, a kernel-side rule) are on `main`'s
-  `ROADMAP.md`. This branch reaches the fix when its base becomes `main`.
+  up behind a long loop's acks, a kernel-side rule) are below.
 
 - **A login waits on `netd` (found 2026-09-27, review of user-keys step 4).**
   `login`'s `NETOP_KEY_DROP_MINE` before every prompt and its `HOLD` after a
@@ -786,6 +787,23 @@ The small open tails those arcs deliberately left:
   to `cond`, say) resets its own heartbeat and keeps the caller's pause on,
   so neither detector fires. A kernel rule needs a bound on the pause
   before it is safe.
+
+- **A call's reply wait accepts the partner's own request (found
+  2026-09-27, latent).** `send_message` direct-delivers any message from the
+  task a caller is blocked on as that caller's reply, including a new
+  `MSG_CALL` request from it. Two servers calling each other at the same moment
+  would turn one's request into the other's reply, and the first would then
+  wait forever. No pair of SERVERS can do it today (by the send masks, `fsd`
+  calls only `cond`, `cond` nobody, `netd` and `accountd` only `fsd` and
+  `cond`); the first server-to-server cycle makes it possible. The shell and
+  its children may message each other both ways (`TO_SPAWNABLE`, `TO_SHELL`),
+  and whether two simultaneous calls there can meet has not been examined. A
+  reply needs to be told apart from a request at delivery.
+
+- **`check-site-freshness.py` prints a page name its `--update` refuses
+  (found 2026-09-27).** A stale page is reported as `docs/site/<page>`, the
+  manifest keys it as `site/<page>`, and `--update docs/site/<page>` answers
+  "not currently reported stale". Print the key, or accept both spellings.
 
 - **A server past its restart cap draws a second wedge line (seen
   2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot
