@@ -11,6 +11,19 @@
 > it graduates to a postmortem — that is how every other hardware surprise in
 > this project got written up.
 
+> **Update 2026-09-27: the Pi 400, two wrong predictions and a live
+> regression.** A desk session checking this plan against a Raspberry Pi 400
+> found three things without a board. Two are predictions that were wrong on
+> paper. **The keyboard cannot work yet**: every USB 2.0 device on a BCM2711
+> board, the Pi 400's built-in keyboard included, sits behind an on-board hub,
+> and `xhci.rs` has no hub support (§1b). **The xHCI BAR is a bus address, not
+> a CPU address**, on this board (§6 checkpoint 4). The third is observed, not
+> predicted: **the xHCI discovery's exclusive root-bridge open was refused by
+> firmware**, and `make run-usb-kbd` had found no controller on QEMU since
+> 2026-08-29 (Risk 6). The second and third are fixed on branch
+> `pi400/bar-translation`; the table in §2, §3's shopping list, checkpoint 4
+> and §6's storage note are corrected in place.
+
 The practical guide to booting Ouroboros on a **real Raspberry Pi 4** under UEFI
 firmware. Companion to [`testing-qemu.md`](testing-qemu.md) (the fast dev loop,
 single machine and two-node cluster) and [`testing-parallels.md`](testing-parallels.md)
@@ -66,6 +79,46 @@ Beyond the firmware, four things make the Pi 4 fit *this* kernel unusually well:
 
 ---
 
+## 1b. The Raspberry Pi 400
+
+The Pi 400 is a Pi 4 built into a keyboard: the same BCM2711 SoC, the same
+VL805 xHCI controller behind the same PCIe block, 4 GB of RAM. The pftf/EDK2
+firmware lists it as supported next to the Pi 4 B (confirmed: edk2-platforms
+`Platform/RaspberryPi/RPi4/Readme.md`), so everything in this document applies
+to it. What differs:
+
+- **The keyboard is a USB device behind a hub, and `xhci.rs` cannot reach
+  it.** On a Pi 400 `lsusb` shows the built-in keyboard (Holtek, `04d9:0007`)
+  behind the VIA Labs hub `2109:3431` (confirmed: user reports, see Sources).
+  That hub is soldered to the VL805's USB 2.0 root port on every BCM2711
+  board, so on a plain Pi 4 **every USB 2.0 device** sits behind it too:
+  keyboards, and USB sticks that are not SuperSpeed. `xhci.rs` addresses only
+  devices attached directly to a root port (its module doc: *"no hubs (route
+  string is always 0)"*). Predicted result: the port scan finds the hub,
+  reads interface class `0x09`, skips it, and the boot has **no keyboard at
+  all**. On the Pi 400 there is no workaround short of an external keyboard,
+  and an external USB 2.0 keyboard goes through the same hub. (predicted)
+- **What still works without hubs:** a SuperSpeed (USB 3) stick in one of the
+  two blue ports is attached directly to a USB 3 root port, so `usb_msd.rs`
+  should reach it. (predicted)
+- **Serial:** the 40-pin GPIO header is on the back edge, same pinout, so §3's
+  wiring applies unchanged.
+- **RAM:** 4 GB, so the "Limit RAM to 3 GB" setting in §5 is the one that
+  matters. Leave it on.
+
+**Hub support is therefore the first piece of new driver work the Pi 400
+needs**, ahead of any NIC. It can be built and tested on QEMU before any
+board is on the bench: `-device usb-hub,bus=xhci0.0,port=1 -device
+usb-kbd,bus=xhci0.0,port=1.1` puts a keyboard behind a hub on the existing
+`qemu-xhci`. The work: recognise a hub (class `0x09`), read its hub
+descriptor, power and reset its ports with hub class requests, and address
+each downstream device with a nonzero route string. **One part QEMU cannot
+exercise:** QEMU's `usb-hub` is full-speed, while the VIA hub is high-speed
+with a full- or low-speed keyboard below it. That case needs the
+transaction-translator fields in the slot contexts (the hub's own slot marked
+as a hub with its port count and TT think time; the keyboard's slot naming its
+parent hub slot and port). Those fields get their first test on the board.
+
 ## 2. The one caveat that shapes everything: still no networking
 
 **A Pi 4 has no virtio device of any kind.** Its NIC is Broadcom GENET
@@ -103,8 +156,8 @@ Three ways to close that gap, ranked by how much new ground each breaks:
 | Capability | Real Pi 4 | Real Parallels | Two QEMU VMs |
 | --- | --- | --- | --- |
 | Boot, console (serial + HDMI/GOP) | ✅ (predicted) | ✅ | ✅ |
-| USB keyboard (xHCI HID) | ✅ (predicted) | ✅ | ✅ |
-| USB storage + disk/FS commands | ✅ **USB stick only** — see §6 | ✅ (USB-MSD) | ✅ (virtio-blk) |
+| USB keyboard (xHCI HID) | ❌ **behind a hub** until hub support exists, see §1b | ✅ | ✅ |
+| USB storage + disk/FS commands | ✅ **SuperSpeed stick in a blue port only**, see §1b and §6 | ✅ (USB-MSD) | ✅ (virtio-blk) |
 | Shell, `/bin`, pipelines, env | ✅ (predicted) | ✅ | ✅ |
 | Networking (`ping`/`resolve`/`fetch`) | ❌ GENET is not virtio | ❌ no NIC transport | ✅ |
 | Cluster (`mount -r`/`cpu`/`dial`/export/auth) | ❌ same | ❌ same | ✅ |
@@ -132,8 +185,14 @@ Per board:
   important item in the list.
 - **micro-HDMI cable** — the GOP framebuffer console (`fbconsole.rs`) is a
   separate output path from serial and needs its own verification.
-- **A USB keyboard** (the xHCI HID path) and **a FAT32-formatted USB stick**
-  (the `usb_msd` block path, and the only runtime filesystem the Pi has — §6).
+- **A FAT32-formatted USB 3 (SuperSpeed) stick**, for a blue port: the
+  `usb_msd` block path, and the only runtime filesystem the Pi has (§6). A USB
+  2.0 stick, or any stick in the black port, goes through the on-board hub and
+  will not be found (§1b).
+- **No USB keyboard yet.** Every USB keyboard goes through the on-board hub
+  (§1b), the Pi 400's own included. Until hub support exists, type over the
+  serial cable: the PL011 console reads input as well as writing it
+  (`console.rs`'s `read_byte`), so the Mac's terminal is the keyboard.
 
 ### Wiring the serial console
 
@@ -258,6 +317,32 @@ localises the failure without any guessing.
    in `pci.rs` made every prior platform read `0xffffffff` or take an External
    Abort, and the fix is only confirmed on Parallels so far.
 
+   **Order changed 2026-09-27:** this line now prints later than its number
+   says, after checkpoint 5's MADT line and the loader's program lines, as the
+   last thing before boot services exit (Risk 6 has why). Its reprint after the
+   exit is still the first `xhci:` line of the post-exit console.
+
+   **Corrected 2026-09-27: `{base}` must be the CPU address, and on this board
+   the BAR does not hold it.** The BCM2711's PCIe window is translated: under
+   pftf the BAR holds a bus address near `0xF800_0000` while the CPU reaches
+   the controller at `0x6_0000_0000` (confirmed: edk2-platforms `RPi4.dsc`,
+   `PcdBcm27xxPciBusMmioAdr` and `PcdBcm27xxPciCpuMmioAdr`). Before the fix,
+   `pci.rs` used the raw BAR, and `xhci.rs`'s first register read would have
+   gone to an address with nothing behind it. Branch `pi400/bar-translation`
+   takes the CPU address from firmware (`PciIo.GetBarAttributes`, which per
+   UEFI 2.7 reports the host address and does the conversion itself) and
+   refuses the controller unless that address plus firmware's translation
+   gives back the BAR read from config space. The line to read, reprinted after
+   `exit_boot_services` so it survives on an HDMI-only boot:
+   `xhci: CPU {cpu} (BAR {bus}, translation {t})`. Expected here: CPU
+   `0x6_0000_0000` or just above, BAR near `0xF800_0000`, translation
+   `0xffff_fffa_f800_0000` (`0xF800_0000 - 0x6_0000_0000`, wrapped). On QEMU
+   the translation is 0, so this checkpoint is the first test of a nonzero
+   one. A refusal reads `xHCI discovery failed (xHCI controller: BAR0 …
+   does not equal firmware's CPU … + translation …)` and the boot goes on
+   without USB; that is the fail-closed path, checked on QEMU by corrupting
+   the CPU address on purpose. (predicted)
+
 5. **MADT parse → GICv2.** *(predicted)* The Pi 4's GIC-400 is a GICv2, with
    GICD at `0xFF84_1000` and GICC at `0xFF84_2000`. **This is the single most
    valuable checkpoint on the board**, because a hardcoded `GICD_BASE` is
@@ -292,10 +377,13 @@ protocol during the boot-services window (confirmed: `loader.rs`'s module doc �
 two runtime drivers, `virtio_blk` and `usb_msd` (confirmed: `block.rs`). The Pi
 has neither on its SD slot.
 
-So: the card boots the kernel and supplies `/bin` and `/man`, and then becomes
-invisible the moment `exit_boot_services` runs. Every runtime filesystem test —
+So: the card boots the kernel and the boot programs, and then becomes
+invisible the moment `exit_boot_services` runs. The `/bin` and `/man` copies on
+it are unreachable from then on: running a program goes through `fsd`
+(`spawn_stage` in the shell reports `NO_FS` without a disk), so with no stick
+the shell has its builtins and nothing else. Every runtime filesystem test:
 `ls`, `cat`, `write`, `mount`, `erase disk`, `partition`, `format` — needs the
-**USB stick**, exactly as on Parallels. This is not a Pi limitation; it is the
+**USB 3 stick in a blue port**, as on Parallels. This is not a Pi limitation; it is the
 same architecture that made USB-MSD necessary there in the first place.
 
 ---
@@ -387,6 +475,71 @@ entirely. **Connect both from the first boot**, before anything needs debugging.
 
 ---
 
+### Risk 6: firmware refuses the exclusive root-bridge open
+
+Before the fix, `pci::discover_xhci` opened `PciRootBridgeIo` with
+`open_protocol_exclusive`, which asks firmware to disconnect every driver bound
+anywhere below that root bridge. If any of them refused, the open failed with
+`ACCESS_DENIED`, the loop skipped the bridge without a word, and the result was
+`no xHCI controller found`.
+
+**Observed on QEMU on 2026-09-27, and it has been happening since 2026-08-29.**
+`make run-usb-kbd` has found no keyboard since `-device virtio-rng-device`
+joined every disk target (#26). One variable at a time: with the RNG and
+QEMU's default virtio-net-pci NIC, the open is refused; drop the RNG, or keep
+it and drop the NIC (`-nic none`), and the controller is found and the
+keyboard comes up. The likely mechanism, not confirmed: this EDK2 starts its
+network stack only when an RNG protocol exists, and that stack will not let
+go of the NIC. The same shape is how `framebuffer.rs` once killed the firmware
+console on Parallels, the bug its module doc records.
+
+**Why it matters here:** on the Pi the firmware has the VL805 bound to its own
+xHCI driver with the USB keyboard as console input, and a hardware RNG.
+
+**Fixed on branch `pi400/bar-translation`.** Every root-bridge open in
+`pci.rs` is now read-only (`GetProtocol`), and the one exclusive open left is
+of the xHCI controller's own `PciIo`, which asks only firmware's xHCI driver
+and the USB devices under it to stop. Checked on QEMU with the RNG and the NIC
+both present: the controller is found, and keystrokes injected through the
+monitor reach the shell; the three-device rig (`run-usb-multi`'s keyboard,
+tablet and storage stick) finds all three. **Not checked:** Parallels, where
+the old exclusive opens were the confirmed-working shape. Its firmware drivers
+for other PCI devices now stay bound until `exit_boot_services`, where before
+they may have been torn down. The signature, if firmware refuses the narrower
+open on the board: `pci: xHCI controller at … skipped (xHCI controller: firmware
+refused its PciIo (…))`, then `xHCI discovery failed` with the same reason.
+
+**Also fixed with it: the takeover now happens last before
+`exit_boot_services`.** Stopping firmware's xHCI driver also stops the USB
+storage under it, and a Pi booted entirely from a USB stick has its ESP there.
+Discovery used to run before the loader read the boot programs and before the
+boot identity read its counter file, both off the ESP; it now runs after both.
+**Checked on QEMU, with a control that fails:** booted from a USB stick holding
+`build/esp.img` and no other disk, `main`'s kernel took the controller and then
+panicked with `failed to load shell program: couldn't open the boot volume`;
+this branch loads every program over firmware's USB stack, takes the
+controller, and then mounts the same stick through `usb_msd.rs` as its runtime
+disk (`FAT32 mounted`). So one USB 3 stick can be the Pi's whole disk, boot and
+runtime, as far as the kernel is concerned. Whether pftf itself boots from USB
+is a firmware question the board settles.
+
+**Also a new dependency:** both PCI discovery paths (the xHCI and the 16550
+console) now need firmware to have a `PciIo` handle for the device and to
+answer `GetBarAttributes`; before, the root bridge alone was enough. Without
+either, the device is refused (`no firmware PciIo handle at its location`, or
+`no BAR0 attributes from firmware`). That is deliberate, the fail-closed
+choice, and it is also why the address is now checked before the controller
+is taken, not after: a refused controller is left with firmware's driver
+still running it.
+
+**One consequence not checked anywhere but QEMU:** firmware's drivers for the
+*other* PCI devices now stay bound until `exit_boot_services`. Under the old
+exclusive open, where it succeeded (Parallels), they were stopped first. A
+firmware driver that kept a device writing to memory by DMA past
+`exit_boot_services` would corrupt memory the kernel has taken back. UEFI
+drivers are required to stop DMA at that point, but only a Parallels run
+settles it.
+
 ## Develop on QEMU first (raspi3b / raspi4b) — you don't have to wait for the boards
 
 QEMU emulates the Raspberry Pi, so Pi-specific bring-up can start on the fast dev
@@ -474,5 +627,14 @@ fix are all above, which is the whole reason for writing them down first.
   external references in [`resources.md`](../resources.md).
 - [QEMU Arm — Raspberry Pi boards](https://www.qemu.org/docs/master/system/arm/raspi.html) —
   the `raspi3b`/`raspi4b` machine types (see "Develop on QEMU first" above).
+- [Pi 400 keyboard HID descriptors (Gadgetoid/pi400kb #7)](https://github.com/Gadgetoid/pi400kb/issues/7)
+  and [raspberrypi/firmware #64](https://github.com/raspberrypi/firmware/issues/64):
+  user `lsusb` output showing the VIA Labs hub `2109:3431` on BCM2711 boards and
+  the Pi 400's Holtek keyboard `04d9:0007`, the basis for §1b.
+- [edk2-platforms `RPi4.dsc`](https://github.com/tianocore/edk2-platforms/blob/master/Platform/RaspberryPi/RPi4/RPi4.dsc)
+  and `Silicon/Broadcom/Bcm27xx/Library/Bcm2711PciHostBridgeLib`: the PCIe bus
+  and CPU windows and the aperture translation, the basis for checkpoint 4's
+  correction; edk2 `MdeModulePkg/Bus/Pci/PciHostBridgeDxe/PciRootBridgeIo.c`
+  for the convention that apertures are reported as CPU addresses.
 - This repository: `kernel/src/main.rs`, `virtio_mmio.rs`, `pci.rs`, `madt.rs`,
   `block.rs`, `loader.rs`, and the `Makefile`'s `esp`/`image` targets.

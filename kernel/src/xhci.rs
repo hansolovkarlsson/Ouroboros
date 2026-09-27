@@ -8,11 +8,15 @@
 //! ## Why this is safe to attempt even where `qemu_device_region_safe` is
 //! ## false
 //!
-//! Every register this module touches lives at an address read directly
-//! out of the xHCI controller's own PCI configuration-space BAR
-//! (`pci::discover_xhci`, boot-services `PciRootBridgeIo` - the identical,
-//! already-proven-safe-on-real-Parallels-hardware mechanism
-//! `pci::discover_uart16550`/`log_all_devices` already use). That's a
+//! Every register this module touches lives at an address firmware itself
+//! reports for the xHCI controller's BAR0 (`pci::discover_xhci`: the host
+//! address from the controller's own `PciIo.GetBarAttributes`, accepted
+//! only when it agrees with the BAR read out of PCI configuration space).
+//! **Not the mechanism Parallels confirmed**: there the address was the
+//! raw BAR, read through `PciRootBridgeIo`. The two are the same wherever
+//! the PCIe window is not translated, and the Raspberry Pi 4/400's is,
+//! which is why it changed (2026-09-27); the new path is checked on QEMU
+//! only, so the first Parallels or Pi boot is its first real test. That's a
 //! fundamentally different situation from `virtio_mmio.rs`'s
 //! `SLOT_BASE`/`gic.rs`'s `GICD_BASE` - both fixed, QEMU-shaped
 //! conventions confirmed unsafe on Parallels by two decoded Synchronous
