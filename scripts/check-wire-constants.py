@@ -417,6 +417,38 @@ PEER_BASELINE = {
 }
 
 
+def check_dev_user_keys(problems):
+    """The dev users' keys: `mkclusterkeys.py`'s Python against the Rust fixture.
+
+    Step 3 of docs/roadmap/roadmap-user-keys.md derives a user key in two
+    independent implementations, and they must agree byte for byte or a right
+    password reads as a wrong one. `clusterkeys/src/users.rs` pins each dev
+    user's key in DEV_USER_KEYS and a host test derives them in Rust and
+    compares; THIS compares the same table with what the Python derives now. The
+    two halves together are the agreement: change the salt in either language
+    and one of them fails. Run as a subprocess, because importing the script
+    runs its Ed25519 reference's self-check at module level.
+    """
+    import subprocess
+    out = subprocess.run([sys.executable, os.path.join(HERE, "mkclusterkeys.py"), "--dev-user-keys"],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        problems.append(f"mkclusterkeys.py --dev-user-keys failed: {out.stderr.strip()[-200:]}")
+        return
+    py = dict(line.split() for line in out.stdout.splitlines() if line.strip())
+    src = open(os.path.join(ROOT, "clusterkeys", "src", "users.rs")).read()
+    block = re.search(r"const DEV_USER_KEYS: &\[\(&str, &str, &str\)\] = &\[(.*?)\];", src, re.S)
+    if not block:
+        problems.append("clusterkeys/src/users.rs: DEV_USER_KEYS not found (renamed?)")
+        return
+    rs = {n: k for n, _pw, k in re.findall(r'\("([^"]+)",\s*"([^"]*)",\s*"([0-9a-f]{64})"\)', block.group(1))}
+    if not rs:
+        problems.append("clusterkeys/src/users.rs: DEV_USER_KEYS parsed empty - a check over nothing")
+    elif rs != py:
+        problems.append(f"dev user keys disagree: clusterkeys' fixture has {rs}, "
+                        f"mkclusterkeys.py derives {py}")
+
+
 def check_dev_peer_labels(problems):
     """BOTH peers' short-name maps must match `mkclusterkeys.py`'s dev peers.
 
@@ -621,6 +653,7 @@ def main():
         problems.append(f"only {compared} constant(s) compared, expected at least {len(CHECKED)}")
 
     check_dev_peer_labels(problems)
+    check_dev_user_keys(problems)
     check_fid_gate_budget(problems, rust)
 
     if problems:
@@ -633,7 +666,7 @@ def main():
     # same restatement-goes-stale shape this file warns about twice already.
     print(f"check-wire-constants: {compared} constant(s) agree across Rust and "
           f"{len(peers)} peer(s) ({', '.join(sorted(peers))}), "
-          "and the dev peer labels and root flags agree, and the fid gate's budget exceeds MAX_FIDS")
+          "and the dev peer labels, root flags and user keys agree, and the fid gate's budget exceeds MAX_FIDS")
     return 0
 
 

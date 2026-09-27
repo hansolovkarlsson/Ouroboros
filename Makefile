@@ -721,7 +721,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	# /etc/passwd + /etc/group: the account database the shell's login gate and
 	# the /bin account tools (id/su/passwd/useradd/groupadd/usermod) use
 	# (name:uid:gid:home:salt:hash / name:gid:members, hashes precomputed - see
-	# scripts/mkpasswd.py + scripts/mkgroup.py; DEV creds root/root + user/user).
+	# scripts/mkpasswd.py + scripts/mkgroup.py; DEV creds root/root, user/user, guest/guest).
 	# Absent -> login falls back to root.
 	python3 scripts/mkpasswd.py > $(ESP_DIR)/etc/passwd
 	python3 scripts/mkpasswd.py --shadow > $(ESP_DIR)/etc/shadow
@@ -730,7 +730,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	# Per-user home directories under /Users (the login home for `user`; `~`
 	# expands to it). FAT can't record an owner, so it's world-usable here; on
 	# ext2 the image build chowns it (see the ext2-src staging).
-	mkdir -p $(ESP_DIR)/Users/user
+	mkdir -p $(ESP_DIR)/Users/user $(ESP_DIR)/Users/guest
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.
@@ -979,7 +979,7 @@ $(EXFAT_PART): esp
 	# the login-time warning.
 	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/exfat-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/exfat-src/etc/group
-	mkdir -p $(BUILD_DIR)/exfat-src/Users/user
+	mkdir -p $(BUILD_DIR)/exfat-src/Users/user $(BUILD_DIR)/exfat-src/Users/guest
 	printf 'hello from an exFAT volume\r\n' > $(BUILD_DIR)/exfat-src/HELLO.TXT
 	printf 'line one\r\nline two has several words\r\nthird and final line\r\n' > $(BUILD_DIR)/exfat-src/README.TXT
 	mkdir -p $(BUILD_DIR)/exfat-src/SUB
@@ -1051,7 +1051,7 @@ $(EXT2_PART): esp
 	# anything - and mke2fs -d carries the host's mode onto the guest.
 	mkdir -p $(BUILD_DIR)/ext2-src/etc/cluster
 	python3 scripts/mkclusterkeys.py $(BUILD_DIR)/ext2-src/etc/cluster $(CLUSTER_NODE)
-	mkdir -p $(BUILD_DIR)/ext2-src/Users/user
+	mkdir -p $(BUILD_DIR)/ext2-src/Users/user $(BUILD_DIR)/ext2-src/Users/guest
 	printf 'only user may read this\n' > $(BUILD_DIR)/ext2-src/Users/user/PRIVATE.TXT
 	chmod 600 $(BUILD_DIR)/ext2-src/Users/user/PRIVATE.TXT
 	printf 'hello from an ext2 volume\n' > $(BUILD_DIR)/ext2-src/HELLO.TXT
@@ -1067,6 +1067,8 @@ $(EXT2_PART): esp
 	# record an owner). debugfs ships with e2fsprogs alongside mke2fs.
 	"$(DEBUGFS)" -w -R "sif /Users/user uid 1000" $(EXT2_PART) 2>/dev/null
 	"$(DEBUGFS)" -w -R "sif /Users/user gid 1000" $(EXT2_PART) 2>/dev/null
+	"$(DEBUGFS)" -w -R "sif /Users/guest uid 1001" $(EXT2_PART) 2>/dev/null
+	"$(DEBUGFS)" -w -R "sif /Users/guest gid 1001" $(EXT2_PART) 2>/dev/null
 	# /Users/user/PRIVATE.TXT: a file only `user` may read (0600, uid/gid 1000).
 	# The impersonation gate's row 2 reads it while CLAIMING to be `user` from a
 	# peer `user` never logged in on (docs/roadmap/roadmap-user-keys.md, step 0).

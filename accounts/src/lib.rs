@@ -59,22 +59,87 @@ pub struct Account<'a> {
     pub secret: Option<Secret>,
 }
 
-/// A password secret: the salt and the hash of `salt || password`. Split out of
-/// [`Account`] so it can live in `/etc/shadow` instead of the world-readable
-/// `/etc/passwd`.
+/// Bytes of salt in a **version-2** shadow secret: 7, so its field (`2$` and
+/// 14 hex digits) is exactly as wide as a version-1 8-byte salt's 16 hex
+/// digits. That equal width is what lets `accountd` upgrade a line in place
+/// (Decision 10 of docs/roadmap/roadmap-user-keys.md).
+pub const SALT_V2: usize = 7;
+
+/// The marker that opens a version-2 salt field. `$` is never a hex digit, so a
+/// version-1 field can never be read as version 2 or the reverse.
+pub const V2_MARK: &[u8] = b"2$";
+
+/// Which hash a secret's `hash` is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SecretVersion {
+    /// `SHA-256(salt || password)`: one fast hash. Still verified, never
+    /// written by `useradd` or `mkpasswd.py` once version 2 is.
+    V1,
+    /// The first 32 bytes of PBKDF2-HMAC-SHA-512 over a 7-byte salt at
+    /// `ninep_abi::USERKEY_ITERATIONS`: the slow function a user key costs a
+    /// guesser, so a stolen `/etc/shadow` is no faster to attack. About one
+    /// second on the QEMU guest, so it is verified only in a program that has
+    /// the password and is not supervised, never in a server.
+    V2,
+}
+
+/// A password secret: the salt and the hash of the password, and which hash it
+/// is. Split out of [`Account`] so it can live in `/etc/shadow` instead of the
+/// world-readable `/etc/passwd`.
 #[derive(Clone, Copy)]
 pub struct Secret {
+    pub version: SecretVersion,
     pub salt: [u8; SALT_MAX],
     pub salt_len: usize,
     pub hash: [u8; DIGEST],
 }
 
 impl Secret {
-    /// Constant-time check of `password` against this salt+hash.
+    /// Constant-time check of `password` against this salt+hash, by the
+    /// secret's own version. A version-2 check takes about a second on the
+    /// guest.
+    ///
+    /// It reads nothing but the secret and the password: no realm, no cluster
+    /// file. So no cluster misconfiguration can refuse a login (Decision 10).
     pub fn verify(&self, password: &[u8]) -> bool {
-        let digest = sha256_two(&self.salt[..self.salt_len], password);
+        let digest = match self.version {
+            SecretVersion::V1 => sha256_two(&self.salt[..self.salt_len], password),
+            SecretVersion::V2 => v2_hash(&self.salt[..self.salt_len], password),
+        };
         digest_eq(&digest, &self.hash)
     }
+
+    /// The check for a SUPERVISED SERVER: `Some(ok)` for a version-1 secret,
+    /// and `None` for version 2, which would need a derivation, about a second
+    /// on the guest, inside a server the watchdog restarts after 2.56 s. A
+    /// caller that gets `None` refuses; it never falls back to [`Self::verify`].
+    /// `accountd` uses this and only this, so a version-2 line cannot make it
+    /// derive, whoever wrote the line.
+    pub fn verify_without_deriving(&self, password: &[u8]) -> Option<bool> {
+        match self.version {
+            SecretVersion::V1 => Some(digest_eq(&sha256_two(&self.salt[..self.salt_len], password), &self.hash)),
+            SecretVersion::V2 => None,
+        }
+    }
+}
+
+/// The version-2 hash of `password` over `salt`.
+fn v2_hash(salt: &[u8], password: &[u8]) -> [u8; DIGEST] {
+    let mut out = [0u8; 64];
+    ed25519::pbkdf2_hmac_sha512(password, salt, ninep_abi::USERKEY_COUNT, &mut out);
+    let mut hash = [0u8; DIGEST];
+    hash.copy_from_slice(&out[..DIGEST]);
+    hash
+}
+
+/// A new version-2 secret for `password` over `salt` (from the RNG, or the
+/// documented weak fallback where there is none). One derivation: about a
+/// second on the guest, so it belongs in `login`, `passwd` or `useradd`, which
+/// have the password, and never in `accountd`.
+pub fn secret_v2(salt: [u8; SALT_V2], password: &[u8]) -> Secret {
+    let mut s = [0u8; SALT_MAX];
+    s[..SALT_V2].copy_from_slice(&salt);
+    Secret { version: SecretVersion::V2, salt: s, salt_len: SALT_V2, hash: v2_hash(&salt, password) }
 }
 
 impl Account<'_> {
@@ -125,16 +190,30 @@ fn parse_account(line: &[u8]) -> Option<Account<'_>> {
     Some(Account { name, uid, gid, home, secret })
 }
 
-/// Decode a hex salt + hex hash pair into a [`Secret`], rejecting a hash that
-/// isn't exactly [`DIGEST`] bytes (a truncated line must not verify).
-fn decode_secret(salt_hex: &[u8], hash_hex: &[u8]) -> Option<Secret> {
+/// Decode a salt field + hex hash pair into a [`Secret`], rejecting a hash
+/// that isn't exactly [`DIGEST`] bytes (a truncated line must not verify).
+///
+/// A salt field opening with [`V2_MARK`] is version 2 and must hold exactly
+/// [`SALT_V2`] bytes; any other is version 1's plain hex. A version-2 field of
+/// another width is refused rather than read as version 1, so a damaged line
+/// does not verify under the wrong hash.
+fn decode_secret(salt_field: &[u8], hash_hex: &[u8]) -> Option<Secret> {
     let mut salt = [0u8; SALT_MAX];
-    let salt_len = hex_decode(salt_hex, &mut salt)?;
+    let (version, salt_len) = match salt_field.strip_prefix(V2_MARK) {
+        Some(hex) => {
+            let n = hex_decode(hex, &mut salt)?;
+            if n != SALT_V2 || hex.len() != SALT_V2 * 2 {
+                return None;
+            }
+            (SecretVersion::V2, n)
+        }
+        None => (SecretVersion::V1, hex_decode(salt_field, &mut salt)?),
+    };
     let mut hash = [0u8; DIGEST];
     if hex_decode(hash_hex, &mut hash)? != DIGEST {
         return None;
     }
-    Some(Secret { salt, salt_len, hash })
+    Some(Secret { version, salt, salt_len, hash })
 }
 
 /// Parse one `/etc/shadow` line: `name:salt_hex:hash_hex`.
@@ -162,7 +241,25 @@ pub fn find_secret_by_name(shadow: &[u8], name: &[u8]) -> Option<Secret> {
     None
 }
 
-/// Format one `/etc/shadow` line (no trailing newline): `name:salt:hash`.
+/// Format one `/etc/shadow` line for `secret`, of either version (no trailing
+/// newline). The way to copy a secret from one line to another: rebuilding a
+/// line from a secret's salt and hash with [`format_shadow_line`] would drop a
+/// version-2 marker and leave a line that verifies nothing.
+pub fn format_secret_line(buf: &mut [u8], name: &[u8], secret: &Secret) -> Option<usize> {
+    let mut w = Writer::new(buf);
+    w.bytes(name)?;
+    w.byte(b':')?;
+    if secret.version == SecretVersion::V2 {
+        w.bytes(V2_MARK)?;
+    }
+    w.hex(&secret.salt[..secret.salt_len])?;
+    w.byte(b':')?;
+    w.hex(&secret.hash)?;
+    Some(w.len)
+}
+
+/// Format one VERSION-1 `/etc/shadow` line (no trailing newline):
+/// `name:salt:hash`.
 pub fn format_shadow_line(buf: &mut [u8], name: &[u8], salt: &[u8], hash: &[u8]) -> Option<usize> {
     let mut w = Writer::new(buf);
     w.bytes(name)?;
@@ -1015,5 +1112,95 @@ mod tests {
         let mut buf = [0u8; 64];
         let n = format_group_line(&mut buf, b"devs", 2000, b"a,b,c").unwrap();
         assert_eq!(&buf[..n], b"devs:2000:a,b,c");
+    }
+
+    // --- version-2 shadow (docs/roadmap/roadmap-user-keys.md, Decision 10) ---
+
+    /// Both lines were made by Python's `hashlib`, not by this crate: the v2
+    /// with `pbkdf2_hmac('sha512', b"user", salt, 210000)[:32]`, the v1 with
+    /// `sha256(salt + b"user")`.
+    const V2_LINE: &[u8] =
+        b"user:2$0123456789abcd:cc7623596d13435ff5a5b3ed5612e645a327dfe8bf44dfda3f5fa6f65f54dedb";
+    const V1_LINE: &[u8] =
+        b"user:0011223344556677:a906c4f786b84f6b85fc108b03ad5d11aa73c8e23e5a00888f623c5bb3e22e9e";
+
+    /// The step's check: a version-2 line verifies the right password and
+    /// refuses a wrong one, and a version-1 line still verifies. The v2 hash
+    /// is a function of the salt and the password alone (the fixture was made
+    /// with nothing else), which is what keeps local login independent of the
+    /// realm: `verify` has no way to read one.
+    #[test]
+    fn version_2_verifies_the_right_password_only_and_version_1_still_works() {
+        let v2 = find_secret_by_name(V2_LINE, b"user").expect("v2 parses");
+        assert_eq!(v2.version, SecretVersion::V2);
+        assert_eq!(v2.salt_len, SALT_V2);
+        assert!(v2.verify(b"user"));
+        assert!(!v2.verify(b"User"));
+        let v1 = find_secret_by_name(V1_LINE, b"user").expect("v1 parses");
+        assert_eq!(v1.version, SecretVersion::V1);
+        assert!(v1.verify(b"user"));
+        assert!(!v1.verify(b"User"));
+    }
+
+    /// The upgrade's safety rests on this: a version-1 line with an 8-byte
+    /// salt and its version-2 replacement are the same length, so `accountd`
+    /// rewrites it in place and never truncates `/etc/shadow`.
+    #[test]
+    fn a_version_2_line_is_exactly_as_long_as_a_version_1_line() {
+        assert_eq!(V1_LINE.len(), V2_LINE.len());
+        for name in [&b"u"[..], b"user", b"a-thirty-two-byte-user-name-here"] {
+            let v1 = Secret { version: SecretVersion::V1, salt: [7; SALT_MAX], salt_len: 8, hash: [9; DIGEST] };
+            let v2 = Secret { version: SecretVersion::V2, salt: [7; SALT_MAX], salt_len: SALT_V2, hash: [9; DIGEST] };
+            let (mut a, mut b) = ([0u8; 160], [0u8; 160]);
+            let la = format_secret_line(&mut a, name, &v1).expect("v1");
+            let lb = format_secret_line(&mut b, name, &v2).expect("v2");
+            assert_eq!(la, lb, "name {name:?}");
+        }
+    }
+
+    /// The formatter writes each version back as it was read, which is what
+    /// `usermod` relies on to carry a secret to a renamed line.
+    #[test]
+    fn a_secret_formats_back_to_the_line_it_came_from() {
+        for line in [V1_LINE, V2_LINE] {
+            let secret = find_secret_by_name(line, b"user").expect("parses");
+            let mut out = [0u8; 160];
+            let n = format_secret_line(&mut out, b"user", &secret).expect("formats");
+            assert_eq!(&out[..n], line);
+        }
+    }
+
+    /// A version-2 field of any other width, or with non-hex digits, is
+    /// refused, never read as version 1: `2$` is not hex, so a v1 reading
+    /// could not succeed anyway, and a v2 reading of the wrong width would
+    /// verify under a salt nobody wrote.
+    #[test]
+    fn a_damaged_version_2_field_is_refused() {
+        for field in [&b"2$0123456789ab"[..], b"2$0123456789abcdef", b"2$0123456789abcz", b"2$", b"3$0123456789abcd"] {
+            let mut line = [0u8; 160];
+            let mut n = 0;
+            for part in [&b"user:"[..], field, b":cc7623596d13435ff5a5b3ed5612e645a327dfe8bf44dfda3f5fa6f65f54dedb"] {
+                line[n..n + part.len()].copy_from_slice(part);
+                n += part.len();
+            }
+            assert!(find_secret_by_name(&line[..n], b"user").is_none(), "{field:?}");
+        }
+    }
+
+    #[test]
+    fn the_servers_check_answers_version_1_and_declines_version_2() {
+        let v1 = find_secret_by_name(V1_LINE, b"user").expect("v1");
+        assert_eq!(v1.verify_without_deriving(b"user"), Some(true));
+        assert_eq!(v1.verify_without_deriving(b"User"), Some(false));
+        let v2 = find_secret_by_name(V2_LINE, b"user").expect("v2");
+        assert_eq!(v2.verify_without_deriving(b"user"), None, "a server must not derive");
+    }
+
+    #[test]
+    fn a_new_version_2_secret_verifies_its_password() {
+        let s = secret_v2([1, 2, 3, 4, 5, 6, 7], b"pw");
+        assert_eq!(s.version, SecretVersion::V2);
+        assert!(s.verify(b"pw"));
+        assert!(!s.verify(b"pw2"));
     }
 }

@@ -14,3 +14,8 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+# Version-2 /etc/shadow (docs/roadmap/roadmap-user-keys.md, Decision 10):
+# PBKDF2-HMAC-SHA-512 at the cluster's iteration count, which ninep-abi holds
+# so the shadow hash and the user key cannot drift apart.
+ed25519 = { path = "../ed25519" }
+ninep-abi = { path = "../ninep-abi" }

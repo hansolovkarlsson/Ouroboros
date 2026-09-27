@@ -1967,8 +1967,8 @@ def do_impersonate_gate(host, port, stage):
           "kind exists until step 7", flush=True)
     print("[n/a ] row 4: `user` with a valid credential - no credential kind exists until "
           "step 7", flush=True)
-    print("[n/a ] row 5: a name with no registered key - there is no registry until step 3, "
-          "so every name is unregistered today, which rows 1 and 2 already show", flush=True)
+    print("[n/a ] row 5: `guest`, a name with no registered key - the registry is staged since "
+          "step 3 but no export reads it until step 7", flush=True)
 
     print(f"impersonate-gate: {failed} check(s) failed", flush=True)
     return failed

@@ -8,6 +8,8 @@
 //! clusterkey peers        list the peers this machine accepts
 //! clusterkey line N IP    print the authorized line to paste on another machine
 //!                         (never root-flagged: that is the other machine's call)
+//! clusterkey realm        show the cluster's realm
+//! clusterkey realm new [-f]  generate a realm (refuses without real entropy)
 //! ```
 //!
 //! ## Why generation refuses rather than degrades
@@ -29,6 +31,7 @@ use clusterkeys::{KEY_HEX_LEN, KEY_LEN};
 const ID_PATH: &str = "/etc/cluster/id";
 const PUB_PATH: &str = "/etc/cluster/id.pub";
 const AUTHORIZED_PATH: &str = "/etc/cluster/authorized";
+const REALM_PATH: &str = "/etc/cluster/realm";
 
 /// Mode for the private key: readable by its owner and nobody else. Enforced on
 /// ext2; FAT32 and exFAT model no mode at all, which the boot warning already
@@ -51,8 +54,10 @@ pub extern "C" fn _start() -> ! {
         peers(target)
     } else if cmd == b"line" {
         line(target)
+    } else if cmd == b"realm" {
+        realm(target)
     } else {
-        out(target, b"usage: clusterkey [new [-f] | peers | line <name> <ip>]\r\n");
+        out(target, b"usage: clusterkey [new [-f] | peers | line <name> <ip> | realm [new [-f]]]\r\n");
         2
     };
     ulib::end_of_stream(target);
@@ -172,6 +177,122 @@ fn generate(target: u64) -> u64 {
         1
     } else {
         0
+    }
+}
+
+/// Show the realm, or with `new [-f]` generate one.
+///
+/// The realm is the cluster's half of every user key's salt
+/// (docs/roadmap/roadmap-user-keys.md, Decision 2), the same on every node of
+/// a cluster and different from every other cluster's, since a dictionary
+/// precomputed for one realm serves every node in it. So it is generated from
+/// the entropy device and COPIED to the other nodes, never typed in, and
+/// generation refuses without entropy exactly as `new` does.
+fn realm(target: u64) -> u64 {
+    let mut word = [0u8; 8];
+    let wn = ulib::arg(2, &mut word).unwrap_or(0);
+    // REALM_FILE_MAX + 1, the size every reader uses, so a longer file is
+    // refused here exactly as `login` will refuse it (see parse_realm).
+    let mut buf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
+    let current = read_realm_file(&mut buf);
+    if wn == 0 {
+        return match current {
+            FileRead::Bytes(n) => match clusterkeys::parse_realm(&buf[..n]) {
+                Some(r) => {
+                    out(target, r);
+                    out(target, b"\r\n");
+                    0
+                }
+                None => {
+                    out(target, b"clusterkey: /etc/cluster/realm is not a realm (one word, at most 32\r\n");
+                    out(target, b"  printable bytes; empty counts as none), so this machine derives\r\n");
+                    out(target, b"  no user keys. 'clusterkey realm new -f' replaces it.\r\n");
+                    1
+                }
+            },
+            FileRead::Absent => {
+                out(target, b"clusterkey: no realm here - this machine derives no user keys.\r\n");
+                out(target, b"  Copy /etc/cluster/realm from another node of the cluster, or\r\n");
+                out(target, b"  start a cluster with 'clusterkey realm new'.\r\n");
+                1
+            }
+            FileRead::Unreadable => {
+                out(target, b"clusterkey: /etc/cluster/realm is unreadable\r\n");
+                1
+            }
+        };
+    }
+    if &word[..wn] != b"new" {
+        out(target, b"usage: clusterkey realm [new [-f]]\r\n");
+        return 2;
+    }
+    if ulib::getuid() != 0 {
+        out(target, b"clusterkey: only root may change this machine's realm\r\n");
+        return 1;
+    }
+    let mut flag = [0u8; 8];
+    let fn_ = ulib::arg(3, &mut flag).unwrap_or(0);
+    let force = &flag[..fn_] == b"-f";
+    match current {
+        FileRead::Absent => {}
+        FileRead::Bytes(_) if force => {}
+        FileRead::Bytes(_) => {
+            out(target, b"clusterkey: a realm already exists here.\r\n");
+            out(target, b"  Replacing it changes EVERY user's cluster key on this node, and\r\n");
+            out(target, b"  every node of the cluster must be given the new one.\r\n");
+            out(target, b"  Use 'clusterkey realm new -f' if that is what you want.\r\n");
+            return 1;
+        }
+        // Fails closed, as `new` does: unreadable is not absent.
+        FileRead::Unreadable => {
+            out(target, b"clusterkey: cannot tell whether a realm already exists.\r\n");
+            out(target, b"  /etc/cluster/realm is unreadable rather than absent; refusing.\r\n");
+            return 1;
+        }
+    }
+    let mut raw = [0u8; 16];
+    if ulib::random(&mut raw) != raw.len() {
+        out(target, b"clusterkey: no entropy device, so no realm was generated.\r\n");
+        out(target, b"  A guessable realm lets one precomputed dictionary serve the cluster.\r\n");
+        out(target, b"  On QEMU add '-device virtio-rng-device'. On hardware without one,\r\n");
+        out(target, b"  generate it elsewhere and copy /etc/cluster/realm in.\r\n");
+        return 1;
+    }
+    // 16 random bytes as 32 hex digits: exactly REALM_MAX, all printable.
+    let mut text = [0u8; 33];
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (i, b) in raw.iter().enumerate() {
+        text[i * 2] = HEX[(b >> 4) as usize];
+        text[i * 2 + 1] = HEX[(b & 0x0f) as usize];
+    }
+    text[32] = b'\n';
+    if clusterkeys::parse_realm(&text).is_none() {
+        out(target, b"clusterkey: generated realm does not parse (a bug); nothing written\r\n");
+        return 1;
+    }
+    if ulib::is_fs_error(ulib::fs_write_bulk(REALM_PATH, &text)) {
+        out(target, b"clusterkey: could not write /etc/cluster/realm\r\n");
+        return 1;
+    }
+    out(target, b"clusterkey: new realm generated:\r\n");
+    out(target, &text[..32]);
+    out(target, b"\r\n  Copy /etc/cluster/realm to every node of this cluster. A node with\r\n");
+    out(target, b"  another realm derives different user keys and its users' claims fail.\r\n");
+    0
+}
+
+/// Read `/etc/cluster/realm`. Unlike [`read_file`], an EMPTY file is its own
+/// answer, `Bytes(0)`, which parses as no realm: a truncate-then-write cut
+/// short by an `fsd` restart leaves exactly that, and folding it into
+/// `Unreadable` made `realm new -f` refuse to replace it for good.
+fn read_realm_file(buf: &mut [u8]) -> FileRead {
+    let r = ulib::fs_read_bulk(REALM_PATH, 0, buf);
+    if r == syscall_abi::FS_ERR_NOT_FOUND {
+        FileRead::Absent
+    } else if ulib::is_fs_error(r) {
+        FileRead::Unreadable
+    } else {
+        FileRead::Bytes((r as usize).min(buf.len()))
     }
 }
 

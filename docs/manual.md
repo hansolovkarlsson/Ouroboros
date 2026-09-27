@@ -353,6 +353,8 @@ private one: it requires no key and no account.
 | `/etc/cluster/id` | This machine's **private** key (0600, 64 hex chars). Absent ⇒ it can neither serve nor make remote requests. Generate with `clusterkey new`. |
 | `/etc/cluster/id.pub` | The public half, for pasting into a peer's `authorized`. `clusterkey` with no arguments prints it. |
 | `/etc/cluster/authorized` | The peers this machine accepts, one per line: `<name> <ipv4> <pubkey-hex> [root]`. A trailing `root` trusts that peer to act as root (uid or gid 0) here; without it the peer is refused as root and served as anyone else. Absent or empty ⇒ the export serves nobody. Comment a line out (or delete it) to **revoke** that peer. |
+| `/etc/cluster/realm` | The cluster's **realm**, one word of at most 32 bytes, the same on every node and unique to the cluster: half the salt every user key is derived with. `clusterkey realm new` generates one (refusing without entropy); copy it to the other nodes. Absent ⇒ this node derives no user keys, and local login is unaffected. The dev images stage the public `ouroboros-dev`. |
+| `/etc/cluster/users` | The **user-key registry** (0600): `<name> <pubkey-hex>` per user whose remote claims will need their own credential here. Nothing reads it yet: the per-user keys arc (`docs/roadmap/roadmap-user-keys.md`) builds that in stages. The dev images register `user`. |
 | `\NOEXEC` | Presence-only flag: authenticated peers may still `mount -r` the disk, but every `cpu` (remote-exec) is refused. |
 
 In the QEMU images a dev identity is staged automatically

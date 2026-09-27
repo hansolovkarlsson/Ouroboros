@@ -21,6 +21,7 @@ import sys
 GROUPS = [
     ("root", 0, ""),
     ("user", 1000, ""),
+    ("guest", 1001, ""),
 ]
 
 

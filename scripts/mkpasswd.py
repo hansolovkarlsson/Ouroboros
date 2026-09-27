@@ -28,6 +28,11 @@ import sys
 ACCOUNTS = [
     ("root", 0, 0, "/", "root"),
     ("user", 1000, 1000, "/Users/user", "user"),
+    # A second unprivileged account, and the one the impersonation gate's row 5
+    # claims: a name with NO key in /etc/cluster/users (mkclusterkeys.py
+    # registers `user` only), so a claim of it is served on the machine's word
+    # (docs/roadmap/roadmap-user-keys.md, Decision 5).
+    ("guest", 1001, 1001, "/Users/guest", "guest"),
 ]
 
 
