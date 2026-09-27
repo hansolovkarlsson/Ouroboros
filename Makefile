@@ -225,7 +225,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels test-keyboard-chain test-reentrant-session test-async-rmount test-held-keys clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels test-keyboard-chain test-usb-hub test-reentrant-session test-async-rmount test-held-keys clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -875,6 +875,32 @@ run-usb-multi: esp $(USBSTICK_IMG)
 		-monitor unix:$(BUILD_DIR)/qemu-monitor.sock,server,nowait \
 		-nographic
 
+# The Raspberry Pi's USB layout, as far as QEMU can model it: a usb-hub on
+# root port 1 with the keyboard and the storage stick BEHIND it (every USB 2.0
+# device on a Pi 4/400 sits behind an on-board hub - docs/testing/testing-pi4.md
+# section 1b), and a usb-tablet directly on root port 2. QEMU's hub is
+# full-speed, so the Pi's high-speed hub with a slower keyboard below it (the
+# transaction-translator case) is not modelled. `make test-usb-hub` is the
+# scripted check of the same layout.
+run-usb-hub: esp $(USBSTICK_IMG)
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
+		-global virtio-mmio.force-legacy=false \
+		-device qemu-xhci,id=xhci0 \
+		-device usb-hub,bus=xhci0.0,port=1 \
+		-device usb-kbd,bus=xhci0.0,port=1.1 \
+		-drive file=$(USBSTICK_IMG),format=raw,if=none,id=usbstick \
+		-device usb-storage,drive=usbstick,bus=xhci0.0,port=1.2 \
+		-device usb-tablet,bus=xhci0.0,port=2 \
+		-monitor unix:$(BUILD_DIR)/qemu-monitor.sock,server,nowait \
+		-nographic
+
 # Same as `run`, but forces QEMU's virt machine onto GICv3 instead of its
 # default GICv2 (`-machine virt,help` confirms `gic-version` accepts
 # 2/3/4/x-5/host/max - real, checked, not assumed). For exercising
@@ -1379,6 +1405,15 @@ test-parallels:
 # script also refuses an esp.img older than the kernel binary).
 test-keyboard-chain: image
 	PROFILE="$(PROFILE)" ./scripts/test-keyboard-chain.sh
+
+# The USB hub check (scripts/test-usb-hub.py): one driven boot of
+# build/esp.img with a keyboard and a storage stick behind a usb-hub, graded
+# on outcomes (keyboard ready, stick configured, a line typed through the USB
+# keyboard runs). `python3 scripts/test-usb-hub.py --direct` is its control,
+# the same devices on root ports. About a minute, so not in `make test`; run
+# it when xhci.rs's port scan or device setup changes.
+test-usb-hub: image $(USBSTICK_IMG)
+	python3 scripts/test-usb-hub.py
 
 # The re-entrant session check (scripts/test-reentrant-session.sh): a remote
 # fid op arriving at netd while it is inside a cpu run, on the two-node ext2

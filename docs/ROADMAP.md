@@ -901,7 +901,10 @@ The small open tails those arcs deliberately left:
 >       all** until this lands. Buildable on QEMU with `usb-hub`; the
 >       transaction-translator fields (a full-speed keyboard below a
 >       high-speed hub) get their first test on the board. The first new
->       driver work the Pi needs, ahead of any NIC.
+>       driver work the Pi needs, ahead of any NIC. **The rig exists**
+>       (2026-09-27, branch `pi400/usb-hub`): `make test-usb-hub` fails 3 of 4
+>       today (keyboard, storage, typed; the direct-port control device
+>       passes), and its `--direct` control passes all four.
 > - [x] **Open the xHCI's own `PciIo` exclusively, not the whole root
 >       bridge.** The root-bridge open was refused (`ACCESS_DENIED`) when any
 >       firmware driver on the bus would not stop. On QEMU that had been true
