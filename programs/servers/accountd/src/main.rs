@@ -94,6 +94,14 @@ pub extern "C" fn _start() -> ! {
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
         reply[..REPLY_LEN].fill(0);
         let n = handle(&req[..len], &mut reply);
+        // An ACCTOP_UPGRADE carries the plaintext password, and a shorter next
+        // request would leave it here (review of step 4). Every request is
+        // wiped, not only that one: this server sees few, and the rest carry
+        // hashes. Volatile, so it is not dropped as a dead store.
+        for b in req[..len].iter_mut() {
+            // SAFETY: a byte of this server's own receive buffer.
+            unsafe { core::ptr::write_volatile(b, 0) };
+        }
         ulib::syscall4(syscall_abi::MSG_SEND, sender, reply.as_mut_ptr() as u64, n as u64, 0);
     }
     // The receive loop only ends if the kernel refuses to deliver, which means

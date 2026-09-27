@@ -58,9 +58,6 @@ const DEL: u8 = 127;
 pub struct Session {
     /// Length of the home path written into the cwd buffer `login` was given.
     pub cwd_len: usize,
-    /// The handle `netd` gave the user's held cluster key, which logout drops.
-    /// `None` when no key is held: no realm, no NIC server, or a full table.
-    pub key: Option<u64>,
 }
 
 /// Run the login gate. Writes the session's home directory into `cwd` and
@@ -122,8 +119,9 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
                 }
                 // The cluster key, while this task is still root (netd accepts
                 // a hold only from uid 0). Derived here because the password is
-                // here; the seed goes to netd and is wiped.
-                let key = hold_cluster_key(&ubuf[..ulen], &wbuf[..wlen], acct.uid);
+                // here; the seed goes to netd and is wiped. Logout drops it by
+                // task (drop_my_keys), never by handle: see that function.
+                hold_cluster_key(&ubuf[..ulen], &wbuf[..wlen], acct.uid);
                 // Drop from root to the user. The kernel saves root as this
                 // task's saved identity, so logout can restore it.
                 // Identity and memberships in ONE call: the group half of
@@ -139,7 +137,7 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
                     n as u64,
                 );
                 let hlen = write_cwd(cwd, acct.home);
-                return Session { cwd_len: hlen, key };
+                return Session { cwd_len: hlen };
             }
         }
         crate::print_line("Login incorrect");
@@ -149,7 +147,7 @@ pub fn login(cwd: &mut [u8; CWD_SIZE]) -> Session {
 /// A root session at `/` (the no-`/etc/passwd` fallback). No `SET_ID` needed -
 /// the shell boots as root already.
 fn root_at(cwd: &mut [u8; CWD_SIZE]) -> Session {
-    Session { cwd_len: write_cwd(cwd, b"/"), key: None }
+    Session { cwd_len: write_cwd(cwd, b"/") }
 }
 
 /// Copy `home` into the cwd buffer (defaulting to `/` if empty), returning its
@@ -214,8 +212,11 @@ fn verify_password(acct: &accounts::Account<'_>, name: &[u8], password: &[u8]) -
 /// in one line. About a second on the guest, which is the login's second
 /// derivation (docs/roadmap/roadmap-user-keys.md, step 0 budgets both).
 ///
-/// Local login never depends on this: the password was already checked, and
-/// nothing here can refuse the session.
+/// Nothing here can REFUSE a local login: the password was already checked.
+/// But the hold is a blocking `MSG_CALL`, so a login does WAIT on `netd`: a
+/// busy `netd` delays it, and a wedged one delays it until the supervisor
+/// restarts it (or, past its cap, tears it down), when the call fails and the
+/// login goes on. Bounded, not a hang; a timed call is a recorded follow-up.
 #[inline(never)]
 fn hold_cluster_key(name: &[u8], password: &[u8], uid: u32) -> Option<u64> {
     let mut rbuf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
@@ -258,22 +259,20 @@ fn hold_cluster_key(name: &[u8], password: &[u8], uid: u32) -> Option<u64> {
     Some(u64::from_le_bytes(reply[8..16].try_into().ok()?))
 }
 
-/// Ask `netd` to drop every key this task holds (`NETOP_KEY_DROP_MINE`).
-/// Best effort: with no network server there is nothing held.
-fn drop_my_keys() {
+/// Ask `netd` to drop every key this task holds (`NETOP_KEY_DROP_MINE`), before
+/// every login prompt and at logout. Best effort: with no network server there
+/// is nothing held.
+///
+/// BY TASK, NEVER BY HANDLE. `netd` keys this on the kernel's packed task
+/// identity of the sender, so it can only ever drop this task's own keys. A
+/// logout used to drop by handle, sent as root (after the `SET_ID` back), and
+/// root passes `drop_handle`'s owner check: a handle gone stale across a `netd`
+/// restart named whichever login's key had taken that slot since, and logout
+/// wiped it (review of step 4). Handles are bare slot numbers until step 7.
+pub fn drop_my_keys() {
     let req = syscall_abi::NETOP_KEY_DROP_MINE.to_le_bytes();
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     crate::syscall4(syscall_abi::MSG_CALL, syscall_abi::NET_TASK, req.as_ptr() as u64, 8, reply.as_mut_ptr() as u64);
-}
-
-/// Drop the key under `handle` (`NETOP_KEY_DROP`), at logout. Best effort, and
-/// backed by the next prompt's [`drop_my_keys`].
-pub fn drop_key(handle: u64) {
-    let mut req = [0u8; 16];
-    req[..8].copy_from_slice(&syscall_abi::NETOP_KEY_DROP.to_le_bytes());
-    req[8..16].copy_from_slice(&handle.to_le_bytes());
-    let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    crate::syscall4(syscall_abi::MSG_CALL, syscall_abi::NET_TASK, req.as_ptr() as u64, 16, reply.as_mut_ptr() as u64);
 }
 
 /// Upgrade `name`'s version-1 secret to version 2 (docs/roadmap/roadmap-user-keys.md,
@@ -287,7 +286,12 @@ fn upgrade_secret(name: &[u8], password: &[u8]) {
     let got = crate::syscall4(syscall_abi::RANDOM, raw.as_mut_ptr() as u64, raw.len() as u64, 0, 0);
     let random = (got == raw.len() as u64).then_some(raw);
     let clock = crate::syscall4(syscall_abi::MONOTONIC_US, 0, 0, 0, 0);
-    let (salt8, _strong) = accounts::salt_from(random, clock);
+    let (salt8, strong) = accounts::salt_from(random, clock);
+    // Said out loud, as passwd and useradd do: a clock salt is weaker, and this
+    // path writes it into /etc/shadow without anyone having asked for a change.
+    if !strong {
+        crate::print_line("login: no hardware RNG - using a weaker clock-derived salt");
+    }
     let mut salt = [0u8; accounts::SALT_V2];
     salt.copy_from_slice(&salt8[..accounts::SALT_V2]);
     let secret = accounts::secret_v2(salt, password);
@@ -312,6 +316,12 @@ fn upgrade_secret(name: &[u8], password: &[u8]) {
         w as u64,
         reply.as_mut_ptr() as u64,
     );
+    // The request carries the plaintext password: wipe it, as hold_cluster_key
+    // wipes its seed (volatile, so it is not optimised away as a dead store).
+    for b in req[..w].iter_mut() {
+        // SAFETY: a byte of a local array.
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
     let ok = packed < syscall_abi::FS_ERR_MIN
         && (packed & 0xffff_ffff) >= 8
         && reply[..8] == 0u64.to_le_bytes();

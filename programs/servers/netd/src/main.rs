@@ -742,6 +742,17 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
         } else {
             handle_client(packed_mac, sender, buf, len, dials, remotes, sessions, auth, pending, held);
         }
+        // A HOLD carried a user's seed, and `buf` is never cleared between
+        // messages: a shorter one leaves bytes 16..48 as they were. key_op
+        // wipes its own copy; this wipes the one the kernel delivered into
+        // (review of step 4). Volatile, so it is not dropped as a dead store.
+        if len >= 8 && read_u64(buf, 0) == syscall_abi::NETOP_KEY_HOLD {
+            let n = len.min(buf.len());
+            for b in buf[..n].iter_mut() {
+                // SAFETY: a byte of netd's own receive buffer.
+                unsafe { core::ptr::write_volatile(b, 0) };
+            }
+        }
     }
 }
 

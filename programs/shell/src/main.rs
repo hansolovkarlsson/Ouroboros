@@ -693,11 +693,10 @@ fn main() -> ! {
         // the next user logs in.
         syscall4(syscall_abi::SET_ID, 0, 0, 0, 0);
         // The session's cluster key goes with it (docs/roadmap/roadmap-user-keys.md,
-        // Decision 4). Sent as root, after the SET_ID above; the next login
-        // prompt's DROP_MINE catches it if this one is lost.
-        if let Some(handle) = session.key {
-            login::drop_key(handle);
-        }
+        // Decision 4). By TASK, never by handle: this runs as root, which passes
+        // a handle drop's owner check, so a stale handle would drop another
+        // login's key (see drop_my_keys). The next prompt repeats it anyway.
+        login::drop_my_keys();
         print_line("logout");
     }
 }
@@ -2206,7 +2205,12 @@ pub(crate) fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
     // rather than something wrong; the caller falls back to a root session,
     // which is the same answer as "no /etc/passwd".
     if off == buf.len() {
-        print_line("warning: the account file is larger than this shell can read - ignoring it");
+        // Named, since /etc/cluster/realm comes through here too: a generic
+        // "the account file" sent an operator to /etc/passwd for an oversized
+        // realm (review of step 4).
+        print_str("warning: ");
+        print_str(path);
+        print_line(" is larger than this shell can read - ignoring it");
         return 0;
     }
     off
