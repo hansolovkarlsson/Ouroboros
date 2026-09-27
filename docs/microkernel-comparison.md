@@ -238,8 +238,12 @@ same day as the isolation work, which is not a coincidence.
   block transport in the kernel for now (see `ROADMAP.md`).
 - **Wedge detection is heuristic, not a proof.** Both detectors are sound
   on this single-user, fast-request system — a healthy server returns to
-  `Blocked` in far less than a tick, and acks a ping within a tick or two —
-  but neither can tell a genuine multi-second workload from a wedge, and
+  `Blocked` in far less than a tick, and an idle one acks a ping within a
+  tick or two. A server inside a run of calls to another cannot ack until
+  the run ends, so a long run has to beat on its own (`netd`'s
+  `heartbeat()`, added to the `cpu` spawn on 2026-09-27 after it restarted
+  a healthy `netd` about one run in ten). Even so, neither detector can
+  tell a genuine multi-second workload from a wedge, and
   the active ping's value is largely forward-looking: in today's small,
   acyclic server topology a true blocked-deadlock can't actually form
   (`fail_calls_to` rescues callers of a *dying* server, and a

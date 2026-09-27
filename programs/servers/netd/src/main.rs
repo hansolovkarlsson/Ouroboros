@@ -4989,6 +4989,14 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
         if n == 0 {
             break;
         }
+        // Alive between chunks: the supervisor pings a server it sees Blocked,
+        // and this loop is Blocked in fsd calls for its whole length (98 for a
+        // 49 KB binary, each re-walking the FAT chain from the start) without
+        // returning to the loop that acks. A ping landing with more than
+        // PING_TIMEOUT of it left restarted netd about one `cpu` run in ten
+        // (2026-09-27). A call that never returns still sends no beat, so a
+        // real wedge in fsd is still caught.
+        heartbeat();
         let n = (n as usize).min(chunk.len());
         if syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n as u64, 0) != 0 {
             return None; // staged past the kernel's buffer
