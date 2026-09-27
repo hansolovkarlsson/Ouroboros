@@ -1450,6 +1450,11 @@ test:
 	@# drives one request per verb and checks the group each lands in.
 	@echo "== 9P peer verb dispatch"
 	@python3 scripts/np9p_server.py --self-test || exit 1
+	@# The PBKDF2 vectors are pasted from a hashlib run into ed25519 and, two of
+	@# them, into edtest. A paste nobody re-checks is a copy that drifts, and the
+	@# vectors are what stand between the crate and a key every node derives.
+	@echo "== PBKDF2 vectors vs hashlib"
+	@python3 scripts/gen-pbkdf2-vectors.py --check || exit 1
 	@# The published site abridges documents in this repo, and nothing lays the
 	@# two side by side - not the compiler, not a test, not review, because the
 	@# drift crosses a FILE FORMAT. The failure is silent and outward-facing: a

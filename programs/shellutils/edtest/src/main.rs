@@ -26,10 +26,11 @@
 //! `NP_NET_MAX` message, which is that step's gate (well under one sign).
 //!
 //! Since step 0 of `docs/roadmap/roadmap-user-keys.md` it times **a PBKDF2
-//! iteration**: the two SHA-512 compressions of an HMAC whose key pads were
-//! absorbed once, which is what a login will pay per iteration, so the
-//! iteration count (a wire constant, fixed forever) is chosen from a figure
-//! measured on the slowest platform rather than estimated from another one.
+//! iteration**, which is what a login will pay per iteration, so the iteration
+//! count (a wire constant, fixed forever) was chosen from a figure measured on
+//! the slowest platform rather than estimated from another one. Since step 2
+//! it times the crate's own `pbkdf2_hmac_sha512` and checks it against two
+//! `hashlib` vectors on the target, one at the chosen count.
 //!
 //! It stays in `/bin` rather than being a throwaway: the Raspberry Pi bring-up
 //! will want exactly this, on a third code generator and real hardware.
@@ -37,9 +38,11 @@
 #![no_std]
 #![no_main]
 
+use core::num::NonZeroU32;
+
 use ed25519::{
-    hmac_sha512, public_key, sign, verify, x25519_public, x25519_shared, HmacSha512, Sha512, SigningKey,
-    HMAC_LEN,
+    hmac_sha512, pbkdf2_hmac_sha512, public_key, sign, verify, x25519_public, x25519_shared, HmacSha512,
+    SigningKey,
 };
 
 /// RFC 8032 §7.1 TEST 1 — the same vector the host tests use, so a disagreement
@@ -112,6 +115,9 @@ enum Op {
     X25519,
     /// One HMAC-SHA-512 over a full `NP_NET_MAX` message.
     Hmac,
+    /// One PBKDF2 derivation (few iterations: the depth does not grow with
+    /// the count). `login` derives on the shell's stack from step 4.
+    Pbkdf2,
 }
 
 /// The byte a stack probe is painted with, chosen as an unlikely value to write
@@ -249,6 +255,7 @@ pub extern "C" fn _start() -> ! {
     failures += report_stack(target, Op::SignVerify, b"sign+verify");
     failures += report_stack(target, Op::X25519, b"X25519");
     failures += report_stack(target, Op::Hmac, b"HMAC");
+    failures += report_stack(target, Op::Pbkdf2, b"PBKDF2");
 
     if failures == 0 {
         out(target, b"\r\nedtest: all checks passed\r\n");
@@ -282,13 +289,28 @@ fn time_hmac() -> u64 {
     t1 - t0
 }
 
-/// SHA-512's block, and so the length of HMAC's key pads (RFC 2104). The crate
-/// keeps its own constant private; this one is only the pad width below.
-const PAD_LEN: usize = 128;
+/// Two of `ed25519`'s PBKDF2 vectors (from `scripts/gen-pbkdf2-vectors.py`,
+/// Python's `hashlib`), run on the target: `password`/`salt` at 2 iterations,
+/// and the dev `user` at the count every node derives with, 210,000, whose
+/// wall time is also printed as the cost of one real derivation.
+const PBKDF2_V2: [u8; 64] = [
+    0xe1, 0xd9, 0xc1, 0x6a, 0xa6, 0x81, 0x70, 0x8a, 0x45, 0xf5, 0xc7, 0xc4, 0xe2, 0x15, 0xce, 0xb6,
+    0x6e, 0x01, 0x1a, 0x2e, 0x9f, 0x00, 0x40, 0x71, 0x3f, 0x18, 0xae, 0xfd, 0xb8, 0x66, 0xd5, 0x3c,
+    0xf7, 0x6c, 0xab, 0x28, 0x68, 0xa3, 0x9b, 0x9f, 0x78, 0x40, 0xed, 0xce, 0x4f, 0xef, 0x5a, 0x82,
+    0xbe, 0x67, 0x33, 0x5c, 0x77, 0xa6, 0x06, 0x8e, 0x04, 0x11, 0x27, 0x54, 0xf2, 0x7c, 0xcf, 0x4e,
+];
+const PBKDF2_V210: [u8; 64] = [
+    0x63, 0x84, 0x9c, 0x3e, 0x6e, 0x5c, 0x9e, 0x28, 0x99, 0x47, 0x12, 0x52, 0x9e, 0xcc, 0x92, 0x7b,
+    0x6d, 0x06, 0xc6, 0x0c, 0x49, 0x95, 0x67, 0x90, 0xca, 0x89, 0xfa, 0x29, 0x70, 0x6e, 0xfe, 0xb4,
+    0xce, 0x36, 0xaf, 0xf8, 0xd9, 0x08, 0x7a, 0x81, 0x8f, 0x62, 0xc8, 0xe1, 0x76, 0xfd, 0xcb, 0x73,
+    0x70, 0xf8, 0xfb, 0xed, 0x11, 0x4f, 0x13, 0x52, 0xae, 0x39, 0x6b, 0xa1, 0xb4, 0xea, 0xc1, 0x4d,
+];
 
-/// The password the PBKDF2 timing runs under: the dev `user` account's. Its
-/// value does not change the cost of an iteration, only of priming the pads.
-const PBKDF2_PASSWORD: &[u8] = b"user";
+/// The count every node derives with (Decision 3; a wire constant in
+/// `ninep-abi` from step 5, when this should read it from there).
+/// `PBKDF2_V210` is `hashlib`'s answer at THIS count, which
+/// `scripts/gen-pbkdf2-vectors.py --check` holds true on every `make test`.
+const PBKDF2_COUNT: NonZeroU32 = nonzero(210_000);
 
 /// Iterations in the shorter timed PBKDF2 run; the longer is twice this, so
 /// the calibration can ask whether the time doubled.
@@ -308,78 +330,51 @@ const PBKDF2_N: u32 = 25_000;
 /// (Decision 3) and OWASP's current figure for PBKDF2-HMAC-SHA-512.
 const PBKDF2_CANDIDATES: [u64; 2] = [100_000, 210_000];
 
-/// HMAC's inner and outer hashes, each primed with its key pad, which is the
-/// state PBKDF2 precomputes once and copies per iteration.
-///
-/// Built HERE, not taken from the crate, because the crate has no PBKDF2 yet
-/// (step 2 adds it) and its `HmacSha512` rebuilds the outer hash inside
-/// `finalize`, which would time three compressions an iteration rather than
-/// the two a PBKDF2 pays. `pbkdf2_step_is_hmac` checks this construction
-/// against `hmac_sha512`, so the figure is the cost of a real HMAC.
-///
-/// The password must fit one block (128 bytes); RFC 2104 hashes a longer key
-/// first, as `HmacSha512::new` does, and step 2's PBKDF2 must too. Here it is
-/// always the four-byte dev password.
-fn primed_pads(password: &[u8]) -> (Sha512, Sha512) {
-    let mut k = [0u8; PAD_LEN];
-    k[..password.len()].copy_from_slice(password);
-    let mut ikey = [0u8; PAD_LEN];
-    let mut okey = [0u8; PAD_LEN];
-    for i in 0..PAD_LEN {
-        ikey[i] = k[i] ^ 0x36;
-        okey[i] = k[i] ^ 0x5c;
-    }
-    let mut inner = Sha512::new();
-    inner.update(&ikey);
-    let mut outer = Sha512::new();
-    outer.update(&okey);
-    (inner, outer)
-}
-
-/// One PBKDF2 iteration: `HMAC(P, u)` from the primed pads. Two compressions:
-/// the inner hash's one block (`u` and its padding fit in 128 bytes), and the
-/// outer's.
-#[inline(always)]
-fn pbkdf2_step(inner: &Sha512, outer: &Sha512, u: &[u8; HMAC_LEN]) -> [u8; HMAC_LEN] {
-    let mut i = inner.clone();
-    i.update(u);
-    let mut o = outer.clone();
-    o.update(&i.finalize());
-    o.finalize()
-}
-
-/// Whether one step from the primed pads equals `hmac_sha512`. Without it, a
-/// wrong pad would still time two compressions and the number would look
-/// right while measuring something that is not an HMAC.
+/// Microseconds for one derivation of `n` iterations and one 64-byte block,
+/// with the crate's own function, the code a login runs. (Until step 2 of the
+/// plan this timed a copy of the pad priming written here, because the crate
+/// had no PBKDF2; the copy is gone.)
 #[inline(never)]
-fn pbkdf2_step_is_hmac() -> bool {
-    let (inner, outer) = primed_pads(PBKDF2_PASSWORD);
-    let u = hmac_sha512(PBKDF2_PASSWORD, b"a salt");
-    pbkdf2_step(&inner, &outer, &u) == hmac_sha512(PBKDF2_PASSWORD, &u)
-}
-
-/// Microseconds for `n` PBKDF2 iterations after the first, the loop body of
-/// RFC 8018's F: `U_j = HMAC(P, U_{j-1})`, XORed into the block. The pads are
-/// primed outside the timed region, as a derivation primes them once.
-#[inline(never)]
-fn time_pbkdf2(n: u32) -> u64 {
-    let (inner, outer) = primed_pads(PBKDF2_PASSWORD);
-    let mut u = hmac_sha512(PBKDF2_PASSWORD, b"a salt\0\0\0\x01");
-    let mut t = u;
+fn time_pbkdf2(n: NonZeroU32) -> u64 {
+    let mut out = [0u8; 64];
     let t0 = ulib::monotonic_us();
-    for _ in 0..n {
-        u = pbkdf2_step(&inner, &outer, core::hint::black_box(&u));
-        for k in 0..HMAC_LEN {
-            t[k] ^= u[k];
-        }
-    }
+    pbkdf2_hmac_sha512(b"user", b"a salt", n, &mut out);
     let t1 = ulib::monotonic_us();
-    core::hint::black_box(t);
+    core::hint::black_box(out);
     t1 - t0
 }
 
+/// `n` as the crate's iteration type, for CONSTANTS ONLY: evaluated in a
+/// `const`, a zero fails the build. It used to run at runtime and turn a zero
+/// into 1 without a word, bringing back the count the crate's `NonZeroU32`
+/// exists to make unspellable.
+const fn nonzero(n: u32) -> NonZeroU32 {
+    match NonZeroU32::new(n) {
+        Some(n) => n,
+        None => panic!("a PBKDF2 iteration count must be positive"),
+    }
+}
+
+/// The two timed runs' counts, the second twice the first.
+const PBKDF2_N1: NonZeroU32 = nonzero(PBKDF2_N);
+const PBKDF2_N2: NonZeroU32 = nonzero(PBKDF2_N * 2);
+
+/// Whether the crate's PBKDF2 gives `hashlib`'s answer on this machine, for
+/// the two vectors above, and the microseconds the 210,000 one took.
+#[inline(never)]
+fn pbkdf2_vectors() -> (bool, bool, u64) {
+    let mut out = [0u8; 64];
+    const TWO: NonZeroU32 = nonzero(2);
+    pbkdf2_hmac_sha512(b"password", b"salt", TWO, &mut out);
+    let v2_ok = out == PBKDF2_V2;
+    let t0 = ulib::monotonic_us();
+    pbkdf2_hmac_sha512(b"user", b"ouroboros-dev", PBKDF2_COUNT, &mut out);
+    let t1 = ulib::monotonic_us();
+    (v2_ok, out == PBKDF2_V210, t1 - t0)
+}
+
 /// The fastest of three timed runs of `n` iterations.
-fn fastest_pbkdf2(n: u32) -> u64 {
+fn fastest_pbkdf2(n: NonZeroU32) -> u64 {
     let mut best = u64::MAX;
     for _ in 0..3 {
         best = best.min(time_pbkdf2(n));
@@ -391,10 +386,10 @@ fn fastest_pbkdf2(n: u32) -> u64 {
 /// the per-iteration cost with a login's cost at each candidate count. Returns
 /// the number of failures.
 ///
-/// TWO CHECKS BEFORE THE NUMBER IS BELIEVED. The step must be a real HMAC
-/// (`pbkdf2_step_is_hmac`), and the time must SCALE: twice the iterations has
-/// to take about twice as long, or the loop was optimised away, the clock is
-/// too coarse, or a stall dominated the run. The band is wide (1.6 to 3.0)
+/// TWO CHECKS BEFORE THE NUMBER IS BELIEVED. The derivation must match
+/// `hashlib` on this machine (`pbkdf2_vectors`), and the time must SCALE:
+/// twice the iterations has to take about twice as long, or the loop was
+/// optimised away, the clock is too coarse, or a stall dominated the run. The band is wide (1.6 to 3.0)
 /// because other tasks' ticks land inside a run: boots have read 1.8 to 2.4.
 /// It has refused twice already, for the two causes described at
 /// `PBKDF2_N` and in the body below.
@@ -405,10 +400,26 @@ fn fastest_pbkdf2(n: u32) -> u64 {
 #[inline(never)]
 fn report_pbkdf2(target: u64) -> u32 {
     let mut failures = 0u32;
-    if pbkdf2_step_is_hmac() {
-        out(target, b"  [ok]   PBKDF2 step from primed pads equals hmac_sha512\r\n");
+    let (v2_ok, v210_ok, v210_us) = pbkdf2_vectors();
+    if v2_ok {
+        out(target, b"  [ok]   PBKDF2 matches hashlib at 2 iterations\r\n");
     } else {
-        out(target, b"  [FAIL] PBKDF2 step from primed pads differs from hmac_sha512\r\n");
+        out(target, b"  [FAIL] PBKDF2 differs from hashlib at 2 iterations\r\n");
+        failures += 1;
+    }
+    // The time is ONE run, printed as such: it follows printed lines, so it
+    // can carry the transient the fastest-of-three below exists to drop. The
+    // calibrated figure is the per-iteration one.
+    if v210_ok {
+        out(target, b"  [ok]   PBKDF2 matches hashlib at ");
+        put_dec(target, PBKDF2_COUNT.get() as u64);
+        out(target, b" iterations, in ");
+        put_dec(target, v210_us / 1000);
+        out(target, b" ms (one derivation, a single run)\r\n");
+    } else {
+        out(target, b"  [FAIL] PBKDF2 differs from hashlib at ");
+        put_dec(target, PBKDF2_COUNT.get() as u64);
+        out(target, b" iterations\r\n");
         failures += 1;
     }
     // The FASTEST of three runs at each size. A single run carried about
@@ -416,10 +427,10 @@ fn report_pbkdf2(target: u64) -> u32 {
     // of three dropped the 5,000-iteration figure from 38.8 ms to 13.4 ms. The
     // likely cause, not proven: the run starts right after a line is printed,
     // and the console server renders it on the same CPU. Another task can only
-    // make a run slower, so the minimum drops that. It does not drop the tick losses `PBKDF2_N`
-    // describes, which every run of this length pays alike.
-    let one = fastest_pbkdf2(PBKDF2_N);
-    let two = fastest_pbkdf2(PBKDF2_N * 2);
+    // make a run slower, so the minimum drops that. It does not drop the tick
+    // losses `PBKDF2_N` describes, which every run of this length pays alike.
+    let one = fastest_pbkdf2(PBKDF2_N1);
+    let two = fastest_pbkdf2(PBKDF2_N2);
     out(target, b"    PBKDF2 x");
     put_dec(target, PBKDF2_N as u64);
     out(target, b" = ");
@@ -602,7 +613,18 @@ fn work(secret: &[u8; 32], op: Op) {
         Op::SignVerify => work_sign_verify(secret),
         Op::X25519 => work_x25519(secret),
         Op::Hmac => work_hmac(secret),
+        Op::Pbkdf2 => work_pbkdf2(secret),
     }
+}
+
+/// A 64-byte derivation, the length `login` will take its key and its shadow
+/// hash from.
+#[inline(never)]
+fn work_pbkdf2(secret: &[u8; 32]) {
+    let mut out = [0u8; 64];
+    const THREE: NonZeroU32 = nonzero(3);
+    pbkdf2_hmac_sha512(secret, b"stack measurement", THREE, &mut out);
+    core::hint::black_box(out);
 }
 
 #[inline(never)]

@@ -35,23 +35,53 @@ pub struct HmacSha512 {
     okey: [u8; BLOCK_LEN],
 }
 
+/// RFC 2104's key, as one block: a key longer than the block is hashed first,
+/// and the result (or the key) is padded with zeros. Shared by [`HmacSha512`]
+/// and PBKDF2 (through [`pads`]), so the one length rule HMAC has is written
+/// once.
+fn key_block(key: &[u8]) -> [u8; BLOCK_LEN] {
+    let mut k = [0u8; BLOCK_LEN];
+    if key.len() > BLOCK_LEN {
+        let mut h = Sha512::new();
+        h.update(key);
+        k[..DIGEST_LEN].copy_from_slice(&h.finalize());
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    k
+}
+
+/// RFC 2104's two pads for `key`: `K ^ ipad` and `K ^ opad`. The one place
+/// they are built, for [`HmacSha512`] and PBKDF2 alike.
+fn pads(key: &[u8]) -> ([u8; BLOCK_LEN], [u8; BLOCK_LEN]) {
+    let k = key_block(key);
+    let mut ikey = [0u8; BLOCK_LEN];
+    let mut okey = [0u8; BLOCK_LEN];
+    for i in 0..BLOCK_LEN {
+        ikey[i] = k[i] ^ IPAD;
+        okey[i] = k[i] ^ OPAD;
+    }
+    (ikey, okey)
+}
+
+/// The inner and outer hashes, each primed with its key pad: the state PBKDF2
+/// computes once and copies per iteration, which makes an iteration two
+/// compressions rather than four. [`HmacSha512`] keeps the outer PAD instead of
+/// a primed outer hash, 80 bytes less on `netd`'s stack for the MAC it runs per
+/// frame, at the cost of the compression PBKDF2 must not pay.
+pub(crate) fn primed_pads(key: &[u8]) -> (Sha512, Sha512) {
+    let (ikey, okey) = pads(key);
+    let mut inner = Sha512::new();
+    inner.update(&ikey);
+    let mut outer = Sha512::new();
+    outer.update(&okey);
+    (inner, outer)
+}
+
 impl HmacSha512 {
     /// Start a MAC under `key`, of any length.
     pub fn new(key: &[u8]) -> Self {
-        let mut k = [0u8; BLOCK_LEN];
-        if key.len() > BLOCK_LEN {
-            let mut h = Sha512::new();
-            h.update(key);
-            k[..DIGEST_LEN].copy_from_slice(&h.finalize());
-        } else {
-            k[..key.len()].copy_from_slice(key);
-        }
-        let mut ikey = [0u8; BLOCK_LEN];
-        let mut okey = [0u8; BLOCK_LEN];
-        for i in 0..BLOCK_LEN {
-            ikey[i] = k[i] ^ IPAD;
-            okey[i] = k[i] ^ OPAD;
-        }
+        let (ikey, okey) = pads(key);
         let mut inner = Sha512::new();
         inner.update(&ikey);
         HmacSha512 { inner, okey }
