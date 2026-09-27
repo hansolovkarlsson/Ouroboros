@@ -711,6 +711,53 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **A `cpu` spawn reads its binary quadratically (found 2026-09-27).**
+  `netd`'s `cpu_spawn` fetches `/bin/<cmd>` as one path-based `NP_READ` per
+  512-byte chunk (98 for the 49 KB `clusterkey`), and each one re-walks `/`
+  and `/bin` and then the file's FAT chain from its first cluster. With the
+  images' 512-byte clusters and no FAT-sector cache in `fsd`, chunk *k* costs
+  about *k* disk reads: some 4,800 for one spawn, while `fsd` shares the CPU
+  half and half with the idle task. It is what made the supervisor's ping
+  restart `netd` about one `cpu` run in ten (fixed the same day by a
+  `heartbeat()` per chunk in `cpu_spawn`), and it is still slow. Two
+  independent cures: read by fid (`NP_OPEN` once, then `NP_PREAD`), and a
+  small FAT-sector cache in `fat32.rs`. Neither is needed for correctness
+  now.
+
+- **A long loop's acks let pings pile up in the mailbox (found 2026-09-27,
+  in review).** A server clears `ping_outstanding` when it is seen
+  `Runnable` or sends an unprompted ack (`note_ack`), while the ping itself
+  is still unread in its mailbox. So a server that stays inside one long
+  loop (`netd`'s `cpu_spawn`, or its multi-round-trip remote reads, both of
+  which beat) is pinged again every `PING_INTERVAL`, and after about five
+  seconds its 4-deep mailbox is full of pings and refuses clients
+  (`MSG_ERR_FULL`) until the loop ends. Not seen in a run. Keeping the flag
+  set until the ping itself is answered would close it.
+
+- **Should the kernel, not each server, know a waiting server is alive?
+  (open question, 2026-09-27).** The per-loop `heartbeat()` is opt-in: this
+  is the second time a long `netd` loop was killed for being busy (the
+  first was remote reads, 2026-09-03). A kernel rule was built and reviewed
+  the same day and set aside: pausing a server's ping while its call chain
+  ends in a running supervised server. It had a hole the opt-in does not.
+  A callee that never replies but blocks briefly now and then (short calls
+  to `cond`, say) resets its own heartbeat and keeps the caller's pause on,
+  so neither detector fires. A kernel rule needs a bound on the pause
+  before it is safe.
+
+- **A server past its restart cap draws a second wedge line (seen
+  2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot
+  printed `failed more than 3 times this boot - giving up` and then
+  `slot 4 wedged - no progress (runnable) - restarting` and a second
+  `giving up`. Read from the code, not yet confirmed by a run: the
+  heartbeat's `blocked` is "the state is `Blocked`", so a torn-down (`Unused`)
+  slot counts as runnable, and the ping's `Wedged` path zeroes
+  `runnable_ticks` (`reset_liveness`), which `heartbeat`'s own comment relies
+  on NOT happening ("a give-up leaves it climbing past the threshold so it
+  never re-fires"). After a ping-timeout give-up it climbs from zero and
+  fires once more, calling `kill_task` on an `Unused` slot, which has not
+  been checked for harm. The cap holds either way.
+
 - ~~**libc's `MSG_CALL` does not ride out the delegation window (found
   2026-09-23).**~~ **FIXED 2026-09-23**: `np_request` now retries a
   `MSG_ERR_DENIED` from `netd` for the same 150 ticks as
