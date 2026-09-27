@@ -720,6 +720,27 @@ The small open tails those arcs deliberately left:
   up behind a long loop's acks, a kernel-side rule) are on `main`'s
   `ROADMAP.md`. This branch reaches the fix when its base becomes `main`.
 
+- **A login waits on `netd` (found 2026-09-27, review of user-keys step 4).**
+  `login`'s `NETOP_KEY_DROP_MINE` before every prompt and its `HOLD` after a
+  good password are blocking `MSG_CALL`s. A busy `netd` delays the prompt; a
+  wedged one delays it until the supervisor restarts it or, past its cap,
+  tears it down and the call fails. Bounded, never a hang, but local login
+  should not wait on the network server at all: a timed call, or skipping the
+  drop when this task never held a key.
+
+- **`netd` reaps held keys on every wake (found 2026-09-27, review of
+  user-keys step 4).** `held.reap_dead()` runs once per pass of the serve loop,
+  two syscalls per held key, so under TCP or 9P load a full table adds eight
+  syscalls to every wake. `HOLD` and `LIST` already reap on demand; the loop's
+  reap only needs the timeout or ping path.
+
+- **Three copies of the version-2 salt code (found 2026-09-27, review of
+  user-keys step 4).** `passwd`, `useradd` and `login` each draw random bytes,
+  fall back to the clock and truncate to `SALT_V2`, and each restates the
+  40-byte request header. One had already drifted (`login` dropped the
+  weak-salt warning; fixed). An `accounts::salt_v2_from` and a shared request
+  header width in `syscall-abi` would leave one of each.
+
 - **Files `mke2fs -d` stages on the ext2 images belong to the building host's
   uid, not root (found 2026-09-26).** `ls -l /etc/cluster` on the ext2 image
   shows owner 501 (the macOS uid that ran `make`) for `id`, `authorized`,

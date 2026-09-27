@@ -459,6 +459,34 @@ prompt's `DROP_MINE` catches it.
   becomes `main`. Run the rig after that before merging. The kernel's
   blocked-on report stays.
 
+**The review of step 4 (ten findings, six acted on, four recorded).** One
+was a real defect in this step's own work. **Logout dropped a key by handle,
+as root**: the shell restores uid 0 before the drop, root passes
+`drop_handle`'s owner check, and a handle is a bare slot number, so after a
+`netd` restart a stale handle named whichever login's key had taken that slot
+since, and logging out wiped it. Logout now sends `NETOP_KEY_DROP_MINE`, which
+`netd` keys on the sender's packed task identity and so can only drop the
+shell's own keys; the handle and `Session.key` are gone from the shell. The
+rest acted on: `netd` wipes its receive buffer after a `HOLD` (the seed stayed
+there, since the buffer is never cleared between messages), `accountd` wipes
+its receive buffer after every request, and `login` its request, both of
+which held the plaintext password of an upgrade; a first-login upgrade with no
+hardware RNG says it used a clock salt, as `passwd` and `useradd` do; and the
+"larger than this shell can read" warning names the file, since the realm is
+read through it too. `hold_cluster_key`'s "local login never depends on this"
+is corrected: nothing there can refuse a login, but it does wait on `netd`,
+bounded by the supervisor.
+**Recorded, not acted on:** handles carry no generation. Nothing in the tree
+names a key by handle now except `keyprobe`'s refusal check, and step 8 finds a
+key by uid, not handle; **if a later step comes to name a key by handle, pack a
+generation into it first**, as task identities do. And **`accountd` no longer
+refuses an empty new password**: `passwd` sends a hash, so the server cannot
+tell. The policy now lives in the `passwd` client, and a crafted program can
+set its own account's password to empty (or to bytes that lock it); that is
+the caller's own account, not an escalation. The login's blocking call, the
+per-wake reap's cost and three copies of the version-2 salt code are follow-ups
+in `ROADMAP.md`.
+
 **Deferred to step 8:** closing a uid's attested sessions when its last key
 goes. There are no attested sessions until step 8, so there is nothing to
 close yet; the table is exercised here, as the step says.
