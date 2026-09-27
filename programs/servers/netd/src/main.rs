@@ -3783,7 +3783,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
         deny_9p(c, request);
         return false;
     }
-    let Some((msg, nonce, name)) = authenticate(auth, request) else {
+    let Some((msg, nonce, name, peer_root)) = authenticate(auth, request) else {
         deny_9p(c, request);
         return false;
     };
@@ -3795,12 +3795,18 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // root - is exactly the hole this closes, and a "map the stranger onto
     // nobody" fallback would just be a quieter way of guessing.
     //
-    // The honest limit, stated where it is decided: a peer holding the cluster
-    // key can claim ANY name. This defends against the *users* of a trusted
-    // node, which is the real exposure - a node's own users are not all trusted
-    // even when the node is. Defending against a compromised node needs
-    // per-user keys, a further tier (docs/ROADMAP.md).
-    let proxy = match map_user(&name) {
+    // The honest limit, stated where it is decided: an authorized peer can
+    // claim ANY name that exists here, except one resolving to uid 0 or gid 0,
+    // which needs the `root` flag on its line (root squash). This defends
+    // against the *users* of a trusted node, which is the real exposure - a
+    // node's own users are not all trusted even when the node is. Defending
+    // against a compromised node needs per-user keys, the tier
+    // docs/roadmap/roadmap-user-keys.md builds.
+    //
+    // A KEYED SESSION IS COVERED HERE TOO: its user is fixed by the signed
+    // NP_SESSION that keyed it, which came through this call, and no later frame
+    // on it carries a name.
+    let proxy = match map_user(&name, peer_root) {
         Ok(p) => p,
         Err(cause) => {
             // NOT deny_9p: that reports a key failure, and the signature
@@ -3810,7 +3816,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
             // this peer has already proved it holds an authorized private key;
             // the pre-auth path stays deliberately ambiguous so an
             // unauthenticated stranger cannot enumerate accounts.
-            deny_unknown_user(c, request, cause, auth, &nonce);
+            deny_claim(c, request, cause, auth, &nonce);
             return false;
         }
     };
@@ -4195,7 +4201,7 @@ fn count_peers(authorized: &[u8]) -> usize {
 fn authenticate<'a>(
     auth: &Auth,
     request: &'a [u8],
-) -> Option<(&'a [u8], [u8; ninep_abi::NP_NONCE_LEN], [u8; ninep_abi::NP_NAME_LEN])> {
+) -> Option<Authenticated<'a>> {
     let p = ninep_abi::NP_NET_LEN_PREFIX; // 4
     if request.len() < p + 8 {
         return None;
@@ -4216,6 +4222,12 @@ fn authenticate<'a>(
     }
     authenticate_signed(auth, request)
 }
+
+/// What an authenticated request carries: the bare NP message, the request
+/// nonce the reply is signed against, the claimed user's name (NUL-padded), and
+/// whether the signing peer is trusted with root (its `authorized` line's
+/// `root` flag, for [`map_user`]'s root squash).
+type Authenticated<'a> = (&'a [u8], [u8; ninep_abi::NP_NONCE_LEN], [u8; ninep_abi::NP_NAME_LEN], bool);
 
 /// Where the NP message starts in a framed request, by format.
 ///
@@ -4254,11 +4266,12 @@ fn np_offset(request: &[u8]) -> Option<usize> {
 /// 3. The signature verifies over `SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖ message`.
 ///
 /// Returns the bare NP message, the nonce (which the reply is signed against, so
-/// the two are bound to one transaction), and the claimed user name.
+/// the two are bound to one transaction), the claimed user name, and whether
+/// the signing peer's `authorized` line carries the `root` flag.
 fn authenticate_signed<'a>(
     auth: &Auth,
     request: &'a [u8],
-) -> Option<(&'a [u8], [u8; ninep_abi::NP_NONCE_LEN], [u8; ninep_abi::NP_NAME_LEN])> {
+) -> Option<Authenticated<'a>> {
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     let need = p + ninep_abi::NP_AUTH_HDR_SIGNED;
     if request.len() < need {
@@ -4274,7 +4287,10 @@ fn authenticate_signed<'a>(
 
     // Is this key allowed here at all? An unknown key never reaches the verifier.
     //
-    // THE MATCHED PEER IS DELIBERATELY DISCARDED, and that is worth stating
+    // ONE FIELD OF THE MATCHED PEER IS KEPT: its `root` flag, which decides
+    // whether this peer may claim a user resolving to uid 0 or gid 0 (root
+    // squash, Decision 6 of docs/roadmap/roadmap-user-keys.md; `map_user`
+    // applies it). The rest is DELIBERATELY DISCARDED, and that is worth stating
     // because a lookup whose result is thrown away reads like a mistake. Two
     // reasons, both design:
     //
@@ -4288,7 +4304,7 @@ fn authenticate_signed<'a>(
     //    and need only decide whether it is allowed, so pinning the address as
     //    well would refuse an authorized machine that dialled from a second
     //    interface without making any forgery harder - the key is the claim.
-    clusterkeys::find_by_key(auth.authorized(), &offered)?;
+    let peer_root = clusterkeys::find_by_key(auth.authorized(), &offered)?.root;
 
     let np = &request[need..];
     // The signed bytes, after the domain tag: nonce ‖ name ‖ message. Built
@@ -4318,7 +4334,7 @@ fn authenticate_signed<'a>(
     nonce.copy_from_slice(&request[noff..noff + ninep_abi::NP_NONCE_LEN]);
     let mut who = [0u8; ninep_abi::NP_NAME_LEN];
     who.copy_from_slice(&request[woff..woff + ninep_abi::NP_NAME_LEN]);
-    Some((np, nonce, who))
+    Some((np, nonce, who, peer_root))
 }
 
 /// Seal a framed export reply — reply-auth, i.e. mutual authentication.
@@ -4458,11 +4474,13 @@ fn deny_9p(c: &mut TcpConn, request: &[u8]) {
     }
 }
 
-/// Refuse a request whose MAC verified but whose *user* this machine has never
-/// heard of. Distinct from [`deny_9p`] only in what it says: same `FS_ERR_AUTH`
-/// on the wire (one refusal code, so a client needs no new case), an accurate
-/// line for the `cpu` caller, who reads the reply as raw output.
-fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan, auth: &Auth, nonce: &[u8]) {
+/// Refuse a request whose signature verified but whose claimed *user* this
+/// machine will not act as: one it has never heard of, or one resolving to
+/// uid 0 or gid 0 from a peer not trusted with root. Distinct from [`deny_9p`]
+/// only in what it says: `FS_ERR_AUTH` on the wire for both (one refusal code,
+/// so a client needs no new case), an accurate line for the `cpu` caller, who
+/// reads the reply as raw output.
+fn deny_claim(c: &mut TcpConn, request: &[u8], cause: Refused, auth: &Auth, nonce: &[u8]) {
     let is_run = raw_run(c, request);
     c.file = false;
     c.prefix_off = 0;
@@ -4474,9 +4492,14 @@ fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan, auth: &Au
     // fourth state a compile error instead.
     if is_run {
         let m: &[u8] = match cause {
-            LineScan::Unreadable => b"cpu: this host cannot read its account database right now\r\n",
-            LineScan::NoDatabase => b"cpu: this host has no readable account database\r\n",
-            _ => b"cpu: no account of that name on this host (the signature was accepted)\r\n",
+            Refused::Scan(LineScan::Unreadable) => b"cpu: this host cannot read its account database right now\r\n",
+            Refused::Scan(LineScan::NoDatabase) => b"cpu: this host has no readable account database\r\n",
+            Refused::Scan(LineScan::NotFound | LineScan::Found) => {
+                b"cpu: no account of that name on this host (the signature was accepted)\r\n"
+            }
+            Refused::RootSquash => {
+                b"cpu: this host does not trust yours with root (no `root` flag on its authorized line)\r\n"
+            }
         };
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
@@ -4486,9 +4509,9 @@ fn deny_unknown_user(c: &mut TcpConn, request: &[u8], cause: LineScan, auth: &Au
         // filesystem", which is true AND worth retrying. A missing database is
         // not worth retrying, and a real stranger is neither.
         let status = match cause {
-            LineScan::Unreadable => syscall_abi::NO_FS,
-            LineScan::NoDatabase => syscall_abi::FS_ERR_NOT_FOUND,
-            _ => syscall_abi::FS_ERR_AUTH,
+            Refused::Scan(LineScan::Unreadable) => syscall_abi::NO_FS,
+            Refused::Scan(LineScan::NoDatabase) => syscall_abi::FS_ERR_NOT_FOUND,
+            Refused::Scan(LineScan::NotFound | LineScan::Found) | Refused::RootSquash => syscall_abi::FS_ERR_AUTH,
         };
         // SEALED, or the three statuses above are a distinction no client can
         // observe. An unsealed refusal is 12 bytes - `[len][status]` - and every
@@ -6396,11 +6419,18 @@ fn caller_name(out: &mut [u8; ninep_abi::NP_NAME_LEN]) -> LineScan {
 /// answer when it goes stale relative to `useradd`/`usermod`, and a wrong answer
 /// there is a misauthorization. If the cost ever matters, that is the question
 /// to answer first.
+///
+/// ROOT SQUASH IS A REQUIRED PARAMETER, not a check beside the call: a claim
+/// resolving to uid 0 or gid 0 is refused unless `peer_root` (the signing
+/// peer's `authorized` line carries the `root` flag). gid 0 as well as uid 0,
+/// because `fsd`'s `mode_allows` grants group-root access on it; the primary
+/// gid is the only group that crosses the cluster. Taking it here means an
+/// inbound path cannot resolve a name without deciding it.
 #[inline(never)]
-fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Result<Proxy, LineScan> {
+fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN], peer_root: bool) -> Result<Proxy, Refused> {
     let name = trim_nul(who);
     if name.is_empty() {
-        return Err(LineScan::NotFound);
+        return Err(Refused::Scan(LineScan::NotFound));
     }
     let mut found: Option<Proxy> = None;
     let scan = for_each_line(b"/etc/passwd", |line| match accounts::find_user_by_name(line, name) {
@@ -6413,6 +6443,7 @@ fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Result<Proxy, LineScan> {
     // An id too large for the identity word cannot be carried, and truncating it
     // would authorize a different account. Refuse instead.
     match found.filter(|p| ninep_abi::proxy_id(p.uid, p.gid).is_some()) {
+        Some(p) if (p.uid == 0 || p.gid == 0) && !peer_root => Err(Refused::RootSquash),
         Some(p) => Ok(p),
         // A scan that could not read the file has not established that the
         // account is absent - only that we cannot tell, and there are two ways
@@ -6422,9 +6453,19 @@ fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Result<Proxy, LineScan> {
         // and a correctly-named caller was called a stranger because THIS
         // machine has no account database. Found by running it against a node
         // with no `/etc/passwd`, not by reading it.
-        None if scan != LineScan::Found => Err(scan),
-        None => Err(LineScan::NotFound),
+        None if scan != LineScan::Found => Err(Refused::Scan(scan)),
+        None => Err(Refused::Scan(LineScan::NotFound)),
     }
+}
+
+/// Why [`map_user`] would not act as a remote caller's claimed user.
+#[derive(Clone, Copy)]
+enum Refused {
+    /// The account scan's own answer: no such account, or no database to ask.
+    Scan(LineScan),
+    /// The account resolves to uid 0 or gid 0 and the peer is not trusted with
+    /// root (root squash).
+    RootSquash,
 }
 
 /// WHO a call to `fsd` is made on behalf of - a **required parameter** of every

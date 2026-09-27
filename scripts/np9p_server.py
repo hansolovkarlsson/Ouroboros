@@ -184,6 +184,15 @@ DEV_PEER_LABELS = {
     "intruder": "ouroboros-dev-intruder",  # impersonate-gate's hostile peer; no machine
 }
 
+# ROOT SQUASH (Decision 6 of docs/roadmap/roadmap-user-keys.md, step 1). The
+# peers trusted to claim a user that resolves to uid 0 or gid 0: the `root` flag
+# on an `authorized` line, which this server has no file for. It is the dev
+# cluster's flags, held equal to `mkclusterkeys.py`'s by check-wire-constants.py,
+# and every identity a rig drives this server as root with is in it (`host` for
+# the self-test and the host-driven recipes, `node-a` for a guest mounting this
+# server). `intruder` is not, which is the point of it.
+DEV_ROOT_PEERS = {"node-a", "node-b", "host"}
+
 NP_NONCE_LEN = 16  # fresh per-request value the reply signature is bound to
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded
 NP_PUBKEY_LEN = 32  # named as ninep-abi and np9p_client.py name it - see below
@@ -243,6 +252,31 @@ def ed():
 _AUTHORIZED = None
 
 
+def root_claims():
+    """The names that resolve to uid 0 or gid 0, as bytes.
+
+    This server has no /etc/passwd to resolve a claim through, so it takes the
+    accounts every dev image stages from `mkpasswd.py`'s own table, and computes
+    the property rather than naming `root`: a second uid-0 or gid-0 account
+    added there is squashed here without anyone remembering this file."""
+    import mkpasswd
+    return {n.encode() for n, uid, gid, _home, _pw in mkpasswd.ACCOUNTS if uid == 0 or gid == 0}
+
+
+ROOT_CLAIMS = root_claims()
+
+
+def claimed(name):
+    """The claimed user: the wire field up to its first NUL."""
+    return name.split(b"\0", 1)[0]
+
+
+def squashed(name, peer):
+    """Whether a claim of `name` (the NUL-padded wire field) from dev peer
+    `peer` is refused by root squash."""
+    return claimed(name) in ROOT_CLAIMS and peer not in DEV_ROOT_PEERS
+
+
 def dev_authorized():
     """The dev peers' public keys, as bytes, one per DEV_PEER_LABELS entry
     (`intruder` included: every dev key is public-seeded, so authorizing it
@@ -252,9 +286,11 @@ def dev_authorized():
     the budget this rig was just found to be marginal against."""
     global _AUTHORIZED
     if _AUTHORIZED is None:
+        # Public key -> the peer's short name, which is what its root flag is
+        # recorded under.
         _AUTHORIZED = {
-            ed().public_key(hashlib.sha256(l.encode()).digest())
-            for l in DEV_PEER_LABELS.values()
+            ed().public_key(hashlib.sha256(l.encode()).digest()): n
+            for n, l in DEV_PEER_LABELS.items()
         }
     return _AUTHORIZED
 
@@ -283,11 +319,12 @@ def verify_signed(body):
     pub = body[koff : koff + NP_PUBKEY_LEN]
     sig = body[koff + NP_PUBKEY_LEN : NP_AUTH_HDR_SIGNED]
     np = body[NP_AUTH_HDR_SIGNED:]
-    if pub not in dev_authorized():
+    peer = dev_authorized().get(pub)
+    if peer is None:
         return None
     if not ed().verify(pub, SIG_DOMAIN_REQUEST + nonce + name + np, sig):
         return None
-    return np, nonce, name
+    return np, nonce, name, peer
 
 
 # The host peer's own identity - the "host" dev key, which every image's
@@ -315,9 +352,11 @@ def warm_up():
 
 
 def verify(body):
-    """Strip + verify the auth header; return (NP message, nonce, name), or
-    None. The nonce is what the reply is signed against (reply-auth); the name
-    is the user the request is made as, which a fid is bound to at open.
+    """Strip + verify the auth header; return (NP message, nonce, name, peer),
+    or None. The nonce is what the reply is signed against (reply-auth); the
+    name is the user the request is made as, which a fid is bound to at open;
+    the peer is the dev identity that signed, whose root flag decides a root
+    claim.
 
     ONE FORMAT. The retired shared-key MAC'd format (`AUTHNP02`) was accepted
     here until the flag day; a frame carrying it is now refused like any other
@@ -476,7 +515,12 @@ def serve_request(body):
     verified = verify(body)
     if verified is None:
         return frame_reply(FS_ERR_AUTH)
-    body, nonce, name = verified
+    body, nonce, name, peer = verified
+    if squashed(name, peer):
+        # SIGNED, as netd's is: the peer proved it holds an authorized key, so
+        # it gets an authenticated answer, refusal included.
+        print(f"  [root squash: {peer} claimed {claimed(name)!r}, refused]", flush=True)
+        return seal(nonce, FS_ERR_AUTH)
     return serve_np(body, name, lambda status, data=b"": seal(nonce, status, data))
 
 
@@ -724,7 +768,9 @@ def self_test(quiet=True):
     """
     global verify
     real_verify = verify
-    verify = lambda body: (body, b"\0" * NP_NONCE_LEN, b"self-test")  # noqa: E731
+    # Signed as `host`: the dispatch table is not about root squash, which the
+    # keyed self-test below and the impersonation gate exercise.
+    verify = lambda body: (body, b"\0" * NP_NONCE_LEN, b"self-test", "host")  # noqa: E731
     bad = []
     try:
         FIDS.clear()
@@ -976,6 +1022,53 @@ def keyed_self_test(quiet=True):
         if got != "closed" or ended != "refused":
             bad.append(f"  - keyed: the export did not refuse {label} "
                        f"(client saw: {got}; server: {ended})")
+
+    # 4. ROOT SQUASH, both ways in, from a peer with no `root` flag (`intruder`):
+    # a signed request claiming root is refused FS_ERR_AUTH, a keyed session
+    # opened as root is refused and never keyed, and the same peer claiming
+    # `user` is served - so the refusals are about the claim, not the key.
+    # Everything above signs as `host`, which is flagged, so without this the
+    # squash could be deleted from this server and `make test` stay green.
+    intruder = c.dev_seed(c.DEV_PEER_LABELS["intruder"])
+    stat = _frame(NP_BASE + 12, ("PLEN", 0, 0), b"/HELLO.TXT", 0)
+
+    def one_op_as(user):
+        def go(port):
+            s = c.Session("127.0.0.1", port)
+            try:
+                st, _ = s.op(stat, user=user, seed=intruder)
+                return st
+            except (RuntimeError, OSError) as e:
+                return f"broke: {e}"
+            finally:
+                s.close()
+        return go
+
+    def keyed_as_root(port):
+        s = c.Session("127.0.0.1", port)
+        saved = c.SIGN_KEY
+        c.SIGN_KEY = intruder
+        try:
+            st, _ = s.open(keyed=True, user=b"root")
+            return (st, s.keys is not None)
+        except (RuntimeError, OSError) as e:
+            return f"broke: {e}"
+        finally:
+            c.SIGN_KEY = saved
+            s.close()
+
+    for label, fn, want in (
+        ("a signed request from an unflagged peer claiming root", one_op_as(b"root"), FS_ERR_AUTH),
+        ("a keyed session from an unflagged peer claiming root", keyed_as_root, (FS_ERR_AUTH, False)),
+    ):
+        got, ended = run(None, fn)
+        if got != want or ended.startswith("CRASHED"):
+            shown = got if isinstance(got, (str, tuple)) else classify(got)
+            bad.append(f"  - root squash: {label} was not refused FS_ERR_AUTH ({shown}; server: {ended})")
+    got, ended = run(None, one_op_as(b"user"))
+    if isinstance(got, str) or got >= (1 << 64) - 64:
+        shown = got if isinstance(got, str) else classify(got)
+        bad.append(f"  - root squash control: the unflagged peer claiming `user` was not served ({shown})")
     return bad
 
 
@@ -1085,11 +1178,17 @@ def open_keyed(body):
     """Key a session from a verified NP_SESSION offering `eph_client`: the
     reply (a SIGNED one, carrying `eph_export`) and the Keyed state, or None
     for a refusal to send as the unsigned denial, or "close" for an all-zero
-    shared secret, which closes without a reply on both sides."""
+    shared secret, which closes without a reply on both sides. A root-squashed
+    claim is the signed refusal with no Keyed state: a session keyed as root
+    would run every later verb as root without the claim being seen again."""
     verified = verify(body)
     if verified is None:
         return None
-    np_msg, nonce, name = verified
+    np_msg, nonce, name, peer = verified
+    if squashed(name, peer):
+        print(f"  [root squash: {peer} claimed {claimed(name)!r} for a keyed session, refused]",
+              flush=True)
+        return seal(nonce, FS_ERR_AUTH), None
     eph_client = np_msg[HDR:HDR + NP_EPHEMERAL_LEN]
     secret = export_ephemeral(nonce)
     eph_export = x25519_ref.public(secret)
@@ -1153,8 +1252,9 @@ def serve_connection(conn, addr, delay=0.0):
                     reply = frame_reply(FS_ERR_AUTH)
                 else:
                     reply, keyed = opened
-                    session = True
-                    print("  [keyed session opened on this connection]", flush=True)
+                    if keyed is not None:
+                        session = True
+                        print("  [keyed session opened on this connection]", flush=True)
             else:
                 reply = serve_request(body)
                 if request_verb(body) == NP_SESSION and reply_status(reply) == 0:

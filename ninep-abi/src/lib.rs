@@ -439,8 +439,13 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 // docs/roadmap/roadmap-cluster.md): replay-of-observed-ops (a passive sniffer can replay
 // a captured request verbatim; forgery of a *new* one it cannot), transport
 // encryption, and reply-auth for the `cpu`-run output *stream* (not a framed
-// reply). Keys are per-MACHINE, not per-user, so an authorized machine can still
-// claim any of its own users' names.
+// reply). Keys are per-MACHINE, not per-user, so an authorized machine can
+// claim ANY name that exists on the export, not only its own users' (nothing
+// checks the name exists on the caller). The one exception is ROOT SQUASH: a
+// name resolving to uid 0 or gid 0 on the export is refused (FS_ERR_AUTH,
+// signed) unless the peer's `authorized` line carries the `root` flag
+// (docs/roadmap/roadmap-user-keys.md, Decision 6). Per-user keys, the rest of
+// that plan, close the remainder.
 //
 // The retired shared-key MAC format ("AUTHNP02") is refused outright; it
 // survives only as a negative control `np9p_client.py --legacy-mac` can send.
@@ -537,8 +542,9 @@ pub const NP_NONCE_LEN: usize = 16;
 /// that machine's users is asking, so the far side can apply its own permission
 /// model instead of serving every remote request as root. It is covered by the
 /// signature, so the claimed user cannot be tampered with in flight - though an
-/// authorized machine can still claim any of its own users' names, which is what
-/// a per-USER key tier would close.
+/// authorized machine can claim ANY name the far side has, not only its own
+/// users', except a root-equivalent one without the `root` flag (root squash).
+/// A per-USER key tier (docs/roadmap/roadmap-user-keys.md) closes the rest.
 ///
 /// **A name, not a uid.** Two nodes have independent `/etc/passwd` files, so
 /// uid 1000 need not be the same person on both - numeric identity (NFS's

@@ -10,7 +10,18 @@
 //! |---|---|---|
 //! | `id` | 0600 | this machine's **private** key, 64 hex characters |
 //! | `id.pub` | 0644 | this machine's public key, 64 hex characters |
-//! | `authorized` | 0644 | one line per peer: `<name> <ipv4> <pubkey-hex>` |
+//! | `authorized` | 0644 | one line per peer: `<name> <ipv4> <pubkey-hex> [root]` |
+//!
+//! ## The `root` flag
+//!
+//! An `authorized` line may end with the word `root` (before any `# note`).
+//! It is the explicit statement "this machine is trusted with root": the
+//! export serves a request whose claimed user resolves to uid 0 or gid 0 only
+//! from a peer whose line carries it (root squash, Decision 6 of
+//! `docs/roadmap/roadmap-user-keys.md`). Without it, a peer is authorized for
+//! every other user and refused as root. Any other trailing word makes the line
+//! malformed, so a misspelt flag leaves the peer unauthorized rather than
+//! guessing which was meant, and `clusterkey peers` reports the line.
 //!
 //! ## Why `authorized` carries an address as well as a key
 //!
@@ -67,6 +78,8 @@ pub struct Peer<'a> {
     pub ip: [u8; 4],
     /// The public key, which is what actually grants access.
     pub key: [u8; KEY_LEN],
+    /// Whether this peer may claim a user that resolves to uid 0 or gid 0.
+    pub root: bool,
 }
 
 /// Decode exactly `KEY_HEX_LEN` hex characters into a key.
@@ -212,6 +225,13 @@ fn parse_peer(line: &[u8]) -> Option<Peer<'_>> {
     let (name, rest) = split_field(line)?;
     let (ip_text, rest) = split_field(rest)?;
     let (key_text, rest) = split_field(rest)?;
+    // The optional `root` flag, spelled exactly. Only a lowercase whole word:
+    // `ROOT` or `rooted` is not the flag, and falls to the check below, which
+    // refuses the line. A flag that grants root must not be matched loosely.
+    let (root, rest) = match split_field(rest) {
+        Some((b"root", after)) => (true, after),
+        _ => (false, rest),
+    };
     // A trailing `# note` is accepted - it is how people annotate this kind of
     // file, and rejecting it would silently unauthorize a peer whose line still
     // looks correct. Anything else trailing means the line is not what this
@@ -224,20 +244,32 @@ fn parse_peer(line: &[u8]) -> Option<Peer<'_>> {
     if name.is_empty() || name.len() > NAME_MAX {
         return None;
     }
-    Some(Peer { name, ip: parse_ip(ip_text)?, key: decode_key(key_text)? })
+    Some(Peer { name, ip: parse_ip(ip_text)?, key: decode_key(key_text)?, root })
 }
 
 /// The peer whose **public key** matches — what an exporter asks when a client
 /// offers a key.
+///
+/// **ROOT ONLY IF EVERY LINE FOR THE KEY SAYS SO.** The peer returned is the
+/// first line holding the key, but its `root` is true only when no other line
+/// holding that key lacks the flag. Taking the first line's flag meant that an
+/// operator withdrawing root by appending an unflagged line, and leaving the
+/// old one, went on granting root: the "append and leave the old line" mistake
+/// [`find_by_ip`] refuses for addresses. Disagreeing lines resolve to the less
+/// trusted reading rather than the first one.
 pub fn find_by_key<'a>(authorized: &'a [u8], key: &[u8; KEY_LEN]) -> Option<Peer<'a>> {
+    let mut hit: Option<Peer<'a>> = None;
     for line in authorized.split(|&c| c == b'\n') {
         if let Some(p) = parse_line(line) {
             if &p.key == key {
-                return Some(p);
+                match hit.as_mut() {
+                    Some(first) => first.root &= p.root,
+                    None => hit = Some(p),
+                }
             }
         }
     }
-    None
+    hit
 }
 
 /// The peer expected at an **address** — what a client asks before trusting a
@@ -296,11 +328,16 @@ pub fn duplicate_ip_lines(authorized: &[u8], out: &mut [u32]) -> usize {
 
 /// Format an `authorized` line (without a trailing newline) into `out`,
 /// returning its length.
+///
+/// `root` is REQUIRED, not defaulted: whether a peer is trusted with root is a
+/// decision every caller must make visibly, and a default of either value
+/// would make it for them.
 pub fn format_line(
     out: &mut [u8],
     name: &[u8],
     ip: &[u8; 4],
     key: &[u8; KEY_LEN],
+    root: bool,
 ) -> Option<usize> {
     // A name that would make the line unreadable is refused rather than written.
     // A leading `#` is the subtle one: the line would look authorized to anyone
@@ -312,7 +349,8 @@ pub fn format_line(
     let ip_len = format_ip(ip, &mut ip_buf);
     let mut key_buf = [0u8; KEY_HEX_LEN];
     encode_key(key, &mut key_buf);
-    let total = name.len() + 1 + ip_len + 1 + KEY_HEX_LEN;
+    const FLAG: &[u8] = b" root";
+    let total = name.len() + 1 + ip_len + 1 + KEY_HEX_LEN + if root { FLAG.len() } else { 0 };
     if out.len() < total {
         return None;
     }
@@ -326,6 +364,10 @@ pub fn format_line(
     out[n] = b' ';
     n += 1;
     out[n..n + KEY_HEX_LEN].copy_from_slice(&key_buf);
+    n += KEY_HEX_LEN;
+    if root {
+        out[n..n + FLAG.len()].copy_from_slice(FLAG);
+    }
     Some(total)
 }
 
@@ -571,7 +613,7 @@ mod tests {
         // format/parse must agree: writing `#node-a` would produce a line that
         // looks authorized in the file and is skipped by every lookup.
         let mut buf = [0u8; 160];
-        assert!(format_line(&mut buf, b"#node-a", &[10, 0, 2, 10], &KEY_A).is_none());
+        assert!(format_line(&mut buf, b"#node-a", &[10, 0, 2, 10], &KEY_A, false).is_none());
     }
 
     #[test]
@@ -610,24 +652,79 @@ mod tests {
     #[test]
     fn formatting_a_line_produces_one_this_parses() {
         let mut buf = [0u8; 160];
-        let n = format_line(&mut buf, b"node-c", &[192, 168, 1, 7], &KEY_B).expect("format");
-        let p = parse_line(&buf[..n]).expect("the line we just wrote must parse");
-        assert_eq!(p.name, b"node-c");
-        assert_eq!(p.ip, [192, 168, 1, 7]);
-        assert_eq!(p.key, KEY_B);
+        for root in [false, true] {
+            let n = format_line(&mut buf, b"node-c", &[192, 168, 1, 7], &KEY_B, root).expect("format");
+            let p = parse_line(&buf[..n]).expect("the line we just wrote must parse");
+            assert_eq!(p.name, b"node-c");
+            assert_eq!(p.ip, [192, 168, 1, 7]);
+            assert_eq!(p.key, KEY_B);
+            assert_eq!(p.root, root, "the flag must survive a round trip");
+        }
+    }
+
+    #[test]
+    fn root_needs_every_line_for_the_key_to_say_so() {
+        const K: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        // Two lines for one key, with the given tails, in a fixed buffer.
+        let file = |tails: [&str; 2]| {
+            let mut buf = [0u8; 256];
+            let mut n = 0;
+            for t in tails {
+                for part in [&b"node-a 10.0.2.10 "[..], K.as_bytes(), t.as_bytes(), b"\n"] {
+                    buf[n..n + part.len()].copy_from_slice(part);
+                    n += part.len();
+                }
+            }
+            (buf, n)
+        };
+        let root_of = |tails: [&str; 2]| {
+            let (buf, n) = file(tails);
+            find_by_key(&buf[..n], &KEY_A).expect("still authorized").root
+        };
+        // Root withdrawn by appending an unflagged line, the old one left in
+        // place: not root, in either order.
+        assert!(!root_of([" root", ""]), "disagreeing lines must not grant root");
+        assert!(!root_of(["", " root"]), "disagreeing lines must not grant root");
+        // Agreeing lines keep what they agree on.
+        assert!(root_of([" root", " root"]));
+        assert!(!root_of(["", ""]));
+    }
+
+    #[test]
+    fn the_root_flag_is_read_exactly() {
+        const K: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        let line = |tail: &str| {
+            let mut buf = [0u8; 160];
+            let text = [b"node-a 10.0.2.10 ", K.as_bytes(), tail.as_bytes()].concat();
+            buf[..text.len()].copy_from_slice(&text);
+            (buf, text.len())
+        };
+        // Absent: authorized, not for root. Present, with or without a note.
+        for (tail, want) in [("", false), (" root", true), ("  root  ", true), (" root # primary", true), (" # root", false)] {
+            let (buf, n) = line(tail);
+            let p = parse_line(&buf[..n]).unwrap_or_else(|| panic!("{tail:?} must parse"));
+            assert_eq!(p.root, want, "tail {tail:?}");
+        }
+        // Anything near it is NOT the flag, and the line is refused, not read
+        // as a peer without root: a misspelt flag must be seen, not absorbed.
+        for tail in [" ROOT", " rooted", " roo", " root root", " root extra"] {
+            let (buf, n) = line(tail);
+            assert!(parse_line(&buf[..n]).is_none(), "tail {tail:?} must be malformed");
+            assert!(matches!(classify(&buf[..n]), LineKind::Malformed), "tail {tail:?} reports as broken");
+        }
     }
 
     #[test]
     fn formatting_refuses_a_name_that_would_break_the_format() {
         let mut buf = [0u8; 160];
         // A space in a name would silently shift every field on re-read.
-        assert!(format_line(&mut buf, b"node a", &[10, 0, 0, 1], &KEY_A).is_none());
-        assert!(format_line(&mut buf, b"", &[10, 0, 0, 1], &KEY_A).is_none());
+        assert!(format_line(&mut buf, b"node a", &[10, 0, 0, 1], &KEY_A, false).is_none());
+        assert!(format_line(&mut buf, b"", &[10, 0, 0, 1], &KEY_A, false).is_none());
         let long = [b'x'; NAME_MAX + 1];
-        assert!(format_line(&mut buf, &long, &[10, 0, 0, 1], &KEY_A).is_none());
+        assert!(format_line(&mut buf, &long, &[10, 0, 0, 1], &KEY_A, false).is_none());
         // And a buffer too small must refuse rather than truncate.
         let mut tiny = [0u8; 8];
-        assert!(format_line(&mut tiny, b"node-c", &[10, 0, 0, 1], &KEY_A).is_none());
+        assert!(format_line(&mut tiny, b"node-c", &[10, 0, 0, 1], &KEY_A, false).is_none());
     }
 
     #[test]
@@ -706,7 +803,7 @@ mod generator_agreement {
     //! becoming a guest that silently authorizes nobody.
     use super::*;
 
-    const GENERATED_AUTHORIZED: &str = "# Peers this machine accepts. One line per peer:\n#   <name> <ipv4> <public-key-hex>\n# Delete or comment out a line to revoke that peer.\n# DEV KEYS: derived from fixed seeds, so they are public. Not for real use.\nnode-a 10.0.2.10 de5317f86f9d763d9fc5c4589a85dda15d136d5c31d4c7d6bba980dfca37d4e6\nnode-b 10.0.2.11 e9e1630da4a29b961703d42eb3300448078ff0f1c1c7d37dde269f132d53b81d\nhost 10.0.2.2 3e71226a69d738c5921acfcad1e823d28c1d3e0b047b0af245b220b436bee964\nintruder 10.0.2.20 11ffb4857fd1afb89cccc048526a2d15e60b57ff8e6ffc9c5c00da07647cbbc6\n";
+    const GENERATED_AUTHORIZED: &str = "# Peers this machine accepts. One line per peer:\n#   <name> <ipv4> <public-key-hex> [root]\n# `root` trusts that peer to act as root (uid or gid 0) here.\n# Delete or comment out a line to revoke that peer.\n# DEV KEYS: derived from fixed seeds, so they are public. Not for real use.\nnode-a 10.0.2.10 de5317f86f9d763d9fc5c4589a85dda15d136d5c31d4c7d6bba980dfca37d4e6 root\nnode-b 10.0.2.11 e9e1630da4a29b961703d42eb3300448078ff0f1c1c7d37dde269f132d53b81d root\nhost 10.0.2.2 3e71226a69d738c5921acfcad1e823d28c1d3e0b047b0af245b220b436bee964 root\nintruder 10.0.2.20 11ffb4857fd1afb89cccc048526a2d15e60b57ff8e6ffc9c5c00da07647cbbc6\n";
     const GENERATED_ID: &str = "92c8e58c772b748688638ab47c61185a8aaa12ff690c61caeab9e98ca44f9e9f\n";
     const GENERATED_ID_PUB: &str = "de5317f86f9d763d9fc5c4589a85dda15d136d5c31d4c7d6bba980dfca37d4e6\n";
 
@@ -725,14 +822,17 @@ mod generator_agreement {
     #[test]
     fn the_generated_peers_are_findable_by_key_and_address() {
         let bytes = GENERATED_AUTHORIZED.as_bytes();
-        for (name, ip) in [
-            (&b"node-a"[..], [10u8, 0, 2, 10]),
-            (&b"node-b"[..], [10, 0, 2, 11]),
-            (&b"host"[..], [10, 0, 2, 2]),
-            (&b"intruder"[..], [10, 0, 2, 20]),
+        // The root flag too: the three identities the rigs drive the cluster as
+        // root with carry it, and the gate's hostile peer does not.
+        for (name, ip, root) in [
+            (&b"node-a"[..], [10u8, 0, 2, 10], true),
+            (&b"node-b"[..], [10, 0, 2, 11], true),
+            (&b"host"[..], [10, 0, 2, 2], true),
+            (&b"intruder"[..], [10, 0, 2, 20], false),
         ] {
             let by_ip = find_by_ip(bytes, &ip).unwrap_or_else(|| panic!("{name:?} by address"));
             assert_eq!(by_ip.name, name);
+            assert_eq!(by_ip.root, root, "{name:?}'s root flag");
             let by_key = find_by_key(bytes, &by_ip.key).expect("and back by its key");
             assert_eq!(by_key.name, name);
         }

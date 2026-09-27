@@ -253,7 +253,8 @@ at a roadmap arc:
    carries the caller's **name** inside the MAC, resolved through the far side's
    own `/etc/passwd`, and reaches `fsd` as a required field of the request. What
    remains is the tier below it: the key is still per-*machine*, so a peer that
-   holds it can claim any name.
+   holds it can claim any name, except a root-equivalent one unless the export
+   flags it `root` (root squash, 2026-09-26).
 2. **A userland libc personality — DONE, mechanism (2026-08-28).** POSIX/C
    portability was the single biggest thing given up across every comparison.
    The six-step libc arc built it: a C program runs, and **picolibc is ported**

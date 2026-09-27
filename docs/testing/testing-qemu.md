@@ -236,20 +236,21 @@ console naming the reason, which is where an operator finds it: the client
 only sees the connection end.
 
 **The impersonation gate** (user-keys step 0, 2026-09-26): `impersonate-gate
-[stage]` signs as `intruder`, a dev identity every image authorizes and no
+<stage>` signs as `intruder`, a dev identity every image authorizes and no
 machine holds, and claims users it has no credential for: row 1 claims root
 and reads `/etc/shadow`, row 2 claims `user` and reads
 `/Users/user/PRIVATE.TXT` (0600, `user`'s). Four controls run first (modes are
 enforced, the intruder key is authorized, an unauthorized key is refused, the
-private file's mode and owner). Stage `0` expects both rows **served**, which
-is the gap today; stage `1` (root squash) expects row 1 refused. It needs the
+private file's mode and owner). Stage `0` expects both rows **served**, the gap
+as it was before root squash; stage `1` (root squash, the current code) expects
+row 1 refused `FS_ERR_AUTH` or `FS_ERR_PERM` and row 2 still served. It needs the
 **ext2 image**; against FAT32 the mode control fails and says why:
 
 ```sh
 make image-ext2
 IMAGE=build/espext2.img NO_BUILD=1 scripts/run-guest.sh -- \
-    python3 scripts/np9p_client.py localhost 5640 impersonate-gate 0
-# expected on main before root squash: 6 PASS, 3 n/a, "impersonate-gate: 0 check(s) failed"
+    python3 scripts/np9p_client.py localhost 5640 impersonate-gate 1
+# expected: 6 PASS, 3 n/a, "impersonate-gate: 0 check(s) failed" (row 1 refused FS_ERR_AUTH)
 ```
 
 **The session gate** (step 4 of `docs/roadmap/roadmap-fid-verbs.md`, 2026-09-07):

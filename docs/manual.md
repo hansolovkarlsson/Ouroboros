@@ -325,10 +325,13 @@ root. Two consequences worth knowing:
   refused remotely and allowed locally.
 
 This is still auth at the **machine** level: a machine the cluster authorizes
-can claim any user who has an account on the exporting machine, **root
-included**, so this protects you from the *users* of a machine you trust, not
-from a machine you don't. One compromised authorized machine is root on every
-export that lists it. Root squash and per-user keys are planned in
+can claim any user who has an account on the exporting machine, so this
+protects you from the *users* of a machine you trust, not from a machine you
+don't. **Root is the exception (root squash):** a claim that resolves to uid 0
+or gid 0 on the exporting machine is refused unless that machine's
+`authorized` line for the peer ends with `root`. So a compromised machine is
+root only on the exports that chose to trust it with root, and every other
+account remains claimable. Per-user keys, which close the rest, are planned in
 `docs/roadmap/roadmap-user-keys.md`. It assumes a **trusted LAN** for the
 parts still deferred (a passive sniffer reads your files and can replay an
 observed one-shot request; encryption, replay protection for one-shot requests
@@ -349,7 +352,7 @@ private one: it requires no key and no account.
 | --- | --- |
 | `/etc/cluster/id` | This machine's **private** key (0600, 64 hex chars). Absent ⇒ it can neither serve nor make remote requests. Generate with `clusterkey new`. |
 | `/etc/cluster/id.pub` | The public half, for pasting into a peer's `authorized`. `clusterkey` with no arguments prints it. |
-| `/etc/cluster/authorized` | The peers this machine accepts, one per line: `<name> <ipv4> <pubkey-hex>`. Absent or empty ⇒ the export serves nobody. Comment a line out (or delete it) to **revoke** that peer. |
+| `/etc/cluster/authorized` | The peers this machine accepts, one per line: `<name> <ipv4> <pubkey-hex> [root]`. A trailing `root` trusts that peer to act as root (uid or gid 0) here; without it the peer is refused as root and served as anyone else. Absent or empty ⇒ the export serves nobody. Comment a line out (or delete it) to **revoke** that peer. |
 | `\NOEXEC` | Presence-only flag: authenticated peers may still `mount -r` the disk, but every `cpu` (remote-exec) is refused. |
 
 In the QEMU images a dev identity is staged automatically

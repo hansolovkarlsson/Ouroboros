@@ -5,7 +5,7 @@ Writes, into a directory given on the command line:
 
     id           this machine's PRIVATE key, 64 hex characters (mode 0600)
     id.pub       its public key
-    authorized   one line per peer: <name> <ipv4> <pubkey-hex>
+    authorized   one line per peer: <name> <ipv4> <pubkey-hex> [root]
 
 THE DEV KEYS ARE DETERMINISTIC, AND THAT IS DELIBERATE. `make image-ext2` builds
 node A's disk and node B's disk in separate invocations, and both must end up
@@ -52,11 +52,18 @@ _spec.loader.exec_module(edref)  # this ASSERTS the reference against RFC 8032
 # client looks one up only for a host it dials, which nobody dials this one.
 # Sharing an address with a real peer would make that peer's lookup ambiguous,
 # which `find_by_ip` refuses.
+#
+# The last field is the `root` flag (root squash, step 1 of the same plan): a
+# peer may claim a user resolving to uid 0 or gid 0 only if its line carries
+# it. Every identity the rigs drive the cluster as root with is flagged, so
+# those rigs are unchanged; `intruder` is not, which is what the gate's row 1
+# sees. `np9p_server.py` keeps its own copy of the flags (DEV_ROOT_PEERS), and
+# `check-wire-constants.py` holds the two equal.
 DEV_PEERS = [
-    ("node-a", "10.0.2.10", "ouroboros-dev-node-a"),
-    ("node-b", "10.0.2.11", "ouroboros-dev-node-b"),
-    ("host", "10.0.2.2", "ouroboros-dev-host-peer"),
-    ("intruder", "10.0.2.20", "ouroboros-dev-intruder"),
+    ("node-a", "10.0.2.10", "ouroboros-dev-node-a", True),
+    ("node-b", "10.0.2.11", "ouroboros-dev-node-b", True),
+    ("host", "10.0.2.2", "ouroboros-dev-host-peer", True),
+    ("intruder", "10.0.2.20", "ouroboros-dev-intruder", False),
 ]
 
 
@@ -76,18 +83,18 @@ def main():
         args.remove("--random")
     if len(args) != 2:
         print("usage: mkclusterkeys.py [--random] <out-dir> <this-node-name>", file=sys.stderr)
-        print(f"  node names: {', '.join(n for n, _, _ in DEV_PEERS)}", file=sys.stderr)
+        print(f"  node names: {', '.join(n for n, _, _, _ in DEV_PEERS)}", file=sys.stderr)
         sys.exit(2)
     out_dir, me = args
-    names = [n for n, _, _ in DEV_PEERS]
+    names = [n for n, _, _, _ in DEV_PEERS]
     if me not in names:
         print(f"mkclusterkeys.py: unknown node '{me}' (expected one of {names})", file=sys.stderr)
         sys.exit(2)
 
     keys = {}
-    for name, ip, label in DEV_PEERS:
+    for name, ip, label, root in DEV_PEERS:
         seed = seed_from(label)
-        keys[name] = (seed, edref.public_key(seed), ip)
+        keys[name] = (seed, edref.public_key(seed), ip, root)
     if random_keys:
         # --random replaces THIS NODE'S key with a real one, and nothing else.
         #
@@ -96,12 +103,16 @@ def main():
         # nodes built by separate invocations each got an `authorized` naming the
         # other's WRONG public key. A deployment path that cannot produce a
         # working cluster is worse than none, because it looks like one.
-        my_ip = dict((n, i) for n, i, _ in DEV_PEERS)[me]
+        # Its own line is not root-flagged: a machine's trust in ITSELF with
+        # root is not what the flag is for, and granting it here would be a
+        # default nobody chose. An operator adds ` root` to a peer's line by
+        # hand when that machine should be trusted with root.
+        my_ip = dict((n, i) for n, i, _, _ in DEV_PEERS)[me]
         seed = os.urandom(32)
-        keys = {me: (seed, edref.public_key(seed), my_ip)}
+        keys = {me: (seed, edref.public_key(seed), my_ip, False)}
 
     os.makedirs(out_dir, exist_ok=True)
-    my_seed, my_pub, _ = keys[me]
+    my_seed, my_pub, _, _ = keys[me]
 
     id_path = os.path.join(out_dir, "id")
     # Created 0600 rather than written and then chmod'd: the naive order leaves a
@@ -120,7 +131,8 @@ def main():
 
     with open(os.path.join(out_dir, "authorized"), "w") as f:
         f.write("# Peers this machine accepts. One line per peer:\n")
-        f.write("#   <name> <ipv4> <public-key-hex>\n")
+        f.write("#   <name> <ipv4> <public-key-hex> [root]\n")
+        f.write("# `root` trusts that peer to act as root (uid or gid 0) here.\n")
         f.write("# Delete or comment out a line to revoke that peer.\n")
         if random_keys:
             f.write("# This key was generated randomly, so no other machine's public key is\n")
@@ -128,8 +140,8 @@ def main():
             f.write("# /etc/cluster/id.pub - see `clusterkey` on the device.\n")
         else:
             f.write("# DEV KEYS: derived from fixed seeds, so they are public. Not for real use.\n")
-        for name, (_seed, pub, ip) in keys.items():
-            f.write(f"{name} {ip} {pub.hex()}\n")
+        for name, (_seed, pub, ip, root) in keys.items():
+            f.write(f"{name} {ip} {pub.hex()}{' root' if root else ''}\n")
 
     print(f"mkclusterkeys: {out_dir} identity={me} peers={len(keys)}"
           f"{' (RANDOM keys)' if random_keys else ' (fixed dev keys)'}")

@@ -18,7 +18,7 @@ Usage:
     python3 scripts/np9p_client.py <host> <port> fid-gate [path] [data_path]  # the step-5/6 checks: open/fstat/clunk, and pread to EOF, on a session
     python3 scripts/np9p_client.py <host> <port> path-gate              # the path verbs end to end on a scratch file, plus the console and /net arms
     python3 scripts/np9p_client.py <host> <port> keyed-gate [data_path] [user]  # session-auth step 6: the export keys a session, and refuses every forgery by closing
-    python3 scripts/np9p_client.py <host> <port> impersonate-gate [stage]  # user-keys step 0: an authorized peer claims users it has no credential for (ext2 image)
+    python3 scripts/np9p_client.py <host> <port> impersonate-gate <stage>  # user-keys step 0: an authorized peer claims users it has no credential for (ext2 image)
 
 Every request is SIGNED with a per-machine Ed25519 key: the auth header is
 `[magic:8][nonce:16][name:32][pubkey:32][sig:64]` in front of the NP message,
@@ -2301,8 +2301,16 @@ def main():
         sys.exit(min(do_path_gate(host, port), 125))
 
     if op == "impersonate-gate":
+        # REQUIRED. It defaulted to 0, the pre-squash expectation, so a bare
+        # run against today's tree reported row 1 as a failure and read like a
+        # regression. The stage is what the run claims about the code, and a
+        # claim should be stated, not defaulted.
+        if len(args) < 4:
+            sys.exit("impersonate-gate: give the stage the code is at "
+                     f"({', '.join(str(k) for k in sorted(IMPERSONATE_STAGES))}); "
+                     "1 is root squash, the current code")
         try:
-            stage = int(args[3]) if len(args) > 3 else 0
+            stage = int(args[3])
         except ValueError:
             sys.exit(f"impersonate-gate: the stage is a number, not {args[3]!r}")
         sys.exit(min(do_impersonate_gate(host, port, stage), 125))

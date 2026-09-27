@@ -7,6 +7,7 @@
 //! clusterkey new [-f]     generate a keypair (refuses without real entropy)
 //! clusterkey peers        list the peers this machine accepts
 //! clusterkey line N IP    print the authorized line to paste on another machine
+//!                         (never root-flagged: that is the other machine's call)
 //! ```
 //!
 //! ## Why generation refuses rather than degrades
@@ -230,6 +231,11 @@ fn peers(target: u64) -> u64 {
                 let mut hex = [0u8; KEY_HEX_LEN];
                 clusterkeys::encode_key(&p.key, &mut hex);
                 out(target, &hex);
+                // Shown, because it is the one field that changes what a peer
+                // may do rather than whether it may do anything.
+                if p.root {
+                    out(target, b"  root");
+                }
                 out(target, b"\r\n");
                 // A well-formed line can still carry a key that cannot ever
                 // authenticate anything, and the parser deliberately does not
@@ -330,7 +336,10 @@ fn line(target: u64) -> u64 {
         return 1;
     };
     let mut line = [0u8; 160];
-    match clusterkeys::format_line(&mut line, &name[..nlen], &ip, &key) {
+    // NOT root-flagged. Whether the OTHER machine trusts this one with root is
+    // that machine's decision, made there by appending ` root` to the line; a
+    // line printed here to be pasted must not make it on its behalf.
+    match clusterkeys::format_line(&mut line, &name[..nlen], &ip, &key, false) {
         Some(len) => {
             out(target, &line[..len]);
             out(target, b"\r\n");
