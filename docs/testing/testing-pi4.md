@@ -548,6 +548,18 @@ clear wipes them, so squares still on screen mean the boot stopped before it,
 and none at all means inside the firmware's `ExitBootServices`. Checked on
 QEMU with a hang planted after each: one square, then two.
 
+**Where the Pi 4 stops, as far as HDMI can say** (build `3da3cad`,
+`NOXHCI` + `FBCON`): the screen cleared, with no squares and no text. The
+clear is the early console's, and it wipes the squares, so the exit returned,
+the vectors went in, and the whole-screen clear (one `write_bytes` and one
+cache clean) reached the display; the first line after it
+(`framebuffer console live early …`, drawn a pixel at a time with a clean per
+glyph) never appeared. The stop is between the clear and that line, or the
+line was drawn and never reached the display. Testing paused here on
+2026-09-28 until the serial cable arrives: boot without flags first, since
+the console is now at the translated `0xfe201000` and every line after the
+exit goes to serial.
+
 ---
 
 ## 7. Risks, ranked
