@@ -644,6 +644,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is
   src/virtio_rng.rs  virtio-rng, backing the RANDOM syscall; absent on Parallels/Pi and that is a supported case
+  src/bootflags.rs   boot flag files (\NOXHCI, \XHCINOWR) at the ESP root: switch off one boot step to bisect a hang on hardware
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
   src/xhci.rs        from-scratch xHCI: rings, multi-device port scan, HID interrupt endpoint, storage endpoint reset

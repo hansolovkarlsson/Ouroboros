@@ -5,6 +5,7 @@ extern crate alloc;
 
 mod acpi;
 mod block;
+mod bootflags;
 mod bootid;
 mod console;
 mod devicetree;
@@ -342,7 +343,16 @@ fn main() -> Status {
     // the Pi, whose PCIe window is translated), rather than guessed - see
     // xhci.rs's module doc comment for why that makes it safe to actually
     // use later regardless of `virtio_mmio_probe_safe`.
-    let xhci_info = match pci::discover_xhci() {
+    // Boot flag files (bootflags.rs), read here, before the takeover: `\NOXHCI`
+    // skips this step, `\XHCINOWR` skips only its command-register write.
+    // Bench diagnostics for bisecting a hang on real hardware.
+    let xhci_no_write = bootflags::present(bootflags::XHCI_NO_WRITE);
+    let xhci_result = if bootflags::present(bootflags::NO_XHCI) {
+        Err(pci::XhciDiscoveryError::SkippedByFlag)
+    } else {
+        pci::discover_xhci(!xhci_no_write)
+    };
+    let xhci_info = match xhci_result {
         Ok(info) => {
             log::info!(
                 "Ouroboros kernel: xHCI controller @ {:#x} (BAR {:#x}, translation {:#x}), PCI command register {:#06x} -> {:#06x}",
@@ -352,7 +362,15 @@ fn main() -> Status {
                 info.command_before,
                 info.command_after
             );
-            Some(info)
+            if xhci_no_write {
+                // Memory Space stays off, so the controller's registers do
+                // not decode (QEMU reads all-ones and the bring-up hangs);
+                // under this flag the result is how far the boot gets.
+                log::warn!("Ouroboros kernel: xhci: not brought up (\\XHCINOWR)");
+                None
+            } else {
+                Some(info)
+            }
         }
         Err(e) => {
             log::warn!("Ouroboros kernel: xHCI discovery failed ({e})");

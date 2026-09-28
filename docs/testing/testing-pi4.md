@@ -445,6 +445,23 @@ the shell has its builtins and nothing else. Every runtime filesystem test:
 **USB 3 stick in a blue port**, as on Parallels. This is not a Pi limitation; it is the
 same architecture that made USB-MSD necessary there in the first place.
 
+### Bisecting a hang with boot flag files
+
+An empty file at the card's root switches off one boot step
+(`kernel/src/bootflags.rs`), so a hang can be narrowed without a rebuild or a
+serial cable: `touch /Volumes/OUROBOROS/NOXHCI`, eject, boot; delete it for the
+next round. `make sdcard` leaves files at the root alone. The boot log names a
+flag when it is set.
+
+| Flag | What it switches off | A boot that reaches `shell ready` means |
+|---|---|---|
+| `NOXHCI` | xHCI discovery and bring-up: no USB at all | the hang is inside `pci::discover_xhci` |
+| `XHCINOWR` | only the PCI command-register write in discovery (the takeover from firmware still happens), and the bring-up after the exit | the write is the culprit, not the takeover |
+
+One flag per boot. They exist for the first Pi 400 boot (2026-09-28), which
+stopped on HDMI partway through the line after that write,
+`xhci: PCI command register was`, with no serial cable to show why.
+
 ---
 
 ## 7. Risks, ranked
