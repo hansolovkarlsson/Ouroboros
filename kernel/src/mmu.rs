@@ -502,7 +502,13 @@ impl NcPlan {
             let end = (base + size + 0xfff) & !0xfff;
             let in_ram = ram_blocks.is_some_and(|(first, last)| first <= base / GIB && (end - 1) / GIB <= last);
             if !in_ram {
-                continue; // not RAM: its own mapping (Device, if any) stands
+                // Not RAM: its own mapping (Device, if any) stands. Said
+                // out loud, since a range asked for non-cacheable and left
+                // cacheable is otherwise invisible until DMA misbehaves.
+                if log {
+                    nc_note(NcNote::Refused(base, size, "outside RAM: left as it is mapped"));
+                }
+                continue;
             }
             if base & 0xfff != 0 {
                 if log {
@@ -881,36 +887,63 @@ fn dcache_line() -> u64 {
     4u64 << ((ctr >> 16) & 0xf)
 }
 
-/// Cleans and invalidates `[base, base+size)` from the data cache to the
-/// point of coherency (`dc civac`), a cache line at a time. Works on the
-/// line whatever the page's memory type now is.
-fn clean_invalidate(base: u64, size: u64) {
-    let line = dcache_line();
-    let mut addr = base & !(line - 1);
-    while addr < base + size {
-        unsafe { asm!("dc civac, {0}", in(reg) addr, options(nostack, preserves_flags)) };
-        addr += line;
-    }
-    unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+/// Which cache-maintenance-by-address operation [`dcache_lines`] runs.
+#[derive(Clone, Copy)]
+enum DcOp {
+    /// `dc cvac`: write dirty lines back to the point of coherency.
+    Clean,
+    /// `dc civac`: write them back and drop them from the cache.
+    CleanInvalidate,
 }
 
-/// Cleans `[base, base+len)` to the point of coherency (`dc cvac`): writes
-/// any dirty lines back to memory, where something that does not look in
-/// the CPU's caches can see them - a display engine reading a framebuffer
-/// (`fbdev.rs`, `fbconsole.rs`: `docs/testing/testing-pi4.md` Risk 7). A
-/// no-op on memory that is not cached (a framebuffer that is a PCI BAR,
-/// mapped Device), so callers need not know which kind they have.
-pub(crate) fn clean_to_poc(base: u64, len: u64) {
+/// Runs `op` on every data-cache line of `[base, base+len)`, with NO
+/// barrier: the one line-stepping loop, which the callers below finish
+/// with a single `dsb sy` however many ranges they cover. Works on a line
+/// whatever the page's memory type now is.
+fn dcache_lines(op: DcOp, base: u64, len: u64) {
     if len == 0 {
         return;
     }
     let line = dcache_line();
     let mut addr = base & !(line - 1);
     while addr < base + len {
-        unsafe { asm!("dc cvac, {0}", in(reg) addr, options(nostack, preserves_flags)) };
+        match op {
+            DcOp::Clean => unsafe { asm!("dc cvac, {0}", in(reg) addr, options(nostack, preserves_flags)) },
+            DcOp::CleanInvalidate => unsafe { asm!("dc civac, {0}", in(reg) addr, options(nostack, preserves_flags)) },
+        }
         addr += line;
     }
+}
+
+fn dcache_barrier() {
     unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+}
+
+/// Cleans and invalidates `[base, base+size)` from the data cache to the
+/// point of coherency (`dc civac`).
+fn clean_invalidate(base: u64, size: u64) {
+    dcache_lines(DcOp::CleanInvalidate, base, size);
+    dcache_barrier();
+}
+
+/// Cleans `rows` ranges of `len` bytes, `stride` bytes apart (a glyph's
+/// pixel rows, say; `rows` 1 for one range), to the point of coherency
+/// (`dc cvac`): writes any dirty lines back to memory, where something that
+/// does not look in the CPU's caches can see them - a display engine
+/// reading a framebuffer (`fbdev.rs`, `fbconsole.rs`:
+/// `docs/testing/testing-pi4.md` Risk 7). A no-op on memory that is not
+/// cached (a framebuffer that is a PCI BAR, mapped Device), so callers need
+/// not know which kind they have. ONE barrier at the end, not one per
+/// range: a barrier per 32-byte glyph row once cost a 1080p screen clear
+/// about 259,000 of them.
+pub(crate) fn clean_to_poc(base: u64, len: u64, rows: u64, stride: u64) {
+    if len == 0 || rows == 0 {
+        return;
+    }
+    for r in 0..rows {
+        dcache_lines(DcOp::Clean, base + r * stride, len);
+    }
+    dcache_barrier();
 }
 
 /// A walked attribute for a log line: `0x44`, or `fault`.

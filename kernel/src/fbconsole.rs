@@ -82,20 +82,21 @@ impl FbConsole {
         (y * self.stride + x) * BYTES_PER_PIXEL
     }
 
+    /// Makes `rows` runs of `len` bytes, starting at byte offset `off` and
+    /// one pixel row apart, visible to the display - see `fbdev::publish`,
+    /// the same rule: every write path here ends in a call to this, with
+    /// one cache barrier however many rows it covers.
+    fn publish(&self, off: usize, len: usize, rows: usize) {
+        let stride_bytes = (self.stride * BYTES_PER_PIXEL) as u64;
+        crate::mmu::clean_to_poc(self.base as u64 + off as u64, len as u64, rows as u64, stride_bytes);
+    }
+
     /// Both `Rgb` and `Bgr` are 4 bytes/pixel (3 colour + 1 reserved) per
     /// the GOP spec - `discover()` rejects every other format, see its
     /// `UnsupportedPixelFormat`. White and black are channel-order
     /// symmetric, so this module doesn't need to track which format it
     /// got - a future colour beyond pure white/black would need to start
     /// storing and branching on it.
-    /// Makes `len` bytes written at byte offset `off` visible to the
-    /// display - see `fbdev::publish`, the same rule: every write path
-    /// here ends in a call to this (`clear` and `scroll`'s blank row go
-    /// through `draw_glyph`, which does).
-    fn publish(&self, off: usize, len: usize) {
-        crate::mmu::clean_to_poc(self.base as u64 + off as u64, len as u64);
-    }
-
     fn put_pixel(&mut self, x: usize, y: usize, white: bool) {
         let off = self.pixel_offset(x, y);
         let level: u8 = if white { 0xff } else { 0x00 };
@@ -116,17 +117,17 @@ impl FbConsole {
                 self.put_pixel(x0 + dx, y0 + dy, set);
             }
         }
-        for dy in 0..GLYPH_H {
-            self.publish(self.pixel_offset(x0, y0 + dy), GLYPH_W * BYTES_PER_PIXEL);
-        }
+        self.publish(self.pixel_offset(x0, y0), GLYPH_W * BYTES_PER_PIXEL, GLYPH_H);
     }
 
+    /// Blanks the text area in one write and one publish (it used to draw
+    /// a space glyph into every cell, each with its own cache clean).
     fn clear(&mut self) {
-        for row in 0..self.rows {
-            for col in 0..self.cols {
-                self.draw_glyph(col, row, b' ');
-            }
+        let total = self.stride * BYTES_PER_PIXEL * GLYPH_H * self.rows;
+        unsafe {
+            core::ptr::write_bytes(self.base, 0, total);
         }
+        self.publish(0, total, 1);
         self.cursor_col = 0;
         self.cursor_row = 0;
     }
@@ -142,11 +143,10 @@ impl FbConsole {
         let move_bytes = row_bytes * (total_pixel_rows - GLYPH_H);
         unsafe {
             core::ptr::copy(self.base.add(glyph_row_bytes), self.base, move_bytes);
+            // Blank the bottom text row the copy exposed.
+            core::ptr::write_bytes(self.base.add(move_bytes), 0, glyph_row_bytes);
         }
-        self.publish(0, move_bytes);
-        for col in 0..self.cols {
-            self.draw_glyph(col, self.rows - 1, b' ');
-        }
+        self.publish(0, move_bytes + glyph_row_bytes, 1);
     }
 
     fn newline(&mut self) {

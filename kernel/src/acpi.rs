@@ -172,8 +172,17 @@ unsafe fn xsdt_entries(rsdp: Option<*const u8>) -> Result<impl Iterator<Item = *
     Ok((0..entry_count).map(move |i| unsafe { ptr::read_unaligned(entries_ptr.add(i)) } as *const u8))
 }
 
+/// Where a `Name(_CCA, Zero)` was found: the table's signature and the
+/// byte offset of the `NameOp` inside it, so the boot log names the match
+/// and a wrong one can be looked up in a disassembly of that table.
+#[derive(Debug, Clone, Copy)]
+pub struct CcaZero {
+    pub table: [u8; 4],
+    pub offset: usize,
+}
+
 /// Whether the firmware declares any device's DMA NOT cache-coherent:
-/// `Ok(true)` if its DSDT or any SSDT contains `Name(_CCA, Zero)`.
+/// `Ok(Some(where))` if its DSDT or any SSDT contains `Name(_CCA, Zero)`.
 ///
 /// `_CCA` ("cache coherency attribute") is ACPI's own statement of
 /// whether a device's DMA is coherent with the CPU caches; 0 means it is
@@ -202,7 +211,7 @@ unsafe fn xsdt_entries(rsdp: Option<*const u8>) -> Result<impl Iterator<Item = *
 ///
 /// # Safety
 /// Same as [`find_table`].
-pub unsafe fn dma_noncoherent(rsdp: Option<*const u8>) -> Result<bool, DiscoveryError> {
+pub unsafe fn dma_noncoherent(rsdp: Option<*const u8>) -> Result<Option<CcaZero>, DiscoveryError> {
     for table in unsafe { xsdt_entries(rsdp) }? {
         let header = unsafe { ptr::read_unaligned(table.cast::<SdtHeader>()) };
         let aml = if &header.signature == b"SSDT" {
@@ -225,25 +234,29 @@ pub unsafe fn dma_noncoherent(rsdp: Option<*const u8>) -> Result<bool, Discovery
         } else {
             continue;
         };
-        if unsafe { aml_declares_cca_zero(aml) } {
-            return Ok(true);
+        if let Some(offset) = unsafe { aml_cca_zero_offset(aml) } {
+            let table = unsafe { ptr::read_unaligned(aml.cast::<SdtHeader>()) }.signature;
+            return Ok(Some(CcaZero { table, offset }));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
-/// Whether the AML table at `table` (a DSDT or SSDT, header included)
-/// contains `Name(_CCA, Zero)` in either zero encoding.
-unsafe fn aml_declares_cca_zero(table: *const u8) -> bool {
+/// The byte offset, within the AML table at `table` (a DSDT or SSDT,
+/// header included), of the first `Name(_CCA, Zero)` in either zero
+/// encoding, if any.
+unsafe fn aml_cca_zero_offset(table: *const u8) -> Option<usize> {
     let header = unsafe { ptr::read_unaligned(table.cast::<SdtHeader>()) };
     let len = header.length as usize;
     if len <= size_of::<SdtHeader>() {
-        return false;
+        return None;
     }
     let bytes = unsafe { core::slice::from_raw_parts(table, len) };
     const NAME_CCA: [u8; 5] = [0x08, b'_', b'C', b'C', b'A'];
-    bytes.windows(7).any(|w| w[..5] == NAME_CCA && (w[5] == 0x00 || (w[5] == 0x0a && w[6] == 0x00)))
-        || bytes[len - 6..].starts_with(&NAME_CCA) && bytes[len - 1] == 0x00
+    bytes
+        .windows(7)
+        .position(|w| w[..5] == NAME_CCA && (w[5] == 0x00 || (w[5] == 0x0a && w[6] == 0x00)))
+        .or_else(|| (bytes[len - 6..].starts_with(&NAME_CCA) && bytes[len - 1] == 0x00).then_some(len - 6))
 }
 
 /// Parses the ACPI tables reachable from `rsdp` (if present) and resolves

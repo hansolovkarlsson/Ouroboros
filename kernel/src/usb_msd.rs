@@ -84,9 +84,10 @@ impl core::fmt::Display for Error {
 
 // DMA buffers - single-instance, exactly one command in flight ever
 // (every caller is the single-core SVC/boot path). They live in
-// `xhci.rs`'s `DMA_POOL`, the one page-aligned block of DMA memory that
-// `mmu.rs` maps non-cacheable (the Raspberry Pi's PCIe DMA is not
-// cache-coherent); these are references into it.
+// `xhci.rs`'s `DMA_POOL`, the one page-aligned block of DMA memory, which
+// `mmu.rs` maps non-cacheable where the firmware declares DMA non-coherent
+// (the Raspberry Pi's PCIe) and leaves ordinary memory everywhere else;
+// these are references into it.
 use crate::xhci::{USB_CBW_BUF as CBW_BUF, USB_CSW_BUF as CSW_BUF, USB_DATA_BUF as DATA_BUF};
 
 /// Monotonic CBW tag - echoed back in each CSW and checked, so a stale

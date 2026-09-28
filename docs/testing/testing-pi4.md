@@ -624,7 +624,10 @@ caches, so it cannot show the bug or the fix; what it can show is the
 mapping, through the CPU's own table walker, and the kernel checks that at
 every boot (with the scan's answer forced on QEMU, the pool walks
 non-cacheable and USB still works). The lines to read on the board: early,
-before `exit_boot_services`, `ACPI declares DMA non-coherent (_CCA 0)`; and
+before `exit_boot_services`, `ACPI declares DMA non-coherent (_CCA 0, in
+<table> at offset <n>)` (the table and offset say which `_CCA` matched, which
+matters because the rule is "any device": a match that is not the PCIe
+root's can be looked up in a disassembly of that table); and
 just before `shell ready`, `mmu: <pool> mapped Normal Non-cacheable` and
 `mmu: <pool> walks as Normal Non-cacheable (attr 0x44) on every page in all
 N views` (the mapping's report is held until the consoles are up, so a

@@ -180,11 +180,15 @@ fn main() -> Status {
     // cacheable mapping, and a guest-side non-cacheable one could disagree
     // with it; where DMA is coherent the pool stays ordinary memory.
     let dma_noncoherent = match unsafe { acpi::dma_noncoherent(rsdp) } {
-        Ok(true) => {
-            log::info!("Ouroboros kernel: ACPI declares DMA non-coherent (_CCA 0): the DMA pool will be mapped non-cacheable");
+        Ok(Some(at)) => {
+            log::info!(
+                "Ouroboros kernel: ACPI declares DMA non-coherent (_CCA 0, in {} at offset {:#x}): the DMA pool will be mapped non-cacheable",
+                core::str::from_utf8(&at.table).unwrap_or("????"),
+                at.offset
+            );
             true
         }
-        Ok(false) => {
+        Ok(None) => {
             log::info!("Ouroboros kernel: ACPI declares no non-coherent DMA (no _CCA 0): the DMA pool stays cacheable");
             false
         }

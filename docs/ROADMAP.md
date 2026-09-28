@@ -913,8 +913,9 @@ The small open tails those arcs deliberately left:
 >       Normal write-back cacheable with no cache maintenance. QEMU and
 >       Parallels are coherent, so nothing had shown it. It needed a way in
 >       `mmu.rs` to map chosen physical ranges Normal Non-cacheable at 4 KB
->       granularity, the same mechanism as the framebuffer item below
->       (Risk 7): one piece of work, done before the first boot.
+>       granularity, done before the first boot. (The framebuffer item below,
+>       Risk 7, was first planned on the same mechanism and ended up fixed by
+>       cleaning each write instead.)
 >
 > - [ ] **xHCI hub support.** *Built on QEMU; open until the Pi's keyboard
 >       comes up.* Every USB 2.0 device on a BCM2711 board, the Pi

@@ -364,8 +364,11 @@ unsafe impl<T> Sync for Aligned64<T> {}
 ///
 /// **Why one pool, not one static per buffer:** on the Raspberry Pi 4/400
 /// PCIe DMA is not cache-coherent (`docs/testing/testing-pi4.md` Risk 8),
-/// so this memory has to be mapped Normal Non-cacheable (`mmu.rs`, which
-/// is handed [`dma_region`]). Mapping works on whole 4 KB pages, and the
+/// so there this memory is mapped Normal Non-cacheable (`mmu.rs`, which
+/// `main.rs` hands [`dma_region`] only when ACPI declares DMA
+/// non-coherent, `_CCA 0`; everywhere else, QEMU and Parallels included,
+/// it is ordinary write-back memory and nothing here may assume
+/// otherwise). Mapping works on whole 4 KB pages, and the
 /// buffers used to be separate statics sharing pages with ordinary kernel
 /// data - `usb_msd.rs`'s `NEXT_TAG` atomic sat next to its `DATA_BUF`,
 /// and exclusive (atomic) accesses to non-cacheable memory are not
@@ -439,7 +442,6 @@ const fn each_within(offset: usize, size: usize, len: usize, boundary: usize) ->
     true
 }
 const PAGE: usize = 4096;
-const RING_BOUNDARY: usize = 64 * 1024;
 const _: () = {
     use core::mem::{offset_of, size_of};
     // Contexts and context-like structures: no 4 KB page crossing.
@@ -451,16 +453,22 @@ const _: () = {
         "an Output Device Context crosses a page"
     );
     assert!(within(offset_of!(DmaPool, erst), size_of::<[ErstEntry; 1]>(), PAGE), "ERST crosses a page");
-    // Transfer, command and event rings: no 64 KB crossing.
-    assert!(within(offset_of!(DmaPool, command_ring), size_of::<[Trb; CMD_RING_SIZE]>(), RING_BOUNDARY), "command ring crosses 64 KB");
+    // Transfer, command and event rings: xHCI forbids a ring segment that
+    // crosses 64 KB. Checked against the PAGE, not against 64 KB: the pool
+    // is only page-aligned, so an offset says where a ring is within its
+    // page but nothing about where the pool's 64 KB boundaries fall (an
+    // earlier version checked offsets against 64 KB and could not fail for
+    // the case it named). A ring inside one page cannot cross 64 KB, and
+    // every ring here is far smaller than a page.
+    assert!(within(offset_of!(DmaPool, command_ring), size_of::<[Trb; CMD_RING_SIZE]>(), PAGE), "command ring crosses a page");
     assert!(
-        each_within(offset_of!(DmaPool, ep0_rings), size_of::<Aligned64<[Trb; EP0_RING_SIZE]>>(), MAX_DEVICES, RING_BOUNDARY),
-        "an EP0 ring crosses 64 KB"
+        each_within(offset_of!(DmaPool, ep0_rings), size_of::<Aligned64<[Trb; EP0_RING_SIZE]>>(), MAX_DEVICES, PAGE),
+        "an EP0 ring crosses a page"
     );
-    assert!(within(offset_of!(DmaPool, int_ring), size_of::<[Trb; INT_RING_SIZE]>(), RING_BOUNDARY), "interrupt ring crosses 64 KB");
-    assert!(within(offset_of!(DmaPool, bulk_in_ring), size_of::<[Trb; INT_RING_SIZE]>(), RING_BOUNDARY), "bulk IN ring crosses 64 KB");
-    assert!(within(offset_of!(DmaPool, bulk_out_ring), size_of::<[Trb; INT_RING_SIZE]>(), RING_BOUNDARY), "bulk OUT ring crosses 64 KB");
-    assert!(within(offset_of!(DmaPool, event_ring), size_of::<[Trb; EVENT_RING_SIZE]>(), RING_BOUNDARY), "event ring crosses 64 KB");
+    assert!(within(offset_of!(DmaPool, int_ring), size_of::<[Trb; INT_RING_SIZE]>(), PAGE), "interrupt ring crosses a page");
+    assert!(within(offset_of!(DmaPool, bulk_in_ring), size_of::<[Trb; INT_RING_SIZE]>(), PAGE), "bulk IN ring crosses a page");
+    assert!(within(offset_of!(DmaPool, bulk_out_ring), size_of::<[Trb; INT_RING_SIZE]>(), PAGE), "bulk OUT ring crosses a page");
+    assert!(within(offset_of!(DmaPool, event_ring), size_of::<[Trb; EVENT_RING_SIZE]>(), PAGE), "event ring crosses a page");
 };
 
 /// The DMA pool's physical range `(base, size)`, page-aligned at both
@@ -986,10 +994,23 @@ impl Xhci {
     fn event_ring_pop(&mut self) -> Option<Trb> {
         let ring_ptr = EVENT_RING.0.get().cast::<Trb>();
         let slot_ptr = unsafe { ring_ptr.add(self.evt_dequeue) };
-        let trb = unsafe { read_volatile(slot_ptr) };
-        if (trb[3] & 1 != 0) != self.evt_cycle {
+        // The word with the cycle bit FIRST, and the rest only after a
+        // load barrier. The controller writes an event and then hands it
+        // over by its cycle bit; reading all four words at once (as this
+        // used to) lets the CPU satisfy the other three before the one
+        // that says the event is new, and accept a fresh cycle bit with a
+        // stale completion code or pointer. Invisible on QEMU; on the Pi,
+        // where the ring is non-cacheable memory a device writes, it is
+        // the ordering that makes the event whole.
+        let dw3 = unsafe { read_volatile(slot_ptr.cast::<u32>().add(3)) };
+        if (dw3 & 1 != 0) != self.evt_cycle {
             return None;
         }
+        // `dmb oshld`: the loads are ordered against a device's writes,
+        // which is what Linux's `dma_rmb()` uses on arm64.
+        unsafe { core::arch::asm!("dmb oshld", options(nostack, preserves_flags)) };
+        let words = slot_ptr.cast::<u32>();
+        let trb: Trb = unsafe { [read_volatile(words), read_volatile(words.add(1)), read_volatile(words.add(2)), dw3] };
         self.evt_dequeue += 1;
         if self.evt_dequeue == EVENT_RING_SIZE {
             self.evt_dequeue = 0;
