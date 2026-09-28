@@ -59,7 +59,10 @@ class Guest:
     should reuse this rather than copy them.
     """
 
-    def __init__(self, image, extra_args=(), intlog=None, label=""):
+    def __init__(self, image, extra_args=(), intlog=None, label="", virtio_disk=True):
+        """`virtio_disk=False` leaves `image` off the virtio-blk bus, for a
+        caller that attaches it some other way (test-usb-hub.py boots it
+        from a USB stick); `image` still names where the QEMU trace goes."""
         prefix = subprocess.run(
             ["brew", "--prefix", "qemu"], capture_output=True, text=True
         ).stdout.strip()
@@ -71,8 +74,10 @@ class Guest:
         cmd = [
             "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a72",
             "-m", "512M", "-bios", ovmf,
-            "-drive", f"file={image},format=raw,if=none,id=hd0",
-            "-device", "virtio-blk-device,drive=hd0",
+            *([
+                "-drive", f"file={image},format=raw,if=none,id=hd0",
+                "-device", "virtio-blk-device,drive=hd0",
+            ] if virtio_disk else []),
             "-device", "virtio-rng-device",
             "-global", "virtio-mmio.force-legacy=false",
             *extra_args,

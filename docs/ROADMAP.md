@@ -895,13 +895,63 @@ The small open tails those arcs deliberately left:
 > written up in [`testing-pi4.md`](testing/testing-pi4.md) §1b, checkpoint 4 and
 > Risk 6:
 >
-> - [ ] **xHCI hub support.** Every USB 2.0 device on a BCM2711 board, the Pi
+> - [ ] **xHCI hub support.** *Built on QEMU; open until the Pi's keyboard
+>       comes up.* Every USB 2.0 device on a BCM2711 board, the Pi
 >       400's built-in keyboard included, sits behind the on-board VIA hub, and
 >       `xhci.rs` reaches only root-port devices: **no keyboard on the Pi at
 >       all** until this lands. Buildable on QEMU with `usb-hub`; the
 >       transaction-translator fields (a full-speed keyboard below a
 >       high-speed hub) get their first test on the board. The first new
->       driver work the Pi needs, ahead of any NIC.
+>       driver work the Pi needs, ahead of any NIC. **Built 2026-09-27**
+>       (branch `pi400/usb-hub`): `make test-usb-hub` passes both boots (a
+>       keyboard and a stick behind a hub; and a boot FROM a stick behind the
+>       hub, mounted through it), which failed before the driver work (3 of 4,
+>       and 4 of 5), and fail again with the route string forced to 0. Also
+>       in: the Full-speed EP0 packet-size correction, 64-byte bulk
+>       packets at Full speed, a Full-speed interrupt Interval rounded down
+>       and clamped to 3-10 (it rounded up, unclamped), Max ESIT Payload
+>       set, each device's own configuration value, and a failed setup
+>       that releases its slot (Disable Slot), so `mount -a` can retry a
+>       device on a root port. Left for the board: the translator fields.
+>
+>       Follow-ups from the reviews of that branch, not done there:
+>       - [ ] **EP0 recovers only from a Stall.** After a timeout or any
+>             other transfer error, `control_transfer` leaves EP0 halted or
+>             with TRBs outstanding, and a late completion can be taken for
+>             the next request's. The hub path makes many control transfers
+>             and promises that one bad port costs only that port, so it
+>             needs the standard recovery (Stop Endpoint, then Set TR
+>             Dequeue) on every failure. Check: force a timeout, show the
+>             next transfer works.
+>       - [ ] **Full-speed bulk packet size is assumed to be 64.** Full-speed
+>             bulk endpoints may be 8, 16, 32 or 64; read `wMaxPacketSize`
+>             from the endpoint descriptor, for every speed.
+>       - [ ] **`mount -a` does not look behind hubs.** A device behind a
+>             hub that fails at boot, or is plugged in after it, is not
+>             found by the rescan, which walks root ports only.
+>       - [x] **A keystroke during a controller command kills the USB
+>             keyboard.** `wait_command_completion` drops any transfer event
+>             it sees, where `wait_transfer_event` routes the keyboard's to
+>             `process_keyboard_report`. A dropped report is never reposted,
+>             so the interrupt endpoint stops and the keyboard is dead for the
+>             boot. Reached by `mount -a` typed on the USB keyboard: the
+>             Enter key-up arrives during the rescan's Enable Slot (seen on
+>             QEMU 2026-09-27 as `unexpected event type=32 while waiting for
+>             command completion`, after which the keyboard typed nothing).
+>             Already on `main`, not introduced by the hub work. **Fixed on
+>             the same branch:** both waits route the keyboard's reports
+>             through one helper, `route_keyboard_event`; checked by typing
+>             `mount -a` twice on the USB keyboard, which ran only once
+>             before the fix and twice after.
+>       - [ ] **`mount -a` retries a broken root-port device every time.**
+>             Releasing a failed device's slot is what lets `mount -a` retry
+>             a stick that was merely slow at boot; the price is that a device
+>             that always fails is set up again on every `mount -a`, about a
+>             second of timeouts each. Accepted for now (`mount -a` is typed
+>             by a person); a per-port retry limit is the fix if it grates.
+>       - [ ] Tidying: one helper for the input-context command TRB (five
+>             hand-written sites), and a named struct for `Scan`'s storage
+>             tuple (the keyboard's became `KeyboardEndpoint`).
 > - [x] **Open the xHCI's own `PciIo` exclusively, not the whole root
 >       bridge.** The root-bridge open was refused (`ACCESS_DENIED`) when any
 >       firmware driver on the bus would not stop. On QEMU that had been true

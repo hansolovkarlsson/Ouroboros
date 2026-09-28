@@ -1009,6 +1009,8 @@ python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
 ```sh
 make run-usb-kbd     # + an xHCI controller & a USB keyboard (HMP monitor sendkey)
 make run-usb-multi   # + a USB tablet and a storage stick (the 3-device xHCI rig)
+make run-usb-hub     # the keyboard and the stick BEHIND a usb-hub (the Raspberry Pi's layout)
+make test-usb-hub    # the same layout, driven and graded, plus a boot FROM a stick behind the hub (scripts/test-usb-hub.py)
 make run-gicv3       # force GICv3 instead of QEMU's default GICv2
 ```
 
@@ -1067,6 +1069,8 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `run-image-2vm-ext2-b` | machine B of the ext2 pair (connect, IP `.11`) |
 | `run-usb-kbd` | xHCI + USB keyboard |
 | `run-usb-multi` | xHCI + tablet + storage stick |
+| `run-usb-hub` | xHCI + a usb-hub with the keyboard and stick behind it, tablet on a root port |
+| `test-usb-hub` | the hub layout driven: keyboard ready, stick configured, a line typed through USB runs; then `--usb-boot`, booted from a stick behind the hub and mounted through it. `--direct` is the control |
 | `run-gicv3` | force GICv3 |
 | `test-parallels` | scripted real-hardware smoke test (Parallels, not QEMU) |
 
