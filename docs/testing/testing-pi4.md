@@ -98,7 +98,13 @@ to it. What differs:
   reads interface class `0x09`, skips it, and the boot has **no keyboard at
   all**. On the Pi 400 there is no workaround short of an external keyboard,
   and an external USB 2.0 keyboard goes through the same hub. (predicted)
-- **What still works without hubs:** a SuperSpeed (USB 3) stick in one of the
+
+  **Update 2026-09-27: hub support is built** (branch `pi400/usb-hub`, see
+  below), so the prediction now is that the keyboard works, with one open
+  question: the transaction-translator fields, which only this board tests.
+  If the keyboard fails at checkpoint 4 with the hub found and its ports
+  brought up, those fields are the first suspect. (predicted)
+- **What never needed hubs:** a SuperSpeed (USB 3) stick in one of the
   two blue ports is attached directly to a USB 3 root port, so `usb_msd.rs`
   should reach it. (predicted)
 - **Serial:** the 40-pin GPIO header is on the back edge, same pinout, so §3's
@@ -118,6 +124,30 @@ with a full- or low-speed keyboard below it. That case needs the
 transaction-translator fields in the slot contexts (the hub's own slot marked
 as a hub with its port count and TT think time; the keyboard's slot naming its
 parent hub slot and port). Those fields get their first test on the board.
+
+**Built and checked on QEMU (2026-09-27, branch `pi400/usb-hub`).**
+`configure_hub` in `xhci.rs` sets the hub's configuration, reads its
+descriptor, marks its slot as a hub, and powers its ports; then each port is
+reset and its device addressed with a Route String before the next port is
+reset (a real hub with two devices on it would otherwise have both answering
+at address 0, which QEMU cannot show - so a second device behind the Pi's hub
+is worth plugging in on purpose), all Slot
+Contexts coming from one builder (`slot_context`). `make test-usb-hub` runs
+two boots and both pass: the keyboard and a stick behind the hub, with a line
+typed through the USB keyboard; and `--usb-boot`, which boots `build/esp.img`
+from a stick behind the hub with no other disk, the kernel then mounting that
+stick through the hub. Both failed on the kernel before (the controls are in
+the script's docstring), and forcing the route string to 0 makes them fail
+again. What to read on the board, at checkpoint 4 and after:
+`xhci: port N: hub with M ports (speed=3, TT think time T)`, then
+`port N.P: device connected, reset, speed=1` (or `2`) for the keyboard, then
+`keyboard ready`. The keyboard's line is the translator test: speed 1 or 2
+below a speed-3 hub is exactly the case QEMU cannot model. Just before
+`keyboard ready`, `interrupt endpoint Interval field N (every … us)` shows the
+polling rate the controller was given; for a Full-speed keyboard N is 3 to 10.
+If the keyboard fails there with the hub up, the endpoint's bandwidth fields
+(Interval, and Max ESIT Payload, both set to the spec since 2026-09-27) are the
+second suspect after the translator fields.
 
 ## 2. The one caveat that shapes everything: still no networking
 
@@ -156,8 +186,8 @@ Three ways to close that gap, ranked by how much new ground each breaks:
 | Capability | Real Pi 4 | Real Parallels | Two QEMU VMs |
 | --- | --- | --- | --- |
 | Boot, console (serial + HDMI/GOP) | ✅ (predicted) | ✅ | ✅ |
-| USB keyboard (xHCI HID) | ❌ **behind a hub** until hub support exists, see §1b | ✅ | ✅ |
-| USB storage + disk/FS commands | ✅ **SuperSpeed stick in a blue port only**, see §1b and §6 | ✅ (USB-MSD) | ✅ (virtio-blk) |
+| USB keyboard (xHCI HID) | ✅ (predicted) **behind a hub**, the translator fields untested, see §1b | ✅ | ✅ |
+| USB storage + disk/FS commands | ✅ **USB stick only** (predicted: any port since hub support; SuperSpeed in a blue port is the safer bet), see §1b and §6 | ✅ (USB-MSD) | ✅ (virtio-blk) |
 | Shell, `/bin`, pipelines, env | ✅ (predicted) | ✅ | ✅ |
 | Networking (`ping`/`resolve`/`fetch`) | ❌ GENET is not virtio | ❌ no NIC transport | ✅ |
 | Cluster (`mount -r`/`cpu`/`dial`/export/auth) | ❌ same | ❌ same | ✅ |
@@ -187,12 +217,14 @@ Per board:
   separate output path from serial and needs its own verification.
 - **A FAT32-formatted USB 3 (SuperSpeed) stick**, for a blue port: the
   `usb_msd` block path, and the only runtime filesystem the Pi has (§6). A USB
-  2.0 stick, or any stick in the black port, goes through the on-board hub and
-  will not be found (§1b).
-- **No USB keyboard yet.** Every USB keyboard goes through the on-board hub
-  (§1b), the Pi 400's own included. Until hub support exists, type over the
-  serial cable: the PL011 console reads input as well as writing it
-  (`console.rs`'s `read_byte`), so the Mac's terminal is the keyboard.
+  2.0 stick, or any stick in the black port, goes through the on-board hub:
+  reachable since hub support (§1b), but through the untested translator path
+  if it is not High-speed, so the SuperSpeed stick is the first one to try.
+- **The keyboard is the one to test, not to rely on.** Every USB keyboard
+  goes through the on-board hub (§1b), the Pi 400's own included, and it is
+  the translator fields' first test. Keep the serial cable as the fallback:
+  the PL011 console reads input as well as writing it (`console.rs`'s
+  `read_byte`), so the Mac's terminal is the keyboard if the USB one is not.
 
 ### Wiring the serial console
 

@@ -1406,14 +1406,20 @@ test-parallels:
 test-keyboard-chain: image
 	PROFILE="$(PROFILE)" ./scripts/test-keyboard-chain.sh
 
-# The USB hub check (scripts/test-usb-hub.py): one driven boot of
-# build/esp.img with a keyboard and a storage stick behind a usb-hub, graded
-# on outcomes (keyboard ready, stick configured, a line typed through the USB
-# keyboard runs). `python3 scripts/test-usb-hub.py --direct` is its control,
-# the same devices on root ports. About a minute, so not in `make test`; run
-# it when xhci.rs's port scan or device setup changes.
+# The USB hub check (scripts/test-usb-hub.py): two driven boots with a
+# keyboard and a storage stick behind a usb-hub, graded on outcomes (keyboard
+# ready, stick configured, a line typed through the USB keyboard runs). The
+# second, --usb-boot, boots build/esp.img FROM the stick behind the hub with
+# no other disk, so it must also mount through the hub. `python3
+# scripts/test-usb-hub.py --direct` is the control, the same devices on root
+# ports. About two minutes, so not in `make test`; run it when xhci.rs's port
+# scan or device setup changes. Both boots always run (a failure in the first
+# must not hide the second's result); the target fails if either did.
 test-usb-hub: image $(USBSTICK_IMG)
-	python3 scripts/test-usb-hub.py
+	@fail=0; \
+	python3 scripts/test-usb-hub.py || fail=1; \
+	python3 scripts/test-usb-hub.py --usb-boot || fail=1; \
+	exit $$fail
 
 # The re-entrant session check (scripts/test-reentrant-session.sh): a remote
 # fid op arriving at netd while it is inside a cpu run, on the two-node ext2

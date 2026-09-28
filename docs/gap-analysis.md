@@ -132,7 +132,7 @@ set; roadmap arcs are cited by their `ROADMAP.md` section.
 | Block storage | ✅ | virtio-blk (QEMU) + USB mass storage / xHCI (Parallels). |
 | Console / framebuffer | ✅ | GOP framebuffer + UART, owned by `cond`. |
 | USB keyboard (xHCI) | ✅ | From-scratch xHCI + HID; real-hardware confirmed. |
-| USB: hubs / hot-plug / EHCI (USB 2.0) | ✗ | One tier of ports, boot-time scan, no hubs; USB 2.0 sticks route to EHCI (undriven). |
+| USB: hubs / hot-plug / EHCI (USB 2.0) | ◐ | USB 2.0 hubs since 2026-09-27 (for the Raspberry Pi 4/400, where every USB 2.0 device sits behind an on-board hub), checked on QEMU by `make test-usb-hub`; the high-speed-hub translator fields untested until the Pi. No USB 3 hubs, no hot-plug (boot-time scan only), and USB 2.0 sticks on a controller's EHCI companion stay undriven. |
 | NIC | ◐ | virtio-net (QEMU) only; PCI transport missing for Parallels. |
 | `/dev` namespace / driver framework | ✗ | Drivers are ad-hoc kernel modules or fixed servers; no uniform device model or dynamic driver loading. |
 | DMA safety without an IOMMU | ◐ | The constraint that keeps DMA-owning drivers *in* the kernel (block/NIC can't safely leave). Shapes the whole architecture; not a "fix," a fact. |

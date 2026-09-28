@@ -22,6 +22,13 @@ Checks, each an outcome rather than a log line of the driver under test:
   typed          a line typed through the USB keyboard runs, and its output
                  appears
 
+--usb-boot is the hub layout with build/esp.img itself as the stick behind the
+hub and no other disk: firmware boots from it, the kernel takes the controller,
+and the filesystem server must mount that stick THROUGH THE HUB before
+/bin/echo can run at all. So `typed` there also proves bulk data moves through
+the hub, and a fifth check requires the mount. It is the Raspberry Pi booted
+entirely from one USB stick, less the high-speed hub.
+
 --direct puts the keyboard and the stick on root ports instead, with the same
 checks. That is the control: it passes on a kernel with no hub support, which
 shows the checks can pass, while the hub layout fails there (measured
@@ -31,7 +38,7 @@ QEMU's usb-hub is full-speed (USB 1.1). The Pi's hub is high-speed with a
 slower keyboard behind it, which needs the transaction-translator fields of the
 slot context; this rig cannot exercise those, the board is their first test.
 
-Usage:  python3 scripts/test-usb-hub.py [--direct]
+Usage:  python3 scripts/test-usb-hub.py [--direct | --usb-boot]
         make test-usb-hub          (rebuilds the image and the stick first)
 Exit status: the number of checks that failed.
 """
@@ -55,16 +62,16 @@ WORD = "usbhub"      # typed as `echo usbhub`; its output is this word alone
 KEY_DELAY = 0.3      # between sendkeys; each key is held ~100 ms by QEMU
 
 
-def layout(direct):
+def layout(direct, stick_image):
     """QEMU arguments for the USB devices. The stick is a snapshot so the
-    check never writes the shared image."""
+    check never writes the image behind it."""
     kbd, stick = ("1", "3") if direct else ("1.1", "1.2")
     args = ["-device", "qemu-xhci,id=xhci0"]
     if not direct:
         args += ["-device", "usb-hub,bus=xhci0.0,port=1"]
     return args + [
         "-device", f"usb-kbd,bus=xhci0.0,port={kbd}",
-        "-drive", f"file={STICK},format=raw,if=none,id=usbstick,snapshot=on",
+        "-drive", f"file={stick_image},format=raw,if=none,id=usbstick,snapshot=on",
         "-device", f"usb-storage,drive=usbstick,bus=xhci0.0,port={stick}",
         "-device", "usb-tablet,bus=xhci0.0,port=2",
         "-monitor", f"unix:{MONITOR},server,nowait",
@@ -83,7 +90,13 @@ def sendkeys(text):
 
 def main():
     direct = "--direct" in sys.argv[1:]
-    for path in (IMAGE, STICK):
+    usb_boot = "--usb-boot" in sys.argv[1:]
+    if direct and usb_boot:
+        print("test-usb-hub: --direct and --usb-boot are separate runs")
+        return 2
+    # --usb-boot's stick is the image itself, so it needs no usbstick.img.
+    needed = (IMAGE,) if usb_boot else (IMAGE, STICK)
+    for path in needed:
         if not os.path.exists(path):
             print(f"test-usb-hub: {path} missing - run make image {os.path.relpath(STICK, ROOT)}")
             return 2
@@ -96,9 +109,13 @@ def main():
     if os.path.exists(MONITOR):
         os.remove(MONITOR)
 
-    label = "direct" if direct else "hub"
+    label = "direct" if direct else "usb-boot" if usb_boot else "hub"
     print(f"test-usb-hub: {label} layout")
-    g = drive_qemu.Guest(IMAGE, extra_args=layout(direct))
+    g = drive_qemu.Guest(
+        IMAGE,
+        extra_args=layout(direct, IMAGE if usb_boot else STICK),
+        virtio_disk=not usb_boot,
+    )
     typed = False
     try:
         if g.run([("login:", "root"), ("assword", "root"), ("# ", "")]):
@@ -119,6 +136,8 @@ def main():
         ("storage", re.search(r"xhci: storage bulk endpoints configured", out)),
         ("typed", typed),
     ]
+    if usb_boot:
+        checks.append(("mounted through the hub", re.search(r"FAT32 mounted", out)))
     failed = 0
     for name, ok in checks:
         print(f"{'ok  ' if ok else 'FAIL'} {name}")
