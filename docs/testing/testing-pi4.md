@@ -572,6 +572,37 @@ firmware driver that kept a device writing to memory by DMA past
 drivers are required to stop DMA at that point, but only a Parallels run
 settles it.
 
+### Risk 7: the HDMI console is mapped cacheable
+
+**The mapping is confirmed; the symptom is predicted.** `mmu.rs` maps every
+1 GB block of the RAM span as Normal write-back cacheable memory, and gives a
+discovered device region its own Device mapping only when it lies *outside*
+RAM (`build_tables`'s `l1_span_devices`, applied only where the RAM loop left
+the block unmapped). A framebuffer inside RAM therefore gets the cacheable
+RAM mapping, silently. Checked on QEMU 2026-09-27 with `-device ramfb`, whose
+framebuffer OVMF allocates from guest RAM: `GOP framebuffer @ 0x5c7a0000`,
+inside `identity map RAM 0x40000000-0x60000000`, and no `device region …
+mapped as its own device block` line for it. QEMU cannot show the
+consequence (TCG models no caches), and Parallels never met it (its
+framebuffer is a PCI BAR, outside RAM).
+
+On the Pi 4/400 the firmware's framebuffer sits in the VideoCore's share of
+the first gigabyte, inside the RAM span. (predicted) The CPU's pixel writes
+then land in its data cache, and the display engine, which reads memory
+directly, sees whatever reached memory: **stale or half-drawn text on HDMI,
+correcting itself in patches as cache lines are evicted**, while the serial
+console is fine. That is the signature, and it is a display artefact, not a
+hang.
+
+**The fix, not yet made:** map an in-RAM framebuffer as Normal
+Non-cacheable (what Linux uses for a framebuffer: write-combining), at 4 KB
+granularity at its edges so no kernel memory next to it loses its caching,
+and merged with the per-task EL0 page splits that share the same gigabyte.
+The smaller alternative is to clean the written range to the point of
+coherency (`dc cvac`) after every framebuffer write in `fbdev.rs` and
+`fbconsole.rs`. Either way, `mmu.rs`'s module doc is the required reading
+first.
+
 ## Develop on QEMU first (raspi3b / raspi4b) — you don't have to wait for the boards
 
 QEMU emulates the Raspberry Pi, so Pi-specific bring-up can start on the fast dev
