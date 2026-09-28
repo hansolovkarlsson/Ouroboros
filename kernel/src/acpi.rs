@@ -134,6 +134,23 @@ pub unsafe fn find_table(
     rsdp: Option<*const u8>,
     signature: &[u8; 4],
 ) -> Result<*const u8, DiscoveryError> {
+    for table_addr in unsafe { xsdt_entries(rsdp) }? {
+        let header = unsafe { ptr::read_unaligned(table_addr.cast::<SdtHeader>()) };
+        if &header.signature == signature {
+            return Ok(table_addr);
+        }
+    }
+    Err(DiscoveryError::TableNotFound)
+}
+
+/// Validates the RSDP and XSDT reachable from `rsdp` and returns every
+/// table pointer the XSDT lists, in order - the one walk `find_table`
+/// (first match) and `dma_noncoherent` (every DSDT/SSDT) share, so the
+/// validation cannot drift between them.
+///
+/// # Safety
+/// Same as [`find_table`].
+unsafe fn xsdt_entries(rsdp: Option<*const u8>) -> Result<impl Iterator<Item = *const u8>, DiscoveryError> {
     let rsdp_ptr = rsdp.ok_or(DiscoveryError::NoRsdp)?;
     let rsdp = unsafe { ptr::read_unaligned(rsdp_ptr.cast::<Rsdp>()) };
     if &rsdp.signature != b"RSD PTR " {
@@ -149,18 +166,97 @@ pub unsafe fn find_table(
         return Err(DiscoveryError::BadXsdtSignature);
     }
 
-    let entry_count = (xsdt_header.length as usize - size_of::<SdtHeader>()) / size_of::<u64>();
+    let entry_count = (xsdt_header.length as usize).saturating_sub(size_of::<SdtHeader>()) / size_of::<u64>();
     let entries_ptr = unsafe { xsdt_ptr.add(size_of::<SdtHeader>()) }.cast::<u64>();
+    // SAFETY: the caller's contract - the XSDT and its entries are mapped.
+    Ok((0..entry_count).map(move |i| unsafe { ptr::read_unaligned(entries_ptr.add(i)) } as *const u8))
+}
 
-    for i in 0..entry_count {
-        let table_addr = unsafe { ptr::read_unaligned(entries_ptr.add(i)) } as *const u8;
-        let header = unsafe { ptr::read_unaligned(table_addr.cast::<SdtHeader>()) };
-        if &header.signature == signature {
-            return Ok(table_addr);
+/// Where a `Name(_CCA, Zero)` was found: the table's signature and the
+/// byte offset of the `NameOp` inside it, so the boot log names the match
+/// and a wrong one can be looked up in a disassembly of that table.
+#[derive(Debug, Clone, Copy)]
+pub struct CcaZero {
+    pub table: [u8; 4],
+    pub offset: usize,
+}
+
+/// Whether the firmware declares any device's DMA NOT cache-coherent:
+/// `Ok(Some(where))` if its DSDT or any SSDT contains `Name(_CCA, Zero)`.
+///
+/// `_CCA` ("cache coherency attribute") is ACPI's own statement of
+/// whether a device's DMA is coherent with the CPU caches; 0 means it is
+/// not, and the OS must keep that device's DMA memory out of the caches.
+/// The Raspberry Pi 4/400's pftf firmware says it of the PCIe root, which
+/// the VL805 xHCI sits behind (`Name(_CCA, 0) // Mark the PCI noncoherent`,
+/// edk2-platforms `Platform/RaspberryPi/AcpiTables/Pci.asl`); QEMU's `virt`
+/// says `_CCA 1`. This kernel parses no AML, so the object is found by its
+/// fixed encoding - NameOp, the name `_CCA`, and a zero, as `ZeroOp`
+/// (`08 5F 43 43 41 00`) or `ByteConst 0` (`08 5F 43 43 41 0A 00`) - a
+/// byte scan, not an interpretation: it answers "does any device say
+/// non-coherent", not which one. Every platform this kernel meets has at
+/// most the one PCIe root doing DMA, so "any" is the question.
+///
+/// **What it cannot see, stated because the fallback is "coherent":** a
+/// `_CCA` returned by a Method (`Method(_CCA) { Return(Zero) }`), one
+/// declared under a path (`Name(\_SB.PCI0._CCA, Zero)`, where the name
+/// string carries a prefix before `_CCA`), or any other encoding than the
+/// two above. The pftf firmware uses the plain `Name` form this finds;
+/// firmware that did not would leave the DMA pool cacheable on a
+/// non-coherent machine, and the boot log's `ACPI declares no non-coherent
+/// DMA` line is where that shows (`docs/testing/testing-pi4.md` Risk 8).
+///
+/// Must be called while the tables are mapped (before or after
+/// `exit_boot_services` - they are plain memory).
+///
+/// # Safety
+/// Same as [`find_table`].
+pub unsafe fn dma_noncoherent(rsdp: Option<*const u8>) -> Result<Option<CcaZero>, DiscoveryError> {
+    for table in unsafe { xsdt_entries(rsdp) }? {
+        let header = unsafe { ptr::read_unaligned(table.cast::<SdtHeader>()) };
+        let aml = if &header.signature == b"SSDT" {
+            table
+        } else if &header.signature == b"FACP" {
+            // The DSDT hangs off the FADT: X_DSDT (64-bit, offset 140)
+            // when the table is long enough and it is set, else DSDT
+            // (32-bit, offset 40).
+            let x_dsdt = if header.length >= 148 {
+                unsafe { ptr::read_unaligned(table.add(140).cast::<u64>()) }
+            } else {
+                0
+            };
+            let dsdt = unsafe { ptr::read_unaligned(table.add(40).cast::<u32>()) } as u64;
+            let addr = if x_dsdt != 0 { x_dsdt } else { dsdt };
+            if addr == 0 {
+                continue;
+            }
+            addr as *const u8
+        } else {
+            continue;
+        };
+        if let Some(offset) = unsafe { aml_cca_zero_offset(aml) } {
+            let table = unsafe { ptr::read_unaligned(aml.cast::<SdtHeader>()) }.signature;
+            return Ok(Some(CcaZero { table, offset }));
         }
     }
+    Ok(None)
+}
 
-    Err(DiscoveryError::TableNotFound)
+/// The byte offset, within the AML table at `table` (a DSDT or SSDT,
+/// header included), of the first `Name(_CCA, Zero)` in either zero
+/// encoding, if any.
+unsafe fn aml_cca_zero_offset(table: *const u8) -> Option<usize> {
+    let header = unsafe { ptr::read_unaligned(table.cast::<SdtHeader>()) };
+    let len = header.length as usize;
+    if len <= size_of::<SdtHeader>() {
+        return None;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(table, len) };
+    const NAME_CCA: [u8; 5] = [0x08, b'_', b'C', b'C', b'A'];
+    bytes
+        .windows(7)
+        .position(|w| w[..5] == NAME_CCA && (w[5] == 0x00 || (w[5] == 0x0a && w[6] == 0x00)))
+        .or_else(|| (bytes[len - 6..].starts_with(&NAME_CCA) && bytes[len - 1] == 0x00).then_some(len - 6))
 }
 
 /// Parses the ACPI tables reachable from `rsdp` (if present) and resolves

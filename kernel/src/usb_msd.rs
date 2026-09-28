@@ -44,7 +44,6 @@
 //! recovered - see `xhci::reset_storage_endpoint` - but the common Stall/halt
 //! case is.)
 
-use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -83,16 +82,13 @@ impl core::fmt::Display for Error {
     }
 }
 
-#[repr(align(64))]
-struct Aligned64<T>(UnsafeCell<T>);
-unsafe impl<T> Sync for Aligned64<T> {}
-
-// DMA buffers - single-instance statics, same idiom as virtio_blk.rs's
-// rings and xhci.rs's CTRL_BUF/INT_BUF: exactly one command in flight
-// ever (every caller is the single-core SVC/boot path).
-static CBW_BUF: Aligned64<[u8; 31]> = Aligned64(UnsafeCell::new([0; 31]));
-static CSW_BUF: Aligned64<[u8; 13]> = Aligned64(UnsafeCell::new([0; 13]));
-static DATA_BUF: Aligned64<[u8; 512]> = Aligned64(UnsafeCell::new([0; 512]));
+// DMA buffers - single-instance, exactly one command in flight ever
+// (every caller is the single-core SVC/boot path). They live in
+// `xhci.rs`'s `DMA_POOL`, the one page-aligned block of DMA memory, which
+// `mmu.rs` maps non-cacheable where the firmware declares DMA non-coherent
+// (the Raspberry Pi's PCIe) and leaves ordinary memory everywhere else;
+// these are references into it.
+use crate::xhci::{USB_CBW_BUF as CBW_BUF, USB_CSW_BUF as CSW_BUF, USB_DATA_BUF as DATA_BUF};
 
 /// Monotonic CBW tag - echoed back in each CSW and checked, so a stale
 /// or misrouted status can't be mistaken for the current command's.

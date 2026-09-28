@@ -895,16 +895,27 @@ The small open tails those arcs deliberately left:
 > written up in [`testing-pi4.md`](testing/testing-pi4.md) §1b, checkpoint 4 and
 > Risk 6:
 >
-> - [ ] **BLOCKS ALL USB ON THE PI: map xHCI DMA memory non-cacheable.** The
->       BCM2711's PCIe DMA is not cache-coherent (`testing-pi4.md` Risk 8:
->       the pftf firmware's ACPI `_CCA 0` for the PCIe root, its
+> - [ ] **BLOCKS ALL USB ON THE PI: map xHCI DMA memory non-cacheable.**
+>       *Built 2026-09-27 (branch `pi400/noncacheable-dma`); open until USB
+>       works on the board.* All xHCI/USB DMA memory in one page-aligned pool,
+>       mapped Normal Non-cacheable by `mmu.rs`, checked at every boot through
+>       the hardware walker in every view, every page and the neighbours on
+>       either side (mutations that plan nothing, break either table path,
+>       bleed past a range or reach kernel data are caught). Only where the
+>       firmware's ACPI declares DMA non-coherent (`_CCA 0`, found by a byte
+>       scan of the DSDT/SSDTs): Parallels emulates xHCI and a guest-side
+>       non-cacheable mapping could disagree with the host's cacheable one.
+>       QEMU cannot show the bug itself.
+>       Why: the BCM2711's PCIe DMA is not cache-coherent (`testing-pi4.md`
+>       Risk 8: the pftf firmware's ACPI `_CCA 0` for the PCIe root, its
 >       `NonCoherentDmaLib`, no `dma-coherent` in Linux's devicetree), and
->       every ring, context and buffer in `xhci.rs` and `usb_msd.rs` is
+>       every ring, context and buffer in `xhci.rs` and `usb_msd.rs` was
 >       Normal write-back cacheable with no cache maintenance. QEMU and
->       Parallels are coherent, so nothing has shown it. Needs a way in
+>       Parallels are coherent, so nothing had shown it. It needed a way in
 >       `mmu.rs` to map chosen physical ranges Normal Non-cacheable at 4 KB
->       granularity, the same mechanism as the framebuffer item below
->       (Risk 7): one piece of work, done before the first boot.
+>       granularity, done before the first boot. (The framebuffer item below,
+>       Risk 7, was first planned on the same mechanism and ended up fixed by
+>       cleaning each write instead.)
 >
 > - [ ] **xHCI hub support.** *Built on QEMU; open until the Pi's keyboard
 >       comes up.* Every USB 2.0 device on a BCM2711 board, the Pi
@@ -953,13 +964,27 @@ The small open tails those arcs deliberately left:
 >             position instead; the storage one is the path confirmed on
 >             Parallels ("Mode A"), so it is left for its own change and
 >             check. Found reading the code, not observed.
->       - [ ] **Map an in-RAM framebuffer Normal Non-cacheable** (the Pi's
+>       - [x] **Make the Pi's in-RAM framebuffer visible to the display** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is
 >             predicted for the Pi. Fix in `mmu.rs` at 4 KB granularity at
 >             its edges, merged with the per-task EL0 splits, or clean the
 >             written range to the point of coherency after each write.
 >             Same `mmu.rs` mechanism as the xHCI DMA item at the top.
+>             **Done (2026-09-27), by cleaning:** the framebuffer stays
+>             cacheable and every write in `fbdev.rs`/`fbconsole.rs` is
+>             cleaned out to memory (`mmu::clean_to_poc`). A non-cacheable
+>             mapping was built first and replaced after review: a hypervisor
+>             host reading guest memory cacheable could show it stale, and
+>             every scroll read 8 MB of uncached memory. Nothing becomes
+>             non-cacheable implicitly; only the ranges `main.rs` passes.
+>       - [ ] **A kernel log buffer and `dmesg`.** Every kernel boot line,
+>             the non-cacheable mapping's self-check included, reaches a
+>             framebuffer-only screen only until the console server clears
+>             it, and the kernel keeps nothing to read back. On the Pi,
+>             watched over HDMI alone, the lines `testing-pi4.md` says to
+>             read are gone within seconds; a ring buffer of kernel output
+>             and a command to print it would keep them.
 >       - [ ] **CLEAR_TT_BUFFER after a halted transfer behind a
 >             High-speed hub.** When EP0 (or a bulk endpoint) of a Full- or
 >             Low-speed device behind a High-speed hub halts, the hub's

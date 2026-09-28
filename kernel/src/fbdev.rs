@@ -79,6 +79,17 @@ pub fn rows() -> usize {
     unsafe { (*FB.0.get()).as_ref().map_or(0, |f| f.rows) }
 }
 
+/// Makes `rows` runs of `len` bytes, starting at byte offset `off` and one
+/// pixel row apart, visible to the display: the framebuffer is ordinary
+/// cacheable memory, and the display engine reads memory, not the CPU's
+/// caches (`docs/testing/testing-pi4.md` Risk 7, the Raspberry Pi). EVERY
+/// write path below ends in a call to this - the pixels are not on screen
+/// until it runs - and it costs one cache barrier however many rows.
+fn publish(fb: &FbDev, off: usize, len: usize, rows: usize) {
+    let stride_bytes = (fb.stride * BYTES_PER_PIXEL) as u64;
+    crate::mmu::clean_to_poc(fb.base as u64 + off as u64, len as u64, rows as u64, stride_bytes);
+}
+
 fn put_pixel(fb: &FbDev, x: usize, y: usize, white: bool) {
     let off = (y * fb.stride + x) * BYTES_PER_PIXEL;
     let level: u8 = if white { 0xff } else { 0x00 };
@@ -113,6 +124,7 @@ pub fn blit_glyphs(glyphs: &[u8], count: usize, col: usize, row: usize) {
     if row >= fb.rows {
         return;
     }
+    let mut drawn = 0usize;
     for i in 0..count {
         let c = col + i;
         if c >= fb.cols {
@@ -123,7 +135,11 @@ pub fn blit_glyphs(glyphs: &[u8], count: usize, col: usize, row: usize) {
             break;
         }
         draw_one(fb, &glyphs[start..start + GLYPH_BYTES], c, row);
+        drawn += 1;
     }
+    // The run of cells is contiguous within each of its pixel rows.
+    let off = (row * GLYPH_H * fb.stride + col * GLYPH_W) * BYTES_PER_PIXEL;
+    publish(fb, off, drawn * GLYPH_W * BYTES_PER_PIXEL, GLYPH_H);
 }
 
 /// Scroll the screen up by `n` text rows (memmove within the framebuffer,
@@ -148,6 +164,7 @@ pub fn scroll(n: usize) {
         // Blank the bottom n text rows the copy exposed.
         core::ptr::write_bytes(fb.base.add(total_bytes - shift_bytes), 0, shift_bytes);
     }
+    publish(fb, 0, total_bytes, 1);
 }
 
 /// Blank the entire framebuffer.
@@ -159,4 +176,5 @@ pub fn clear() {
     unsafe {
         core::ptr::write_bytes(fb.base, 0, total_bytes);
     }
+    publish(fb, 0, total_bytes, 1);
 }

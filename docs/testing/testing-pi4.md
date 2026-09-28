@@ -610,7 +610,35 @@ Predicted signature: xHCI discovery and the controller reset succeed
 `xhci: keyboard not available (command ring: timed out waiting for a completion
 event)`, or behaves erratically. (predicted)
 
-**The fix, before the first boot:** map every xHCI and USB-storage DMA buffer
+**Fixed on branch `pi400/noncacheable-dma` (2026-09-27), checked on QEMU
+as far as QEMU can check it.** All of `xhci.rs`'s and `usb_msd.rs`'s DMA
+memory now lives in one page-aligned pool (`xhci::DMA_POOL`, 14 pages on
+QEMU), and `mmu.rs` maps it Normal Non-cacheable, cleaned from the cache at
+install - **only where the firmware declares DMA non-coherent**: the kernel
+scans the ACPI DSDT/SSDTs for `Name(_CCA, Zero)` (`acpi::dma_noncoherent`),
+which the pftf firmware writes for the PCIe root and QEMU does not (it
+writes `_CCA One`); under a hypervisor that emulates xHCI (Parallels), a
+guest-side non-cacheable mapping could disagree with the host's cacheable
+one, so a coherent platform keeps the pool ordinary memory. QEMU models no
+caches, so it cannot show the bug or the fix; what it can show is the
+mapping, through the CPU's own table walker, and the kernel checks that at
+every boot (with the scan's answer forced on QEMU, the pool walks
+non-cacheable and USB still works). The lines to read on the board: early,
+before `exit_boot_services`, `ACPI declares DMA non-coherent (_CCA 0, in
+<table> at offset <n>)` (the table and offset say which `_CCA` matched, which
+matters because the rule is "any device": a match that is not the PCIe
+root's can be looked up in a disassembly of that table); and
+just before `shell ready`, `mmu: <pool> mapped Normal Non-cacheable` and
+`mmu: <pool> walks as Normal Non-cacheable (attr 0x44) on every page in all
+N views` (the mapping's report is held until the consoles are up, so a
+framebuffer-only boot draws it too - but the console server clears the
+screen when it starts, and the kernel keeps no log to read back, so read
+these on the SERIAL console). `ACPI declares no non-coherent DMA` there
+means the scan missed the firmware's `_CCA` (and USB will misbehave); a
+`WARNING: mmu:` line means the mapping is wrong. (predicted to work; the
+board is its first real test)
+
+**What the fix was, as planned:** map every xHCI and USB-storage DMA buffer
 Normal Non-cacheable (MAIR `0x44`), with no cacheable alias, or clean and
 invalidate the caches around every DMA. The first is the usual choice for
 rings, and it is the same `mmu.rs` mechanism Risk 7's framebuffer needs: a
@@ -641,7 +669,21 @@ correcting itself in patches as cache lines are evicted**, while the serial
 console is fine. That is the signature, and it is a display artefact, not a
 hang.
 
-**The fix, not yet made:** map an in-RAM framebuffer as Normal
+**Fixed on branch `pi400/noncacheable-dma` (2026-09-27), by cleaning, not
+by remapping.** The framebuffer stays ordinary cacheable memory, and every
+write path in `fbdev.rs` and `fbconsole.rs` ends by cleaning the bytes it
+wrote out to memory (`mmu::clean_to_poc`, `dc cvac`), where the display
+engine reads them. A non-cacheable mapping was built first and replaced
+after review: under a hypervisor whose host reads guest memory cacheable
+(QEMU `ramfb` with hardware acceleration), a guest non-cacheable
+framebuffer can show stale text, and scrolling a non-cacheable framebuffer
+reads about 8 MB of uncached memory per line at 1080p. The clean is right
+on the Pi, harmless under a hypervisor, and a no-op on a framebuffer that
+is a PCI BAR (Parallels). QEMU models no caches, so a screendump can show
+only that rendering still works, not that the clean is needed; the board
+is its test (the signature above: stale or half-drawn HDMI text).
+
+**The fix, as it was planned:** map an in-RAM framebuffer as Normal
 Non-cacheable (what Linux uses for a framebuffer: write-combining), at 4 KB
 granularity at its edges so no kernel memory next to it loses its caching,
 and merged with the per-task EL0 page splits that share the same gigabyte.

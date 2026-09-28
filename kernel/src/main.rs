@@ -172,6 +172,32 @@ fn main() -> Status {
         }
     };
 
+    // Whether the firmware declares DMA non-coherent (ACPI `_CCA 0`, the
+    // Raspberry Pi 4/400's PCIe root: docs/testing/testing-pi4.md Risk 8).
+    // Decides whether the xHCI/USB DMA pool is mapped non-cacheable below.
+    // Not unconditional: under a hypervisor that emulates the device (as
+    // Parallels emulates xHCI), the host reads guest memory through a
+    // cacheable mapping, and a guest-side non-cacheable one could disagree
+    // with it; where DMA is coherent the pool stays ordinary memory.
+    let dma_noncoherent = match unsafe { acpi::dma_noncoherent(rsdp) } {
+        Ok(Some(at)) => {
+            log::info!(
+                "Ouroboros kernel: ACPI declares DMA non-coherent (_CCA 0, in {} at offset {:#x}): the DMA pool will be mapped non-cacheable",
+                core::str::from_utf8(&at.table).unwrap_or("????"),
+                at.offset
+            );
+            true
+        }
+        Ok(None) => {
+            log::info!("Ouroboros kernel: ACPI declares no non-coherent DMA (no _CCA 0): the DMA pool stays cacheable");
+            false
+        }
+        Err(e) => {
+            log::warn!("Ouroboros kernel: DMA coherence unknown ({e:?}), assuming coherent: the DMA pool stays cacheable");
+            false
+        }
+    };
+
     // MADT (GIC version/address) discovery - see madt.rs's module doc
     // comment for why this replaces `qemu_device_region_safe` for GIC/timer
     // setup specifically, rather than continuing to rely on the "an early
@@ -419,10 +445,21 @@ fn main() -> Status {
     el0_regions[4] = netd.as_ref().map_or((0, 0), |n| (n.base, n.size));
     el0_regions[5] = accountd.as_ref().map_or((0, 0), |a| (a.base, a.size));
     unsafe {
+        // The xHCI/USB DMA pool is mapped Normal Non-cacheable only where
+        // the firmware declared DMA non-coherent (above,
+        // docs/testing/testing-pi4.md Risk 8), since nothing in xhci.rs or
+        // usb_msd.rs maintains caches. The framebuffer is NOT: it stays
+        // ordinary memory and fbdev.rs/fbconsole.rs clean every write out
+        // to memory for the display engine (Risk 7) - correct on bare
+        // metal and under a hypervisor alike, and a scroll reads cached
+        // memory rather than uncached.
+        let uncached = [xhci::dma_region()];
+        let uncached_count = usize::from(dma_noncoherent);
         mmu::install_identity_map(
             memory_map,
             el0_regions,
             &extra_devices[..extra_device_count],
+            &uncached[..uncached_count],
         )
     };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
