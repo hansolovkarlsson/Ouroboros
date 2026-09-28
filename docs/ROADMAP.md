@@ -895,6 +895,17 @@ The small open tails those arcs deliberately left:
 > written up in [`testing-pi4.md`](testing/testing-pi4.md) §1b, checkpoint 4 and
 > Risk 6:
 >
+> - [ ] **BLOCKS ALL USB ON THE PI: map xHCI DMA memory non-cacheable.** The
+>       BCM2711's PCIe DMA is not cache-coherent (`testing-pi4.md` Risk 8:
+>       the pftf firmware's ACPI `_CCA 0` for the PCIe root, its
+>       `NonCoherentDmaLib`, no `dma-coherent` in Linux's devicetree), and
+>       every ring, context and buffer in `xhci.rs` and `usb_msd.rs` is
+>       Normal write-back cacheable with no cache maintenance. QEMU and
+>       Parallels are coherent, so nothing has shown it. Needs a way in
+>       `mmu.rs` to map chosen physical ranges Normal Non-cacheable at 4 KB
+>       granularity, the same mechanism as the framebuffer item below
+>       (Risk 7): one piece of work, done before the first boot.
+>
 > - [ ] **xHCI hub support.** *Built on QEMU; open until the Pi's keyboard
 >       comes up.* Every USB 2.0 device on a BCM2711 board, the Pi
 >       400's built-in keyboard included, sits behind the on-board VIA hub, and
@@ -948,6 +959,15 @@ The small open tails those arcs deliberately left:
 >             predicted for the Pi. Fix in `mmu.rs` at 4 KB granularity at
 >             its edges, merged with the per-task EL0 splits, or clean the
 >             written range to the point of coherency after each write.
+>             Same `mmu.rs` mechanism as the xHCI DMA item at the top.
+>       - [ ] **CLEAR_TT_BUFFER after a halted transfer behind a
+>             High-speed hub.** When EP0 (or a bulk endpoint) of a Full- or
+>             Low-speed device behind a High-speed hub halts, the hub's
+>             transaction translator can keep the failed split transaction
+>             buffered; Linux sends the hub CLEAR_TT_BUFFER (USB 2.0
+>             11.24.2.3). The Pi 400's keyboard is exactly that case. Not
+>             written: QEMU models no translator, so the code would run in no
+>             check we have. For the bench session.
 >       - [ ] **Full-speed bulk packet size is assumed to be 64.** Full-speed
 >             bulk endpoints may be 8, 16, 32 or 64; read `wMaxPacketSize`
 >             from the endpoint descriptor, for every speed.

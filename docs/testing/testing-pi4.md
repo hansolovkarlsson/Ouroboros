@@ -23,6 +23,12 @@
 > 2026-08-29 (Risk 6). The second and third are fixed on branch
 > `pi400/bar-translation`; the table in §2, §3's shopping list, checkpoint 4
 > and §6's storage note are corrected in place.
+>
+> **Later the same day, the largest finding: the Pi's PCIe DMA is not
+> cache-coherent** (Risk 8, confirmed from the firmware's own ACPI tables and
+> from Linux's and FreeBSD's drivers), and `xhci.rs` assumes it is. Until
+> that is fixed, expect no USB at all on the board, so no keyboard and no
+> disk: plan the first boot around the serial console.
 
 The practical guide to booting Ouroboros on a **real Raspberry Pi 4** under UEFI
 firmware. Companion to [`testing-qemu.md`](testing-qemu.md) (the fast dev loop,
@@ -572,6 +578,47 @@ firmware driver that kept a device writing to memory by DMA past
 drivers are required to stop DMA at that point, but only a Parallels run
 settles it.
 
+### Risk 8: PCIe DMA is not cache-coherent, and every xHCI buffer is cacheable
+
+**Confirmed from sources, 2026-09-27; this blocks all USB on the Pi until it
+is fixed.** On the BCM2711, DMA by PCIe devices, the VL805 xHCI included, is
+not coherent with the Cortex-A72's data caches:
+
+- The pftf firmware's own ACPI table for the PCIe root says so:
+  `Name(_CCA, 0)    // Mark the PCI noncoherent`, with a `_DMA` window of
+  `0x0`-`0xbfffffff`, translation 0 (edk2-platforms
+  `Platform/RaspberryPi/AcpiTables/Pci.asl`; `Xhci.asl` has `_CCA 0x0` too).
+- The firmware does cache maintenance for PCIe DMA itself:
+  `DmaLib|EmbeddedPkg/Library/NonCoherentDmaLib/NonCoherentDmaLib.inf`
+  and `NonCoherentIoMmuDxe` (edk2-platforms `Platform/RaspberryPi/RPi4/RPi4.dsc`).
+- Linux's devicetree has no `dma-coherent` on `pcie@7d500000` or anywhere in
+  `bcm2711.dtsi`, `bcm2711-rpi-4-b.dts` or `bcm2711-rpi-400.dts` (upstream and
+  the Raspberry Pi tree), so Linux treats it as non-coherent and does cache
+  maintenance.
+- FreeBSD's `sys/arm/broadcom/bcm2835/bcm2838_pci.c` creates its DMA tag
+  without `BUS_DMA_COHERENT`.
+
+**Why it matters here:** `xhci.rs` keeps its command ring, event ring, device
+contexts, transfer rings and the keyboard and control buffers in statics that
+`mmu.rs` maps as Normal write-back cacheable, and does no cache maintenance
+anywhere; `usb_msd.rs`'s sector buffers are the same. QEMU and Parallels
+model coherent DMA, so nothing has ever shown the difference. On the Pi the
+controller can read stale memory (a TRB still sitting in the CPU's cache) and
+the CPU can read stale cache lines (missing an event the controller wrote).
+Predicted signature: xHCI discovery and the controller reset succeed
+(registers are MMIO, mapped Device), then the first command times out,
+`xhci: keyboard not available (command ring: timed out waiting for a completion
+event)`, or behaves erratically. (predicted)
+
+**The fix, before the first boot:** map every xHCI and USB-storage DMA buffer
+Normal Non-cacheable (MAIR `0x44`), with no cacheable alias, or clean and
+invalidate the caches around every DMA. The first is the usual choice for
+rings, and it is the same `mmu.rs` mechanism Risk 7's framebuffer needs: a
+way to map chosen physical ranges non-cacheable at 4 KB granularity. The
+addresses need no change: the PCIe inbound window is identity (translation
+0), and every buffer must lie below 3 GB (`0xC0000000`), which the
+firmware's "Limit RAM to 3 GB" setting (§5) guarantees while it stays on.
+
 ### Risk 7: the HDMI console is mapped cacheable
 
 **The mapping is confirmed; the symptom is predicted.** `mmu.rs` maps every
@@ -699,5 +746,13 @@ fix are all above, which is the whole reason for writing them down first.
   and CPU windows and the aperture translation, the basis for checkpoint 4's
   correction; edk2 `MdeModulePkg/Bus/Pci/PciHostBridgeDxe/PciRootBridgeIo.c`
   for the convention that apertures are reported as CPU addresses.
+- Risk 8 (PCIe DMA is not cache-coherent):
+  [Linux `bcm2711.dtsi`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/arch/arm/boot/dts/broadcom/bcm2711.dtsi)
+  (no `dma-coherent`; the `pcie0` `dma-ranges` and its 3 GB comment);
+  edk2-platforms [`Platform/RaspberryPi/AcpiTables/Pci.asl`](https://github.com/tianocore/edk2-platforms/blob/master/Platform/RaspberryPi/AcpiTables/Pci.asl)
+  and `Xhci.asl` (`_CCA 0`), and [`RPi4.dsc`](https://github.com/tianocore/edk2-platforms/blob/master/Platform/RaspberryPi/RPi4/RPi4.dsc)
+  (`NonCoherentDmaLib`, `NonCoherentIoMmuDxe`); FreeBSD
+  [`sys/arm/broadcom/bcm2835/bcm2838_pci.c`](https://github.com/freebsd/freebsd-src/blob/main/sys/arm/broadcom/bcm2835/bcm2838_pci.c)
+  (a DMA tag without `BUS_DMA_COHERENT`).
 - This repository: `kernel/src/main.rs`, `virtio_mmio.rs`, `pci.rs`, `madt.rs`,
   `block.rs`, `loader.rs`, and the `Makefile`'s `esp`/`image` targets.
