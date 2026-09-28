@@ -501,6 +501,24 @@ pre-exit fault: its firmware printed the same `Synchronous Exception at`
 line, and the script named the planted write. An address outside the image
 is firmware code, and only the serial dump names that module.
 
+**The second `FBCON` boot placed it** (build `b5bf5b3`): `image @
+0x376df000..0x378c8000` (0x1e9000 bytes, matching the binary, which is the
+check that the digits were read right: an earlier misreading of a low-resolution
+photo landed in `.rdata`, and another on a stack store between two stack stores
+that had succeeded), and `Synchronous Exception at 0x37758628`, offset
+0x79628: `core::sync::atomic::atomic_load` (instantiated in `log`) + 0x5c, the
+`ldr x8, [x8]` of a Relaxed load through the pointer the debug build had
+spilled to the stack four instructions earlier. Its three callers are the
+`AtomicUsize::load` wrappers of the kernel, `uefi` and `log`, and every
+`AtomicUsize` among them is a static in the image, so the pointer should always
+be valid. This time the fault came before the `was …` line, right after
+`boot flag \FBCON is set`; the first `FBCON` boot faulted after it. A fault
+that moves, on a load whose address cannot be wrong, points at memory changing
+underneath the kernel (the stack slot overwritten, or the image's pages made
+unreadable) rather than at one bad instruction, and nothing in the kernel
+changes memory attributes before the exit. Unresolved: the firmware's serial
+dump (ESR, FAR and a backtrace naming the caller) is what settles it.
+
 ---
 
 ## 7. Risks, ranked
