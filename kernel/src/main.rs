@@ -172,13 +172,6 @@ fn main() -> Status {
         }
     };
 
-    // MADT (GIC version/address) discovery - see madt.rs's module doc
-    // comment for why this replaces `qemu_device_region_safe` for GIC/timer
-    // setup specifically, rather than continuing to rely on the "an early
-    // console was found" heuristic. Only reads plain memory (like
-    // acpi::discover_pl011), so it's boot-services-safe, and logging it
-    // here means the result is visible even on a platform where every
-    // console mechanism otherwise fails.
     // Whether the firmware declares DMA non-coherent (ACPI `_CCA 0`, the
     // Raspberry Pi 4/400's PCIe root: docs/testing/testing-pi4.md Risk 8).
     // Decides whether the xHCI/USB DMA pool is mapped non-cacheable below.
@@ -201,6 +194,13 @@ fn main() -> Status {
         }
     };
 
+    // MADT (GIC version/address) discovery - see madt.rs's module doc
+    // comment for why this replaces `qemu_device_region_safe` for GIC/timer
+    // setup specifically, rather than continuing to rely on the "an early
+    // console was found" heuristic. Only reads plain memory (like
+    // acpi::discover_pl011), so it's boot-services-safe, and logging it
+    // here means the result is visible even on a platform where every
+    // console mechanism otherwise fails.
     let gic_info = match unsafe { madt::discover(rsdp) } {
         Ok(info) => {
             log::info!(
@@ -441,22 +441,16 @@ fn main() -> Status {
     el0_regions[4] = netd.as_ref().map_or((0, 0), |n| (n.base, n.size));
     el0_regions[5] = accountd.as_ref().map_or((0, 0), |a| (a.base, a.size));
     unsafe {
-        // Mapped Normal Non-cacheable where they lie in RAM
-        // (docs/testing/testing-pi4.md Risks 7 and 8): the framebuffer
-        // always - a display engine reads it straight from memory, never
-        // through the CPU's caches - and the xHCI/USB DMA pool only where
-        // the firmware declared DMA non-coherent (above), since nothing in
-        // xhci.rs or usb_msd.rs maintains caches.
-        let mut uncached = [(0u64, 0u64); 2];
-        let mut uncached_count = 0;
-        if let Some(info) = fb_info {
-            uncached[uncached_count] = (info.base, info.size as u64);
-            uncached_count += 1;
-        }
-        if dma_noncoherent {
-            uncached[uncached_count] = xhci::dma_region();
-            uncached_count += 1;
-        }
+        // The xHCI/USB DMA pool is mapped Normal Non-cacheable only where
+        // the firmware declared DMA non-coherent (above,
+        // docs/testing/testing-pi4.md Risk 8), since nothing in xhci.rs or
+        // usb_msd.rs maintains caches. The framebuffer is NOT: it stays
+        // ordinary memory and fbdev.rs/fbconsole.rs clean every write out
+        // to memory for the display engine (Risk 7) - correct on bare
+        // metal and under a hypervisor alike, and a scroll reads cached
+        // memory rather than uncached.
+        let uncached = [xhci::dma_region()];
+        let uncached_count = usize::from(dma_noncoherent);
         mmu::install_identity_map(
             memory_map,
             el0_regions,

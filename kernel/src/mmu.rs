@@ -150,17 +150,25 @@
 //! this kernel maintains caches. That is only correct where DMA is
 //! cache-coherent (QEMU, Parallels). The Raspberry Pi's PCIe DMA is not
 //! (`docs/testing/testing-pi4.md` Risk 8: the pftf firmware's own ACPI
-//! says `_CCA 0`), and its framebuffer sits in RAM, read by a display
-//! engine that does not look in the CPU's caches (Risk 7). So a third
-//! memory type, Normal Non-cacheable (MAIR index 2, `0x44`), is mapped
-//! for exactly the ranges `install_identity_map` is given in `uncached`,
-//! and of those only the ones inside RAM: `main.rs` passes the
-//! framebuffer always, and the xHCI/USB DMA pool (`xhci::dma_region`)
-//! only when the firmware's ACPI declares DMA non-coherent (`_CCA 0`,
-//! `acpi::dma_noncoherent`) - under a hypervisor that emulates the device,
-//! a guest-side non-cacheable mapping could disagree with the host's
-//! cacheable one, so coherent platforms keep the pool ordinary memory.
-//! Nothing is made non-cacheable implicitly: MMIO must stay Device.
+//! says `_CCA 0`). So a third memory type, Normal Non-cacheable (MAIR
+//! index 2, `0x44`), is mapped for exactly the ranges
+//! `install_identity_map` is given in `uncached`, and of those only the
+//! ones inside RAM: `main.rs` passes the xHCI/USB DMA pool
+//! (`xhci::dma_region`) only when the firmware's ACPI declares DMA
+//! non-coherent (`_CCA 0`, `acpi::dma_noncoherent`) - under a hypervisor
+//! that emulates the device, a guest-side non-cacheable mapping could
+//! disagree with the host's cacheable one, so coherent platforms keep the
+//! pool ordinary memory. Nothing is made non-cacheable implicitly: MMIO
+//! must stay Device.
+//!
+//! The framebuffer (Risk 7: in RAM on the Pi, read by a display engine
+//! that does not look in the CPU's caches) is deliberately NOT one of
+//! these ranges. It stays ordinary cacheable memory, and every write to it
+//! is cleaned out to memory ([`clean_to_poc`], from `fbdev.rs` and
+//! `fbconsole.rs`): correct on bare metal and under a hypervisor alike,
+//! where a non-cacheable mapping would have the same host-disagreement
+//! problem as the pool, and a scroll reads cached memory, not 8 MB of
+//! uncached memory per line.
 //!
 //! An [`NcPlan`], built once per table build, holds the ranges (rounded
 //! out to pages) and the SHARED tables that carry them, identical in every
@@ -209,14 +217,70 @@ const _: () = assert!(SLOT_PAGES == ENTRIES_PER_TABLE as u64, "the loader's slot
 /// and size of the last such region; `0` size means none.
 static DEFERRED_REFUSAL: (AtomicU64, AtomicU64) = (AtomicU64::new(0), AtomicU64::new(0));
 
-/// Prints a `build_view` refusal that happened before a console existed.
-/// Called from `main.rs` once every console mechanism has had its turn.
+/// What the boot-time non-cacheable plan and its self-check found, kept
+/// here and printed by [`report_deferred_warnings`] instead of at the
+/// moment: `install_identity_map` runs before the framebuffer console
+/// exists, so on a board watched over HDMI alone (a Raspberry Pi without
+/// its serial cable) a line printed then would be lost - including the
+/// ones `docs/testing/testing-pi4.md` says to read.
+#[derive(Clone, Copy)]
+enum NcNote {
+    /// A range the plan mapped non-cacheable, `(start, end)`.
+    Mapped(u64, u64),
+    /// A range the plan refused, `(base, size, why)`.
+    Refused(u64, u64, &'static str),
+    /// The plan needed more shared tables than exist and mapped nothing.
+    Exhausted,
+    /// The self-check passed for `(start, end)` in this many views.
+    Checked(u64, u64, usize),
+    /// The self-check failed: `(start, end, address, walked attribute,
+    /// view, what)`.
+    Bad(u64, u64, u64, Option<u64>, usize, &'static str),
+}
+
+const MAX_NC_NOTES: usize = 3 * MAX_NC_RANGES + 1;
+static NC_NOTES: SyncCell<([Option<NcNote>; MAX_NC_NOTES], usize)> = SyncCell::new(([None; MAX_NC_NOTES], 0));
+
+fn nc_note(note: NcNote) {
+    let notes = unsafe { &mut *NC_NOTES.get() };
+    if notes.1 < MAX_NC_NOTES {
+        notes.0[notes.1] = Some(note);
+        notes.1 += 1;
+    }
+}
+
+/// Prints what boot-time table building could not print yet: a
+/// `build_view` refusal, and the non-cacheable plan and its self-check
+/// ([`NcNote`]). Called from `main.rs` once every console mechanism has
+/// had its turn.
 pub(crate) fn report_deferred_warnings() {
     let size = DEFERRED_REFUSAL.1.swap(0, Ordering::Relaxed);
     if size != 0 {
         let base = DEFERRED_REFUSAL.0.load(Ordering::Relaxed);
         refusal_warning(base, size);
     }
+    let notes = unsafe { &mut *NC_NOTES.get() };
+    for note in notes.0[..notes.1].iter().flatten() {
+        match *note {
+            NcNote::Mapped(start, end) => {
+                crate::console::println!("Ouroboros kernel: mmu: {start:#x}-{end:#x} mapped Normal Non-cacheable")
+            }
+            NcNote::Refused(base, size, why) => crate::console::println_force!(
+                "Ouroboros kernel: WARNING: mmu: {base:#x}+{size:#x} not mapped non-cacheable ({why})"
+            ),
+            NcNote::Exhausted => crate::console::println_force!(
+                "Ouroboros kernel: WARNING: mmu: the non-cacheable ranges need more shared tables than exist, so none is mapped non-cacheable"
+            ),
+            NcNote::Checked(start, end, views) => crate::console::println!(
+                "Ouroboros kernel: mmu: {start:#x}-{end:#x} walks as Normal Non-cacheable (attr {MAIR_ATTR_NORMAL_NC:#04x}) on every page in all {views} views, its neighbours and kernel data do not"
+            ),
+            NcNote::Bad(start, end, va, a, view, what) => crate::console::println_force!(
+                "Ouroboros kernel: WARNING: mmu: range {start:#x}-{end:#x}: {va:#x} walks as {} in view {view} ({what}) - the non-cacheable mapping is wrong",
+                Attr(a)
+            ),
+        }
+    }
+    notes.1 = 0;
 }
 
 fn refusal_warning(base: u64, size: u64) {
@@ -358,8 +422,8 @@ static EL0_L3_TABLES: [Table; MAX_EL0_REGIONS] =
     [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
 /// The most non-cacheable ranges [`install_identity_map`] takes
-/// (`uncached`): today the xHCI/USB DMA pool (where the firmware declares
-/// DMA non-coherent) and a framebuffer, with room to spare.
+/// (`uncached`): today the xHCI/USB DMA pool, where the firmware declares
+/// DMA non-coherent, with room to spare.
 const MAX_UNCACHED: usize = 4;
 /// Every range an [`NcPlan`] can hold: exactly the explicit ones. Nothing
 /// is made non-cacheable implicitly - an automatic "every device region
@@ -409,18 +473,19 @@ impl NcPlan {
     /// Plans `ranges` (`(base, size)`; zero sizes ignored) and fills the
     /// shared L2/L3 tables. A range is planned only if it lies inside the
     /// RAM loop's blocks (`ram_blocks`, first and last 1GB block index):
-    /// one outside RAM (a framebuffer that is a PCI BAR, as on Parallels)
-    /// is not RAM, keeps its Device mapping, and needs nothing here. A
+    /// one outside RAM is not RAM, keeps whatever mapping it has, and needs
+    /// nothing here. A
     /// range whose base is not page-aligned is REFUSED with a warning,
     /// not rounded outward: rounding would pull whatever shares its first
     /// page into the non-cacheable mapping (the DMA pool is page-aligned
     /// by construction, and this is what checks it); the end is rounded up
-    /// to a page. Returns the plan even when a table pool runs out: a slot
-    /// left without its L3 stays cacheable, with a warning - wrong for DMA
-    /// on the Pi, but never a kernel page made non-cacheable. Warnings and
-    /// the plan's log lines print only when `log` (the boot build): a
-    /// runtime rebuild on every spawn and exit would otherwise repeat them
-    /// over the console server's screen.
+    /// to a page; a range over 1GB is refused too, which bounds the table
+    /// pools. If the shared tables still run out the plan is EMPTY, never
+    /// partial (see the comment at the table assignment). What it did is
+    /// recorded as [`NcNote`]s only when `log` (the boot build), printed
+    /// later by `report_deferred_warnings`: a runtime rebuild on every
+    /// spawn and exit must not repeat them over the console server's
+    /// screen.
     fn build(ranges: &[(u64, u64)], ram_blocks: Option<(u64, u64)>, log: bool) -> NcPlan {
         let mut plan = NcPlan {
             ranges: [(0, 0); MAX_NC_RANGES],
@@ -441,53 +506,51 @@ impl NcPlan {
             }
             if base & 0xfff != 0 {
                 if log {
-                    crate::console::println_force!(
-                        "Ouroboros kernel: WARNING: mmu: {base:#x}+{size:#x} is not page-aligned, left cacheable rather than taking its neighbours along"
-                    );
+                    nc_note(NcNote::Refused(base, size, "not page-aligned: left cacheable rather than taking its neighbours along"));
+                }
+                continue;
+            }
+            if end - base > GIB {
+                // Bounds the table pools: a range of at most 1GB touches at
+                // most two 1GB blocks and has at most two partial slots.
+                if log {
+                    nc_note(NcNote::Refused(base, size, "larger than 1GB"));
                 }
                 continue;
             }
             plan.ranges[plan.count] = (base, end);
             plan.count += 1;
         }
-        // Shared L3 tables first: one per partly covered slot.
+        // Which shared tables the plan needs - an L3 per partly covered
+        // slot, an L2 per 1GB block holding a range - assigned before any
+        // is filled, because a plan that runs out of tables must be ALL or
+        // NOTHING: a range with only some of its tables would leave a page
+        // non-cacheable in one view (an EL0 split takes its slots from the
+        // plan) and write-back in another, the mismatched alias the whole
+        // design exists to avoid. The pools hold two of each per range and
+        // a range is at most 1GB, so running out means a bug; it is still
+        // handled.
+        let mut exhausted = false;
         for r in 0..plan.count {
             let (start, end) = plan.ranges[r];
             let mut slot = start & !(MIB2 - 1);
             while slot < end {
                 if matches!(plan.slot(slot), NcSlot::Partial) && !plan.l3_slots[..plan.l3_count].contains(&slot) {
                     if plan.l3_count == MAX_NC_L3_TABLES {
-                        if log {
-                            crate::console::println_force!("Ouroboros kernel: WARNING: out of non-cacheable L3 tables, slot {slot:#x} stays cacheable");
-                        }
+                        exhausted = true;
                     } else {
-                        let l3 = unsafe { &mut *NC_L3_TABLES[plan.l3_count].get() };
-                        for (j, page) in l3.iter_mut().enumerate() {
-                            let page_base = slot + (j as u64) * 4096;
-                            *page = if plan.page_is_nc(page_base) { nc_page_4k(page_base) } else { kernel_page_4k(page_base) };
-                        }
                         plan.l3_slots[plan.l3_count] = slot;
                         plan.l3_count += 1;
                     }
                 }
                 slot += MIB2;
             }
-        }
-        // Then one shared L2 per 1GB block holding a range.
-        for r in 0..plan.count {
-            let (start, end) = plan.ranges[r];
             let mut block = start / GIB;
             while block * GIB < end {
                 if !plan.l2_blocks[..plan.l2_count].contains(&block) {
                     if plan.l2_count == MAX_NC_L2_TABLES {
-                        if log {
-                            crate::console::println_force!("Ouroboros kernel: WARNING: out of non-cacheable L2 tables, block {:#x} stays cacheable", block * GIB);
-                        }
+                        exhausted = true;
                     } else {
-                        let l2 = unsafe { &mut *NC_L2_TABLES[plan.l2_count].get() };
-                        for (i, entry) in l2.iter_mut().enumerate() {
-                            *entry = plan.slot_entry(block * GIB + (i as u64) * MIB2);
-                        }
                         plan.l2_blocks[plan.l2_count] = block;
                         plan.l2_count += 1;
                     }
@@ -495,9 +558,31 @@ impl NcPlan {
                 block += 1;
             }
         }
+        if exhausted {
+            if log {
+                nc_note(NcNote::Exhausted);
+            }
+            plan.count = 0;
+            plan.l2_count = 0;
+            plan.l3_count = 0;
+            return plan;
+        }
+        for (i, &slot) in plan.l3_slots[..plan.l3_count].iter().enumerate() {
+            let l3 = unsafe { &mut *NC_L3_TABLES[i].get() };
+            for (j, page) in l3.iter_mut().enumerate() {
+                let page_base = slot + (j as u64) * 4096;
+                *page = if plan.page_is_nc(page_base) { nc_page_4k(page_base) } else { kernel_page_4k(page_base) };
+            }
+        }
+        for (i, &block) in plan.l2_blocks[..plan.l2_count].iter().enumerate() {
+            let l2 = unsafe { &mut *NC_L2_TABLES[i].get() };
+            for (k, entry) in l2.iter_mut().enumerate() {
+                *entry = plan.slot_entry(block * GIB + (k as u64) * MIB2);
+            }
+        }
         if log {
             for &(start, end) in &plan.ranges[..plan.count] {
-                crate::console::println!("Ouroboros kernel: {start:#x}-{end:#x} mapped Normal Non-cacheable");
+                nc_note(NcNote::Mapped(start, end));
             }
         }
         plan
@@ -530,7 +615,7 @@ impl NcPlan {
             NcSlot::Full => nc_block_2m(slot_base),
             NcSlot::Partial => match self.l3_slots[..self.l3_count].iter().position(|&s| s == slot_base) {
                 Some(i) => table_desc(NC_L3_TABLES[i].get() as u64),
-                None => kernel_block_2m(slot_base), // pool ran out (warned in `build`)
+                None => kernel_block_2m(slot_base), // unreachable: `build` assigns every partial slot or plans nothing
             },
         }
     }
@@ -574,10 +659,8 @@ const MAIR_ATTR_DEVICE_NGNRNE: u64 = 0x00;
 const MAIR_ATTR_NORMAL_WB: u64 = 0xff;
 /// Normal memory, Inner and Outer Non-cacheable: memory a device reads and
 /// writes by DMA on a platform whose DMA is not cache-coherent (the
-/// Raspberry Pi 4/400's PCIe, `docs/testing/testing-pi4.md` Risk 8), and a
-/// framebuffer the display engine reads straight from memory (Risk 7).
-/// Normal, not Device: unaligned and wide accesses stay legal, which a
-/// framebuffer copy relies on.
+/// Raspberry Pi 4/400's PCIe, `docs/testing/testing-pi4.md` Risk 8).
+/// Normal, not Device: unaligned and wide accesses stay legal.
 const MAIR_ATTR_NORMAL_NC: u64 = 0x44;
 
 fn table_desc(next_level_addr: u64) -> u64 {
@@ -723,11 +806,11 @@ fn overlaps(region: (u64, u64), start: u64, end: u64) -> bool {
 /// framebuffer (`framebuffer::discover`, needed by `fbconsole.rs`) and the
 /// xHCI controller's PCI BAR (`pci::discover_xhci`, needed by `xhci.rs`).
 /// A region inside the discovered-RAM span (a framebuffer the firmware
-/// allocated from RAM: QEMU's `ramfb`, the Raspberry Pi's) is mapped
-/// Normal Non-cacheable, since the display engine reads that memory
-/// directly: see "Non-cacheable ranges" in the module doc. (Until
-/// 2026-09-27 the RAM loop simply covered it write-back cacheable, which
-/// this comment used to call fine; it is not, on the Pi - Risk 7.)
+/// allocated from RAM: QEMU's `ramfb`, the Raspberry Pi's) is covered by
+/// the RAM loop, write-back cacheable; for a framebuffer that is correct
+/// only because its writers clean every write out to memory for the
+/// display engine (`clean_to_poc`, Risk 7 - see "Non-cacheable ranges" in
+/// the module doc for why it is not mapped non-cacheable instead).
 /// Only if a region's containing 1GB block is *still*
 /// unmapped after that loop - real hardware might genuinely have a device
 /// outside the RAM span reported by the memory map - does this add one
@@ -740,10 +823,9 @@ fn overlaps(region: (u64, u64), start: u64, end: u64) -> bool {
 /// guessed, so mapping it carries none of that risk regardless of platform.
 ///
 /// `uncached` are the ranges to map Normal Non-cacheable where they lie
-/// inside RAM: a framebuffer (read by a display engine straight from
-/// memory, Risk 7) and memory a device reaches by DMA on a platform whose
-/// DMA is not cache-coherent (`xhci::dma_region` on the Raspberry Pi
-/// 4/400, Risk 8). A range outside RAM keeps whatever mapping it has. Each
+/// inside RAM: memory a device reaches by DMA on a platform whose DMA is
+/// not cache-coherent (`xhci::dma_region` on the Raspberry Pi 4/400, Risk
+/// 8). A range outside RAM keeps whatever mapping it has. Each
 /// must start on a page and own its pages outright (a misaligned one is
 /// refused): the mapping is page-granular, and anything sharing those
 /// pages would become non-cacheable too.
@@ -791,16 +873,41 @@ pub unsafe fn install_identity_map(
     check_attributes(&planned[..planned_count]);
 }
 
+/// The smallest data-cache line, in bytes (`CTR_EL0.DminLine`, log2 of
+/// words): the stride every cache-maintenance loop here steps by.
+fn dcache_line() -> u64 {
+    let ctr: u64;
+    unsafe { asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
+    4u64 << ((ctr >> 16) & 0xf)
+}
+
 /// Cleans and invalidates `[base, base+size)` from the data cache to the
 /// point of coherency (`dc civac`), a cache line at a time. Works on the
 /// line whatever the page's memory type now is.
 fn clean_invalidate(base: u64, size: u64) {
-    let ctr: u64;
-    unsafe { asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags)) };
-    let line = 4u64 << ((ctr >> 16) & 0xf); // DminLine: log2 of words
+    let line = dcache_line();
     let mut addr = base & !(line - 1);
     while addr < base + size {
         unsafe { asm!("dc civac, {0}", in(reg) addr, options(nostack, preserves_flags)) };
+        addr += line;
+    }
+    unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
+}
+
+/// Cleans `[base, base+len)` to the point of coherency (`dc cvac`): writes
+/// any dirty lines back to memory, where something that does not look in
+/// the CPU's caches can see them - a display engine reading a framebuffer
+/// (`fbdev.rs`, `fbconsole.rs`: `docs/testing/testing-pi4.md` Risk 7). A
+/// no-op on memory that is not cached (a framebuffer that is a PCI BAR,
+/// mapped Device), so callers need not know which kind they have.
+pub(crate) fn clean_to_poc(base: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+    let line = dcache_line();
+    let mut addr = base & !(line - 1);
+    while addr < base + len {
+        unsafe { asm!("dc cvac, {0}", in(reg) addr, options(nostack, preserves_flags)) };
         addr += line;
     }
     unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
@@ -841,7 +948,8 @@ fn walked_attr(va: u64) -> Option<u64> {
 ///   (`0xff`), so kernel memory made non-cacheable by mistake is caught -
 ///   exclusive (atomic) accesses to it would not be guaranteed to work.
 ///
-/// One line per range, or a WARNING naming the view and address. Checks
+/// One line per range, or a WARNING naming the view and address, both
+/// recorded and printed later (see [`NcNote`]). Checks
 /// the ranges the plan actually made (`planned`), not a second derivation
 /// of which ones it should have. QEMU models no caches, so this walk is
 /// the part of the non-coherent-DMA fix it CAN check. Switches views to
@@ -850,9 +958,10 @@ fn walked_attr(va: u64) -> Option<u64> {
 fn check_attributes(planned: &[(u64, u64)]) {
     let current = crate::tasks::current_index();
     let kernel_va = L0_TABLES.as_ptr() as u64;
+    let in_planned = |va: u64| planned.iter().any(|&(s, e)| s <= va && va < e);
     for &(start, end) in planned {
         let mut views = 0usize;
-        let mut bad: Option<(usize, u64, Option<u64>, &str)> = None;
+        let mut bad: Option<(usize, u64, Option<u64>, &'static str)> = None;
         for view in TaskIndex::all() {
             activate_task(view);
             let mut page = start;
@@ -863,9 +972,11 @@ fn check_attributes(planned: &[(u64, u64)]) {
                 }
                 page += 4096;
             }
+            // A neighbour that is itself planned (two abutting ranges) is
+            // meant to be non-cacheable, and is checked as its own range.
             for outside in [start.wrapping_sub(4096), end] {
                 let a = walked_attr(outside);
-                if a == Some(MAIR_ATTR_NORMAL_NC) && bad.is_none() {
+                if a == Some(MAIR_ATTR_NORMAL_NC) && !in_planned(outside) && bad.is_none() {
                     bad = Some((view.index(), outside, a, "outside the range, but Normal Non-cacheable"));
                 }
             }
@@ -876,15 +987,10 @@ fn check_attributes(planned: &[(u64, u64)]) {
             views += 1;
         }
         activate_task(current);
-        match bad {
-            None => crate::console::println!(
-                "Ouroboros kernel: mmu: {start:#x}-{end:#x} walks as Normal Non-cacheable (attr {MAIR_ATTR_NORMAL_NC:#04x}) on every page in all {views} views, its neighbours and kernel data do not"
-            ),
-            Some((view, va, a, what)) => crate::console::println_force!(
-                "Ouroboros kernel: WARNING: mmu: range {start:#x}-{end:#x}: {va:#x} walks as {} in view {view} ({what}) - the non-cacheable mapping is wrong",
-                Attr(a)
-            ),
-        }
+        nc_note(match bad {
+            None => NcNote::Checked(start, end, views),
+            Some((view, va, a, what)) => NcNote::Bad(start, end, va, a, view, what),
+        });
     }
 }
 

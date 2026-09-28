@@ -30,12 +30,13 @@
 //! `CLAUDE.md`'s framebuffer-console section). Whether the framebuffer
 //! lands inside the identity map's discovered-RAM span or needs
 //! `mmu.rs`'s separate device-region fallback determines its memory type:
-//! inside RAM (QEMU `ramfb`, the Raspberry Pi) it is Normal Non-cacheable
-//! since 2026-09-27, so the display engine, which reads memory directly,
-//! sees every write (`docs/testing/testing-pi4.md` Risk 7; it used to be
-//! write-back cacheable there); outside RAM (a PCI BAR, Parallels) it is a
-//! Device-nGnRnE block. The `ptr::copy` scroll path is screendump-checked
-//! on the former (QEMU `ramfb`, non-cacheable).
+//! inside RAM (QEMU `ramfb`, the Raspberry Pi) it is ordinary write-back
+//! cacheable memory, and every write path here ends in `publish`, which
+//! cleans the written bytes out to memory for the display engine - it
+//! reads memory, not the CPU's caches (`docs/testing/testing-pi4.md` Risk
+//! 7); outside RAM (a PCI BAR, Parallels) it is a Device-nGnRnE block, on
+//! which the clean is a no-op. The `ptr::copy` scroll path is
+//! screendump-checked on the former (QEMU `ramfb`).
 
 use crate::font;
 use crate::framebuffer::Info;
@@ -87,6 +88,14 @@ impl FbConsole {
     /// symmetric, so this module doesn't need to track which format it
     /// got - a future colour beyond pure white/black would need to start
     /// storing and branching on it.
+    /// Makes `len` bytes written at byte offset `off` visible to the
+    /// display - see `fbdev::publish`, the same rule: every write path
+    /// here ends in a call to this (`clear` and `scroll`'s blank row go
+    /// through `draw_glyph`, which does).
+    fn publish(&self, off: usize, len: usize) {
+        crate::mmu::clean_to_poc(self.base as u64 + off as u64, len as u64);
+    }
+
     fn put_pixel(&mut self, x: usize, y: usize, white: bool) {
         let off = self.pixel_offset(x, y);
         let level: u8 = if white { 0xff } else { 0x00 };
@@ -106,6 +115,9 @@ impl FbConsole {
                 let set = (bits >> dx) & 1 != 0;
                 self.put_pixel(x0 + dx, y0 + dy, set);
             }
+        }
+        for dy in 0..GLYPH_H {
+            self.publish(self.pixel_offset(x0, y0 + dy), GLYPH_W * BYTES_PER_PIXEL);
         }
     }
 
@@ -131,6 +143,7 @@ impl FbConsole {
         unsafe {
             core::ptr::copy(self.base.add(glyph_row_bytes), self.base, move_bytes);
         }
+        self.publish(0, move_bytes);
         for col in 0..self.cols {
             self.draw_glyph(col, self.rows - 1, b' ');
         }

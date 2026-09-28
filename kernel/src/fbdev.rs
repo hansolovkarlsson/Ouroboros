@@ -79,6 +79,15 @@ pub fn rows() -> usize {
     unsafe { (*FB.0.get()).as_ref().map_or(0, |f| f.rows) }
 }
 
+/// Makes `len` bytes written at byte offset `off` visible to the display:
+/// the framebuffer is ordinary cacheable memory, and the display engine
+/// reads memory, not the CPU's caches (`docs/testing/testing-pi4.md` Risk
+/// 7, the Raspberry Pi). EVERY write path below ends in a call to this -
+/// the pixels are not on screen until it runs.
+fn publish(fb: &FbDev, off: usize, len: usize) {
+    crate::mmu::clean_to_poc(fb.base as u64 + off as u64, len as u64);
+}
+
 fn put_pixel(fb: &FbDev, x: usize, y: usize, white: bool) {
     let off = (y * fb.stride + x) * BYTES_PER_PIXEL;
     let level: u8 = if white { 0xff } else { 0x00 };
@@ -113,6 +122,7 @@ pub fn blit_glyphs(glyphs: &[u8], count: usize, col: usize, row: usize) {
     if row >= fb.rows {
         return;
     }
+    let mut drawn = 0usize;
     for i in 0..count {
         let c = col + i;
         if c >= fb.cols {
@@ -123,6 +133,12 @@ pub fn blit_glyphs(glyphs: &[u8], count: usize, col: usize, row: usize) {
             break;
         }
         draw_one(fb, &glyphs[start..start + GLYPH_BYTES], c, row);
+        drawn += 1;
+    }
+    // The run of cells is contiguous within each of its pixel rows.
+    for dy in 0..GLYPH_H {
+        let off = ((row * GLYPH_H + dy) * fb.stride + col * GLYPH_W) * BYTES_PER_PIXEL;
+        publish(fb, off, drawn * GLYPH_W * BYTES_PER_PIXEL);
     }
 }
 
@@ -148,6 +164,7 @@ pub fn scroll(n: usize) {
         // Blank the bottom n text rows the copy exposed.
         core::ptr::write_bytes(fb.base.add(total_bytes - shift_bytes), 0, shift_bytes);
     }
+    publish(fb, 0, total_bytes);
 }
 
 /// Blank the entire framebuffer.
@@ -159,4 +176,5 @@ pub fn clear() {
     unsafe {
         core::ptr::write_bytes(fb.base, 0, total_bytes);
     }
+    publish(fb, 0, total_bytes);
 }
