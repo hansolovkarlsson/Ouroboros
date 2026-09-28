@@ -963,23 +963,27 @@ The small open tails those arcs deliberately left:
 >             position instead; the storage one is the path confirmed on
 >             Parallels ("Mode A"), so it is left for its own change and
 >             check. Found reading the code, not observed.
->       - [x] **Map an in-RAM framebuffer Normal Non-cacheable** (the Pi's
+>       - [x] **Make the Pi's in-RAM framebuffer visible to the display** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is
 >             predicted for the Pi. Fix in `mmu.rs` at 4 KB granularity at
 >             its edges, merged with the per-task EL0 splits, or clean the
 >             written range to the point of coherency after each write.
 >             Same `mmu.rs` mechanism as the xHCI DMA item at the top.
->             **Done with it (2026-09-27):** a device region inside RAM is
->             mapped non-cacheable automatically; checked on QEMU `ramfb` by
->             the walker and a screendump.
->       - [ ] **Scrolling the non-cacheable framebuffer reads it uncached.**
->             Since an in-RAM framebuffer became Normal Non-cacheable, every
->             scroll's `ptr::copy` (`fbdev.rs`, `fbconsole.rs`) reads the
->             whole framebuffer from DRAM: about 8 MB per new line at
->             1920x1080 on the Pi. Slow, not wrong. A cacheable shadow
->             buffer copied out, or a redraw from `cond`'s text model,
->             avoids reading non-cacheable memory. QEMU TCG hides it.
+>             **Done (2026-09-27), by cleaning:** the framebuffer stays
+>             cacheable and every write in `fbdev.rs`/`fbconsole.rs` is
+>             cleaned out to memory (`mmu::clean_to_poc`). A non-cacheable
+>             mapping was built first and replaced after review: a hypervisor
+>             host reading guest memory cacheable could show it stale, and
+>             every scroll read 8 MB of uncached memory. Nothing becomes
+>             non-cacheable implicitly; only the ranges `main.rs` passes.
+>       - [ ] **A kernel log buffer and `dmesg`.** Every kernel boot line,
+>             the non-cacheable mapping's self-check included, reaches a
+>             framebuffer-only screen only until the console server clears
+>             it, and the kernel keeps nothing to read back. On the Pi,
+>             watched over HDMI alone, the lines `testing-pi4.md` says to
+>             read are gone within seconds; a ring buffer of kernel output
+>             and a command to print it would keep them.
 >       - [ ] **CLEAR_TT_BUFFER after a halted transfer behind a
 >             High-speed hub.** When EP0 (or a bulk endpoint) of a Full- or
 >             Low-speed device behind a High-speed hub halts, the hub's

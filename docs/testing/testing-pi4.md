@@ -623,12 +623,17 @@ one, so a coherent platform keeps the pool ordinary memory. QEMU models no
 caches, so it cannot show the bug or the fix; what it can show is the
 mapping, through the CPU's own table walker, and the kernel checks that at
 every boot (with the scan's answer forced on QEMU, the pool walks
-non-cacheable and USB still works). The lines to read on the board, before
-`xhci: controller @`: `ACPI declares DMA non-coherent (_CCA 0)`, then
+non-cacheable and USB still works). The lines to read on the board: early,
+before `exit_boot_services`, `ACPI declares DMA non-coherent (_CCA 0)`; and
+just before `shell ready`, `mmu: <pool> mapped Normal Non-cacheable` and
 `mmu: <pool> walks as Normal Non-cacheable (attr 0x44) on every page in all
-N views`. `ACPI declares no non-coherent DMA` there means the scan missed
-the firmware's `_CCA` (and USB will misbehave); a `WARNING: mmu:` line means
-the mapping is wrong. (predicted to work; the board is its first real test)
+N views` (the mapping's report is held until the consoles are up, so a
+framebuffer-only boot draws it too - but the console server clears the
+screen when it starts, and the kernel keeps no log to read back, so read
+these on the SERIAL console). `ACPI declares no non-coherent DMA` there
+means the scan missed the firmware's `_CCA` (and USB will misbehave); a
+`WARNING: mmu:` line means the mapping is wrong. (predicted to work; the
+board is its first real test)
 
 **What the fix was, as planned:** map every xHCI and USB-storage DMA buffer
 Normal Non-cacheable (MAIR `0x44`), with no cacheable alias, or clean and
@@ -661,15 +666,19 @@ correcting itself in patches as cache lines are evicted**, while the serial
 console is fine. That is the signature, and it is a display artefact, not a
 hang.
 
-**Fixed with Risk 8, on branch `pi400/noncacheable-dma` (2026-09-27):** the
-framebuffer, when it lies inside RAM, is mapped Normal Non-cacheable, page
-by page at its edges (it is passed to `mmu.rs` explicitly; no other device
-region is made non-cacheable, since MMIO must stay Device). On QEMU `ramfb`
-the boot logs `mmu: 0x5c7a0000-0x5caa0000 walks as Normal Non-cacheable
-(attr 0x44) on every page in all N views`, and a screendump shows the
-console rendered through that mapping. On the Pi, the same line names its
-framebuffer. Scrolling it is now slow (it reads uncached memory): a
-ROADMAP.md follow-up.
+**Fixed on branch `pi400/noncacheable-dma` (2026-09-27), by cleaning, not
+by remapping.** The framebuffer stays ordinary cacheable memory, and every
+write path in `fbdev.rs` and `fbconsole.rs` ends by cleaning the bytes it
+wrote out to memory (`mmu::clean_to_poc`, `dc cvac`), where the display
+engine reads them. A non-cacheable mapping was built first and replaced
+after review: under a hypervisor whose host reads guest memory cacheable
+(QEMU `ramfb` with hardware acceleration), a guest non-cacheable
+framebuffer can show stale text, and scrolling a non-cacheable framebuffer
+reads about 8 MB of uncached memory per line at 1080p. The clean is right
+on the Pi, harmless under a hypervisor, and a no-op on a framebuffer that
+is a PCI BAR (Parallels). QEMU models no caches, so a screendump can show
+only that rendering still works, not that the clean is needed; the board
+is its test (the signature above: stale or half-drawn HDMI text).
 
 **The fix, as it was planned:** map an in-RAM framebuffer as Normal
 Non-cacheable (what Linux uses for a framebuffer: write-combining), at 4 KB
