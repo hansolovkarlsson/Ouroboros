@@ -180,8 +180,12 @@ const TRB_TYPE_PORT_STATUS_CHANGE_EVENT: u32 = 34;
 // it in the Output Device Context.
 const EP_STATE_RUNNING: u32 = 1;
 const EP_STATE_HALTED: u32 = 2;
+const EP_STATE_STOPPED: u32 = 3;
 
 const COMPLETION_SUCCESS: u32 = 1;
+const COMPLETION_CONTEXT_STATE_ERROR: u32 = 19;
+const COMPLETION_STOPPED: u32 = 26;
+const COMPLETION_STOPPED_LENGTH_INVALID: u32 = 27;
 const COMPLETION_SHORT_PACKET: u32 = 13;
 
 // Capability register offsets, from the PCI BAR base.
@@ -926,10 +930,22 @@ impl Xhci {
             let Some(trb) = self.event_ring_pop() else { continue };
             let trb_type = (trb[3] >> 10) & 0x3f;
             if trb_type != TRB_TYPE_CMD_COMPLETION_EVENT {
-                if trb_type == TRB_TYPE_TRANSFER_EVENT && self.route_keyboard_event(trb) {
-                    continue;
-                }
-                if trb_type != TRB_TYPE_PORT_STATUS_CHANGE_EVENT {
+                if trb_type == TRB_TYPE_TRANSFER_EVENT {
+                    if self.route_keyboard_event(trb) {
+                        continue;
+                    }
+                    // Not the keyboard's: named by slot, endpoint and code,
+                    // so a request that recovery stopped (Stopped, the
+                    // expected by-product of Stop Endpoint on a request in
+                    // progress) reads differently from a genuinely stray
+                    // completion.
+                    let (slot, dci, code) = (trb[3] >> 24, (trb[3] >> 16) & 0x1f, trb[2] >> 24);
+                    if code == COMPLETION_STOPPED || code == COMPLETION_STOPPED_LENGTH_INVALID {
+                        console::println!("Ouroboros kernel: xhci: slot {slot} DCI {dci}: stopped request's event consumed");
+                    } else {
+                        console::println!("Ouroboros kernel: xhci: stray transfer event (slot {slot}, DCI {dci}, code {code}) while waiting for command completion, skipping");
+                    }
+                } else if trb_type != TRB_TYPE_PORT_STATUS_CHANGE_EVENT {
                     console::println!("Ouroboros kernel: xhci: unexpected event type={trb_type} while waiting for command completion");
                 }
                 continue;
@@ -958,7 +974,18 @@ impl Xhci {
     /// the whole port scan finishes, see `init_inner` - but the filter
     /// is what makes that an ordering nicety instead of a correctness
     /// dependency.)
-    fn wait_transfer_event(&mut self, expected_slot_id: u32) -> Result<Trb, Error> {
+    ///
+    /// **And from the request's own TRBs** (`td`, the addresses
+    /// `ring_push` returned for it): an event from the right slot that
+    /// points at any other TRB is a leftover from an earlier request - a
+    /// late completion after a timeout, or the Stopped event of a request
+    /// that recovery cancelled - and is skipped and logged, never taken
+    /// as this request's answer. Matching by slot alone once let exactly
+    /// that pair each later request with the previous one's answer. Every
+    /// TRB of the request is accepted, not only the last: an error in a
+    /// control transfer's data stage is reported against the data-stage
+    /// TRB.
+    fn wait_transfer_event(&mut self, expected_slot_id: u32, td: &[u64]) -> Result<Trb, Error> {
         let deadline = poll_deadline();
         while crate::timer::now_ticks() < deadline {
             let Some(trb) = self.event_ring_pop() else { continue };
@@ -978,6 +1005,12 @@ impl Xhci {
                 if !self.route_keyboard_event(trb) {
                     console::println!("Ouroboros kernel: xhci: transfer event for slot {event_slot} while waiting on slot {expected_slot_id}, skipping");
                 }
+                continue;
+            }
+            let ptr = (trb[0] as u64) | ((trb[1] as u64) << 32);
+            if !td.contains(&ptr) {
+                let dci = (trb[3] >> 16) & 0x1f;
+                console::println!("Ouroboros kernel: xhci: stale transfer event (slot {event_slot}, DCI {dci}, code {code}) from an earlier request, skipping");
                 continue;
             }
             // Short Packet is success with a residue (normal for a
@@ -1015,10 +1048,23 @@ impl Xhci {
     /// bad port costs only that port; a timeout that left EP0 unusable
     /// would cost every port after it, the keyboard's included.
     ///
-    /// Best-effort: a command that fails is logged and the rest still run,
-    /// since giving up would leave the endpoint certainly unusable. An
-    /// event the stopped request still produces is consumed (and logged)
-    /// by `wait_command_completion`, before the next request is queued.
+    /// **The state read is not trusted alone.** When it names no command
+    /// (a state that is neither Running, Halted nor Stopped), the failure
+    /// decides: a timeout leaves the request queued (Stop Endpoint),
+    /// anything the controller reported halts the endpoint (Reset
+    /// Endpoint). And when the controller answers Context State Error
+    /// (the endpoint was not in the state read - it halted just after the
+    /// read, say), the other command is sent.
+    ///
+    /// Best-effort otherwise: a failed command is logged and Set TR
+    /// Dequeue still runs, since giving up would leave the endpoint
+    /// certainly unusable - except when the controller stops answering
+    /// commands at all (Command Timeout), where the rest would only add a
+    /// second full timeout to every failure. The event a stopped request
+    /// still produces is consumed and logged by `wait_command_completion`
+    /// ("stopped request's event consumed"); one arriving later is
+    /// skipped by `wait_transfer_event`, which accepts only the current
+    /// request's own TRBs.
     fn recover_ep0(&mut self, idx: usize, cause: &Error) {
         let Some((slot_id, enqueue, cycle)) = self.slots[idx].as_ref().map(|s| (s.slot_id, s.ep0_enqueue, s.ep0_cycle)) else {
             return;
@@ -1026,15 +1072,48 @@ impl Xhci {
         // EP0 is DCI 1: its context follows the Slot Context.
         let state = unsafe { read_volatile(OUTPUT_DEVICE_CONTEXTS[idx].0.get().cast::<u32>().add(self.ctx_dwords)) } & 0x7;
         console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovering after {cause} (endpoint state {state})");
+        // The command, from the state when it names one, else from the
+        // failure itself: a timeout leaves a request queued (Stop), a
+        // failure reported by the controller halts the endpoint (Reset).
+        // Already Stopped needs neither.
+        let from_cause = if matches!(cause, Error::TransferTimeout) {
+            TRB_TYPE_STOP_ENDPOINT_CMD
+        } else {
+            TRB_TYPE_RESET_ENDPOINT_CMD
+        };
         let first = match state {
             EP_STATE_HALTED => Some(TRB_TYPE_RESET_ENDPOINT_CMD),
             EP_STATE_RUNNING => Some(TRB_TYPE_STOP_ENDPOINT_CMD),
-            _ => None, // already Stopped (or in a state no command fixes): dequeue only
+            EP_STATE_STOPPED => None,
+            _ => Some(from_cause),
         };
         if let Some(cmd) = first {
-            let ptr = self.push_command([0, 0, 0, (cmd << 10) | (1 << 16) | (slot_id << 24)]);
-            if let Err(e) = self.wait_command_completion(ptr) {
-                console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovery command failed ({e})");
+            match self.ep0_command(cmd, slot_id) {
+                Ok(()) => {}
+                // The endpoint was not in the state read: it moved (a
+                // Running endpoint that halted just after the read) or the
+                // read was out of date. The other command matches the other
+                // state.
+                Err(Error::CommandFailed(COMPLETION_CONTEXT_STATE_ERROR)) => {
+                    let other = if cmd == TRB_TYPE_RESET_ENDPOINT_CMD {
+                        TRB_TYPE_STOP_ENDPOINT_CMD
+                    } else {
+                        TRB_TYPE_RESET_ENDPOINT_CMD
+                    };
+                    console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 not in the state read, sending the other command");
+                    if let Err(e) = self.ep0_command(other, slot_id) {
+                        console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovery command failed ({e})");
+                    }
+                }
+                // The controller is not answering commands: give up rather
+                // than pay another full timeout for Set TR Dequeue, on every
+                // failure (a hub's settle loop would otherwise take about
+                // three times as long per unreadable port).
+                Err(Error::CommandTimeout) => {
+                    console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovery abandoned (controller not answering commands)");
+                    return;
+                }
+                Err(e) => console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovery command failed ({e})"),
             }
         }
         let dequeue = EP0_RINGS[idx].0.get() as u64 + (enqueue as u64) * 16;
@@ -1049,6 +1128,13 @@ impl Xhci {
         }
     }
 
+    /// Issues Reset Endpoint or Stop Endpoint (`cmd`) for EP0 of `slot_id`
+    /// and waits for it.
+    fn ep0_command(&mut self, cmd: u32, slot_id: u32) -> Result<(), Error> {
+        let ptr = self.push_command([0, 0, 0, (cmd << 10) | (1 << 16) | (slot_id << 24)]);
+        self.wait_command_completion(ptr).map(|_| ())
+    }
+
     /// Recovers a *bulk* endpoint on the storage device after a Stall/halt
     /// (or a failed transfer more generally) - the BOT "reset recovery"
     /// primitive `usb_msd.rs` invokes between retries, and the fix for the
@@ -1058,23 +1144,28 @@ impl Xhci {
     /// stall, and with no recovery the halted endpoint stays halted so every
     /// later command fails permanently.
     ///
-    /// Same two-command shape as [`recover_ep0`](Self::recover_ep0)
-    /// for EP0, but targeting a storage bulk DCI: a Reset Endpoint clears the
-    /// endpoint's Halted state, then a Set TR Dequeue Pointer re-synchronizes
-    /// hardware's dequeue with a known-good ring position (the ring start).
-    /// These are controller *commands*, not device *class requests* - so they
-    /// work on Parallels, whose passthrough doesn't forward class requests
-    /// (see `control_transfer`'s doc comment).
+    /// A Reset Endpoint clears the endpoint's Halted state, then a Set TR
+    /// Dequeue Pointer moves hardware's dequeue to the ring's start, and the
+    /// software producer state is reset to match. These are controller
+    /// *commands*, not device *class requests* - so they work on Parallels,
+    /// whose passthrough doesn't forward class requests (see
+    /// `control_transfer`'s doc comment).
     ///
-    /// Unlike the EP0 recovery, this is **not** best-effort: the software ring
-    /// producer state is only reset to the ring start *after both commands
-    /// succeed*, so a Reset Endpoint that fails because the endpoint wasn't
-    /// actually halted (e.g. the caller reset the healthy direction too, or
-    /// the failure was a pure timeout with the endpoint still Running) leaves
-    /// the software/hardware dequeue in sync and returns `Err` rather than
-    /// desynchronizing them. Targets the Stall/halt case the module doc calls
-    /// out; a pure timeout is not fully recovered (the endpoint stays Running),
-    /// but the state is left consistent, no worse than before.
+    /// **Known flaw, recorded in `docs/ROADMAP.md` and left for its own
+    /// change:** the ring's start is NOT a known-good position. The slots
+    /// after it still hold earlier TRBs carrying the cycle bit the
+    /// controller expects, so it can run on into a stale TRB once the new
+    /// ones are done. `recover_ep0` dequeues at the current enqueue position
+    /// instead for exactly this reason; this path is the one confirmed on
+    /// Parallels ("Mode A"), so it has not been changed along with it.
+    ///
+    /// Not best-effort, unlike `recover_ep0`: the software ring state is
+    /// reset only *after both commands succeed*, so a Reset Endpoint that
+    /// fails because the endpoint wasn't actually halted (the caller reset
+    /// the healthy direction too, or the failure was a pure timeout with
+    /// the endpoint still Running) leaves software and hardware in sync and
+    /// returns `Err`. A pure timeout is not recovered (the endpoint stays
+    /// Running), but the state is left consistent.
     fn reset_storage_endpoint(&mut self, dir_in: bool) -> Result<(), Error> {
         let (slot_idx, dci) = {
             let st = self.storage.as_ref().ok_or(Error::NoPortConnected)?;
@@ -1141,30 +1232,37 @@ impl Xhci {
         let trt: u32 = if w_length == 0 { 0 } else if data_in { 3 } else { 2 };
         let setup_param_lo = (bm_request_type as u32) | ((b_request as u32) << 8) | ((w_value as u32) << 16);
         let setup_param_hi = (w_index as u32) | ((w_length as u32) << 16);
-        self.push_ep0(idx, [
+        // The request's own TRBs, for `wait_transfer_event` to match its
+        // completion against.
+        let mut td = [0u64; 3];
+        let mut td_len = 0usize;
+        td[td_len] = self.push_ep0(idx, [
             setup_param_lo,
             setup_param_hi,
             8, // TRB Transfer Length is always 8 - the setup packet itself, not wLength
             (1 << 6) | (TRB_TYPE_SETUP_STAGE << 10) | (trt << 16), // IDT
         ]);
+        td_len += 1;
 
         if w_length != 0 {
             let buf_addr = CTRL_BUF.0.get() as u64;
-            self.push_ep0(idx, [
+            td[td_len] = self.push_ep0(idx, [
                 buf_addr as u32,
                 (buf_addr >> 32) as u32,
                 w_length as u32,
                 (TRB_TYPE_DATA_STAGE << 10) | ((data_in as u32) << 16),
             ]);
+            td_len += 1;
         }
 
         // Status stage direction is the opposite of the data stage's; if
         // there was no data stage, it's always IN.
         let status_dir_in = if w_length == 0 { true } else { !data_in };
-        self.push_ep0(idx, [0, 0, 0, (1 << 5) | (TRB_TYPE_STATUS_STAGE << 10) | ((status_dir_in as u32) << 16)]); // IOC
+        td[td_len] = self.push_ep0(idx, [0, 0, 0, (1 << 5) | (TRB_TYPE_STATUS_STAGE << 10) | ((status_dir_in as u32) << 16)]); // IOC
+        td_len += 1;
 
         self.ring_ep0_doorbell(idx);
-        if let Err(e) = self.wait_transfer_event(slot_id) {
+        if let Err(e) = self.wait_transfer_event(slot_id, &td[..td_len]) {
             self.recover_ep0(idx, &e);
             return Err(e);
         }
@@ -1277,15 +1375,15 @@ impl Xhci {
         } else {
             (&mut st.out_enqueue, &mut st.out_cycle)
         };
-        unsafe {
+        let trb_addr = unsafe {
             Self::ring_push(
                 ring_ptr,
                 ring_len,
                 enqueue,
                 cycle,
                 [buf_addr as u32, (buf_addr >> 32) as u32, len, (1 << 5) | (TRB_TYPE_NORMAL << 10)], // IOC
-            );
-        }
+            )
+        };
         let Some(slot_id) = self.slots[slot_idx].as_ref().map(|s| s.slot_id) else {
             return Err(Error::NoPortConnected);
         };
@@ -1293,7 +1391,7 @@ impl Xhci {
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             write32(self.db_base + (slot_id as u64) * 4, dci);
         }
-        self.wait_transfer_event(slot_id).map(|_| ())
+        self.wait_transfer_event(slot_id, &[trb_addr]).map(|_| ())
     }
 
     /// Pops the oldest queued keycode, if any.
