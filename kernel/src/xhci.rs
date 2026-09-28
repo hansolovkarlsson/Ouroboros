@@ -353,22 +353,90 @@ struct Page(UnsafeCell<[u8; 4096]>);
 unsafe impl Sync for Page {}
 
 #[repr(align(64))]
-struct Aligned64<T>(UnsafeCell<T>);
+pub(crate) struct Aligned64<T>(pub(crate) UnsafeCell<T>);
 unsafe impl<T> Sync for Aligned64<T> {}
 
-// One static per piece of driver-owned DMA memory, same idiom as
-// `virtio_blk.rs`'s DESC_TABLE/AVAIL_RING/USED_RING and `mmu.rs`'s
-// `Table` - single-instance, populated once, never touched concurrently
-// (this driver has exactly one command/transfer in flight at a time).
-static DCBAA: Aligned64<[u64; MAX_SLOTS_ENABLED + 1]> = Aligned64(UnsafeCell::new([0; MAX_SLOTS_ENABLED + 1]));
-static SCRATCHPAD_ARRAY: Aligned64<[u64; MAX_SCRATCHPAD_BUFFERS]> = Aligned64(UnsafeCell::new([0; MAX_SCRATCHPAD_BUFFERS]));
-static SCRATCHPAD_PAGES: [Page; MAX_SCRATCHPAD_BUFFERS] = [
+/// Every byte the xHCI controller (and, through it, the USB storage
+/// driver) reaches by DMA, in ONE page-aligned static that owns its pages
+/// outright: nothing else the kernel keeps can share a page with it,
+/// because the struct is 4096-aligned and Rust rounds its size up to that
+/// alignment.
+///
+/// **Why one pool, not one static per buffer:** on the Raspberry Pi 4/400
+/// PCIe DMA is not cache-coherent (`docs/testing/testing-pi4.md` Risk 8),
+/// so this memory has to be mapped Normal Non-cacheable (`mmu.rs`, which
+/// is handed [`dma_region`]). Mapping works on whole 4 KB pages, and the
+/// buffers used to be separate statics sharing pages with ordinary kernel
+/// data - `usb_msd.rs`'s `NEXT_TAG` atomic sat next to its `DATA_BUF`,
+/// and exclusive (atomic) accesses to non-cacheable memory are not
+/// guaranteed to work. The per-buffer statics below are now references
+/// into this pool, so every use of them is unchanged.
+#[repr(C, align(4096))]
+pub(crate) struct DmaPool {
+    scratchpad_pages: [Page; MAX_SCRATCHPAD_BUFFERS],
+    output_device_contexts: [Aligned64<[u32; CTX_DWORDS_MAX * 32]>; MAX_DEVICES],
+    input_context: Aligned64<[u32; CTX_DWORDS_MAX * 33]>,
+    dcbaa: Aligned64<[u64; MAX_SLOTS_ENABLED + 1]>,
+    scratchpad_array: Aligned64<[u64; MAX_SCRATCHPAD_BUFFERS]>,
+    command_ring: Aligned64<[Trb; CMD_RING_SIZE]>,
+    ep0_rings: [Aligned64<[Trb; EP0_RING_SIZE]>; MAX_DEVICES],
+    int_ring: Aligned64<[Trb; INT_RING_SIZE]>,
+    bulk_in_ring: Aligned64<[Trb; INT_RING_SIZE]>,
+    bulk_out_ring: Aligned64<[Trb; INT_RING_SIZE]>,
+    event_ring: Aligned64<[Trb; EVENT_RING_SIZE]>,
+    erst: Aligned64<[ErstEntry; 1]>,
+    ctrl_buf: Aligned64<[u8; 64]>,
+    int_buf: Aligned64<[u8; 8]>,
+    usb_cbw: Aligned64<[u8; 31]>,
+    usb_csw: Aligned64<[u8; 13]>,
+    usb_data: Aligned64<[u8; 512]>,
+}
+
+static DMA_POOL: DmaPool = DmaPool {
+    scratchpad_pages: [
     Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
     Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
     Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
     Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
-];
-static COMMAND_RING: Aligned64<[Trb; CMD_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; CMD_RING_SIZE]));
+],
+    output_device_contexts: [const { Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32])) }; MAX_DEVICES],
+    input_context: Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 33])),
+    dcbaa: Aligned64(UnsafeCell::new([0; MAX_SLOTS_ENABLED + 1])),
+    scratchpad_array: Aligned64(UnsafeCell::new([0; MAX_SCRATCHPAD_BUFFERS])),
+    command_ring: Aligned64(UnsafeCell::new([[0; 4]; CMD_RING_SIZE])),
+    ep0_rings: [const { Aligned64(UnsafeCell::new([[0; 4]; EP0_RING_SIZE])) }; MAX_DEVICES],
+    int_ring: Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE])),
+    bulk_in_ring: Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE])),
+    bulk_out_ring: Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE])),
+    event_ring: Aligned64(UnsafeCell::new([[0; 4]; EVENT_RING_SIZE])),
+    erst: Aligned64(UnsafeCell::new([ErstEntry { base: 0, size: 0, _reserved: 0 }])),
+    ctrl_buf: Aligned64(UnsafeCell::new([0; 64])),
+    int_buf: Aligned64(UnsafeCell::new([0; 8])),
+    usb_cbw: Aligned64(UnsafeCell::new([0; 31])),
+    usb_csw: Aligned64(UnsafeCell::new([0; 13])),
+    usb_data: Aligned64(UnsafeCell::new([0; 512])),
+};
+
+/// The DMA pool's physical range `(base, size)`, page-aligned at both
+/// ends - what `main.rs` hands `mmu.rs` to map non-cacheable.
+pub(crate) fn dma_region() -> (u64, u64) {
+    (&DMA_POOL as *const DmaPool as u64, core::mem::size_of::<DmaPool>() as u64)
+}
+
+/// `usb_msd.rs`'s three DMA buffers (command block, status, one sector),
+/// in the pool with the rest.
+pub(crate) static USB_CBW_BUF: &Aligned64<[u8; 31]> = &DMA_POOL.usb_cbw;
+pub(crate) static USB_CSW_BUF: &Aligned64<[u8; 13]> = &DMA_POOL.usb_csw;
+pub(crate) static USB_DATA_BUF: &Aligned64<[u8; 512]> = &DMA_POOL.usb_data;
+
+// One name per piece of driver-owned DMA memory, each a reference into
+// `DMA_POOL` above - single-instance, populated once, never touched
+// concurrently (this driver has exactly one command/transfer in flight at
+// a time).
+static DCBAA: &Aligned64<[u64; MAX_SLOTS_ENABLED + 1]> = &DMA_POOL.dcbaa;
+static SCRATCHPAD_ARRAY: &Aligned64<[u64; MAX_SCRATCHPAD_BUFFERS]> = &DMA_POOL.scratchpad_array;
+static SCRATCHPAD_PAGES: &[Page; MAX_SCRATCHPAD_BUFFERS] = &DMA_POOL.scratchpad_pages;
+static COMMAND_RING: &Aligned64<[Trb; CMD_RING_SIZE]> = &DMA_POOL.command_ring;
 // One EP0 transfer ring per concurrently-addressed device (pool index =
 // `Xhci::slots` index). Used to be a single shared ring, with a
 // per-candidate-device reset dance: each device's Address Device command
@@ -378,8 +446,7 @@ static COMMAND_RING: Aligned64<[Trb; CMD_RING_SIZE]> = Aligned64(UnsafeCell::new
 // the base each time to keep matching what the new device's Address
 // Device declared. With devices staying concurrently addressed, each
 // needs its own ring memory outright.
-static EP0_RINGS: [Aligned64<[Trb; EP0_RING_SIZE]>; MAX_DEVICES] =
-    [const { Aligned64(UnsafeCell::new([[0; 4]; EP0_RING_SIZE])) }; MAX_DEVICES];
+static EP0_RINGS: &[Aligned64<[Trb; EP0_RING_SIZE]>; MAX_DEVICES] = &DMA_POOL.ep0_rings;
 // Transfer ring for the keyboard's interrupt IN endpoint - see
 // `Device::poll_key`'s doc comment for why this replaced GET_REPORT
 // control transfers entirely: real Parallels hardware testing showed
@@ -393,13 +460,13 @@ static EP0_RINGS: [Aligned64<[Trb; EP0_RING_SIZE]>; MAX_DEVICES] =
 // reports with no request/response round trip of any kind - hardware
 // polls the device on its own schedule and DMAs new data straight into
 // a buffer this driver posted ahead of time.
-static INT_RING: Aligned64<[Trb; INT_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE]));
+static INT_RING: &Aligned64<[Trb; INT_RING_SIZE]> = &DMA_POOL.int_ring;
 // Transfer rings for the mass-storage device's bulk endpoint pair
 // (usb_msd.rs drives them through `bulk_transfer` below) - same
 // 16-entry shape as INT_RING, one ring per endpoint per the xHCI model.
-static BULK_IN_RING: Aligned64<[Trb; INT_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE]));
-static BULK_OUT_RING: Aligned64<[Trb; INT_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE]));
-static EVENT_RING: Aligned64<[Trb; EVENT_RING_SIZE]> = Aligned64(UnsafeCell::new([[0; 4]; EVENT_RING_SIZE]));
+static BULK_IN_RING: &Aligned64<[Trb; INT_RING_SIZE]> = &DMA_POOL.bulk_in_ring;
+static BULK_OUT_RING: &Aligned64<[Trb; INT_RING_SIZE]> = &DMA_POOL.bulk_out_ring;
+static EVENT_RING: &Aligned64<[Trb; EVENT_RING_SIZE]> = &DMA_POOL.event_ring;
 
 #[repr(C)]
 struct ErstEntry {
@@ -407,7 +474,7 @@ struct ErstEntry {
     size: u32,
     _reserved: u32,
 }
-static ERST: Aligned64<[ErstEntry; 1]> = Aligned64(UnsafeCell::new([ErstEntry { base: 0, size: 0, _reserved: 0 }]));
+static ERST: &Aligned64<[ErstEntry; 1]> = &DMA_POOL.erst;
 
 // Context word count: 8 dwords (32 bytes) normally, or 16 dwords (64
 // bytes) if HCCPARAMS1.CSZ is set - a real, common controller
@@ -422,7 +489,7 @@ const CTX_DWORDS_MAX: usize = 16;
 // (Slot Context + EP0-EP15 IN/OUT) - always allocated at full size per
 // spec, even though this driver only ever populates the Slot and EP0
 // entries.
-static INPUT_CONTEXT: Aligned64<[u32; CTX_DWORDS_MAX * 33]> = Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 33]));
+static INPUT_CONTEXT: &Aligned64<[u32; CTX_DWORDS_MAX * 33]> = &DMA_POOL.input_context;
 // Output Device Contexts: same 32-entry shape as the Input Context,
 // minus the Input Control Context - this is what the xHC itself writes
 // each device's state into, via the DCBAA entry for that device's slot
@@ -432,8 +499,7 @@ static INPUT_CONTEXT: Aligned64<[u32; CTX_DWORDS_MAX * 33]> = Aligned64(UnsafeCe
 // memory - real corruption, not a bookkeeping nicety - which is why the
 // old single `OUTPUT_DEVICE_CONTEXT` only ever worked while this driver
 // abandoned every device but the keyboard.
-static OUTPUT_DEVICE_CONTEXTS: [Aligned64<[u32; CTX_DWORDS_MAX * 32]>; MAX_DEVICES] =
-    [const { Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32])) }; MAX_DEVICES];
+static OUTPUT_DEVICE_CONTEXTS: &[Aligned64<[u32; CTX_DWORDS_MAX * 32]>; MAX_DEVICES] = &DMA_POOL.output_device_contexts;
 
 /// Scratch buffer for control-transfer data stages. Sized 64, not 8 -
 /// real Parallels hardware testing showed `GET_REPORT`'s 8-byte data
@@ -446,14 +512,14 @@ static OUTPUT_DEVICE_CONTEXTS: [Aligned64<[u32; CTX_DWORDS_MAX * 32]>; MAX_DEVIC
 /// section 5.5.3) means the Data Stage TRB's declared length can no
 /// longer coincidentally equal the Setup packet's fixed 8-byte size,
 /// which a same-size buffer never could either way this bug turns out.
-static CTRL_BUF: Aligned64<[u8; 64]> = Aligned64(UnsafeCell::new([0; 64]));
+static CTRL_BUF: &Aligned64<[u8; 64]> = &DMA_POOL.ctrl_buf;
 
 /// DMA target for the interrupt endpoint's incoming HID reports - a real
 /// boot-protocol report is always 8 bytes, so this doesn't need
 /// `CTRL_BUF`'s "widened past 8" treatment (that was specifically about
 /// a control-transfer/Setup-packet aliasing question that doesn't apply
 /// to a Normal TRB, which has no Setup stage at all).
-static INT_BUF: Aligned64<[u8; 8]> = Aligned64(UnsafeCell::new([0; 8]));
+static INT_BUF: &Aligned64<[u8; 8]> = &DMA_POOL.int_buf;
 
 unsafe fn read32(addr: u64) -> u32 {
     unsafe { read_volatile(addr as *const u32) }
@@ -1496,6 +1562,8 @@ static XHCI: SyncCell<Option<Xhci>> = SyncCell::new(None);
 /// `mmu::install_identity_map` has run with it folded into
 /// `extra_devices`.
 pub unsafe fn init(bar_base: u64) {
+    let (pool_base, pool_size) = dma_region();
+    console::println!("Ouroboros kernel: xhci: DMA pool @ {pool_base:#x}, {pool_size:#x} bytes");
     match unsafe { init_inner(bar_base) } {
         Ok(()) => console::println!("Ouroboros kernel: xhci: keyboard ready"),
         Err(e) => console::println!("Ouroboros kernel: xhci: keyboard not available ({e})"),
