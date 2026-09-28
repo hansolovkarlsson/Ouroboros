@@ -358,7 +358,14 @@ localises the failure without any guessing.
    console — which the firmware mirrors to both serial and HDMI. Reaching here
    proves the card layout and the firmware handoff, nothing else.
 
-2. **`console @ {base:#x} (via {source})`.** *(predicted: `via acpi`)* — the
+2. **`console @ {base:#x} (via {source})`.** *(predicted: `via acpi`; observed
+   2026-09-28 on a Pi 4 with the firmware set to ACPI + Devicetree:
+   `console @ 0x7e201000 (via devicetree)`. The devicetree is tried first and
+   its `reg` is a VideoCore bus address; the PL011 is at `0xfe201000` for the
+   ARM. `dtranges.rs` now translates through the ancestors' `ranges`, so the
+   line should read `0xfe201000`. Checked on the host against
+   `bcm2711-rpi-4-b.dtb` and `bcm2711-rpi-400.dtb` from the pinned firmware,
+   not yet on a board.)* The
    RPi4 EDK2 firmware ships a real SPCR table, so the ACPI branch should
    resolve a PL011 base. **If this line is missing**, `pci::log_all_devices`
    runs instead as a diagnostic, and after `exit_boot_services` there is no

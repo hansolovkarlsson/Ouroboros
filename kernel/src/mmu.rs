@@ -344,10 +344,14 @@ static L0_TABLES: [Table; MAX_EL0_REGIONS] =
 static L1_TABLES: [Table; MAX_EL0_REGIONS] =
     [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
-/// The most `extra_devices` entries `install_identity_map` has ever been
-/// called with - matches `main.rs`'s own fixed-size staging array
-/// (framebuffer, xHCI BAR, GICD, GICR).
-const MAX_EXTRA_DEVICES: usize = 4;
+/// The most `extra_devices` entries `install_identity_map` takes, and the
+/// size of `main.rs`'s staging array, which uses this constant rather than
+/// its own number (a longer slice is truncated below): framebuffer, xHCI
+/// BAR, GICD, GICR, and the discovered serial console (added 2026-09-28,
+/// when the Pi 4's devicetree console turned out to sit at 0xfe201000, far
+/// above the fixed low-1GB device block; it was covered only by the GIC's
+/// 1GB block, by coincidence).
+pub(crate) const MAX_EXTRA_DEVICES: usize = 5;
 
 /// [`install_identity_map`]'s inputs, kept around after its first call so
 /// a later runtime caller (`rebuild_with_el0_regions`, for

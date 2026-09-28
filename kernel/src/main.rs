@@ -9,6 +9,7 @@ mod bootflags;
 mod bootid;
 mod console;
 mod devicetree;
+mod dtranges;
 mod exceptions;
 mod fbconsole;
 mod fbdev;
@@ -442,6 +443,8 @@ fn main() -> Status {
         }
     }
 
+    // Kept for the identity map below, which maps the console explicitly.
+    let console_base = discovery.as_ref().map(|&(base, _, _)| base as u64);
     if let Some((base, kind, _source)) = discovery.filter(|_| !fb_console_forced) {
         // SAFETY: `base` came from the platform's own devicetree, ACPI
         // tables, or PCI configuration space.
@@ -462,8 +465,16 @@ fn main() -> Status {
     // xHCI BAR turned out not to respect that assumption either. See
     // `mmu.rs`'s `MAX_EXTRA_L1_TABLES` doc comment for the matching bump
     // on that side.
-    let mut extra_devices = [(0u64, 0u64); 4];
+    let mut extra_devices = [(0u64, 0u64); mmu::MAX_EXTRA_DEVICES];
     let mut extra_device_count = 0;
+    // The discovered serial console, mapped because it is the console: the
+    // fixed low-1GB device block is a QEMU-shaped convention, and the Pi 4's
+    // PL011 (0xfe201000) is far above it. Mapped under `\FBCON` too, where it
+    // goes unused, since it costs one block and keeps the map the same.
+    if let Some(base) = console_base {
+        extra_devices[extra_device_count] = (base, 0x1000);
+        extra_device_count += 1;
+    }
     if let Some(info) = fb_info {
         extra_devices[extra_device_count] = (info.base, info.size as u64);
         extra_device_count += 1;

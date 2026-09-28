@@ -616,6 +616,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/uart.rs        PL011 console driver (post-ExitBootServices only)
   src/uart16550.rs   16550 console driver - PCI-discovered consoles, genuinely different hardware
   src/devicetree.rs  console discovery via the UEFI devicetree (dead end on QEMU and Parallels)
+  src/dtranges.rs    devicetree address translation through `ranges` (bus -> CPU; the Pi 4's PL011 is 0x7e201000 on the bus, 0xfe201000 for the CPU)
   src/acpi.rs        console discovery via RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels) + the shared find_table walk
   src/madt.rs        GIC version/address discovery via the ACPI MADT - where gic.rs's addresses actually come from
   src/power.rs       POWER syscall backend: PSCI SYSTEM_OFF via the FADT-discovered conduit, else halt

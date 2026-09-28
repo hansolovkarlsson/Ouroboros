@@ -50,6 +50,9 @@ pub enum DiscoveryError {
     UnsupportedConsole,
     /// A PL011 node exists but has no usable `reg` property.
     NoRegProperty,
+    /// The `reg` address could not be translated to a CPU address through
+    /// the ancestors' `ranges` (`dtranges.rs`).
+    Untranslatable,
 }
 
 /// Parses `dtb` (if present) and resolves it to a PL011 UART base address.
@@ -85,5 +88,10 @@ pub unsafe fn discover_pl011(dtb: Option<*const u8>) -> Result<usize, DiscoveryE
         .reg()
         .and_then(|mut regs| regs.next())
         .ok_or(DiscoveryError::NoRegProperty)?;
-    Ok(region.starting_address as usize)
+    // `reg` is in the parent bus's address space; the CPU's can differ (the
+    // Pi 4's PL011 is at bus 0x7e201000, CPU 0xfe201000). No translation,
+    // no console: never the bus address as a guess.
+    crate::dtranges::to_cpu(&fdt, node, region.starting_address as u64)
+        .map(|a| a as usize)
+        .ok_or(DiscoveryError::Untranslatable)
 }
