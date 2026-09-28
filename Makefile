@@ -1376,7 +1376,12 @@ parallels-hdd: image
 #   make sdcard SDCARD=/Volumes/OUROBOROS KEEP_ETC=1   # keep the card's /etc
 #   make sdcard SDCARD=/Volumes/OUROBOROS FIRMWARE=1   # reinstall the firmware
 #   make sdcard SDCARD=/Volumes/OUROBOROS EJECT=1
-sdcard: esp
+# The SDCARD check runs before the build, so a missing or mistyped path fails
+# in a second rather than after a full rebuild; the script checks it properly.
+sdcard:
+	@test -n "$(SDCARD)" && test -d "$(SDCARD)" || { \
+		echo "sdcard: SDCARD='$(SDCARD)' is not a mounted card, e.g. make sdcard SDCARD=/Volumes/OUROBOROS"; exit 1; }
+	$(MAKE) esp
 	SDCARD="$(SDCARD)" KEEP_ETC="$(KEEP_ETC)" FIRMWARE="$(FIRMWARE)" EJECT="$(EJECT)" \
 		ESP_DIR="$(ESP_DIR)" CACHE_DIR="$(BUILD_DIR)/cache" ./scripts/sdcard.sh
 

@@ -285,16 +285,21 @@ make sdcard SDCARD=/Volumes/OUROBOROS            # add EJECT=1 to eject when don
 erases some other disk, so step 1 stays manual. `scripts/sdcard.sh` refuses a
 path that is not a volume's mount point under `/Volumes`, a volume that is not
 FAT, one on fixed internal media, and one that is neither empty nor already a
-Pi card (no `RPI_EFI.fd`). Each refusal was seen once against a disk image
-built to trip it.
+Pi card (no `RPI_EFI.fd`). Each refusal was seen once: against a disk image
+built to trip it, except fixed internal media, which an attached image never
+reports, so that one was tripped through a `diskutil` shim that reports it.
+`make sdcard` checks that `SDCARD` names a directory before it builds anything.
 
 **The firmware is pinned, checksummed and installed once.** The release
 (pftf v1.53) and its SHA-256 are constants in `scripts/sdcard.sh`; the zip is
 cached in `build/cache/` and checked on every use. It is unzipped onto a card
 only when the card has no `RPI_EFI.fd`, because this firmware has no NVRAM: the
 §5 settings and every UEFI variable, the boot counter's included, are stored
-inside `RPI_EFI.fd` itself (pftf readme, "NVRAM"). Rewriting it on each update
-would silently reset them. `FIRMWARE=1` reinstalls it deliberately. The
+inside `RPI_EFI.fd` itself (edk2-platforms' `Platform/RaspberryPi/RPi4/Readme.md`,
+"NVRAM"; the readme in the pftf zip does not say). Rewriting it on each update
+would silently reset them. `FIRMWARE=1` reinstalls it deliberately, and even
+then keeps an existing `config.txt`, since Risk 3's UART overlay is set there
+by hand. The
 firmware's files keep the names they ship with; the readme is explicit that
 renaming them breaks boot. To move to a newer release, bump the version and the
 checksum together (`gh release view --repo pftf/RPi4` prints the asset's).
@@ -304,11 +309,16 @@ are is computed from `build/esp`: each top-level entry and each entry under
 `EFI/`. A program dropped from the tree therefore leaves the card too. Two of
 them are state rather than build output:
 
-- `etc` is re-staged by default (a fresh passwd, shadow and cluster keys, as
-  every other image target does). `KEEP_ETC=1` keeps the card's copy.
+- `etc` is re-staged by default (the dev passwd, shadow, group and cluster
+  files, as every other image target stages them; the cluster keys are
+  deterministic, so the identity does not change). That resets accounts and
+  passwords made on the Pi, and the script says so. `KEEP_ETC=1` keeps the
+  card's files and adds only the ones a newer tree introduced.
 - `Users` (the home directories) only gains the directories it is missing.
   What was made on the Pi is never replaced.
 
+Each is copied beside the old one and swapped in afterwards, so a copy that
+fails (a full card, a pulled reader) leaves the old `EFI/BOOT` bootable.
 Anything else on the card, the firmware's files or a file of your own at the
 root, is left alone. Re-staging `EFI/ORBS/BOOTID.TXT` rolls the boot counter's
 file store back, as every image does; the counter's preferred store is the
