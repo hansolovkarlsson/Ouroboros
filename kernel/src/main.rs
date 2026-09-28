@@ -423,6 +423,25 @@ fn main() -> Status {
     // untested address once did on Parallels.
     exceptions::install();
 
+    // `\FBCON`: the framebuffer console right away, on the firmware's page
+    // tables, so everything from here on (the MMU switch included, and any
+    // exception report, which needs an installed console) reaches HDMI. Built
+    // for the Pi 400, whose boot went silent after the exit with no serial
+    // cable to say where.
+    if fb_console_forced {
+        if let Some(info) = fb_info {
+            // SAFETY: the firmware's translation tables are still live
+            // (mmu.rs has not switched TTBR0 yet), UEFI requires them to
+            // identity-map memory, and the firmware's own text console was
+            // drawing into this framebuffer moments ago, so it is mapped and
+            // writable at `info.base`. After the switch our tables map it
+            // too (`extra_devices` below), so the console survives it.
+            let fb = unsafe { fbconsole::FbConsole::new(&info) };
+            console::install(Console::Framebuffer(fb));
+            console::println!("Ouroboros kernel: framebuffer console live early (\\FBCON), on the firmware's page tables");
+        }
+    }
+
     if let Some((base, kind, _source)) = discovery.filter(|_| !fb_console_forced) {
         // SAFETY: `base` came from the platform's own devicetree, ACPI
         // tables, or PCI configuration space.
@@ -482,6 +501,7 @@ fn main() -> Status {
     el0_regions[3] = cond.as_ref().map_or((0, 0), |c| (c.base, c.size));
     el0_regions[4] = netd.as_ref().map_or((0, 0), |n| (n.base, n.size));
     el0_regions[5] = accountd.as_ref().map_or((0, 0), |a| (a.base, a.size));
+    console::println!("Ouroboros kernel: installing our own identity map");
     unsafe {
         // The xHCI/USB DMA pool is mapped Normal Non-cacheable only where
         // the firmware declared DMA non-coherent (above,

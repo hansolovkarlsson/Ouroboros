@@ -457,7 +457,7 @@ flag when it is set.
 |---|---|---|
 | `NOXHCI` | xHCI discovery and bring-up: no USB at all | the hang is inside `pci::discover_xhci` |
 | `XHCINOWR` | only the PCI command-register write in discovery (the takeover from firmware still happens), and the bring-up after the exit | the write is the culprit, not the takeover |
-| `FBCON` | installing the SPCR serial console after the exit, so the kernel's framebuffer console takes HDMI | (not a bisection) the kernel's own post-exit lines appear on HDMI, so the last one shows where the boot stops |
+| `FBCON` | installing the SPCR serial console after the exit; the kernel's framebuffer console is installed instead, right after `exceptions::install()`, on the firmware's page tables | (not a bisection) every post-exit line, the MMU switch and the kernel's own `EXCEPTION …` report included, appears on HDMI, so the last one shows where the boot stops |
 
 One flag per bisection boot; `FBCON` combines with either of the others.
 They exist for the first Pi 400 boots (2026-09-28), which all ended on HDMI
@@ -518,6 +518,17 @@ underneath the kernel (the stack slot overwritten, or the image's pages made
 unreadable) rather than at one bad instruction, and nothing in the kernel
 changes memory attributes before the exit. Unresolved: the firmware's serial
 dump (ESR, FAR and a backtrace naming the caller) is what settles it.
+
+**`NOXHCI` + `FBCON` got through the exit** (`exiting boot services`, no
+firmware exception), so the firmware-phase fault needs the xHCI takeover. Then
+HDMI showed nothing more, not even `framebuffer console live`: something
+between the exit and the MMU switch, with no console yet for an exception
+report. `FBCON` now installs the framebuffer console right after
+`exceptions::install()` and the kernel prints `installing our own identity
+map` just before the switch, so that stretch is on screen. Checked on QEMU
+(`-device ramfb`): a fault planted just before the switch shows
+`EXCEPTION vector=4 esr_el1=0x96000047 far_el1=0x10` on the framebuffer, and
+without the plant the boot reaches the shell.
 
 ---
 
