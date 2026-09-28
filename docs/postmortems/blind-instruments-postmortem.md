@@ -721,3 +721,46 @@ real addresses. Found by the last review of the day: the right check is the
 on the contexts, is sound, and was shown to fail with `MAX_DEVICES` set to 7.
 (Fixed the next morning on #179's branch: the rings are checked against the
 page, and an event ring made larger than a page now fails the build.)
+
+## Three more, from the first boots on the boards (2026-09-28)
+
+The Pi 400 and a 1 GB Pi 4 booted for the first time, watched over HDMI with no
+serial cable, through a phone camera. Every observation came through at least
+two instruments that had never been checked: the screen and the photo of it.
+
+**A screen that stopped updating, read as a machine that stopped.** The first
+boot ended on the firmware's text, partway through the line after the xHCI
+command-register write, and I said it had frozen at that write. Two boots with
+flags later I said the opposite: the firmware's ACPI names a serial port, so
+the kernel's own lines after the exit go to serial only, and the Pi might be at
+the shell with nothing reaching HDMI. Both were readings of the screen, not of
+the machine. What settled it was booting QEMU with `-device ramfb` and looking:
+the console server draws on the framebuffer whenever one exists (`CON_INFO`
+asks `fbdev`, not the kernel's console), so an HDMI screen that never changes
+means the boot never reached it. The fix to the instrument was to make the
+screen report: `\FBCON` puts the kernel's framebuffer console up right after
+the exit, and progress squares cover the stretch before any console exists.
+Each was shown to fail on QEMU with a planted fault or hang.
+
+**A photo read wrong, twice, each time to an answer that looked like one.** The
+firmware printed only `Synchronous Exception at 0x…` on HDMI, and the kernel
+now logs where it was loaded. From a 480×360 photo I read the image base
+`0x376d0000`: the address fell in `.rdata`, on a `core::panic::Location`.
+Correcting one digit by the image's size gave `0x376d7000`: the address fell on
+a stack store between two stack stores that had succeeded. Both were readings
+of blurred hex digits, and both produced a symbol name. The check that caught
+them was a property the answer had to have: the loaded image is exactly
+`SizeOfImage` long (0x1e9000, seen on QEMU), so a base and end read off the
+screen must differ by that. A sharp photo gave `0x376df000..0x378c8000`, which
+does, and an instruction that can fault. I had asked for the sharper photo
+only because the answers were impossible; a plausible wrong one would have
+gone through.
+
+**A disk image that was not the card.** `make sdcard` was tested against
+`hdiutil` FAT32 images, every guard shown to fail. On the first real card it
+stopped with `rm: .Spotlight-V100: Operation not permitted`: Spotlight indexes
+a mounted card and macOS will not let its folder go, and the images were
+never indexed in time. Rerunning the old script on a fresh image passed, so the
+image could not reproduce it at all. It reproduced every time with an `rm`
+shim that refuses that one path: the old script failed, the fix passed. The
+stand-in has to be made to do what the real thing does, not assumed to.
