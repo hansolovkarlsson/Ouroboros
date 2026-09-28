@@ -457,10 +457,24 @@ flag when it is set.
 |---|---|---|
 | `NOXHCI` | xHCI discovery and bring-up: no USB at all | the hang is inside `pci::discover_xhci` |
 | `XHCINOWR` | only the PCI command-register write in discovery (the takeover from firmware still happens), and the bring-up after the exit | the write is the culprit, not the takeover |
+| `FBCON` | installing the SPCR serial console after the exit, so the kernel's framebuffer console takes HDMI | (not a bisection) the kernel's own post-exit lines appear on HDMI, so the last one shows where the boot stops |
 
-One flag per boot. They exist for the first Pi 400 boot (2026-09-28), which
-stopped on HDMI partway through the line after that write,
-`xhci: PCI command register was`, with no serial cable to show why.
+One flag per bisection boot; `FBCON` combines with either of the others.
+They exist for the first Pi 400 boots (2026-09-28), which all ended on HDMI
+with the firmware's text console: first partway through
+`xhci: PCI command register was`, then under `NOXHCI` at the
+`xHCI discovery failed (skipped…)` line, and under `XHCINOWR` at the earlier
+MADT line.
+
+**Why HDMI shows nothing after the firmware's text, without `FBCON`.** The
+firmware describes a serial port in ACPI SPCR, so the kernel installs the
+PL011 console after the exit (checkpoint 2) and every kernel line from there
+on goes to serial only. The framebuffer is not idle, though: `cond` draws on
+it whenever a framebuffer was discovered (`CON_INFO` asks `fbdev`, not the
+kernel's console), which QEMU with `-device ramfb` confirms. So HDMI that
+never changes after the firmware's text means the boot did not reach `cond`,
+or the framebuffer does not show what is written to it. `NOXHCI` did not
+change that, so it is not the xHCI step alone.
 
 ---
 

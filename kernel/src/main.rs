@@ -347,6 +347,9 @@ fn main() -> Status {
     // skips this step, `\XHCINOWR` skips only its command-register write.
     // Bench diagnostics for bisecting a hang on real hardware.
     let xhci_no_write = bootflags::present(bootflags::XHCI_NO_WRITE);
+    // `\FBCON`: leave the discovered serial console uninstalled after the
+    // exit, so the framebuffer console below takes HDMI.
+    let fb_console_forced = bootflags::present(bootflags::FB_CONSOLE);
     let xhci_result = if bootflags::present(bootflags::NO_XHCI) {
         Err(pci::XhciDiscoveryError::SkippedByFlag)
     } else {
@@ -403,7 +406,7 @@ fn main() -> Status {
     // untested address once did on Parallels.
     exceptions::install();
 
-    if let Some((base, kind, _source)) = discovery {
+    if let Some((base, kind, _source)) = discovery.filter(|_| !fb_console_forced) {
         // SAFETY: `base` came from the platform's own devicetree, ACPI
         // tables, or PCI configuration space.
         let console = match kind {
@@ -801,7 +804,7 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
     // own device-block mapping. Either way it's mapped and writable now.
     let fb = unsafe { fbconsole::FbConsole::new(&info) };
     console::install(Console::Framebuffer(fb));
-    console::println!("Ouroboros kernel: framebuffer console live (fallback - every byte-stream mechanism failed)");
+    console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed, or the \\FBCON boot flag)");
 }
 
 /// Discovers and initializes the virtio-blk device, reads sector 0 back

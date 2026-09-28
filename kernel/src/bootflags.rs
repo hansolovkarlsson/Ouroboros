@@ -26,6 +26,13 @@ pub const NO_XHCI: &CStr16 = cstr16!("\\NOXHCI");
 /// and how far it gets is the result.
 pub const XHCI_NO_WRITE: &CStr16 = cstr16!("\\XHCINOWR");
 
+/// `\FBCON`: do not install the discovered serial console after the exit,
+/// so the framebuffer console on HDMI takes over. A serial console, when one
+/// is discovered (the Pi's firmware describes one in ACPI SPCR), otherwise
+/// wins, and then nothing after `exit_boot_services` reaches HDMI: without a
+/// serial cable that looks exactly like a hang.
+pub const FB_CONSOLE: &CStr16 = cstr16!("\\FBCON");
+
 /// Whether the flag file `path` exists at the ESP's root.
 pub fn present(path: &CStr16) -> bool {
     let Ok(mut sfs) = boot::get_image_file_system(boot::image_handle()) else {
