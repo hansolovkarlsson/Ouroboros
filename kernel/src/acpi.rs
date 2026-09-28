@@ -163,6 +163,88 @@ pub unsafe fn find_table(
     Err(DiscoveryError::TableNotFound)
 }
 
+/// Whether the firmware declares any device's DMA NOT cache-coherent:
+/// `Ok(true)` if its DSDT or any SSDT contains `Name(_CCA, Zero)`.
+///
+/// `_CCA` ("cache coherency attribute") is ACPI's own statement of
+/// whether a device's DMA is coherent with the CPU caches; 0 means it is
+/// not, and the OS must keep that device's DMA memory out of the caches.
+/// The Raspberry Pi 4/400's pftf firmware says it of the PCIe root, which
+/// the VL805 xHCI sits behind (`Name(_CCA, 0) // Mark the PCI noncoherent`,
+/// edk2-platforms `Platform/RaspberryPi/AcpiTables/Pci.asl`); QEMU's `virt`
+/// says `_CCA 1`. This kernel parses no AML, so the object is found by its
+/// fixed encoding - NameOp, the name `_CCA`, and a zero, as `ZeroOp`
+/// (`08 5F 43 43 41 00`) or `ByteConst 0` (`08 5F 43 43 41 0A 00`) - a
+/// byte scan, not an interpretation: it answers "does any device say
+/// non-coherent", not which one. Every platform this kernel meets has at
+/// most the one PCIe root doing DMA, so "any" is the question.
+///
+/// Must be called while the tables are mapped (before or after
+/// `exit_boot_services` - they are plain memory).
+///
+/// # Safety
+/// Same as [`find_table`].
+pub unsafe fn dma_noncoherent(rsdp: Option<*const u8>) -> Result<bool, DiscoveryError> {
+    let rsdp_ptr = rsdp.ok_or(DiscoveryError::NoRsdp)?;
+    let rsdp = unsafe { ptr::read_unaligned(rsdp_ptr.cast::<Rsdp>()) };
+    if &rsdp.signature != b"RSD PTR " {
+        return Err(DiscoveryError::BadRsdpSignature);
+    }
+    if rsdp.revision < 2 || rsdp.xsdt_address == 0 {
+        return Err(DiscoveryError::NoXsdt);
+    }
+    let xsdt_ptr = rsdp.xsdt_address as *const u8;
+    let xsdt_header = unsafe { ptr::read_unaligned(xsdt_ptr.cast::<SdtHeader>()) };
+    if &xsdt_header.signature != b"XSDT" {
+        return Err(DiscoveryError::BadXsdtSignature);
+    }
+    let entry_count = (xsdt_header.length as usize - size_of::<SdtHeader>()) / size_of::<u64>();
+    let entries_ptr = unsafe { xsdt_ptr.add(size_of::<SdtHeader>()) }.cast::<u64>();
+
+    for i in 0..entry_count {
+        let table = unsafe { ptr::read_unaligned(entries_ptr.add(i)) } as *const u8;
+        let header = unsafe { ptr::read_unaligned(table.cast::<SdtHeader>()) };
+        let aml = if &header.signature == b"SSDT" {
+            table
+        } else if &header.signature == b"FACP" {
+            // The DSDT hangs off the FADT: X_DSDT (64-bit, offset 140)
+            // when the table is long enough and it is set, else DSDT
+            // (32-bit, offset 40).
+            let x_dsdt = if header.length >= 148 {
+                unsafe { ptr::read_unaligned(table.add(140).cast::<u64>()) }
+            } else {
+                0
+            };
+            let dsdt = unsafe { ptr::read_unaligned(table.add(40).cast::<u32>()) } as u64;
+            let addr = if x_dsdt != 0 { x_dsdt } else { dsdt };
+            if addr == 0 {
+                continue;
+            }
+            addr as *const u8
+        } else {
+            continue;
+        };
+        if unsafe { aml_declares_cca_zero(aml) } {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether the AML table at `table` (a DSDT or SSDT, header included)
+/// contains `Name(_CCA, Zero)` in either zero encoding.
+unsafe fn aml_declares_cca_zero(table: *const u8) -> bool {
+    let header = unsafe { ptr::read_unaligned(table.cast::<SdtHeader>()) };
+    let len = header.length as usize;
+    if len <= size_of::<SdtHeader>() {
+        return false;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(table, len) };
+    const NAME_CCA: [u8; 5] = [0x08, b'_', b'C', b'C', b'A'];
+    bytes.windows(7).any(|w| w[..5] == NAME_CCA && (w[5] == 0x00 || (w[5] == 0x0a && w[6] == 0x00)))
+        || bytes[len - 6..].starts_with(&NAME_CCA) && bytes[len - 1] == 0x00
+}
+
 /// Parses the ACPI tables reachable from `rsdp` (if present) and resolves
 /// the SPCR table to a PL011-compatible UART base address. Safe to call
 /// either side of `exit_boot_services` — only reads plain memory, no UEFI

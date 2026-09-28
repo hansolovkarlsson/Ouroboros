@@ -28,11 +28,14 @@
 //! `framebuffer.rs`), but this is the only way to find out - confirmed
 //! working on QEMU's `ramfb` device (screendump-verified, see
 //! `CLAUDE.md`'s framebuffer-console section). Whether the framebuffer
-//! lands inside the identity map's discovered-RAM block or needs
-//! `mmu.rs`'s separate device-region fallback determines its cacheability
-//! (Normal WB vs Device-nGnRnE) - the `ptr::copy` scroll path is only
-//! confirmed safe in the former case (QEMU `ramfb`, RAM-backed); the
-//! latter is unverified on any real hardware.
+//! lands inside the identity map's discovered-RAM span or needs
+//! `mmu.rs`'s separate device-region fallback determines its memory type:
+//! inside RAM (QEMU `ramfb`, the Raspberry Pi) it is Normal Non-cacheable
+//! since 2026-09-27, so the display engine, which reads memory directly,
+//! sees every write (`docs/testing/testing-pi4.md` Risk 7; it used to be
+//! write-back cacheable there); outside RAM (a PCI BAR, Parallels) it is a
+//! Device-nGnRnE block. The `ptr::copy` scroll path is screendump-checked
+//! on the former (QEMU `ramfb`, non-cacheable).
 
 use crate::font;
 use crate::framebuffer::Info;

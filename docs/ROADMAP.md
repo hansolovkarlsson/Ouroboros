@@ -895,13 +895,23 @@ The small open tails those arcs deliberately left:
 > written up in [`testing-pi4.md`](testing/testing-pi4.md) §1b, checkpoint 4 and
 > Risk 6:
 >
-> - [ ] **BLOCKS ALL USB ON THE PI: map xHCI DMA memory non-cacheable.** The
->       BCM2711's PCIe DMA is not cache-coherent (`testing-pi4.md` Risk 8:
->       the pftf firmware's ACPI `_CCA 0` for the PCIe root, its
+> - [ ] **BLOCKS ALL USB ON THE PI: map xHCI DMA memory non-cacheable.**
+>       *Built 2026-09-27 (branch `pi400/noncacheable-dma`); open until USB
+>       works on the board.* All xHCI/USB DMA memory in one page-aligned pool,
+>       mapped Normal Non-cacheable by `mmu.rs`, checked at every boot through
+>       the hardware walker in every view, every page and the neighbours on
+>       either side (mutations that plan nothing, break either table path,
+>       bleed past a range or reach kernel data are caught). Only where the
+>       firmware's ACPI declares DMA non-coherent (`_CCA 0`, found by a byte
+>       scan of the DSDT/SSDTs): Parallels emulates xHCI and a guest-side
+>       non-cacheable mapping could disagree with the host's cacheable one.
+>       QEMU cannot show the bug itself.
+>       Why: the BCM2711's PCIe DMA is not cache-coherent (`testing-pi4.md`
+>       Risk 8: the pftf firmware's ACPI `_CCA 0` for the PCIe root, its
 >       `NonCoherentDmaLib`, no `dma-coherent` in Linux's devicetree), and
->       every ring, context and buffer in `xhci.rs` and `usb_msd.rs` is
+>       every ring, context and buffer in `xhci.rs` and `usb_msd.rs` was
 >       Normal write-back cacheable with no cache maintenance. QEMU and
->       Parallels are coherent, so nothing has shown it. Needs a way in
+>       Parallels are coherent, so nothing had shown it. It needed a way in
 >       `mmu.rs` to map chosen physical ranges Normal Non-cacheable at 4 KB
 >       granularity, the same mechanism as the framebuffer item below
 >       (Risk 7): one piece of work, done before the first boot.
@@ -953,13 +963,23 @@ The small open tails those arcs deliberately left:
 >             position instead; the storage one is the path confirmed on
 >             Parallels ("Mode A"), so it is left for its own change and
 >             check. Found reading the code, not observed.
->       - [ ] **Map an in-RAM framebuffer Normal Non-cacheable** (the Pi's
+>       - [x] **Map an in-RAM framebuffer Normal Non-cacheable** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is
 >             predicted for the Pi. Fix in `mmu.rs` at 4 KB granularity at
 >             its edges, merged with the per-task EL0 splits, or clean the
 >             written range to the point of coherency after each write.
 >             Same `mmu.rs` mechanism as the xHCI DMA item at the top.
+>             **Done with it (2026-09-27):** a device region inside RAM is
+>             mapped non-cacheable automatically; checked on QEMU `ramfb` by
+>             the walker and a screendump.
+>       - [ ] **Scrolling the non-cacheable framebuffer reads it uncached.**
+>             Since an in-RAM framebuffer became Normal Non-cacheable, every
+>             scroll's `ptr::copy` (`fbdev.rs`, `fbconsole.rs`) reads the
+>             whole framebuffer from DRAM: about 8 MB per new line at
+>             1920x1080 on the Pi. Slow, not wrong. A cacheable shadow
+>             buffer copied out, or a redraw from `cond`'s text model,
+>             avoids reading non-cacheable memory. QEMU TCG hides it.
 >       - [ ] **CLEAR_TT_BUFFER after a halted transfer behind a
 >             High-speed hub.** When EP0 (or a bulk endpoint) of a Full- or
 >             Low-speed device behind a High-speed hub halts, the hub's
