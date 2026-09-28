@@ -657,3 +657,67 @@ wedges showed `fsd` in `find`. Ten had been measured; the first printed no PC
 and the second printed the stale one above. Corrected after merge, and marked
 as corrected. The count was right and the claim about it was wider than the
 instrument that produced it.
+
+## Seven more, from porting to a board that was not on the desk (2026-09-27, later)
+
+*Added from the afternoon's Raspberry Pi 400 work (#176 to #179), recorded in
+[`2026-09-27.md`](../work-journal/2026-09-27.md).* Every check of the day ran
+on QEMU, standing in for a machine it differs from in exactly the places the
+work was about. Most of these are that difference, seen late.
+
+**A rig broken for a month that nothing depended on.** `make run-usb-kbd` had
+found no xHCI controller since 2026-08-29: the discovery code's exclusive
+open of the PCI root bridge was refused once `virtio-rng` joined every disk
+target, and the loop skipped the refusal without a log line. No automated
+check noticed, because every driven test types over the serial console, and
+the boot still reached a prompt. It was found by running the target by hand
+for a different reason. A rig that nothing fails without is not checked by
+anything.
+
+**A platform that cannot see the property under test.** QEMU and Parallels
+both model coherent DMA and no caches worth the name, and the Pi's PCIe is not
+coherent. Every USB check in the project, and every framebuffer check, was
+therefore blind to the one thing that decides whether USB and HDMI work on the
+board; the difference was found by reading the firmware's ACPI source, not by
+any run. The compensating instrument is the kernel's own table-walker
+self-check, which proves the mapping, and says in its log what it cannot prove.
+
+**A translation QEMU sets to zero.** On QEMU the PCI address translation is 0,
+so no run could tell a right sign from a wrong one in my first fix's
+arithmetic. The fix that landed stopped doing arithmetic: it takes firmware's
+own host address and refuses it unless it gives back the raw BAR, a check that
+can fail on QEMU too (it did, under a mutation).
+
+**A control that passed both ways.** Leaving one hub request unrung produced a
+real timeout, and the kernel with EP0 recovery passed; so did the kernel
+without it, because QEMU completes a ring the moment it is rung and the
+off-by-one pairing of requests with answers never shows. The only tell was one
+stray completion in the log. And the review then found that the line I used as
+the old bug's signature, `unexpected event type=32`, is also what a correct
+recovery prints on real hardware, so on the board it would not have told a
+fixed kernel from a broken one. The line now names a stopped request's event
+as such.
+
+**A check that failed for a different reason.** Checking that `mount -a`
+retries a device that failed at boot, typed on the USB keyboard, the second
+`mount -a` never arrived. The retry was fine; the keyboard had died, because a
+keystroke that lands while the kernel waits on a controller command was
+dropped (a real bug, already on `main`). Typed over serial, the check passed.
+A failing check says something failed, not what.
+
+**A self-check that looked at two bytes in one view.** The first version of
+the non-cacheable mapping's self-check walked the two ends of each range under
+the current task's tables. A wrong 2 MB slot in the middle, or a wrong entry
+in the shared tables that only an empty task's view uses, would have passed.
+The review found it; the check now walks every page in every view, plus the
+page either side and the kernel's own data, and a mutation of each path was
+shown to trip it.
+
+**A boundary check on offsets that cannot fail.** The compile-time assertion
+that no xHCI ring crosses 64 KB tests offsets inside the DMA pool, and the
+pool is aligned to 4 KB, not 64 KB, so the assertion says nothing about the
+real addresses. Found by the last review of the day: the right check is the
+4 KB page, which the pool's alignment makes exact. Its sibling, the page check
+on the contexts, is sound, and was shown to fail with `MAX_DEVICES` set to 7.
+(Fixed the next morning on #179's branch: the rings are checked against the
+page, and an event ring made larger than a page now fails the build.)
