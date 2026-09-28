@@ -895,6 +895,17 @@ The small open tails those arcs deliberately left:
 > written up in [`testing-pi4.md`](testing/testing-pi4.md) §1b, checkpoint 4 and
 > Risk 6:
 >
+> - [ ] **BLOCKS ALL USB ON THE PI: map xHCI DMA memory non-cacheable.** The
+>       BCM2711's PCIe DMA is not cache-coherent (`testing-pi4.md` Risk 8:
+>       the pftf firmware's ACPI `_CCA 0` for the PCIe root, its
+>       `NonCoherentDmaLib`, no `dma-coherent` in Linux's devicetree), and
+>       every ring, context and buffer in `xhci.rs` and `usb_msd.rs` is
+>       Normal write-back cacheable with no cache maintenance. QEMU and
+>       Parallels are coherent, so nothing has shown it. Needs a way in
+>       `mmu.rs` to map chosen physical ranges Normal Non-cacheable at 4 KB
+>       granularity, the same mechanism as the framebuffer item below
+>       (Risk 7): one piece of work, done before the first boot.
+>
 > - [ ] **xHCI hub support.** *Built on QEMU; open until the Pi's keyboard
 >       comes up.* Every USB 2.0 device on a BCM2711 board, the Pi
 >       400's built-in keyboard included, sits behind the on-board VIA hub, and
@@ -915,14 +926,48 @@ The small open tails those arcs deliberately left:
 >       device on a root port. Left for the board: the translator fields.
 >
 >       Follow-ups from the reviews of that branch, not done there:
->       - [ ] **EP0 recovers only from a Stall.** After a timeout or any
+>       - [x] **EP0 recovers only from a Stall.** After a timeout or any
 >             other transfer error, `control_transfer` leaves EP0 halted or
 >             with TRBs outstanding, and a late completion can be taken for
 >             the next request's. The hub path makes many control transfers
 >             and promises that one bad port costs only that port, so it
 >             needs the standard recovery (Stop Endpoint, then Set TR
->             Dequeue) on every failure. Check: force a timeout, show the
->             next transfer works.
+>             Dequeue) on every failure. **Done 2026-09-27 (branch
+>             `pi400/fb-and-ep0`):** `recover_ep0` runs after every failed
+>             control transfer: Reset Endpoint if Halted, Stop Endpoint if
+>             Running, then Set TR Dequeue to the *current* enqueue position.
+>             Checked by leaving one hub `GET_STATUS` unrung (a real timeout
+>             with its TRBs queued): recovery ran, the rig passed, and no
+>             stray completion was left; the kernel before it left one
+>             (`unexpected event type=32`), which on real hardware pairs
+>             each later request with the previous one's answer. QEMU hides
+>             that, since it completes a ring as soon as it is rung. A
+>             forced Stall recovers too (endpoint state 2, Reset Endpoint).
+>       - [ ] **The storage endpoint's recovery rewinds to the ring's
+>             start.** `reset_storage_endpoint` sets the dequeue pointer to
+>             the ring's start with DCS=1. The slots after it still hold
+>             earlier TRBs carrying that cycle bit, so the controller can
+>             run on into a stale TRB once the new ones are done: an old
+>             Normal TRB, and a DMA into an old buffer. The EP0 version had
+>             the same flaw and now dequeues at the current enqueue
+>             position instead; the storage one is the path confirmed on
+>             Parallels ("Mode A"), so it is left for its own change and
+>             check. Found reading the code, not observed.
+>       - [ ] **Map an in-RAM framebuffer Normal Non-cacheable** (the Pi's
+>             HDMI console, `testing-pi4.md` Risk 7). The mapping is
+>             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is
+>             predicted for the Pi. Fix in `mmu.rs` at 4 KB granularity at
+>             its edges, merged with the per-task EL0 splits, or clean the
+>             written range to the point of coherency after each write.
+>             Same `mmu.rs` mechanism as the xHCI DMA item at the top.
+>       - [ ] **CLEAR_TT_BUFFER after a halted transfer behind a
+>             High-speed hub.** When EP0 (or a bulk endpoint) of a Full- or
+>             Low-speed device behind a High-speed hub halts, the hub's
+>             transaction translator can keep the failed split transaction
+>             buffered; Linux sends the hub CLEAR_TT_BUFFER (USB 2.0
+>             11.24.2.3). The Pi 400's keyboard is exactly that case. Not
+>             written: QEMU models no translator, so the code would run in no
+>             check we have. For the bench session.
 >       - [ ] **Full-speed bulk packet size is assumed to be 64.** Full-speed
 >             bulk endpoints may be 8, 16, 32 or 64; read `wMaxPacketSize`
 >             from the endpoint descriptor, for every speed.
