@@ -476,6 +476,31 @@ never changes after the firmware's text means the boot did not reach `cond`,
 or the framebuffer does not show what is written to it. `NOXHCI` did not
 change that, so it is not the xHCI step alone.
 
+**`FBCON`'s first boot ended in the firmware's own exception handler**:
+`xhci: PCI command register was 0x0140, wrote+read back 0x0146`, blank lines,
+then `Synchronous Exception at 0x0000000039F31A40`. That message is EDK2's, not
+the kernel's (the kernel reports `EXCEPTION vector=… esr_el1=…`), so the fault
+came while the firmware's vectors were still installed: after that line and
+before `exceptions::install()` just past `exit_boot_services`. The
+`xHCI controller @ …` line that normally follows did not appear.
+
+**Placing a firmware-reported address.** The kernel logs where the firmware
+loaded it (`image @ <base>..<end>`, printed at startup and again, so that it
+is still on screen, just before the xHCI step), and
+`exiting boot services` right before the exit. With the address from HDMI:
+
+```sh
+cargo rustc -p ouroboros-kernel --target aarch64-unknown-uefi -- \
+    -C link-arg=/MAP:build/BOOTAA64.map          # the same tree as the card
+scripts/efi-symbol.py build/BOOTAA64.map <base>..<end> <pc>
+```
+
+The build is deterministic apart from the PE timestamp and debug record, so
+the relinked map fits the card's binary. Checked on QEMU with a planted
+pre-exit fault: its firmware printed the same `Synchronous Exception at`
+line, and the script named the planted write. An address outside the image
+is firmware code, and only the serial dump names that module.
+
 ---
 
 ## 7. Risks, ranked

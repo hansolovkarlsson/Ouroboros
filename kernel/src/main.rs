@@ -84,6 +84,17 @@ fn main() -> Status {
     uefi::helpers::init().unwrap();
 
     log::info!("Ouroboros kernel: UEFI stage alive");
+    // Where firmware loaded this image, so an address in the firmware's own
+    // exception report ("Synchronous Exception at 0x...", which on a board
+    // without a serial cable is all HDMI shows) can be placed inside this
+    // image or outside it, and turned into an offset for the disassembly.
+    let image_range = boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(boot::image_handle())
+        .map(|image| {
+            let (base, size) = image.info();
+            (base as u64, base as u64 + size)
+        })
+        .unwrap_or((0, 0));
+    log::info!("Ouroboros kernel: image @ {:#x}..{:#x}", image_range.0, image_range.1);
 
     // Must happen before exit_boot_services: the devicetree/ACPI pointers
     // live in the UEFI configuration table, and PCI enumeration needs boot
@@ -346,6 +357,9 @@ fn main() -> Status {
     // Boot flag files (bootflags.rs), read here, before the takeover: `\NOXHCI`
     // skips this step, `\XHCINOWR` skips only its command-register write.
     // Bench diagnostics for bisecting a hang on real hardware.
+    // Repeated here, next to the step under suspicion, so it is still on
+    // screen when a firmware exception report lands below it.
+    log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
     let xhci_no_write = bootflags::present(bootflags::XHCI_NO_WRITE);
     // `\FBCON`: leave the discovered serial console uninstalled after the
     // exit, so the framebuffer console below takes HDMI.
@@ -387,6 +401,9 @@ fn main() -> Status {
     // `uart16550`, and only when `discovery` gave us an address to trust.
     // The returned memory map is kept, not discarded: mmu.rs uses it to
     // identity-map real discovered RAM instead of a hardcoded address.
+    // The last line before the exit, so a fault can be placed on one side of
+    // it (before this line, it is in the discovery above).
+    log::info!("Ouroboros kernel: exiting boot services");
     let memory_map = unsafe { boot::exit_boot_services(None) };
 
     // IRQs masked from here until the first `eret` into task 0, by our own
