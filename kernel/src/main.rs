@@ -406,6 +406,9 @@ fn main() -> Status {
     // it (before this line, it is in the discovery above).
     log::info!("Ouroboros kernel: exiting boot services");
     let memory_map = unsafe { boot::exit_boot_services(None) };
+    if fb_console_forced {
+        progress_square(fb_info, 1);
+    }
 
     // IRQs masked from here until the first `eret` into task 0, by our own
     // instruction and not by trusting what the firmware left: EDK2's
@@ -423,6 +426,9 @@ fn main() -> Status {
     // handler and halts, instead of taking the whole VM down the way an
     // untested address once did on Parallels.
     exceptions::install();
+    if fb_console_forced {
+        progress_square(fb_info, 2);
+    }
 
     // `\FBCON`: the framebuffer console right away, on the firmware's page
     // tables, so everything from here on (the MMU switch included, and any
@@ -841,6 +847,34 @@ fn try_virtio_console() {
 /// byte-stream console, if one existed at all. On a framebuffer-only
 /// platform, the first thing that will ever actually appear on screen is
 /// whatever's printed right after this call.
+/// Under `\FBCON`: a solid white square at the top-right of the screen, the
+/// `n`th from the right edge, drawn with plain stores and no console. For the
+/// stretch just after `exit_boot_services` where there is no console yet to
+/// print through: square 1 means the exit returned, square 2 that the
+/// exception vectors are installed. The early console's clear wipes them, so
+/// squares still on screen mean the boot stopped before that clear. White is
+/// the same in every GOP pixel format.
+fn progress_square(fb_info: Option<framebuffer::Info>, n: usize) {
+    const SIDE: usize = 48;
+    let Some(info) = fb_info else { return };
+    let Some(x0) = info.width.checked_sub(n * (SIDE + 16)) else { return };
+    let y0 = 16;
+    if y0 + SIDE > info.height {
+        return;
+    }
+    let base = info.base as *mut u32;
+    for y in y0..y0 + SIDE {
+        for x in x0..x0 + SIDE {
+            // SAFETY: inside the framebuffer by the bounds above; the
+            // firmware's identity map still covers it (see the early
+            // console's SAFETY comment in `main`).
+            unsafe { base.add(y * info.stride + x).write_volatile(0xffff_ffff) };
+        }
+    }
+    let stride_bytes = (info.stride * 4) as u64;
+    mmu::clean_to_poc(info.base + (y0 * info.stride + x0) as u64 * 4, (SIDE * 4) as u64, SIDE as u64, stride_bytes);
+}
+
 fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
     let Some(info) = fb_info else {
         console::println!("Ouroboros kernel: no GOP framebuffer was discovered, no console available");

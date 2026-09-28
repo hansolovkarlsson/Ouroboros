@@ -537,6 +537,17 @@ map` just before the switch, so that stretch is on screen. Checked on QEMU
 `EXCEPTION vector=4 esr_el1=0x96000047 far_el1=0x10` on the framebuffer, and
 without the plant the boot reaches the shell.
 
+**The Pi 4 then stopped at `exiting boot services` without the clear** (build
+`0602ca3`, `NOXHCI` + `FBCON`), where an earlier build's boot of the same board
+had cleared the screen: the same step behaving differently between boots, as
+on the Pi 400. Nothing prints between the exit and that clear, so under
+`FBCON` the kernel now draws solid white squares at the top-right, with plain
+stores and no console: **square 1** when `exit_boot_services` has returned,
+**square 2** when the exception vectors are installed. The early console's
+clear wipes them, so squares still on screen mean the boot stopped before it,
+and none at all means inside the firmware's `ExitBootServices`. Checked on
+QEMU with a hang planted after each: one square, then two.
+
 ---
 
 ## 7. Risks, ranked
