@@ -162,9 +162,15 @@ done
 
 # FAT holds no xattrs, so macOS spills them into ._* sidecars; -X above avoids
 # most, this catches the rest. The directories are macOS's own bookkeeping,
-# which fsd would list at the root. The same set `make image` strips.
+# which fsd would list at the root. The same set `make image` strips, but
+# best-effort here: `make image` works on an image attached -nobrowse, and
+# this is a live card that Spotlight may be indexing, which makes macOS refuse
+# to remove .Spotlight-V100 ("Operation not permitted"). Leftovers are only
+# clutter in `ls /` on the Pi, never a reason to stop before sync and eject.
 find "$CARD" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
-rm -rf "$CARD/.fseventsd" "$CARD/.Trashes" "$CARD/.Spotlight-V100"
+for d in .fseventsd .Trashes .Spotlight-V100; do
+    rm -rf "${CARD:?}/$d" 2>/dev/null || echo "sdcard: $d left on the card (macOS holds it while mounted; harmless)"
+done
 sync
 
 echo "sdcard: $CARD staged from $ESP_DIR"
