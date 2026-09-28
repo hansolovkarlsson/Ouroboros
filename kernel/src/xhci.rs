@@ -139,8 +139,8 @@
 //! ## What isn't handled - real, documented gaps, not oversights
 //!
 //! No stall recovery for the *interrupt* endpoint specifically (EP0's
-//! setup-time control transfers do recover from a Stall - see
-//! `recover_from_stall` - but an interrupt-endpoint Stall just logs and
+//! control transfers recover from any failure - see `recover_ep0` - but
+//! an interrupt-endpoint Stall just logs and
 //! re-arms the ring, without the Reset Endpoint/Set TR Dequeue Pointer
 //! sequence real recovery needs); no auto-repeat (a held key reports once
 //! per press, not repeatedly, by design - see [`poll_key`]);
@@ -170,13 +170,18 @@ const TRB_TYPE_ADDRESS_DEVICE_CMD: u32 = 11;
 const TRB_TYPE_CONFIGURE_ENDPOINT_CMD: u32 = 12;
 const TRB_TYPE_EVALUATE_CONTEXT_CMD: u32 = 13;
 const TRB_TYPE_RESET_ENDPOINT_CMD: u32 = 14;
+const TRB_TYPE_STOP_ENDPOINT_CMD: u32 = 15;
 const TRB_TYPE_SET_TR_DEQUEUE_CMD: u32 = 16;
 const TRB_TYPE_TRANSFER_EVENT: u32 = 32;
 const TRB_TYPE_CMD_COMPLETION_EVENT: u32 = 33;
 const TRB_TYPE_PORT_STATUS_CHANGE_EVENT: u32 = 34;
 
+// Endpoint Context EP State (dword 0 bits 2:0), as the controller keeps
+// it in the Output Device Context.
+const EP_STATE_RUNNING: u32 = 1;
+const EP_STATE_HALTED: u32 = 2;
+
 const COMPLETION_SUCCESS: u32 = 1;
-const COMPLETION_STALL_ERROR: u32 = 6;
 const COMPLETION_SHORT_PACKET: u32 = 13;
 
 // Capability register offsets, from the PCI BAR base.
@@ -986,39 +991,62 @@ impl Xhci {
         Err(Error::TransferTimeout)
     }
 
-    /// Recovers EP0 after a Stall completion code on one of the standard
-    /// setup-time control transfers (`control_transfer` is no longer
-    /// called from the polling path at all - see `INT_RING`'s doc
-    /// comment - but a real device can still Stall a one-off
-    /// `GET_DESCRIPTOR`/`SET_CONFIGURATION`, and without recovery every
-    /// *later* control transfer on EP0 would fail too). Standard xHCI
-    /// Stall recovery: a
-    /// Reset Endpoint command clears the halt, then a Set TR Dequeue
-    /// Pointer command re-synchronizes hardware's dequeue tracking with
-    /// this driver's own ring state, which is reset to the ring's start
-    /// (`ep0_enqueue = 0`) at the same time - the two must agree, or the
-    /// next transfer this driver enqueues would land somewhere hardware
-    /// doesn't expect. Best-effort: doesn't fail if either command times
-    /// out, since giving up on recovery entirely would be worse than a
-    /// best-effort attempt that might not fully succeed.
-    fn recover_from_stall(&mut self, idx: usize) {
-        console::println!("Ouroboros kernel: xhci: EP0 stalled, recovering");
-        let Some(slot_id) = self.slots[idx].as_ref().map(|s| s.slot_id) else { return };
-        let reset_ep = self.push_command([0, 0, 0, (TRB_TYPE_RESET_ENDPOINT_CMD << 10) | (1 << 16) | (slot_id << 24)]);
-        let _ = self.wait_command_completion(reset_ep);
-
-        if let Some(slot) = self.slots[idx].as_mut() {
-            slot.ep0_enqueue = 0;
-            slot.ep0_cycle = true;
+    /// Recovers EP0 of pool entry `idx` after ANY failed control transfer,
+    /// so the next one on that endpoint starts clean. Two things can be
+    /// left behind: the endpoint Halted (a Stall, or a USB transaction
+    /// error), or the request's TRBs still queued on a Running endpoint (a
+    /// timeout), where a late completion would be taken for the next
+    /// request's. So: read the endpoint's state from the Output Device
+    /// Context; a Halted endpoint gets Reset Endpoint, a Running one Stop
+    /// Endpoint; then Set TR Dequeue points the controller at this
+    /// driver's *current* enqueue position, past the aborted request.
+    ///
+    /// **Why the current position, not the ring's start** (the Stall-only
+    /// version this replaced rewound to the start): the slots after the
+    /// start still hold the earlier requests' TRBs with the cycle bit the
+    /// controller now expects, so after a rewind the controller could run
+    /// on into them once the new TRBs were done. At the current enqueue
+    /// position everything ahead carries the previous lap's cycle bit, so
+    /// the controller stops where the next request ends. The software ring
+    /// state is left as it is; the two agree by construction.
+    ///
+    /// **Why every failure and not only a Stall:** the hub path sends many
+    /// control transfers through the hub's one EP0 and promises that one
+    /// bad port costs only that port; a timeout that left EP0 unusable
+    /// would cost every port after it, the keyboard's included.
+    ///
+    /// Best-effort: a command that fails is logged and the rest still run,
+    /// since giving up would leave the endpoint certainly unusable. An
+    /// event the stopped request still produces is consumed (and logged)
+    /// by `wait_command_completion`, before the next request is queued.
+    fn recover_ep0(&mut self, idx: usize, cause: &Error) {
+        let Some((slot_id, enqueue, cycle)) = self.slots[idx].as_ref().map(|s| (s.slot_id, s.ep0_enqueue, s.ep0_cycle)) else {
+            return;
+        };
+        // EP0 is DCI 1: its context follows the Slot Context.
+        let state = unsafe { read_volatile(OUTPUT_DEVICE_CONTEXTS[idx].0.get().cast::<u32>().add(self.ctx_dwords)) } & 0x7;
+        console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovering after {cause} (endpoint state {state})");
+        let first = match state {
+            EP_STATE_HALTED => Some(TRB_TYPE_RESET_ENDPOINT_CMD),
+            EP_STATE_RUNNING => Some(TRB_TYPE_STOP_ENDPOINT_CMD),
+            _ => None, // already Stopped (or in a state no command fixes): dequeue only
+        };
+        if let Some(cmd) = first {
+            let ptr = self.push_command([0, 0, 0, (cmd << 10) | (1 << 16) | (slot_id << 24)]);
+            if let Err(e) = self.wait_command_completion(ptr) {
+                console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovery command failed ({e})");
+            }
         }
-        let ep0_ring_addr = EP0_RINGS[idx].0.get() as u64;
+        let dequeue = EP0_RINGS[idx].0.get() as u64 + (enqueue as u64) * 16;
         let set_dequeue = self.push_command([
-            (ep0_ring_addr as u32) | 1, // DCS=1, matching the software reset above
-            (ep0_ring_addr >> 32) as u32,
+            (dequeue as u32) | (cycle as u32), // DCS = the cycle the next TRB will carry
+            (dequeue >> 32) as u32,
             0,
             (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (1 << 16) | (slot_id << 24),
         ]);
-        let _ = self.wait_command_completion(set_dequeue);
+        if let Err(e) = self.wait_command_completion(set_dequeue) {
+            console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 Set TR Dequeue failed ({e})");
+        }
     }
 
     /// Recovers a *bulk* endpoint on the storage device after a Stall/halt
@@ -1030,7 +1058,7 @@ impl Xhci {
     /// stall, and with no recovery the halted endpoint stays halted so every
     /// later command fails permanently.
     ///
-    /// Same two-command shape as [`recover_from_stall`](Self::recover_from_stall)
+    /// Same two-command shape as [`recover_ep0`](Self::recover_ep0)
     /// for EP0, but targeting a storage bulk DCI: a Reset Endpoint clears the
     /// endpoint's Halted state, then a Set TR Dequeue Pointer re-synchronizes
     /// hardware's dequeue with a known-good ring position (the ring start).
@@ -1137,9 +1165,7 @@ impl Xhci {
 
         self.ring_ep0_doorbell(idx);
         if let Err(e) = self.wait_transfer_event(slot_id) {
-            if let Error::TransferFailed(COMPLETION_STALL_ERROR) = e {
-                self.recover_from_stall(idx);
-            }
+            self.recover_ep0(idx, &e);
             return Err(e);
         }
 

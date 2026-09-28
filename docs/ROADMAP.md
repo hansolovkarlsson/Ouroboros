@@ -915,14 +915,39 @@ The small open tails those arcs deliberately left:
 >       device on a root port. Left for the board: the translator fields.
 >
 >       Follow-ups from the reviews of that branch, not done there:
->       - [ ] **EP0 recovers only from a Stall.** After a timeout or any
+>       - [x] **EP0 recovers only from a Stall.** After a timeout or any
 >             other transfer error, `control_transfer` leaves EP0 halted or
 >             with TRBs outstanding, and a late completion can be taken for
 >             the next request's. The hub path makes many control transfers
 >             and promises that one bad port costs only that port, so it
 >             needs the standard recovery (Stop Endpoint, then Set TR
->             Dequeue) on every failure. Check: force a timeout, show the
->             next transfer works.
+>             Dequeue) on every failure. **Done 2026-09-27 (branch
+>             `pi400/fb-and-ep0`):** `recover_ep0` runs after every failed
+>             control transfer: Reset Endpoint if Halted, Stop Endpoint if
+>             Running, then Set TR Dequeue to the *current* enqueue position.
+>             Checked by leaving one hub `GET_STATUS` unrung (a real timeout
+>             with its TRBs queued): recovery ran, the rig passed, and no
+>             stray completion was left; the kernel before it left one
+>             (`unexpected event type=32`), which on real hardware pairs
+>             each later request with the previous one's answer. QEMU hides
+>             that, since it completes a ring as soon as it is rung. A
+>             forced Stall recovers too (endpoint state 2, Reset Endpoint).
+>       - [ ] **The storage endpoint's recovery rewinds to the ring's
+>             start.** `reset_storage_endpoint` sets the dequeue pointer to
+>             the ring's start with DCS=1. The slots after it still hold
+>             earlier TRBs carrying that cycle bit, so the controller can
+>             run on into a stale TRB once the new ones are done: an old
+>             Normal TRB, and a DMA into an old buffer. The EP0 version had
+>             the same flaw and now dequeues at the current enqueue
+>             position instead; the storage one is the path confirmed on
+>             Parallels ("Mode A"), so it is left for its own change and
+>             check. Found reading the code, not observed.
+>       - [ ] **Map an in-RAM framebuffer Normal Non-cacheable** (the Pi's
+>             HDMI console, `testing-pi4.md` Risk 7). The mapping is
+>             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is
+>             predicted for the Pi. Fix in `mmu.rs` at 4 KB granularity at
+>             its edges, merged with the per-task EL0 splits, or clean the
+>             written range to the point of coherency after each write.
 >       - [ ] **Full-speed bulk packet size is assumed to be 64.** Full-speed
 >             bulk endpoints may be 8, 16, 32 or 64; read `wMaxPacketSize`
 >             from the endpoint descriptor, for every speed.
