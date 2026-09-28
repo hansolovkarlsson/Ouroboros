@@ -417,6 +417,52 @@ static DMA_POOL: DmaPool = DmaPool {
     usb_data: Aligned64(UnsafeCell::new([0; 512])),
 };
 
+// xHCI placement rules for the pool's contents (xHCI 1.2 Table 6-1),
+// checked at compile time: the layout satisfies them today only because of
+// field order and the current constants, and a change to either (say
+// `MAX_DEVICES`) would otherwise break them silently - the controller then
+// reads a corrupt context, with nothing to show why. `DMA_POOL` itself is
+// 4096-aligned, so an offset's page is the address's page.
+const fn within(offset: usize, size: usize, boundary: usize) -> bool {
+    offset / boundary == (offset + size - 1) / boundary
+}
+/// Every element of an array field of `len` elements of `size` bytes at
+/// `offset` stays within `boundary`.
+const fn each_within(offset: usize, size: usize, len: usize, boundary: usize) -> bool {
+    let mut i = 0;
+    while i < len {
+        if !within(offset + i * size, size, boundary) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+const PAGE: usize = 4096;
+const RING_BOUNDARY: usize = 64 * 1024;
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    // Contexts and context-like structures: no 4 KB page crossing.
+    assert!(within(offset_of!(DmaPool, dcbaa), size_of::<[u64; MAX_SLOTS_ENABLED + 1]>(), PAGE), "DCBAA crosses a page");
+    assert!(within(offset_of!(DmaPool, scratchpad_array), size_of::<[u64; MAX_SCRATCHPAD_BUFFERS]>(), PAGE), "scratchpad array crosses a page");
+    assert!(within(offset_of!(DmaPool, input_context), size_of::<[u32; CTX_DWORDS_MAX * 33]>(), PAGE), "Input Context crosses a page");
+    assert!(
+        each_within(offset_of!(DmaPool, output_device_contexts), size_of::<Aligned64<[u32; CTX_DWORDS_MAX * 32]>>(), MAX_DEVICES, PAGE),
+        "an Output Device Context crosses a page"
+    );
+    assert!(within(offset_of!(DmaPool, erst), size_of::<[ErstEntry; 1]>(), PAGE), "ERST crosses a page");
+    // Transfer, command and event rings: no 64 KB crossing.
+    assert!(within(offset_of!(DmaPool, command_ring), size_of::<[Trb; CMD_RING_SIZE]>(), RING_BOUNDARY), "command ring crosses 64 KB");
+    assert!(
+        each_within(offset_of!(DmaPool, ep0_rings), size_of::<Aligned64<[Trb; EP0_RING_SIZE]>>(), MAX_DEVICES, RING_BOUNDARY),
+        "an EP0 ring crosses 64 KB"
+    );
+    assert!(within(offset_of!(DmaPool, int_ring), size_of::<[Trb; INT_RING_SIZE]>(), RING_BOUNDARY), "interrupt ring crosses 64 KB");
+    assert!(within(offset_of!(DmaPool, bulk_in_ring), size_of::<[Trb; INT_RING_SIZE]>(), RING_BOUNDARY), "bulk IN ring crosses 64 KB");
+    assert!(within(offset_of!(DmaPool, bulk_out_ring), size_of::<[Trb; INT_RING_SIZE]>(), RING_BOUNDARY), "bulk OUT ring crosses 64 KB");
+    assert!(within(offset_of!(DmaPool, event_ring), size_of::<[Trb; EVENT_RING_SIZE]>(), RING_BOUNDARY), "event ring crosses 64 KB");
+};
+
 /// The DMA pool's physical range `(base, size)`, page-aligned at both
 /// ends - what `main.rs` hands `mmu.rs` to map non-cacheable.
 pub(crate) fn dma_region() -> (u64, u64) {

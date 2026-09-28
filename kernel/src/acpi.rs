@@ -134,6 +134,23 @@ pub unsafe fn find_table(
     rsdp: Option<*const u8>,
     signature: &[u8; 4],
 ) -> Result<*const u8, DiscoveryError> {
+    for table_addr in unsafe { xsdt_entries(rsdp) }? {
+        let header = unsafe { ptr::read_unaligned(table_addr.cast::<SdtHeader>()) };
+        if &header.signature == signature {
+            return Ok(table_addr);
+        }
+    }
+    Err(DiscoveryError::TableNotFound)
+}
+
+/// Validates the RSDP and XSDT reachable from `rsdp` and returns every
+/// table pointer the XSDT lists, in order - the one walk `find_table`
+/// (first match) and `dma_noncoherent` (every DSDT/SSDT) share, so the
+/// validation cannot drift between them.
+///
+/// # Safety
+/// Same as [`find_table`].
+unsafe fn xsdt_entries(rsdp: Option<*const u8>) -> Result<impl Iterator<Item = *const u8>, DiscoveryError> {
     let rsdp_ptr = rsdp.ok_or(DiscoveryError::NoRsdp)?;
     let rsdp = unsafe { ptr::read_unaligned(rsdp_ptr.cast::<Rsdp>()) };
     if &rsdp.signature != b"RSD PTR " {
@@ -149,18 +166,10 @@ pub unsafe fn find_table(
         return Err(DiscoveryError::BadXsdtSignature);
     }
 
-    let entry_count = (xsdt_header.length as usize - size_of::<SdtHeader>()) / size_of::<u64>();
+    let entry_count = (xsdt_header.length as usize).saturating_sub(size_of::<SdtHeader>()) / size_of::<u64>();
     let entries_ptr = unsafe { xsdt_ptr.add(size_of::<SdtHeader>()) }.cast::<u64>();
-
-    for i in 0..entry_count {
-        let table_addr = unsafe { ptr::read_unaligned(entries_ptr.add(i)) } as *const u8;
-        let header = unsafe { ptr::read_unaligned(table_addr.cast::<SdtHeader>()) };
-        if &header.signature == signature {
-            return Ok(table_addr);
-        }
-    }
-
-    Err(DiscoveryError::TableNotFound)
+    // SAFETY: the caller's contract - the XSDT and its entries are mapped.
+    Ok((0..entry_count).map(move |i| unsafe { ptr::read_unaligned(entries_ptr.add(i)) } as *const u8))
 }
 
 /// Whether the firmware declares any device's DMA NOT cache-coherent:
@@ -179,30 +188,22 @@ pub unsafe fn find_table(
 /// non-coherent", not which one. Every platform this kernel meets has at
 /// most the one PCIe root doing DMA, so "any" is the question.
 ///
+/// **What it cannot see, stated because the fallback is "coherent":** a
+/// `_CCA` returned by a Method (`Method(_CCA) { Return(Zero) }`), one
+/// declared under a path (`Name(\_SB.PCI0._CCA, Zero)`, where the name
+/// string carries a prefix before `_CCA`), or any other encoding than the
+/// two above. The pftf firmware uses the plain `Name` form this finds;
+/// firmware that did not would leave the DMA pool cacheable on a
+/// non-coherent machine, and the boot log's `ACPI declares no non-coherent
+/// DMA` line is where that shows (`docs/testing/testing-pi4.md` Risk 8).
+///
 /// Must be called while the tables are mapped (before or after
 /// `exit_boot_services` - they are plain memory).
 ///
 /// # Safety
 /// Same as [`find_table`].
 pub unsafe fn dma_noncoherent(rsdp: Option<*const u8>) -> Result<bool, DiscoveryError> {
-    let rsdp_ptr = rsdp.ok_or(DiscoveryError::NoRsdp)?;
-    let rsdp = unsafe { ptr::read_unaligned(rsdp_ptr.cast::<Rsdp>()) };
-    if &rsdp.signature != b"RSD PTR " {
-        return Err(DiscoveryError::BadRsdpSignature);
-    }
-    if rsdp.revision < 2 || rsdp.xsdt_address == 0 {
-        return Err(DiscoveryError::NoXsdt);
-    }
-    let xsdt_ptr = rsdp.xsdt_address as *const u8;
-    let xsdt_header = unsafe { ptr::read_unaligned(xsdt_ptr.cast::<SdtHeader>()) };
-    if &xsdt_header.signature != b"XSDT" {
-        return Err(DiscoveryError::BadXsdtSignature);
-    }
-    let entry_count = (xsdt_header.length as usize - size_of::<SdtHeader>()) / size_of::<u64>();
-    let entries_ptr = unsafe { xsdt_ptr.add(size_of::<SdtHeader>()) }.cast::<u64>();
-
-    for i in 0..entry_count {
-        let table = unsafe { ptr::read_unaligned(entries_ptr.add(i)) } as *const u8;
+    for table in unsafe { xsdt_entries(rsdp) }? {
         let header = unsafe { ptr::read_unaligned(table.cast::<SdtHeader>()) };
         let aml = if &header.signature == b"SSDT" {
             table
