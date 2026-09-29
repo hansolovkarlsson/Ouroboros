@@ -1156,6 +1156,17 @@ be reviewed after the fact from the saved screenshots.
 > port a real application on top (SQLite, a small C compiler) — now "port one
 > more program," not "invent the mechanism." See `docs/processes.md`'s "Writing a
 > program in C." The reasoning below is the original parked plan, still accurate.
+>
+> **The small C compiler has a plan since 2026-09-29.** The workspace chose
+> Ouroboros as the destination of its C toolchain arc: hello.c edited,
+> compiled, linked and run here, by CPP (the preprocessor), a compiler that
+> Phoenix generates and an assembler Futamura describes. All three are C11
+> with no dependencies, so the path above carries them. The order and the gaps
+> are in `~/Projects/docs/c-compiler-toolchain.md`, outside this repository.
+> Two things it asks of Ouroboros itself: **a static ELF linker that runs
+> here**, since picolibc is a `.a` and LLD is on the host, probably a project
+> of its own; and **an editor**, whose catch is that the console offers no
+> termios for one in the kilo style, so a line editor comes first.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
