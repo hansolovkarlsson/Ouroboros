@@ -1065,16 +1065,21 @@ The small open tails those arcs deliberately left:
 >       not pushed): `dtranges.rs` applies every ancestor's `ranges`, fails
 >       closed, and the console is mapped as its own device (it was covered
 >       only by the GIC's 1 GB block). Checked on the host against the pftf
->       zip's Pi 4 and Pi 400 trees, hand-built trees and a mutation; open
->       until serial shows `0xfe201000` on a board.*
-> - [ ] **Boot flag files and `\FBCON` for bench diagnostics.** `\NOXHCI`,
+>       zip's Pi 4 and Pi 400 trees, hand-built trees and a mutation; on
+>       `main` since #181 (2026-10-01); open until serial shows
+>       `0xfe201000` on a board.*
+> - [x] **Boot flag files and `\FBCON` for bench diagnostics.** `\NOXHCI`,
 >       `\XHCINOWR`, `\FBCON` (the framebuffer console right after the exit,
 >       with progress squares before it), the image range and an
 >       `exiting boot services` marker in the log, and
 >       `scripts/efi-symbol.py` to place a firmware-reported address. *Built
 >       on the same branch; each checked on QEMU (`-device ramfb`, planted
->       faults and hangs). Needs a review before a PR.*
-> - [ ] **`make sdcard`.** *Built 2026-09-28 (#180, open):* the pinned pftf
+>       faults and hangs). Reviewed and merged as #181 (2026-10-01); the
+>       review found `\FBCON` with no framebuffer left no console at all,
+>       and `efi-symbol.py` now refuses a range whose length is not the
+>       relinked `.efi`'s `SizeOfImage`. Still open from it, small:
+>       `bootflags::present()` opens the volume once per flag.*
+> - [x] **`make sdcard`.** *Built 2026-09-28, merged as #180 (2026-10-01):* the pinned pftf
 >       firmware plus `build/esp` on an already-formatted card, installed
 >       once since the firmware keeps its settings in `RPI_EFI.fd`; never
 >       formats.
@@ -1082,7 +1087,10 @@ The small open tails those arcs deliberately left:
 >       (`chosen()` expects one; found building test trees, real firmware
 >       trees have it). And the UART's and GIC's device block depends on
 >       "Limit RAM to 3 GB" staying on: with RAM to 4 GB, block 3 is mapped as
->       RAM and the device mapping is skipped.
+>       RAM and the device mapping is skipped. Since #181 the kernel at least
+>       says so: after the MMU switch it asks the hardware walker whether the
+>       serial console is Device memory and warns if not (shown on QEMU by
+>       pointing the check at RAM). The GIC has no such check.
 
 Every real-hardware bug in `xhci-keyboard-postmortem.md` and
 `boot-bringup-postmortem.md` cost a manual round trip: rebuild, re-image,
@@ -1159,7 +1167,7 @@ be reviewed after the fact from the saved screenshots.
 >
 > **The small C compiler has a plan since 2026-09-29.** The workspace chose
 > Ouroboros as the destination of its C toolchain arc: hello.c edited,
-> compiled, linked and run here, by CPP (the preprocessor), a compiler that
+> compiled, linked and run here, by Proem (the preprocessor), a compiler that
 > Phoenix generates and an assembler Futamura describes. All three are C11
 > with no dependencies, so the path above carries them. The order and the gaps
 > are in `~/Projects/docs/c-compiler-toolchain.md`, outside this repository.
@@ -1167,6 +1175,11 @@ be reviewed after the fact from the saved screenshots.
 > here**, since picolibc is a `.a` and LLD is on the host, probably a project
 > of its own; and **an editor**, whose catch is that the console offers no
 > termios for one in the kilo style, so a line editor comes first.
+>
+> **CPP is now Proem, since 2026-10-01.** The workspace's C preprocessor was
+> renamed: the folder is `~/Projects/Proem` and the repository
+> `github.com/hansolovkarlsson/Proem`. `~/Projects/CPP` no longer exists. A
+> mention of CPP in older records means Proem.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

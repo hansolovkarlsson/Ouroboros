@@ -764,3 +764,34 @@ never indexed in time. Rerunning the old script on a fresh image passed, so the
 image could not reproduce it at all. It reproduced every time with an `rm`
 shim that refuses that one path: the old script failed, the fix passed. The
 stand-in has to be made to do what the real thing does, not assumed to.
+
+## Two more, from the review of the bench tools (2026-10-01)
+
+The diagnostics built for the first boots went through a review before their
+pull request (#181). Neither of its two real findings had been seen on QEMU,
+because every QEMU run had been set up so that it could not show them.
+
+**A tool built after the lesson, without the lesson in it.** The section above
+ends on the property that caught two misread photos: a base and end read off
+the screen must differ by the image's `SizeOfImage`. `scripts/efi-symbol.py`
+was written the same day, to turn exactly those readings into a function name,
+and it did not check that property. Given a base with one blurred digit it
+printed a confident `symbol + offset`, and the same for a map relinked from a
+different profile than the card's binary. The check had been applied by hand
+and written down as the lesson, but never put into the tool. The script now
+takes the relinked `.efi` as a required argument and refuses before naming
+anything unless the map and the `.efi` share a link timestamp and `<end>-<base>`
+is that `.efi`'s `SizeOfImage`. Both refusals were run: a base off by one digit,
+and an `.efi` whose timestamp was patched.
+
+**A flag that made the screen report could make nothing report.** `\FBCON`
+puts the framebuffer console up instead of the serial one. It dropped the
+serial console whenever the flag was set, whether or not a framebuffer existed,
+so on a board with a UART and no usable GOP the flag removed the only console,
+and every line after the exit went nowhere, the kernel's own `EXCEPTION`
+report included. Every QEMU check of `\FBCON` had run with `-device ramfb`,
+because the point was to see the screen, so the case without a framebuffer
+never ran. The review found it by reading. The fix drops the serial console
+only when there is a framebuffer to replace it with, and the control is the old
+filter put back: with no `ramfb`, that boot's serial log ends at
+`exiting boot services`, where the fixed one reaches the shell.
