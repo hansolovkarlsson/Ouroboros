@@ -1446,9 +1446,9 @@ test-keyboard-chain: image
 # second, --usb-boot, boots build/esp.img FROM the stick behind the hub with
 # no other disk, so it must also mount through the hub. The third, --stall,
 # is --usb-boot from build/usb-hub-stall.img (`make image-stall`, the image
-# with the MSDSTALL boot flag): QEMU's stick stalls on every seventh CBW,
-# about 30 times, and the bulk-endpoint recovery must carry the boot
-# through. Its image is built just before that boot, so a failure there
+# with the MSDSTALL boot flag): QEMU's stick stalls on every seventh CBW
+# (Bulk-OUT) and on a short CSW read for another (Bulk-IN), about 30 of
+# each, and the bulk-endpoint recovery must carry the boot through. Its image is built just before that boot, so a failure there
 # costs only that boot. `python3 scripts/test-usb-hub.py --direct` is the
 # control, the same devices on root ports. About three minutes, so not in
 # `make test`; run it when xhci.rs's port scan, device setup or storage

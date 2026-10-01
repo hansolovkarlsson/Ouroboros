@@ -979,7 +979,7 @@ The small open tails those arcs deliberately left:
 >             reads, followed by reads that succeed, confirm it; repeated
 >             retries that all fail point at the next item first. From the
 >             review of #184.
->       - [ ] **Bulk recovery never clears the halt on the device.** It
+>       - [x] **Bulk recovery never clears the halt on the device.** It
 >             resets the host side only (Reset Endpoint, Set TR Dequeue) and
 >             never sends CLEAR_FEATURE(ENDPOINT_HALT), which the BOT spec's
 >             reset recovery includes. A real stick that stalled keeps its
@@ -987,7 +987,13 @@ The small open tails those arcs deliberately left:
 >             retry can stall again. QEMU does not need it, which is why the
 >             injected Stalls recovered. A standard request, not a class one,
 >             so Parallels' passthrough limit does not rule it out. For the
->             Pi's stick. From the same review.
+>             Pi's stick. From the same review. *Done 2026-10-01 (branch
+>             `pi400/msd-in-stall`): `reset_storage_endpoint` sends it after
+>             a Reset Endpoint that took (the endpoint was halted), and only
+>             then, since on a healthy endpoint it would reset the device's
+>             data toggle and not the host's. Best-effort. QEMU cannot check
+>             it: the Stall test passes with it removed. Open on a real stick
+>             with the board item above.*
 >       - [ ] **A storage transfer timeout is still not recovered.** With
 >             the endpoint Running, Reset Endpoint is refused and the timed
 >             out TRB stays queued ahead of the retry's, so the retry can
@@ -1023,7 +1029,7 @@ The small open tails those arcs deliberately left:
 >             fault does not single out first attempts.) Corrupt some
 >             retries on purpose, and grade the second and third attempts.
 >             From the review of #185.
->       - [ ] **A Bulk-IN Stall in the data or status phase is not
+>       - [x] **A Bulk-IN Stall in the data or status phase is not
 >             recovered.** `bot_command` answers every transfer failure the
 >             same way: reset both host endpoints, send a fresh CBW. After
 >             a Bulk-IN Stall the device still owes its CSW (BOT 6.7.2 and
@@ -1035,15 +1041,31 @@ The small open tails those arcs deliberately left:
 >             that stalls a failed READ(10) is in the same state. The fix is
 >             recovery by phase: after a data- or status-phase Stall, clear
 >             the halt and read the CSW before any new CBW. Ahead of the
->             board's storage, and the next branch after #185.
->       - [ ] **`--stall` exercises the Bulk-OUT recovery only.** The fault
->             corrupts CBWs, so only Bulk-OUT halts; at every recovery the
->             IN endpoint is Running and its Reset Endpoint and Set TR
->             Dequeue are refused. Deleting the IN recovery outright still
->             passes (the same review). Needs a Bulk-IN Stall the driver can
->             recover, so it follows the item above. With it: the capped
->             recovery log the board uses is not run by any test either,
->             since arming the fault lifts the cap.
+>             board's storage, and the next branch after #185. *Done 2026-10-01 (branch
+>             `pi400/msd-in-stall`): a stalled data stage clears that
+>             endpoint and reads the CSW before the command fails for the
+>             retry; a stalled CSW read clears the IN halt and reads it once
+>             more. The status phase is observed: `\MSDSTALL` reads the CSW
+>             of every command with tag 5 mod 7 as 12 bytes, QEMU stalls it
+>             with the CSW owed, and `--stall` recovers 30 in place; with
+>             the CSW recovery disabled, or the IN endpoint reset removed,
+>             the boot does not mount. The data phase is not observed: QEMU
+>             pads a short data phase rather than stalling it.*
+>       - [ ] **`--stall` exercised the Bulk-OUT recovery only.** The fault
+>             corrupted CBWs, so only Bulk-OUT halted, and deleting the IN
+>             recovery outright still passed (the max review of #185).
+>             *Mostly done 2026-10-01 (branch `pi400/msd-in-stall`): the
+>             short CSW read halts Bulk-IN, and the same deletion now fails.*
+>             Still open: the capped recovery log the board uses is run by
+>             no test, since arming the fault lifts the cap.
+>       - [ ] **An invalid CSW is not recovered.** A CSW whose signature or
+>             tag is wrong returns `CswMismatch`, which `bot_command` does
+>             not retry, so the read fails up to `fsd` as a disk I/O error;
+>             BOT 6.7 calls for reset recovery. Seen while looking for a way
+>             to stall the data phase on QEMU (a CBW promising more data
+>             than the command returns makes QEMU pad, and the CSW read
+>             then gets padding). Reset recovery's class request is not
+>             forwarded by Parallels, so the shape needs thought.
 >       - [x] **Make the Pi's in-RAM framebuffer visible to the display** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is
