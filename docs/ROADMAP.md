@@ -987,8 +987,7 @@ The small open tails those arcs deliberately left:
 >             retry can stall again. QEMU does not need it, which is why the
 >             injected Stalls recovered. A standard request, not a class one,
 >             so Parallels' passthrough limit does not rule it out. For the
->             Pi's stick. From the same review. *Done 2026-10-01 (branch
->             `pi400/msd-in-stall`): `reset_storage_endpoint` sends it after
+>             Pi's stick. From the same review. *Done 2026-10-01 (#186, open): `reset_storage_endpoint` sends it after
 >             a Reset Endpoint that took (the endpoint was halted), and only
 >             then, since on a healthy endpoint it would reset the device's
 >             data toggle and not the host's. Best-effort. QEMU checks only
@@ -1044,8 +1043,7 @@ The small open tails those arcs deliberately left:
 >             that stalls a failed READ(10) is in the same state. The fix is
 >             recovery by phase: after a data- or status-phase Stall, clear
 >             the halt and read the CSW before any new CBW. Ahead of the
->             board's storage, and the next branch after #185. *Done 2026-10-01 (branch
->             `pi400/msd-in-stall`): a stalled data stage clears that
+>             board's storage, and the next branch after #185. *Done 2026-10-01 (#186, open): a stalled data stage clears that
 >             endpoint and reads the CSW, and the command then fails with
 >             the CSW's status, or `ShortData` when that says success (not
 >             retried, see below); a stalled CSW read clears the IN halt and
@@ -1060,7 +1058,7 @@ The small open tails those arcs deliberately left:
 >       - [ ] **`--stall` exercised the Bulk-OUT recovery only.** The fault
 >             corrupted CBWs, so only Bulk-OUT halted, and deleting the IN
 >             recovery outright still passed (the max review of #185).
->             *Mostly done 2026-10-01 (branch `pi400/msd-in-stall`): the
+>             *Mostly done 2026-10-01 (#186, open): the
 >             short CSW read halts Bulk-IN, and the same deletion now fails.*
 >             Still open: the capped recovery log the board uses is run by
 >             no test, since arming the fault lifts the cap.
@@ -1073,7 +1071,7 @@ The small open tails those arcs deliberately left:
 >             MODE SENSE, REQUEST SENSE) would need the bytes that did
 >             arrive: per-command rules, and the transfer event's own
 >             residual length, which `bulk_transfer` does not report. From
->             the review of `pi400/msd-in-stall`.
+>             the review of #186.
       - [ ] **An invalid CSW is not recovered.** A CSW whose signature or
 >             tag is wrong returns `CswMismatch`, which `bot_command` does
 >             not retry, so the read fails up to `fsd` as a disk I/O error;
