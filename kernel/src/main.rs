@@ -451,7 +451,11 @@ fn main() -> Status {
 
     // Kept for the identity map below, which maps the console explicitly.
     let console_base = discovery.as_ref().map(|&(base, _, _)| base as u64);
-    if let Some((base, kind, _source)) = discovery.filter(|_| !fb_console_forced) {
+    // `\FBCON` replaces the serial console only when there is a framebuffer
+    // to replace it with; without one, the flag would leave no console at all.
+    let serial_console = discovery.filter(|_| !(fb_console_forced && fb_info.is_some()));
+    let serial_console_base = serial_console.as_ref().map(|&(base, _, _)| base as u64);
+    if let Some((base, kind, _source)) = serial_console {
         // SAFETY: `base` came from the platform's own devicetree, ACPI
         // tables, or PCI configuration space.
         let console = match kind {
@@ -463,14 +467,11 @@ fn main() -> Status {
     }
 
     // SAFETY: called after exit_boot_services, with the memory map that
-    // call returned. Sized for 4, not 2 (framebuffer + xHCI BAR), as of
-    // the MADT/GICv3 work: GICD/GICR are genuinely discovered addresses
-    // now (madt.rs), not assumed to live in the fixed low-1GB device
-    // block the way gic.rs's old QEMU-devicetree-derived addresses did -
-    // real Parallels hardware could put them anywhere, the same way its
-    // xHCI BAR turned out not to respect that assumption either. See
-    // `mmu.rs`'s `MAX_EXTRA_L1_TABLES` doc comment for the matching bump
-    // on that side.
+    // call returned. Up to five regions (`mmu::MAX_EXTRA_DEVICES`): the
+    // console, framebuffer, xHCI BAR, GICD and GICR, all discovered
+    // addresses (madt.rs for the GIC), none assumed to live in the fixed
+    // low-1GB device block. `mmu.rs`'s `MAX_EXTRA_L1_TABLES` is sized to
+    // match, so each can have its own L1 table past 512GB.
     let mut extra_devices = [(0u64, 0u64); mmu::MAX_EXTRA_DEVICES];
     let mut extra_device_count = 0;
     // The discovered serial console, mapped because it is the console: the
@@ -538,6 +539,17 @@ fn main() -> Status {
         )
     };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
+    // The console's own device mapping gives way to RAM's when RAM's span
+    // covers its 1GB block (the Pi 4 with RAM above 3GB): the UART is then
+    // cacheable and its output may never leave the cache. Asked of the
+    // hardware walker, not inferred from the plan.
+    if let Some(base) = serial_console_base {
+        if !mmu::walks_as_device(base) {
+            console::println!(
+                "Ouroboros kernel: WARNING: console {base:#x} is not mapped as a device (its 1GB block is RAM's), its output may stop here"
+            );
+        }
+    }
     tasks::init_runtime_allocator();
 
     // Make the framebuffer available to the console server's FB_* syscalls
@@ -832,21 +844,6 @@ fn try_virtio_console() {
     console::println!("Ouroboros kernel: virtio-console live (fallback - every other mechanism failed)");
 }
 
-/// Installs the GOP framebuffer console - the real answer for Parallels
-/// (see `framebuffer.rs`/`fbconsole.rs`'s module doc comments), tried
-/// right after devicetree/ACPI/PCI, ahead of virtio-console - see
-/// `try_virtio_console`'s doc comment for why that's now deliberately
-/// last rather than first.
-///
-/// Note what's already lost by the time this can run: `fb_info` had to be
-/// discovered before `exit_boot_services` (boot-services-only protocol),
-/// but the console itself can't be *installed* until after
-/// `mmu::install_identity_map` has run with this framebuffer's address
-/// folded in (`FbConsole::new`'s safety requirement) - so every boot
-/// message between `exit_boot_services` and here only ever reached a
-/// byte-stream console, if one existed at all. On a framebuffer-only
-/// platform, the first thing that will ever actually appear on screen is
-/// whatever's printed right after this call.
 /// Under `\FBCON`: a solid white square at the top-right of the screen, the
 /// `n`th from the right edge, drawn with plain stores and no console. For the
 /// stretch just after `exit_boot_services` where there is no console yet to
@@ -875,6 +872,21 @@ fn progress_square(fb_info: Option<framebuffer::Info>, n: usize) {
     mmu::clean_to_poc(info.base + (y0 * info.stride + x0) as u64 * 4, (SIDE * 4) as u64, SIDE as u64, stride_bytes);
 }
 
+/// Installs the GOP framebuffer console - the real answer for Parallels
+/// (see `framebuffer.rs`/`fbconsole.rs`'s module doc comments), tried
+/// right after devicetree/ACPI/PCI, ahead of virtio-console - see
+/// `try_virtio_console`'s doc comment for why that's now deliberately
+/// last rather than first.
+///
+/// Note what's already lost by the time this can run: `fb_info` had to be
+/// discovered before `exit_boot_services` (boot-services-only protocol),
+/// but the console itself can't be *installed* until after
+/// `mmu::install_identity_map` has run with this framebuffer's address
+/// folded in (`FbConsole::new`'s safety requirement) - so every boot
+/// message between `exit_boot_services` and here only ever reached a
+/// byte-stream console, if one existed at all. On a framebuffer-only
+/// platform, the first thing that will ever actually appear on screen is
+/// whatever's printed right after this call.
 fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
     let Some(info) = fb_info else {
         console::println!("Ouroboros kernel: no GOP framebuffer was discovered, no console available");
@@ -886,7 +898,7 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
     // own device-block mapping. Either way it's mapped and writable now.
     let fb = unsafe { fbconsole::FbConsole::new(&info) };
     console::install(Console::Framebuffer(fb));
-    console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed, or the \\FBCON boot flag)");
+    console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed)");
 }
 
 /// Discovers and initializes the virtio-blk device, reads sector 0 back

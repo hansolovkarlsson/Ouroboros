@@ -463,7 +463,7 @@ flag when it is set.
 | Flag | What it switches off | A boot that reaches `shell ready` means |
 |---|---|---|
 | `NOXHCI` | xHCI discovery and bring-up: no USB at all | the hang is inside `pci::discover_xhci` |
-| `XHCINOWR` | only the PCI command-register write in discovery (the takeover from firmware still happens), and the bring-up after the exit | the write is the culprit, not the takeover |
+| `XHCINOWR` | only the PCI command-register write in discovery (the takeover from firmware still happens), and the bring-up after the exit | the hang is the write or the bring-up after the exit, not the takeover; `NOXHCI` cannot split those two either, so a boot that reaches the shell under both flags leaves both open |
 | `FBCON` | installing the SPCR serial console after the exit; the kernel's framebuffer console is installed instead, right after `exceptions::install()`, on the firmware's page tables | (not a bisection) every post-exit line, the MMU switch and the kernel's own `EXCEPTION …` report included, appears on HDMI, so the last one shows where the boot stops |
 
 One flag per bisection boot; `FBCON` combines with either of the others.
@@ -499,11 +499,15 @@ is still on screen, just before the xHCI step), and
 ```sh
 cargo rustc -p ouroboros-kernel --target aarch64-unknown-uefi -- \
     -C link-arg=/MAP:build/BOOTAA64.map          # the same tree as the card
-scripts/efi-symbol.py build/BOOTAA64.map <base>..<end> <pc>
+scripts/efi-symbol.py build/BOOTAA64.map \
+    target/aarch64-unknown-uefi/debug/BOOTAA64.efi <base>..<end> <pc>
 ```
 
 The build is deterministic apart from the PE timestamp and debug record, so
-the relinked map fits the card's binary. Checked on QEMU with a planted
+the relinked map fits the card's binary. The script refuses before naming
+anything unless `<end>-<base>` is the relinked `.efi`'s `SizeOfImage` (a
+misread digit, or a card built with another profile or tree) and the map and
+`.efi` come from the same link. Checked on QEMU with a planted
 pre-exit fault: its firmware printed the same `Synchronous Exception at`
 line, and the script named the planted write. An address outside the image
 is firmware code, and only the serial dump names that module.

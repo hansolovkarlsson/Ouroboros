@@ -403,14 +403,12 @@ static STORED_UNCACHED: SyncCell<([(u64, u64); MAX_UNCACHED], usize)> = SyncCell
 // device unmapped, then hard-fault the moment `gic.rs` touches it (this
 // kernel has no resumable EL1 synchronous-fault path - see
 // `exceptions.rs`'s module doc comment). Cheap to size generously: each
-// slot is one 4KB table.
-const MAX_EXTRA_L1_TABLES: usize = 4;
-static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] = [
-    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
-    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
-    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
-    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
-];
+// slot is one 4KB table. One per `extra_devices` entry, so the count
+// follows `MAX_EXTRA_DEVICES` (five since the console joined the list,
+// 2026-09-28) rather than being bumped by hand beside it.
+const MAX_EXTRA_L1_TABLES: usize = MAX_EXTRA_DEVICES;
+static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] =
+    [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EXTRA_L1_TABLES];
 
 // One L2 + one L3 per *view* (not per region-in-a-shared-map, the
 // pre-per-task-tables design): view i only ever fine-grains the single
@@ -971,6 +969,13 @@ fn walked_attr(va: u64) -> Option<u64> {
         asm!("at s1e1r, {va}", "isb", "mrs {par}, par_el1", va = in(reg) va, par = out(reg) par, options(nostack, preserves_flags));
     }
     if par & 1 != 0 { None } else { Some(par >> 56) }
+}
+
+/// Whether `va` walks as Device memory in the current tables: for a
+/// device whose own block may have given way to RAM's (see `main.rs`'s
+/// console check after `install_identity_map`).
+pub(crate) fn walks_as_device(va: u64) -> bool {
+    walked_attr(va) == Some(MAIR_ATTR_DEVICE_NGNRNE)
 }
 
 /// Boot-time self-check of the non-cacheable mapping, through the
