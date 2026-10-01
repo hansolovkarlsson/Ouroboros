@@ -954,7 +954,7 @@ The small open tails those arcs deliberately left:
 >             each later request with the previous one's answer. QEMU hides
 >             that, since it completes a ring as soon as it is rung. A
 >             forced Stall recovers too (endpoint state 2, Reset Endpoint).
->       - [ ] **The storage endpoint's recovery rewinds to the ring's
+>       - [x] **The storage endpoint's recovery rewinds to the ring's
 >             start.** `reset_storage_endpoint` sets the dequeue pointer to
 >             the ring's start with DCS=1. The slots after it still hold
 >             earlier TRBs carrying that cycle bit, so the controller can
@@ -963,7 +963,45 @@ The small open tails those arcs deliberately left:
 >             the same flaw and now dequeues at the current enqueue
 >             position instead; the storage one is the path confirmed on
 >             Parallels ("Mode A"), so it is left for its own change and
->             check. Found reading the code, not observed.
+>             check. Found reading the code, not observed. *Fixed 2026-10-01
+>             (#184, open): it dequeues at the current
+>             enqueue position with the current cycle, as EP0 does. Observed
+>             on QEMU by corrupting every seventh CBW's signature, which
+>             `usb-storage` answers with a Stall, under `test-usb-hub.py
+>             --usb-boot`: the old code timed out 12 transfers after its
+>             rewinds and failed the typed check; the fix recovered 30
+>             Stalls with no timeout and passed. `make test-usb-hub` passes
+>             without the injection.*
+      - [ ] **Re-confirm the storage recovery on the board.** The fix above
+>             replaces the path confirmed on Parallels ("Mode A") and has
+>             been observed only on QEMU. Recovery lines
+>             (`usb-msd: ... resetting bulk endpoints`) during the Pi's stick
+>             reads, followed by reads that succeed, confirm it; repeated
+>             retries that all fail point at the next item first. From the
+>             review of #184.
+>       - [ ] **Bulk recovery never clears the halt on the device.** It
+>             resets the host side only (Reset Endpoint, Set TR Dequeue) and
+>             never sends CLEAR_FEATURE(ENDPOINT_HALT), which the BOT spec's
+>             reset recovery includes. A real stick that stalled keeps its
+>             own endpoint halted or its data toggle out of step, so every
+>             retry can stall again. QEMU does not need it, which is why the
+>             injected Stalls recovered. A standard request, not a class one,
+>             so Parallels' passthrough limit does not rule it out. For the
+>             Pi's stick. From the same review.
+>       - [ ] **A storage transfer timeout is still not recovered.** With
+>             the endpoint Running, Reset Endpoint is refused and the timed
+>             out TRB stays queued ahead of the retry's, so the retry can
+>             take the wrong packet. `recover_ep0`'s state dispatch (Halted:
+>             Reset Endpoint; Running: Stop Endpoint; then Set TR Dequeue at
+>             the enqueue position) is the shape. From the same review.
+>       - [ ] **The storage Stall test is not committed.** The injection
+>             that observed the fix (every seventh CBW's signature
+>             corrupted) was temporary, so no committed test runs
+>             `reset_storage_endpoint` at all, and going back to the
+>             rewind would pass `make test-usb-hub`. A test-only boot flag
+>             that corrupts CBWs, and a `test-usb-hub.py` mode that sets it
+>             and requires recovery lines and the typed check, would make it
+>             a check that can fail. From the same review.
 >       - [x] **Make the Pi's in-RAM framebuffer visible to the display** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is

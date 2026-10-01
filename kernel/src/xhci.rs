@@ -1249,16 +1249,25 @@ impl Xhci {
                 Err(e) => console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovery command failed ({e})"),
             }
         }
-        let dequeue = EP0_RINGS[idx].0.get() as u64 + (enqueue as u64) * 16;
-        let set_dequeue = self.push_command([
+        if let Err(e) = self.set_tr_dequeue(EP0_RINGS[idx].0.get() as u64, enqueue, cycle, 1, slot_id) {
+            console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 Set TR Dequeue failed ({e})");
+        }
+    }
+
+    /// Set TR Dequeue Pointer for endpoint `dci` of `slot_id`, to slot
+    /// `enqueue` of the ring at `ring_addr` with DCS `cycle`: the producer's
+    /// current position, so the controller resumes where the next TRB will
+    /// be written. Shared by `recover_ep0` and `reset_storage_endpoint`;
+    /// see `recover_ep0`'s doc comment for why the current position.
+    fn set_tr_dequeue(&mut self, ring_addr: u64, enqueue: usize, cycle: bool, dci: u32, slot_id: u32) -> Result<(), Error> {
+        let dequeue = ring_addr + (enqueue * size_of::<Trb>()) as u64;
+        let ptr = self.push_command([
             (dequeue as u32) | (cycle as u32), // DCS = the cycle the next TRB will carry
             (dequeue >> 32) as u32,
             0,
-            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (1 << 16) | (slot_id << 24),
+            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (dci << 16) | (slot_id << 24),
         ]);
-        if let Err(e) = self.wait_command_completion(set_dequeue) {
-            console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 Set TR Dequeue failed ({e})");
-        }
+        self.wait_command_completion(ptr).map(|_| ())
     }
 
     /// Issues Reset Endpoint or Stop Endpoint (`cmd`) for EP0 of `slot_id`
@@ -1278,60 +1287,51 @@ impl Xhci {
     /// later command fails permanently.
     ///
     /// A Reset Endpoint clears the endpoint's Halted state, then a Set TR
-    /// Dequeue Pointer moves hardware's dequeue to the ring's start, and the
-    /// software producer state is reset to match. These are controller
+    /// Dequeue Pointer moves hardware's dequeue to the current enqueue
+    /// position, past the failed transfer. These are controller
     /// *commands*, not device *class requests* - so they work on Parallels,
     /// whose passthrough doesn't forward class requests (see
     /// `control_transfer`'s doc comment).
     ///
-    /// **Known flaw, recorded in `docs/ROADMAP.md` and left for its own
-    /// change:** the ring's start is NOT a known-good position. The slots
-    /// after it still hold earlier TRBs carrying the cycle bit the
-    /// controller expects, so it can run on into a stale TRB once the new
-    /// ones are done. `recover_ep0` dequeues at the current enqueue position
-    /// instead for exactly this reason; this path is the one confirmed on
-    /// Parallels ("Mode A"), so it has not been changed along with it.
+    /// **Why the current position, not the ring's start** (the version
+    /// this replaced rewound to the start): the slots after the start still
+    /// hold earlier TRBs with the cycle bit the controller then expects, so
+    /// it could run on into a stale Normal TRB, a DMA into an old buffer,
+    /// once the new ones were done. At the current enqueue position
+    /// everything ahead carries the previous lap's cycle bit, so the
+    /// controller stops where the next transfer ends. The software ring
+    /// state is left as it is; the two agree by construction. The same
+    /// reasoning as `recover_ep0`'s.
     ///
-    /// Not best-effort, unlike `recover_ep0`: the software ring state is
-    /// reset only *after both commands succeed*, so a Reset Endpoint that
-    /// fails because the endpoint wasn't actually halted (the caller reset
-    /// the healthy direction too, or the failure was a pure timeout with
-    /// the endpoint still Running) leaves software and hardware in sync and
-    /// returns `Err`. A pure timeout is not recovered (the endpoint stays
-    /// Running), but the state is left consistent.
+    /// **Set TR Dequeue is sent after Reset Endpoint succeeds, and also
+    /// after it fails with Context State Error.** That error means the
+    /// endpoint was not Halted: either it is Running (the healthy direction,
+    /// which the caller resets too, or a pure timeout), where Set TR Dequeue
+    /// is refused the same way and changes nothing; or it is Stopped, left
+    /// so by an earlier recovery whose Reset Endpoint took and whose Set TR
+    /// Dequeue did not, where only Set TR Dequeue can move the dequeue
+    /// pointer off the failed transfer. Without it, that endpoint would
+    /// restart on the failed transfer at every later doorbell. Any other
+    /// failure returns `Err` without it. A pure timeout is still not
+    /// recovered (the endpoint stays Running, its transfer queued).
     fn reset_storage_endpoint(&mut self, dir_in: bool) -> Result<(), Error> {
-        let (slot_idx, dci) = {
+        let (slot_idx, dci, enqueue, cycle) = {
             let st = self.storage.as_ref().ok_or(Error::NoPortConnected)?;
-            (st.slot, if dir_in { st.in_dci } else { st.out_dci })
+            if dir_in {
+                (st.slot, st.in_dci, st.in_enqueue, st.in_cycle)
+            } else {
+                (st.slot, st.out_dci, st.out_enqueue, st.out_cycle)
+            }
         };
         let slot_id = self.slots[slot_idx].as_ref().ok_or(Error::NoPortConnected)?.slot_id;
         let ring_addr = if dir_in { BULK_IN_RING.0.get() } else { BULK_OUT_RING.0.get() } as u64;
 
         let reset_ep = self.push_command([0, 0, 0, (TRB_TYPE_RESET_ENDPOINT_CMD << 10) | (dci << 16) | (slot_id << 24)]);
-        self.wait_command_completion(reset_ep)?;
-
-        let set_dequeue = self.push_command([
-            (ring_addr as u32) | 1, // DCS=1, matching the software cycle reset below
-            (ring_addr >> 32) as u32,
-            0,
-            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (dci << 16) | (slot_id << 24),
-        ]);
-        self.wait_command_completion(set_dequeue)?;
-
-        // Both commands took: now the software producer state can safely be
-        // reset to the ring start to match hardware's new dequeue pointer.
-        // The Link TRB at the ring's end (from activate_storage) is intact, so
-        // only the enqueue index and cycle need resetting.
-        if let Some(st) = self.storage.as_mut() {
-            if dir_in {
-                st.in_enqueue = 0;
-                st.in_cycle = true;
-            } else {
-                st.out_enqueue = 0;
-                st.out_cycle = true;
-            }
+        match self.wait_command_completion(reset_ep) {
+            Ok(_) | Err(Error::CommandFailed(COMPLETION_CONTEXT_STATE_ERROR)) => {}
+            Err(e) => return Err(e),
         }
-        Ok(())
+        self.set_tr_dequeue(ring_addr, enqueue, cycle, dci, slot_id)
     }
 
     /// A standard or class control transfer over EP0: Setup Stage (always
