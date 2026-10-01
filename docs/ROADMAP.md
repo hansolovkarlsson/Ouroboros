@@ -1002,7 +1002,7 @@ The small open tails those arcs deliberately left:
 >             that corrupts CBWs, and a `test-usb-hub.py` mode that sets it
 >             and requires recovery lines and the typed check, would make it
 >             a check that can fail. From the same review. *Done 2026-10-01
->             (branch `pi400/msd-stall-test`): the `\MSDSTALL` boot flag,
+>             (#185, open): the `\MSDSTALL` boot flag,
 >             honoured only for a stick whose INQUIRY vendor is `QEMU`, `make
 >             image-stall`, and `test-usb-hub.py --stall`, run third by `make
 >             test-usb-hub`. It requires the fault armed, the Stalls by
@@ -1019,7 +1019,7 @@ The small open tails those arcs deliberately left:
 >             attempts are not exercised: a recovery that works once but
 >             leaves the endpoint wrong for the next one passes. Corrupt
 >             some retries too, and grade the second and third attempts.
->             From the review of `pi400/msd-stall-test`.
+>             From the review of #185.
 >       - [x] **Make the Pi's in-RAM framebuffer visible to the display** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is
