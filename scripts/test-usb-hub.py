@@ -30,20 +30,29 @@ the hub, and a fifth check requires the mount. It is the Raspberry Pi booted
 entirely from one USB stick, less the high-speed hub.
 
 --stall is --usb-boot from build/usb-hub-stall.img (`make image-stall`:
-build/esp.img with the MSDSTALL boot flag file): the kernel corrupts every
-seventh CBW's signature and QEMU's usb-storage answers each with a Stall, so
-the bulk-endpoint recovery (xhci.rs's reset_storage_endpoint, usb_msd.rs's
-retry) runs about 30 times, which no ordinary QEMU run makes it do. On top of
---usb-boot's checks it requires that the kernel armed the fault, that QEMU
-itself reported the bad signatures (the foreign observer: the stalls
-happened), and that each one was recovered by its first retry: exactly one
-`retry 1/3` line per Stall, no `retry 2/` line, no `giving up` (the kernel
-logs every recovery while the fault is armed). An injected Stall's own
-retry is never corrupted (its tag is 4 mod 7), so a second Stall in a row
-and running out of attempts are not exercised. Only Bulk-OUT is stalled:
-the read side's recovery is not exercised either (see docs/ROADMAP.md). Measured 2026-10-01: the recovery that rewound to the ring's start
-(before #184) fails it; the one that dequeues at the enqueue position
-passes.
+build/esp.img with the MSDSTALL boot flag file). The kernel makes QEMU's stick
+stall two ways, which no ordinary QEMU run does: it corrupts the signature of
+every seventh CBW (tag 3 mod 7), which usb-storage answers with a Bulk-OUT
+Stall, recovered by usb_msd.rs's retry from a fresh CBW; and it reads the CSW
+of every command with tag 5 mod 7 as 12 bytes, which usb-storage answers with
+a Bulk-IN Stall while the CSW stays owed, recovered in place by clearing the
+halt and reading the CSW again. On top of --usb-boot's checks it requires
+that the kernel armed the fault, that QEMU itself reported the bad
+signatures (the foreign observer: the OUT stalls happened), that the kernel
+logged recovering CSW reads, and that every OUT Stall was recovered by its
+first retry: exactly one `retry 1/3` line per bad signature, no `retry 2/`
+line, no `giving up` (the kernel logs every recovery while the fault is
+armed). A CSW recovery that failed would fall back to that retry and break
+the count. Every recovery also sends the device CLEAR_FEATURE(ENDPOINT_HALT);
+QEMU does not need it, so the test passes without it, but a refused one is
+logged, and the test requires none. QEMU logs nothing for the short reads, so their count is the
+kernel's own. An injected Stall's own retry is never corrupted (its tag is
+4 mod 7), so a second Stall in a row and running out of attempts are not
+exercised. A Stall in the data stage is not exercised either: QEMU pads a
+data phase that comes up short rather than stalling it (see
+docs/ROADMAP.md). Measured 2026-10-01: the recovery that rewound to the
+ring's start (before #184) fails it; the one that dequeues at the enqueue
+position passes.
 
 --direct puts the keyboard and the stick on root ports instead, with the same
 checks. That is the control: it passes on a kernel with no hub support, which
@@ -170,11 +179,14 @@ def main():
         checks.append(("mounted through the hub", re.search(r"FAT32 mounted", out)))
     if stall:
         stalls = len(re.findall(r"qemu-system-aarch64: usb-msd: Bad signature", out))
+        csw = len(re.findall(r"Ouroboros kernel: usb-msd: CSW read stalled", out))
         first = len(re.findall(r"Ouroboros kernel: usb-msd: .*resetting bulk endpoints, retry 1/", out))
         again = len(re.findall(r"Ouroboros kernel: usb-msd: .*(retry [2-9]/|giving up)", out))
         checks += [
             ("fault armed", re.search(r"MSDSTALL armed", out)),
             (f"stalls injected ({stalls}, QEMU's count)", stalls >= MIN_STALLS),
+            (f"CSW reads stalled ({csw}, the kernel's count)", csw >= MIN_STALLS),
+            ("no CLEAR_FEATURE refused", not re.search(r"CLEAR_FEATURE\(ENDPOINT_HALT\) failed", out)),
             (f"each recovered at once ({first} first retries, {again} further)", first == stalls and again == 0),
         ]
     failed = 0

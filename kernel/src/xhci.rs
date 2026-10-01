@@ -183,6 +183,7 @@ const EP_STATE_HALTED: u32 = 2;
 const EP_STATE_STOPPED: u32 = 3;
 
 const COMPLETION_SUCCESS: u32 = 1;
+const COMPLETION_STALL_ERROR: u32 = 6;
 const COMPLETION_CONTEXT_STATE_ERROR: u32 = 19;
 const COMPLETION_STOPPED: u32 = 26;
 const COMPLETION_STOPPED_LENGTH_INVALID: u32 = 27;
@@ -328,6 +329,14 @@ pub enum Error {
     TransferFailed(u32),
 }
 
+impl Error {
+    /// Whether this is a transfer the device answered with a Stall (the
+    /// endpoint is now Halted), as opposed to a timeout or another error.
+    pub(crate) fn is_stall(&self) -> bool {
+        matches!(self, Error::TransferFailed(COMPLETION_STALL_ERROR))
+    }
+}
+
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -342,8 +351,8 @@ impl core::fmt::Display for Error {
             Error::TooManyScratchpadBuffers(n) => write!(f, "controller wants {n} scratchpad buffers, only {MAX_SCRATCHPAD_BUFFERS} are supported"),
             Error::CommandTimeout => write!(f, "command ring: timed out waiting for a completion event"),
             Error::CommandFailed(code) => write!(f, "command failed, completion code {code}"),
-            Error::TransferTimeout => write!(f, "control transfer: timed out waiting for a transfer event"),
-            Error::TransferFailed(code) => write!(f, "control transfer failed, completion code {code}"),
+            Error::TransferTimeout => write!(f, "transfer: timed out waiting for a transfer event"),
+            Error::TransferFailed(code) => write!(f, "transfer failed, completion code {code}"),
         }
     }
 }
@@ -1286,12 +1295,15 @@ impl Xhci {
     /// stall, and with no recovery the halted endpoint stays halted so every
     /// later command fails permanently.
     ///
-    /// A Reset Endpoint clears the endpoint's Halted state, then a Set TR
+    /// A Reset Endpoint clears the endpoint's Halted state, CLEAR_FEATURE
+    /// (ENDPOINT_HALT) clears the device's end of it, then a Set TR
     /// Dequeue Pointer moves hardware's dequeue to the current enqueue
-    /// position, past the failed transfer. These are controller
+    /// position, past the failed transfer. The first and last are controller
     /// *commands*, not device *class requests* - so they work on Parallels,
     /// whose passthrough doesn't forward class requests (see
-    /// `control_transfer`'s doc comment).
+    /// `control_transfer`'s doc comment). CLEAR_FEATURE is a *standard*
+    /// request, the kind Parallels does forward (`GET_DESCRIPTOR`,
+    /// `SET_CONFIGURATION`), but it has not been run there.
     ///
     /// **Why the current position, not the ring's start** (the version
     /// this replaced rewound to the start): the slots after the start still
@@ -1328,7 +1340,26 @@ impl Xhci {
 
         let reset_ep = self.push_command([0, 0, 0, (TRB_TYPE_RESET_ENDPOINT_CMD << 10) | (dci << 16) | (slot_id << 24)]);
         match self.wait_command_completion(reset_ep) {
-            Ok(_) | Err(Error::CommandFailed(COMPLETION_CONTEXT_STATE_ERROR)) => {}
+            Ok(_) => {
+                // The host endpoint was Halted and Reset Endpoint (sent
+                // without TSP) has put the host's data toggle back to DATA0.
+                // CLEAR_FEATURE(ENDPOINT_HALT) (USB 2.0 9.4.5) puts the
+                // device's toggle there too, and clears the device's halt
+                // when a Stall caused this one; after a Babble or a
+                // Transaction Error the device was never halted, and the
+                // request then only realigns the toggles. Only here: sent
+                // where Reset Endpoint was refused (the endpoint was not
+                // Halted), it would reset the device's toggle and not the
+                // host's. A Reset Endpoint with TSP=1 would keep the host's
+                // toggle, and this would then be wrong. Best-effort: a
+                // refusal is logged (control_transfer recovers EP0) and the
+                // host side is still repaired.
+                let ep_addr = (dci / 2) as u16 | if dir_in { 0x80 } else { 0 };
+                if let Err(e) = self.control_transfer(slot_idx, 0x02, 0x01, 0, ep_addr, &mut [], false) {
+                    console::println!("Ouroboros kernel: xhci: storage endpoint {ep_addr:#04x}: CLEAR_FEATURE(ENDPOINT_HALT) failed ({e})");
+                }
+            }
+            Err(Error::CommandFailed(COMPLETION_CONTEXT_STATE_ERROR)) => {}
             Err(e) => return Err(e),
         }
         self.set_tr_dequeue(ring_addr, enqueue, cycle, dci, slot_id)
@@ -2892,8 +2923,10 @@ pub(crate) fn storage_bulk(dir_in: bool, buf_addr: u64, len: u32) -> Result<(), 
 }
 
 /// Reset-recover the storage device's IN (`dir_in`) or OUT bulk endpoint
-/// after a stalled/failed transfer - [`Xhci::reset_storage_endpoint`].
-/// `usb_msd.rs`'s BOT reset-recovery step between command retries.
+/// after a stalled/failed transfer - [`Xhci::reset_storage_endpoint`]:
+/// Reset Endpoint, CLEAR_FEATURE(ENDPOINT_HALT) to the device over EP0 when
+/// the endpoint was halted, Set TR Dequeue. `usb_msd.rs` uses it between
+/// command retries and to clear a stalled data stage or CSW read in place.
 pub(crate) fn storage_reset_endpoint(dir_in: bool) -> Result<(), Error> {
     match unsafe { (*XHCI.get()).as_mut() } {
         Some(x) => x.reset_storage_endpoint(dir_in),
