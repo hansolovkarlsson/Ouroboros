@@ -38,14 +38,15 @@ const XHCI_NO_WRITE: &CStr16 = cstr16!("\\XHCINOWR");
 /// serial cable that looks exactly like a hang.
 const FB_CONSOLE: &CStr16 = cstr16!("\\FBCON");
 
-/// `\MSDSTALL`: corrupt the signature of every seventh CBW `usb_msd.rs`
-/// sends. QEMU's `usb-storage` answers a bad signature with a Stall, so the
-/// bulk recovery (`xhci::reset_storage_endpoint` and the BOT retry) runs
-/// once per seven CBWs (each retry sends one too), about 30 times in a
-/// boot from the stick. A test
-/// fault for `test-usb-hub.py --stall`, honoured only for a stick whose
-/// INQUIRY vendor is `QEMU`: a real device answers a bad CBW differently,
-/// and would hang.
+/// `\MSDSTALL`: make QEMU's stick stall, two ways, for `usb_msd.rs`'s
+/// recovery to repair. The signature of every seventh CBW is corrupted (tag
+/// 3 mod 7, each retry takes a tag too), which `usb-storage` answers with a
+/// Bulk-OUT Stall, repaired by the BOT retry; and the CSW of every command
+/// with tag 5 mod 7 is read as 12 bytes, which it answers with a Bulk-IN
+/// Stall while the CSW stays owed, repaired in place. About 30 of each in a
+/// boot from the stick. A test fault for `test-usb-hub.py --stall`,
+/// honoured only for a stick whose INQUIRY vendor is `QEMU`: a real device
+/// answers these differently, and could hang.
 const MSD_STALL: &CStr16 = cstr16!("\\MSDSTALL");
 
 /// Which boot flags are set, read once by [`read`].
