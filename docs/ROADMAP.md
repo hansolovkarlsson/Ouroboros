@@ -1330,6 +1330,45 @@ be reviewed after the fact from the saved screenshots.
 > renamed: the folder is `~/Projects/Proem` and the repository
 > `github.com/hansolovkarlsson/Proem`. `~/Projects/CPP` no longer exists. A
 > mention of CPP in older records means Proem.
+>
+> **What Proem asks of Ouroboros, accepted 2026-10-01, for later.** Three
+> handoff notes, triaged and accepted; none is started. Each note carries its
+> evidence, its **Done when** and the reply below in full.
+>
+> - [ ] **new** **A user heap of at least 1 MiB, ideally sized per program.**
+>       `HEAP_PAGES` is 64 (256 KiB, `kernel/src/loader.rs`) for every
+>       program; Proem measured 697 KiB of live `malloc` for
+>       `libc/picodemo.c` and 1,459 KiB for its C11-header test. The bound is
+>       the one 2 MB region slot that holds code, heap, guard and stack: 1 MiB
+>       fits, 1.5 MiB is tight beside Proem's code, and Proem's 3.5 MiB
+>       picolibc test needs regions larger than one slot, which is `mmu.rs`
+>       and `tasks.rs` work. Within one slot a larger `HEAP_PAGES` costs no
+>       RAM (`allocate_runtime_region` rounds every region to a whole slot
+>       already), only code room in every program, the largest of which
+>       loads at 135 KiB today (`netd`, static data included): 256 pages is
+>       the cheap first step. A size carried
+>       per program in the ELF is what goes further, and with multi-slot
+>       regions past 2 MB. Blocks step 8 of `roadmap-c-hosting.md` (branch
+>       `docs/c-hosting`). Note:
+>       [`handoffs/2026-10-01-from-proem-heap-growth.md`](handoffs/2026-10-01-from-proem-heap-growth.md).
+> - [ ] **fix** **`fstat` leaves every field but two as it found them.**
+>       `libc/src/file.c`'s `fstat` sets `st_size` and `st_mode` only, so a
+>       caller's `struct stat` keeps stack garbage in `st_dev` and `st_ino`,
+>       and Proem's `#pragma once` and include-guard skipping can take two
+>       headers for one. First, and small: zero every field `fstat` does not
+>       fill, which Proem reads as "no identity". Then a real identity: the
+>       `NP_FSTAT` record (27 bytes, `ninep-abi`) has no inode or qid, so it
+>       is a wire change across `ninep-abi`, both C headers and the Python
+>       peers, plus an identity per filesystem (ext2's inode; FAT32 and
+>       exFAT have none, so the directory entry's location; `/proc`'s own)
+>       and an `st_dev` per server and per remote mount. Note:
+>       [`handoffs/2026-10-01-from-proem-fstat-identity.md`](handoffs/2026-10-01-from-proem-fstat-identity.md).
+> - [ ] **Rename CPP to Proem in the C-hosting plan** on the branch that
+>       carries it (`docs/c-hosting`, `f060b8d`, not on `main`): `/bin/proem`,
+>       `proem-bin`, `PROEM_DIR` defaulting to `../Proem`, `driver/proem.c`,
+>       the finish line's command, and the plan's index line. Before the
+>       plan merges, so `main` never carries the old names. Note:
+>       [`handoffs/2026-10-01-from-workspace-proem-rename.md`](handoffs/2026-10-01-from-workspace-proem-rename.md).
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
