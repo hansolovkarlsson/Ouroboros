@@ -994,14 +994,20 @@ The small open tails those arcs deliberately left:
 >             take the wrong packet. `recover_ep0`'s state dispatch (Halted:
 >             Reset Endpoint; Running: Stop Endpoint; then Set TR Dequeue at
 >             the enqueue position) is the shape. From the same review.
->       - [ ] **The storage Stall test is not committed.** The injection
+>       - [x] **The storage Stall test is not committed.** The injection
 >             that observed the fix (every seventh CBW's signature
 >             corrupted) was temporary, so no committed test runs
 >             `reset_storage_endpoint` at all, and going back to the
 >             rewind would pass `make test-usb-hub`. A test-only boot flag
 >             that corrupts CBWs, and a `test-usb-hub.py` mode that sets it
 >             and requires recovery lines and the typed check, would make it
->             a check that can fail. From the same review.
+>             a check that can fail. From the same review. *Done 2026-10-01
+>             (branch `pi400/msd-stall-test`): the `\MSDSTALL` boot flag and
+>             `test-usb-hub.py --stall`, run third by `make test-usb-hub`. It
+>             passes (30 Stalls by QEMU's count, recovered, none timed out);
+>             with the rewind from before #184 put back it fails `typed` and
+>             `no transfer timed out`, and with the flag ignored it fails
+>             `stalls injected` and `recovered`.*
 >       - [x] **Make the Pi's in-RAM framebuffer visible to the display** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is

@@ -492,6 +492,9 @@ flag when it is set.
 | `FBCON` | installing the SPCR serial console after the exit; the kernel's framebuffer console is installed instead, right after `exceptions::install()`, on the firmware's page tables | (not a bisection) every post-exit line, the MMU switch and the kernel's own `EXCEPTION …` report included, appears on HDMI, so the last one shows where the boot stops |
 
 One flag per bisection boot; `FBCON` combines with either of the others.
+A fourth flag, `MSDSTALL`, is a test fault for QEMU and not a diagnostic: it
+corrupts every seventh CBW so QEMU's stick stalls (`test-usb-hub.py
+--stall`). Never put it on a card.
 They exist for the first Pi 400 boots (2026-09-28), which all ended on HDMI
 with the firmware's text console: first partway through
 `xhci: PCI command register was`, then under `NOXHCI` at the

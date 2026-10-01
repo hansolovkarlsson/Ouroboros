@@ -1010,7 +1010,7 @@ python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
 make run-usb-kbd     # + an xHCI controller & a USB keyboard (HMP monitor sendkey)
 make run-usb-multi   # + a USB tablet and a storage stick (the 3-device xHCI rig)
 make run-usb-hub     # the keyboard and the stick BEHIND a usb-hub (the Raspberry Pi's layout)
-make test-usb-hub    # the same layout, driven and graded, plus a boot FROM a stick behind the hub (scripts/test-usb-hub.py)
+make test-usb-hub    # the same layout, driven and graded, plus a boot FROM a stick behind the hub, and that boot again with injected Stalls (scripts/test-usb-hub.py)
 make run-gicv3       # force GICv3 instead of QEMU's default GICv2
 ```
 
@@ -1070,7 +1070,7 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `run-usb-kbd` | xHCI + USB keyboard |
 | `run-usb-multi` | xHCI + tablet + storage stick |
 | `run-usb-hub` | xHCI + a usb-hub with the keyboard and stick behind it, tablet on a root port |
-| `test-usb-hub` | the hub layout driven: keyboard ready, stick configured, a line typed through USB runs; then `--usb-boot`, booted from a stick behind the hub and mounted through it. `--direct` is the control |
+| `test-usb-hub` | the hub layout driven: keyboard ready, stick configured, a line typed through USB runs; then `--usb-boot`, booted from a stick behind the hub and mounted through it; then `--stall`, that boot from a copy of the image with the `MSDSTALL` flag file, so the stick stalls about a dozen times (QEMU's own count is checked) and the bulk recovery must carry the boot with no transfer timing out. `--direct` is the control |
 | `run-gicv3` | force GICv3 |
 | `test-parallels` | scripted real-hardware smoke test (Parallels, not QEMU) |
 
