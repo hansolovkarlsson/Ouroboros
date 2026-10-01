@@ -795,3 +795,54 @@ never ran. The review found it by reading. The fix drops the serial console
 only when there is a framebuffer to replace it with, and the control is the old
 filter put back: with no `ramfb`, that boot's serial log ends at
 `exiting boot services`, where the fixed one reaches the shell.
+
+## Three more, from the storage recovery (2026-10-01, later)
+
+The rest of the day turned two storage defects found by reading into defects
+observed on QEMU, and built a committed test for each (#184 to #186). Three of
+the instruments built along the way passed while blind to the thing they were
+named for, and one more was blind by design and is recorded as such.
+
+**A harness whose every tree had one answer.** The fix for the devicetree's
+missing `/chosen` (#182) was checked by a host harness running the old and the
+new console lookup side by side on hand-built trees. Each tree had one PL011,
+so "`stdout-path` resolved" and "`stdout-path` failed, fell back to the first
+PL011" returned the same node, and a lookup that dropped the last byte of a
+path agreed with one that did not. The review's fix for exactly that byte
+passed the harness before the harness could see it. A decoy PL011 placed
+ahead of the real one in every tree made the two outcomes different; then the
+old code's truncation showed (it fell back to the decoy), and putting either
+old behaviour back was caught.
+
+**A "recovered" check that saw a retry begin.** The first version of
+`test-usb-hub.py --stall` (#185) passed `recovered` on the kernel's `retry 1/3`
+line, which is printed before the reset and the retry run, and passed `no
+transfer timed out` on the absence of a line the kernel stops printing after
+sixteen recoveries, in a boot that has thirty. A recovery that never worked
+would have passed both. The review found it by reading the log limit against
+the measured count. The check became exact: one `retry 1/` line per Stall by
+QEMU's own count, no `retry 2/`, no `giving up`, with the cap lifted while the
+fault is armed. The rewind from before #184 put back then fails it with 56
+first retries and 18 further for 19 Stalls.
+
+**A Stall test that only ever stalled one direction.** The same test
+corrupted CBWs, so only Bulk-OUT ever halted, and at every recovery the IN
+endpoint was Running and its reset was refused and discarded. The max review
+deleted the IN half of the recovery outright and every check stayed green.
+It then moved one Stall from the CBW to the CSW read, and found the driver bug
+the test could not reach: after a Bulk-IN Stall the device still owes its CSW,
+and the driver's fresh CBW is stalled in turn, so the command gave up and
+nothing mounted (fixed in #186). The test now also reads some CSWs short,
+which QEMU stalls with the CSW owed, and the same deletion fails it.
+
+**Blind by design, and said so.** The device-side CLEAR_FEATURE(ENDPOINT_HALT)
+added in #186 is something QEMU does not need: the Stall test passes with it
+removed, and with it sent to the wrong endpoint, since QEMU accepts any
+endpoint address. The one thing QEMU can see is a refusal, and a class-type
+request in its place fails the check with sixty. That reach is written into
+the roadmap entry, so a green `--stall` is not read as evidence that a real
+stick's halt was cleared. It is not; the board decides.
+
+It is this document's spine again: each was found by breaking the thing
+underneath (a decoy, a deletion, a moved Stall) and watching whether the
+instrument noticed, and none by the instrument's own green.
