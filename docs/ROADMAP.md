@@ -1008,7 +1008,11 @@ The small open tails those arcs deliberately left:
 >             test-usb-hub`. It requires the fault armed, the Stalls by
 >             QEMU's own count, and exactly one first retry per Stall with no
 >             second retry and no giving up (every recovery is logged while
->             the fault is armed).*
+>             the fault is armed). Passes with 30 Stalls and 30 first
+>             retries. Fails with the rewind from before #184 put back (19
+>             Stalls, 56 first retries and 18 further, `typed` too), with
+>             the corruption disabled (no Stalls), and with the vendor test
+>             pointed elsewhere (not armed, no Stalls).*
 >       - [ ] **The Stall test never stalls a retry.** `\MSDSTALL` corrupts
 >             first attempts only (a retry's tag is never 3 mod 7), so a
 >             second Stall in a row on the same command and running out of
