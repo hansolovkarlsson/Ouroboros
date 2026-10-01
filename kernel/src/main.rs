@@ -363,7 +363,10 @@ fn main() -> Status {
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
     // `\FBCON` (`fb_console_forced`): leave the discovered serial console
     // uninstalled after the exit, so the framebuffer console below takes HDMI.
-    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced } = bootflags::read();
+    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall } = bootflags::read();
+    if msd_stall {
+        usb_msd::inject_stalls();
+    }
     let xhci_result = if no_xhci {
         Err(pci::XhciDiscoveryError::SkippedByFlag)
     } else {

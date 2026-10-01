@@ -1426,19 +1426,23 @@ test-parallels:
 test-keyboard-chain: image
 	PROFILE="$(PROFILE)" ./scripts/test-keyboard-chain.sh
 
-# The USB hub check (scripts/test-usb-hub.py): two driven boots with a
+# The USB hub check (scripts/test-usb-hub.py): three driven boots with a
 # keyboard and a storage stick behind a usb-hub, graded on outcomes (keyboard
 # ready, stick configured, a line typed through the USB keyboard runs). The
 # second, --usb-boot, boots build/esp.img FROM the stick behind the hub with
-# no other disk, so it must also mount through the hub. `python3
-# scripts/test-usb-hub.py --direct` is the control, the same devices on root
-# ports. About two minutes, so not in `make test`; run it when xhci.rs's port
-# scan or device setup changes. Both boots always run (a failure in the first
-# must not hide the second's result); the target fails if either did.
+# no other disk, so it must also mount through the hub. The third, --stall,
+# is --usb-boot with the MSDSTALL boot flag on a copy of the image: QEMU's
+# stick stalls about a dozen times and the bulk-endpoint recovery must carry
+# the boot through. `python3 scripts/test-usb-hub.py --direct` is the
+# control, the same devices on root ports. About three minutes, so not in
+# `make test`; run it when xhci.rs's port scan, device setup or storage
+# recovery changes, or usb_msd.rs's retry. Every boot always runs (a failure
+# in one must not hide the next's result); the target fails if any did.
 test-usb-hub: image $(USBSTICK_IMG)
 	@fail=0; \
 	python3 scripts/test-usb-hub.py || fail=1; \
 	python3 scripts/test-usb-hub.py --usb-boot || fail=1; \
+	python3 scripts/test-usb-hub.py --stall || fail=1; \
 	exit $$fail
 
 # The re-entrant session check (scripts/test-reentrant-session.sh): a remote

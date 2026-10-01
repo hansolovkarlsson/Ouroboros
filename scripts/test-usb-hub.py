@@ -29,6 +29,17 @@ and the filesystem server must mount that stick THROUGH THE HUB before
 the hub, and a fifth check requires the mount. It is the Raspberry Pi booted
 entirely from one USB stick, less the high-speed hub.
 
+--stall is --usb-boot from a copy of build/esp.img carrying the MSDSTALL boot
+flag file: the kernel corrupts every seventh CBW's signature and QEMU's
+usb-storage answers each with a Stall, so the bulk-endpoint recovery
+(xhci.rs's reset_storage_endpoint, usb_msd.rs's retry) runs about a dozen
+times, which no ordinary QEMU run makes it do. On top of --usb-boot's checks
+it requires that QEMU itself reported the bad signatures (the foreign
+observer: the stalls happened), that the kernel logged recovering from them,
+and that no bulk transfer timed out. Measured 2026-10-01: the recovery that
+rewound to the ring's start (before #184) times out after its rewinds and
+fails `typed`; the one that dequeues at the enqueue position passes.
+
 --direct puts the keyboard and the stick on root ports instead, with the same
 checks. That is the control: it passes on a kernel with no hub support, which
 shows the checks can pass, while the hub layout fails there (measured
@@ -38,15 +49,18 @@ QEMU's usb-hub is full-speed (USB 1.1). The Pi's hub is high-speed with a
 slower keyboard behind it, which needs the transaction-translator fields of the
 slot context; this rig cannot exercise those, the board is their first test.
 
-Usage:  python3 scripts/test-usb-hub.py [--direct | --usb-boot]
+Usage:  python3 scripts/test-usb-hub.py [--direct | --usb-boot | --stall]
         make test-usb-hub          (rebuilds the image and the stick first)
 Exit status: the number of checks that failed.
 """
 import importlib.util
 import os
 import re
+import shutil
 import socket
+import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,6 +72,8 @@ _spec.loader.exec_module(drive_qemu)
 IMAGE = os.path.join(ROOT, "build", "esp.img")
 STICK = os.path.join(ROOT, "build", "usbstick.img")
 MONITOR = os.path.join(ROOT, "build", "usb-hub-monitor.sock")
+STALL_IMAGE = os.path.join(ROOT, "build", "usb-hub-stall.img")
+MIN_STALLS = 5       # a --stall boot measured 30; fewer means the flag did not take
 WORD = "usbhub"      # typed as `echo usbhub`; its output is this word alone
 KEY_DELAY = 0.3      # between sendkeys; each key is held ~100 ms by QEMU
 
@@ -78,6 +94,25 @@ def layout(direct, stick_image):
     ]
 
 
+def stall_image():
+    """A copy of IMAGE with the MSDSTALL flag file at its root, made with
+    hdiutil as `make image` makes IMAGE. Returns an error message or None."""
+    shutil.copyfile(IMAGE, STALL_IMAGE)
+    mount = tempfile.mkdtemp()
+    try:
+        r = subprocess.run(["hdiutil", "attach", "-nobrowse", "-mountpoint", mount, STALL_IMAGE],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return f"hdiutil attach failed: {r.stderr.strip()}"
+        try:
+            open(os.path.join(mount, "MSDSTALL"), "w").close()
+        finally:
+            subprocess.run(["hdiutil", "detach", mount], capture_output=True)
+    finally:
+        os.rmdir(mount)
+    return None
+
+
 def sendkeys(text):
     """Types `text` and Enter through the monitor: USB keyboard only."""
     names = {" ": "spc", "\n": "ret"}
@@ -90,9 +125,10 @@ def sendkeys(text):
 
 def main():
     direct = "--direct" in sys.argv[1:]
-    usb_boot = "--usb-boot" in sys.argv[1:]
+    stall = "--stall" in sys.argv[1:]
+    usb_boot = "--usb-boot" in sys.argv[1:] or stall
     if direct and usb_boot:
-        print("test-usb-hub: --direct and --usb-boot are separate runs")
+        print("test-usb-hub: --direct and --usb-boot/--stall are separate runs")
         return 2
     # --usb-boot's stick is the image itself, so it needs no usbstick.img.
     needed = (IMAGE,) if usb_boot else (IMAGE, STICK)
@@ -109,11 +145,18 @@ def main():
     if os.path.exists(MONITOR):
         os.remove(MONITOR)
 
-    label = "direct" if direct else "usb-boot" if usb_boot else "hub"
+    label = "direct" if direct else "stall" if stall else "usb-boot" if usb_boot else "hub"
     print(f"test-usb-hub: {label} layout")
+    boot_image = IMAGE
+    if stall:
+        error = stall_image()
+        if error:
+            print(f"test-usb-hub: {error}")
+            return 2
+        boot_image = STALL_IMAGE
     g = drive_qemu.Guest(
-        IMAGE,
-        extra_args=layout(direct, IMAGE if usb_boot else STICK),
+        boot_image,
+        extra_args=layout(direct, boot_image if usb_boot else STICK),
         virtio_disk=not usb_boot,
     )
     typed = False
@@ -138,6 +181,13 @@ def main():
     ]
     if usb_boot:
         checks.append(("mounted through the hub", re.search(r"FAT32 mounted", out)))
+    if stall:
+        stalls = len(re.findall(r"usb-msd: Bad signature", out))
+        checks += [
+            (f"stalls injected ({stalls}, QEMU's count)", stalls >= MIN_STALLS),
+            ("recovered", re.search(r"usb-msd: bulk transfer failed .*resetting bulk endpoints", out)),
+            ("no transfer timed out", not re.search(r"timed out waiting for a transfer event", out)),
+        ]
     failed = 0
     for name, ok in checks:
         print(f"{'ok  ' if ok else 'FAIL'} {name}")

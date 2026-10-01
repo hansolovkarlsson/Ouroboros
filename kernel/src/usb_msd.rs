@@ -45,7 +45,7 @@
 //! case is.)
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::console;
 use crate::xhci;
@@ -93,6 +93,17 @@ use crate::xhci::{USB_CBW_BUF as CBW_BUF, USB_CSW_BUF as CSW_BUF, USB_DATA_BUF a
 /// Monotonic CBW tag - echoed back in each CSW and checked, so a stale
 /// or misrouted status can't be mistaken for the current command's.
 static NEXT_TAG: AtomicU32 = AtomicU32::new(1);
+
+/// Set by [`inject_stalls`] when the `\MSDSTALL` boot flag is set: every
+/// seventh CBW goes out with a corrupted signature, which QEMU's
+/// `usb-storage` answers with a Stall. A test fault, for exercising the
+/// recovery in [`bot_command`]; see `bootflags.rs`.
+static INJECT_STALLS: AtomicBool = AtomicBool::new(false);
+
+/// Turns on the `\MSDSTALL` test fault. Called once, before the exit.
+pub fn inject_stalls() {
+    INJECT_STALLS.store(true, Ordering::Relaxed);
+}
 
 /// A mounted-capacity handle - deliberately tiny: the endpoint state
 /// lives in `xhci.rs`, the DMA buffers are statics, so all a device
@@ -230,9 +241,9 @@ const RECOVERY_LOG_LIMIT: u32 = 16;
 /// QEMU never stalls a transfer on its own, so in an ordinary QEMU run the
 /// retry path never runs and behavior is identical to a single
 /// `bot_command_once`. It can be made to: QEMU's `usb-storage` answers a
-/// CBW with a bad signature with a Stall, which is how the recovery was
-/// exercised on 2026-10-01 (see `docs/ROADMAP.md`). Nothing committed does
-/// that yet.
+/// CBW with a bad signature with a Stall, and the `\MSDSTALL` boot flag
+/// ([`inject_stalls`]) sends one every seventh command, which is what
+/// `scripts/test-usb-hub.py --stall` boots with.
 fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Error> {
     const MAX_ATTEMPTS: u32 = 3;
     let mut attempt = 1u32;
@@ -287,6 +298,9 @@ fn bot_command_once(cdb: &[u8], data: Option<(&mut [u8], bool)>) -> Result<(), E
         cbw[13] = 0; // LUN 0
         cbw[14] = cdb.len() as u8;
         cbw[15..15 + cdb.len()].copy_from_slice(cdb);
+        if INJECT_STALLS.load(Ordering::Relaxed) && tag % 7 == 3 {
+            cbw[0] ^= 0xff;
+        }
     }
     xhci::storage_bulk(false, CBW_BUF.0.get() as u64, 31).map_err(Error::Transfer)?;
 
