@@ -1085,7 +1085,7 @@ The small open tails those arcs deliberately left:
 >       formats.
 > - [x] **Small:** the `fdt` crate panics on a tree with no `/chosen`
 >       (`chosen()` expects one; found building test trees, real firmware
->       trees have it). *Fixed 2026-10-01 (branch `pi400/fdt-chosen`):*
+>       trees have it). *Fixed 2026-10-01 (#182, open):*
 >       `devicetree.rs` reads `/chosen/stdout-path` itself. That also removes
 >       the crate's second panic, on a zero-length `stdout-path`; skips a path
 >       that is only a NUL (`find_node("")` is the root, which ended the
@@ -1101,7 +1101,7 @@ The small open tails those arcs deliberately left:
 >       lives outside the tree, so going back to `chosen().stdout()` would
 >       pass `make test` and every QEMU run and show only as a halted Pi.
 >       Move the lookup into a pure helper with host tests over those trees.
->       From the review of `pi400/fdt-chosen`.
+>       From the review of #182.
 > - [ ] **Other `fdt` panics reachable from firmware data.** In the same
 >       function: `reg()`'s cell sizes on a short `#address-cells`, a
 >       malformed unit name in `find_node`, and alias resolution that
