@@ -1002,7 +1002,7 @@ The small open tails those arcs deliberately left:
 >             that corrupts CBWs, and a `test-usb-hub.py` mode that sets it
 >             and requires recovery lines and the typed check, would make it
 >             a check that can fail. From the same review. *Done 2026-10-01
->             (#185, open): the `\MSDSTALL` boot flag,
+>             (#185, merged 2026-10-01): the `\MSDSTALL` boot flag,
 >             honoured only for a stick whose INQUIRY vendor is `QEMU`, `make
 >             image-stall`, and `test-usb-hub.py --stall`, run third by `make
 >             test-usb-hub`. It requires the fault armed, the Stalls by
