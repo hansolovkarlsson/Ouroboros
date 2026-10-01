@@ -45,13 +45,18 @@ pub struct Flags {
 }
 
 /// Reads every flag file at the ESP's root, opening the volume once. If the
-/// volume cannot be opened, every flag is absent.
+/// volume cannot be opened, every flag is absent, and the log says so: a
+/// flag file on the card that was never read must not look like one that
+/// was read and changed nothing.
 pub fn read() -> Flags {
-    let Ok(mut sfs) = boot::get_image_file_system(boot::image_handle()) else {
-        return Flags::default();
-    };
-    let Ok(mut root) = sfs.open_volume() else {
-        return Flags::default();
+    let root = boot::get_image_file_system(boot::image_handle())
+        .and_then(|mut sfs| sfs.open_volume());
+    let mut root = match root {
+        Ok(root) => root,
+        Err(e) => {
+            log::warn!("Ouroboros kernel: boot flags not read ({:?}), all taken as absent", e.status());
+            return Flags::default();
+        }
     };
     let mut present = |path: &CStr16| {
         let set = root.open(path, FileMode::Read, FileAttribute::empty()).is_ok();
