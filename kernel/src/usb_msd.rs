@@ -246,18 +246,22 @@ impl Device {
 static RECOVERY_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 const RECOVERY_LOG_LIMIT: u32 = 16;
 
-/// Whether to log this bulk-recovery event: the first
-/// [`RECOVERY_LOG_LIMIT`], then one line saying the rest are suppressed;
-/// all of them while the `\MSDSTALL` test fault is armed.
-fn recovery_log() -> bool {
+/// Logs one bulk-recovery event: the first [`RECOVERY_LOG_LIMIT`], the
+/// last of them followed by one line saying the rest are suppressed; all
+/// of them while the `\MSDSTALL` test fault is armed, since
+/// `test-usb-hub.py --stall` counts them.
+fn recovery_log(line: core::fmt::Arguments) {
     if INJECT_STALLS.load(Ordering::Relaxed) {
-        return true;
+        console::println!("Ouroboros kernel: usb-msd: {line}");
+        return;
     }
     let n = RECOVERY_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
-    if n + 1 == RECOVERY_LOG_LIMIT {
-        console::println!("Ouroboros kernel: usb-msd: (further bulk-recovery messages suppressed after this one)");
+    if n < RECOVERY_LOG_LIMIT {
+        console::println!("Ouroboros kernel: usb-msd: {line}");
+        if n + 1 == RECOVERY_LOG_LIMIT {
+            console::println!("Ouroboros kernel: usb-msd: (further bulk-recovery messages suppressed)");
+        }
     }
-    n < RECOVERY_LOG_LIMIT
 }
 
 /// One full BOT command with bounded error recovery. Runs
@@ -273,7 +277,7 @@ fn recovery_log() -> bool {
 /// retry path never runs and behavior is identical to a single
 /// `bot_command_once`. It can be made to: QEMU's `usb-storage` answers a
 /// CBW with a bad signature with a Stall, and the `\MSDSTALL` boot flag
-/// ([`inject_stalls`]) sends one every seventh command to QEMU's stick,
+/// ([`inject_stalls`]) sends one as every seventh CBW to QEMU's stick,
 /// about 30 in a boot from it, which is what `scripts/test-usb-hub.py
 /// --stall` boots with.
 fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Error> {
@@ -287,9 +291,7 @@ fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Er
         match bot_command_once(cdb, this) {
             Ok(()) => return Ok(()),
             Err(e @ Error::Transfer(_)) if attempt < MAX_ATTEMPTS => {
-                if recovery_log() {
-                    console::println!("Ouroboros kernel: usb-msd: {e}; resetting bulk endpoints, retry {attempt}/{MAX_ATTEMPTS}");
-                }
+                recovery_log(format_args!("{e}; resetting bulk endpoints, retry {attempt}/{MAX_ATTEMPTS}"));
                 // Reset both directions; the healthy one no-ops (its Reset
                 // Endpoint fails on a non-halted endpoint and is ignored -
                 // and its Set TR Dequeue is refused the same way -
@@ -300,8 +302,8 @@ fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Er
                 attempt += 1;
             }
             Err(e) => {
-                if matches!(e, Error::Transfer(_)) && recovery_log() {
-                    console::println!("Ouroboros kernel: usb-msd: {e}; giving up after {MAX_ATTEMPTS} attempts");
+                if matches!(e, Error::Transfer(_)) {
+                    recovery_log(format_args!("{e}; giving up after {MAX_ATTEMPTS} attempts"));
                 }
                 return Err(e);
             }

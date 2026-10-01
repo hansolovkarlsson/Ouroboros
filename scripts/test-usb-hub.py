@@ -38,9 +38,10 @@ retry) runs about 30 times, which no ordinary QEMU run makes it do. On top of
 itself reported the bad signatures (the foreign observer: the stalls
 happened), and that each one was recovered by its first retry: exactly one
 `retry 1/3` line per Stall, no `retry 2/` line, no `giving up` (the kernel
-logs every recovery while the fault is armed). Only first attempts are
-corrupted, so a second Stall in a row and running out of attempts are not
-exercised. Measured 2026-10-01: the recovery that rewound to the ring's start
+logs every recovery while the fault is armed). An injected Stall's own
+retry is never corrupted (its tag is 4 mod 7), so a second Stall in a row
+and running out of attempts are not exercised. Only Bulk-OUT is stalled:
+the read side's recovery is not exercised either (see docs/ROADMAP.md). Measured 2026-10-01: the recovery that rewound to the ring's start
 (before #184) fails it; the one that dequeues at the enqueue position
 passes.
 
@@ -106,17 +107,24 @@ def sendkeys(text):
 
 
 def main():
-    direct = "--direct" in sys.argv[1:]
-    stall = "--stall" in sys.argv[1:]
-    usb_boot = "--usb-boot" in sys.argv[1:] or stall
+    args = sys.argv[1:]
+    unknown = [a for a in args if a not in ("--direct", "--usb-boot", "--stall")]
+    if unknown:
+        print(f"test-usb-hub: unknown argument {unknown[0]}; usage: [--direct | --usb-boot | --stall]")
+        return 2
+    direct = "--direct" in args
+    stall = "--stall" in args
+    usb_boot = "--usb-boot" in args or stall
     if direct and usb_boot:
         print("test-usb-hub: --direct and --usb-boot/--stall are separate runs")
         return 2
     # --usb-boot's stick is the image itself, so it needs no usbstick.img.
     needed = (STALL_IMAGE,) if stall else (IMAGE,) if usb_boot else (IMAGE, STICK)
+    # What rebuilds each: image-stall rebuilds IMAGE first, then the copy.
+    remedy = "make image-stall" if stall else "make image" if usb_boot else f"make image {os.path.relpath(STICK, ROOT)}"
     for path in needed:
         if not os.path.exists(path):
-            print(f"test-usb-hub: {path} missing - run make image-stall {os.path.relpath(STICK, ROOT)}")
+            print(f"test-usb-hub: {path} missing - run {remedy}")
             return 2
     # A stale image would grade the previous kernel (same guard as
     # test-keyboard-chain.sh).
@@ -125,7 +133,7 @@ def main():
     # IMAGE as its writable disk, so the guest's own writes make it newer.
     for path in needed:
         if path != STICK and os.path.exists(kernel) and os.path.getmtime(kernel) > os.path.getmtime(path):
-            print(f"test-usb-hub: {path} is older than {kernel} - run make image-stall")
+            print(f"test-usb-hub: {path} is older than {kernel} - run {remedy}")
             return 2
     if os.path.exists(MONITOR):
         os.remove(MONITOR)

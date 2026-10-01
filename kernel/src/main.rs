@@ -357,7 +357,9 @@ fn main() -> Status {
     // use later regardless of `virtio_mmio_probe_safe`.
     // Boot flag files (bootflags.rs), read here, before the takeover: `\NOXHCI`
     // skips this step, `\XHCINOWR` skips only its command-register write.
-    // Bench diagnostics for bisecting a hang on real hardware.
+    // Bench diagnostics for bisecting a hang on real hardware, except
+    // `\MSDSTALL`, a QEMU test fault: it asks usb_msd.rs to stall QEMU's stick
+    // (armed there only for a stick whose vendor is QEMU).
     // Repeated here, next to the step under suspicion, so it is still on
     // screen when a firmware exception report lands below it.
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);

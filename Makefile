@@ -948,16 +948,16 @@ image: esp
 
 # build/esp.img again with the MSDSTALL boot flag file at its root, for
 # `test-usb-hub.py --stall` (see bootflags.rs): the same attach, change,
-# strip-sidecars, detach as `image`, and a failed detach fails the target
-# rather than leaving the image mounted.
+# strip-sidecars, detach as `image`. The detach is always attempted, forced
+# if it is refused, and a failure at any step fails the target.
 image-stall: image
 	cp $(ESP_DIR).img $(STALL_IMG)
-	@set -e; MP=$$(mktemp -d); \
-	hdiutil attach -nobrowse -mountpoint "$$MP" $(STALL_IMG) >/dev/null; \
-	touch "$$MP/MSDSTALL"; \
-	find "$$MP" -name '._*' -delete; \
-	hdiutil detach "$$MP" >/dev/null; \
-	rmdir "$$MP"
+	@MP=$$(mktemp -d); \
+	hdiutil attach -nobrowse -mountpoint "$$MP" $(STALL_IMG) >/dev/null || { rmdir "$$MP"; exit 1; }; \
+	ok=0; touch "$$MP/MSDSTALL" && find "$$MP" -name '._*' -delete && ok=1; \
+	hdiutil detach "$$MP" >/dev/null || hdiutil detach -force "$$MP" >/dev/null || { echo "image-stall: $$MP is still mounted"; exit 1; }; \
+	rmdir "$$MP"; \
+	test $$ok = 1 || { echo "image-stall: could not stage MSDSTALL"; exit 1; }
 
 # Boots the real build/esp.img (genuine FAT32) instead of `run`'s vvfat
 # passthrough - needed for anything that reads the filesystem at runtime
@@ -1446,17 +1446,19 @@ test-keyboard-chain: image
 # second, --usb-boot, boots build/esp.img FROM the stick behind the hub with
 # no other disk, so it must also mount through the hub. The third, --stall,
 # is --usb-boot from build/usb-hub-stall.img (`make image-stall`, the image
-# with the MSDSTALL boot flag): QEMU's stick stalls once per seven commands,
-# about 30 times, and the bulk-endpoint recovery must carry the boot through. `python3 scripts/test-usb-hub.py --direct` is the
+# with the MSDSTALL boot flag): QEMU's stick stalls on every seventh CBW,
+# about 30 times, and the bulk-endpoint recovery must carry the boot
+# through. Its image is built just before that boot, so a failure there
+# costs only that boot. `python3 scripts/test-usb-hub.py --direct` is the
 # control, the same devices on root ports. About three minutes, so not in
 # `make test`; run it when xhci.rs's port scan, device setup or storage
 # recovery changes, or usb_msd.rs's retry. Every boot always runs (a failure
 # in one must not hide the next's result); the target fails if any did.
-test-usb-hub: image image-stall $(USBSTICK_IMG)
+test-usb-hub: image $(USBSTICK_IMG)
 	@fail=0; \
 	python3 scripts/test-usb-hub.py || fail=1; \
 	python3 scripts/test-usb-hub.py --usb-boot || fail=1; \
-	python3 scripts/test-usb-hub.py --stall || fail=1; \
+	{ $(MAKE) --no-print-directory image-stall && python3 scripts/test-usb-hub.py --stall; } || fail=1; \
 	exit $$fail
 
 # The re-entrant session check (scripts/test-reentrant-session.sh): a remote

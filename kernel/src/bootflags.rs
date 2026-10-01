@@ -41,7 +41,8 @@ const FB_CONSOLE: &CStr16 = cstr16!("\\FBCON");
 /// `\MSDSTALL`: corrupt the signature of every seventh CBW `usb_msd.rs`
 /// sends. QEMU's `usb-storage` answers a bad signature with a Stall, so the
 /// bulk recovery (`xhci::reset_storage_endpoint` and the BOT retry) runs
-/// once per seven commands, about 30 times in a boot from the stick. A test
+/// once per seven CBWs (each retry sends one too), about 30 times in a
+/// boot from the stick. A test
 /// fault for `test-usb-hub.py --stall`, honoured only for a stick whose
 /// INQUIRY vendor is `QEMU`: a real device answers a bad CBW differently,
 /// and would hang.

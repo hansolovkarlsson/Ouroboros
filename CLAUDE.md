@@ -490,7 +490,7 @@ make run-image-2vm-b         # two-VM cluster: machine B - connects the shared l
 make run-usb-kbd             # same as `run`, plus an xHCI controller + USB keyboard + HMP monitor socket for sendkey keystroke injection (see "USB HID keyboard driver" above)
 make run-usb-multi           # same as `run-usb-kbd`, plus a usb-tablet and a usb-storage stick on the same controller - the three-device rig for xhci.rs's multi-device scan (see "xHCI multi-device support" above)
 make run-usb-hub             # the Raspberry Pi's USB layout on QEMU: keyboard + stick BEHIND a usb-hub, tablet on a root port (QEMU's hub is full-speed, so the Pi's transaction-translator case is not modelled)
-make test-usb-hub            # the hub layout driven and graded (scripts/test-usb-hub.py): three boots, about three minutes - keyboard + stick behind the hub, then --usb-boot (booted FROM a stick behind the hub, mounted through it), then --stall (the same, from `make image-stall`'s copy carrying the \MSDSTALL flag, so QEMU's stick stalls once per seven commands, about 30 times, and each Stall must be recovered by its first retry); `--direct` is the control with the same devices on root ports - run it whenever xhci.rs's port scan, device setup or storage recovery changes
+make test-usb-hub            # the hub layout driven and graded (scripts/test-usb-hub.py): three boots, about three minutes - keyboard + stick behind the hub, then --usb-boot (booted FROM a stick behind the hub, mounted through it), then --stall (the same, from `make image-stall`'s copy carrying the \MSDSTALL flag, so QEMU's stick stalls on every seventh CBW, about 30 times, and each Stall must be recovered by its first retry); `--direct` is the control with the same devices on root ports - run it whenever xhci.rs's port scan, device setup or storage recovery changes
 make image                  # build build/esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
 make run-image               # boot build/esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (the fsd server and every disk command)
 make run-image-gpt           # build build/espgpt.img (build/esp.img's FAT32 wrapped in a bootable GPT disk via scripts/mkgpt.py) and boot it - exercises fsd's GPT partition discovery (the disk has no real MBR table)
@@ -645,7 +645,8 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is
   src/virtio_rng.rs  virtio-rng, backing the RANDOM syscall; absent on Parallels/Pi and that is a supported case
-  src/bootflags.rs   boot flag files (\NOXHCI, \XHCINOWR, \FBCON) at the ESP root: switch off one boot step to bisect a hang on hardware
+  src/bootflags.rs   boot flag files at the ESP root: \NOXHCI, \XHCINOWR, \FBCON switch off one boot step to bisect a hang on hardware;
+                     \MSDSTALL is a QEMU test fault (QEMU's stick only) for test-usb-hub.py --stall
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
   src/xhci.rs        from-scratch xHCI: rings, multi-device port scan, HID interrupt endpoint, storage endpoint reset
