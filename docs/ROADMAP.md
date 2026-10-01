@@ -1079,8 +1079,8 @@ The small open tails those arcs deliberately left:
 >       and `efi-symbol.py` now refuses a range whose length is not the
 >       relinked `.efi`'s `SizeOfImage`. The one small item it left,
 >       `bootflags::present()` opening the volume once per flag, became
->       `bootflags::read()`, one open for all three (branch
->       `pi400/bootflags-once`, 2026-10-01).*
+>       `bootflags::read()`, one open for all three (#183,
+>       open, 2026-10-01).*
 > - [x] **`make sdcard`.** *Built 2026-09-28, merged as #180 (2026-10-01):* the pinned pftf
 >       firmware plus `build/esp` on an already-formatted card, installed
 >       once since the firmware keeps its settings in `RPI_EFI.fd`; never
