@@ -994,14 +994,56 @@ The small open tails those arcs deliberately left:
 >             take the wrong packet. `recover_ep0`'s state dispatch (Halted:
 >             Reset Endpoint; Running: Stop Endpoint; then Set TR Dequeue at
 >             the enqueue position) is the shape. From the same review.
->       - [ ] **The storage Stall test is not committed.** The injection
+>       - [x] **The storage Stall test is not committed.** The injection
 >             that observed the fix (every seventh CBW's signature
 >             corrupted) was temporary, so no committed test runs
 >             `reset_storage_endpoint` at all, and going back to the
 >             rewind would pass `make test-usb-hub`. A test-only boot flag
 >             that corrupts CBWs, and a `test-usb-hub.py` mode that sets it
 >             and requires recovery lines and the typed check, would make it
->             a check that can fail. From the same review.
+>             a check that can fail. From the same review. *Done 2026-10-01
+>             (#185, open): the `\MSDSTALL` boot flag,
+>             honoured only for a stick whose INQUIRY vendor is `QEMU`, `make
+>             image-stall`, and `test-usb-hub.py --stall`, run third by `make
+>             test-usb-hub`. It requires the fault armed, the Stalls by
+>             QEMU's own count, and exactly one first retry per Stall with no
+>             second retry and no giving up (every recovery is logged while
+>             the fault is armed). Passes with 30 Stalls and 30 first
+>             retries. Fails with the rewind from before #184 put back (19
+>             Stalls, 56 first retries and 18 further, `typed` too), with
+>             the corruption disabled (no Stalls), and with the vendor test
+>             pointed elsewhere (not armed, no Stalls).*
+>       - [ ] **The Stall test never stalls a retry.** `\MSDSTALL`
+>             corrupts a CBW whose tag is 3 mod 7, and every attempt takes a
+>             tag, so an injected Stall's own retry (4 mod 7) is never
+>             corrupted: a second Stall in a row on one command and running
+>             out of attempts are not exercised, and a recovery that works
+>             once but leaves the endpoint wrong for the next one passes.
+>             (A retry after some other failure can land on 3 mod 7; the
+>             fault does not single out first attempts.) Corrupt some
+>             retries on purpose, and grade the second and third attempts.
+>             From the review of #185.
+>       - [ ] **A Bulk-IN Stall in the data or status phase is not
+>             recovered.** `bot_command` answers every transfer failure the
+>             same way: reset both host endpoints, send a fresh CBW. After
+>             a Bulk-IN Stall the device still owes its CSW (BOT 6.7.2 and
+>             6.7.3: clear the halt, then read the CSW), so each new CBW is
+>             stalled in turn and the command gives up. Reproduced on QEMU
+>             by the max review of #185, stalling one CSW read (an IN
+>             shorter than 13 bytes): READ CAPACITY gave up after three
+>             attempts, `usb-msd init failed`, nothing mounted. A real stick
+>             that stalls a failed READ(10) is in the same state. The fix is
+>             recovery by phase: after a data- or status-phase Stall, clear
+>             the halt and read the CSW before any new CBW. Ahead of the
+>             board's storage, and the next branch after #185.
+>       - [ ] **`--stall` exercises the Bulk-OUT recovery only.** The fault
+>             corrupts CBWs, so only Bulk-OUT halts; at every recovery the
+>             IN endpoint is Running and its Reset Endpoint and Set TR
+>             Dequeue are refused. Deleting the IN recovery outright still
+>             passes (the same review). Needs a Bulk-IN Stall the driver can
+>             recover, so it follows the item above. With it: the capped
+>             recovery log the board uses is not run by any test either,
+>             since arming the fault lifts the cap.
 >       - [x] **Make the Pi's in-RAM framebuffer visible to the display** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is

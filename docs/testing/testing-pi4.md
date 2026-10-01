@@ -498,6 +498,11 @@ with the firmware's text console: first partway through
 `xHCI discovery failed (skipped…)` line, and under `XHCINOWR` at the earlier
 MADT line.
 
+A fourth flag, `MSDSTALL` (2026-10-01), is a test fault for QEMU and not a
+diagnostic: it corrupts every seventh CBW so QEMU's stick stalls
+(`test-usb-hub.py --stall`). The kernel honours it only for a stick whose
+INQUIRY vendor is `QEMU`, but it has no place on a card.
+
 **Why HDMI shows nothing after the firmware's text, without `FBCON`.** The
 firmware describes a serial port in ACPI SPCR, so the kernel installs the
 PL011 console after the exit (checkpoint 2) and every kernel line from there

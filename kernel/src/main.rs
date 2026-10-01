@@ -357,13 +357,18 @@ fn main() -> Status {
     // use later regardless of `virtio_mmio_probe_safe`.
     // Boot flag files (bootflags.rs), read here, before the takeover: `\NOXHCI`
     // skips this step, `\XHCINOWR` skips only its command-register write.
-    // Bench diagnostics for bisecting a hang on real hardware.
+    // Bench diagnostics for bisecting a hang on real hardware, except
+    // `\MSDSTALL`, a QEMU test fault: it asks usb_msd.rs to stall QEMU's stick
+    // (armed there only for a stick whose vendor is QEMU).
     // Repeated here, next to the step under suspicion, so it is still on
     // screen when a firmware exception report lands below it.
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
     // `\FBCON` (`fb_console_forced`): leave the discovered serial console
     // uninstalled after the exit, so the framebuffer console below takes HDMI.
-    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced } = bootflags::read();
+    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall } = bootflags::read();
+    if msd_stall {
+        usb_msd::inject_stalls();
+    }
     let xhci_result = if no_xhci {
         Err(pci::XhciDiscoveryError::SkippedByFlag)
     } else {

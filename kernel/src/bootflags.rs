@@ -4,6 +4,11 @@
 //! Diagnostics for the bench, not configuration: every flag here names what
 //! it switches off, and the boot log says when one is set.
 //!
+//! One flag is not a diagnostic but a test fault: `\MSDSTALL` makes the
+//! USB stick stall, so QEMU can exercise the bulk recovery that no ordinary
+//! run reaches. It belongs on a test image, and `usb_msd.rs` ignores it for
+//! any stick that is not QEMU's.
+//!
 //! Read before `exit_boot_services`, through the same image file system
 //! `bootid.rs` uses, and before the xHCI takeover in `main.rs`, which can take
 //! a USB boot disk away. A flag that cannot be read (no file system, any
@@ -33,6 +38,16 @@ const XHCI_NO_WRITE: &CStr16 = cstr16!("\\XHCINOWR");
 /// serial cable that looks exactly like a hang.
 const FB_CONSOLE: &CStr16 = cstr16!("\\FBCON");
 
+/// `\MSDSTALL`: corrupt the signature of every seventh CBW `usb_msd.rs`
+/// sends. QEMU's `usb-storage` answers a bad signature with a Stall, so the
+/// bulk recovery (`xhci::reset_storage_endpoint` and the BOT retry) runs
+/// once per seven CBWs (each retry sends one too), about 30 times in a
+/// boot from the stick. A test
+/// fault for `test-usb-hub.py --stall`, honoured only for a stick whose
+/// INQUIRY vendor is `QEMU`: a real device answers a bad CBW differently,
+/// and would hang.
+const MSD_STALL: &CStr16 = cstr16!("\\MSDSTALL");
+
 /// Which boot flags are set, read once by [`read`].
 #[derive(Clone, Copy, Default)]
 pub struct Flags {
@@ -42,6 +57,8 @@ pub struct Flags {
     pub xhci_no_write: bool,
     /// [`FB_CONSOLE`]
     pub fb_console: bool,
+    /// [`MSD_STALL`]
+    pub msd_stall: bool,
 }
 
 /// Reads every flag file at the ESP's root, opening the volume once. If the
@@ -69,5 +86,6 @@ pub fn read() -> Flags {
         no_xhci: present(NO_XHCI),
         xhci_no_write: present(XHCI_NO_WRITE),
         fb_console: present(FB_CONSOLE),
+        msd_stall: present(MSD_STALL),
     }
 }

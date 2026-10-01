@@ -45,7 +45,7 @@
 //! case is.)
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::console;
 use crate::xhci;
@@ -94,6 +94,25 @@ use crate::xhci::{USB_CBW_BUF as CBW_BUF, USB_CSW_BUF as CSW_BUF, USB_DATA_BUF a
 /// or misrouted status can't be mistaken for the current command's.
 static NEXT_TAG: AtomicU32 = AtomicU32::new(1);
 
+/// Set by [`inject_stalls`] when the `\MSDSTALL` boot flag is set. A
+/// request only: [`Device::init`] arms the fault ([`INJECT_STALLS`]) for a
+/// stick whose INQUIRY vendor is `QEMU`, and for no other, since a real
+/// device answers a bad CBW by needing a class reset this driver never
+/// sends, and its storage would hang.
+static STALLS_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Armed by [`Device::init`] for QEMU's stick when [`STALLS_REQUESTED`]:
+/// every seventh CBW goes out with a corrupted signature, which QEMU's
+/// `usb-storage` answers with a Stall. While armed, every recovery is
+/// logged (no [`RECOVERY_LOG_LIMIT`]), since `test-usb-hub.py --stall`
+/// counts them. A test fault; see `bootflags.rs`.
+static INJECT_STALLS: AtomicBool = AtomicBool::new(false);
+
+/// Requests the `\MSDSTALL` test fault. Called once, before the exit.
+pub fn inject_stalls() {
+    STALLS_REQUESTED.store(true, Ordering::Relaxed);
+}
+
 /// A mounted-capacity handle - deliberately tiny: the endpoint state
 /// lives in `xhci.rs`, the DMA buffers are statics, so all a device
 /// *is* here is its validated capacity.
@@ -120,6 +139,15 @@ impl Device {
         let vendor = core::str::from_utf8(&inquiry[8..16]).unwrap_or("?").trim_ascii_end();
         let product = core::str::from_utf8(&inquiry[16..32]).unwrap_or("?").trim_ascii_end();
         console::println!("Ouroboros kernel: usb-msd: INQUIRY -> vendor='{vendor}' product='{product}'");
+        if STALLS_REQUESTED.load(Ordering::Relaxed) {
+            let qemu = vendor == "QEMU";
+            INJECT_STALLS.store(qemu, Ordering::Relaxed);
+            if qemu {
+                console::println!("Ouroboros kernel: usb-msd: \\MSDSTALL armed: every seventh CBW is corrupted");
+            } else {
+                console::println!("Ouroboros kernel: usb-msd: \\MSDSTALL ignored: the stick is not QEMU's");
+            }
+        }
 
         // A freshly attached/reset device reports a Unit Attention
         // condition: the first non-INQUIRY command fails with CHECK
@@ -218,6 +246,24 @@ impl Device {
 static RECOVERY_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 const RECOVERY_LOG_LIMIT: u32 = 16;
 
+/// Logs one bulk-recovery event: the first [`RECOVERY_LOG_LIMIT`], the
+/// last of them followed by one line saying the rest are suppressed; all
+/// of them while the `\MSDSTALL` test fault is armed, since
+/// `test-usb-hub.py --stall` counts them.
+fn recovery_log(line: core::fmt::Arguments) {
+    if INJECT_STALLS.load(Ordering::Relaxed) {
+        console::println!("Ouroboros kernel: usb-msd: {line}");
+        return;
+    }
+    let n = RECOVERY_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n < RECOVERY_LOG_LIMIT {
+        console::println!("Ouroboros kernel: usb-msd: {line}");
+        if n + 1 == RECOVERY_LOG_LIMIT {
+            console::println!("Ouroboros kernel: usb-msd: (further bulk-recovery messages suppressed)");
+        }
+    }
+}
+
 /// One full BOT command with bounded error recovery. Runs
 /// [`bot_command_once`]; on a bulk-transfer failure (`Error::Transfer` -
 /// a stall or timeout at the xHCI level), resets both bulk endpoints
@@ -230,9 +276,10 @@ const RECOVERY_LOG_LIMIT: u32 = 16;
 /// QEMU never stalls a transfer on its own, so in an ordinary QEMU run the
 /// retry path never runs and behavior is identical to a single
 /// `bot_command_once`. It can be made to: QEMU's `usb-storage` answers a
-/// CBW with a bad signature with a Stall, which is how the recovery was
-/// exercised on 2026-10-01 (see `docs/ROADMAP.md`). Nothing committed does
-/// that yet.
+/// CBW with a bad signature with a Stall, and the `\MSDSTALL` boot flag
+/// ([`inject_stalls`]) sends one as every seventh CBW to QEMU's stick,
+/// about 30 in a boot from it, which is what `scripts/test-usb-hub.py
+/// --stall` boots with.
 fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Error> {
     const MAX_ATTEMPTS: u32 = 3;
     let mut attempt = 1u32;
@@ -244,13 +291,7 @@ fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Er
         match bot_command_once(cdb, this) {
             Ok(()) => return Ok(()),
             Err(e @ Error::Transfer(_)) if attempt < MAX_ATTEMPTS => {
-                let n = RECOVERY_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
-                if n < RECOVERY_LOG_LIMIT {
-                    console::println!("Ouroboros kernel: usb-msd: {e}; resetting bulk endpoints, retry {attempt}/{MAX_ATTEMPTS}");
-                    if n + 1 == RECOVERY_LOG_LIMIT {
-                        console::println!("Ouroboros kernel: usb-msd: (further bulk-recovery messages suppressed)");
-                    }
-                }
+                recovery_log(format_args!("{e}; resetting bulk endpoints, retry {attempt}/{MAX_ATTEMPTS}"));
                 // Reset both directions; the healthy one no-ops (its Reset
                 // Endpoint fails on a non-halted endpoint and is ignored -
                 // and its Set TR Dequeue is refused the same way -
@@ -260,7 +301,12 @@ fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Er
                 let _ = xhci::storage_reset_endpoint(false);
                 attempt += 1;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if matches!(e, Error::Transfer(_)) {
+                    recovery_log(format_args!("{e}; giving up after {MAX_ATTEMPTS} attempts"));
+                }
+                return Err(e);
+            }
         }
     }
 }
@@ -287,6 +333,9 @@ fn bot_command_once(cdb: &[u8], data: Option<(&mut [u8], bool)>) -> Result<(), E
         cbw[13] = 0; // LUN 0
         cbw[14] = cdb.len() as u8;
         cbw[15..15 + cdb.len()].copy_from_slice(cdb);
+        if INJECT_STALLS.load(Ordering::Relaxed) && tag % 7 == 3 {
+            cbw[0] ^= 0xff;
+        }
     }
     xhci::storage_bulk(false, CBW_BUF.0.get() as u64, 31).map_err(Error::Transfer)?;
 
