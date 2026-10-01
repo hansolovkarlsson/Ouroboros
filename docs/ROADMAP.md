@@ -964,7 +964,7 @@ The small open tails those arcs deliberately left:
 >             position instead; the storage one is the path confirmed on
 >             Parallels ("Mode A"), so it is left for its own change and
 >             check. Found reading the code, not observed. *Fixed 2026-10-01
->             (branch `pi400/storage-dequeue`): it dequeues at the current
+>             (#184, open): it dequeues at the current
 >             enqueue position with the current cycle, as EP0 does. Observed
 >             on QEMU by corrupting every seventh CBW's signature, which
 >             `usb-storage` answers with a Stall, under `test-usb-hub.py
@@ -978,7 +978,7 @@ The small open tails those arcs deliberately left:
 >             (`usb-msd: ... resetting bulk endpoints`) during the Pi's stick
 >             reads, followed by reads that succeed, confirm it; repeated
 >             retries that all fail point at the next item first. From the
->             review of `pi400/storage-dequeue`.
+>             review of #184.
 >       - [ ] **Bulk recovery never clears the halt on the device.** It
 >             resets the host side only (Reset Endpoint, Set TR Dequeue) and
 >             never sends CLEAR_FEATURE(ENDPOINT_HALT), which the BOT spec's
