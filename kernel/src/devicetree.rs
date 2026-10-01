@@ -42,8 +42,9 @@ pub enum DiscoveryError {
     NoDtb,
     /// A devicetree pointer was found, but `fdt` couldn't parse it.
     MalformedDtb,
-    /// Parsed fine, but neither `/chosen/stdout` nor a `compatible =
-    /// "arm,pl011"` node exists.
+    /// Parsed fine, but `/chosen`'s `stdout-path` names no node (or there
+    /// is no `/chosen`, or no `stdout-path` in it), and no `compatible =
+    /// "arm,pl011"` node exists either.
     NoConsoleNode,
     /// A console node exists but isn't PL011-compatible — this driver
     /// doesn't know its register layout.
@@ -74,12 +75,14 @@ pub unsafe fn discover_pl011(dtb: Option<*const u8>) -> Result<usize, DiscoveryE
     // Not `fdt.chosen().stdout()`: the crate panics when the tree has no
     // `/chosen`, and again when `stdout-path` is empty. The tree is
     // firmware's, so a missing node has to fall through, not halt the boot.
-    // Same lookup otherwise, the trailing NUL dropped as the crate does.
+    // An empty path is skipped too: `find_node("")` returns the root, which
+    // would end the search as `UnsupportedConsole` with a PL011 in the tree.
     let stdout = fdt
         .find_node("/chosen")
         .and_then(|chosen| chosen.property("stdout-path"))
-        .and_then(|prop| prop.value.split_last())
-        .and_then(|(_, path)| core::str::from_utf8(path).ok())
+        .and_then(|prop| core::str::from_utf8(prop.value).ok())
+        .map(|path| path.trim_end_matches('\0'))
+        .filter(|path| !path.is_empty())
         .and_then(|path| fdt.find_node(path));
     let node = stdout
         .or_else(|| fdt.find_compatible(&["arm,pl011"]))

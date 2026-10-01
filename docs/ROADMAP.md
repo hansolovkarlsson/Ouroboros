@@ -1086,12 +1086,37 @@ The small open tails those arcs deliberately left:
 > - [x] **Small:** the `fdt` crate panics on a tree with no `/chosen`
 >       (`chosen()` expects one; found building test trees, real firmware
 >       trees have it). *Fixed 2026-10-01 (branch `pi400/fdt-chosen`):*
->       `devicetree.rs` reads `/chosen/stdout-path` itself, which also
->       removes a second panic in the crate's `stdout()` on an empty
->       `stdout-path`. A host harness ran the old and new lookups on the
->       pftf Pi 4 and Pi 400 trees and six hand-built ones: the two that
->       panicked now fall through to the PL011 search, and every other tree
->       gives the same node as before.
+>       `devicetree.rs` reads `/chosen/stdout-path` itself. That also removes
+>       the crate's second panic, on a zero-length `stdout-path`; skips a path
+>       that is only a NUL (`find_node("")` is the root, which ended the
+>       search as an unsupported console); and trims a trailing NUL instead
+>       of dropping the last byte. Checked by a host harness, not committed,
+>       on the pftf Pi 4 and Pi 400 trees and seven hand-built ones with a
+>       decoy PL011 ahead of the real one: the two that panicked fall
+>       through, the NUL-only and NUL-less paths now resolve as intended,
+>       the rest are unchanged, and putting back either old behaviour is
+>       caught.
+> - [ ] **The devicetree console lookup has no test that can fail.** QEMU
+>       never runs it (its firmware publishes no DTB) and the harness above
+>       lives outside the tree, so going back to `chosen().stdout()` would
+>       pass `make test` and every QEMU run and show only as a halted Pi.
+>       Move the lookup into a pure helper with host tests over those trees.
+>       From the review of `pi400/fdt-chosen`.
+> - [ ] **Other `fdt` panics reachable from firmware data.** In the same
+>       function: `reg()`'s cell sizes on a short `#address-cells`, a
+>       malformed unit name in `find_node`, and alias resolution that
+>       recurses without limit on an alias naming itself. Wrap the crate
+>       in non-panicking helpers as `dtranges.rs` already does, or
+>       validate the tree first. From the same review.
+> - [ ] **Which UART the devicetree console picks: three open choices, for
+>       the serial session.** `stdout-path` may carry options
+>       (`serial0:115200n8`) that are not stripped, so it never resolves; the
+>       PL011 fallback takes the first in tree order, including one with
+>       `status = "disabled"`; and a `stdout-path` naming a non-PL011 UART
+>       (the Pi's mini UART) ends as an unsupported console without trying
+>       the PL011 search. Each changes which UART a board gets, so none is
+>       made before the serial dump shows what the Pi's tree says. From the
+>       same review.
 > - [ ] **Small:** the UART's and GIC's device block depends on
 >       "Limit RAM to 3 GB" staying on: with RAM to 4 GB, block 3 is mapped as
 >       RAM and the device mapping is skipped. Since #181 the kernel at least
