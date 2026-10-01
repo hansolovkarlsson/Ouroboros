@@ -358,7 +358,14 @@ localises the failure without any guessing.
    console — which the firmware mirrors to both serial and HDMI. Reaching here
    proves the card layout and the firmware handoff, nothing else.
 
-2. **`console @ {base:#x} (via {source})`.** *(predicted: `via acpi`)* — the
+2. **`console @ {base:#x} (via {source})`.** *(predicted: `via acpi`; observed
+   2026-09-28 on a Pi 4 with the firmware set to ACPI + Devicetree:
+   `console @ 0x7e201000 (via devicetree)`. The devicetree is tried first and
+   its `reg` is a VideoCore bus address; the PL011 is at `0xfe201000` for the
+   ARM. `dtranges.rs` now translates through the ancestors' `ranges`, so the
+   line should read `0xfe201000`. Checked on the host against
+   `bcm2711-rpi-4-b.dtb` and `bcm2711-rpi-400.dtb` from the pinned firmware,
+   not yet on a board.)* The
    RPi4 EDK2 firmware ships a real SPCR table, so the ACPI branch should
    resolve a PL011 base. **If this line is missing**, `pci::log_all_devices`
    runs instead as a diagnostic, and after `exit_boot_services` there is no
@@ -444,6 +451,118 @@ the shell has its builtins and nothing else. Every runtime filesystem test:
 `ls`, `cat`, `write`, `mount`, `erase disk`, `partition`, `format` — needs the
 **USB 3 stick in a blue port**, as on Parallels. This is not a Pi limitation; it is the
 same architecture that made USB-MSD necessary there in the first place.
+
+### Bisecting a hang with boot flag files
+
+An empty file at the card's root switches off one boot step
+(`kernel/src/bootflags.rs`), so a hang can be narrowed without a rebuild or a
+serial cable: `touch /Volumes/OUROBOROS/NOXHCI`, eject, boot; delete it for the
+next round. `make sdcard` leaves files at the root alone. The boot log names a
+flag when it is set.
+
+| Flag | What it switches off | A boot that reaches `shell ready` means |
+|---|---|---|
+| `NOXHCI` | xHCI discovery and bring-up: no USB at all | the hang is inside `pci::discover_xhci` |
+| `XHCINOWR` | only the PCI command-register write in discovery (the takeover from firmware still happens), and the bring-up after the exit | the hang is the write or the bring-up after the exit, not the takeover; `NOXHCI` cannot split those two either, so a boot that reaches the shell under both flags leaves both open |
+| `FBCON` | installing the SPCR serial console after the exit; the kernel's framebuffer console is installed instead, right after `exceptions::install()`, on the firmware's page tables | (not a bisection) every post-exit line, the MMU switch and the kernel's own `EXCEPTION …` report included, appears on HDMI, so the last one shows where the boot stops |
+
+One flag per bisection boot; `FBCON` combines with either of the others.
+They exist for the first Pi 400 boots (2026-09-28), which all ended on HDMI
+with the firmware's text console: first partway through
+`xhci: PCI command register was`, then under `NOXHCI` at the
+`xHCI discovery failed (skipped…)` line, and under `XHCINOWR` at the earlier
+MADT line.
+
+**Why HDMI shows nothing after the firmware's text, without `FBCON`.** The
+firmware describes a serial port in ACPI SPCR, so the kernel installs the
+PL011 console after the exit (checkpoint 2) and every kernel line from there
+on goes to serial only. The framebuffer is not idle, though: `cond` draws on
+it whenever a framebuffer was discovered (`CON_INFO` asks `fbdev`, not the
+kernel's console), which QEMU with `-device ramfb` confirms. So HDMI that
+never changes after the firmware's text means the boot did not reach `cond`,
+or the framebuffer does not show what is written to it. `NOXHCI` did not
+change that, so it is not the xHCI step alone.
+
+**`FBCON`'s first boot ended in the firmware's own exception handler**:
+`xhci: PCI command register was 0x0140, wrote+read back 0x0146`, blank lines,
+then `Synchronous Exception at 0x0000000039F31A40`. That message is EDK2's, not
+the kernel's (the kernel reports `EXCEPTION vector=… esr_el1=…`), so the fault
+came while the firmware's vectors were still installed: after that line and
+before `exceptions::install()` just past `exit_boot_services`. The
+`xHCI controller @ …` line that normally follows did not appear.
+
+**Placing a firmware-reported address.** The kernel logs where the firmware
+loaded it (`image @ <base>..<end>`, printed at startup and again, so that it
+is still on screen, just before the xHCI step), and
+`exiting boot services` right before the exit. With the address from HDMI:
+
+```sh
+cargo rustc -p ouroboros-kernel --target aarch64-unknown-uefi -- \
+    -C link-arg=/MAP:build/BOOTAA64.map          # the same tree as the card
+scripts/efi-symbol.py build/BOOTAA64.map \
+    target/aarch64-unknown-uefi/debug/BOOTAA64.efi <base>..<end> <pc>
+```
+
+The build is deterministic apart from the PE timestamp and debug record, so
+the relinked map fits the card's binary. The script refuses before naming
+anything unless `<end>-<base>` is the relinked `.efi`'s `SizeOfImage` (a
+misread digit, or a card built with another profile or tree) and the map and
+`.efi` come from the same link. Checked on QEMU with a planted
+pre-exit fault: its firmware printed the same `Synchronous Exception at`
+line, and the script named the planted write. An address outside the image
+is firmware code, and only the serial dump names that module.
+
+**The second `FBCON` boot placed it** (build `b5bf5b3`): `image @
+0x376df000..0x378c8000` (0x1e9000 bytes, matching the binary, which is the
+check that the digits were read right: an earlier misreading of a low-resolution
+photo landed in `.rdata`, and another on a stack store between two stack stores
+that had succeeded), and `Synchronous Exception at 0x37758628`, offset
+0x79628: `core::sync::atomic::atomic_load` (instantiated in `log`) + 0x5c, the
+`ldr x8, [x8]` of a Relaxed load through the pointer the debug build had
+spilled to the stack four instructions earlier. Its three callers are the
+`AtomicUsize::load` wrappers of the kernel, `uefi` and `log`, and every
+`AtomicUsize` among them is a static in the image, so the pointer should always
+be valid. This time the fault came before the `was …` line, right after
+`boot flag \FBCON is set`; the first `FBCON` boot faulted after it. A fault
+that moves, on a load whose address cannot be wrong, points at memory changing
+underneath the kernel (the stack slot overwritten, or the image's pages made
+unreadable) rather than at one bad instruction, and nothing in the kernel
+changes memory attributes before the exit. Unresolved: the firmware's serial
+dump (ESR, FAR and a backtrace naming the caller) is what settles it.
+
+**`NOXHCI` + `FBCON` got through the exit** (`exiting boot services`, no
+firmware exception), so the firmware-phase fault needs the xHCI takeover. Then
+HDMI showed nothing more, not even `framebuffer console live`: something
+between the exit and the MMU switch, with no console yet for an exception
+report. `FBCON` now installs the framebuffer console right after
+`exceptions::install()` and the kernel prints `installing our own identity
+map` just before the switch, so that stretch is on screen. Checked on QEMU
+(`-device ramfb`): a fault planted just before the switch shows
+`EXCEPTION vector=4 esr_el1=0x96000047 far_el1=0x10` on the framebuffer, and
+without the plant the boot reaches the shell.
+
+**The Pi 4 then stopped at `exiting boot services` without the clear** (build
+`0602ca3`, `NOXHCI` + `FBCON`), where an earlier build's boot of the same board
+had cleared the screen: the same step behaving differently between boots, as
+on the Pi 400. Nothing prints between the exit and that clear, so under
+`FBCON` the kernel now draws solid white squares at the top-right, with plain
+stores and no console: **square 1** when `exit_boot_services` has returned,
+**square 2** when the exception vectors are installed. The early console's
+clear wipes them, so squares still on screen mean the boot stopped before it,
+and none at all means inside the firmware's `ExitBootServices`. Checked on
+QEMU with a hang planted after each: one square, then two.
+
+**Where the Pi 4 stops, as far as HDMI can say** (build `3da3cad`,
+`NOXHCI` + `FBCON`): the screen cleared, with no squares and no text. The
+clear is the early console's, and it wipes the squares, so the exit returned,
+the vectors went in, and the whole-screen clear (one `write_bytes` and one
+cache clean) reached the display; the first line after it
+(`framebuffer console live early …`, drawn a pixel at a time with a clean per
+glyph) never appeared. The stop is between the clear and that line, or the
+line was drawn and never reached the display. Testing paused here on
+2026-09-28 until the serial cable arrives: boot without flags first, since
+the console is now at the translated `0xfe201000` and every line after the
+exit goes to serial.
 
 ---
 

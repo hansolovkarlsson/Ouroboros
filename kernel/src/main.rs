@@ -5,9 +5,11 @@ extern crate alloc;
 
 mod acpi;
 mod block;
+mod bootflags;
 mod bootid;
 mod console;
 mod devicetree;
+mod dtranges;
 mod exceptions;
 mod fbconsole;
 mod fbdev;
@@ -83,6 +85,17 @@ fn main() -> Status {
     uefi::helpers::init().unwrap();
 
     log::info!("Ouroboros kernel: UEFI stage alive");
+    // Where firmware loaded this image, so an address in the firmware's own
+    // exception report ("Synchronous Exception at 0x...", which on a board
+    // without a serial cable is all HDMI shows) can be placed inside this
+    // image or outside it, and turned into an offset for the disassembly.
+    let image_range = boot::open_protocol_exclusive::<uefi::proto::loaded_image::LoadedImage>(boot::image_handle())
+        .map(|image| {
+            let (base, size) = image.info();
+            (base as u64, base as u64 + size)
+        })
+        .unwrap_or((0, 0));
+    log::info!("Ouroboros kernel: image @ {:#x}..{:#x}", image_range.0, image_range.1);
 
     // Must happen before exit_boot_services: the devicetree/ACPI pointers
     // live in the UEFI configuration table, and PCI enumeration needs boot
@@ -342,7 +355,22 @@ fn main() -> Status {
     // the Pi, whose PCIe window is translated), rather than guessed - see
     // xhci.rs's module doc comment for why that makes it safe to actually
     // use later regardless of `virtio_mmio_probe_safe`.
-    let xhci_info = match pci::discover_xhci() {
+    // Boot flag files (bootflags.rs), read here, before the takeover: `\NOXHCI`
+    // skips this step, `\XHCINOWR` skips only its command-register write.
+    // Bench diagnostics for bisecting a hang on real hardware.
+    // Repeated here, next to the step under suspicion, so it is still on
+    // screen when a firmware exception report lands below it.
+    log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
+    let xhci_no_write = bootflags::present(bootflags::XHCI_NO_WRITE);
+    // `\FBCON`: leave the discovered serial console uninstalled after the
+    // exit, so the framebuffer console below takes HDMI.
+    let fb_console_forced = bootflags::present(bootflags::FB_CONSOLE);
+    let xhci_result = if bootflags::present(bootflags::NO_XHCI) {
+        Err(pci::XhciDiscoveryError::SkippedByFlag)
+    } else {
+        pci::discover_xhci(!xhci_no_write)
+    };
+    let xhci_info = match xhci_result {
         Ok(info) => {
             log::info!(
                 "Ouroboros kernel: xHCI controller @ {:#x} (BAR {:#x}, translation {:#x}), PCI command register {:#06x} -> {:#06x}",
@@ -352,7 +380,15 @@ fn main() -> Status {
                 info.command_before,
                 info.command_after
             );
-            Some(info)
+            if xhci_no_write {
+                // Memory Space stays off, so the controller's registers do
+                // not decode (QEMU reads all-ones and the bring-up hangs);
+                // under this flag the result is how far the boot gets.
+                log::warn!("Ouroboros kernel: xhci: not brought up (\\XHCINOWR)");
+                None
+            } else {
+                Some(info)
+            }
         }
         Err(e) => {
             log::warn!("Ouroboros kernel: xHCI discovery failed ({e})");
@@ -366,7 +402,13 @@ fn main() -> Status {
     // `uart16550`, and only when `discovery` gave us an address to trust.
     // The returned memory map is kept, not discarded: mmu.rs uses it to
     // identity-map real discovered RAM instead of a hardcoded address.
+    // The last line before the exit, so a fault can be placed on one side of
+    // it (before this line, it is in the discovery above).
+    log::info!("Ouroboros kernel: exiting boot services");
     let memory_map = unsafe { boot::exit_boot_services(None) };
+    if fb_console_forced {
+        progress_square(fb_info, 1);
+    }
 
     // IRQs masked from here until the first `eret` into task 0, by our own
     // instruction and not by trusting what the firmware left: EDK2's
@@ -384,8 +426,36 @@ fn main() -> Status {
     // handler and halts, instead of taking the whole VM down the way an
     // untested address once did on Parallels.
     exceptions::install();
+    if fb_console_forced {
+        progress_square(fb_info, 2);
+    }
 
-    if let Some((base, kind, _source)) = discovery {
+    // `\FBCON`: the framebuffer console right away, on the firmware's page
+    // tables, so everything from here on (the MMU switch included, and any
+    // exception report, which needs an installed console) reaches HDMI. Built
+    // for the Pi 400, whose boot went silent after the exit with no serial
+    // cable to say where.
+    if fb_console_forced {
+        if let Some(info) = fb_info {
+            // SAFETY: the firmware's translation tables are still live
+            // (mmu.rs has not switched TTBR0 yet), UEFI requires them to
+            // identity-map memory, and the firmware's own text console was
+            // drawing into this framebuffer moments ago, so it is mapped and
+            // writable at `info.base`. After the switch our tables map it
+            // too (`extra_devices` below), so the console survives it.
+            let fb = unsafe { fbconsole::FbConsole::new(&info) };
+            console::install(Console::Framebuffer(fb));
+            console::println!("Ouroboros kernel: framebuffer console live early (\\FBCON), on the firmware's page tables");
+        }
+    }
+
+    // Kept for the identity map below, which maps the console explicitly.
+    let console_base = discovery.as_ref().map(|&(base, _, _)| base as u64);
+    // `\FBCON` replaces the serial console only when there is a framebuffer
+    // to replace it with; without one, the flag would leave no console at all.
+    let serial_console = discovery.filter(|_| !(fb_console_forced && fb_info.is_some()));
+    let serial_console_base = serial_console.as_ref().map(|&(base, _, _)| base as u64);
+    if let Some((base, kind, _source)) = serial_console {
         // SAFETY: `base` came from the platform's own devicetree, ACPI
         // tables, or PCI configuration space.
         let console = match kind {
@@ -397,16 +467,21 @@ fn main() -> Status {
     }
 
     // SAFETY: called after exit_boot_services, with the memory map that
-    // call returned. Sized for 4, not 2 (framebuffer + xHCI BAR), as of
-    // the MADT/GICv3 work: GICD/GICR are genuinely discovered addresses
-    // now (madt.rs), not assumed to live in the fixed low-1GB device
-    // block the way gic.rs's old QEMU-devicetree-derived addresses did -
-    // real Parallels hardware could put them anywhere, the same way its
-    // xHCI BAR turned out not to respect that assumption either. See
-    // `mmu.rs`'s `MAX_EXTRA_L1_TABLES` doc comment for the matching bump
-    // on that side.
-    let mut extra_devices = [(0u64, 0u64); 4];
+    // call returned. Up to five regions (`mmu::MAX_EXTRA_DEVICES`): the
+    // console, framebuffer, xHCI BAR, GICD and GICR, all discovered
+    // addresses (madt.rs for the GIC), none assumed to live in the fixed
+    // low-1GB device block. `mmu.rs`'s `MAX_EXTRA_L1_TABLES` is sized to
+    // match, so each can have its own L1 table past 512GB.
+    let mut extra_devices = [(0u64, 0u64); mmu::MAX_EXTRA_DEVICES];
     let mut extra_device_count = 0;
+    // The discovered serial console, mapped because it is the console: the
+    // fixed low-1GB device block is a QEMU-shaped convention, and the Pi 4's
+    // PL011 (0xfe201000) is far above it. Mapped under `\FBCON` too, where it
+    // goes unused, since it costs one block and keeps the map the same.
+    if let Some(base) = console_base {
+        extra_devices[extra_device_count] = (base, 0x1000);
+        extra_device_count += 1;
+    }
     if let Some(info) = fb_info {
         extra_devices[extra_device_count] = (info.base, info.size as u64);
         extra_device_count += 1;
@@ -444,6 +519,7 @@ fn main() -> Status {
     el0_regions[3] = cond.as_ref().map_or((0, 0), |c| (c.base, c.size));
     el0_regions[4] = netd.as_ref().map_or((0, 0), |n| (n.base, n.size));
     el0_regions[5] = accountd.as_ref().map_or((0, 0), |a| (a.base, a.size));
+    console::println!("Ouroboros kernel: installing our own identity map");
     unsafe {
         // The xHCI/USB DMA pool is mapped Normal Non-cacheable only where
         // the firmware declared DMA non-coherent (above,
@@ -463,6 +539,17 @@ fn main() -> Status {
         )
     };
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
+    // The console's own device mapping gives way to RAM's when RAM's span
+    // covers its 1GB block (the Pi 4 with RAM above 3GB): the UART is then
+    // cacheable and its output may never leave the cache. Asked of the
+    // hardware walker, not inferred from the plan.
+    if let Some(base) = serial_console_base {
+        if !mmu::walks_as_device(base) {
+            console::println!(
+                "Ouroboros kernel: WARNING: console {base:#x} is not mapped as a device (its 1GB block is RAM's), its output may stop here"
+            );
+        }
+    }
     tasks::init_runtime_allocator();
 
     // Make the framebuffer available to the console server's FB_* syscalls
@@ -757,6 +844,34 @@ fn try_virtio_console() {
     console::println!("Ouroboros kernel: virtio-console live (fallback - every other mechanism failed)");
 }
 
+/// Under `\FBCON`: a solid white square at the top-right of the screen, the
+/// `n`th from the right edge, drawn with plain stores and no console. For the
+/// stretch just after `exit_boot_services` where there is no console yet to
+/// print through: square 1 means the exit returned, square 2 that the
+/// exception vectors are installed. The early console's clear wipes them, so
+/// squares still on screen mean the boot stopped before that clear. White is
+/// the same in every GOP pixel format.
+fn progress_square(fb_info: Option<framebuffer::Info>, n: usize) {
+    const SIDE: usize = 48;
+    let Some(info) = fb_info else { return };
+    let Some(x0) = info.width.checked_sub(n * (SIDE + 16)) else { return };
+    let y0 = 16;
+    if y0 + SIDE > info.height {
+        return;
+    }
+    let base = info.base as *mut u32;
+    for y in y0..y0 + SIDE {
+        for x in x0..x0 + SIDE {
+            // SAFETY: inside the framebuffer by the bounds above; the
+            // firmware's identity map still covers it (see the early
+            // console's SAFETY comment in `main`).
+            unsafe { base.add(y * info.stride + x).write_volatile(0xffff_ffff) };
+        }
+    }
+    let stride_bytes = (info.stride * 4) as u64;
+    mmu::clean_to_poc(info.base + (y0 * info.stride + x0) as u64 * 4, (SIDE * 4) as u64, SIDE as u64, stride_bytes);
+}
+
 /// Installs the GOP framebuffer console - the real answer for Parallels
 /// (see `framebuffer.rs`/`fbconsole.rs`'s module doc comments), tried
 /// right after devicetree/ACPI/PCI, ahead of virtio-console - see
@@ -783,7 +898,7 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
     // own device-block mapping. Either way it's mapped and writable now.
     let fb = unsafe { fbconsole::FbConsole::new(&info) };
     console::install(Console::Framebuffer(fb));
-    console::println!("Ouroboros kernel: framebuffer console live (fallback - every byte-stream mechanism failed)");
+    console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed)");
 }
 
 /// Discovers and initializes the virtio-blk device, reads sector 0 back

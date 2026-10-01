@@ -1036,6 +1036,53 @@ The small open tails those arcs deliberately left:
 >       refuses the controller unless it reproduces the BAR (a refusal checked
 >       on QEMU by mutation). Open until the board shows a nonzero
 >       translation working: QEMU's is 0.
+>
+> **First boots on the boards (2026-09-28), over HDMI alone**, a Pi 400 and a
+> 1 GB Pi 4, with no serial cable yet. Written up as a log in
+> [`testing-pi4.md`](testing/testing-pi4.md) §6 ("Bisecting a hang with boot
+> flag files" and what follows it):
+>
+> - [ ] **The Pi 400's xHCI takeover damages memory before the exit.** The
+>       firmware's own handler reported `Synchronous Exception at …` at a
+>       point that moved between boots; placed once (`scripts/efi-symbol.py`)
+>       at a Relaxed `atomic_load` in `log` through a pointer the debug build
+>       had spilled to the stack four instructions earlier, a pointer that
+>       cannot be wrong unless memory changed under it. With `\NOXHCI` the
+>       boot gets through `exiting boot services`. Two suspects, both
+>       Pi 400-shaped: its keyboard is always attached, so the controller is
+>       always doing DMA for the firmware's driver; and its VL805 has no
+>       firmware EEPROM (loaded by the bootloader, and reloaded by Linux after
+>       a reset). The serial dump (ESR, FAR, a backtrace) decides.
+> - [ ] **The Pi 4 stops after the early console's clear.** Under `\FBCON`
+>       the whole-screen clear reaches the display and the first line after it
+>       never does. On an earlier build the same board went black the same
+>       way; on another boot it did not clear at all. For the serial cable.
+> - [ ] **The devicetree console's address is a bus address; translate it.**
+>       The Pi 4 logged `console @ 0x7e201000 (via devicetree)`, the PL011's
+>       VideoCore bus address (`0xfe201000` for the ARM), so without `\FBCON`
+>       the kernel's first write after the exit went to no device (1 GB Pi 4)
+>       or to RAM (Pi 400). *Built 2026-09-28 (branch `pi400/boot-flags`,
+>       not pushed): `dtranges.rs` applies every ancestor's `ranges`, fails
+>       closed, and the console is mapped as its own device (it was covered
+>       only by the GIC's 1 GB block). Checked on the host against the pftf
+>       zip's Pi 4 and Pi 400 trees, hand-built trees and a mutation; open
+>       until serial shows `0xfe201000` on a board.*
+> - [ ] **Boot flag files and `\FBCON` for bench diagnostics.** `\NOXHCI`,
+>       `\XHCINOWR`, `\FBCON` (the framebuffer console right after the exit,
+>       with progress squares before it), the image range and an
+>       `exiting boot services` marker in the log, and
+>       `scripts/efi-symbol.py` to place a firmware-reported address. *Built
+>       on the same branch; each checked on QEMU (`-device ramfb`, planted
+>       faults and hangs). Needs a review before a PR.*
+> - [ ] **`make sdcard`.** *Built 2026-09-28 (#180, open):* the pinned pftf
+>       firmware plus `build/esp` on an already-formatted card, installed
+>       once since the firmware keeps its settings in `RPI_EFI.fd`; never
+>       formats.
+> - [ ] **Small:** the `fdt` crate panics on a tree with no `/chosen`
+>       (`chosen()` expects one; found building test trees, real firmware
+>       trees have it). And the UART's and GIC's device block depends on
+>       "Limit RAM to 3 GB" staying on: with RAM to 4 GB, block 3 is mapped as
+>       RAM and the device mapping is skipped.
 
 Every real-hardware bug in `xhci-keyboard-postmortem.md` and
 `boot-bringup-postmortem.md` cost a manual round trip: rebuild, re-image,
@@ -1109,6 +1156,17 @@ be reviewed after the fact from the saved screenshots.
 > port a real application on top (SQLite, a small C compiler) — now "port one
 > more program," not "invent the mechanism." See `docs/processes.md`'s "Writing a
 > program in C." The reasoning below is the original parked plan, still accurate.
+>
+> **The small C compiler has a plan since 2026-09-29.** The workspace chose
+> Ouroboros as the destination of its C toolchain arc: hello.c edited,
+> compiled, linked and run here, by CPP (the preprocessor), a compiler that
+> Phoenix generates and an assembler Futamura describes. All three are C11
+> with no dependencies, so the path above carries them. The order and the gaps
+> are in `~/Projects/docs/c-compiler-toolchain.md`, outside this repository.
+> Two things it asks of Ouroboros itself: **a static ELF linker that runs
+> here**, since picolibc is a `.a` and LLD is on the host, probably a project
+> of its own; and **an editor**, whose catch is that the console offers no
+> termios for one in the kilo style, so a line editor comes first.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

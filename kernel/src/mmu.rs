@@ -344,10 +344,14 @@ static L0_TABLES: [Table; MAX_EL0_REGIONS] =
 static L1_TABLES: [Table; MAX_EL0_REGIONS] =
     [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
-/// The most `extra_devices` entries `install_identity_map` has ever been
-/// called with - matches `main.rs`'s own fixed-size staging array
-/// (framebuffer, xHCI BAR, GICD, GICR).
-const MAX_EXTRA_DEVICES: usize = 4;
+/// The most `extra_devices` entries `install_identity_map` takes, and the
+/// size of `main.rs`'s staging array, which uses this constant rather than
+/// its own number (a longer slice is truncated below): framebuffer, xHCI
+/// BAR, GICD, GICR, and the discovered serial console (added 2026-09-28,
+/// when the Pi 4's devicetree console turned out to sit at 0xfe201000, far
+/// above the fixed low-1GB device block; it was covered only by the GIC's
+/// 1GB block, by coincidence).
+pub(crate) const MAX_EXTRA_DEVICES: usize = 5;
 
 /// [`install_identity_map`]'s inputs, kept around after its first call so
 /// a later runtime caller (`rebuild_with_el0_regions`, for
@@ -399,14 +403,12 @@ static STORED_UNCACHED: SyncCell<([(u64, u64); MAX_UNCACHED], usize)> = SyncCell
 // device unmapped, then hard-fault the moment `gic.rs` touches it (this
 // kernel has no resumable EL1 synchronous-fault path - see
 // `exceptions.rs`'s module doc comment). Cheap to size generously: each
-// slot is one 4KB table.
-const MAX_EXTRA_L1_TABLES: usize = 4;
-static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] = [
-    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
-    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
-    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
-    Table(SyncCell::new([0; ENTRIES_PER_TABLE])),
-];
+// slot is one 4KB table. One per `extra_devices` entry, so the count
+// follows `MAX_EXTRA_DEVICES` (five since the console joined the list,
+// 2026-09-28) rather than being bumped by hand beside it.
+const MAX_EXTRA_L1_TABLES: usize = MAX_EXTRA_DEVICES;
+static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] =
+    [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EXTRA_L1_TABLES];
 
 // One L2 + one L3 per *view* (not per region-in-a-shared-map, the
 // pre-per-task-tables design): view i only ever fine-grains the single
@@ -967,6 +969,13 @@ fn walked_attr(va: u64) -> Option<u64> {
         asm!("at s1e1r, {va}", "isb", "mrs {par}, par_el1", va = in(reg) va, par = out(reg) par, options(nostack, preserves_flags));
     }
     if par & 1 != 0 { None } else { Some(par >> 56) }
+}
+
+/// Whether `va` walks as Device memory in the current tables: for a
+/// device whose own block may have given way to RAM's (see `main.rs`'s
+/// console check after `install_identity_map`).
+pub(crate) fn walks_as_device(va: u64) -> bool {
+    walked_attr(va) == Some(MAIR_ATTR_DEVICE_NGNRNE)
 }
 
 /// Boot-time self-check of the non-cacheable mapping, through the

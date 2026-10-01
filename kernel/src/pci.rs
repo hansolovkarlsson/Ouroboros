@@ -189,6 +189,8 @@ pub enum XhciDiscoveryError {
     /// learn where its BAR decodes - see [`BarError`]. Fails closed: a
     /// keyboard-less boot, never a guessed address.
     Bar(BarError),
+    /// Not attempted: the `\NOXHCI` boot flag file is set (`bootflags.rs`).
+    SkippedByFlag,
 }
 
 /// `read_bar0_address` is shared with the serial path, so its errors
@@ -217,6 +219,7 @@ impl core::fmt::Display for XhciDiscoveryError {
             XhciDiscoveryError::UnsupportedBarType => write!(f, "xHCI controller's BAR0 has an unsupported type"),
             XhciDiscoveryError::ConfigRead => write!(f, "xHCI controller's BAR0 could not be read from config space"),
             XhciDiscoveryError::Bar(e) => write!(f, "xHCI controller: {e}"),
+            XhciDiscoveryError::SkippedByFlag => write!(f, "skipped: the \\NOXHCI boot flag is set"),
         }
     }
 }
@@ -294,7 +297,11 @@ impl core::fmt::Display for XhciDiscoveryError {
 /// that diagnostic output is otherwise unrecoverable the instant a crash
 /// happens later in the boot, which is exactly what made the two
 /// Command-register findings documented above so slow to pin down.
-pub fn discover_xhci() -> Result<XhciInfo, XhciDiscoveryError> {
+///
+/// `enable_write` is false only under the `\XHCINOWR` boot flag
+/// (`bootflags.rs`): the command-register write below is then skipped and
+/// logged as skipped, to separate it from the takeover on real hardware.
+pub fn discover_xhci(enable_write: bool) -> Result<XhciInfo, XhciDiscoveryError> {
     let handles =
         uefi::boot::find_handles::<PciRootBridgeIo>().map_err(|_| XhciDiscoveryError::NoRootBridge)?;
     let mut last_error = XhciDiscoveryError::NotFound;
@@ -327,7 +334,7 @@ pub fn discover_xhci() -> Result<XhciInfo, XhciDiscoveryError> {
             // A controller that cannot be taken or resolved is skipped, not
             // the end of the search: a later one may still be usable. The
             // last failure is what the caller sees if none is.
-            match take_xhci(&mut root_bridge, addr) {
+            match take_xhci(&mut root_bridge, addr, enable_write) {
                 Ok(info) => return Ok(info),
                 Err(e) => {
                     log::warn!("Ouroboros kernel: pci: skipping the xHCI controller at {addr:?}: {e}");
@@ -344,7 +351,11 @@ pub fn discover_xhci() -> Result<XhciInfo, XhciDiscoveryError> {
 /// for [`discover_xhci`]. Taking it stops firmware's USB stack on that
 /// controller, so nothing may read the boot disk afterwards: see
 /// `discover_xhci`'s placement in `main.rs`.
-fn take_xhci(root_bridge: &mut PciRootBridgeIo, addr: &PciIoAddress) -> Result<XhciInfo, XhciDiscoveryError> {
+fn take_xhci(
+    root_bridge: &mut PciRootBridgeIo,
+    addr: &PciIoAddress,
+    enable_write: bool,
+) -> Result<XhciInfo, XhciDiscoveryError> {
     // Resolve the address FIRST, through a read-only open that leaves
     // firmware's driver running. Only a controller whose address checks out
     // is taken: taking one stops firmware's USB stack on it, and enabling
@@ -394,7 +405,11 @@ fn take_xhci(root_bridge: &mut PciRootBridgeIo, addr: &PciIoAddress) -> Result<X
         .unwrap_or(0xffff); // sentinel distinct from any real 16-bit command value's low byte pattern - read itself failed
 
     let mut command_after = command_before;
-    if command_before & (CMD_MEMORY_SPACE | CMD_BUS_MASTER) != (CMD_MEMORY_SPACE | CMD_BUS_MASTER) {
+    if !enable_write {
+        log::warn!(
+            "Ouroboros kernel: xhci: PCI command register {command_before:#06x}, write skipped (\\XHCINOWR)"
+        );
+    } else if command_before & (CMD_MEMORY_SPACE | CMD_BUS_MASTER) != (CMD_MEMORY_SPACE | CMD_BUS_MASTER) {
         if let Ok(command_status) = root_bridge
             .pci()
             .read_one::<u32>(addr.with_register(COMMAND_REGISTER))
