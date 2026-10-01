@@ -29,6 +29,18 @@
 > from Linux's and FreeBSD's drivers), and `xhci.rs` assumes it is. Until
 > that is fixed, expect no USB at all on the board, so no keyboard and no
 > disk: plan the first boot around the serial console.
+>
+> **Update 2026-10-01: the two notes above are superseded, and the boards
+> have booted.** Everything they say is missing is now on `main`: the BAR
+> translation and the exclusive open (#176), hub support (#177) and the
+> non-cacheable DMA pool under ACPI `_CCA 0` (#179). So the keyboard and USB
+> storage are expected to work, and are not yet seen to. On 2026-09-28 a Pi 400
+> and a Pi 4 booted over HDMI alone, with no serial cable, and neither reached
+> the shell: the Pi 400 faults in firmware once the xHCI is taken, and the
+> Pi 4 stops after the early console's clear (§6, "Bisecting a hang with boot
+> flag files", and the roadmap's "First boots on the boards"). The next session
+> is serial, through a Raspberry Pi Debug Probe (§3), and it is the one that
+> starts turning this plan into a log.
 
 The practical guide to booting Ouroboros on a **real Raspberry Pi 4** under UEFI
 firmware. Companion to [`testing-qemu.md`](testing-qemu.md) (the fast dev loop,
@@ -217,8 +229,9 @@ Per board:
   you are also debugging a kernel.
 - **2× microSD cards** (A2, 32 GB) plus a reader. Two per board so there is
   always a known-good card to fall back to.
-- **A 3.3 V USB-TTL serial adapter** (CP2102 or FT232). This is the single most
-  important item in the list.
+- **A 3.3 V USB serial adapter.** This is the single most important item in
+  the list. The one on order is the **Raspberry Pi Debug Probe**; a CP2102 or
+  FT232 USB-TTL adapter does the same job.
 - **micro-HDMI cable** — the GOP framebuffer console (`fbconsole.rs`) is a
   separate output path from serial and needs its own verification.
 - **A FAT32-formatted USB 3 (SuperSpeed) stick**, for a blue port: the
@@ -247,10 +260,22 @@ TX and RX cross. **Do not connect the adapter's VCC to the Pi** — the Pi is
 powered by its own supply, and back-feeding it through the header while the
 USB-C supply is also connected is how boards die.
 
-On macOS, `ls /dev/tty.usbserial-*` after plugging the adapter in, then:
+With the Debug Probe, the wires are its UART cable on the port marked **U**:
+orange is the probe's TX (to Pi pin 10), yellow its RX (to Pi pin 8), black
+GND (to Pi pin 6). The cable carries no VCC, so there is nothing to leave
+off. (confirmed: Raspberry Pi's Debug Probe documentation, see Sources)
+
+The device name depends on the adapter. The Debug Probe is a USB CDC device
+and appears as `/dev/tty.usbmodem*` (its documentation names the
+`/dev/cu.usbmodem*` twin, and either works for `screen`); a CP2102 or FT232
+appears as
+`/dev/tty.usbserial-*`. `ls` both after plugging it in, then capture the whole
+session to a file (`-L` writes `screenlog.0` in the current directory), since
+the log is the evidence §6 and §8 work from:
 
 ```sh
-screen /dev/tty.usbserial-XXXXXXXX 115200
+screen -L /dev/tty.usbmodemXXXX 115200          # Debug Probe
+screen -L /dev/tty.usbserial-XXXXXXXX 115200    # CP2102 / FT232
 ```
 
 115200 8N1 is the pftf firmware default (confirmed: pftf/RPi4 readme). Exit
@@ -938,3 +963,6 @@ fix are all above, which is the whole reason for writing them down first.
   (a DMA tag without `BUS_DMA_COHERENT`).
 - This repository: `kernel/src/main.rs`, `virtio_mmio.rs`, `pci.rs`, `madt.rs`,
   `block.rs`, `loader.rs`, and the `Makefile`'s `esp`/`image` targets.
+- [Raspberry Pi Debug Probe](https://www.raspberrypi.com/documentation/microcontrollers/debug-probe.html):
+  the UART cable's colours (orange TX, yellow RX, black GND, no VCC) and the
+  macOS device name, the basis for §3's wiring.
