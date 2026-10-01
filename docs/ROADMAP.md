@@ -972,6 +972,36 @@ The small open tails those arcs deliberately left:
 >             rewinds and failed the typed check; the fix recovered 30
 >             Stalls with no timeout and passed. `make test-usb-hub` passes
 >             without the injection.*
+      - [ ] **Re-confirm the storage recovery on the board.** The fix above
+>             replaces the path confirmed on Parallels ("Mode A") and has
+>             been observed only on QEMU. Recovery lines
+>             (`usb-msd: ... resetting bulk endpoints`) during the Pi's stick
+>             reads, followed by reads that succeed, confirm it; repeated
+>             retries that all fail point at the next item first. From the
+>             review of `pi400/storage-dequeue`.
+>       - [ ] **Bulk recovery never clears the halt on the device.** It
+>             resets the host side only (Reset Endpoint, Set TR Dequeue) and
+>             never sends CLEAR_FEATURE(ENDPOINT_HALT), which the BOT spec's
+>             reset recovery includes. A real stick that stalled keeps its
+>             own endpoint halted or its data toggle out of step, so every
+>             retry can stall again. QEMU does not need it, which is why the
+>             injected Stalls recovered. A standard request, not a class one,
+>             so Parallels' passthrough limit does not rule it out. For the
+>             Pi's stick. From the same review.
+>       - [ ] **A storage transfer timeout is still not recovered.** With
+>             the endpoint Running, Reset Endpoint is refused and the timed
+>             out TRB stays queued ahead of the retry's, so the retry can
+>             take the wrong packet. `recover_ep0`'s state dispatch (Halted:
+>             Reset Endpoint; Running: Stop Endpoint; then Set TR Dequeue at
+>             the enqueue position) is the shape. From the same review.
+>       - [ ] **The storage Stall test is not committed.** The injection
+>             that observed the fix (every seventh CBW's signature
+>             corrupted) was temporary, so no committed test runs
+>             `reset_storage_endpoint` at all, and going back to the
+>             rewind would pass `make test-usb-hub`. A test-only boot flag
+>             that corrupts CBWs, and a `test-usb-hub.py` mode that sets it
+>             and requires recovery lines and the typed check, would make it
+>             a check that can fail. From the same review.
 >       - [x] **Make the Pi's in-RAM framebuffer visible to the display** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is

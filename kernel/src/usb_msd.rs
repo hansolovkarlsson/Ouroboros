@@ -227,9 +227,12 @@ const RECOVERY_LOG_LIMIT: u32 = 16;
 /// transport stalling, and its own caller (e.g. `init`'s Unit Attention
 /// clear) handles it.
 ///
-/// On QEMU the transfer never stalls, so the retry path never runs and
-/// behavior is identical to a single `bot_command_once` - the recovery is
-/// exercised only by real shared-controller hardware.
+/// QEMU never stalls a transfer on its own, so in an ordinary QEMU run the
+/// retry path never runs and behavior is identical to a single
+/// `bot_command_once`. It can be made to: QEMU's `usb-storage` answers a
+/// CBW with a bad signature with a Stall, which is how the recovery was
+/// exercised on 2026-10-01 (see `docs/ROADMAP.md`). Nothing committed does
+/// that yet.
 fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Error> {
     const MAX_ATTEMPTS: u32 = 3;
     let mut attempt = 1u32;
@@ -250,9 +253,9 @@ fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Er
                 }
                 // Reset both directions; the healthy one no-ops (its Reset
                 // Endpoint fails on a non-halted endpoint and is ignored -
-                // reset_storage_endpoint then sends no Set TR Dequeue, and it
-                // never changes software ring state, so a no-op reset can't
-                // desync it).
+                // and its Set TR Dequeue is refused the same way -
+                // reset_storage_endpoint never changes software ring state,
+                // so a no-op reset can't desync it).
                 let _ = xhci::storage_reset_endpoint(true);
                 let _ = xhci::storage_reset_endpoint(false);
                 attempt += 1;

@@ -1249,16 +1249,25 @@ impl Xhci {
                 Err(e) => console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovery command failed ({e})"),
             }
         }
-        let dequeue = EP0_RINGS[idx].0.get() as u64 + (enqueue as u64) * 16;
-        let set_dequeue = self.push_command([
+        if let Err(e) = self.set_tr_dequeue(EP0_RINGS[idx].0.get() as u64, enqueue, cycle, 1, slot_id) {
+            console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 Set TR Dequeue failed ({e})");
+        }
+    }
+
+    /// Set TR Dequeue Pointer for endpoint `dci` of `slot_id`, to slot
+    /// `enqueue` of the ring at `ring_addr` with DCS `cycle`: the producer's
+    /// current position, so the controller resumes where the next TRB will
+    /// be written. Shared by `recover_ep0` and `reset_storage_endpoint`;
+    /// see `recover_ep0`'s doc comment for why the current position.
+    fn set_tr_dequeue(&mut self, ring_addr: u64, enqueue: usize, cycle: bool, dci: u32, slot_id: u32) -> Result<(), Error> {
+        let dequeue = ring_addr + (enqueue * size_of::<Trb>()) as u64;
+        let ptr = self.push_command([
             (dequeue as u32) | (cycle as u32), // DCS = the cycle the next TRB will carry
             (dequeue >> 32) as u32,
             0,
-            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (1 << 16) | (slot_id << 24),
+            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (dci << 16) | (slot_id << 24),
         ]);
-        if let Err(e) = self.wait_command_completion(set_dequeue) {
-            console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 Set TR Dequeue failed ({e})");
-        }
+        self.wait_command_completion(ptr).map(|_| ())
     }
 
     /// Issues Reset Endpoint or Stop Endpoint (`cmd`) for EP0 of `slot_id`
@@ -1294,37 +1303,35 @@ impl Xhci {
     /// state is left as it is; the two agree by construction. The same
     /// reasoning as `recover_ep0`'s.
     ///
-    /// Not best-effort, unlike `recover_ep0`: Set TR Dequeue is sent only
-    /// *after Reset Endpoint succeeds*, so a Reset Endpoint that
-    /// fails because the endpoint wasn't actually halted (the caller reset
-    /// the healthy direction too, or the failure was a pure timeout with
-    /// the endpoint still Running) leaves software and hardware in sync and
-    /// returns `Err`. A pure timeout is not recovered (the endpoint stays
-    /// Running), but the state is left consistent.
+    /// **Set TR Dequeue is sent after Reset Endpoint succeeds, and also
+    /// after it fails with Context State Error.** That error means the
+    /// endpoint was not Halted: either it is Running (the healthy direction,
+    /// which the caller resets too, or a pure timeout), where Set TR Dequeue
+    /// is refused the same way and changes nothing; or it is Stopped, left
+    /// so by an earlier recovery whose Reset Endpoint took and whose Set TR
+    /// Dequeue did not, where only Set TR Dequeue can move the dequeue
+    /// pointer off the failed transfer. Without it, that endpoint would
+    /// restart on the failed transfer at every later doorbell. Any other
+    /// failure returns `Err` without it. A pure timeout is still not
+    /// recovered (the endpoint stays Running, its transfer queued).
     fn reset_storage_endpoint(&mut self, dir_in: bool) -> Result<(), Error> {
-        let (slot_idx, dci) = {
+        let (slot_idx, dci, enqueue, cycle) = {
             let st = self.storage.as_ref().ok_or(Error::NoPortConnected)?;
-            (st.slot, if dir_in { st.in_dci } else { st.out_dci })
+            if dir_in {
+                (st.slot, st.in_dci, st.in_enqueue, st.in_cycle)
+            } else {
+                (st.slot, st.out_dci, st.out_enqueue, st.out_cycle)
+            }
         };
         let slot_id = self.slots[slot_idx].as_ref().ok_or(Error::NoPortConnected)?.slot_id;
+        let ring_addr = if dir_in { BULK_IN_RING.0.get() } else { BULK_OUT_RING.0.get() } as u64;
 
         let reset_ep = self.push_command([0, 0, 0, (TRB_TYPE_RESET_ENDPOINT_CMD << 10) | (dci << 16) | (slot_id << 24)]);
-        self.wait_command_completion(reset_ep)?;
-
-        let (enqueue, cycle) = {
-            let st = self.storage.as_ref().ok_or(Error::NoPortConnected)?;
-            if dir_in { (st.in_enqueue, st.in_cycle) } else { (st.out_enqueue, st.out_cycle) }
-        };
-        let ring_addr = if dir_in { BULK_IN_RING.0.get() } else { BULK_OUT_RING.0.get() } as u64;
-        let dequeue = ring_addr + (enqueue as u64) * 16;
-        let set_dequeue = self.push_command([
-            (dequeue as u32) | (cycle as u32), // DCS = the cycle the next TRB will carry
-            (dequeue >> 32) as u32,
-            0,
-            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (dci << 16) | (slot_id << 24),
-        ]);
-        self.wait_command_completion(set_dequeue)?;
-        Ok(())
+        match self.wait_command_completion(reset_ep) {
+            Ok(_) | Err(Error::CommandFailed(COMPLETION_CONTEXT_STATE_ERROR)) => {}
+            Err(e) => return Err(e),
+        }
+        self.set_tr_dequeue(ring_addr, enqueue, cycle, dci, slot_id)
     }
 
     /// A standard or class control transfer over EP0: Setup Stage (always
