@@ -1083,9 +1083,16 @@ The small open tails those arcs deliberately left:
 >       firmware plus `build/esp` on an already-formatted card, installed
 >       once since the firmware keeps its settings in `RPI_EFI.fd`; never
 >       formats.
-> - [ ] **Small:** the `fdt` crate panics on a tree with no `/chosen`
+> - [x] **Small:** the `fdt` crate panics on a tree with no `/chosen`
 >       (`chosen()` expects one; found building test trees, real firmware
->       trees have it). And the UART's and GIC's device block depends on
+>       trees have it). *Fixed 2026-10-01 (branch `pi400/fdt-chosen`):*
+>       `devicetree.rs` reads `/chosen/stdout-path` itself, which also
+>       removes a second panic in the crate's `stdout()` on an empty
+>       `stdout-path`. A host harness ran the old and new lookups on the
+>       pftf Pi 4 and Pi 400 trees and six hand-built ones: the two that
+>       panicked now fall through to the PL011 search, and every other tree
+>       gives the same node as before.
+> - [ ] **Small:** the UART's and GIC's device block depends on
 >       "Limit RAM to 3 GB" staying on: with RAM to 4 GB, block 3 is mapped as
 >       RAM and the device mapping is skipped. Since #181 the kernel at least
 >       says so: after the MMU switch it asks the hardware walker whether the

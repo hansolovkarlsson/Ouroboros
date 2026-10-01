@@ -71,9 +71,17 @@ pub unsafe fn discover_pl011(dtb: Option<*const u8>) -> Result<usize, DiscoveryE
     let dtb = dtb.ok_or(DiscoveryError::NoDtb)?;
     let fdt = unsafe { Fdt::from_ptr(dtb) }.map_err(|_| DiscoveryError::MalformedDtb)?;
 
-    let node = fdt
-        .chosen()
-        .stdout()
+    // Not `fdt.chosen().stdout()`: the crate panics when the tree has no
+    // `/chosen`, and again when `stdout-path` is empty. The tree is
+    // firmware's, so a missing node has to fall through, not halt the boot.
+    // Same lookup otherwise, the trailing NUL dropped as the crate does.
+    let stdout = fdt
+        .find_node("/chosen")
+        .and_then(|chosen| chosen.property("stdout-path"))
+        .and_then(|prop| prop.value.split_last())
+        .and_then(|(_, path)| core::str::from_utf8(path).ok())
+        .and_then(|path| fdt.find_node(path));
+    let node = stdout
         .or_else(|| fdt.find_compatible(&["arm,pl011"]))
         .ok_or(DiscoveryError::NoConsoleNode)?;
 
