@@ -263,45 +263,66 @@ screen /dev/tty.usbserial-XXXXXXXX 115200
 The Pi's boot medium holds two things that do not collide: the firmware at the
 root of the FAT partition, and Ouroboros's ESP tree underneath `EFI/`. The
 firmware boots `RPI_EFI.fd` via `armstub`, which then boots
-`\EFI\BOOT\BOOTAA64.EFI` from that same partition — the well-known removable-media
-path `make esp` already writes to (confirmed: `Makefile`'s `esp` target).
-
-```sh
-make esp     # populates build/esp/ - do NOT use `make image` here
-```
+`\EFI\BOOT\BOOTAA64.EFI` from that same partition, the well-known
+removable-media path `make esp` already writes to (confirmed: `Makefile`'s `esp`
+target).
 
 **Do not `dd` `build/esp.img` onto the card.** It is a fixed 64 MB `hdiutil`
 image (confirmed: `Makefile`'s `image` target) with no room for the firmware,
-and writing it would leave the rest of the card unusable. Copy the tree instead:
+and writing it would leave the rest of the card unusable. `make sdcard` copies
+the tree instead.
 
 ```sh
-# 1. Format the card as MS-DOS (FAT32) with an MBR partition map.
+# 1. Once per card, BY HAND: format it as MS-DOS (FAT32) with an MBR map.
 #    Disk Utility: "MS-DOS (FAT)" + "Master Boot Record". Or:
 #    diskutil eraseDisk MS-DOS OUROBOROS MBRFormat /dev/diskN     # CHECK diskN FIRST
 
-# 2. Firmware first.
-curl -LO https://github.com/pftf/RPi4/releases/latest/download/RPi4_UEFI_Firmware_v1.42.zip
-unzip -o RPi4_UEFI_Firmware_v1.42.zip -d /Volumes/OUROBOROS
-rm -f /Volumes/OUROBOROS/Readme.md
-
-# 3. Ouroboros on top.
-cp -R build/esp/ /Volumes/OUROBOROS/
-
-# 4. Strip the AppleDouble sidecars, same reason `make image` does
-#    (FAT holds no xattrs, so macOS spills them into ._* files that show up
-#    in `ls` as mangled 8.3 aliases).
-find /Volumes/OUROBOROS -name '._*' -delete
-find /Volumes/OUROBOROS -name '.DS_Store' -delete
-diskutil eject /Volumes/OUROBOROS
+# 2. Every time after that:
+make sdcard SDCARD=/Volumes/OUROBOROS            # add EJECT=1 to eject when done
 ```
 
-Check the release tag against [the releases page](https://github.com/pftf/RPi4/releases)
-rather than trusting the version pinned above. Keep the firmware files' names
-exactly as shipped — the readme is explicit that renaming them breaks boot.
+**The target never formats.** Erasing takes a `/dev/diskN`, and a wrong N
+erases some other disk, so step 1 stays manual. `scripts/sdcard.sh` refuses a
+path that is not a volume's mount point under `/Volumes`, a volume that is not
+FAT, one on fixed internal media, and one that is neither empty nor already a
+Pi card (no `RPI_EFI.fd`). Each refusal was seen once: against a disk image
+built to trip it, except fixed internal media, which an attached image never
+reports, so that one was tripped through a `diskutil` shim that reports it.
+`make sdcard` checks that `SDCARD` names a directory before it builds anything.
 
-Once this stabilises it is worth a `make sdcard SDCARD=/Volumes/OUROBOROS`
-target next to `parallels-hdd`, so the round trip is one command like every
-other target in this project.
+**The firmware is pinned, checksummed and installed once.** The release
+(pftf v1.53) and its SHA-256 are constants in `scripts/sdcard.sh`; the zip is
+cached in `build/cache/` and checked on every use. It is unzipped onto a card
+only when the card has no `RPI_EFI.fd`, because this firmware has no NVRAM: the
+§5 settings and every UEFI variable, the boot counter's included, are stored
+inside `RPI_EFI.fd` itself (edk2-platforms' `Platform/RaspberryPi/RPi4/Readme.md`,
+"NVRAM"; the readme in the pftf zip does not say). Rewriting it on each update
+would silently reset them. `FIRMWARE=1` reinstalls it deliberately, and even
+then keeps an existing `config.txt`, since Risk 3's UART overlay is set there
+by hand. The
+firmware's files keep the names they ship with; the readme is explicit that
+renaming them breaks boot. To move to a newer release, bump the version and the
+checksum together (`gh release view --repo pftf/RPi4` prints the asset's).
+
+**Ouroboros's entries are replaced whole on every run.** Which entries those
+are is computed from `build/esp`: each top-level entry and each entry under
+`EFI/`. A program dropped from the tree therefore leaves the card too. Two of
+them are state rather than build output:
+
+- `etc` is re-staged by default (the dev passwd, shadow, group and cluster
+  files, as every other image target stages them; the cluster keys are
+  deterministic, so the identity does not change). That resets accounts and
+  passwords made on the Pi, and the script says so. `KEEP_ETC=1` keeps the
+  card's files and adds only the ones a newer tree introduced.
+- `Users` (the home directories) only gains the directories it is missing.
+  What was made on the Pi is never replaced.
+
+Each is copied beside the old one and swapped in afterwards, so a copy that
+fails (a full card, a pulled reader) leaves the old `EFI/BOOT` bootable.
+Anything else on the card, the firmware's files or a file of your own at the
+root, is left alone. Re-staging `EFI/ORBS/BOOTID.TXT` rolls the boot counter's
+file store back, as every image does; the counter's preferred store is the
+UEFI variable, which lives in `RPI_EFI.fd` and so survives.
 
 ---
 

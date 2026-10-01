@@ -225,7 +225,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels test-keyboard-chain test-usb-hub test-reentrant-session test-async-rmount test-held-keys clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard release test check-relocs test-parallels test-keyboard-chain test-usb-hub test-reentrant-session test-async-rmount test-held-keys clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -1364,6 +1364,26 @@ parallels-hdd: image
 	hdiutil convert $(ESP_DIR).img -format UDZO -o $(ESP_DIR).dmg
 	rm -rf $(ESP_DIR).hdd
 	"$(PDT)" create --hdd "$(CURDIR)/$(ESP_DIR).hdd" --dmg "$(CURDIR)/$(ESP_DIR).dmg"
+
+# Stages the Raspberry Pi 4 / Pi 400 boot card: the pftf UEFI firmware
+# (pinned, checksummed, cached under build/cache) plus build/esp on top, on an
+# already-mounted FAT volume. It never formats; see scripts/sdcard.sh for the
+# guards and docs/testing/testing-pi4.md section 4 for the card itself.
+# The firmware is installed only on a card that has none, since its settings
+# and UEFI variables live inside RPI_EFI.fd.
+#
+#   make sdcard SDCARD=/Volumes/OUROBOROS
+#   make sdcard SDCARD=/Volumes/OUROBOROS KEEP_ETC=1   # keep the card's /etc
+#   make sdcard SDCARD=/Volumes/OUROBOROS FIRMWARE=1   # reinstall the firmware
+#   make sdcard SDCARD=/Volumes/OUROBOROS EJECT=1
+# The SDCARD check runs before the build, so a missing or mistyped path fails
+# in a second rather than after a full rebuild; the script checks it properly.
+sdcard:
+	@test -n "$(SDCARD)" && test -d "$(SDCARD)" || { \
+		echo "sdcard: SDCARD='$(SDCARD)' is not a mounted card, e.g. make sdcard SDCARD=/Volumes/OUROBOROS"; exit 1; }
+	$(MAKE) esp
+	SDCARD="$(SDCARD)" KEEP_ETC="$(KEEP_ETC)" FIRMWARE="$(FIRMWARE)" EJECT="$(EJECT)" \
+		ESP_DIR="$(ESP_DIR)" CACHE_DIR="$(BUILD_DIR)/cache" ./scripts/sdcard.sh
 
 # Cut a release: build the release-profile disk images and package the
 # downloadable artifacts (esp.img.zip + esp.hdd.zip + SHA256SUMS) under
