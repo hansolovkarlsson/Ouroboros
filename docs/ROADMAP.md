@@ -954,7 +954,7 @@ The small open tails those arcs deliberately left:
 >             each later request with the previous one's answer. QEMU hides
 >             that, since it completes a ring as soon as it is rung. A
 >             forced Stall recovers too (endpoint state 2, Reset Endpoint).
->       - [ ] **The storage endpoint's recovery rewinds to the ring's
+>       - [x] **The storage endpoint's recovery rewinds to the ring's
 >             start.** `reset_storage_endpoint` sets the dequeue pointer to
 >             the ring's start with DCS=1. The slots after it still hold
 >             earlier TRBs carrying that cycle bit, so the controller can
@@ -963,7 +963,15 @@ The small open tails those arcs deliberately left:
 >             the same flaw and now dequeues at the current enqueue
 >             position instead; the storage one is the path confirmed on
 >             Parallels ("Mode A"), so it is left for its own change and
->             check. Found reading the code, not observed.
+>             check. Found reading the code, not observed. *Fixed 2026-10-01
+>             (branch `pi400/storage-dequeue`): it dequeues at the current
+>             enqueue position with the current cycle, as EP0 does. Observed
+>             on QEMU by corrupting every seventh CBW's signature, which
+>             `usb-storage` answers with a Stall, under `test-usb-hub.py
+>             --usb-boot`: the old code timed out 12 transfers after its
+>             rewinds and failed the typed check; the fix recovered 30
+>             Stalls with no timeout and passed. `make test-usb-hub` passes
+>             without the injection.*
 >       - [x] **Make the Pi's in-RAM framebuffer visible to the display** (the Pi's
 >             HDMI console, `testing-pi4.md` Risk 7). The mapping is
 >             confirmed cacheable on QEMU `ramfb`; the stale-text symptom is
