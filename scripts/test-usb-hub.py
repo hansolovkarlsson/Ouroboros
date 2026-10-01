@@ -118,15 +118,15 @@ def main():
         if not os.path.exists(path):
             print(f"test-usb-hub: {path} missing - run make image-stall {os.path.relpath(STICK, ROOT)}")
             return 2
-    if stall and os.path.getmtime(STALL_IMAGE) < os.path.getmtime(IMAGE):
-        print(f"test-usb-hub: {STALL_IMAGE} is older than {IMAGE} - run make image-stall")
-        return 2
     # A stale image would grade the previous kernel (same guard as
     # test-keyboard-chain.sh).
     kernel = os.path.join(ROOT, "build", "esp", "EFI", "BOOT", "BOOTAA64.EFI")
-    if os.path.exists(kernel) and os.path.getmtime(kernel) > os.path.getmtime(IMAGE):
-        print(f"test-usb-hub: {IMAGE} is older than {kernel} - run make image")
-        return 2
+    # Compared with the kernel, not with each other: the hub boot uses
+    # IMAGE as its writable disk, so the guest's own writes make it newer.
+    for path in needed:
+        if path != STICK and os.path.exists(kernel) and os.path.getmtime(kernel) > os.path.getmtime(path):
+            print(f"test-usb-hub: {path} is older than {kernel} - run make image-stall")
+            return 2
     if os.path.exists(MONITOR):
         os.remove(MONITOR)
 
