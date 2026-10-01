@@ -30,16 +30,21 @@
 //!
 //! **BOT error recovery**: a failed or stalled bulk transfer is no longer
 //! fatal to the whole session. `bot_command` retries (bounded) with an
-//! xHCI-level endpoint reset between attempts (`xhci::storage_reset_endpoint`
-//! -> Reset Endpoint + Set TR Dequeue), which clears a halted bulk endpoint
-//! so the *next* command starts clean. This is the fix for the real-Parallels
+//! endpoint reset between attempts (`xhci::storage_reset_endpoint` ->
+//! Reset Endpoint, CLEAR_FEATURE(ENDPOINT_HALT) to the device, Set TR
+//! Dequeue), which clears a halted bulk endpoint so the *next* command
+//! starts clean. A Stall in the data stage or on the CSW read is repaired
+//! in place instead (`bot_command_once`, `clear_stalled`): the device
+//! still owes its CSW there, so the halt is cleared and the CSW read
+//! before anything new is sent. This is the fix for the real-Parallels
 //! symptom where storage reads "degrade to I/O errors shortly after mount":
 //! once the keyboard's interrupt endpoint is armed on the same shared xHCI
 //! controller, a bulk transfer eventually stalls, and without recovery the
 //! halted endpoint stayed halted so every later command failed permanently.
-//! (This is the xHCI Reset Endpoint path, not the USB Bulk-Only Mass Storage
-//! *Reset* class request - Parallels' passthrough doesn't forward class
-//! requests, so the controller-command form is what actually works here. A
+//! (This is the xHCI Reset Endpoint path plus a *standard* CLEAR_FEATURE,
+//! not the USB Bulk-Only Mass Storage *Reset* class request - Parallels'
+//! passthrough doesn't forward class requests, so this form is what can
+//! work there; CLEAR_FEATURE itself has not been run on Parallels. A
 //! pure transfer *timeout*, where the endpoint stays Running, isn't fully
 //! recovered - see `xhci::reset_storage_endpoint` - but the common Stall/halt
 //! case is.)
@@ -66,6 +71,11 @@ pub enum Error {
     CswMismatch,
     /// The device reported the command failed (CSW status != 0).
     CommandFailed(u8),
+    /// The data stage stalled and the CSW then reported success, with
+    /// `residue` bytes not transferred (BOT 6.7.2, the host expecting more
+    /// than the device had). Not retried: the device answers the same way
+    /// again. Partial data is not handed back as if it were whole.
+    ShortData(u32),
     /// The device's block size isn't the 512 bytes `fat32.rs` assumes.
     UnsupportedBlockSize(u32),
 }
@@ -77,6 +87,7 @@ impl core::fmt::Display for Error {
             Error::Transfer(e) => write!(f, "bulk transfer failed ({e})"),
             Error::CswMismatch => write!(f, "CSW signature/tag mismatch"),
             Error::CommandFailed(status) => write!(f, "command failed (CSW status {status})"),
+            Error::ShortData(residue) => write!(f, "data stage stalled, {residue} bytes not transferred (CSW status 0)"),
             Error::UnsupportedBlockSize(n) => write!(f, "unsupported block size {n} (only 512 is implemented)"),
         }
     }
@@ -266,21 +277,22 @@ fn recovery_log(line: core::fmt::Arguments) {
 }
 
 /// One full BOT command with bounded error recovery. Runs
-/// [`bot_command_once`]; on a bulk-transfer failure (`Error::Transfer` -
-/// a stall or timeout at the xHCI level), resets both bulk endpoints
-/// (`xhci::storage_reset_endpoint`) and retries from the CBW, up to
-/// `MAX_ATTEMPTS`. A CSW-level failure (`CommandFailed`/`CswMismatch`) is
-/// *not* retried here - that's the device rejecting the command, not the
-/// transport stalling, and its own caller (e.g. `init`'s Unit Attention
-/// clear) handles it.
+/// [`bot_command_once`], which repairs a Stall in the data stage or on the
+/// CSW read in place; on any other bulk-transfer failure (`Error::Transfer`
+/// - a Stall of the CBW, a timeout, or an in-place repair that failed),
+/// resets both bulk endpoints (`xhci::storage_reset_endpoint`) and retries
+/// from the CBW, up to `MAX_ATTEMPTS`. A CSW-level failure
+/// (`CommandFailed`/`CswMismatch`/`ShortData`) is *not* retried here -
+/// that's the device's answer to the command, not the transport failing,
+/// and its own caller (e.g. `init`'s Unit Attention clear) handles it.
 ///
-/// QEMU never stalls a transfer on its own, so in an ordinary QEMU run the
-/// retry path never runs and behavior is identical to a single
-/// `bot_command_once`. It can be made to: QEMU's `usb-storage` answers a
-/// CBW with a bad signature with a Stall, and the `\MSDSTALL` boot flag
-/// ([`inject_stalls`]) sends one as every seventh CBW to QEMU's stick,
-/// about 30 in a boot from it, which is what `scripts/test-usb-hub.py
-/// --stall` boots with.
+/// QEMU never stalls a transfer on its own, so in an ordinary QEMU run
+/// neither recovery runs and behavior is identical to a single
+/// `bot_command_once`. It can be made to: the `\MSDSTALL` boot flag
+/// ([`inject_stalls`]) corrupts every seventh CBW's signature and reads
+/// another command's CSW short, and QEMU's `usb-storage` stalls both, about
+/// 30 of each in a boot from its stick, which is what
+/// `scripts/test-usb-hub.py --stall` boots with.
 fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Error> {
     const MAX_ATTEMPTS: u32 = 3;
     let mut attempt = 1u32;
@@ -343,8 +355,8 @@ fn bot_command_once(cdb: &[u8], data: Option<(&mut [u8], bool)>) -> Result<(), E
     // Data stage, bounced through DATA_BUF. A Stall here leaves the CSW
     // still owed (BOT 6.7.2, 6.7.3): the halt is cleared and the CSW read,
     // so the device is back in step, and the command then fails with the
-    // Stall for `bot_command` to retry (or with the CSW's own status).
-    let mut data_stall = None;
+    // CSW's status, or with `ShortData` when that says success.
+    let mut data_stalled = false;
     if let Some((buf, dir_in)) = data {
         let len = buf.len().min(512);
         let result = if dir_in {
@@ -363,14 +375,9 @@ fn bot_command_once(cdb: &[u8], data: Option<(&mut [u8], bool)>) -> Result<(), E
             }
             xhci::storage_bulk(false, DATA_BUF.0.get() as u64, len as u32)
         };
-        match result {
-            Ok(()) => {}
-            Err(e) if e.is_stall() => {
-                recovery_log(format_args!("data stage stalled; clearing the halt and reading the CSW"));
-                xhci::storage_reset_endpoint(dir_in).map_err(Error::Transfer)?;
-                data_stall = Some(e);
-            }
-            Err(e) => return Err(Error::Transfer(e)),
+        if let Err(e) = result {
+            clear_stalled(e, dir_in, "data stage stalled; clearing the halt and reading the CSW")?;
+            data_stalled = true;
         }
     }
 
@@ -378,14 +385,9 @@ fn bot_command_once(cdb: &[u8], data: Option<(&mut [u8], bool)>) -> Result<(), E
     // it once more (BOT 6.7.2's second try), before giving up to the full
     // reset in `bot_command`.
     let csw_len = if INJECT_STALLS.load(Ordering::Relaxed) && tag % 7 == 5 { 12 } else { 13 };
-    match xhci::storage_bulk(true, CSW_BUF.0.get() as u64, csw_len) {
-        Ok(()) => {}
-        Err(e) if e.is_stall() => {
-            recovery_log(format_args!("CSW read stalled; clearing the halt and reading it again"));
-            xhci::storage_reset_endpoint(true).map_err(Error::Transfer)?;
-            xhci::storage_bulk(true, CSW_BUF.0.get() as u64, 13).map_err(Error::Transfer)?;
-        }
-        Err(e) => return Err(Error::Transfer(e)),
+    if let Err(e) = xhci::storage_bulk(true, CSW_BUF.0.get() as u64, csw_len) {
+        clear_stalled(e, true, "CSW read stalled; clearing the halt and reading it again")?;
+        xhci::storage_bulk(true, CSW_BUF.0.get() as u64, 13).map_err(Error::Transfer)?;
     }
     let csw = unsafe { &*CSW_BUF.0.get() };
     let signature = u32::from_le_bytes([csw[0], csw[1], csw[2], csw[3]]);
@@ -396,8 +398,24 @@ fn bot_command_once(cdb: &[u8], data: Option<(&mut [u8], bool)>) -> Result<(), E
     if csw[12] != 0 {
         return Err(Error::CommandFailed(csw[12]));
     }
-    match data_stall {
-        Some(e) => Err(Error::Transfer(e)),
-        None => Ok(()),
+    if data_stalled {
+        return Err(Error::ShortData(u32::from_le_bytes([csw[8], csw[9], csw[10], csw[11]])));
     }
+    Ok(())
+}
+
+/// The in-place half of BOT recovery: a transfer that failed with a Stall
+/// leaves the CSW still owed, so the halt is cleared (`what` logged) and
+/// the caller goes on to read the CSW; `Ok` means it may. Anything else,
+/// and a Stall whose endpoint could not be reset, is returned as
+/// `Error::Transfer` for `bot_command`'s full reset and retry. Stall only,
+/// as Linux's usb-storage does: after a Babble or a Transaction Error the
+/// CSW may already have been sent and lost, and a second read would time
+/// out, which the full reset handles and a re-read does not.
+fn clear_stalled(e: xhci::Error, dir_in: bool, what: &str) -> Result<(), Error> {
+    if !e.is_stall() {
+        return Err(Error::Transfer(e));
+    }
+    recovery_log(format_args!("{what}"));
+    xhci::storage_reset_endpoint(dir_in).map_err(Error::Transfer)
 }

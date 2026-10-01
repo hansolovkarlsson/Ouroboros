@@ -1448,9 +1448,10 @@ test-keyboard-chain: image
 # is --usb-boot from build/usb-hub-stall.img (`make image-stall`, the image
 # with the MSDSTALL boot flag): QEMU's stick stalls on every seventh CBW
 # (Bulk-OUT) and on a short CSW read for another (Bulk-IN), about 30 of
-# each, and the bulk-endpoint recovery must carry the boot through. Its image is built just before that boot, so a failure there
-# costs only that boot. `python3 scripts/test-usb-hub.py --direct` is the
-# control, the same devices on root ports. About three minutes, so not in
+# each, and the bulk-endpoint recovery must carry the boot through. Its
+# image is built just before that boot, so a failure there costs only that
+# boot. `python3 scripts/test-usb-hub.py --direct` is the control, the same
+# devices on root ports. About three minutes, so not in
 # `make test`; run it when xhci.rs's port scan, device setup or storage
 # recovery changes, or usb_msd.rs's retry. Every boot always runs (a failure
 # in one must not hide the next's result); the target fails if any did.

@@ -1043,9 +1043,12 @@ The small open tails those arcs deliberately left:
 >             the halt and read the CSW before any new CBW. Ahead of the
 >             board's storage, and the next branch after #185. *Done 2026-10-01 (branch
 >             `pi400/msd-in-stall`): a stalled data stage clears that
->             endpoint and reads the CSW before the command fails for the
->             retry; a stalled CSW read clears the IN halt and reads it once
->             more. The status phase is observed: `\MSDSTALL` reads the CSW
+>             endpoint and reads the CSW, and the command then fails with
+>             the CSW's status, or `ShortData` when that says success (not
+>             retried, see below); a stalled CSW read clears the IN halt and
+>             reads it once more. Stall only, as Linux's usb-storage does:
+>             after a Babble or a Transaction Error the CSW may already be
+>             lost, and the full reset handles that. The status phase is observed: `\MSDSTALL` reads the CSW
 >             of every command with tag 5 mod 7 as 12 bytes, QEMU stalls it
 >             with the CSW owed, and `--stall` recovers 30 in place; with
 >             the CSW recovery disabled, or the IN endpoint reset removed,
@@ -1058,7 +1061,17 @@ The small open tails those arcs deliberately left:
 >             short CSW read halts Bulk-IN, and the same deletion now fails.*
 >             Still open: the capped recovery log the board uses is run by
 >             no test, since arming the fault lifts the cap.
->       - [ ] **An invalid CSW is not recovered.** A CSW whose signature or
+>       - [ ] **A short data stage is an error, not partial data.** When
+>             the data stage stalls and the CSW then reports success with a
+>             residue (BOT 6.7.2, the host asking more than the device
+>             has), `bot_command_once` returns `ShortData` and hands no
+>             data back, since a sector read with a residue is not a
+>             sector. A command that may legally come back short (INQUIRY,
+>             MODE SENSE, REQUEST SENSE) would need the bytes that did
+>             arrive: per-command rules, and the transfer event's own
+>             residual length, which `bulk_transfer` does not report. From
+>             the review of `pi400/msd-in-stall`.
+      - [ ] **An invalid CSW is not recovered.** A CSW whose signature or
 >             tag is wrong returns `CswMismatch`, which `bot_command` does
 >             not retry, so the read fails up to `fsd` as a disk I/O error;
 >             BOT 6.7 calls for reset recovery. Seen while looking for a way

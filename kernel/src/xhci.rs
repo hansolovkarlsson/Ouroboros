@@ -351,8 +351,8 @@ impl core::fmt::Display for Error {
             Error::TooManyScratchpadBuffers(n) => write!(f, "controller wants {n} scratchpad buffers, only {MAX_SCRATCHPAD_BUFFERS} are supported"),
             Error::CommandTimeout => write!(f, "command ring: timed out waiting for a completion event"),
             Error::CommandFailed(code) => write!(f, "command failed, completion code {code}"),
-            Error::TransferTimeout => write!(f, "control transfer: timed out waiting for a transfer event"),
-            Error::TransferFailed(code) => write!(f, "control transfer failed, completion code {code}"),
+            Error::TransferTimeout => write!(f, "transfer: timed out waiting for a transfer event"),
+            Error::TransferFailed(code) => write!(f, "transfer failed, completion code {code}"),
         }
     }
 }
@@ -1341,12 +1341,17 @@ impl Xhci {
         let reset_ep = self.push_command([0, 0, 0, (TRB_TYPE_RESET_ENDPOINT_CMD << 10) | (dci << 16) | (slot_id << 24)]);
         match self.wait_command_completion(reset_ep) {
             Ok(_) => {
-                // The endpoint was Halted, so the device's end is halted
-                // too: clear it there (USB 2.0 9.4.1, CLEAR_FEATURE
-                // ENDPOINT_HALT), which also resets the device's data toggle
-                // to match the host's, reset by Reset Endpoint. Only here:
-                // sent to an endpoint that was not halted, it would reset
-                // the device's toggle and not the host's. Best-effort: a
+                // The host endpoint was Halted and Reset Endpoint (sent
+                // without TSP) has put the host's data toggle back to DATA0.
+                // CLEAR_FEATURE(ENDPOINT_HALT) (USB 2.0 9.4.5) puts the
+                // device's toggle there too, and clears the device's halt
+                // when a Stall caused this one; after a Babble or a
+                // Transaction Error the device was never halted, and the
+                // request then only realigns the toggles. Only here: sent
+                // where Reset Endpoint was refused (the endpoint was not
+                // Halted), it would reset the device's toggle and not the
+                // host's. A Reset Endpoint with TSP=1 would keep the host's
+                // toggle, and this would then be wrong. Best-effort: a
                 // refusal is logged (control_transfer recovers EP0) and the
                 // host side is still repaired.
                 let ep_addr = (dci / 2) as u16 | if dir_in { 0x80 } else { 0 };
@@ -2918,8 +2923,10 @@ pub(crate) fn storage_bulk(dir_in: bool, buf_addr: u64, len: u32) -> Result<(), 
 }
 
 /// Reset-recover the storage device's IN (`dir_in`) or OUT bulk endpoint
-/// after a stalled/failed transfer - [`Xhci::reset_storage_endpoint`].
-/// `usb_msd.rs`'s BOT reset-recovery step between command retries.
+/// after a stalled/failed transfer - [`Xhci::reset_storage_endpoint`]:
+/// Reset Endpoint, CLEAR_FEATURE(ENDPOINT_HALT) to the device over EP0 when
+/// the endpoint was halted, Set TR Dequeue. `usb_msd.rs` uses it between
+/// command retries and to clear a stalled data stage or CSW read in place.
 pub(crate) fn storage_reset_endpoint(dir_in: bool) -> Result<(), Error> {
     match unsafe { (*XHCI.get()).as_mut() } {
         Some(x) => x.reset_storage_endpoint(dir_in),

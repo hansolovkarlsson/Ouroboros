@@ -43,7 +43,9 @@ logged recovering CSW reads, and that every OUT Stall was recovered by its
 first retry: exactly one `retry 1/3` line per bad signature, no `retry 2/`
 line, no `giving up` (the kernel logs every recovery while the fault is
 armed). A CSW recovery that failed would fall back to that retry and break
-the count. QEMU logs nothing for the short reads, so their count is the
+the count. Every recovery also sends the device CLEAR_FEATURE(ENDPOINT_HALT);
+QEMU does not need it, so the test passes without it, but a refused one is
+logged, and the test requires none. QEMU logs nothing for the short reads, so their count is the
 kernel's own. An injected Stall's own retry is never corrupted (its tag is
 4 mod 7), so a second Stall in a row and running out of attempts are not
 exercised. A Stall in the data stage is not exercised either: QEMU pads a
@@ -184,6 +186,7 @@ def main():
             ("fault armed", re.search(r"MSDSTALL armed", out)),
             (f"stalls injected ({stalls}, QEMU's count)", stalls >= MIN_STALLS),
             (f"CSW reads stalled ({csw}, the kernel's count)", csw >= MIN_STALLS),
+            ("no CLEAR_FEATURE refused", not re.search(r"CLEAR_FEATURE\(ENDPOINT_HALT\) failed", out)),
             (f"each recovered at once ({first} first retries, {again} further)", first == stalls and again == 0),
         ]
     failed = 0
