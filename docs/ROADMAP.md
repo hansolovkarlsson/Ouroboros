@@ -964,7 +964,7 @@ The small open tails those arcs deliberately left:
 >             position instead; the storage one is the path confirmed on
 >             Parallels ("Mode A"), so it is left for its own change and
 >             check. Found reading the code, not observed. *Fixed 2026-10-01
->             (#184, open): it dequeues at the current
+>             (#184, merged 2026-10-01): it dequeues at the current
 >             enqueue position with the current cycle, as EP0 does. Observed
 >             on QEMU by corrupting every seventh CBW's signature, which
 >             `usb-storage` answers with a Stall, under `test-usb-hub.py
@@ -1118,14 +1118,14 @@ The small open tails those arcs deliberately left:
 >       relinked `.efi`'s `SizeOfImage`. The one small item it left,
 >       `bootflags::present()` opening the volume once per flag, became
 >       `bootflags::read()`, one open for all three (#183,
->       open, 2026-10-01).*
+>       merged 2026-10-01).*
 > - [x] **`make sdcard`.** *Built 2026-09-28, merged as #180 (2026-10-01):* the pinned pftf
 >       firmware plus `build/esp` on an already-formatted card, installed
 >       once since the firmware keeps its settings in `RPI_EFI.fd`; never
 >       formats.
 > - [x] **Small:** the `fdt` crate panics on a tree with no `/chosen`
 >       (`chosen()` expects one; found building test trees, real firmware
->       trees have it). *Fixed 2026-10-01 (#182, open):*
+>       trees have it). *Fixed 2026-10-01 (#182, merged the same day):*
 >       `devicetree.rs` reads `/chosen/stdout-path` itself. That also removes
 >       the crate's second panic, on a zero-length `stdout-path`; skips a path
 >       that is only a NUL (`find_node("")` is the root, which ended the
