@@ -29,16 +29,20 @@ and the filesystem server must mount that stick THROUGH THE HUB before
 the hub, and a fifth check requires the mount. It is the Raspberry Pi booted
 entirely from one USB stick, less the high-speed hub.
 
---stall is --usb-boot from a copy of build/esp.img carrying the MSDSTALL boot
-flag file: the kernel corrupts every seventh CBW's signature and QEMU's
-usb-storage answers each with a Stall, so the bulk-endpoint recovery
-(xhci.rs's reset_storage_endpoint, usb_msd.rs's retry) runs about a dozen
-times, which no ordinary QEMU run makes it do. On top of --usb-boot's checks
-it requires that QEMU itself reported the bad signatures (the foreign
-observer: the stalls happened), that the kernel logged recovering from them,
-and that no bulk transfer timed out. Measured 2026-10-01: the recovery that
-rewound to the ring's start (before #184) times out after its rewinds and
-fails `typed`; the one that dequeues at the enqueue position passes.
+--stall is --usb-boot from build/usb-hub-stall.img (`make image-stall`:
+build/esp.img with the MSDSTALL boot flag file): the kernel corrupts every
+seventh CBW's signature and QEMU's usb-storage answers each with a Stall, so
+the bulk-endpoint recovery (xhci.rs's reset_storage_endpoint, usb_msd.rs's
+retry) runs about 30 times, which no ordinary QEMU run makes it do. On top of
+--usb-boot's checks it requires that the kernel armed the fault, that QEMU
+itself reported the bad signatures (the foreign observer: the stalls
+happened), and that each one was recovered by its first retry: exactly one
+`retry 1/3` line per Stall, no `retry 2/` line, no `giving up` (the kernel
+logs every recovery while the fault is armed). Only first attempts are
+corrupted, so a second Stall in a row and running out of attempts are not
+exercised. Measured 2026-10-01: the recovery that rewound to the ring's start
+(before #184) fails it; the one that dequeues at the enqueue position
+passes.
 
 --direct puts the keyboard and the stick on root ports instead, with the same
 checks. That is the control: it passes on a kernel with no hub support, which
@@ -56,11 +60,8 @@ Exit status: the number of checks that failed.
 import importlib.util
 import os
 import re
-import shutil
 import socket
-import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -73,7 +74,7 @@ IMAGE = os.path.join(ROOT, "build", "esp.img")
 STICK = os.path.join(ROOT, "build", "usbstick.img")
 MONITOR = os.path.join(ROOT, "build", "usb-hub-monitor.sock")
 STALL_IMAGE = os.path.join(ROOT, "build", "usb-hub-stall.img")
-MIN_STALLS = 5       # a --stall boot measured 30; fewer means the flag did not take
+MIN_STALLS = 5       # a --stall boot measured 30; fewer means the fault barely ran
 WORD = "usbhub"      # typed as `echo usbhub`; its output is this word alone
 KEY_DELAY = 0.3      # between sendkeys; each key is held ~100 ms by QEMU
 
@@ -94,25 +95,6 @@ def layout(direct, stick_image):
     ]
 
 
-def stall_image():
-    """A copy of IMAGE with the MSDSTALL flag file at its root, made with
-    hdiutil as `make image` makes IMAGE. Returns an error message or None."""
-    shutil.copyfile(IMAGE, STALL_IMAGE)
-    mount = tempfile.mkdtemp()
-    try:
-        r = subprocess.run(["hdiutil", "attach", "-nobrowse", "-mountpoint", mount, STALL_IMAGE],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            return f"hdiutil attach failed: {r.stderr.strip()}"
-        try:
-            open(os.path.join(mount, "MSDSTALL"), "w").close()
-        finally:
-            subprocess.run(["hdiutil", "detach", mount], capture_output=True)
-    finally:
-        os.rmdir(mount)
-    return None
-
-
 def sendkeys(text):
     """Types `text` and Enter through the monitor: USB keyboard only."""
     names = {" ": "spc", "\n": "ret"}
@@ -131,11 +113,14 @@ def main():
         print("test-usb-hub: --direct and --usb-boot/--stall are separate runs")
         return 2
     # --usb-boot's stick is the image itself, so it needs no usbstick.img.
-    needed = (IMAGE,) if usb_boot else (IMAGE, STICK)
+    needed = (STALL_IMAGE,) if stall else (IMAGE,) if usb_boot else (IMAGE, STICK)
     for path in needed:
         if not os.path.exists(path):
-            print(f"test-usb-hub: {path} missing - run make image {os.path.relpath(STICK, ROOT)}")
+            print(f"test-usb-hub: {path} missing - run make image-stall {os.path.relpath(STICK, ROOT)}")
             return 2
+    if stall and os.path.getmtime(STALL_IMAGE) < os.path.getmtime(IMAGE):
+        print(f"test-usb-hub: {STALL_IMAGE} is older than {IMAGE} - run make image-stall")
+        return 2
     # A stale image would grade the previous kernel (same guard as
     # test-keyboard-chain.sh).
     kernel = os.path.join(ROOT, "build", "esp", "EFI", "BOOT", "BOOTAA64.EFI")
@@ -147,13 +132,7 @@ def main():
 
     label = "direct" if direct else "stall" if stall else "usb-boot" if usb_boot else "hub"
     print(f"test-usb-hub: {label} layout")
-    boot_image = IMAGE
-    if stall:
-        error = stall_image()
-        if error:
-            print(f"test-usb-hub: {error}")
-            return 2
-        boot_image = STALL_IMAGE
+    boot_image = STALL_IMAGE if stall else IMAGE
     g = drive_qemu.Guest(
         boot_image,
         extra_args=layout(direct, boot_image if usb_boot else STICK),
@@ -182,11 +161,13 @@ def main():
     if usb_boot:
         checks.append(("mounted through the hub", re.search(r"FAT32 mounted", out)))
     if stall:
-        stalls = len(re.findall(r"usb-msd: Bad signature", out))
+        stalls = len(re.findall(r"qemu-system-aarch64: usb-msd: Bad signature", out))
+        first = len(re.findall(r"Ouroboros kernel: usb-msd: .*resetting bulk endpoints, retry 1/", out))
+        again = len(re.findall(r"Ouroboros kernel: usb-msd: .*(retry [2-9]/|giving up)", out))
         checks += [
+            ("fault armed", re.search(r"MSDSTALL armed", out)),
             (f"stalls injected ({stalls}, QEMU's count)", stalls >= MIN_STALLS),
-            ("recovered", re.search(r"usb-msd: bulk transfer failed .*resetting bulk endpoints", out)),
-            ("no transfer timed out", not re.search(r"timed out waiting for a transfer event", out)),
+            (f"each recovered at once ({first} first retries, {again} further)", first == stalls and again == 0),
         ]
     failed = 0
     for name, ok in checks:

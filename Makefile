@@ -150,6 +150,7 @@ EXFAT_PART   := $(BUILD_DIR)/exfatpart.img
 EXT2_IMG     := $(BUILD_DIR)/espext2.img
 EXT2_PART    := $(BUILD_DIR)/ext2part.img
 USBSTICK_IMG := $(BUILD_DIR)/usbstick.img
+STALL_IMG := $(BUILD_DIR)/usb-hub-stall.img
 NET_PCAP     := $(BUILD_DIR)/net.pcap
 # mke2fs (ext2 image builder) from Homebrew's keg-only e2fsprogs - macOS has no
 # native ext2 tooling. `brew install e2fsprogs` provides it. Used only by the
@@ -225,7 +226,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard release test check-relocs test-parallels test-keyboard-chain test-usb-hub test-reentrant-session test-async-rmount test-held-keys clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard release test check-relocs test-parallels test-keyboard-chain test-usb-hub image-stall test-reentrant-session test-async-rmount test-held-keys clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -945,6 +946,19 @@ image: esp
 	hdiutil detach "$$MP" >/dev/null; \
 	rmdir "$$MP"
 
+# build/esp.img again with the MSDSTALL boot flag file at its root, for
+# `test-usb-hub.py --stall` (see bootflags.rs): the same attach, change,
+# strip-sidecars, detach as `image`, and a failed detach fails the target
+# rather than leaving the image mounted.
+image-stall: image
+	cp $(ESP_DIR).img $(STALL_IMG)
+	@set -e; MP=$$(mktemp -d); \
+	hdiutil attach -nobrowse -mountpoint "$$MP" $(STALL_IMG) >/dev/null; \
+	touch "$$MP/MSDSTALL"; \
+	find "$$MP" -name '._*' -delete; \
+	hdiutil detach "$$MP" >/dev/null; \
+	rmdir "$$MP"
+
 # Boots the real build/esp.img (genuine FAT32) instead of `run`'s vvfat
 # passthrough - needed for anything that reads the filesystem at runtime
 # (fat32.rs and up), not just the fast kernel-dev loop `run` is for.
@@ -1431,14 +1445,14 @@ test-keyboard-chain: image
 # ready, stick configured, a line typed through the USB keyboard runs). The
 # second, --usb-boot, boots build/esp.img FROM the stick behind the hub with
 # no other disk, so it must also mount through the hub. The third, --stall,
-# is --usb-boot with the MSDSTALL boot flag on a copy of the image: QEMU's
-# stick stalls about a dozen times and the bulk-endpoint recovery must carry
-# the boot through. `python3 scripts/test-usb-hub.py --direct` is the
+# is --usb-boot from build/usb-hub-stall.img (`make image-stall`, the image
+# with the MSDSTALL boot flag): QEMU's stick stalls once per seven commands,
+# about 30 times, and the bulk-endpoint recovery must carry the boot through. `python3 scripts/test-usb-hub.py --direct` is the
 # control, the same devices on root ports. About three minutes, so not in
 # `make test`; run it when xhci.rs's port scan, device setup or storage
 # recovery changes, or usb_msd.rs's retry. Every boot always runs (a failure
 # in one must not hide the next's result); the target fails if any did.
-test-usb-hub: image $(USBSTICK_IMG)
+test-usb-hub: image image-stall $(USBSTICK_IMG)
 	@fail=0; \
 	python3 scripts/test-usb-hub.py || fail=1; \
 	python3 scripts/test-usb-hub.py --usb-boot || fail=1; \
