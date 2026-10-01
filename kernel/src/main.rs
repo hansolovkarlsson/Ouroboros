@@ -361,11 +361,12 @@ fn main() -> Status {
     // Repeated here, next to the step under suspicion, so it is still on
     // screen when a firmware exception report lands below it.
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
-    let xhci_no_write = bootflags::present(bootflags::XHCI_NO_WRITE);
+    let flags = bootflags::read();
+    let xhci_no_write = flags.xhci_no_write;
     // `\FBCON`: leave the discovered serial console uninstalled after the
     // exit, so the framebuffer console below takes HDMI.
-    let fb_console_forced = bootflags::present(bootflags::FB_CONSOLE);
-    let xhci_result = if bootflags::present(bootflags::NO_XHCI) {
+    let fb_console_forced = flags.fb_console;
+    let xhci_result = if flags.no_xhci {
         Err(pci::XhciDiscoveryError::SkippedByFlag)
     } else {
         pci::discover_xhci(!xhci_no_write)
