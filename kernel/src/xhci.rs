@@ -1278,22 +1278,24 @@ impl Xhci {
     /// later command fails permanently.
     ///
     /// A Reset Endpoint clears the endpoint's Halted state, then a Set TR
-    /// Dequeue Pointer moves hardware's dequeue to the ring's start, and the
-    /// software producer state is reset to match. These are controller
+    /// Dequeue Pointer moves hardware's dequeue to the current enqueue
+    /// position, past the failed transfer. These are controller
     /// *commands*, not device *class requests* - so they work on Parallels,
     /// whose passthrough doesn't forward class requests (see
     /// `control_transfer`'s doc comment).
     ///
-    /// **Known flaw, recorded in `docs/ROADMAP.md` and left for its own
-    /// change:** the ring's start is NOT a known-good position. The slots
-    /// after it still hold earlier TRBs carrying the cycle bit the
-    /// controller expects, so it can run on into a stale TRB once the new
-    /// ones are done. `recover_ep0` dequeues at the current enqueue position
-    /// instead for exactly this reason; this path is the one confirmed on
-    /// Parallels ("Mode A"), so it has not been changed along with it.
+    /// **Why the current position, not the ring's start** (the version
+    /// this replaced rewound to the start): the slots after the start still
+    /// hold earlier TRBs with the cycle bit the controller then expects, so
+    /// it could run on into a stale Normal TRB, a DMA into an old buffer,
+    /// once the new ones were done. At the current enqueue position
+    /// everything ahead carries the previous lap's cycle bit, so the
+    /// controller stops where the next transfer ends. The software ring
+    /// state is left as it is; the two agree by construction. The same
+    /// reasoning as `recover_ep0`'s.
     ///
-    /// Not best-effort, unlike `recover_ep0`: the software ring state is
-    /// reset only *after both commands succeed*, so a Reset Endpoint that
+    /// Not best-effort, unlike `recover_ep0`: Set TR Dequeue is sent only
+    /// *after Reset Endpoint succeeds*, so a Reset Endpoint that
     /// fails because the endpoint wasn't actually halted (the caller reset
     /// the healthy direction too, or the failure was a pure timeout with
     /// the endpoint still Running) leaves software and hardware in sync and
@@ -1305,32 +1307,23 @@ impl Xhci {
             (st.slot, if dir_in { st.in_dci } else { st.out_dci })
         };
         let slot_id = self.slots[slot_idx].as_ref().ok_or(Error::NoPortConnected)?.slot_id;
-        let ring_addr = if dir_in { BULK_IN_RING.0.get() } else { BULK_OUT_RING.0.get() } as u64;
 
         let reset_ep = self.push_command([0, 0, 0, (TRB_TYPE_RESET_ENDPOINT_CMD << 10) | (dci << 16) | (slot_id << 24)]);
         self.wait_command_completion(reset_ep)?;
 
+        let (enqueue, cycle) = {
+            let st = self.storage.as_ref().ok_or(Error::NoPortConnected)?;
+            if dir_in { (st.in_enqueue, st.in_cycle) } else { (st.out_enqueue, st.out_cycle) }
+        };
+        let ring_addr = if dir_in { BULK_IN_RING.0.get() } else { BULK_OUT_RING.0.get() } as u64;
+        let dequeue = ring_addr + (enqueue as u64) * 16;
         let set_dequeue = self.push_command([
-            (ring_addr as u32) | 1, // DCS=1, matching the software cycle reset below
-            (ring_addr >> 32) as u32,
+            (dequeue as u32) | (cycle as u32), // DCS = the cycle the next TRB will carry
+            (dequeue >> 32) as u32,
             0,
             (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (dci << 16) | (slot_id << 24),
         ]);
         self.wait_command_completion(set_dequeue)?;
-
-        // Both commands took: now the software producer state can safely be
-        // reset to the ring start to match hardware's new dequeue pointer.
-        // The Link TRB at the ring's end (from activate_storage) is intact, so
-        // only the enqueue index and cycle need resetting.
-        if let Some(st) = self.storage.as_mut() {
-            if dir_in {
-                st.in_enqueue = 0;
-                st.in_cycle = true;
-            } else {
-                st.out_enqueue = 0;
-                st.out_cycle = true;
-            }
-        }
         Ok(())
     }
 

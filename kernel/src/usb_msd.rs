@@ -250,8 +250,9 @@ fn bot_command(cdb: &[u8], mut data: Option<(&mut [u8], bool)>) -> Result<(), Er
                 }
                 // Reset both directions; the healthy one no-ops (its Reset
                 // Endpoint fails on a non-halted endpoint and is ignored -
-                // reset_storage_endpoint only touches software ring state on
-                // success, so a no-op reset can't desync it).
+                // reset_storage_endpoint then sends no Set TR Dequeue, and it
+                // never changes software ring state, so a no-op reset can't
+                // desync it).
                 let _ = xhci::storage_reset_endpoint(true);
                 let _ = xhci::storage_reset_endpoint(false);
                 attempt += 1;
