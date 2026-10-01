@@ -991,9 +991,12 @@ The small open tails those arcs deliberately left:
 >             `pi400/msd-in-stall`): `reset_storage_endpoint` sends it after
 >             a Reset Endpoint that took (the endpoint was halted), and only
 >             then, since on a healthy endpoint it would reset the device's
->             data toggle and not the host's. Best-effort. QEMU cannot check
->             it: the Stall test passes with it removed. Open on a real stick
->             with the board item above.*
+>             data toggle and not the host's. Best-effort. QEMU checks only
+>             that it is not refused (`--stall` fails on a class-type
+>             request, 60 refusals): the test passes with the request
+>             removed, and with it sent to the wrong endpoint, since QEMU
+>             accepts any endpoint address. Open on a real stick with the
+>             board item above.*
 >       - [ ] **A storage transfer timeout is still not recovered.** With
 >             the endpoint Running, Reset Endpoint is refused and the timed
 >             out TRB stays queued ahead of the retry's, so the retry can
