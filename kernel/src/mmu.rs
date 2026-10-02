@@ -844,12 +844,48 @@ fn overlaps(region: (u64, u64), start: u64, end: u64) -> bool {
 /// creation's `spawn` syscall) needs to rebuild the whole table set again
 /// with one more `el0_regions` entry, long after UEFI boot services (and
 /// therefore any way to reconstruct `memory_map` from scratch) are gone.
+///
+/// Two halves, [`build_identity_map`] and [`switch_to_identity_map`], and
+/// this is their composition. The build half writes memory only (the
+/// tables, and the stashes above); the switch half writes the registers
+/// and then runs the checks that need the new tables live. They are
+/// separate because the exception level decides what the switch is: at
+/// EL1 it is [`switch_full`], the same register sequence as every runtime
+/// rebuild; on a platform that hands off at EL2 (the Raspberry Pi) the
+/// `_EL1` registers are set from EL2 and the switch is the `eret` that
+/// drops into them (`docs/roadmap/roadmap-el1-drop.md`). The switch half
+/// takes the build half's result, so it cannot be called without it.
 pub unsafe fn install_identity_map(
     memory_map: MemoryMapOwned,
     el0_regions: [(u64, u64); MAX_EL0_REGIONS],
     extra_devices: &[(u64, u64)],
     uncached: &[(u64, u64)],
 ) {
+    let planned = unsafe { build_identity_map(memory_map, el0_regions, extra_devices, uncached) };
+    unsafe { switch_to_identity_map(planned) };
+}
+
+/// The non-cacheable ranges the build half planned, which the switch half
+/// cleans from the cache and checks through the hardware walker once the
+/// tables are live. Only [`build_identity_map`] makes one.
+pub struct Planned {
+    ranges: [(u64, u64); MAX_NC_RANGES],
+    count: usize,
+}
+
+/// The build half of [`install_identity_map`]: stashes the inputs for the
+/// runtime rebuilds and writes every table, and no register. The tables
+/// are complete and consistent when this returns; nothing walks them until
+/// the switch half.
+///
+/// # Safety
+/// As [`install_identity_map`].
+pub unsafe fn build_identity_map(
+    memory_map: MemoryMapOwned,
+    el0_regions: [(u64, u64); MAX_EL0_REGIONS],
+    extra_devices: &[(u64, u64)],
+    uncached: &[(u64, u64)],
+) -> Planned {
     let mut stored = [(0u64, 0u64); MAX_EXTRA_DEVICES];
     let count = extra_devices.len().min(MAX_EXTRA_DEVICES);
     stored[..count].copy_from_slice(&extra_devices[..count]);
@@ -862,8 +898,23 @@ pub unsafe fn install_identity_map(
     // Re-borrow from the stash rather than the original parameter (now
     // moved) - the rest of this function is unchanged either way.
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }.unwrap();
-    let (planned, planned_count) =
+    let (ranges, count) =
         unsafe { build_tables(memory_map, el0_regions, extra_devices, &stored_nc[..nc_count], true) };
+    Planned { ranges, count }
+}
+
+/// The switch half of [`install_identity_map`], for a kernel running at
+/// EL1: [`switch_full`] onto the current task's view, then the one-time
+/// cache clean of the non-cacheable ranges and the walker check of every
+/// view, both of which need the new tables live.
+///
+/// # Safety
+/// [`build_identity_map`] must have returned `planned` on this boot, and
+/// the caller must be at EL1 (at EL2 these register writes install nothing;
+/// see `el2.rs`).
+pub unsafe fn switch_to_identity_map(planned: Planned) {
+    unsafe { switch_full(crate::tasks::current_index()) };
+    let planned = &planned.ranges[..planned.count];
 
     // The non-cacheable ranges were written through cacheable mappings
     // until a moment ago (firmware zeroed `.bss` and drew its splash that
@@ -875,10 +926,10 @@ pub unsafe fn install_identity_map(
     // Only the ranges actually planned: those are mapped (a cache
     // operation on an unmapped address faults at EL1), and they are the
     // only ones that were ever cacheable RAM.
-    for &(start, end) in &planned[..planned_count] {
+    for &(start, end) in planned {
         clean_invalidate(start, end - start);
     }
-    check_attributes(&planned[..planned_count]);
+    check_attributes(planned);
 }
 
 /// The smallest data-cache line, in bytes (`CTR_EL0.DminLine`, log2 of
@@ -1068,6 +1119,7 @@ pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_
     let (extra_devices, count) = unsafe { *STORED_EXTRA_DEVICES.get() };
     let (uncached, nc_count) = unsafe { *STORED_UNCACHED.get() };
     let _ = unsafe { build_tables(memory_map, el0_regions, &extra_devices[..count], &uncached[..nc_count], false) };
+    unsafe { switch_full(crate::tasks::current_index()) };
 }
 
 /// The discovered general-RAM span `(min_addr, max_addr)` - the same
@@ -1090,6 +1142,10 @@ pub(crate) fn ram_span() -> (u64, u64) {
     (min_addr, max_addr)
 }
 
+/// Writes every view's tables from the inputs, and returns the
+/// non-cacheable ranges it planned. Memory only: no register is written
+/// here, so the tables in use are unchanged when this returns, and the
+/// caller switches ([`switch_full`], or the EL2 drop).
 unsafe fn build_tables(
     memory_map: &MemoryMapOwned,
     el0_regions: [(u64, u64); MAX_EL0_REGIONS],
@@ -1200,7 +1256,6 @@ unsafe fn build_tables(
         );
     }
 
-    unsafe { switch_full(crate::tasks::current_index()) };
     let mut planned = [(0u64, 0u64); MAX_NC_RANGES];
     planned[..nc.count].copy_from_slice(&nc.ranges[..nc.count]);
     (planned, nc.count)
@@ -1380,12 +1435,17 @@ pub(crate) fn activate_task(view: TaskIndex) {
     }
 }
 
-/// The full MAIR/TCR/TTBR0 configuration sequence, switching to
-/// `view`'s table set - the boot-time install and every runtime
-/// rebuild end here. [`activate_task`] is the lighter switch-only
-/// sibling used on every context switch; both look the view up through
-/// [`l0_table`].
-unsafe fn switch_full(view: TaskIndex) {
+/// The EL1 translation regime's register values for `view`'s table set:
+/// what [`switch_full`] writes at EL1, and what the EL2 drop writes into
+/// the `_EL1` registers from EL2 before its `eret` (`el2.rs`). One
+/// derivation, so the two paths cannot disagree.
+pub(crate) struct El1Regime {
+    pub(crate) mair: u64,
+    pub(crate) tcr: u64,
+    pub(crate) ttbr0: u64,
+}
+
+pub(crate) fn el1_regime(view: TaskIndex) -> El1Regime {
     let mair_el1: u64 =
         (MAIR_ATTR_DEVICE_NGNRNE << (8 * MAIR_IDX_DEVICE_NGNRNE))
             | (MAIR_ATTR_NORMAL_WB << (8 * MAIR_IDX_NORMAL_WB))
@@ -1422,6 +1482,16 @@ unsafe fn switch_full(view: TaskIndex) {
         | (ips << 32); // IPS: from hardware
 
     let ttbr0_el1 = l0_table(view).get() as u64;
+    El1Regime { mair: mair_el1, tcr: tcr_el1, ttbr0: ttbr0_el1 }
+}
+
+/// The full MAIR/TCR/TTBR0 configuration sequence, switching to
+/// `view`'s table set - the boot-time install at EL1 and every runtime
+/// rebuild end here. [`activate_task`] is the lighter switch-only
+/// sibling used on every context switch; both look the view up through
+/// [`l0_table`].
+unsafe fn switch_full(view: TaskIndex) {
+    let El1Regime { mair: mair_el1, tcr: tcr_el1, ttbr0: ttbr0_el1 } = el1_regime(view);
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0
     // switch below, code is still running under firmware's *old* tables
