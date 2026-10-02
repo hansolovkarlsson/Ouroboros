@@ -476,7 +476,10 @@ fn main() -> Status {
     // `discovery` ever resolves an address that isn't actually valid on
     // some untested platform), but it now reports through the exception
     // handler and halts, instead of taking the whole VM down the way an
-    // untested address once did on Parallels.
+    // untested address once did on Parallels. On an EL2 handoff (the
+    // Raspberry Pi) this VBAR_EL1 write takes effect at the drop to EL1
+    // inside `mmu::switch_to_identity_map` below; until then a fault still
+    // goes through the firmware's EL2 vectors (and `earlyfault.rs`).
     exceptions::install();
     if fb_console_forced {
         progress_square(fb_info, 2);
@@ -592,6 +595,8 @@ fn main() -> Status {
             &uncached[..uncached_count],
         )
     };
+    // True at EL1 on every platform now: on an EL2 handoff the install
+    // dropped to EL1 on the way (`el2.rs`), and logged it.
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
     // The console's own device mapping gives way to RAM's when RAM's span
     // covers its 1GB block (the Pi 4 with RAM above 3GB): the UART is then

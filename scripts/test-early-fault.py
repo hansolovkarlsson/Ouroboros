@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test the early fault reporter (kernel/src/earlyfault.rs) on QEMU.
 
-    python3 scripts/test-early-fault.py [--esp build/esp] [--keep]
+    python3 scripts/test-early-fault.py [--esp build/esp] [--keep] [--el2]
 
 Two boots of a copy of the staged ESP, each graded from the serial console:
 
@@ -22,7 +22,21 @@ Two boots of a copy of the staged ESP, each graded from the serial console:
    the registration did not take.
 
 2. Without the flag, the control: the reporter arms, the boot leaves boot
-   services and reaches the shell, and no `EARLY EXCEPTION` line appears.
+   services, says which exception level it was handed off at, and reaches
+   the shell, where `help` typed after a pause is answered (the shell task
+   is scheduled and served, so the tick and the keyboard both work); no
+   `EARLY EXCEPTION` and no kernel `EXCEPTION` line appears.
+
+With --el2 both boots run on `-machine virt,virtualization=on`, where the
+firmware hands the kernel off at EL2 as the Raspberry Pi's does (`make
+run-el2`, `make test-el1-drop`). The fault boot is the same test: the
+reporter's dump is the firmware's handler either way. The control is the
+EL1 drop's check (kernel/src/el2.rs, docs/roadmap/roadmap-el1-drop.md): the
+kernel must say `running at EL2 after the exit`, then `dropped from EL2 to
+EL1`, and then behave as the plain control does. Before the drop this boot
+reached `shell ready` and then faulted at address 0 through the firmware's
+vectors, from the firmware's own EL2 timer; so the control's dwell after
+the shell line, and the typed `help`, are what can fail here.
 
 Why both: the dump proves the handler is reached and reads the context the
 firmware passes; the control proves arming it costs the ordinary boot
@@ -44,6 +58,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
@@ -51,19 +66,27 @@ drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
 
 TIMEOUT = 90
+# The control's dwell at the shell before `help` is typed: long enough for
+# a leftover EL2 timer to fire (it did within a second, before the drop).
+DWELL = 5
 
 
-def boot(esp, until):
+def boot(esp, until, machine, then=None):
     """Boot the dev-loop machine on the ESP directory `esp` (vvfat) and
     return the serial transcript once `until` (a regex) matches or TIMEOUT
-    seconds pass."""
+    seconds pass. With `then`, a line to type after a DWELL at the match,
+    the transcript also holds the shell's answer (or its absence)."""
     guest = drive_qemu.Guest(
         os.path.join(esp, "boot"), virtio_disk=False, label=os.path.basename(esp),
         extra_args=["-drive", f"file=fat:rw:{esp},format=raw,media=disk,if=none,id=hd0",
                     "-device", "virtio-blk-device,drive=hd0"],
+        machine=machine,
     )
     try:
-        guest.wait_for(until, timeout=TIMEOUT)
+        if guest.wait_for(until, timeout=TIMEOUT) and then:
+            time.sleep(DWELL)
+            guest.type_line(then)
+            guest.wait_for(r"builtins:|EXCEPTION|halted", timeout=20)
         return guest.transcript()
     finally:
         guest.stop()
@@ -87,7 +110,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--esp", default="build/esp", help="the staged ESP directory (make esp)")
     ap.add_argument("--keep", action="store_true", help="keep the transcripts even when both boots pass")
+    ap.add_argument("--el2", action="store_true", help="hand the kernel off at EL2 (virtualization=on): the EL1 drop's rig")
     args = ap.parse_args()
+    machine = "virt,virtualization=on" if args.el2 else "virt"
+    handed_off = "EL2" if args.el2 else "EL1"
     if not os.path.isdir(args.esp):
         sys.exit(f"{args.esp} is not a directory; run `make esp` first")
 
@@ -99,7 +125,7 @@ def main():
     shutil.copytree(args.esp, esp)
     open(os.path.join(esp, "EARLYFAULT"), "w").close()
     print("boot 1: EARLYFAULT set, expecting the reporter's dump")
-    text = boot(esp, r"halted in the early fault reporter|Synchronous Exception at|shell ready")
+    text = boot(esp, r"halted in the early fault reporter|Synchronous Exception at|shell ready", machine)
     open(os.path.join(work, "fault.serial"), "w").write(text)
     planted = re.search(r"asking the firmware to copy to (0x[0-9a-f]+)", text)
     far = planted.group(1) if planted else "<the address the kernel logged>"
@@ -122,15 +148,20 @@ def main():
     # 2. The control, no flag.
     esp = os.path.join(work, "esp-plain")
     shutil.copytree(args.esp, esp)
-    print("boot 2: no flag, expecting the shell")
-    text = boot(esp, r"shell ready|halted in the early fault reporter|Synchronous Exception at")
+    print(f"boot 2: no flag, handed off at {handed_off}, expecting the shell and its answer to `help`")
+    text = boot(esp, r"shell ready|halted in the early fault reporter|Synchronous Exception at", machine, then="help")
     open(os.path.join(work, "plain.serial"), "w").write(text)
     results.append(grade("control", text, [
         ("reporter armed", r"early fault reporter armed"),
         ("boot services exited", r"exiting boot services"),
+        (f"handed off at {handed_off}", rf"running at {handed_off} after the exit"),
+        *([("dropped to EL1", r"dropped from EL2 to EL1, on our own tables and vectors")] if args.el2 else []),
+        ("identity map installed", r"identity map installed, MMU running on our own tables"),
         ("shell", r"shell ready"),
+        ("help answered after the dwell", r"^builtins: help"),
     ], [
         ("EARLY EXCEPTION", r"EARLY EXCEPTION"),
+        ("kernel EXCEPTION", r"EXCEPTION vector="),
         ("firmware's own line", r"Synchronous Exception at"),
     ]))
 

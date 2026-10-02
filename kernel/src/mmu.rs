@@ -903,17 +903,25 @@ pub unsafe fn build_identity_map(
     Planned { ranges, count }
 }
 
-/// The switch half of [`install_identity_map`], for a kernel running at
-/// EL1: [`switch_full`] onto the current task's view, then the one-time
-/// cache clean of the non-cacheable ranges and the walker check of every
-/// view, both of which need the new tables live.
+/// The switch half of [`install_identity_map`]: onto the current task's
+/// view, then the one-time cache clean of the non-cacheable ranges and the
+/// walker check of every view, both of which need the new tables live.
+/// The exception level decides the switch. At EL1 it is [`switch_full`],
+/// the sequence every runtime rebuild uses. At EL2 (the Raspberry Pi's
+/// handoff) those `_EL1` writes would install nothing for the running
+/// level, so the switch is `el2::drop_to_el1`: EL1's regime set from EL2
+/// and an `eret` into it; this returns at EL1 either way.
 ///
 /// # Safety
-/// [`build_identity_map`] must have returned `planned` on this boot, and
-/// the caller must be at EL1 (at EL2 these register writes install nothing;
-/// see `el2.rs`).
+/// [`build_identity_map`] must have returned `planned` on this boot, after
+/// `exit_boot_services`, with IRQs masked and `exceptions::install` done.
 pub unsafe fn switch_to_identity_map(planned: Planned) {
-    unsafe { switch_full(crate::tasks::current_index()) };
+    let view = crate::tasks::current_index();
+    if crate::el2::current_el() == 2 {
+        unsafe { crate::el2::drop_to_el1(el1_regime(view)) };
+    } else {
+        unsafe { switch_full(view) };
+    }
     let planned = &planned.ranges[..planned.count];
 
     // The non-cacheable ranges were written through cacheable mappings
