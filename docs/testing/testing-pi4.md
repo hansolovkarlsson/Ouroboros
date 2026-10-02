@@ -498,8 +498,13 @@ with the firmware's text console: first partway through
 `xHCI discovery failed (skipped…)` line, and under `XHCINOWR` at the earlier
 MADT line.
 
-A fourth flag, `MSDSTALL` (2026-10-01), is a test fault for QEMU and not a
-diagnostic: it corrupts every seventh CBW so QEMU's stick stalls
+Two more flags are test faults for QEMU and not diagnostics. `EARLYFAULT`
+(2026-10-01) asks the firmware's own `CopyMem` to write at an address nothing
+maps, just before the xHCI takeover, so the fault is taken in the firmware's
+code with the firmware's vectors installed, the shape of the Pi 4's first
+serial boot below; what follows on serial is the early fault reporter's dump
+(`kernel/src/earlyfault.rs`, checked by `make test-early-fault`). On a card it
+only ends the boot in that dump. `MSDSTALL` (2026-10-01) is the other: it corrupts every seventh CBW so QEMU's stick stalls
 (`test-usb-hub.py --stall`). The kernel honours it only for a stick whose
 INQUIRY vendor is `QEMU`, but it has no place on a card.
 
@@ -559,6 +564,12 @@ underneath the kernel (the stack slot overwritten, or the image's pages made
 unreadable) rather than at one bad instruction, and nothing in the kernel
 changes memory attributes before the exit. Unresolved: the firmware's serial
 dump (ESR, FAR and a backtrace naming the caller) is what settles it.
+**Update 2026-10-01: the firmware has no such dump.** EDK2's default handler
+prints the one line through the serial port and everything after it with
+`DEBUG()`, which a RELEASE build compiles out, and pftf's release zip ships
+only the RELEASE firmware (its workflow builds DEBUG too and does not package
+it). The Pi 4's first serial boot, below, showed exactly the one line, twice.
+The kernel now prints the dump itself: see "The early fault reporter" below.
 
 **`NOXHCI` + `FBCON` got through the exit** (`exiting boot services`, no
 firmware exception), so the firmware-phase fault needs the xHCI takeover. Then
@@ -593,6 +604,54 @@ line was drawn and never reached the display. Testing paused here on
 2026-09-28 until the serial cable arrives: boot without flags first, since
 the console is now at the translated `0xfe201000` and every line after the
 exit goes to serial.
+
+**The Pi 4's first serial boot (2026-10-01, build `b8aaf33`, no flag, the
+Debug Probe on the PL011, `screen -L`).** Three things it settled:
+
+- `console @ 0xfe201000 (via devicetree)`: the translation through `ranges`
+  (#181) holds on the board. The item is closed.
+- The boot got further than any HDMI session had shown: the GOP framebuffer,
+  `_CCA 0`, the MADT (GIC V2, GICD `0xff841000`), all five programs loaded,
+  the boot identity (`boot 1`, the UEFI variable absent, the file present, 32
+  bytes of entropy), and `image @ 0x376e1000..0x378d0000, taking the xHCI
+  controller next`. Then, with none of `discover_xhci`'s own lines (no
+  `skipping`, no `PCI command register`, no `xHCI controller @`), the firmware
+  printed `Synchronous Exception at 0x0000000039F2D1A0` twice and nothing
+  else: no ESR, no FAR, no registers, no module. The address is above the
+  image, so firmware code, during the takeover, which is where the Pi 400's
+  first `FBCON` boot faulted too (`0x39F31A40`, 18 KB away, after its
+  command-register write; the Pi 4's came before that line).
+- The firmware's one line is all a RELEASE build prints (see the update
+  above), so the "serial dump" the Pi 400 item waited for was never going to
+  arrive from the firmware.
+
+**The early fault reporter** (`kernel/src/earlyfault.rs`, the same day) is the
+answer: right after console discovery the kernel registers its own handler for
+synchronous exceptions through the firmware's `EFI_CPU_ARCH_PROTOCOL`, the
+mechanism the firmware's GIC driver uses for IRQs, so VBAR_EL1 and the
+firmware's interrupt handling are untouched. From then until
+`exceptions::install()` a fault prints, on the serial console with raw writes
+(or, with no serial console, on a framebuffer console made at that moment,
+which clears the screen first: the HDMI-only case the Pi 400's first boots
+were), the ESR decoded (class, fault status and level, read or write), FAR, ELR, SP,
+LR, FP, every x register, a frame-pointer backtrace (the kernel is now built
+with frame records, `.cargo/config.toml`), and for each code address the
+loaded image holding it, from the firmware's debug image info table: the
+kernel by offset, a firmware driver by the module name in its PE debug entry
+(`XhciDxe.dll`, say) and the firmware-file GUID of its device path. Checked on
+QEMU by `make test-early-fault`: a fault planted in the DXE core's `CopyMem`
+(`EARLYFAULT`) prints `elr ... = DxeCore.dll ... + 0x1dd00`, then the kernel's
+own frames, then the firmware's frames that called the kernel; and with the
+registration deleted the test fails and the firmware's bare line comes back.
+The frame walk believes a record only between the faulting SP and the end of
+the stack's memory-map descriptor, so a clobbered frame pointer cannot make
+the report fault and cut itself short. The framebuffer fallback is not
+exercised by the test: QEMU's firmware always describes a serial console, so
+the serial path wins there.
+The next Pi 4 boot, with no flag, should end in that dump instead of the one
+line. If it still shows only the line, the fault corrupted the firmware's
+dispatcher or stack before the handler ran, which is itself the answer the
+memory-damage suspect predicts.
 
 ---
 

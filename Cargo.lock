@@ -311,6 +311,7 @@ dependencies = [
  "log",
  "syscall-abi",
  "uefi",
+ "uefi-raw",
 ]
 
 [[package]]

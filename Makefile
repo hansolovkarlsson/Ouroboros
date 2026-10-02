@@ -226,7 +226,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard release test check-relocs test-parallels test-keyboard-chain test-usb-hub image-stall test-reentrant-session test-async-rmount test-held-keys clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard release test check-relocs test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault test-reentrant-session test-async-rmount test-held-keys clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -1461,6 +1461,20 @@ test-usb-hub: image $(USBSTICK_IMG)
 	python3 scripts/test-usb-hub.py --usb-boot || fail=1; \
 	{ $(MAKE) --no-print-directory image-stall && python3 scripts/test-usb-hub.py --stall; } || fail=1; \
 	exit $$fail
+
+# The early fault reporter (kernel/src/earlyfault.rs) exercised on QEMU
+# (scripts/test-early-fault.py): one boot with the EARLYFAULT flag file at the
+# ESP root, where the kernel asks the firmware's CopyMem to write at an
+# unmapped address just before the xHCI takeover, so the fault is taken in
+# the firmware's own code with the firmware's vectors installed, as on the
+# Pi 4; the serial console must show the reporter's dump (ESR decoded, the
+# faulting PC placed in the DXE core by name, a frame placed in the kernel)
+# and not the firmware's one line. Then a boot without the flag, which must
+# reach the shell with the reporter armed. About a minute. Run it when
+# earlyfault.rs, the console discovery it prints through, or the kernel's
+# frame-pointer setting (.cargo/config.toml) changes.
+test-early-fault: esp
+	python3 scripts/test-early-fault.py
 
 # The re-entrant session check (scripts/test-reentrant-session.sh): a remote
 # fid op arriving at netd while it is inside a cpu run, on the two-node ext2

@@ -18,7 +18,9 @@
 //! Deliberately not installed until after `exit_boot_services` — firmware
 //! has its own VBAR_EL1 that its boot-services internals may depend on;
 //! clobbering it while boot services are still active would be touching
-//! state we don't own yet.
+//! state we don't own yet. A fault before that point is reported by
+//! `earlyfault.rs`, which registers a handler through the firmware's own
+//! CPU protocol rather than replacing its table.
 //!
 //! ## The IRQ vector is different from the other 15
 //!

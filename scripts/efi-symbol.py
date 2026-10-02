@@ -23,8 +23,12 @@ named, since a misread digit or the wrong build still yields a confident
 symbol: the map and the .efi carry the same link timestamp, and <end>-<base>
 is the .efi's SizeOfImage. Either failing refuses the lookup.
 
-An address outside the image is firmware code (a DXE driver); only the serial
-dump, which names the module, places it.
+An address outside the image is firmware code (a DXE driver). The firmware's
+own serial dump names the module only in a DEBUG build; the pftf release is
+a RELEASE build and prints the one line. Since 2026-10-01 the kernel's early
+fault reporter (kernel/src/earlyfault.rs) prints the module name, the ESR,
+FAR and a backtrace for such a fault on the serial console, so a board with
+serial no longer needs this script for the firmware-code case.
 """
 import re
 import sys

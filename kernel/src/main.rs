@@ -10,6 +10,7 @@ mod bootid;
 mod console;
 mod devicetree;
 mod dtranges;
+mod earlyfault;
 mod exceptions;
 mod fbconsole;
 mod fbdev;
@@ -50,9 +51,25 @@ use uart16550::Uart16550;
 /// 16550-family device (that's what PCI class 0x07/0x00 means). See
 /// `pci.rs` for why these are genuinely different hardware, not just a
 /// different address for the same driver.
+#[derive(Clone, Copy)]
 enum ConsoleKind {
     Pl011,
     Uart16550,
+}
+
+impl ConsoleKind {
+    /// The driver for a console of this kind at `base`.
+    ///
+    /// # Safety
+    /// `base` must be the register base of such a device, as the
+    /// platform's own devicetree, ACPI tables or PCI configuration space
+    /// reported it; nothing checks that a write there lands anywhere.
+    unsafe fn console(self, base: usize) -> Console {
+        match self {
+            ConsoleKind::Pl011 => Console::Pl011(unsafe { Uart::new(base) }),
+            ConsoleKind::Uart16550 => Console::Uart16550(unsafe { Uart16550::new(base) }),
+        }
+    }
 }
 
 /// Tries devicetree, then ACPI/SPCR, then PCI enumeration, logging why each
@@ -184,6 +201,29 @@ fn main() -> Status {
             None
         }
     };
+
+    // The early fault reporter (earlyfault.rs): from here until
+    // `exceptions::install()`, a synchronous exception still goes through
+    // the firmware's vectors, and a RELEASE firmware (the Pi's pftf build)
+    // prints one line for it, with no ESR, FAR or link register.
+    // Registering the kernel's own handler through the firmware's CPU
+    // protocol gets the whole dump, on the serial console just discovered
+    // or, without one, on the framebuffer (the Pi over HDMI alone,
+    // Parallels), with raw writes the handler can make from a fault. The
+    // first Pi 4 serial boot (2026-10-01) died in the xHCI takeover below
+    // with only the firmware's line to show for it; this reads the rest.
+    // SAFETY: the same address the post-exit console will use, from the
+    // platform's own devicetree, ACPI tables or PCI config space.
+    let early_serial = discovery.map(|(base, kind, _)| unsafe { kind.console(base) });
+    let early_on = if early_serial.is_some() { "the serial console" } else { "the framebuffer" };
+    match earlyfault::arm(early_serial, fb_info, image_range) {
+        Ok(()) => log::info!(
+            "Ouroboros kernel: early fault reporter armed: a fault before the kernel's own vectors reports on {early_on}"
+        ),
+        Err(e) => log::warn!(
+            "Ouroboros kernel: early fault reporter not armed ({e}); a fault before the kernel's own vectors shows only what the firmware prints"
+        ),
+    }
 
     // Whether the firmware declares DMA non-coherent (ACPI `_CCA 0`, the
     // Raspberry Pi 4/400's PCIe root: docs/testing/testing-pi4.md Risk 8).
@@ -365,9 +405,16 @@ fn main() -> Status {
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
     // `\FBCON` (`fb_console_forced`): leave the discovered serial console
     // uninstalled after the exit, so the framebuffer console below takes HDMI.
-    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall } = bootflags::read();
+    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall, early_fault } =
+        bootflags::read();
     if msd_stall {
         usb_msd::inject_stalls();
+    }
+    if early_fault {
+        // `\EARLYFAULT`: a fault inside the firmware's own code, here, at
+        // the step the Pi 4 died in; the boot ends in the early fault
+        // reporter's dump. Does not return.
+        earlyfault::plant_firmware_fault();
     }
     let xhci_result = if no_xhci {
         Err(pci::XhciDiscoveryError::SkippedByFlag)
@@ -462,10 +509,7 @@ fn main() -> Status {
     if let Some((base, kind, _source)) = serial_console {
         // SAFETY: `base` came from the platform's own devicetree, ACPI
         // tables, or PCI configuration space.
-        let console = match kind {
-            ConsoleKind::Pl011 => Console::Pl011(unsafe { Uart::new(base) }),
-            ConsoleKind::Uart16550 => Console::Uart16550(unsafe { Uart16550::new(base) }),
-        };
+        let console = unsafe { kind.console(base) };
         console::install(console);
         console::println!("Ouroboros kernel: boot services exited, console live");
     }

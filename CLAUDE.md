@@ -499,6 +499,7 @@ make run-image-ext2          # build build/espext2.img (two-partition MBR: ext2 
 make parallels-hdd          # wrap build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk
 make sdcard SDCARD=/Volumes/OUROBOROS  # stage the Pi 4 / Pi 400 boot card on an already-formatted FAT volume: pinned pftf firmware (installed once, since its settings live in RPI_EFI.fd) + build/esp on top. Never formats. KEEP_ETC=1 keeps the card's /etc (default re-stages it, resetting Pi-made accounts), FIRMWARE=1 reinstalls the firmware, EJECT=1 ejects. See docs/testing/testing-pi4.md section 4
 make test-parallels          # scripted real-hardware round trip via prlctl - see below
+make test-early-fault        # the early fault reporter on QEMU (scripts/test-early-fault.py): a boot with the \EARLYFAULT flag must end in the kernel's own dump of a fault taken in the firmware's code (the DXE core named, a kernel frame in the backtrace), and a boot without it must reach the shell; about a minute - run it whenever earlyfault.rs or console discovery changes
 make test-async-rmount       # rebuilds the image, then three driven QEMU boots against host-run 9P peers (scripts/test-async-rmount.sh): the parked remote mount is served, a parked reply never reaches a recycled slot, and a live peer is served while a silent one is parked - run it whenever netd's client paths or the kernel's MSG_SEND arm change
 make test-held-keys          # rebuilds the image, then five driven QEMU boots of the held user keys (scripts/test-held-keys.py): login holds, logout and a killed shell drop, an ordinary user is refused; minutes, so not in `make test` - run it whenever login, the shell's session loop or netd's held-key table changes
 make test-keyboard-chain     # rebuilds the image, then four driven QEMU boots through the nested-shell keyboard-chain recipes (scripts/test-keyboard-chain.sh); minutes, so not in `make test` - run it whenever tasks.rs's keyboard ownership changes
@@ -626,6 +627,10 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/font.rs        embedded 8x8 bitmap font, printable ASCII only (cond keeps its own copy)
   src/fbconsole.rs   framebuffer text console - the kernel's EMERGENCY/boot console only; steady state is cond
   src/fbdev.rs       dumb framebuffer primitives for cond (FB_BLIT/FB_SCROLL/FB_CLEAR), gated to CON_TASK
+  src/earlyfault.rs  the early fault reporter: a fault BEFORE exceptions::install() goes through the firmware's vectors, and a RELEASE
+                     firmware (the Pi's) prints one line for it; this registers the kernel's own handler through the firmware's CPU
+                     protocol and prints ESR/FAR/ELR, a backtrace and the loaded image holding each address, on the serial
+                     console, or on the framebuffer when there is none
   src/exceptions.rs  VBAR_EL1 vector table + fault reporting, and the three resumable paths (IRQ, SVC, EL0 fault)
   src/mmu.rs         per-task translation tables. READ ITS MODULE DOC FIRST: the L0 start level is a fixed bug, not a style choice
   src/gic.rs         version-dispatching facade over gicv2/gicv3, selected by madt.rs
@@ -646,7 +651,8 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is
   src/virtio_rng.rs  virtio-rng, backing the RANDOM syscall; absent on Parallels/Pi and that is a supported case
   src/bootflags.rs   boot flag files at the ESP root: \NOXHCI, \XHCINOWR, \FBCON switch off one boot step to bisect a hang on hardware;
-                     \MSDSTALL is a QEMU test fault (QEMU's stick only) for test-usb-hub.py --stall
+                     \MSDSTALL is a QEMU test fault (QEMU's stick only) for test-usb-hub.py --stall; \EARLYFAULT plants a fault in
+                     the firmware's own code before the exit, for test-early-fault.py
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
   src/xhci.rs        from-scratch xHCI: rings, multi-device port scan, HID interrupt endpoint, storage endpoint reset
