@@ -1168,12 +1168,31 @@ The small open tails those arcs deliberately left:
 >       Pi 400-shaped: its keyboard is always attached, so the controller is
 >       always doing DMA for the firmware's driver; and its VL805 has no
 >       firmware EEPROM (loaded by the bootloader, and reloaded by Linux after
->       a reset). The serial dump (ESR, FAR, a backtrace) decides.
+>       a reset). The serial dump (ESR, FAR, a backtrace) decides. *Update
+>       2026-10-01: the Pi 4's first serial boot faulted in the same step,
+>       at a firmware address (`0x39F2D1A0`, outside the image, before the
+>       command-register line), and the firmware printed its one line and
+>       no dump: a RELEASE build compiles the register dump out, and the
+>       pftf zip ships only RELEASE. So the dump is now the kernel's: the
+>       next item.*
+> - [ ] **The early fault reporter: the kernel's own dump for a fault taken
+>       under the firmware's vectors.** `earlyfault.rs` registers a handler
+>       for synchronous exceptions through `EFI_CPU_ARCH_PROTOCOL` right
+>       after console discovery (VBAR_EL1 untouched) and prints ESR decoded,
+>       FAR, ELR, every register, a frame-pointer backtrace and the loaded
+>       image holding each address (the kernel by offset, a firmware driver
+>       by PE debug name and firmware-file GUID). *Built 2026-10-01 (branch
+>       `pi4/early-fault-reporter`): checked on QEMU by `make
+>       test-early-fault` (the `\EARLYFAULT` flag plants a fault in the DXE
+>       core's `CopyMem`; the dump names `DxeCore.dll` and the kernel's
+>       frames; with the registration removed the test fails). The kernel
+>       is built with frame records now (`.cargo/config.toml`). Open until a
+>       Pi boot shows the dump where the firmware's line was.*
 > - [ ] **The Pi 4 stops after the early console's clear.** Under `\FBCON`
 >       the whole-screen clear reaches the display and the first line after it
 >       never does. On an earlier build the same board went black the same
 >       way; on another boot it did not clear at all. For the serial cable.
-> - [ ] **The devicetree console's address is a bus address; translate it.**
+> - [x] **The devicetree console's address is a bus address; translate it.**
 >       The Pi 4 logged `console @ 0x7e201000 (via devicetree)`, the PL011's
 >       VideoCore bus address (`0xfe201000` for the ARM), so without `\FBCON`
 >       the kernel's first write after the exit went to no device (1 GB Pi 4)
@@ -1182,8 +1201,8 @@ The small open tails those arcs deliberately left:
 >       closed, and the console is mapped as its own device (it was covered
 >       only by the GIC's 1 GB block). Checked on the host against the pftf
 >       zip's Pi 4 and Pi 400 trees, hand-built trees and a mutation; on
->       `main` since #181 (2026-10-01); open until serial shows
->       `0xfe201000` on a board.*
+>       `main` since #181 (2026-10-01). Serial showed `console @ 0xfe201000
+>       (via devicetree)` on the Pi 4 the same day: closed.*
 > - [x] **Boot flag files and `\FBCON` for bench diagnostics.** `\NOXHCI`,
 >       `\XHCINOWR`, `\FBCON` (the framebuffer console right after the exit,
 >       with progress squares before it), the image range and an

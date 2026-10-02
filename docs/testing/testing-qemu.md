@@ -1071,6 +1071,7 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `run-usb-multi` | xHCI + tablet + storage stick |
 | `run-usb-hub` | xHCI + a usb-hub with the keyboard and stick behind it, tablet on a root port |
 | `test-usb-hub` | the hub layout driven: keyboard ready, stick configured, a line typed through USB runs; then `--usb-boot`, booted from a stick behind the hub and mounted through it; then `--stall`, that boot from `build/usb-hub-stall.img` (`make image-stall`, the image with the `MSDSTALL` flag file), so QEMU's stick stalls on every seventh CBW (about 30 by QEMU's own count, each recovered by its first retry) and on a short CSW read for another (about 30, each recovered in place by clearing the halt and reading the CSW again). `--direct` is the control |
+| `test-early-fault` | the early fault reporter (`kernel/src/earlyfault.rs`): a boot with the `EARLYFAULT` flag file, where the kernel asks the firmware's CopyMem to write at an unmapped address before the xHCI takeover, must end in the kernel's dump of that fault (taken in the DXE core, with the firmware's vectors installed): ESR decoded, the PC placed in `DxeCore.dll`, a frame placed in the kernel; then a boot without the flag, which must reach the shell with the reporter armed. The case is the Raspberry Pi 4's first serial boot, where the RELEASE firmware printed one line and no registers |
 | `run-gicv3` | force GICv3 |
 | `test-parallels` | scripted real-hardware smoke test (Parallels, not QEMU) |
 
