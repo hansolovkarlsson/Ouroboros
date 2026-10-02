@@ -59,10 +59,13 @@ class Guest:
     should reuse this rather than copy them.
     """
 
-    def __init__(self, image, extra_args=(), intlog=None, label="", virtio_disk=True):
+    def __init__(self, image, extra_args=(), intlog=None, label="", virtio_disk=True, machine="virt"):
         """`virtio_disk=False` leaves `image` off the virtio-blk bus, for a
         caller that attaches it some other way (test-usb-hub.py boots it
-        from a USB stick); `image` still names where the QEMU trace goes."""
+        from a USB stick); `image` still names where the QEMU trace goes.
+        `machine` is QEMU's -machine value: `virt,virtualization=on` makes
+        the firmware hand the kernel off at EL2, as the Raspberry Pi's does
+        (test-early-fault.py --el2, the EL1 drop's rig)."""
         prefix = subprocess.run(
             ["brew", "--prefix", "qemu"], capture_output=True, text=True
         ).stdout.strip()
@@ -72,7 +75,7 @@ class Guest:
             os.path.dirname(os.path.abspath(image)), "qemu-int.log"
         )
         cmd = [
-            "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a72",
+            "qemu-system-aarch64", "-machine", machine, "-cpu", "cortex-a72",
             "-m", "512M", "-bios", ovmf,
             *([
                 "-drive", f"file={image},format=raw,if=none,id=hd0",

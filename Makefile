@@ -226,7 +226,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard release test check-relocs test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault test-reentrant-session test-async-rmount test-held-keys clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard release test check-relocs test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -753,9 +753,12 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 # (non-legacy) register interface - QEMU defaults virtio-mmio to legacy
 # mode, confirmed via `-device virtio-mmio,help`'s printed default, kept
 # only for old-guest compatibility this project has no need to imitate.
+# `-machine` for `run`: `run-el2` overrides it (a target-specific variable
+# reaches the prerequisite's recipe), so the two boot one device list.
+MACHINE ?= virt
 run: esp
 	qemu-system-aarch64 \
-		-machine virt \
+		-machine $(MACHINE) \
 		-cpu cortex-a72 \
 		-m 512M \
 		-bios $(OVMF) \
@@ -764,6 +767,15 @@ run: esp
 		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
+
+# `run` with the firmware handing the kernel off at EL2, as the Raspberry
+# Pi's does (virtualization=on gives the guest an EL2 and the firmware runs
+# there): the dev loop for the EL1 drop, docs/roadmap/roadmap-el1-drop.md.
+# The kernel's `running at EL2 after the exit` line, then `dropped from EL2
+# to EL1`, is the check. Not a copy of `run`: the same recipe with MACHINE
+# overridden, so a change to `run`'s devices reaches this boot too.
+run-el2: override MACHINE := $(MACHINE),virtualization=on
+run-el2: run
 
 # Same as `run`, plus a virtio-net device on virtio-mmio with QEMU's
 # user-mode (SLIRP) networking - the dev loop for the network stack
@@ -1475,6 +1487,17 @@ test-usb-hub: image $(USBSTICK_IMG)
 # frame-pointer setting (.cargo/config.toml) changes.
 test-early-fault: esp
 	python3 scripts/test-early-fault.py
+
+# The EL1 drop (kernel/src/el2.rs, docs/roadmap/roadmap-el1-drop.md): the
+# same two boots handed off at EL2 (virtualization=on, as the Raspberry
+# Pi's firmware does). The control must say `running at EL2`, `dropped
+# from EL2 to EL1`, reach the shell and answer `help` after a dwell, where
+# before the drop the first eret into task 0, made at EL2, restored the
+# firmware's stale ELR_EL2 and landed at address 0. About a minute; run it
+# whenever el2.rs, mmu.rs's switch or
+# exceptions::install changes.
+test-el1-drop: esp
+	python3 scripts/test-early-fault.py --el2
 
 # The re-entrant session check (scripts/test-reentrant-session.sh): a remote
 # fid op arriving at netd while it is inside a cpu run, on the two-node ext2

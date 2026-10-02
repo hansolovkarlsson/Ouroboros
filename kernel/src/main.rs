@@ -11,6 +11,7 @@ mod console;
 mod devicetree;
 mod dtranges;
 mod earlyfault;
+mod el2;
 mod exceptions;
 mod fbconsole;
 mod fbdev;
@@ -475,7 +476,12 @@ fn main() -> Status {
     // `discovery` ever resolves an address that isn't actually valid on
     // some untested platform), but it now reports through the exception
     // handler and halts, instead of taking the whole VM down the way an
-    // untested address once did on Parallels.
+    // untested address once did on Parallels. On an EL2 handoff (the
+    // Raspberry Pi) this write is made all the same but takes effect only
+    // at the drop to EL1 inside `mmu::install_identity_map` below; until
+    // then a fault goes through the firmware's EL2 vectors, where
+    // `earlyfault.rs`'s handler is registered. `install` is the one owner
+    // of the write (it refuses it only under a VHE firmware, see there).
     exceptions::install();
     if fb_console_forced {
         progress_square(fb_info, 2);
@@ -513,6 +519,11 @@ fn main() -> Status {
         console::install(console);
         console::println!("Ouroboros kernel: boot services exited, console live");
     }
+    // The exception level the firmware handed off at, stated before any
+    // `_EL1` register is relied on: at EL2 (the Raspberry Pi) every write
+    // after this line goes to a register the running level does not use.
+    // See `el2.rs`.
+    console::println!("Ouroboros kernel: running at EL{} after the exit", el2::current_el());
 
     // SAFETY: called after exit_boot_services, with the memory map that
     // call returned. Up to five regions (`mmu::MAX_EXTRA_DEVICES`): the
@@ -586,6 +597,8 @@ fn main() -> Status {
             &uncached[..uncached_count],
         )
     };
+    // True at EL1 on every platform now: on an EL2 handoff the install
+    // dropped to EL1 on the way (`el2.rs`), and logged it.
     console::println!("Ouroboros kernel: identity map installed, MMU running on our own tables");
     // The console's own device mapping gives way to RAM's when RAM's span
     // covers its 1GB block (the Pi 4 with RAM above 3GB): the UART is then
@@ -896,7 +909,9 @@ fn try_virtio_console() {
 /// `n`th from the right edge, drawn with plain stores and no console. For the
 /// stretch just after `exit_boot_services` where there is no console yet to
 /// print through: square 1 means the exit returned, square 2 that the
-/// exception vectors are installed. The early console's clear wipes them, so
+/// exception vectors are written (live at once on an EL1 handoff; on the
+/// Pi's EL2 handoff, live from the drop to EL1 inside the identity-map
+/// install, see `el2.rs`). The early console's clear wipes them, so
 /// squares still on screen mean the boot stopped before that clear. White is
 /// the same in every GOP pixel format.
 fn progress_square(fb_info: Option<framebuffer::Info>, n: usize) {

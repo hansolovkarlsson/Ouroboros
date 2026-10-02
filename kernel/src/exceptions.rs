@@ -10,12 +10,17 @@
 //! console — if one exists yet — and then halts, rather than running off
 //! into whatever undefined behavior an unconfigured VBAR_EL1 produces.
 //!
-//! Assumes EL1: this kernel has only ever been observed running at EL1
-//! under both QEMU and Parallels (typical for a UEFI OS loader; EL2 is the
-//! hypervisor's own level, not the guest's). The Raspberry Pi's firmware
-//! hands off at EL2 (found 2026-10-01 by `earlyfault.rs`'s first dump on a
-//! Pi 4), where the VBAR_EL1 write below installs nothing: see
-//! `docs/roadmap/roadmap-el1-drop.md` for the drop that fixes it.
+//! Runs at EL1. QEMU and Parallels hand off at EL1 (typical for a UEFI OS
+//! loader; EL2 is the hypervisor's own level, not the guest's), and the
+//! VBAR_EL1 write in [`install`] is live at once. The Raspberry Pi's
+//! firmware hands off at EL2 (found 2026-10-01 by `earlyfault.rs`'s first
+//! dump on a Pi 4): there the same write, made from EL2, installs nothing
+//! for the running level and takes effect when `el2.rs` drops to EL1
+//! inside the identity-map install; until then a fault goes through the
+//! firmware's EL2 vectors. The write is made from EL2 all the same, so
+//! there is one owner of it; it is refused only under a VHE firmware
+//! (`HCR_EL2.E2H`), where the `_EL1` name would reach `VBAR_EL2` and
+//! replace the firmware's own vectors while it is still the handler.
 //!
 //! Deliberately not installed until after `exit_boot_services` — firmware
 //! has its own VBAR_EL1 that its boot-services internals may depend on;
@@ -431,8 +436,20 @@ unsafe extern "C" {
 }
 
 /// Points VBAR_EL1 at [`exception_vector_table`]. Must be called after
-/// `exit_boot_services`, before anything that could plausibly fault.
+/// `exit_boot_services`, before anything that could plausibly fault. The
+/// one place the vectors are written, at any handoff level: at EL1 live at
+/// once, at EL2 live at the drop (see the module doc). At EL2 under
+/// `HCR_EL2.E2H` the write is skipped: the name would reach `VBAR_EL2`,
+/// and the drop halts on E2H anyway, with a line.
 pub fn install() {
+    if crate::el2::current_el() == 2 {
+        const HCR_EL2_E2H: u64 = 1 << 34;
+        let hcr: u64;
+        unsafe { core::arch::asm!("mrs {0}, hcr_el2", out(reg) hcr, options(nomem, nostack, preserves_flags)) };
+        if hcr & HCR_EL2_E2H != 0 {
+            return;
+        }
+    }
     unsafe {
         let table_addr = &raw const exception_vector_table as u64;
         core::arch::asm!(

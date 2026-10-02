@@ -8,6 +8,16 @@ translation tables, the timer, goes to an `_EL1` register that the exception
 level it is running at does not use. The boot therefore keeps running on the
 firmware's EL2 tables and vectors while its log says otherwise.
 
+**Status 2026-10-02: steps 0 to 2 built and proven on QEMU, on the branch
+`pi4/el1-drop`; step 3, the board, is the next bench round trip.** The
+drop is `kernel/src/el2.rs`; `make test-el1-drop` is its rig, and a
+mutation that disabled the drop turned the rig red on three checks. Read
+on the way: QEMU's firmware leaves `SCTLR_EL1` at `0x30d0198d` on an EL1
+handoff, which is what the drop writes; at EL2 it leaves `HCR_EL2` at
+`0x8000038` (`RW` with `IMO`/`FMO`/`AMO`), so the drop's `RW`-only write
+is what moves interrupts to EL1; and its FADT names `smc` under
+`virtualization=on` and `hvc` plain, both of which power off.
+
 Grounded in the code at `2c0c8d6` (2026-10-01). Found by the early fault
 reporter's first dump on a Pi 4 (`testing-pi4.md` section 6): a fault
 delivered through the firmware's vectors after `exceptions::install()`,
@@ -16,7 +26,13 @@ delivered through the firmware's vectors after `exceptions::install()`,
 `-machine virt,virtualization=on`: the firmware then runs at EL2 as well, the
 boot reaches `shell ready` on QEMU's permissive firmware map, and the
 firmware's EL2 timer interrupt, which the kernel's EL1 timer setup never
-stopped, lands in the firmware's vectors and faults at address 0. **That
+stopped, lands in the firmware's vectors and faults at address 0 (*as
+written on 2026-10-01. Wrong: the dump's fields, `esr=0x86000007`,
+`elr=0`, `spsr=0x800003c9`, are an instruction abort at address 0 taken at
+EL2h with interrupts masked, which is the register table's own row for
+`eret`: `tasks::start`'s first `eret` into task 0 restored the firmware's
+stale `ELR_EL2` and `SPSR_EL2`. No interrupt was involved. Found by the
+fifth review on 2026-10-02; `el2.rs`'s module doc is the account*). **That
 option is the dev loop for this plan: every step below is checked on QEMU
 before it goes near a board.**
 
@@ -71,11 +87,17 @@ cleaning it:
    EL1 path keeps today's switch half untouched.
 2. **At EL2, set EL1's regime to those tables**: `MAIR_EL1`, `TCR_EL1`,
    `TTBR0_EL1`, then `SCTLR_EL1` with `M`, `C`, `I` set and the RES1 bits,
-   `nTWE`/`nTWI` included; `tlbi vmalle1` for the regime that has never run;
+   `nTWE`/`nTWI` included (*as built: without `nTWE`/`nTWI`, which
+   `tasks.rs` ORs in on both paths as before; the value is composed from
+   named bits in `el2.rs`, `SPAN` among them*); `tlbi vmalle1` for the
+   regime that has never run (*as built, after `VTTBR_EL2` is zeroed*);
    `VBAR_EL1` to the kernel's table so there is no window at EL1 with no
    vectors. All of these are writable from EL2.
 3. **At EL2, set the hypervisor controls for a plain EL1 guest of itself**:
-   `HCR_EL2 = RW` (EL1 is AArch64) and nothing else (no `VM`, so no stage 2;
+   `HCR_EL2 = RW` (EL1 is AArch64) and nothing else (*as built: `RW | HCD`
+   plus the PAuth/MTE no-trap bits, `el2.rs`'s `HCR_EL2_VALUE`; the
+   reviews added `HCD` so an `hvc` from EL1 reports through the kernel's
+   vectors*) (no `VM`, so no stage 2;
    no `TGE`; no `IMO`/`FMO`/`AMO`, so interrupts route to EL1; no traps);
    `CNTHCTL_EL2.EL1PCTEN | EL1PCEN` so EL1 may use the physical counter and
    timer; `CNTVOFF_EL2 = 0`; `CPTR_EL2` with no FP/SIMD trap (`0x33ff`, the
@@ -98,7 +120,8 @@ logs the drop, so a capture says which path ran.
 ## What it changes for the firmware's leftovers
 
 - The firmware's EL2 timer (`CNTHP`) is still armed after the exit; on QEMU
-  it fired into the firmware's vectors. After the drop EL2 takes no
+  it fired into the firmware's vectors (*as written; it did not, see
+  above. The drop still switches `CNTHP_CTL_EL2` off*). After the drop EL2 takes no
   interrupts (`HCR_EL2.IMO` is 0 and nothing at EL1 unmasks until task 0),
   and the EL1 timer's own IRQ is INTID 30, not the hypervisor timer's 26,
   which `gic.rs` never enables. Disable `CNTHP_CTL_EL2` at the drop anyway,
@@ -110,23 +133,39 @@ logs the drop, so a capture says which path ran.
   traps to EL2, to the firmware's leftover `VBAR_EL2`, with nobody to answer.
   The Pi's TF-A answers `smc`; if its FADT names `hvc`, `power.rs` falls back
   to the halt, as it does with no conduit. Check the FADT's flag on the board
-  (the kernel should log the conduit; it does not today).
+  (the kernel should log the conduit; it does not today). (*As built: the
+  drop sets `HCR_EL2.HCD`, so an `hvc` at EL1 is an undefined instruction
+  reported by the kernel's vectors; `power.rs` treats an `hvc` conduit on a
+  dropping boot as none, logs every branch, and `shutdown` halts.*)
 
 ## Steps, each with the check that can fail
 
-0. **Log `CurrentEL` after the exit, on every platform**, nothing else.
-   Check: QEMU plain prints EL1, QEMU `virtualization=on` and the Pi print
-   EL2. A one-line change that turns the finding into a kernel fact.
-1. **Split `mmu::install_identity_map`** into build and switch, behaviour
-   unchanged. Check: `make run` to the shell, `make test-early-fault`, the
-   module's own deliberate-fault re-verification (its doc says to redo it
-   when it changes).
-2. **The drop** (`kernel/src/el2.rs`, or in `mmu.rs` beside the switch).
-   Check on QEMU `virtualization=on`: the log says "handed off at EL2,
-   running at EL1" and the boot reaches the shell with the tick alternating
-   tasks, where today it faults at address 0 after `shell ready`. Check on
-   QEMU plain: nothing changes. A Makefile target `run-el2` (and the
-   `test-early-fault.py` control run under it) so the rig stays.
+0. ~~**Log `CurrentEL` after the exit, on every platform**, nothing else.~~
+   **Done 2026-10-02** (`el2::current_el`, the line `running at EL{n} after
+   the exit`, `make run-el2`): QEMU plain prints EL1; `virtualization=on`
+   prints EL2 and then, as predicted, reaches `shell ready` and faults at
+   address 0 through the firmware's vectors.
+1. ~~**Split `mmu::install_identity_map`** into build and switch, behaviour
+   unchanged.~~ **Done 2026-10-02**: `build_identity_map` returns a
+   `Planned` that `switch_to_identity_map` requires, `build_tables` no
+   longer switches, the runtime rebuild switches itself, and `el1_regime`
+   is the one derivation of the register values. Checked by the module
+   doc's deliberate fault (a write to block index 2 after the switch,
+   reported by the kernel's handler, then removed), `make run` to the
+   shell, `test-early-fault.py`, and three spawned programs on the image.
+2. ~~**The drop**~~ **Done 2026-10-02**, `kernel/src/el2.rs`, called from
+   `switch_to_identity_map` when `CurrentEL` is 2: the register sequence of
+   the design above, `ICC_SRE_EL2` gated on `ID_AA64PFR0_EL1.GIC` rather
+   than the MADT (on a GICv2 the register is undefined), `SCTLR_EL1`
+   written whole. Checked on `virtualization=on`: the log says `running at
+   EL2 after the exit` then `dropped from EL2 to EL1, on our own tables and
+   vectors`, the shell answers `help` after a twelve-second dwell, QEMU's
+   `-d int` trace shows IRQs and SVCs and no abort, the same with
+   `gic-version=3`, the FAT32 image logs in and spawns, and `shutdown`
+   powers off. QEMU plain: unchanged. `make test-el1-drop` runs
+   `test-early-fault.py --el2`, whose control requires the handoff level,
+   the drop, the identity map line and the answered `help`; with the drop
+   disabled it fails on three checks.
 3. **The Pi 4 boot, `NOXHCI`**: the log past the exit now means what it
    says; `identity map installed` is followed by whatever the Pi does next
    on its own tables, which is the first time that has been observed. The

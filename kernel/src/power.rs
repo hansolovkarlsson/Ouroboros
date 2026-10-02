@@ -49,12 +49,16 @@ static CONDUIT: AtomicU8 = AtomicU8::new(CONDUIT_NONE);
 pub unsafe fn discover_conduit(rsdp: Option<*const u8>) {
     let addr = match unsafe { acpi::find_table(rsdp, b"FACP") } {
         Ok(addr) => addr,
-        Err(_) => return, // no FADT -> leave CONDUIT = NONE
+        Err(_) => {
+            log::info!("Ouroboros kernel: PSCI conduit: none (no FADT), power off will halt");
+            return; // no FADT -> leave CONDUIT = NONE
+        }
     };
     // ARM_BOOT_ARCH is a u16 at a fixed offset into the FADT.
     let boot_arch =
         unsafe { core::ptr::read_unaligned(addr.add(FADT_ARM_BOOT_ARCH_OFFSET).cast::<u16>()) };
     if boot_arch & ARM_PSCI_COMPLIANT == 0 {
+        log::info!("Ouroboros kernel: PSCI conduit: none (FADT not PSCI-compliant), power off will halt");
         return; // not PSCI-compliant -> NONE
     }
     let conduit = if boot_arch & ARM_PSCI_USE_HVC != 0 {
@@ -62,6 +66,25 @@ pub unsafe fn discover_conduit(rsdp: Option<*const u8>) {
     } else {
         CONDUIT_SMC
     };
+    // The conduit decides where the call goes once the kernel has dropped
+    // from EL2 to EL1 (`el2.rs`): an `smc` reaches the secure firmware
+    // either way, but an `hvc` from EL1 traps to EL2, where only the
+    // firmware's leftover vectors are, with nobody to answer (and since the
+    // drop sets HCR_EL2.HCD, it is an undefined instruction at EL1, which
+    // halts): a power-off would end in a fault report. So on a boot that
+    // drops, an `hvc` conduit is no conduit, and power off halts, with the
+    // reason logged here. The predicate is el2.rs's, the same one the drop
+    // runs on.
+    if conduit == CONDUIT_HVC && crate::el2::drops_to_el1() {
+        log::info!(
+            "Ouroboros kernel: PSCI conduit: hvc (FADT ARM_BOOT_ARCH {boot_arch:#x}), unusable from EL1 after the drop from EL2; power off will halt"
+        );
+        return;
+    }
+    log::info!(
+        "Ouroboros kernel: PSCI conduit: {} (FADT ARM_BOOT_ARCH {boot_arch:#x})",
+        if conduit == CONDUIT_HVC { "hvc" } else { "smc" }
+    );
     CONDUIT.store(conduit, Ordering::Relaxed);
 }
 

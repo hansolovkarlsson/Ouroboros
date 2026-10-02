@@ -1,9 +1,11 @@
 //! The early fault reporter: a kernel-written dump for a fault taken while
 //! the firmware's exception vectors are still installed.
 //!
-//! Before `exceptions::install()` (which runs right after
-//! `exit_boot_services`), a synchronous exception lands in the firmware's
-//! own vector table, and what the firmware prints is up to the firmware.
+//! Before the kernel's vectors are live (`exceptions::install()` right
+//! after `exit_boot_services` on an EL1 handoff; on the Pi's EL2 handoff,
+//! the drop to EL1 inside the identity-map install, `el2.rs`), a
+//! synchronous exception lands in the firmware's own vector table, and
+//! what the firmware prints is up to the firmware.
 //! EDK2's `DefaultExceptionHandler` writes one line to the serial port,
 //! `Synchronous Exception at 0x<pc>`, and the register dump that would
 //! follow it is a `DEBUG()` print, compiled out of a RELEASE build. The
@@ -27,9 +29,12 @@
 //! [`arm`] registers [`report`] for the synchronous class and keeps the
 //! serial console discovered at boot for it to print through, with raw
 //! MMIO writes and no boot service, since a handler runs in the fault's
-//! own context. It stays registered until `exceptions::install()` points
-//! VBAR_EL1 at the kernel's table, after which the firmware's dispatcher
-//! is never entered again. The dump names what the firmware's line does
+//! own context. It stays registered until the kernel's vectors are live
+//! (see above), after which the firmware's dispatcher is never entered
+//! again: on an EL1 handoff because VBAR_EL1 now names the kernel's table,
+//! on an EL2 handoff because nothing routes to EL2 any more (the drop's
+//! `HCR_EL2`), not because VBAR_EL2 changed, which it does not. The dump
+//! names what the firmware's line does
 //! not: the exception class and fault status decoded from ESR, the
 //! faulting address, the link and frame pointers, every general register,
 //! a frame-pointer backtrace, and for each code address the loaded image
@@ -188,10 +193,11 @@ impl fmt::Display for ArmError {
 /// at all. Boot services only: it opens a protocol and reads the memory
 /// map. `image_range` is the kernel image's `[base, end)`.
 ///
-/// On success the reporter is live from here until
-/// `exceptions::install()`. Nothing unregisters it: the firmware's vector
-/// table stops being used at that point, and the handler reads only
-/// memory and the console, so it is safe to be reached at any time before.
+/// On success the reporter is live from here until the kernel's vectors
+/// are live (`exceptions::install()` on an EL1 handoff, the drop on an EL2
+/// one). Nothing unregisters it: the firmware's vector table stops being
+/// used at that point, and the handler reads only memory and the console,
+/// so it is safe to be reached at any time before.
 pub fn arm(
     serial: Option<Console>,
     framebuffer: Option<framebuffer::Info>,

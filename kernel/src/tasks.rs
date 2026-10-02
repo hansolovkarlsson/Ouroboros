@@ -2539,10 +2539,11 @@ fn clean_dcache_range(addr: u64, len: u64) {
 /// # Safety
 /// Must be called after [`init`].
 pub unsafe fn start() -> ! {
-    // The boot-time build already left task 0's view active
-    // (build_tables switches to the current task's view, and CURRENT
-    // starts at 0) - activated again here for explicitness, so this
-    // function's contract doesn't silently depend on that ordering.
+    // The boot-time install already left task 0's view active
+    // (mmu::install_identity_map's switch half switches to the current
+    // task's view, and CURRENT starts at 0) - activated again here for
+    // explicitness, so this function's contract doesn't silently depend on
+    // that ordering.
     crate::mmu::activate_task(TaskIndex::FIRST);
     let ctx = unsafe { *TASKS[TaskIndex::FIRST.index()].get() };
     unsafe {

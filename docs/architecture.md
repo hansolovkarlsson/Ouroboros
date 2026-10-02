@@ -54,12 +54,23 @@ in `kernel/src/main.rs` runs the following, in order:
    world. Nothing after this point may use `log::*`, `alloc`, or any UEFI
    protocol.
 5. **`exceptions::install`**. Points `VBAR_EL1` at the kernel's own vector
-   table before anything else gets a chance to fault.
+   table before anything else gets a chance to fault. On an EL1 handoff
+   (QEMU, Parallels) the vectors are live from here. On an EL2 handoff
+   (the Raspberry Pi) the write installs nothing for the running level
+   until step 7 drops; a fault before that still goes through the
+   firmware's EL2 vectors, where `earlyfault.rs`'s handler is registered.
 6. **Console installation**. If discovery in step 2 succeeded, the driver
    is constructed now and raw MMIO console output becomes available
-   (`console::println!`).
-7. **`mmu::install_identity_map`**. Replaces firmware's translation tables
-   with the kernel's own (see "Memory layout" below).
+   (`console::println!`). The first line after it states the exception
+   level the firmware handed off at (`running at EL{n} after the exit`,
+   `el2.rs`).
+7. **`mmu::install_identity_map`**. Builds the kernel's own translation
+   tables, then switches onto them (see "Memory layout" below). At EL1
+   the switch is a register sequence; at EL2 it is the drop to EL1
+   (`el2::drop_to_el1`): EL1's regime, vectors and hypervisor controls
+   set from EL2, then an `eret` onto the same stack at EL1, logged as
+   `dropped from EL2 to EL1`. Either way the kernel is at EL1 on its own
+   tables and vectors when this returns.
 8. **virtio-console fallback** (`try_virtio_console`), tried only if step
    2's three mechanisms all failed. Has to run here, after step 7, not
    alongside step 6 — see "Console" below for why.
@@ -74,8 +85,14 @@ in `kernel/src/main.rs` runs the following, in order:
 ## Privilege model
 
 Two exception levels are in play: **EL1** (the kernel) and **EL0**
-(userland tasks). There is no EL2/hypervisor use — the kernel has only
-ever been observed booting directly at EL1, typical for a UEFI OS loader.
+(userland tasks). There is no EL2/hypervisor use. QEMU and Parallels hand
+the kernel off at EL1, typical for a UEFI OS loader; the Raspberry Pi's
+firmware hands off at **EL2** (found 2026-10-01), and there the kernel
+drops to EL1 inside the identity-map install, with EL1's tables and
+vectors prepared from EL2 and an `eret` into a running MMU
+(`kernel/src/el2.rs`, 2026-10-02). The log states the handoff level on
+every boot (`running at EL{n} after the exit`) and the drop when it
+happens.
 
 EL0 code cannot access kernel memory, MMIO, or privileged system
 registers; the only way back to EL1 is a trap — a syscall (`svc`), a
