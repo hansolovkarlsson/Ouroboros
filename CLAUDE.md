@@ -679,7 +679,8 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/virtio_rng.rs  virtio-rng, backing the RANDOM syscall; absent on Parallels/Pi and that is a supported case
   src/bootflags.rs   boot flag files at the ESP root: \NOXHCI, \XHCINOWR, \FBCON switch off one boot step to bisect a hang on hardware;
                      \MSDSTALL is a QEMU test fault (QEMU's stick only) for test-usb-hub.py --stall; \EARLYFAULT plants a fault in
-                     the firmware's own code before the exit, for test-early-fault.py
+                     the firmware's own code before the exit, and \WALKFAULT one inside the reporter's own image walk, both for
+                     test-early-fault.py
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
   src/xhci.rs        from-scratch xHCI: rings, multi-device port scan, HID interrupt endpoint, storage endpoint reset

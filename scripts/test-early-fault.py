@@ -3,7 +3,7 @@
 
     python3 scripts/test-early-fault.py [--esp build/esp] [--keep] [--el2]
 
-Two boots of a copy of the staged ESP, each graded from the serial console:
+Three boots of a copy of the staged ESP, each graded from the serial console:
 
 1. With the `EARLYFAULT` flag file at the ESP root (bootflags.rs), the
    kernel asks the firmware's own CopyMem to write at an address nothing
@@ -29,7 +29,16 @@ Two boots of a copy of the staged ESP, each graded from the serial console:
    is scheduled and served, so the tick and the keyboard both work); no
    `EARLY EXCEPTION` and no kernel `EXCEPTION` line appears.
 
-With --el2 both boots run on `-machine virt,virtualization=on`, where the
+3. With both `EARLYFAULT` and `WALKFAULT`, the reporter's own fault: the
+   report takes a planted read of an unmapped address inside its image walk
+   (the case a Pi 4 showed on 2026-10-01, where a bad table entry faulted
+   the walk at frame 10 and the rows printed after it were lost). The boot
+   must show the register rows, then the one line a nested fault prints,
+   with `far` the unmapped address and the image base named as the memory
+   under read, and NOT the ordinary halt line; and QEMU's trace carries the
+   two faults.
+
+With --el2 all boots run on `-machine virt,virtualization=on`, where the
 firmware hands the kernel off at EL2 as the Raspberry Pi's does (`make
 run-el2`, `make test-el1-drop`). The fault boot is the same test: the
 reporter's dump is the firmware's handler either way. The control is the
@@ -84,7 +93,7 @@ DWELL = 5
 # own report (a fault under its vectors, which halts through a silent loop),
 # an EL0 task's fault, and the halt the drop takes on a level it has no path
 # for. Named so a failed boot ends at its line instead of at TIMEOUT.
-ENDINGS = r"halted in the early fault reporter|Synchronous Exception at|EXCEPTION vector=|EL0 FAULT|system halted"
+ENDINGS = r"halted in the early fault reporter|while reporting one|Synchronous Exception at|EXCEPTION vector=|EL0 FAULT|system halted"
 
 
 def boot(esp, until, machine, then=None):
@@ -190,6 +199,28 @@ def main():
         ("shell", r"shell ready"),
     ], aborts, "some", order=[
         ("register rows before the first frame", r"x28=0x[0-9a-f]{16}", r"frame 1: fp="),
+    ]))
+
+    # 3. The reporter's own fault, inside its image walk.
+    esp = os.path.join(work, "esp-walk")
+    shutil.copytree(args.esp, esp)
+    open(os.path.join(esp, "EARLYFAULT"), "w").close()
+    open(os.path.join(esp, "WALKFAULT"), "w").close()
+    print("boot 3: EARLYFAULT and WALKFAULT set, expecting the rows and then the nested-fault line")
+    text, aborts = boot(esp, ENDINGS + r"|shell ready", machine)
+    open(os.path.join(work, "walk.serial"), "w").write(text)
+    results.append(grade("walk", text, [
+        ("flag seen", r"boot flag \\WALKFAULT is set"),
+        ("exception line", r"EARLY EXCEPTION \(firmware vectors\) type=0 esr=0x[0-9a-f]+ far=" + re.escape(far)),
+        ("register rows", r"x28=0x[0-9a-f]{16} x29=0x[0-9a-f]{16} x30=0x[0-9a-f]{16}"),
+        ("nested-fault line, FAR the unmapped address, an image base under read",
+         r"EARLY EXCEPTION while reporting one: esr=0x[0-9a-f]+ far=" + re.escape(far) + r" elr=0x[0-9a-f]+, while reading firmware memory at 0x[0-9a-f]+000; halted"),
+    ], [
+        ("ordinary halt line", r"halted in the early fault reporter"),
+        ("a frame", r"frame \d+: fp="),
+        ("firmware's own line", r"Synchronous Exception at"),
+    ], aborts, "some", order=[
+        ("register rows before the nested-fault line", r"x28=0x[0-9a-f]{16}", r"while reporting one"),
     ]))
 
     # 2. The control, no flag.

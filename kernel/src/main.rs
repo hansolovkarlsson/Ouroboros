@@ -406,10 +406,15 @@ fn main() -> Status {
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
     // `\FBCON` (`fb_console_forced`): leave the discovered serial console
     // uninstalled after the exit, so the framebuffer console below takes HDMI.
-    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall, early_fault } =
+    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall, early_fault, walk_fault } =
         bootflags::read();
     if msd_stall {
         usb_msd::inject_stalls();
+    }
+    if walk_fault {
+        // `\WALKFAULT`: the report that `\EARLYFAULT` causes faults inside
+        // its own image walk; the rows must survive it.
+        earlyfault::plant_walk_fault();
     }
     if early_fault {
         // `\EARLYFAULT`: a fault inside the firmware's own code, here, at

@@ -61,6 +61,17 @@ const MSD_STALL: &CStr16 = cstr16!("\\MSDSTALL");
 /// on a card it only ends the boot with that dump.
 const EARLY_FAULT: &CStr16 = cstr16!("\\EARLYFAULT");
 
+/// `\WALKFAULT`: the third test fault, for the reporter's own report.
+/// With it set, the reporter reads an address nothing maps just before it
+/// reads the first image header of its image-naming walk, so the report
+/// faults inside itself the way a Pi 4's did on 2026-10-01 (frame 10, an
+/// entry claiming an address below the board's RAM). What the console
+/// must show is the register rows, printed before the walk, and then the
+/// one line a nested fault prints, with `far` and the memory under read.
+/// Only with `\EARLYFAULT`, which is what makes a report happen; for
+/// `scripts/test-early-fault.py`.
+const WALK_FAULT: &CStr16 = cstr16!("\\WALKFAULT");
+
 /// Which boot flags are set, read once by [`read`].
 #[derive(Clone, Copy, Default)]
 pub struct Flags {
@@ -74,6 +85,8 @@ pub struct Flags {
     pub msd_stall: bool,
     /// [`EARLY_FAULT`]
     pub early_fault: bool,
+    /// [`WALK_FAULT`]
+    pub walk_fault: bool,
 }
 
 /// Reads every flag file at the ESP's root, opening the volume once. If the
@@ -103,5 +116,6 @@ pub fn read() -> Flags {
         fb_console: present(FB_CONSOLE),
         msd_stall: present(MSD_STALL),
         early_fault: present(EARLY_FAULT),
+        walk_fault: present(WALK_FAULT),
     }
 }
