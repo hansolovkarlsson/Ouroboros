@@ -1185,7 +1185,15 @@ The small open tails those arcs deliberately left:
 >       tables have a hole, intermittently. The dump is in `testing-pi4.md`
 >       section 6; a second one at the same address, to compare `far` and
 >       the registers, is the next data point. The pftf `RPi4.dsc` sets no
->       heap guard, so the hole is not EDK2's freed-memory guard.*
+>       heap guard, so the hole is not EDK2's freed-memory guard.* *Third
+>       sighting the same afternoon, one boot in four: a firmware write
+>       into the GOP framebuffer at `0x3e98fe00` (the console drawing a
+>       glyph row), a level-2 translation fault, before the exit and before
+>       the boot-identity line. Three faults, three addresses, one shape:
+>       the firmware's tables with an invalid entry where a valid one was.
+>       The next instrument is the reporter walking the firmware's live
+>       tables for `far` and printing each level's entry, zero or garbage;
+>       `testing-pi4.md` section 6 has the reading and the suspects.*
 > - [x] **The early fault reporter: the kernel's own dump for a fault taken
 >       under the firmware's vectors.** `earlyfault.rs` registers a handler
 >       for synchronous exceptions through `EFI_CPU_ARCH_PROTOCOL` right
