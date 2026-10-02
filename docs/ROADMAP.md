@@ -1378,26 +1378,52 @@ be reviewed after the fact from the saved screenshots.
 > `github.com/hansolovkarlsson/Proem`. `~/Projects/CPP` no longer exists. A
 > mention of CPP in older records means Proem.
 >
-> **What Proem asks of Ouroboros, accepted 2026-10-01, for later.** Four
-> handoff notes, triaged and accepted; none is started. Each note carries its
-> evidence, its **Done when** and the reply below in full.
+> **What Proem asks of Ouroboros, accepted 2026-10-01 and 2026-10-02, for
+> later.** Five handoff notes, triaged and accepted; none is started. A sixth,
+> a notice with Proem's smaller heap numbers, was taken on 2026-10-02 and is
+> in `handoffs/closed/`. Each note carries its evidence, its **Done when**
+> and the reply below in full.
 >
 > - [ ] **new** **A user heap of at least 1 MiB, ideally sized per program.**
 >       `HEAP_PAGES` is 64 (256 KiB, `kernel/src/loader.rs`) for every
->       program; Proem measured 697 KiB of live `malloc` for
->       `libc/picodemo.c` and 1,459 KiB for its C11-header test. The bound is
->       the one 2 MB region slot that holds code, heap, guard and stack: 1 MiB
->       fits, 1.5 MiB is tight beside Proem's code, and Proem's 3.5 MiB
->       picolibc test needs regions larger than one slot, which is `mmu.rs`
->       and `tasks.rs` work. Within one slot a larger `HEAP_PAGES` costs no
->       RAM (`allocate_runtime_region` rounds every region to a whole slot
->       already), only code room in every program, the largest of which
->       loads at 135 KiB today (`netd`, static data included): 256 pages is
->       the cheap first step. A size carried
->       per program in the ELF is what goes further, and with multi-slot
->       regions past 2 MB. Blocks step 8 of `roadmap-c-hosting.md` (branch
->       `docs/c-hosting`). Note:
->       [`handoffs/2026-10-01-from-proem-heap-growth.md`](handoffs/2026-10-01-from-proem-heap-growth.md).
+>       program; an empty file with Proem's `target.h` already takes 152 KB
+>       of live `malloc`. Proem's figures, remeasured on 2026-10-01 after it
+>       freed each file's text and shrank its tables: 342 KB for
+>       `libc/picodemo.c`, 667 KB for its C11-header test, 2,031 KB for its
+>       112-header picolibc test (down from 697, 1,459 and 3,560). The bound
+>       is the one 2 MB region slot that holds code, heap, guard and stack:
+>       1 MiB now holds everything but the picolibc test, which needs regions
+>       larger than one slot, `mmu.rs` and `tasks.rs` work. Within one slot a
+>       larger `HEAP_PAGES` costs no RAM (`allocate_runtime_region` rounds
+>       every region to a whole slot already), only code room in every
+>       program, the largest of which loads at 135 KiB today (`netd`, static
+>       data included): 256 pages is the cheap first step and meets the
+>       request. A size carried per program in the ELF is what goes further,
+>       with multi-slot regions past 2 MB, wanted for that one test and for
+>       the compiler later. Blocks step 8 of `roadmap-c-hosting.md` (branch
+>       `docs/c-hosting`). Notes:
+>       [`handoffs/2026-10-01-from-proem-heap-growth.md`](handoffs/2026-10-01-from-proem-heap-growth.md)
+>       and, for the numbers,
+>       [`handoffs/closed/2026-10-01-from-proem-heap-numbers.md`](handoffs/closed/2026-10-01-from-proem-heap-numbers.md).
+> - [ ] **new** **Stage the headers in two directories, and build `proem`
+>       with them built in.** Steps 6 and 8 of the C-hosting plan, decided:
+>       `/include` holds picolibc's 136 headers and a `target.h` generated at
+>       build time with exactly `$(CFLAGS_OS)`; `/include/clang` holds
+>       clang's eleven freestanding headers plus their `__float_*.h`,
+>       `__stddef_*.h` and `__stdarg_*.h` helpers, copied from `$(clang
+>       -print-resource-dir)/include` by glob, not by a kept list. Two
+>       directories because `inttypes.h`, `limits.h`, `stdint.h` and
+>       `stdnoreturn.h` exist on both sides and picolibc's `limits.h` reaches
+>       clang's by `#include_next` (its line 143). `driver/proem.c` is then
+>       compiled with `-DPROEM_SYSTEM_DIRS='"/include:/include/clang"'`, so
+>       `proem hello.c` needs no options. To check on the way: the FAT32 ESP
+>       takes the lowercase, nested and `__`-prefixed names through `fsd`'s
+>       long-name path, and the ext2 and exFAT images stage the tree too.
+>       The stage has its own check (`cat /include/stdio.h`, `ls
+>       /include/sys`, `ls /include/clang` on a booted image); the build
+>       waits on steps 1 to 5 and the heap above, and its **Done when** is
+>       the arc's finish line. Note:
+>       [`handoffs/2026-10-01-from-proem-system-dirs.md`](handoffs/2026-10-01-from-proem-system-dirs.md).
 > - [ ] **fix** **`fstat` leaves every field but two as it found them.**
 >       `libc/src/file.c`'s `fstat` sets `st_size` and `st_mode` only, so a
 >       caller's `struct stat` keeps stack garbage in `st_dev` and `st_ino`,
