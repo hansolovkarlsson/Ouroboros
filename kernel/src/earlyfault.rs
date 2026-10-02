@@ -155,9 +155,13 @@ static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
 /// The GOP framebuffer, for a platform with no serial console (the Pi
 /// over HDMI alone, Parallels).
 static FRAMEBUFFER: SyncCell<Option<framebuffer::Info>> = SyncCell::new(None);
-/// The end of the stack the kernel runs on, from the memory map at
-/// [`arm`] time: the frame walk believes no record beyond it.
-static STACK_END: SyncCell<u64> = SyncCell::new(0);
+/// The two stacks a frame record may lie on, `(base, end)` each: the
+/// kernel's own (`main.rs`'s `KERNEL_STACK`, which the entry switches to
+/// as its first act) and the firmware's, the memory-map descriptor holding
+/// the firmware's SP at entry, which the frames that called the kernel
+/// are on. The walk believes a record only inside one of them, and crosses
+/// from the kernel's to the firmware's once, at the entry frame.
+static STACKS: SyncCell<[(u64, u64); 2]> = SyncCell::new([(0, 0); 2]);
 /// The RAM descriptors of the memory map at [`arm`] time (those
 /// `mmu::is_general_ram` admits), `(start, end)` each, and their count:
 /// the image walk reads a table entry, a loaded-image record, an image
@@ -287,9 +291,9 @@ pub fn arm(
         *CONSOLE.get() = serial;
         *FRAMEBUFFER.get() = framebuffer;
         *IMAGE_RANGE.get() = image_range;
-        let (stack, ram, count, truncated, test_fault) = map_facts();
-        *STACK_END.get() = stack;
-        *RAM.get() = (ram, count);
+        let MapFacts { firmware_stack, ranges, count, truncated, test_fault } = map_facts();
+        *STACKS.get() = [crate::stacks().0, firmware_stack];
+        *RAM.get() = (ranges, count);
         *RAM_TRUNCATED.get() = truncated;
         *TEST_FAULT.get() = test_fault;
         *IMAGE_TABLE.get() = uefi::system::with_config_table(|entries| {
@@ -324,10 +328,10 @@ pub fn arm(
     }
 }
 
-/// Two facts from one read of the memory map. The end of the stack this
-/// code runs on: the end of the descriptor holding the current SP (the
-/// firmware's DXE stack, which the kernel inherits until it switches to
-/// its own), or SP plus [`STACK_FALLBACK`] if the map does not cover it.
+/// Facts from one read of the memory map. The firmware's stack as `(base,
+/// end)`: the descriptor holding the firmware's SP at entry (the DXE
+/// stack the kernel was entered on and left for its own), or that SP
+/// less and plus [`STACK_FALLBACK`] if the map does not cover it.
 /// And the RAM ranges: the descriptors `mmu::is_general_ram` admits,
 /// sorted by address and contiguous ones merged (UEFI does not promise a
 /// sorted map, so the order is not trusted), up to [`MAX_RAM_RANGES`] of
@@ -335,16 +339,23 @@ pub fn arm(
 /// be read, which makes the image walk read nothing. A descriptor whose
 /// extent does not compute (a corrupt page count, the class of bad
 /// firmware record this module exists for) is skipped, not trusted: this
-/// runs before the reporter exists to catch a panic. The stack end is the
-/// first descriptor holding SP, as before: two that overlap it would
+/// runs before the reporter exists to catch a panic. The firmware stack is
+/// the first descriptor holding its SP: two that overlap it would
 /// otherwise let a reserved window past it extend the walk.
-fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool, u64) {
-    let sp: u64;
-    // SAFETY: reads the stack pointer, nothing else.
-    unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
+struct MapFacts {
+    firmware_stack: (u64, u64),
+    ranges: [(u64, u64); MAX_RAM_RANGES],
+    count: usize,
+    truncated: bool,
+    test_fault: u64,
+}
+
+fn map_facts() -> MapFacts {
+    let sp = crate::stacks().1;
+    let fallback = (sp.saturating_sub(STACK_FALLBACK), sp + STACK_FALLBACK);
     let mut ranges = [(0u64, 0u64); MAX_RAM_RANGES];
     let Ok(map) = boot::memory_map(MemoryType::LOADER_DATA) else {
-        return (sp + STACK_FALLBACK, ranges, 0, false, UNMAPPED);
+        return MapFacts { firmware_stack: fallback, ranges, count: 0, truncated: false, test_fault: UNMAPPED };
     };
     let mut stack = None;
     let mut count = 0usize;
@@ -358,7 +369,7 @@ fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool, u64) {
             continue;
         }
         if stack.is_none() && start <= sp && sp < end {
-            stack = Some(end);
+            stack = Some((start, end));
         }
         if crate::mmu::is_general_ram(d.ty) && !insert_range(&mut ranges, &mut count, (start, end)) {
             truncated = true;
@@ -380,7 +391,7 @@ fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool, u64) {
             None => break,
         }
     }
-    (stack.unwrap_or(sp + STACK_FALLBACK), ranges, count, truncated, candidate)
+    MapFacts { firmware_stack: stack.unwrap_or(fallback), ranges, count, truncated, test_fault: candidate }
 }
 
 /// Adds `(start, end)` to the sorted, merged `ranges[..count]`: merged
@@ -835,16 +846,20 @@ fn place(addr: u64) {
 /// Frame records are `(previous fp, lr)` pairs that x29 chains through.
 /// Each is believed only while it is 8-aligned (GCC's firmware code keeps
 /// them 16-aligned; LLVM's kernel code puts them 8 past that, seen on
-/// QEMU), above the last one, and between the faulting SP and the end of
-/// the stack ([`STACK_END`]), so a frame pointer that was never one ends
-/// the walk instead of reading from anywhere, and a read that would fault
-/// cannot cut the report short.
+/// QEMU), on one of the two stacks ([`STACKS`]), and above the last one
+/// while on the same stack (the chain crosses once, from the kernel's
+/// stack to the firmware's frames that called it, and may go down then),
+/// so a frame pointer that was never one ends the walk instead of reading
+/// from anywhere, and a read that would fault cannot cut the report short.
 fn backtrace(ctx: &SystemContextAarch64) {
+    let stacks = unsafe { *STACKS.get() };
+    let stack_of = |a: u64| stacks.iter().position(|&(lo, hi)| lo <= a && a + 16 <= hi);
     let mut fp = ctx.x[29];
     let mut last = ctx.sp.saturating_sub(16);
-    let end = unsafe { *STACK_END.get() }.saturating_sub(16);
+    let mut last_stack = stack_of(ctx.sp);
     for n in 1..=MAX_FRAMES {
-        if fp == 0 || !fp.is_multiple_of(8) || fp <= last || fp < ctx.sp || fp > end {
+        let Some(on) = stack_of(fp) else { return };
+        if fp == 0 || !fp.is_multiple_of(8) || (Some(on) == last_stack && fp <= last) {
             return;
         }
         // SAFETY: `fp` lies within the live stack by the check above, 8-aligned;
@@ -856,6 +871,7 @@ fn backtrace(ctx: &SystemContextAarch64) {
         place(lr);
         out(format_args!("\n"));
         last = fp;
+        last_stack = Some(on);
         fp = next;
     }
 }

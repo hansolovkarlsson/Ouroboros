@@ -1210,7 +1210,12 @@ The small open tails those arcs deliberately left:
 >       unchanged, and `NOXHCI` boots on the Pi 4 that no longer fault in
 >       firmware code, with the walk's line never again showing garbage in
 >       the tables; a mutation (the switch disabled) must bring the fault
->       back on the board.
+>       back on the board. *Built 2026-10-02 on `pi4/own-stack`: the
+>       switch as the entry's first act, the banner line naming the stack
+>       (and saying `the FIRMWARE'S stack` with the switch disabled, which
+>       the rig's control then fails on), the frame walk crossing once into
+>       the firmware's frames. QEMU: both rigs and the image's spawns pass.
+>       The board boot is pending.*
 > - [x] **The early fault reporter: the kernel's own dump for a fault taken
 >       under the firmware's vectors.** `earlyfault.rs` registers a handler
 >       for synchronous exceptions through `EFI_CPU_ARCH_PROTOCOL` right

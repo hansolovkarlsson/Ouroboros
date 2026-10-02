@@ -381,7 +381,11 @@ localises the failure without any guessing.
 
 1. **Firmware splash, then the Ouroboros banner** over the UEFI boot-services
    console — which the firmware mirrors to both serial and HDMI. Reaching here
-   proves the card layout and the firmware handoff, nothing else.
+   proves the card layout and the firmware handoff, nothing else. *(Since
+   2026-10-02 the banner line says `on its own stack (sp ..., the kernel's
+   stack ..., the firmware's sp was ...)`: the kernel left the firmware's
+   16 KB stack, whose page tables lie beneath it, as its first act. A line
+   saying `the FIRMWARE'S stack` means the switch did not happen.)*
 
 2. **`console @ {base:#x} (via {source})`.** *(predicted: `via acpi`; observed
    2026-09-28 on a Pi 4 with the firmware set to ACPI + Devicetree:
@@ -928,7 +932,13 @@ before anything the firmware or the kernel pushes can reach the tables;
 until then every boot of a debug kernel on this board is a dice roll, and
 even a release build only shrinks the frames. Everything after the exit
 runs on the same stack today too (the drop sets `SP_EL1` to it), so the
-switch matters past the exit as well.
+switch matters past the exit as well. *Built the same evening on
+`pi4/own-stack`: `KERNEL_STACK`, 256 KB in the image, entered before any
+call; the banner line names the stack; the reporter's frame walk crosses
+from it into the firmware's frames that called the kernel. The check on
+this board: `NOXHCI` boots that never again fault in firmware code, and a
+`tables for far:` line, if any fault comes, that shows entries and not
+frames.*
 
 ---
 
