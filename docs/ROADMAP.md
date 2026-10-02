@@ -1174,7 +1174,18 @@ The small open tails those arcs deliberately left:
 >       command-register line), and the firmware printed its one line and
 >       no dump: a RELEASE build compiles the register dump out, and the
 >       pftf zip ships only RELEASE. So the dump is now the kernel's: the
->       next item.*
+>       next item.* *Revised 2026-10-02: a `NOXHCI` boot died at the same
+>       firmware instruction (`DxeCore + 0xae14`, `0x39F36E14`) INSIDE
+>       `ExitBootServices`, with the controller untouched: a write to
+>       `0x38670810`, a RAM page the firmware's own tables do not map
+>       (translation fault at level 3), one of 0x1100 bytes from
+>       `0x38660708`; the next boot of the same card went through. So the
+>       suspect is no longer the takeover's DMA but a DxeCore routine
+>       reached from both the PCI protocol and the exit, writing where its
+>       tables have a hole, intermittently. The dump is in `testing-pi4.md`
+>       section 6; a second one at the same address, to compare `far` and
+>       the registers, is the next data point. The pftf `RPi4.dsc` sets no
+>       heap guard, so the hole is not EDK2's freed-memory guard.*
 > - [x] **The early fault reporter: the kernel's own dump for a fault taken
 >       under the firmware's vectors.** `earlyfault.rs` registers a handler
 >       for synchronous exceptions through `EFI_CPU_ARCH_PROTOCOL` right
@@ -1197,7 +1208,7 @@ The small open tails those arcs deliberately left:
 >       the reporter and the kernel's PL011 driver both work on the Pi;
 >       what it showed is the next item. Done: the dump on a board was the
 >       condition, and the `NOXHCI` boot gave it.*
-> - [ ] **The Pi hands the kernel off at EL2, and the kernel assumes EL1.**
+> - [x] **The Pi hands the kernel off at EL2, and the kernel assumes EL1.**
 >       The `NOXHCI` dump (2026-10-01, `testing-pi4.md` section 6): SPSR mode
 >       EL2h, the fault delivered through the firmware's vectors after
 >       `exceptions::install()`, a translation fault at `0xa000000` after
@@ -1217,7 +1228,17 @@ The small open tails those arcs deliberately left:
 >       rig, and a mutation that disabled the drop fails it. Open for step
 >       3, one Pi 4 boot under `NOXHCI` from a card staged off `main`,
 >       which is the first boot whose post-exit log can mean what it
->       says; `testing-pi4.md` checkpoint 5b has the three lines to read.*
+>       says; `testing-pi4.md` checkpoint 5b has the three lines to read.
+>       Done the same day: the second of two `NOXHCI` boots printed the
+>       three lines in order and reached the shell, the GIC-400 and the
+>       tick up. The first boot is the revised item above.*
+> - [ ] **fix** `virtio_mmio_probe_safe`'s premise ("a serial console means
+>       QEMU") is false on the Pi 4, which has a serial console and no
+>       virtio transport. Under the kernel's own tables the scan at
+>       `0xa000000` did not fault there (2026-10-02; the low 1GB is a Device
+>       block) and reported no device, so the premise is false but harmless.
+>       Retire it for honesty, the way the devicetree translation fails
+>       closed, not because it is dangerous.
 > - [ ] **fix** The reporter's register rows come after the backtrace, so a
 >       fault in the image-naming walk (seen on the Pi, frame 10, a return
 >       address in the firmware volume) loses them; and the walk reads

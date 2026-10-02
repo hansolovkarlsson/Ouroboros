@@ -752,6 +752,79 @@ a Pi means what its log line says. If it still shows only the line, the fault co
 dispatcher or stack before the handler ran, which is itself the answer the
 memory-damage suspect predicts.
 
+**2026-10-02, the drop on the board: two `NOXHCI` boots from a card staged
+off `main` at `367ceda` (#188 merged).** The first died inside
+`ExitBootServices`; the second ran the drop and reached the shell.
+
+*Boot 1 (boot identity 1).* Every line to `exiting boot services` as before,
+then the reporter's dump, with the controller untouched:
+
+```
+EARLY EXCEPTION (firmware vectors) type=0 esr=0x96000047 far=0x38670810 elr=0x39f36e14 sp=0x3b3fcd90 lr=0x39f2ebb4 fp=0x3b3fcd90 spsr=0x60000309
+  esr: ec=0x25 (data abort, same EL), fsc=0x07 (translation fault at level 3), write
+  elr 0x39f36e14 = DxeCore.dll @ 0x39f2c000 + 0xae14
+  lr  0x39f2ebb4 = DxeCore.dll @ 0x39f2c000 + 0x2bb4
+  frames 1-9: DxeCore + 0x2d44, 0x3c94, 0xda20, 0xda48, 0xdc88, 0x5b00, 0x608c, 0x66b0, 0x6898
+  frames 10-12: kernel + 0x7007c, 0x6f9b8, 0xd4ac
+  frames 13-16: DxeCore + 0x943c, BdsDxe + 0x8c08, 0xa100, DxeCore + 0x918c
+```
+
+Read: a firmware write, nine frames below the kernel's call into
+`ExitBootServices` (the `uefi` crate's `exit_boot_services`, which allocates
+a pool buffer for the memory map and calls the service twice at most), to a
+RAM address (`0x38670810`, in the firmware's own region below the kernel's
+image) that the firmware's tables do not map at level 3. `x2` is
+`0x38670808`, `x3` is `0x1100`, `x0` is `0x38660708`: a copy or fill of
+0x1100 bytes, one write past `0x38670808`. **The same instruction,
+`0x39F36E14`, is where the two 17:40 boots of 2026-10-01 died, inside the
+xHCI takeover, before any `exiting boot services` line.** So the faulting
+firmware routine is reached both from the PCI protocol and from
+`ExitBootServices`, and it faults without the takeover: the memory-damage
+suspect that named the xHCI is weakened, and the fault is now "a DxeCore
+routine at `+0xae14`, writing into a page its own tables do not map,
+intermittently". The pftf build's `RPi4.dsc` sets no heap guard, so the
+unmapped page is not EDK2's freed-memory guard. The register rows printed
+in full this time, and the walk reached the firmware's BDS frames: the
+rows-first fix is still owed but was not needed here.
+
+*Boot 2 (boot identity 2), the same card, power-cycled.* Checkpoint 5b's
+three lines, in order, through the kernel's PL011 driver:
+
+```
+boot services exited, console live
+running at EL2 after the exit
+installing our own identity map
+identity map RAM 0x3b0000-0x3b400000, device 0x0-0x3fffffff, per-task EL0 regions [...]
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+identity map installed, MMU running on our own tables
+virtio-blk discovery failed (no virtio-mmio block device found)
+MADT: GIC V2, GICD @ 0xff841000, GICC/GICR @ 0xff842000 (size 0x0)
+mmu: 0x377b4000-0x377c2000 mapped Normal Non-cacheable
+mmu: 0x377b4000-0x377c2000 walks as Normal Non-cacheable (attr 0x44) on every page in all 11 views, its neighbours and kernel data do not
+shell ready - type and press Enter
+```
+
+**(confirmed)** The drop lands on the Pi 4: the `eret` into the kernel's
+own EL1 regime from the L0-start tables worked first time, the GIC-400
+came up at the MADT's addresses, the tick runs (the shell was served), and
+every post-exit line now describes the machine. **Risk 1 did not fire the
+way it was predicted to:** the virtio-mmio scan at `0xa000000` ran under the
+kernel's own tables, where the low 1GB is a Device block, and reported no
+device instead of faulting; under the firmware's EL2 tables on 2026-10-01
+the same read faulted. So the scan is harmless on this board and the
+premise of `virtio_mmio_probe_safe` is false but not dangerous; the item
+to retire it stands on honesty, not safety. The shell prompt appeared on
+HDMI: with a GOP framebuffer the console server draws there and the
+kernel's serial console goes quiet after `shell ready`, so typing on the
+serial terminal reaches the shell (the UART is the keyboard under
+`NOXHCI`) and its echo lands on the monitor. The capture ends on the shell
+line for that reason, not because the board stopped.
+
+Next on this board: the `+0xae14` fault wants a second dump at the same
+address, to compare `far` and the registers; and the no-flag boot, now
+with the kernel's own vectors live after the exit, to see the takeover's
+fault reported in full.
+
 ---
 
 ## 7. Risks, ranked

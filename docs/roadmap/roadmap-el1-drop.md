@@ -8,9 +8,11 @@ translation tables, the timer, goes to an `_EL1` register that the exception
 level it is running at does not use. The boot therefore keeps running on the
 firmware's EL2 tables and vectors while its log says otherwise.
 
-**Status 2026-10-02: steps 0 to 2 built and proven on QEMU, merged as
-#188 (`367ceda`) after five review rounds; step 3, the board, is the next
-bench round trip, from a card staged off `main`.** The
+**Status 2026-10-02: done. Steps 0 to 2 built and proven on QEMU, merged as
+#188 (`367ceda`) after five review rounds; step 3, the board, ran the same
+day: the drop landed on the Pi 4 and the shell came up. Step 4, the xHCI
+takeover with the reporter, stays open, now beside an `ExitBootServices`
+fault at the same firmware address (`testing-pi4.md` section 6).** The
 drop is `kernel/src/el2.rs`; `make test-el1-drop` is its rig, and a
 mutation that disabled the drop turned the rig red on three checks. Read
 on the way: QEMU's firmware leaves `SCTLR_EL1` at `0x30d0198d` on an EL1
@@ -167,7 +169,16 @@ logs the drop, so a capture says which path ran.
    `test-early-fault.py --el2`, whose control requires the handoff level,
    the drop, the identity map line and the answered `help`; with the drop
    disabled it fails on three checks.
-3. **The Pi 4 boot, `NOXHCI`**: the log past the exit now means what it
+3. ~~**The Pi 4 boot, `NOXHCI`**~~ **Done 2026-10-02, by Hans, on the second
+   of two boots** (`testing-pi4.md` section 6): `running at EL2 after the
+   exit`, `dropped from EL2 to EL1, on our own tables and vectors`,
+   `identity map installed`, the GIC and the tick up, `shell ready` on HDMI
+   with the serial terminal as the keyboard. The virtio-mmio scan did not
+   fault under the kernel's tables (the low 1GB is a Device block there), so
+   the bisection predicted below did not happen; the first of the two boots
+   died in `ExitBootServices` at the firmware address the 2026-10-01 takeover
+   boots died at, which is now its own item. As planned:
+   **The Pi 4 boot, `NOXHCI`**: the log past the exit now means what it
    says; `identity map installed` is followed by whatever the Pi does next
    on its own tables, which is the first time that has been observed. The
    virtio-mmio scan at `0xa000000` is expected to fault still, now into the
