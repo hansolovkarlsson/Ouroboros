@@ -917,11 +917,15 @@ unsafe fn build_identity_map(
 ///
 /// # Safety
 /// [`build_identity_map`] must have returned `planned` on this boot, after
-/// `exit_boot_services`, with IRQs masked and `exceptions::install` done.
+/// `exit_boot_services`, with IRQs masked. On an EL1 handoff
+/// `exceptions::install` must have been done; on an EL2 handoff it must
+/// NOT have been (a `VBAR_EL1` write from EL2 installs nothing for the
+/// running level, and under VHE would replace the firmware's vectors):
+/// the drop writes the vectors itself.
 unsafe fn switch_to_identity_map(planned: Planned) {
     let view = crate::tasks::current_index();
     if crate::el2::drops_to_el1() {
-        unsafe { crate::el2::drop_to_el1(el1_regime(view)) };
+        unsafe { crate::el2::drop_to_el1(el1_regime(view, &planned)) };
     } else {
         unsafe { switch_full(view, &planned) };
     }
@@ -1449,14 +1453,16 @@ pub(crate) fn activate_task(view: TaskIndex) {
 /// The EL1 translation regime's register values for `view`'s table set:
 /// what [`switch_full`] writes at EL1, and what the EL2 drop writes into
 /// the `_EL1` registers from EL2 before its `eret` (`el2.rs`). One
-/// derivation, so the two paths cannot disagree.
+/// derivation, so the two paths cannot disagree, and constructible only
+/// with the [`Planned`] a build returned, so the drop, like
+/// [`switch_full`], cannot be spelled without a build.
 pub(crate) struct El1Regime {
     pub(crate) mair: u64,
     pub(crate) tcr: u64,
     pub(crate) ttbr0: u64,
 }
 
-pub(crate) fn el1_regime(view: TaskIndex) -> El1Regime {
+fn el1_regime(view: TaskIndex, _built: &Planned) -> El1Regime {
     let mair_el1: u64 =
         (MAIR_ATTR_DEVICE_NGNRNE << (8 * MAIR_IDX_DEVICE_NGNRNE))
             | (MAIR_ATTR_NORMAL_WB << (8 * MAIR_IDX_NORMAL_WB))
@@ -1502,8 +1508,8 @@ pub(crate) fn el1_regime(view: TaskIndex) -> El1Regime {
 /// which is what makes this unspellable without a build. [`activate_task`]
 /// is the lighter switch-only sibling used on every context switch; both
 /// look the view up through [`l0_table`].
-unsafe fn switch_full(view: TaskIndex, _built: &Planned) {
-    let El1Regime { mair: mair_el1, tcr: tcr_el1, ttbr0: ttbr0_el1 } = el1_regime(view);
+unsafe fn switch_full(view: TaskIndex, built: &Planned) {
+    let El1Regime { mair: mair_el1, tcr: tcr_el1, ttbr0: ttbr0_el1 } = el1_regime(view, built);
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0
     // switch below, code is still running under firmware's *old* tables

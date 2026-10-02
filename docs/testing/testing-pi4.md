@@ -449,8 +449,9 @@ localises the failure without any guessing.
      and EL2 only under `make run-el2`.
    - `dropped from EL2 to EL1, on our own tables and vectors (GIC system
      registers: not implemented)`: `el2.rs` set EL1's regime to the built
-     identity map, wrote `HCR_EL2` to `RW` alone, switched the firmware's
-     EL2 timer off, and `eret`ed. The GIC-400 is a GICv2, so
+     identity map, wrote `HCR_EL2` to `el2.rs`'s `HCR_EL2_VALUE` (`RW`,
+     `HCD`, no traps, interrupts to EL1), switched the firmware's EL2
+     timer off, and `eret`ed. The GIC-400 is a GICv2, so
      `ID_AA64PFR0_EL1.GIC` is 0 and `ICC_SRE_EL2` is left alone; QEMU
      under `gic-version=3` prints `enabled for EL1` here instead.
    - `identity map installed, MMU running on our own tables`, which before

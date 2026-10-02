@@ -35,7 +35,8 @@ EL1 drop's check (kernel/src/el2.rs, docs/roadmap/roadmap-el1-drop.md): the
 kernel must say `running at EL2 after the exit`, then `dropped from EL2 to
 EL1`, and then behave as the plain control does. Before the drop this boot
 reached `shell ready` and then faulted at address 0 through the firmware's
-vectors, from the firmware's own EL2 timer; so the control's dwell after
+vectors, from an interrupt the firmware's HCR_EL2 routed to EL2 (most
+likely the kernel's own tick, see el2.rs); so the control's dwell after
 the shell line, and the typed `help`, are what can fail here.
 
 Why both: the dump proves the handler is reached and reads the context the
@@ -67,7 +68,7 @@ _spec.loader.exec_module(drive_qemu)
 
 TIMEOUT = 90
 # The control's dwell at the shell before `help` is typed: long enough for
-# a leftover EL2 timer to fire (it did within a second, before the drop).
+# the interrupt that faulted before the drop to fire (it did within a second).
 DWELL = 5
 
 

@@ -22,6 +22,19 @@
 //! translation regime, so the kernel's whole EL0 story would have to be
 //! rebuilt. The plan is `docs/roadmap/roadmap-el1-drop.md`.
 //!
+//! ## What faulted before the drop
+//!
+//! On QEMU `virtualization=on` the boot reached `shell ready` and then
+//! faulted at address 0 through the firmware's EL2 vectors. That was an
+//! interrupt the firmware's `HCR_EL2` (`IMO` set, logged as `0x8000038`)
+//! routed to EL2 once task 0's `eret` unmasked IRQs: most likely the
+//! kernel's own tick (`timer.rs` arms `CNTP`, which at non-VHE EL2 is the
+//! EL1 physical timer, and `gic.rs` enables its INTID), since the
+//! firmware's timer driver disables its timer at `ExitBootServices`; the
+//! interrupt number was never read, so the firmware's `CNTHP` is not
+//! ruled out, and the drop switches it off regardless. Either way the
+//! drop's `IMO`-clear `HCR_EL2` is what closed it.
+//!
 //! ## Prepare EL1 at EL2, then `eret` into a running MMU
 //!
 //! The naive drop, `eret` to EL1 with its MMU off and switch on from
@@ -102,6 +115,14 @@ const _: () = assert!(SCTLR_EL1_MMU_ON == 0x30d0_198d);
 /// route to EL1, where the firmware had them routed to EL2), no `E2H`, no
 /// traps. `smc` is untouched (no `TSC`): PSCI through TF-A still works.
 const HCR_EL2_RW_HCD: u64 = (1 << 31) | (1 << 29);
+/// `HCR_EL2.API | APK | ATA`: EL1 pointer authentication (FEAT_PAuth, bits
+/// 41 and 40) and memory tagging (FEAT_MTE, bit 56) do not trap to EL2,
+/// where nobody is home. RES0 on a core without the feature (the A72), so
+/// set unconditionally, as Linux's non-VHE host flags set API and APK.
+const HCR_EL2_NO_PAUTH_MTE_TRAPS: u64 = (1 << 41) | (1 << 40) | (1 << 56);
+/// What the drop writes to `HCR_EL2`: `0xa0000000` plus the two feature
+/// bits above. The records cite this constant rather than restating it.
+const HCR_EL2_VALUE: u64 = HCR_EL2_RW_HCD | HCR_EL2_NO_PAUTH_MTE_TRAPS;
 /// `MDCR_EL2`'s `HPMN` field (bits 4:0), the one part kept: the rest is
 /// debug and PMU trap bits (`TDRA`, `TDOSA`, `TDA`, `TDE`, `TPM`, `TPMCR`),
 /// all cleared so nothing EL1 does traps to EL2. `HPMN` is kept rather than
@@ -142,27 +163,28 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
     // Masked, all four, as mmu::switch_full's first instruction masks them:
     // until the eret the firmware's HCR_EL2 routes FIQ and SError to its
     // own vectors, and nothing here can be interrupted half-way through
-    // rewriting the hypervisor controls. Then HCR_EL2 before any `_EL1`
-    // register: with E2H set (not on this core, but not assumed) the `_EL1`
-    // names below would reach the `_EL2` registers of the level still
-    // running. The firmware's value is read first so the log can say if
-    // the vector write made before this went that way.
+    // rewriting the hypervisor controls.
     let hcr_before: u64;
     unsafe {
-        asm!(
-            "msr daifset, #0xf",
-            "mrs {before}, hcr_el2",
-            "msr hcr_el2, {hcr}",
-            "isb",
-            before = out(reg) hcr_before,
-            hcr = in(reg) HCR_EL2_RW_HCD,
-            options(nomem, nostack, preserves_flags),
-        );
+        asm!("msr daifset, #0xf", "mrs {0}, hcr_el2", out(reg) hcr_before, options(nomem, nostack, preserves_flags));
     }
+    // A VHE firmware (E2H set) is not supported: clearing E2H re-lays-out
+    // the EL2 regime the firmware is still running (TCR_EL2's shape,
+    // TTBR1_EL2 gone), so the stack and the console may vanish at the
+    // write. Said BEFORE the write, while the console still works, and
+    // then halted, which is the honest end of a boot this code was not
+    // written for. The A72 has no VHE.
     if hcr_before & HCR_EL2_E2H != 0 {
         crate::console::println!(
-            "Ouroboros kernel: WARNING: handed off with HCR_EL2.E2H set ({hcr_before:#x}): a VHE firmware, which this drop does not support; E2H is now clear and the firmware's EL2 regime has changed under it"
+            "Ouroboros kernel: handed off with HCR_EL2.E2H set ({hcr_before:#x}): a VHE firmware, which the drop to EL1 does not support"
         );
+        crate::power::halt();
+    }
+    // HCR_EL2 before any `_EL1` register: with E2H the `_EL1` names below
+    // would reach the `_EL2` registers of the level still running, and
+    // HCD must be set before EL1 can run an hvc.
+    unsafe {
+        asm!("msr hcr_el2, {0}", "isb", in(reg) HCR_EL2_VALUE, options(nomem, nostack, preserves_flags));
     }
     // The vectors: on an EL2 handoff main.rs skips exceptions::install
     // before the drop (a VBAR_EL1 write from EL2 installs nothing for the
@@ -200,7 +222,7 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             // counter and timer, the firmware's timer off.
             "msr cnthctl_el2, {cnthctl}",
             "msr cntvoff_el2, xzr",
-            "msr cnthp_ctl_el2, xzr",  // the firmware's EL2 timer, still armed from boot services
+            "msr cnthp_ctl_el2, xzr",  // the firmware's EL2 timer, in case it is still armed (see the module doc)
             "msr cptr_el2, {cptr}",
             "msr hstr_el2, xzr",
             "mrs {tmp}, mdcr_el2",     // debug/PMU traps off, HPMN kept

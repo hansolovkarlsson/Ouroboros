@@ -26,7 +26,11 @@ delivered through the firmware's vectors after `exceptions::install()`,
 `-machine virt,virtualization=on`: the firmware then runs at EL2 as well, the
 boot reaches `shell ready` on QEMU's permissive firmware map, and the
 firmware's EL2 timer interrupt, which the kernel's EL1 timer setup never
-stopped, lands in the firmware's vectors and faults at address 0. **That
+stopped, lands in the firmware's vectors and faults at address 0 (*as
+written; the reviews of 2026-10-02 noted the interrupt number was never
+read, and the kernel's own tick, routed to EL2 by the firmware's `IMO`,
+fits the evidence at least as well, since the firmware's timer driver
+disables its timer at the exit: see `el2.rs`'s module doc*). **That
 option is the dev loop for this plan: every step below is checked on QEMU
 before it goes near a board.**
 
@@ -85,7 +89,10 @@ cleaning it:
    `VBAR_EL1` to the kernel's table so there is no window at EL1 with no
    vectors. All of these are writable from EL2.
 3. **At EL2, set the hypervisor controls for a plain EL1 guest of itself**:
-   `HCR_EL2 = RW` (EL1 is AArch64) and nothing else (no `VM`, so no stage 2;
+   `HCR_EL2 = RW` (EL1 is AArch64) and nothing else (*as built: `RW | HCD`
+   plus the PAuth/MTE no-trap bits, `el2.rs`'s `HCR_EL2_VALUE`; the
+   reviews added `HCD` so an `hvc` from EL1 reports through the kernel's
+   vectors*) (no `VM`, so no stage 2;
    no `TGE`; no `IMO`/`FMO`/`AMO`, so interrupts route to EL1; no traps);
    `CNTHCTL_EL2.EL1PCTEN | EL1PCEN` so EL1 may use the physical counter and
    timer; `CNTVOFF_EL2 = 0`; `CPTR_EL2` with no FP/SIMD trap (`0x33ff`, the

@@ -1492,8 +1492,8 @@ test-early-fault: esp
 # same two boots handed off at EL2 (virtualization=on, as the Raspberry
 # Pi's firmware does). The control must say `running at EL2`, `dropped
 # from EL2 to EL1`, reach the shell and answer `help` after a dwell, where
-# before the drop it faulted at address 0 from the firmware's leftover EL2
-# timer. About a minute; run it whenever el2.rs, mmu.rs's switch or
+# before the drop it faulted at address 0 from an interrupt the firmware's
+# HCR_EL2 routed to EL2. About a minute; run it whenever el2.rs, mmu.rs's switch or
 # exceptions::install changes.
 test-el1-drop: esp
 	python3 scripts/test-early-fault.py --el2
