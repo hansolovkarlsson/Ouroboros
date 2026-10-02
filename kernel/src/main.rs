@@ -116,15 +116,35 @@ const KERNEL_STACK_SIZE: usize = 256 * 1024;
 struct KernelStack([u8; KERNEL_STACK_SIZE]);
 static KERNEL_STACK: synccell::SyncCell<KernelStack> = synccell::SyncCell::new(KernelStack([0; KERNEL_STACK_SIZE]));
 
-/// The firmware's stack pointer at entry, kept for `earlyfault.rs`: its
+/// [`main`]'s own stack pointer on the firmware's stack, read after its
+/// prologue (so the firmware's SP at entry less `main`'s frame, which is
+/// why it is not called the firmware's SP), kept for `earlyfault.rs`: its
 /// frame walk crosses from the kernel's stack back into the firmware's
-/// frames that called the kernel, and needs to know where those are.
-static FIRMWARE_SP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// frames that called the kernel, which lie at and above this value.
+static ENTRY_SP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// The kernel's stack as `(base, end)`, and the firmware's SP at entry.
+/// The word at the base of [`KERNEL_STACK`], written before the switch
+/// and checked by both fault reporters: an overflow of the kernel's stack
+/// overwrites it first. Not a guard page, which would fault at once: that
+/// needs a 4 KB page unmapped inside the kernel's own block in `mmu.rs`
+/// and is on the roadmap; until then the canary names the overflow in a
+/// dump instead of leaving it to look like something else, which is what
+/// the firmware's stack did for two days.
+const STACK_CANARY: u64 = 0x5141_5141_5141_5141;
+
+/// The kernel's stack as `(base, end)`, and [`ENTRY_SP`].
 pub(crate) fn stacks() -> ((u64, u64), u64) {
     let base = KERNEL_STACK.get() as u64;
-    ((base, base + KERNEL_STACK_SIZE as u64), FIRMWARE_SP.load(core::sync::atomic::Ordering::Relaxed))
+    ((base, base + KERNEL_STACK_SIZE as u64), ENTRY_SP.load(core::sync::atomic::Ordering::Relaxed))
+}
+
+/// Whether [`STACK_CANARY`] still sits at the kernel stack's base: false
+/// means the stack overflowed its 256 KB and wrote below it.
+pub(crate) fn stack_canary_intact() -> bool {
+    // SAFETY: the base word of a static the kernel owns, written once in
+    // `main` before the switch; read volatile since nothing the compiler
+    // can see writes it.
+    unsafe { core::ptr::read_volatile(KERNEL_STACK.get().cast::<u64>()) == STACK_CANARY }
 }
 
 #[entry]
@@ -134,11 +154,14 @@ fn main() -> Status {
     // `kernel_main` entered; it never returns, so there is no way back to
     // the firmware's stack and this function's own frame is the last thing
     // the firmware's stack holds of the kernel.
-    let (top, old_sp): (u64, u64);
+    let (top, entry_sp): (u64, u64);
     unsafe {
-        core::arch::asm!("mov {0}, sp", out(reg) old_sp, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("mov {0}, sp", out(reg) entry_sp, options(nomem, nostack, preserves_flags));
     }
-    FIRMWARE_SP.store(old_sp, core::sync::atomic::Ordering::Relaxed);
+    ENTRY_SP.store(entry_sp, core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the base word of the kernel's own stack, which nothing has
+    // used yet.
+    unsafe { core::ptr::write_volatile(KERNEL_STACK.get().cast::<u64>(), STACK_CANARY) };
     top = KERNEL_STACK.get() as u64 + KERNEL_STACK_SIZE as u64;
     unsafe {
         // x29 is left as it is: this function's own frame record, on the
@@ -159,11 +182,11 @@ fn main() -> Status {
 extern "C" fn kernel_main() -> ! {
     uefi::helpers::init().unwrap();
 
-    let ((stack_base, stack_end), firmware_sp) = stacks();
+    let ((stack_base, stack_end), entry_sp) = stacks();
     let sp: u64;
     unsafe { core::arch::asm!("mov {0}, sp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
     log::info!(
-        "Ouroboros kernel: UEFI stage alive, on {} (sp {sp:#x}, the kernel's stack {stack_base:#x}..{stack_end:#x}, the firmware's sp was {firmware_sp:#x})",
+        "Ouroboros kernel: UEFI stage alive, on {} (sp {sp:#x}, the kernel's stack {stack_base:#x}..{stack_end:#x}, the entry's sp on the firmware's was {entry_sp:#x})",
         if (stack_base..stack_end).contains(&sp) { "its own stack" } else { "the FIRMWARE'S stack, which the switch should have left" }
     );
     // Where firmware loaded this image, so an address in the firmware's own

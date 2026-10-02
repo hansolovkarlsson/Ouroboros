@@ -157,11 +157,16 @@ static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
 static FRAMEBUFFER: SyncCell<Option<framebuffer::Info>> = SyncCell::new(None);
 /// The two stacks a frame record may lie on, `(base, end)` each: the
 /// kernel's own (`main.rs`'s `KERNEL_STACK`, which the entry switches to
-/// as its first act) and the firmware's, the memory-map descriptor holding
-/// the firmware's SP at entry, which the frames that called the kernel
-/// are on. The walk believes a record only inside one of them, and crosses
-/// from the kernel's to the firmware's once, at the entry frame.
+/// as its first act) and the firmware's, from `main`'s SP on it less
+/// [`ENTRY_FRAME`] (its own frame record lies just above that SP) to the
+/// end of the memory-map descriptor holding it, since the frames that
+/// called the kernel are all above the entry's. The walk believes a record
+/// only inside one of them, and crosses once, from the kernel's to the
+/// firmware's, at the entry frame.
 static STACKS: SyncCell<[(u64, u64); 2]> = SyncCell::new([(0, 0); 2]);
+/// How far below `main`'s post-prologue SP its frame record may lie: a
+/// generous bound on one small frame.
+const ENTRY_FRAME: u64 = 256;
 /// The RAM descriptors of the memory map at [`arm`] time (those
 /// `mmu::is_general_ram` admits), `(start, end)` each, and their count:
 /// the image walk reads a table entry, a loaded-image record, an image
@@ -329,9 +334,10 @@ pub fn arm(
 }
 
 /// Facts from one read of the memory map. The firmware's stack as `(base,
-/// end)`: the descriptor holding the firmware's SP at entry (the DXE
-/// stack the kernel was entered on and left for its own), or that SP
-/// less and plus [`STACK_FALLBACK`] if the map does not cover it.
+/// end)`: from the entry's SP less [`ENTRY_FRAME`] to the end of the
+/// descriptor holding that SP (the DXE stack the kernel was entered on and
+/// left for its own), or to that SP plus [`STACK_FALLBACK`] if the map
+/// does not cover it.
 /// And the RAM ranges: the descriptors `mmu::is_general_ram` admits,
 /// sorted by address and contiguous ones merged (UEFI does not promise a
 /// sorted map, so the order is not trusted), up to [`MAX_RAM_RANGES`] of
@@ -352,7 +358,8 @@ struct MapFacts {
 
 fn map_facts() -> MapFacts {
     let sp = crate::stacks().1;
-    let fallback = (sp.saturating_sub(STACK_FALLBACK), sp + STACK_FALLBACK);
+    let base = sp.saturating_sub(ENTRY_FRAME);
+    let fallback = (base, sp + STACK_FALLBACK);
     let mut ranges = [(0u64, 0u64); MAX_RAM_RANGES];
     let Ok(map) = boot::memory_map(MemoryType::LOADER_DATA) else {
         return MapFacts { firmware_stack: fallback, ranges, count: 0, truncated: false, test_fault: UNMAPPED };
@@ -369,7 +376,7 @@ fn map_facts() -> MapFacts {
             continue;
         }
         if stack.is_none() && start <= sp && sp < end {
-            stack = Some((start, end));
+            stack = Some((base, end));
         }
         if crate::mmu::is_general_ram(d.ty) && !insert_range(&mut ranges, &mut count, (start, end)) {
             truncated = true;
@@ -597,6 +604,12 @@ unsafe extern "efiapi" fn report(exception_type: isize, context: *const SystemCo
     out(format_args!("Ouroboros kernel:   esr: "));
     describe_esr(ctx.esr);
     out(format_args!("\n"));
+    if !crate::stack_canary_intact() {
+        line!(
+            "Ouroboros kernel:   the kernel stack's canary is OVERWRITTEN: the stack overflowed below {:#x}",
+            crate::stacks().0.0
+        );
+    }
     // The rows first: they need nothing but the context the firmware
     // saved. Everything after them reads firmware memory (the image table,
     // image headers, the stack) and can fault; on a Pi 4 on 2026-10-01 the
@@ -847,20 +860,35 @@ fn place(addr: u64) {
 /// Each is believed only while it is 8-aligned (GCC's firmware code keeps
 /// them 16-aligned; LLVM's kernel code puts them 8 past that, seen on
 /// QEMU), on one of the two stacks ([`STACKS`]), and above the last one
-/// while on the same stack (the chain crosses once, from the kernel's
-/// stack to the firmware's frames that called it, and may go down then),
-/// so a frame pointer that was never one ends the walk instead of reading
-/// from anywhere, and a read that would fault cannot cut the report short.
+/// while on the same stack; the chain may change stack exactly once, from
+/// the kernel's (index 0) to the firmware's (index 1), at the entry frame,
+/// and any other change ends the walk, so a frame pointer that was never
+/// one, or a cycle of two records across the stacks, ends it instead of
+/// reading from anywhere, and a read that would fault cannot cut the
+/// report short.
 fn backtrace(ctx: &SystemContextAarch64) {
     let stacks = unsafe { *STACKS.get() };
-    let stack_of = |a: u64| stacks.iter().position(|&(lo, hi)| lo <= a && a + 16 <= hi);
+    // A record is two words; `a + 16` is checked, since `a` is a raw
+    // register value that may sit at the top of the address space.
+    let stack_of =
+        |a: u64| stacks.iter().position(|&(lo, hi)| lo <= a && a.checked_add(16).is_some_and(|end| end <= hi));
     let mut fp = ctx.x[29];
     let mut last = ctx.sp.saturating_sub(16);
     let mut last_stack = stack_of(ctx.sp);
+    let mut crossed = false;
     for n in 1..=MAX_FRAMES {
         let Some(on) = stack_of(fp) else { return };
-        if fp == 0 || !fp.is_multiple_of(8) || (Some(on) == last_stack && fp <= last) {
+        if !fp.is_multiple_of(8) {
             return;
+        }
+        if Some(on) == last_stack {
+            if fp <= last {
+                return;
+            }
+        } else if crossed || on != 1 {
+            return;
+        } else {
+            crossed = true;
         }
         // SAFETY: `fp` lies within the live stack by the check above, 8-aligned;
         // the record is two u64s read as such.
