@@ -648,7 +648,13 @@ the stack's memory-map descriptor, so a clobbered frame pointer cannot make
 the report fault and cut itself short. The framebuffer fallback is not
 exercised by the test: QEMU's firmware always describes a serial console, so
 the serial path wins there.
-The next Pi 4 boot, with no flag, should end in that dump instead of the one
+A second Pi 4 boot the same evening (17:40), meant to carry the reporter but
+staged from the tree before #187 merged (the kernel's line numbers in the log
+say so, and no `armed` line), showed the same shape at a third address:
+`Synchronous Exception at 0x0000000039F36E14`, twice, after `taking the xHCI
+controller next`, with the image at `0x376c4000..0x378b3000` this time. Three
+boots, three firmware addresses, one step: the fault moves. The next boot, with
+the merged kernel and no flag, should end in the dump instead of the one
 line. If it still shows only the line, the fault corrupted the firmware's
 dispatcher or stack before the handler ran, which is itself the answer the
 memory-damage suspect predicts.

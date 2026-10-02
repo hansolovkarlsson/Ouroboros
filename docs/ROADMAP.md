@@ -1186,8 +1186,11 @@ The small open tails those arcs deliberately left:
 >       test-early-fault` (the `\EARLYFAULT` flag plants a fault in the DXE
 >       core's `CopyMem`; the dump names `DxeCore.dll` and the kernel's
 >       frames; with the registration removed the test fails). The kernel
->       is built with frame records now (`.cargo/config.toml`). Open until a
->       Pi boot shows the dump where the firmware's line was.*
+>       is built with frame records now (`.cargo/config.toml`). Reviewed
+>       and merged as #187 (2026-10-01). Open until a Pi boot shows the
+>       dump where the firmware's line was: the first boot after the merge
+>       ran a card staged from the pre-merge tree, and showed the one line
+>       again at a third address (`0x39F36E14`).*
 > - [ ] **The Pi 4 stops after the early console's clear.** Under `\FBCON`
 >       the whole-screen clear reaches the display and the first line after it
 >       never does. On an earlier build the same board went black the same
