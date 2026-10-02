@@ -74,8 +74,14 @@ in `kernel/src/main.rs` runs the following, in order:
 ## Privilege model
 
 Two exception levels are in play: **EL1** (the kernel) and **EL0**
-(userland tasks). There is no EL2/hypervisor use — the kernel has only
-ever been observed booting directly at EL1, typical for a UEFI OS loader.
+(userland tasks). There is no EL2/hypervisor use. QEMU and Parallels hand
+the kernel off at EL1, typical for a UEFI OS loader; the Raspberry Pi's
+firmware hands off at **EL2** (found 2026-10-01), and there the kernel
+drops to EL1 inside the identity-map install, with EL1's tables and
+vectors prepared from EL2 and an `eret` into a running MMU
+(`kernel/src/el2.rs`, 2026-10-02). The log states the handoff level on
+every boot (`running at EL{n} after the exit`) and the drop when it
+happens.
 
 EL0 code cannot access kernel memory, MMIO, or privileged system
 registers; the only way back to EL1 is a trap — a syscall (`svc`), a

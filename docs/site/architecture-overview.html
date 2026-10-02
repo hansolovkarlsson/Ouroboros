@@ -210,7 +210,11 @@
       into EL1 is a <strong>trap</strong> — a system call
       (<code class="inline">svc</code>), a fault, or the timer interrupt —
       caught by the exception vector table. That single crossing is where
-      the whole design lives.
+      the whole design lives. Firmware decides which level the kernel is
+      entered at: QEMU and Parallels hand off at EL1, the Raspberry Pi at
+      EL2, and there the kernel drops to EL1 before it relies on any EL1
+      register, with its tables and vectors prepared from EL2 and an
+      <code class="inline">eret</code> into a running MMU.
     </p>
 
     <figure>

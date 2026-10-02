@@ -8,6 +8,16 @@ translation tables, the timer, goes to an `_EL1` register that the exception
 level it is running at does not use. The boot therefore keeps running on the
 firmware's EL2 tables and vectors while its log says otherwise.
 
+**Status 2026-10-02: steps 0 to 2 built and proven on QEMU, on the branch
+`pi4/el1-drop`; step 3, the board, is the next bench round trip.** The
+drop is `kernel/src/el2.rs`; `make test-el1-drop` is its rig, and a
+mutation that disabled the drop turned the rig red on three checks. Read
+on the way: QEMU's firmware leaves `SCTLR_EL1` at `0x30d0198d` on an EL1
+handoff, which is what the drop writes; at EL2 it leaves `HCR_EL2` at
+`0x8000038` (`RW` with `IMO`/`FMO`/`AMO`), so the drop's `RW`-only write
+is what moves interrupts to EL1; and its FADT names `smc` under
+`virtualization=on` and `hvc` plain, both of which power off.
+
 Grounded in the code at `2c0c8d6` (2026-10-01). Found by the early fault
 reporter's first dump on a Pi 4 (`testing-pi4.md` section 6): a fault
 delivered through the firmware's vectors after `exceptions::install()`,
@@ -114,19 +124,32 @@ logs the drop, so a capture says which path ran.
 
 ## Steps, each with the check that can fail
 
-0. **Log `CurrentEL` after the exit, on every platform**, nothing else.
-   Check: QEMU plain prints EL1, QEMU `virtualization=on` and the Pi print
-   EL2. A one-line change that turns the finding into a kernel fact.
-1. **Split `mmu::install_identity_map`** into build and switch, behaviour
-   unchanged. Check: `make run` to the shell, `make test-early-fault`, the
-   module's own deliberate-fault re-verification (its doc says to redo it
-   when it changes).
-2. **The drop** (`kernel/src/el2.rs`, or in `mmu.rs` beside the switch).
-   Check on QEMU `virtualization=on`: the log says "handed off at EL2,
-   running at EL1" and the boot reaches the shell with the tick alternating
-   tasks, where today it faults at address 0 after `shell ready`. Check on
-   QEMU plain: nothing changes. A Makefile target `run-el2` (and the
-   `test-early-fault.py` control run under it) so the rig stays.
+0. ~~**Log `CurrentEL` after the exit, on every platform**, nothing else.~~
+   **Done 2026-10-02** (`el2::current_el`, the line `running at EL{n} after
+   the exit`, `make run-el2`): QEMU plain prints EL1; `virtualization=on`
+   prints EL2 and then, as predicted, reaches `shell ready` and faults at
+   address 0 through the firmware's vectors.
+1. ~~**Split `mmu::install_identity_map`** into build and switch, behaviour
+   unchanged.~~ **Done 2026-10-02**: `build_identity_map` returns a
+   `Planned` that `switch_to_identity_map` requires, `build_tables` no
+   longer switches, the runtime rebuild switches itself, and `el1_regime`
+   is the one derivation of the register values. Checked by the module
+   doc's deliberate fault (a write to block index 2 after the switch,
+   reported by the kernel's handler, then removed), `make run` to the
+   shell, `test-early-fault.py`, and three spawned programs on the image.
+2. ~~**The drop**~~ **Done 2026-10-02**, `kernel/src/el2.rs`, called from
+   `switch_to_identity_map` when `CurrentEL` is 2: the register sequence of
+   the design above, `ICC_SRE_EL2` gated on `ID_AA64PFR0_EL1.GIC` rather
+   than the MADT (on a GICv2 the register is undefined), `SCTLR_EL1`
+   written whole. Checked on `virtualization=on`: the log says `running at
+   EL2 after the exit` then `dropped from EL2 to EL1, on our own tables and
+   vectors`, the shell answers `help` after a twelve-second dwell, QEMU's
+   `-d int` trace shows IRQs and SVCs and no abort, the same with
+   `gic-version=3`, the FAT32 image logs in and spawns, and `shutdown`
+   powers off. QEMU plain: unchanged. `make test-el1-drop` runs
+   `test-early-fault.py --el2`, whose control requires the handoff level,
+   the drop, the identity map line and the answered `help`; with the drop
+   disabled it fails on three checks.
 3. **The Pi 4 boot, `NOXHCI`**: the log past the exit now means what it
    says; `identity map installed` is followed by whatever the Pi does next
    on its own tables, which is the first time that has been observed. The

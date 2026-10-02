@@ -441,6 +441,34 @@ localises the failure without any guessing.
    `gicv2.rs` were written to make that impossible. A third platform with a
    genuinely different GIC address is the first real test of that claim.
 
+5b. **After the exit, three lines in this order** *(predicted 2026-10-02,
+   from `pi4/el1-drop`; the first line's fact is confirmed, the other two
+   are the drop's first run on a board)*:
+   - `running at EL2 after the exit`. The 2026-10-01 `NOXHCI` dump showed
+     SPSR in EL2h, so EL2 is what this board hands off at; QEMU says EL1,
+     and EL2 only under `make run-el2`.
+   - `dropped from EL2 to EL1, on our own tables and vectors (GIC system
+     registers: not implemented)`: `el2.rs` set EL1's regime to the built
+     identity map, wrote `HCR_EL2` to `RW` alone, switched the firmware's
+     EL2 timer off, and `eret`ed. The GIC-400 is a GICv2, so
+     `ID_AA64PFR0_EL1.GIC` is 0 and `ICC_SRE_EL2` is left alone; QEMU
+     under `gic-version=3` prints `enabled for EL1` here instead.
+   - `identity map installed, MMU running on our own tables`, which before
+     the drop was true of the registers and false of the machine
+     (`blind-instruments-postmortem.md`, 2026-10-01).
+
+   **If the second line is missing** the `eret` did not land: the first
+   suspect is the L0 start level (`mmu.rs`'s module doc; the EL1 regime
+   starts from nothing here, with no firmware configuration to match), and
+   the reporter's dump, still registered through the firmware's EL2
+   vectors at that point, is what to read. After the second line a fault
+   reports through the kernel's own `EXCEPTION vector=...` line, the first
+   time that has been possible on this board; the virtio-mmio scan at
+   `0xa000000` (Risk 1) is expected to be the first. Also read, before the
+   exit: `PSCI conduit: smc` or `hvc` (the FADT's flag, logged since
+   2026-10-02). TF-A answers `smc`; an `hvc` from EL1 now traps to EL2 with
+   nobody to answer, and `power.rs` would fall through to the halt.
+
 6. **Timer, preemption, task start** — `cond`, `fsd`, `netd`, the supervisor.
 
 7. **`netd`: "no NIC this boot."** Expected (§2). It is a pass, not a failure —
