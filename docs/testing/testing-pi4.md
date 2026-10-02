@@ -875,7 +875,9 @@ ESR's; on QEMU the planted fault reads `L0[0x0] ... (table), L1[0x1] ...
 (table), L2[0x100] @ 0x47ffd800 = 0x0 (invalid), neighbours: [0xfe]=...003
 [0xff]=...003 [0x101]=0x0 [0x102]=0x0; the ESR's level 2 agrees`, which is
 the Pi's framebuffer fault's shape, with the answer the Pi's line will
-give in the entry's value). Suspects, in order: the kernel's own pre-exit writes landing
+give in the entry's value; the test faults land on the lowest page past
+RAM that no descriptor of any type covers, chosen from the map at arm
+time, not on an address assumed free). Suspects, in order: the kernel's own pre-exit writes landing
 outside what it owns (its allocations move a little per boot, which fits
 the intermittence); the firmware's own break-before-make on a split block;
 the VideoCore writing into ARM memory. The dump's frames 4 to 16 are in the

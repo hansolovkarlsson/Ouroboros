@@ -658,7 +658,9 @@ const SH_OUTER: u64 = 0b10 << 8;
 const AF: u64 = 1 << 10;
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
-const OUTPUT_ADDR_MASK: u64 = 0x0000_ffff_ffff_f000; // bits 47:12
+/// The output-address field of a table or page descriptor, bits 47:12.
+/// Shared with `earlyfault.rs`'s table walk, so one constant.
+pub(crate) const OUTPUT_ADDR_MASK: u64 = 0x0000_ffff_ffff_f000; // bits 47:12
 
 const MAIR_IDX_DEVICE_NGNRNE: u64 = 0;
 const MAIR_IDX_NORMAL_WB: u64 = 1;
