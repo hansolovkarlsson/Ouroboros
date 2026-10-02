@@ -17,7 +17,9 @@ Two boots of a copy of the staged ESP, each graded from the serial console:
    the constant), the ESR decoded as a data abort at the same EL, `elr`
    placed in a firmware image (the DXE core, named from its PE debug entry),
    at least one backtrace frame placed in the kernel by offset, the register
-   rows, and the halt line. The firmware's own line must NOT appear: the
+   rows BEFORE the first frame (the rows read nothing and the walk reads
+   firmware memory, which faulted on a Pi 4 and lost the rows printed after
+   it), and the halt line. The firmware's own line must NOT appear: the
    registered handler replaces the default one, so its presence would mean
    the registration did not take.
 
@@ -117,11 +119,18 @@ def boot(esp, until, machine, then=None):
         guest.stop()
 
 
-def grade(name, text, must, must_not, aborts=None, expect_aborts=None):
+def grade(name, text, must, must_not, aborts=None, expect_aborts=None, order=()):
     """`expect_aborts`: None to leave QEMU's trace ungraded, "zero" to
     require a clean trace, "some" to require at least one fault line (the
-    planted fault). A missing trace fails either way."""
+    planted fault). A missing trace fails either way. `order`: (label,
+    first, second) triples, each a pair of patterns whose first match must
+    come before the other's."""
     ok = True
+    for label, first, second in order:
+        a, b = re.search(first, text, re.M), re.search(second, text, re.M)
+        good = bool(a and b and a.start() < b.start())
+        print(f"  {'ok  ' if good else 'FAIL'} {label}")
+        ok &= good
     if expect_aborts is not None:
         if aborts is None:
             print("  FAIL QEMU trace: NO TRACE (health bar unavailable - this is not a pass)")
@@ -179,7 +188,9 @@ def main():
     ], [
         ("firmware's own line", r"Synchronous Exception at"),
         ("shell", r"shell ready"),
-    ], aborts, "some"))
+    ], aborts, "some", order=[
+        ("register rows before the first frame", r"x28=0x[0-9a-f]{16}", r"frame 1: fp="),
+    ]))
 
     # 2. The control, no flag.
     esp = os.path.join(work, "esp-plain")
