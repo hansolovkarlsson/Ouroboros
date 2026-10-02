@@ -1190,7 +1190,11 @@ The small open tails those arcs deliberately left:
 >       and merged as #187 (2026-10-01). Open until a Pi boot shows the
 >       dump where the firmware's line was: the first boot after the merge
 >       ran a card staged from the pre-merge tree, and showed the one line
->       again at a third address (`0x39F36E14`).*
+>       again at a third address (`0x39F36E14`); the boot after it, with the
+>       reporter armed, went silent at the same step: no firmware line, no
+>       dump (`testing-pi4.md` section 6 has the three readings). Next:
+>       `NOXHCI` on the same card, to see whether the kernel's own PL011
+>       driver prints on the Pi at all.*
 > - [ ] **The Pi 4 stops after the early console's clear.** Under `\FBCON`
 >       the whole-screen clear reaches the display and the first line after it
 >       never does. On an earlier build the same board went black the same

@@ -653,9 +653,26 @@ staged from the tree before #187 merged (the kernel's line numbers in the log
 say so, and no `armed` line), showed the same shape at a third address:
 `Synchronous Exception at 0x0000000039F36E14`, twice, after `taking the xHCI
 controller next`, with the image at `0x376c4000..0x378b3000` this time. Three
-boots, three firmware addresses, one step: the fault moves. The next boot, with
-the merged kernel and no flag, should end in the dump instead of the one
-line. If it still shows only the line, the fault corrupted the firmware's
+boots, three firmware addresses, one step: the fault moves.
+
+**The first boot with the reporter (17:44, build `b51b022`, no flag) went
+silent instead.** `early fault reporter armed: a fault before the kernel's own
+vectors reports on the serial console` printed where expected, every line up
+to `taking the xHCI controller next` matched the earlier boots (the image at
+`0x376ab000..0x378a700`, the console at `0xfe201000`), and then nothing at
+all: no firmware line, no dump, the capture ends on that line. The one change
+from the boot before was the registration, and with it the firmware's one line
+is gone too, so the firmware's dispatcher took the registered path and what
+came of it never reached the UART. Three readings, not yet told apart: the
+handler ran and its console was empty or its writes went nowhere (the kernel's
+own PL011 driver has never printed on a Pi, since every boot died before the
+exit); the handler was never reached, the fault having wrecked the
+dispatcher's data or the stack before the call (the memory-damage suspect,
+which the moving address already favours); or there was no fault this time
+and the takeover hangs, the memory-map read `arm` adds having moved the
+firmware's allocations. The next boot asks the first question alone: `NOXHCI`
+on the same card, which skips the takeover and should print the kernel's
+post-exit lines through that driver. If it still shows only the line, the fault corrupted the firmware's
 dispatcher or stack before the handler ran, which is itself the answer the
 memory-damage suspect predicts.
 
