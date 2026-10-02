@@ -672,7 +672,49 @@ which the moving address already favours); or there was no fault this time
 and the takeover hangs, the memory-map read `arm` adds having moved the
 firmware's allocations. The next boot asks the first question alone: `NOXHCI`
 on the same card, which skips the takeover and should print the kernel's
-post-exit lines through that driver. If it still shows only the line, the fault corrupted the firmware's
+post-exit lines through that driver.
+
+**`NOXHCI` with the reporter (17:55): the kernel's PL011 driver works, the
+reporter works, and the kernel is running at EL2.** The boot left boot
+services and printed, through the kernel's own driver at `0xfe201000`,
+`boot services exited, console live`, `installing our own identity map`, the
+map's ranges (RAM `0x3b0000-0x3b400000`, device `0x0-0x3fffffff`, the six EL0
+regions) and `identity map installed, MMU running on our own tables`. The
+next thing on serial was the reporter's dump:
+
+```
+EARLY EXCEPTION (firmware vectors) type=0 esr=0x96000006 far=0xa000000 elr=0x376c923c sp=0x3b3fceb0 lr=0x376c9234 fp=0x3b3fced0 spsr=0x400003c9
+  esr: ec=0x25 (data abort, same EL), fsc=0x06 (translation fault at level 2), read
+```
+
+Three facts in it. The fault was delivered through the FIRMWARE's vectors,
+after `exceptions::install()` had written VBAR_EL1: so VBAR_EL1 is not the
+vector base in use. `SPSR` mode bits are `0b1001`, EL2h: the firmware hands
+the kernel off at EL2 (TF-A's BL31 enters UEFI at EL2 on this board), and
+`exceptions.rs`'s "assumes EL1, not verified at any other EL" is the case that
+was never tested. And the faulting read is at `0xa000000`, the first
+virtio-mmio slot, a translation fault: the identity map that "installed" is
+in TTBR0_EL1/TCR_EL1/MAIR_EL1, which do not govern translation at EL2, so the
+MMU is still on the firmware's EL2 tables, where nothing maps that address.
+Every EL1 system register the kernel writes after the exit (VBAR, TTBR0, TCR,
+MAIR, SCTLR, the EL1 timer) has been written to a register the running
+exception level does not use. That is also the shape of "the Pi 4 stops after
+the early console's clear": a fault to the firmware's EL2 vectors with the
+firmware's text console gone.
+
+The dump itself was cut short: at frame 10 (the records below the kernel's
+own, a return address inside the firmware volume at `0x26e28`) the image
+naming walk took a translation fault of its own (`esr=0x96000007` in
+`pe_codeview_name`), and the reentrancy guard halted before the register
+rows. The register rows belong before the walk, and the walk needs a bound
+on what it reads.
+
+What follows is a kernel decision, not a boot: drop to EL1 right after
+`exit_boot_services`, as Linux's entry does (`HCR_EL2.RW` for AArch64 EL1,
+no traps, no stage 2, the EL1 physical timer allowed through `CNTHCTL_EL2`,
+`SP_EL1` set, `eret`), and let `mmu.rs` enable the EL1 MMU from off rather
+than swap tables under one that is on. Until then nothing after the exit on
+a Pi means what its log line says. If it still shows only the line, the fault corrupted the firmware's
 dispatcher or stack before the handler ran, which is itself the answer the
 memory-damage suspect predicts.
 

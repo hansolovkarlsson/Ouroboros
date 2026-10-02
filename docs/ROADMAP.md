@@ -1192,9 +1192,26 @@ The small open tails those arcs deliberately left:
 >       ran a card staged from the pre-merge tree, and showed the one line
 >       again at a third address (`0x39F36E14`); the boot after it, with the
 >       reporter armed, went silent at the same step: no firmware line, no
->       dump (`testing-pi4.md` section 6 has the three readings). Next:
->       `NOXHCI` on the same card, to see whether the kernel's own PL011
->       driver prints on the Pi at all.*
+>       dump (`testing-pi4.md` section 6 has the three readings). The
+>       `NOXHCI` boot after that showed the dump for a post-exit fault, so
+>       the reporter and the kernel's PL011 driver both work on the Pi;
+>       what it showed is the next item.*
+> - [ ] **The Pi hands the kernel off at EL2, and the kernel assumes EL1.**
+>       The `NOXHCI` dump (2026-10-01, `testing-pi4.md` section 6): SPSR mode
+>       EL2h, the fault delivered through the firmware's vectors after
+>       `exceptions::install()`, a translation fault at `0xa000000` after
+>       the identity map "installed": VBAR_EL1, TTBR0_EL1, TCR_EL1, MAIR_EL1
+>       and the EL1 timer are all written to registers EL2 does not use. Drop
+>       to EL1 right after `exit_boot_services` (HCR_EL2.RW, no traps, no
+>       stage 2, CNTHCTL_EL2 for the EL1 timer, SP_EL1, `eret`), and give
+>       `mmu.rs` an enable-from-off path. Explains "the Pi 4 stops after the
+>       early console's clear". The xHCI takeover fault is before the exit
+>       and stays its own item.
+> - [ ] **fix** The reporter's register rows come after the backtrace, so a
+>       fault in the image-naming walk (seen on the Pi, frame 10, a return
+>       address in the firmware volume) loses them; and the walk reads
+>       images with no bound beyond their declared size. Rows first, the
+>       nested-fault line with FAR, the walk bounded.
 > - [ ] **The Pi 4 stops after the early console's clear.** Under `\FBCON`
 >       the whole-screen clear reaches the display and the first line after it
 >       never does. On an earlier build the same board went black the same
