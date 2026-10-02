@@ -291,10 +291,9 @@ pub fn arm(
         // a board the question is whether an address a bad entry claims
         // (`0x26e28` on the Pi 4, 2026-10-01) falls inside any range.
         let (ranges, count) = unsafe { &*RAM.get() };
-        let lo = ranges[..*count].iter().map(|r| r.0).min().unwrap_or(0);
-        let hi = ranges[..*count].iter().map(|r| r.1).max().unwrap_or(0);
         log::info!(
-            "Ouroboros kernel: early fault reporter: image walk bounded to {count} RAM range(s), {lo:#x}..{hi:#x}{}",
+            "Ouroboros kernel: early fault reporter: image walk bounded to {count} RAM range(s): {}{}",
+            Ranges(&ranges[..*count]),
             if unsafe { *RAM_TRUNCATED.get() } { " (the map had more; the rest are outside the walk)" } else { "" }
         );
         Ok(())
@@ -312,12 +311,15 @@ pub fn arm(
 /// firmware's DXE stack, which the kernel inherits until it switches to
 /// its own), or SP plus [`STACK_FALLBACK`] if the map does not cover it.
 /// And the RAM ranges: the descriptors `mmu::is_general_ram` admits,
-/// contiguous ones merged (the map is sorted by address), up to
-/// [`MAX_RAM_RANGES`] of them with a flag for any dropped past that; none
-/// if the map could not be read, which makes the image walk read nothing.
-/// A descriptor whose extent does not compute (a corrupt page count, the
-/// class of bad firmware record this module exists for) is skipped, not
-/// trusted: this runs before the reporter exists to catch a panic.
+/// sorted by address and contiguous ones merged (UEFI does not promise a
+/// sorted map, so the order is not trusted), up to [`MAX_RAM_RANGES`] of
+/// them with a flag for any dropped past that; none if the map could not
+/// be read, which makes the image walk read nothing. A descriptor whose
+/// extent does not compute (a corrupt page count, the class of bad
+/// firmware record this module exists for) is skipped, not trusted: this
+/// runs before the reporter exists to catch a panic. The stack end is the
+/// first descriptor holding SP, as before: two that overlap it would
+/// otherwise let a reserved window past it extend the walk.
 fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool) {
     let sp: u64;
     // SAFETY: reads the stack pointer, nothing else.
@@ -326,7 +328,7 @@ fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool) {
     let Ok(map) = boot::memory_map(MemoryType::LOADER_DATA) else {
         return (sp + STACK_FALLBACK, ranges, 0, false);
     };
-    let mut stack = sp + STACK_FALLBACK;
+    let mut stack = None;
     let mut count = 0usize;
     let mut truncated = false;
     for d in map.entries() {
@@ -337,22 +339,59 @@ fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool) {
         if start >= end {
             continue;
         }
-        if start <= sp && sp < end {
-            stack = end;
+        if stack.is_none() && start <= sp && sp < end {
+            stack = Some(end);
         }
         if !crate::mmu::is_general_ram(d.ty) {
             continue;
         }
-        if count > 0 && ranges[count - 1].1 == start {
-            ranges[count - 1].1 = end;
-        } else if count < MAX_RAM_RANGES {
+        if count < MAX_RAM_RANGES {
             ranges[count] = (start, end);
             count += 1;
         } else {
             truncated = true;
         }
     }
-    (stack, ranges, count, truncated)
+    // Sort (insertion, at most 64 entries), then merge contiguous ranges
+    // in place.
+    for i in 1..count {
+        let mut j = i;
+        while j > 0 && ranges[j - 1].0 > ranges[j].0 {
+            ranges.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    let mut merged = 0usize;
+    for i in 0..count {
+        let (start, end) = ranges[i];
+        if merged > 0 && ranges[merged - 1].1 >= start {
+            ranges[merged - 1].1 = ranges[merged - 1].1.max(end);
+        } else {
+            ranges[merged] = (start, end);
+            merged += 1;
+        }
+    }
+    (stack.unwrap_or(sp + STACK_FALLBACK), ranges, merged, truncated)
+}
+
+/// The ranges of the `armed` line, each `start..end`, the first eight in
+/// full and a count for the rest: every hole between them is outside the
+/// walk, which one `min..max` span would hide.
+struct Ranges<'a>(&'a [(u64, u64)]);
+
+impl fmt::Display for Ranges<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, &(lo, hi)) in self.0.iter().take(8).enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{lo:#x}..{hi:#x}")?;
+        }
+        if self.0.len() > 8 {
+            write!(f, " and {} more", self.0.len() - 8)?;
+        }
+        Ok(())
+    }
 }
 
 /// Whether `[addr, addr+len)`, `len` nonzero, lies inside one RAM
@@ -368,12 +407,16 @@ fn in_ram(addr: u64, len: u64) -> bool {
 }
 
 /// Marks `addr` as the firmware memory under read, for the nested-fault
-/// line; `reading(0)` once the read is done. A volatile store: its only
-/// reader is the exception handler the fault jumps to, which the compiler
-/// cannot see, so an ordinary store could be sunk past the read it marks
-/// or merged with the `reading(0)` after it.
+/// line; `reading(0)` once the read is done. A volatile store between two
+/// compiler fences: its only reader is the exception handler the fault
+/// jumps to, which the compiler cannot see, so an ordinary store could be
+/// sunk past the read it marks or merged with the `reading(0)` after it,
+/// and the fences keep the plain loads it brackets (a record field, an
+/// unaligned header read) from moving across it either way.
 fn reading(addr: u64) {
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
     unsafe { core::ptr::write_volatile(READING.get(), addr) };
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
 }
 
 /// An address no firmware maps: bit 47, the top of a 48-bit address space,
@@ -697,16 +740,22 @@ fn find_image(addr: u64) -> Option<Image> {
 /// # Safety
 /// `base..base+size` must be readable.
 unsafe fn pe_codeview_name(base: *const u8, size: u64) -> Option<&'static [u8]> {
+    // Each read marks its own address as under read, so the nested-fault
+    // line's two addresses agree when a header points past the pages the
+    // firmware mapped (the image is up to 64 MB; `far` alone would have
+    // to be reconciled with the base).
     let rd32 = |off: u64| -> Option<u32> {
         if off.checked_add(4)? > size {
             return None;
         }
+        reading(base as u64 + off);
         Some(unsafe { base.add(off as usize).cast::<u32>().read_unaligned() })
     };
     let rd16 = |off: u64| -> Option<u16> {
         if off.checked_add(2)? > size {
             return None;
         }
+        reading(base as u64 + off);
         Some(unsafe { base.add(off as usize).cast::<u16>().read_unaligned() })
     };
     if rd16(0)? != 0x5a4d {
@@ -745,6 +794,7 @@ unsafe fn pe_codeview_name(base: *const u8, size: u64) -> Option<&'static [u8]> 
         };
         let mut len = 0u64;
         while path + len < size && len < 512 {
+            reading(base as u64 + path + len);
             if unsafe { *base.add((path + len) as usize) } == 0 {
                 break;
             }

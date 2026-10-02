@@ -29,14 +29,14 @@ Three boots of a copy of the staged ESP, each graded from the serial console:
    is scheduled and served, so the tick and the keyboard both work); no
    `EARLY EXCEPTION` and no kernel `EXCEPTION` line appears.
 
-3. With both `EARLYFAULT` and `WALKFAULT`, the reporter's own fault: the
+3. With both `EARLYFAULT` and `WALKFAULT`, run last, the reporter's own fault: the
    report takes a planted read of an unmapped address inside its image walk
    (the case a Pi 4 showed on 2026-10-01, where a bad table entry faulted
    the walk at frame 10 and the rows printed after it were lost). The boot
    must show the register rows, then the one line a nested fault prints,
-   with `far` the unmapped address and the image base named as the memory
-   under read, and NOT the ordinary halt line; and QEMU's trace carries the
-   two faults.
+   with `far` the unmapped address and the DXE core's base (the one boot 1
+   placed `elr` in) named as the memory under read, and NOT the ordinary
+   halt line; and QEMU's trace carries the two faults.
 
 With --el2 all boots run on `-machine virt,virtualization=on`, where the
 firmware hands the kernel off at EL2 as the Raspberry Pi's does (`make
@@ -185,6 +185,8 @@ def main():
     open(os.path.join(work, "fault.serial"), "w").write(text)
     planted = re.search(r"asking the firmware to copy to (0x[0-9a-f]+)", text)
     far = planted.group(1) if planted else "<the address the kernel logged>"
+    dxe = re.search(r"elr 0x[0-9a-f]+ = \S*DxeCore\S* \(firmware file [0-9a-f-]+\) @ (0x[0-9a-f]+) \+ 0x", text)
+    dxe_base = dxe.group(1) if dxe else "<the DXE core's base from boot 1>"
     results.append(grade("fault", text, [
         ("reporter armed", r"early fault reporter armed"),
         ("flag seen", r"boot flag \\EARLYFAULT is set"),
@@ -201,33 +203,6 @@ def main():
         ("shell", r"shell ready"),
     ], aborts, "some", order=[
         ("register rows before the first frame", r"x28=0x[0-9a-f]{16}", r"frame 1: fp="),
-    ]))
-
-    # 3. The reporter's own fault, inside its image walk.
-    esp = os.path.join(work, "esp-walk")
-    shutil.copytree(args.esp, esp)
-    open(os.path.join(esp, "EARLYFAULT"), "w").close()
-    open(os.path.join(esp, "WALKFAULT"), "w").close()
-    print("boot 3: EARLYFAULT and WALKFAULT set, expecting the rows and then the nested-fault line")
-    text, aborts = boot(esp, ENDINGS + r"|shell ready", machine)
-    open(os.path.join(work, "walk.serial"), "w").write(text)
-    # This boot's own planted address, not boot 1's: a boot 1 that never
-    # printed it must not fail this boot on a placeholder.
-    planted = re.search(r"asking the firmware to copy to (0x[0-9a-f]+)", text)
-    far = planted.group(1) if planted else "<the address the kernel logged>"
-    results.append(grade("walk", text, [
-        ("flag seen", r"boot flag \\WALKFAULT is set"),
-        ("planted address logged", r"asking the firmware to copy to 0x[0-9a-f]+"),
-        ("exception line", r"EARLY EXCEPTION \(firmware vectors\) type=0 esr=0x[0-9a-f]+ far=" + re.escape(far)),
-        ("register rows", r"x28=0x[0-9a-f]{16} x29=0x[0-9a-f]{16} x30=0x[0-9a-f]{16}"),
-        ("nested-fault line, FAR the unmapped address, an image base under read",
-         r"EARLY EXCEPTION while reporting one: esr=0x[0-9a-f]+ far=" + re.escape(far) + r" elr=0x[0-9a-f]+, while reading firmware memory at 0x[0-9a-f]+000; halted"),
-    ], [
-        ("ordinary halt line", r"halted in the early fault reporter"),
-        ("a frame", r"frame \d+: fp="),
-        ("firmware's own line", r"Synchronous Exception at"),
-    ], aborts, "two", order=[
-        ("register rows before the nested-fault line", r"x28=0x[0-9a-f]{16}", r"while reporting one"),
     ]))
 
     # 2. The control, no flag.
@@ -250,6 +225,37 @@ def main():
         ("EL0 fault, kill or restart", r"EL0 FAULT|killed after fault|restarted"),
         ("firmware's own line", r"Synchronous Exception at"),
     ], aborts, "zero"))
+
+    # 3. The reporter's own fault, inside its image walk.
+    esp = os.path.join(work, "esp-walk")
+    shutil.copytree(args.esp, esp)
+    open(os.path.join(esp, "EARLYFAULT"), "w").close()
+    open(os.path.join(esp, "WALKFAULT"), "w").close()
+    print("boot 3: EARLYFAULT and WALKFAULT set, expecting the rows and then the nested-fault line")
+    text, aborts = boot(esp, ENDINGS + r"|shell ready", machine)
+    open(os.path.join(work, "walk.serial"), "w").write(text)
+    # This boot's own planted address, not boot 1's: a boot 1 that never
+    # printed it must not fail this boot on a placeholder. The image under
+    # read is boot 1's: the first thing the report places is `elr`, in the
+    # DXE core, whose base boot 1's dump named, and the firmware loads it
+    # at the same address every boot; any page-aligned number would pass a
+    # marker that named the wrong memory.
+    planted = re.search(r"asking the firmware to copy to (0x[0-9a-f]+)", text)
+    far = planted.group(1) if planted else "<the address the kernel logged>"
+    results.append(grade("walk", text, [
+        ("flag seen", r"boot flag \\WALKFAULT is set"),
+        ("planted address logged", r"asking the firmware to copy to 0x[0-9a-f]+"),
+        ("exception line", r"EARLY EXCEPTION \(firmware vectors\) type=0 esr=0x[0-9a-f]+ far=" + re.escape(far)),
+        ("register rows", r"x28=0x[0-9a-f]{16} x29=0x[0-9a-f]{16} x30=0x[0-9a-f]{16}"),
+        ("nested-fault line, FAR the unmapped address, the DXE core's base under read",
+         r"EARLY EXCEPTION while reporting one: esr=0x[0-9a-f]+ far=" + re.escape(far) + r" elr=0x[0-9a-f]+, while reading firmware memory at " + re.escape(dxe_base) + r"; halted"),
+    ], [
+        ("ordinary halt line", r"halted in the early fault reporter"),
+        ("a frame", r"frame \d+: fp="),
+        ("firmware's own line", r"Synchronous Exception at"),
+    ], aborts, "two", order=[
+        ("register rows before the nested-fault line", r"x28=0x[0-9a-f]{16}", r"while reporting one"),
+    ]))
 
     passed = all(results)
     if args.keep or not passed:
