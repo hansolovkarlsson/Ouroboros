@@ -1175,7 +1175,7 @@ The small open tails those arcs deliberately left:
 >       no dump: a RELEASE build compiles the register dump out, and the
 >       pftf zip ships only RELEASE. So the dump is now the kernel's: the
 >       next item.*
-> - [ ] **The early fault reporter: the kernel's own dump for a fault taken
+> - [x] **The early fault reporter: the kernel's own dump for a fault taken
 >       under the firmware's vectors.** `earlyfault.rs` registers a handler
 >       for synchronous exceptions through `EFI_CPU_ARCH_PROTOCOL` right
 >       after console discovery (VBAR_EL1 untouched) and prints ESR decoded,
@@ -1195,7 +1195,8 @@ The small open tails those arcs deliberately left:
 >       dump (`testing-pi4.md` section 6 has the three readings). The
 >       `NOXHCI` boot after that showed the dump for a post-exit fault, so
 >       the reporter and the kernel's PL011 driver both work on the Pi;
->       what it showed is the next item.*
+>       what it showed is the next item. Done: the dump on a board was the
+>       condition, and the `NOXHCI` boot gave it.*
 > - [ ] **The Pi hands the kernel off at EL2, and the kernel assumes EL1.**
 >       The `NOXHCI` dump (2026-10-01, `testing-pi4.md` section 6): SPSR mode
 >       EL2h, the fault delivered through the firmware's vectors after
@@ -1220,6 +1221,10 @@ The small open tails those arcs deliberately left:
 >       the whole-screen clear reaches the display and the first line after it
 >       never does. On an earlier build the same board went black the same
 >       way; on another boot it did not clear at all. For the serial cable.
+>       *Explained 2026-10-01: the kernel runs at EL2 on the Pi, so the
+>       early console's first write after `exceptions::install()` and the
+>       MMU switch faulted into the firmware's EL2 vectors with the
+>       firmware's text console gone. Closes with the EL1 drop below.*
 > - [x] **The devicetree console's address is a bus address; translate it.**
 >       The Pi 4 logged `console @ 0x7e201000 (via devicetree)`, the PL011's
 >       VideoCore bus address (`0xfe201000` for the ARM), so without `\FBCON`

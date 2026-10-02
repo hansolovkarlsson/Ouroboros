@@ -232,6 +232,11 @@ object would need to allocate, and the console is only ever installed after
 and no longer usable) and halts, rather than leaving a bad access to run
 into whatever an unconfigured VBAR_EL1 does. This kernel has only ever been
 observed at EL1 (typical for a UEFI OS loader) — not verified at any other EL.
+**Update 2026-10-01: the Raspberry Pi's firmware hands off at EL2**, and
+every `_EL1` write after the exit (this table, the MMU switch, the timer)
+then goes to a register the running level does not use; found by the early
+fault reporter (`earlyfault.rs`), reproduced on QEMU with `-machine
+virt,virtualization=on`. The plan is `docs/roadmap/roadmap-el1-drop.md`.
 
 **A real gotcha hit and fixed while building this, worth not repeating:**
 the vector table was first placed in a custom section (`.section

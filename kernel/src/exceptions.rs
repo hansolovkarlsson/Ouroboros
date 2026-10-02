@@ -12,8 +12,10 @@
 //!
 //! Assumes EL1: this kernel has only ever been observed running at EL1
 //! under both QEMU and Parallels (typical for a UEFI OS loader; EL2 is the
-//! hypervisor's own level, not the guest's). Not verified against any
-//! platform that hands off at a different EL.
+//! hypervisor's own level, not the guest's). The Raspberry Pi's firmware
+//! hands off at EL2 (found 2026-10-01 by `earlyfault.rs`'s first dump on a
+//! Pi 4), where the VBAR_EL1 write below installs nothing: see
+//! `docs/roadmap/roadmap-el1-drop.md` for the drop that fixes it.
 //!
 //! Deliberately not installed until after `exit_boot_services` — firmware
 //! has its own VBAR_EL1 that its boot-services internals may depend on;

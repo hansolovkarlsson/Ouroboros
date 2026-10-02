@@ -846,3 +846,42 @@ stick's halt was cleared. It is not; the board decides.
 It is this document's spine again: each was found by breaking the thing
 underneath (a decoy, a deletion, a moved Stall) and watching whether the
 instrument noticed, and none by the instrument's own green.
+
+## Three more, from the Pi 4's first boots with serial (2026-10-01, evening)
+
+The early fault reporter (#187) was built so a Pi could say what the
+firmware's one-line exception report does not. Its first dump on the board
+said the kernel was running at EL2, and in doing so named the oldest blind
+instrument in the tree.
+
+**A log line that reported the registers, not the machine.** `identity map
+installed, MMU running on our own tables` has printed on every post-exit boot
+since the MMU milestone, and `mmu.rs` backs it with a check: after the
+switch it asks the hardware walker (`AT S1E1R`, `PAR_EL1`) whether the serial
+console is Device memory. On the Pi both passed, and neither was true of the
+machine, because `TTBR0_EL1`, `TCR_EL1` and `MAIR_EL1` had been written at
+EL2, where they govern nothing, and `AT S1E1R` walks exactly those tables.
+The check confirmed that the tables the kernel wrote describe what the kernel
+wrote. `exceptions.rs` had said since its first day that the kernel "assumes
+EL1, not verified at any other EL", which is the honest form of the claim;
+nothing turned it into a check, and the instrument that finally did was built
+for a different question. The one-line fix that should have existed all
+along, log `CurrentEL` after the exit, is step 0 of the plan.
+
+**A round trip spent on the previous build.** The first boot after the merge
+was staged from the tree before the merge had reached it, and ran the old
+kernel. Nothing on the bench checks which build a card carries. What caught
+it was incidental: the kernel's log lines carry their source line numbers,
+and those did not match the file; the `armed` line the new kernel prints was
+absent. A boot should say what it is: the image range is already logged, and
+a build identity beside it (the commit, or the binary's link timestamp) would
+have made this a one-second check instead of a round trip read backwards.
+
+**A dump that ordered its fragile part before its robust part.** The
+reporter prints the backtrace before the register rows, and on the Pi the
+backtrace's tenth frame led the image-naming walk into a translation fault of
+its own. The reentrancy guard did its job and halted, and the register rows,
+which need nothing but the context the firmware had already saved, were never
+printed. The instrument lost its most reliable output to its least reliable
+one. Rows first, then the walk, and the walk bounded, is on the roadmap.
+
