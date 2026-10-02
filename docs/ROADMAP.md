@@ -1239,11 +1239,23 @@ The small open tails those arcs deliberately left:
 >       block) and reported no device, so the premise is false but harmless.
 >       Retire it for honesty, the way the devicetree translation fails
 >       closed, not because it is dangerous.
-> - [ ] **fix** The reporter's register rows come after the backtrace, so a
+> - [x] **fix** The reporter's register rows come after the backtrace, so a
 >       fault in the image-naming walk (seen on the Pi, frame 10, a return
 >       address in the firmware volume) loses them; and the walk reads
 >       images with no bound beyond their declared size. Rows first, the
->       nested-fault line with FAR, the walk bounded.
+>       nested-fault line with FAR, the walk bounded. *Done 2026-10-02: the
+>       rows print before anything reads firmware memory; the nested line
+>       carries `far` and the address of whatever firmware memory was under
+>       read (a table entry, a record, an image header, a device path, a
+>       frame record), or says there was none; the walk believes each of
+>       those only inside one RAM descriptor of the memory map at arm time
+>       (`mmu::is_general_ram`, up to 64 of them), and the `armed` log line
+>       states the bound. Whether the Pi's entry claiming to hold `0x26e28`
+>       falls outside it is for that line to say on the next boot: the
+>       kernel's own RAM span there starts at `0x3b0000`, but the reporter
+>       admits more types. `\WALKFAULT` makes the report fault inside its
+>       walk, and the rig's third boot grades the rows and the nested line;
+>       mutations showed the order check and the refusal path can fail.*
 > - [ ] **The Pi 4 stops after the early console's clear.** Under `\FBCON`
 >       the whole-screen clear reaches the display and the first line after it
 >       never does. On an earlier build the same board went black the same

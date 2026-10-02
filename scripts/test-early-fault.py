@@ -3,7 +3,7 @@
 
     python3 scripts/test-early-fault.py [--esp build/esp] [--keep] [--el2]
 
-Two boots of a copy of the staged ESP, each graded from the serial console:
+Three boots of a copy of the staged ESP, each graded from the serial console:
 
 1. With the `EARLYFAULT` flag file at the ESP root (bootflags.rs), the
    kernel asks the firmware's own CopyMem to write at an address nothing
@@ -17,7 +17,9 @@ Two boots of a copy of the staged ESP, each graded from the serial console:
    the constant), the ESR decoded as a data abort at the same EL, `elr`
    placed in a firmware image (the DXE core, named from its PE debug entry),
    at least one backtrace frame placed in the kernel by offset, the register
-   rows, and the halt line. The firmware's own line must NOT appear: the
+   rows BEFORE the first frame (the rows read nothing and the walk reads
+   firmware memory, which faulted on a Pi 4 and lost the rows printed after
+   it), and the halt line. The firmware's own line must NOT appear: the
    registered handler replaces the default one, so its presence would mean
    the registration did not take.
 
@@ -27,7 +29,16 @@ Two boots of a copy of the staged ESP, each graded from the serial console:
    is scheduled and served, so the tick and the keyboard both work); no
    `EARLY EXCEPTION` and no kernel `EXCEPTION` line appears.
 
-With --el2 both boots run on `-machine virt,virtualization=on`, where the
+3. With both `EARLYFAULT` and `WALKFAULT`, run last, the reporter's own fault: the
+   report takes a planted read of an unmapped address inside its image walk
+   (the case a Pi 4 showed on 2026-10-01, where a bad table entry faulted
+   the walk at frame 10 and the rows printed after it were lost). The boot
+   must show the register rows, then the one line a nested fault prints,
+   with `far` the unmapped address and the DXE core's base (the one boot 1
+   placed `elr` in) named as the memory under read, and NOT the ordinary
+   halt line; and QEMU's trace carries the two faults.
+
+With --el2 all boots run on `-machine virt,virtualization=on`, where the
 firmware hands the kernel off at EL2 as the Raspberry Pi's does (`make
 run-el2`, `make test-el1-drop`). The fault boot is the same test: the
 reporter's dump is the firmware's handler either way. The control is the
@@ -39,9 +50,10 @@ vectors: the first eret into task 0, made at EL2, restored the firmware's
 stale ELR_EL2 and SPSR_EL2 (see el2.rs); so the control's dwell after the
 shell line, and the typed `help`, are what can fail here.
 
-Both boots also read QEMU's own -d int trace, the project's health bar
-(drive-qemu.py's Guest.aborts): the control requires zero fault lines, and
-a missing trace is a failure, not a pass. The serial transcript alone would
+Every boot also reads QEMU's own -d int trace, the project's health bar
+(drive-qemu.py's Guest.aborts): the control requires zero fault lines, the
+fault boot at least one, the walk boot at least two (the planted fault and
+the one inside the report), and a missing trace is a failure, not a pass. The serial transcript alone would
 grade a post-drop fault the kernel survives (an EL0 task killed, a server
 restarted) as a pass while the shell still answers.
 
@@ -53,10 +65,10 @@ dump without the flag is a failure of the control, not a pass of the test.
 
 The guest is drive-qemu.py's `Guest`, so the machine is the dev loop's
 (`make run`), with the ESP copy on the vvfat drive in place of an image.
-Each boot runs to its end state or a timeout, and both always run, so one
-failure does not hide the other result. The transcripts are kept whenever
+Each boot runs to its end state or a timeout, and all three always run, so
+one failure does not hide another result. The transcripts are kept whenever
 a grade failed, and with --keep; their directory is printed. Exit status 1
-if either boot failed.
+if any boot failed.
 """
 import argparse
 import importlib.util
@@ -82,7 +94,7 @@ DWELL = 5
 # own report (a fault under its vectors, which halts through a silent loop),
 # an EL0 task's fault, and the halt the drop takes on a level it has no path
 # for. Named so a failed boot ends at its line instead of at TIMEOUT.
-ENDINGS = r"halted in the early fault reporter|Synchronous Exception at|EXCEPTION vector=|EL0 FAULT|system halted"
+ENDINGS = r"halted in the early fault reporter|while reporting one|Synchronous Exception at|EXCEPTION vector=|EL0 FAULT|system halted"
 
 
 def boot(esp, until, machine, then=None):
@@ -117,17 +129,25 @@ def boot(esp, until, machine, then=None):
         guest.stop()
 
 
-def grade(name, text, must, must_not, aborts=None, expect_aborts=None):
+def grade(name, text, must, must_not, aborts=None, expect_aborts=None, order=()):
     """`expect_aborts`: None to leave QEMU's trace ungraded, "zero" to
     require a clean trace, "some" to require at least one fault line (the
-    planted fault). A missing trace fails either way."""
+    planted fault), "two" at least two (the planted fault and the one
+    inside the report). A missing trace fails either way. `order`: (label,
+    first, second) triples, each a pair of patterns whose first match must
+    come before the other's."""
     ok = True
+    for label, first, second in order:
+        a, b = re.search(first, text, re.M), re.search(second, text, re.M)
+        good = bool(a and b and a.start() < b.start())
+        print(f"  {'ok  ' if good else 'FAIL'} {label}")
+        ok &= good
     if expect_aborts is not None:
         if aborts is None:
             print("  FAIL QEMU trace: NO TRACE (health bar unavailable - this is not a pass)")
             ok = False
         else:
-            want = aborts == 0 if expect_aborts == "zero" else aborts > 0
+            want = {"zero": aborts == 0, "some": aborts > 0, "two": aborts >= 2}[expect_aborts]
             print(f"  {'ok  ' if want else 'FAIL'} QEMU trace: {aborts} fault lines (Abort/SError), expected {expect_aborts}")
             ok &= want
     for label, pattern in must:
@@ -165,6 +185,8 @@ def main():
     open(os.path.join(work, "fault.serial"), "w").write(text)
     planted = re.search(r"asking the firmware to copy to (0x[0-9a-f]+)", text)
     far = planted.group(1) if planted else "<the address the kernel logged>"
+    dxe = re.search(r"elr 0x[0-9a-f]+ = \S*DxeCore\S* \(firmware file [0-9a-f-]+\) @ (0x[0-9a-f]+) \+ 0x", text)
+    dxe_base = dxe.group(1) if dxe else "<the DXE core's base from boot 1>"
     results.append(grade("fault", text, [
         ("reporter armed", r"early fault reporter armed"),
         ("flag seen", r"boot flag \\EARLYFAULT is set"),
@@ -179,7 +201,9 @@ def main():
     ], [
         ("firmware's own line", r"Synchronous Exception at"),
         ("shell", r"shell ready"),
-    ], aborts, "some"))
+    ], aborts, "some", order=[
+        ("register rows before the first frame", r"x28=0x[0-9a-f]{16}", r"frame 1: fp="),
+    ]))
 
     # 2. The control, no flag.
     esp = os.path.join(work, "esp-plain")
@@ -201,6 +225,37 @@ def main():
         ("EL0 fault, kill or restart", r"EL0 FAULT|killed after fault|restarted"),
         ("firmware's own line", r"Synchronous Exception at"),
     ], aborts, "zero"))
+
+    # 3. The reporter's own fault, inside its image walk.
+    esp = os.path.join(work, "esp-walk")
+    shutil.copytree(args.esp, esp)
+    open(os.path.join(esp, "EARLYFAULT"), "w").close()
+    open(os.path.join(esp, "WALKFAULT"), "w").close()
+    print("boot 3: EARLYFAULT and WALKFAULT set, expecting the rows and then the nested-fault line")
+    text, aborts = boot(esp, ENDINGS + r"|shell ready", machine)
+    open(os.path.join(work, "walk.serial"), "w").write(text)
+    # This boot's own planted address, not boot 1's: a boot 1 that never
+    # printed it must not fail this boot on a placeholder. The image under
+    # read is boot 1's: the first thing the report places is `elr`, in the
+    # DXE core, whose base boot 1's dump named, and the firmware loads it
+    # at the same address every boot; any page-aligned number would pass a
+    # marker that named the wrong memory.
+    planted = re.search(r"asking the firmware to copy to (0x[0-9a-f]+)", text)
+    far = planted.group(1) if planted else "<the address the kernel logged>"
+    results.append(grade("walk", text, [
+        ("flag seen", r"boot flag \\WALKFAULT is set"),
+        ("planted address logged", r"asking the firmware to copy to 0x[0-9a-f]+"),
+        ("exception line", r"EARLY EXCEPTION \(firmware vectors\) type=0 esr=0x[0-9a-f]+ far=" + re.escape(far)),
+        ("register rows", r"x28=0x[0-9a-f]{16} x29=0x[0-9a-f]{16} x30=0x[0-9a-f]{16}"),
+        ("nested-fault line, FAR the unmapped address, the DXE core's base under read",
+         r"EARLY EXCEPTION while reporting one: esr=0x[0-9a-f]+ far=" + re.escape(far) + r" elr=0x[0-9a-f]+, while reading firmware memory at " + re.escape(dxe_base) + r"; halted"),
+    ], [
+        ("ordinary halt line", r"halted in the early fault reporter"),
+        ("a frame", r"frame \d+: fp="),
+        ("firmware's own line", r"Synchronous Exception at"),
+    ], aborts, "two", order=[
+        ("register rows before the nested-fault line", r"x28=0x[0-9a-f]{16}", r"while reporting one"),
+    ]))
 
     passed = all(results)
     if args.keep or not passed:

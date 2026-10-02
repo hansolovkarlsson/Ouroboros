@@ -770,7 +770,11 @@ fn nc_block_2m(base: u64) -> u64 {
         | UXN
 }
 
-fn is_general_ram(ty: MemoryType) -> bool {
+/// Whether a memory-map descriptor of type `ty` is memory the kernel may
+/// treat as RAM: everything but MMIO, reserved and unaccepted. One
+/// predicate, shared with `earlyfault.rs`'s image walk, so the reporter's
+/// notion of RAM and the identity map's cannot drift apart.
+pub(crate) fn is_general_ram(ty: MemoryType) -> bool {
     !matches!(
         ty,
         MemoryType::MMIO | MemoryType::MMIO_PORT_SPACE | MemoryType::RESERVED | MemoryType::UNACCEPTED

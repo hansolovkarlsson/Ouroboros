@@ -531,7 +531,9 @@ with the firmware's text console: first partway through
 `xHCI discovery failed (skipped…)` line, and under `XHCINOWR` at the earlier
 MADT line.
 
-Two more flags are test faults for QEMU and not diagnostics. `EARLYFAULT`
+Three more flags are test faults for QEMU and not diagnostics (`WALKFAULT`,
+2026-10-02, makes the reporter's own report fault inside its image walk,
+with `EARLYFAULT`; the rows must survive it). `EARLYFAULT`
 (2026-10-01) asks the firmware's own `CopyMem` to write at an address nothing
 maps, just before the xHCI takeover, so the fault is taken in the firmware's
 code with the firmware's vectors installed, the shape of the Pi 4's first

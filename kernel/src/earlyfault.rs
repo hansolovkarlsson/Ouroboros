@@ -35,8 +35,11 @@
 //! on an EL2 handoff because nothing routes to EL2 any more (the drop's
 //! `HCR_EL2`), not because VBAR_EL2 changed, which it does not. The dump
 //! names what the firmware's line does
-//! not: the exception class and fault status decoded from ESR, the
-//! faulting address, the link and frame pointers, every general register,
+//! not, in this order, the parts that read nothing first: the exception
+//! class and fault status decoded from ESR, the faulting address, the link
+//! and frame pointers, every general register (before any firmware memory
+//! is read, since a Pi 4 boot on 2026-10-01 lost the rows to a fault in
+//! the walk that followed them), then the images holding `elr` and `lr`,
 //! a frame-pointer backtrace, and for each code address the loaded image
 //! that holds it (from the firmware's debug image info table: the kernel
 //! itself by its offset, a firmware driver by the module name in its PE
@@ -151,6 +154,47 @@ static FRAMEBUFFER: SyncCell<Option<framebuffer::Info>> = SyncCell::new(None);
 /// The end of the stack the kernel runs on, from the memory map at
 /// [`arm`] time: the frame walk believes no record beyond it.
 static STACK_END: SyncCell<u64> = SyncCell::new(0);
+/// The RAM descriptors of the memory map at [`arm`] time (those
+/// `mmu::is_general_ram` admits), `(start, end)` each, and their count:
+/// the image walk reads a table entry, a loaded-image record, an image
+/// header, a device path or a frame record only inside ONE of them
+/// ([`in_ram`]). A pointer elsewhere is firmware data that is wrong, and
+/// is skipped rather than read: a Pi 4 boot on 2026-10-01 had an entry
+/// whose image claimed to hold `0x26e28`, and reading it faulted the
+/// report itself; whether that address lies in a descriptor on the Pi is
+/// what the `armed` log line's span now says. Descriptors rather than one
+/// span, so a device window between two RAM ranges (the Pi 4's
+/// peripherals at `0xfc000000`, inside an 8 GB board's RAM) is outside.
+/// A hole inside a descriptor (a page the firmware's own tables do not
+/// map, the 2026-10-02 kind of fault) cannot be told from here;
+/// [`READING`] is for that case. Contiguous descriptors are merged as
+/// they are read (the map splits RAM by type and attribute, QEMU's into
+/// about thirty pieces), so an image whose pages span two of them is
+/// inside one range here, and the cap of [`MAX_RAM_RANGES`] is reached
+/// only by a map with that many separate holes in RAM; past it the rest
+/// are dropped and [`RAM_TRUNCATED`] says so, since the walk is then
+/// narrower than RAM, which is the safe direction.
+static RAM: SyncCell<([(u64, u64); MAX_RAM_RANGES], usize)> = SyncCell::new(([(0, 0); MAX_RAM_RANGES], 0));
+static RAM_TRUNCATED: SyncCell<bool> = SyncCell::new(false);
+const MAX_RAM_RANGES: usize = 64;
+/// The firmware memory the report is reading at this moment, or 0: set
+/// around every read the report makes of firmware memory (the image
+/// table, an entry, a loaded-image record, an image header, a device
+/// path, a frame record), so a fault inside the report can say what it
+/// was reading; 0 means none was under way.
+static READING: SyncCell<u64> = SyncCell::new(0);
+/// `\WALKFAULT` (`bootflags.rs`): the image walk reads [`UNMAPPED`] just
+/// before its first image header, so the report faults inside itself.
+static PLANT_WALK_FAULT: AtomicBool = AtomicBool::new(false);
+
+/// `\WALKFAULT`'s plant: see [`PLANT_WALK_FAULT`]. Takes effect in the
+/// report `\EARLYFAULT` causes; on its own it changes nothing.
+pub fn plant_walk_fault() {
+    PLANT_WALK_FAULT.store(true, Ordering::SeqCst);
+}
+/// The largest image the walk believes: a loaded driver is a few MB; an
+/// entry claiming more is wrong data.
+const MAX_IMAGE_SIZE: u64 = 64 << 20;
 /// Where the kernel image sits, so an address in it is named by offset.
 static IMAGE_RANGE: SyncCell<(u64, u64)> = SyncCell::new((0, 0));
 /// The debug image info table header, read from the config table at
@@ -226,7 +270,10 @@ pub fn arm(
         *CONSOLE.get() = serial;
         *FRAMEBUFFER.get() = framebuffer;
         *IMAGE_RANGE.get() = image_range;
-        *STACK_END.get() = stack_end();
+        let (stack, ram, count, truncated) = map_facts();
+        *STACK_END.get() = stack;
+        *RAM.get() = (ram, count);
+        *RAM_TRUNCATED.get() = truncated;
         *IMAGE_TABLE.get() = uefi::system::with_config_table(|entries| {
             entries
                 .iter()
@@ -240,6 +287,15 @@ pub fn arm(
     // pointer, with a handler of the signature the protocol declares.
     let status = unsafe { (cpu.register_interrupt_handler)(this, EXCEPT_SYNCHRONOUS, Some(report)) };
     if status.is_success() {
+        // The walk's bound, stated, so a dump can be read against it: on
+        // a board the question is whether an address a bad entry claims
+        // (`0x26e28` on the Pi 4, 2026-10-01) falls inside any range.
+        let (ranges, count) = unsafe { &*RAM.get() };
+        log::info!(
+            "Ouroboros kernel: early fault reporter: image walk bounded to {count} RAM range(s): {}{}",
+            Ranges(&ranges[..*count]),
+            if unsafe { *RAM_TRUNCATED.get() } { " (the map had more; the rest are outside the walk)" } else { "" }
+        );
         Ok(())
     } else {
         unsafe {
@@ -250,22 +306,117 @@ pub fn arm(
     }
 }
 
-/// The end of the stack this code runs on: the end of the memory-map
-/// descriptor holding the current SP (the firmware's DXE stack, which the
-/// kernel inherits until it switches to its own), or SP plus
-/// [`STACK_FALLBACK`] if the map does not cover it.
-fn stack_end() -> u64 {
+/// Two facts from one read of the memory map. The end of the stack this
+/// code runs on: the end of the descriptor holding the current SP (the
+/// firmware's DXE stack, which the kernel inherits until it switches to
+/// its own), or SP plus [`STACK_FALLBACK`] if the map does not cover it.
+/// And the RAM ranges: the descriptors `mmu::is_general_ram` admits,
+/// sorted by address and contiguous ones merged (UEFI does not promise a
+/// sorted map, so the order is not trusted), up to [`MAX_RAM_RANGES`] of
+/// them with a flag for any dropped past that; none if the map could not
+/// be read, which makes the image walk read nothing. A descriptor whose
+/// extent does not compute (a corrupt page count, the class of bad
+/// firmware record this module exists for) is skipped, not trusted: this
+/// runs before the reporter exists to catch a panic. The stack end is the
+/// first descriptor holding SP, as before: two that overlap it would
+/// otherwise let a reserved window past it extend the walk.
+fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool) {
     let sp: u64;
     // SAFETY: reads the stack pointer, nothing else.
     unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
-    boot::memory_map(MemoryType::LOADER_DATA)
-        .ok()
-        .and_then(|map| {
-            map.entries()
-                .find(|d| d.phys_start <= sp && sp < d.phys_start + d.page_count * 4096)
-                .map(|d| d.phys_start + d.page_count * 4096)
-        })
-        .unwrap_or(sp + STACK_FALLBACK)
+    let mut ranges = [(0u64, 0u64); MAX_RAM_RANGES];
+    let Ok(map) = boot::memory_map(MemoryType::LOADER_DATA) else {
+        return (sp + STACK_FALLBACK, ranges, 0, false);
+    };
+    let mut stack = None;
+    let mut count = 0usize;
+    let mut truncated = false;
+    for d in map.entries() {
+        let start = d.phys_start;
+        let Some(end) = d.page_count.checked_mul(4096).and_then(|len| start.checked_add(len)) else {
+            continue;
+        };
+        if start >= end {
+            continue;
+        }
+        if stack.is_none() && start <= sp && sp < end {
+            stack = Some(end);
+        }
+        if !crate::mmu::is_general_ram(d.ty) {
+            continue;
+        }
+        if count < MAX_RAM_RANGES {
+            ranges[count] = (start, end);
+            count += 1;
+        } else {
+            truncated = true;
+        }
+    }
+    // Sort (insertion, at most 64 entries), then merge contiguous ranges
+    // in place.
+    for i in 1..count {
+        let mut j = i;
+        while j > 0 && ranges[j - 1].0 > ranges[j].0 {
+            ranges.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    let mut merged = 0usize;
+    for i in 0..count {
+        let (start, end) = ranges[i];
+        if merged > 0 && ranges[merged - 1].1 >= start {
+            ranges[merged - 1].1 = ranges[merged - 1].1.max(end);
+        } else {
+            ranges[merged] = (start, end);
+            merged += 1;
+        }
+    }
+    (stack.unwrap_or(sp + STACK_FALLBACK), ranges, merged, truncated)
+}
+
+/// The ranges of the `armed` line, each `start..end`, the first eight in
+/// full and a count for the rest: every hole between them is outside the
+/// walk, which one `min..max` span would hide.
+struct Ranges<'a>(&'a [(u64, u64)]);
+
+impl fmt::Display for Ranges<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, &(lo, hi)) in self.0.iter().take(8).enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{lo:#x}..{hi:#x}")?;
+        }
+        if self.0.len() > 8 {
+            write!(f, " and {} more", self.0.len() - 8)?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether `[addr, addr+len)`, `len` nonzero, lies inside one RAM
+/// descriptor of [`arm`] time. An empty read, or a map that gave no
+/// descriptor, refuses.
+fn in_ram(addr: u64, len: u64) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let Some(end) = addr.checked_add(len) else { return false };
+    let (ranges, count) = unsafe { &*RAM.get() };
+    ranges[..*count].iter().any(|&(lo, hi)| lo <= addr && end <= hi)
+}
+
+/// Marks `addr` as the firmware memory under read, for the nested-fault
+/// line; `reading(0)` once the read is done. A volatile store between two
+/// compiler fences: its only reader is the exception handler the fault
+/// jumps to, which the compiler cannot see, so an ordinary store could be
+/// sunk past the read it marks or merged with the `reading(0)` after it,
+/// and the fences keep the plain loads it brackets (a record field, an
+/// unaligned header read) from moving across it either way.
+fn reading(addr: u64) {
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    unsafe { core::ptr::write_volatile(READING.get(), addr) };
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
 }
 
 /// An address no firmware maps: bit 47, the top of a 48-bit address space,
@@ -329,9 +480,21 @@ macro_rules! line {
 unsafe extern "efiapi" fn report(exception_type: isize, context: *const SystemContextAarch64) {
     if ENTERED.swap(true, Ordering::SeqCst) {
         // A fault while reporting: say so with what is cheapest to read
-        // and stop, rather than loop through the report again.
-        let (esr, elr) = if context.is_null() { (0, 0) } else { unsafe { ((*context).esr, (*context).elr) } };
-        line!("Ouroboros kernel: EARLY EXCEPTION while reporting one: esr={esr:#x} elr={elr:#x}; halted");
+        // and stop, rather than loop through the report again. The rows
+        // of the first report are already out (they print before any
+        // firmware memory is read); this names what was being read.
+        let (esr, far, elr) =
+            if context.is_null() { (0, 0, 0) } else { unsafe { ((*context).esr, (*context).far, (*context).elr) } };
+        // On its own line: the first report was mid-way through an `elr`,
+        // `lr` or `frame` line when the read faulted.
+        let reading = unsafe { core::ptr::read_volatile(READING.get()) };
+        if reading == 0 {
+            line!("\nOuroboros kernel: EARLY EXCEPTION while reporting one: esr={esr:#x} far={far:#x} elr={elr:#x}, with no firmware memory under read; halted");
+        } else {
+            line!(
+                "\nOuroboros kernel: EARLY EXCEPTION while reporting one: esr={esr:#x} far={far:#x} elr={elr:#x}, while reading firmware memory at {reading:#x}; halted"
+            );
+        }
         crate::halt();
     }
     if context.is_null() {
@@ -356,13 +519,10 @@ unsafe extern "efiapi" fn report(exception_type: isize, context: *const SystemCo
     out(format_args!("Ouroboros kernel:   esr: "));
     describe_esr(ctx.esr);
     out(format_args!("\n"));
-    out(format_args!("Ouroboros kernel:   elr "));
-    place(ctx.elr);
-    out(format_args!("\n"));
-    out(format_args!("Ouroboros kernel:   lr  "));
-    place(ctx.x[30]);
-    out(format_args!("\n"));
-    backtrace(ctx);
+    // The rows first: they need nothing but the context the firmware
+    // saved. Everything after them reads firmware memory (the image table,
+    // image headers, the stack) and can fault; on a Pi 4 on 2026-10-01 the
+    // walk did, at frame 10, and the rows printed after it were lost.
     for row in 0..8 {
         out(format_args!("Ouroboros kernel:  "));
         for i in row * 4..(row * 4 + 4).min(31) {
@@ -370,6 +530,13 @@ unsafe extern "efiapi" fn report(exception_type: isize, context: *const SystemCo
         }
         out(format_args!("\n"));
     }
+    out(format_args!("Ouroboros kernel:   elr "));
+    place(ctx.elr);
+    out(format_args!("\n"));
+    out(format_args!("Ouroboros kernel:   lr  "));
+    place(ctx.x[30]);
+    out(format_args!("\n"));
+    backtrace(ctx);
     line!("Ouroboros kernel: halted in the early fault reporter");
     crate::halt()
 }
@@ -476,7 +643,9 @@ fn backtrace(ctx: &SystemContextAarch64) {
         }
         // SAFETY: `fp` lies within the live stack by the check above, 8-aligned;
         // the record is two u64s read as such.
+        reading(fp);
         let (next, lr) = unsafe { ((fp as *const u64).read_volatile(), (fp as *const u64).add(1).read_volatile()) };
+        reading(0);
         out(format_args!("Ouroboros kernel:   frame {n}: fp={fp:#x} lr="));
         place(lr);
         out(format_args!("\n"));
@@ -493,40 +662,71 @@ struct Image {
 
 /// The loaded image whose `[base, base+size)` holds `addr`, from the
 /// firmware's debug image info table. Every pointer in the walk is
-/// firmware-written; the walk is bounded by [`MAX_IMAGES`] and each image
-/// is read only within its own declared size.
+/// firmware-written and believed only inside the RAM span of `arm` time
+/// ([`in_ram`]): the table, each entry, each loaded-image record, the
+/// image itself (page-aligned, at most [`MAX_IMAGE_SIZE`]) and its device
+/// path. The walk is bounded by [`MAX_IMAGES`], each image is read only
+/// within its own declared size, and [`READING`] names the image or path
+/// under read, for the line a fault inside the report prints.
 fn find_image(addr: u64) -> Option<Image> {
-    let header = unsafe { *IMAGE_TABLE.get() } as *const DebugImageInfoTableHeader;
-    if header.is_null() {
+    let header_addr = unsafe { *IMAGE_TABLE.get() };
+    if header_addr == 0 || !in_ram(header_addr, size_of::<DebugImageInfoTableHeader>() as u64) {
         return None;
     }
     // SAFETY: the config table pointed here at `arm` time; the DXE core
-    // keeps the header for the life of boot services.
-    let header = unsafe { &*header };
-    if header.table.is_null() {
+    // keeps the header for the life of boot services; it lies in RAM.
+    reading(header_addr);
+    let header = unsafe { &*(header_addr as *const DebugImageInfoTableHeader) };
+    let (table, count) = (header.table, header.table_size.min(MAX_IMAGES));
+    reading(0);
+    if table.is_null() || count == 0 || !in_ram(table as u64, u64::from(count) * 8) {
         return None;
     }
-    for i in 0..header.table_size.min(MAX_IMAGES) {
-        // SAFETY: `table` has `table_size` pointer-sized entries.
-        let entry = unsafe { *header.table.add(i as usize) };
-        if entry.is_null() || unsafe { *entry } != DEBUG_IMAGE_INFO_TYPE_NORMAL {
+    for i in 0..count {
+        // SAFETY: `table` has `table_size` pointer-sized entries, in RAM.
+        reading(table as u64 + u64::from(i) * 8);
+        let entry = unsafe { *table.add(i as usize) };
+        reading(0);
+        if entry.is_null() || !in_ram(entry as u64, size_of::<DebugImageInfoNormal>() as u64) {
             continue;
         }
-        let normal = unsafe { &*entry.cast::<DebugImageInfoNormal>() };
-        if normal.loaded_image.is_null() {
+        reading(entry as u64);
+        let (kind, loaded_ptr) = unsafe { (*entry, (*entry.cast::<DebugImageInfoNormal>()).loaded_image) };
+        reading(0);
+        if kind != DEBUG_IMAGE_INFO_TYPE_NORMAL
+            || loaded_ptr.is_null()
+            || !in_ram(loaded_ptr as u64, size_of::<LoadedImageProtocol>() as u64)
+        {
             continue;
         }
-        let loaded = unsafe { &*normal.loaded_image };
-        let base = loaded.image_base as u64;
-        let size = loaded.image_size;
-        if base == 0 || size == 0 || !(base..base.saturating_add(size)).contains(&addr) {
+        reading(loaded_ptr as u64);
+        let loaded = unsafe { &*loaded_ptr };
+        let (base, size, path) = (loaded.image_base as u64, loaded.image_size, loaded.file_path as u64);
+        reading(0);
+        if base == 0
+            || size == 0
+            || size > MAX_IMAGE_SIZE
+            || !base.is_multiple_of(4096)
+            || !in_ram(base, size)
+            || !(base..base + size).contains(&addr)
+        {
             continue;
         }
-        return Some(Image {
-            base,
-            name: unsafe { pe_codeview_name(loaded.image_base.cast::<u8>(), size) },
-            file_guid: unsafe { firmware_file_guid(loaded.file_path.cast::<u8>()) },
-        });
+        reading(base);
+        if PLANT_WALK_FAULT.swap(false, Ordering::SeqCst) {
+            // `\WALKFAULT`: the fault a bad entry would take, taken here on
+            // purpose, once, with the image base named as under read.
+            unsafe { core::ptr::read_volatile(UNMAPPED as *const u8) };
+        }
+        let name = unsafe { pe_codeview_name(base as *const u8, size) };
+        let file_guid = if path != 0 && in_ram(path, 20) {
+            reading(path);
+            unsafe { firmware_file_guid(path as *const u8) }
+        } else {
+            None
+        };
+        reading(0);
+        return Some(Image { base, name, file_guid });
     }
     None
 }
@@ -540,16 +740,22 @@ fn find_image(addr: u64) -> Option<Image> {
 /// # Safety
 /// `base..base+size` must be readable.
 unsafe fn pe_codeview_name(base: *const u8, size: u64) -> Option<&'static [u8]> {
+    // Each read marks its own address as under read, so the nested-fault
+    // line's two addresses agree when a header points past the pages the
+    // firmware mapped (the image is up to 64 MB; `far` alone would have
+    // to be reconciled with the base).
     let rd32 = |off: u64| -> Option<u32> {
         if off.checked_add(4)? > size {
             return None;
         }
+        reading(base as u64 + off);
         Some(unsafe { base.add(off as usize).cast::<u32>().read_unaligned() })
     };
     let rd16 = |off: u64| -> Option<u16> {
         if off.checked_add(2)? > size {
             return None;
         }
+        reading(base as u64 + off);
         Some(unsafe { base.add(off as usize).cast::<u16>().read_unaligned() })
     };
     if rd16(0)? != 0x5a4d {
@@ -588,6 +794,7 @@ unsafe fn pe_codeview_name(base: *const u8, size: u64) -> Option<&'static [u8]> 
         };
         let mut len = 0u64;
         while path + len < size && len < 512 {
+            reading(base as u64 + path + len);
             if unsafe { *base.add((path + len) as usize) } == 0 {
                 break;
             }
@@ -609,11 +816,9 @@ unsafe fn pe_codeview_name(base: *const u8, size: u64) -> Option<&'static [u8]> 
 /// carries no name. The GUID maps to a module through its `.inf`.
 ///
 /// # Safety
-/// `path` is a device path the firmware wrote, or null.
+/// `path` is a device path the firmware wrote, with at least 20 bytes
+/// readable (the caller checked it lies in RAM).
 unsafe fn firmware_file_guid(path: *const u8) -> Option<Guid> {
-    if path.is_null() {
-        return None;
-    }
     let (kind, sub, len) = unsafe { (*path, *path.add(1), u16::from_le_bytes([*path.add(2), *path.add(3)])) };
     if kind != 4 || sub != 6 || len != 20 {
         return None;
