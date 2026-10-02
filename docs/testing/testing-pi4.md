@@ -466,8 +466,12 @@ localises the failure without any guessing.
    time that has been possible on this board; the virtio-mmio scan at
    `0xa000000` (Risk 1) is expected to be the first. Also read, before the
    exit: `PSCI conduit: smc` or `hvc` (the FADT's flag, logged since
-   2026-10-02). TF-A answers `smc`; an `hvc` from EL1 now traps to EL2 with
-   nobody to answer, and `power.rs` would fall through to the halt.
+   2026-10-02). TF-A answers `smc`. An `hvc` conduit would be unusable: the
+   drop sets `HCR_EL2.HCD`, so an `hvc` at EL1 is an undefined instruction
+   reported by the kernel's own vectors, and on a boot that drops
+   `power.rs` treats an `hvc` conduit as none and `shutdown` halts, saying
+   so in this line. Neither branch has run on a board; both were run on
+   QEMU by forcing the conduit.
 
 6. **Timer, preemption, task start** — `cond`, `fsd`, `netd`, the supervisor.
 

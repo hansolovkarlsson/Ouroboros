@@ -870,7 +870,9 @@ pub unsafe fn install_identity_map(
 
 /// The non-cacheable ranges the build half planned, which the switch half
 /// cleans from the cache and checks through the hardware walker once the
-/// tables are live. Only [`build_identity_map`] makes one.
+/// tables are live. Only [`build_tables`] makes one, and [`switch_full`]
+/// requires one, so neither the boot install nor the runtime rebuild can
+/// switch onto tables that were not just built.
 struct Planned {
     ranges: [(u64, u64); MAX_NC_RANGES],
     count: usize,
@@ -901,9 +903,7 @@ unsafe fn build_identity_map(
     // Re-borrow from the stash rather than the original parameter (now
     // moved) - the rest of this function is unchanged either way.
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }.unwrap();
-    let (ranges, count) =
-        unsafe { build_tables(memory_map, el0_regions, extra_devices, &stored_nc[..nc_count], true) };
-    Planned { ranges, count }
+    unsafe { build_tables(memory_map, el0_regions, extra_devices, &stored_nc[..nc_count], true) }
 }
 
 /// The switch half of [`install_identity_map`]: onto the current task's
@@ -923,7 +923,7 @@ unsafe fn switch_to_identity_map(planned: Planned) {
     if crate::el2::drops_to_el1() {
         unsafe { crate::el2::drop_to_el1(el1_regime(view)) };
     } else {
-        unsafe { switch_full(view) };
+        unsafe { switch_full(view, &planned) };
     }
     let planned = &planned.ranges[..planned.count];
 
@@ -1129,8 +1129,8 @@ pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_
         .expect("install_identity_map must run before rebuild_with_el0_regions");
     let (extra_devices, count) = unsafe { *STORED_EXTRA_DEVICES.get() };
     let (uncached, nc_count) = unsafe { *STORED_UNCACHED.get() };
-    let _ = unsafe { build_tables(memory_map, el0_regions, &extra_devices[..count], &uncached[..nc_count], false) };
-    unsafe { switch_full(crate::tasks::current_index()) };
+    let planned = unsafe { build_tables(memory_map, el0_regions, &extra_devices[..count], &uncached[..nc_count], false) };
+    unsafe { switch_full(crate::tasks::current_index(), &planned) };
 }
 
 /// The discovered general-RAM span `(min_addr, max_addr)` - the same
@@ -1163,7 +1163,7 @@ unsafe fn build_tables(
     extra_devices: &[(u64, u64)],
     uncached: &[(u64, u64)],
     log: bool,
-) -> ([(u64, u64); MAX_NC_RANGES], usize) {
+) -> Planned {
     // RAM: real discovered span, not a guess - computed once, used by
     // every view.
     let mut min_addr = u64::MAX;
@@ -1267,9 +1267,9 @@ unsafe fn build_tables(
         );
     }
 
-    let mut planned = [(0u64, 0u64); MAX_NC_RANGES];
-    planned[..nc.count].copy_from_slice(&nc.ranges[..nc.count]);
-    (planned, nc.count)
+    let mut ranges = [(0u64, 0u64); MAX_NC_RANGES];
+    ranges[..nc.count].copy_from_slice(&nc.ranges[..nc.count]);
+    Planned { ranges, count: nc.count }
 }
 
 /// Builds one task's translation-table view: the shared kernel shape
@@ -1498,10 +1498,11 @@ pub(crate) fn el1_regime(view: TaskIndex) -> El1Regime {
 
 /// The full MAIR/TCR/TTBR0 configuration sequence, switching to
 /// `view`'s table set - the boot-time install at EL1 and every runtime
-/// rebuild end here. [`activate_task`] is the lighter switch-only
-/// sibling used on every context switch; both look the view up through
-/// [`l0_table`].
-unsafe fn switch_full(view: TaskIndex) {
+/// rebuild end here, each with the [`Planned`] its build just returned,
+/// which is what makes this unspellable without a build. [`activate_task`]
+/// is the lighter switch-only sibling used on every context switch; both
+/// look the view up through [`l0_table`].
+unsafe fn switch_full(view: TaskIndex, _built: &Planned) {
     let El1Regime { mair: mair_el1, tcr: tcr_el1, ttbr0: ttbr0_el1 } = el1_regime(view);
 
     // Masked and left masked: between the MAIR/TCR write and the TTBR0

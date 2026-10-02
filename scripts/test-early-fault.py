@@ -91,7 +91,8 @@ def boot(esp, until, machine, then=None):
         if matched and then and re.search(r"shell ready", guest.transcript()):
             time.sleep(DWELL)
             guest.type_line(then)
-            guest.wait_for(r"builtins:|EXCEPTION|halted", timeout=20)
+            if not guest.wait_for(r"builtins:|EXCEPTION|halted", timeout=20):
+                guest.report(f"!!! TIMEOUT waiting for the answer to {then!r} after the dwell")
         return guest.transcript()
     finally:
         guest.stop()

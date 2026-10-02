@@ -476,12 +476,17 @@ fn main() -> Status {
     // `discovery` ever resolves an address that isn't actually valid on
     // some untested platform), but it now reports through the exception
     // handler and halts, instead of taking the whole VM down the way an
-    // untested address once did on Parallels. On an EL2 handoff (the
-    // Raspberry Pi) this VBAR_EL1 write takes effect at the drop to EL1
-    // inside `mmu::install_identity_map` below (its switch half, which
-    // writes the vectors once more from `el2.rs`); until then a fault still
-    // goes through the firmware's EL2 vectors (and `earlyfault.rs`).
-    exceptions::install();
+    // untested address once did on Parallels. Not on an EL2 handoff (the
+    // Raspberry Pi): there a VBAR_EL1 write from EL2 installs nothing for
+    // the running level, and under a VHE firmware (E2H) it would replace
+    // the firmware's own EL2 vectors; the drop to EL1 inside
+    // `mmu::install_identity_map` below writes the vectors itself, from
+    // `el2.rs`, once HCR_EL2 is the kernel's. Until then a fault goes
+    // through the firmware's EL2 vectors, where `earlyfault.rs`'s handler
+    // is registered, which is the better report anyway.
+    if !el2::drops_to_el1() {
+        exceptions::install();
+    }
     if fb_console_forced {
         progress_square(fb_info, 2);
     }

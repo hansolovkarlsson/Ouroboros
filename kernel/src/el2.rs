@@ -80,9 +80,20 @@ fn gic_sysregs_implemented() -> bool {
     (pfr0 >> 24) & 0xf != 0
 }
 
-/// `SCTLR_EL1` for the drop: QEMU's firmware's EL1 value (see the module
-/// doc). RES1 `0x30d00800` | M (0) | C (2) | SA (3) | ITD (7) | SED (8) | I (12).
-const SCTLR_EL1_MMU_ON: u64 = 0x30d0_198d;
+/// `SCTLR_EL1`'s RES1 bits on an ARMv8.0 core: 29, 28, 23, 22, 20 and 11.
+const SCTLR_EL1_RES1: u64 = (1 << 29) | (1 << 28) | (1 << 23) | (1 << 22) | (1 << 20) | (1 << 11);
+const SCTLR_EL1_M: u64 = 1 << 0;
+const SCTLR_EL1_C: u64 = 1 << 2;
+const SCTLR_EL1_SA: u64 = 1 << 3;
+const SCTLR_EL1_ITD: u64 = 1 << 7;
+const SCTLR_EL1_SED: u64 = 1 << 8;
+const SCTLR_EL1_I: u64 = 1 << 12;
+/// `SCTLR_EL1` for the drop, composed from the bits above: equal to
+/// `0x30d0198d`, QEMU's firmware's EL1 value (see the module doc), which
+/// the constant is checked against below rather than copied from.
+const SCTLR_EL1_MMU_ON: u64 =
+    SCTLR_EL1_RES1 | SCTLR_EL1_M | SCTLR_EL1_C | SCTLR_EL1_SA | SCTLR_EL1_ITD | SCTLR_EL1_SED | SCTLR_EL1_I;
+const _: () = assert!(SCTLR_EL1_MMU_ON == 0x30d0_198d);
 /// `HCR_EL2.RW | HCD`: EL1 is AArch64, and `hvc` is disabled, so one from
 /// EL1 or EL0 is an undefined instruction reported through the kernel's
 /// own vectors (EL1h halts, an EL0 task is killed) rather than a trap into
@@ -150,12 +161,14 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
     }
     if hcr_before & HCR_EL2_E2H != 0 {
         crate::console::println!(
-            "Ouroboros kernel: WARNING: handed off with HCR_EL2.E2H set ({hcr_before:#x}); the VBAR_EL1 write before the drop went to VBAR_EL2"
+            "Ouroboros kernel: WARNING: handed off with HCR_EL2.E2H set ({hcr_before:#x}): a VHE firmware, which this drop does not support; E2H is now clear and the firmware's EL2 regime has changed under it"
         );
     }
-    // The vectors, again, now that the name reaches EL1's register for
-    // certain: exceptions::install wrote them before, under the firmware's
-    // HCR_EL2.
+    // The vectors: on an EL2 handoff main.rs skips exceptions::install
+    // before the drop (a VBAR_EL1 write from EL2 installs nothing for the
+    // running level, and under E2H would have replaced the firmware's own
+    // EL2 vectors), so this is their first and only write, made now that
+    // the name reaches EL1's register for certain.
     crate::exceptions::install();
     let gicv3 = gic_sysregs_implemented();
     if gicv3 {
@@ -168,13 +181,21 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             // the eret, so there is no "old tables, new attributes"
             // window here as there is in mmu::switch_full. The table
             // writes must be visible to the walker before it starts.
+            "msr vttbr_el2, xzr",      // VMID 0 for every EL1&0 TLB entry and every tlbi, this one first
+            "isb",
             "dsb ishst",
             "msr mair_el1, {mair}",
             "msr tcr_el1, {tcr}",
             "msr ttbr0_el1, {ttbr0}",
-            "tlbi vmalle1",            // a regime that has never run: drop anything cached for it
+            "tlbi vmalle1",            // a regime that has never run under VMID 0: drop anything cached for it
             "dsb ish",
             "msr sctlr_el1, {sctlr}",  // MMU and caches on, from the first EL1 instruction
+            // What EL1 reads as MIDR_EL1 and MPIDR_EL1 once an EL2 exists
+            // (gicv3.rs finds its redistributor by MPIDR): the real ones.
+            "mrs {tmp}, midr_el1",
+            "msr vpidr_el2, {tmp}",
+            "mrs {tmp}, mpidr_el1",
+            "msr vmpidr_el2, {tmp}",
             // The rest of the hypervisor controls: no traps, EL1's own
             // counter and timer, the firmware's timer off.
             "msr cnthctl_el2, {cnthctl}",
@@ -185,7 +206,6 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             "mrs {tmp}, mdcr_el2",     // debug/PMU traps off, HPMN kept
             "and {tmp}, {tmp}, {hpmn}",
             "msr mdcr_el2, {tmp}",
-            "msr vttbr_el2, xzr",      // VMID 0, so every EL1&0 TLB entry and every tlbi agree on it
             "msr cpacr_el1, {cpacr}",
             "isb",
             // The drop itself: same stack, next instruction, EL1h, masked.
