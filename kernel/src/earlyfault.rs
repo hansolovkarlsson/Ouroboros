@@ -168,12 +168,13 @@ static STACK_END: SyncCell<u64> = SyncCell::new(0);
 /// A hole inside a descriptor (a page the firmware's own tables do not
 /// map, the 2026-10-02 kind of fault) cannot be told from here;
 /// [`READING`] is for that case. Contiguous descriptors are merged as
-/// they are read (the map splits RAM by type and attribute, QEMU's into
-/// about thirty pieces), so an image whose pages span two of them is
-/// inside one range here, and the cap of [`MAX_RAM_RANGES`] is reached
-/// only by a map with that many separate holes in RAM; past it the rest
-/// are dropped and [`RAM_TRUNCATED`] says so, since the walk is then
-/// narrower than RAM, which is the safe direction.
+/// each is read ([`insert_range`]; the map splits RAM by type and
+/// attribute, QEMU's into about thirty pieces and the Pi 4's into more
+/// than sixty-four), so an image whose pages span two of them is inside
+/// one range here, and the cap of [`MAX_RAM_RANGES`] counts merged
+/// ranges, reached only by a map with that many separate holes in RAM;
+/// past it the rest are dropped and [`RAM_TRUNCATED`] says so, since the
+/// walk is then narrower than RAM, which is the safe direction.
 static RAM: SyncCell<([(u64, u64); MAX_RAM_RANGES], usize)> = SyncCell::new(([(0, 0); MAX_RAM_RANGES], 0));
 static RAM_TRUNCATED: SyncCell<bool> = SyncCell::new(false);
 const MAX_RAM_RANGES: usize = 64;
@@ -342,36 +343,45 @@ fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool) {
         if stack.is_none() && start <= sp && sp < end {
             stack = Some(end);
         }
-        if !crate::mmu::is_general_ram(d.ty) {
-            continue;
-        }
-        if count < MAX_RAM_RANGES {
-            ranges[count] = (start, end);
-            count += 1;
-        } else {
+        if crate::mmu::is_general_ram(d.ty) && !insert_range(&mut ranges, &mut count, (start, end)) {
             truncated = true;
         }
     }
-    // Sort (insertion, at most 64 entries), then merge contiguous ranges
-    // in place.
-    for i in 1..count {
-        let mut j = i;
-        while j > 0 && ranges[j - 1].0 > ranges[j].0 {
-            ranges.swap(j - 1, j);
-            j -= 1;
+    (stack.unwrap_or(sp + STACK_FALLBACK), ranges, count, truncated)
+}
+
+/// Adds `(start, end)` to the sorted, merged `ranges[..count]`: merged
+/// into a range it touches or overlaps (and that range into its new
+/// neighbour), else inserted in order. Merging as each descriptor
+/// arrives, not after a capped collection, is what keeps the cap on
+/// RANGES rather than on descriptors: a Pi 4 boot on 2026-10-02 showed
+/// that a map of more than 64 descriptors, capped first, kept the lowest
+/// 64 and lost the top of RAM, where the firmware loads every image, so
+/// the dump named none. Returns false when the range would be a new one
+/// past the cap, and leaves it out.
+fn insert_range(ranges: &mut [(u64, u64); MAX_RAM_RANGES], count: &mut usize, new: (u64, u64)) -> bool {
+    let (start, end) = new;
+    // The first range that ends at or after `start`: the one `new` merges
+    // into or goes before.
+    let i = ranges[..*count].iter().position(|&(_, hi)| hi >= start).unwrap_or(*count);
+    if i < *count && ranges[i].0 <= end {
+        ranges[i].0 = ranges[i].0.min(start);
+        ranges[i].1 = ranges[i].1.max(end);
+        // Absorb every following range the grown one now reaches.
+        while i + 1 < *count && ranges[i + 1].0 <= ranges[i].1 {
+            ranges[i].1 = ranges[i].1.max(ranges[i + 1].1);
+            ranges.copy_within(i + 2..*count, i + 1);
+            *count -= 1;
         }
+        return true;
     }
-    let mut merged = 0usize;
-    for i in 0..count {
-        let (start, end) = ranges[i];
-        if merged > 0 && ranges[merged - 1].1 >= start {
-            ranges[merged - 1].1 = ranges[merged - 1].1.max(end);
-        } else {
-            ranges[merged] = (start, end);
-            merged += 1;
-        }
+    if *count == MAX_RAM_RANGES {
+        return false;
     }
-    (stack.unwrap_or(sp + STACK_FALLBACK), ranges, merged, truncated)
+    ranges.copy_within(i..*count, i + 1);
+    ranges[i] = new;
+    *count += 1;
+    true
 }
 
 /// The ranges of the `armed` line, each `start..end`, the first eight in
