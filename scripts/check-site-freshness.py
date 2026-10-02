@@ -78,7 +78,7 @@ MANIFEST = {
     "index.html": None,
     "site/docs.html": None,
     "site/glossary.html": None,
-    "site/architecture-overview.html": ("architecture.md", "189db7544c6b"),
+    "site/architecture-overview.html": ("architecture.md", "3c9cb89c67d8"),
     "site/manual.html": ("manual.md", "2b3d70500f42"),
     "site/microkernel-comparison.html": ("microkernel-comparison.md", "4c41bec32e6f"),
     "site/tutorial.html": ("tutorial.md", "73ad88234bb5"),

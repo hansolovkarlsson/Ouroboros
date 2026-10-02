@@ -920,7 +920,7 @@ unsafe fn build_identity_map(
 /// `exit_boot_services`, with IRQs masked and `exceptions::install` done.
 unsafe fn switch_to_identity_map(planned: Planned) {
     let view = crate::tasks::current_index();
-    if crate::el2::current_el() == 2 {
+    if crate::el2::drops_to_el1() {
         unsafe { crate::el2::drop_to_el1(el1_regime(view)) };
     } else {
         unsafe { switch_full(view) };

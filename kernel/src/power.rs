@@ -69,10 +69,13 @@ pub unsafe fn discover_conduit(rsdp: Option<*const u8>) {
     // The conduit decides where the call goes once the kernel has dropped
     // from EL2 to EL1 (`el2.rs`): an `smc` reaches the secure firmware
     // either way, but an `hvc` from EL1 traps to EL2, where only the
-    // firmware's leftover vectors are, with nobody to answer: a power-off
-    // would end in a fault dump. So on an EL2 handoff an `hvc` conduit is
-    // no conduit, and power off halts, with the reason logged here.
-    if conduit == CONDUIT_HVC && crate::el2::current_el() == 2 {
+    // firmware's leftover vectors are, with nobody to answer (and since the
+    // drop sets HCR_EL2.HCD, it is an undefined instruction at EL1, which
+    // halts): a power-off would end in a fault report. So on a boot that
+    // drops, an `hvc` conduit is no conduit, and power off halts, with the
+    // reason logged here. The predicate is el2.rs's, the same one the drop
+    // runs on.
+    if conduit == CONDUIT_HVC && crate::el2::drops_to_el1() {
         log::info!(
             "Ouroboros kernel: PSCI conduit: hvc (FADT ARM_BOOT_ARCH {boot_arch:#x}), unusable from EL1 after the drop from EL2; power off will halt"
         );

@@ -1090,7 +1090,6 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `run-el2` | `run` on `-machine virt,virtualization=on`: the firmware hands the kernel off at EL2, as the Raspberry Pi's does. The log must say `running at EL2 after the exit` and then `dropped from EL2 to EL1, on our own tables and vectors` (`kernel/src/el2.rs`). Section 1 |
 | `test-el1-drop` | `test-early-fault.py --el2`: the same two boots handed off at EL2. The control must show the handoff level, the drop, the identity map line, and the shell answering `help` after the dwell, with no kernel `EXCEPTION` line; before the drop this boot reached `shell ready` and then faulted at address 0 through the firmware's vectors, from its leftover EL2 timer. With the drop disabled (a mutation) the control fails on three checks. Run it whenever `el2.rs`, `mmu.rs`'s switch or `exceptions::install` changes |
 | `run-gicv3` | force GICv3 |
-| (no target yet) `-machine virt,virtualization=on` | QEMU's firmware then hands the kernel off at **EL2**, as the Raspberry Pi's does: the dev loop for `docs/roadmap/roadmap-el1-drop.md`. Today's kernel reaches `shell ready` under it and then the firmware's EL2 timer interrupt faults at address 0 through the firmware's vectors, which the early fault reporter prints |
 | `test-parallels` | scripted real-hardware smoke test (Parallels, not QEMU) |
 
 **A note on `virtio-rng`.** **Every** target that attaches a disk also attaches

@@ -36,6 +36,12 @@
 //! own vectors (`exceptions::install` wrote `VBAR_EL1` from EL2 already,
 //! so there is no instant at EL1 without them).
 //!
+//! The firmware's EL2 vectors stay where they are after the drop: nothing
+//! is routed to them any more (no traps, no interrupts, `hvc` disabled by
+//! `HCR_EL2.HCD`, and `smc` goes to EL3), so the kernel installs no EL2
+//! table of its own. If a reason to trap to EL2 ever appears, a minimal
+//! report-and-halt EL2 table belongs here.
+//!
 //! `SCTLR_EL1` is written whole, not read-modify-written: its reset value
 //! on the EL2 handoff is not the firmware's EL1 configuration. The value
 //! is the one QEMU's firmware leaves on an EL1 handoff, read on 2026-10-02
@@ -54,6 +60,14 @@ pub fn current_el() -> u64 {
     (el >> 2) & 0b11
 }
 
+/// Whether this boot drops to EL1 (it was handed off at EL2). The one
+/// predicate: `mmu::switch_to_identity_map` drops on it, and `power.rs`
+/// refuses an `hvc` conduit on it, so the two cannot disagree. True before
+/// the drop and false after, since it reads the level.
+pub fn drops_to_el1() -> bool {
+    current_el() == 2
+}
+
 /// Whether the GIC's system register interface (`ICC_*_EL1`, GICv3 and
 /// later) is implemented: `ID_AA64PFR0_EL1.GIC` (bits 27:24) nonzero. The
 /// hardware's own answer, read rather than taken from the MADT: at EL2
@@ -69,10 +83,19 @@ fn gic_sysregs_implemented() -> bool {
 /// `SCTLR_EL1` for the drop: QEMU's firmware's EL1 value (see the module
 /// doc). RES1 `0x30d00800` | M (0) | C (2) | SA (3) | ITD (7) | SED (8) | I (12).
 const SCTLR_EL1_MMU_ON: u64 = 0x30d0_198d;
-/// `HCR_EL2.RW`: EL1 is AArch64. Nothing else: no `VM` (no stage 2), no
-/// `TGE`, no `IMO`/`FMO`/`AMO` (interrupts route to EL1, where the firmware
-/// had them routed to EL2), no `E2H`, no traps.
-const HCR_EL2_RW: u64 = 1 << 31;
+/// `HCR_EL2.RW | HCD`: EL1 is AArch64, and `hvc` is disabled, so one from
+/// EL1 or EL0 is an undefined instruction reported through the kernel's
+/// own vectors (EL1h halts, an EL0 task is killed) rather than a trap into
+/// the firmware's leftover EL2 vectors with boot services gone. Nothing
+/// else: no `VM` (no stage 2), no `TGE`, no `IMO`/`FMO`/`AMO` (interrupts
+/// route to EL1, where the firmware had them routed to EL2), no `E2H`, no
+/// traps. `smc` is untouched (no `TSC`): PSCI through TF-A still works.
+const HCR_EL2_RW_HCD: u64 = (1 << 31) | (1 << 29);
+/// `MDCR_EL2`'s `HPMN` field (bits 4:0), the one part kept: the rest is
+/// debug and PMU trap bits (`TDRA`, `TDOSA`, `TDA`, `TDE`, `TPM`, `TPMCR`),
+/// all cleared so nothing EL1 does traps to EL2. `HPMN` is kept rather than
+/// written because 0 is CONSTRAINED UNPREDICTABLE without FEAT_HPMN0.
+const MDCR_EL2_HPMN_MASK: u64 = 0x1f;
 /// `HCR_EL2.E2H`: with it set, every `_EL1` register name at EL2 reaches
 /// the `_EL2` register instead (VHE, ARMv8.1). The Cortex-A72 has no VHE,
 /// but the drop does not assume it: `HCR_EL2` is written first, and the
@@ -121,7 +144,7 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             "msr hcr_el2, {hcr}",
             "isb",
             before = out(reg) hcr_before,
-            hcr = in(reg) HCR_EL2_RW,
+            hcr = in(reg) HCR_EL2_RW_HCD,
             options(nomem, nostack, preserves_flags),
         );
     }
@@ -159,6 +182,10 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             "msr cnthp_ctl_el2, xzr",  // the firmware's EL2 timer, still armed from boot services
             "msr cptr_el2, {cptr}",
             "msr hstr_el2, xzr",
+            "mrs {tmp}, mdcr_el2",     // debug/PMU traps off, HPMN kept
+            "and {tmp}, {tmp}, {hpmn}",
+            "msr mdcr_el2, {tmp}",
+            "msr vttbr_el2, xzr",      // VMID 0, so every EL1&0 TLB entry and every tlbi agree on it
             "msr cpacr_el1, {cpacr}",
             "isb",
             // The drop itself: same stack, next instruction, EL1h, masked.
@@ -180,6 +207,7 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             cptr = in(reg) CPTR_EL2_NO_TRAPS,
             cpacr = in(reg) CPACR_EL1_FPEN,
             spsr = in(reg) SPSR_EL1H_MASKED,
+            hpmn = in(reg) MDCR_EL2_HPMN_MASK,
             tmp = out(reg) _,
             options(nostack),
         );
