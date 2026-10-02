@@ -1212,11 +1212,12 @@ The small open tails those arcs deliberately left:
 >       `eret` into a running MMU; four steps; the dev loop is QEMU with
 >       `-machine virt,virtualization=on`, whose firmware also hands off at
 >       EL2 and which reproduced the Pi's signature the same evening.
->       *Steps 0 to 2 built 2026-10-02 on `pi4/el1-drop`: `el2.rs` drops
+>       *Steps 0 to 2 built 2026-10-02, merged as #188: `el2.rs` drops
 >       from `mmu::switch_to_identity_map`, `make test-el1-drop` is the
 >       rig, and a mutation that disabled the drop fails it. Open for step
->       3, one Pi 4 boot under `NOXHCI`, which is the first boot whose
->       post-exit log can mean what it says.*
+>       3, one Pi 4 boot under `NOXHCI` from a card staged off `main`,
+>       which is the first boot whose post-exit log can mean what it
+>       says; `testing-pi4.md` checkpoint 5b has the three lines to read.*
 > - [ ] **fix** The reporter's register rows come after the backtrace, so a
 >       fault in the image-naming walk (seen on the Pi, frame 10, a return
 >       address in the firmware volume) loses them; and the walk reads

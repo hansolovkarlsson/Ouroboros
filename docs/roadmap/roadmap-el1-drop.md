@@ -8,8 +8,9 @@ translation tables, the timer, goes to an `_EL1` register that the exception
 level it is running at does not use. The boot therefore keeps running on the
 firmware's EL2 tables and vectors while its log says otherwise.
 
-**Status 2026-10-02: steps 0 to 2 built and proven on QEMU, on the branch
-`pi4/el1-drop`; step 3, the board, is the next bench round trip.** The
+**Status 2026-10-02: steps 0 to 2 built and proven on QEMU, merged as
+#188 (`367ceda`) after five review rounds; step 3, the board, is the next
+bench round trip, from a card staged off `main`.** The
 drop is `kernel/src/el2.rs`; `make test-el1-drop` is its rig, and a
 mutation that disabled the drop turned the rig red on three checks. Read
 on the way: QEMU's firmware leaves `SCTLR_EL1` at `0x30d0198d` on an EL1
