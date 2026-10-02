@@ -476,17 +476,13 @@ fn main() -> Status {
     // `discovery` ever resolves an address that isn't actually valid on
     // some untested platform), but it now reports through the exception
     // handler and halts, instead of taking the whole VM down the way an
-    // untested address once did on Parallels. Not on an EL2 handoff (the
-    // Raspberry Pi): there a VBAR_EL1 write from EL2 installs nothing for
-    // the running level, and under a VHE firmware (E2H) it would replace
-    // the firmware's own EL2 vectors; the drop to EL1 inside
-    // `mmu::install_identity_map` below writes the vectors itself, from
-    // `el2.rs`, once HCR_EL2 is the kernel's. Until then a fault goes
-    // through the firmware's EL2 vectors, where `earlyfault.rs`'s handler
-    // is registered, which is the better report anyway.
-    if !el2::drops_to_el1() {
-        exceptions::install();
-    }
+    // untested address once did on Parallels. On an EL2 handoff (the
+    // Raspberry Pi) this write is made all the same but takes effect only
+    // at the drop to EL1 inside `mmu::install_identity_map` below; until
+    // then a fault goes through the firmware's EL2 vectors, where
+    // `earlyfault.rs`'s handler is registered. `install` is the one owner
+    // of the write (it refuses it only under a VHE firmware, see there).
+    exceptions::install();
     if fb_console_forced {
         progress_square(fb_info, 2);
     }
@@ -913,7 +909,9 @@ fn try_virtio_console() {
 /// `n`th from the right edge, drawn with plain stores and no console. For the
 /// stretch just after `exit_boot_services` where there is no console yet to
 /// print through: square 1 means the exit returned, square 2 that the
-/// exception vectors are installed. The early console's clear wipes them, so
+/// exception vectors are written (live at once on an EL1 handoff; on the
+/// Pi's EL2 handoff, live from the drop to EL1 inside the identity-map
+/// install, see `el2.rs`). The early console's clear wipes them, so
 /// squares still on screen mean the boot stopped before that clear. White is
 /// the same in every GOP pixel format.
 fn progress_square(fb_info: Option<framebuffer::Info>, n: usize) {

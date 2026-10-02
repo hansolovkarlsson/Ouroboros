@@ -35,9 +35,15 @@ EL1 drop's check (kernel/src/el2.rs, docs/roadmap/roadmap-el1-drop.md): the
 kernel must say `running at EL2 after the exit`, then `dropped from EL2 to
 EL1`, and then behave as the plain control does. Before the drop this boot
 reached `shell ready` and then faulted at address 0 through the firmware's
-vectors, from an interrupt the firmware's HCR_EL2 routed to EL2 (most
-likely the kernel's own tick, see el2.rs); so the control's dwell after
-the shell line, and the typed `help`, are what can fail here.
+vectors: the first eret into task 0, made at EL2, restored the firmware's
+stale ELR_EL2 and SPSR_EL2 (see el2.rs); so the control's dwell after the
+shell line, and the typed `help`, are what can fail here.
+
+Both boots also read QEMU's own -d int trace, the project's health bar
+(drive-qemu.py's Guest.aborts): the control requires zero fault lines, and
+a missing trace is a failure, not a pass. The serial transcript alone would
+grade a post-drop fault the kernel survives (an EL0 task killed, a server
+restarted) as a pass while the shell still answers.
 
 Why both: the dump proves the handler is reached and reads the context the
 firmware passes; the control proves arming it costs the ordinary boot
@@ -68,13 +74,21 @@ _spec.loader.exec_module(drive_qemu)
 
 TIMEOUT = 90
 # The control's dwell at the shell before `help` is typed: long enough for
-# the interrupt that faulted before the drop to fire (it did within a second).
+# whatever follows `shell ready` to go wrong (before the drop, the fault came
+# within a second of it).
 DWELL = 5
+# The lines a boot can end on, besides the shell: the reporter's halt and the
+# firmware's one line (a fault under the firmware's vectors), the kernel's
+# own report (a fault under its vectors, which halts through a silent loop),
+# an EL0 task's fault, and the halt the drop takes on a level it has no path
+# for. Named so a failed boot ends at its line instead of at TIMEOUT.
+ENDINGS = r"halted in the early fault reporter|Synchronous Exception at|EXCEPTION vector=|EL0 FAULT|system halted"
 
 
 def boot(esp, until, machine, then=None):
     """Boot the dev-loop machine on the ESP directory `esp` (vvfat) and
-    return the serial transcript once `until` (a regex) matches or TIMEOUT
+    return the serial transcript and the fault-line count from QEMU's trace
+    (None if there was no trace) once `until` (a regex) matches or TIMEOUT
     seconds pass. With `then`, a line to type after a DWELL at the match,
     the transcript also holds the shell's answer (or its absence)."""
     guest = drive_qemu.Guest(
@@ -85,22 +99,37 @@ def boot(esp, until, machine, then=None):
     )
     try:
         matched = guest.wait_for(until, timeout=TIMEOUT)
-        # Only a boot that reached the shell gets the dwell and the typed
-        # line: `until` also names the failure lines, and typing into a
-        # halted guest would put a `help` in a transcript that never had a
-        # shell, and cost 25 s more per failed run.
-        if matched and then and re.search(r"shell ready", guest.transcript()):
+        # Only a boot that reached the shell, and has not ended since, gets
+        # the dwell and the typed line: `until` also names the failure
+        # lines, a fault can follow `shell ready` within milliseconds (the
+        # pre-drop one did, before the driver's high-water mark moved past
+        # it), and typing into a halted guest would put a `help` in a
+        # transcript that never had a shell, and cost 25 s more per failed
+        # run.
+        so_far = guest.transcript()
+        if matched and then and re.search(r"shell ready", so_far) and not re.search(ENDINGS, so_far):
             time.sleep(DWELL)
             guest.type_line(then)
-            if not guest.wait_for(r"builtins:|EXCEPTION|halted", timeout=20):
+            if not guest.wait_for(r"builtins:|" + ENDINGS, timeout=20):
                 guest.report(f"!!! TIMEOUT waiting for the answer to {then!r} after the dwell")
-        return guest.transcript()
+        return guest.transcript(), guest.aborts()
     finally:
         guest.stop()
 
 
-def grade(name, text, must, must_not):
+def grade(name, text, must, must_not, aborts=None, expect_aborts=None):
+    """`expect_aborts`: None to leave QEMU's trace ungraded, "zero" to
+    require a clean trace, "some" to require at least one fault line (the
+    planted fault). A missing trace fails either way."""
     ok = True
+    if expect_aborts is not None:
+        if aborts is None:
+            print("  FAIL QEMU trace: NO TRACE (health bar unavailable - this is not a pass)")
+            ok = False
+        else:
+            want = aborts == 0 if expect_aborts == "zero" else aborts > 0
+            print(f"  {'ok  ' if want else 'FAIL'} QEMU trace: {aborts} fault lines (Abort/SError), expected {expect_aborts}")
+            ok &= want
     for label, pattern in must:
         hit = re.search(pattern, text, re.M)
         print(f"  {'ok  ' if hit else 'FAIL'} {label}" + (f": {hit.group(0).strip()[:110]}" if hit else ""))
@@ -132,7 +161,7 @@ def main():
     shutil.copytree(args.esp, esp)
     open(os.path.join(esp, "EARLYFAULT"), "w").close()
     print("boot 1: EARLYFAULT set, expecting the reporter's dump")
-    text = boot(esp, r"halted in the early fault reporter|Synchronous Exception at|shell ready", machine)
+    text, aborts = boot(esp, ENDINGS + r"|shell ready", machine)
     open(os.path.join(work, "fault.serial"), "w").write(text)
     planted = re.search(r"asking the firmware to copy to (0x[0-9a-f]+)", text)
     far = planted.group(1) if planted else "<the address the kernel logged>"
@@ -150,13 +179,13 @@ def main():
     ], [
         ("firmware's own line", r"Synchronous Exception at"),
         ("shell", r"shell ready"),
-    ]))
+    ], aborts, "some"))
 
     # 2. The control, no flag.
     esp = os.path.join(work, "esp-plain")
     shutil.copytree(args.esp, esp)
     print(f"boot 2: no flag, handed off at {handed_off}, expecting the shell and its answer to `help`")
-    text = boot(esp, r"shell ready|halted in the early fault reporter|Synchronous Exception at", machine, then="help")
+    text, aborts = boot(esp, r"shell ready|" + ENDINGS, machine, then="help")
     open(os.path.join(work, "plain.serial"), "w").write(text)
     results.append(grade("control", text, [
         ("reporter armed", r"early fault reporter armed"),
@@ -169,8 +198,9 @@ def main():
     ], [
         ("EARLY EXCEPTION", r"EARLY EXCEPTION"),
         ("kernel EXCEPTION", r"EXCEPTION vector="),
+        ("EL0 fault, kill or restart", r"EL0 FAULT|killed after fault|restarted"),
         ("firmware's own line", r"Synchronous Exception at"),
-    ]))
+    ], aborts, "zero"))
 
     passed = all(results)
     if args.keep or not passed:

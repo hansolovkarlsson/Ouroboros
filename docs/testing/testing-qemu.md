@@ -43,7 +43,7 @@ EL2 to EL1, on our own tables and vectors` (`kernel/src/el2.rs`); on a plain
 `make run` the first line says EL1 and there is no second. QEMU's FADT names
 `smc` as the PSCI conduit on this machine and `hvc` on the plain one, so
 `shutdown` powers off on both. `make test-el1-drop` is the graded version
-(section 7).
+(the quick reference at the end).
 
 ---
 
@@ -1088,7 +1088,7 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `test-usb-hub` | the hub layout driven: keyboard ready, stick configured, a line typed through USB runs; then `--usb-boot`, booted from a stick behind the hub and mounted through it; then `--stall`, that boot from `build/usb-hub-stall.img` (`make image-stall`, the image with the `MSDSTALL` flag file), so QEMU's stick stalls on every seventh CBW (about 30 by QEMU's own count, each recovered by its first retry) and on a short CSW read for another (about 30, each recovered in place by clearing the halt and reading the CSW again). `--direct` is the control |
 | `test-early-fault` | the early fault reporter (`kernel/src/earlyfault.rs`): a boot with the `EARLYFAULT` flag file, where the kernel asks the firmware's CopyMem to write at an unmapped address before the xHCI takeover, must end in the kernel's dump of that fault (taken in the DXE core, with the firmware's vectors installed): ESR decoded, the PC placed in `DxeCore.dll`, a frame placed in the kernel; then a boot without the flag, which must reach the shell with the reporter armed, say it was handed off at EL1, and answer `help` typed after a five-second dwell. The case is the Raspberry Pi 4's first serial boot, where the RELEASE firmware printed one line and no registers |
 | `run-el2` | `run` on `-machine virt,virtualization=on`: the firmware hands the kernel off at EL2, as the Raspberry Pi's does. The log must say `running at EL2 after the exit` and then `dropped from EL2 to EL1, on our own tables and vectors` (`kernel/src/el2.rs`). Section 1 |
-| `test-el1-drop` | `test-early-fault.py --el2`: the same two boots handed off at EL2. The control must show the handoff level, the drop, the identity map line, and the shell answering `help` after the dwell, with no kernel `EXCEPTION` line; before the drop this boot reached `shell ready` and then faulted at address 0 through the firmware's vectors, from an interrupt its `HCR_EL2` routed to EL2 (most likely the kernel's own tick; see `el2.rs`). With the drop disabled (a mutation) the control fails on three checks. Run it whenever `el2.rs`, `mmu.rs`'s switch or `exceptions::install` changes |
+| `test-el1-drop` | `test-early-fault.py --el2`: the same two boots handed off at EL2. The control must show the handoff level, the drop, the identity map line, and the shell answering `help` after the dwell, with no kernel `EXCEPTION` line; before the drop this boot reached `shell ready` and then faulted at address 0 through the firmware's vectors, because the first `eret` into task 0, made at EL2, restored the firmware's stale `ELR_EL2` and landed there (see `el2.rs`). Both boots also grade QEMU's own trace: the control requires zero fault lines and a missing trace fails. With the drop disabled (a mutation) the control fails on three checks. Run it whenever `el2.rs`, `mmu.rs`'s switch or `exceptions::install` changes |
 | `run-gicv3` | force GICv3 |
 | `test-parallels` | scripted real-hardware smoke test (Parallels, not QEMU) |
 

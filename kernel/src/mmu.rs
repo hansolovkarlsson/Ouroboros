@@ -915,19 +915,26 @@ unsafe fn build_identity_map(
 /// level, so the switch is `el2::drop_to_el1`: EL1's regime set from EL2
 /// and an `eret` into it; this returns at EL1 either way.
 ///
+/// A handoff at any other level (EL3, or EL0, which cannot happen) halts
+/// with a line: before the drop existed an unexpected level was logged
+/// and then trusted, and every post-exit line described registers the
+/// running level did not use.
+///
 /// # Safety
 /// [`build_identity_map`] must have returned `planned` on this boot, after
-/// `exit_boot_services`, with IRQs masked. On an EL1 handoff
-/// `exceptions::install` must have been done; on an EL2 handoff it must
-/// NOT have been (a `VBAR_EL1` write from EL2 installs nothing for the
-/// running level, and under VHE would replace the firmware's vectors):
-/// the drop writes the vectors itself.
+/// `exit_boot_services`, with IRQs masked and `exceptions::install` done
+/// (at EL2 that write takes effect at the drop).
 unsafe fn switch_to_identity_map(planned: Planned) {
     let view = crate::tasks::current_index();
-    if crate::el2::drops_to_el1() {
-        unsafe { crate::el2::drop_to_el1(el1_regime(view, &planned)) };
-    } else {
-        unsafe { switch_full(view, &planned) };
+    match crate::el2::current_el() {
+        1 => unsafe { switch_full(view, &planned) },
+        2 => unsafe { crate::el2::drop_to_el1(el1_regime(view, &planned)) },
+        el => {
+            crate::console::println!(
+                "Ouroboros kernel: handed off at EL{el}, which this kernel has no path for (EL1 runs, EL2 drops)"
+            );
+            crate::power::halt();
+        }
     }
     let planned = &planned.ranges[..planned.count];
 
@@ -1469,7 +1476,9 @@ fn el1_regime(view: TaskIndex, _built: &Planned) -> El1Regime {
             | (MAIR_ATTR_NORMAL_NC << (8 * MAIR_IDX_NORMAL_NC));
 
     // T0SZ=20 -> 44-bit input address space, walk starting at L0 -
-    // deliberately matching firmware's own T0SZ, not a smaller/simpler
+    // deliberately matching firmware's own T0SZ (on an EL1 handoff; on
+    // the EL2 drop there is no firmware EL1 regime to match and the same
+    // value is kept, see el2.rs), not a smaller/simpler
     // table config that would still legally cover our mapped range. See
     // the module doc comment: this isn't a style choice, a different
     // starting level was tried first and hard-faulted.

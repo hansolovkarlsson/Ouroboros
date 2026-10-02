@@ -621,7 +621,8 @@ had cleared the screen: the same step behaving differently between boots, as
 on the Pi 400. Nothing prints between the exit and that clear, so under
 `FBCON` the kernel now draws solid white squares at the top-right, with plain
 stores and no console: **square 1** when `exit_boot_services` has returned,
-**square 2** when the exception vectors are installed. The early console's
+**square 2** when the exception vectors are written (on this board's EL2
+handoff they are live only from the drop to EL1, checkpoint 5b). The early console's
 clear wipes them, so squares still on screen mean the boot stopped before it,
 and none at all means inside the firmware's `ExitBootServices`. Checked on
 QEMU with a hang planted after each: one square, then two.

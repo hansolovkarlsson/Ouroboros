@@ -27,10 +27,12 @@ delivered through the firmware's vectors after `exceptions::install()`,
 boot reaches `shell ready` on QEMU's permissive firmware map, and the
 firmware's EL2 timer interrupt, which the kernel's EL1 timer setup never
 stopped, lands in the firmware's vectors and faults at address 0 (*as
-written; the reviews of 2026-10-02 noted the interrupt number was never
-read, and the kernel's own tick, routed to EL2 by the firmware's `IMO`,
-fits the evidence at least as well, since the firmware's timer driver
-disables its timer at the exit: see `el2.rs`'s module doc*). **That
+written on 2026-10-01. Wrong: the dump's fields, `esr=0x86000007`,
+`elr=0`, `spsr=0x800003c9`, are an instruction abort at address 0 taken at
+EL2h with interrupts masked, which is the register table's own row for
+`eret`: `tasks::start`'s first `eret` into task 0 restored the firmware's
+stale `ELR_EL2` and `SPSR_EL2`. No interrupt was involved. Found by the
+fifth review on 2026-10-02; `el2.rs`'s module doc is the account*). **That
 option is the dev loop for this plan: every step below is checked on QEMU
 before it goes near a board.**
 
@@ -85,7 +87,10 @@ cleaning it:
    EL1 path keeps today's switch half untouched.
 2. **At EL2, set EL1's regime to those tables**: `MAIR_EL1`, `TCR_EL1`,
    `TTBR0_EL1`, then `SCTLR_EL1` with `M`, `C`, `I` set and the RES1 bits,
-   `nTWE`/`nTWI` included; `tlbi vmalle1` for the regime that has never run;
+   `nTWE`/`nTWI` included (*as built: without `nTWE`/`nTWI`, which
+   `tasks.rs` ORs in on both paths as before; the value is composed from
+   named bits in `el2.rs`, `SPAN` among them*); `tlbi vmalle1` for the
+   regime that has never run (*as built, after `VTTBR_EL2` is zeroed*);
    `VBAR_EL1` to the kernel's table so there is no window at EL1 with no
    vectors. All of these are writable from EL2.
 3. **At EL2, set the hypervisor controls for a plain EL1 guest of itself**:
@@ -115,7 +120,8 @@ logs the drop, so a capture says which path ran.
 ## What it changes for the firmware's leftovers
 
 - The firmware's EL2 timer (`CNTHP`) is still armed after the exit; on QEMU
-  it fired into the firmware's vectors. After the drop EL2 takes no
+  it fired into the firmware's vectors (*as written; it did not, see
+  above. The drop still switches `CNTHP_CTL_EL2` off*). After the drop EL2 takes no
   interrupts (`HCR_EL2.IMO` is 0 and nothing at EL1 unmasks until task 0),
   and the EL1 timer's own IRQ is INTID 30, not the hypervisor timer's 26,
   which `gic.rs` never enables. Disable `CNTHP_CTL_EL2` at the drop anyway,
@@ -127,7 +133,10 @@ logs the drop, so a capture says which path ran.
   traps to EL2, to the firmware's leftover `VBAR_EL2`, with nobody to answer.
   The Pi's TF-A answers `smc`; if its FADT names `hvc`, `power.rs` falls back
   to the halt, as it does with no conduit. Check the FADT's flag on the board
-  (the kernel should log the conduit; it does not today).
+  (the kernel should log the conduit; it does not today). (*As built: the
+  drop sets `HCR_EL2.HCD`, so an `hvc` at EL1 is an undefined instruction
+  reported by the kernel's vectors; `power.rs` treats an `hvc` conduit on a
+  dropping boot as none, logs every branch, and `shutdown` halts.*)
 
 ## Steps, each with the check that can fail
 

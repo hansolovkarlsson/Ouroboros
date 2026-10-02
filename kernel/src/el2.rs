@@ -25,15 +25,18 @@
 //! ## What faulted before the drop
 //!
 //! On QEMU `virtualization=on` the boot reached `shell ready` and then
-//! faulted at address 0 through the firmware's EL2 vectors. That was an
-//! interrupt the firmware's `HCR_EL2` (`IMO` set, logged as `0x8000038`)
-//! routed to EL2 once task 0's `eret` unmasked IRQs: most likely the
-//! kernel's own tick (`timer.rs` arms `CNTP`, which at non-VHE EL2 is the
-//! EL1 physical timer, and `gic.rs` enables its INTID), since the
-//! firmware's timer driver disables its timer at `ExitBootServices`; the
-//! interrupt number was never read, so the firmware's `CNTHP` is not
-//! ruled out, and the drop switches it off regardless. Either way the
-//! drop's `IMO`-clear `HCR_EL2` is what closed it.
+//! faulted at address 0 through the firmware's EL2 vectors. The dump said
+//! what it was: `esr=0x86000007` (an instruction abort taken at the same
+//! EL, translation fault), `far=0`, `elr=0`, `spsr=0x800003c9` (EL2h,
+//! D/A/I/F masked). That is `tasks::start`'s first `eret` into task 0,
+//! made at EL2: an `eret` restores `ELR_EL2` and `SPSR_EL2`, which the
+//! kernel never wrote (it wrote `ELR_EL1` and `SPSR_EL1`), so it landed at
+//! the firmware's stale `ELR_EL2`, address 0, still at EL2h with
+//! interrupts masked, and fetched from an unmapped page. No interrupt was
+//! involved; the earlier accounts (the firmware's EL2 timer, then the
+//! kernel's tick routed by `IMO`) were inferences nobody checked against
+//! the dump's fields. What closed it is the drop making that `eret` an EL1
+//! `eret`.
 //!
 //! ## Prepare EL1 at EL2, then `eret` into a running MMU
 //!
@@ -93,8 +96,20 @@ fn gic_sysregs_implemented() -> bool {
     (pfr0 >> 24) & 0xf != 0
 }
 
-/// `SCTLR_EL1`'s RES1 bits on an ARMv8.0 core: 29, 28, 23, 22, 20 and 11.
-const SCTLR_EL1_RES1: u64 = (1 << 29) | (1 << 28) | (1 << 23) | (1 << 22) | (1 << 20) | (1 << 11);
+/// The `SCTLR_EL1` bits that are RES1 on an ARMv8.0 core and named fields
+/// on later ones, all left at 1: `EOS` (11, exception exit is
+/// context-synchronising), `TSCXT` (20), `EIS` (22, exception entry is
+/// context-synchronising), `SPAN` (23: with FEAT_PAN, PSTATE.PAN is left
+/// alone on exception entry; 0 would set PAN and fault every syscall that
+/// reads an EL0 buffer by raw pointer), `nTLSMD` (28) and `LSMAOE` (29).
+const SCTLR_EL1_EOS: u64 = 1 << 11;
+const SCTLR_EL1_TSCXT: u64 = 1 << 20;
+const SCTLR_EL1_EIS: u64 = 1 << 22;
+const SCTLR_EL1_SPAN: u64 = 1 << 23;
+const SCTLR_EL1_NTLSMD: u64 = 1 << 28;
+const SCTLR_EL1_LSMAOE: u64 = 1 << 29;
+const SCTLR_EL1_RES1: u64 =
+    SCTLR_EL1_LSMAOE | SCTLR_EL1_NTLSMD | SCTLR_EL1_SPAN | SCTLR_EL1_EIS | SCTLR_EL1_TSCXT | SCTLR_EL1_EOS;
 const SCTLR_EL1_M: u64 = 1 << 0;
 const SCTLR_EL1_C: u64 = 1 << 2;
 const SCTLR_EL1_SA: u64 = 1 << 3;
@@ -136,8 +151,35 @@ const HCR_EL2_E2H: u64 = 1 << 34;
 /// `CNTHCTL_EL2.EL1PCTEN | EL1PCEN` (with `HCR_EL2.E2H` 0): EL1 may read
 /// the physical counter and use the physical timer, which `timer.rs` does.
 const CNTHCTL_EL2_EL1_PHYS: u64 = (1 << 0) | (1 << 1);
-/// `CPTR_EL2` with no FP/SIMD trap: the RES1 pattern, `TFP` (bit 10) clear.
+/// `CPTR_EL2` with no FP/SIMD trap: the ARMv8.0 RES1 pattern, `TFP` (bit
+/// 10) clear. Bit 8 is `TZ` on a core with SVE and bit 12 `TSM` on one with
+/// SME, RES1 otherwise, so [`cptr_el2_value`] clears each only when the ID
+/// registers say the feature exists. The fine-grained trap registers
+/// (FEAT_FGT) and `HCRX_EL2` are left at reset: none of the kernel's
+/// targets has them, and on a board with EL3 the writes themselves trap
+/// unless `SCR_EL3` allows them.
 const CPTR_EL2_NO_TRAPS: u64 = 0x33ff;
+const CPTR_EL2_TZ: u64 = 1 << 8;
+const CPTR_EL2_TSM: u64 = 1 << 12;
+
+/// [`CPTR_EL2_NO_TRAPS`], with `TZ` clear when `ID_AA64PFR0_EL1.SVE` (bits
+/// 35:32) is nonzero and `TSM` clear when `ID_AA64PFR1_EL1.SME` (bits
+/// 27:24) is, so SVE and SME at EL1 or EL0 do not trap to an EL2 with
+/// nobody home.
+fn cptr_el2_value() -> u64 {
+    let (pfr0, pfr1): (u64, u64);
+    unsafe {
+        asm!("mrs {0}, id_aa64pfr0_el1", "mrs {1}, id_aa64pfr1_el1", out(reg) pfr0, out(reg) pfr1, options(nomem, nostack, preserves_flags));
+    }
+    let mut cptr = CPTR_EL2_NO_TRAPS;
+    if (pfr0 >> 32) & 0xf != 0 {
+        cptr &= !CPTR_EL2_TZ;
+    }
+    if (pfr1 >> 24) & 0xf != 0 {
+        cptr &= !CPTR_EL2_TSM;
+    }
+    cptr
+}
 /// `CPACR_EL1.FPEN = 0b11`: EL0 and EL1 may use FP/SIMD. On an EL1 handoff
 /// the firmware had already allowed it; here nobody has.
 const CPACR_EL1_FPEN: u64 = 0b11 << 20;
@@ -155,10 +197,11 @@ const ICC_SRE_EL2_SRE_ENABLE: u64 = (1 << 0) | (1 << 3);
 /// tables map.
 ///
 /// # Safety
-/// Must be called exactly once, at EL2, after `exit_boot_services`;
-/// `mmu::build_identity_map` must have written the tables `regime` points
-/// at. Masks D, A, I and F itself and leaves them masked, as the EL1 path
-/// does. Nothing after this returns runs at EL2 again.
+/// Must be called exactly once, at EL2, after `exit_boot_services` and
+/// `exceptions::install`; `mmu::build_identity_map` must have written the
+/// tables `regime` points at. Masks D, A, I and F itself and leaves them
+/// masked, as the EL1 path does. Nothing after this returns runs at EL2
+/// again.
 pub unsafe fn drop_to_el1(regime: El1Regime) {
     // Masked, all four, as mmu::switch_full's first instruction masks them:
     // until the eret the firmware's HCR_EL2 routes FIQ and SError to its
@@ -182,21 +225,23 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
     }
     // HCR_EL2 before any `_EL1` register: with E2H the `_EL1` names below
     // would reach the `_EL2` registers of the level still running, and
-    // HCD must be set before EL1 can run an hvc.
+    // HCD must be set before EL1 can run an hvc. The vectors need no write
+    // here: exceptions::install wrote VBAR_EL1 from EL2 at the exit (the
+    // one owner of that write; it refuses only under E2H, which halted
+    // above), and the write takes effect at the eret.
     unsafe {
         asm!("msr hcr_el2, {0}", "isb", in(reg) HCR_EL2_VALUE, options(nomem, nostack, preserves_flags));
     }
-    // The vectors: on an EL2 handoff main.rs skips exceptions::install
-    // before the drop (a VBAR_EL1 write from EL2 installs nothing for the
-    // running level, and under E2H would have replaced the firmware's own
-    // EL2 vectors), so this is their first and only write, made now that
-    // the name reaches EL1's register for certain.
-    crate::exceptions::install();
     let gicv3 = gic_sysregs_implemented();
     if gicv3 {
-        // SAFETY: the register exists, by the ID register read above.
-        unsafe { asm!("msr icc_sre_el2, {0}", "isb", in(reg) ICC_SRE_EL2_SRE_ENABLE, options(nomem, nostack, preserves_flags)) };
+        // SAFETY: the registers exist, by the ID register read above.
+        // ICH_HCR_EL2 zeroed as Linux's el2 setup does: its trap bits
+        // (TC, TALL0, TALL1, TDIR) would send EL1's ICC_* accesses to EL2.
+        unsafe {
+            asm!("msr icc_sre_el2, {0}", "isb", "msr ich_hcr_el2, xzr", in(reg) ICC_SRE_EL2_SRE_ENABLE, options(nomem, nostack, preserves_flags))
+        };
     }
+    let cptr = cptr_el2_value();
     unsafe {
         asm!(
             // EL1's translation regime, from EL2: nothing walks it until
@@ -222,7 +267,7 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             // counter and timer, the firmware's timer off.
             "msr cnthctl_el2, {cnthctl}",
             "msr cntvoff_el2, xzr",
-            "msr cnthp_ctl_el2, xzr",  // the firmware's EL2 timer, in case it is still armed (see the module doc)
+            "msr cnthp_ctl_el2, xzr",  // the EL2 physical timer off, so nothing at EL2 is left armed
             "msr cptr_el2, {cptr}",
             "msr hstr_el2, xzr",
             "mrs {tmp}, mdcr_el2",     // debug/PMU traps off, HPMN kept
@@ -246,7 +291,7 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             ttbr0 = in(reg) regime.ttbr0,
             sctlr = in(reg) SCTLR_EL1_MMU_ON,
             cnthctl = in(reg) CNTHCTL_EL2_EL1_PHYS,
-            cptr = in(reg) CPTR_EL2_NO_TRAPS,
+            cptr = in(reg) cptr,
             cpacr = in(reg) CPACR_EL1_FPEN,
             spsr = in(reg) SPSR_EL1H_MASKED,
             hpmn = in(reg) MDCR_EL2_HPMN_MASK,

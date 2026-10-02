@@ -774,7 +774,7 @@ run: esp
 # The kernel's `running at EL2 after the exit` line, then `dropped from EL2
 # to EL1`, is the check. Not a copy of `run`: the same recipe with MACHINE
 # overridden, so a change to `run`'s devices reaches this boot too.
-run-el2: MACHINE = virt,virtualization=on
+run-el2: override MACHINE := $(MACHINE),virtualization=on
 run-el2: run
 
 # Same as `run`, plus a virtio-net device on virtio-mmio with QEMU's
@@ -1492,8 +1492,9 @@ test-early-fault: esp
 # same two boots handed off at EL2 (virtualization=on, as the Raspberry
 # Pi's firmware does). The control must say `running at EL2`, `dropped
 # from EL2 to EL1`, reach the shell and answer `help` after a dwell, where
-# before the drop it faulted at address 0 from an interrupt the firmware's
-# HCR_EL2 routed to EL2. About a minute; run it whenever el2.rs, mmu.rs's switch or
+# before the drop the first eret into task 0, made at EL2, restored the
+# firmware's stale ELR_EL2 and landed at address 0. About a minute; run it
+# whenever el2.rs, mmu.rs's switch or
 # exceptions::install changes.
 test-el1-drop: esp
 	python3 scripts/test-early-fault.py --el2

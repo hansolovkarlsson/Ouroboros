@@ -221,7 +221,8 @@ real address for.
 
 `kernel/src/exceptions.rs` installs a minimal AArch64 vector table (VBAR_EL1)
 right after `exit_boot_services`, before anything else gets a chance to
-fault. On any synchronous exception, IRQ, FIQ, or SError, it reports
+fault (on an EL2 handoff the write is made then but is live only from the
+drop to EL1; see the 2026-10-02 update at the end of this section). On any synchronous exception, IRQ, FIQ, or SError, it reports
 `ESR_EL1`/`FAR_EL1`/`ELR_EL1` and the vector index through the global
 console (`kernel/src/console.rs` — a `Sync`-wrapped
 `UnsafeCell<Option<Console>>` shared between `main()` and the exception
@@ -272,6 +273,13 @@ console + deliberate fault) was removed after confirming this; don't expect
 to find it in `main()`.
 
 ### MMU: identity-mapped on our own tables, not firmware's — a real starting-level bug, worth reading before touching this again
+
+**Update 2026-10-02: the install is two halves now** (`build_identity_map`,
+memory only, then `switch_to_identity_map`), and on the Raspberry Pi's EL2
+handoff the switch is not the TTBR0 swap described below but the drop to
+EL1 in `el2.rs`: EL1's regime and `SCTLR_EL1` are written from EL2 and an
+`eret` lands on the tables; a handoff at any other level halts with a line.
+The paragraphs below describe the EL1 path, which is unchanged.
 
 `kernel/src/mmu.rs` replaces firmware's translation tables with our own
 right after `exit_boot_services` + `exceptions::install()`. Firmware runs
@@ -512,7 +520,7 @@ make sdcard SDCARD=/Volumes/OUROBOROS  # stage the Pi 4 / Pi 400 boot card on an
 make test-parallels          # scripted real-hardware round trip via prlctl - see below
 make test-early-fault        # the early fault reporter on QEMU (scripts/test-early-fault.py): a boot with the \EARLYFAULT flag must end in the kernel's own dump of a fault taken in the firmware's code (the DXE core named, a kernel frame in the backtrace), and a boot without it must reach the shell and answer `help`; about a minute - run it whenever earlyfault.rs or console discovery changes
 make run-el2                 # `run` with the firmware handing off at EL2 (-machine virt,virtualization=on), as the Raspberry Pi's does: the dev loop for the EL1 drop (kernel/src/el2.rs); the log must say `running at EL2 after the exit` then `dropped from EL2 to EL1`
-make test-el1-drop           # the EL1 drop's rig: test-early-fault.py --el2, both boots handed off at EL2; the control must show the drop and the shell answering `help` after a dwell, where before the drop the boot faulted at address 0 from an interrupt the firmware's HCR_EL2 routed to EL2; about a minute - run it whenever el2.rs, mmu.rs's switch or exceptions::install changes
+make test-el1-drop           # the EL1 drop's rig: test-early-fault.py --el2, both boots handed off at EL2; the control must show the drop and the shell answering `help` after a dwell, where before the drop the first eret into task 0, made at EL2, restored the firmware's stale ELR_EL2 and landed at address 0; about a minute - run it whenever el2.rs, mmu.rs's switch or exceptions::install changes
 make test-async-rmount       # rebuilds the image, then three driven QEMU boots against host-run 9P peers (scripts/test-async-rmount.sh): the parked remote mount is served, a parked reply never reaches a recycled slot, and a live peer is served while a silent one is parked - run it whenever netd's client paths or the kernel's MSG_SEND arm change
 make test-held-keys          # rebuilds the image, then five driven QEMU boots of the held user keys (scripts/test-held-keys.py): login holds, logout and a killed shell drop, an ordinary user is refused; minutes, so not in `make test` - run it whenever login, the shell's session loop or netd's held-key table changes
 make test-keyboard-chain     # rebuilds the image, then four driven QEMU boots through the nested-shell keyboard-chain recipes (scripts/test-keyboard-chain.sh); minutes, so not in `make test` - run it whenever tasks.rs's keyboard ownership changes
