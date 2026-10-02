@@ -50,9 +50,10 @@ vectors: the first eret into task 0, made at EL2, restored the firmware's
 stale ELR_EL2 and SPSR_EL2 (see el2.rs); so the control's dwell after the
 shell line, and the typed `help`, are what can fail here.
 
-Both boots also read QEMU's own -d int trace, the project's health bar
-(drive-qemu.py's Guest.aborts): the control requires zero fault lines, and
-a missing trace is a failure, not a pass. The serial transcript alone would
+Every boot also reads QEMU's own -d int trace, the project's health bar
+(drive-qemu.py's Guest.aborts): the control requires zero fault lines, the
+fault boot at least one, the walk boot at least two (the planted fault and
+the one inside the report), and a missing trace is a failure, not a pass. The serial transcript alone would
 grade a post-drop fault the kernel survives (an EL0 task killed, a server
 restarted) as a pass while the shell still answers.
 
@@ -64,10 +65,10 @@ dump without the flag is a failure of the control, not a pass of the test.
 
 The guest is drive-qemu.py's `Guest`, so the machine is the dev loop's
 (`make run`), with the ESP copy on the vvfat drive in place of an image.
-Each boot runs to its end state or a timeout, and both always run, so one
-failure does not hide the other result. The transcripts are kept whenever
+Each boot runs to its end state or a timeout, and all three always run, so
+one failure does not hide another result. The transcripts are kept whenever
 a grade failed, and with --keep; their directory is printed. Exit status 1
-if either boot failed.
+if any boot failed.
 """
 import argparse
 import importlib.util
@@ -131,7 +132,8 @@ def boot(esp, until, machine, then=None):
 def grade(name, text, must, must_not, aborts=None, expect_aborts=None, order=()):
     """`expect_aborts`: None to leave QEMU's trace ungraded, "zero" to
     require a clean trace, "some" to require at least one fault line (the
-    planted fault). A missing trace fails either way. `order`: (label,
+    planted fault), "two" at least two (the planted fault and the one
+    inside the report). A missing trace fails either way. `order`: (label,
     first, second) triples, each a pair of patterns whose first match must
     come before the other's."""
     ok = True
@@ -145,7 +147,7 @@ def grade(name, text, must, must_not, aborts=None, expect_aborts=None, order=())
             print("  FAIL QEMU trace: NO TRACE (health bar unavailable - this is not a pass)")
             ok = False
         else:
-            want = aborts == 0 if expect_aborts == "zero" else aborts > 0
+            want = {"zero": aborts == 0, "some": aborts > 0, "two": aborts >= 2}[expect_aborts]
             print(f"  {'ok  ' if want else 'FAIL'} QEMU trace: {aborts} fault lines (Abort/SError), expected {expect_aborts}")
             ok &= want
     for label, pattern in must:
@@ -209,8 +211,13 @@ def main():
     print("boot 3: EARLYFAULT and WALKFAULT set, expecting the rows and then the nested-fault line")
     text, aborts = boot(esp, ENDINGS + r"|shell ready", machine)
     open(os.path.join(work, "walk.serial"), "w").write(text)
+    # This boot's own planted address, not boot 1's: a boot 1 that never
+    # printed it must not fail this boot on a placeholder.
+    planted = re.search(r"asking the firmware to copy to (0x[0-9a-f]+)", text)
+    far = planted.group(1) if planted else "<the address the kernel logged>"
     results.append(grade("walk", text, [
         ("flag seen", r"boot flag \\WALKFAULT is set"),
+        ("planted address logged", r"asking the firmware to copy to 0x[0-9a-f]+"),
         ("exception line", r"EARLY EXCEPTION \(firmware vectors\) type=0 esr=0x[0-9a-f]+ far=" + re.escape(far)),
         ("register rows", r"x28=0x[0-9a-f]{16} x29=0x[0-9a-f]{16} x30=0x[0-9a-f]{16}"),
         ("nested-fault line, FAR the unmapped address, an image base under read",
@@ -219,7 +226,7 @@ def main():
         ("ordinary halt line", r"halted in the early fault reporter"),
         ("a frame", r"frame \d+: fp="),
         ("firmware's own line", r"Synchronous Exception at"),
-    ], aborts, "some", order=[
+    ], aborts, "two", order=[
         ("register rows before the nested-fault line", r"x28=0x[0-9a-f]{16}", r"while reporting one"),
     ]))
 

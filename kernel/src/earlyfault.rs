@@ -167,10 +167,15 @@ static STACK_END: SyncCell<u64> = SyncCell::new(0);
 /// peripherals at `0xfc000000`, inside an 8 GB board's RAM) is outside.
 /// A hole inside a descriptor (a page the firmware's own tables do not
 /// map, the 2026-10-02 kind of fault) cannot be told from here;
-/// [`READING`] is for that case. A map with more descriptors than
-/// [`MAX_RAM_RANGES`] keeps the first ones and says so: the walk is then
+/// [`READING`] is for that case. Contiguous descriptors are merged as
+/// they are read (the map splits RAM by type and attribute, QEMU's into
+/// about thirty pieces), so an image whose pages span two of them is
+/// inside one range here, and the cap of [`MAX_RAM_RANGES`] is reached
+/// only by a map with that many separate holes in RAM; past it the rest
+/// are dropped and [`RAM_TRUNCATED`] says so, since the walk is then
 /// narrower than RAM, which is the safe direction.
 static RAM: SyncCell<([(u64, u64); MAX_RAM_RANGES], usize)> = SyncCell::new(([(0, 0); MAX_RAM_RANGES], 0));
+static RAM_TRUNCATED: SyncCell<bool> = SyncCell::new(false);
 const MAX_RAM_RANGES: usize = 64;
 /// The firmware memory the report is reading at this moment, or 0: set
 /// around every read the report makes of firmware memory (the image
@@ -265,9 +270,10 @@ pub fn arm(
         *CONSOLE.get() = serial;
         *FRAMEBUFFER.get() = framebuffer;
         *IMAGE_RANGE.get() = image_range;
-        let (stack, ram, count) = map_facts();
+        let (stack, ram, count, truncated) = map_facts();
         *STACK_END.get() = stack;
         *RAM.get() = (ram, count);
+        *RAM_TRUNCATED.get() = truncated;
         *IMAGE_TABLE.get() = uefi::system::with_config_table(|entries| {
             entries
                 .iter()
@@ -284,12 +290,12 @@ pub fn arm(
         // The walk's bound, stated, so a dump can be read against it: on
         // a board the question is whether an address a bad entry claims
         // (`0x26e28` on the Pi 4, 2026-10-01) falls inside any range.
-        let (ranges, count) = unsafe { *RAM.get() };
-        let lo = ranges[..count].iter().map(|r| r.0).min().unwrap_or(0);
-        let hi = ranges[..count].iter().map(|r| r.1).max().unwrap_or(0);
+        let (ranges, count) = unsafe { &*RAM.get() };
+        let lo = ranges[..*count].iter().map(|r| r.0).min().unwrap_or(0);
+        let hi = ranges[..*count].iter().map(|r| r.1).max().unwrap_or(0);
         log::info!(
             "Ouroboros kernel: early fault reporter: image walk bounded to {count} RAM range(s), {lo:#x}..{hi:#x}{}",
-            if count == MAX_RAM_RANGES { " (the map had more; the rest are outside the walk)" } else { "" }
+            if unsafe { *RAM_TRUNCATED.get() } { " (the map had more; the rest are outside the walk)" } else { "" }
         );
         Ok(())
     } else {
@@ -305,30 +311,48 @@ pub fn arm(
 /// code runs on: the end of the descriptor holding the current SP (the
 /// firmware's DXE stack, which the kernel inherits until it switches to
 /// its own), or SP plus [`STACK_FALLBACK`] if the map does not cover it.
-/// And the RAM descriptors (`mmu::is_general_ram`), up to
-/// [`MAX_RAM_RANGES`] of them, none if the map could not be read, which
-/// makes the image walk read nothing.
-fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize) {
+/// And the RAM ranges: the descriptors `mmu::is_general_ram` admits,
+/// contiguous ones merged (the map is sorted by address), up to
+/// [`MAX_RAM_RANGES`] of them with a flag for any dropped past that; none
+/// if the map could not be read, which makes the image walk read nothing.
+/// A descriptor whose extent does not compute (a corrupt page count, the
+/// class of bad firmware record this module exists for) is skipped, not
+/// trusted: this runs before the reporter exists to catch a panic.
+fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool) {
     let sp: u64;
     // SAFETY: reads the stack pointer, nothing else.
     unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
     let mut ranges = [(0u64, 0u64); MAX_RAM_RANGES];
     let Ok(map) = boot::memory_map(MemoryType::LOADER_DATA) else {
-        return (sp + STACK_FALLBACK, ranges, 0);
+        return (sp + STACK_FALLBACK, ranges, 0, false);
     };
     let mut stack = sp + STACK_FALLBACK;
     let mut count = 0usize;
+    let mut truncated = false;
     for d in map.entries() {
-        let (start, end) = (d.phys_start, d.phys_start + d.page_count * 4096);
+        let start = d.phys_start;
+        let Some(end) = d.page_count.checked_mul(4096).and_then(|len| start.checked_add(len)) else {
+            continue;
+        };
+        if start >= end {
+            continue;
+        }
         if start <= sp && sp < end {
             stack = end;
         }
-        if crate::mmu::is_general_ram(d.ty) && start < end && count < MAX_RAM_RANGES {
+        if !crate::mmu::is_general_ram(d.ty) {
+            continue;
+        }
+        if count > 0 && ranges[count - 1].1 == start {
+            ranges[count - 1].1 = end;
+        } else if count < MAX_RAM_RANGES {
             ranges[count] = (start, end);
             count += 1;
+        } else {
+            truncated = true;
         }
     }
-    (stack, ranges, count)
+    (stack, ranges, count, truncated)
 }
 
 /// Whether `[addr, addr+len)`, `len` nonzero, lies inside one RAM
@@ -339,14 +363,17 @@ fn in_ram(addr: u64, len: u64) -> bool {
         return false;
     }
     let Some(end) = addr.checked_add(len) else { return false };
-    let (ranges, count) = unsafe { *RAM.get() };
-    ranges[..count].iter().any(|&(lo, hi)| lo <= addr && end <= hi)
+    let (ranges, count) = unsafe { &*RAM.get() };
+    ranges[..*count].iter().any(|&(lo, hi)| lo <= addr && end <= hi)
 }
 
 /// Marks `addr` as the firmware memory under read, for the nested-fault
-/// line; `reading(0)` once the read is done.
+/// line; `reading(0)` once the read is done. A volatile store: its only
+/// reader is the exception handler the fault jumps to, which the compiler
+/// cannot see, so an ordinary store could be sunk past the read it marks
+/// or merged with the `reading(0)` after it.
 fn reading(addr: u64) {
-    unsafe { *READING.get() = addr };
+    unsafe { core::ptr::write_volatile(READING.get(), addr) };
 }
 
 /// An address no firmware maps: bit 47, the top of a 48-bit address space,
@@ -415,12 +442,14 @@ unsafe extern "efiapi" fn report(exception_type: isize, context: *const SystemCo
         // firmware memory is read); this names what was being read.
         let (esr, far, elr) =
             if context.is_null() { (0, 0, 0) } else { unsafe { ((*context).esr, (*context).far, (*context).elr) } };
-        let reading = unsafe { *READING.get() };
+        // On its own line: the first report was mid-way through an `elr`,
+        // `lr` or `frame` line when the read faulted.
+        let reading = unsafe { core::ptr::read_volatile(READING.get()) };
         if reading == 0 {
-            line!("Ouroboros kernel: EARLY EXCEPTION while reporting one: esr={esr:#x} far={far:#x} elr={elr:#x}, with no firmware memory under read; halted");
+            line!("\nOuroboros kernel: EARLY EXCEPTION while reporting one: esr={esr:#x} far={far:#x} elr={elr:#x}, with no firmware memory under read; halted");
         } else {
             line!(
-                "Ouroboros kernel: EARLY EXCEPTION while reporting one: esr={esr:#x} far={far:#x} elr={elr:#x}, while reading firmware memory at {reading:#x}; halted"
+                "\nOuroboros kernel: EARLY EXCEPTION while reporting one: esr={esr:#x} far={far:#x} elr={elr:#x}, while reading firmware memory at {reading:#x}; halted"
             );
         }
         crate::halt();

@@ -1480,16 +1480,20 @@ test-usb-hub: image $(USBSTICK_IMG)
 # unmapped address just before the xHCI takeover, so the fault is taken in
 # the firmware's own code with the firmware's vectors installed, as on the
 # Pi 4; the serial console must show the reporter's dump (ESR decoded, the
-# faulting PC placed in the DXE core by name, a frame placed in the kernel)
-# and not the firmware's one line. Then a boot without the flag, which must
-# reach the shell with the reporter armed. About a minute. Run it when
-# earlyfault.rs, the console discovery it prints through, or the kernel's
-# frame-pointer setting (.cargo/config.toml) changes.
+# register rows before the first frame, the faulting PC placed in the DXE
+# core by name, a frame placed in the kernel) and not the firmware's one
+# line. A boot with EARLYFAULT and WALKFAULT, where the report faults inside
+# its own image walk and must have printed the rows and then the one line a
+# nested fault prints, with FAR and the image under read. Then a boot without
+# a flag, which must reach the shell with the reporter armed and answer
+# `help`. Every boot's QEMU trace is graded too. About ninety seconds. Run it
+# when earlyfault.rs, the console discovery it prints through, or the
+# kernel's frame-pointer setting (.cargo/config.toml) changes.
 test-early-fault: esp
 	python3 scripts/test-early-fault.py
 
 # The EL1 drop (kernel/src/el2.rs, docs/roadmap/roadmap-el1-drop.md): the
-# same two boots handed off at EL2 (virtualization=on, as the Raspberry
+# same three boots handed off at EL2 (virtualization=on, as the Raspberry
 # Pi's firmware does). The control must say `running at EL2`, `dropped
 # from EL2 to EL1`, reach the shell and answer `help` after a dwell, where
 # before the drop the first eret into task 0, made at EL2, restored the
