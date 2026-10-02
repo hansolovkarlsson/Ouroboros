@@ -1203,10 +1203,14 @@ The small open tails those arcs deliberately left:
 >       the identity map "installed": VBAR_EL1, TTBR0_EL1, TCR_EL1, MAIR_EL1
 >       and the EL1 timer are all written to registers EL2 does not use. Drop
 >       to EL1 right after `exit_boot_services` (HCR_EL2.RW, no traps, no
->       stage 2, CNTHCTL_EL2 for the EL1 timer, SP_EL1, `eret`), and give
->       `mmu.rs` an enable-from-off path. Explains "the Pi 4 stops after the
->       early console's clear". The xHCI takeover fault is before the exit
->       and stays its own item.
+>       stage 2, CNTHCTL_EL2 for the EL1 timer, SP_EL1, `eret`). Explains
+>       "the Pi 4 stops after the early console's clear". The xHCI takeover
+>       fault is before the exit and stays its own item. **The plan:
+>       [`roadmap-el1-drop.md`](roadmap/roadmap-el1-drop.md)** (2026-10-01,
+>       scoped before code): prepare EL1's tables and vectors at EL2, then
+>       `eret` into a running MMU; four steps; the dev loop is QEMU with
+>       `-machine virt,virtualization=on`, whose firmware also hands off at
+>       EL2 and which reproduced the Pi's signature the same evening.
 > - [ ] **fix** The reporter's register rows come after the backtrace, so a
 >       fault in the image-naming walk (seen on the Pi, frame 10, a return
 >       address in the firmware volume) loses them; and the walk reads
