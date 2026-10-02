@@ -827,6 +827,63 @@ address, to compare `far` and the registers; and the no-flag boot, now
 with the kernel's own vectors live after the exit, to see the takeover's
 fault reported in full.
 
+**2026-10-02, afternoon: four `NOXHCI` boots of a card from `main` at
+`a9672d1` (#189, the reporter's rows first and its walk bounded).** Boots 1
+to 3 went through the drop to the shell, as in the morning. Boot 4 died
+BEFORE the exit, between `loaded account server` and the boot-identity
+line, with the rows intact:
+
+```
+EARLY EXCEPTION (firmware vectors) type=0 esr=0x96000046 far=0x3e98fe00 elr=0x39f43b60 sp=0x3b3fbf40 lr=0x385b2fe0 fp=0x3b3fbf40 spsr=0x80000309
+  esr: ec=0x25 (data abort, same EL), fsc=0x06 (translation fault at level 2), write
+  x0 =0x3e98fe00 x1 =0x37fee018 x2 =0x20 ...
+  elr 0x39f43b60 (in no loaded image)        <- DxeCore + 0x17b60, see below
+  lr  0x385b2fe0 (in no loaded image)
+  frames 1-3 in no loaded image; frames 4-16 in the kernel
+```
+
+A firmware `CopyMem` of 32 bytes from `0x37fee018` to `0x3e98fe00`, which
+is inside the GOP framebuffer (`0x3e402000`, size `0x7e9000`): the
+firmware's text console drawing a glyph row onto HDMI, as it had for every
+line of this boot and the three before. The 2 MB block holding that part
+of the framebuffer took a translation fault at level 2 in the firmware's
+own tables. The images are unnamed because the reporter's walk was
+bounded to three ranges, `0x3b0000..0x3e0000`, `0x400000..0x380b0000`,
+`0x38120000..0x387b0000`, with "the map had more": the Pi's map has more
+than 64 descriptors and the cap was applied before the merge, dropping
+the top of RAM where every image lives (fixed on `pi4/reporter-tables`;
+`elr` is `DxeCore + 0x17b60` by the morning's base). One fact the bound
+gave anyway: the lowest RAM range starts at `0x3b0000`, so the 2026-10-01
+entry claiming to hold `0x26e28` lies outside the walk, as the fix
+intended.
+
+**Three firmware faults today, read together.** Each is a write by the
+firmware's DXE core to memory the firmware had mapped and was using,
+taken as a translation fault in its own tables: at `0x38670810` (level 3,
+in `ExitBootServices`), at `0x3e98fe00` (level 2, the framebuffer, while
+printing), and on 2026-10-01 at `0x39F36E14`'s target inside the xHCI
+takeover. Different kernel steps, different addresses, one of two to one
+of four boots. What they share is the firmware's translation tables having
+an invalid entry where a valid one was: a cleared or clobbered table page,
+not a missing mapping. Whether the entry is zero (cleared) or garbage
+(overwritten) is what the next instrument reads: the reporter walking the
+firmware's live tables for `far` at the moment of the fault, printing each
+level's entry (built the same afternoon on `pi4/reporter-tables`: a
+`tables for far:` line after the rows, each level's entry down to the
+invalid one and its four neighbours, and whether the level agrees with the
+ESR's; on QEMU the planted fault reads `L0[0x0] ... (table), L1[0x1] ...
+(table), L2[0x100] @ 0x47ffd800 = 0x0 (invalid), neighbours: [0xfe]=...003
+[0xff]=...003 [0x101]=0x0 [0x102]=0x0; the ESR's level 2 agrees`, which is
+the Pi's framebuffer fault's shape, with the answer the Pi's line will
+give in the entry's value; the test faults land on the lowest page past
+RAM that no descriptor of any type covers, chosen from the map at arm
+time, not on an address assumed free). Suspects, in order: the kernel's own pre-exit writes landing
+outside what it owns (its allocations move a little per boot, which fits
+the intermittence); the firmware's own break-before-make on a split block;
+the VideoCore writing into ARM memory. The dump's frames 4 to 16 are in the
+kernel: with the linker map (`scripts/efi-symbol.py`) they say which
+kernel call the firmware was printing for.
+
 ---
 
 ## 7. Risks, ranked

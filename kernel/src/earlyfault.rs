@@ -39,7 +39,11 @@
 //! class and fault status decoded from ESR, the faulting address, the link
 //! and frame pointers, every general register (before any firmware memory
 //! is read, since a Pi 4 boot on 2026-10-01 lost the rows to a fault in
-//! the walk that followed them), then the images holding `elr` and `lr`,
+//! the walk that followed them), then, for an abort, the live translation
+//! tables walked for the faulting address with each level's entry printed
+//! (a cleared entry and an overwritten one read differently, which is the
+//! question the Pi 4's firmware faults of 2026-10-02 left), then the
+//! images holding `elr` and `lr`,
 //! a frame-pointer backtrace, and for each code address the loaded image
 //! that holds it (from the firmware's debug image info table: the kernel
 //! itself by its offset, a firmware driver by the module name in its PE
@@ -168,22 +172,35 @@ static STACK_END: SyncCell<u64> = SyncCell::new(0);
 /// A hole inside a descriptor (a page the firmware's own tables do not
 /// map, the 2026-10-02 kind of fault) cannot be told from here;
 /// [`READING`] is for that case. Contiguous descriptors are merged as
-/// they are read (the map splits RAM by type and attribute, QEMU's into
-/// about thirty pieces), so an image whose pages span two of them is
-/// inside one range here, and the cap of [`MAX_RAM_RANGES`] is reached
-/// only by a map with that many separate holes in RAM; past it the rest
-/// are dropped and [`RAM_TRUNCATED`] says so, since the walk is then
-/// narrower than RAM, which is the safe direction.
+/// each is read ([`insert_range`]; the map splits RAM by type and
+/// attribute, QEMU's into about thirty pieces and the Pi 4's into more
+/// than sixty-four), so an image whose pages span two of them is inside
+/// one range here, and the cap of [`MAX_RAM_RANGES`] counts merged
+/// ranges, reached only by a map with that many separate holes in RAM;
+/// past it the rest are dropped and [`RAM_TRUNCATED`] says so, since the
+/// walk is then narrower than RAM, which is the safe direction.
 static RAM: SyncCell<([(u64, u64); MAX_RAM_RANGES], usize)> = SyncCell::new(([(0, 0); MAX_RAM_RANGES], 0));
 static RAM_TRUNCATED: SyncCell<bool> = SyncCell::new(false);
-const MAX_RAM_RANGES: usize = 64;
+/// 256 ranges, 4 KB: reached only by a map with that many separate holes
+/// in RAM. At the cap the SMALLEST range gives way to a larger newcomer,
+/// not the latest to arrive: UEFI maps are unsorted, and the range the
+/// DXE core lives in must not be the one lost to arrival order.
+const MAX_RAM_RANGES: usize = 256;
+/// Where the test faults land: chosen at [`arm`] time as the lowest page
+/// at or past the top of RAM that no memory-map descriptor of ANY type
+/// covers, so the firmware has had no reason to map it and nothing sits
+/// behind it (`0x60000000` on QEMU with 512 MB; on a Pi 4 whatever lies
+/// past the last descriptor, GPU carve-out or peripheral window
+/// excluded, since those are listed as reserved or MMIO). [`UNMAPPED`]
+/// when the map could not be read.
+static TEST_FAULT: SyncCell<u64> = SyncCell::new(UNMAPPED);
 /// The firmware memory the report is reading at this moment, or 0: set
 /// around every read the report makes of firmware memory (the image
 /// table, an entry, a loaded-image record, an image header, a device
 /// path, a frame record), so a fault inside the report can say what it
 /// was reading; 0 means none was under way.
 static READING: SyncCell<u64> = SyncCell::new(0);
-/// `\WALKFAULT` (`bootflags.rs`): the image walk reads [`UNMAPPED`] just
+/// `\WALKFAULT` (`bootflags.rs`): the image walk reads [`test_fault_address`] just
 /// before its first image header, so the report faults inside itself.
 static PLANT_WALK_FAULT: AtomicBool = AtomicBool::new(false);
 
@@ -270,10 +287,11 @@ pub fn arm(
         *CONSOLE.get() = serial;
         *FRAMEBUFFER.get() = framebuffer;
         *IMAGE_RANGE.get() = image_range;
-        let (stack, ram, count, truncated) = map_facts();
+        let (stack, ram, count, truncated, test_fault) = map_facts();
         *STACK_END.get() = stack;
         *RAM.get() = (ram, count);
         *RAM_TRUNCATED.get() = truncated;
+        *TEST_FAULT.get() = test_fault;
         *IMAGE_TABLE.get() = uefi::system::with_config_table(|entries| {
             entries
                 .iter()
@@ -320,13 +338,13 @@ pub fn arm(
 /// runs before the reporter exists to catch a panic. The stack end is the
 /// first descriptor holding SP, as before: two that overlap it would
 /// otherwise let a reserved window past it extend the walk.
-fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool) {
+fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool, u64) {
     let sp: u64;
     // SAFETY: reads the stack pointer, nothing else.
     unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
     let mut ranges = [(0u64, 0u64); MAX_RAM_RANGES];
     let Ok(map) = boot::memory_map(MemoryType::LOADER_DATA) else {
-        return (sp + STACK_FALLBACK, ranges, 0, false);
+        return (sp + STACK_FALLBACK, ranges, 0, false, UNMAPPED);
     };
     let mut stack = None;
     let mut count = 0usize;
@@ -342,36 +360,73 @@ fn map_facts() -> (u64, [(u64, u64); MAX_RAM_RANGES], usize, bool) {
         if stack.is_none() && start <= sp && sp < end {
             stack = Some(end);
         }
-        if !crate::mmu::is_general_ram(d.ty) {
-            continue;
-        }
-        if count < MAX_RAM_RANGES {
-            ranges[count] = (start, end);
-            count += 1;
-        } else {
+        if crate::mmu::is_general_ram(d.ty) && !insert_range(&mut ranges, &mut count, (start, end)) {
             truncated = true;
         }
     }
-    // Sort (insertion, at most 64 entries), then merge contiguous ranges
-    // in place.
-    for i in 1..count {
-        let mut j = i;
-        while j > 0 && ranges[j - 1].0 > ranges[j].0 {
-            ranges.swap(j - 1, j);
-            j -= 1;
+    // The test-fault address: from the top of RAM, step past every
+    // descriptor of any type that covers the candidate, until none does.
+    // Bounded by the descriptor count, since each step consumes one.
+    let mut candidate = ranges[..count].last().map_or(UNMAPPED, |r| r.1);
+    for _ in 0..map.entries().count() {
+        let covering = map.entries().find(|d| {
+            d.page_count
+                .checked_mul(4096)
+                .and_then(|len| d.phys_start.checked_add(len))
+                .is_some_and(|end| d.phys_start <= candidate && candidate < end)
+        });
+        match covering {
+            Some(d) => candidate = d.phys_start + d.page_count * 4096,
+            None => break,
         }
     }
-    let mut merged = 0usize;
-    for i in 0..count {
-        let (start, end) = ranges[i];
-        if merged > 0 && ranges[merged - 1].1 >= start {
-            ranges[merged - 1].1 = ranges[merged - 1].1.max(end);
-        } else {
-            ranges[merged] = (start, end);
-            merged += 1;
+    (stack.unwrap_or(sp + STACK_FALLBACK), ranges, count, truncated, candidate)
+}
+
+/// Adds `(start, end)` to the sorted, merged `ranges[..count]`: merged
+/// into a range it touches or overlaps (and that range into its new
+/// neighbour), else inserted in order. Merging as each descriptor
+/// arrives, not after a capped collection, is what keeps the cap on
+/// RANGES rather than on descriptors: a Pi 4 boot on 2026-10-02 showed
+/// that a map of more than 64 descriptors, capped first, kept the lowest
+/// 64 and lost the top of RAM, where the firmware loads every image, so
+/// the dump named none. Returns false when the range would be a new one
+/// past the cap, and leaves it out.
+fn insert_range(ranges: &mut [(u64, u64); MAX_RAM_RANGES], count: &mut usize, new: (u64, u64)) -> bool {
+    let (start, end) = new;
+    // The first range that ends at or after `start`: the one `new` merges
+    // into or goes before.
+    let i = ranges[..*count].iter().position(|&(_, hi)| hi >= start).unwrap_or(*count);
+    if i < *count && ranges[i].0 <= end {
+        ranges[i].0 = ranges[i].0.min(start);
+        ranges[i].1 = ranges[i].1.max(end);
+        // Absorb every following range the grown one now reaches.
+        while i + 1 < *count && ranges[i + 1].0 <= ranges[i].1 {
+            ranges[i].1 = ranges[i].1.max(ranges[i + 1].1);
+            ranges.copy_within(i + 2..*count, i + 1);
+            *count -= 1;
         }
+        return true;
     }
-    (stack.unwrap_or(sp + STACK_FALLBACK), ranges, merged, truncated)
+    if *count == MAX_RAM_RANGES {
+        // Full: the smallest range gives way if the newcomer is larger.
+        let si = (0..*count).min_by_key(|&k| ranges[k].1 - ranges[k].0).expect("a full array has a smallest");
+        let (slo, shi) = ranges[si];
+        if end - start <= shi - slo {
+            return false;
+        }
+        ranges.copy_within(si + 1..*count, si);
+        *count -= 1;
+        let i = ranges[..*count].iter().position(|&(lo, _)| lo > start).unwrap_or(*count);
+        ranges.copy_within(i..*count, i + 1);
+        ranges[i] = new;
+        *count += 1;
+        return false;
+    }
+    ranges.copy_within(i..*count, i + 1);
+    ranges[i] = new;
+    *count += 1;
+    true
 }
 
 /// The ranges of the `armed` line, each `start..end`, the first eight in
@@ -423,8 +478,19 @@ fn reading(addr: u64) {
 /// far above any RAM or device window a platform of this class has.
 const UNMAPPED: u64 = 1 << 47;
 
+/// Where the test faults are planted: [`TEST_FAULT`], chosen at arm time
+/// as the lowest page past RAM that no descriptor of any type covers.
+/// Inside the input range, so the fault is taken in the tables below a
+/// populated upper level (on QEMU, L0 and L1 tables and an invalid L2
+/// entry, which is the shape of the Pi 4's framebuffer fault) and
+/// [`walk_tables`] has entries to read. [`UNMAPPED`] is above the input
+/// range, where the walk has nothing to read.
+fn test_fault_address() -> u64 {
+    unsafe { *TEST_FAULT.get() }
+}
+
 /// `\EARLYFAULT`'s test fault (`bootflags.rs`): asks the firmware's own
-/// `CopyMem` boot service to write eight bytes at [`UNMAPPED`], so the data
+/// `CopyMem` boot service to write eight bytes at [`test_fault_address`], so the data
 /// abort is taken with the PC inside the firmware's DXE core, not the
 /// kernel, which is the case the reporter exists for: the firmware's line
 /// alone places such a PC in no image the kernel knows. The dump should
@@ -433,7 +499,8 @@ const UNMAPPED: u64 = 1 << 47;
 /// address, and that is reported and the boot halted, so that a test
 /// looking for the dump does not find a shell instead.
 pub fn plant_firmware_fault() -> ! {
-    log::warn!("Ouroboros kernel: boot flag \\EARLYFAULT: asking the firmware to copy to {UNMAPPED:#x}, which nothing maps");
+    let target = test_fault_address();
+    log::warn!("Ouroboros kernel: boot flag \\EARLYFAULT: asking the firmware to copy to {target:#x}, which nothing maps");
     let source = 0u64;
     match uefi::table::system_table_raw() {
         Some(system_table) => {
@@ -442,9 +509,9 @@ pub fn plant_firmware_fault() -> ! {
             // is meant to fault.
             unsafe {
                 let boot_services = (*system_table.as_ptr()).boot_services;
-                ((*boot_services).copy_mem)(UNMAPPED as *mut u8, core::ptr::from_ref(&source).cast::<u8>(), 8);
+                ((*boot_services).copy_mem)(target as *mut u8, core::ptr::from_ref(&source).cast::<u8>(), 8);
             }
-            log::error!("Ouroboros kernel: the copy to {UNMAPPED:#x} returned: this platform maps it, and the test fault proved nothing");
+            log::error!("Ouroboros kernel: the copy to {target:#x} returned: this platform maps it, and the test fault proved nothing");
         }
         None => log::error!("Ouroboros kernel: no system table, so the test fault was not planted"),
     }
@@ -530,6 +597,13 @@ unsafe extern "efiapi" fn report(exception_type: isize, context: *const SystemCo
         }
         out(format_args!("\n"));
     }
+    // The firmware's live translation tables, walked for `far`: what the
+    // MMU found at each level, as data. A fault on memory the firmware had
+    // mapped (the Pi 4's three faults of 2026-10-02) is told apart here:
+    // an entry of 0 was cleared, anything else invalid was overwritten.
+    if is_abort(ctx.esr) {
+        walk_tables(ctx.far, ctx.esr);
+    }
     out(format_args!("Ouroboros kernel:   elr "));
     place(ctx.elr);
     out(format_args!("\n"));
@@ -539,6 +613,138 @@ unsafe extern "efiapi" fn report(exception_type: isize, context: *const SystemCo
     backtrace(ctx);
     line!("Ouroboros kernel: halted in the early fault reporter");
     crate::halt()
+}
+
+/// Whether `esr` is a data or instruction abort, where `FAR` is an address
+/// worth walking for.
+fn is_abort(esr: u64) -> bool {
+    matches!((esr >> 26) & 0x3f, 0x20 | 0x21 | 0x24 | 0x25)
+}
+
+/// The level an abort's FSC names, for the status kinds that name one
+/// (address size, translation, access flag and permission faults,
+/// `0b00xxxx` with the kind in bits 5:2 and the level in 1:0).
+fn fault_level(esr: u64) -> Option<u64> {
+    let fsc = esr & 0x3f;
+    (fsc >> 2 <= 0b0011).then_some(fsc & 0x3)
+}
+
+/// `ISS.FnV` (bit 10): FAR is not valid for this abort (a synchronous
+/// external abort), so there is no address to walk.
+fn far_not_valid(esr: u64) -> bool {
+    (esr >> 10) & 1 != 0
+}
+
+/// Walks the current EL's stage-1 tables (`TTBR0_ELx`, `TCR_ELx`) for `va`
+/// and prints one line: the regime's T0SZ and granule, then each level's
+/// entry (`L1[0x1f4] @ 0x3b2f1fa0 = 0x...`) down to the leaf or the first
+/// invalid one, named as table, block, page or invalid; for an invalid
+/// one, the entries either side of it, so a cleared page (zeros) and an
+/// overwritten one (anything else) read differently. Ends by saying
+/// whether the level agrees with the ESR's. Every table page is a
+/// firmware pointer, believed only inside RAM ([`in_ram`]) and marked
+/// under read. Only the 4 KB granule is walked; another is stated and
+/// left.
+fn walk_tables(va: u64, esr: u64) {
+    if far_not_valid(esr) {
+        line!("Ouroboros kernel:   tables: far not valid for this abort (FnV), not walked");
+        return;
+    }
+    let (ttbr, tcr): (u64, u64);
+    match crate::el2::current_el() {
+        2 => unsafe {
+            core::arch::asm!("mrs {0}, ttbr0_el2", "mrs {1}, tcr_el2", out(reg) ttbr, out(reg) tcr, options(nomem, nostack, preserves_flags))
+        },
+        1 => unsafe {
+            core::arch::asm!("mrs {0}, ttbr0_el1", "mrs {1}, tcr_el1", out(reg) ttbr, out(reg) tcr, options(nomem, nostack, preserves_flags))
+        },
+        el => {
+            line!("Ouroboros kernel:   tables: not walked at EL{el}");
+            return;
+        }
+    }
+    let t0sz = tcr & 0x3f;
+    let tg0 = (tcr >> 14) & 0b11;
+    let root = ttbr & crate::mmu::OUTPUT_ADDR_MASK;
+    out(format_args!("Ouroboros kernel:   tables for far: TTBR0 {root:#x}, T0SZ {t0sz}, "));
+    if tg0 != 0 {
+        line!("granule not 4K (TG0 {tg0}): not walked");
+        return;
+    }
+    // 4 KB granule: a 48-bit space starts at L0 (bits 47:39); T0SZ moves
+    // the start down one level per nine bits.
+    let (mut level, mut shift) = match t0sz {
+        16..=24 => (0u64, 39u32),
+        25..=33 => (1, 30),
+        34..=39 => (2, 21),
+        _ => {
+            line!("T0SZ out of range: not walked");
+            return;
+        }
+    };
+    out(format_args!("4K, from L{level}: "));
+    if va >> (64 - t0sz) != 0 {
+        line!("far is above the {}-bit input range, so no entry covers it", 64 - t0sz);
+        return;
+    }
+    let mut table = root;
+    let esr_level = fault_level(esr);
+    let agreement = |level: u64| match esr_level {
+        Some(l) if l == level => line!("; the ESR's level {l} agrees"),
+        Some(l) => line!("; the ESR says level {l}, which DISAGREES"),
+        None => line!("; the ESR names no level"),
+    };
+    loop {
+        if !in_ram(table, 4096) {
+            line!("table page {table:#x} outside RAM, not read");
+            return;
+        }
+        let idx = (va >> shift) & 0x1ff;
+        let entry_addr = table + idx * 8;
+        reading(entry_addr);
+        let entry = unsafe { (entry_addr as *const u64).read_volatile() };
+        reading(0);
+        out(format_args!("L{level}[{idx:#x}] @ {entry_addr:#x} = {entry:#x}"));
+        let valid = entry & 1 != 0;
+        let is_table = entry & 0b10 != 0;
+        // A block is legal only at L1 and L2 with the 4 KB granule: the
+        // encoding at L0 is reserved, and at L3 it is the invalid one.
+        if !valid || (!is_table && level != 1 && level != 2) {
+            // Invalid (or a reserved encoding): say which, and show the
+            // neighbours, so a cleared page and an overwritten one read
+            // differently.
+            out(format_args!(" (invalid), neighbours:"));
+            for n in [idx.wrapping_sub(2), idx.wrapping_sub(1), idx + 1, idx + 2] {
+                if n < 512 {
+                    let a = table + n * 8;
+                    reading(a);
+                    let e = unsafe { (a as *const u64).read_volatile() };
+                    reading(0);
+                    out(format_args!(" [{n:#x}]={e:#x}"));
+                }
+            }
+            agreement(level);
+            return;
+        }
+        if level == 3 || !is_table {
+            // The leaf: mapped, so an access-flag or permission fault's
+            // reason is in its bits.
+            out(format_args!(
+                " ({}): far is mapped at this level, AF={} AP={:#b} UXN={} PXN={}",
+                if level == 3 { "page" } else { "block" },
+                (entry >> 10) & 1,
+                (entry >> 6) & 0b11,
+                (entry >> 54) & 1,
+                (entry >> 53) & 1
+            ));
+            agreement(level);
+            return;
+        }
+        out(format_args!(" (table), "));
+        table = entry & crate::mmu::OUTPUT_ADDR_MASK;
+        level += 1;
+        shift -= 9;
+    }
 }
 
 /// The exception class and, for an abort, the fault status, in words.
@@ -569,7 +775,7 @@ fn describe_esr(esr: u64) {
     out(format_args!("ec={ec:#04x} ({class})"));
     if matches!(ec, 0x20 | 0x21 | 0x24 | 0x25) {
         let fsc = iss & 0x3f;
-        let level = fsc & 0x3;
+        let level = fault_level(esr).unwrap_or(fsc & 0x3);
         let status = match fsc >> 2 {
             0b0000 => "address size fault",
             0b0001 => "translation fault",
@@ -716,7 +922,11 @@ fn find_image(addr: u64) -> Option<Image> {
         if PLANT_WALK_FAULT.swap(false, Ordering::SeqCst) {
             // `\WALKFAULT`: the fault a bad entry would take, taken here on
             // purpose, once, with the image base named as under read.
-            unsafe { core::ptr::read_volatile(UNMAPPED as *const u8) };
+            unsafe { core::ptr::read_volatile(test_fault_address() as *const u8) };
+            line!(
+                "\nOuroboros kernel: the \\WALKFAULT read of {:#x} returned: this platform maps it, and the plant proved nothing",
+                test_fault_address()
+            );
         }
         let name = unsafe { pe_codeview_name(base as *const u8, size) };
         let file_guid = if path != 0 && in_ram(path, 20) {

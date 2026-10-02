@@ -7,14 +7,18 @@ Three boots of a copy of the staged ESP, each graded from the serial console:
 
 1. With the `EARLYFAULT` flag file at the ESP root (bootflags.rs), the
    kernel asks the firmware's own CopyMem to write at an address nothing
-   maps, just before the xHCI takeover. The fault is taken inside the
+   maps (the first byte past RAM), just before the xHCI takeover. The fault is taken inside the
    firmware's DXE core while the firmware's vectors are still installed,
    which is the case a Raspberry Pi 4's first serial boot showed with only
    the firmware's one line, `Synchronous Exception at 0x...`, to read. The
    boot must end in the reporter's dump: the reporter armed, an
    `EARLY EXCEPTION` line whose FAR is the address the kernel said it would
    write (read back from its own log line, so the test carries no copy of
-   the constant), the ESR decoded as a data abort at the same EL, `elr`
+   the constant), the ESR decoded as a data abort at the same EL, the
+   firmware's live translation tables walked for that address down to an
+   invalid entry at the level the ESR names (the instrument for the Pi 4's
+   firmware faults of 2026-10-02: an entry of 0 was cleared, anything else
+   invalid was overwritten), `elr`
    placed in a firmware image (the DXE core, named from its PE debug entry),
    at least one backtrace frame placed in the kernel by offset, the register
    rows BEFORE the first frame (the rows read nothing and the walk reads
@@ -194,6 +198,8 @@ def main():
         ("exception line, FAR the planted address",
          r"EARLY EXCEPTION \(firmware vectors\) type=0 esr=0x[0-9a-f]+ far=" + re.escape(far) + r" elr=0x"),
         ("esr decoded as a same-EL data abort", r"esr: ec=0x25 \(data abort, same EL\), fsc=0x[0-9a-f]+ \(.*\), write"),
+        ("tables walked to an invalid entry at the ESR's level",
+         r"tables for far: TTBR0 0x[0-9a-f]+, T0SZ \d+, 4K, from L\d: (L\d\[0x[0-9a-f]+\] @ 0x[0-9a-f]+ = 0x[0-9a-f]+ \(table\), )*L\d\[0x[0-9a-f]+\] @ 0x[0-9a-f]+ = 0x[0-9a-f]+ \(invalid\), neighbours:( \[0x[0-9a-f]+\]=0x[0-9a-f]+)+; the ESR's level \d agrees"),
         ("elr placed in a firmware image", r"elr 0x[0-9a-f]+ = \S*DxeCore\S* \(firmware file [0-9a-f-]+\) @ 0x[0-9a-f]+ \+ 0x"),
         ("a frame placed in the kernel", r"frame \d+: fp=0x[0-9a-f]+ lr=0x[0-9a-f]+ = kernel \+ 0x"),
         ("register rows", r"x28=0x[0-9a-f]{16} x29=0x[0-9a-f]{16} x30=0x[0-9a-f]{16}"),
@@ -201,6 +207,7 @@ def main():
     ], [
         ("firmware's own line", r"Synchronous Exception at"),
         ("shell", r"shell ready"),
+        ("a walk that disagrees with the ESR", r"DISAGREES"),
     ], aborts, "some", order=[
         ("register rows before the first frame", r"x28=0x[0-9a-f]{16}", r"frame 1: fp="),
     ]))
