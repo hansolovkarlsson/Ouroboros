@@ -765,6 +765,22 @@ run: esp
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
+# `run` with the firmware handing the kernel off at EL2, as the Raspberry
+# Pi's does (virtualization=on gives the guest an EL2 and the firmware runs
+# there): the dev loop for the EL1 drop, docs/roadmap/roadmap-el1-drop.md.
+# The kernel's `running at EL2 after the exit` line is the check.
+run-el2: esp
+	qemu-system-aarch64 \
+		-machine virt,virtualization=on \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
 # Same as `run`, plus a virtio-net device on virtio-mmio with QEMU's
 # user-mode (SLIRP) networking - the dev loop for the network stack
 # (kernel/src/virtio_net.rs, docs/ROADMAP.md's Stage 1). SLIRP answers ARP

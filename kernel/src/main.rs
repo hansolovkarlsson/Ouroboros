@@ -11,6 +11,7 @@ mod console;
 mod devicetree;
 mod dtranges;
 mod earlyfault;
+mod el2;
 mod exceptions;
 mod fbconsole;
 mod fbdev;
@@ -513,6 +514,11 @@ fn main() -> Status {
         console::install(console);
         console::println!("Ouroboros kernel: boot services exited, console live");
     }
+    // The exception level the firmware handed off at, stated before any
+    // `_EL1` register is relied on: at EL2 (the Raspberry Pi) every write
+    // after this line goes to a register the running level does not use.
+    // See `el2.rs`.
+    console::println!("Ouroboros kernel: running at EL{} after the exit", el2::current_el());
 
     // SAFETY: called after exit_boot_services, with the memory map that
     // call returned. Up to five regions (`mmu::MAX_EXTRA_DEVICES`): the
