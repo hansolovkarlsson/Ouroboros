@@ -1331,7 +1331,7 @@ be reviewed after the fact from the saved screenshots.
 > `github.com/hansolovkarlsson/Proem`. `~/Projects/CPP` no longer exists. A
 > mention of CPP in older records means Proem.
 >
-> **What Proem asks of Ouroboros, accepted 2026-10-01, for later.** Three
+> **What Proem asks of Ouroboros, accepted 2026-10-01, for later.** Four
 > handoff notes, triaged and accepted; none is started. Each note carries its
 > evidence, its **Done when** and the reply below in full.
 >
@@ -1369,6 +1369,16 @@ be reviewed after the fact from the saved screenshots.
 >       the finish line's command, and the plan's index line. Before the
 >       plan merges, so `main` never carries the old names. Note:
 >       [`handoffs/2026-10-01-from-workspace-proem-rename.md`](handoffs/2026-10-01-from-workspace-proem-rename.md).
+> - [ ] **new** **`unlink` in the C port.** picolibc's `remove` calls
+>       `unlink`, which nothing in `libc/src` defines, so linking Proem (which
+>       removes its `-o` output after a failed run, as Clang does) fails on
+>       the undefined symbol. One more `np_request` in `libc/src/file.c`,
+>       `NP_RM` on the resolved path beside `open`'s `NP_OPEN`; 0 on success,
+>       -1 with `errno` (`ENOENT` for a missing file) from step 2 of the
+>       C-hosting plan, so it lands with or after that step. Done when a C
+>       program on a booted image removes a file it made, `ls` no longer
+>       shows it, and a second `remove` gives -1 and `ENOENT`. Note:
+>       [`handoffs/2026-10-01-from-proem-unlink.md`](handoffs/2026-10-01-from-proem-unlink.md).
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
