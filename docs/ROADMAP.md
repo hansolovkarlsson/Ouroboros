@@ -1194,6 +1194,23 @@ The small open tails those arcs deliberately left:
 >       The next instrument is the reporter walking the firmware's live
 >       tables for `far` and printing each level's entry, zero or garbage;
 >       `testing-pi4.md` section 6 has the reading and the suspects.*
+>       ***Answered the same evening (#190's walk, first boot): the
+>       firmware's root table reads as stack frames. The Pi firmware's
+>       stack is 16 KB (`PcdCPUCorePrimaryStackSize 0x4000`) at the top of
+>       RAM with its page tables directly below, and the kernel, running on
+>       it, overflows into them; the TLB hides it until a cold page is
+>       walked. Every firmware fault since 2026-10-01 is this. The fix is a
+>       kernel-owned stack from the first instruction: the next item.***
+> - [ ] **fix** **The kernel runs on the firmware's stack, which on the Pi
+>       is 16 KB with the page tables beneath it.** Switch to a stack the
+>       kernel owns (a static in the image, 256 KB) as the entry's first
+>       act, before any call; keep it through the exit and the drop
+>       (`SP_EL1` is set from `SP`). `earlyfault::arm`'s stack bound then
+>       comes from the kernel's own stack. Check: the rigs on QEMU
+>       unchanged, and `NOXHCI` boots on the Pi 4 that no longer fault in
+>       firmware code, with the walk's line never again showing garbage in
+>       the tables; a mutation (the switch disabled) must bring the fault
+>       back on the board.
 > - [x] **The early fault reporter: the kernel's own dump for a fault taken
 >       under the firmware's vectors.** `earlyfault.rs` registers a handler
 >       for synchronous exceptions through `EFI_CPU_ARCH_PROTOCOL` right

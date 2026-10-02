@@ -884,6 +884,52 @@ the VideoCore writing into ARM memory. The dump's frames 4 to 16 are in the
 kernel: with the linker map (`scripts/efi-symbol.py`) they say which
 kernel call the firmware was printing for.
 
+**2026-10-02, evening: the answer, from a card at `185a137` (#190, the
+tables walked at the fault).** First `NOXHCI` boot, a fault inside the
+boot-identity variable read, with the walk's line:
+
+```
+EARLY EXCEPTION (firmware vectors) type=0 esr=0x96000007 far=0x3b0038 elr=0x39be0384 sp=0x3b3fc930 ...
+  esr: ec=0x25 (data abort, same EL), fsc=0x07 (translation fault at level 3), read
+  tables for far: TTBR0 0x3b3fa000, T0SZ 20, 4K, from L0: L0[0x0] @ 0x3b3fa000 = 0x3b3fa038 (invalid), neighbours: [0x1]=0x388 [0x2]=0x0; the ESR says level 3, which DISAGREES
+  elr 0x39be0384 = VarBlockServiceDxe.dll @ 0x39bd0000 + 0x10384
+  frames 1-5 VariableRuntimeDxe.dll, 6-9 kernel, 10-13 DxeCore/BdsDxe, 14-15 at 0x26e28/0x26f88 (in no loaded image)
+```
+
+Read: the firmware's ROOT translation table, at `0x3b3fa000`, does not hold
+page-table entries. Its first entry is `0x3b3fa038`, a pointer into the
+same page 0x38 further on, the second is `0x388`, the third 0: the shape of
+stack frames (a saved frame pointer, a small count), not descriptors. The
+firmware's stack is 16 KB (`PcdCPUCorePrimaryStackSize` is `0x4000` in
+pftf's `RPi4.dsc`) at the top of RAM, `0x3b3fc000..0x3b400000` (`sp` is
+`0x3b3fc930` here, the DXE core's frames at `0x3b3ff7xx`), and its page
+tables lie directly below it, the root two pages down. The kernel runs on
+that stack, a debug build with large frames, and its deepest calls (plus
+the firmware's timer interrupt landing on top, which is the intermittence)
+push below `0x3b3fc000` and write stack frames over the tables. The TLB
+keeps the firmware running on cached translations until some cold page is
+walked, and that walk fails at whatever level's page the overflow reached:
+level 3 on 10-01 and this morning, level 2 this afternoon (the
+framebuffer), level 0 now. The ESR's "level 3" against the walk's "level
+0" is the TLB too: the hardware walk that faulted used the still-cached
+upper levels and failed at a clobbered L3 page; by the time the reporter
+walked from memory, the root itself read as garbage.
+
+So the suspect is the kernel, as the morning's list had first: not a write
+outside what it owns, but its stack, which was never its own. QEMU's
+firmware gives it 128 KB with the tables elsewhere, so no rig could see
+this. Frames 14 and 15, at `0x26e28` and `0x26f88` below RAM, are the same
+unplaceable addresses as 10-01's: the firmware's own entry stack frames in
+TF-A or the FD at `0x0..0x3b0000`, outside the walk's bound and correctly
+refused now.
+
+**The fix is a stack the kernel owns**, switched to as its first act,
+before anything the firmware or the kernel pushes can reach the tables;
+until then every boot of a debug kernel on this board is a dice roll, and
+even a release build only shrinks the frames. Everything after the exit
+runs on the same stack today too (the drop sets `SP_EL1` to it), so the
+switch matters past the exit as well.
+
 ---
 
 ## 7. Risks, ranked
