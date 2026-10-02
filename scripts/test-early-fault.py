@@ -83,7 +83,12 @@ def boot(esp, until, machine, then=None):
         machine=machine,
     )
     try:
-        if guest.wait_for(until, timeout=TIMEOUT) and then:
+        matched = guest.wait_for(until, timeout=TIMEOUT)
+        # Only a boot that reached the shell gets the dwell and the typed
+        # line: `until` also names the failure lines, and typing into a
+        # halted guest would put a `help` in a transcript that never had a
+        # shell, and cost 25 s more per failed run.
+        if matched and then and re.search(r"shell ready", guest.transcript()):
             time.sleep(DWELL)
             guest.type_line(then)
             guest.wait_for(r"builtins:|EXCEPTION|halted", timeout=20)

@@ -854,7 +854,10 @@ fn overlaps(region: (u64, u64), start: u64, end: u64) -> bool {
 /// rebuild; on a platform that hands off at EL2 (the Raspberry Pi) the
 /// `_EL1` registers are set from EL2 and the switch is the `eret` that
 /// drops into them (`docs/roadmap/roadmap-el1-drop.md`). The switch half
-/// takes the build half's result, so it cannot be called without it.
+/// takes the build half's result, so it cannot be called without it, and
+/// both halves are private: this composition is the one entry, called
+/// once from `main.rs`, since the build half takes the memory map by value
+/// and stashes it.
 pub unsafe fn install_identity_map(
     memory_map: MemoryMapOwned,
     el0_regions: [(u64, u64); MAX_EL0_REGIONS],
@@ -868,7 +871,7 @@ pub unsafe fn install_identity_map(
 /// The non-cacheable ranges the build half planned, which the switch half
 /// cleans from the cache and checks through the hardware walker once the
 /// tables are live. Only [`build_identity_map`] makes one.
-pub struct Planned {
+struct Planned {
     ranges: [(u64, u64); MAX_NC_RANGES],
     count: usize,
 }
@@ -880,7 +883,7 @@ pub struct Planned {
 ///
 /// # Safety
 /// As [`install_identity_map`].
-pub unsafe fn build_identity_map(
+unsafe fn build_identity_map(
     memory_map: MemoryMapOwned,
     el0_regions: [(u64, u64); MAX_EL0_REGIONS],
     extra_devices: &[(u64, u64)],
@@ -915,7 +918,7 @@ pub unsafe fn build_identity_map(
 /// # Safety
 /// [`build_identity_map`] must have returned `planned` on this boot, after
 /// `exit_boot_services`, with IRQs masked and `exceptions::install` done.
-pub unsafe fn switch_to_identity_map(planned: Planned) {
+unsafe fn switch_to_identity_map(planned: Planned) {
     let view = crate::tasks::current_index();
     if crate::el2::current_el() == 2 {
         unsafe { crate::el2::drop_to_el1(el1_regime(view)) };

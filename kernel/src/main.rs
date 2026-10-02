@@ -478,7 +478,8 @@ fn main() -> Status {
     // handler and halts, instead of taking the whole VM down the way an
     // untested address once did on Parallels. On an EL2 handoff (the
     // Raspberry Pi) this VBAR_EL1 write takes effect at the drop to EL1
-    // inside `mmu::switch_to_identity_map` below; until then a fault still
+    // inside `mmu::install_identity_map` below (its switch half, which
+    // writes the vectors once more from `el2.rs`); until then a fault still
     // goes through the firmware's EL2 vectors (and `earlyfault.rs`).
     exceptions::install();
     if fb_console_forced {

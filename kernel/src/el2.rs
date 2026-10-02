@@ -71,8 +71,13 @@ fn gic_sysregs_implemented() -> bool {
 const SCTLR_EL1_MMU_ON: u64 = 0x30d0_198d;
 /// `HCR_EL2.RW`: EL1 is AArch64. Nothing else: no `VM` (no stage 2), no
 /// `TGE`, no `IMO`/`FMO`/`AMO` (interrupts route to EL1, where the firmware
-/// had them routed to EL2), no traps.
+/// had them routed to EL2), no `E2H`, no traps.
 const HCR_EL2_RW: u64 = 1 << 31;
+/// `HCR_EL2.E2H`: with it set, every `_EL1` register name at EL2 reaches
+/// the `_EL2` register instead (VHE, ARMv8.1). The Cortex-A72 has no VHE,
+/// but the drop does not assume it: `HCR_EL2` is written first, and the
+/// vectors again after it.
+const HCR_EL2_E2H: u64 = 1 << 34;
 /// `CNTHCTL_EL2.EL1PCTEN | EL1PCEN` (with `HCR_EL2.E2H` 0): EL1 may read
 /// the physical counter and use the physical timer, which `timer.rs` does.
 const CNTHCTL_EL2_EL1_PHYS: u64 = (1 << 0) | (1 << 1);
@@ -95,11 +100,40 @@ const ICC_SRE_EL2_SRE_ENABLE: u64 = (1 << 0) | (1 << 3);
 /// tables map.
 ///
 /// # Safety
-/// Must be called exactly once, at EL2, after `exit_boot_services` with
-/// IRQs masked; `mmu::build_identity_map` must have written the tables
-/// `regime` points at and `exceptions::install` must have written
-/// `VBAR_EL1`. Nothing after this returns runs at EL2 again.
+/// Must be called exactly once, at EL2, after `exit_boot_services`;
+/// `mmu::build_identity_map` must have written the tables `regime` points
+/// at. Masks D, A, I and F itself and leaves them masked, as the EL1 path
+/// does. Nothing after this returns runs at EL2 again.
 pub unsafe fn drop_to_el1(regime: El1Regime) {
+    // Masked, all four, as mmu::switch_full's first instruction masks them:
+    // until the eret the firmware's HCR_EL2 routes FIQ and SError to its
+    // own vectors, and nothing here can be interrupted half-way through
+    // rewriting the hypervisor controls. Then HCR_EL2 before any `_EL1`
+    // register: with E2H set (not on this core, but not assumed) the `_EL1`
+    // names below would reach the `_EL2` registers of the level still
+    // running. The firmware's value is read first so the log can say if
+    // the vector write made before this went that way.
+    let hcr_before: u64;
+    unsafe {
+        asm!(
+            "msr daifset, #0xf",
+            "mrs {before}, hcr_el2",
+            "msr hcr_el2, {hcr}",
+            "isb",
+            before = out(reg) hcr_before,
+            hcr = in(reg) HCR_EL2_RW,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    if hcr_before & HCR_EL2_E2H != 0 {
+        crate::console::println!(
+            "Ouroboros kernel: WARNING: handed off with HCR_EL2.E2H set ({hcr_before:#x}); the VBAR_EL1 write before the drop went to VBAR_EL2"
+        );
+    }
+    // The vectors, again, now that the name reaches EL1's register for
+    // certain: exceptions::install wrote them before, under the firmware's
+    // HCR_EL2.
+    crate::exceptions::install();
     let gicv3 = gic_sysregs_implemented();
     if gicv3 {
         // SAFETY: the register exists, by the ID register read above.
@@ -118,9 +152,8 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             "tlbi vmalle1",            // a regime that has never run: drop anything cached for it
             "dsb ish",
             "msr sctlr_el1, {sctlr}",  // MMU and caches on, from the first EL1 instruction
-            // The hypervisor controls: a plain AArch64 EL1 with no stage
-            // 2, no traps, its own interrupts, its own counter and timer.
-            "msr hcr_el2, {hcr}",
+            // The rest of the hypervisor controls: no traps, EL1's own
+            // counter and timer, the firmware's timer off.
             "msr cnthctl_el2, {cnthctl}",
             "msr cntvoff_el2, xzr",
             "msr cnthp_ctl_el2, xzr",  // the firmware's EL2 timer, still armed from boot services
@@ -143,7 +176,6 @@ pub unsafe fn drop_to_el1(regime: El1Regime) {
             tcr = in(reg) regime.tcr,
             ttbr0 = in(reg) regime.ttbr0,
             sctlr = in(reg) SCTLR_EL1_MMU_ON,
-            hcr = in(reg) HCR_EL2_RW,
             cnthctl = in(reg) CNTHCTL_EL2_EL1_PHYS,
             cptr = in(reg) CPTR_EL2_NO_TRAPS,
             cpacr = in(reg) CPACR_EL1_FPEN,

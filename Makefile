@@ -753,9 +753,12 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 # (non-legacy) register interface - QEMU defaults virtio-mmio to legacy
 # mode, confirmed via `-device virtio-mmio,help`'s printed default, kept
 # only for old-guest compatibility this project has no need to imitate.
+# `-machine` for `run`: `run-el2` overrides it (a target-specific variable
+# reaches the prerequisite's recipe), so the two boot one device list.
+MACHINE ?= virt
 run: esp
 	qemu-system-aarch64 \
-		-machine virt \
+		-machine $(MACHINE) \
 		-cpu cortex-a72 \
 		-m 512M \
 		-bios $(OVMF) \
@@ -768,18 +771,11 @@ run: esp
 # `run` with the firmware handing the kernel off at EL2, as the Raspberry
 # Pi's does (virtualization=on gives the guest an EL2 and the firmware runs
 # there): the dev loop for the EL1 drop, docs/roadmap/roadmap-el1-drop.md.
-# The kernel's `running at EL2 after the exit` line is the check.
-run-el2: esp
-	qemu-system-aarch64 \
-		-machine virt,virtualization=on \
-		-cpu cortex-a72 \
-		-m 512M \
-		-bios $(OVMF) \
-		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=hd0 \
-		-device virtio-blk-device,drive=hd0 \
-		-device virtio-rng-device \
-		-global virtio-mmio.force-legacy=false \
-		-nographic
+# The kernel's `running at EL2 after the exit` line, then `dropped from EL2
+# to EL1`, is the check. Not a copy of `run`: the same recipe with MACHINE
+# overridden, so a change to `run`'s devices reaches this boot too.
+run-el2: MACHINE = virt,virtualization=on
+run-el2: run
 
 # Same as `run`, plus a virtio-net device on virtio-mmio with QEMU's
 # user-mode (SLIRP) networking - the dev loop for the network stack
