@@ -4,10 +4,12 @@
 //! Diagnostics for the bench, not configuration: every flag here names what
 //! it switches off, and the boot log says when one is set.
 //!
-//! One flag is not a diagnostic but a test fault: `\MSDSTALL` makes the
+//! Two flags are not diagnostics but test faults: `\MSDSTALL` makes the
 //! USB stick stall, so QEMU can exercise the bulk recovery that no ordinary
-//! run reaches. It belongs on a test image, and `usb_msd.rs` ignores it for
-//! any stick that is not QEMU's.
+//! run reaches (it belongs on a test image, and `usb_msd.rs` ignores it for
+//! any stick that is not QEMU's); `\EARLYFAULT` takes a fault inside the
+//! firmware's code before the exit, so QEMU can exercise the early fault
+//! reporter (`earlyfault.rs`) that only a board has needed.
 //!
 //! Read before `exit_boot_services`, through the same image file system
 //! `bootid.rs` uses, and before the xHCI takeover in `main.rs`, which can take
@@ -49,6 +51,16 @@ const FB_CONSOLE: &CStr16 = cstr16!("\\FBCON");
 /// answers these differently, and could hang.
 const MSD_STALL: &CStr16 = cstr16!("\\MSDSTALL");
 
+/// `\EARLYFAULT`: the second test fault. Just before the xHCI takeover,
+/// where the Pi 4's first serial boot died with only the firmware's one
+/// line to show, ask the firmware to copy into an address nothing maps,
+/// so the fault is taken inside the firmware's own code while its vectors
+/// are still installed. What the serial console then shows is the early
+/// fault reporter's dump (`earlyfault.rs`), or, if the reporter is not
+/// armed, the firmware's line alone. For `scripts/test-early-fault.py`;
+/// on a card it only ends the boot with that dump.
+const EARLY_FAULT: &CStr16 = cstr16!("\\EARLYFAULT");
+
 /// Which boot flags are set, read once by [`read`].
 #[derive(Clone, Copy, Default)]
 pub struct Flags {
@@ -60,6 +72,8 @@ pub struct Flags {
     pub fb_console: bool,
     /// [`MSD_STALL`]
     pub msd_stall: bool,
+    /// [`EARLY_FAULT`]
+    pub early_fault: bool,
 }
 
 /// Reads every flag file at the ESP's root, opening the volume once. If the
@@ -88,5 +102,6 @@ pub fn read() -> Flags {
         xhci_no_write: present(XHCI_NO_WRITE),
         fb_console: present(FB_CONSOLE),
         msd_stall: present(MSD_STALL),
+        early_fault: present(EARLY_FAULT),
     }
 }
