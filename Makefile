@@ -226,7 +226,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -1567,6 +1567,18 @@ PURE_CRATES := accounts regex ed25519 clusterkeys ninep-abi
 check-relocs:
 	@./scripts/check-relocs.sh
 
+# The xHCI driver's two DMA barriers in the built kernel (2026-10-03). No QEMU
+# rig can fail for a missing one: QEMU's controller sees guest memory as the
+# CPU last wrote it, and only the Pi's non-coherent PCIe controller needs
+# them. xhci.rs keeps each barrier and its store as a naked function of three
+# fixed instructions, and the script finds both in the image and the calls to
+# them. Shown to fail by deleting a barrier, putting a `nop` before the store,
+# and routing write32 around the function. PART OF `test`, since a check
+# outside the default suite decays; checks the PROFILE that `make sdcard`
+# stages (debug unless PROFILE says otherwise).
+check-xhci-barriers: build
+	@python3 scripts/check-xhci-barriers.py $(KERNEL)
+
 # The published website vs the documents it abridges. docs/ is served live by
 # GitHub Pages and docs/site/*.html is hand-written - an abridgement, not a
 # rendering - so nothing notices when a source moves on and its page does not,
@@ -1620,6 +1632,8 @@ test:
 	@# public page keeps serving a confident, stale answer. See check-site above.
 	@echo "== published site vs its sources"
 	@python3 scripts/check-site-freshness.py || exit 1
+	@echo "== xHCI barriers in the kernel image"
+	@$(MAKE) --no-print-directory check-xhci-barriers || exit 1
 	@echo "== all pure-crate host tests passed, and clippy clean including tests"
 
 clean:
