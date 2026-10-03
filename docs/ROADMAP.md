@@ -1409,6 +1409,39 @@ The small open tails those arcs deliberately left:
 >       answers one question; take it after that round whatever it shows.
 >       *(That round answered: the split write alone brought the
 >       controller up. This stays a correctness fix, not a board fix.)*
+>       *Built 2026-10-03 on `pi4/xhci-handover-barrier`: a `dsb sy`
+>       before DCBAAP, CRCR, the ERST block and Run in `init_inner`. No
+>       QEMU boot can tell it from the old code; the check is the image,
+>       four more `dsb sy` in debug and release alike.*
+> - [ ] **fix** **A TRB's cycle bit is not ordered after its other words.**
+>       `ring_push` writes all four dwords of a TRB in one `write_volatile`,
+>       cycle bit included, with no barrier before dword 3. On the Pi the
+>       pool is non-cacheable and the controller may re-read the dequeue
+>       TRB without a new doorbell, so it can see a fresh cycle bit over a
+>       stale buffer pointer or length. Write dwords 0 to 2, a write
+>       barrier, then dword 3 (Linux's `queue_trb` does `wmb()` before
+>       `field[3]`); the Link TRB's cycle rewrite on a wrap the same. The
+>       write-side twin of `event_ring_pop`'s read order. Found by the
+>       review of `pi4/xhci-handover-barrier`; take it next.
+> - [ ] **fix** **The barrier before an xHCI register write is placed by
+>       hand.** Every doorbell and, since `pi4/xhci-handover-barrier`, the
+>       four handover writes in `init_inner` carry their own `dsb sy`; the
+>       next register that hands the controller memory can be written
+>       without one, and QEMU will not show it. Put the barrier in the
+>       write path (a `write32`/`write64` that orders, as Linux's `writel`
+>       does, or a required handover variant), so the barrier-free form
+>       cannot be spelled. Settle the one odd site with it: `event_ring_pop`
+>       writes ERDP after `dmb sy`, every other site `dsb sy`, and no
+>       comment says why. Then the redundant barrier before Run goes, and
+>       the manual `dsb` count stops being the only check. Found by the
+>       same review.
+> - [ ] **fix** **ERDP is programmed after ERSTBA.** `init_inner` writes
+>       ERSTSZ, ERSTBA, ERDP; the xHCI spec's initialization order (4.2)
+>       is ERSTSZ, ERDP, ERSTBA, so a controller that starts on the
+>       segment at the ERSTBA write could sample a stale dequeue pointer.
+>       Check edk2's and Linux's order before changing it, and change it in
+>       a round of its own: it changes what the board sees. Found by the
+>       same review.
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
