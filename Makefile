@@ -1570,14 +1570,15 @@ check-relocs:
 # The xHCI driver's two DMA barriers in the built kernel (2026-10-03). No QEMU
 # rig can fail for a missing one: QEMU's controller sees guest memory as the
 # CPU last wrote it, and only the Pi's non-coherent PCIe controller needs
-# them. xhci.rs keeps each barrier and its store as a naked function of three
-# fixed instructions, and the script finds both in the image and the calls to
-# them. Shown to fail by deleting a barrier, putting a `nop` before the store,
-# and routing write32 around the function. PART OF `test`, since a check
-# outside the default suite decays; checks the PROFILE that `make sdcard`
-# stages (debug unless PROFILE says otherwise).
+# them. xhci.rs keeps each barrier and its store as a naked function of fixed
+# instructions, and the script finds each in the image, once, and a call to it.
+# Shown to fail by deleting a barrier, putting a `nop` before the store, and
+# routing write32 itself around its function. It does NOT see one new raw
+# register write added beside the others (see the script's docstring). PART
+# OF `test`, since a check outside the default suite decays; checks the
+# PROFILE that `make sdcard` stages (debug unless PROFILE says otherwise).
 check-xhci-barriers: build
-	@python3 scripts/check-xhci-barriers.py $(KERNEL)
+	@python3 scripts/check-xhci-barriers.py $(KERNEL) $(dir $(OBJCOPY))
 
 # The published website vs the documents it abridges. docs/ is served live by
 # GitHub Pages and docs/site/*.html is hand-written - an abridgement, not a

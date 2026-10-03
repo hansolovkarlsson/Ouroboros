@@ -627,17 +627,24 @@ unsafe fn write32(addr: u64, val: u32) {
     unsafe { mmio_write32(addr, val) }
 }
 
-/// The barrier and the register store as three fixed instructions, never
+/// The barrier and the register store as fixed instructions, never
 /// inlined, so the image holds `dsb sy; str w1, [x0]; ret` whatever the
 /// profile or the compiler does around it: QEMU has no write buffer to show
 /// the barrier missing, so `scripts/check-xhci-barriers.py` (run by `make
-/// test`) finds this sequence in the built kernel, and the calls to it.
+/// test`) finds this sequence in the built kernel, and a call to it.
 /// A Rust `asm!` barrier before a `write_volatile` compiles to different
 /// shapes in debug and release, and no check can tell its `dsb sy` from
 /// another module's.
 #[unsafe(naked)]
 unsafe extern "C" fn mmio_write32(addr: u64, val: u32) {
     core::arch::naked_asm!("dsb sy", "str w1, [x0]", "ret");
+}
+
+/// [`write64`]'s form of [`mmio_write32`], fixed for the same check: `dsb
+/// sy; str w1, [x0]; str w2, [x0, #4]; ret`, low half first.
+#[unsafe(naked)]
+unsafe extern "C" fn mmio_write64(addr: u64, lo: u32, hi: u32) {
+    core::arch::naked_asm!("dsb sy", "str w1, [x0]", "str w2, [x0, #4]", "ret");
 }
 
 /// `ring_publish`'s flip, for the same reason: `dmb oshst; str w1, [x0];
@@ -655,12 +662,12 @@ unsafe extern "C" fn publish_cycle_word(ptr: *mut u32, val: u32) {
 /// store crosses the BCM2711's PCIe bridge, which has not been shown to
 /// carry one intact; the first command timed out on the board while the
 /// store was 64-bit (2026-10-03).
-/// Through [`write32`], so each half carries its barrier.
+/// One barrier, then both halves: the barrier orders everything before
+/// the low half, and the high half needs nothing more (ERDP is written on
+/// every event, so a second `dsb sy` there would be paid on the keyboard's
+/// hot path for nothing).
 unsafe fn write64(addr: u64, val: u64) {
-    unsafe {
-        write32(addr, val as u32);
-        write32(addr + 4, (val >> 32) as u32);
-    }
+    unsafe { mmio_write64(addr, val as u32, (val >> 32) as u32) }
 }
 unsafe fn read64(addr: u64) -> u64 {
     unsafe { read32(addr) as u64 | ((read32(addr + 4) as u64) << 32) }

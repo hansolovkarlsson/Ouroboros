@@ -10,20 +10,32 @@ missing one is a timing window, not a reliable failure. So the check is on
 the image instead.
 
 `kernel/src/xhci.rs` keeps each barrier and the store it orders as one naked
-function, three fixed instructions whatever the profile:
+function, fixed instructions whatever the profile:
 
-    mmio_write32:        dsb sy;    str w1, [x0]; ret   (every register write)
-    publish_cycle_word:  dmb oshst; str w1, [x0]; ret   (a TRB batch's flip)
+    mmio_write32:        dsb sy;    str w1, [x0]; ret                    (32-bit registers)
+    mmio_write64:        dsb sy;    str w1, [x0]; str w2, [x0, #4]; ret  (64-bit registers)
+    publish_cycle_word:  dmb oshst; str w1, [x0]; ret                    (a TRB batch's flip)
 
 This script disassembles the kernel image (`llvm-objdump`, from the
 `llvm-tools` rustup component the Makefile already needs) and requires each
-sequence exactly once, and at least one `bl` to each: present, and in use.
-The PE image carries no symbols, so the sequences are found by their
-instructions, which is why they are fixed in assembly rather than left to
-the compiler. Deleting either barrier, putting an instruction between it and
-its store, or routing the writes around the function fails it.
+sequence exactly once, and at least one call to each (`bl`, or `b` for a
+tail call): present, and in use. The PE image carries no symbols, so the
+sequences are found by their instructions, which is why they are fixed in
+assembly rather than left to the compiler. Deleting a barrier, putting an
+instruction between it and its store, or routing `write32`/`write64`/the
+flip around its function fails it.
 
-Usage: check-xhci-barriers.py [IMAGE]   (default: the debug kernel)
+What it cannot see: ONE new raw `write_volatile` to a register somewhere
+else in `xhci.rs`. The functions are still called by everything else, so
+the check stays green; that every register write goes through `write32` or
+`write64` is a property of the source, not of this check. And "exactly
+once" is deliberate: a second copy of the same instructions elsewhere
+in the kernel fails it, loudly, rather than letting either copy stand in
+for the other.
+
+Usage: check-xhci-barriers.py [IMAGE] [LLVM_TOOLS_DIR]
+  IMAGE defaults to the debug kernel; LLVM_TOOLS_DIR to the llvm-tools bin
+  directory of the active toolchain (the Makefile passes the one it uses).
 """
 
 import re
@@ -35,24 +47,31 @@ DEFAULT_IMAGE = "target/aarch64-unknown-uefi/debug/BOOTAA64.efi"
 
 SEQUENCES = {
     "mmio_write32 (dsb sy; str w1, [x0]; ret)": ["dsb sy", "str w1, [x0]", "ret"],
+    "mmio_write64 (dsb sy; str w1, [x0]; str w2, [x0, #4]; ret)": ["dsb sy", "str w1, [x0]", "str w2, [x0, #0x4]", "ret"],
     "publish_cycle_word (dmb oshst; str w1, [x0]; ret)": ["dmb oshst", "str w1, [x0]", "ret"],
 }
 
 LINE = re.compile(r"^\s*([0-9a-f]+):\s+(\S+)(?:\s+(.*?))?\s*$")
-BL = re.compile(r"^0x([0-9a-f]+)")
+CALL = re.compile(r"^(?:bl|b) 0x([0-9a-f]+)")
 
 
 def objdump() -> str:
+    if len(sys.argv) > 2:
+        return str(Path(sys.argv[2]) / "llvm-objdump")
     sysroot = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True, check=True).stdout.strip()
     host = next(l.split(": ", 1)[1] for l in subprocess.run(["rustc", "-vV"], capture_output=True, text=True, check=True).stdout.splitlines() if l.startswith("host: "))
-    tool = Path(sysroot) / "lib" / "rustlib" / host / "bin" / "llvm-objdump"
+    return str(Path(sysroot) / "lib" / "rustlib" / host / "bin" / "llvm-objdump")
+
+
+def checked_objdump() -> str:
+    tool = Path(objdump())
     if not tool.exists():
         sys.exit(f"check-xhci-barriers: {tool} not found; run `rustup component add llvm-tools`")
     return str(tool)
 
 
 def instructions(image: str) -> list[tuple[int, str]]:
-    out = subprocess.run([objdump(), "-d", "--no-show-raw-insn", image], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run([checked_objdump(), "-d", "--no-show-raw-insn", image], capture_output=True, text=True, check=True).stdout
     insns = []
     for line in out.splitlines():
         m = LINE.match(line)
@@ -70,11 +89,10 @@ def main() -> int:
     texts = [t for _, t in insns]
     calls = {}
     for _, t in insns:
-        if t.startswith("bl "):
-            m = BL.match(t[3:])
-            if m:
-                target = int(m.group(1), 16)
-                calls[target] = calls.get(target, 0) + 1
+        m = CALL.match(t)
+        if m:
+            target = int(m.group(1), 16)
+            calls[target] = calls.get(target, 0) + 1
 
     ok = True
     for name, seq in SEQUENCES.items():
