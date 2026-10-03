@@ -885,3 +885,64 @@ which need nothing but the context the firmware had already saved, were never
 printed. The instrument lost its most reliable output to its least reliable
 one. Rows first, then the walk, and the walk bounded, is on the roadmap.
 
+## Three more, and the one that worked (2026-10-02)
+
+The day the Pi 4's firmware faults were finally read. Four of them in two
+days, at four addresses, in four kernel steps, and the dumps from the
+reporter built the day before were in hand for all but the first.
+
+**A rig blind by platform.** Every check this kernel has ran on QEMU, whose
+firmware gives the loader a 128 KB stack with its page tables somewhere else.
+The Pi firmware gives it 16 KB with the tables directly beneath. The kernel's
+deepest pre-exit calls, a debug build with the firmware's timer interrupt
+landing on top, pushed past that bottom and wrote frames over the tables,
+and the TLB kept the firmware running until a cold page was walked. No rig
+could have seen it, and none did: the two-day search went through the xHCI,
+the exit, the console and the variable store because those were where the
+cold walks happened. The 2026-09-27 section of this document says QEMU
+differs from the Pi exactly where the work lives; this is the sharpest case
+yet, since the difference was in the one thing the kernel never measured
+because it never owned it, the stack it was entered on. The fix is a stack of
+its own; the lesson for the instruments is that a kernel's log should say
+what it was given (`PcdCPUCorePrimaryStackSize` is a number in a public
+file) before it runs on it.
+
+**A bound narrower than it claimed, and honest about it.** The reporter's
+image walk was bounded to the memory map's RAM ranges, capped at 64, and the
+cap was applied before contiguous descriptors were merged. The Pi's map has
+more than 64, so the walk kept the lowest ones and dropped the top of RAM,
+where every firmware image lives, and a dump placed `elr` and three
+firmware frames in no image. What caught it was the instrument's own line:
+`bounded to 3 RAM range(s) ... (the map had more; the rest are outside the
+walk)`. An instrument that states its own narrowing is caught on its first
+bad reading; one that does not is caught on its first wrong one. The cap
+now counts merged ranges, with the smallest giving way at it, and the line
+lists the ranges.
+
+**A diagnosis written six times and measured never.** The fault at address
+0 that the EL1 drop closed was written down as "the firmware's leftover EL2
+timer" in the plan, the rig's docstring, two testing guides, a Makefile
+comment and the module doc, then hedged to "most likely the kernel's own
+tick" in all six, before a reviewer read the dump's fields: `spsr=0x800003c9`,
+EL2h with interrupts masked, `elr=0`, an instruction abort at the same EL.
+No interrupt can produce that. It was the first `eret` into task 0, made at
+EL2, restoring the firmware's stale `ELR_EL2`. The fields had been on the
+screen all along; what was missing was anyone matching them to the
+mechanism rather than reasoning from what the kernel had done last. This is
+[`true-when-written`](true-when-written-postmortem.md)'s class as much as
+this one's, and it is recorded there too.
+
+**And the one that worked.** After the third firmware fault the question was
+whether the firmware's table entry was zero (cleared) or garbage (overwritten),
+and the instrument for it was a line in the dump: walk the firmware's live
+tables for `far` and print each level's entry. It was built and checked on
+QEMU in an afternoon, with the planted test fault moved to the first byte
+past RAM so the walk had entries to read and the rig could require the
+walk's level to agree with the ESR's. Its first boot on the board printed
+`L0[0x0] @ 0x3b3fa000 = 0x3b3fa038 (invalid), neighbours: [0x1]=0x388
+[0x2]=0x0`, a saved frame pointer and a count where descriptors should be,
+and the two-day search ended. The spine of this document is that the
+observer is a check too. Its converse held today: an observer that reads the
+machine, rather than the registers the kernel wrote or the story the kernel
+told, answers in one boot what six written diagnoses could not.
+
