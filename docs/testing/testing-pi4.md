@@ -1233,6 +1233,42 @@ pins did not make contact or whose link did not train, it appears at High
 Speed behind the hub. The reformat between the boots cannot have changed
 that, since enumeration reads no sector.
 
+**2026-10-03, evening: the ordering fixes on the board.** Card and stick
+staged from `main` at `e738302`, which carries #196 (a `dsb sy` before the
+registers that hand the controller its rings) and #197 (TRBs published as
+a batch, the first one's cycle bit flipped last behind `dmb oshst`). The
+stick in a blue socket, the keyboard behind the hub. That the card carried
+this build is read from the image, since a boot does not yet say which
+build it is: `image @ 0x37760000..0x379bd000` is `0x25d000` bytes, the
+`SizeOfImage` of the `BOOTAA64.EFI` built for the staging, after both
+merges.
+
+```
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: port 3: not enabled after the hot reset; before it 0x00281203 (CCS 1, PED 1, PLS 0, speed 4), after it 0x00200311 (CCS 1, PED 0, PLS 8, speed 0)
+xhci: port 3: enabled after the reset: 0x00201203 (CCS 1, PED 1, PLS 0, speed 4)
+xhci: port 3 reset, speed=4
+xhci: port 1: hub with 4 ports (speed=3, TT think time 3)
+xhci: port 1.4: device connected, reset, speed=1
+xhci: storage bulk endpoints configured (IN 0x81 DCI 3, OUT 0x02 DCI 4)
+xhci: keyboard ready
+usb-msd: INQUIRY -> vendor='Lexar' product='USB Flash Drive'
+usb-msd block device installed
+```
+
+The same session as the two boots before it: the stick on SuperSpeed root
+port 3, through the same Polling window #194 waits out; the keyboard on
+port 1.4; `exFAT mounted at partition LBA 2048`; `login: root`; `ls`,
+`mount`, `man ls`, `ls Users/` from the stick; `shutdown` powered the board
+off. No fault, no timeout, no `WARNING`. Every request on the way went
+through the batch publish: Enable Slot and Address Device for three slots,
+each device's descriptors and configuration as control transfers (Setup,
+Data and Status published together), the hub's, the keyboard's and the
+storage endpoints' commands, and every bulk transfer `fsd` made. **#196 and
+#197 break nothing on the board.** That is all a boot can say about them:
+the board ran without them too, and what they fix is a window this boot did
+not have to hit.
+
 ---
 
 ## 7. Risks, ranked

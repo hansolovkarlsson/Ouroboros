@@ -1413,8 +1413,9 @@ The small open tails those arcs deliberately left:
 >       before DCBAAP, CRCR, the ERST block and Run in `init_inner`. No
 >       QEMU boot can tell it from the old code; the check is the image,
 >       four more `dsb sy` in debug and release alike. Merged as #196,
->       with its review's three findings on the roadmap below. Done; not
->       yet booted on the board, which came up without it.*
+>       with its review's three findings on the roadmap below. Done; on the
+>       board 2026-10-03 with #197, a full session, no fault (`testing-pi4.md`
+>       section 6).*
 > - [x] **fix** **A TRB's cycle bit is not ordered after its other words.**
 >       `ring_push` writes all four dwords of a TRB in one `write_volatile`,
 >       cycle bit included, with no barrier before dword 3. On the Pi the
@@ -1449,7 +1450,9 @@ The small open tails those arcs deliberately left:
 >       in the ring with its cycle bit 0 and timed out, so the held TRB is
 >       not the controller's until the flip; in the release image all 19
 >       `dmb oshst` have the flip at `+0xc` as the first store after them.
->       Merged as #197. Done; not yet booted on the board.*
+>       Merged as #197. Done; on the board 2026-10-03, a full session over
+>       the USB keyboard and a SuperSpeed stick, no fault (`testing-pi4.md`
+>       section 6).*
 > - [x] **fix** **`INT_RING` is not zeroed when the keyboard is set up.**
 >       `activate_keyboard` writes only the ring's Link TRB, where the EP0
 >       and bulk ring setups zero the whole ring first. A second activation
