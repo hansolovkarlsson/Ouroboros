@@ -1408,26 +1408,26 @@ sdcard:
 	@test -n "$(SDCARD)" && test -d "$(SDCARD)" || { \
 		echo "sdcard: SDCARD='$(SDCARD)' is not a mounted card, e.g. make sdcard SDCARD=/Volumes/OUROBOROS"; exit 1; }
 	$(MAKE) esp
-	SDCARD="$(SDCARD)" KEEP_ETC="$(KEEP_ETC)" FIRMWARE="$(FIRMWARE)" EJECT="$(EJECT)" \
+	STICK="$(STICK_MODE)" SDCARD="$(SDCARD)" KEEP_ETC="$(KEEP_ETC)" FIRMWARE="$(FIRMWARE)" EJECT="$(EJECT)" \
 		ESP_DIR="$(ESP_DIR)" CACHE_DIR="$(BUILD_DIR)/cache" ./scripts/sdcard.sh
 
 # Stages the same tree on a USB stick, the Pi's only disk once the kernel
 # runs (the SD slot has no driver after exit_boot_services, testing-pi4.md
 # section 6): what `mount -a` mounts and where /bin, /etc and /man come
-# from. scripts/sdcard.sh with STICK=1: the same guards (a mounted volume on
-# removable or external media, empty or already an Ouroboros stick), no
-# firmware, FAT32 or exFAT. It never formats; in Disk Utility, MS-DOS (FAT)
-# with the Master Boot Record scheme gives FAT32 on a stick over 2 GB.
+# from. The sdcard target with STICK_MODE=1, so one recipe and one script
+# (scripts/sdcard.sh, STICK=1, whose header lists the differences): the same
+# guards, no firmware and no EFI tree, FAT32 or exFAT on partition 1 of an
+# MBR disk, and its /etc kept by default. It never formats; in Disk Utility,
+# MS-DOS (FAT) with the Master Boot Record scheme gives FAT32 on a stick
+# over 2 GB.
 #
 #   make stick STICK=/Volumes/STICK
-#   make stick STICK=/Volumes/STICK KEEP_ETC=1   # keep the stick's /etc
+#   make stick STICK=/Volumes/STICK KEEP_ETC=0   # re-stage the stick's /etc
 #   make stick STICK=/Volumes/STICK EJECT=1
 stick:
 	@test -n "$(STICK)" && test -d "$(STICK)" || { \
 		echo "stick: STICK='$(STICK)' is not a mounted stick, e.g. make stick STICK=/Volumes/STICK"; exit 1; }
-	$(MAKE) esp
-	STICK=1 SDCARD="$(STICK)" KEEP_ETC="$(KEEP_ETC)" EJECT="$(EJECT)" \
-		ESP_DIR="$(ESP_DIR)" ./scripts/sdcard.sh
+	$(MAKE) sdcard SDCARD="$(STICK)" STICK_MODE=1
 
 # Cut a release: build the release-profile disk images and package the
 # downloadable artifacts (esp.img.zip + esp.hdd.zip + SHA256SUMS) under

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Stage the Raspberry Pi 4 / Pi 400 boot card: the pftf UEFI firmware at the
-# root of a FAT volume, and Ouroboros's ESP tree (build/esp) on top of it.
+# root of a FAT volume, and Ouroboros's ESP tree (build/esp) on top of it. Or,
+# with STICK=1, the USB stick that is the Pi's disk once the kernel runs.
 # docs/testing/testing-pi4.md section 4 is the guide; this is its procedure as
 # one command.
 #
@@ -11,16 +12,29 @@
 #   SDCARD=/Volumes/OUROBOROS EJECT=1 ./scripts/sdcard.sh      # eject when done
 #   STICK=1 SDCARD=/Volumes/STICK ./scripts/sdcard.sh          # a USB stick (make stick)
 #
-# STICK=1 stages the same tree on a USB stick instead, the Pi's only disk
-# after exit_boot_services (the SD slot has no driver then, testing-pi4.md
-# section 6): no firmware, FAT32 or exFAT (fsd mounts both), and "already
-# ours" means EFI/ORBS/INIT.CFG at its root rather than RPI_EFI.fd. The
-# same guards apply, and it never formats either.
+# STICK=1 stages a USB stick instead, the Pi's only disk after
+# exit_boot_services (the SD slot has no driver then, testing-pi4.md section
+# 6): fsd mounts it, and /bin, /etc and /man come from it. Differences from
+# a card:
+#   - no firmware, and no EFI tree: the kernel and the boot programs are the
+#     card's, nothing at runtime reads EFI from the disk, and a stick with
+#     its own EFI/BOOT/BOOTAA64.EFI could be booted by the firmware in the
+#     card's place, running a stale kernel;
+#   - FAT32 or exFAT (what fsd mounts and macOS writes), on the FIRST
+#     partition of an MBR disk, since fsd mounts the first partition it can
+#     probe and a GUID-scheme stick from Disk Utility has a hidden EFI
+#     partition there;
+#   - "already ours" is a .ouroboros-stick file at the root, written before
+#     anything is copied, so an interrupted first run is still ours on the
+#     next; a volume with RPI_EFI.fd (a card) is refused;
+#   - etc is KEPT by default (KEEP_ETC=0 re-stages it), since the stick is
+#     where accounts and passwords made on the Pi live.
 #
 # It NEVER formats. Erasing a disk takes a /dev/diskN, and a wrong N erases
 # some other disk; that step stays by hand (testing-pi4.md section 4). What
-# this writes to must already be a mounted FAT volume on removable or external
-# media, and must be empty or already a Pi card (RPI_EFI.fd at its root).
+# this writes to must already be a mounted FAT volume (FAT32 or exFAT for a
+# stick) on removable or external media, and must be empty or already ours
+# (RPI_EFI.fd at a card's root, .ouroboros-stick at a stick's).
 #
 # The firmware is installed only when the card has none (or FIRMWARE=1). The
 # pftf firmware has no NVRAM: its settings (the 3 GB limit, ACPI/devicetree
@@ -32,13 +46,15 @@
 # UART overlay is set by hand.
 #
 # What Ouroboros owns on the card is computed from build/esp, not listed here:
-# every top-level entry except EFI, plus every entry under EFI. Those are
+# every top-level entry except EFI, plus every entry under EFI (not on a
+# stick). Those are
 # replaced whole, so a program dropped from the tree also leaves the card.
 # Two are state, not build output:
 #   etc    re-staged by default (the dev passwd, shadow, group and cluster
-#          files, like every other image target), which resets accounts and
-#          passwords made on the Pi. KEEP_ETC=1 keeps the card's files and only
-#          adds the ones a newer tree introduced.
+#          files, like every other image target) on a card; kept by default
+#          on a stick, where it holds the accounts made on the Pi. KEEP_ETC=1
+#          keeps the files there and only adds the ones a newer tree
+#          introduced; KEEP_ETC=0 re-stages.
 #   Users  the home directories: only the ones missing are created, never
 #          replaced, since they hold what was made on the Pi.
 # Anything else on the card (the firmware's files, a user's own) is untouched.
@@ -54,19 +70,20 @@ FW_URL="https://github.com/pftf/RPi4/releases/download/${FW_VERSION}/${FW_ZIP}"
 ESP_DIR="${ESP_DIR:-build/esp}"
 CACHE_DIR="${CACHE_DIR:-build/cache}"
 SDCARD="${SDCARD:-}"
-KEEP_ETC="${KEEP_ETC:-0}"
 FIRMWARE="${FIRMWARE:-0}"
 EJECT="${EJECT:-0}"
 STICK="${STICK:-0}"
 
 if [ "$STICK" = 1 ]; then
-    ME=stick; MARKER=EFI/ORBS/INIT.CFG; WHAT="an Ouroboros stick"
+    ME=stick; MARKER=.ouroboros-stick; WHAT="an Ouroboros stick"
+    KEEP_ETC="${KEEP_ETC:-1}"
 else
     ME=sdcard; MARKER=RPI_EFI.fd; WHAT="a Pi card"
+    KEEP_ETC="${KEEP_ETC:-0}"
 fi
 die() { echo "$ME: $*" >&2; exit 1; }
 
-# --- The card: refuse anything that does not look like one. -----------------
+# --- The volume: refuse anything that does not look like one. ---------------
 
 [ -n "$SDCARD" ] || die "set SDCARD to the mounted volume, e.g. make sdcard SDCARD=/Volumes/OUROBOROS, make stick STICK=/Volumes/STICK"
 [ -d "$SDCARD" ] || die "$SDCARD is not a directory (is it mounted?)"
@@ -85,8 +102,14 @@ FS=$(field 'File System Personality')
 if [ "$STICK" = 1 ]; then
     case "$FS" in
         "MS-DOS FAT32"|ExFAT) ;;
-        *) die "$CARD is '$FS'; fsd mounts FAT32 or exFAT from a stick (in Disk Utility: MS-DOS (FAT) on a stick over 2 GB, or ExFAT)" ;;
+        *) die "$CARD is '$FS'; fsd mounts FAT32 or exFAT from a stick (in Disk Utility: MS-DOS (FAT) on a stick over 2 GB, or ExFAT, with the Master Boot Record scheme)" ;;
     esac
+    DEV=$(field 'Device Identifier')
+    WHOLE=$(field 'Part of Whole')
+    SCHEME=$(diskutil info "$WHOLE" 2>/dev/null | sed -n 's/^ *Content (IOContent): *//p' | head -n 1)
+    [ "$SCHEME" = FDisk_partition_scheme ] && [ "$DEV" = "${WHOLE}s1" ] || \
+        die "$CARD is $DEV on a '$SCHEME' disk; fsd mounts the first partition it can, so the stick must be partition 1 of a Master Boot Record disk (Disk Utility's GUID scheme puts a hidden EFI partition first)"
+    [ ! -e "$CARD/RPI_EFI.fd" ] || die "$CARD holds RPI_EFI.fd: it is a Pi card, not a stick (make sdcard stages a card)"
 else
     case "$FS" in
         MS-DOS*) ;;
@@ -106,6 +129,12 @@ if [ ! -e "$CARD/$MARKER" ]; then
 fi
 
 [ -f "$ESP_DIR/EFI/ORBS/INIT.CFG" ] || die "$ESP_DIR is not a staged Ouroboros ESP tree (run make esp)"
+
+# A stick is marked as ours before anything is copied, so a run that stops
+# partway (a full stick, a pulled cable) leaves one the next run accepts.
+if [ "$STICK" = 1 ] && [ ! -e "$CARD/$MARKER" ]; then
+    printf 'An Ouroboros stick, staged by make stick (scripts/sdcard.sh).\n' > "$CARD/$MARKER"
+fi
 
 # --- Firmware: pinned, checksummed, cached, installed once. -----------------
 
@@ -156,7 +185,13 @@ place() {
                 echo "$ME: etc kept (KEEP_ETC=1), missing files added"
                 return
             fi
-            [ -e "$CARD/etc" ] && echo "$ME: etc re-staged: accounts and passwords made on the Pi are reset (KEEP_ETC=1 keeps them)" ;;
+            if [ -e "$CARD/etc" ]; then
+                if [ "$STICK" = 1 ]; then
+                    echo "$ME: etc re-staged (KEEP_ETC=0): accounts and passwords made on the Pi are reset"
+                else
+                    echo "$ME: etc re-staged (KEEP_ETC=1 keeps the card's)"
+                fi
+            fi ;;
         Users)
             for home in "$ESP_DIR/Users"/*; do
                 [ -e "$home" ] || continue
@@ -175,12 +210,17 @@ place() {
     mv "$CARD/$1.sdnew" "$CARD/$1"
 }
 
-mkdir -p "$CARD/EFI"
-for entry in "$ESP_DIR"/* "$ESP_DIR"/EFI/*; do
+for entry in "$ESP_DIR"/*; do
     rel=${entry#"$ESP_DIR"/}
     [ "$rel" = EFI ] && continue
     place "$rel"
 done
+if [ "$STICK" != 1 ]; then
+    mkdir -p "$CARD/EFI"
+    for entry in "$ESP_DIR"/EFI/*; do
+        place "${entry#"$ESP_DIR"/}"
+    done
+fi
 
 # FAT holds no xattrs, so macOS spills them into ._* sidecars; -X above avoids
 # most, this catches the rest. The directories are macOS's own bookkeeping,

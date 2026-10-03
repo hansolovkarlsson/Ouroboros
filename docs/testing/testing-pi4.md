@@ -353,31 +353,49 @@ UEFI variable, which lives in `RPI_EFI.fd` and so survives.
 
 The card stops being readable once the kernel runs (see "The storage
 surprise" in §6), so the stick is the only disk the system has: `mount -a`
-mounts it, and `/bin`, `/etc` and `/man` come from it. It needs the same tree
-as the card, and no firmware:
+mounts it, and `/bin`, `/etc` and `/man` come from it.
 
 ```sh
-make stick STICK=/Volumes/<stick>          # add KEEP_ETC=1 to keep its /etc, EJECT=1 to eject
+make stick STICK=/Volumes/<stick>          # KEEP_ETC=0 re-stages its /etc, EJECT=1 ejects
 ```
 
-This is `scripts/sdcard.sh` with `STICK=1`: the same guards (a mounted volume
-under `/Volumes` on removable or external media, never formatted, and either
-empty or already an Ouroboros stick, which means `EFI/ORBS/INIT.CFG` at its
-root), the same copy-and-swap and the same `etc`/`Users` rules. The
-differences: no firmware, and the volume must be FAT32 or exFAT, the two
-`fsd` mounts that macOS can write. FAT16, which Disk Utility makes on a stick
-of 2 GB or less, is refused. Format it once by hand, in Disk Utility as
-MS-DOS (FAT) or ExFAT with the Master Boot Record scheme. A stick staged this
-way also carries `EFI/BOOT/BOOTAA64.EFI`, so the kernel could boot from it
-too (§6, "the takeover now happens last"); the card still boots it today.
+Format it once by hand: in Disk Utility, **MS-DOS (FAT) or ExFAT with the
+Master Boot Record scheme**. MS-DOS (FAT) gives FAT32 on a stick over 2 GB.
+The default GUID scheme puts a hidden EFI partition first, and `fsd` mounts
+the first partition it can, so `make stick` refuses a volume that is not
+partition 1 of an MBR disk. FAT16 is refused too: `fsd` mounts FAT32 and
+exFAT.
 
-*Built 2026-10-03, checked only on `hdiutil` images:* a fresh FAT32 image and
-an exFAT one staged; a restage; refused were an image holding a foreign file,
-a FAT16 image, `make sdcard` on a staged stick and `make stick` with no
-volume. `make sdcard` on a fresh image still installs the firmware and keeps
-it on a second run. A real stick may differ in what macOS does to a mounted
-volume, as the first real card did (`blind-instruments-postmortem.md`, "A
-disk image that was not the card").
+`make stick` is `make sdcard` in stick mode (`scripts/sdcard.sh` with
+`STICK=1`): the same guards (a mounted volume under `/Volumes` on removable
+or external media, never formatted, empty or already ours) and the same
+copy-and-swap. What differs:
+
+- **No firmware and no `EFI` tree.** The kernel and the boot programs are
+  the card's, and nothing at runtime reads `EFI` from the disk. A stick
+  carrying its own `EFI/BOOT/BOOTAA64.EFI` could be booted by the firmware
+  in the card's place, running whatever kernel was last staged on it.
+- **"Ours" is a `.ouroboros-stick` file at the root**, written before
+  anything is copied, so a run that stops partway leaves a stick the next
+  run accepts. A volume with `RPI_EFI.fd` is a card and is refused.
+- **`etc` is kept by default**, since the stick is where accounts and
+  passwords made on the Pi live; files a newer tree adds are still copied.
+  `KEEP_ETC=0` re-stages it and says so.
+
+**Stage the card and the stick from the same build.** Nothing checks that
+they match yet (roadmap: "A Pi boot from a card and a stick of different
+builds"), and old programs on a stick under a new kernel look like a kernel
+bug.
+
+*Built 2026-10-03, checked only on `hdiutil` images:* FAT32 and exFAT staged
+(no `EFI`, the marker present); a restage keeping `etc`; `KEEP_ETC=0`
+re-staging it; a stick with its marker but half its tree accepted; refused
+were a GUID-scheme volume (partition 2), a FAT16 volume, a volume holding a
+foreign file, `make stick` on a staged card and `make sdcard` on a staged
+stick. `make sdcard` on a fresh image still installs the firmware once. A
+real stick may differ in what macOS does to a mounted volume, as the first
+real card did (`blind-instruments-postmortem.md`, "A disk image that was not
+the card").
 
 ---
 

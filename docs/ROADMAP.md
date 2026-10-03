@@ -1267,6 +1267,17 @@ The small open tails those arcs deliberately left:
 >       port 1 (`2109:3431`, 4 ports) configured, and a boot-protocol
 >       keyboard on port 1.4 brought to `keyboard ready`, the first USB
 >       device on this board. So the 64-bit store was the cause. Done.*
+> - [ ] **new** **A Pi boot from a card and a stick of different builds.**
+>       Since `make stick` (2026-10-03) a Pi boot has two staged halves: the
+>       card holds the kernel and the boot servers, the stick `/bin`,
+>       `/etc` and `/man`. Nothing checks they came from the same build, so
+>       a card restaged after an ABI or protocol change runs old programs
+>       from the stick, which looks like a kernel bug. Stamp a build
+>       identity (a hash of `build/esp`) on both and compare: at boot, once
+>       the stick mounts, and in the log line that says which build is
+>       running, which a boot also still lacks (owed since the wrong-tree
+>       card of 2026-10-01). Until then, restage both together. Found by
+>       the review of `pi4/stick-target`.
 > - [ ] **fix** **A USB3 stick on the Pi 4's SuperSpeed root port comes out
 >       of its reset with speed 0.** Same boot: `port 3 reset, speed=0`,
 >       `unsupported port speed 0`, at boot and again on `mount -a`'s
