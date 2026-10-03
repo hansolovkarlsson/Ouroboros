@@ -349,6 +349,54 @@ root, is left alone. Re-staging `EFI/ORBS/BOOTID.TXT` rolls the boot counter's
 file store back, as every image does; the counter's preferred store is the
 UEFI variable, which lives in `RPI_EFI.fd` and so survives.
 
+### The USB stick
+
+The card stops being readable once the kernel runs (see "The storage
+surprise" in §6), so the stick is the only disk the system has: `mount -a`
+mounts it, and `/bin`, `/etc` and `/man` come from it.
+
+```sh
+make stick STICK=/Volumes/<stick>          # KEEP_ETC=0 re-stages its /etc, EJECT=1 ejects
+```
+
+Format it once by hand: in Disk Utility, **MS-DOS (FAT) or ExFAT with the
+Master Boot Record scheme**. MS-DOS (FAT) gives FAT32 on a stick over 2 GB.
+The default GUID scheme puts a hidden EFI partition first, and `fsd` mounts
+the first partition it can, so `make stick` refuses a volume that is not
+partition 1 of an MBR disk. FAT16 is refused too: `fsd` mounts FAT32 and
+exFAT.
+
+`make stick` is `make sdcard` in stick mode (`scripts/sdcard.sh` with
+`STICK=1`): the same guards (a mounted volume under `/Volumes` on removable
+or external media, never formatted, empty or already ours) and the same
+copy-and-swap. What differs:
+
+- **No firmware and no `EFI` tree.** The kernel and the boot programs are
+  the card's, and nothing at runtime reads `EFI` from the disk. A stick
+  carrying its own `EFI/BOOT/BOOTAA64.EFI` could be booted by the firmware
+  in the card's place, running whatever kernel was last staged on it.
+- **"Ours" is a `.ouroboros-stick` file at the root**, written before
+  anything is copied, so a run that stops partway leaves a stick the next
+  run accepts. A volume with `RPI_EFI.fd` is a card and is refused.
+- **`etc` is kept by default**, since the stick is where accounts and
+  passwords made on the Pi live; files a newer tree adds are still copied.
+  `KEEP_ETC=0` re-stages it and says so.
+
+**Stage the card and the stick from the same build.** Nothing checks that
+they match yet (roadmap: "A Pi boot from a card and a stick of different
+builds"), and old programs on a stick under a new kernel look like a kernel
+bug.
+
+*Built 2026-10-03, checked only on `hdiutil` images:* FAT32 and exFAT staged
+(no `EFI`, the marker present); a restage keeping `etc`; `KEEP_ETC=0`
+re-staging it; a stick with its marker but half its tree accepted; refused
+were a GUID-scheme volume (partition 2), a FAT16 volume, a volume holding a
+foreign file, `make stick` on a staged card and `make sdcard` on a staged
+stick. `make sdcard` on a fresh image still installs the firmware once. A
+real stick may differ in what macOS does to a mounted volume, as the first
+real card did (`blind-instruments-postmortem.md`, "A disk image that was not
+the card").
+
 ---
 
 ## 5. Firmware settings to check before the first boot
@@ -511,7 +559,8 @@ it are unreachable from then on: running a program goes through `fsd`
 (`spawn_stage` in the shell reports `NO_FS` without a disk), so with no stick
 the shell has its builtins and nothing else. Every runtime filesystem test:
 `ls`, `cat`, `write`, `mount`, `erase disk`, `partition`, `format` — needs the
-**USB 3 stick in a blue port**, as on Parallels. This is not a Pi limitation; it is the
+**USB 3 stick in a blue port**, as on Parallels, staged with `make stick`
+(§4) so that `/bin` is there to run. This is not a Pi limitation; it is the
 same architecture that made USB-MSD necessary there in the first place.
 
 ### Bisecting a hang with boot flag files
