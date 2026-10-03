@@ -201,6 +201,7 @@ const HCCPARAMS1_CSZ: u32 = 1 << 2;
 // Operational register offsets, from `op_base` (= BAR base + CAPLENGTH).
 const OP_USBCMD: u64 = 0x00;
 const OP_USBSTS: u64 = 0x04;
+const OP_PAGESIZE: u64 = 0x08;
 const OP_CRCR: u64 = 0x18;
 const OP_DCBAAP: u64 = 0x30;
 const OP_CONFIG: u64 = 0x38;
@@ -240,8 +241,8 @@ const EP_TYPE_BULK_OUT: u32 = 2;
 const EP_TYPE_BULK_IN: u32 = 6;
 
 const MAX_SLOTS_ENABLED: usize = 8;
-// The Pi 4's VL805 asks for 31 (HCSPARAMS2 0xfc000031, 2026-10-03); QEMU's
-// controller asks for fewer than 8, which is all this used to hold.
+// The Pi 4's VL805 asks for 31 (HCSPARAMS2 0xfc000031, 2026-10-03); this
+// held 8 until then. The count each controller asks for is logged at init.
 const MAX_SCRATCHPAD_BUFFERS: usize = 32;
 const CMD_RING_SIZE: usize = 16;
 const EP0_RING_SIZE: usize = 16;
@@ -325,6 +326,7 @@ pub enum Error {
     BadHubDescriptor,
     PortNotEnabled,
     TooManyScratchpadBuffers(u32),
+    PageSizeNot4K(u32),
     CommandTimeout,
     CommandFailed(u32),
     TransferTimeout,
@@ -351,6 +353,7 @@ impl core::fmt::Display for Error {
             Error::BadHubDescriptor => write!(f, "hub descriptor unreadable or out of range (1-15 ports)"),
             Error::UnsupportedSpeed(speed) => write!(f, "unsupported port speed {speed} (only Low/Full/High/SuperSpeed/SuperSpeedPlus are implemented)"),
             Error::TooManyScratchpadBuffers(n) => write!(f, "controller wants {n} scratchpad buffers, only {MAX_SCRATCHPAD_BUFFERS} are supported"),
+            Error::PageSizeNot4K(reg) => write!(f, "controller's PAGESIZE is {reg:#x}, and scratchpad buffers here are 4 KB pages"),
             Error::CommandTimeout => write!(f, "command ring: timed out waiting for a completion event"),
             Error::CommandFailed(code) => write!(f, "command failed, completion code {code}"),
             Error::TransferTimeout => write!(f, "transfer: timed out waiting for a transfer event"),
@@ -415,19 +418,19 @@ static DMA_POOL: DmaPool = DmaPool {
     output_device_contexts: [const { Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32])) }; MAX_DEVICES],
     input_context: Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 33])),
     dcbaa: Aligned64(UnsafeCell::new([0; MAX_SLOTS_ENABLED + 1])),
-    scratchpad_array: Aligned64(UnsafeCell::new([0; MAX_SCRATCHPAD_BUFFERS])),
+    erst: Aligned64(UnsafeCell::new([ErstEntry { base: 0, size: 0, _reserved: 0 }])),
     command_ring: Aligned64(UnsafeCell::new([[0; 4]; CMD_RING_SIZE])),
     ep0_rings: [const { Aligned64(UnsafeCell::new([[0; 4]; EP0_RING_SIZE])) }; MAX_DEVICES],
     int_ring: Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE])),
     bulk_in_ring: Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE])),
     bulk_out_ring: Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE])),
     event_ring: Aligned64(UnsafeCell::new([[0; 4]; EVENT_RING_SIZE])),
-    erst: Aligned64(UnsafeCell::new([ErstEntry { base: 0, size: 0, _reserved: 0 }])),
     ctrl_buf: Aligned64(UnsafeCell::new([0; 64])),
     int_buf: Aligned64(UnsafeCell::new([0; 8])),
     usb_cbw: Aligned64(UnsafeCell::new([0; 31])),
     usb_csw: Aligned64(UnsafeCell::new([0; 13])),
     usb_data: Aligned64(UnsafeCell::new([0; 512])),
+    scratchpad_array: Aligned64(UnsafeCell::new([0; MAX_SCRATCHPAD_BUFFERS])),
 };
 
 // xHCI placement rules for the pool's contents (xHCI 1.2 Table 6-1),
@@ -1776,7 +1779,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
 
     let max_slots = hcsparams1 & 0xff;
     let max_ports = (hcsparams1 >> 24) & 0xff;
-    console::println!("Ouroboros kernel: xhci: controller @ {bar_base:#x}, max_slots={max_slots} max_ports={max_ports}");
+    let scratchpad_count = (((hcsparams2 >> 27) & 0x1f) | (((hcsparams2 >> 21) & 0x1f) << 5)) as usize;
+    console::println!("Ouroboros kernel: xhci: controller @ {bar_base:#x}, max_slots={max_slots} max_ports={max_ports} scratchpads={scratchpad_count}");
 
     // Wait for the controller to report ready before touching anything
     // else, then reset it unconditionally - same "don't assume a clean
@@ -1794,9 +1798,15 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     let slots_enabled = (max_slots as usize).min(MAX_SLOTS_ENABLED) as u32;
     unsafe { write32(op_base + OP_CONFIG, slots_enabled) };
 
-    let scratchpad_count = (((hcsparams2 >> 27) & 0x1f) | (((hcsparams2 >> 21) & 0x1f) << 5)) as usize;
     if scratchpad_count > MAX_SCRATCHPAD_BUFFERS {
         return Err(Error::TooManyScratchpadBuffers(scratchpad_count as u32));
+    }
+    // A scratchpad buffer is one controller page, PAGESIZE-sized and
+    // -aligned; bit 0 is 4 KB, the size of `Page`. A controller that
+    // cannot do 4 KB would write past each one into its neighbour.
+    let pagesize = unsafe { read32(op_base + OP_PAGESIZE) };
+    if scratchpad_count > 0 && pagesize & 1 == 0 {
+        return Err(Error::PageSizeNot4K(pagesize));
     }
     let dcbaa = unsafe { &mut *DCBAA.0.get() };
     if scratchpad_count > 0 {

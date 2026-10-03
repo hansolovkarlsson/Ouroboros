@@ -1236,7 +1236,24 @@ The small open tails those arcs deliberately left:
 >       non-cacheable with the rest). QEMU cannot check the number, since
 >       its controller asks for fewer than 8; the check is the board: the
 >       driver goes past `DCBAAP` and the port scan reports the VL805's
->       ports. `testing-pi4.md` §6.
+>       ports. `testing-pi4.md` §6. *Built 2026-10-03 on
+>       `pi4/scratchpad-32`: 32 pages; the array moved to the pool's end
+>       and the ERST into its slot (the layout assertions refused the first
+>       order); the count logged on the controller line; a controller whose
+>       `PAGESIZE` lacks 4 KB refused rather than handed 4 KB buffers. QEMU:
+>       `test-usb-hub` and `test-el1-drop` pass. The board boot is pending.*
+> - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
+>       The EP0 rings sit on a 256-byte boundary only because the 64-byte
+>       ERST precedes them; the compile-time assertions catch a bad order,
+>       but each layout change means reshuffling. A ring type aligned to its
+>       own size (`#[repr(align(256))]` for the 16-TRB rings) makes every
+>       order safe. Found by the review of `pi4/scratchpad-32`.
+> - [ ] **new** **Scratchpad pages sized to what the controller asks.** The
+>       pool keeps 32 pages (128 KB) in `.bss` on every platform, used only
+>       by the VL805 so far, and caps the count at 32 where the spec allows
+>       1023. Taking them from boot-services `AllocatePages` before the
+>       exit, sized from `HCSPARAMS2`, removes both. Lower priority than the
+>       board check. Found by the same review.
 > - [ ] **new** **A guard page under the kernel's stack.** `KERNEL_STACK`
 >       has a canary word at its base that both fault reporters check and
 >       name, which turns an overflow into a line in the next dump rather
