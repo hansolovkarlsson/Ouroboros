@@ -104,7 +104,13 @@ a separate kernel binary. That split hasn't happened yet.
 
 `main()` never returns `Status::SUCCESS` — it logs a boot message and parks
 the core in a `wfe` spin loop (`halt()` in `kernel/src/main.rs`) instead.
-Returning to firmware is a dead end for kernel code.
+Returning to firmware is a dead end for kernel code. **Since 2026-10-02 its
+first act is to leave the firmware's stack for the kernel's own** (256 KB
+in the image's `.bss`, `KERNEL_STACK`), then `kernel_main` runs there and
+never returns: on the Raspberry Pi the firmware's stack is 16 KB with its
+page tables directly below it, and the kernel overflowed it into them,
+which was every firmware fault the board showed (`testing-pi4.md`
+section 6). The first log line says which stack it is on.
 
 `main()` now calls `boot::exit_boot_services(None)` partway through and
 permanently leaves the UEFI environment. Everything before that call may use
@@ -635,7 +641,8 @@ docs/                every document is annotated in full in `docs/README.md` - r
   research/          synthesis notes on MINIX/Plan 9/Helix/Redox, the GUI stack, and where the design should go next
 
 kernel/              every file annotated in full in `docs/source-map.md`; each also carries its own `//!`
-  src/main.rs        #[entry]: UEFI init, console/MADT/PSCI discovery, loader, ExitBootServices, then exceptions/mmu/xhci/storage/net/gic/timer/tasks
+  src/main.rs        #[entry]: the switch to the kernel's own 256 KB stack first (the Pi firmware's is 16 KB over its page tables), then
+                     UEFI init, console/MADT/PSCI discovery, loader, ExitBootServices, then exceptions/mmu/xhci/storage/net/gic/timer/tasks
   src/uart.rs        PL011 console driver (post-ExitBootServices only)
   src/uart16550.rs   16550 console driver - PCI-discovered consoles, genuinely different hardware
   src/devicetree.rs  console discovery via the UEFI devicetree (dead end on QEMU and Parallels)

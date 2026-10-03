@@ -210,6 +210,8 @@ def main():
         ("a walk that disagrees with the ESR", r"DISAGREES"),
     ], aborts, "some", order=[
         ("register rows before the first frame", r"x28=0x[0-9a-f]{16}", r"frame 1: fp="),
+        ("a kernel frame, then a firmware frame: the walk crossed from the kernel's stack to the firmware's",
+         r"frame \d+: fp=0x[0-9a-f]+ lr=0x[0-9a-f]+ = kernel \+ 0x", r"frame \d+: fp=0x[0-9a-f]+ lr=0x[0-9a-f]+ = \S*(DxeCore|BdsDxe)\S* \(firmware file"),
     ]))
 
     # 2. The control, no flag.
@@ -220,6 +222,7 @@ def main():
     open(os.path.join(work, "plain.serial"), "w").write(text)
     results.append(grade("control", text, [
         ("reporter armed", r"early fault reporter armed"),
+        ("on the kernel's own stack", r"UEFI stage alive, on its own stack \(sp 0x[0-9a-f]+, the kernel's stack 0x[0-9a-f]+\.\.0x[0-9a-f]+, the entry's sp on the firmware's was 0x[0-9a-f]+\)"),
         ("boot services exited", r"exiting boot services"),
         (f"handed off at {handed_off}", rf"running at {handed_off} after the exit"),
         *([("dropped to EL1", r"dropped from EL2 to EL1, on our own tables and vectors")] if args.el2 else []),
@@ -229,6 +232,7 @@ def main():
     ], [
         ("EARLY EXCEPTION", r"EARLY EXCEPTION"),
         ("kernel EXCEPTION", r"EXCEPTION vector="),
+        ("the firmware's stack", r"the FIRMWARE'S stack"),
         ("EL0 fault, kill or restart", r"EL0 FAULT|killed after fault|restarted"),
         ("firmware's own line", r"Synchronous Exception at"),
     ], aborts, "zero"))

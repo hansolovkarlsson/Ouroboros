@@ -468,6 +468,12 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
     console::println_force!(
         "Ouroboros kernel: EXCEPTION vector={vector} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
     );
+    if !crate::stack_canary_intact() {
+        console::println_force!(
+            "Ouroboros kernel:   the kernel stack's canary is OVERWRITTEN: the stack overflowed below {:#x}",
+            crate::stacks().0.0
+        );
+    }
     halt()
 }
 

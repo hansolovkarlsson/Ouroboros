@@ -1210,7 +1210,21 @@ The small open tails those arcs deliberately left:
 >       unchanged, and `NOXHCI` boots on the Pi 4 that no longer fault in
 >       firmware code, with the walk's line never again showing garbage in
 >       the tables; a mutation (the switch disabled) must bring the fault
->       back on the board.
+>       back on the board. *Built 2026-10-02 on `pi4/own-stack`: the
+>       switch as the entry's first act, the banner line naming the stack
+>       (and saying `the FIRMWARE'S stack` with the switch disabled, which
+>       the rig's control then fails on), the frame walk crossing once into
+>       the firmware's frames. QEMU: both rigs and the image's spawns pass.
+>       The board boot is pending.*
+> - [ ] **new** **A guard page under the kernel's stack.** `KERNEL_STACK`
+>       has a canary word at its base that both fault reporters check and
+>       name, which turns an overflow into a line in the next dump rather
+>       than a mystery; a guard page would fault at the moment of the
+>       overflow instead. It needs the lowest 4 KB page of the stack left
+>       unmapped in the kernel's own tables, a page split inside the
+>       kernel's 2 MB block in `mmu.rs`, which today splits only the EL0
+>       regions. Check: a deliberate overflow halts with a fault at the
+>       guard's address, under both handoffs.
 > - [x] **The early fault reporter: the kernel's own dump for a fault taken
 >       under the firmware's vectors.** `earlyfault.rs` registers a handler
 >       for synchronous exceptions through `EFI_CPU_ARCH_PROTOCOL` right
