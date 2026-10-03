@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Check that the built kernel still carries the xHCI driver's two barriers.
+
+The xHCI driver orders its DMA memory against the controller with two
+barriers, and no rig can see either one: QEMU's controller is emulated in
+the same process and sees guest memory as the CPU last wrote it, so every
+QEMU test passes with or without them. Only the Raspberry Pi 4 (a
+non-coherent PCIe controller behind a write buffer) needs them, and there a
+missing one is a timing window, not a reliable failure. So the check is on
+the image instead.
+
+`kernel/src/xhci.rs` keeps each barrier and the store it orders as one naked
+function, three fixed instructions whatever the profile:
+
+    mmio_write32:        dsb sy;    str w1, [x0]; ret   (every register write)
+    publish_cycle_word:  dmb oshst; str w1, [x0]; ret   (a TRB batch's flip)
+
+This script disassembles the kernel image (`llvm-objdump`, from the
+`llvm-tools` rustup component the Makefile already needs) and requires each
+sequence exactly once, and at least one `bl` to each: present, and in use.
+The PE image carries no symbols, so the sequences are found by their
+instructions, which is why they are fixed in assembly rather than left to
+the compiler. Deleting either barrier, putting an instruction between it and
+its store, or routing the writes around the function fails it.
+
+Usage: check-xhci-barriers.py [IMAGE]   (default: the debug kernel)
+"""
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+DEFAULT_IMAGE = "target/aarch64-unknown-uefi/debug/BOOTAA64.efi"
+
+SEQUENCES = {
+    "mmio_write32 (dsb sy; str w1, [x0]; ret)": ["dsb sy", "str w1, [x0]", "ret"],
+    "publish_cycle_word (dmb oshst; str w1, [x0]; ret)": ["dmb oshst", "str w1, [x0]", "ret"],
+}
+
+LINE = re.compile(r"^\s*([0-9a-f]+):\s+(\S+)(?:\s+(.*?))?\s*$")
+BL = re.compile(r"^0x([0-9a-f]+)")
+
+
+def objdump() -> str:
+    sysroot = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True, check=True).stdout.strip()
+    host = next(l.split(": ", 1)[1] for l in subprocess.run(["rustc", "-vV"], capture_output=True, text=True, check=True).stdout.splitlines() if l.startswith("host: "))
+    tool = Path(sysroot) / "lib" / "rustlib" / host / "bin" / "llvm-objdump"
+    if not tool.exists():
+        sys.exit(f"check-xhci-barriers: {tool} not found; run `rustup component add llvm-tools`")
+    return str(tool)
+
+
+def instructions(image: str) -> list[tuple[int, str]]:
+    out = subprocess.run([objdump(), "-d", "--no-show-raw-insn", image], capture_output=True, text=True, check=True).stdout
+    insns = []
+    for line in out.splitlines():
+        m = LINE.match(line)
+        if m:
+            text = m.group(2) + (" " + re.sub(r"\s+", " ", m.group(3)) if m.group(3) else "")
+            insns.append((int(m.group(1), 16), text))
+    return insns
+
+
+def main() -> int:
+    image = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_IMAGE
+    if not Path(image).exists():
+        sys.exit(f"check-xhci-barriers: {image} not found; build the kernel first")
+    insns = instructions(image)
+    texts = [t for _, t in insns]
+    calls = {}
+    for _, t in insns:
+        if t.startswith("bl "):
+            m = BL.match(t[3:])
+            if m:
+                target = int(m.group(1), 16)
+                calls[target] = calls.get(target, 0) + 1
+
+    ok = True
+    for name, seq in SEQUENCES.items():
+        starts = [insns[i][0] for i in range(len(texts) - len(seq) + 1) if texts[i:i + len(seq)] == seq]
+        if len(starts) != 1:
+            print(f"FAIL {name}: found {len(starts)} times, want exactly 1")
+            ok = False
+            continue
+        n = calls.get(starts[0], 0)
+        if n == 0:
+            print(f"FAIL {name}: at {starts[0]:#x}, but nothing calls it")
+            ok = False
+            continue
+        print(f"ok   {name}: at {starts[0]:#x}, called from {n} site(s)")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
