@@ -186,7 +186,12 @@ logs the drop, so a capture says which path ran.
    bisection, and `virtio_mmio_probe_safe`'s premise (a serial console means
    QEMU) is the next thing to retire.
 4. **Then the xHCI takeover**, with the reporter, as planned: untouched by
-   this plan, and now the only pre-exit item.
+   this plan, and now the only pre-exit item. *(2026-10-03: with the
+   kernel's own stack under it too, since the takeover's faults of
+   2026-10-01 were the kernel overflowing the firmware's 16 KB stack into
+   its page tables, found by this plan's instruments and fixed in #191,
+   `testing-pi4.md` section 6. Four `NOXHCI` boots of the fix reached the
+   shell; the no-flag boot is next.)*
 
 ## Size
 

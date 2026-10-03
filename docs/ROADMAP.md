@@ -1158,7 +1158,7 @@ The small open tails those arcs deliberately left:
 > [`testing-pi4.md`](testing/testing-pi4.md) §6 ("Bisecting a hang with boot
 > flag files" and what follows it):
 >
-> - [ ] **The Pi 400's xHCI takeover damages memory before the exit.** The
+> - [x] **The Pi 400's xHCI takeover damages memory before the exit.** The
 >       firmware's own handler reported `Synchronous Exception at …` at a
 >       point that moved between boots; placed once (`scripts/efi-symbol.py`)
 >       at a Relaxed `atomic_load` in `log` through a pointer the debug build
@@ -1201,7 +1201,11 @@ The small open tails those arcs deliberately left:
 >       it, overflows into them; the TLB hides it until a cold page is
 >       walked. Every firmware fault since 2026-10-01 is this. The fix is a
 >       kernel-owned stack from the first instruction: the next item.***
-> - [ ] **fix** **The kernel runs on the firmware's stack, which on the Pi
+>       *Closed 2026-10-03: four `NOXHCI` boots of the fix (#191), four
+>       shells, no fault; the card before it faulted once more with the
+>       identical table garbage. The takeover itself is still to be booted
+>       with the fix (step 4 of the drop plan), but its fault was this.*
+> - [x] **fix** **The kernel runs on the firmware's stack, which on the Pi
 >       is 16 KB with the page tables beneath it.** Switch to a stack the
 >       kernel owns (a static in the image, 256 KB) as the entry's first
 >       act, before any call; keep it through the exit and the drop
@@ -1215,7 +1219,9 @@ The small open tails those arcs deliberately left:
 >       (and saying `the FIRMWARE'S stack` with the switch disabled, which
 >       the rig's control then fails on), the frame walk crossing once into
 >       the firmware's frames. QEMU: both rigs and the image's spawns pass.
->       The board boot is pending.*
+>       Merged as #191; on the board 2026-10-03, four `NOXHCI` boots, four
+>       shells, no fault, where the day before one boot in two to four
+>       faulted in firmware code. Done.*
 > - [ ] **new** **A guard page under the kernel's stack.** `KERNEL_STACK`
 >       has a canary word at its base that both fault reporters check and
 >       name, which turns an overflow into a line in the next dump rather

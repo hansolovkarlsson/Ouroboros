@@ -940,6 +940,44 @@ this board: `NOXHCI` boots that never again fault in firmware code, and a
 `tables for far:` line, if any fault comes, that shows entries and not
 frames.*
 
+**2026-10-03: the fix on the board. Four `NOXHCI` boots of a card at
+`c8492ad` (#191), four shells, no fault.** The banner line each time:
+
+```
+UEFI stage alive, on its own stack (sp 0x3787c340, the kernel's stack 0x3783e870..0x3787e870, the entry's sp on the firmware's was 0x3b3ff730)
+```
+
+So the kernel's stack is in its image (`0x37788000..0x379cb000`), and the
+firmware's SP at entry was `0x3b3ff730`, 0x8d0 below the top of its 16 KB
+stack, with the root table at `0x3b3fa000` a further 0x5730 down: the
+margin the whole boot used to run in. Every boot then went `running at EL2
+after the exit`, `dropped from EL2 to EL1`, `identity map installed`, and
+reached the shell, where the day before a boot faulted in firmware code one
+time in two to one time in four. Two more facts from the same capture. The
+card before the fix faulted once more before it was re-staged, in the
+variable store's write this time (`far=0x3b7f38`, VarBlockServiceDxe +
+0x11468), with the identical root-table garbage (`0x3b3fa038`, `0x388`,
+`0`): the same overflow, same signature. And `shutdown` from the shell
+printed `powering off` and the board went down: the first PSCI power-off on
+this board, through the `smc` conduit the FADT names, as `power.rs` was
+written to do.
+
+These boots had no HDMI display (`GOP framebuffer discovery failed`), so
+the console server took the serial backend and the shell's own lines came
+over the cable: `login: no /etc/passwd - starting a root session`, and
+`unknown command: ls`. Both are the known limit of `NOXHCI` on this board,
+not defects: after the exit the kernel has no block device (the SD card is
+the firmware's, and USB storage is what the flag skips), so `fsd` has no
+disk, no `/etc` and no `/bin`. The disk arrives with the takeover.
+
+**Next: the no-flag boot**, the xHCI takeover with the kernel's own stack
+under it and the reporter still armed, which is the one pre-exit step
+whose fault the overflow may or may not have been. The 2026-10-01 takeover
+faults showed the same stack-frame shape in the firmware's one line
+(`0x39F36E14` is the same DxeCore instruction the exit faulted at), so the
+expectation is a clean takeover and the first USB keyboard and stick on
+the board; if it faults, the dump now carries the tables and the canary.
+
 ---
 
 ## 7. Risks, ranked
