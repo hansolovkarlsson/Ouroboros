@@ -1146,12 +1146,17 @@ The small open tails those arcs deliberately left:
 >       by running it, one variable at a time; fixed on branch
 >       `pi400/bar-translation` and checked on QEMU with both present.
 >       Parallels not rechecked.
-> - [ ] **The xHCI BAR is a bus address; use firmware's CPU address.** On
+> - [x] **The xHCI BAR is a bus address; use firmware's CPU address.** On
 >       the Pi the CPU sees it at `0x6_0000_0000`. Branch
 >       `pi400/bar-translation` takes it from `PciIo.GetBarAttributes` and
 >       refuses the controller unless it reproduces the BAR (a refusal checked
 >       on QEMU by mutation). Open until the board shows a nonzero
 >       translation working: QEMU's is 0.
+>       *2026-10-03: the no-flag Pi 4 boot used translation
+>       `0xfffffffaf8000000` (BAR `0xf8000000` to CPU `0x600000000`), and
+>       the controller reset and read `max_slots=32 max_ports=5` there, so
+>       a nonzero translation works on the board. Merged as #176; this
+>       was the check it waited on.*
 >
 > **First boots on the boards (2026-09-28), over HDMI alone**, a Pi 400 and a
 > 1 GB Pi 4, with no serial cable yet. Written up as a log in
@@ -1222,6 +1227,16 @@ The small open tails those arcs deliberately left:
 >       Merged as #191; on the board 2026-10-03, four `NOXHCI` boots, four
 >       shells, no fault, where the day before one boot in two to four
 >       faulted in firmware code. Done.*
+> - [ ] **fix** **The xHCI DMA pool has 8 scratchpad pages; the Pi's VL805
+>       wants 31.** The no-flag boot of 2026-10-03 took the controller and
+>       crossed the exit and the drop with no fault, then `xhci.rs`
+>       declined it: `controller wants 31 scratchpad buffers, only 8 are
+>       supported` (`HCSPARAMS2` `0xfc000031`). Raise
+>       `MAX_SCRATCHPAD_BUFFERS` to 32 (128 KB of the pool, still mapped
+>       non-cacheable with the rest). QEMU cannot check the number, since
+>       its controller asks for fewer than 8; the check is the board: the
+>       driver goes past `DCBAAP` and the port scan reports the VL805's
+>       ports. `testing-pi4.md` §6.
 > - [ ] **new** **A guard page under the kernel's stack.** `KERNEL_STACK`
 >       has a canary word at its base that both fault reporters check and
 >       name, which turns an overflow into a line in the next dump rather

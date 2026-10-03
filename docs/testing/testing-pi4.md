@@ -978,6 +978,41 @@ faults showed the same stack-frame shape in the firmware's one line
 expectation is a clean takeover and the first USB keyboard and stick on
 the board; if it faults, the dump now carries the tables and the canary.
 
+**2026-10-03, later: the no-flag boot. The takeover is clean, and the
+driver stops at a limit of its own.** Same card, `NOXHCI` removed, serial
+capture in `screenlog.0`. Before the exit, in order: `taking the xHCI
+controller next`, the PCI command register `0x0140 -> 0x0146`, the
+controller at `0x600000000` (BAR `0xf8000000` plus the translation read from
+`PciIo.GetBarAttributes`, here `0xfffffffaf8000000`), `exiting boot
+services`. After it: `running at EL2`,
+`dropped from EL2 to EL1`, `identity map installed`, and then the driver
+itself, under the kernel's tables:
+
+```
+xhci: DMA pool @ 0x378e8000, 0xe000 bytes
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5
+xhci: keyboard not available (controller wants 31 scratchpad buffers, only 8 are supported)
+```
+
+No fault anywhere in the boot, which closes the question this step was
+for: the 2026-10-01 takeover faults were the stack overflow too. The
+controller came out of its reset and its registers read sanely
+(`max_slots=32`, `max_ports=5`) at the translated address, the first
+nonzero translation seen working, and the driver
+then refused it on purpose: `HCSPARAMS2` is `0xfc000031`, whose Max
+Scratchpad Buffers field (bits 31:27, high bits 25:21) is 31, and
+`xhci.rs` reserves `MAX_SCRATCHPAD_BUFFERS = 8` pages in its DMA pool.
+QEMU's controller asks for few enough that the limit was never reached
+before. The rest of the boot is what no xHCI means on this board: the
+non-cacheable plan and its self-check pass on the pool (`walks as Normal
+Non-cacheable ... in all 11 views`), the shell comes up over the serial
+backend as root with no `/etc/passwd`, and `mount -a` finds no USB storage.
+
+**Next: give the pool 32 scratchpad pages** (128 KB; the spec allows up to
+1023, the VL805 asks for 31), and boot this card again. That is the first
+time the board's controller is run past `DCBAAP`, so the port scan, the
+keyboard and the stick are all new on this hardware from there.
+
 ---
 
 ## 7. Risks, ranked

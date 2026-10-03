@@ -191,7 +191,11 @@ logs the drop, so a capture says which path ran.
    2026-10-01 were the kernel overflowing the firmware's 16 KB stack into
    its page tables, found by this plan's instruments and fixed in #191,
    `testing-pi4.md` section 6. Four `NOXHCI` boots of the fix reached the
-   shell; the no-flag boot is next.)*
+   shell; the no-flag boot is next.)* *(Later 2026-10-03: the no-flag
+   boot took the controller and went through the exit and the drop with no
+   fault; the driver then declined the VL805 for wanting 31 scratchpad
+   buffers to its 8. The pre-exit work of this plan is done; what remains
+   on the board is the driver's, `testing-pi4.md` section 6.)*
 
 ## Size
 
