@@ -1423,6 +1423,12 @@ The small open tails those arcs deliberately left:
 >       `field[3]`); the Link TRB's cycle rewrite on a wrap the same. The
 >       write-side twin of `event_ring_pop`'s read order. Found by the
 >       review of `pi4/xhci-handover-barrier`; take it next.
+>       *Built 2026-10-03 on `pi4/trb-cycle-order`: dwords 0 to 2, then
+>       `dmb oshst`, then dword 3, in `ring_push`, the only TRB writer.
+>       The Link TRB needs none (its pointer words are fixed at setup).
+>       QEMU cannot show the difference; the check is the image, 0 then
+>       17 `dmb oshst` in release, and in all 17 the first store after
+>       the barrier is the one at `+0xc`.*
 > - [ ] **fix** **The barrier before an xHCI register write is placed by
 >       hand.** Every doorbell and, since `pi4/xhci-handover-barrier`, the
 >       four handover writes in `init_inner` carry their own `dsb sy`; the
