@@ -1169,6 +1169,41 @@ Reset after the Hot one was the answer; `root port not enabled after
 reset` means none of these, and the decoded PORTSC values say what the
 port did instead.
 
+**2026-10-03: a whole session on the board.** Card and stick staged from
+`main` at #195 (`make sdcard`, `make stick`, the stick exFAT), no
+`NOXHCI`, the keyboard and the stick plugged in:
+
+```
+xhci: port 1: hub with 4 ports (speed=3, TT think time 3)
+xhci: port 1.2: device connected, reset, speed=3
+xhci: port 1.2: USB mass storage - activating after the scan
+xhci: port 1.4: device connected, reset, speed=1
+xhci: port 1.4: boot-protocol keyboard - activating after the scan
+xhci: storage bulk endpoints configured (IN 0x81 DCI 3, OUT 0x02 DCI 4)
+xhci: keyboard ready
+usb-msd: INQUIRY -> vendor='Lexar' product='USB Flash Drive'
+usb-msd: capacity 243404800 sectors (512-byte blocks)
+usb-msd block device installed
+```
+
+Then `fsd` mounted the stick (`exFAT mounted, disk commands available`, the
+line interleaved with the other servers' on the serial console) and warned,
+correctly, that exFAT cannot enforce permissions. `login:` asked for a user
+from the stick's `/etc/passwd`; a mistyped first attempt said `Login
+incorrect`, then `root` logged in. Typed on the USB keyboard, Hans
+confirmed: `ls` showed `bin/ etc/ man/ Users/` (the `.ouroboros-stick`
+marker hidden as a dot file), `ls bin` the programs, `man rev` its page,
+`uptime` its ticks, Ctrl+C ended a waiting `rev`, and `halt` halted.
+**The first full session on the Pi 4: USB keyboard in, USB disk mounted,
+programs run from it.**
+
+The stick came up behind the hub at High Speed (port 1.2), the USB 2 path,
+not on a SuperSpeed root port as the stick of the earlier boots did, so the
+root-port recovery built for that (#194) did not run, and the transaction
+translator path (a Full or Low Speed device behind the High Speed hub) has
+still only carried the keyboard's interrupt endpoint, not bulk storage. Open:
+a stick on a SuperSpeed root port.
+
 ---
 
 ## 7. Risks, ranked

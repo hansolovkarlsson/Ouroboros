@@ -1292,8 +1292,11 @@ The small open tails those arcs deliberately left:
 >       rather than addressed if none of that worked. Each step logs its
 >       outcome. QEMU cannot produce the case; forced onto every port the
 >       lines decode and every device still enumerates, and with no port
->       counted as enabled every port is refused and the rig fails. The
->       board boot is pending.*
+>       counted as enabled every port is refused and the rig fails. Merged
+>       as #194. The first board boot after it (2026-10-03) had the stick,
+>       a Lexar, on hub port 1.2 at High Speed, the USB 2 path, so it never
+>       reached a SuperSpeed root port and this path did not run. Open
+>       until a stick on a SuperSpeed root port is booted.*
 > - [ ] **fix** **No barrier between the xHCI ring setup and the registers
 >       that hand it over.** The DCBAA, the scratchpad array, the command
 >       ring's Link TRB and the ERST are stores to the DMA pool; DCBAAP,
