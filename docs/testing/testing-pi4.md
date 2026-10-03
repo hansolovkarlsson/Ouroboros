@@ -1012,6 +1012,9 @@ backend as root with no `/etc/passwd`, and `mount -a` finds no USB storage.
 1023, the VL805 asks for 31), and boot this card again. That is the first
 time the board's controller is run past `DCBAAP`, so the port scan, the
 keyboard and the stick are all new on this hardware from there.
+*(Built on `pi4/scratchpad-32`, which also logs the count as
+`scratchpads=` on the controller line and refuses a controller whose
+`PAGESIZE` lacks 4 KB. The board boot of that branch is pending.)*
 
 ---
 
