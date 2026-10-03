@@ -1480,10 +1480,11 @@ The small open tails those arcs deliberately left:
 >       `dmb oshst` is a call into `write_volatile`, not an adjacent store
 >       (the earlier hand checks were all on release), and other modules'
 >       `dsb sy` look like the xHCI one. So each barrier and its store became
->       a naked function of three fixed instructions (`mmio_write32`:
->       `dsb sy; str w1, [x0]; ret`; `publish_cycle_word`: `dmb oshst; str
->       w1, [x0]; ret`), and the script requires each exactly once in the
->       image and called at least once. Shown to fail three ways (the `dsb`
+>       a naked function of fixed instructions (`mmio_write32`: `dsb sy;
+>       str w1, [x0]; ret`; `mmio_write64`, the same with both halves after
+>       one barrier; `publish_cycle_word`: `dmb oshst; str w1, [x0]; ret`),
+>       and the script requires each exactly once in the image and called
+>       (`bl`, or `b` for a tail call) at least once. Shown to fail three ways (the `dsb`
 >       deleted, a `nop` before the store, `write32` routed around the
 >       function), and `make test` itself red with the `dsb` deleted. Its
 >       limit: a new raw `write_volatile` to a register elsewhere in
@@ -1501,8 +1502,9 @@ The small open tails those arcs deliberately left:
 >       comment says why. Then the redundant barrier before Run goes, and
 >       the manual `dsb` count stops being the only check. Found by the
 >       same review. *Built 2026-10-03 on `pi4/xhci-write-barrier`: every
->       register write goes through `mmio_write32` (`dsb sy` then the
->       store), so a register cannot be written without the barrier; the
+>       register write goes through `mmio_write32` or `mmio_write64` (`dsb
+>       sy` then the store, one barrier for both halves of a 64-bit
+>       register), so a register cannot be written without the barrier; the
 >       nine hand-placed barriers are gone, the one before Run with them;
 >       ERDP's `dmb sy` became the same `dsb sy`, which also completes the
 >       event's loads before the controller is told the slot is free.
