@@ -1409,6 +1409,10 @@ The small open tails those arcs deliberately left:
 >       answers one question; take it after that round whatever it shows.
 >       *(That round answered: the split write alone brought the
 >       controller up. This stays a correctness fix, not a board fix.)*
+>       *Built 2026-10-03 on `pi4/xhci-handover-barrier`: a `dsb sy`
+>       before DCBAAP, CRCR, the ERST block and Run in `init_inner`. No
+>       QEMU boot can tell it from the old code; the check is the image,
+>       four more `dsb sy` in debug and release alike.*
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
