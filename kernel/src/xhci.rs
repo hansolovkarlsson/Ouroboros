@@ -240,7 +240,9 @@ const EP_TYPE_BULK_OUT: u32 = 2;
 const EP_TYPE_BULK_IN: u32 = 6;
 
 const MAX_SLOTS_ENABLED: usize = 8;
-const MAX_SCRATCHPAD_BUFFERS: usize = 8;
+// The Pi 4's VL805 asks for 31 (HCSPARAMS2 0xfc000031, 2026-10-03); QEMU's
+// controller asks for fewer than 8, which is all this used to hold.
+const MAX_SCRATCHPAD_BUFFERS: usize = 32;
 const CMD_RING_SIZE: usize = 16;
 const EP0_RING_SIZE: usize = 16;
 const INT_RING_SIZE: usize = 16;
@@ -389,28 +391,27 @@ pub(crate) struct DmaPool {
     output_device_contexts: [Aligned64<[u32; CTX_DWORDS_MAX * 32]>; MAX_DEVICES],
     input_context: Aligned64<[u32; CTX_DWORDS_MAX * 33]>,
     dcbaa: Aligned64<[u64; MAX_SLOTS_ENABLED + 1]>,
-    scratchpad_array: Aligned64<[u64; MAX_SCRATCHPAD_BUFFERS]>,
+    // Here for its 64 bytes, which put the EP0 rings on a 256-byte
+    // boundary so none of them crosses a page (the 8-entry scratchpad
+    // array used to sit here and do the same; the assertions below say
+    // when an order stops working).
+    erst: Aligned64<[ErstEntry; 1]>,
     command_ring: Aligned64<[Trb; CMD_RING_SIZE]>,
     ep0_rings: [Aligned64<[Trb; EP0_RING_SIZE]>; MAX_DEVICES],
     int_ring: Aligned64<[Trb; INT_RING_SIZE]>,
     bulk_in_ring: Aligned64<[Trb; INT_RING_SIZE]>,
     bulk_out_ring: Aligned64<[Trb; INT_RING_SIZE]>,
     event_ring: Aligned64<[Trb; EVENT_RING_SIZE]>,
-    erst: Aligned64<[ErstEntry; 1]>,
     ctrl_buf: Aligned64<[u8; 64]>,
     int_buf: Aligned64<[u8; 8]>,
     usb_cbw: Aligned64<[u8; 31]>,
     usb_csw: Aligned64<[u8; 13]>,
     usb_data: Aligned64<[u8; 512]>,
+    scratchpad_array: Aligned64<[u64; MAX_SCRATCHPAD_BUFFERS]>,
 }
 
 static DMA_POOL: DmaPool = DmaPool {
-    scratchpad_pages: [
-    Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
-    Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
-    Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
-    Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
-],
+    scratchpad_pages: [const { Page(UnsafeCell::new([0; 4096])) }; MAX_SCRATCHPAD_BUFFERS],
     output_device_contexts: [const { Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32])) }; MAX_DEVICES],
     input_context: Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 33])),
     dcbaa: Aligned64(UnsafeCell::new([0; MAX_SLOTS_ENABLED + 1])),
