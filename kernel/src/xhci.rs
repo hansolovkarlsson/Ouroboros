@@ -1904,9 +1904,10 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // Each register below hands the controller a structure just written
     // to the DMA pool: Normal stores, while the registers are Device
     // stores, and nothing orders the two kinds without a barrier. The
-    // same `dsb sy` every doorbell in this file is preceded by; Linux's
-    // `writel` puts one before every MMIO write. QEMU has no write buffer
-    // to show it missing.
+    // same `dsb sy` every doorbell in this file is preceded by. Linux
+    // orders every MMIO write the same way, with a lighter barrier
+    // (`writel` on arm64 is `dmb oshst` then the store). QEMU has no
+    // write buffer to show it missing.
     unsafe {
         core::arch::asm!("dsb sy", options(nostack, preserves_flags));
         write64(op_base + OP_DCBAAP, DCBAA.0.get() as u64);
