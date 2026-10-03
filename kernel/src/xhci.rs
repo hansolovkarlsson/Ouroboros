@@ -1901,7 +1901,16 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         }
         dcbaa[0] = SCRATCHPAD_ARRAY.0.get() as u64;
     }
-    unsafe { write64(op_base + OP_DCBAAP, DCBAA.0.get() as u64) };
+    // Each register below hands the controller a structure just written
+    // to the DMA pool: Normal stores, while the registers are Device
+    // stores, and nothing orders the two kinds without a barrier. The
+    // same `dsb sy` every doorbell in this file is preceded by; Linux's
+    // `writel` puts one before every MMIO write. QEMU has no write buffer
+    // to show it missing.
+    unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        write64(op_base + OP_DCBAAP, DCBAA.0.get() as u64);
+    }
 
     // Command ring: producer cycle state starts at 1 (RCS=1), the Link
     // TRB (last slot) pre-set to match.
@@ -1910,7 +1919,10 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let ring_addr = COMMAND_RING.0.get() as u64;
         ring[CMD_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1]; // TC, cycle=1
     }
-    unsafe { write64(op_base + OP_CRCR, (COMMAND_RING.0.get() as u64) | CRCR_RCS) };
+    unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        write64(op_base + OP_CRCR, (COMMAND_RING.0.get() as u64) | CRCR_RCS);
+    }
 
     // (Per-device EP0 transfer rings are initialized as each device
     // claims its pool entry during the port scan - see
@@ -1921,13 +1933,21 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let erst = unsafe { &mut *ERST.0.get() };
         erst[0] = ErstEntry { base: EVENT_RING.0.get() as u64, size: EVENT_RING_SIZE as u32, _reserved: 0 };
     }
+    // The controller fetches the ERST when ERSTBA is written.
     unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
         write32(ir0_base + IR_ERSTSZ, 1);
         write64(ir0_base + IR_ERSTBA, ERST.0.get() as u64);
         write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64);
     }
 
-    unsafe { write32(op_base + OP_USBCMD, USBCMD_RUN) };
+    // And reads the scratchpad array at Run. The barriers above already
+    // cover it; this one keeps it covered if a pool store is ever added
+    // between the ERST block and here.
+    unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
+        write32(op_base + OP_USBCMD, USBCMD_RUN);
+    }
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH == 0) } {
         return Err(Error::StartTimeout);
     }
