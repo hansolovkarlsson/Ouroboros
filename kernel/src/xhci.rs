@@ -225,6 +225,17 @@ const CRCR_CRR: u32 = 1 << 3;
 const PORTSC_CCS: u32 = 1 << 0;
 const PORTSC_PR: u32 = 1 << 4;
 const PORTSC_PRC: u32 = 1 << 21;
+const PORTSC_PED: u32 = 1 << 1;
+const PORTSC_WRC: u32 = 1 << 19;
+const PORTSC_WPR: u32 = 1 << 31;
+const PORTSC_PLS_SHIFT: u32 = 5;
+const PORTSC_PLS_MASK: u32 = 0xf;
+/// Link states after which a USB3 port needs a Warm Reset, not a Hot one
+/// (xHCI 4.19.1.2; Linux's `hub_port_warm_reset_required`). Neither occurs
+/// on a USB2 port, so seeing one also says the port is USB3, where Warm
+/// Port Reset is defined.
+const PLS_SS_INACTIVE: u32 = 6;
+const PLS_COMPLIANCE: u32 = 10;
 const PORTSC_SPEED_SHIFT: u32 = 10;
 const PORTSC_SPEED_MASK: u32 = 0xf;
 const PORTSC_WRITE_CLEAR_MASK: u32 =
@@ -2473,6 +2484,57 @@ fn ep0_context(idx: usize, max_packet_size: u32) -> [u32; 5] {
     ]
 }
 
+/// PORTSC decoded for a log line: the raw value, then the fields a port's
+/// bring-up turns on.
+struct Portsc(u32);
+
+impl core::fmt::Display for Portsc {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let v = self.0;
+        write!(
+            f,
+            "{v:#010x} (CCS {}, PED {}, PLS {}, speed {})",
+            v & PORTSC_CCS,
+            (v & PORTSC_PED) >> 1,
+            (v >> PORTSC_PLS_SHIFT) & PORTSC_PLS_MASK,
+            (v >> PORTSC_SPEED_SHIFT) & PORTSC_SPEED_MASK
+        )
+    }
+}
+
+/// Watches root port `port` for up to `POLL_TIMEOUT_MS` until it is
+/// enabled with a speed, logging each change of its PORTSC (a change,
+/// not every read, and at most `MAX_LOGGED` of them, so a flapping link
+/// cannot flood the console), and returns the last value read. `when`
+/// names the step for the log.
+///
+/// # Safety
+/// `portsc_addr` is the port's PORTSC register.
+unsafe fn watch_port_enable(port: u32, portsc_addr: u64, when: &str) -> u32 {
+    const MAX_LOGGED: u32 = 16;
+    let deadline = poll_deadline();
+    let mut last = unsafe { read32(portsc_addr) };
+    let mut changes = 0u32;
+    loop {
+        if last & PORTSC_PED != 0 && (last >> PORTSC_SPEED_SHIFT) & PORTSC_SPEED_MASK != 0 {
+            console::println!("Ouroboros kernel: xhci: port {port}: enabled {when}: {}", Portsc(last));
+            return last;
+        }
+        if crate::timer::now_ticks() >= deadline {
+            console::println!("Ouroboros kernel: xhci: port {port}: not enabled {POLL_TIMEOUT_MS} ms {when} ({changes} changes): {}", Portsc(last));
+            return last;
+        }
+        let now = unsafe { read32(portsc_addr) };
+        if now != last {
+            changes += 1;
+            if changes <= MAX_LOGGED {
+                console::println!("Ouroboros kernel: xhci: port {port}: {when}, now {}", Portsc(now));
+            }
+            last = now;
+        }
+    }
+}
+
 /// Resets root port `port` and hands the device on it to
 /// [`address_and_classify`]. The reset is the only root-port-specific
 /// step: a device behind a hub is reset by the hub ([`configure_hub`]).
@@ -2490,13 +2552,35 @@ unsafe fn setup_device_on_port(
     console::println!("Ouroboros kernel: xhci: device connected on port {port}");
 
     // Reset the port, then clear the resulting Port Reset Change bit.
-    let current = unsafe { read32(portsc_addr) };
-    unsafe { write32(portsc_addr, portsc_preserve(current) | PORTSC_PR) };
+    let before = unsafe { read32(portsc_addr) };
+    unsafe { write32(portsc_addr, portsc_preserve(before) | PORTSC_PR) };
     if !unsafe { poll_until(|| read32(portsc_addr) & PORTSC_PRC != 0) } {
         return Err(Error::PortResetTimeout);
     }
-    let current = unsafe { read32(portsc_addr) };
+    let mut current = unsafe { read32(portsc_addr) };
     unsafe { write32(portsc_addr, portsc_preserve(current) | PORTSC_PRC) };
+
+    // A port that comes out of its reset with no speed is not enabled. On
+    // the Pi 4 a USB3 stick did this on its SuperSpeed root port, at boot
+    // and on a rescan (2026-10-03), with nothing logged to say why. Each
+    // step below logs the port's state, so a capture says which one, if
+    // any, brought it up: first a wait for link training to finish, then,
+    // only from a link state that requires it, a Warm Reset.
+    if (current >> PORTSC_SPEED_SHIFT) & PORTSC_SPEED_MASK == 0 {
+        console::println!("Ouroboros kernel: xhci: port {port}: no speed after reset; before it {}, after it {}", Portsc(before), Portsc(current));
+        current = unsafe { watch_port_enable(port, portsc_addr, "after the reset") };
+        let pls = (current >> PORTSC_PLS_SHIFT) & PORTSC_PLS_MASK;
+        if current & PORTSC_PED == 0 && (pls == PLS_SS_INACTIVE || pls == PLS_COMPLIANCE) {
+            console::println!("Ouroboros kernel: xhci: port {port}: link state {pls}, warm reset");
+            unsafe { write32(portsc_addr, portsc_preserve(current) | PORTSC_WPR) };
+            if !unsafe { poll_until(|| read32(portsc_addr) & (PORTSC_WRC | PORTSC_PRC) != 0) } {
+                return Err(Error::PortResetTimeout);
+            }
+            let done = unsafe { read32(portsc_addr) };
+            unsafe { write32(portsc_addr, portsc_preserve(done) | (done & (PORTSC_WRC | PORTSC_PRC))) };
+            current = unsafe { watch_port_enable(port, portsc_addr, "after the warm reset") };
+        }
+    }
 
     // Default PSIV mapping (no Protocol Speed ID table override present -
     // true for every controller this has been tested against, QEMU's and
