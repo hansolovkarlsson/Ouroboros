@@ -1245,7 +1245,7 @@ The small open tails those arcs deliberately left:
 >       board 2026-10-03, two boots: `scratchpads=31`, the controller
 >       accepted, port 1 connected and reset (High Speed). Done; the first
 >       command then timed out, the next item.*
-> - [ ] **fix** **The first xHCI command times out on the Pi 4.** Two
+> - [x] **fix** **The first xHCI command times out on the Pi 4.** Two
 >       boots of #192: `port 1 setup failed (command ring: timed out waiting
 >       for a completion event)`, while the non-coherent pool's self-check
 >       passed. The driver differed from every one that works on the VL805
@@ -1262,8 +1262,27 @@ The small open tails those arcs deliberately left:
 >       64-bit store was built and taken out at review: it was the suspect
 >       access itself, and could damage CONFIG beside DCBAAP. QEMU:
 >       `test-usb-hub` and `test-el1-drop` pass, and the dump read
->       correctly with the command doorbell removed. The board boot is
->       pending: success is the port scan getting past Enable Slot.*
+>       correctly with the command doorbell removed. Merged as #193; on
+>       the board 2026-10-03: slot 1 enabled and addressed, the VIA hub on
+>       port 1 (`2109:3431`, 4 ports) configured, and a boot-protocol
+>       keyboard on port 1.4 brought to `keyboard ready`, the first USB
+>       device on this board. So the 64-bit store was the cause. Done.*
+> - [ ] **fix** **A USB3 stick on the Pi 4's SuperSpeed root port comes out
+>       of its reset with speed 0.** Same boot: `port 3 reset, speed=0`,
+>       `unsupported port speed 0`, at boot and again on `mount -a`'s
+>       rescan, so no disk. Nothing in the log said why. *Built
+>       2026-10-03 on `pi4/usb3-port-state`: a port in SS.Inactive or
+>       Compliance before its reset is Warm Reset at once (Linux's rule);
+>       a port not enabled after its reset gets PORTSC before and after,
+>       decoded (CCS, PED, PLS, speed), a watch of up to a second for it
+>       to enable (each change logged, at most 16; stops on disconnect),
+>       then, from those two states, a Warm Reset and the same watch, and
+>       is refused (`root port not enabled after reset`, with PORTSC)
+>       rather than addressed if none of that worked. Each step logs its
+>       outcome. QEMU cannot produce the case; forced onto every port the
+>       lines decode and every device still enumerates, and with no port
+>       counted as enabled every port is refused and the rig fails. The
+>       board boot is pending.*
 > - [ ] **fix** **No barrier between the xHCI ring setup and the registers
 >       that hand it over.** The DCBAA, the scratchpad array, the command
 >       ring's Link TRB and the ERST are stores to the DMA pool; DCBAAP,
@@ -1274,6 +1293,8 @@ The small open tails those arcs deliberately left:
 >       buffer to show the miss. A `dsb` before the register block (and
 >       before Run). Held back from the 64-bit-store round so the board
 >       answers one question; take it after that round whatever it shows.
+>       *(That round answered: the split write alone brought the
+>       controller up. This stays a correctness fix, not a board fix.)*
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,

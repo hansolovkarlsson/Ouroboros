@@ -1072,6 +1072,54 @@ and an empty event slot means it ran the command and its event did not
 reach the ring the CPU reads (the barrier is next); `HSE true` is a DMA
 fault.
 
+**2026-10-03: the board boot of #193. The controller runs commands, and
+the keyboard comes up.** One boot, no `NOXHCI`:
+
+```
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: device connected on port 1
+xhci: port 1 reset, speed=3
+xhci: slot 1 enabled
+xhci: slot 1 addressed (port 1)
+xhci: GET_DESCRIPTOR(Device) -> [12, 01, 10, 02, 09, 00, 01, 40, 09, 21, 31, 34, 21, 04, 00, 01, 00, 01]
+xhci: port 1: hub - its ports are brought up after the root ports
+xhci: device connected on port 3
+xhci: port 3 reset, speed=0
+xhci: port 3 setup failed (unsupported port speed 0 (only Low/Full/High/SuperSpeed/SuperSpeedPlus are implemented)), continuing with other ports
+xhci: port 1: hub with 4 ports (speed=3, TT think time 3)
+xhci: port 1.4: device connected, reset, speed=1
+xhci: slot 2 enabled
+...
+xhci: port 1.4: boot-protocol keyboard - activating after the scan
+...
+xhci: keyboard ready
+```
+
+No dump, no HSE line: Enable Slot completed, so **the 64-bit store was the
+cause**, the one variable of the round. Root port 1 is the VL805's USB 2
+port, wired to a VIA hub (`2109:3431`, 4 ports) that carries the USB 2
+lines of all four sockets; the keyboard, a Full Speed device, is on its
+port 4 and reached `keyboard ready`, the first USB device brought up on
+this board. The stick did not: it showed up on root port 3, one of the
+VL805's SuperSpeed ports (a USB 2 device would have appeared behind the
+hub), and came out of its reset with speed 0, at boot and again when
+`mount -a` rescanned, so there was still no disk and `ls` was unknown.
+
+**Built on `pi4/usb3-port-state`.** A port already in SS.Inactive (`PLS
+6`) or Compliance (`PLS 10`) before its reset gets a Warm Reset instead of
+a Hot one, as Linux does. A port that is not enabled after its reset gets
+its PORTSC before and after, decoded (`CCS`, `PED`, `PLS`, `speed`); a
+watch of up to a second for it to enable, logging each change; then, from
+those two link states, a Warm Reset and the same watch; and it is refused
+with its PORTSC rather than addressed if none of that brought it up. **Read
+on the board:** `link state … before the reset, warm reset` means the port
+was waiting for a Warm Reset from the start; `enabled after the reset`
+means the link was still training and only needed time; `link state 6`
+or `10, warm reset` then `enabled after the warm reset` means the Warm
+Reset after the Hot one was the answer; `root port not enabled after
+reset` means none of these, and the decoded PORTSC values say what the
+port did instead.
+
 ---
 
 ## 7. Risks, ranked

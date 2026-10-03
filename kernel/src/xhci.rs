@@ -225,6 +225,18 @@ const CRCR_CRR: u32 = 1 << 3;
 const PORTSC_CCS: u32 = 1 << 0;
 const PORTSC_PR: u32 = 1 << 4;
 const PORTSC_PRC: u32 = 1 << 21;
+const PORTSC_PED: u32 = 1 << 1;
+const PORTSC_WRC: u32 = 1 << 19;
+const PORTSC_PLC: u32 = 1 << 22;
+const PORTSC_WPR: u32 = 1 << 31;
+const PORTSC_PLS_SHIFT: u32 = 5;
+const PORTSC_PLS_MASK: u32 = 0xf;
+/// Link states after which a USB3 port needs a Warm Reset, not a Hot one
+/// (xHCI 4.19.1.2; Linux's `hub_port_warm_reset_required`). Neither occurs
+/// on a USB2 port, so seeing one also says the port is USB3, where Warm
+/// Port Reset is defined.
+const PLS_SS_INACTIVE: u32 = 6;
+const PLS_COMPLIANCE: u32 = 10;
 const PORTSC_SPEED_SHIFT: u32 = 10;
 const PORTSC_SPEED_MASK: u32 = 0xf;
 const PORTSC_WRITE_CLEAR_MASK: u32 =
@@ -328,6 +340,7 @@ pub enum Error {
     UnsupportedSpeed(u32),
     BadHubDescriptor,
     PortNotEnabled,
+    RootPortNotEnabled(u32),
     TooManyScratchpadBuffers(u32),
     PageSizeNot4K(u32),
     CommandTimeout,
@@ -353,6 +366,7 @@ impl core::fmt::Display for Error {
             Error::NoKeyboardFound => write!(f, "devices found, but no boot-protocol keyboard among them"),
             Error::PortResetTimeout => write!(f, "port reset timed out"),
             Error::PortNotEnabled => write!(f, "hub port not enabled after reset"),
+            Error::RootPortNotEnabled(portsc) => write!(f, "root port not enabled after reset, PORTSC {}", Portsc(*portsc)),
             Error::BadHubDescriptor => write!(f, "hub descriptor unreadable or out of range (1-15 ports)"),
             Error::UnsupportedSpeed(speed) => write!(f, "unsupported port speed {speed} (only Low/Full/High/SuperSpeed/SuperSpeedPlus are implemented)"),
             Error::TooManyScratchpadBuffers(n) => write!(f, "controller wants {n} scratchpad buffers, only {MAX_SCRATCHPAD_BUFFERS} are supported"),
@@ -2473,6 +2487,99 @@ fn ep0_context(idx: usize, max_packet_size: u32) -> [u32; 5] {
     ]
 }
 
+/// PORTSC decoded for a log line: the raw value, then the fields a port's
+/// bring-up turns on.
+struct Portsc(u32);
+
+impl core::fmt::Display for Portsc {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let v = self.0;
+        write!(
+            f,
+            "{v:#010x} (CCS {}, PED {}, PLS {}, speed {})",
+            v & PORTSC_CCS,
+            (v & PORTSC_PED) >> 1,
+            portsc_pls(v),
+            portsc_speed(v)
+        )
+    }
+}
+
+fn portsc_speed(v: u32) -> u32 {
+    (v >> PORTSC_SPEED_SHIFT) & PORTSC_SPEED_MASK
+}
+fn portsc_pls(v: u32) -> u32 {
+    (v >> PORTSC_PLS_SHIFT) & PORTSC_PLS_MASK
+}
+/// Enabled with a speed: what Address Device needs of a root port.
+fn portsc_enabled(v: u32) -> bool {
+    v & PORTSC_PED != 0 && portsc_speed(v) != 0
+}
+/// In a link state that a Hot Reset cannot leave (see `PLS_SS_INACTIVE`).
+fn portsc_needs_warm_reset(v: u32) -> bool {
+    matches!(portsc_pls(v), PLS_SS_INACTIVE | PLS_COMPLIANCE)
+}
+
+/// Resets root port `port`, Hot (`PR`, waiting for PRC) or Warm (`WPR`,
+/// waiting for WRC and PRC, which a Warm Reset sets both of), then clears
+/// the change bits a reset leaves: PRC, WRC and PLC, each only if it is
+/// set, so a USB2 port, where WRC is reserved, never has a 1 written
+/// there. Returns PORTSC as the reset left it. A timeout is logged with
+/// the port's state before it is returned.
+///
+/// # Safety
+/// `portsc_addr` is the port's PORTSC register.
+unsafe fn reset_root_port(port: u32, portsc_addr: u64, warm: bool) -> Result<u32, Error> {
+    let (set, done, kind) = if warm { (PORTSC_WPR, PORTSC_WRC | PORTSC_PRC, "warm") } else { (PORTSC_PR, PORTSC_PRC, "hot") };
+    let current = unsafe { read32(portsc_addr) };
+    unsafe { write32(portsc_addr, portsc_preserve(current) | set) };
+    if !unsafe { poll_until(|| read32(portsc_addr) & done == done) } {
+        let now = unsafe { read32(portsc_addr) };
+        console::println!("Ouroboros kernel: xhci: port {port}: {kind} reset timed out: {}", Portsc(now));
+        return Err(Error::PortResetTimeout);
+    }
+    let after = unsafe { read32(portsc_addr) };
+    unsafe { write32(portsc_addr, portsc_preserve(after) | (after & (PORTSC_PRC | PORTSC_WRC | PORTSC_PLC))) };
+    Ok(after)
+}
+
+/// Watches root port `port` for up to `POLL_TIMEOUT_MS` until it is
+/// enabled with a speed or disconnected, logging each change of its PORTSC (a change,
+/// not every read, and at most `MAX_LOGGED` of them, so a flapping link
+/// cannot flood the console), and returns the last value read. `when`
+/// names the step for the log.
+///
+/// # Safety
+/// `portsc_addr` is the port's PORTSC register.
+unsafe fn watch_port_enable(port: u32, portsc_addr: u64, when: &str) -> u32 {
+    const MAX_LOGGED: u32 = 16;
+    let deadline = poll_deadline();
+    let mut last = unsafe { read32(portsc_addr) };
+    let mut changes = 0u32;
+    loop {
+        if portsc_enabled(last) {
+            console::println!("Ouroboros kernel: xhci: port {port}: enabled {when}: {}", Portsc(last));
+            return last;
+        }
+        if last & PORTSC_CCS == 0 {
+            console::println!("Ouroboros kernel: xhci: port {port}: disconnected {when}: {}", Portsc(last));
+            return last;
+        }
+        if crate::timer::now_ticks() >= deadline {
+            console::println!("Ouroboros kernel: xhci: port {port}: not enabled {POLL_TIMEOUT_MS} ms {when} ({changes} changes): {}", Portsc(last));
+            return last;
+        }
+        let now = unsafe { read32(portsc_addr) };
+        if now != last {
+            changes += 1;
+            if changes <= MAX_LOGGED {
+                console::println!("Ouroboros kernel: xhci: port {port}: {when}, now {}", Portsc(now));
+            }
+            last = now;
+        }
+    }
+}
+
 /// Resets root port `port` and hands the device on it to
 /// [`address_and_classify`]. The reset is the only root-port-specific
 /// step: a device behind a hub is reset by the hub ([`configure_hub`]).
@@ -2489,14 +2596,40 @@ unsafe fn setup_device_on_port(
 ) -> Result<DeviceClass, Error> {
     console::println!("Ouroboros kernel: xhci: device connected on port {port}");
 
-    // Reset the port, then clear the resulting Port Reset Change bit.
-    let current = unsafe { read32(portsc_addr) };
-    unsafe { write32(portsc_addr, portsc_preserve(current) | PORTSC_PR) };
-    if !unsafe { poll_until(|| read32(portsc_addr) & PORTSC_PRC != 0) } {
-        return Err(Error::PortResetTimeout);
+    // A USB3 port in SS.Inactive or Compliance is Warm Reset at once, as
+    // Linux does; any other port gets a Hot Reset. A port that does not
+    // come out of its reset enabled with a speed is not addressed. On the
+    // Pi 4 a USB3 stick on its SuperSpeed root port came out of a Hot Reset
+    // with speed 0, at boot and on a rescan (2026-10-03), with nothing
+    // logged to say why. Each step below logs the port's state, so a
+    // capture says which one, if any, brought it up: a wait for link
+    // training to finish, then, from a state that requires one, a Warm
+    // Reset.
+    let before = unsafe { read32(portsc_addr) };
+    let warm_first = portsc_needs_warm_reset(before);
+    if warm_first {
+        console::println!("Ouroboros kernel: xhci: port {port}: link state {} before the reset, warm reset: {}", portsc_pls(before), Portsc(before));
     }
-    let current = unsafe { read32(portsc_addr) };
-    unsafe { write32(portsc_addr, portsc_preserve(current) | PORTSC_PRC) };
+    let mut current = unsafe { reset_root_port(port, portsc_addr, warm_first)? };
+    if !portsc_enabled(current) {
+        console::println!(
+            "Ouroboros kernel: xhci: port {port}: not enabled after the {} reset; before it {}, after it {}",
+            if warm_first { "warm" } else { "hot" },
+            Portsc(before),
+            Portsc(current)
+        );
+        current = unsafe { watch_port_enable(port, portsc_addr, "after the reset") };
+        if !warm_first && !portsc_enabled(current) && current & PORTSC_CCS != 0 && portsc_needs_warm_reset(current) {
+            console::println!("Ouroboros kernel: xhci: port {port}: link state {}, warm reset", portsc_pls(current));
+            current = unsafe { reset_root_port(port, portsc_addr, true)? };
+            if !portsc_enabled(current) {
+                current = unsafe { watch_port_enable(port, portsc_addr, "after the warm reset") };
+            }
+        }
+        if !portsc_enabled(current) {
+            return Err(Error::RootPortNotEnabled(current));
+        }
+    }
 
     // Default PSIV mapping (no Protocol Speed ID table override present -
     // true for every controller this has been tested against, QEMU's and
@@ -2504,7 +2637,7 @@ unsafe fn setup_device_on_port(
     // 5=SuperSpeedPlus - the same numbering a Slot Context's Speed field
     // uses, which is why a hub child's speed (from its hub port status)
     // is converted to it too.
-    let speed = (current >> PORTSC_SPEED_SHIFT) & PORTSC_SPEED_MASK;
+    let speed = portsc_speed(current);
     console::println!("Ouroboros kernel: xhci: port {port} reset, speed={speed}");
     unsafe { address_and_classify(xhci, dcbaa, idx, Location::root(port), speed) }
 }
