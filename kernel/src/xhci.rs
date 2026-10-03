@@ -611,8 +611,49 @@ static INT_BUF: &Aligned64<[u8; 8]> = &DMA_POOL.int_buf;
 unsafe fn read32(addr: u64) -> u32 {
     unsafe { read_volatile(addr as *const u32) }
 }
+/// A register write, with the barrier every one of them needs in front
+/// of it: `dsb sy`, so each load and store the CPU made before it is
+/// complete before the controller sees the write. A register write is how
+/// the controller is told to look at memory (a doorbell after a TRB,
+/// DCBAAP/CRCR/ERSTBA/Run after the structures they point at) or that
+/// memory may be reused (ERDP after the event is read), and the pool's
+/// stores and loads are Normal accesses that nothing orders against a
+/// Device store without one. In the write itself, so there is no way to
+/// write a register without it; until 2026-10-03 it was placed by hand
+/// before each such write, and one site had `dmb sy` instead. Linux's
+/// `writel` does the same with the lighter `dmb oshst`; `dsb sy` is the
+/// barrier the Pi 4 has run every doorbell behind.
 unsafe fn write32(addr: u64, val: u32) {
-    unsafe { write_volatile(addr as *mut u32, val) }
+    unsafe { mmio_write32(addr, val) }
+}
+
+/// The barrier and the register store as fixed instructions, never
+/// inlined, so the image holds `dsb sy; str w1, [x0]; ret` whatever the
+/// profile or the compiler does around it: QEMU has no write buffer to show
+/// the barrier missing, so `scripts/check-xhci-barriers.py` (run by `make
+/// test`) finds this sequence in the built kernel, and a call to it.
+/// A Rust `asm!` barrier before a `write_volatile` compiles to different
+/// shapes in debug and release, and no check can tell its `dsb sy` from
+/// another module's.
+#[unsafe(naked)]
+unsafe extern "C" fn mmio_write32(addr: u64, val: u32) {
+    core::arch::naked_asm!("dsb sy", "str w1, [x0]", "ret");
+}
+
+/// [`write64`]'s form of [`mmio_write32`], fixed for the same check: `dsb
+/// sy; str w1, [x0]; str w2, [x0, #4]; ret`, low half first.
+#[unsafe(naked)]
+unsafe extern "C" fn mmio_write64(addr: u64, lo: u32, hi: u32) {
+    core::arch::naked_asm!("dsb sy", "str w1, [x0]", "str w2, [x0, #4]", "ret");
+}
+
+/// `ring_publish`'s flip, for the same reason: `dmb oshst; str w1, [x0];
+/// ret`, the barrier and the one store that hands a batch of TRBs to the
+/// controller, fixed together where no edit can put a store between them
+/// and the image check can find them.
+#[unsafe(naked)]
+unsafe extern "C" fn publish_cycle_word(ptr: *mut u32, val: u32) {
+    core::arch::naked_asm!("dmb oshst", "str w1, [x0]", "ret");
 }
 /// A 64-bit register as two 32-bit writes, low half first, the order
 /// xHCI section 5.1 gives for Dword writes, and what every driver that
@@ -621,11 +662,12 @@ unsafe fn write32(addr: u64, val: u32) {
 /// store crosses the BCM2711's PCIe bridge, which has not been shown to
 /// carry one intact; the first command timed out on the board while the
 /// store was 64-bit (2026-10-03).
+/// One barrier, then both halves: the barrier orders everything before
+/// the low half, and the high half needs nothing more (ERDP is written on
+/// every event, so a second `dsb sy` there would be paid on the keyboard's
+/// hot path for nothing).
 unsafe fn write64(addr: u64, val: u64) {
-    unsafe {
-        write_volatile(addr as *mut u32, val as u32);
-        write_volatile((addr + 4) as *mut u32, (val >> 32) as u32);
-    }
+    unsafe { mmio_write64(addr, val as u32, (val >> 32) as u32) }
 }
 unsafe fn read64(addr: u64) -> u64 {
     unsafe { read32(addr) as u64 | ((read32(addr + 4) as u64) << 32) }
@@ -976,10 +1018,7 @@ impl Xhci {
                 *enqueue = 0;
             }
         }
-        unsafe {
-            core::arch::asm!("dmb oshst", options(nostack, preserves_flags));
-            write_volatile(first_dw3_ptr, first_dw3);
-        }
+        unsafe { publish_cycle_word(first_dw3_ptr, first_dw3) };
         addrs
     }
 
@@ -1024,10 +1063,7 @@ impl Xhci {
     fn push_command(&mut self, trb: Trb) -> u64 {
         let ring_ptr = COMMAND_RING.0.get().cast::<Trb>();
         let addr = unsafe { Self::ring_push(ring_ptr, CMD_RING_SIZE, &mut self.cmd_enqueue, &mut self.cmd_cycle, trb) };
-        unsafe {
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-            write32(self.db_base, 0); // doorbell 0, target field unused for the command ring
-        }
+        unsafe { write32(self.db_base, 0) }; // doorbell 0, target field unused for the command ring
         addr
     }
 
@@ -1048,7 +1084,6 @@ impl Xhci {
     fn ring_ep0_doorbell(&self, idx: usize) {
         let Some(slot) = self.slots[idx].as_ref() else { return };
         unsafe {
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             // Doorbell target 1 = the default control endpoint (EP0).
             write32(self.db_base + (slot.slot_id as u64) * 4, 1);
         }
@@ -1076,7 +1111,6 @@ impl Xhci {
                 &mut kb.int_cycle,
                 [buf_addr as u32, (buf_addr >> 32) as u32, 8, (1 << 5) | (TRB_TYPE_NORMAL << 10)], // IOC
             );
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             // Doorbell target = the endpoint's own Device Context Index,
             // per the xHCI spec's doorbell register definition (target
             // values above 1 map 1:1 to DCI - see `db_base`'s other
@@ -1116,10 +1150,9 @@ impl Xhci {
             self.evt_cycle = !self.evt_cycle;
         }
         let new_erdp = unsafe { ring_ptr.add(self.evt_dequeue) } as u64;
-        unsafe {
-            core::arch::asm!("dmb sy", options(nostack, preserves_flags));
-            write64(self.ir0_base + IR_ERDP, new_erdp);
-        }
+        // `write64`'s barrier orders the reads of the event above before
+        // the controller is told its slot is free.
+        unsafe { write64(self.ir0_base + IR_ERDP, new_erdp) };
         Some(trb)
     }
 
@@ -1696,10 +1729,7 @@ impl Xhci {
         let Some(slot_id) = self.slots[slot_idx].as_ref().map(|s| s.slot_id) else {
             return Err(Error::NoPortConnected);
         };
-        unsafe {
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-            write32(self.db_base + (slot_id as u64) * 4, dci);
-        }
+        unsafe { write32(self.db_base + (slot_id as u64) * 4, dci) };
         self.wait_transfer_event(slot_id, &[trb_addr]).map(|_| ())
     }
 
@@ -1958,16 +1988,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         dcbaa[0] = SCRATCHPAD_ARRAY.0.get() as u64;
     }
     // Each register below hands the controller a structure just written
-    // to the DMA pool: Normal stores, while the registers are Device
-    // stores, and nothing orders the two kinds without a barrier. The
-    // same `dsb sy` every doorbell in this file is preceded by. Linux
-    // orders every MMIO write the same way, with a lighter barrier
-    // (`writel` on arm64 is `dmb oshst` then the store). QEMU has no
-    // write buffer to show it missing.
-    unsafe {
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-        write64(op_base + OP_DCBAAP, DCBAA.0.get() as u64);
-    }
+    // to the DMA pool; `write32`'s barrier orders those stores first.
+    unsafe { write64(op_base + OP_DCBAAP, DCBAA.0.get() as u64) };
 
     // Command ring: producer cycle state starts at 1 (RCS=1), the Link
     // TRB (last slot) pre-set to match.
@@ -1976,10 +1998,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let ring_addr = COMMAND_RING.0.get() as u64;
         ring[CMD_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1]; // TC, cycle=1
     }
-    unsafe {
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-        write64(op_base + OP_CRCR, (COMMAND_RING.0.get() as u64) | CRCR_RCS);
-    }
+    unsafe { write64(op_base + OP_CRCR, (COMMAND_RING.0.get() as u64) | CRCR_RCS) };
 
     // (Per-device EP0 transfer rings are initialized as each device
     // claims its pool entry during the port scan - see
@@ -1992,19 +2011,13 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     }
     // The controller fetches the ERST when ERSTBA is written.
     unsafe {
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
         write32(ir0_base + IR_ERSTSZ, 1);
         write64(ir0_base + IR_ERSTBA, ERST.0.get() as u64);
         write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64);
     }
 
-    // And reads the scratchpad array at Run. The barriers above already
-    // cover it; this one keeps it covered if a pool store is ever added
-    // between the ERST block and here.
-    unsafe {
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-        write32(op_base + OP_USBCMD, USBCMD_RUN);
-    }
+    // And reads the scratchpad array at Run.
+    unsafe { write32(op_base + OP_USBCMD, USBCMD_RUN) };
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH == 0) } {
         return Err(Error::StartTimeout);
     }

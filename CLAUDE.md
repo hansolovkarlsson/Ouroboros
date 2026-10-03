@@ -531,8 +531,9 @@ make test-el1-drop           # the EL1 drop's rig: test-early-fault.py --el2, th
 make test-async-rmount       # rebuilds the image, then three driven QEMU boots against host-run 9P peers (scripts/test-async-rmount.sh): the parked remote mount is served, a parked reply never reaches a recycled slot, and a live peer is served while a silent one is parked - run it whenever netd's client paths or the kernel's MSG_SEND arm change
 make test-held-keys          # rebuilds the image, then five driven QEMU boots of the held user keys (scripts/test-held-keys.py): login holds, logout and a killed shell drop, an ordinary user is refused; minutes, so not in `make test` - run it whenever login, the shell's session loop or netd's held-key table changes
 make test-keyboard-chain     # rebuilds the image, then four driven QEMU boots through the nested-shell keyboard-chain recipes (scripts/test-keyboard-chain.sh); minutes, so not in `make test` - run it whenever tasks.rs's keyboard ownership changes
-make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi) + the cross-language wire-constant check
+make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi) + the cross-language wire-constant check + check-site + check-xhci-barriers (so it also builds the kernel)
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary
+make check-xhci-barriers    # the xHCI driver's two DMA barriers found in the built kernel image (scripts/check-xhci-barriers.py); no QEMU rig can see one missing - ALSO RUN BY `make test` since 2026-10-03
 make check-site             # the published GitHub Pages site vs the documents it abridges - ALSO RUN BY `make test` since 2026-09-05
 make clean
 ```
@@ -559,7 +560,10 @@ two Python peers), the 9P host peer's verb-dispatch self-test
 after a range test silently swallowed five verbs its docstring claimed; since
 2026-09-23 also a KEYED session against `np9p_client.py` over loopback, every
 verb plus the refusals on both sides, which is most of the suite's ~20 s), and
-`check-site` (above). It exists because such a crate can otherwise have
+`check-site` (above), and since 2026-10-03 `check-xhci-barriers` (above),
+which builds the kernel and finds the xHCI driver's two DMA barriers in its
+image, the one check here no QEMU rig could stand in for. The suite exists
+because such a crate can otherwise have
 **no build coverage at all**: it is a workspace member but not a
 default-member, so until something depends on it, `cargo build`, `make
 build` and `make esp` all stay green while it is broken. Run it before

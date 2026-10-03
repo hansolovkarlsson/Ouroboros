@@ -1472,7 +1472,24 @@ The small open tails those arcs deliberately left:
 >       disassembly check over the built image (the PE carries no symbols,
 >       so it matches the instruction pattern, not a function), shown to
 >       fail by deleting one barrier. Found by the second review of
->       `pi4/trb-cycle-order`.
+>       `pi4/trb-cycle-order`. *Built 2026-10-03 on
+>       `pi4/xhci-write-barrier`, with the item below:
+>       `scripts/check-xhci-barriers.py`, run by `make test` and on its own
+>       as `make check-xhci-barriers`. A pattern over compiled Rust could not
+>       work: in the debug build `make sdcard` stages, the flip after
+>       `dmb oshst` is a call into `write_volatile`, not an adjacent store
+>       (the earlier hand checks were all on release), and other modules'
+>       `dsb sy` look like the xHCI one. So each barrier and its store became
+>       a naked function of fixed instructions (`mmio_write32`: `dsb sy;
+>       str w1, [x0]; ret`; `mmio_write64`, the same with both halves after
+>       one barrier; `publish_cycle_word`: `dmb oshst; str w1, [x0]; ret`),
+>       and the script requires each exactly once in the image and called
+>       (`bl`, or `b` for a tail call) at least once. Shown to fail three ways (the `dsb`
+>       deleted, a `nop` before the store, `write32` routed around the
+>       function), and `make test` itself red with the `dsb` deleted. Its
+>       limit: a new raw `write_volatile` to a register elsewhere in
+>       `xhci.rs` would pass; `write32` being the only register writer is
+>       what that rests on.*
 > - [ ] **fix** **The barrier before an xHCI register write is placed by
 >       hand.** Every doorbell and, since `pi4/xhci-handover-barrier`, the
 >       four handover writes in `init_inner` carry their own `dsb sy`; the
@@ -1484,7 +1501,17 @@ The small open tails those arcs deliberately left:
 >       writes ERDP after `dmb sy`, every other site `dsb sy`, and no
 >       comment says why. Then the redundant barrier before Run goes, and
 >       the manual `dsb` count stops being the only check. Found by the
->       same review.
+>       same review. *Built 2026-10-03 on `pi4/xhci-write-barrier`: every
+>       register write goes through `mmio_write32` or `mmio_write64` (`dsb
+>       sy` then the store, one barrier for both halves of a 64-bit
+>       register), so a register cannot be written without the barrier; the
+>       nine hand-placed barriers are gone, the one before Run with them;
+>       ERDP's `dmb sy` became the same `dsb sy`, which also completes the
+>       event's loads before the controller is told the slot is free.
+>       `dsb sy`, not Linux's lighter `dmb oshst`, because it is the barrier
+>       the Pi 4 has run every doorbell behind; a register write is now a
+>       call and a `dsb` more than before, on every write. QEMU:
+>       `test-usb-hub` (19 ok) and `test-el1-drop` green.*
 > - [ ] **fix** **ERDP is programmed after ERSTBA.** `init_inner` writes
 >       ERSTSZ, ERSTBA, ERDP; the xHCI spec's initialization order (4.2)
 >       is ERSTSZ, ERDP, ERSTBA, so a controller that starts on the
