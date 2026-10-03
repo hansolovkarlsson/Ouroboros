@@ -211,9 +211,11 @@ const USBCMD_RUN: u32 = 1 << 0;
 const USBCMD_HCRST: u32 = 1 << 1;
 
 const USBSTS_HCH: u32 = 1 << 0;
+const USBSTS_HSE: u32 = 1 << 2;
 const USBSTS_CNR: u32 = 1 << 11;
 
 const CRCR_RCS: u64 = 1 << 0;
+const CRCR_CRR: u32 = 1 << 3;
 
 // PORTSC bits/fields. The RW1C status bits (CSC/PEC/WRC/OCC/PRC/PLC/CEC)
 // and PED (R/W, but writing 1 *disables* the port - not a "preserve as
@@ -231,6 +233,7 @@ const PORTSC_WRITE_CLEAR_MASK: u32 =
 // Runtime interrupter register set 0, from `ir0_base` (= BAR base +
 // RTSOFF + 0x20 - interrupter register sets start at RTSOFF+0x20, register
 // set 0 is always present).
+const IR_IMAN: u64 = 0x00;
 const IR_ERSTSZ: u64 = 0x08;
 const IR_ERSTBA: u64 = 0x10;
 const IR_ERDP: u64 = 0x18;
@@ -594,8 +597,21 @@ unsafe fn read32(addr: u64) -> u32 {
 unsafe fn write32(addr: u64, val: u32) {
     unsafe { write_volatile(addr as *mut u32, val) }
 }
+/// A 64-bit register as two 32-bit writes, low half first, the order
+/// xHCI section 5.1 gives for Dword writes, and what every driver that
+/// works on the Pi 4's VL805 does: the firmware's own (edk2 `XhciDxe`),
+/// Linux (`xhci_write_64` is `lo_hi_writeq`) and U-Boot. A single 64-bit
+/// store crosses the BCM2711's PCIe bridge, which has not been shown to
+/// carry one intact; the first command timed out on the board while the
+/// store was 64-bit (2026-10-03).
 unsafe fn write64(addr: u64, val: u64) {
-    unsafe { write_volatile(addr as *mut u64, val) }
+    unsafe {
+        write_volatile(addr as *mut u32, val as u32);
+        write_volatile((addr + 4) as *mut u32, (val >> 32) as u32);
+    }
+}
+unsafe fn read64(addr: u64) -> u64 {
+    unsafe { read32(addr) as u64 | ((read32(addr + 4) as u64) << 32) }
 }
 
 fn portsc_preserve(current: u32) -> u32 {
@@ -690,6 +706,8 @@ struct Xhci {
     cmd_cycle: bool,
     evt_dequeue: usize,
     evt_cycle: bool,
+    /// Set once the first command timeout has been dumped this boot.
+    timeout_dumped: bool,
     slots: [Option<DeviceSlot>; MAX_DEVICES],
     keyboard: Option<KeyboardState>,
     storage: Option<StorageState>,
@@ -1106,7 +1124,60 @@ impl Xhci {
             }
             return Ok(trb);
         }
+        self.dump_on_command_timeout(cmd_ptr);
         Err(Error::CommandTimeout)
+    }
+
+    /// One dump, the first time a command times out this boot: whether the
+    /// controller saw the rings at all (the register readbacks, CRCR's
+    /// Command Ring Running bit), whether it hit a DMA error (USBSTS.HSE),
+    /// and whether it wrote an event this driver did not see (the event
+    /// ring's memory at the dequeue slot). `cmd_ptr` is the command that
+    /// timed out.
+    fn dump_on_command_timeout(&mut self, cmd_ptr: u64) {
+        if self.timeout_dumped {
+            return;
+        }
+        self.timeout_dumped = true;
+        let (op, ir) = (self.op_base, self.ir0_base);
+        let (usbsts, crcr, dcbaap, iman, erstsz, erstba, erdp) = unsafe {
+            (
+                read32(op + OP_USBSTS),
+                read32(op + OP_CRCR),
+                read64(op + OP_DCBAAP),
+                read32(ir + IR_IMAN),
+                read32(ir + IR_ERSTSZ),
+                read64(ir + IR_ERSTBA),
+                read64(ir + IR_ERDP),
+            )
+        };
+        console::println!(
+            "Ouroboros kernel: xhci: command timeout: USBSTS {usbsts:#x} (HCH {}, HSE {}), CRCR.CRR {}, IMAN {iman:#x}",
+            usbsts & USBSTS_HCH != 0,
+            usbsts & USBSTS_HSE != 0,
+            crcr & CRCR_CRR != 0
+        );
+        console::println!(
+            "Ouroboros kernel: xhci: command timeout: DCBAAP {dcbaap:#x} (pool {:#x}), ERSTSZ {erstsz}, ERSTBA {erstba:#x} (pool {:#x}), ERDP {erdp:#x}",
+            DCBAA.0.get() as u64,
+            ERST.0.get() as u64
+        );
+        let read_words = |p: *const u32, n: usize| {
+            let mut w = [0u32; 4];
+            for (i, slot) in w.iter_mut().enumerate().take(n) {
+                *slot = unsafe { read_volatile(p.add(i)) };
+            }
+            w
+        };
+        let evt = read_words(unsafe { EVENT_RING.0.get().cast::<Trb>().add(self.evt_dequeue) }.cast(), 4);
+        let erst0 = read_words(ERST.0.get().cast(), 3);
+        let cmd = read_words(cmd_ptr as *const u32, 4);
+        console::println!(
+            "Ouroboros kernel: xhci: command timeout: event slot {} {evt:08x?} (cycle wanted {}), ERST[0] {:08x?}, the command @ {cmd_ptr:#x} {cmd:08x?}",
+            self.evt_dequeue,
+            self.evt_cycle as u32,
+            &erst0[..3]
+        );
     }
 
     /// Waits for a Transfer Event *from `expected_slot_id`
@@ -1846,6 +1917,12 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH == 0) } {
         return Err(Error::StartTimeout);
     }
+    // A failed DMA fetch at Run (the ERST, the scratchpad array) sets HSE
+    // and halts the controller; said here, not a command timeout later.
+    let usbsts = unsafe { read32(op_base + OP_USBSTS) };
+    if usbsts & USBSTS_HSE != 0 {
+        console::println!("Ouroboros kernel: xhci: WARNING: Host System Error after Run (USBSTS {usbsts:#x})");
+    }
 
     let mut xhci = Xhci {
         db_base,
@@ -1857,6 +1934,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         cmd_cycle: true,
         evt_dequeue: 0,
         evt_cycle: true,
+        timeout_dumped: false,
         slots: [const { None }; MAX_DEVICES],
         keyboard: None,
         storage: None,

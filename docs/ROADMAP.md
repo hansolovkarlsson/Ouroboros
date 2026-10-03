@@ -1227,7 +1227,7 @@ The small open tails those arcs deliberately left:
 >       Merged as #191; on the board 2026-10-03, four `NOXHCI` boots, four
 >       shells, no fault, where the day before one boot in two to four
 >       faulted in firmware code. Done.*
-> - [ ] **fix** **The xHCI DMA pool has 8 scratchpad pages; the Pi's VL805
+> - [x] **fix** **The xHCI DMA pool has 8 scratchpad pages; the Pi's VL805
 >       wants 31.** The no-flag boot of 2026-10-03 took the controller and
 >       crossed the exit and the drop with no fault, then `xhci.rs`
 >       declined it: `controller wants 31 scratchpad buffers, only 8 are
@@ -1241,7 +1241,39 @@ The small open tails those arcs deliberately left:
 >       and the ERST into its slot (the layout assertions refused the first
 >       order); the count logged on the controller line; a controller whose
 >       `PAGESIZE` lacks 4 KB refused rather than handed 4 KB buffers. QEMU:
->       `test-usb-hub` and `test-el1-drop` pass. The board boot is pending.*
+>       `test-usb-hub` and `test-el1-drop` pass. Merged as #192; on the
+>       board 2026-10-03, two boots: `scratchpads=31`, the controller
+>       accepted, port 1 connected and reset (High Speed). Done; the first
+>       command then timed out, the next item.*
+> - [ ] **fix** **The first xHCI command times out on the Pi 4.** Two
+>       boots of #192: `port 1 setup failed (command ring: timed out waiting
+>       for a completion event)`, while the non-coherent pool's self-check
+>       passed. The driver differed from every one that works on the VL805
+>       (edk2 `XhciDxe`, Linux, U-Boot) in two places: it wrote the 64-bit
+>       registers (DCBAAP, CRCR, ERSTBA, ERDP) as one 64-bit store across
+>       the PCIe bridge, and it put no barrier between the ring setup in
+>       memory and the register writes that hand it over (the next item).
+>       One variable per board round, so this one is the store. *Built
+>       2026-10-03 on `pi4/xhci-mmio-order`: `write64` as low then high
+>       32-bit halves; passively, `USBSTS.HSE` logged right after Run, and
+>       a once-per-boot dump on a command timeout (USBSTS, CRCR.CRR, IMAN,
+>       the register readbacks against the pool's addresses, the event
+>       ring's slot, ERST[0], the command that timed out). A probe of one
+>       64-bit store was built and taken out at review: it was the suspect
+>       access itself, and could damage CONFIG beside DCBAAP. QEMU:
+>       `test-usb-hub` and `test-el1-drop` pass, and the dump read
+>       correctly with the command doorbell removed. The board boot is
+>       pending: success is the port scan getting past Enable Slot.*
+> - [ ] **fix** **No barrier between the xHCI ring setup and the registers
+>       that hand it over.** The DCBAA, the scratchpad array, the command
+>       ring's Link TRB and the ERST are stores to the DMA pool; DCBAAP,
+>       CRCR, ERSTBA and Run are Device stores, and nothing orders the two
+>       kinds without a barrier. The controller fetches the ERST when
+>       ERSTBA is written and reads the scratchpad array at Run. Linux's
+>       `writel` puts a barrier before every MMIO write; QEMU has no write
+>       buffer to show the miss. A `dsb` before the register block (and
+>       before Run). Held back from the 64-bit-store round so the board
+>       answers one question; take it after that round whatever it shows.
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
