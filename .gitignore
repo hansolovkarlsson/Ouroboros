@@ -19,3 +19,7 @@ __pycache__/
 # drive-qemu.py writes its interrupt log beside the image; a bad image
 # argument puts it at the root (review of session-auth step 7)
 /qemu-int.log
+
+# GNU screen's log of the Pi's serial console (`screen -L`), written where
+# screen was started; its lines go into docs/testing/testing-pi4.md section 6
+/screenlog.0
