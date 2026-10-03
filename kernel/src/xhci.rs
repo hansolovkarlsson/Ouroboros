@@ -215,6 +215,7 @@ const USBSTS_HSE: u32 = 1 << 2;
 const USBSTS_CNR: u32 = 1 << 11;
 
 const CRCR_RCS: u64 = 1 << 0;
+const CRCR_CRR: u32 = 1 << 3;
 
 // PORTSC bits/fields. The RW1C status bits (CSC/PEC/WRC/OCC/PRC/PLC/CEC)
 // and PED (R/W, but writing 1 *disables* the port - not a "preserve as
@@ -596,13 +597,13 @@ unsafe fn read32(addr: u64) -> u32 {
 unsafe fn write32(addr: u64, val: u32) {
     unsafe { write_volatile(addr as *mut u32, val) }
 }
-/// A 64-bit register as two 32-bit writes, low half first, which xHCI
-/// allows (section 5.1) and which every driver that works on the Pi 4's
-/// VL805 does: the firmware's own (edk2 `XhciDxe`), Linux (`xhci_write_64`
-/// is `lo_hi_writeq`) and U-Boot. A single 64-bit store crosses the
-/// BCM2711's PCIe bridge, which has not been shown to carry one intact;
-/// the first command timed out on the board while the store was 64-bit
-/// (2026-10-03). `probe_store64` logs what one 64-bit store does there.
+/// A 64-bit register as two 32-bit writes, low half first, the order
+/// xHCI section 5.1 gives for Dword writes, and what every driver that
+/// works on the Pi 4's VL805 does: the firmware's own (edk2 `XhciDxe`),
+/// Linux (`xhci_write_64` is `lo_hi_writeq`) and U-Boot. A single 64-bit
+/// store crosses the BCM2711's PCIe bridge, which has not been shown to
+/// carry one intact; the first command timed out on the board while the
+/// store was 64-bit (2026-10-03).
 unsafe fn write64(addr: u64, val: u64) {
     unsafe {
         write_volatile(addr as *mut u32, val as u32);
@@ -1123,7 +1124,7 @@ impl Xhci {
             }
             return Ok(trb);
         }
-        self.dump_on_command_timeout();
+        self.dump_on_command_timeout(cmd_ptr);
         Err(Error::CommandTimeout)
     }
 
@@ -1131,8 +1132,9 @@ impl Xhci {
     /// controller saw the rings at all (the register readbacks, CRCR's
     /// Command Ring Running bit), whether it hit a DMA error (USBSTS.HSE),
     /// and whether it wrote an event this driver did not see (the event
-    /// ring's memory at the dequeue slot).
-    fn dump_on_command_timeout(&mut self) {
+    /// ring's memory at the dequeue slot). `cmd_ptr` is the command that
+    /// timed out.
+    fn dump_on_command_timeout(&mut self, cmd_ptr: u64) {
         if self.timeout_dumped {
             return;
         }
@@ -1153,28 +1155,28 @@ impl Xhci {
             "Ouroboros kernel: xhci: command timeout: USBSTS {usbsts:#x} (HCH {}, HSE {}), CRCR.CRR {}, IMAN {iman:#x}",
             usbsts & USBSTS_HCH != 0,
             usbsts & USBSTS_HSE != 0,
-            crcr & (1 << 3) != 0
+            crcr & CRCR_CRR != 0
         );
         console::println!(
             "Ouroboros kernel: xhci: command timeout: DCBAAP {dcbaap:#x} (pool {:#x}), ERSTSZ {erstsz}, ERSTBA {erstba:#x} (pool {:#x}), ERDP {erdp:#x}",
             DCBAA.0.get() as u64,
             ERST.0.get() as u64
         );
-        let ring = EVENT_RING.0.get().cast::<Trb>();
-        let cmd = COMMAND_RING.0.get().cast::<Trb>();
-        let (evt, erst0, cmd0) = unsafe {
-            let e = ring.add(self.evt_dequeue);
-            let r = ERST.0.get().cast::<u32>();
-            (
-                [read_volatile(e.cast::<u32>()), read_volatile(e.cast::<u32>().add(1)), read_volatile(e.cast::<u32>().add(2)), read_volatile(e.cast::<u32>().add(3))],
-                [read_volatile(r), read_volatile(r.add(1)), read_volatile(r.add(2))],
-                [read_volatile(cmd.cast::<u32>()), read_volatile(cmd.cast::<u32>().add(1)), read_volatile(cmd.cast::<u32>().add(2)), read_volatile(cmd.cast::<u32>().add(3))],
-            )
+        let read_words = |p: *const u32, n: usize| {
+            let mut w = [0u32; 4];
+            for (i, slot) in w.iter_mut().enumerate().take(n) {
+                *slot = unsafe { read_volatile(p.add(i)) };
+            }
+            w
         };
+        let evt = read_words(unsafe { EVENT_RING.0.get().cast::<Trb>().add(self.evt_dequeue) }.cast(), 4);
+        let erst0 = read_words(ERST.0.get().cast(), 3);
+        let cmd = read_words(cmd_ptr as *const u32, 4);
         console::println!(
-            "Ouroboros kernel: xhci: command timeout: event slot {} {evt:08x?} (cycle wanted {}), ERST[0] {erst0:08x?}, command TRB 0 {cmd0:08x?}",
+            "Ouroboros kernel: xhci: command timeout: event slot {} {evt:08x?} (cycle wanted {}), ERST[0] {:08x?}, the command @ {cmd_ptr:#x} {cmd:08x?}",
             self.evt_dequeue,
-            self.evt_cycle as u32
+            self.evt_cycle as u32,
+            &erst0[..3]
         );
     }
 
@@ -1885,17 +1887,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         }
         dcbaa[0] = SCRATCHPAD_ARRAY.0.get() as u64;
     }
-    // Diagnostic, once per boot: what a single 64-bit store to DCBAAP reads
-    // back as. Harmless, since the controller reads DCBAAP only for a slot
-    // command and the split write below replaces it before Run.
-    let dcbaa_addr = DCBAA.0.get() as u64;
-    unsafe { write_volatile((op_base + OP_DCBAAP) as *mut u64, dcbaa_addr) };
-    let probed = unsafe { read64(op_base + OP_DCBAAP) };
-    console::println!(
-        "Ouroboros kernel: xhci: a 64-bit store to DCBAAP of {dcbaa_addr:#x} reads back {probed:#x} ({})",
-        if probed == dcbaa_addr { "intact" } else { "NOT intact" }
-    );
-    unsafe { write64(op_base + OP_DCBAAP, dcbaa_addr) };
+    unsafe { write64(op_base + OP_DCBAAP, DCBAA.0.get() as u64) };
 
     // Command ring: producer cycle state starts at 1 (RCS=1), the Link
     // TRB (last slot) pre-set to match.
@@ -1915,17 +1907,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let erst = unsafe { &mut *ERST.0.get() };
         erst[0] = ErstEntry { base: EVENT_RING.0.get() as u64, size: EVENT_RING_SIZE as u32, _reserved: 0 };
     }
-    // The DCBAA, the scratchpad array, the command ring's Link TRB and the
-    // ERST above are ordinary stores to the DMA pool; the register writes
-    // below are Device stores, and nothing orders the two kinds without a
-    // barrier. Writing ERSTBA makes the controller fetch the ERST at once,
-    // so it must already be in memory. (Linux's `writel` puts a barrier
-    // before every MMIO write; QEMU has no write buffer to show the miss.)
-    // The DCBAAP and CRCR writes above come before this barrier, but the
-    // controller reads neither table until a command is rung, behind the
-    // doorbell's own `dsb`.
     unsafe {
-        core::arch::asm!("dsb sy", options(nostack, preserves_flags));
         write32(ir0_base + IR_ERSTSZ, 1);
         write64(ir0_base + IR_ERSTBA, ERST.0.get() as u64);
         write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64);
@@ -1934,6 +1916,12 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     unsafe { write32(op_base + OP_USBCMD, USBCMD_RUN) };
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH == 0) } {
         return Err(Error::StartTimeout);
+    }
+    // A failed DMA fetch at Run (the ERST, the scratchpad array) sets HSE
+    // and halts the controller; said here, not a command timeout later.
+    let usbsts = unsafe { read32(op_base + OP_USBSTS) };
+    if usbsts & USBSTS_HSE != 0 {
+        console::println!("Ouroboros kernel: xhci: WARNING: Host System Error after Run (USBSTS {usbsts:#x})");
     }
 
     let mut xhci = Xhci {
