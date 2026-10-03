@@ -924,10 +924,28 @@ impl Xhci {
     unsafe fn ring_push(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, mut trb: Trb) -> u64 {
         trb[3] = (trb[3] & !1) | (*cycle as u32);
         let slot_ptr = unsafe { ring_ptr.add(*enqueue) };
-        unsafe { write_volatile(slot_ptr, trb) };
+        // The TRB's other three words FIRST, and the word with the cycle
+        // bit only after a store barrier: the cycle bit is what hands the
+        // TRB to the controller, which may re-read the dequeue TRB without
+        // a new doorbell. One four-word store (as this used to be) lets the
+        // fresh cycle bit become visible over a stale pointer or length.
+        // `dmb oshst` is Linux's `dma_wmb()` on arm64; the write-side twin
+        // of `event_ring_pop`'s `dmb oshld`.
+        let words = slot_ptr.cast::<u32>();
+        unsafe {
+            write_volatile(words, trb[0]);
+            write_volatile(words.add(1), trb[1]);
+            write_volatile(words.add(2), trb[2]);
+            core::arch::asm!("dmb oshst", options(nostack, preserves_flags));
+            write_volatile(words.add(3), trb[3]);
+        }
         let addr = slot_ptr as u64;
         *enqueue += 1;
         if *enqueue == ring_len - 1 {
+            // The Link TRB's pointer words are written at ring setup, before
+            // the command that gives the controller the ring, and do not
+            // change while it is in use: only its cycle bit is new here, so
+            // there is nothing to order it after.
             let link_ptr = unsafe { ring_ptr.add(ring_len - 1) };
             let mut link = unsafe { read_volatile(link_ptr) };
             link[3] = (link[3] & !1) | (*cycle as u32);
