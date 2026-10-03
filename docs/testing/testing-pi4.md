@@ -387,6 +387,13 @@ they match yet (roadmap: "A Pi boot from a card and a stick of different
 builds"), and old programs on a stick under a new kernel look like a kernel
 bug.
 
+**Which kernel the card carries is in the capture** since 2026-10-03: the
+first line, `UEFI stage alive, build <commit>[+dirty] <profile>, ...`, and
+again after the exit, `boot services exited, console live, build ...`.
+Compare it with `git rev-parse --short=12 HEAD` of the tree you staged from;
+`+dirty` means the tree had uncommitted changes to tracked files when it was
+built. It says nothing about the stick, which has no kernel.
+
 *Built 2026-10-03, checked only on `hdiutil` images:* FAT32 and exFAT staged
 (no `EFI`, the marker present); a restage keeping `etc`; `KEEP_ETC=0`
 re-staging it; a stick with its marker but half its tree accepted; refused

@@ -110,7 +110,9 @@ in the image's `.bss`, `KERNEL_STACK`), then `kernel_main` runs there and
 never returns: on the Raspberry Pi the firmware's stack is 16 KB with its
 page tables directly below it, and the kernel overflowed it into them,
 which was every firmware fault the board showed (`testing-pi4.md`
-section 6). The first log line says which stack it is on.
+section 6). The first log line says which build it is (the commit, `+dirty`,
+the profile, from `kernel/build.rs`, which reruns every build) and which
+stack it is on.
 
 `main()` now calls `boot::exit_boot_services(None)` partway through and
 permanently leaves the UEFI environment. Everything before that call may use
