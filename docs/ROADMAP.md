@@ -1420,9 +1420,53 @@ The small open tails those arcs deliberately left:
 >       TRB without a new doorbell, so it can see a fresh cycle bit over a
 >       stale buffer pointer or length. Write dwords 0 to 2, a write
 >       barrier, then dword 3 (Linux's `queue_trb` does `wmb()` before
->       `field[3]`); the Link TRB's cycle rewrite on a wrap the same. The
->       write-side twin of `event_ring_pop`'s read order. Found by the
->       review of `pi4/xhci-handover-barrier`; take it next.
+>       `field[3]`). The write-side twin of `event_ring_pop`'s read order.
+>       Found by the review of `pi4/xhci-handover-barrier`; take it next.
+>       *Built 2026-10-03 on `pi4/trb-cycle-order`, wider than asked: the
+>       review of the first build found the same gap ACROSS the TRBs of one
+>       transfer (a control request's Setup could be taken before its Data
+>       and Status TRBs were written). `ring_publish` now writes a batch of
+>       TRBs (one TD, or a control transfer's three stage TDs together, as
+>       Linux's `xhci_queue_ctrl_tx` does) the way `giveback_first_trb`
+>       publishes: every word written with the first TRB's cycle bit still
+>       software's, then `dmb oshst`, then that bit flipped. `ring_push` is
+>       a batch of one, and `control_transfer` publishes its TRBs together.
+>       It is the one way a TRB reaches a ring the controller may be
+>       reading; ring setup (zeroing, the Link TRB) is the only other TRB
+>       store, made before the ring is handed over. The Link TRB's wrap
+>       writes its cycle word only and needs no barrier of its own: the
+>       controller stops at the held first TRB. A second review found no
+>       correctness bug in the path and seven smaller things, taken: the
+>       addresses returned by value in a `[u64; MAX_PUBLISH]` rather than
+>       through a caller's slice (two slices of unequal length could panic
+>       halfway through a held batch), the count asserted before anything
+>       is written, the stage-TD wording, the history note, a stale doc
+>       line, and `INT_RING` zeroed (the item below). Checked on the final
+>       code: `test-usb-hub` (19 ok) and `test-el1-drop` green; with the
+>       flip removed the rig fails (17 FAIL), the Enable Slot command left
+>       in the ring with its cycle bit 0 and timed out, so the held TRB is
+>       not the controller's until the flip; in the release image all 19
+>       `dmb oshst` have the flip at `+0xc` as the first store after them.*
+> - [x] **fix** **`INT_RING` is not zeroed when the keyboard is set up.**
+>       `activate_keyboard` writes only the ring's Link TRB, where the EP0
+>       and bulk ring setups zero the whole ring first. A second activation
+>       would start at enqueue 0 with cycle 1 over TRBs left from the first,
+>       and any of them carrying cycle 1 would look owned to the
+>       controller. Latent: `activate_keyboard` runs once per boot today.
+>       Zero it like the others. Found by the review of
+>       `pi4/trb-cycle-order`. *Done on the same branch, after its second
+>       review pointed out that `ring_publish`'s contract says ring setup
+>       zeroes the ring: one line, no change on today's single activation.*
+> - [ ] **fix** **No committed check guards the xHCI barriers.** Every QEMU
+>       rig passes with or without the `dmb oshst` in `ring_publish` and the
+>       `dsb sy` before the register writes, and the image checks (19
+>       barriers, the flip the first store after each; `dsb sy` 18 to 22)
+>       were run by hand. A refactor that drops a barrier, or puts a store
+>       between it and the flip, stays green everywhere. A scripted
+>       disassembly check over the built image (the PE carries no symbols,
+>       so it matches the instruction pattern, not a function), shown to
+>       fail by deleting one barrier. Found by the second review of
+>       `pi4/trb-cycle-order`.
 > - [ ] **fix** **The barrier before an xHCI register write is placed by
 >       hand.** Every doorbell and, since `pi4/xhci-handover-barrier`, the
 >       four handover writes in `init_inner` carry their own `dsb sy`; the

@@ -256,6 +256,9 @@ const EP_TYPE_BULK_OUT: u32 = 2;
 const EP_TYPE_BULK_IN: u32 = 6;
 
 const MAX_SLOTS_ENABLED: usize = 8;
+/// The most TRBs `Xhci::ring_publish` takes at once: a control transfer's
+/// Setup, Data and Status stages.
+const MAX_PUBLISH: usize = 3;
 // The Pi 4's VL805 asks for 31 (HCSPARAMS2 0xfc000031, 2026-10-03); this
 // held 8 until then. The count each controller asks for is logged at init.
 const MAX_SCRATCHPAD_BUFFERS: usize = 32;
@@ -906,11 +909,33 @@ struct KeyboardState {
 }
 
 impl Xhci {
-    /// Advances `enqueue`/`cycle` after writing `trb` into `ring` at the
-    /// current producer position, wrapping through the ring's fixed Link
-    /// TRB (the last slot) when it reaches the end. Returns the physical
-    /// address `trb` was written to - callers that need to match a later
-    /// Command Completion Event by pointer (see `push_command`) use this.
+    /// Writes `trbs` in order at the current producer position of `ring`,
+    /// advancing `enqueue`/`cycle` and wrapping through the ring's fixed
+    /// Link TRB (the last slot) when it reaches the end, and publishes them
+    /// to the controller at once. Returns each TRB's physical address at
+    /// the same index (the rest zero), for callers that match a later
+    /// completion event by pointer (see `push_command`). A batch is one TD,
+    /// or a control transfer's Setup, Data and Status stage TDs together,
+    /// as Linux's `xhci_queue_ctrl_tx` publishes them; at most
+    /// `MAX_PUBLISH` TRBs, which a caller's wrong count turns into a halt
+    /// before anything is written. The one way a TRB reaches a ring the
+    /// controller may be reading; the only other TRB stores are a ring's
+    /// setup (zeroing it and writing its Link TRB), made before the
+    /// command that gives the controller the ring.
+    ///
+    /// **The order is the contract.** A TRB belongs to the controller as
+    /// soon as its cycle bit matches the ring's, and the controller may
+    /// re-read the dequeue TRB without a new doorbell. So every word of
+    /// the batch is written first with the FIRST TRB's cycle bit still
+    /// software's, then `dmb oshst`, then that one bit flipped: the
+    /// controller sees all of the batch or none of it, never a fresh cycle
+    /// bit over a stale pointer or length, and never a Setup stage whose
+    /// Data and Status TRBs are not there yet. This is Linux's
+    /// `giveback_first_trb`; `dmb oshst` is its `dma_wmb()` on arm64, the
+    /// write-side twin of `event_ring_pop`'s `dmb oshld`. Until 2026-10-03
+    /// each TRB was one `write_volatile` of all four words, which the
+    /// compiler may split into stores in any order, cycle word included,
+    /// and which published the TRB as it was written.
     ///
     /// The Link TRB's own cycle bit is rewritten on every wrap, not just
     /// set once at ring-init time: it's logically "produced" exactly like
@@ -920,22 +945,49 @@ impl Xhci {
     /// only actually matters once a ring wraps more than once, which the
     /// command ring (at most 2-3 commands ever issued) never does in this
     /// driver's own testing, but the EP0 ring (one `poll_key` per shell
-    /// loop iteration, indefinitely) certainly will.
-    unsafe fn ring_push(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, mut trb: Trb) -> u64 {
-        trb[3] = (trb[3] & !1) | (*cycle as u32);
-        let slot_ptr = unsafe { ring_ptr.add(*enqueue) };
-        unsafe { write_volatile(slot_ptr, trb) };
-        let addr = slot_ptr as u64;
-        *enqueue += 1;
-        if *enqueue == ring_len - 1 {
-            let link_ptr = unsafe { ring_ptr.add(ring_len - 1) };
-            let mut link = unsafe { read_volatile(link_ptr) };
-            link[3] = (link[3] & !1) | (*cycle as u32);
-            unsafe { write_volatile(link_ptr, link) };
-            *cycle = !*cycle;
-            *enqueue = 0;
+    /// loop iteration, indefinitely) certainly will. Only its cycle word
+    /// is written: its pointer words are fixed at ring setup. A wrap inside
+    /// a batch is covered by the same barrier, since the controller stops
+    /// at the held first TRB and reads nothing past it until the flip.
+    unsafe fn ring_publish(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, trbs: &[Trb]) -> [u64; MAX_PUBLISH] {
+        assert!(trbs.len() <= MAX_PUBLISH);
+        let mut addrs = [0u64; MAX_PUBLISH];
+        let Some(first) = trbs.first() else { return addrs };
+        let first_dw3_ptr = unsafe { ring_ptr.add(*enqueue).cast::<u32>().add(3) };
+        let first_dw3 = (first[3] & !1) | (*cycle as u32);
+        for (i, trb) in trbs.iter().enumerate() {
+            let dw3 = (trb[3] & !1) | (*cycle as u32);
+            let slot_ptr = unsafe { ring_ptr.add(*enqueue) };
+            let words = slot_ptr.cast::<u32>();
+            unsafe {
+                write_volatile(words, trb[0]);
+                write_volatile(words.add(1), trb[1]);
+                write_volatile(words.add(2), trb[2]);
+                // The first is held: its cycle bit software's until the flip.
+                write_volatile(words.add(3), if i == 0 { dw3 ^ 1 } else { dw3 });
+            }
+            addrs[i] = slot_ptr as u64;
+            *enqueue += 1;
+            if *enqueue == ring_len - 1 {
+                let link_dw3 = unsafe { ring_ptr.add(ring_len - 1).cast::<u32>().add(3) };
+                let link = unsafe { read_volatile(link_dw3) };
+                unsafe { write_volatile(link_dw3, (link & !1) | (*cycle as u32)) };
+                *cycle = !*cycle;
+                *enqueue = 0;
+            }
         }
-        addr
+        unsafe {
+            core::arch::asm!("dmb oshst", options(nostack, preserves_flags));
+            write_volatile(first_dw3_ptr, first_dw3);
+        }
+        addrs
+    }
+
+    /// One TRB, through [`ring_publish`](Self::ring_publish); returns its
+    /// physical address.
+    unsafe fn ring_push(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, trb: Trb) -> u64 {
+        let addrs = unsafe { Self::ring_publish(ring_ptr, ring_len, enqueue, cycle, &[trb]) };
+        addrs[0]
     }
 
     /// Undoes a failed setup's hold on pool entry `idx`: if a hardware
@@ -984,11 +1036,13 @@ impl Xhci {
     /// (`slots[idx].ep0_enqueue`/`ep0_cycle`). A `None` slot is an
     /// internal caller bug; degrading to a no-op (returning a null
     /// pointer no completion will ever match) beats a panic-handler
-    /// hang.
-    fn push_ep0(&mut self, idx: usize, trb: Trb) -> u64 {
+    /// hang. Published at once by [`ring_publish`](Self::ring_publish): a
+    /// control request's Setup, Data and Status TRBs reach the controller
+    /// together. Returns their addresses, all null for an empty slot.
+    fn push_ep0(&mut self, idx: usize, trbs: &[Trb]) -> [u64; MAX_PUBLISH] {
         let ring_ptr = EP0_RINGS[idx].0.get().cast::<Trb>();
-        let Some(slot) = self.slots[idx].as_mut() else { return 0 };
-        unsafe { Self::ring_push(ring_ptr, EP0_RING_SIZE, &mut slot.ep0_enqueue, &mut slot.ep0_cycle, trb) }
+        let Some(slot) = self.slots[idx].as_mut() else { return [0; MAX_PUBLISH] };
+        unsafe { Self::ring_publish(ring_ptr, EP0_RING_SIZE, &mut slot.ep0_enqueue, &mut slot.ep0_cycle, trbs) }
     }
 
     fn ring_ep0_doorbell(&self, idx: usize) {
@@ -1207,7 +1261,7 @@ impl Xhci {
     /// dependency.)
     ///
     /// **And from the request's own TRBs** (`td`, the addresses
-    /// `ring_push` returned for it): an event from the right slot that
+    /// `ring_push` or `ring_publish` returned for it): an event from the right slot that
     /// points at any other TRB is a leftover from an earlier request - a
     /// late completion after a timeout, or the Stopped event of a request
     /// that recovery cancelled - and is skipped and logged, never taken
@@ -1485,35 +1539,37 @@ impl Xhci {
         let trt: u32 = if w_length == 0 { 0 } else if data_in { 3 } else { 2 };
         let setup_param_lo = (bm_request_type as u32) | ((b_request as u32) << 8) | ((w_value as u32) << 16);
         let setup_param_hi = (w_index as u32) | ((w_length as u32) << 16);
-        // The request's own TRBs, for `wait_transfer_event` to match its
-        // completion against.
-        let mut td = [0u64; 3];
+        // The request's TRBs, built first and published together; their
+        // addresses are what `wait_transfer_event` matches the completion
+        // against.
+        let mut trbs: [Trb; MAX_PUBLISH] = [[0; 4]; MAX_PUBLISH];
         let mut td_len = 0usize;
-        td[td_len] = self.push_ep0(idx, [
+        trbs[td_len] = [
             setup_param_lo,
             setup_param_hi,
             8, // TRB Transfer Length is always 8 - the setup packet itself, not wLength
             (1 << 6) | (TRB_TYPE_SETUP_STAGE << 10) | (trt << 16), // IDT
-        ]);
+        ];
         td_len += 1;
 
         if w_length != 0 {
             let buf_addr = CTRL_BUF.0.get() as u64;
-            td[td_len] = self.push_ep0(idx, [
+            trbs[td_len] = [
                 buf_addr as u32,
                 (buf_addr >> 32) as u32,
                 w_length as u32,
                 (TRB_TYPE_DATA_STAGE << 10) | ((data_in as u32) << 16),
-            ]);
+            ];
             td_len += 1;
         }
 
         // Status stage direction is the opposite of the data stage's; if
         // there was no data stage, it's always IN.
         let status_dir_in = if w_length == 0 { true } else { !data_in };
-        td[td_len] = self.push_ep0(idx, [0, 0, 0, (1 << 5) | (TRB_TYPE_STATUS_STAGE << 10) | ((status_dir_in as u32) << 16)]); // IOC
+        trbs[td_len] = [0, 0, 0, (1 << 5) | (TRB_TYPE_STATUS_STAGE << 10) | ((status_dir_in as u32) << 16)]; // IOC
         td_len += 1;
 
+        let td = self.push_ep0(idx, &trbs[..td_len]);
         self.ring_ep0_doorbell(idx);
         if let Err(e) = self.wait_transfer_event(slot_id, &td[..td_len]) {
             self.recover_ep0(idx, &e);
@@ -3010,6 +3066,10 @@ unsafe fn activate_keyboard(xhci: &mut Xhci, idx: usize, kb: KeyboardEndpoint) -
     {
         let ring = unsafe { &mut *INT_RING.0.get() };
         let ring_addr = INT_RING.0.get() as u64;
+        // Zeroed like the EP0 and bulk rings: the keyboard's producer
+        // state starts at slot 0 with cycle 1, and a TRB left from an
+        // earlier activation could carry cycle 1 and look owned.
+        *ring = [[0; 4]; INT_RING_SIZE];
         ring[INT_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1];
     }
 
