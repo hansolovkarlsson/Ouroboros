@@ -677,6 +677,98 @@ serial/storage device (vendor `0x1ab8`, no public spec); and an EHCI
 driver for USB 2.0 sticks (a whole second host-controller bring-up for
 poor value).
 
+## The Raspberry Pi, after the first full session (asked by Hans, 2026-10-03)
+
+The first full session on the Pi 4 ran on 2026-10-03 (`testing-pi4.md` §6):
+the kernel and boot programs from the SD card, then a USB keyboard and a USB
+stick that `fsd` mounted and ran `/bin` from. Hans listed six directions to
+keep in the pipeline before the current tests go on. Not sequenced against
+the rest of this roadmap; the dependencies between them are stated. Claims
+not yet checked on this tree are marked (predicted).
+
+- [ ] **1. More than one partition in use, on the card or a stick.** `fsd`
+      already discovers MBR and GPT partitions (`partition::discover`) but
+      mounts only the first one that probes as FAT32, exFAT or ext2 (`vfs.rs`).
+      Wanted: the card's FAT32 boot partition and, beside it, a data
+      partition (ext2, the one where `fsd` enforces permissions), each
+      mountable, `mount` naming which. This is where the `/dev` namespace
+      item under "Remaining follow-ups" stops being speculative. **Depends on
+      item 2 for the card** (the kernel cannot read the card at all after
+      the exit); on a stick it can be built and tested now, and on QEMU first
+      (`make run-image-ext2` already builds a two-partition disk).
+- [ ] **2. The SD card as a runtime disk, so no stick is needed.** A driver
+      for the BCM2711's EMMC2 controller (SDHCI-style, the one the card sits
+      on), as a third `block.rs` arm beside `virtio_blk` and `usb_msd`, taken
+      over at the exit the way the xHCI is. What to settle first, each
+      (predicted) until read in the firmware's tables or sources: where the
+      ACPI tables describe it and whether that agrees with Linux's devicetree
+      (`emmc2` at `0xfe340000` CPU side); whether PIO is enough for a first
+      version, since EMMC2's DMA has its own address limits; and **the
+      firmware keeps its variable store inside `RPI_EFI.fd` on this same
+      card**, so the kernel must not write the card while anything could
+      still write variables through the firmware (today nothing does after
+      the exit; the boot counter uses the variable before it). Not testable on
+      QEMU's `virt` machine (no such controller); QEMU's `raspi4b` machine
+      has one but no UEFI path (see "Develop on QEMU first" in
+      `testing-pi4.md`). With it, a card and nothing else is a whole system,
+      and item 1 applies to the card.
+- [ ] **3. Booting from a stick, with no card.** Most of it exists: on QEMU
+      the kernel already boots from a USB stick behind a hub and mounts that
+      same stick as its runtime disk (`test-usb-hub.py --usb-boot`, and
+      `testing-pi4.md` §6, "the takeover now happens last"). What is left is
+      the board's side: the Pi 4's bootloader EEPROM must try USB (its
+      `BOOT_ORDER`; recent EEPROMs try SD then USB, (predicted) for this
+      board until read with `rpi-eeprom-config`), and the stick must carry
+      the firmware and the whole ESP, FAT32 on MBR partition 1. That is a
+      card staged on a stick, which `make stick` deliberately does not do
+      (it leaves out `EFI` so a stick never boots a stale kernel in a card's
+      place), so this needs its own mode, say `make bootstick`, and a rule
+      for which of card and stick wins when both are present. Also the Pi
+      400 (item 6).
+- [ ] **4. Multi-core, on QEMU first.** Today one core runs everything and
+      the others are never started; the single-core argument is load-bearing
+      (`synccell.rs` states it once for every mutable static, and the kernel
+      never runs at EL1 with IRQs unmasked). What it needs: the secondary
+      cores started through PSCI `CPU_ON` (the conduit is already found,
+      `power.rs`), a stack and an exception level setup per core (the EL2
+      drop too, on the Pi), the GIC's per-core interface and the timer per
+      core, the cores found from the MADT's GICC entries, and then the real
+      work: locking or per-core ownership wherever `SyncCell` stands today,
+      and a scheduler that places tasks on cores. A plan document before any
+      code, the way `roadmap-el1-drop.md` was. QEMU `-smp 4` is the loop; the
+      Pi 4 (four A72s) and Parallels follow.
+- [ ] **5. SSH, to reach a Pi remotely.** **Needs networking on the Pi
+      first**, which it has none of: the Pi 4's on-board Ethernet is GENET,
+      not virtio (see the Pi test plan note above), so either a GENET driver
+      or a USB-Ethernet adapter through the existing xHCI stack (a CDC-ECM or
+      CDC-NCM class driver; the adapter chip decides which). Then an SSH
+      server in userland beside `netd`. Pieces that exist: Ed25519 for the
+      host key, X25519 for `curve25519-sha256` key exchange and HMAC (the
+      `ed25519` crate, from session auth), SHA-256 (`accounts`), users and
+      passwords (`/etc/passwd`, `login`). Missing: a cipher
+      (`chacha20-poly1305@openssh.com` needs ChaCha20 and Poly1305), the SSH
+      transport, user-auth and connection protocols, and a channel that
+      carries a shell session the way `cond` carries the console. A nearer
+      step, once there is networking: the cluster's own remote execution
+      (`cpu`, over 9P with signed requests) from the Mac with the host peer
+      `scripts/np9p_client.py`, which already exists.
+- [ ] **6. More hardware: the Pi 400 again, and whether a Pi 3 can run it.**
+      **The Pi 400** is the same BCM2711 as the Pi 4: its faults of
+      2026-10-01 were the stack overflow fixed in #191, so it should now
+      reach the same session; its built-in keyboard is behind the same VIA
+      hub. Re-boot it with the same card and stick. **A Pi 3**
+      (predicted, from the hardware, not tried): it is AArch64 (Cortex-A53)
+      and has UEFI firmware from the same project (`pftf/RPi3`), so the
+      kernel may well boot to the exit, but almost nothing after it carries
+      over. It has **no GIC** (the BCM2837 has Broadcom's own interrupt
+      controllers), so there is no timer tick and no scheduling without a new
+      interrupt backend beside `gicv2.rs`/`gicv3.rs`; and **no xHCI**: its
+      USB host is a DWC2 (Synopsys OTG), a different and notoriously hard
+      controller, which is also where its Ethernet sits (on USB). So a Pi 3
+      is a serial-console port with two new drivers before it has a
+      keyboard, a disk or a tick. Worth a boot to see how far it gets; not
+      worth the drivers before items 2 to 5.
+
 ## Completed arcs (moved out)
 
 These arcs are **done**; their full plan-shaped write-ups moved to
@@ -917,8 +1009,11 @@ The small open tails those arcs deliberately left:
 >       Risk 7, was first planned on the same mechanism and ended up fixed by
 >       cleaning each write instead.)
 >
-> - [ ] **xHCI hub support.** *Built on QEMU; open until the Pi's keyboard
->       comes up.* Every USB 2.0 device on a BCM2711 board, the Pi
+> - [x] **xHCI hub support.** *Built on QEMU; open until the Pi's keyboard
+>       comes up. Closed 2026-10-03: on the Pi 4 the VIA hub on root port 1
+>       was configured and a Full Speed keyboard behind it (the transaction
+>       translator's first test) typed a whole session, beside a High Speed
+>       stick on the same hub (`testing-pi4.md` §6).* Every USB 2.0 device on a BCM2711 board, the Pi
 >       400's built-in keyboard included, sits behind the on-board VIA hub, and
 >       `xhci.rs` reaches only root-port devices: **no keyboard on the Pi at
 >       all** until this lands. Buildable on QEMU with `usb-hub`; the
