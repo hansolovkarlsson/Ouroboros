@@ -1014,7 +1014,63 @@ time the board's controller is run past `DCBAAP`, so the port scan, the
 keyboard and the stick are all new on this hardware from there.
 *(Built on `pi4/scratchpad-32`, which also logs the count as
 `scratchpads=` on the controller line and refuses a controller whose
-`PAGESIZE` lacks 4 KB. The board boot of that branch is pending.)*
+`PAGESIZE` lacks 4 KB. Merged as #192.)*
+
+**2026-10-03, later still: two boots of #192. The controller is accepted,
+and the first command times out.** Both captures, the same lines:
+
+```
+xhci: DMA pool @ 0x378d0000, 0x26000 bytes
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: device connected on port 1
+xhci: port 1 reset, speed=3
+xhci: port 1 setup failed (command ring: timed out waiting for a completion event), continuing with other ports
+xhci: keyboard not available (command ring: timed out waiting for a completion event)
+```
+
+Then, as before, `mmu: 0x378d0000-0x378f6000 walks as Normal Non-cacheable
+(attr 0x44) on every page in all 11 views`, and a shell with no disk. The
+scratchpad fix did its part: the driver programmed the controller, started
+it, and reset a High Speed device on port 1. The timeout is the signature
+Risk 8 predicted for non-coherent DMA, but that fix is in and its self-check
+passes, so the cause is elsewhere. Two places where `xhci.rs` differed from
+every driver that works on this controller (edk2 `XhciDxe`, Linux's
+`xhci_write_64`, U-Boot):
+
+- **64-bit registers were written as one 64-bit store** (DCBAAP, CRCR,
+  ERSTBA, ERDP), across a PCIe bridge not shown to carry one intact. The
+  others write the low half, then the high half, which xHCI section 5.1
+  allows.
+- **No barrier between the ring setup and the registers that hand it
+  over.** The DCBAA, the command ring's Link TRB and the ERST are stores to
+  the pool (Normal Non-cacheable); the register writes are Device stores,
+  and nothing orders the two kinds without a barrier. Writing ERSTBA makes
+  the controller fetch the ERST at once. Linux's `writel` has a barrier
+  before every MMIO write; QEMU has no write buffer to show the miss.
+
+**Built on `pi4/xhci-mmio-order`, one variable: the 64-bit store.**
+`write64` writes the low half, then the high half; the barrier is held for
+the round after, so the board answers one question. Two passive lines to
+read: `xhci: WARNING: Host System Error after Run` if the controller
+failed a DMA fetch when it started; and, on the first command timeout of a
+boot, a dump of `USBSTS` (HCH, HSE), `CRCR.CRR` (whether the controller
+took the command ring), `IMAN`, the DCBAAP/ERSTSZ/ERSTBA/ERDP readbacks
+beside the pool's addresses, the event ring's slot at the dequeue pointer,
+`ERST[0]` and the command that timed out. Checked on QEMU with the command
+doorbell removed: `CRCR.CRR false`, readbacks equal to the pool's
+addresses, an empty event slot, the Enable Slot TRB. (A probe that logged
+what one 64-bit store to DCBAAP reads back was built and taken out at
+review: it was the suspect access itself, and a mangled store could damage
+CONFIG beside DCBAAP while the readback looked intact.)
+
+**Read on the board:** success is the port scan getting past Enable Slot on
+port 1, which names the 64-bit store as the cause. A timeout again refutes
+it, and the dump says where to look: readbacks that differ from the pool's
+addresses mean the registers still do not hold the rings; `CRCR.CRR false`
+with correct readbacks means the controller never took the ring; `CRR true`
+and an empty event slot means it ran the command and its event did not
+reach the ring the CPU reads (the barrier is next); `HSE true` is a DMA
+fault.
 
 ---
 
