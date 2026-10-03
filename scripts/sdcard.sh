@@ -9,6 +9,13 @@
 #   SDCARD=/Volumes/OUROBOROS KEEP_ETC=1 ./scripts/sdcard.sh   # keep the card's /etc
 #   SDCARD=/Volumes/OUROBOROS FIRMWARE=1 ./scripts/sdcard.sh   # reinstall the firmware
 #   SDCARD=/Volumes/OUROBOROS EJECT=1 ./scripts/sdcard.sh      # eject when done
+#   STICK=1 SDCARD=/Volumes/STICK ./scripts/sdcard.sh          # a USB stick (make stick)
+#
+# STICK=1 stages the same tree on a USB stick instead, the Pi's only disk
+# after exit_boot_services (the SD slot has no driver then, testing-pi4.md
+# section 6): no firmware, FAT32 or exFAT (fsd mounts both), and "already
+# ours" means EFI/ORBS/INIT.CFG at its root rather than RPI_EFI.fd. The
+# same guards apply, and it never formats either.
 #
 # It NEVER formats. Erasing a disk takes a /dev/diskN, and a wrong N erases
 # some other disk; that step stays by hand (testing-pi4.md section 4). What
@@ -50,13 +57,19 @@ SDCARD="${SDCARD:-}"
 KEEP_ETC="${KEEP_ETC:-0}"
 FIRMWARE="${FIRMWARE:-0}"
 EJECT="${EJECT:-0}"
+STICK="${STICK:-0}"
 
-die() { echo "sdcard: $*" >&2; exit 1; }
+if [ "$STICK" = 1 ]; then
+    ME=stick; MARKER=EFI/ORBS/INIT.CFG; WHAT="an Ouroboros stick"
+else
+    ME=sdcard; MARKER=RPI_EFI.fd; WHAT="a Pi card"
+fi
+die() { echo "$ME: $*" >&2; exit 1; }
 
 # --- The card: refuse anything that does not look like one. -----------------
 
-[ -n "$SDCARD" ] || die "set SDCARD to the card's mounted volume, e.g. make sdcard SDCARD=/Volumes/OUROBOROS"
-[ -d "$SDCARD" ] || die "$SDCARD is not a directory (is the card mounted?)"
+[ -n "$SDCARD" ] || die "set SDCARD to the mounted volume, e.g. make sdcard SDCARD=/Volumes/OUROBOROS, make stick STICK=/Volumes/STICK"
+[ -d "$SDCARD" ] || die "$SDCARD is not a directory (is it mounted?)"
 CARD=$(cd "$SDCARD" && pwd -P)
 case "$CARD" in
     /Volumes/*/*|/Volumes/) die "$CARD is not a volume's mount point (expected /Volumes/<name>)" ;;
@@ -69,27 +82,36 @@ field() { printf '%s\n' "$INFO" | sed -n "s/^ *$1: *//p" | head -n 1; }
 MOUNT=$(field 'Mount Point')
 [ "$MOUNT" = "$CARD" ] || die "$CARD is not a mount point (diskutil reports '$MOUNT')"
 FS=$(field 'File System Personality')
-case "$FS" in
-    MS-DOS*) ;;
-    *) die "$CARD is '$FS', not FAT; the Pi's boot ROM reads FAT only" ;;
-esac
+if [ "$STICK" = 1 ]; then
+    case "$FS" in
+        "MS-DOS FAT32"|ExFAT) ;;
+        *) die "$CARD is '$FS'; fsd mounts FAT32 or exFAT from a stick (in Disk Utility: MS-DOS (FAT) on a stick over 2 GB, or ExFAT)" ;;
+    esac
+else
+    case "$FS" in
+        MS-DOS*) ;;
+        *) die "$CARD is '$FS', not FAT; the Pi's boot ROM reads FAT only" ;;
+    esac
+fi
 REMOVABLE=$(field 'Removable Media')
 LOCATION=$(field 'Device Location')
 [ "$REMOVABLE" = "Removable" ] || [ "$LOCATION" = "External" ] || \
     die "$CARD is on fixed internal media (Removable Media: $REMOVABLE, Device Location: $LOCATION); refusing"
 
-# Empty, or already a Pi card. The names macOS itself leaves on a fresh FAT
-# volume do not count as contents.
-if [ ! -e "$CARD/RPI_EFI.fd" ]; then
+# Empty, or already ours ($MARKER at its root). The names macOS itself
+# leaves on a fresh FAT volume do not count as contents.
+if [ ! -e "$CARD/$MARKER" ]; then
     OTHER=$(ls -A "$CARD" | grep -v -x -E '\._.*|\.DS_Store|\.Spotlight-V100|\.fseventsd|\.Trashes|\.TemporaryItems|\.VolumeIcon\.icns|\.metadata_never_index|\.apdisk|System Volume Information' || true)
-    [ -z "$OTHER" ] || die "$CARD is neither empty nor a Pi card (no RPI_EFI.fd), and holds: $(echo $OTHER); refusing"
+    [ -z "$OTHER" ] || die "$CARD is neither empty nor $WHAT (no $MARKER), and holds: $(echo $OTHER); refusing"
 fi
 
 [ -f "$ESP_DIR/EFI/ORBS/INIT.CFG" ] || die "$ESP_DIR is not a staged Ouroboros ESP tree (run make esp)"
 
 # --- Firmware: pinned, checksummed, cached, installed once. -----------------
 
-if [ ! -e "$CARD/RPI_EFI.fd" ] || [ "$FIRMWARE" = 1 ]; then
+if [ "$STICK" = 1 ]; then
+    FW_NOTE="none (a stick)"
+elif [ ! -e "$CARD/RPI_EFI.fd" ] || [ "$FIRMWARE" = 1 ]; then
     if [ -e "$CARD/RPI_EFI.fd" ]; then
         echo "sdcard: FIRMWARE=1: reinstalling; this resets the firmware's settings and UEFI variables"
     fi
@@ -131,10 +153,10 @@ place() {
                         cp -X "$ESP_DIR/$f" "$CARD/$f"
                     fi
                 done
-                echo "sdcard: etc kept (KEEP_ETC=1), missing files added"
+                echo "$ME: etc kept (KEEP_ETC=1), missing files added"
                 return
             fi
-            [ -e "$CARD/etc" ] && echo "sdcard: etc re-staged: accounts and passwords made on the card are reset (KEEP_ETC=1 keeps them)" ;;
+            [ -e "$CARD/etc" ] && echo "$ME: etc re-staged: accounts and passwords made on the Pi are reset (KEEP_ETC=1 keeps them)" ;;
         Users)
             for home in "$ESP_DIR/Users"/*; do
                 [ -e "$home" ] || continue
@@ -169,14 +191,14 @@ done
 # clutter in `ls /` on the Pi, never a reason to stop before sync and eject.
 find "$CARD" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 for d in .fseventsd .Trashes .Spotlight-V100; do
-    rm -rf "${CARD:?}/$d" 2>/dev/null || echo "sdcard: $d left on the card (macOS holds it while mounted; harmless)"
+    rm -rf "${CARD:?}/$d" 2>/dev/null || echo "$ME: $d left on $CARD (macOS holds it while mounted; harmless)"
 done
 sync
 
-echo "sdcard: $CARD staged from $ESP_DIR"
-echo "sdcard: firmware $FW_NOTE"
+echo "$ME: $CARD staged from $ESP_DIR"
+echo "$ME: firmware $FW_NOTE"
 if [ "$EJECT" = 1 ]; then
     diskutil eject "$CARD"
 else
-    echo "sdcard: not ejected; run diskutil eject $CARD (or pass EJECT=1)"
+    echo "$ME: not ejected; run diskutil eject $CARD (or pass EJECT=1)"
 fi

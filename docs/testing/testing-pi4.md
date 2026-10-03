@@ -349,6 +349,36 @@ root, is left alone. Re-staging `EFI/ORBS/BOOTID.TXT` rolls the boot counter's
 file store back, as every image does; the counter's preferred store is the
 UEFI variable, which lives in `RPI_EFI.fd` and so survives.
 
+### The USB stick
+
+The card stops being readable once the kernel runs (see "The storage
+surprise" in §6), so the stick is the only disk the system has: `mount -a`
+mounts it, and `/bin`, `/etc` and `/man` come from it. It needs the same tree
+as the card, and no firmware:
+
+```sh
+make stick STICK=/Volumes/<stick>          # add KEEP_ETC=1 to keep its /etc, EJECT=1 to eject
+```
+
+This is `scripts/sdcard.sh` with `STICK=1`: the same guards (a mounted volume
+under `/Volumes` on removable or external media, never formatted, and either
+empty or already an Ouroboros stick, which means `EFI/ORBS/INIT.CFG` at its
+root), the same copy-and-swap and the same `etc`/`Users` rules. The
+differences: no firmware, and the volume must be FAT32 or exFAT, the two
+`fsd` mounts that macOS can write. FAT16, which Disk Utility makes on a stick
+of 2 GB or less, is refused. Format it once by hand, in Disk Utility as
+MS-DOS (FAT) or ExFAT with the Master Boot Record scheme. A stick staged this
+way also carries `EFI/BOOT/BOOTAA64.EFI`, so the kernel could boot from it
+too (§6, "the takeover now happens last"); the card still boots it today.
+
+*Built 2026-10-03, checked only on `hdiutil` images:* a fresh FAT32 image and
+an exFAT one staged; a restage; refused were an image holding a foreign file,
+a FAT16 image, `make sdcard` on a staged stick and `make stick` with no
+volume. `make sdcard` on a fresh image still installs the firmware and keeps
+it on a second run. A real stick may differ in what macOS does to a mounted
+volume, as the first real card did (`blind-instruments-postmortem.md`, "A
+disk image that was not the card").
+
 ---
 
 ## 5. Firmware settings to check before the first boot
@@ -511,7 +541,8 @@ it are unreachable from then on: running a program goes through `fsd`
 (`spawn_stage` in the shell reports `NO_FS` without a disk), so with no stick
 the shell has its builtins and nothing else. Every runtime filesystem test:
 `ls`, `cat`, `write`, `mount`, `erase disk`, `partition`, `format` — needs the
-**USB 3 stick in a blue port**, as on Parallels. This is not a Pi limitation; it is the
+**USB 3 stick in a blue port**, as on Parallels, staged with `make stick`
+(§4) so that `/bin` is there to run. This is not a Pi limitation; it is the
 same architecture that made USB-MSD necessary there in the first place.
 
 ### Bisecting a hang with boot flag files
