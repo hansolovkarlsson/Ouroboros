@@ -1397,7 +1397,7 @@ The small open tails those arcs deliberately left:
 >       speed 4 within the second, then storage came up and mounted. The
 >       old code read the speed at PRC; the wait was the fix, no Warm Reset
 >       needed.*
-> - [ ] **fix** **No barrier between the xHCI ring setup and the registers
+> - [x] **fix** **No barrier between the xHCI ring setup and the registers
 >       that hand it over.** The DCBAA, the scratchpad array, the command
 >       ring's Link TRB and the ERST are stores to the DMA pool; DCBAAP,
 >       CRCR, ERSTBA and Run are Device stores, and nothing orders the two
@@ -1412,8 +1412,10 @@ The small open tails those arcs deliberately left:
 >       *Built 2026-10-03 on `pi4/xhci-handover-barrier`: a `dsb sy`
 >       before DCBAAP, CRCR, the ERST block and Run in `init_inner`. No
 >       QEMU boot can tell it from the old code; the check is the image,
->       four more `dsb sy` in debug and release alike.*
-> - [ ] **fix** **A TRB's cycle bit is not ordered after its other words.**
+>       four more `dsb sy` in debug and release alike. Merged as #196,
+>       with its review's three findings on the roadmap below. Done; not
+>       yet booted on the board, which came up without it.*
+> - [x] **fix** **A TRB's cycle bit is not ordered after its other words.**
 >       `ring_push` writes all four dwords of a TRB in one `write_volatile`,
 >       cycle bit included, with no barrier before dword 3. On the Pi the
 >       pool is non-cacheable and the controller may re-read the dequeue
@@ -1446,7 +1448,8 @@ The small open tails those arcs deliberately left:
 >       flip removed the rig fails (17 FAIL), the Enable Slot command left
 >       in the ring with its cycle bit 0 and timed out, so the held TRB is
 >       not the controller's until the flip; in the release image all 19
->       `dmb oshst` have the flip at `+0xc` as the first store after them.*
+>       `dmb oshst` have the flip at `+0xc` as the first store after them.
+>       Merged as #197. Done; not yet booted on the board.*
 > - [x] **fix** **`INT_RING` is not zeroed when the keyboard is set up.**
 >       `activate_keyboard` writes only the ring's Link TRB, where the EP0
 >       and bulk ring setups zero the whole ring first. A second activation

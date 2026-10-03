@@ -1000,3 +1000,36 @@ comparison with code that already works on the hardware, and a log of the
 state rather than the conclusion. The one instrument the review stopped,
 the probe, is the one that would have taken the round's answer with it.
 
+
+## Two more, from the ordering fixes (2026-10-03, afternoon)
+
+Two barrier fixes in the xHCI driver after the board was up, #196 (a `dsb`
+before the registers that hand the controller its rings) and
+`pi4/trb-cycle-order` (a TD published whole, its first TRB's cycle bit
+flipped last behind `dmb oshst`). Neither changes anything QEMU can see.
+
+**Rigs that pass either way.** `test-usb-hub` and `test-el1-drop` were green
+on both branches and would have been green without either fix: QEMU's
+controller is emulated in the same process and sees guest memory as the
+CPU last wrote it, with no write buffer between them. A green rig here proves the change broke nothing; it says
+nothing about the change. Both branches said so in their own text, and
+both found a second instrument. For #196 it was the image, the count of
+`dsb sy` up by four. For the TD it was a mutation that can fail: with the
+final flip removed, the rig went red on every device and the timeout dump
+showed the Enable Slot command held in the ring with its cycle bit 0. That
+proves the hold, not the barrier; nothing on QEMU can prove the barrier,
+and the image is the only place it is visible at all.
+
+**An image check written up from a sample.** A count of barriers in the
+image proves they exist, not where. The first roadmap note on the
+cycle-bit fix said each of the 17 `dmb oshst` sat between the `+0x8` and
+`+0xc` stores, written after looking at three. Checking all 17 found five
+with other instructions between the barrier and the store; the property
+that held for all of them, and the one that matters, is that the first
+store after each barrier is the cycle word. The note was narrowed to that.
+And nothing in the tree re-runs either check: the counts were run by hand
+once, and a later edit can drop a barrier with every rig still green. The
+structure narrows that (one function is now the only way a TRB reaches a
+live ring, so there is one barrier to lose rather than one per caller) but
+does not close it: the branch's second review said so, and a scripted
+disassembly check, shown to fail by deleting a barrier, is on the roadmap.
