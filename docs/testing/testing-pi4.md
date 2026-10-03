@@ -1204,6 +1204,35 @@ translator path (a Full or Low Speed device behind the High Speed hub) has
 still only carried the keyboard's interrupt endpoint, not bulk storage. Open:
 a stick on a SuperSpeed root port.
 
+**2026-10-03: the stick on a SuperSpeed root port, and the reason for
+`speed=0`.** The same Lexar stick (reformatted, re-staged), this time on
+root port 2:
+
+```
+xhci: port 2: not enabled after the hot reset; before it 0x00281203 (CCS 1, PED 1, PLS 0, speed 4), after it 0x00200311 (CCS 1, PED 0, PLS 8, speed 0)
+xhci: port 2: enabled after the reset: 0x00201203 (CCS 1, PED 1, PLS 0, speed 4)
+xhci: port 2 reset, speed=4
+...
+xhci: port 2: USB mass storage - activating after the scan
+usb-msd block device installed
+```
+
+The port was already enabled in U0 at SuperSpeed before the driver touched
+it; the Hot Reset sent the link back through Polling (`PLS 8`), and PRC was
+set while it was still there, with `PED 0` and speed 0. The old code read
+the speed at that moment, which is every `port 3 reset, speed=0` of the
+earlier boots. Waiting for the port to enable was the whole fix; the Warm
+Reset path was not needed. The descriptor now says `bcdUSB 0x0320` (it said
+`0x0210` behind the hub, the same stick at High Speed). Then the session as
+before: `exFAT mounted`, `login: root`, `ls` from the stick, `halt`.
+
+Which path a USB 3 stick takes is decided by the link, not by what is on
+it: in a blue socket it trains SuperSpeed and appears on a root port (2 or
+3, one per blue socket); in a black socket, or a blue one whose SuperSpeed
+pins did not make contact or whose link did not train, it appears at High
+Speed behind the hub. The reformat between the boots cannot have changed
+that, since enumeration reads no sector.
+
 ---
 
 ## 7. Risks, ranked

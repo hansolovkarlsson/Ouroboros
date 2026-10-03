@@ -1373,7 +1373,7 @@ The small open tails those arcs deliberately left:
 >       running, which a boot also still lacks (owed since the wrong-tree
 >       card of 2026-10-01). Until then, restage both together. Found by
 >       the review of `pi4/stick-target`.
-> - [ ] **fix** **A USB3 stick on the Pi 4's SuperSpeed root port comes out
+> - [x] **fix** **A USB3 stick on the Pi 4's SuperSpeed root port comes out
 >       of its reset with speed 0.** Same boot: `port 3 reset, speed=0`,
 >       `unsupported port speed 0`, at boot and again on `mount -a`'s
 >       rescan, so no disk. Nothing in the log said why. *Built
@@ -1390,8 +1390,13 @@ The small open tails those arcs deliberately left:
 >       counted as enabled every port is refused and the rig fails. Merged
 >       as #194. The first board boot after it (2026-10-03) had the stick,
 >       a Lexar, on hub port 1.2 at High Speed, the USB 2 path, so it never
->       reached a SuperSpeed root port and this path did not run. Open
->       until a stick on a SuperSpeed root port is booted.*
+>       reached a SuperSpeed root port and this path did not run. Closed
+>       the same day: the stick on SuperSpeed root port 2 was enabled at
+>       speed 4 before the reset, the Hot Reset left it in Polling (`PLS
+>       8`, speed 0) when PRC was set, and the watch saw it back in U0 at
+>       speed 4 within the second, then storage came up and mounted. The
+>       old code read the speed at PRC; the wait was the fix, no Warm Reset
+>       needed.*
 > - [ ] **fix** **No barrier between the xHCI ring setup and the registers
 >       that hand it over.** The DCBAA, the scratchpad array, the command
 >       ring's Link TRB and the ERST are stores to the DMA pool; DCBAAP,
