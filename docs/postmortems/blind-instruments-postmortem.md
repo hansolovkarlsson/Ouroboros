@@ -946,3 +946,57 @@ observer is a check too. Its converse held today: an observer that reads the
 machine, rather than the registers the kernel wrote or the story the kernel
 told, answers in one boot what six written diagnoses could not.
 
+## Three more, from the Pi's USB controller (2026-10-03)
+
+The day the xHCI driver met its first real controller since Parallels: the
+Pi 4's VL805, behind the BCM2711's PCIe bridge. Four board boots, four pull
+requests (#192 to #195), and by the end a full session over a USB keyboard
+and a USB stick. Each stop on the way was a limit or an assumption that
+QEMU had made invisible, and each was found by a different kind of
+instrument.
+
+**A limit sized by the only controller it had met.** The driver reserved
+eight scratchpad pages, and QEMU's controller asks for none, so the number
+was never exercised. The VL805 asks for 31. What caught it was the driver's
+own refusal, `controller wants 31 scratchpad buffers, only 8 are
+supported`: a limit that names itself when it is hit is found on the first
+boot that hits it. The rigs could not have; QEMU reports `scratchpads=0`,
+which the controller line now logs, so the fact is on every boot rather
+than in a comment about QEMU that nothing checked. The compile-time layout
+assertions caught the next mistake, a 256-byte array pushing a ring across
+a page, before anything ran.
+
+**A store that every working driver splits, and this one did not.** With
+the scratchpads in place the first command timed out. The symptom was the
+one predicted for non-coherent DMA, whose fix was in and whose self-check
+passed, so the reading went elsewhere: the driver against the three that
+work on this controller (edk2's, Linux's, U-Boot's), which all write a
+64-bit xHCI register as two 32-bit halves where this one used one 64-bit
+store across the bridge. The first build of the fix also added a barrier
+and a probe that logged what a single 64-bit store read back as. The review
+caught that the probe was the suspect access itself, able to damage the
+register beside it while reading back intact, and that the round now
+changed three things at once. The board round shipped with the split write
+alone and passive logging, and its answer was unambiguous: Enable Slot
+completed. **An instrument built to observe a suspect operation must not
+perform it**; this one would have been the observer that broke the thing.
+
+**A field read at the one instant it is not valid.** A USB 3 stick on a
+SuperSpeed root port came out of every reset with `speed=0`, at boot and on
+rescan, and the log said nothing more. The next build logged the port's
+state before and after the reset and watched it for a second. The first
+boot with it read: enabled at SuperSpeed before the reset, in Polling with
+no speed at the moment the reset-complete bit was set, back at SuperSpeed
+within the watch. The old code had read the speed in exactly that window,
+on every boot. The warm-reset fallback built beside the watch was never
+needed. The logging, not the reasoning, found it: three plausible causes had
+been written down, and the right one was the least interesting.
+
+What the three share is the 2026-10-02 lesson again from a new direction:
+QEMU's controller differs from the board in its scratchpad count, its bus
+and its link timing, and none of those differences can be seen from QEMU.
+What found them was, in order, a limit that says when it is hit, a
+comparison with code that already works on the hardware, and a log of the
+state rather than the conclusion. The one instrument the review stopped,
+the probe, is the one that would have taken the round's answer with it.
+

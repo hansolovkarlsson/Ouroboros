@@ -12,7 +12,12 @@ firmware's EL2 tables and vectors while its log says otherwise.
 #188 (`367ceda`) after five review rounds; step 3, the board, ran the same
 day: the drop landed on the Pi 4 and the shell came up. Step 4, the xHCI
 takeover with the reporter, stays open, now beside an `ExitBootServices`
-fault at the same firmware address (`testing-pi4.md` section 6).** The
+fault at the same firmware address (`testing-pi4.md` section 6).**
+**2026-10-03: step 4 done too.** That fault was the kernel overflowing the
+firmware's 16 KB stack, fixed by a stack of its own (#191); the no-flag
+boot then took the xHCI before the exit and crossed the exit and the drop
+with no fault, and by the end of the day the Pi 4 ran a full session over
+USB (#192 to #195). Nothing in this plan is open. The
 drop is `kernel/src/el2.rs`; `make test-el1-drop` is its rig, and a
 mutation that disabled the drop turned the rig red on three checks. Read
 on the way: QEMU's firmware leaves `SCTLR_EL1` at `0x30d0198d` on an EL1
