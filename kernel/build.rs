@@ -7,10 +7,11 @@
 //! was read off its image size).
 //!
 //! **Reruns on every build**, by naming a path that never exists: cargo
-//! reruns a build script whose `rerun-if-changed` file is missing. Without
-//! it, committing an edited tree (a new HEAD, no source change) would leave
-//! the old commit in the image, which is the one case the line is for.
-//! Cargo recompiles the kernel only when the value changes.
+//! reruns a build script whose `rerun-if-changed` file is missing. The usual
+//! `rerun-if-changed=build.rs` was shown on 2026-10-03 to leave the old
+//! commit in the image after a commit that changes no source (a new HEAD,
+//! the same files), and cargo did not even recompile: the one case the line
+//! is for. Cargo recompiles the kernel only when the value changes.
 //!
 //! Outside a git checkout (a source tarball) it says `unknown`, rather than
 //! failing the build.

@@ -79,6 +79,7 @@ import importlib.util
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -166,6 +167,16 @@ def grade(name, text, must, must_not, aborts=None, expect_aborts=None, order=())
     return ok
 
 
+def tree_build():
+    """The build identity kernel/build.rs bakes in for this tree, by the same
+    rule: the commit to 12 digits, `+dirty` when tracked files differ. The
+    control boot must name it, so a staged ESP from another tree, or a
+    build script that stopped rerunning, fails here rather than on a board."""
+    git = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True, check=True).stdout.strip()
+    commit = git("rev-parse", "--short=12", "HEAD")
+    return commit + ("+dirty" if git("status", "--porcelain", "--untracked-files=no") else "")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--esp", default="build/esp", help="the staged ESP directory (make esp)")
@@ -177,6 +188,7 @@ def main():
     if not os.path.isdir(args.esp):
         sys.exit(f"{args.esp} is not a directory; run `make esp` first")
 
+    build = tree_build()
     work = tempfile.mkdtemp(prefix="early-fault-")
     results = []
 
@@ -222,7 +234,9 @@ def main():
     open(os.path.join(work, "plain.serial"), "w").write(text)
     results.append(grade("control", text, [
         ("reporter armed", r"early fault reporter armed"),
-        ("on the kernel's own stack", r"UEFI stage alive, on its own stack \(sp 0x[0-9a-f]+, the kernel's stack 0x[0-9a-f]+\.\.0x[0-9a-f]+, the entry's sp on the firmware's was 0x[0-9a-f]+\)"),
+        ("the build line names this tree", r"UEFI stage alive, build " + re.escape(build) + r" (debug|release), "),
+        ("the post-exit line names it too", r"boot services exited, console live, build " + re.escape(build) + r" (debug|release)\b"),
+        ("on the kernel's own stack", r"UEFI stage alive, build \S+ \w+, on its own stack \(sp 0x[0-9a-f]+, the kernel's stack 0x[0-9a-f]+\.\.0x[0-9a-f]+, the entry's sp on the firmware's was 0x[0-9a-f]+\)"),
         ("boot services exited", r"exiting boot services"),
         (f"handed off at {handed_off}", rf"running at {handed_off} after the exit"),
         *([("dropped to EL1", r"dropped from EL2 to EL1, on our own tables and vectors")] if args.el2 else []),
