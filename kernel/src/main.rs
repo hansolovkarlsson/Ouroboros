@@ -178,6 +178,10 @@ fn main() -> Status {
     }
 }
 
+/// Which build this is: the commit, `+dirty` if the tree differed from it,
+/// and the profile. Set by `build.rs`, which says why it reruns every build.
+const BUILD: &str = env!("OUROBOROS_BUILD");
+
 /// The kernel proper, on its own stack. Never returns.
 extern "C" fn kernel_main() -> ! {
     uefi::helpers::init().unwrap();
@@ -186,7 +190,7 @@ extern "C" fn kernel_main() -> ! {
     let sp: u64;
     unsafe { core::arch::asm!("mov {0}, sp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
     log::info!(
-        "Ouroboros kernel: UEFI stage alive, on {} (sp {sp:#x}, the kernel's stack {stack_base:#x}..{stack_end:#x}, the entry's sp on the firmware's was {entry_sp:#x})",
+        "Ouroboros kernel: UEFI stage alive, build {BUILD}, on {} (sp {sp:#x}, the kernel's stack {stack_base:#x}..{stack_end:#x}, the entry's sp on the firmware's was {entry_sp:#x})",
         if (stack_base..stack_end).contains(&sp) { "its own stack" } else { "the FIRMWARE'S stack, which the switch should have left" }
     );
     // Where firmware loaded this image, so an address in the firmware's own
@@ -608,7 +612,7 @@ extern "C" fn kernel_main() -> ! {
         // tables, or PCI configuration space.
         let console = unsafe { kind.console(base) };
         console::install(console);
-        console::println!("Ouroboros kernel: boot services exited, console live");
+        console::println!("Ouroboros kernel: boot services exited, console live, build {BUILD}");
     }
     // The exception level the firmware handed off at, stated before any
     // `_EL1` register is relied on: at EL2 (the Raspberry Pi) every write
