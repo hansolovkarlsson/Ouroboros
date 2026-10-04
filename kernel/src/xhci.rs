@@ -826,8 +826,8 @@ mod reg {
             unsafe { read32(self.addr) & self.rsvdp }
         }
         /// The write that keeps the register's RsvdP bits: reads it, keeps
-        /// them, puts `val` in the other bits and writes it with the barrier
-        /// ([`Whole32::write`]'s). A `val` with a bit in the RsvdP field is
+        /// them, puts `val` in the other bits and writes it through
+        /// [`Whole32::write`], so with its barrier. A `val` with a bit in the RsvdP field is
         /// a caller's bug (an address not aligned enough, say), so a debug
         /// build, which the card carries, stops on it; a release build
         /// masks it.
@@ -835,7 +835,11 @@ mod reg {
             debug_assert!(val & self.rsvdp == 0, "a value with bits in the register's RsvdP field");
             let current = unsafe { read32(self.addr) };
             let merged = rsvdp_merge(current as u64, self.rsvdp as u64, val as u64) as u32;
-            unsafe { mmio_write32(self.addr, merged) }
+            // Through `Whole32::write`, not `mmio_write32`: one caller per
+            // barrier store, so the image check fails if that caller is
+            // routed around it (a second caller kept it green, the review
+            // of #207).
+            unsafe { Whole32(self.addr).write(merged) }
         }
     }
 
@@ -850,7 +854,7 @@ mod reg {
             debug_assert!(val & self.rsvdp == 0, "a value with bits in the register's RsvdP field");
             let current = unsafe { read64(self.addr) };
             let merged = rsvdp_merge(current, self.rsvdp, val);
-            unsafe { mmio_write64(self.addr, merged as u32, (merged >> 32) as u32) }
+            unsafe { Whole64(self.addr).write(merged) }
         }
     }
 

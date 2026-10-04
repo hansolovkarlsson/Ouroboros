@@ -24,7 +24,10 @@ sequences are found by their instructions, which is why they are fixed in
 assembly rather than left to the compiler. Deleting a barrier, putting an
 instruction between it and its store, or routing a register write (a
 `reg::Whole32::write` that stores without calling `mmio_write32`) or the
-flip around its function fails it.
+flip around its function fails it. That holds because each function has ONE
+caller in the source (`Whole32::write`, `Whole64::write`, `ring_publish`;
+the RsvdP writes go through the first two): with a second caller, routing
+one around it leaves "at least one call" true and the check green.
 
 What it cannot see: ONE new raw `write_volatile` to a register somewhere
 else in `xhci.rs`. The functions are still called by everything else, so
