@@ -1741,10 +1741,31 @@ The small open tails those arcs deliberately left:
 >       plain. Shown unspellable by mutation: a bare `mmio_write32`, a
 >       hand-built `Whole32` and a hand-built `Kept32` at USBCMD each fail
 >       to compile (E0603, E0603, E0451), and a legal write at the same spot
->       compiles. Not covered: a raw pointer store, and a handle built from
->       the wrong base. Behaviour unchanged: the barrier check finds both
+>       compiles. Behaviour unchanged: the barrier check finds both
 >       sequences, `test-usb-hub` 19 ok with the same reset and RsvdP lines,
->       `test-el1-drop` and `make test` green.*
+>       `test-el1-drop` and `make test` green. Its review (`/code-review
+>       high`, eight findings, no bug) found the claim wider than the code:
+>       every constructor took a bare `u64` base, so `reg::doorbell(op_base,
+>       0)` was a whole write to USBCMD. Now the blocks are types
+>       (`OpRegs`, `Ir0Regs`, `Doorbells`) made only by `reg::locate` from
+>       the capability registers, and that spelling fails (E0308, a
+>       hand-built `Doorbells` E0603). It also found that the split had
+>       weakened the image check: `mmio_write32` had two callers, so
+>       rerouting `Whole32::write` left it green (shown so); the RsvdP
+>       writes now go through `Whole32::write`/`Whole64::write`, one caller
+>       per store, and rerouting either fails the check (`found 0 times`).
+>       Also: reads through the handles (`read`, `kept_bits`, so the RsvdP
+>       diagnostic no longer restates address and mask), `debug_assert`s on
+>       the port and doorbell index, and the holes named in the module doc
+>       and the source map: a raw pointer store, `publish_cycle_word` (any
+>       pointer), a block's `at` used for a read. Suites green again.*
+> - [ ] **fix** **PORTSC's RW1C bits and PED are masked by convention.**
+>       `reg::portsc` is a `Whole32`, and every write must go through
+>       `portsc_preserve` or it writes back PED (disabling the port) and
+>       clears pending change bits; nothing makes the bare write
+>       unspellable, the same opt-in shape #207 removed for RsvdP. A PORTSC
+>       handle whose write applies the preserve itself, taking the RW1C
+>       bits to clear as an explicit argument. Found by the review of #207.
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
