@@ -648,6 +648,7 @@ docs/                every document is annotated in full in `docs/README.md` - r
   research/          synthesis notes on MINIX/Plan 9/Helix/Redox, the GUI stack, and where the design should go next
 
 kernel/              every file annotated in full in `docs/source-map.md`; each also carries its own `//!`
+  build.rs           the build identity (commit, +dirty, profile) the boot logs; reruns every build on purpose
   src/main.rs        #[entry]: the switch to the kernel's own 256 KB stack first (the Pi firmware's is 16 KB over its page tables), then
                      UEFI init, console/MADT/PSCI discovery, loader, ExitBootServices, then exceptions/mmu/xhci/storage/net/gic/timer/tasks
   src/uart.rs        PL011 console driver (post-ExitBootServices only)

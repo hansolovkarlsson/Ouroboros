@@ -180,6 +180,9 @@ fn main() -> Status {
 
 /// Which build this is: the commit, `+dirty` if the tree differed from it,
 /// and the profile. Set by `build.rs`, which says why it reruns every build.
+/// Logged in the first line and again in whichever line announces the
+/// console after the exit (serial, `\FBCON`, or a fallback), so a capture
+/// from any console carries it.
 const BUILD: &str = env!("OUROBOROS_BUILD");
 
 /// The kernel proper, on its own stack. Never returns.
@@ -597,7 +600,7 @@ extern "C" fn kernel_main() -> ! {
             // too (`extra_devices` below), so the console survives it.
             let fb = unsafe { fbconsole::FbConsole::new(&info) };
             console::install(Console::Framebuffer(fb));
-            console::println!("Ouroboros kernel: framebuffer console live early (\\FBCON), on the firmware's page tables");
+            console::println!("Ouroboros kernel: framebuffer console live early (\\FBCON), on the firmware's page tables, build {BUILD}");
         }
     }
 
@@ -997,7 +1000,7 @@ fn try_virtio_console() {
         return;
     }
     console::install(Console::Virtio(device));
-    console::println!("Ouroboros kernel: virtio-console live (fallback - every other mechanism failed)");
+    console::println!("Ouroboros kernel: virtio-console live (fallback - every other mechanism failed), build {BUILD}");
 }
 
 /// Under `\FBCON`: a solid white square at the top-right of the screen, the
@@ -1056,7 +1059,7 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
     // own device-block mapping. Either way it's mapped and writable now.
     let fb = unsafe { fbconsole::FbConsole::new(&info) };
     console::install(Console::Framebuffer(fb));
-    console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed)");
+    console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed), build {BUILD}");
 }
 
 /// Discovers and initializes the virtio-blk device, reads sector 0 back

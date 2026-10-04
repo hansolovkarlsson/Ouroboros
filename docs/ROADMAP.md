@@ -1375,11 +1375,13 @@ The small open tails those arcs deliberately left:
 >       the review of `pi4/stick-target`. *The kernel's half built
 >       2026-10-03 on `pi4/build-identity`: `kernel/build.rs` bakes in the
 >       commit (12 digits), `+dirty` and the profile, and the boot logs it
->       in its first line and after the exit. The script reruns every
->       build: the usual `rerun-if-changed=build.rs` was shown to keep the
->       old commit after a commit that changed no source. The control boot
->       of `test-early-fault`/`test-el1-drop` requires both lines to name
->       the tree under test, and fails on a stale ESP (shown). Open: the
+>       in its first line and in whichever line announces the console after
+>       the exit. The script reruns every build (the kernel crate then
+>       recompiles, about a second): the usual `rerun-if-changed=build.rs`
+>       was shown to keep the old commit after a commit that changed no
+>       source. The control boot of `test-early-fault`/`test-el1-drop`
+>       requires both lines to name the staged image's identity and that
+>       identity to be HEAD's commit, and fails on a stale ESP (shown). Open: the
 >       stick's stamp and the comparison once it mounts.*
 > - [x] **fix** **A USB3 stick on the Pi 4's SuperSpeed root port comes out
 >       of its reset with speed 0.** Same boot: `port 3 reset, speed=0`,

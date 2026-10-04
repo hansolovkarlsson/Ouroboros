@@ -167,14 +167,23 @@ def grade(name, text, must, must_not, aborts=None, expect_aborts=None, order=())
     return ok
 
 
-def tree_build():
-    """The build identity kernel/build.rs bakes in for this tree, by the same
-    rule: the commit to 12 digits, `+dirty` when tracked files differ. The
-    control boot must name it, so a staged ESP from another tree, or a
-    build script that stopped rerunning, fails here rather than on a board."""
-    git = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True, check=True).stdout.strip()
-    commit = git("rev-parse", "--short=12", "HEAD")
-    return commit + ("+dirty" if git("status", "--porcelain", "--untracked-files=no") else "")
+def staged_build(esp):
+    """The build identity the staged kernel carries (kernel/build.rs bakes it
+    in: the commit to 12 digits, `+dirty`, the profile), read from the image,
+    and whether it is this tree's commit. The control boot must log exactly
+    the image's identity, and the image must be HEAD's commit: a stale ESP,
+    or a build script that stopped rerunning, fails on QEMU rather than on a
+    board. `+dirty` is not compared with the tree, which may have changed
+    since `make esp` without changing the kernel. Without git, build.rs bakes
+    in `unknown`, and so is the commit expected here."""
+    image = open(os.path.join(esp, "EFI", "BOOT", "BOOTAA64.EFI"), "rb").read()
+    found = sorted(set(re.findall(rb"(?:[0-9a-f]{12}|unknown)(?:\+dirty)? (?:debug|release)", image)))
+    ident = found[0].decode() if len(found) == 1 else None
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        head = "unknown"
+    return ident, head
 
 
 def main():
@@ -188,7 +197,9 @@ def main():
     if not os.path.isdir(args.esp):
         sys.exit(f"{args.esp} is not a directory; run `make esp` first")
 
-    build = tree_build()
+    ident, head = staged_build(args.esp)
+    print(f"staged kernel: build {ident or '<not exactly one identity in the image>'}; this tree: {head}")
+    build = re.escape(ident) if ident else "<no identity>"
     work = tempfile.mkdtemp(prefix="early-fault-")
     results = []
 
@@ -234,8 +245,9 @@ def main():
     open(os.path.join(work, "plain.serial"), "w").write(text)
     results.append(grade("control", text, [
         ("reporter armed", r"early fault reporter armed"),
-        ("the build line names this tree", r"UEFI stage alive, build " + re.escape(build) + r" (debug|release), "),
-        ("the post-exit line names it too", r"boot services exited, console live, build " + re.escape(build) + r" (debug|release)\b"),
+        ("the build line names the staged kernel", r"UEFI stage alive, build " + build + r", "),
+        ("the post-exit line names it too", r"console live, build " + build + r"\b"),
+        (f"the staged kernel is this tree's commit ({head})", r"^" if ident and ident.split(" ")[0].removesuffix("+dirty") == head else r"(?!x)x"),
         ("on the kernel's own stack", r"UEFI stage alive, build \S+ \w+, on its own stack \(sp 0x[0-9a-f]+, the kernel's stack 0x[0-9a-f]+\.\.0x[0-9a-f]+, the entry's sp on the firmware's was 0x[0-9a-f]+\)"),
         ("boot services exited", r"exiting boot services"),
         (f"handed off at {handed_off}", rf"running at {handed_off} after the exit"),
