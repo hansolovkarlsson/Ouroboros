@@ -1399,6 +1399,39 @@ Then `exFAT mounted`, `login: root`, `ls`, `ls bin`, `man ls`, `shutdown`,
 powered off. No fault, no command timeout, no `Host System Error`, no
 `WARNING`.
 
+**2026-10-04, night: #205 on the board, the halt before HCRST.** Stick then
+card staged from `main` at `676797f` (#205's merge and its records), the
+card's kernel compared byte for byte with `build/esp`'s. Two boots over
+serial in one capture: the firmware's settings had been reset, its boot
+order now starting with the network, so the first boot sat a long time at
+the network attempt before it reached the card; Hans set the SD card first
+in the firmware's menu and booted again.
+
+```
+boot services exited, console live, build 676797f83e01 debug
+xhci: as handed over: USBCMD 0x8 (R/S false, RsvdP 0x0), USBSTS 0x19 (HCH true, CNR false)
+xhci: at the reset write: USBSTS 0x19 (HCH true, found running false)
+xhci: RsvdP after the reset, kept by each write: USBCMD 0x0, CONFIG 0x0, CRCR 0x0, ERSTSZ 0x0, ERSTBA 0x0
+usb-msd block device installed
+```
+
+**Handed over halted, so nothing was written before the reset, as
+predicted.** Both boots, from `boot services exited` to the first `login:`,
+match #203's line for line but for the new field and one task region a page
+higher. The RAM span is #203's (`0x3b0000-0x3b400000`), so the firmware's
+reset left "Limit RAM to 3 GB" on. No fault, no command timeout, no `Host
+System Error`, no `WARNING`.
+
+**New, and not the kernel's change: `root` was refused at first.** Boot 1:
+`login: root`, `Login incorrect`, twice, then a reboot into the firmware.
+Boot 2: `root` refused once, then `user` logged in, `exit`, and `root`
+logged in. Every earlier capture logs `root` in on the first try. The
+staged secrets are version 2, so no login rewrites `/etc/shadow`; the
+likelier path is that the shadow read failed and nothing said so:
+`find_account_line` retries only `NO_FS`, and any other error from `fsd`
+reads as a wrong password. Unconfirmed: the password is not echoed and the
+refusal does not say why. On the roadmap.
+
 ---
 
 ## 7. Risks, ranked

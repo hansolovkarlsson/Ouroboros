@@ -1602,7 +1602,7 @@ The small open tails those arcs deliberately left:
 >       0x0 after it, so on the VL805 it writes what the old code wrote;
 >       booted to the shell, no fault or timeout (`testing-pi4.md` section
 >       6).*
-> - [ ] **fix** **HCRST is set without halting the controller first.**
+> - [x] **fix** **HCRST is set without halting the controller first.**
 >       `init_inner` waits for CNR and sets HCRST; xHCI 5.4.1 says HCRST
 >       shall not be set while HCHalted is 0, and Linux's `xhci_reset`
 >       calls `xhci_halt` first. Clear R/S (through `write32_rsvdp`), poll
@@ -1646,7 +1646,24 @@ The small open tails those arcs deliberately left:
 >       `HCH false`, so the line catches a missing halt. Unmutated:
 >       `found running false`, `HCH true`. `make test`, `test-el1-drop`
 >       and `test-usb-hub` (19 ok) green. The board round should print
->       `found running false` and change nothing else. Merged as #205.*
+>       `found running false` and change nothing else. Merged as #205. Done; on the board
+>       2026-10-04 (`build 676797f83e01 debug`), two boots: `at the reset
+>       write: USBSTS 0x19 (HCH true, found running false)`, every line to
+>       the first `login:` as #203's, no fault or timeout (`testing-pi4.md`
+>       section 6).*
+> - [ ] **fix** **A login refusal does not say why, and a shadow read
+>       error reads as a wrong password.** On the Pi 2026-10-04 (#205's
+>       round), `root` was refused on its first attempts in two boots and
+>       logged in after `user` had; every earlier capture logs `root` in
+>       first time. `find_account_line` (`programs/shell/src/main.rs`)
+>       retries only `NO_FS`, so any other `fsd` error on `/etc/shadow`
+>       (a transient stick read, say) returns `None` and `verify_password`
+>       falls through to a passwd line with no secret: `Login incorrect`.
+>       First observe: say on the console when the shadow file could not
+>       be read and with which error (no word about the account or the
+>       password), and try `root` first on the next boots. Only then
+>       decide whether a retry is right; retrying an error nobody has seen
+>       would hide it. Found on the board, unconfirmed.
 > - [x] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd
