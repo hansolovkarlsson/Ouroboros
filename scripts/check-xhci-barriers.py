@@ -22,13 +22,14 @@ sequence exactly once, and at least one call to each (`bl`, or `b` for a
 tail call): present, and in use. The PE image carries no symbols, so the
 sequences are found by their instructions, which is why they are fixed in
 assembly rather than left to the compiler. Deleting a barrier, putting an
-instruction between it and its store, or routing `write32`/`write64`/the
+instruction between it and its store, or routing a register write or the
 flip around its function fails it.
 
 What it cannot see: ONE new raw `write_volatile` to a register somewhere
 else in `xhci.rs`. The functions are still called by everything else, so
-the check stays green; that every register write goes through `write32` or
-`write64` is a property of the source, not of this check. And "exactly
+the check stays green; that every register write goes through `xhci.rs`'s
+`reg` handles, whose barrier stores are private to that module, is a
+property of the source, not of this check. And "exactly
 once" is deliberate: a second copy of the same instructions elsewhere
 in the kernel fails it, loudly, rather than letting either copy stand in
 for the other.
