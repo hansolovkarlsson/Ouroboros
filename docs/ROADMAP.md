@@ -1530,7 +1530,18 @@ The small open tails those arcs deliberately left:
 >       segment at the ERSTBA write could sample a stale dequeue pointer.
 >       Check edk2's and Linux's order before changing it, and change it in
 >       a round of its own: it changes what the board sees. Found by the
->       same review.
+>       same review. *Checked 2026-10-03 in the sources: edk2's
+>       `XhcInitSched` writes ERSTSZ, ERDP, ERSTBA (each commented with its
+>       spec section); U-Boot's `xhci_mem_init` ERDP, ERSTSZ, ERSTBA;
+>       Linux's `xhci_add_interrupter` ERSTSZ, ERSTBA, ERDP, this driver's
+>       old order (Linux also carries `XHCI_WRITE_64_HI_LO` for controllers
+>       that act on ERSTBA's low-half write, which is the ERSTBA write as a
+>       trigger). Built on `pi4/erdp-before-erstba`: ERSTSZ, ERDP, ERSTBA,
+>       edk2's order, since edk2 drives this VL805 before the kernel.
+>       Hardening, not a fix for anything seen: the board works in Linux's
+>       order. The spec PDF itself was not read; its order is taken from
+>       edk2's comments. QEMU: `test-usb-hub` (19 ok) and `test-el1-drop`
+>       green.*
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
