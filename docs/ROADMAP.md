@@ -1524,7 +1524,7 @@ The small open tails those arcs deliberately left:
 >       `test-usb-hub` (19 ok) and `test-el1-drop` green. Merged as #198.
 >       Done; on the board 2026-10-03 (`build 08d3b4e27601 debug`), a full
 >       session, no fault (`testing-pi4.md` section 6).*
-> - [ ] **fix** **ERDP is programmed after ERSTBA.** `init_inner` writes
+> - [x] **fix** **ERDP is programmed after ERSTBA.** `init_inner` writes
 >       ERSTSZ, ERSTBA, ERDP; the xHCI spec's initialization order (4.2)
 >       is ERSTSZ, ERDP, ERSTBA, so a controller that starts on the
 >       segment at the ERSTBA write could sample a stale dequeue pointer.
@@ -1541,7 +1541,8 @@ The small open tails those arcs deliberately left:
 >       Hardening, not a fix for anything seen: the board works in Linux's
 >       order. The spec PDF itself was not read; its order is taken from
 >       edk2's comments. QEMU: `test-usb-hub` (19 ok) and `test-el1-drop`
->       green.*
+>       green. Merged as #200. Done; not yet booted on the board, the
+>       round this change is the only variable of.*
 > - [ ] **fix** **ERSTSZ and ERSTBA are written bare, zeroing their RsvdP
 >       bits.** `init_inner` writes ERSTSZ as `1` and ERSTBA as the address,
 >       where the spec's RsvdP fields (ERSTSZ 31:16, ERSTBA 5:0) are to be

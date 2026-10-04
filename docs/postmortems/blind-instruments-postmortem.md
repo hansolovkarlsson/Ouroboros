@@ -1033,3 +1033,36 @@ structure narrows that (one function is now the only way a TRB reaches a
 live ring, so there is one barrier to lose rather than one per caller) but
 does not close it: the branch's second review said so, and a scripted
 disassembly check, shown to fail by deleting a barrier, is on the roadmap.
+
+## Two more, from the evening (2026-10-03)
+
+The same day, after the barriers were on the board: the committed check the
+afternoon's section asked for, and the build line the 10-01 section asked
+for. Each turned up an instrument that would have read the wrong thing.
+
+**An image check run on the build the card does not carry.** Every
+disassembly check of the afternoon (the barrier counts, the flip as the
+first store after each `dmb oshst`) was run on the release image, because
+release is where the pattern was tidy. `make sdcard` stages the debug
+build. Writing the committed check showed the difference: in debug, the
+flip after `dmb oshst` is a call into `write_volatile`, not an adjacent
+store, so the afternoon's property was never true of the kernel on the
+card; it was true of a kernel nobody boots. The barrier was there in both,
+and the debug build is still correct, but the check was an observation of
+a different artifact. The fix moved the property out of the compiler's
+hands: each barrier and its store became a naked function of fixed
+instructions (#198), the same in every profile, and
+`scripts/check-xhci-barriers.py` checks the profile `make sdcard` stages.
+Check the artifact that ships, not the one that is easiest to read.
+
+**A build line that would have named the previous commit.** The line that
+says which build is running (#199) is baked in by a build script, and the
+idiomatic `rerun-if-changed=build.rs` was measured before it went in: after
+a commit that changed no source (a new HEAD, the same files), the image
+kept the old commit and cargo did not even recompile. That is the one case
+the line exists for, a card staged right after a commit. So the script
+reruns on every build, at about a second a build, and the QEMU rig reads the
+identity from the staged image and requires the boot to log it and its
+commit to be HEAD's; a stale ESP fails it. An instrument that says which
+build ran has to be the one thing that cannot be stale, so it was mutated
+before it was trusted: the idiom was the mutation.
