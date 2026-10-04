@@ -185,7 +185,12 @@ class Guest:
 
 def fault_line(guest) -> str:
     """The health bar, worded so a missing trace never reads as a clean run."""
-    n = guest.aborts()
+    return fault_text(guest.aborts())
+
+
+def fault_text(n) -> str:
+    """`fault_line` for a count already read, so a caller that needs the
+    number too reads the trace once."""
     if n is None:
         return "NO TRACE (health bar unavailable - this is not a pass)"
     return f"{n} fault lines (Abort/SError)"

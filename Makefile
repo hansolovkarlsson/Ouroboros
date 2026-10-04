@@ -1486,13 +1486,14 @@ test-keyboard-chain: image
 # recovery changes, or usb_msd.rs's retry. Every boot always runs (a failure
 # in one must not hide the next's result); the target fails if any did.
 test-usb-hub: image $(USBSTICK_IMG)
-	@fail=0; inc=0; \
-	python3 scripts/test-usb-hub.py; s=$$?; [ $$s -eq 100 ] && inc=1; [ $$s -ne 0 ] && fail=1; \
-	python3 scripts/test-usb-hub.py --usb-boot; s=$$?; [ $$s -eq 100 ] && inc=1; [ $$s -ne 0 ] && fail=1; \
+	@fail=0; inc=0; hard=0; \
+	python3 scripts/test-usb-hub.py; s=$$?; [ $$s -eq 100 ] && inc=1; [ $$s -ne 0 ] && fail=1; [ $$s -ne 0 ] && [ $$s -ne 100 ] && hard=1; \
+	python3 scripts/test-usb-hub.py --usb-boot; s=$$?; [ $$s -eq 100 ] && inc=1; [ $$s -ne 0 ] && fail=1; [ $$s -ne 0 ] && [ $$s -ne 100 ] && hard=1; \
 	if $(MAKE) --no-print-directory image-stall; then \
-		python3 scripts/test-usb-hub.py --stall; s=$$?; [ $$s -eq 100 ] && inc=1; [ $$s -ne 0 ] && fail=1; \
-	else fail=1; fi; \
-	[ $$inc -eq 1 ] && echo "test-usb-hub: a layout was INCONCLUSIVE (QEMU's firmware never loaded the kernel), so this is not a pass: run it again"; \
+		python3 scripts/test-usb-hub.py --stall; s=$$?; [ $$s -eq 100 ] && inc=1; [ $$s -ne 0 ] && fail=1; [ $$s -ne 0 ] && [ $$s -ne 100 ] && hard=1; \
+	else fail=1; hard=1; fi; \
+	if [ $$hard -eq 1 ]; then echo "test-usb-hub: a layout FAILED its checks"; \
+	elif [ $$inc -eq 1 ]; then echo "test-usb-hub: a layout was INCONCLUSIVE (QEMU's firmware never loaded the kernel) and none failed, so this is not a pass: run it again"; fi; \
 	exit $$fail
 
 # The early fault reporter (kernel/src/earlyfault.rs) exercised on QEMU

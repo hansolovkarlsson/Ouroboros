@@ -66,18 +66,23 @@ slot context; this rig cannot exercise those, the board is their first test.
 INCONCLUSIVE: QEMU's own firmware sometimes stalls in its USB boot, before it
 loads the kernel at all (2026-10-04, one --usb-boot run in three). The checks
 would then fail for a kernel that never ran, so that one case is reported as
-INCONCLUSIVE instead, with exit status 100, and appended to
-build/usb-hub-inconclusive.log, whose count is printed: a change that makes the
-stall likelier shows as a growing count, which a retry until green would hide.
-The case is narrow on purpose: the kernel printed nothing, the fault trace
+INCONCLUSIVE instead, with exit status 100. Every run, whatever its verdict,
+is appended to scratch/usb-hub-runs.log (outside build/, so `make clean`
+keeps it), and an INCONCLUSIVE run prints its layout's count against all of
+that layout's runs: a change that makes the stall likelier shows as a rising
+rate, which a retry until green would hide. Each stalled transcript is kept
+in scratch/usb-hub-inconclusive/, named in its log line, since the rerun
+overwrites build/usb-hub-<layout>.txt. The case is narrow on purpose: the kernel printed nothing, the fault trace
 was read and is clean, and the transcript ends in the firmware's
 UsbBootExecCmd. Anything else that never reaches the kernel, a kernel that
 hangs before its first line included, is still FAIL. `--self-test` checks that
 classifier on fixed transcripts; `make test` runs it.
 
-Usage:  python3 scripts/test-usb-hub.py [--direct | --usb-boot | --stall | --self-test]
+Usage:  python3 scripts/test-usb-hub.py [--direct | --usb-boot | --stall]
+        python3 scripts/test-usb-hub.py --self-test     (alone)
         make test-usb-hub          (rebuilds the image and the stick first)
-Exit status: the number of checks that failed, or 100 for INCONCLUSIVE.
+Exit status: the number of checks that failed, or 100 for INCONCLUSIVE; for
+--self-test, the number of classifier cases that failed.
 """
 import importlib.util
 import os
@@ -100,7 +105,8 @@ MIN_STALLS = 5       # a --stall boot measured 30; fewer means the fault barely 
 WORD = "usbhub"      # typed as `echo usbhub`; its output is this word alone
 KEY_DELAY = 0.3      # between sendkeys; each key is held ~100 ms by QEMU
 INCONCLUSIVE = 100   # the exit status for a run the firmware never handed over
-INCONCLUSIVE_LOG = os.path.join(ROOT, "build", "usb-hub-inconclusive.log")
+RUNS_LOG = os.path.join(ROOT, "scratch", "usb-hub-runs.log")
+STALLED_DIR = os.path.join(ROOT, "scratch", "usb-hub-inconclusive")
 
 
 def firmware_stalled(out, aborts):
@@ -114,15 +120,42 @@ def firmware_stalled(out, aborts):
     return bool(lines) and "UsbBootExecCmd" in lines[-1]
 
 
-# The 2026-10-04 stall as captured (build/usb-hub-usb-boot.txt, 667 bytes),
-# less the screen-control escapes before its last line.
-STALLED = """UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+# The 2026-10-04 stall (build/usb-hub-usb-boot.txt, 667 bytes, since
+# overwritten by a rerun; transcribed from the session that saw it), its last
+# line with the screen-control escapes it was captured with.
+FIRMWARE_HEAD = """UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
 ArmTrngLib could not be correctly initialized.
 Error: Image at 0005FDB6000 start failed: 00000001
+Error: Image at 0005FD6D000 start failed: Not Found
+Error: Image at 0005FCBA000 start failed: Unsupported
+Error: Image at 0005FC3F000 start failed: Not Found
+Error: Image at 0005FB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
 Tpm2SubmitCommand - Tcg2 - Not Found
 Image type X64 can't be loaded on AARCH64 UEFI system.
-UsbBootExecCmd: Success to Exec 0x0 Cmd (Result = 1)
 """
+USB_BOOT_LINE = "\x1b[2J\x1b[01;01H\x1b[=3h\x1b[2J\x1b[01;01H\x1b[2J\x1b[01;01H\x1b[=3h\x1b[2J\x1b[01;01HUsbBootExecCmd: Success to Exec 0x0 Cmd (Result = 1)\n"
+STALLED = FIRMWARE_HEAD + USB_BOOT_LINE
+# What a passing --usb-boot run prints after that line, before the kernel's
+# first: a kernel that hung here would end the transcript on BdsDxe.
+BDS_STARTED = (
+    'BdsDxe: loading Boot0001 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:02.0-1.2" from PciRoot(0x0)/Pci(0x2,0x0)/USB(0x4,0x0)/USB(0x1,0x0)\n'
+    "ConvertPages: failed to find range 140000000 - 14025DFFF\n"
+    'BdsDxe: starting Boot0001 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:02.0-1.2" from PciRoot(0x0)/Pci(0x2,0x0)/USB(0x4,0x0)/USB(0x1,0x0)\n'
+)
+
+
+def record_run(label, verdict, kept=None):
+    """Appends this run to RUNS_LOG and returns (INCONCLUSIVE runs, all runs)
+    for `label`, so the stall reads as a rate, not a count that only grows."""
+    os.makedirs(os.path.dirname(RUNS_LOG), exist_ok=True)
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {label} {verdict}"
+    with open(RUNS_LOG, "a") as fh:
+        fh.write(line + (f" {os.path.relpath(kept, ROOT)}" if kept else "") + "\n")
+    with open(RUNS_LOG) as fh:
+        mine = [entry.split() for entry in fh if entry.split()[2:3] == [label]]
+    return sum(1 for entry in mine if entry[3:4] == ["INCONCLUSIVE"]), len(mine)
 
 
 def self_test():
@@ -136,6 +169,7 @@ def self_test():
         ("the kernel ran, then the firmware's line", STALLED + "Ouroboros kernel: UEFI stage alive\n", 0, False),
         ("a kernel line, firmware line last", "Ouroboros kernel: UEFI stage alive\n" + STALLED, 0, False),
         ("no kernel, a different last line", STALLED + "Synchronous Exception at 0x5C5480EC\n", 0, False),
+        ("the firmware started the kernel, which printed nothing", STALLED + BDS_STARTED, 0, False),
         ("an empty transcript", "", 0, False),
     ]
     failed = 0
@@ -178,7 +212,7 @@ def main():
         return self_test()
     unknown = [a for a in args if a not in ("--direct", "--usb-boot", "--stall")]
     if unknown:
-        print(f"test-usb-hub: unknown argument {unknown[0]}; usage: [--direct | --usb-boot | --stall]")
+        print(f"test-usb-hub: unknown argument {unknown[0]}; usage: [--direct | --usb-boot | --stall], or --self-test alone")
         return 2
     direct = "--direct" in args
     stall = "--stall" in args
@@ -228,14 +262,17 @@ def main():
     with open(log, "w") as fh:
         fh.write(out)
 
-    if firmware_stalled(out, g.aborts()):
-        with open(INCONCLUSIVE_LOG, "a") as fh:
-            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {label}\n")
-        with open(INCONCLUSIVE_LOG) as fh:
-            count = sum(1 for line in fh if line.split()[-1:] == [label])
-        print(f"INCONCLUSIVE: QEMU's firmware stalled in its USB boot (UsbBootExecCmd) and never loaded the kernel; not a pass, run it again")
-        print(f"  {count} such {label} run(s) recorded in {os.path.relpath(INCONCLUSIVE_LOG, ROOT)}")
-        print(f"transcript: {os.path.relpath(log, ROOT)}; {drive_qemu.fault_line(g)}")
+    aborts = g.aborts()
+    if firmware_stalled(out, aborts):
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        os.makedirs(STALLED_DIR, exist_ok=True)
+        kept = os.path.join(STALLED_DIR, f"{stamp}-{label}.txt")
+        with open(kept, "w") as fh:
+            fh.write(out)
+        stalled, runs = record_run(label, "INCONCLUSIVE", kept)
+        print("INCONCLUSIVE: QEMU's firmware stalled in its USB boot (UsbBootExecCmd) and never loaded the kernel; not a pass, run it again")
+        print(f"  {stalled} of {runs} {label} run(s) in {os.path.relpath(RUNS_LOG, ROOT)} stalled; this one kept as {os.path.relpath(kept, ROOT)}")
+        print(f"transcript: {os.path.relpath(log, ROOT)}; {drive_qemu.fault_text(aborts)}")
         return INCONCLUSIVE
 
     checks = [
@@ -262,7 +299,8 @@ def main():
     for name, ok in checks:
         print(f"{'ok  ' if ok else 'FAIL'} {name}")
         failed += not ok
-    print(f"transcript: {os.path.relpath(log, ROOT)}; {drive_qemu.fault_line(g)}")
+    record_run(label, "FAIL" if failed else "PASS")
+    print(f"transcript: {os.path.relpath(log, ROOT)}; {drive_qemu.fault_text(aborts)}")
     return failed
 
 
