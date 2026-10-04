@@ -1557,11 +1557,25 @@ The small open tails those arcs deliberately left:
 >       variable. Found by the review of `pi4/erdp-before-erstba`. *Built
 >       2026-10-04 on `pi4/erst-rsvdp`: ERSTSZ and ERSTBA read, their RsvdP
 >       bits kept (`ERSTSZ_RSVDP`, `ERSTBA_RSVDP`), the size and the address
->       ORed in; ERDP still written whole. After HCRST those bits read 0 on
->       every controller seen, so this most likely writes the same values
->       as before; no QEMU rig can tell the two apart. QEMU: `test-usb-hub`
->       (19 ok) and `test-el1-drop` green, `make test` green. Not yet
->       reviewed or on the board.*
+>       each masked to its field and ORed in; ERDP still written whole. Its
+>       review: the address masked as Linux masks it, a const assert that
+>       ERST is 64-byte aligned (shown to fail by mutation), the timeout
+>       dump's ERSTSZ in hex, and one init line printing the bits kept, since
+>       "they read 0 after HCRST" had never been observed. On QEMU it says
+>       `RsvdP kept: ERSTSZ 0x0, ERSTBA 0x0`, so there this writes what the
+>       old code wrote; the board's line is the round's evidence. QEMU:
+>       `test-usb-hub` 19 ok in three captured runs and 18 in one run whose
+>       output was not kept (the missing check unknown; watch for it),
+>       `test-el1-drop` and `make test` green. Not yet merged or on the
+>       board.*
+> - [ ] **fix** **CRCR, CONFIG and USBCMD are written whole, zeroing their
+>       RsvdP bits** (CRCR 5:4, CONFIG 31:10, USBCMD's reserved ranges), the
+>       same defect as ERSTSZ/ERSTBA in the same function. Linux keeps them
+>       (`CMD_RING_RSVD_BITS`; CONFIG read and `HCS_SLOTS_MASK` replaced).
+>       Fix with one helper that reads, keeps a mask and masks the new value
+>       to its field (`portsc_preserve` is the existing shape), then move
+>       ERSTSZ/ERSTBA onto it. Spec form, nothing seen; a board round of
+>       its own. Found by the review of `pi4/erst-rsvdp`.
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
