@@ -1610,7 +1610,23 @@ The small open tails those arcs deliberately left:
 >       controller over before this, so whether it is still running here is
 >       a question for the capture: log USBSTS.HCH before the reset first,
 >       then change it. A board round of its own. Found by the review of
->       `pi4/rsvdp-preserve`.
+>       `pi4/rsvdp-preserve`. *Step 1, the log, built 2026-10-04 on
+>       `pi4/hcrst-halt-log`: one read-only line before HCRST, `xhci:
+>       before the reset: USBCMD … (R/S …), USBSTS … (HCH …)`. QEMU says
+>       `USBCMD 0x0 (R/S 0), USBSTS 0x9 (HCH 1)`, halted (EINT pending from
+>       the firmware). The Pi's line decides step 2: HCH 1 there makes the
+>       halt a no-op on the board, HCH 0 makes it a real change. QEMU:
+>       `test-usb-hub` 19 ok in two runs after one run lost to the flake
+>       below, `test-el1-drop` and `make test` green.*
+> - [ ] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
+>       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
+>       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd
+>       (Result = 1)` the last line, the transcript 667 bytes, no `UEFI stage
+>       alive`), and the rig reported five FAILs for a kernel that never
+>       ran. Two fixes: the rig should say "the firmware never loaded the
+>       kernel" rather than fail each check, and should retry that one case
+>       once. Whether the unexplained 18-of-19 run earlier the same day was
+>       this is unknown (one FAIL, not five, so probably not).
 > - [ ] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
