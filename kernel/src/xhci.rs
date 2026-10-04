@@ -2043,8 +2043,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // wait, since no operational register is written before CNR clears.
     // Only when HCH is 0: the Pi's firmware hands the controller over
     // halted (2026-10-04), and there nothing is written here.
-    let was_running = unsafe { read32(op_base + OP_USBSTS) } & USBSTS_HCH == 0;
-    if was_running {
+    let found_running = unsafe { read32(op_base + OP_USBSTS) } & USBSTS_HCH == 0;
+    if found_running {
         unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, 0) };
         if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH != 0) } {
             return Err(Error::HaltTimeout(unsafe { read32(op_base + OP_USBSTS) }));
@@ -2053,10 +2053,14 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // HCH again with nothing between the read and the reset write, said
     // after it: a print first would take milliseconds over serial, and a
     // controller halting as it was handed over could finish meanwhile.
+    // Beside it, whether the controller was found running: the line says
+    // what was read, not that the halt ran, so `found running true` with
+    // `HCH true` is a halt done here, and with `HCH false` one that did
+    // not happen (shown so by a mutation that skipped it, 2026-10-04).
     let usbsts_at_reset = unsafe { read32(op_base + OP_USBSTS) };
     unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_HCRST) };
     console::println!(
-        "Ouroboros kernel: xhci: at the reset write: USBSTS {usbsts_at_reset:#x} (HCH {}, halted here first {was_running})",
+        "Ouroboros kernel: xhci: at the reset write: USBSTS {usbsts_at_reset:#x} (HCH {}, found running {found_running})",
         usbsts_at_reset & USBSTS_HCH != 0
     );
     if !unsafe { poll_until(|| read32(op_base + OP_USBCMD) & USBCMD_HCRST == 0 && read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
