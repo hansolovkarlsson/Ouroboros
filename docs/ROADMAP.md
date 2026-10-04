@@ -1624,7 +1624,15 @@ The small open tails those arcs deliberately left:
 >       The Pi's lines decide step 2: HCH true at the write makes the halt
 >       a no-op on the board, false makes it a real change. QEMU:
 >       `test-usb-hub` 19 ok in four runs after one lost to the flake
->       below, `test-el1-drop` and `make test` green.*
+>       below, `test-el1-drop` and `make test` green. Merged as #203. On
+>       the board 2026-10-04 (`build 7f39b6ea226c debug`): `as handed
+>       over: USBCMD 0x8 (R/S false, …), USBSTS 0x19 (HCH true, …)` and `at
+>       the reset write: … (HCH true)`. **The Pi's firmware hands the
+>       controller over halted**, so step 2 (clear R/S, wait for HCH, then
+>       HCRST) is a spec-form no-op on this board: worth building for
+>       other firmware and for any later path that re-initializes the
+>       controller (a supervisor restart), not urgent, and its board round
+>       can show only that it changed nothing.*
 > - [ ] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd

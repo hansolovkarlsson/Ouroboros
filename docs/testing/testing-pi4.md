@@ -1377,6 +1377,28 @@ files read off the stick), and the shell answering three empty lines; no
 commands beyond that this time, and no `shutdown` in the capture. No fault,
 no command timeout, no `Host System Error`, no `WARNING`.
 
+**2026-10-04, evening: #203 on the board, the controller as handed over.**
+Stick then card staged from `main` at `7f39b6e` (#203's merge), the card's
+kernel compared byte for byte with `build/esp`'s. One boot over serial:
+
+```
+UEFI stage alive, build 7f39b6ea226c debug, on its own stack (sp 0x37...
+boot services exited, console live, build 7f39b6ea226c debug
+xhci: as handed over: USBCMD 0x8 (R/S false, RsvdP 0x0), USBSTS 0x19 (HCH true, CNR false)
+xhci: at the reset write: USBSTS 0x19 (HCH true)
+xhci: RsvdP after the reset, kept by each write: USBCMD 0x0, CONFIG 0x0, CRCR 0x0, ERSTSZ 0x0, ERSTBA 0x0
+usb-msd block device installed
+```
+
+**The firmware hands the VL805 over halted**: R/S 0 and HCH 1 both as
+handed over and at the HCRST write, so the kernel does not reset a running
+controller on this board. What the firmware leaves set is not a running
+controller but its traces: USBCMD's HSEE (bit 3), and in USBSTS a pending
+EINT (bit 3) and a Port Change Detect (bit 4), all cleared by the reset.
+Then `exFAT mounted`, `login: root`, `ls`, `ls bin`, `man ls`, `shutdown`,
+powered off. No fault, no command timeout, no `Host System Error`, no
+`WARNING`.
+
 ---
 
 ## 7. Risks, ranked
