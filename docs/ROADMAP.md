@@ -1675,8 +1675,18 @@ The small open tails those arcs deliberately left:
 >       verdict unchanged; a bare `Login incorrect` is now a wrong password.
 >       Each line shown by a mutation on QEMU (the path misspelled, the name
 >       swapped, the line cut), unmutated a wrong password still bare.
->       `make test`, `check-relocs`, `test-held-keys` green. Merged as #206.
->       Next: a board boot, `root` at once after the prompt.*
+>       `make test`, `check-relocs`, `test-held-keys` green. Merged as #206.*
+>       *Not reproduced since: on the board 2026-10-04 (`build 0af55b5c3b81
+>       debug`, the stick and card re-staged), four boots, `root` typed at
+>       once after the prompt, logged in every time, no line. The failing
+>       and the passing sessions print the same boot lines (sorted, unique),
+>       so nothing on screen tells them apart. Open, with the line armed: a
+>       line before `Login incorrect` names a read error; a bare one says the
+>       file was read and the password did not match, a typo or a lost byte
+>       (the password is not echoed, and the kernel never programs the
+>       PL011's LCR_H, so the receive FIFO is whatever the firmware left,
+>       and the firmware's settings had just been reset). Leave it until it
+>       recurs; no retry on a guess.*
 > - [x] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd

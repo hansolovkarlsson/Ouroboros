@@ -1432,6 +1432,14 @@ likelier path is that the shadow read failed and nothing said so:
 reads as a wrong password. Unconfirmed: the password is not echoed and the
 refusal does not say why. On the roadmap.
 
+Narrowed in the same session: after a logout `root` logged in; after a
+reboot it was refused 5 s after the prompt and accepted 5 s later, nothing
+printed between. **#206 then made the login say why** (a read error with its
+code, no entry, an entry that does not parse; a bare `Login incorrect` is a
+wrong password). On the board with it (`build 0af55b5c3b81 debug`, stick and
+card re-staged): four boots, `root` typed at once each time, logged in every
+time, no line, the boot counter 1 to 4. Not reproduced; the line stays armed.
+
 ---
 
 ## 7. Risks, ranked
