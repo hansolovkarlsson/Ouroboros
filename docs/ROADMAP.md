@@ -1372,7 +1372,17 @@ The small open tails those arcs deliberately left:
 >       the stick mounts, and in the log line that says which build is
 >       running, which a boot also still lacks (owed since the wrong-tree
 >       card of 2026-10-01). Until then, restage both together. Found by
->       the review of `pi4/stick-target`.
+>       the review of `pi4/stick-target`. *The kernel's half built
+>       2026-10-03 on `pi4/build-identity`: `kernel/build.rs` bakes in the
+>       commit (12 digits), `+dirty` and the profile, and the boot logs it
+>       in its first line and in whichever line announces the console after
+>       the exit. The script reruns every build (the kernel crate then
+>       recompiles, about a second): the usual `rerun-if-changed=build.rs`
+>       was shown to keep the old commit after a commit that changed no
+>       source. The control boot of `test-early-fault`/`test-el1-drop`
+>       requires both lines to name the staged image's identity and that
+>       identity to be HEAD's commit, and fails on a stale ESP (shown). Open: the
+>       stick's stamp and the comparison once it mounts.*
 > - [x] **fix** **A USB3 stick on the Pi 4's SuperSpeed root port comes out
 >       of its reset with speed 0.** Same boot: `port 3 reset, speed=0`,
 >       `unsupported port speed 0`, at boot and again on `mount -a`'s
@@ -1463,7 +1473,7 @@ The small open tails those arcs deliberately left:
 >       `pi4/trb-cycle-order`. *Done on the same branch, after its second
 >       review pointed out that `ring_publish`'s contract says ring setup
 >       zeroes the ring: one line, no change on today's single activation.*
-> - [ ] **fix** **No committed check guards the xHCI barriers.** Every QEMU
+> - [x] **fix** **No committed check guards the xHCI barriers.** Every QEMU
 >       rig passes with or without the `dmb oshst` in `ring_publish` and the
 >       `dsb sy` before the register writes, and the image checks (19
 >       barriers, the flip the first store after each; `dsb sy` 18 to 22)
@@ -1489,8 +1499,8 @@ The small open tails those arcs deliberately left:
 >       function), and `make test` itself red with the `dsb` deleted. Its
 >       limit: a new raw `write_volatile` to a register elsewhere in
 >       `xhci.rs` would pass; `write32` being the only register writer is
->       what that rests on.*
-> - [ ] **fix** **The barrier before an xHCI register write is placed by
+>       what that rests on. Merged as #198. Done.*
+> - [x] **fix** **The barrier before an xHCI register write is placed by
 >       hand.** Every doorbell and, since `pi4/xhci-handover-barrier`, the
 >       four handover writes in `init_inner` carry their own `dsb sy`; the
 >       next register that hands the controller memory can be written
@@ -1511,7 +1521,9 @@ The small open tails those arcs deliberately left:
 >       `dsb sy`, not Linux's lighter `dmb oshst`, because it is the barrier
 >       the Pi 4 has run every doorbell behind; a register write is now a
 >       call and a `dsb` more than before, on every write. QEMU:
->       `test-usb-hub` (19 ok) and `test-el1-drop` green.*
+>       `test-usb-hub` (19 ok) and `test-el1-drop` green. Merged as #198.
+>       Done; not yet booted on the board, where every register write is
+>       now a call and a `dsb sy` more than before.*
 > - [ ] **fix** **ERDP is programmed after ERSTBA.** `init_inner` writes
 >       ERSTSZ, ERSTBA, ERDP; the xHCI spec's initialization order (4.2)
 >       is ERSTSZ, ERDP, ERSTBA, so a controller that starts on the

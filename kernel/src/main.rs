@@ -178,6 +178,13 @@ fn main() -> Status {
     }
 }
 
+/// Which build this is: the commit, `+dirty` if the tree differed from it,
+/// and the profile. Set by `build.rs`, which says why it reruns every build.
+/// Logged in the first line and again in whichever line announces the
+/// console after the exit (serial, `\FBCON`, or a fallback), so a capture
+/// from any console carries it.
+const BUILD: &str = env!("OUROBOROS_BUILD");
+
 /// The kernel proper, on its own stack. Never returns.
 extern "C" fn kernel_main() -> ! {
     uefi::helpers::init().unwrap();
@@ -186,7 +193,7 @@ extern "C" fn kernel_main() -> ! {
     let sp: u64;
     unsafe { core::arch::asm!("mov {0}, sp", out(reg) sp, options(nomem, nostack, preserves_flags)) };
     log::info!(
-        "Ouroboros kernel: UEFI stage alive, on {} (sp {sp:#x}, the kernel's stack {stack_base:#x}..{stack_end:#x}, the entry's sp on the firmware's was {entry_sp:#x})",
+        "Ouroboros kernel: UEFI stage alive, build {BUILD}, on {} (sp {sp:#x}, the kernel's stack {stack_base:#x}..{stack_end:#x}, the entry's sp on the firmware's was {entry_sp:#x})",
         if (stack_base..stack_end).contains(&sp) { "its own stack" } else { "the FIRMWARE'S stack, which the switch should have left" }
     );
     // Where firmware loaded this image, so an address in the firmware's own
@@ -593,7 +600,7 @@ extern "C" fn kernel_main() -> ! {
             // too (`extra_devices` below), so the console survives it.
             let fb = unsafe { fbconsole::FbConsole::new(&info) };
             console::install(Console::Framebuffer(fb));
-            console::println!("Ouroboros kernel: framebuffer console live early (\\FBCON), on the firmware's page tables");
+            console::println!("Ouroboros kernel: framebuffer console live early (\\FBCON), on the firmware's page tables, build {BUILD}");
         }
     }
 
@@ -608,7 +615,7 @@ extern "C" fn kernel_main() -> ! {
         // tables, or PCI configuration space.
         let console = unsafe { kind.console(base) };
         console::install(console);
-        console::println!("Ouroboros kernel: boot services exited, console live");
+        console::println!("Ouroboros kernel: boot services exited, console live, build {BUILD}");
     }
     // The exception level the firmware handed off at, stated before any
     // `_EL1` register is relied on: at EL2 (the Raspberry Pi) every write
@@ -993,7 +1000,7 @@ fn try_virtio_console() {
         return;
     }
     console::install(Console::Virtio(device));
-    console::println!("Ouroboros kernel: virtio-console live (fallback - every other mechanism failed)");
+    console::println!("Ouroboros kernel: virtio-console live (fallback - every other mechanism failed), build {BUILD}");
 }
 
 /// Under `\FBCON`: a solid white square at the top-right of the screen, the
@@ -1052,7 +1059,7 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
     // own device-block mapping. Either way it's mapped and writable now.
     let fb = unsafe { fbconsole::FbConsole::new(&info) };
     console::install(Console::Framebuffer(fb));
-    console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed)");
+    console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed), build {BUILD}");
 }
 
 /// Discovers and initializes the virtio-blk device, reads sector 0 back

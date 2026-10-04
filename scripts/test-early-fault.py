@@ -79,6 +79,7 @@ import importlib.util
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -166,6 +167,25 @@ def grade(name, text, must, must_not, aborts=None, expect_aborts=None, order=())
     return ok
 
 
+def staged_build(esp):
+    """The build identity the staged kernel carries (kernel/build.rs bakes it
+    in: the commit to 12 digits, `+dirty`, the profile), read from the image,
+    and whether it is this tree's commit. The control boot must log exactly
+    the image's identity, and the image must be HEAD's commit: a stale ESP,
+    or a build script that stopped rerunning, fails on QEMU rather than on a
+    board. `+dirty` is not compared with the tree, which may have changed
+    since `make esp` without changing the kernel. Without git, build.rs bakes
+    in `unknown`, and so is the commit expected here."""
+    image = open(os.path.join(esp, "EFI", "BOOT", "BOOTAA64.EFI"), "rb").read()
+    found = sorted(set(re.findall(rb"(?:[0-9a-f]{12}|unknown)(?:\+dirty)? (?:debug|release)", image)))
+    ident = found[0].decode() if len(found) == 1 else None
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        head = "unknown"
+    return ident, head
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--esp", default="build/esp", help="the staged ESP directory (make esp)")
@@ -177,6 +197,9 @@ def main():
     if not os.path.isdir(args.esp):
         sys.exit(f"{args.esp} is not a directory; run `make esp` first")
 
+    ident, head = staged_build(args.esp)
+    print(f"staged kernel: build {ident or '<not exactly one identity in the image>'}; this tree: {head}")
+    build = re.escape(ident) if ident else "<no identity>"
     work = tempfile.mkdtemp(prefix="early-fault-")
     results = []
 
@@ -222,7 +245,10 @@ def main():
     open(os.path.join(work, "plain.serial"), "w").write(text)
     results.append(grade("control", text, [
         ("reporter armed", r"early fault reporter armed"),
-        ("on the kernel's own stack", r"UEFI stage alive, on its own stack \(sp 0x[0-9a-f]+, the kernel's stack 0x[0-9a-f]+\.\.0x[0-9a-f]+, the entry's sp on the firmware's was 0x[0-9a-f]+\)"),
+        ("the build line names the staged kernel", r"UEFI stage alive, build " + build + r", "),
+        ("the post-exit line names it too", r"console live, build " + build + r"\b"),
+        (f"the staged kernel is this tree's commit ({head})", r"^" if ident and ident.split(" ")[0].removesuffix("+dirty") == head else r"(?!x)x"),
+        ("on the kernel's own stack", r"UEFI stage alive, build \S+ \w+, on its own stack \(sp 0x[0-9a-f]+, the kernel's stack 0x[0-9a-f]+\.\.0x[0-9a-f]+, the entry's sp on the firmware's was 0x[0-9a-f]+\)"),
         ("boot services exited", r"exiting boot services"),
         (f"handed off at {handed_off}", rf"running at {handed_off} after the exit"),
         *([("dropped to EL1", r"dropped from EL2 to EL1, on our own tables and vectors")] if args.el2 else []),

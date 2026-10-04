@@ -110,7 +110,9 @@ in the image's `.bss`, `KERNEL_STACK`), then `kernel_main` runs there and
 never returns: on the Raspberry Pi the firmware's stack is 16 KB with its
 page tables directly below it, and the kernel overflowed it into them,
 which was every firmware fault the board showed (`testing-pi4.md`
-section 6). The first log line says which stack it is on.
+section 6). The first log line says which build it is (the commit, `+dirty`,
+the profile, from `kernel/build.rs`, which reruns every build) and which
+stack it is on.
 
 `main()` now calls `boot::exit_boot_services(None)` partway through and
 permanently leaves the UEFI environment. Everything before that call may use
@@ -646,6 +648,7 @@ docs/                every document is annotated in full in `docs/README.md` - r
   research/          synthesis notes on MINIX/Plan 9/Helix/Redox, the GUI stack, and where the design should go next
 
 kernel/              every file annotated in full in `docs/source-map.md`; each also carries its own `//!`
+  build.rs           the build identity (commit, +dirty, profile) the boot logs; reruns every build on purpose
   src/main.rs        #[entry]: the switch to the kernel's own 256 KB stack first (the Pi firmware's is 16 KB over its page tables), then
                      UEFI init, console/MADT/PSCI discovery, loader, ExitBootServices, then exceptions/mmu/xhci/storage/net/gic/timer/tasks
   src/uart.rs        PL011 console driver (post-ExitBootServices only)
