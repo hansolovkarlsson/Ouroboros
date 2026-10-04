@@ -633,12 +633,12 @@ unsafe fn read32(addr: u64) -> u32 {
     unsafe { read_volatile(addr as *const u32) }
 }
 
-
-
-/// `ring_publish`'s flip, for the same reason: `dmb oshst; str w1, [x0];
-/// ret`, the barrier and the one store that hands a batch of TRBs to the
-/// controller, fixed together where no edit can put a store between them
-/// and the image check can find them.
+/// `ring_publish`'s flip: `dmb oshst; str w1, [x0]; ret`, the barrier and
+/// the one store that hands a batch of TRBs to the controller. Naked, like
+/// `reg`'s `mmio_write32`, so the image holds these fixed instructions
+/// whatever the profile: no edit can put a store between them, and
+/// `scripts/check-xhci-barriers.py` can find them. Inlining it would leave
+/// that check nothing to find.
 #[unsafe(naked)]
 unsafe extern "C" fn publish_cycle_word(ptr: *mut u32, val: u32) {
     core::arch::naked_asm!("dmb oshst", "str w1, [x0]", "ret");
@@ -672,23 +672,29 @@ const _: () = {
 /// no way to spell a register write that skips either: no bare `write32` to
 /// USBCMD, and no handle for it but the one carrying its RsvdP mask. Until
 /// 2026-10-04 the RsvdP helpers were opt-in beside a plain `write32` that
-/// would take any address. Reads stay plain:
-/// `read32`/`read64` on the register's address, which cannot clobber
-/// anything.
+/// would take any address. Reads cannot clobber anything, so they are not
+/// held to this: PORTSC and the RsvdP diagnostic read through their
+/// handles, the rest with `read32`/`read64` at a block's `at`.
 ///
 /// The handles are built only from their own register block, an
 /// [`reg::OpRegs`], [`reg::Ir0Regs`] or [`reg::Doorbells`], and those only by
 /// [`reg::locate`] from the capability registers, so a handle cannot be built
-/// at another block's address: until the review of #207 a doorbell built
-/// from the operational base was a whole write to USBCMD.
+/// from another block's base: until the review of #207 a doorbell built
+/// from the operational base was a whole write to USBCMD. Within a block,
+/// a port or doorbell index past its range is checked only by a
+/// `debug_assert` (the card carries a debug build); the callers bound it.
 ///
 /// What this does not cover: TRBs and contexts are memory, written with
 /// `write_volatile`, and nothing stops a raw pointer store to a register
 /// address; `publish_cycle_word`, the ring's `dmb oshst; str`, takes any
 /// pointer, so it too would store to a register without the `dsb sy` or the
-/// RsvdP merge; and a block's `at` gives a plain address for a read, which
-/// can name another block's offset. PORTSC's RW1C bits and PED are still
-/// masked by convention (`portsc_preserve`).
+/// RsvdP merge; a block's `at` gives a plain address for a read, which can
+/// name another block's offset; PORTSC and the doorbells are both a
+/// `Whole32` (DCBAAP and ERDP both a `Whole64`), so a port function would
+/// take a doorbell; and PORTSC's RW1C bits and PED are still masked by
+/// convention (`portsc_preserve`). The image check sees a rerouted
+/// `Whole32::write` or `Whole64::write`, but not a `Kept` write routed
+/// around them, since the whole writes keep their other callers.
 mod reg {
     use super::*;
 
@@ -836,9 +842,11 @@ mod reg {
             let current = unsafe { read32(self.addr) };
             let merged = rsvdp_merge(current as u64, self.rsvdp as u64, val as u64) as u32;
             // Through `Whole32::write`, not `mmio_write32`: one caller per
-            // barrier store, so the image check fails if that caller is
-            // routed around it (a second caller kept it green, the review
-            // of #207).
+            // barrier store, so the image check fails if `Whole32::write`
+            // is routed around it (a second caller kept it green, the
+            // review of #207). Routing THIS write around `Whole32::write`
+            // is not seen by that check: the doorbells and PORTSC still
+            // call it.
             unsafe { Whole32(self.addr).write(merged) }
         }
     }
