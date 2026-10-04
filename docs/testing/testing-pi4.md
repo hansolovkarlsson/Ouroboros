@@ -1305,6 +1305,34 @@ restaged, so its boot counter started again.) `screen -L` appends, so the
 capture also holds the previous boot above this one; the build line is what
 tells the two apart.
 
+**2026-10-04: #200 on the board, ERDP before ERSTBA.** Card and stick staged
+together from `main` at `d89908f`, which is #200's kernel (`097da77`) plus a
+docs-only commit, so the build line names `d89908f` and the ERDP order is
+the round's only variable. `screenlog.0` was moved aside first, so the
+capture holds these two boots and nothing older:
+
+```
+UEFI stage alive, build d89908f1d0ab debug, on its own stack (sp 0...
+boot services exited, console live, build d89908f1d0ab debug
+running at EL2 after the exit
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: port 3 reset, speed=4
+usb-msd block device installed
+```
+
+Two boots, both to the shell: the stick on SuperSpeed root port 3 through
+#194's wait, `exFAT mounted`, `login: root`, then `ls`, `ls -l`, `ls etc`,
+`ls bin`, `cat etc/passwd`, `man`, `chello`, `bootid` and `shutdown`, which
+powered off both times. `bootid` said `boot 1` and then `boot 2`: the card
+was restaged, so its counter started again. No fault, no command timeout,
+no `Host System Error`, no `WARNING`. **The ERDP order costs nothing visible
+on the board.** No keyboard and no display this time, on purpose: Hans typed
+over the serial console, so the hub reported four ports and nothing behind
+them (`keyboard not available`), which is the empty hub and not a finding.
+The keyboard behind the hub was last seen working on `08d3b4e`, the boot
+above.
+
 ---
 
 ## 7. Risks, ranked

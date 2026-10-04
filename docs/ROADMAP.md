@@ -1541,8 +1541,10 @@ The small open tails those arcs deliberately left:
 >       Hardening, not a fix for anything seen: the board works in Linux's
 >       order. The spec PDF itself was not read; its order is taken from
 >       edk2's comments. QEMU: `test-usb-hub` (19 ok) and `test-el1-drop`
->       green. Merged as #200. Done; not yet booted on the board, the
->       round this change is the only variable of.*
+>       green. Merged as #200. Done; on the board 2026-10-04 (`build
+>       d89908f1d0ab debug`, #200's kernel), two boots and a full session
+>       over the serial console, no fault or timeout (`testing-pi4.md`
+>       section 6).*
 > - [ ] **fix** **ERSTSZ and ERSTBA are written bare, zeroing their RsvdP
 >       bits.** `init_inner` writes ERSTSZ as `1` and ERSTBA as the address,
 >       where the spec's RsvdP fields (ERSTSZ 31:16, ERSTBA 5:0) are to be
