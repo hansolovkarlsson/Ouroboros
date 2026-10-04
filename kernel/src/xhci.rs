@@ -249,6 +249,10 @@ const IR_IMAN: u64 = 0x00;
 const IR_ERSTSZ: u64 = 0x08;
 const IR_ERSTBA: u64 = 0x10;
 const IR_ERDP: u64 = 0x18;
+// The RsvdP bits of ERSTSZ (31:16) and ERSTBA (5:0): written back as read,
+// as Linux's `xhci_add_interrupter` and U-Boot do.
+const ERSTSZ_RSVDP: u32 = 0xffff_0000;
+const ERSTBA_RSVDP: u64 = 0x3f;
 
 const EP_TYPE_CONTROL: u32 = 4;
 const EP_TYPE_INTERRUPT_IN: u32 = 7;
@@ -2017,11 +2021,15 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // place before anything can start on the segment. Until 2026-10-03
     // ERDP came last, as in Linux's `xhci_add_interrupter`, which works on
     // the Pi too; this removes the dependence on the controller not
-    // sampling ERDP at the ERSTBA write.
+    // sampling ERDP at the ERSTBA write. ERSTSZ and ERSTBA keep their
+    // RsvdP bits; `ERST` is `Aligned64`, so its address has none of
+    // ERSTBA's set. ERDP is written whole: its EHB is RW1C, written 0.
     unsafe {
-        write32(ir0_base + IR_ERSTSZ, 1);
+        let erstsz = read32(ir0_base + IR_ERSTSZ) & ERSTSZ_RSVDP;
+        write32(ir0_base + IR_ERSTSZ, erstsz | 1);
         write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64);
-        write64(ir0_base + IR_ERSTBA, ERST.0.get() as u64);
+        let erstba = read64(ir0_base + IR_ERSTBA) & ERSTBA_RSVDP;
+        write64(ir0_base + IR_ERSTBA, erstba | ERST.0.get() as u64);
     }
 
     // And reads the scratchpad array at Run.
