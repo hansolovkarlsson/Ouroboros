@@ -1633,7 +1633,7 @@ The small open tails those arcs deliberately left:
 >       other firmware and for any later path that re-initializes the
 >       controller (a supervisor restart), not urgent, and its board round
 >       can show only that it changed nothing.*
-> - [x] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
+> - [ ] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd
 >       (Result = 1)` the last line, the transcript 667 bytes, no `UEFI stage
@@ -1648,13 +1648,28 @@ The small open tails those arcs deliberately left:
 >       it only when the kernel printed nothing, the fault trace was read
 >       and is clean, and the transcript ends in `UsbBootExecCmd`;
 >       anything else, a kernel hanging before its first line included,
->       is still FAIL. INCONCLUSIVE exits 100, appends to
->       `build/usb-hub-inconclusive.log` and prints the count; the make
->       target still fails and says to run it again. `--self-test` checks
->       the classifier on eight fixed transcripts and `make test` runs it.
->       Mutated: dropping either condition fails the self-test, and a
->       forced verdict drove the whole path through `make test-usb-hub`.
->       Not yet reviewed or merged.*
+>       is still FAIL. INCONCLUSIVE exits 100; the make target still fails,
+>       and says to run it again only when no layout really failed. Its
+>       review: every run's verdict goes to `scratch/usb-hub-runs.log`
+>       (outside `build/`, which `make clean` empties) and an INCONCLUSIVE
+>       run prints its layout's stalls out of all its runs, a rate rather
+>       than a count that only grows; each stalled transcript is kept in
+>       `scratch/usb-hub-inconclusive/`, since the rerun overwrites the
+>       one in `build/` (as it did the first one, which the fixture had to
+>       be transcribed from); the fixture keeps the real line's escapes,
+>       and a "firmware started the kernel, which printed nothing" case
+>       must stay graded. `--self-test` (nine cases) runs in `make test`.
+>       Mutated: dropping either condition, or anchoring the match, fails
+>       the self-test; a forced verdict and a forced verdict beside a real
+>       FAIL drove both endings of the make target. Not yet merged.*
+> - [ ] **new** **Is the usb-boot stall the rig's own doing?** The
+>       `--usb-boot` stick is `build/esp.img`, which the hub boot just
+>       before it mounted read-write as its virtio disk and then killed
+>       (`g.stop()` is a SIGKILL). If the stall comes from that state, it
+>       is a rig defect that INCONCLUSIVE would hide. Once
+>       `scratch/usb-hub-runs.log` has a base rate, boot `--usb-boot` from
+>       a fresh copy, as `--stall` already does with its own image, and
+>       compare. Found by the review of `rig/usb-hub-inconclusive`.
 > - [ ] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
