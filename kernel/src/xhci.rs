@@ -2009,6 +2009,23 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     let scratchpad_count = (((hcsparams2 >> 27) & 0x1f) | (((hcsparams2 >> 21) & 0x1f) << 5)) as usize;
     console::println!("Ouroboros kernel: xhci: controller @ {bar_base:#x}, max_slots={max_slots} max_ports={max_ports} scratchpads={scratchpad_count}");
 
+    // The controller as the firmware handed it over, read before anything
+    // is waited on or written, so a capture has it however this goes on:
+    // whether it is still running (R/S, HCH; xHCI 5.4.1 says HCRST is not
+    // to be set while HCHalted is 0, Linux halts first, this driver does
+    // not yet), whether it is ready (CNR), and the USBCMD RsvdP bits the
+    // reset write keeps. QEMU reads 0 in every RsvdP field; the board is
+    // the only place a kept bit can show. Read only: no probe here
+    // performs the operation in question.
+    let (usbcmd, usbsts) = unsafe { (read32(op_base + OP_USBCMD), read32(op_base + OP_USBSTS)) };
+    console::println!(
+        "Ouroboros kernel: xhci: as handed over: USBCMD {usbcmd:#x} (R/S {}, RsvdP {:#x}), USBSTS {usbsts:#x} (HCH {}, CNR {})",
+        usbcmd & USBCMD_RUN != 0,
+        usbcmd & USBCMD_RSVDP,
+        usbsts & USBSTS_HCH != 0,
+        usbsts & USBSTS_CNR != 0
+    );
+
     // Wait for the controller to report ready before touching anything
     // else, then reset it unconditionally - same "don't assume a clean
     // slate" discipline as virtio_blk.rs::Device::init, since UEFI's own
@@ -2017,13 +2034,15 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
-    // The RsvdP bits each write below keeps, said before the write rather
-    // than after it, so a write that hangs on the board still leaves them
-    // in the capture: QEMU reads 0 in all of them, the board is the only
-    // place a kept bit can show.
-    let usbcmd_rsvdp = unsafe { read32(op_base + OP_USBCMD) } & USBCMD_RSVDP;
-    console::println!("Ouroboros kernel: xhci: RsvdP before the reset: USBCMD {usbcmd_rsvdp:#x}");
+    // HCH again with nothing between the read and the reset write, said
+    // after it: a print first would take milliseconds over serial, and a
+    // controller halting as it was handed over could finish meanwhile.
+    let usbsts_at_reset = unsafe { read32(op_base + OP_USBSTS) };
     unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_HCRST) };
+    console::println!(
+        "Ouroboros kernel: xhci: at the reset write: USBSTS {usbsts_at_reset:#x} (HCH {})",
+        usbsts_at_reset & USBSTS_HCH != 0
+    );
     if !unsafe { poll_until(|| read32(op_base + OP_USBCMD) & USBCMD_HCRST == 0 && read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
