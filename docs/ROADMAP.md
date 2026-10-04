@@ -1724,7 +1724,7 @@ The small open tails those arcs deliberately left:
 >       `scratch/usb-hub-runs.log` has a base rate, boot `--usb-boot` from
 >       a fresh copy, as `--stall` already does with its own image, and
 >       compare. Found by the review of `rig/usb-hub-inconclusive`.
-> - [ ] **fix** **Nothing stops a plain `write32` to a register with RsvdP
+> - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
 >       wrong write unspellable: typed register handles whose only writer
@@ -1764,7 +1764,8 @@ The small open tails those arcs deliberately left:
 >       reach above, an index bound only by `debug_assert`, and reads half
 >       through handles; the comments now say so. Not done, judged cleanup:
 >       one generic block type for the three, and the timeout dump's reads
->       through the handles.*
+>       through the handles. Merged as #207. Done; no board round, the same
+>       instructions through the same two stores.*
 > - [ ] **fix** **PORTSC's RW1C bits and PED are masked by convention.**
 >       `reg::portsc` is a `Whole32`, and every write must go through
 >       `portsc_preserve` or it writes back PED (disabling the port) and
