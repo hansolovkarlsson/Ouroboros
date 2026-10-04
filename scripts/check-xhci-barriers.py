@@ -22,7 +22,8 @@ sequence exactly once, and at least one call to each (`bl`, or `b` for a
 tail call): present, and in use. The PE image carries no symbols, so the
 sequences are found by their instructions, which is why they are fixed in
 assembly rather than left to the compiler. Deleting a barrier, putting an
-instruction between it and its store, or routing a register write or the
+instruction between it and its store, or routing a register write (a
+`reg::Whole32::write` that stores without calling `mmio_write32`) or the
 flip around its function fails it.
 
 What it cannot see: ONE new raw `write_volatile` to a register somewhere

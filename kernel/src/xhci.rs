@@ -250,13 +250,13 @@ const IR_ERSTSZ: u64 = 0x08;
 const IR_ERSTBA: u64 = 0x10;
 const IR_ERDP: u64 = 0x18;
 // The RsvdP bits of each register written whole, kept by its
-// `reg::Kept32`/`reg::Kept64` handle (the only way to write it): ERSTSZ 31:16 and ERSTBA 5:0 (as Linux's
-// `xhci_add_interrupter` and U-Boot keep them), CONFIG 31:10 and CRCR 5:4
-// (Linux's `xhci.h`). USBCMD keeps only 6:4 and 31:17: Linux's `xhci.h`
-// calls 4:6 and 15:31 reserved and leaves 12 and 13 unmentioned, and xHCI
-// 1.2 is recalled as defining 13:16 (the spec PDF was not read). Bits 12:16,
-// which these sources do not settle, are written 0 as before, so no bit the
-// firmware left set there is kept on a guess.
+// `reg::Kept32`/`reg::Kept64` handle: ERSTSZ 31:16 and ERSTBA 5:0 (as
+// Linux's `xhci_add_interrupter` and U-Boot keep them), CONFIG 31:10 and
+// CRCR 5:4 (Linux's `xhci.h`). USBCMD keeps only 6:4 and 31:17: Linux's
+// `xhci.h` calls 4:6 and 15:31 reserved and leaves 12 and 13 unmentioned,
+// and xHCI 1.2 is recalled as defining 13:16 (the spec PDF was not read).
+// Bits 12:16, which these sources do not settle, are written 0 as before,
+// so no bit the firmware left set there is kept on a guess.
 const ERSTSZ_RSVDP: u32 = 0xffff_0000;
 const ERSTBA_RSVDP: u64 = 0x3f;
 const CONFIG_RSVDP: u32 = 0xffff_fc00;
@@ -676,12 +676,54 @@ const _: () = {
 /// `read32`/`read64` on the register's address, which cannot clobber
 /// anything.
 ///
+/// The handles are built only from their own register block, an
+/// [`reg::OpRegs`], [`reg::Ir0Regs`] or [`reg::Doorbells`], and those only by
+/// [`reg::locate`] from the capability registers, so a handle cannot be built
+/// at another block's address: until the review of #207 a doorbell built
+/// from the operational base was a whole write to USBCMD.
+///
 /// What this does not cover: TRBs and contexts are memory, written with
-/// `write_volatile` and `publish_cycle_word`, and nothing stops a raw
-/// pointer store to a register address; and a handle built from the wrong
-/// base address (USBCMD from `ir0_base`) is not caught here.
+/// `write_volatile`, and nothing stops a raw pointer store to a register
+/// address; `publish_cycle_word`, the ring's `dmb oshst; str`, takes any
+/// pointer, so it too would store to a register without the `dsb sy` or the
+/// RsvdP merge; and a block's `at` gives a plain address for a read, which
+/// can name another block's offset. PORTSC's RW1C bits and PED are still
+/// masked by convention (`portsc_preserve`).
 mod reg {
     use super::*;
+
+    /// The operational registers, at BAR + CAPLENGTH.
+    #[derive(Clone, Copy)]
+    pub(super) struct OpRegs(u64);
+    /// Interrupter register set 0, at BAR + RTSOFF + 0x20 (the sets start at
+    /// RTSOFF + 0x20, and set 0 is always present).
+    #[derive(Clone, Copy)]
+    pub(super) struct Ir0Regs(u64);
+    /// The doorbell array, at BAR + DBOFF.
+    #[derive(Clone, Copy)]
+    pub(super) struct Doorbells(u64);
+
+    /// The three register blocks, from the capability registers at
+    /// `bar_base`. The only way to make one.
+    pub(super) unsafe fn locate(bar_base: u64) -> (OpRegs, Ir0Regs, Doorbells) {
+        let caplength = (unsafe { read32(bar_base) } & 0xff) as u64;
+        let dboff = unsafe { read32(bar_base + CAP_DBOFF) } as u64 & !0x3;
+        let rtsoff = unsafe { read32(bar_base + CAP_RTSOFF) } as u64 & !0x1f;
+        (OpRegs(bar_base + caplength), Ir0Regs(bar_base + rtsoff + 0x20), Doorbells(bar_base + dboff))
+    }
+
+    impl OpRegs {
+        /// The address of the register at `off`, for a read.
+        pub(super) fn at(self, off: u64) -> u64 {
+            self.0 + off
+        }
+    }
+    impl Ir0Regs {
+        /// The address of the register at `off`, for a read.
+        pub(super) fn at(self, off: u64) -> u64 {
+            self.0 + off
+        }
+    }
 
     /// A 32-bit register with no RsvdP bits, written whole.
     #[derive(Clone, Copy)]
@@ -702,45 +744,47 @@ mod reg {
         rsvdp: u64,
     }
 
-    pub(super) fn usbcmd(op_base: u64) -> Kept32 {
-        Kept32 { addr: op_base + OP_USBCMD, rsvdp: USBCMD_RSVDP }
+    pub(super) fn usbcmd(op: OpRegs) -> Kept32 {
+        Kept32 { addr: op.at(OP_USBCMD), rsvdp: USBCMD_RSVDP }
     }
-    pub(super) fn config(op_base: u64) -> Kept32 {
-        Kept32 { addr: op_base + OP_CONFIG, rsvdp: CONFIG_RSVDP }
+    pub(super) fn config(op: OpRegs) -> Kept32 {
+        Kept32 { addr: op.at(OP_CONFIG), rsvdp: CONFIG_RSVDP }
     }
-    pub(super) fn crcr(op_base: u64) -> Kept64 {
-        Kept64 { addr: op_base + OP_CRCR, rsvdp: CRCR_RSVDP }
+    pub(super) fn crcr(op: OpRegs) -> Kept64 {
+        Kept64 { addr: op.at(OP_CRCR), rsvdp: CRCR_RSVDP }
     }
     /// DCBAAP's low 6 bits are RsvdZ: written 0, which a 64-byte-aligned
     /// array does.
-    pub(super) fn dcbaap(op_base: u64) -> Whole64 {
-        Whole64(op_base + OP_DCBAAP)
+    pub(super) fn dcbaap(op: OpRegs) -> Whole64 {
+        Whole64(op.at(OP_DCBAAP))
     }
     /// A root port's PORTSC, `port` 1-based, written whole: its RW1C bits
     /// and PED are the caller's to mask, through `portsc_preserve`, which
     /// writes every other bit back as read.
-    pub(super) fn portsc(op_base: u64, port: u32) -> Whole32 {
-        Whole32(op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10)
+    pub(super) fn portsc(op: OpRegs, port: u32) -> Whole32 {
+        debug_assert!(port >= 1, "PORTSC: ports are 1-based");
+        Whole32(op.at(OP_PORTSC_BASE + ((port - 1) as u64) * 0x10))
     }
-    pub(super) fn erstsz(ir0_base: u64) -> Kept32 {
-        Kept32 { addr: ir0_base + IR_ERSTSZ, rsvdp: ERSTSZ_RSVDP }
+    pub(super) fn erstsz(ir: Ir0Regs) -> Kept32 {
+        Kept32 { addr: ir.at(IR_ERSTSZ), rsvdp: ERSTSZ_RSVDP }
     }
-    pub(super) fn erstba(ir0_base: u64) -> Kept64 {
-        Kept64 { addr: ir0_base + IR_ERSTBA, rsvdp: ERSTBA_RSVDP }
+    pub(super) fn erstba(ir: Ir0Regs) -> Kept64 {
+        Kept64 { addr: ir.at(IR_ERSTBA), rsvdp: ERSTBA_RSVDP }
     }
     /// ERDP has no RsvdP bits; its EHB is RW1C, written 0.
-    pub(super) fn erdp(ir0_base: u64) -> Whole64 {
-        Whole64(ir0_base + IR_ERDP)
+    pub(super) fn erdp(ir: Ir0Regs) -> Whole64 {
+        Whole64(ir.at(IR_ERDP))
     }
-    /// Doorbell `n` (0 the command ring, else a slot ID). Bits 15:8 are
-    /// RsvdZ.
-    pub(super) fn doorbell(db_base: u64, n: u32) -> Whole32 {
-        Whole32(db_base + (n as u64) * 4)
+    /// Doorbell `n` (0 the command ring, else a slot ID, at most 255).
+    /// Bits 15:8 are RsvdZ.
+    pub(super) fn doorbell(db: Doorbells, n: u32) -> Whole32 {
+        debug_assert!(n <= 255, "doorbell: past the 256-entry array");
+        Whole32(db.0 + (n as u64) * 4)
     }
 
     impl Whole32 {
-        pub(super) fn addr(self) -> u64 {
-            self.0
+        pub(super) unsafe fn read(self) -> u32 {
+            unsafe { read32(self.0) }
         }
         /// A register write, with the barrier every one of them needs in front
         /// of it: `dsb sy`, so each load and store the CPU made before it is
@@ -777,6 +821,10 @@ mod reg {
     }
 
     impl Kept32 {
+        /// The RsvdP bits as they read now, what a write would keep.
+        pub(super) unsafe fn kept_bits(self) -> u32 {
+            unsafe { read32(self.addr) & self.rsvdp }
+        }
         /// The write that keeps the register's RsvdP bits: reads it, keeps
         /// them, puts `val` in the other bits and writes it with the barrier
         /// ([`Whole32::write`]'s). A `val` with a bit in the RsvdP field is
@@ -792,6 +840,10 @@ mod reg {
     }
 
     impl Kept64 {
+        /// [`Kept32::kept_bits`] for a 64-bit register.
+        pub(super) unsafe fn kept_bits(self) -> u64 {
+            unsafe { read64(self.addr) & self.rsvdp }
+        }
         /// [`Kept32::write`] for a 64-bit register: two halves, low first,
         /// as [`Whole64::write`].
         pub(super) unsafe fn write(self, val: u64) {
@@ -901,13 +953,13 @@ fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
 /// exists - this driver still drives exactly one keyboard, it just no
 /// longer *abandons* every other device to do it.
 struct Xhci {
-    db_base: u64,
-    ir0_base: u64,
+    db_base: reg::Doorbells,
+    ir0_base: reg::Ir0Regs,
     /// Kept for runtime port rescans (`rescan_ports`) - the boot scan's
     /// locals weren't enough once "scan again later" became a real
     /// operation (Parallels attaches passthrough USB seconds after the
     /// boot scan runs).
-    op_base: u64,
+    op_base: reg::OpRegs,
     max_ports: u32,
     /// 8 or 16, from HCCPARAMS1.CSZ - see `CTX_DWORDS_MAX`'s doc comment.
     ctx_dwords: usize,
@@ -1393,13 +1445,13 @@ impl Xhci {
         let (op, ir) = (self.op_base, self.ir0_base);
         let (usbsts, crcr, dcbaap, iman, erstsz, erstba, erdp) = unsafe {
             (
-                read32(op + OP_USBSTS),
-                read32(op + OP_CRCR),
-                read64(op + OP_DCBAAP),
-                read32(ir + IR_IMAN),
-                read32(ir + IR_ERSTSZ),
-                read64(ir + IR_ERSTBA),
-                read64(ir + IR_ERDP),
+                read32(op.at(OP_USBSTS)),
+                read32(op.at(OP_CRCR)),
+                read64(op.at(OP_DCBAAP)),
+                read32(ir.at(IR_IMAN)),
+                read32(ir.at(IR_ERSTSZ)),
+                read64(ir.at(IR_ERSTBA)),
+                read64(ir.at(IR_ERDP)),
             )
         };
         console::println!(
@@ -2081,15 +2133,10 @@ impl Scan {
 }
 
 unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
-    let caplength = (unsafe { read32(bar_base) } & 0xff) as u64;
-    let op_base = bar_base + caplength;
+    let (op_base, ir0_base, db_base) = unsafe { reg::locate(bar_base) };
     let hcsparams1 = unsafe { read32(bar_base + CAP_HCSPARAMS1) };
     let hcsparams2 = unsafe { read32(bar_base + CAP_HCSPARAMS2) };
     let hccparams1 = unsafe { read32(bar_base + CAP_HCCPARAMS1) };
-    let dboff = unsafe { read32(bar_base + CAP_DBOFF) } as u64 & !0x3;
-    let rtsoff = unsafe { read32(bar_base + CAP_RTSOFF) } as u64 & !0x1f;
-    let db_base = bar_base + dboff;
-    let ir0_base = bar_base + rtsoff + 0x20;
 
     // 32-byte contexts normally, 64-byte if the controller requires it
     // (HCCPARAMS1.CSZ) - a real, common configuration (QEMU's `qemu-xhci`
@@ -2111,7 +2158,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // reset write keeps. QEMU reads 0 in every RsvdP field; the board is
     // the only place a kept bit can show. Read only: no probe here
     // performs the operation in question.
-    let (usbcmd, usbsts) = unsafe { (read32(op_base + OP_USBCMD), read32(op_base + OP_USBSTS)) };
+    let (usbcmd, usbsts) = unsafe { (read32(op_base.at(OP_USBCMD)), read32(op_base.at(OP_USBSTS))) };
     console::println!(
         "Ouroboros kernel: xhci: as handed over: USBCMD {usbcmd:#x} (R/S {}, RsvdP {:#x}), USBSTS {usbsts:#x} (HCH {}, CNR {})",
         usbcmd & USBCMD_RUN != 0,
@@ -2125,7 +2172,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // slate" discipline as virtio_blk.rs::Device::init, since UEFI's own
     // xHCI driver (however it found and booted from this same hardware)
     // may have already initialized it.
-    if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
+    if !unsafe { poll_until(|| read32(op_base.at(OP_USBSTS)) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
     // xHCI 5.4.1: HCRST is not to be set while HCHalted is 0, so a
@@ -2135,11 +2182,11 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // wait, since no operational register is written before CNR clears.
     // Only when HCH is 0: the Pi's firmware hands the controller over
     // halted (2026-10-04), and there nothing is written here.
-    let found_running = unsafe { read32(op_base + OP_USBSTS) } & USBSTS_HCH == 0;
+    let found_running = unsafe { read32(op_base.at(OP_USBSTS)) } & USBSTS_HCH == 0;
     if found_running {
         unsafe { reg::usbcmd(op_base).write(0) };
-        if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH != 0) } {
-            return Err(Error::HaltTimeout(unsafe { read32(op_base + OP_USBSTS) }));
+        if !unsafe { poll_until(|| read32(op_base.at(OP_USBSTS)) & USBSTS_HCH != 0) } {
+            return Err(Error::HaltTimeout(unsafe { read32(op_base.at(OP_USBSTS)) }));
         }
     }
     // HCH again with nothing between the read and the reset write, said
@@ -2149,22 +2196,22 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // what was read, not that the halt ran, so `found running true` with
     // `HCH true` is a halt done here, and with `HCH false` one that did
     // not happen (shown so by a mutation that skipped it, 2026-10-04).
-    let usbsts_at_reset = unsafe { read32(op_base + OP_USBSTS) };
+    let usbsts_at_reset = unsafe { read32(op_base.at(OP_USBSTS)) };
     unsafe { reg::usbcmd(op_base).write(USBCMD_HCRST) };
     console::println!(
         "Ouroboros kernel: xhci: at the reset write: USBSTS {usbsts_at_reset:#x} (HCH {}, found running {found_running})",
         usbsts_at_reset & USBSTS_HCH != 0
     );
-    if !unsafe { poll_until(|| read32(op_base + OP_USBCMD) & USBCMD_HCRST == 0 && read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
+    if !unsafe { poll_until(|| read32(op_base.at(OP_USBCMD)) & USBCMD_HCRST == 0 && read32(op_base.at(OP_USBSTS)) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
     let (usbcmd_rsvdp, config_rsvdp, crcr_rsvdp, erstsz_rsvdp, erstba_rsvdp) = unsafe {
         (
-            read32(op_base + OP_USBCMD) & USBCMD_RSVDP,
-            read32(op_base + OP_CONFIG) & CONFIG_RSVDP,
-            read64(op_base + OP_CRCR) & CRCR_RSVDP,
-            read32(ir0_base + IR_ERSTSZ) & ERSTSZ_RSVDP,
-            read64(ir0_base + IR_ERSTBA) & ERSTBA_RSVDP,
+            reg::usbcmd(op_base).kept_bits(),
+            reg::config(op_base).kept_bits(),
+            reg::crcr(op_base).kept_bits(),
+            reg::erstsz(ir0_base).kept_bits(),
+            reg::erstba(ir0_base).kept_bits(),
         )
     };
     console::println!(
@@ -2180,7 +2227,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // A scratchpad buffer is one controller page, PAGESIZE-sized and
     // -aligned; bit 0 is 4 KB, the size of `Page`. A controller that
     // cannot do 4 KB would write past each one into its neighbour.
-    let pagesize = unsafe { read32(op_base + OP_PAGESIZE) };
+    let pagesize = unsafe { read32(op_base.at(OP_PAGESIZE)) };
     if scratchpad_count > 0 && pagesize & 1 == 0 {
         return Err(Error::PageSizeNot4K(pagesize));
     }
@@ -2232,12 +2279,12 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
 
     // And reads the scratchpad array at Run.
     unsafe { reg::usbcmd(op_base).write(USBCMD_RUN) };
-    if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH == 0) } {
+    if !unsafe { poll_until(|| read32(op_base.at(OP_USBSTS)) & USBSTS_HCH == 0) } {
         return Err(Error::StartTimeout);
     }
     // A failed DMA fetch at Run (the ERST, the scratchpad array) sets HSE
     // and halts the controller; said here, not a command timeout later.
-    let usbsts = unsafe { read32(op_base + OP_USBSTS) };
+    let usbsts = unsafe { read32(op_base.at(OP_USBSTS)) };
     if usbsts & USBSTS_HSE != 0 {
         console::println!("Ouroboros kernel: xhci: WARNING: Host System Error after Run (USBSTS {usbsts:#x})");
     }
@@ -2285,7 +2332,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let mut mask = 0u64;
         for port in 1..=max_ports {
             let portsc = reg::portsc(op_base, port);
-            if unsafe { read32(portsc.addr()) } & PORTSC_CCS != 0 {
+            if unsafe { portsc.read() } & PORTSC_CCS != 0 {
                 mask |= 1u64 << (port % 64);
             }
         }
@@ -2323,7 +2370,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     let mut scan = Scan::default();
     for port in 1..=max_ports {
         let portsc = reg::portsc(op_base, port);
-        if unsafe { read32(portsc.addr()) } & PORTSC_CCS == 0 {
+        if unsafe { portsc.read() } & PORTSC_CCS == 0 {
             continue;
         }
         let loc = Location::root(port);
@@ -2835,14 +2882,14 @@ fn portsc_needs_warm_reset(v: u32) -> bool {
 /// `portsc` is the port's PORTSC register.
 unsafe fn reset_root_port(port: u32, portsc: reg::Whole32, warm: bool) -> Result<u32, Error> {
     let (set, done, kind) = if warm { (PORTSC_WPR, PORTSC_WRC | PORTSC_PRC, "warm") } else { (PORTSC_PR, PORTSC_PRC, "hot") };
-    let current = unsafe { read32(portsc.addr()) };
+    let current = unsafe { portsc.read() };
     unsafe { portsc.write(portsc_preserve(current) | set) };
-    if !unsafe { poll_until(|| read32(portsc.addr()) & done == done) } {
-        let now = unsafe { read32(portsc.addr()) };
+    if !unsafe { poll_until(|| portsc.read() & done == done) } {
+        let now = unsafe { portsc.read() };
         console::println!("Ouroboros kernel: xhci: port {port}: {kind} reset timed out: {}", Portsc(now));
         return Err(Error::PortResetTimeout);
     }
-    let after = unsafe { read32(portsc.addr()) };
+    let after = unsafe { portsc.read() };
     unsafe { portsc.write(portsc_preserve(after) | (after & (PORTSC_PRC | PORTSC_WRC | PORTSC_PLC))) };
     Ok(after)
 }
@@ -2858,7 +2905,7 @@ unsafe fn reset_root_port(port: u32, portsc: reg::Whole32, warm: bool) -> Result
 unsafe fn watch_port_enable(port: u32, portsc: reg::Whole32, when: &str) -> u32 {
     const MAX_LOGGED: u32 = 16;
     let deadline = poll_deadline();
-    let mut last = unsafe { read32(portsc.addr()) };
+    let mut last = unsafe { portsc.read() };
     let mut changes = 0u32;
     loop {
         if portsc_enabled(last) {
@@ -2873,7 +2920,7 @@ unsafe fn watch_port_enable(port: u32, portsc: reg::Whole32, when: &str) -> u32 
             console::println!("Ouroboros kernel: xhci: port {port}: not enabled {POLL_TIMEOUT_MS} ms {when} ({changes} changes): {}", Portsc(last));
             return last;
         }
-        let now = unsafe { read32(portsc.addr()) };
+        let now = unsafe { portsc.read() };
         if now != last {
             changes += 1;
             if changes <= MAX_LOGGED {
@@ -2909,7 +2956,7 @@ unsafe fn setup_device_on_port(
     // capture says which one, if any, brought it up: a wait for link
     // training to finish, then, from a state that requires one, a Warm
     // Reset.
-    let before = unsafe { read32(portsc.addr()) };
+    let before = unsafe { portsc.read() };
     let warm_first = portsc_needs_warm_reset(before);
     if warm_first {
         console::println!("Ouroboros kernel: xhci: port {port}: link state {} before the reset, warm reset: {}", portsc_pls(before), Portsc(before));
@@ -3481,7 +3528,7 @@ pub(crate) fn rescan_ports() {
     let dcbaa = unsafe { &mut *DCBAA.0.get() };
     for port in 1..=x.max_ports {
         let portsc = reg::portsc(x.op_base, port);
-        if unsafe { read32(portsc.addr()) } & PORTSC_CCS == 0 {
+        if unsafe { portsc.read() } & PORTSC_CCS == 0 {
             continue;
         }
         if x.slots.iter().flatten().any(|s| s.loc.root_port == port) {
