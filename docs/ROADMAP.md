@@ -1578,7 +1578,19 @@ The small open tails those arcs deliberately left:
 >       Fix with one helper that reads, keeps a mask and masks the new value
 >       to its field (`portsc_preserve` is the existing shape), then move
 >       ERSTSZ/ERSTBA onto it. Spec form, nothing seen; a board round of
->       its own. Found by the review of `pi4/erst-rsvdp`.
+>       its own. Found by the review of `pi4/erst-rsvdp`. *Built 2026-10-04
+>       on `pi4/rsvdp-preserve`: `write32_rsvdp`/`write64_rsvdp` (read, keep
+>       the mask, the new value masked to the rest, write, return the bits
+>       kept) for USBCMD (both writes), CONFIG, CRCR, ERSTSZ and ERSTBA.
+>       Masks: CONFIG 31:10 and CRCR 5:4 from Linux's `xhci.h`; USBCMD only
+>       6:4 and 31:17, where Linux's comments (4:6, 15:31) and xHCI 1.2
+>       (13:16 defined) agree, so 12:16 stay written 0 and no enable the
+>       firmware left set is kept (the spec PDF was not read). The boot's
+>       one line now names all six writes; on QEMU all are 0, so no rig can
+>       fail on this change (a helper that dropped the kept bits passes them
+>       all), and the board's line is the only evidence. QEMU:
+>       `test-usb-hub` 19 ok in two runs, `test-el1-drop` and `make test`
+>       green. Not yet reviewed or on the board.*
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
