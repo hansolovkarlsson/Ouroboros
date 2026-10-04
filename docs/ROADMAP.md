@@ -1542,6 +1542,16 @@ The small open tails those arcs deliberately left:
 >       order. The spec PDF itself was not read; its order is taken from
 >       edk2's comments. QEMU: `test-usb-hub` (19 ok) and `test-el1-drop`
 >       green.*
+> - [ ] **fix** **ERSTSZ and ERSTBA are written bare, zeroing their RsvdP
+>       bits.** `init_inner` writes ERSTSZ as `1` and ERSTBA as the address,
+>       where the spec's RsvdP fields (ERSTSZ 31:16, ERSTBA 5:0) are to be
+>       preserved: Linux (`xhci_add_interrupter`) and U-Boot read, modify
+>       and write both. edk2 writes them bare too, on this very controller,
+>       so the Pi shows no harm; spec-correctness, not a fix for anything
+>       seen. Read-modify-write both (ERDP's DESI/EHB bits are another
+>       question: EHB is RW1C and is written 0 deliberately). Its own
+>       change, kept out of the ERDP-order round so that round has one
+>       variable. Found by the review of `pi4/erdp-before-erstba`.
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,

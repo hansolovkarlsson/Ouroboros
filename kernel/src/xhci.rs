@@ -2009,9 +2009,10 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let erst = unsafe { &mut *ERST.0.get() };
         erst[0] = ErstEntry { base: EVENT_RING.0.get() as u64, size: EVENT_RING_SIZE as u32, _reserved: 0 };
     }
-    // ERSTSZ, ERDP, then ERSTBA, the order of the spec's initialization
-    // sequence and of edk2's `XhcInitSched` (the firmware that drives the
-    // Pi 4's VL805 before us; U-Boot also sets ERDP first). The controller
+    // ERSTSZ, ERDP, then ERSTBA: edk2's `XhcInitSched` order (the firmware
+    // that drives the Pi 4's VL805 before us), whose comments give it as
+    // the spec's initialization sequence (not checked against the spec
+    // itself); U-Boot also sets ERDP first. The controller
     // fetches the ERST when ERSTBA is written, so the dequeue pointer is in
     // place before anything can start on the segment. Until 2026-10-03
     // ERDP came last, as in Linux's `xhci_add_interrupter`, which works on
