@@ -1675,8 +1675,8 @@ The small open tails those arcs deliberately left:
 >       verdict unchanged; a bare `Login incorrect` is now a wrong password.
 >       Each line shown by a mutation on QEMU (the path misspelled, the name
 >       swapped, the line cut), unmutated a wrong password still bare.
->       `make test`, `check-relocs`, `test-held-keys` green. Next: a board
->       boot, `root` at once after the prompt.*
+>       `make test`, `check-relocs`, `test-held-keys` green. Merged as #206.
+>       Next: a board boot, `root` at once after the prompt.*
 > - [x] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd
