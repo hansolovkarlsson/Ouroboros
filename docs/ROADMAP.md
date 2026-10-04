@@ -1571,7 +1571,7 @@ The small open tails those arcs deliberately left:
 >       0x0, ERSTBA 0x0`, so on the VL805 it writes what the old code
 >       wrote, and a full session over serial, no fault or timeout
 >       (`testing-pi4.md` section 6).*
-> - [ ] **fix** **CRCR, CONFIG and USBCMD are written whole, zeroing their
+> - [x] **fix** **CRCR, CONFIG and USBCMD are written whole, zeroing their
 >       RsvdP bits** (CRCR 5:4, CONFIG 31:10, USBCMD's reserved ranges), the
 >       same defect as ERSTSZ/ERSTBA in the same function. Linux keeps them
 >       (`CMD_RING_RSVD_BITS`; CONFIG read and `HCS_SLOTS_MASK` replaced).
@@ -1596,8 +1596,12 @@ The small open tails those arcs deliberately left:
 >       leaves them; a `debug_assert` against a value with RsvdP bits and a
 >       const assert that the command ring is 64-byte aligned; the ERST
 >       writes as three plain statements. QEMU: `test-usb-hub` 19 ok in four
->       runs, `test-el1-drop` and `make test` green. Not yet merged or on
->       the board.*
+>       runs, `test-el1-drop` and `make test` green. Merged as #202. Done;
+>       on the board 2026-10-04 (`build 9ff7e4a9831b debug`): USBCMD 0x0
+>       before the reset, and USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA all
+>       0x0 after it, so on the VL805 it writes what the old code wrote;
+>       booted to the shell, no fault or timeout (`testing-pi4.md` section
+>       6).*
 > - [ ] **fix** **HCRST is set without halting the controller first.**
 >       `init_inner` waits for CNR and sets HCRST; xHCI 5.4.1 says HCRST
 >       shall not be set while HCHalted is 0, and Linux's `xhci_reset`

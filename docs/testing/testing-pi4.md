@@ -1355,6 +1355,28 @@ form on this controller, and now observed to be. Then `exFAT mounted`,
 restaged), `shutdown`, powered off. No fault, no command timeout, no `Host
 System Error`, no `WARNING`; no keyboard, by choice.
 
+**2026-10-04, later still: #202 on the board, every RsvdP write logged.**
+Stick then card staged from `main` at `9ff7e4a` (#202's merge), the card's
+kernel compared byte for byte with `build/esp`'s. One boot over serial:
+
+```
+UEFI stage alive, build 9ff7e4a9831b debug, on its own stack (sp 0...
+boot services exited, console live, build 9ff7e4a9831b debug
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: RsvdP before the reset: USBCMD 0x0
+xhci: RsvdP after the reset, kept by each write: USBCMD 0x0, CONFIG 0x0, CRCR 0x0, ERSTSZ 0x0, ERSTBA 0x0
+xhci: port 3 reset, speed=4
+usb-msd block device installed
+```
+
+**Every RsvdP bit the driver now keeps reads 0 on the VL805, USBCMD's even
+before the reset, where the firmware's state is**, so #202 writes what the
+code before it wrote. Then `exFAT mounted` and `login: root` (the account
+files read off the stick), and the shell answering three empty lines; no
+commands beyond that this time, and no `shutdown` in the capture. No fault,
+no command timeout, no `Host System Error`, no `WARNING`.
+
 ---
 
 ## 7. Risks, ranked
