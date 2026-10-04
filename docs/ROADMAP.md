@@ -1633,6 +1633,20 @@ The small open tails those arcs deliberately left:
 >       other firmware and for any later path that re-initializes the
 >       controller (a supervisor restart), not urgent, and its board round
 >       can show only that it changed nothing.*
+>       *Step 2 built 2026-10-04 on `pi4/halt-before-hcrst`: after the CNR
+>       wait, a controller with HCH 0 has R/S cleared through
+>       `write32_rsvdp` and HCH waited for (`Error::HaltTimeout` with
+>       USBSTS if it never comes); a halted one is not written, so the Pi
+>       sees no change. The reset line gains `found running …`, what was
+>       read, not a claim the halt ran: the first wording, `halted here
+>       first`, said `true` under a mutation that skipped the halt, and was
+>       renamed for it. Mutated on QEMU: the controller started before the
+>       handover read gave `found running true`, `HCH true` at the reset
+>       write and a working keyboard; the same with the halt skipped gave
+>       `HCH false`, so the line catches a missing halt. Unmutated:
+>       `found running false`, `HCH true`. `make test`, `test-el1-drop`
+>       and `test-usb-hub` (19 ok) green. The board round should print
+>       `found running false` and change nothing else.*
 > - [x] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd
