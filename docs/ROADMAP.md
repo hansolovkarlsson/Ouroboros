@@ -1646,7 +1646,7 @@ The small open tails those arcs deliberately left:
 >       `HCH false`, so the line catches a missing halt. Unmutated:
 >       `found running false`, `HCH true`. `make test`, `test-el1-drop`
 >       and `test-usb-hub` (19 ok) green. The board round should print
->       `found running false` and change nothing else.*
+>       `found running false` and change nothing else. Merged as #205.*
 > - [x] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd
