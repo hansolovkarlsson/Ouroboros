@@ -349,6 +349,7 @@ fn poll_deadline() -> u64 {
 #[derive(Debug)]
 pub enum Error {
     ResetTimeout,
+    HaltTimeout(u32),
     StartTimeout,
     NoPortConnected,
     NoKeyboardFound,
@@ -377,6 +378,7 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Error::ResetTimeout => write!(f, "controller reset timed out"),
+            Error::HaltTimeout(usbsts) => write!(f, "controller handed over running did not halt before the reset (USBSTS {usbsts:#x})"),
             Error::StartTimeout => write!(f, "controller failed to start (USBSTS.HCH stuck set)"),
             Error::NoPortConnected => write!(f, "no device connected on any root port"),
             Error::NoKeyboardFound => write!(f, "devices found, but no boot-protocol keyboard among them"),
@@ -2012,8 +2014,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // The controller as the firmware handed it over, read before anything
     // is waited on or written, so a capture has it however this goes on:
     // whether it is still running (R/S, HCH; xHCI 5.4.1 says HCRST is not
-    // to be set while HCHalted is 0, Linux halts first, this driver does
-    // not yet), whether it is ready (CNR), and the USBCMD RsvdP bits the
+    // to be set while HCHalted is 0, so a running one is halted below
+    // first), whether it is ready (CNR), and the USBCMD RsvdP bits the
     // reset write keeps. QEMU reads 0 in every RsvdP field; the board is
     // the only place a kept bit can show. Read only: no probe here
     // performs the operation in question.
@@ -2027,20 +2029,38 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     );
 
     // Wait for the controller to report ready before touching anything
-    // else, then reset it unconditionally - same "don't assume a clean
+    // else, then halt it if it is running and reset it unconditionally - same "don't assume a clean
     // slate" discipline as virtio_blk.rs::Device::init, since UEFI's own
     // xHCI driver (however it found and booted from this same hardware)
     // may have already initialized it.
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
+    // xHCI 5.4.1: HCRST is not to be set while HCHalted is 0, so a
+    // controller handed over running is stopped first, as Linux's
+    // `xhci_halt` does: R/S cleared (USBCMD's interrupt enables with it,
+    // which the reset clears anyway), then HCH waited for. After the CNR
+    // wait, since no operational register is written before CNR clears.
+    // Only when HCH is 0: the Pi's firmware hands the controller over
+    // halted (2026-10-04), and there nothing is written here.
+    let found_running = unsafe { read32(op_base + OP_USBSTS) } & USBSTS_HCH == 0;
+    if found_running {
+        unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, 0) };
+        if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH != 0) } {
+            return Err(Error::HaltTimeout(unsafe { read32(op_base + OP_USBSTS) }));
+        }
+    }
     // HCH again with nothing between the read and the reset write, said
     // after it: a print first would take milliseconds over serial, and a
     // controller halting as it was handed over could finish meanwhile.
+    // Beside it, whether the controller was found running: the line says
+    // what was read, not that the halt ran, so `found running true` with
+    // `HCH true` is a halt done here, and with `HCH false` one that did
+    // not happen (shown so by a mutation that skipped it, 2026-10-04).
     let usbsts_at_reset = unsafe { read32(op_base + OP_USBSTS) };
     unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_HCRST) };
     console::println!(
-        "Ouroboros kernel: xhci: at the reset write: USBSTS {usbsts_at_reset:#x} (HCH {})",
+        "Ouroboros kernel: xhci: at the reset write: USBSTS {usbsts_at_reset:#x} (HCH {}, found running {found_running})",
         usbsts_at_reset & USBSTS_HCH != 0
     );
     if !unsafe { poll_until(|| read32(op_base + OP_USBCMD) & USBCMD_HCRST == 0 && read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
