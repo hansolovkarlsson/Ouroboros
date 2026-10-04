@@ -1611,21 +1611,30 @@ The small open tails those arcs deliberately left:
 >       a question for the capture: log USBSTS.HCH before the reset first,
 >       then change it. A board round of its own. Found by the review of
 >       `pi4/rsvdp-preserve`. *Step 1, the log, built 2026-10-04 on
->       `pi4/hcrst-halt-log`: one read-only line before HCRST, `xhci:
->       before the reset: USBCMD … (R/S …), USBSTS … (HCH …)`. QEMU says
->       `USBCMD 0x0 (R/S 0), USBSTS 0x9 (HCH 1)`, halted (EINT pending from
->       the firmware). The Pi's line decides step 2: HCH 1 there makes the
->       halt a no-op on the board, HCH 0 makes it a real change. QEMU:
->       `test-usb-hub` 19 ok in two runs after one run lost to the flake
+>       `pi4/hcrst-halt-log`, read only: `xhci: as handed over: USBCMD …
+>       (R/S …, RsvdP …), USBSTS … (HCH …, CNR …)` before the CNR wait,
+>       and `xhci: at the reset write: USBSTS … (HCH …)`, read with nothing
+>       between it and the write (the review: a serial print in between
+>       could outlast a halt in progress, and a CNR timeout would have lost
+>       a line taken after it). QEMU: `R/S false`, `HCH true` on both,
+>       USBSTS 0x9 (EINT pending from the firmware). Mutated before it was
+>       trusted: the controller started just before the read gave `R/S
+>       true`, `HCH false` on both lines, and QEMU accepted that HCRST of a
+>       running controller, so only the board can say what the VL805 does.
+>       The Pi's lines decide step 2: HCH true at the write makes the halt
+>       a no-op on the board, false makes it a real change. QEMU:
+>       `test-usb-hub` 19 ok in four runs after one lost to the flake
 >       below, `test-el1-drop` and `make test` green.*
 > - [ ] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd
 >       (Result = 1)` the last line, the transcript 667 bytes, no `UEFI stage
 >       alive`), and the rig reported five FAILs for a kernel that never
->       ran. Two fixes: the rig should say "the firmware never loaded the
->       kernel" rather than fail each check, and should retry that one case
->       once. Whether the unexplained 18-of-19 run earlier the same day was
+>       ran. The rig should report that case as INCONCLUSIVE ("the
+>       firmware never loaded the kernel", no `UEFI stage alive`) rather
+>       than fail each check, and count such runs; not retry until green,
+>       which would hide a change that makes the stall likelier (the review
+>       of `pi4/hcrst-halt-log`). Whether the unexplained 18-of-19 run earlier the same day was
 >       this is unknown (one FAIL, not five, so probably not).
 > - [ ] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
