@@ -1633,7 +1633,7 @@ The small open tails those arcs deliberately left:
 >       other firmware and for any later path that re-initializes the
 >       controller (a supervisor restart), not urgent, and its board round
 >       can show only that it changed nothing.*
-> - [ ] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
+> - [x] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd
 >       (Result = 1)` the last line, the transcript 667 bytes, no `UEFI stage
@@ -1643,7 +1643,18 @@ The small open tails those arcs deliberately left:
 >       than fail each check, and count such runs; not retry until green,
 >       which would hide a change that makes the stall likelier (the review
 >       of `pi4/hcrst-halt-log`). Whether the unexplained 18-of-19 run earlier the same day was
->       this is unknown (one FAIL, not five, so probably not).
+>       this is unknown (one FAIL, not five, so probably not). *Built
+>       2026-10-04 on `rig/usb-hub-inconclusive`: `firmware_stalled` calls
+>       it only when the kernel printed nothing, the fault trace was read
+>       and is clean, and the transcript ends in `UsbBootExecCmd`;
+>       anything else, a kernel hanging before its first line included,
+>       is still FAIL. INCONCLUSIVE exits 100, appends to
+>       `build/usb-hub-inconclusive.log` and prints the count; the make
+>       target still fails and says to run it again. `--self-test` checks
+>       the classifier on eight fixed transcripts and `make test` runs it.
+>       Mutated: dropping either condition fails the self-test, and a
+>       forced verdict drove the whole path through `make test-usb-hub`.
+>       Not yet reviewed or merged.*
 > - [ ] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
