@@ -1663,7 +1663,20 @@ The small open tails those arcs deliberately left:
 >       be read and with which error (no word about the account or the
 >       password), and try `root` first on the next boots. Only then
 >       decide whether a retry is right; retrying an error nobody has seen
->       would hide it. Found on the board, unconfirmed.
+>       would hide it. Found on the board, unconfirmed. Narrowed the same night:
+>       `root` again after a logout logged in; after a reboot, refused 5 s
+>       after the prompt and accepted 5 s later, nothing printed between.
+>       A window early in the boot, not a state a login changes. *The
+>       observation built 2026-10-04 on `login/say-why`: `find_account_line`
+>       returns the read error instead of `None`, and `verify_password`
+>       says which way the lookup failed (`login: /etc/shadow could not be
+>       read (u64::MAX-N): <reason>`, `no /etc/shadow entry for this
+>       account`, `this account's /etc/shadow entry does not parse`), the
+>       verdict unchanged; a bare `Login incorrect` is now a wrong password.
+>       Each line shown by a mutation on QEMU (the path misspelled, the name
+>       swapped, the line cut), unmutated a wrong password still bare.
+>       `make test`, `check-relocs`, `test-held-keys` green. Next: a board
+>       boot, `root` at once after the prompt.*
 > - [x] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd

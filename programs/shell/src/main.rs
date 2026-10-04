@@ -2234,11 +2234,15 @@ pub(crate) fn read_account_file(path: &str, buf: &mut [u8]) -> usize {
 /// makes the size of the credential database irrelevant to whether anyone can
 /// log in.
 ///
-/// Returns `None` when the file cannot be read or holds no such entry; the
-/// caller must treat that as "cannot verify" and refuse, never as "no password".
+/// Returns `Ok(None)` when the file holds no such entry and `Err(code)` when it
+/// could not be read (the `fsd` error, after the boot race's `NO_FS` retries);
+/// the caller must treat both as "cannot verify" and refuse, never as "no
+/// password". They are told apart so the caller can say which: on the Pi
+/// 2026-10-04 root was refused for the first seconds after the prompt with
+/// nothing to say whether the password or the read had failed.
 /// A line too long for `out` is skipped rather than truncated, so a mangled
 /// entry can never half-match a shorter name.
-pub(crate) fn find_account_line(path: &str, name: &[u8], out: &mut [u8]) -> Option<usize> {
+pub(crate) fn find_account_line(path: &str, name: &[u8], out: &mut [u8]) -> Result<Option<usize>, u64> {
     const CHUNK: usize = syscall_abi::FS_DATA_MAX as usize;
     let mut chunk = [0u8; CHUNK];
     let mut len = 0usize;
@@ -2256,14 +2260,14 @@ pub(crate) fn find_account_line(path: &str, name: &[u8], out: &mut [u8]) -> Opti
                 tries += 1;
                 continue;
             }
-            return None;
+            return Err(r);
         }
         let n = (r as usize).min(CHUNK);
         off += n as u64;
         for &b in &chunk[..n] {
             if b == b'\n' {
                 if !overlong && line_names(&out[..len], name) {
-                    return Some(len);
+                    return Ok(Some(len));
                 }
                 len = 0;
                 overlong = false;
@@ -2282,9 +2286,9 @@ pub(crate) fn find_account_line(path: &str, name: &[u8], out: &mut [u8]) -> Opti
     }
     // A final line with no trailing newline.
     if !overlong && len > 0 && line_names(&out[..len], name) {
-        return Some(len);
+        return Ok(Some(len));
     }
-    None
+    Ok(None)
 }
 
 /// Whether `line`'s first colon-field is exactly `name`.
