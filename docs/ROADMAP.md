@@ -1633,7 +1633,7 @@ The small open tails those arcs deliberately left:
 >       other firmware and for any later path that re-initializes the
 >       controller (a supervisor restart), not urgent, and its board round
 >       can show only that it changed nothing.*
-> - [ ] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
+> - [x] **fix** **`test-usb-hub`'s usb-boot layout sometimes never reaches
 >       the kernel.** 2026-10-04, one run in three: QEMU's firmware stopped
 >       in its own USB boot (`UsbBootExecCmd: Success to Exec 0x0 Cmd
 >       (Result = 1)` the last line, the transcript 667 bytes, no `UEFI stage
@@ -1661,7 +1661,7 @@ The small open tails those arcs deliberately left:
 >       must stay graded. `--self-test` (nine cases) runs in `make test`.
 >       Mutated: dropping either condition, or anchoring the match, fails
 >       the self-test; a forced verdict and a forced verdict beside a real
->       FAIL drove both endings of the make target. Not yet merged.*
+>       FAIL drove both endings of the make target. Merged as #204. Done.*
 > - [ ] **new** **Is the usb-boot stall the rig's own doing?** The
 >       `--usb-boot` stick is `build/esp.img`, which the hub boot just
 >       before it mounted read-write as its virtio disk and then killed
