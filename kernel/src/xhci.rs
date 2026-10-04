@@ -2023,6 +2023,17 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // place a kept bit can show.
     let usbcmd_rsvdp = unsafe { read32(op_base + OP_USBCMD) } & USBCMD_RSVDP;
     console::println!("Ouroboros kernel: xhci: RsvdP before the reset: USBCMD {usbcmd_rsvdp:#x}");
+    // Whether the controller is still running as it is reset. xHCI 5.4.1
+    // says HCRST is not to be set while HCHalted is 0, and Linux halts
+    // first; this driver does not yet. Read only, so the board can say
+    // whether the firmware's hand-over leaves it running before the halt
+    // is built (the roadmap's HCRST item).
+    let (usbcmd, usbsts) = unsafe { (read32(op_base + OP_USBCMD), read32(op_base + OP_USBSTS)) };
+    console::println!(
+        "Ouroboros kernel: xhci: before the reset: USBCMD {usbcmd:#x} (R/S {}), USBSTS {usbsts:#x} (HCH {})",
+        usbcmd & USBCMD_RUN,
+        usbsts & USBSTS_HCH
+    );
     unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_HCRST) };
     if !unsafe { poll_until(|| read32(op_base + OP_USBCMD) & USBCMD_HCRST == 0 && read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
