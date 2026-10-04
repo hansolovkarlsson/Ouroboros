@@ -1066,3 +1066,62 @@ identity from the staged image and requires the boot to log it and its
 commit to be HEAD's; a stale ESP fails it. An instrument that says which
 build ran has to be the one thing that cannot be stale, so it was mutated
 before it was trusted: the idiom was the mutation.
+
+## Four more, from the register rounds (2026-10-04)
+
+A day of four small xHCI changes, each a board round (#200 to #203), and one
+rig fix (#204). The controller changes were all spec form: on the Pi 4
+every one of them turned out to write what the code before it wrote. That
+is what made the instruments the day's real subject, since the only way to
+know a change was a no-op was to see it.
+
+**A claim with no instrument under it.** The first version of the RsvdP
+change (#201) said in its commit and on the roadmap that the RsvdP bits
+"read 0 after HCRST on every controller seen". Nothing in the tree had ever
+printed them before the write; the only reads were in the command-timeout
+dump, which runs after the writes and only on a timeout. The review asked
+where they had been seen. One line at init printing the kept bits made the
+claim an observation, and the board then confirmed it (`RsvdP kept: ERSTSZ
+0x0, ERSTBA 0x0`). The sentence was true; it had simply never been checked,
+and a sentence like that reads the same either way.
+
+**A check that could not fail, said so by its own author.** The follow-up
+(#202) put five registers behind one merge helper, and its roadmap note
+admitted that no rig could fail on it: QEMU reads 0 in every RsvdP field,
+so a helper that dropped the kept bits passed `test-usb-hub`,
+`test-el1-drop` and `make test` alike. Saying so was honest and not
+enough. The review moved the merge into a pure `const fn` under const
+asserts, and two mutations of it then broke the build. Where the system
+under test cannot produce the condition, move the property to where it can
+be checked: here, the compiler. The same review moved the log line from
+after the writes it reports to before them, since a write that hung the
+board would otherwise have left the capture without the one value the
+round was for.
+
+**An observer shown wrong before it was trusted.** The HCRST question (is
+the controller still running when it is reset?) was answered with a
+read-only line (#203), and QEMU only ever shows a halted controller, so the
+line had only ever printed one answer. It was mutated: with the controller
+started just before the read, both lines said `R/S true ... HCH false`. The
+same mutation showed something no reading could: QEMU accepted the reset
+of a running controller and the rig stayed green, so only the board could
+say whether this mattered. It did not; the Pi's firmware hands the
+controller over halted. The review also caught that the first version read
+HCH and then printed before the write, and a serial line takes long enough
+for a controller that was still halting to finish.
+
+**A rig that failed a kernel that never ran, and then lost the evidence.**
+One `test-usb-hub` run reported five FAILs. The transcript, 667 bytes, had
+no kernel line in it: QEMU's own firmware had stalled in its USB boot. An
+instrument that grades a run it never observed reads exactly like a
+regression. The fix (#204) calls that case INCONCLUSIVE, and only that
+case, because the loose version, "no kernel line", would also have hidden
+a kernel that hangs before printing; a saved passing transcript showed
+such a kernel ends on `BdsDxe: starting`, and the self-test now holds that
+case graded. Its review found two more blind spots in the fix itself: a
+count of stalls has no denominator, so it grows the same at any stall rate
+(every run's verdict is logged now, and the stall prints as a rate); and
+the rerun the rig asks for overwrites the transcript, which is how the
+first stall was lost and why its fixture had to be transcribed from the
+session that saw it. A verdict that says "run it again" has to keep what
+it saw first.
