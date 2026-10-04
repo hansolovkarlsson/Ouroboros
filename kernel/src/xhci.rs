@@ -249,10 +249,19 @@ const IR_IMAN: u64 = 0x00;
 const IR_ERSTSZ: u64 = 0x08;
 const IR_ERSTBA: u64 = 0x10;
 const IR_ERDP: u64 = 0x18;
-// The RsvdP bits of ERSTSZ (31:16) and ERSTBA (5:0): written back as read,
-// as Linux's `xhci_add_interrupter` and U-Boot do.
+// The RsvdP bits of each register written whole, kept by
+// `write32_rsvdp`/`write64_rsvdp`: ERSTSZ 31:16 and ERSTBA 5:0 (as Linux's
+// `xhci_add_interrupter` and U-Boot keep them), CONFIG 31:10 and CRCR 5:4
+// (Linux's `xhci.h`). USBCMD keeps only 6:4 and 31:17: Linux's `xhci.h`
+// calls 4:6 and 15:31 reserved and leaves 12 and 13 unmentioned, and xHCI
+// 1.2 is recalled as defining 13:16 (the spec PDF was not read). Bits 12:16,
+// which these sources do not settle, are written 0 as before, so no bit the
+// firmware left set there is kept on a guess.
 const ERSTSZ_RSVDP: u32 = 0xffff_0000;
 const ERSTBA_RSVDP: u64 = 0x3f;
+const CONFIG_RSVDP: u32 = 0xffff_fc00;
+const CRCR_RSVDP: u64 = 0x30;
+const USBCMD_RSVDP: u32 = 0xfffe_0070;
 
 const EP_TYPE_CONTROL: u32 = 4;
 const EP_TYPE_INTERRUPT_IN: u32 = 7;
@@ -493,6 +502,9 @@ const _: () = {
     // ERSTBA's low six bits are RsvdP, kept from the register; the pool is
     // page-aligned, so this offset is the ERST address's alignment.
     assert!(offset_of!(DmaPool, erst) % 64 == 0, "ERST not 64-byte aligned");
+    // CRCR's bits 5:4 are RsvdP, kept from the register, so the command
+    // ring's address has to leave them clear.
+    assert!(offset_of!(DmaPool, command_ring) % 64 == 0, "command ring not 64-byte aligned");
     // Transfer, command and event rings: xHCI forbids a ring segment that
     // crosses 64 KB. Checked against the PAGE, not against 64 KB: the pool
     // is only page-aligned, so an offset says where a ring is within its
@@ -678,6 +690,43 @@ unsafe fn write64(addr: u64, val: u64) {
 }
 unsafe fn read64(addr: u64) -> u64 {
     unsafe { read32(addr) as u64 | ((read32(addr + 4) as u64) << 32) }
+}
+
+/// What a register write that keeps RsvdP bits writes: `current`'s `rsvdp`
+/// bits, and `val` in the rest. Pure and `const`, so the asserts below
+/// check it at build time: QEMU reads 0 in every RsvdP field, so no rig can
+/// see a merge that drops the kept bits.
+const fn rsvdp_merge(current: u64, rsvdp: u64, val: u64) -> u64 {
+    (current & rsvdp) | (val & !rsvdp)
+}
+const _: () = {
+    // The kept bits survive, the new value fills the rest, and a stray bit
+    // of the new value cannot land in a kept field.
+    assert!(rsvdp_merge(0xffff_0000, 0xffff_0000, 1) == 0xffff_0001);
+    assert!(rsvdp_merge(0x0000_ffff, 0xffff_0000, 1) == 1);
+    assert!(rsvdp_merge(0x30, 0x30, 0x1000_0040) == 0x1000_0070);
+    assert!(rsvdp_merge(0, 0x30, 0x1000_0070) == 0x1000_0040);
+};
+
+/// A register write that keeps the register's RsvdP bits, which the spec
+/// says to write back as read: reads it, keeps `rsvdp`, puts `val` in the
+/// other bits and writes it through `write32`. A `val` with a bit in
+/// `rsvdp` is a caller's bug (an address not aligned enough, say), so a
+/// debug build, which the card carries, stops on it; a release build masks
+/// it. Every register written here with RsvdP bits goes through this or
+/// [`write64_rsvdp`]; nothing yet checks that a later write does too (on
+/// the roadmap).
+unsafe fn write32_rsvdp(addr: u64, rsvdp: u32, val: u32) {
+    debug_assert!(val & rsvdp == 0, "a value with bits in the register's RsvdP field");
+    let current = unsafe { read32(addr) };
+    unsafe { write32(addr, rsvdp_merge(current as u64, rsvdp as u64, val as u64) as u32) };
+}
+/// [`write32_rsvdp`] for a 64-bit register, through `write64` (two
+/// halves, low first).
+unsafe fn write64_rsvdp(addr: u64, rsvdp: u64, val: u64) {
+    debug_assert!(val & rsvdp == 0, "a value with bits in the register's RsvdP field");
+    let current = unsafe { read64(addr) };
+    unsafe { write64(addr, rsvdp_merge(current, rsvdp, val)) };
 }
 
 fn portsc_preserve(current: u32) -> u32 {
@@ -1968,13 +2017,31 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
-    unsafe { write32(op_base + OP_USBCMD, USBCMD_HCRST) };
+    // The RsvdP bits each write below keeps, said before the write rather
+    // than after it, so a write that hangs on the board still leaves them
+    // in the capture: QEMU reads 0 in all of them, the board is the only
+    // place a kept bit can show.
+    let usbcmd_rsvdp = unsafe { read32(op_base + OP_USBCMD) } & USBCMD_RSVDP;
+    console::println!("Ouroboros kernel: xhci: RsvdP before the reset: USBCMD {usbcmd_rsvdp:#x}");
+    unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_HCRST) };
     if !unsafe { poll_until(|| read32(op_base + OP_USBCMD) & USBCMD_HCRST == 0 && read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
+    let (usbcmd_rsvdp, config_rsvdp, crcr_rsvdp, erstsz_rsvdp, erstba_rsvdp) = unsafe {
+        (
+            read32(op_base + OP_USBCMD) & USBCMD_RSVDP,
+            read32(op_base + OP_CONFIG) & CONFIG_RSVDP,
+            read64(op_base + OP_CRCR) & CRCR_RSVDP,
+            read32(ir0_base + IR_ERSTSZ) & ERSTSZ_RSVDP,
+            read64(ir0_base + IR_ERSTBA) & ERSTBA_RSVDP,
+        )
+    };
+    console::println!(
+        "Ouroboros kernel: xhci: RsvdP after the reset, kept by each write: USBCMD {usbcmd_rsvdp:#x}, CONFIG {config_rsvdp:#x}, CRCR {crcr_rsvdp:#x}, ERSTSZ {erstsz_rsvdp:#x}, ERSTBA {erstba_rsvdp:#x}"
+    );
 
     let slots_enabled = (max_slots as usize).min(MAX_SLOTS_ENABLED) as u32;
-    unsafe { write32(op_base + OP_CONFIG, slots_enabled) };
+    unsafe { write32_rsvdp(op_base + OP_CONFIG, CONFIG_RSVDP, slots_enabled) };
 
     if scratchpad_count > MAX_SCRATCHPAD_BUFFERS {
         return Err(Error::TooManyScratchpadBuffers(scratchpad_count as u32));
@@ -2005,7 +2072,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let ring_addr = COMMAND_RING.0.get() as u64;
         ring[CMD_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1]; // TC, cycle=1
     }
-    unsafe { write64(op_base + OP_CRCR, (COMMAND_RING.0.get() as u64) | CRCR_RCS) };
+    unsafe { write64_rsvdp(op_base + OP_CRCR, CRCR_RSVDP, (COMMAND_RING.0.get() as u64) | CRCR_RCS) };
 
     // (Per-device EP0 transfer rings are initialized as each device
     // claims its pool entry during the port scan - see
@@ -2025,19 +2092,14 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // ERDP came last, as in Linux's `xhci_add_interrupter`, which works on
     // the Pi too; this removes the dependence on the controller not
     // sampling ERDP at the ERSTBA write. ERSTSZ and ERSTBA keep their
-    // RsvdP bits, and each new value is masked to its own field, as Linux
-    // masks the address. ERDP is written whole: its EHB is RW1C, written 0.
-    let (erstsz_rsvdp, erstba_rsvdp) =
-        unsafe { (read32(ir0_base + IR_ERSTSZ) & ERSTSZ_RSVDP, read64(ir0_base + IR_ERSTBA) & ERSTBA_RSVDP) };
-    console::println!("Ouroboros kernel: xhci: RsvdP kept: ERSTSZ {erstsz_rsvdp:#x}, ERSTBA {erstba_rsvdp:#x}");
-    unsafe {
-        write32(ir0_base + IR_ERSTSZ, erstsz_rsvdp | (1 & !ERSTSZ_RSVDP));
-        write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64);
-        write64(ir0_base + IR_ERSTBA, erstba_rsvdp | (ERST.0.get() as u64 & !ERSTBA_RSVDP));
-    }
+    // RsvdP bits; ERDP has none and is written whole: its EHB is RW1C,
+    // written 0.
+    unsafe { write32_rsvdp(ir0_base + IR_ERSTSZ, ERSTSZ_RSVDP, 1) };
+    unsafe { write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64) };
+    unsafe { write64_rsvdp(ir0_base + IR_ERSTBA, ERSTBA_RSVDP, ERST.0.get() as u64) };
 
     // And reads the scratchpad array at Run.
-    unsafe { write32(op_base + OP_USBCMD, USBCMD_RUN) };
+    unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_RUN) };
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH == 0) } {
         return Err(Error::StartTimeout);
     }

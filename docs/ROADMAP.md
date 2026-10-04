@@ -1578,7 +1578,42 @@ The small open tails those arcs deliberately left:
 >       Fix with one helper that reads, keeps a mask and masks the new value
 >       to its field (`portsc_preserve` is the existing shape), then move
 >       ERSTSZ/ERSTBA onto it. Spec form, nothing seen; a board round of
->       its own. Found by the review of `pi4/erst-rsvdp`.
+>       its own. Found by the review of `pi4/erst-rsvdp`. *Built 2026-10-04
+>       on `pi4/rsvdp-preserve`: `write32_rsvdp`/`write64_rsvdp` (read, keep
+>       the mask, the new value masked to the rest, write, return the bits
+>       kept) for USBCMD (both writes), CONFIG, CRCR, ERSTSZ and ERSTBA.
+>       Masks: CONFIG 31:10 and CRCR 5:4 from Linux's `xhci.h`; USBCMD only
+>       6:4 and 31:17, where Linux's comments (4:6, 15:31) and xHCI 1.2
+>       (13:16 defined) agree, so 12:16 stay written 0 and no enable the
+>       firmware left set is kept (the spec PDF was not read). The boot's
+>       one line now names all six writes; on QEMU all are 0, so no rig can
+>       fail on this change (a helper that dropped the kept bits passes them
+>       all), and the board's line is the only evidence. Its review: the
+>       merge made a pure `const fn` (`rsvdp_merge`) under const asserts,
+>       so a broken merge now fails the build (two mutations shown); the
+>       bits printed before the writes, not after (USBCMD's before the
+>       reset, all five after it), so a write that hangs the board still
+>       leaves them; a `debug_assert` against a value with RsvdP bits and a
+>       const assert that the command ring is 64-byte aligned; the ERST
+>       writes as three plain statements. QEMU: `test-usb-hub` 19 ok in four
+>       runs, `test-el1-drop` and `make test` green. Not yet merged or on
+>       the board.*
+> - [ ] **fix** **HCRST is set without halting the controller first.**
+>       `init_inner` waits for CNR and sets HCRST; xHCI 5.4.1 says HCRST
+>       shall not be set while HCHalted is 0, and Linux's `xhci_reset`
+>       calls `xhci_halt` first. Clear R/S (through `write32_rsvdp`), poll
+>       for HCH, then reset. On the Pi the firmware has handed the
+>       controller over before this, so whether it is still running here is
+>       a question for the capture: log USBSTS.HCH before the reset first,
+>       then change it. A board round of its own. Found by the review of
+>       `pi4/rsvdp-preserve`.
+> - [ ] **fix** **Nothing stops a plain `write32` to a register with RsvdP
+>       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
+>       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
+>       wrong write unspellable: typed register handles whose only writer
+>       takes the mask, or failing that a check in `make test` that rejects
+>       a bare write at those offsets (`unspellable-postmortem.md`). Found
+>       by the same review.
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
