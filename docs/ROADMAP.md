@@ -1731,6 +1731,20 @@ The small open tails those arcs deliberately left:
 >       takes the mask, or failing that a check in `make test` that rejects
 >       a bare write at those offsets (`unspellable-postmortem.md`). Found
 >       by the same review.
+>       *Built 2026-10-04 on `xhci/typed-registers`: a private `mod reg`
+>       in `xhci.rs` holds the two barrier stores and four handle types,
+>       `Whole32`/`Whole64` (doorbells, PORTSC, DCBAAP, ERDP) and
+>       `Kept32`/`Kept64` (USBCMD, CONFIG, CRCR, ERSTSZ, ERSTBA), their
+>       fields private, so the only handle for a RsvdP register is the one
+>       its constructor gives, carrying its mask. The free `write32`,
+>       `write64`, `write32_rsvdp` and `write64_rsvdp` are gone; reads stay
+>       plain. Shown unspellable by mutation: a bare `mmio_write32`, a
+>       hand-built `Whole32` and a hand-built `Kept32` at USBCMD each fail
+>       to compile (E0603, E0603, E0451), and a legal write at the same spot
+>       compiles. Not covered: a raw pointer store, and a handle built from
+>       the wrong base. Behaviour unchanged: the barrier check finds both
+>       sequences, `test-usb-hub` 19 ok with the same reset and RsvdP lines,
+>       `test-el1-drop` and `make test` green.*
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
