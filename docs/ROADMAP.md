@@ -1545,7 +1545,7 @@ The small open tails those arcs deliberately left:
 >       d89908f1d0ab debug`, #200's kernel), two boots and a full session
 >       over the serial console, no fault or timeout (`testing-pi4.md`
 >       section 6).*
-> - [ ] **fix** **ERSTSZ and ERSTBA are written bare, zeroing their RsvdP
+> - [x] **fix** **ERSTSZ and ERSTBA are written bare, zeroing their RsvdP
 >       bits.** `init_inner` writes ERSTSZ as `1` and ERSTBA as the address,
 >       where the spec's RsvdP fields (ERSTSZ 31:16, ERSTBA 5:0) are to be
 >       preserved: Linux (`xhci_add_interrupter`) and U-Boot read, modify
@@ -1566,8 +1566,11 @@ The small open tails those arcs deliberately left:
 >       old code wrote; the board's line is the round's evidence. QEMU:
 >       `test-usb-hub` 19 ok in three captured runs and 18 in one run whose
 >       output was not kept (the missing check unknown; watch for it),
->       `test-el1-drop` and `make test` green. Not yet merged or on the
->       board.*
+>       `test-el1-drop` and `make test` green. Merged as #201. Done; on the
+>       board 2026-10-04 (`build c07804a040e7 debug`): `RsvdP kept: ERSTSZ
+>       0x0, ERSTBA 0x0`, so on the VL805 it writes what the old code
+>       wrote, and a full session over serial, no fault or timeout
+>       (`testing-pi4.md` section 6).*
 > - [ ] **fix** **CRCR, CONFIG and USBCMD are written whole, zeroing their
 >       RsvdP bits** (CRCR 5:4, CONFIG 31:10, USBCMD's reserved ranges), the
 >       same defect as ERSTSZ/ERSTBA in the same function. Linux keeps them

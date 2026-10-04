@@ -1333,6 +1333,28 @@ them (`keyboard not available`), which is the empty hub and not a finding.
 The keyboard behind the hub was last seen working on `08d3b4e`, the boot
 above.
 
+**2026-10-04, later: #201 on the board, ERSTSZ and ERSTBA keeping their
+RsvdP bits.** Stick then card staged from `main` at `c07804a` (#201's
+merge), the card's `BOOTAA64.EFI` compared byte for byte with `build/esp`'s
+before the eject. One boot, over the serial console:
+
+```
+UEFI stage alive, build c07804a040e7 debug, on its own stack (sp 0...
+boot services exited, console live, build c07804a040e7 debug
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: RsvdP kept: ERSTSZ 0x0, ERSTBA 0x0
+xhci: port 3 reset, speed=4
+usb-msd block device installed
+```
+
+**The VL805's RsvdP bits read 0 after HCRST**, as on QEMU, so this change
+writes exactly what the code before it wrote: the read-modify-write is spec
+form on this controller, and now observed to be. Then `exFAT mounted`,
+`login: root`, `ls`, `ls etc`, `ls bin`, `bootid` (`boot 1`, the card
+restaged), `shutdown`, powered off. No fault, no command timeout, no `Host
+System Error`, no `WARNING`; no keyboard, by choice.
+
 ---
 
 ## 7. Risks, ranked
