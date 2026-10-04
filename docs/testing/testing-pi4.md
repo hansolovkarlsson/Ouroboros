@@ -1278,6 +1278,33 @@ storage endpoints' commands, and every bulk transfer `fsd` made. **#196 and
 the board ran without them too, and what they fix is a window this boot did
 not have to hit.
 
+**2026-10-03, later: #198 on the board, and the first boot that names its
+build.** Card and stick staged from `main` at `08d3b4e` (#198, every xHCI
+register write through `mmio_write32`/`mmio_write64`, a call and a `dsb sy`
+each; #199, the build line). The capture says which build it is, so this
+time nothing was inferred:
+
+```
+UEFI stage alive, build 08d3b4e27601 debug, on its own stack (sp 0...
+boot services exited, console live, build 08d3b4e27601 debug
+running at EL2 after the exit
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: port 3 reset, speed=4
+xhci: keyboard ready
+usb-msd block device installed
+```
+
+Then the same session as the boots before it: the stick on SuperSpeed root
+port 3 through #194's wait, the keyboard on port 1.4 behind the hub, `exFAT
+mounted`, `login: root` (a first attempt with an empty name said `Login
+incorrect`, as it should), `ls` from the stick, `shutdown` powered off. No
+fault, no timeout, no `WARNING`. **The barrier on every register write costs
+nothing visible on the board.** (`netd: boot identity: boot 1`: the card was
+restaged, so its boot counter started again.) `screen -L` appends, so the
+capture also holds the previous boot above this one; the build line is what
+tells the two apart.
+
 ---
 
 ## 7. Risks, ranked

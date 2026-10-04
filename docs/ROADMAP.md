@@ -1522,8 +1522,8 @@ The small open tails those arcs deliberately left:
 >       the Pi 4 has run every doorbell behind; a register write is now a
 >       call and a `dsb` more than before, on every write. QEMU:
 >       `test-usb-hub` (19 ok) and `test-el1-drop` green. Merged as #198.
->       Done; not yet booted on the board, where every register write is
->       now a call and a `dsb sy` more than before.*
+>       Done; on the board 2026-10-03 (`build 08d3b4e27601 debug`), a full
+>       session, no fault (`testing-pi4.md` section 6).*
 > - [ ] **fix** **ERDP is programmed after ERSTBA.** `init_inner` writes
 >       ERSTSZ, ERSTBA, ERDP; the xHCI spec's initialization order (4.2)
 >       is ERSTSZ, ERDP, ERSTBA, so a controller that starts on the
