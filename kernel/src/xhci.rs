@@ -490,6 +490,9 @@ const _: () = {
         "an Output Device Context crosses a page"
     );
     assert!(within(offset_of!(DmaPool, erst), size_of::<[ErstEntry; 1]>(), PAGE), "ERST crosses a page");
+    // ERSTBA's low six bits are RsvdP, kept from the register; the pool is
+    // page-aligned, so this offset is the ERST address's alignment.
+    assert!(offset_of!(DmaPool, erst) % 64 == 0, "ERST not 64-byte aligned");
     // Transfer, command and event rings: xHCI forbids a ring segment that
     // crosses 64 KB. Checked against the PAGE, not against 64 KB: the pool
     // is only page-aligned, so an offset says where a ring is within its
@@ -1263,7 +1266,7 @@ impl Xhci {
             crcr & CRCR_CRR != 0
         );
         console::println!(
-            "Ouroboros kernel: xhci: command timeout: DCBAAP {dcbaap:#x} (pool {:#x}), ERSTSZ {erstsz}, ERSTBA {erstba:#x} (pool {:#x}), ERDP {erdp:#x}",
+            "Ouroboros kernel: xhci: command timeout: DCBAAP {dcbaap:#x} (pool {:#x}), ERSTSZ {erstsz:#x}, ERSTBA {erstba:#x} (pool {:#x}), ERDP {erdp:#x}",
             DCBAA.0.get() as u64,
             ERST.0.get() as u64
         );
@@ -2022,14 +2025,15 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // ERDP came last, as in Linux's `xhci_add_interrupter`, which works on
     // the Pi too; this removes the dependence on the controller not
     // sampling ERDP at the ERSTBA write. ERSTSZ and ERSTBA keep their
-    // RsvdP bits; `ERST` is `Aligned64`, so its address has none of
-    // ERSTBA's set. ERDP is written whole: its EHB is RW1C, written 0.
+    // RsvdP bits, and each new value is masked to its own field, as Linux
+    // masks the address. ERDP is written whole: its EHB is RW1C, written 0.
+    let (erstsz_rsvdp, erstba_rsvdp) =
+        unsafe { (read32(ir0_base + IR_ERSTSZ) & ERSTSZ_RSVDP, read64(ir0_base + IR_ERSTBA) & ERSTBA_RSVDP) };
+    console::println!("Ouroboros kernel: xhci: RsvdP kept: ERSTSZ {erstsz_rsvdp:#x}, ERSTBA {erstba_rsvdp:#x}");
     unsafe {
-        let erstsz = read32(ir0_base + IR_ERSTSZ) & ERSTSZ_RSVDP;
-        write32(ir0_base + IR_ERSTSZ, erstsz | 1);
+        write32(ir0_base + IR_ERSTSZ, erstsz_rsvdp | (1 & !ERSTSZ_RSVDP));
         write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64);
-        let erstba = read64(ir0_base + IR_ERSTBA) & ERSTBA_RSVDP;
-        write64(ir0_base + IR_ERSTBA, erstba | ERST.0.get() as u64);
+        write64(ir0_base + IR_ERSTBA, erstba_rsvdp | (ERST.0.get() as u64 & !ERSTBA_RSVDP));
     }
 
     // And reads the scratchpad array at Run.
