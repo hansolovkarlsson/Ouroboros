@@ -1554,7 +1554,14 @@ The small open tails those arcs deliberately left:
 >       seen. Read-modify-write both (ERDP's DESI/EHB bits are another
 >       question: EHB is RW1C and is written 0 deliberately). Its own
 >       change, kept out of the ERDP-order round so that round has one
->       variable. Found by the review of `pi4/erdp-before-erstba`.
+>       variable. Found by the review of `pi4/erdp-before-erstba`. *Built
+>       2026-10-04 on `pi4/erst-rsvdp`: ERSTSZ and ERSTBA read, their RsvdP
+>       bits kept (`ERSTSZ_RSVDP`, `ERSTBA_RSVDP`), the size and the address
+>       ORed in; ERDP still written whole. After HCRST those bits read 0 on
+>       every controller seen, so this most likely writes the same values
+>       as before; no QEMU rig can tell the two apart. QEMU: `test-usb-hub`
+>       (19 ok) and `test-el1-drop` green, `make test` green. Not yet
+>       reviewed or on the board.*
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
