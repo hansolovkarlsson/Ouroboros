@@ -249,10 +249,17 @@ const IR_IMAN: u64 = 0x00;
 const IR_ERSTSZ: u64 = 0x08;
 const IR_ERSTBA: u64 = 0x10;
 const IR_ERDP: u64 = 0x18;
-// The RsvdP bits of ERSTSZ (31:16) and ERSTBA (5:0): written back as read,
-// as Linux's `xhci_add_interrupter` and U-Boot do.
+// The RsvdP bits of each register written whole, kept by
+// `write32_rsvdp`/`write64_rsvdp`: ERSTSZ 31:16 and ERSTBA 5:0 (as Linux's
+// `xhci_add_interrupter` and U-Boot keep them), CONFIG 31:10 and CRCR 5:4
+// (Linux's `xhci.h`). USBCMD keeps only 6:4 and 31:17, the bits Linux's
+// `xhci.h` (4:6, 15:31) and xHCI 1.2 (13:16 defined) both leave reserved;
+// 12:16 are written 0 as before, so no enable the firmware left set is kept.
 const ERSTSZ_RSVDP: u32 = 0xffff_0000;
 const ERSTBA_RSVDP: u64 = 0x3f;
+const CONFIG_RSVDP: u32 = 0xffff_fc00;
+const CRCR_RSVDP: u64 = 0x30;
+const USBCMD_RSVDP: u32 = 0xfffe_0070;
 
 const EP_TYPE_CONTROL: u32 = 4;
 const EP_TYPE_INTERRUPT_IN: u32 = 7;
@@ -678,6 +685,25 @@ unsafe fn write64(addr: u64, val: u64) {
 }
 unsafe fn read64(addr: u64) -> u64 {
     unsafe { read32(addr) as u64 | ((read32(addr + 4) as u64) << 32) }
+}
+
+/// A register write that keeps the register's RsvdP bits, which the spec
+/// says to write back as read: reads it, keeps `rsvdp`, puts `val` in the
+/// other bits (masked, so a stray bit of `val` cannot land in a kept field)
+/// and writes it through `write32`. Returns the bits kept, for the boot's
+/// log. `rsvdp` is a required argument, so a register with RsvdP bits is
+/// written through this or visibly not.
+unsafe fn write32_rsvdp(addr: u64, rsvdp: u32, val: u32) -> u32 {
+    let kept = unsafe { read32(addr) } & rsvdp;
+    unsafe { write32(addr, kept | (val & !rsvdp)) };
+    kept
+}
+/// [`write32_rsvdp`] for a 64-bit register, through `write64` (two
+/// halves, low first).
+unsafe fn write64_rsvdp(addr: u64, rsvdp: u64, val: u64) -> u64 {
+    let kept = unsafe { read64(addr) } & rsvdp;
+    unsafe { write64(addr, kept | (val & !rsvdp)) };
+    kept
 }
 
 fn portsc_preserve(current: u32) -> u32 {
@@ -1968,13 +1994,13 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
-    unsafe { write32(op_base + OP_USBCMD, USBCMD_HCRST) };
+    let usbcmd_reset_kept = unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_HCRST) };
     if !unsafe { poll_until(|| read32(op_base + OP_USBCMD) & USBCMD_HCRST == 0 && read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
 
     let slots_enabled = (max_slots as usize).min(MAX_SLOTS_ENABLED) as u32;
-    unsafe { write32(op_base + OP_CONFIG, slots_enabled) };
+    let config_kept = unsafe { write32_rsvdp(op_base + OP_CONFIG, CONFIG_RSVDP, slots_enabled) };
 
     if scratchpad_count > MAX_SCRATCHPAD_BUFFERS {
         return Err(Error::TooManyScratchpadBuffers(scratchpad_count as u32));
@@ -2005,7 +2031,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let ring_addr = COMMAND_RING.0.get() as u64;
         ring[CMD_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1]; // TC, cycle=1
     }
-    unsafe { write64(op_base + OP_CRCR, (COMMAND_RING.0.get() as u64) | CRCR_RCS) };
+    let crcr_kept = unsafe { write64_rsvdp(op_base + OP_CRCR, CRCR_RSVDP, (COMMAND_RING.0.get() as u64) | CRCR_RCS) };
 
     // (Per-device EP0 transfer rings are initialized as each device
     // claims its pool entry during the port scan - see
@@ -2025,19 +2051,19 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // ERDP came last, as in Linux's `xhci_add_interrupter`, which works on
     // the Pi too; this removes the dependence on the controller not
     // sampling ERDP at the ERSTBA write. ERSTSZ and ERSTBA keep their
-    // RsvdP bits, and each new value is masked to its own field, as Linux
-    // masks the address. ERDP is written whole: its EHB is RW1C, written 0.
-    let (erstsz_rsvdp, erstba_rsvdp) =
-        unsafe { (read32(ir0_base + IR_ERSTSZ) & ERSTSZ_RSVDP, read64(ir0_base + IR_ERSTBA) & ERSTBA_RSVDP) };
-    console::println!("Ouroboros kernel: xhci: RsvdP kept: ERSTSZ {erstsz_rsvdp:#x}, ERSTBA {erstba_rsvdp:#x}");
-    unsafe {
-        write32(ir0_base + IR_ERSTSZ, erstsz_rsvdp | (1 & !ERSTSZ_RSVDP));
+    // RsvdP bits; ERDP has none and is written whole: its EHB is RW1C,
+    // written 0.
+    let (erstsz_kept, erstba_kept) = unsafe {
+        let erstsz_kept = write32_rsvdp(ir0_base + IR_ERSTSZ, ERSTSZ_RSVDP, 1);
         write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64);
-        write64(ir0_base + IR_ERSTBA, erstba_rsvdp | (ERST.0.get() as u64 & !ERSTBA_RSVDP));
-    }
+        (erstsz_kept, write64_rsvdp(ir0_base + IR_ERSTBA, ERSTBA_RSVDP, ERST.0.get() as u64))
+    };
 
     // And reads the scratchpad array at Run.
-    unsafe { write32(op_base + OP_USBCMD, USBCMD_RUN) };
+    let usbcmd_run_kept = unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_RUN) };
+    console::println!(
+        "Ouroboros kernel: xhci: RsvdP kept: USBCMD {usbcmd_reset_kept:#x} at reset and {usbcmd_run_kept:#x} at Run, CONFIG {config_kept:#x}, CRCR {crcr_kept:#x}, ERSTSZ {erstsz_kept:#x}, ERSTBA {erstba_kept:#x}"
+    );
     if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH == 0) } {
         return Err(Error::StartTimeout);
     }
