@@ -249,14 +249,14 @@ const IR_IMAN: u64 = 0x00;
 const IR_ERSTSZ: u64 = 0x08;
 const IR_ERSTBA: u64 = 0x10;
 const IR_ERDP: u64 = 0x18;
-// The RsvdP bits of each register written whole, kept by
-// `write32_rsvdp`/`write64_rsvdp`: ERSTSZ 31:16 and ERSTBA 5:0 (as Linux's
-// `xhci_add_interrupter` and U-Boot keep them), CONFIG 31:10 and CRCR 5:4
-// (Linux's `xhci.h`). USBCMD keeps only 6:4 and 31:17: Linux's `xhci.h`
-// calls 4:6 and 15:31 reserved and leaves 12 and 13 unmentioned, and xHCI
-// 1.2 is recalled as defining 13:16 (the spec PDF was not read). Bits 12:16,
-// which these sources do not settle, are written 0 as before, so no bit the
-// firmware left set there is kept on a guess.
+// The RsvdP bits of each register written whole, kept by its
+// `reg::Kept32`/`reg::Kept64` handle: ERSTSZ 31:16 and ERSTBA 5:0 (as
+// Linux's `xhci_add_interrupter` and U-Boot keep them), CONFIG 31:10 and
+// CRCR 5:4 (Linux's `xhci.h`). USBCMD keeps only 6:4 and 31:17: Linux's
+// `xhci.h` calls 4:6 and 15:31 reserved and leaves 12 and 13 unmentioned,
+// and xHCI 1.2 is recalled as defining 13:16 (the spec PDF was not read).
+// Bits 12:16, which these sources do not settle, are written 0 as before,
+// so no bit the firmware left set there is kept on a guess.
 const ERSTSZ_RSVDP: u32 = 0xffff_0000;
 const ERSTBA_RSVDP: u64 = 0x3f;
 const CONFIG_RSVDP: u32 = 0xffff_fc00;
@@ -632,63 +632,16 @@ static INT_BUF: &Aligned64<[u8; 8]> = &DMA_POOL.int_buf;
 unsafe fn read32(addr: u64) -> u32 {
     unsafe { read_volatile(addr as *const u32) }
 }
-/// A register write, with the barrier every one of them needs in front
-/// of it: `dsb sy`, so each load and store the CPU made before it is
-/// complete before the controller sees the write. A register write is how
-/// the controller is told to look at memory (a doorbell after a TRB,
-/// DCBAAP/CRCR/ERSTBA/Run after the structures they point at) or that
-/// memory may be reused (ERDP after the event is read), and the pool's
-/// stores and loads are Normal accesses that nothing orders against a
-/// Device store without one. In the write itself, so there is no way to
-/// write a register without it; until 2026-10-03 it was placed by hand
-/// before each such write, and one site had `dmb sy` instead. Linux's
-/// `writel` does the same with the lighter `dmb oshst`; `dsb sy` is the
-/// barrier the Pi 4 has run every doorbell behind.
-unsafe fn write32(addr: u64, val: u32) {
-    unsafe { mmio_write32(addr, val) }
-}
 
-/// The barrier and the register store as fixed instructions, never
-/// inlined, so the image holds `dsb sy; str w1, [x0]; ret` whatever the
-/// profile or the compiler does around it: QEMU has no write buffer to show
-/// the barrier missing, so `scripts/check-xhci-barriers.py` (run by `make
-/// test`) finds this sequence in the built kernel, and a call to it.
-/// A Rust `asm!` barrier before a `write_volatile` compiles to different
-/// shapes in debug and release, and no check can tell its `dsb sy` from
-/// another module's.
-#[unsafe(naked)]
-unsafe extern "C" fn mmio_write32(addr: u64, val: u32) {
-    core::arch::naked_asm!("dsb sy", "str w1, [x0]", "ret");
-}
-
-/// [`write64`]'s form of [`mmio_write32`], fixed for the same check: `dsb
-/// sy; str w1, [x0]; str w2, [x0, #4]; ret`, low half first.
-#[unsafe(naked)]
-unsafe extern "C" fn mmio_write64(addr: u64, lo: u32, hi: u32) {
-    core::arch::naked_asm!("dsb sy", "str w1, [x0]", "str w2, [x0, #4]", "ret");
-}
-
-/// `ring_publish`'s flip, for the same reason: `dmb oshst; str w1, [x0];
-/// ret`, the barrier and the one store that hands a batch of TRBs to the
-/// controller, fixed together where no edit can put a store between them
-/// and the image check can find them.
+/// `ring_publish`'s flip: `dmb oshst; str w1, [x0]; ret`, the barrier and
+/// the one store that hands a batch of TRBs to the controller. Naked, like
+/// `reg`'s `mmio_write32`, so the image holds these fixed instructions
+/// whatever the profile: no edit can put a store between them, and
+/// `scripts/check-xhci-barriers.py` can find them. Inlining it would leave
+/// that check nothing to find.
 #[unsafe(naked)]
 unsafe extern "C" fn publish_cycle_word(ptr: *mut u32, val: u32) {
     core::arch::naked_asm!("dmb oshst", "str w1, [x0]", "ret");
-}
-/// A 64-bit register as two 32-bit writes, low half first, the order
-/// xHCI section 5.1 gives for Dword writes, and what every driver that
-/// works on the Pi 4's VL805 does: the firmware's own (edk2 `XhciDxe`),
-/// Linux (`xhci_write_64` is `lo_hi_writeq`) and U-Boot. A single 64-bit
-/// store crosses the BCM2711's PCIe bridge, which has not been shown to
-/// carry one intact; the first command timed out on the board while the
-/// store was 64-bit (2026-10-03).
-/// One barrier, then both halves: the barrier orders everything before
-/// the low half, and the high half needs nothing more (ERDP is written on
-/// every event, so a second `dsb sy` there would be paid on the keyboard's
-/// hot path for nothing).
-unsafe fn write64(addr: u64, val: u64) {
-    unsafe { mmio_write64(addr, val as u32, (val >> 32) as u32) }
 }
 unsafe fn read64(addr: u64) -> u64 {
     unsafe { read32(addr) as u64 | ((read32(addr + 4) as u64) << 32) }
@@ -710,25 +663,228 @@ const _: () = {
     assert!(rsvdp_merge(0, 0x30, 0x1000_0070) == 0x1000_0040);
 };
 
-/// A register write that keeps the register's RsvdP bits, which the spec
-/// says to write back as read: reads it, keeps `rsvdp`, puts `val` in the
-/// other bits and writes it through `write32`. A `val` with a bit in
-/// `rsvdp` is a caller's bug (an address not aligned enough, say), so a
-/// debug build, which the card carries, stops on it; a release build masks
-/// it. Every register written here with RsvdP bits goes through this or
-/// [`write64_rsvdp`]; nothing yet checks that a later write does too (on
-/// the roadmap).
-unsafe fn write32_rsvdp(addr: u64, rsvdp: u32, val: u32) {
-    debug_assert!(val & rsvdp == 0, "a value with bits in the register's RsvdP field");
-    let current = unsafe { read32(addr) };
-    unsafe { write32(addr, rsvdp_merge(current as u64, rsvdp as u64, val as u64) as u32) };
-}
-/// [`write32_rsvdp`] for a 64-bit register, through `write64` (two
-/// halves, low first).
-unsafe fn write64_rsvdp(addr: u64, rsvdp: u64, val: u64) {
-    debug_assert!(val & rsvdp == 0, "a value with bits in the register's RsvdP field");
-    let current = unsafe { read64(addr) };
-    unsafe { write64(addr, rsvdp_merge(current, rsvdp, val)) };
+/// The xHCI registers, written only through a handle that knows how the
+/// register must be written. A register with RsvdP bits is a [`reg::Kept32`]
+/// or [`reg::Kept64`], whose `write` reads it and keeps those bits (RsvdP
+/// is written back as read); every other register is a
+/// [`reg::Whole32`] or [`reg::Whole64`], written whole. The handles' fields
+/// and the barrier stores are private to this module, so outside it there is
+/// no way to spell a register write that skips either: no bare `write32` to
+/// USBCMD, and no handle for it but the one carrying its RsvdP mask. Until
+/// 2026-10-04 the RsvdP helpers were opt-in beside a plain `write32` that
+/// would take any address. Reads cannot clobber anything, so they are not
+/// held to this: PORTSC and the RsvdP diagnostic read through their
+/// handles, the rest with `read32`/`read64` at a block's `at`.
+///
+/// The handles are built only from their own register block, an
+/// [`reg::OpRegs`], [`reg::Ir0Regs`] or [`reg::Doorbells`], and those only by
+/// [`reg::locate`] from the capability registers, so a handle cannot be built
+/// from another block's base: until the review of #207 a doorbell built
+/// from the operational base was a whole write to USBCMD. Within a block,
+/// a port or doorbell index past its range is checked only by a
+/// `debug_assert` (the card carries a debug build); the callers bound it.
+///
+/// What this does not cover: TRBs and contexts are memory, written with
+/// `write_volatile`, and nothing stops a raw pointer store to a register
+/// address; `publish_cycle_word`, the ring's `dmb oshst; str`, takes any
+/// pointer, so it too would store to a register without the `dsb sy` or the
+/// RsvdP merge; a block's `at` gives a plain address for a read, which can
+/// name another block's offset; PORTSC and the doorbells are both a
+/// `Whole32` (DCBAAP and ERDP both a `Whole64`), so a port function would
+/// take a doorbell; and PORTSC's RW1C bits and PED are still masked by
+/// convention (`portsc_preserve`). The image check sees a rerouted
+/// `Whole32::write` or `Whole64::write`, but not a `Kept` write routed
+/// around them, since the whole writes keep their other callers.
+mod reg {
+    use super::*;
+
+    /// The operational registers, at BAR + CAPLENGTH.
+    #[derive(Clone, Copy)]
+    pub(super) struct OpRegs(u64);
+    /// Interrupter register set 0, at BAR + RTSOFF + 0x20 (the sets start at
+    /// RTSOFF + 0x20, and set 0 is always present).
+    #[derive(Clone, Copy)]
+    pub(super) struct Ir0Regs(u64);
+    /// The doorbell array, at BAR + DBOFF.
+    #[derive(Clone, Copy)]
+    pub(super) struct Doorbells(u64);
+
+    /// The three register blocks, from the capability registers at
+    /// `bar_base`. The only way to make one.
+    pub(super) unsafe fn locate(bar_base: u64) -> (OpRegs, Ir0Regs, Doorbells) {
+        let caplength = (unsafe { read32(bar_base) } & 0xff) as u64;
+        let dboff = unsafe { read32(bar_base + CAP_DBOFF) } as u64 & !0x3;
+        let rtsoff = unsafe { read32(bar_base + CAP_RTSOFF) } as u64 & !0x1f;
+        (OpRegs(bar_base + caplength), Ir0Regs(bar_base + rtsoff + 0x20), Doorbells(bar_base + dboff))
+    }
+
+    impl OpRegs {
+        /// The address of the register at `off`, for a read.
+        pub(super) fn at(self, off: u64) -> u64 {
+            self.0 + off
+        }
+    }
+    impl Ir0Regs {
+        /// The address of the register at `off`, for a read.
+        pub(super) fn at(self, off: u64) -> u64 {
+            self.0 + off
+        }
+    }
+
+    /// A 32-bit register with no RsvdP bits, written whole.
+    #[derive(Clone, Copy)]
+    pub(super) struct Whole32(u64);
+    /// A 64-bit register with no RsvdP bits, written whole.
+    #[derive(Clone, Copy)]
+    pub(super) struct Whole64(u64);
+    /// A 32-bit register with RsvdP bits, written keeping them.
+    #[derive(Clone, Copy)]
+    pub(super) struct Kept32 {
+        addr: u64,
+        rsvdp: u32,
+    }
+    /// A 64-bit register with RsvdP bits, written keeping them.
+    #[derive(Clone, Copy)]
+    pub(super) struct Kept64 {
+        addr: u64,
+        rsvdp: u64,
+    }
+
+    pub(super) fn usbcmd(op: OpRegs) -> Kept32 {
+        Kept32 { addr: op.at(OP_USBCMD), rsvdp: USBCMD_RSVDP }
+    }
+    pub(super) fn config(op: OpRegs) -> Kept32 {
+        Kept32 { addr: op.at(OP_CONFIG), rsvdp: CONFIG_RSVDP }
+    }
+    pub(super) fn crcr(op: OpRegs) -> Kept64 {
+        Kept64 { addr: op.at(OP_CRCR), rsvdp: CRCR_RSVDP }
+    }
+    /// DCBAAP's low 6 bits are RsvdZ: written 0, which a 64-byte-aligned
+    /// array does.
+    pub(super) fn dcbaap(op: OpRegs) -> Whole64 {
+        Whole64(op.at(OP_DCBAAP))
+    }
+    /// A root port's PORTSC, `port` 1-based, written whole: its RW1C bits
+    /// and PED are the caller's to mask, through `portsc_preserve`, which
+    /// writes every other bit back as read.
+    pub(super) fn portsc(op: OpRegs, port: u32) -> Whole32 {
+        debug_assert!(port >= 1, "PORTSC: ports are 1-based");
+        Whole32(op.at(OP_PORTSC_BASE + ((port - 1) as u64) * 0x10))
+    }
+    pub(super) fn erstsz(ir: Ir0Regs) -> Kept32 {
+        Kept32 { addr: ir.at(IR_ERSTSZ), rsvdp: ERSTSZ_RSVDP }
+    }
+    pub(super) fn erstba(ir: Ir0Regs) -> Kept64 {
+        Kept64 { addr: ir.at(IR_ERSTBA), rsvdp: ERSTBA_RSVDP }
+    }
+    /// ERDP has no RsvdP bits; its EHB is RW1C, written 0.
+    pub(super) fn erdp(ir: Ir0Regs) -> Whole64 {
+        Whole64(ir.at(IR_ERDP))
+    }
+    /// Doorbell `n` (0 the command ring, else a slot ID, at most 255).
+    /// Bits 15:8 are RsvdZ.
+    pub(super) fn doorbell(db: Doorbells, n: u32) -> Whole32 {
+        debug_assert!(n <= 255, "doorbell: past the 256-entry array");
+        Whole32(db.0 + (n as u64) * 4)
+    }
+
+    impl Whole32 {
+        pub(super) unsafe fn read(self) -> u32 {
+            unsafe { read32(self.0) }
+        }
+        /// A register write, with the barrier every one of them needs in front
+        /// of it: `dsb sy`, so each load and store the CPU made before it is
+        /// complete before the controller sees the write. A register write is how
+        /// the controller is told to look at memory (a doorbell after a TRB,
+        /// DCBAAP/CRCR/ERSTBA/Run after the structures they point at) or that
+        /// memory may be reused (ERDP after the event is read), and the pool's
+        /// stores and loads are Normal accesses that nothing orders against a
+        /// Device store without one. In the write itself, so there is no way to
+        /// write a register without it; until 2026-10-03 it was placed by hand
+        /// before each such write, and one site had `dmb sy` instead. Linux's
+        /// `writel` does the same with the lighter `dmb oshst`; `dsb sy` is the
+        /// barrier the Pi 4 has run every doorbell behind.
+        pub(super) unsafe fn write(self, val: u32) {
+            unsafe { mmio_write32(self.0, val) }
+        }
+    }
+
+    impl Whole64 {
+        /// A 64-bit register as two 32-bit writes, low half first, the order
+        /// xHCI section 5.1 gives for Dword writes, and what every driver that
+        /// works on the Pi 4's VL805 does: the firmware's own (edk2 `XhciDxe`),
+        /// Linux (`xhci_write_64` is `lo_hi_writeq`) and U-Boot. A single 64-bit
+        /// store crosses the BCM2711's PCIe bridge, which has not been shown to
+        /// carry one intact; the first command timed out on the board while the
+        /// store was 64-bit (2026-10-03).
+        /// One barrier, then both halves: the barrier orders everything before
+        /// the low half, and the high half needs nothing more (ERDP is written on
+        /// every event, so a second `dsb sy` there would be paid on the keyboard's
+        /// hot path for nothing).
+        pub(super) unsafe fn write(self, val: u64) {
+            unsafe { mmio_write64(self.0, val as u32, (val >> 32) as u32) }
+        }
+    }
+
+    impl Kept32 {
+        /// The RsvdP bits as they read now, what a write would keep.
+        pub(super) unsafe fn kept_bits(self) -> u32 {
+            unsafe { read32(self.addr) & self.rsvdp }
+        }
+        /// The write that keeps the register's RsvdP bits: reads it, keeps
+        /// them, puts `val` in the other bits and writes it through
+        /// [`Whole32::write`], so with its barrier. A `val` with a bit in the RsvdP field is
+        /// a caller's bug (an address not aligned enough, say), so a debug
+        /// build, which the card carries, stops on it; a release build
+        /// masks it.
+        pub(super) unsafe fn write(self, val: u32) {
+            debug_assert!(val & self.rsvdp == 0, "a value with bits in the register's RsvdP field");
+            let current = unsafe { read32(self.addr) };
+            let merged = rsvdp_merge(current as u64, self.rsvdp as u64, val as u64) as u32;
+            // Through `Whole32::write`, not `mmio_write32`: one caller per
+            // barrier store, so the image check fails if `Whole32::write`
+            // is routed around it (a second caller kept it green, the
+            // review of #207). Routing THIS write around `Whole32::write`
+            // is not seen by that check: the doorbells and PORTSC still
+            // call it.
+            unsafe { Whole32(self.addr).write(merged) }
+        }
+    }
+
+    impl Kept64 {
+        /// [`Kept32::kept_bits`] for a 64-bit register.
+        pub(super) unsafe fn kept_bits(self) -> u64 {
+            unsafe { read64(self.addr) & self.rsvdp }
+        }
+        /// [`Kept32::write`] for a 64-bit register: two halves, low first,
+        /// as [`Whole64::write`].
+        pub(super) unsafe fn write(self, val: u64) {
+            debug_assert!(val & self.rsvdp == 0, "a value with bits in the register's RsvdP field");
+            let current = unsafe { read64(self.addr) };
+            let merged = rsvdp_merge(current, self.rsvdp, val);
+            unsafe { Whole64(self.addr).write(merged) }
+        }
+    }
+
+    /// The barrier and the register store as fixed instructions, never
+    /// inlined, so the image holds `dsb sy; str w1, [x0]; ret` whatever the
+    /// profile or the compiler does around it: QEMU has no write buffer to show
+    /// the barrier missing, so `scripts/check-xhci-barriers.py` (run by `make
+    /// test`) finds this sequence in the built kernel, and a call to it.
+    /// A Rust `asm!` barrier before a `write_volatile` compiles to different
+    /// shapes in debug and release, and no check can tell its `dsb sy` from
+    /// another module's.
+    #[unsafe(naked)]
+    unsafe extern "C" fn mmio_write32(addr: u64, val: u32) {
+        core::arch::naked_asm!("dsb sy", "str w1, [x0]", "ret");
+    }
+
+    /// [`Whole64::write`]'s form of [`mmio_write32`], fixed for the same
+    /// check: `dsb sy; str w1, [x0]; str w2, [x0, #4]; ret`, low half first.
+    #[unsafe(naked)]
+    unsafe extern "C" fn mmio_write64(addr: u64, lo: u32, hi: u32) {
+        core::arch::naked_asm!("dsb sy", "str w1, [x0]", "str w2, [x0, #4]", "ret");
+    }
 }
 
 fn portsc_preserve(current: u32) -> u32 {
@@ -809,13 +965,13 @@ fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
 /// exists - this driver still drives exactly one keyboard, it just no
 /// longer *abandons* every other device to do it.
 struct Xhci {
-    db_base: u64,
-    ir0_base: u64,
+    db_base: reg::Doorbells,
+    ir0_base: reg::Ir0Regs,
     /// Kept for runtime port rescans (`rescan_ports`) - the boot scan's
     /// locals weren't enough once "scan again later" became a real
     /// operation (Parallels attaches passthrough USB seconds after the
     /// boot scan runs).
-    op_base: u64,
+    op_base: reg::OpRegs,
     max_ports: u32,
     /// 8 or 16, from HCCPARAMS1.CSZ - see `CTX_DWORDS_MAX`'s doc comment.
     ctx_dwords: usize,
@@ -1121,7 +1277,7 @@ impl Xhci {
     fn push_command(&mut self, trb: Trb) -> u64 {
         let ring_ptr = COMMAND_RING.0.get().cast::<Trb>();
         let addr = unsafe { Self::ring_push(ring_ptr, CMD_RING_SIZE, &mut self.cmd_enqueue, &mut self.cmd_cycle, trb) };
-        unsafe { write32(self.db_base, 0) }; // doorbell 0, target field unused for the command ring
+        unsafe { reg::doorbell(self.db_base, 0).write(0) }; // doorbell 0, target field unused for the command ring
         addr
     }
 
@@ -1143,7 +1299,7 @@ impl Xhci {
         let Some(slot) = self.slots[idx].as_ref() else { return };
         unsafe {
             // Doorbell target 1 = the default control endpoint (EP0).
-            write32(self.db_base + (slot.slot_id as u64) * 4, 1);
+            reg::doorbell(self.db_base, slot.slot_id).write(1);
         }
     }
 
@@ -1173,7 +1329,7 @@ impl Xhci {
             // per the xHCI spec's doorbell register definition (target
             // values above 1 map 1:1 to DCI - see `db_base`'s other
             // caller, `ring_ep0_doorbell`, for the EP0/DCI=1 case).
-            write32(self.db_base + (slot.slot_id as u64) * 4, kb.int_dci);
+            reg::doorbell(self.db_base, slot.slot_id).write(kb.int_dci);
         }
     }
 
@@ -1208,9 +1364,9 @@ impl Xhci {
             self.evt_cycle = !self.evt_cycle;
         }
         let new_erdp = unsafe { ring_ptr.add(self.evt_dequeue) } as u64;
-        // `write64`'s barrier orders the reads of the event above before
+        // The write's barrier orders the reads of the event above before
         // the controller is told its slot is free.
-        unsafe { write64(self.ir0_base + IR_ERDP, new_erdp) };
+        unsafe { reg::erdp(self.ir0_base).write(new_erdp) };
         Some(trb)
     }
 
@@ -1301,13 +1457,13 @@ impl Xhci {
         let (op, ir) = (self.op_base, self.ir0_base);
         let (usbsts, crcr, dcbaap, iman, erstsz, erstba, erdp) = unsafe {
             (
-                read32(op + OP_USBSTS),
-                read32(op + OP_CRCR),
-                read64(op + OP_DCBAAP),
-                read32(ir + IR_IMAN),
-                read32(ir + IR_ERSTSZ),
-                read64(ir + IR_ERSTBA),
-                read64(ir + IR_ERDP),
+                read32(op.at(OP_USBSTS)),
+                read32(op.at(OP_CRCR)),
+                read64(op.at(OP_DCBAAP)),
+                read32(ir.at(IR_IMAN)),
+                read32(ir.at(IR_ERSTSZ)),
+                read64(ir.at(IR_ERSTBA)),
+                read64(ir.at(IR_ERDP)),
             )
         };
         console::println!(
@@ -1787,7 +1943,7 @@ impl Xhci {
         let Some(slot_id) = self.slots[slot_idx].as_ref().map(|s| s.slot_id) else {
             return Err(Error::NoPortConnected);
         };
-        unsafe { write32(self.db_base + (slot_id as u64) * 4, dci) };
+        unsafe { reg::doorbell(self.db_base, slot_id).write(dci) };
         self.wait_transfer_event(slot_id, &[trb_addr]).map(|_| ())
     }
 
@@ -1989,15 +2145,10 @@ impl Scan {
 }
 
 unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
-    let caplength = (unsafe { read32(bar_base) } & 0xff) as u64;
-    let op_base = bar_base + caplength;
+    let (op_base, ir0_base, db_base) = unsafe { reg::locate(bar_base) };
     let hcsparams1 = unsafe { read32(bar_base + CAP_HCSPARAMS1) };
     let hcsparams2 = unsafe { read32(bar_base + CAP_HCSPARAMS2) };
     let hccparams1 = unsafe { read32(bar_base + CAP_HCCPARAMS1) };
-    let dboff = unsafe { read32(bar_base + CAP_DBOFF) } as u64 & !0x3;
-    let rtsoff = unsafe { read32(bar_base + CAP_RTSOFF) } as u64 & !0x1f;
-    let db_base = bar_base + dboff;
-    let ir0_base = bar_base + rtsoff + 0x20;
 
     // 32-byte contexts normally, 64-byte if the controller requires it
     // (HCCPARAMS1.CSZ) - a real, common configuration (QEMU's `qemu-xhci`
@@ -2019,7 +2170,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // reset write keeps. QEMU reads 0 in every RsvdP field; the board is
     // the only place a kept bit can show. Read only: no probe here
     // performs the operation in question.
-    let (usbcmd, usbsts) = unsafe { (read32(op_base + OP_USBCMD), read32(op_base + OP_USBSTS)) };
+    let (usbcmd, usbsts) = unsafe { (read32(op_base.at(OP_USBCMD)), read32(op_base.at(OP_USBSTS))) };
     console::println!(
         "Ouroboros kernel: xhci: as handed over: USBCMD {usbcmd:#x} (R/S {}, RsvdP {:#x}), USBSTS {usbsts:#x} (HCH {}, CNR {})",
         usbcmd & USBCMD_RUN != 0,
@@ -2033,7 +2184,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // slate" discipline as virtio_blk.rs::Device::init, since UEFI's own
     // xHCI driver (however it found and booted from this same hardware)
     // may have already initialized it.
-    if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
+    if !unsafe { poll_until(|| read32(op_base.at(OP_USBSTS)) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
     // xHCI 5.4.1: HCRST is not to be set while HCHalted is 0, so a
@@ -2043,11 +2194,11 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // wait, since no operational register is written before CNR clears.
     // Only when HCH is 0: the Pi's firmware hands the controller over
     // halted (2026-10-04), and there nothing is written here.
-    let found_running = unsafe { read32(op_base + OP_USBSTS) } & USBSTS_HCH == 0;
+    let found_running = unsafe { read32(op_base.at(OP_USBSTS)) } & USBSTS_HCH == 0;
     if found_running {
-        unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, 0) };
-        if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH != 0) } {
-            return Err(Error::HaltTimeout(unsafe { read32(op_base + OP_USBSTS) }));
+        unsafe { reg::usbcmd(op_base).write(0) };
+        if !unsafe { poll_until(|| read32(op_base.at(OP_USBSTS)) & USBSTS_HCH != 0) } {
+            return Err(Error::HaltTimeout(unsafe { read32(op_base.at(OP_USBSTS)) }));
         }
     }
     // HCH again with nothing between the read and the reset write, said
@@ -2057,22 +2208,22 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // what was read, not that the halt ran, so `found running true` with
     // `HCH true` is a halt done here, and with `HCH false` one that did
     // not happen (shown so by a mutation that skipped it, 2026-10-04).
-    let usbsts_at_reset = unsafe { read32(op_base + OP_USBSTS) };
-    unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_HCRST) };
+    let usbsts_at_reset = unsafe { read32(op_base.at(OP_USBSTS)) };
+    unsafe { reg::usbcmd(op_base).write(USBCMD_HCRST) };
     console::println!(
         "Ouroboros kernel: xhci: at the reset write: USBSTS {usbsts_at_reset:#x} (HCH {}, found running {found_running})",
         usbsts_at_reset & USBSTS_HCH != 0
     );
-    if !unsafe { poll_until(|| read32(op_base + OP_USBCMD) & USBCMD_HCRST == 0 && read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
+    if !unsafe { poll_until(|| read32(op_base.at(OP_USBCMD)) & USBCMD_HCRST == 0 && read32(op_base.at(OP_USBSTS)) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
     let (usbcmd_rsvdp, config_rsvdp, crcr_rsvdp, erstsz_rsvdp, erstba_rsvdp) = unsafe {
         (
-            read32(op_base + OP_USBCMD) & USBCMD_RSVDP,
-            read32(op_base + OP_CONFIG) & CONFIG_RSVDP,
-            read64(op_base + OP_CRCR) & CRCR_RSVDP,
-            read32(ir0_base + IR_ERSTSZ) & ERSTSZ_RSVDP,
-            read64(ir0_base + IR_ERSTBA) & ERSTBA_RSVDP,
+            reg::usbcmd(op_base).kept_bits(),
+            reg::config(op_base).kept_bits(),
+            reg::crcr(op_base).kept_bits(),
+            reg::erstsz(ir0_base).kept_bits(),
+            reg::erstba(ir0_base).kept_bits(),
         )
     };
     console::println!(
@@ -2080,7 +2231,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     );
 
     let slots_enabled = (max_slots as usize).min(MAX_SLOTS_ENABLED) as u32;
-    unsafe { write32_rsvdp(op_base + OP_CONFIG, CONFIG_RSVDP, slots_enabled) };
+    unsafe { reg::config(op_base).write(slots_enabled) };
 
     if scratchpad_count > MAX_SCRATCHPAD_BUFFERS {
         return Err(Error::TooManyScratchpadBuffers(scratchpad_count as u32));
@@ -2088,7 +2239,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // A scratchpad buffer is one controller page, PAGESIZE-sized and
     // -aligned; bit 0 is 4 KB, the size of `Page`. A controller that
     // cannot do 4 KB would write past each one into its neighbour.
-    let pagesize = unsafe { read32(op_base + OP_PAGESIZE) };
+    let pagesize = unsafe { read32(op_base.at(OP_PAGESIZE)) };
     if scratchpad_count > 0 && pagesize & 1 == 0 {
         return Err(Error::PageSizeNot4K(pagesize));
     }
@@ -2101,8 +2252,9 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         dcbaa[0] = SCRATCHPAD_ARRAY.0.get() as u64;
     }
     // Each register below hands the controller a structure just written
-    // to the DMA pool; `write32`'s barrier orders those stores first.
-    unsafe { write64(op_base + OP_DCBAAP, DCBAA.0.get() as u64) };
+    // to the DMA pool; the write's barrier (`mmio_write32`/`mmio_write64`)
+    // orders those stores first.
+    unsafe { reg::dcbaap(op_base).write(DCBAA.0.get() as u64) };
 
     // Command ring: producer cycle state starts at 1 (RCS=1), the Link
     // TRB (last slot) pre-set to match.
@@ -2111,7 +2263,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let ring_addr = COMMAND_RING.0.get() as u64;
         ring[CMD_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1]; // TC, cycle=1
     }
-    unsafe { write64_rsvdp(op_base + OP_CRCR, CRCR_RSVDP, (COMMAND_RING.0.get() as u64) | CRCR_RCS) };
+    unsafe { reg::crcr(op_base).write((COMMAND_RING.0.get() as u64) | CRCR_RCS) };
 
     // (Per-device EP0 transfer rings are initialized as each device
     // claims its pool entry during the port scan - see
@@ -2133,18 +2285,18 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // sampling ERDP at the ERSTBA write. ERSTSZ and ERSTBA keep their
     // RsvdP bits; ERDP has none and is written whole: its EHB is RW1C,
     // written 0.
-    unsafe { write32_rsvdp(ir0_base + IR_ERSTSZ, ERSTSZ_RSVDP, 1) };
-    unsafe { write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64) };
-    unsafe { write64_rsvdp(ir0_base + IR_ERSTBA, ERSTBA_RSVDP, ERST.0.get() as u64) };
+    unsafe { reg::erstsz(ir0_base).write(1) };
+    unsafe { reg::erdp(ir0_base).write(EVENT_RING.0.get() as u64) };
+    unsafe { reg::erstba(ir0_base).write(ERST.0.get() as u64) };
 
     // And reads the scratchpad array at Run.
-    unsafe { write32_rsvdp(op_base + OP_USBCMD, USBCMD_RSVDP, USBCMD_RUN) };
-    if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH == 0) } {
+    unsafe { reg::usbcmd(op_base).write(USBCMD_RUN) };
+    if !unsafe { poll_until(|| read32(op_base.at(OP_USBSTS)) & USBSTS_HCH == 0) } {
         return Err(Error::StartTimeout);
     }
     // A failed DMA fetch at Run (the ERST, the scratchpad array) sets HSE
     // and halts the controller; said here, not a command timeout later.
-    let usbsts = unsafe { read32(op_base + OP_USBSTS) };
+    let usbsts = unsafe { read32(op_base.at(OP_USBSTS)) };
     if usbsts & USBSTS_HSE != 0 {
         console::println!("Ouroboros kernel: xhci: WARNING: Host System Error after Run (USBSTS {usbsts:#x})");
     }
@@ -2191,8 +2343,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     loop {
         let mut mask = 0u64;
         for port in 1..=max_ports {
-            let portsc_addr = op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
-            if unsafe { read32(portsc_addr) } & PORTSC_CCS != 0 {
+            let portsc = reg::portsc(op_base, port);
+            if unsafe { portsc.read() } & PORTSC_CCS != 0 {
                 mask |= 1u64 << (port % 64);
             }
         }
@@ -2229,8 +2381,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // ordering constraint behind that.
     let mut scan = Scan::default();
     for port in 1..=max_ports {
-        let portsc_addr = op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
-        if unsafe { read32(portsc_addr) } & PORTSC_CCS == 0 {
+        let portsc = reg::portsc(op_base, port);
+        if unsafe { portsc.read() } & PORTSC_CCS == 0 {
             continue;
         }
         let loc = Location::root(port);
@@ -2238,7 +2390,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
             console::println!("Ouroboros kernel: xhci: more connected devices than the {MAX_DEVICES}-entry pool, skipping port {loc}");
             continue;
         };
-        let result = unsafe { setup_device_on_port(&mut xhci, dcbaa, idx, port, portsc_addr) };
+        let result = unsafe { setup_device_on_port(&mut xhci, dcbaa, idx, port, portsc) };
         scan.note(&mut xhci, dcbaa, idx, loc, result);
     }
 
@@ -2739,18 +2891,18 @@ fn portsc_needs_warm_reset(v: u32) -> bool {
 /// the port's state before it is returned.
 ///
 /// # Safety
-/// `portsc_addr` is the port's PORTSC register.
-unsafe fn reset_root_port(port: u32, portsc_addr: u64, warm: bool) -> Result<u32, Error> {
+/// `portsc` is the port's PORTSC register.
+unsafe fn reset_root_port(port: u32, portsc: reg::Whole32, warm: bool) -> Result<u32, Error> {
     let (set, done, kind) = if warm { (PORTSC_WPR, PORTSC_WRC | PORTSC_PRC, "warm") } else { (PORTSC_PR, PORTSC_PRC, "hot") };
-    let current = unsafe { read32(portsc_addr) };
-    unsafe { write32(portsc_addr, portsc_preserve(current) | set) };
-    if !unsafe { poll_until(|| read32(portsc_addr) & done == done) } {
-        let now = unsafe { read32(portsc_addr) };
+    let current = unsafe { portsc.read() };
+    unsafe { portsc.write(portsc_preserve(current) | set) };
+    if !unsafe { poll_until(|| portsc.read() & done == done) } {
+        let now = unsafe { portsc.read() };
         console::println!("Ouroboros kernel: xhci: port {port}: {kind} reset timed out: {}", Portsc(now));
         return Err(Error::PortResetTimeout);
     }
-    let after = unsafe { read32(portsc_addr) };
-    unsafe { write32(portsc_addr, portsc_preserve(after) | (after & (PORTSC_PRC | PORTSC_WRC | PORTSC_PLC))) };
+    let after = unsafe { portsc.read() };
+    unsafe { portsc.write(portsc_preserve(after) | (after & (PORTSC_PRC | PORTSC_WRC | PORTSC_PLC))) };
     Ok(after)
 }
 
@@ -2761,11 +2913,11 @@ unsafe fn reset_root_port(port: u32, portsc_addr: u64, warm: bool) -> Result<u32
 /// names the step for the log.
 ///
 /// # Safety
-/// `portsc_addr` is the port's PORTSC register.
-unsafe fn watch_port_enable(port: u32, portsc_addr: u64, when: &str) -> u32 {
+/// `portsc` is the port's PORTSC register.
+unsafe fn watch_port_enable(port: u32, portsc: reg::Whole32, when: &str) -> u32 {
     const MAX_LOGGED: u32 = 16;
     let deadline = poll_deadline();
-    let mut last = unsafe { read32(portsc_addr) };
+    let mut last = unsafe { portsc.read() };
     let mut changes = 0u32;
     loop {
         if portsc_enabled(last) {
@@ -2780,7 +2932,7 @@ unsafe fn watch_port_enable(port: u32, portsc_addr: u64, when: &str) -> u32 {
             console::println!("Ouroboros kernel: xhci: port {port}: not enabled {POLL_TIMEOUT_MS} ms {when} ({changes} changes): {}", Portsc(last));
             return last;
         }
-        let now = unsafe { read32(portsc_addr) };
+        let now = unsafe { portsc.read() };
         if now != last {
             changes += 1;
             if changes <= MAX_LOGGED {
@@ -2803,7 +2955,7 @@ unsafe fn setup_device_on_port(
     dcbaa: &mut [u64; MAX_SLOTS_ENABLED + 1],
     idx: usize,
     port: u32,
-    portsc_addr: u64,
+    portsc: reg::Whole32,
 ) -> Result<DeviceClass, Error> {
     console::println!("Ouroboros kernel: xhci: device connected on port {port}");
 
@@ -2816,12 +2968,12 @@ unsafe fn setup_device_on_port(
     // capture says which one, if any, brought it up: a wait for link
     // training to finish, then, from a state that requires one, a Warm
     // Reset.
-    let before = unsafe { read32(portsc_addr) };
+    let before = unsafe { portsc.read() };
     let warm_first = portsc_needs_warm_reset(before);
     if warm_first {
         console::println!("Ouroboros kernel: xhci: port {port}: link state {} before the reset, warm reset: {}", portsc_pls(before), Portsc(before));
     }
-    let mut current = unsafe { reset_root_port(port, portsc_addr, warm_first)? };
+    let mut current = unsafe { reset_root_port(port, portsc, warm_first)? };
     if !portsc_enabled(current) {
         console::println!(
             "Ouroboros kernel: xhci: port {port}: not enabled after the {} reset; before it {}, after it {}",
@@ -2829,12 +2981,12 @@ unsafe fn setup_device_on_port(
             Portsc(before),
             Portsc(current)
         );
-        current = unsafe { watch_port_enable(port, portsc_addr, "after the reset") };
+        current = unsafe { watch_port_enable(port, portsc, "after the reset") };
         if !warm_first && !portsc_enabled(current) && current & PORTSC_CCS != 0 && portsc_needs_warm_reset(current) {
             console::println!("Ouroboros kernel: xhci: port {port}: link state {}, warm reset", portsc_pls(current));
-            current = unsafe { reset_root_port(port, portsc_addr, true)? };
+            current = unsafe { reset_root_port(port, portsc, true)? };
             if !portsc_enabled(current) {
-                current = unsafe { watch_port_enable(port, portsc_addr, "after the warm reset") };
+                current = unsafe { watch_port_enable(port, portsc, "after the warm reset") };
             }
         }
         if !portsc_enabled(current) {
@@ -3387,8 +3539,8 @@ pub(crate) fn rescan_ports() {
     };
     let dcbaa = unsafe { &mut *DCBAA.0.get() };
     for port in 1..=x.max_ports {
-        let portsc_addr = x.op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
-        if unsafe { read32(portsc_addr) } & PORTSC_CCS == 0 {
+        let portsc = reg::portsc(x.op_base, port);
+        if unsafe { portsc.read() } & PORTSC_CCS == 0 {
             continue;
         }
         if x.slots.iter().flatten().any(|s| s.loc.root_port == port) {
@@ -3398,7 +3550,7 @@ pub(crate) fn rescan_ports() {
             console::println!("Ouroboros kernel: xhci: rescan: device pool full, skipping port {port}");
             break;
         };
-        match unsafe { setup_device_on_port(x, dcbaa, idx, port, portsc_addr) } {
+        match unsafe { setup_device_on_port(x, dcbaa, idx, port, portsc) } {
             Ok(DeviceClass::Storage(ep_in, ep_out, config)) if x.storage.is_none() => {
                 console::println!("Ouroboros kernel: xhci: rescan: port {port}: USB mass storage - activating");
                 if let Err(e) = unsafe { activate_storage(x, idx, ep_in, ep_out, config) } {
