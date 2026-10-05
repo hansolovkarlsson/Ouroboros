@@ -20,16 +20,24 @@ This document is the one to update first when direction changes.
 
 ## What's next (the current frontier)
 
+> **Released 2026-10-04: v0.22.0, the Raspberry Pi 4 runs a full session**
+> (#176 to #207, recorded in [`CHANGELOG.md`](CHANGELOG.md) and
+> [`roadmap-completed.md`](roadmap-completed.md); the board's record is
+> `testing/testing-pi4.md` section 6). The Pi's open directions are under "The
+> Raspberry Pi, after the first full session" below; per-user keys steps 0 to
+> 4 went out in the same release, with step 5 next (item 1).
+
 > **Done 2026-09-26: session-scoped authentication**
 > ([`roadmap-session-auth.md`](roadmap/roadmap-session-auth.md), moved to
 > [`roadmap-completed.md`](roadmap-completed.md)). A held session is keyed: an
 > X25519 exchange inside the signed `NP_SESSION`, then an HMAC and a strict
 > sequence number per message. The four crypto operations per fid verb fell
 > from 2,926 µs to 169 µs, and the median verb cycle from 7.50 ms to 4.53 ms.
-> **Still owed from it:** the boot identity measured on the Pi 4 (checkpoint 9
-> of `testing-pi4.md`) and on Parallels (A6 of `testing-parallels.md`): which
-> store serves the counter there, and whether the firmware offers
-> `EFI_RNG_PROTOCOL`. A node without entropy keys its sessions with no forward
+> **Still owed from it:** the boot identity measured on Parallels (A6 of
+> `testing-parallels.md`): which store serves the counter there, and whether
+> the firmware offers `EFI_RNG_PROTOCOL`. The Pi 4 answered on its first
+> serial boot (2026-10-01, `testing-pi4.md` section 6): 32 bytes of entropy,
+> and the counter from `\EFI\ORBS\BOOTID.TXT` with the UEFI variable absent. A node without entropy keys its sessions with no forward
 > secrecy, which the plan states rather than claims.
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),

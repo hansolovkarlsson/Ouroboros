@@ -60,6 +60,7 @@ is `0.5.0`.
 | `0.19.0` | 2026-09-07 | delegation reworked (grants accumulate, one-step-down rule, `SENDER_TASK`/`TASK_IDENTITY`), network programs in pipelines, C `open()` on a remote mount, `FS_ERR_NO_SUCH_VERB` (floor to `MAX-39`), MIT licence, `docs/` folders |
 | `0.20.0` | 2026-09-22 | the fid verbs reach the export (C `open()`/`read()`/`write()` on a remote file), the keyboard follows a chain, the remote mount goes asynchronous; error floor to `MAX-43` |
 | `0.21.0` | 2026-09-26 | held sessions keyed (X25519 + HMAC-SHA-512, `AUTHNP04`, offered not required: no flag day), the kernel boot identity (`BOOT_ID`), a park never signs |
+| `0.22.0` | 2026-10-04 | the Raspberry Pi 4 runs a full session (own stack, EL2 to EL1 drop, xHCI on non-coherent PCIe, hubs, `make sdcard`/`make stick`); per-user keys steps 0 to 4 below the wire; root squash; version-2 shadow lines |
 
 ## Four things that have bitten, and how to avoid them
 
