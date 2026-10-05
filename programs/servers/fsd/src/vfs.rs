@@ -61,6 +61,11 @@ pub struct Stat {
 }
 
 /// A mounted filesystem, whatever its on-disk format.
+// FAT32's arm carries a one-sector FAT cache (`fat32::Fs::fat_cache`), 512
+// bytes the others lack. `fsd` has no heap to box it in, and the mount table
+// (`MAX_MOUNTS`, five) lives on its stack: about 2.7 KB of the 56 KB the
+// loader gives it, taken knowingly.
+#[allow(clippy::large_enum_variant)]
 pub enum Filesystem {
     Fat32(fat32::Fs),
     /// exFAT, read-write (see [`exfat`]).
@@ -144,6 +149,15 @@ impl Filesystem {
             Filesystem::ExFat(_) => "exFAT",
             Filesystem::Ext2(_) => "ext2",
             Filesystem::Proc(_) => "proc",
+        }
+    }
+
+    /// Called on every mounted filesystem before each request: drops what
+    /// may only be cached within one request (FAT32's FAT sector, see
+    /// `fat32::Fs::fat_cache`).
+    pub fn begin_request(&mut self) {
+        if let Filesystem::Fat32(fs) = self {
+            fs.begin_request();
         }
     }
 

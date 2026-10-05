@@ -343,6 +343,11 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
+    // Before anything reads the disk: a cache kept from the last request
+    // may be stale, since two trees can hold the same partition.
+    for fs in mounts.iter_mut().flatten() {
+        fs.begin_request();
+    }
     let op = read_u64(req, 0);
 
     // WHO this request is authorized as, resolved ONCE here so that every check
