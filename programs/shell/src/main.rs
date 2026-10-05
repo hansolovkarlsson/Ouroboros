@@ -618,7 +618,7 @@ fn complete_word(buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &[u8; CWD_SI
 // buffer; `ls` is a /bin program now, so its listing buffer lives in the
 // `ls` crate over `ulib`.)
 // The redirect/pipe capture buffer used to be a fixed stack array
-// (`CAPTURE_SIZE`, 1024 bytes); it's the program's 256KB heap region now
+// (`CAPTURE_SIZE`, 1024 bytes); it's the program's heap region now
 // (`get_heap` / `Output::Capture`), so a large capture like
 // `cat big > file` fits and is written to disk in `SAFECOPY_MAX` chunks
 // (`write_all`) rather than refused. Output larger than the heap still
@@ -775,7 +775,7 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
 /// [`dispatch_line`], then - for a redirect - writes the captured output
 /// to the target file ([`finish_redirect`]).
 /// This program's heap region as a mutable byte slice (see the `heap_info`
-/// syscall): a 256KB raw buffer the shell uses to hold a redirect/pipe
+/// syscall): a raw buffer, its size what `HEAP_INFO` reports, the shell uses to hold a redirect/pipe
 /// capture far larger than its stack (the loader's `STACK_PAGES`; `heap_info`
 /// reports both extents). Not an allocator - just this
 /// program's own EL0-accessible heap area.

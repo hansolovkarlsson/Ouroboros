@@ -184,11 +184,14 @@ Semantics, deliberately close to `sh` where the architecture allows:
 
 Limits, all refuse-outright rather than write-something-wrong:
 
-- A command's redirected output is captured in the shell's **256KB heap
+- A command's redirected output is captured in the shell's **1 MiB heap
   region** (the userland-heap milestone — a raw buffer far larger than the
   stack, so `cat big > file` fits and is written to disk in `SAFECOPY_MAX`
-  chunks); a command that emits more than 256KB prints
-  `output too large to capture` and **nothing is written at all**.
+  chunks); a command that emits more than 1 MiB prints
+  `output too large to capture` and **nothing is written at all**. One
+  limit is not a refusal: writing a FAT32 file past about 170 KB can stall
+  `fsd` long enough for the supervisor to restart it, leaving the file
+  short, whether by a redirect or by `cp` (on the roadmap).
 - `>>` **appends at the file's end via the FAT32 offset-write
   primitive** (`write_at`) — no read-back of the existing content, so it
   works on a target file of **any existing size** (the old
@@ -253,7 +256,7 @@ cat out.txt                          ->  Hello from a second program! ...
 **`a | b > file`** (and `>> file`) **redirects the pipeline's output to a
 file** — the last stage's output is captured by the shell and written to the
 file (create/replace for `>`, append for `>>`), exactly the way a single
-`cmd > file` is captured, and subject to the same 256KB-capture limit. The
+`cmd > file` is captured, and subject to the same 1 MiB capture limit. The
 redirect is parsed off first, so the `|` chain runs normally with only its
 last stage's destination changed:
 
@@ -314,7 +317,7 @@ killed after the same timeout.
   256-byte line buffer with no heap — a longer line is handled in pieces
   (`tail` truncates it), the shared caveat of these fixed-buffer filters.
   `sort` is the exception: it *can't* stream (it must see every line before
-  emitting one), so it buffers the whole input in its 256KB heap and sorts an
+  emitting one), so it buffers the whole input in its heap and sorts an
   in-place line index, with a documented size cap (a larger input is truncated
   and a warning is printed to the console). See the Pipelines section.
 - **Write granularity: `write` full-replaces; `writeat`/`>>`/`cp` do

@@ -204,8 +204,14 @@ pub(crate) const GUARD_PAGES: u64 = 1;
 /// syscall), not a `GlobalAlloc`-backed heap. It lets a program hold data
 /// far larger than its stack (`STACK_PAGES`): the shell backs its redirect/pipe
 /// capture with it, so `cat big > file` captures the whole file instead of
-/// refusing. 256KB, still far inside one 2MB slot.
-const HEAP_PAGES: u64 = 64;
+/// refusing. 1 MiB since 2026-10-05 (256 KiB before): Proem's preprocessor
+/// holds 342 KB live for `libc/picodemo.c` and 667 KB for its C11-header
+/// test, on top of picolibc's own (`docs/handoffs/` from Proem,
+/// heap-growth). It costs no RAM, since every region is rounded to a whole
+/// slot already, only code room: 512 pages less this tail leaves 241 for a
+/// program's image, `HEAP_INFO_IMAGE_MAX`, against 135 KiB for the
+/// largest, `netd`.
+const HEAP_PAGES: u64 = 256;
 /// 2MB: the L2 slot `mmu.rs` splits into pages for a task's EL0 view, so
 /// the bound every region must fit (see the module doc comment). One
 /// definition, read by `tasks.rs`'s runtime region allocator (whose

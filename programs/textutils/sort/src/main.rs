@@ -1,12 +1,12 @@
 //! `sort [-r] [-n] [-u] [-f]` - the one line filter that *can't* stream: it
 //! must read all of stdin before it can emit a single line. Unlike the other
 //! filters (which keep only a fixed line buffer or a small ring), `sort`
-//! buffers the whole input, so it uses this program's 256KB heap
+//! buffers the whole input, so it uses this program's heap (`HEAP_INFO`'s size)
 //! (`ulib::heap`) rather than the stack - the input bytes in the front, a
 //! line index (start+len per line) reinterpreted from the heap's tail.
 //!
 //! **Bounded, with a documented cap** (the roadmap's requirement): input is
-//! held in `DATA_CAP` bytes and up to `MAX_LINES` lines; a larger input is
+//! held in `data_cap` bytes (the heap less the index) and up to `MAX_LINES` lines; a larger input is
 //! **truncated** at the cap, sorted, and emitted, with a one-line warning to
 //! the console (not into the sorted output). This is the "documented size cap"
 //! rather than an unbounded (impossible here) sort.
@@ -24,7 +24,7 @@
 use core::cmp::Ordering;
 
 /// Most lines we index (the heap tail holds this many start+len `u32` pairs).
-/// 8192 * 8 bytes = 64KB of the 256KB heap reserved for the index.
+/// 8192 * 8 bytes = 64KB of the heap reserved for the index.
 const MAX_LINES: usize = 8192;
 /// Bytes of the heap reserved for the line index (`MAX_LINES` * two `u32`).
 const INDEX_BYTES: usize = MAX_LINES * 8;

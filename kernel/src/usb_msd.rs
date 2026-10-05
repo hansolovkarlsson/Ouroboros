@@ -278,8 +278,8 @@ fn recovery_log(line: core::fmt::Arguments) {
 
 /// One full BOT command with bounded error recovery. Runs
 /// [`bot_command_once`], which repairs a Stall in the data stage or on the
-/// CSW read in place; on any other bulk-transfer failure (`Error::Transfer`
-/// - a Stall of the CBW, a timeout, or an in-place repair that failed),
+/// CSW read in place; on any other bulk-transfer failure (`Error::Transfer`:
+/// a Stall of the CBW, a timeout, or an in-place repair that failed),
 /// resets both bulk endpoints (`xhci::storage_reset_endpoint`) and retries
 /// from the CBW, up to `MAX_ATTEMPTS`. A CSW-level failure
 /// (`CommandFailed`/`CswMismatch`/`ShortData`) is *not* retried here -
