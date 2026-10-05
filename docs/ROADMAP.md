@@ -881,15 +881,20 @@ The small open tails those arcs deliberately left:
   and the tick reaches the CPU only at EL0, so a tick fired during a disk
   read is taken when `fsd` returns to EL0, `Runnable`, and 128 such ticks
   in a row restarted it. Now the `MSG_RECV` arm calls
-  `supervisor::note_progress` on every call (and `MSG_TRY_RECV` when it
-  returns a message), which clears the passive count: a server back at its
+  `supervisor::note_progress` on every call (not `MSG_TRY_RECV`, which
+  `netd` polls from inside its long loops), which clears the passive
+  count: a server back at its
   receive has finished its last request, and one wedged in a loop never
   gets there. Shown: the copy completes, 758,272 bytes, `cmp`-identical to
   the source from the host; a temporary mutation that spins `fsd` on a
   path holding `WEDGEME` is still restarted after the wedge time, in the
   same boot; without the change the copy is cut short. This is a partial
   answer to the open question below for the passive arm only; the ping
-  arm is unchanged.
+  arm is unchanged. Its review (`/code-review high`, seven findings) took
+  `MSG_TRY_RECV` out, and left one: a single request longer than the
+  wedge time is still a wedge, and `write_at`'s cost grows with the
+  offset (the item above), so a large enough file, or a slow enough
+  disk such as the Pi's USB stick, can still be restarted mid-write.
 
 - **A long loop's acks let pings pile up in the mailbox (found 2026-09-27,
   in review).** A server clears `ping_outstanding` when it is seen

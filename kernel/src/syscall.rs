@@ -1273,13 +1273,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !valid_msg_range(arg0, arg1) {
                 return FS_ERROR;
             }
-            match tasks::try_recv_message(tasks::current_task(), arg0, arg1) {
-                Some(packed) => {
-                    crate::supervisor::note_progress(tasks::current_task());
-                    packed
-                }
-                None => syscall_abi::NO_MSG,
-            }
+            // Not progress for the wedge heartbeat, even with a message:
+            // `netd` drains its mailbox with this from inside its own long
+            // loops, so a message taken here says nothing about whether the
+            // loop is still advancing (the review of #211).
+            tasks::try_recv_message(tasks::current_task(), arg0, arg1).unwrap_or(syscall_abi::NO_MSG)
         }
         syscall_abi::MSG_CALL => {
             let dest = arg0 as usize;

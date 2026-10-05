@@ -561,8 +561,8 @@ taken during a disk read lands as `fsd` returns to EL0. Since then reaching
 make image
 python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
   '# @@cp /EFI/BOOT/BOOTAA64.EFI /k.bin' '# @@ls -l /k.bin' '# @@'
-hdiutil attach -readonly -mountpoint /tmp/esp build/esp.img
-cmp /tmp/esp/k.bin /tmp/esp/EFI/BOOT/BOOTAA64.EFI && hdiutil detach /tmp/esp
+hdiutil attach -readonly -nobrowse -mountpoint /tmp/esp build/esp.img
+cmp /tmp/esp/k.bin /tmp/esp/EFI/BOOT/BOOTAA64.EFI; hdiutil detach /tmp/esp
 ```
 
 Expected: no `wedged` line, `/k.bin` 758272 bytes, `cmp` silent. Before the

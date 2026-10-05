@@ -122,8 +122,9 @@ struct Entry {
     image_len: usize,
     /// Crash + wedge restarts so far this boot, vs [`MAX_RESTARTS`].
     restarts: u32,
-    /// Heartbeat: consecutive ticks observed `Runnable` (reset on any
-    /// `Blocked` state, and on a restart).
+    /// Heartbeat: consecutive ticks observed `Runnable`, reset on any
+    /// `Blocked` state, on a restart, and when the server reaches its
+    /// receive or acks ([`note_progress`], [`note_ack`]).
     runnable_ticks: u32,
     /// Active ping: whether a ping is currently awaiting an ack.
     ping_outstanding: bool,
@@ -285,8 +286,10 @@ pub fn restart(slot: usize) {
 /// `on_tick`. `blocked` = the server is currently in *any* `Blocked` state
 /// (idle in `msg_recv`, or waiting on a sub-call - both mean it's making
 /// progress, not wedged). Returns `true` exactly once, when the server has
-/// been continuously `Runnable` for [`WEDGE_TICKS`] - the wedge signal, on
-/// which the caller restarts it. A no-op for an unregistered slot.
+/// been observed `Runnable` at [`WEDGE_TICKS`] ticks in a row with no
+/// receive or ack between them ([`note_progress`], [`note_ack`]) - the
+/// wedge signal, on which the caller restarts it. A no-op for an
+/// unregistered slot.
 pub fn heartbeat(slot: usize, blocked: bool) -> bool {
     let reg = unsafe { &mut *REGISTRY.get() };
     let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
@@ -333,32 +336,32 @@ pub fn note_ack(slot: usize) {
         // A genuinely wedged server never reaches the line that sends this, so
         // the passive arm still catches the case it was written for. What it
         // stops doing is punishing a server for being busy.
-        e.runnable_ticks = 0;
         e.ping_outstanding = false;
         e.ping_wait = 0;
         e.idle_ticks = 0;
     }
+    note_progress(slot);
 }
 
 /// Record that `slot` is back at its receive: the `MSG_RECV` arm calls
-/// this on every call, and `MSG_TRY_RECV` when it hands a message over (a
-/// poll that finds nothing is not progress: a server can spin on it).
-/// Clears the passive counter only, the way [`note_ack`] does: a server
-/// that has come back for its next request has finished the last one, and
-/// a server wedged in a loop never gets there.
+/// this on entry, before it takes or waits for a message. Clears the
+/// passive counter only: a server that calls its blocking receive has
+/// finished its last request, and a server wedged in a loop never gets
+/// there. `MSG_TRY_RECV` does not call it, since `netd` polls that from
+/// inside its own long loops, where taking a message says nothing about
+/// the loop.
 ///
 /// Why: [`heartbeat`] samples task state at the tick, and the tick reaches
 /// the CPU only at EL0 (the kernel runs with IRQs masked), so a tick that
 /// fires while a server is inside a syscall, such as a disk read, is taken
-/// when that server returns to EL0, `Runnable`. A server busy with a
-/// stream of requests that each spend most of their time in the kernel is
-/// therefore seen `Runnable` at every tick, and past [`WEDGE_TICKS`] is
-/// restarted mid-stream. `cp` of a 758 KB file did that to `fsd` at about
-/// 170 KB on 2026-10-05: each 2 KiB write took at most two ticks, with up
-/// to 353 sector reads each, and the file was left short. `netd`, which polls rather than blocks, has sent its own acks
-/// for the same reason since 2026-09-03 (see [`note_ack`]); this is the
-/// same signal for every server, given by the kernel, which sees the
-/// message handed over. A no-op for an unregistered slot.
+/// when that server returns to EL0, `Runnable`. A server busy with a stream
+/// of requests that each spend most of their time in the kernel is
+/// therefore seen `Runnable` at every tick, and past [`WEDGE_TICKS`] was
+/// restarted mid-stream: `cp` of a 758 KB file did that to `fsd` at about
+/// 170 KB on 2026-10-05, each 2 KiB write within two ticks, the file left
+/// short. What it does not cover: ONE request longer than `WEDGE_TICKS`
+/// is still judged a wedge, as before. `netd`'s long loops send their own
+/// acks for that ([`note_ack`]). A no-op for an unregistered slot.
 pub fn note_progress(slot: usize) {
     let reg = unsafe { &mut *REGISTRY.get() };
     if let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) {
