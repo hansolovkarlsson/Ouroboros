@@ -865,7 +865,31 @@ The small open tails those arcs deliberately left:
   `heartbeat()` per chunk in `cpu_spawn`), and it is still slow. Two
   independent cures: read by fid (`NP_OPEN` once, then `NP_PREAD`), and a
   small FAT-sector cache in `fat32.rs`. Neither is needed for correctness
-  now.
+  now. The write side, measured 2026-10-05 with counters in `fsd`: `cp` of
+  a 758 KB file made 23 reads for its first 2 KiB `write_at` and 353 at
+  160 KB (the walk, plus `find_free_cluster` scanning from cluster 2 for
+  each new cluster), each request still inside two ticks on QEMU. On the
+  Pi, where a read is a USB transfer, it is the same count at a higher
+  price.
+
+- ~~**A server busy with a stream of requests is restarted as wedged
+  (found 2026-10-05).**~~ **FIXED 2026-10-05** on `fsd/large-write`: `cp`
+  of a 758 KB file had `fsd` restarted at about 170 KB (`server slot 2
+  wedged - no progress (runnable)`), the copy left short, with or without
+  #210's 1 MiB heap. No request was slow: counters in `fsd` showed each
+  2 KiB write inside two ticks. The heartbeat samples state at the tick,
+  and the tick reaches the CPU only at EL0, so a tick fired during a disk
+  read is taken when `fsd` returns to EL0, `Runnable`, and 128 such ticks
+  in a row restarted it. Now the `MSG_RECV` arm calls
+  `supervisor::note_progress` on every call (and `MSG_TRY_RECV` when it
+  returns a message), which clears the passive count: a server back at its
+  receive has finished its last request, and one wedged in a loop never
+  gets there. Shown: the copy completes, 758,272 bytes, `cmp`-identical to
+  the source from the host; a temporary mutation that spins `fsd` on a
+  path holding `WEDGEME` is still restarted after the wedge time, in the
+  same boot; without the change the copy is cut short. This is a partial
+  answer to the open question below for the passive arm only; the ping
+  arm is unchanged.
 
 - **A long loop's acks let pings pile up in the mailbox (found 2026-09-27,
   in review).** A server clears `ping_outstanding` when it is seen

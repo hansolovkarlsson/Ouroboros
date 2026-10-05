@@ -1251,6 +1251,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !valid_msg_range(arg0, arg1) {
                 return FS_ERROR;
             }
+            // A server back at its receive has finished its last request:
+            // progress, for the wedge heartbeat, which may never see it
+            // blocked (`supervisor::note_progress`).
+            crate::supervisor::note_progress(tasks::current_task());
             // Fast path: a message is already queued.
             if let Some(packed) = tasks::try_recv_message(tasks::current_task(), arg0, arg1) {
                 return packed;
@@ -1269,7 +1273,13 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !valid_msg_range(arg0, arg1) {
                 return FS_ERROR;
             }
-            tasks::try_recv_message(tasks::current_task(), arg0, arg1).unwrap_or(syscall_abi::NO_MSG)
+            match tasks::try_recv_message(tasks::current_task(), arg0, arg1) {
+                Some(packed) => {
+                    crate::supervisor::note_progress(tasks::current_task());
+                    packed
+                }
+                None => syscall_abi::NO_MSG,
+            }
         }
         syscall_abi::MSG_CALL => {
             let dest = arg0 as usize;

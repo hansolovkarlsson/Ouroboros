@@ -84,7 +84,9 @@ const MAX_RESTARTS: u32 = 3;
 /// the heartbeat declares it wedged. At `timer::TICK_INTERVAL_MS` (20ms)
 /// this is ~2.5s - safely above any real request (servers return to
 /// `Blocked(recv)` in far less than one tick), while still recovering a
-/// genuine wedge promptly. Tunable.
+/// genuine wedge promptly. Tunable. A busy server may never be SEEN
+/// blocked, though (the tick lands when it returns to EL0), so reaching
+/// `msg_recv` also resets the count: [`note_progress`].
 const WEDGE_TICKS: u32 = 128;
 
 /// How often (in ticks) the active ping pokes a server that's been sitting
@@ -335,6 +337,32 @@ pub fn note_ack(slot: usize) {
         e.ping_outstanding = false;
         e.ping_wait = 0;
         e.idle_ticks = 0;
+    }
+}
+
+/// Record that `slot` is back at its receive: the `MSG_RECV` arm calls
+/// this on every call, and `MSG_TRY_RECV` when it hands a message over (a
+/// poll that finds nothing is not progress: a server can spin on it).
+/// Clears the passive counter only, the way [`note_ack`] does: a server
+/// that has come back for its next request has finished the last one, and
+/// a server wedged in a loop never gets there.
+///
+/// Why: [`heartbeat`] samples task state at the tick, and the tick reaches
+/// the CPU only at EL0 (the kernel runs with IRQs masked), so a tick that
+/// fires while a server is inside a syscall, such as a disk read, is taken
+/// when that server returns to EL0, `Runnable`. A server busy with a
+/// stream of requests that each spend most of their time in the kernel is
+/// therefore seen `Runnable` at every tick, and past [`WEDGE_TICKS`] is
+/// restarted mid-stream. `cp` of a 758 KB file did that to `fsd` at about
+/// 170 KB on 2026-10-05: each 2 KiB write took at most two ticks, with up
+/// to 353 sector reads each, and the file was left short. `netd`, which polls rather than blocks, has sent its own acks
+/// for the same reason since 2026-09-03 (see [`note_ack`]); this is the
+/// same signal for every server, given by the kernel, which sees the
+/// message handed over. A no-op for an unregistered slot.
+pub fn note_progress(slot: usize) {
+    let reg = unsafe { &mut *REGISTRY.get() };
+    if let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) {
+        e.runnable_ticks = 0;
     }
 }
 
