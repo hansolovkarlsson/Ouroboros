@@ -15,14 +15,16 @@
  * If netd closed the connection after each verb (the mutation control), the
  * remote read fails partway and the compare - or the size - differs.
  *
- * Fixed paths, because C programs get no argv yet. Run on node B after
- * `mount -r 10.0.2.10:564 /mnt/a` (or 10.0.2.11 from A).
+ * The remote copy is the first argument, `/mnt/a/man/grep` when there is
+ * none; an absolute path on a remote mount, or the program refuses to run. Run on node B after `mount -r 10.0.2.10:564 /mnt/a` (or 10.0.2.11
+ * from A).
  */
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include "sys.h"
+#include "nsresolve.h"
 
 /* Read the whole file at `path` into `buf` (up to `cap`), returning the byte
  * count or -1. One read() per call is enough: libc's read() loops internally,
@@ -51,7 +53,27 @@ static long slurp(const char *path, unsigned char *buf, long cap) {
     return got;
 }
 
-int main(void) {
+/* Whether `path` names a file on a REMOTE mount, through the same namespace
+ * resolver open() uses. The path argument must: given a local one, the remote
+ * checks below would test the local route and pass, proving nothing. */
+static int is_remote(const char *path) {
+    char out[96];
+    unsigned long n = 0;
+    unsigned target = 0;
+    unsigned char ep[NS_ENDPOINT_LEN];
+    if (path[0] != '/' ||
+        ouro_ns_resolve(path, strlen(path), out, sizeof out, &n, &target, ep) != 0) {
+        return 0;
+    }
+    return (target & 0xff) == NS_TARGET_REMOTE;
+}
+
+int main(int argc, char **argv) {
+    const char *rpath = argc > 1 ? argv[1] : "/mnt/a/man/grep";
+    if (!is_remote(rpath)) {
+        printf("cbig: %s is not on a remote mount; usage: cbig [/remote/copy]\r\n", rpath);
+        return 2;
+    }
     static unsigned char local[8192];
     static unsigned char remote[8192];
 
@@ -60,9 +82,9 @@ int main(void) {
         printf("cbig: local /man/grep read failed: %s\r\n", ouro_fs_strerror());
         return 1;
     }
-    long rn = slurp("/mnt/a/man/grep", remote, sizeof remote);
+    long rn = slurp(rpath, remote, sizeof remote);
     if (rn < 0) {
-        printf("cbig: remote /mnt/a/man/grep read failed: %s\r\n", ouro_fs_strerror());
+        printf("cbig: remote %s read failed: %s\r\n", rpath, ouro_fs_strerror());
         return 1;
     }
     /* The check that can fail: same length, same bytes, and longer than one

@@ -337,6 +337,11 @@ CHECKED = [
     "HEAP_INFO_STACK_BASE",
     "HEAP_INFO_STACK_SIZE",
     "HEAP_INFO_IMAGE_MAX",
+    # crt0's argv (step 1 of docs/roadmap/roadmap-c-hosting.md): GET_ARG's
+    # out-of-range answer, and the blob bound crt0 sizes its storage by. A
+    # wrong NO_ARG would read every argument as present or none as present.
+    "NO_ARG",
+    "ARGV_MAX",
     # NP_OPEN's a0. The server has spelled all four since step 2 and the C
     # header since step 3b, unpinned until step 5 (2026-09-12) gave the client
     # a reason to spell OPEN_READ too. A drift here is the quiet kind: a peer
@@ -427,7 +432,7 @@ PEER_BASELINE = {
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 56,  # counted 2026-10-05 (run, not added up): 56 with fstat's six STAT_* names; 50 with NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
+    "libc/include/sys.h": 58,  # counted 2026-10-05 (run, not added up): 58 with NO_ARG and ARGV_MAX for crt0's argv; 56 with fstat's six STAT_* names; 50 with NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 

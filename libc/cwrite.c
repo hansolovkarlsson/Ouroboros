@@ -10,7 +10,9 @@
  * Self-checking, no host oracle: it writes a known pattern and compares the
  * read-back against it.
  *
- * Fixed path, because C programs get no argv yet. Run on node B after
+ * A fixed path on purpose, not an argument: the file is opened O_TRUNC and
+ * overwritten with the pattern, so a path from the command line would let a
+ * typo empty a real file (`cwrite /etc/passwd` as root). Run on node B after
  * `mount -r 10.0.2.10:564 /mnt/a`. Run it as ROOT for the positive case (root
  * may write A's root dir); as a normal USER the create is REFUSED (no write on
  * A's root-owned directory), which is step 7's permission control and needs

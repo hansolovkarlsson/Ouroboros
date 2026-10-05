@@ -1,8 +1,9 @@
 /* Open and read a file on a REMOTE mount, from C - step 3b of
  * docs/roadmap/roadmap-fid-verbs.md, and the thing that could not be done before.
  *
- * Fixed paths, because C programs get no argv yet (crt0.c calls main() with no
- * arguments). Run it after `mount -r <host>:<port> /mnt/a`.
+ * The remote file is the first argument, `/mnt/a/HELLO.TXT` when there is
+ * none; an absolute path on a remote mount, or the program refuses to run.
+ * Run it after `mount -r <host>:<port> /mnt/a`.
  *
  * The local path is checked FIRST and deliberately: every existing C program
  * takes that route, so a change that fixed the remote case by breaking the
@@ -14,6 +15,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "sys.h"
+#include "nsresolve.h"
 
 static int try_read(const char *path) {
     int fd = open(path, O_RDONLY);
@@ -71,10 +73,30 @@ static int must_leave(const char *what, unsigned long expected) {
     return 1;
 }
 
-int main(void) {
+/* Whether `path` names a file on a REMOTE mount, through the same namespace
+ * resolver open() uses. The path argument must: given a local one, the remote
+ * checks below would test the local route and pass, proving nothing. */
+static int is_remote(const char *path) {
+    char out[96];
+    unsigned long n = 0;
+    unsigned target = 0;
+    unsigned char ep[NS_ENDPOINT_LEN];
+    if (path[0] != '/' ||
+        ouro_ns_resolve(path, strlen(path), out, sizeof out, &n, &target, ep) != 0) {
+        return 0;
+    }
+    return (target & 0xff) == NS_TARGET_REMOTE;
+}
+
+int main(int argc, char **argv) {
+    const char *remote = argc > 1 ? argv[1] : "/mnt/a/HELLO.TXT";
+    if (!is_remote(remote)) {
+        printf("cremote: %s is not on a remote mount; usage: cremote [/remote/file]\r\n", remote);
+        return 2;
+    }
     int bad = 0;
     bad |= try_read("/EFI/ORBS/INIT.CFG");  /* local - the no-regression check */
-    bad |= try_read("/mnt/a/HELLO.TXT");    /* remote - the new capability */
+    bad |= try_read(remote);                /* remote - the new capability */
 
     /* O_TRUNC WITHOUT O_CREAT on a missing file must fail (POSIX ENOENT). fsd
      * used to create it, and the sibling O_RDONLY fix left this branch alone. */
@@ -87,7 +109,7 @@ int main(void) {
     /* A remote WRITE must be refused, not silently dropped. It used to grant a
      * buffer that never crosses a machine and send a payload-free request,
      * which would have reported success while transmitting nothing. */
-    fd = open("/mnt/a/HELLO.TXT", O_RDONLY);
+    fd = open(remote, O_RDONLY);
     if (fd >= 0) {
         ssize_t n = write(fd, "x", 1);
         bad |= must_refuse("write() to a remote fd", n >= 0);
