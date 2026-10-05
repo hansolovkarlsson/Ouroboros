@@ -2224,6 +2224,19 @@ be reviewed after the fact from the saved screenshots.
 > of its own; and **an editor**, whose catch is that the console offers no
 > termios for one in the kilo style, so a line editor comes first.
 >
+> **A third came before either, found when CPP (now Proem) was the first tool
+> to port (2026-09-29): the C runtime is not yet a Unix command's.** `crt0.c`
+> calls `main(void)`, so a C program gets no argv although the kernel has had
+> `GET_ARGC`/`GET_ARG` since the standalone-binaries arc; `file.c` sets no
+> `errno`, which Proem's include search depends on; and picolibc's `environ`,
+> `stat` and `gettimeofday` have no port, so Proem does not even link. Add the
+> headers on the disk and the fixed 64-page heap, and this is an arc of its
+> own, first in the chain and useful to every C program. Eight steps with a
+> check each: [`roadmap-c-hosting.md`](roadmap/roadmap-c-hosting.md). Since it
+> was written, the heap became 1 MiB (#210) and `errno` reached `unlink`,
+> `rmdir`, `rename` and `remove` (#215); the plan's "Where it stands" says
+> what that leaves.
+>
 > **CPP is now Proem, since 2026-10-01.** The workspace's C preprocessor was
 > renamed: the folder is `~/Projects/Proem` and the repository
 > `github.com/hansolovkarlsson/Proem`. `~/Projects/CPP` no longer exists. A
@@ -3955,7 +3968,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   no path. The same shape `FS_ERR_NO_SUCH_VERB` was reserved to fix for verbs.
 - **C programs receive no `argv`.** `libc/src/crt0.c` calls `main(void)`; a C
   program cannot read its own command line while a Rust one can, so no ported
-  tool that takes a filename argument works yet.
+  tool that takes a filename argument works yet. Step 1 of
+  [`roadmap-c-hosting.md`](roadmap/roadmap-c-hosting.md) (2026-09-29), which
+  found `errno`, `environ`, `stat` and a clock missing beside it.
 - **Two error tables name the same codes.** The shell's `print_fs_error` and
   `ulib::fs_error_msg` are hand-kept copies, and they have already disagreed
   once (the stale 8.3 filename message, journal 2026-09-05). The split exists
