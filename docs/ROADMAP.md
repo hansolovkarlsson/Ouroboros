@@ -870,7 +870,7 @@ The small open tails those arcs deliberately left:
   160 KB (the walk, plus `find_free_cluster` scanning from cluster 2 for
   each new cluster), each request still inside two ticks on QEMU. On the
   Pi, where a read is a USB transfer, it is the same count at a higher
-  price. **The FAT-sector cache built 2026-10-05 on `fsd/fat-cache`**:
+  price. **The FAT-sector cache built 2026-10-05 on `fsd/fat-cache`, merged as #212**:
   `fat32::Fs` keeps the last FAT sector read (`fat_entry`, used by
   `next_cluster` and `find_free_cluster`), kept in step by
   `write_fat_entry` (dropped at the start of every request until the
@@ -921,7 +921,7 @@ The small open tails those arcs deliberately left:
   write `0xFFFFFFFF` (unknown) once at mount, as the spec allows.
 
 - ~~**`unmount` clears tree 0 only, and partition mounts outlive it (seen
-  2026-10-05, in review).**~~ **FIXED 2026-10-05** on `fsd/unmount-all`,
+  2026-10-05, in review).**~~ **FIXED 2026-10-05** on `fsd/unmount-all`, merged as #214,
   option (a), Hans's choice: `FSOP_UNMOUNT` clears every disk tree and
   drops the fids on them (a fid holds a tree number and a path, and the
   slot may later hold another partition). Shown on a copy of the ext2
@@ -966,7 +966,7 @@ The small open tails those arcs deliberately left:
   carry it), so its own step.
 
 - ~~**Two trees over one partition share nothing (seen 2026-10-05).**~~
-  **FIXED 2026-10-05** on `fsd/no-double-mount` (Hans chose it over
+  **FIXED 2026-10-05** on `fsd/no-double-mount`, merged as #213 (Hans chose it over
   keeping double mounts): `FSOP_MOUNT_AT` on a partition that is already
   a tree returns that tree's id instead of mounting it again (`tree_of`
   in `fsd`'s `main.rs`), and the tree-0 auto-mount refuses a partition
@@ -1000,7 +1000,7 @@ The small open tails those arcs deliberately left:
   wanted is the question.
 
 - ~~**A server busy with a stream of requests is restarted as wedged
-  (found 2026-10-05).**~~ **FIXED 2026-10-05** on `fsd/large-write`: `cp`
+  (found 2026-10-05).**~~ **FIXED 2026-10-05** on `fsd/large-write`, merged as #211: `cp`
   of a 758 KB file had `fsd` restarted at about 170 KB (`server slot 2
   wedged - no progress (runnable)`), the copy left short, with or without
   #210's 1 MiB heap. No request was slow: counters in `fsd` showed each
