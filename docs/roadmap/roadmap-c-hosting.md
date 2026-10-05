@@ -121,7 +121,7 @@ The plan sat on its branch for a week while Proem's handoff notes were met on
 `main` by other routes. The steps above are kept as written; this is what the
 tree at `4dcbddd` leaves of them, read from the code.
 
-- **Step 1, argv: done 2026-10-05.** `crt0.c` builds the vector from
+- **Step 1, argv: done 2026-10-05, #219.** `crt0.c` builds the vector from
   `GET_ARGC`/`GET_ARG` into static storage (no heap, so the hand-rolled
   libc and the picolibc port share it) and calls `main(argc, argv)`.
   `libc/cargs.c` prints it in `/bin/ARGS`'s format, built through picolibc

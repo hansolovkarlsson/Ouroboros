@@ -49,7 +49,7 @@ against the wrong `struct stat`; it now zeroes what it does not fill, and
 reports the file type everywhere. `make test-crename` checks all of it on
 FAT32 and ext2.
 
-**A C program's `main` receives its arguments.** `crt0` builds `argc` and
+**A C program's `main` receives its arguments (#219).** `crt0` builds `argc` and
 `argv` from the kernel's store, the one Rust programs read, and calls
 `main(argc, argv)`; until now it called `main(void)`. `/bin/CARGS` prints the
 vector as `/bin/ARGS` does and `make test-cargs` compares them. Step 1 of the
