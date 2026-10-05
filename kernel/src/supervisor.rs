@@ -84,7 +84,9 @@ const MAX_RESTARTS: u32 = 3;
 /// the heartbeat declares it wedged. At `timer::TICK_INTERVAL_MS` (20ms)
 /// this is ~2.5s - safely above any real request (servers return to
 /// `Blocked(recv)` in far less than one tick), while still recovering a
-/// genuine wedge promptly. Tunable.
+/// genuine wedge promptly. Tunable. A busy server may never be SEEN
+/// blocked, though (the tick lands when it returns to EL0), so reaching
+/// `msg_recv` also resets the count: [`note_progress`].
 const WEDGE_TICKS: u32 = 128;
 
 /// How often (in ticks) the active ping pokes a server that's been sitting
@@ -120,8 +122,9 @@ struct Entry {
     image_len: usize,
     /// Crash + wedge restarts so far this boot, vs [`MAX_RESTARTS`].
     restarts: u32,
-    /// Heartbeat: consecutive ticks observed `Runnable` (reset on any
-    /// `Blocked` state, and on a restart).
+    /// Heartbeat: consecutive ticks observed `Runnable`, reset on any
+    /// `Blocked` state, on a restart, and when the server reaches its
+    /// receive or acks ([`note_progress`], [`note_ack`]).
     runnable_ticks: u32,
     /// Active ping: whether a ping is currently awaiting an ack.
     ping_outstanding: bool,
@@ -283,8 +286,10 @@ pub fn restart(slot: usize) {
 /// `on_tick`. `blocked` = the server is currently in *any* `Blocked` state
 /// (idle in `msg_recv`, or waiting on a sub-call - both mean it's making
 /// progress, not wedged). Returns `true` exactly once, when the server has
-/// been continuously `Runnable` for [`WEDGE_TICKS`] - the wedge signal, on
-/// which the caller restarts it. A no-op for an unregistered slot.
+/// been observed `Runnable` at [`WEDGE_TICKS`] ticks in a row with no
+/// receive or ack between them ([`note_progress`], [`note_ack`]) - the
+/// wedge signal, on which the caller restarts it. A no-op for an
+/// unregistered slot.
 pub fn heartbeat(slot: usize, blocked: bool) -> bool {
     let reg = unsafe { &mut *REGISTRY.get() };
     let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
@@ -331,10 +336,36 @@ pub fn note_ack(slot: usize) {
         // A genuinely wedged server never reaches the line that sends this, so
         // the passive arm still catches the case it was written for. What it
         // stops doing is punishing a server for being busy.
-        e.runnable_ticks = 0;
         e.ping_outstanding = false;
         e.ping_wait = 0;
         e.idle_ticks = 0;
+    }
+    note_progress(slot);
+}
+
+/// Record that `slot` is back at its receive: the `MSG_RECV` arm calls
+/// this on entry, before it takes or waits for a message. Clears the
+/// passive counter only: a server that calls its blocking receive has
+/// finished its last request, and a server wedged in a loop never gets
+/// there. `MSG_TRY_RECV` does not call it, since `netd` polls that from
+/// inside its own long loops, where taking a message says nothing about
+/// the loop.
+///
+/// Why: [`heartbeat`] samples task state at the tick, and the tick reaches
+/// the CPU only at EL0 (the kernel runs with IRQs masked), so a tick that
+/// fires while a server is inside a syscall, such as a disk read, is taken
+/// when that server returns to EL0, `Runnable`. A server busy with a stream
+/// of requests that each spend most of their time in the kernel is
+/// therefore seen `Runnable` at every tick, and past [`WEDGE_TICKS`] was
+/// restarted mid-stream: `cp` of a 758 KB file did that to `fsd` at about
+/// 170 KB on 2026-10-05, each 2 KiB write within two ticks, the file left
+/// short. What it does not cover: ONE request longer than `WEDGE_TICKS`
+/// is still judged a wedge, as before. `netd`'s long loops send their own
+/// acks for that ([`note_ack`]). A no-op for an unregistered slot.
+pub fn note_progress(slot: usize) {
+    let reg = unsafe { &mut *REGISTRY.get() };
+    if let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) {
+        e.runnable_ticks = 0;
     }
 }
 
