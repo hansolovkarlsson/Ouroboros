@@ -1125,3 +1125,59 @@ the rerun the rig asks for overwrites the transcript, which is how the
 first stall was lost and why its fixture had to be transcribed from the
 session that saw it. A verdict that says "run it again" has to keep what
 it saw first.
+
+## Four more, from the night (2026-10-04, after the closeout)
+
+The evening closeout ended on *build the observation into the change, and
+review the observation as hard as the change*. Three PRs followed the same
+night (#205 to #207), and each found a blind instrument, two of them built
+that night by the session that had just written that sentence.
+
+**A log field that said what the code meant to do.** The halt before HCRST
+(#205) added a field to the reset line, `halted here first`, set from the
+condition that decided whether to halt. QEMU hands the controller over
+halted, so the halt path was run by mutation: the controller started before
+the handover read. A second mutation then kept it running and skipped the
+halt. The line printed `HCH false` at the reset write, which caught it, and
+beside it `halted here first true`, which lied. The field reported the
+branch, not the act. Renamed `found running`, what was read, so a halt shows
+as `found running true` beside `HCH true` and a missing one as `HCH false`.
+Only the mutation that removed the thing the field described could show the
+field wrong.
+
+**One verdict for three failures.** On the Pi, `root` was refused for the
+first seconds after the prompt and accepted a few seconds later. The login
+says `Login incorrect` for a wrong password, for no `/etc/shadow` entry, and
+for any read error from `fsd` other than "no filesystem yet". Nothing on the
+screen could say which, and the password is not echoed, so the capture
+could not even rule out a typo. #206 gives each lookup failure its own line
+and leaves the verdict alone, each line forced once on QEMU by a mutation.
+Four boots since have not refused, so the instrument is armed and has
+reported nothing yet. That is still better than the old state, where a
+recurrence would have taught us nothing.
+
+**The instrument a refactor quietly blinded.** `check-xhci-barriers.py`
+requires each barrier store in the image exactly once *and at least one call
+to it*. Before #207, `write32` was the store's only caller, so routing a
+write around the barrier left the store uncalled, dead, and the check red.
+#207 split the writes into handles, and `Kept32::write` called the store
+directly beside `Whole32::write`: two callers, so rerouting either left "at
+least one call" true. Nobody had asked. It turned up because the review
+said a docstring example was vague, and the corrected example was tested
+before it was written: callers went from 2 to 1 and the check exited 0. The
+reserved-bit writes now go through the whole writes, one caller per store,
+and a reroute fails (`found 0 times`). The next review then found the claim
+made of that fix still too wide. A reserved-bit write routed around the
+whole write is not seen either, since the doorbells keep calling it. That
+was shown by mutation too, and the comments now say so. A change that alters
+a function's callers can blind a check that counts calls, and nothing in the
+check will say so.
+
+**A mutation read through a stale image.** The first run of that mutation
+called the script directly on the kernel image already in `target/`, built
+before the mutation, while the rebuilding `make` run beside it had its
+output hidden. The result, green with two callers, was about the old code.
+It was caught because the count had not moved. A mutation test has an
+observer of its own, here the image the script reads, and it has to be shown
+to be looking at the mutated build: the rerun through `make`, output shown,
+said 1 caller.
