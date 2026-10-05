@@ -1282,7 +1282,9 @@ pub const FSOP_TOUCH: u64 = 7;
 /// directory - use [`FSOP_RMDIR`] for those).
 pub const FSOP_RM: u64 = 8;
 /// params: `(src len, dst len)`; payload: src ++ dst -> `0`. Renames
-/// or moves `src` to `dst`; `dst` must not already exist.
+/// or moves `src` to `dst`. An existing `dst` is replaced when both are
+/// ordinary files (POSIX `rename`, since 2026-09-02; libc's `rename` relies
+/// on it); a directory on either side of an existing name is refused.
 pub const FSOP_MV: u64 = 9;
 /// no params -> `0` (mounted now), [`MOUNT_ALREADY`] (tree 0 is mounted,
 /// or the partition found is already another tree), or [`NO_FS`] (a device

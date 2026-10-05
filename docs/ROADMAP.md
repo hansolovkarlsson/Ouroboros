@@ -2345,7 +2345,7 @@ be reviewed after the fact from the saved screenshots.
 >       2026-10-04, `69653a8`**, before the plan merges, so `main` never
 >       carries the old names. Note:
 >       [`handoffs/closed/2026-10-01-from-workspace-proem-rename.md`](handoffs/closed/2026-10-01-from-workspace-proem-rename.md).
-> - [ ] **new** **`unlink` in the C port.** picolibc's `remove` calls
+> - [x] **new** **`unlink` in the C port.** picolibc's `remove` calls
 >       `unlink`, which nothing in `libc/src` defines, so linking Proem (which
 >       removes its `-o` output after a failed run, as Clang does) fails on
 >       the undefined symbol. One more `np_request` in `libc/src/file.c`,
@@ -2379,7 +2379,7 @@ be reviewed after the fact from the saved screenshots.
 >       (`syscall.rs`'s Ctrl-C interception), so it needs its own design
 >       note first. Note:
 >       [`handoffs/2026-10-05-from-edit-editor-console.md`](handoffs/2026-10-05-from-edit-editor-console.md).
-> - [ ] **new** **`rename` in the C port.** picolibc declares it and
+> - [x] **new** **`rename` in the C port.** picolibc declares it and
 >       nothing defines it, so a C program calling it fails to link. One
 >       `np_request` in `libc/src/file.c`, `NP_MV` on the two resolved
 >       paths, which already replaces an existing ordinary file (fixed
@@ -2390,6 +2390,40 @@ be reviewed after the fact from the saved screenshots.
 >       C program's `rename("a.tmp", "a.txt")` with both present returns 0,
 >       `a.txt` holds what `a.tmp` held, and `a.tmp` is gone. Note:
 >       [`handoffs/2026-10-05-from-edit-rename.md`](handoffs/2026-10-05-from-edit-rename.md).
+>       *Built 2026-10-05 with `unlink` above, on `libc/unlink-rename`:
+>       both in `libc/src/file.c`, over `NP_RM` and `NP_MV`, resolving
+>       their paths through the helper `open` now shares
+>       (`resolve_target`), so a path on a partition or remote mount goes
+>       where `open` would send it. `rename` across two mounts answers
+>       `EXDEV` without a request. Both set `errno` where the C library has
+>       one (picolibc; the hand-rolled libc has none and reports through
+>       `ouro_last_fs_status`), ENOENT for a missing file; step 2 of the
+>       C-hosting plan extends that mapping to the rest of the file.
+>       `sys.h` gained `NP_RM`, `NP_MV` and three `FS_ERR_*` codes, all on
+>       `check-wire-constants.py`'s list (a mis-numbered `NP_RM` fails it).
+>       `make test-crename` (`scripts/test-crename.py`, `/bin/CRENAME`,
+>       `libc/crename.c`) runs both notes' checks on FAT32 and on ext2,
+>       the ext2 boot with a partition at `/mnt/f` for `EXDEV`, then `ls /`
+>       for leftovers. Mutations: an `unlink` that sends nothing, and a
+>       `rename` without the cross-mount check, each fail it. `FSOP_MV`'s
+>       doc comment no longer says the destination must not exist. Its
+>       review (`/code-review high`, ten findings) found the worst one
+>       below this layer: no part of `fsd` refused moving a directory into
+>       its own subtree, which on ext2 orphans the subtree; `NP_MV` now
+>       answers `FS_ERR_INVALID_NAME` for it, for every client (the shell's
+>       `mv` included), by the names as sent, so a `..` that hides the
+>       overlap from a raw 9P peer is not caught. Also from it: an empty
+>       path is ENOENT (it named the cwd); `.` and `..` collapse before the
+>       namespace picks a mount (`/mnt/f/../../x` went to the wrong tree);
+>       the errno map covers every code (EEXIST, ENOTEMPTY, ENOSPC, EINVAL,
+>       EBUSY, ENODEV...), and a cross-mount refusal records
+>       `FS_ERR_CROSS_DEVICE`; `errno` is switched on by the build
+>       (`-DOURO_HAVE_ERRNO`), not by what is on the include path; `remove`
+>       is the port's own, taking an empty directory through a new
+>       `rmdir`; and the rig waits for and grades the summary line, which a
+>       substring match passed on a run cut short. Mutations for each new
+>       check: no subtree refusal, no normalization, no empty-path refusal,
+>       each fail `test-crename`.*
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

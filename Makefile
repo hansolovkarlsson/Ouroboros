@@ -222,13 +222,14 @@ PICO_LIBC    := $(PICO_DIR)/lib/libc.a
 PICO_PORT    := $(BUILD_DIR)/pico/crt0.o $(BUILD_DIR)/pico/os.o $(BUILD_DIR)/pico/file.o $(BUILD_DIR)/pico/builtins.o
 CPICO_BIN    := $(BUILD_DIR)/cpico.bin
 CMEM_BIN     := $(BUILD_DIR)/cmem.bin
+CRENAME_BIN  := $(BUILD_DIR)/crename.bin
 
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-unmount clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -494,7 +495,7 @@ $(BUILD_DIR)/pico/os.o: libc/src/os.c
 	$(CC) $(CFLAGS_OS) -Ilibc/include $(PICO_INC) -fno-builtin -c $< -o $@
 $(BUILD_DIR)/pico/file.o: libc/src/file.c
 	@mkdir -p $(BUILD_DIR)/pico
-	$(CC) $(CFLAGS_OS) -Ilibc/include $(PICO_INC) -fno-builtin -c $< -o $@
+	$(CC) $(CFLAGS_OS) -Ilibc/include $(PICO_INC) -DOURO_HAVE_ERRNO -fno-builtin -c $< -o $@
 $(BUILD_DIR)/pico/builtins.o: libc/pico/builtins.c
 	@mkdir -p $(BUILD_DIR)/pico
 	$(CC) $(CFLAGS_OS) -fno-builtin -c $< -o $@
@@ -513,6 +514,14 @@ cmem-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/cmem.c -o $(BUILD_DIR)/pico/cmem.o
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cmem.elf $(PICO_PORT) $(BUILD_DIR)/pico/cmem.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cmem.elf $(CMEM_BIN)
+
+# unlink and rename through picolibc (`remove`, `rename`): the checks Proem's and
+# Edit's handoff notes name. Driven by scripts/test-crename.py. Runs as
+# /bin/CRENAME.
+crename-bin: $(NSRESOLVE_A) $(PICO_PORT)
+	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/crename.c -o $(BUILD_DIR)/pico/crename.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/crename.elf $(PICO_PORT) $(BUILD_DIR)/pico/crename.o $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/crename.elf $(CRENAME_BIN)
 
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
@@ -649,7 +658,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -714,6 +723,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CWRITE_BIN) $(ESP_DIR)/bin/CWRITE
 	cp $(CPICO_BIN) $(ESP_DIR)/bin/CPICO
 	cp $(CMEM_BIN) $(ESP_DIR)/bin/CMEM
+	cp $(CRENAME_BIN) $(ESP_DIR)/bin/CRENAME
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
 	cp $(MORE_BIN) $(ESP_DIR)/bin/MORE
@@ -1583,6 +1593,13 @@ test-heap: image
 # it whenever FSOP_UNMOUNT, the fid table or the shell's mount code changes.
 test-unmount: image-ext2
 	python3 scripts/test-unmount.py
+
+# unlink and rename in the C port (scripts/test-crename.py, /bin/CRENAME): two
+# boots, FAT32 and ext2 (with a partition at /mnt/f for EXDEV), the checks
+# Proem's and Edit's handoff notes name. About two minutes; run it whenever
+# libc's unlink/rename or fsd's NP_RM/NP_MV changes.
+test-crename: image image-ext2
+	python3 scripts/test-crename.py
 
 # Host unit tests for the PURE crates - the ones with no I/O, no syscalls and no
 # target dependency, so they run natively on the build machine. This exists

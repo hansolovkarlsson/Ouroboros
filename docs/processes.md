@@ -459,7 +459,13 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   themselves. `libc/hello.c` remains the self-contained *no-libc* proof (its own
   `svc` stubs) and the `.data`/`.bss` regression test.
 - **File I/O works, via fids** (`libc/src/file.c`, `make cfile-bin` →
-  `/bin/CFILE`): `open`/`read`/`write`/`close`/`lseek`/`fstat`. A **fid** is a
+  `/bin/CFILE`): `open`/`read`/`write`/`close`/`lseek`/`fstat`, and since
+  2026-10-05 `unlink`, `rmdir`, `rename` and `remove` (path verbs
+  `NP_RM`/`NP_RMDIR`/`NP_MV`, no fid; `remove` takes a file or an empty
+  directory; `rename` replaces an existing ordinary file, answers `EXDEV` across
+  mounts and `EINVAL` for a directory moved into itself; all set picolibc's
+  `errno`). Paths collapse `.` and `..` before the namespace picks a mount, and
+  an empty path is `ENOENT`. A **fid** is a
   server-side open-file handle (a POSIX fd *is* a 9P fid) — `open` establishes it
   in `fsd` (`NP_OPEN`, which authorizes the access against the file's mode/owner
   *once*), and the fd the C program holds *is* that fid; `read`/`write`/`fstat`/
