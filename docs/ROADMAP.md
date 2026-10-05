@@ -920,8 +920,27 @@ The small open tails those arcs deliberately left:
   stick may trust the stale count. Update it on allocation and free, or
   write `0xFFFFFFFF` (unknown) once at mount, as the spec allows.
 
-- **`unmount` clears tree 0 only, and partition mounts outlive it (seen
-  2026-10-05, in review).** Trees above 0 are never unmounted. So after
+- ~~**`unmount` clears tree 0 only, and partition mounts outlive it (seen
+  2026-10-05, in review).**~~ **FIXED 2026-10-05** on `fsd/unmount-all`,
+  option (a), Hans's choice: `FSOP_UNMOUNT` clears every disk tree and
+  drops the fids on them (a fid holds a tree number and a path, and the
+  slot may later hold another partition). Shown on a copy of the ext2
+  image: `mount 1 /mnt/f`, `unmount`, then `erase disk` erases; with the
+  old `unmount` the same run is refused. Its review (`/code-review high`,
+  six findings) found the fid drop itself unsafe: a freed slot's number
+  went to the next opener, so a remote session's cached fid, or a C
+  program's old descriptor, reached someone else's file, and `NP_CLUNK` on
+  it failed. Now the fid stays allocated with `Fid::dead` set, answers
+  `NO_FS`, and is freed by `NP_CLUNK` or the reaper. The shell's `unmount`
+  also drops its own partition bindings, which needed the kernel to accept
+  an `NS_SET` of length 0 (it refused one, so a task could never remove
+  its last binding). `make test-unmount` (`scripts/test-unmount.py`, with
+  `/bin/CFIDHOLD`, `libc/cfidhold.c`) holds a file open across `unmount`
+  and `mount -a` on the ext2 image: the new open gets fd 4 not 3, the old
+  fd reads -1 and closes with 0, `/mnt/f` is not found after the remount,
+  and `erase disk` runs. Mutations: freeing the fid fails it (`cfidhold:
+  FAIL`), and so does skipping the binding drop. Its cost is the next
+  item, narrowed to other shells' bindings. The text as found: Trees above 0 are never unmounted. So after
   `mount 1 /mnt/f`, the disk tools stay refused for the rest of the boot
   (`unmount` cannot clear tree 1), and a `mount -a` that replaces the
   device (the shell's USB-rescan path, "safe because nothing is
@@ -932,6 +951,19 @@ The small open tails those arcs deliberately left:
   raises the stakes. `unmount` clearing every disk tree closes both, at
   the cost that a binding to a cleared tree may later point at a
   partition mounted into the same slot. A decision for Hans.
+
+- **A binding to a cleared tree can later reach another partition (left
+  by the fix above, 2026-10-05).** A namespace entry holds a bare tree
+  number. The shell that runs `unmount` drops its own partition bindings,
+  but another shell's (or a running program's) stay. After `unmount`
+  clears tree 1, a shell that had `/mnt/f` bound to it sees nothing
+  there, until some later `mount <n>` puts another
+  partition in slot 1, when `/mnt/f` silently resolves to that. The cure
+  is a generation per tree: `fsd` counts each mount into a slot,
+  `FSOP_MOUNT_AT` returns it with the tree id, the namespace entry keeps
+  it, and a request whose generation no longer matches is refused rather
+  than served. An ABI change (the namespace entry and the `NP_*` request
+  carry it), so its own step.
 
 - ~~**Two trees over one partition share nothing (seen 2026-10-05).**~~
   **FIXED 2026-10-05** on `fsd/no-double-mount` (Hans chose it over

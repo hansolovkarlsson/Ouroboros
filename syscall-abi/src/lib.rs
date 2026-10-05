@@ -647,7 +647,8 @@ pub const CWD_MAX: u64 = 128;
 /// `bind` needs only to update the caller's own view; and every task reads its
 /// own via [`GET_NS`] to resolve paths the same way its parent did. An empty
 /// namespace means identity-to-tree-0 (the default), so a task that never calls
-/// this behaves exactly as before namespaces existed. Bounded by [`NS_MAX`].
+/// this behaves exactly as before namespaces existed. A length of `0` sets an
+/// empty one (the pointer is not read; since 2026-10-05). Bounded by [`NS_MAX`].
 pub const NS_SET: u64 = 52;
 
 /// `(out pointer, out capacity)` -> the length of the current task's namespace
@@ -1349,9 +1350,13 @@ pub const FSOP_MOUNT_INFO: u64 = 14;
 /// resolve "I don't know" toward saying so.
 pub const MOUNT_FLAG_ENFORCES_MODES: u64 = 1 << 0;
 /// no params -> status `0` (was mounted, now dropped) or [`NO_FS`]
-/// (nothing was mounted). Drops the server's mounted filesystem so the
-/// disk can be reformatted or a different volume mounted (disk-tools arc,
-/// milestone 1). The device the kernel holds is untouched - a subsequent
+/// (nothing was mounted). Drops **every** disk mount, the root (tree 0)
+/// and any partition mounts ([`FSOP_MOUNT_AT`]) alike; a fid open on one
+/// stays allocated but answers [`NO_FS`] until its owner clunks it, so the disk can be reformatted or a different volume mounted
+/// (disk-tools arc, milestone 1; every tree since 2026-10-05, tree 0 only
+/// before). The synthetic `/proc` tree stays. A namespace binding to a
+/// cleared tree resolves to nothing until a later mount fills that slot,
+/// possibly with another partition. The device the kernel holds is untouched - a subsequent
 /// [`FSOP_MOUNT`] re-probes and re-mounts it.
 pub const FSOP_UNMOUNT: u64 = 15;
 
