@@ -1194,8 +1194,9 @@ written into the roadmap, was one request too slow for the 2.5 s limit.
 Counters put into `fsd` said each 2 KiB write finished inside two ticks. The
 heartbeat samples task state at the tick, and the tick reaches the CPU only
 at EL0, so a tick fired during a disk-read syscall is taken as `fsd` returns
-to EL0, when it is runnable by definition. A server busy in the kernel looks
-like a wedged one to that observer, every time. Found by measuring the thing
+to EL0, when it is runnable by definition. Every sample of a server busy in
+the kernel reads runnable, so a long enough stream of requests looks like a
+wedge: 128 samples in a row (`WEDGE_TICKS`), which the 758 KB `cp` gave it. Found by measuring the thing
 the observer was judging, not the observer's verdict (#211).
 
 **A program that printed the number and exited 0 whatever it was.** The
@@ -1232,9 +1233,9 @@ free-cluster scan bounded by the FAT's capacity, not the volume's clusters,
 so the zeroed entries a rounded-up FAT holds past its last cluster read as
 free. The test image's FAT is exactly the size of its volume, so no rig on
 it could ever reach them. A copy with 1,000 sectors cut from its recorded
-size, filled from the Mac, made the bug reachable: the old bound wrote about
-500 KB past the volume while `cp` said only `disk full`, and `fsck_msdos`
-named the chain out of range.
+size, filled from the Mac, made the bug reachable: with the old bound the same `cp` wrote about
+500 KB past the volume, and `fsck_msdos` named the chain out of range; with
+the new one `cp` says `disk full` and `fsck_msdos` finds nothing.
 
 And the one that worked the other way: `cfstat`, written to check that
 `fstat` zeroes what it does not fill, failed before the zeroing was even

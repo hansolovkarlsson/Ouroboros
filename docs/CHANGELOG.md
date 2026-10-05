@@ -7,7 +7,7 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## Not yet released
+## Unreleased: the storage server under large writes, and the C library for Proem and Edit
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
 version is held for a go-ahead. So far one day's work, 2026-10-05, #209 to
@@ -49,7 +49,7 @@ against the wrong `struct stat`; it now zeroes what it does not fill, and
 reports the file type everywhere. `make test-crename` checks all of it on
 FAT32 and ext2.
 
-**PORTSC a register type of its own (#209).** Its write keeps only the bits
+**PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or
 restart a reset by writing a bit back as read.
 
