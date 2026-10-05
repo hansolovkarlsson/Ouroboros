@@ -873,16 +873,17 @@ The small open tails those arcs deliberately left:
   price. **The FAT-sector cache built 2026-10-05 on `fsd/fat-cache`**:
   `fat32::Fs` keeps the last FAT sector read (`fat_entry`, used by
   `next_cluster` and `find_free_cluster`), kept in step by
-  `write_fat_entry` and dropped at the start of every request
-  (`begin_request`, from `handle`), since the same partition can be
-  mounted as two trees; and `find_free_cluster` starts at a hint one past
+  `write_fat_entry` (dropped at the start of every request until the
+  double-mount fix below made `fsd` its FAT's only writer, so it now
+  lasts across requests); and `find_free_cluster` starts at a hint one past
   its last answer and wraps to cluster 2. The same `cp` now makes 17
   reads for its first `write_at` and 32 at 640 KB. Checked on QEMU: the
   758 KB copy, a second copy after an `rm`, a copy into a new directory
   and a `>>` append all read back identical from the Mac, and
   `fsck_msdos -n` finds no chain error or orphan; interleaved copies
-  through `/` and `mount 0 /mnt/a` likewise. Not shown: that the
-  per-request drop is needed. With it removed, two interleaving sequences
+  through `/` and `mount 0 /mnt/a` likewise (since the double-mount fix
+  below, `/mnt/a` is tree 0 itself and the drop is gone). Not shown: that
+  the per-request drop was needed. With it removed, two interleaving sequences
   stayed clean, because a request's directory walk reads FAT sector 0
   before anything else and so replaces a stale sector first. It stays, on
   reasoning. The read-by-fid cure for `cpu` spawn is still open; reads
@@ -919,7 +920,45 @@ The small open tails those arcs deliberately left:
   stick may trust the stale count. Update it on allocation and free, or
   write `0xFFFFFFFF` (unknown) once at mount, as the spec allows.
 
-- **Two trees over one partition share nothing (seen 2026-10-05).**
+- **`unmount` clears tree 0 only, and partition mounts outlive it (seen
+  2026-10-05, in review).** Trees above 0 are never unmounted. So after
+  `mount 1 /mnt/f`, the disk tools stay refused for the rest of the boot
+  (`unmount` cannot clear tree 1), and a `mount -a` that replaces the
+  device (the shell's USB-rescan path, "safe because nothing is
+  mounted", which holds for tree 0 only) leaves tree 1 describing the old
+  disk, its geometry and its cached FAT sector, over the new one: a write
+  through `/mnt/f` then lands on the new disk at the old disk's offsets.
+  Older than the double-mount fix; the cache lasting across requests
+  raises the stakes. `unmount` clearing every disk tree closes both, at
+  the cost that a binding to a cleared tree may later point at a
+  partition mounted into the same slot. A decision for Hans.
+
+- ~~**Two trees over one partition share nothing (seen 2026-10-05).**~~
+  **FIXED 2026-10-05** on `fsd/no-double-mount` (Hans chose it over
+  keeping double mounts): `FSOP_MOUNT_AT` on a partition that is already
+  a tree returns that tree's id instead of mounting it again (`tree_of`
+  in `fsd`'s `main.rs`), and the tree-0 auto-mount refuses a partition
+  another tree holds. A plain refusal was built first and dropped before
+  it was pushed: trees above 0 are never unmounted, so one shell's
+  `mount 1 /mnt/f` would have shut every later shell out of partition 1
+  for the boot. With one `Fs` per partition, the FAT cache now lasts
+  across requests (`begin_request` is gone) and the read cursor cannot go
+  stale under another tree. Shown on the ext2 image: `mount 0 /mnt/a`
+  then a write through `/mnt/a` appears at `/`; `mount 1` five times at
+  five paths all bind one tree; with the reuse removed, the third `mount
+  1` gets `every mount slot is in use`. The FAT32 rigs (interleaved
+  copies through `/` and `/mnt/a`, the spare-entries image) stay clean
+  under `fsck_msdos`. Its review (`/code-review high`, nine findings):
+  with reuse, `mount 0 /mnt/a` is tree 0 itself, so after `unmount` a
+  partition mount could take slot 0 and become everyone's `/`, or hold
+  the partition the next `mount -a` picks. Now `FSOP_MOUNT_AT` is refused
+  while tree 0 is empty and never takes slot 0. And `erase`, `partition`
+  and `format` counted the always-present `/proc` tree as a mount, so
+  they had refused every time since `/proc` landed; they count disk
+  trees now (shown: `unmount` then `erase disk` erases, on a copy, where
+  the build before refused). Left: the item below on what `unmount`
+  clears, and the cost of a repeat `mount <n>` (a full probe of the
+  partition to learn its LBA, then thrown away). The text as found:
   `mount 0 /mnt/a` mounts the boot partition a second time, so two
   `fat32::Fs` each keep their own `read_cursor` (and, within a request, a
   FAT cache) over the same FAT. The cache is request-scoped for this

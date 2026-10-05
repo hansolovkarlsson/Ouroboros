@@ -59,7 +59,7 @@ fn main() -> ! {
     // Auto-mount if the kernel already holds a device (QEMU's boot-time
     // virtio path; on Parallels the device arrives later, via the
     // `mount` command -> MOUNT syscall -> FSOP_MOUNT request).
-    try_mount(&mut mounts[0]);
+    try_mount(&mut mounts);
     // The synthetic /proc filesystem (cluster Phase 3) always exists, at the
     // reserved PROC_TREE index - no disk, so it's just constructed here. The
     // shell's `mount -p` binds /proc to it; netd's export routes /proc paths to
@@ -96,29 +96,53 @@ fn main() -> ! {
     }
 }
 
-/// Attempts the mount if the kernel has a device installed. Quiet when
-/// there's simply no device (the ordinary Parallels-before-`mount`
-/// case); logs the outcome whenever a device is actually present.
-fn try_mount(fs: &mut Option<vfs::Filesystem>) {
-    if fs.is_some() {
-        return;
+/// Attempts the auto-mount into tree 0 if the kernel has a device
+/// installed. Quiet when there's simply no device (the ordinary
+/// Parallels-before-`mount` case); logs the outcome whenever a device is
+/// actually present. Returns `0` (mounted), [`MOUNT_ALREADY`] (tree 0 is
+/// full, or the partition it found is already another tree's, see
+/// [`tree_of`]), or [`NO_FS`].
+///
+/// [`MOUNT_ALREADY`]: syscall_abi::MOUNT_ALREADY
+/// [`NO_FS`]: syscall_abi::NO_FS
+fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
+    if mounts[0].is_some() {
+        return syscall_abi::MOUNT_ALREADY;
     }
     if disk::Disk.capacity_sectors().is_err() {
-        return;
+        return syscall_abi::NO_FS;
     }
     match vfs::Filesystem::mount(disk::Disk) {
+        Ok(mounted) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
         Ok(mounted) => {
             print("fsd: ");
             print(mounted.name());
             print(" mounted, disk commands available\r\n");
-            *fs = Some(mounted);
+            mounts[0] = Some(mounted);
+            0
         }
         Err(e) => {
             print("fsd: mount failed (");
             print(error_name(&e));
             print(") - disk commands won't work\r\n");
+            syscall_abi::NO_FS
         }
     }
+}
+
+/// The tree that already holds `candidate`'s partition, if any. A partition
+/// is mounted at most once (since 2026-10-05): two trees over one partition
+/// would be two filesystems over one set of on-disk structures, each with its
+/// own memory of them (FAT32's FAT-sector cache and read cursor), and a write
+/// through one would leave the other's stale. The synthetic `/proc` has no
+/// partition and never matches.
+fn tree_of(mounts: &[Option<vfs::Filesystem>; MAX_MOUNTS], candidate: &vfs::Filesystem) -> Option<usize> {
+    if !candidate.is_disk() {
+        return None;
+    }
+    mounts.iter().position(|m| {
+        m.as_ref().is_some_and(|m| m.is_disk() && m.partition_lba() == candidate.partition_lba())
+    })
 }
 
 /// Zero the disk's first `sectors` 512-byte sectors (`0` -> the default
@@ -343,11 +367,6 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
-    // Before anything reads the disk: a cache kept from the last request
-    // may be stale, since two trees can hold the same partition.
-    for fs in mounts.iter_mut().flatten() {
-        fs.begin_request();
-    }
     let op = read_u64(req, 0);
 
     // WHO this request is authorized as, resolved ONCE here so that every check
@@ -384,13 +403,9 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         if !is_root(&who) {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
-        // The auto-mount at tree 0 (the default the shell's `mount -a` triggers).
-        if mounts[0].is_some() {
-            return status_reply(reply, syscall_abi::MOUNT_ALREADY);
-        }
-        try_mount(&mut mounts[0]);
-        let status = if mounts[0].is_some() { 0 } else { syscall_abi::NO_FS };
-        return status_reply(reply, status);
+        // The auto-mount at tree 0 (the default the shell's `mount -a`
+        // triggers); `try_mount` answers MOUNT_ALREADY when tree 0 is full.
+        return status_reply(reply, try_mount(mounts));
     }
 
     if op == syscall_abi::FSOP_MOUNT_AT {
@@ -400,17 +415,32 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         }
         // Multi-mount: mount the p[0]-th partition into a fresh tree slot and
         // return the tree id, so a client can bind a namespace prefix to it.
+        // A partition that is already a tree is not mounted again: its tree
+        // id is returned, so every shell that mounts it binds the same tree
+        // (`tree_of`). Trees above 0 are never unmounted, so a refusal here
+        // would have shut every later shell out of that partition.
+        //
+        // Tree 0 is the root mount's alone, and must be there first: a
+        // partition mount while `/` is unmounted could take slot 0 (and so
+        // become every task's `/`), or hold the partition the next `mount -a`
+        // picks (the review of #213). So refused while tree 0 is empty, and
+        // a new tree never goes in slot 0.
+        if mounts[0].is_none() {
+            return status_reply(reply, syscall_abi::NO_FS);
+        }
         let index = p[0] as usize;
-        let Some(tree) = mounts.iter().position(|m| m.is_none()) else {
+        let fs = match vfs::Filesystem::mount_partition(disk::Disk, index) {
+            Ok(fs) => fs,
+            Err(_) => return status_reply(reply, syscall_abi::NO_FS),
+        };
+        if let Some(existing) = tree_of(mounts, &fs) {
+            return status_reply(reply, existing as u64);
+        }
+        let Some(tree) = (1..MAX_MOUNTS).find(|&t| mounts[t].is_none()) else {
             return status_reply(reply, syscall_abi::MOUNT_ALREADY); // no free slot
         };
-        match vfs::Filesystem::mount_partition(disk::Disk, index) {
-            Ok(fs) => {
-                mounts[tree] = Some(fs);
-                status_reply(reply, tree as u64)
-            }
-            Err(_) => status_reply(reply, syscall_abi::NO_FS),
-        }
+        mounts[tree] = Some(fs);
+        status_reply(reply, tree as u64)
     } else if op == syscall_abi::FSOP_MOUNT_INFO {
         // Report tree 0 (the primary mount), as ever. Handles the not-mounted
         // case itself (NO_FS).
@@ -456,7 +486,10 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         }
         // Raw-disk ops (erase/partition/format) rewrite disk structures, so they
         // refuse while *any* tree is mounted - unmount everything first.
-        if mounts.iter().any(|m| m.is_some()) {
+        // Disk trees only: the synthetic /proc tree is always there, and
+        // counting it refused these tools every time since /proc landed (the
+        // review of #213).
+        if mounts.iter().flatten().any(|m| m.is_disk()) {
             return status_reply(reply, syscall_abi::MOUNT_ALREADY);
         }
         let status = match op {

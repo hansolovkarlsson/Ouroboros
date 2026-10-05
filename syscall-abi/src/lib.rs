@@ -1283,8 +1283,9 @@ pub const FSOP_RM: u64 = 8;
 /// params: `(src len, dst len)`; payload: src ++ dst -> `0`. Renames
 /// or moves `src` to `dst`; `dst` must not already exist.
 pub const FSOP_MV: u64 = 9;
-/// no params -> `0` (mounted now), [`MOUNT_ALREADY`], or [`NO_FS`] (a
-/// device is present but carries no mountable FAT32). The FS half of
+/// no params -> `0` (mounted now), [`MOUNT_ALREADY`] (tree 0 is mounted,
+/// or the partition found is already another tree), or [`NO_FS`] (a device
+/// is present but carries no mountable filesystem). The FS half of
 /// the `mount` command - the device half is the [`MOUNT`] syscall,
 /// which must succeed (or report already-installed) first.
 pub const FSOP_MOUNT: u64 = 10;
@@ -1388,12 +1389,15 @@ pub const FSOP_PARTITION: u64 = 17;
 /// later steps (an unsupported `fstype` returns [`FS_ERROR`]).
 pub const FSOP_FORMAT: u64 = 18;
 
-/// `(partition index)` -> the **tree id** (0..) the mount was placed in, or an
-/// error `>= FS_ERR_MIN`: [`NO_FS`] (no such partition / it mounts as no known
-/// format), [`MOUNT_ALREADY`] (no free mount slot). Mounts the disk's
-/// `index`-th partition (from the same MBR/GPT discovery the boot auto-mount
-/// uses) into a fresh mount slot, so several filesystems can be mounted at once
-/// (cluster Phase 0 multi-mount). The caller `bind`s a namespace prefix to the
+/// `(partition index)` -> the **tree id** (0..) the partition is mounted as, or
+/// an error `>= FS_ERR_MIN`: [`NO_FS`] (no such partition, it mounts as no
+/// known format, or the root mount, tree 0, is not there yet), [`MOUNT_ALREADY`]
+/// (no free mount slot). Mounts the disk's `index`-th partition (from the same
+/// MBR/GPT discovery the boot auto-mount uses), so several filesystems can be
+/// mounted at once (cluster Phase 0 multi-mount). **A partition is mounted
+/// once** (since 2026-10-05): one already mounted returns its existing tree,
+/// which may be tree 0, the root mount every task sees as `/`, so the tree is
+/// shared, not the caller's own. A new mount never takes tree 0. The caller `bind`s a namespace prefix to the
 /// returned tree so paths under it resolve to this mount. Unlike [`FSOP_MOUNT`]
 /// (which mounts the first validating partition at tree 0), this selects a
 /// specific partition and returns where it landed. A small tree id (0..3) is
