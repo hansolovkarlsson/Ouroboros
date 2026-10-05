@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-05
 - **Kind:** requirement
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** Edit saving safely on Ouroboros. Without it the port saves
   with `O_TRUNC`, which works but can leave a half-written file.
 - **Follows:** `2026-10-05-from-edit-editor-console.md`, whose last
@@ -64,3 +64,14 @@ while the roadmap records the 2026-09-02 fix that made `mv` replace an
 existing ordinary file. The wrapper is the same shape as Proem's `unlink`
 (one `np_request`), so the two will land together. The doc comment gets
 corrected in the same change.
+
+Done 2026-10-05, merged as #215 (`e0c8e09`). `rename` is in
+`libc/src/file.c` over `NP_MV`, and replaces an existing ordinary file at
+`newpath` (on FAT32 and exFAT two entry writes ordered so the name always
+finds one of the two files, on ext2 one). It answers -1 with EXDEV across
+mounts, and EINVAL for a directory moved into itself, which `fsd` now
+refuses for every client. Your **Done when** is checked by `make test-crename`
+on FAT32 and on ext2: with both present, `rename("/crename.tmp",
+"/crename.txt")` gives 0, the target holds the temp's text, and the temp is
+gone. `FSOP_MV`'s doc comment no longer says the destination must not
+exist.

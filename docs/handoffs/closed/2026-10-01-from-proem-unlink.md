@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-01
 - **Kind:** requirement
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** linking `proem` on Ouroboros. Step 8 of `roadmap-c-hosting.md`
   (branch `docs/c-hosting`, `f060b8d`).
 
@@ -78,3 +78,17 @@ on `docs/c-hosting`; `unlink` gets its `ENOENT` from that step, so it lands
 with or after it, as step 8's dependency. And the check: the **Done when**
 needs a C program on a booted image, which is the plan's own test shape, so
 the program that proves step 2 can create, remove and re-remove a file.
+
+Done 2026-10-05, merged as #215 (`e0c8e09`). `unlink` is in
+`libc/src/file.c` over `NP_RM`, and `remove` is now the port's own (linked
+ahead of picolibc's): a file through `unlink`, an empty directory through a
+new `rmdir`. Both set picolibc's `errno`, ENOENT for a missing file. Your
+**Done when** is checked by `make test-crename` (`/bin/CRENAME`,
+`libc/crename.c`) on FAT32 and on ext2: a file made, `remove` gives 0, it is
+gone, a second `remove` gives -1 with ENOENT, and `ls /` shows nothing left.
+
+Worth knowing for Proem: paths collapse `.` and `..` before the namespace
+picks a mount, an empty path is ENOENT, and `errno` is set with a specific
+code for every failure these calls can meet. The rest of the file (`open`,
+`read`, `write`) still sets no `errno`; that is step 2 of the C-hosting
+plan.

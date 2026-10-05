@@ -2230,8 +2230,9 @@ be reviewed after the fact from the saved screenshots.
 > mention of CPP in older records means Proem.
 >
 > **What Proem asks of Ouroboros, accepted 2026-10-01 and 2026-10-02, for
-> later.** Five handoff notes, triaged and accepted. The heap one is done
-> (#210, 2026-10-05) and its note closed; the others are not started. A
+> later.** Five handoff notes, triaged and accepted. The heap one (#210) and
+> `unlink` (#215) are done, 2026-10-05, and their notes closed; the others are
+> not started. A
 > sixth, a notice with Proem's smaller heap numbers, was taken on 2026-10-02
 > and is in `handoffs/closed/`. Each note carries its evidence, its **Done when**
 > and the reply below in full.
@@ -2354,11 +2355,12 @@ be reviewed after the fact from the saved screenshots.
 >       C-hosting plan, so it lands with or after that step. Done when a C
 >       program on a booted image removes a file it made, `ls` no longer
 >       shows it, and a second `remove` gives -1 and `ENOENT`. Note:
->       [`handoffs/2026-10-01-from-proem-unlink.md`](handoffs/2026-10-01-from-proem-unlink.md).
+>       [`handoffs/closed/2026-10-01-from-proem-unlink.md`](handoffs/closed/2026-10-01-from-proem-unlink.md).
 >
-> **What Edit asks of Ouroboros, accepted 2026-10-05, for later.** One
-> handoff note, a full-screen editor's needs, which is item c below (a text
-> editor and full-screen terminal control) made concrete. Not started.
+> **What Edit asks of Ouroboros, accepted 2026-10-05.** Two handoff notes:
+> a full-screen editor's needs, which is item c below (a text editor and
+> full-screen terminal control) made concrete, not started; and `rename` in
+> the C port, done in #215 and its note closed.
 >
 > - [ ] **new** **A console and keyboard a full-screen editor can use.**
 >       Five parts, in Edit's order: (1) `cond`'s framebuffer backend
@@ -2389,7 +2391,7 @@ be reviewed after the fact from the saved screenshots.
 >       still says the destination must not exist. Done when, on FAT32, a
 >       C program's `rename("a.tmp", "a.txt")` with both present returns 0,
 >       `a.txt` holds what `a.tmp` held, and `a.tmp` is gone. Note:
->       [`handoffs/2026-10-05-from-edit-rename.md`](handoffs/2026-10-05-from-edit-rename.md).
+>       [`handoffs/closed/2026-10-05-from-edit-rename.md`](handoffs/closed/2026-10-05-from-edit-rename.md).
 >       *Built 2026-10-05 with `unlink` above, on `libc/unlink-rename`:
 >       both in `libc/src/file.c`, over `NP_RM` and `NP_MV`, resolving
 >       their paths through the helper `open` now shares
@@ -2423,7 +2425,8 @@ be reviewed after the fact from the saved screenshots.
 >       `rmdir`; and the rig waits for and grades the summary line, which a
 >       substring match passed on a run cut short. Mutations for each new
 >       check: no subtree refusal, no normalization, no empty-path refusal,
->       each fail `test-crename`.*
+>       each fail `test-crename`. Merged as #215 (`e0c8e09`); both handoff
+>       notes are done and in `handoffs/closed/`.*
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
