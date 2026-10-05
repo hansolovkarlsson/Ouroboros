@@ -67,6 +67,11 @@
 #define NP_BASE 0x100
 #define NP_WRITE_AT (NP_BASE + 4)
 #define NP_TOUCH (NP_BASE + 5)
+/* unlink and rename (file.c): a0 = path length; for NP_MV a0 = src length,
+ * a1 = dst length, the payload src then dst. */
+#define NP_RMDIR (NP_BASE + 7)
+#define NP_RM (NP_BASE + 8)
+#define NP_MV (NP_BASE + 9)
 #define NP_READ_AT (NP_BASE + 10)
 #define NP_WRITE_FILE (NP_BASE + 11)
 #define NP_STAT (NP_BASE + 12)
@@ -104,6 +109,16 @@
  * reading as "failed". Mirrors syscall-abi's NO_FS. */
 #define NO_FS (~0UL - 1UL)
 #define FS_ERR_NOT_FOUND (~0UL - 2UL)
+/* Mapped to errno by unlink and rename (file.c). */
+#define FS_ERR_NOT_A_FILE (~0UL - 3UL)
+#define FS_ERR_NOT_A_DIRECTORY (~0UL - 4UL)
+#define FS_ERR_INVALID_NAME (~0UL - 5UL)
+#define FS_ERR_ALREADY_EXISTS (~0UL - 6UL)
+#define FS_ERR_NOT_EMPTY (~0UL - 7UL)
+#define FS_ERR_IS_ROOT (~0UL - 8UL)
+#define FS_ERR_DISK_FULL (~0UL - 9UL)
+#define FS_ERR_READ_ONLY (~0UL - 29UL)
+#define FS_ERR_CROSS_DEVICE (~0UL - 33UL)
 #define FS_ERR_PERM (~0UL - 32UL)
 /* A request or reply that did not authenticate: no key for the peer, a reply
  * signature or keyed tag that did not verify. Named so a C caller can tell it
