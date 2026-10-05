@@ -207,10 +207,12 @@ pub(crate) const GUARD_PAGES: u64 = 1;
 /// refusing. 1 MiB since 2026-10-05 (256 KiB before): Proem's preprocessor
 /// holds 342 KB live for `libc/picodemo.c` and 667 KB for its C11-header
 /// test, on top of picolibc's own (`docs/handoffs/` from Proem,
-/// heap-growth). It costs no RAM, since every region is rounded to a whole
-/// slot already, only code room: 512 pages less this tail leaves 241 for a
-/// program's image, `HEAP_INFO_IMAGE_MAX`, against 135 KiB for the
-/// largest, `netd`.
+/// heap-growth). A spawned program's region is rounded to a whole slot
+/// already, so there it costs no RAM; a boot-loaded one (`fsd`, `cond`,
+/// `netd`, `accountd`, the shell) frees the rest of its slot to the
+/// firmware, so each keeps 768 KiB more than with 256 KiB. In code room,
+/// 512 pages less this tail leaves 241 for a program's image
+/// (`HEAP_INFO_IMAGE_MAX`), against about 140 KiB for the largest, `netd`.
 const HEAP_PAGES: u64 = 256;
 /// 2MB: the L2 slot `mmu.rs` splits into pages for a task's EL0 view, so
 /// the bound every region must fit (see the module doc comment). One
@@ -966,6 +968,14 @@ pub(crate) fn elf_region_size(program: &[u8]) -> Result<(ElfHeader, ProgramHeade
 /// region (`tasks::allocate_runtime_region`, not `boot::allocate_pages`)
 /// can reuse it unchanged.
 ///
+/// The whole region is zeroed first, so a program starts with nothing in
+/// it but its own image: a runtime region is the slot the last task to
+/// exit gave back (`free_runtime_region`, LIFO), never cleared, and its
+/// heap and stack would otherwise hold what that task left there, readable
+/// by whoever runs next (the review of #210, which grew the heap to 1 MiB).
+/// `/bin/CMEM` counts the nonzero bytes of its heap before its first
+/// `malloc`.
+///
 /// # Safety
 /// `region_base` must point to a freshly allocated, writable region of at
 /// least `region_size` bytes - the same requirement [`copy_segments`] and
@@ -977,6 +987,9 @@ pub(crate) unsafe fn populate_region(
     region_base: u64,
     region_size: u64,
 ) -> Result<LoadedProgram, LoaderError> {
+    // SAFETY: the region is `region_size` writable bytes, this function's
+    // own contract.
+    unsafe { core::ptr::write_bytes(region_base as *mut u8, 0, region_size as usize) };
     // SAFETY: forwarded from this function's own contract.
     unsafe { copy_segments(program, phdrs, region_base, region_size)? };
 

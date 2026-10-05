@@ -88,8 +88,9 @@ growing the stack - the shell's `exec` path forced 8KB->16KB, and the
 network server forced 16KB->24KB->32KB->40KB as it gained TCP buffers,
 then concurrent connections, then the remote-mount session path; the size
 today is the loader's `STACK_PAGES`, and `heap_info` reports it at runtime).
-Below the guard is a 1 MiB **raw heap area** (the loader's `HEAP_PAGES`; 256KB until 2026-10-05) the program reaches via the
-`heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
+Below the guard is a 1 MiB **raw heap area** (the loader's `HEAP_PAGES`;
+256KB until 2026-10-05), zeroed at load like the rest of the region, which
+the program reaches via the `heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
 "Binary format" for why `alloc`'s `Vec`/`String` can't be used here) - the
 shell uses it to hold a redirect/pipe capture far larger than its stack, so
 `cat big > file` works. `.bss`/`.data` are now supported too (see "Binary

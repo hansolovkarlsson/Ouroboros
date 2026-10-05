@@ -672,8 +672,8 @@ the microkernel arc itself still leaves open):
 
 The stack **guard page** (a guarded stack, which on the day it arrived caught
 a real silent overflow in the shell's own `exec` path; the size today is the
-loader's `STACK_PAGES`) and the 256KB raw
-**userland heap** (`heap_info` — a real `alloc`-backed heap stays blocked on
+loader's `STACK_PAGES`) and the raw
+**userland heap** (256KB then, 1 MiB since 2026-10-05) (`heap_info` — a real `alloc`-backed heap stays blocked on
 stable: prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link
 rejects, and `-Z build-std` is nightly-only), formerly tracked here, both
 shipped 2026-08-20. See `CHANGELOG.md`.
