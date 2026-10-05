@@ -313,12 +313,14 @@ pub struct Fs {
     /// that read a sector per entry now reads it once. Before this, `cp` of
     /// a 758 KB file made 353 disk reads for one 2 KiB `write_at` at
     /// 160 KB, nearly all of them the same few FAT sectors (2026-10-05).
-    /// Valid for ONE request only: [`begin_request`](Self::begin_request)
-    /// drops it, because the same partition can be mounted as two trees,
-    /// two `Fs` over one FAT, and the other one may write it between our
-    /// requests. Within a request only this `Fs` acts (`fsd` is single
-    /// threaded), and [`write_fat_entry`](Self::write_fat_entry) keeps it
-    /// in step with its own writes.
+    /// Kept across requests, which is sound because this `Fs` is the only
+    /// writer of its FAT: `fsd` mounts a partition at most once
+    /// (`tree_of` in `main.rs`, since 2026-10-05; until then it
+    /// was dropped at every request, since a second tree over the same
+    /// partition could write the FAT between them), the disk tools refuse
+    /// while anything is mounted, and
+    /// [`write_fat_entry`](Self::write_fat_entry) keeps it in step with
+    /// this `Fs`'s own writes.
     fat_cache: Option<FatSector>,
     /// Where [`find_free_cluster`](Self::find_free_cluster) starts its
     /// scan: one past the cluster it last returned. Only a starting point,
@@ -546,13 +548,6 @@ impl Fs {
         } else {
             Ok(Some(value))
         }
-    }
-
-    /// Drops the request-scoped FAT cache; `fsd`'s `handle` calls this on
-    /// every mounted filesystem before it serves a request. See
-    /// [`fat_cache`](Self::fat_cache).
-    pub fn begin_request(&mut self) {
-        self.fat_cache = None;
     }
 
     /// One FAT entry's low 28 bits, from the first FAT copy, through the

@@ -152,13 +152,10 @@ impl Filesystem {
         }
     }
 
-    /// Called on every mounted filesystem before each request: drops what
-    /// may only be cached within one request (FAT32's FAT sector, see
-    /// `fat32::Fs::fat_cache`).
-    pub fn begin_request(&mut self) {
-        if let Filesystem::Fat32(fs) = self {
-            fs.begin_request();
-        }
+    /// Whether this filesystem lives on a disk partition (every arm but the
+    /// synthetic `/proc`), so that `partition_lba` names a real place.
+    pub fn is_disk(&self) -> bool {
+        !matches!(self, Filesystem::Proc(_))
     }
 
     /// The first sector of the mounted volume - `mount`-info reporting only

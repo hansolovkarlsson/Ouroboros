@@ -3910,6 +3910,12 @@ fn cmd_mount_at(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Outp
     // fsd mounts the partition into a tree and returns the tree id (a small
     // number < FS_ERR_MIN; an error is >= FS_ERR_MIN).
     let tree = fs_call(syscall_abi::FSOP_MOUNT_AT, [index, 0, 0, 0], &[], &[], &mut []);
+    if tree == MOUNT_ALREADY {
+        // A partition already mounted comes back as its existing tree, so
+        // this means only that every tree slot is taken.
+        out.put_line("mount: every mount slot is in use");
+        return;
+    }
     if tree >= FS_ERR_MIN {
         print_fs_error("mount", tree);
         return;

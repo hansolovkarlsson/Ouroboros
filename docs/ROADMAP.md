@@ -881,8 +881,9 @@ The small open tails those arcs deliberately left:
   758 KB copy, a second copy after an `rm`, a copy into a new directory
   and a `>>` append all read back identical from the Mac, and
   `fsck_msdos -n` finds no chain error or orphan; interleaved copies
-  through `/` and `mount 0 /mnt/a` likewise. Not shown: that the
-  per-request drop is needed. With it removed, two interleaving sequences
+  through `/` and `mount 0 /mnt/a` likewise (since the double-mount fix
+  below, `/mnt/a` is tree 0 itself and the drop is gone). Not shown: that
+  the per-request drop was needed. With it removed, two interleaving sequences
   stayed clean, because a request's directory walk reads FAT sector 0
   before anything else and so replaces a stale sector first. It stays, on
   reasoning. The read-by-fid cure for `cpu` spawn is still open; reads
@@ -919,7 +920,22 @@ The small open tails those arcs deliberately left:
   stick may trust the stale count. Update it on allocation and free, or
   write `0xFFFFFFFF` (unknown) once at mount, as the spec allows.
 
-- **Two trees over one partition share nothing (seen 2026-10-05).**
+- ~~**Two trees over one partition share nothing (seen 2026-10-05).**~~
+  **FIXED 2026-10-05** on `fsd/no-double-mount` (Hans chose it over
+  keeping double mounts): `FSOP_MOUNT_AT` on a partition that is already
+  a tree returns that tree's id instead of mounting it again (`tree_of`
+  in `fsd`'s `main.rs`), and the tree-0 auto-mount refuses a partition
+  another tree holds. A plain refusal was built first and dropped before
+  it was pushed: trees above 0 are never unmounted, so one shell's
+  `mount 1 /mnt/f` would have shut every later shell out of partition 1
+  for the boot. With one `Fs` per partition, the FAT cache now lasts
+  across requests (`begin_request` is gone) and the read cursor cannot go
+  stale under another tree. Shown on the ext2 image: `mount 0 /mnt/a`
+  then a write through `/mnt/a` appears at `/`; `mount 1` five times at
+  five paths all bind one tree; with the reuse removed, the third `mount
+  1` gets `every mount slot is in use`. The FAT32 rigs (interleaved
+  copies through `/` and `/mnt/a`, the spare-entries image) stay clean
+  under `fsck_msdos`. The text as found:
   `mount 0 /mnt/a` mounts the boot partition a second time, so two
   `fat32::Fs` each keep their own `read_cursor` (and, within a request, a
   FAT cache) over the same FAT. The cache is request-scoped for this
