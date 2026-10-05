@@ -501,7 +501,8 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   `stdin`/`stdout`/`stderr` wire to fd 0/1/2 — i.e. straight to the
   `write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit` stubs we already
   wrote. So a picolibc program links `picolibc.a` + `crt0.o os.o file.o` (the
-  stubs, compiled against picolibc's *own* headers so `struct stat`/flags match)
+  stubs, compiled against picolibc's *own* headers so `struct stat`/flags match; true only since 2026-10-05, when `libc/include` moved to the quote path
+  only (`-iquote`), so an angle-bracket include cannot reach a hand-rolled header: before, `file.o` got the hand-rolled `struct stat`, and `fstat` wrote a picolibc program's size into `st_dev`/`st_ino`)
   + `builtins.o`, and drops our `stdio.c`/`stdlib.c`/`string.c` (picolibc
   supplies `printf`/`malloc`/`memcpy`/…).
 - **Two compiler-rt builtins we carry** (`libc/pico/builtins.c`):

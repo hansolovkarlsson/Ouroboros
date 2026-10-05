@@ -93,7 +93,12 @@
 #define MSG_MAX_LEN 768u
 #define STAT_INFO_LEN 27u
 #define STAT_SIZE_OFF 0u
+#define STAT_FLAGS_OFF 8u
 #define STAT_MODE_OFF 20u
+#define STAT_UID_OFF 22u
+#define STAT_GID_OFF 24u
+#define STAT_MODEVALID_OFF 26u
+#define STAT_FLAG_DIR 1u
 
 /* Floor of the reserved error band: any syscall/fs return >= this is an error
  * (mirrors syscall-abi's FS_ERR_MIN = u64::MAX - 43). Hand-mirrored, so it can
@@ -180,5 +185,12 @@ static inline void __wr_u64(unsigned char *p, unsigned long v) {
         p[i] = (unsigned char)(v >> (i * 8));
     }
 }
+
+/* The port's internal hooks, between os.c's _exit and file.c, declared here
+ * because this header reaches both builds: a picolibc object is compiled with
+ * libc/include on the quote path only, so the hand-rolled <unistd.h> that also
+ * declares them is not seen there. */
+void __libc_end_stdout(void);
+void __libc_close_all(void);
 
 #endif
