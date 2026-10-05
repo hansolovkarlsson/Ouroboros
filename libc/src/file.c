@@ -544,18 +544,48 @@ int close(int fd) {
     return 0;
 }
 
+/* What the server's `NP_FSTAT` record says, and nothing else. The whole
+ * `struct stat` is zeroed first: it used to be left as the caller's stack had
+ * it but for two fields, and Proem, which knows a file by `st_dev` and
+ * `st_ino`, could take two headers for one and skip the second silently (its
+ * fstat-identity handoff, 2026-10-01). So `st_dev` and `st_ino` read 0, "no
+ * identity", until the record carries one (a wire change, on the roadmap).
+ * Mode, uid and gid are the disk's where it records them (ext2,
+ * `STAT_MODEVALID_OFF`). Where it does not (FAT32, exFAT, /proc), `st_mode`
+ * is the file type from the record's directory flag with 0666 for a file and
+ * 0777 for a directory: such a filesystem keeps no owner or mode, and fsd
+ * lets every access through on it, so "anyone may read and write" is the
+ * true answer, where 0000 would have told a ported program it may touch
+ * nothing (the review of #216; Linux's vfat makes the bits up the same way,
+ * from its mount options). uid and gid stay 0 there. Before, `st_mode` was 0
+ * on those, so `S_ISREG` was false for every file. */
 int fstat(int fd, struct stat *st) {
     struct file_state *f = file_for(fd);
     if (!f || !st) {
         return -1;
     }
-    unsigned char info[STAT_INFO_LEN];
+    /* Zeroed: np_request copies only what the reply carries, and a shorter
+     * record (an older peer's 20 bytes) must read as "no mode", not as the
+     * stack's leftovers in the mode-valid byte (the review of #216). */
+    unsigned char info[STAT_INFO_LEN] = {0};
     long s = np_request(f->target, f->endpoint, NP_FSTAT, f->fid, 0, 0, 0, 0, info, sizeof(info));
     if ((unsigned long)s >= FS_ERR_MIN) {
         return -1;
     }
+    memset(st, 0, sizeof *st);
     st->st_size = (long)__rd_u64(info + STAT_SIZE_OFF);
-    st->st_mode = (unsigned)(info[STAT_MODE_OFF] | (info[STAT_MODE_OFF + 1] << 8));
+    if (info[STAT_MODEVALID_OFF]) {
+        st->st_mode = (unsigned)(info[STAT_MODE_OFF] | (info[STAT_MODE_OFF + 1] << 8));
+        st->st_uid = (unsigned)(info[STAT_UID_OFF] | (info[STAT_UID_OFF + 1] << 8));
+        st->st_gid = (unsigned)(info[STAT_GID_OFF] | (info[STAT_GID_OFF + 1] << 8));
+    } else {
+        /* The whole u32, as ulib's stat_is_dir reads it. */
+        unsigned long flags = (unsigned long)info[STAT_FLAGS_OFF] |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 1] << 8) |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 2] << 16) |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 3] << 24);
+        st->st_mode = (flags & STAT_FLAG_DIR) ? (S_IFDIR | 0777) : (S_IFREG | 0666);
+    }
     return 0;
 }
 

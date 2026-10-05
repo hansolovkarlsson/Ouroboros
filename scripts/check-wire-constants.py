@@ -247,6 +247,11 @@ CHECKED = [
     # keeps writing bit 0 and every remote directory lists as a FILE, with no
     # error anywhere - the well-formed wrong answer this script exists to stop.
     "STAT_FLAG_DIR",
+    # The rest of the stat record libc's fstat reads (2026-10-05): a drifted
+    # offset is a well-formed wrong owner or mode, nothing failing.
+    "STAT_MODE_OFF",
+    "STAT_UID_OFF",
+    "STAT_GID_OFF",
     # The generic failure sentinel. Server-only (the client reads statuses, it
     # does not send them), and free coverage once the `u64::MAX` pattern
     # existed - found by asking which names a peer and Rust BOTH spell that
@@ -422,7 +427,7 @@ PEER_BASELINE = {
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 50,  # counted 2026-10-05 (run, not added up): +NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
+    "libc/include/sys.h": 56,  # counted 2026-10-05 (run, not added up): 56 with fstat's six STAT_* names; 50 with NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 

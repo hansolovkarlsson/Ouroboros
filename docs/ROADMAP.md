@@ -2327,7 +2327,7 @@ be reviewed after the fact from the saved screenshots.
 >       waits on steps 1 to 5 and the heap above, and its **Done when** is
 >       the arc's finish line. Note:
 >       [`handoffs/2026-10-01-from-proem-system-dirs.md`](handoffs/2026-10-01-from-proem-system-dirs.md).
-> - [ ] **fix** **`fstat` leaves every field but two as it found them.**
+> - [x] **fix** **`fstat` leaves every field but two as it found them.**
 >       `libc/src/file.c`'s `fstat` sets `st_size` and `st_mode` only, so a
 >       caller's `struct stat` keeps stack garbage in `st_dev` and `st_ino`,
 >       and Proem's `#pragma once` and include-guard skipping can take two
@@ -2339,6 +2339,49 @@ be reviewed after the fact from the saved screenshots.
 >       exFAT have none, so the directory entry's location; `/proc`'s own)
 >       and an `st_dev` per server and per remote mount. Note:
 >       [`handoffs/2026-10-01-from-proem-fstat-identity.md`](handoffs/2026-10-01-from-proem-fstat-identity.md).
+>       *The first half built 2026-10-05 on `libc/fstat-fields`, and it
+>       found worse than garbage: picolibc programs' `file.o` was compiled
+>       with `-Ilibc/include` first, so against the hand-rolled `struct
+>       stat` (`st_size` at 0, `st_mode` at 8) while the caller's is
+>       picolibc's (`st_mode` at 4, `st_size` at 16). `fstat` wrote the
+>       file SIZE into `st_dev`/`st_ino` and left `st_size` unset, so
+>       Proem's identity was the size: two headers of one size were one
+>       file. Now every picolibc port object is built with `libc/include`
+>       on the quote path only (`-iquote`), so an angle-bracket include
+>       cannot reach a hand-rolled header, and `fstat` zeroes the whole
+>       struct, then fills size, and mode, uid and gid where the disk
+>       records them (ext2); where it does not (FAT32, exFAT), the type
+>       with 0666 or 0777, since `fsd` enforces nothing there (`S_ISREG`
+>       was false there). `st_dev`
+>       and `st_ino` read 0, "no identity". The hand-rolled `struct stat`
+>       grew the same fields and the `S_IF*`/`S_IS*` macros, and the libc
+>       objects now depend on the headers, so a header change rebuilds
+>       them. `make test-crename` runs `/bin/CFSTAT` (`libc/cfstat.c`) on
+>       both formats: a struct filled with 0xA5 must come back equal to
+>       zero plus the four filled fields, mode 100644 on ext2 and 100000
+>       on FAT32. It failed on both before the header order was fixed, and
+>       fails without the zeroing. Its review (`/code-review high`, ten
+>       findings) made the uid/gid check one that can fail (compared with
+>       `ls -l /etc/passwd`, read through the shell's own path, not with
+>       themselves), added a directory (`S_ISDIR` on `/etc`), zeroed the
+>       reply buffer (a shorter record left the mode-valid byte to the
+>       stack), read the flags as the full u32, put the remaining `STAT_*`
+>       offsets on `check-wire-constants.py`'s list, made `-iquote` the
+>       rule for all three port objects (`crt0.o` and `os.o` still had the
+>       hand-rolled headers first; the port's internal hooks moved to
+>       `sys.h`), and chose the 0666/0777 above over 0000. Mutations: uid
+>       read from the gid offset, and the directory test inverted, each
+>       fail it.*
+> - [ ] **new** **A real file identity in `fstat` (`st_dev`, `st_ino`).**
+>       The second half of the item above: the `NP_FSTAT` record carries
+>       no inode or qid, so it is a wire change (`ninep-abi`, both C
+>       headers, the Python peers, all compared by `make test`), plus an
+>       identity per filesystem (ext2's inode; FAT32 and exFAT have none,
+>       so the directory entry's location, not the first cluster, which an
+>       empty file lacks; `/proc`'s own) and an `st_dev` per server and per
+>       remote mount. Until then Proem reads the zero pair as "no
+>       identity" and rereads headers. Proem's fstat note asked for it
+>       first; the fallback met its **Done when**.
 > - [x] **Rename CPP to Proem in the C-hosting plan** on the branch that
 >       carries it (`docs/c-hosting`, not on `main`): `/bin/proem`,
 >       `proem-bin`, `PROEM_DIR` defaulting to `../Proem`, `driver/proem.c`,
