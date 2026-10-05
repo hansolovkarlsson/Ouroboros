@@ -115,6 +115,36 @@ Steps 1 to 4 are small, independent of Proem and useful to every C program;
 they go first. Step 5's first level is a few lines. Step 6 is the one with a
 design decision in it, and step 7 is the one nobody can answer before trying.
 
+## Where it stands, 2026-10-05
+
+The plan sat on its branch for a week while Proem's handoff notes were met on
+`main` by other routes. The steps above are kept as written; this is what the
+tree at `4dcbddd` leaves of them, read from the code.
+
+- **Step 1, argv: open.** `crt0.c` still calls `main(void)`. Three files
+  still carry the note (`cbig.c`, `cremote.c`, `cwrite.c`); `nsdemo.c` no
+  longer does.
+- **Step 2, errno: begun.** `file.c` has `set_errno_from_status`, built for
+  picolibc programs only (`-DOURO_HAVE_ERRNO`), and `unlink`, `rmdir`,
+  `rename` and `remove` call it (#215). `open`, `read`, `close` and `fstat`
+  do not, and those are the ones Proem's include search needs.
+- **Steps 3 to 5, environ, `stat`, a clock: open.** Nothing in `libc/src`
+  defines `environ`, `stat` or `gettimeofday`.
+- **`fstat` itself** was wrong before this plan touched it, and is fixed:
+  #216 zeroes what it does not fill and builds the picolibc port against
+  picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real
+  file identity is its own item in `ROADMAP.md`.
+- **Step 7, room: half met.** `HEAP_PAGES` is 256 (1 MiB, #210), which
+  holds Proem's `picodemo.c` and C11-header tests. Its 112-header picolibc
+  test needs 2,031 KB, past the one 2 MB slot that holds a program's code,
+  heap and stack, so step 8's second check waits on "a heap sized per
+  program, and regions past one 2 MB slot" in `ROADMAP.md`. `MAX_FILES`
+  (8) and `PATH_MAX_C` (96) are unchanged.
+- **Steps 6 and 8** are not started; they are Proem's system-directories
+  handoff (`docs/handoffs/2026-10-01-from-proem-system-dirs.md`, accepted).
+
+So the order stands: steps 1 to 5 next, each small, then 6 and 8.
+
 ## What stays in Proem's session
 
 Proem's side is recorded in Proem's own roadmap: that its sources build with
