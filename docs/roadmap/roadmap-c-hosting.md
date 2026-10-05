@@ -121,9 +121,16 @@ The plan sat on its branch for a week while Proem's handoff notes were met on
 `main` by other routes. The steps above are kept as written; this is what the
 tree at `4dcbddd` leaves of them, read from the code.
 
-- **Step 1, argv: open.** `crt0.c` still calls `main(void)`. Three files
-  still carry the note (`cbig.c`, `cremote.c`, `cwrite.c`); `nsdemo.c` no
-  longer does.
+- **Step 1, argv: done 2026-10-05.** `crt0.c` builds the vector from
+  `GET_ARGC`/`GET_ARG` into static storage (no heap, so the hand-rolled
+  libc and the picolibc port share it) and calls `main(argc, argv)`.
+  `/bin/CARGS` (`libc/cargs.c`) prints it in `/bin/ARGS`'s format, and
+  `make test-cargs` compares the two over three vectors, the longest the
+  fifteen arguments the shell can pass; a mutation dropping the last
+  argument fails all three. `cbig.c`, `cremote.c` and `cwrite.c` take their
+  remote path as an argument, the old fixed one the default. Found on the
+  way: the shell keeps 16 words and drops the rest without a word
+  (`MAX_ARGS`), an item in `ROADMAP.md`.
 - **Step 2, errno: begun.** `file.c` has `set_errno_from_status`, built for
   picolibc programs only (`-DOURO_HAVE_ERRNO`), and `unlink`, `rmdir`,
   `rename` and `remove` call it (#215). `open`, `read`, `close` and `fstat`

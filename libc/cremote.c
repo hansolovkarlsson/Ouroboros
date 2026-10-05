@@ -1,8 +1,8 @@
 /* Open and read a file on a REMOTE mount, from C - step 3b of
  * docs/roadmap/roadmap-fid-verbs.md, and the thing that could not be done before.
  *
- * Fixed paths, because C programs get no argv yet (crt0.c calls main() with no
- * arguments). Run it after `mount -r <host>:<port> /mnt/a`.
+ * The remote file is the first argument, `/mnt/a/HELLO.TXT` when there is
+ * none. Run it after `mount -r <host>:<port> /mnt/a`.
  *
  * The local path is checked FIRST and deliberately: every existing C program
  * takes that route, so a change that fixed the remote case by breaking the
@@ -71,10 +71,11 @@ static int must_leave(const char *what, unsigned long expected) {
     return 1;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    const char *remote = argc > 1 ? argv[1] : "/mnt/a/HELLO.TXT";
     int bad = 0;
     bad |= try_read("/EFI/ORBS/INIT.CFG");  /* local - the no-regression check */
-    bad |= try_read("/mnt/a/HELLO.TXT");    /* remote - the new capability */
+    bad |= try_read(remote);                /* remote - the new capability */
 
     /* O_TRUNC WITHOUT O_CREAT on a missing file must fail (POSIX ENOENT). fsd
      * used to create it, and the sibling O_RDONLY fix left this branch alone. */
@@ -87,7 +88,7 @@ int main(void) {
     /* A remote WRITE must be refused, not silently dropped. It used to grant a
      * buffer that never crosses a machine and send a payload-free request,
      * which would have reported success while transmitting nothing. */
-    fd = open("/mnt/a/HELLO.TXT", O_RDONLY);
+    fd = open(remote, O_RDONLY);
     if (fd >= 0) {
         ssize_t n = write(fd, "x", 1);
         bad |= must_refuse("write() to a remote fd", n >= 0);

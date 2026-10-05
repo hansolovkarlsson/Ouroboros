@@ -15,8 +15,9 @@
  * If netd closed the connection after each verb (the mutation control), the
  * remote read fails partway and the compare - or the size - differs.
  *
- * Fixed paths, because C programs get no argv yet. Run on node B after
- * `mount -r 10.0.2.10:564 /mnt/a` (or 10.0.2.11 from A).
+ * The remote copy is the first argument, `/mnt/a/man/grep` when there is
+ * none. Run on node B after `mount -r 10.0.2.10:564 /mnt/a` (or 10.0.2.11
+ * from A).
  */
 #include <fcntl.h>
 #include <stdio.h>
@@ -51,7 +52,8 @@ static long slurp(const char *path, unsigned char *buf, long cap) {
     return got;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    const char *rpath = argc > 1 ? argv[1] : "/mnt/a/man/grep";
     static unsigned char local[8192];
     static unsigned char remote[8192];
 
@@ -60,9 +62,9 @@ int main(void) {
         printf("cbig: local /man/grep read failed: %s\r\n", ouro_fs_strerror());
         return 1;
     }
-    long rn = slurp("/mnt/a/man/grep", remote, sizeof remote);
+    long rn = slurp(rpath, remote, sizeof remote);
     if (rn < 0) {
-        printf("cbig: remote /mnt/a/man/grep read failed: %s\r\n", ouro_fs_strerror());
+        printf("cbig: remote %s read failed: %s\r\n", rpath, ouro_fs_strerror());
         return 1;
     }
     /* The check that can fail: same length, same bytes, and longer than one

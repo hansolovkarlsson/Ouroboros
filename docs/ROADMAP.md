@@ -2432,7 +2432,9 @@ be reviewed after the fact from the saved screenshots.
 >       ordinary program on both backends (`CON_INFO` is gated to `cond`,
 >       and `more` assumes 24 rows); (4) a per-program opt-out of the
 >       Ctrl-C kill, so 0x03 reaches it as a key (WordStar's page down);
->       (5) `main(argc, argv)` in `crt0.c`, which calls `main(void)`. Done
+>       (5) `main(argc, argv)` in `crt0.c`, which calls `main(void)`
+>       (*(5) done 2026-10-05, step 1 of the C-hosting plan; `make
+>       test-cargs`*). Done
 >       when a program in this tree, on the framebuffer console, writes
 >       each sequence of (1) and prints the bytes each key of (2) sends,
 >       and a C program's `main` receives its arguments. (4) touches the
@@ -3967,11 +3969,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `FS_ERROR`** ("bad or not-yours", `programs/servers/fsd/src/main.rs`), which
   every client renders as "no such file or directory" for a request that named
   no path. The same shape `FS_ERR_NO_SUCH_VERB` was reserved to fix for verbs.
-- **C programs receive no `argv`.** `libc/src/crt0.c` calls `main(void)`; a C
-  program cannot read its own command line while a Rust one can, so no ported
-  tool that takes a filename argument works yet. Step 1 of
-  [`roadmap-c-hosting.md`](roadmap/roadmap-c-hosting.md) (2026-09-29), which
-  found `errno`, `environ`, `stat` and a clock missing beside it.
+- **The shell drops every word past the sixteenth.** `MAX_ARGS` is 16 in
+  `programs/shell/src/main.rs`, and a longer command line is cut there with
+  no message, so a program run with 40 arguments sees 15 and cannot tell.
+  Found 2026-10-05 by `make test-cargs` (the C-hosting plan's step 1). The
+  fix is a refusal or a larger vector bounded by `ARGV_MAX`, not silence.
 - **Two error tables name the same codes.** The shell's `print_fs_error` and
   `ulib::fs_error_msg` are hand-kept copies, and they have already disagreed
   once (the stale 8.3 filename message, journal 2026-09-05). The split exists

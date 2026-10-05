@@ -18,6 +18,8 @@
 #define SYS_GRANT 31
 #define SYS_STDOUT_TARGET 38
 #define SYS_HEAP_INFO 40
+#define SYS_GET_ARGC 48
+#define SYS_GET_ARG 49
 #define SYS_GET_CWD 51
 #define SYS_YIELD 57
 
@@ -56,6 +58,12 @@
 #define NETOP_RMOUNT 4
 #define NETOP_RMOUNT_ENDPOINT 8
 #define NETOP_RMOUNT_MSG 16
+
+/* The argument vector (crt0.c): GET_ARG's answer for an index past argc, and
+ * the most bytes the kernel's staged blob may hold. NO_ARG is u64::MAX, spelled
+ * in the error band's form so the wire check reads it. */
+#define NO_ARG (~0UL - 0UL)
+#define ARGV_MAX 512u
 
 #define HEAP_INFO_BASE 0
 #define HEAP_INFO_SIZE 1
