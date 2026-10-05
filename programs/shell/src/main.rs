@@ -3881,8 +3881,9 @@ fn cmd_cpu(line: &str, out: &mut Output) {
 
 /// `mount <partition> <path>` - mount the disk's Nth partition and make it
 /// visible at `<path>` in this shell's namespace (cluster Phase 0 multi-mount).
-/// `fsd` mounts the partition into a fresh tree (`FSOP_MOUNT_AT`) and returns
-/// its tree id; we `bind` `<path>` onto that tree's root. A path under `<path>`
+/// `fsd` mounts the partition (`FSOP_MOUNT_AT`) and returns its tree id, an
+/// existing tree if the partition is already mounted (even tree 0, `/`
+/// itself); we `bind` `<path>` onto that tree's root. A path under `<path>`
 /// then resolves to that filesystem - a **second disk visible alongside** the
 /// boot mount at `/`, which the old single-mount model physically couldn't
 /// express. Per-task, like every namespace change.
@@ -3914,6 +3915,10 @@ fn cmd_mount_at(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Outp
         // A partition already mounted comes back as its existing tree, so
         // this means only that every tree slot is taken.
         out.put_line("mount: every mount slot is in use");
+        return;
+    }
+    if tree == NO_FS {
+        out.put_line("mount: no such partition, no filesystem on it, or `/` not mounted yet (`mount -a` first)");
         return;
     }
     if tree >= FS_ERR_MIN {
