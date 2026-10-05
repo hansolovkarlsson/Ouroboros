@@ -1774,7 +1774,7 @@ The small open tails those arcs deliberately left:
 >       one generic block type for the three, and the timeout dump's reads
 >       through the handles. Merged as #207. Done; no board round, the same
 >       instructions through the same two stores.*
-> - [ ] **fix** **PORTSC's RW1C bits and PED are masked by convention.**
+> - [x] **fix** **PORTSC's RW1C bits and PED are masked by convention.**
 >       `reg::portsc` is a `Whole32`, and every write must go through
 >       `portsc_preserve` or it writes back PED (disabling the port) and
 >       clears pending change bits; nothing makes the bare write
@@ -1784,6 +1784,24 @@ The small open tails those arcs deliberately left:
 >       its second review adds that PORTSC and the doorbells share
 >       `Whole32` (DCBAAP and ERDP share `Whole64`), so a port function
 >       takes a doorbell. A PORTSC type of its own closes both.
+>       *Built 2026-10-05 on `xhci/portsc-type`: `reg::PortStatus`, made
+>       only by `reg::portsc`, with `read` and `write(set, clear)`; the
+>       write reads the port and writes `portsc_merge(current, set,
+>       clear)`, every bit as read but PED and the change bits 0, then
+>       `set` and a 1 in each change bit in `clear`, through
+>       `Whole32::write` (so the barrier check is unchanged). A `set` in
+>       PED or a change bit, or a `clear` outside the change bits, stops a
+>       debug build and is dropped in a release one; `portsc_merge` is a
+>       `const fn` with build-time asserts. `portsc_preserve` and
+>       `Whole32::read` are gone. Shown unspellable by mutation: a one-value
+>       write (E0061), a doorbell passed for a port (E0308) and a hand-built
+>       handle (E0603) fail to compile, a legal write compiles, and a merge
+>       that writes the change bits back fails the asserts (E0080). One
+>       behaviour change: the clear after a reset reads the port again
+>       rather than reuse the value it polled, one more read, no write
+>       changed. `make test` green, `test-usb-hub` 19 ok with the same
+>       reset lines, `test-el1-drop` PASS. Left: DCBAAP and ERDP still
+>       share `Whole64`.*
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
