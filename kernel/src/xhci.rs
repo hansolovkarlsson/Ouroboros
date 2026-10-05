@@ -220,8 +220,8 @@ const CRCR_CRR: u32 = 1 << 3;
 // PORTSC bits/fields. The RW1C status bits (CSC/PEC/WRC/OCC/PRC/PLC/CEC)
 // and PED (R/W, but writing 1 *disables* the port - not a "preserve as
 // read" bit) all have to be masked to 0 whenever writing PORTSC for an
-// unrelated reason, or they'd be spuriously cleared/tripped. See
-// `portsc_preserve` below.
+// unrelated reason, or they'd be spuriously cleared/tripped. The only
+// PORTSC write is `reg::PortStatus::write`, which does that itself.
 const PORTSC_CCS: u32 = 1 << 0;
 const PORTSC_PR: u32 = 1 << 4;
 const PORTSC_PRC: u32 = 1 << 21;
@@ -239,8 +239,10 @@ const PLS_SS_INACTIVE: u32 = 6;
 const PLS_COMPLIANCE: u32 = 10;
 const PORTSC_SPEED_SHIFT: u32 = 10;
 const PORTSC_SPEED_MASK: u32 = 0xf;
-const PORTSC_WRITE_CLEAR_MASK: u32 =
-    (1 << 1) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
+/// The RW1C change bits, 23:17: CEC, PLC, PRC, OCC, WRC, PEC, CSC.
+const PORTSC_RW1C: u32 = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
+/// What a PORTSC write must not write back as read: PED and the change bits.
+const PORTSC_WRITE_CLEAR_MASK: u32 = PORTSC_PED | PORTSC_RW1C;
 
 // Runtime interrupter register set 0, from `ir0_base` (= BAR base +
 // RTSOFF + 0x20 - interrupter register sets start at RTSOFF+0x20, register
@@ -654,6 +656,26 @@ unsafe fn read64(addr: u64) -> u64 {
 const fn rsvdp_merge(current: u64, rsvdp: u64, val: u64) -> u64 {
     (current & rsvdp) | (val & !rsvdp)
 }
+/// What a PORTSC write writes: `current` as read, but PED and the change
+/// bits 0, then `set`, and 1 in the change bits named in `clear`. A `set`
+/// bit in PED or a change bit, or a `clear` bit outside the change bits,
+/// is dropped: either would disable the port or clear a change nobody
+/// asked to clear. Pure and `const` for the asserts below, as
+/// [`rsvdp_merge`].
+const fn portsc_merge(current: u32, set: u32, clear: u32) -> u32 {
+    (current & !PORTSC_WRITE_CLEAR_MASK) | (set & !PORTSC_WRITE_CLEAR_MASK) | (clear & PORTSC_RW1C)
+}
+const _: () = {
+    // A port read enabled with every change pending is written with PED
+    // and the changes 0, the rest as read.
+    assert!(portsc_merge(0x00fe_0203, 0, 0) == 0x0000_0201);
+    // A reset sets PR and nothing else moves.
+    assert!(portsc_merge(0x00fe_0203, PORTSC_PR, 0) == 0x0000_0211);
+    // Clearing PRC writes PRC alone of the change bits.
+    assert!(portsc_merge(0x00fe_0203, 0, PORTSC_PRC) == 0x0020_0201);
+    // PED cannot be set, nor cleared through `clear`.
+    assert!(portsc_merge(0x0000_0201, PORTSC_PED, PORTSC_PED) == 0x0000_0201);
+};
 const _: () = {
     // The kept bits survive, the new value fills the rest, and a stray bit
     // of the new value cannot land in a kept field.
@@ -689,10 +711,11 @@ const _: () = {
 /// address; `publish_cycle_word`, the ring's `dmb oshst; str`, takes any
 /// pointer, so it too would store to a register without the `dsb sy` or the
 /// RsvdP merge; a block's `at` gives a plain address for a read, which can
-/// name another block's offset; PORTSC and the doorbells are both a
-/// `Whole32` (DCBAAP and ERDP both a `Whole64`), so a port function would
-/// take a doorbell; and PORTSC's RW1C bits and PED are still masked by
-/// convention (`portsc_preserve`). The image check sees a rerouted
+/// name another block's offset; and DCBAAP and ERDP are both a `Whole64`,
+/// so a function taking one would take the other. PORTSC is a
+/// [`reg::PortStatus`] of its own, whose write masks PED and the change
+/// bits itself (until 2026-10-05 it was a `Whole32`, masked by convention,
+/// and a port function would take a doorbell). The image check sees a rerouted
 /// `Whole32::write` or `Whole64::write`, but not a `Kept` write routed
 /// around them, since the whole writes keep their other callers.
 mod reg {
@@ -737,6 +760,13 @@ mod reg {
     /// A 64-bit register with no RsvdP bits, written whole.
     #[derive(Clone, Copy)]
     pub(super) struct Whole64(u64);
+    /// A root port's PORTSC, written only as a read-modify-write that
+    /// writes PED and the RW1C change bits 0 unless asked: written back as
+    /// read, a 1 in PED disables the port and a 1 in a change bit clears a
+    /// change still pending. Its own type, so no doorbell can be passed
+    /// for it.
+    #[derive(Clone, Copy)]
+    pub(super) struct PortStatus(u64);
     /// A 32-bit register with RsvdP bits, written keeping them.
     #[derive(Clone, Copy)]
     pub(super) struct Kept32 {
@@ -764,12 +794,10 @@ mod reg {
     pub(super) fn dcbaap(op: OpRegs) -> Whole64 {
         Whole64(op.at(OP_DCBAAP))
     }
-    /// A root port's PORTSC, `port` 1-based, written whole: its RW1C bits
-    /// and PED are the caller's to mask, through `portsc_preserve`, which
-    /// writes every other bit back as read.
-    pub(super) fn portsc(op: OpRegs, port: u32) -> Whole32 {
+    /// A root port's PORTSC, `port` 1-based.
+    pub(super) fn portsc(op: OpRegs, port: u32) -> PortStatus {
         debug_assert!(port >= 1, "PORTSC: ports are 1-based");
-        Whole32(op.at(OP_PORTSC_BASE + ((port - 1) as u64) * 0x10))
+        PortStatus(op.at(OP_PORTSC_BASE + ((port - 1) as u64) * 0x10))
     }
     pub(super) fn erstsz(ir: Ir0Regs) -> Kept32 {
         Kept32 { addr: ir.at(IR_ERSTSZ), rsvdp: ERSTSZ_RSVDP }
@@ -789,9 +817,6 @@ mod reg {
     }
 
     impl Whole32 {
-        pub(super) unsafe fn read(self) -> u32 {
-            unsafe { read32(self.0) }
-        }
         /// A register write, with the barrier every one of them needs in front
         /// of it: `dsb sy`, so each load and store the CPU made before it is
         /// complete before the controller sees the write. A register write is how
@@ -806,6 +831,24 @@ mod reg {
         /// barrier the Pi 4 has run every doorbell behind.
         pub(super) unsafe fn write(self, val: u32) {
             unsafe { mmio_write32(self.0, val) }
+        }
+    }
+
+    impl PortStatus {
+        pub(super) unsafe fn read(self) -> u32 {
+            unsafe { read32(self.0) }
+        }
+        /// Reads the port and writes it back through [`portsc_merge`]:
+        /// every bit as read but PED and the change bits, which are 0, then
+        /// `set` (a control bit such as PR or WPR) and a 1 in each change
+        /// bit in `clear`. A `set` in PED or a change bit, or a `clear`
+        /// outside the change bits, is a caller's bug: a debug build, which
+        /// the card carries, stops on it; a release build drops it.
+        pub(super) unsafe fn write(self, set: u32, clear: u32) {
+            debug_assert!(set & PORTSC_WRITE_CLEAR_MASK == 0, "PORTSC: a set bit in PED or a change bit");
+            debug_assert!(clear & !PORTSC_RW1C == 0, "PORTSC: a clear bit outside the change bits");
+            let current = unsafe { read32(self.0) };
+            unsafe { Whole32(self.0).write(portsc_merge(current, set, clear)) }
         }
     }
 
@@ -885,10 +928,6 @@ mod reg {
     unsafe extern "C" fn mmio_write64(addr: u64, lo: u32, hi: u32) {
         core::arch::naked_asm!("dsb sy", "str w1, [x0]", "str w2, [x0, #4]", "ret");
     }
-}
-
-fn portsc_preserve(current: u32) -> u32 {
-    current & !PORTSC_WRITE_CLEAR_MASK
 }
 
 /// USB HID boot-protocol keyboard report is 8 bytes: byte 0 = modifier
@@ -2892,17 +2931,16 @@ fn portsc_needs_warm_reset(v: u32) -> bool {
 ///
 /// # Safety
 /// `portsc` is the port's PORTSC register.
-unsafe fn reset_root_port(port: u32, portsc: reg::Whole32, warm: bool) -> Result<u32, Error> {
+unsafe fn reset_root_port(port: u32, portsc: reg::PortStatus, warm: bool) -> Result<u32, Error> {
     let (set, done, kind) = if warm { (PORTSC_WPR, PORTSC_WRC | PORTSC_PRC, "warm") } else { (PORTSC_PR, PORTSC_PRC, "hot") };
-    let current = unsafe { portsc.read() };
-    unsafe { portsc.write(portsc_preserve(current) | set) };
+    unsafe { portsc.write(set, 0) };
     if !unsafe { poll_until(|| portsc.read() & done == done) } {
         let now = unsafe { portsc.read() };
         console::println!("Ouroboros kernel: xhci: port {port}: {kind} reset timed out: {}", Portsc(now));
         return Err(Error::PortResetTimeout);
     }
     let after = unsafe { portsc.read() };
-    unsafe { portsc.write(portsc_preserve(after) | (after & (PORTSC_PRC | PORTSC_WRC | PORTSC_PLC))) };
+    unsafe { portsc.write(0, after & (PORTSC_PRC | PORTSC_WRC | PORTSC_PLC)) };
     Ok(after)
 }
 
@@ -2914,7 +2952,7 @@ unsafe fn reset_root_port(port: u32, portsc: reg::Whole32, warm: bool) -> Result
 ///
 /// # Safety
 /// `portsc` is the port's PORTSC register.
-unsafe fn watch_port_enable(port: u32, portsc: reg::Whole32, when: &str) -> u32 {
+unsafe fn watch_port_enable(port: u32, portsc: reg::PortStatus, when: &str) -> u32 {
     const MAX_LOGGED: u32 = 16;
     let deadline = poll_deadline();
     let mut last = unsafe { portsc.read() };
@@ -2955,7 +2993,7 @@ unsafe fn setup_device_on_port(
     dcbaa: &mut [u64; MAX_SLOTS_ENABLED + 1],
     idx: usize,
     port: u32,
-    portsc: reg::Whole32,
+    portsc: reg::PortStatus,
 ) -> Result<DeviceClass, Error> {
     console::println!("Ouroboros kernel: xhci: device connected on port {port}");
 
