@@ -2230,9 +2230,9 @@ be reviewed after the fact from the saved screenshots.
 > mention of CPP in older records means Proem.
 >
 > **What Proem asks of Ouroboros, accepted 2026-10-01 and 2026-10-02, for
-> later.** Five handoff notes, triaged and accepted. The heap one (#210) and
-> `unlink` (#215) are done, 2026-10-05, and their notes closed; the others are
-> not started. A
+> later.** Five handoff notes, triaged and accepted. The heap one (#210),
+> `unlink` (#215) and `fstat`'s fallback (#216) are done, 2026-10-05, and their
+> notes closed; the system directories are not started. A
 > sixth, a notice with Proem's smaller heap numbers, was taken on 2026-10-02
 > and is in `handoffs/closed/`. Each note carries its evidence, its **Done when**
 > and the reply below in full.
@@ -2338,7 +2338,7 @@ be reviewed after the fact from the saved screenshots.
 >       peers, plus an identity per filesystem (ext2's inode; FAT32 and
 >       exFAT have none, so the directory entry's location; `/proc`'s own)
 >       and an `st_dev` per server and per remote mount. Note:
->       [`handoffs/2026-10-01-from-proem-fstat-identity.md`](handoffs/2026-10-01-from-proem-fstat-identity.md).
+>       [`handoffs/closed/2026-10-01-from-proem-fstat-identity.md`](handoffs/closed/2026-10-01-from-proem-fstat-identity.md).
 >       *The first half built 2026-10-05 on `libc/fstat-fields`, and it
 >       found worse than garbage: picolibc programs' `file.o` was compiled
 >       with `-Ilibc/include` first, so against the hand-rolled `struct
@@ -2371,7 +2371,9 @@ be reviewed after the fact from the saved screenshots.
 >       hand-rolled headers first; the port's internal hooks moved to
 >       `sys.h`), and chose the 0666/0777 above over 0000. Mutations: uid
 >       read from the gid offset, and the directory test inverted, each
->       fail it.*
+>       fail it. Merged as #216 (`8e132c3`); the note is done and closed,
+>       its reply warning Proem that `st_dev`/`st_ino` carried the file
+>       size until then.*
 > - [ ] **new** **A real file identity in `fstat` (`st_dev`, `st_ino`).**
 >       The second half of the item above: the `NP_FSTAT` record carries
 >       no inode or qid, so it is a wire change (`ninep-abi`, both C

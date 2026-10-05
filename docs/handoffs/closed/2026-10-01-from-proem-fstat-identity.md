@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-01
 - **Kind:** requirement
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** Proem giving correct output on Ouroboros for any header that
   uses `#pragma once` or an include guard, which is nearly all of them.
 
@@ -76,3 +76,30 @@ cluster is not, since an empty file has none), and `/proc` is synthetic.
 `st_dev` has to tell the local server from each remote mount. Proem clearing
 `struct stat` before the call and reading a zero pair as "no identity" is
 the right guard on its side either way.
+
+Done 2026-10-05 for the fallback, merged as #216 (`8e132c3`). `fstat` now
+zeroes the whole `struct stat` and then fills only what the server's record
+carries, so `st_dev` and `st_ino` read 0, "no identity", as your second
+**Done when** allows. `make test-crename` checks it with `/bin/CFSTAT`
+(`libc/cfstat.c`) on FAT32 and ext2: a struct filled with 0xA5 comes back
+equal to zero plus size, mode, uid and gid, padding included.
+
+**Distrust anything Proem measured about file identity on Ouroboros before
+this.** Building that check found the port's `file.o` compiled against the
+hand-rolled `struct stat` (`st_size` at offset 0, `st_mode` at 8), while a
+picolibc program's has `st_mode` at 4 and `st_size` at 16. `fstat` wrote the
+file's SIZE into `st_dev`/`st_ino` and never set `st_size`. So Proem's
+identity was the file size: two headers of the same size compared as one
+file, and the second was skipped. Every picolibc port object is now built
+against picolibc's headers only.
+
+Also from this change: `st_size` is right; `st_mode` carries the file type
+everywhere (`S_ISREG`/`S_ISDIR` were false on FAT32); on ext2 the mode, uid
+and gid are the disk's, and on FAT32 and exFAT, which record none, the mode
+is 0666 for a file and 0777 for a directory (`fsd` enforces nothing there)
+with uid and gid 0.
+
+The real identity, a non-zero `st_dev`/`st_ino` pair, is a wire change and
+an identity per filesystem; it is on our roadmap as its own item, "A real
+file identity in `fstat`". If Proem wants it sooner than its turn, a new
+note naming this one is the way.
