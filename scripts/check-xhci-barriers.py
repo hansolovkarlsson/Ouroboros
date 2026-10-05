@@ -27,9 +27,10 @@ instruction between it and its store, or routing a register write (a
 flip around its function fails it. That holds because each function has ONE
 caller in the source (`Whole32::write`, `Whole64::write`, `ring_publish`):
 with a second caller, routing one around it leaves "at least one call" true
-and the check green. The RsvdP writes (`Kept32::write`, `Kept64::write`) go
-through the first two, which the doorbells, PORTSC, DCBAAP and ERDP also
-call, so a RsvdP write routed around them is NOT seen here.
+and the check green. `Kept32::write` and `PortStatus::write` go through
+`Whole32::write`, which the doorbells also call, and `Kept64::write` through
+`Whole64::write`, which DCBAAP and ERDP also call, so one of those three
+routed around its store is NOT seen here.
 
 What it cannot see: ONE new raw `write_volatile` to a register somewhere
 else in `xhci.rs`. The functions are still called by everything else, so

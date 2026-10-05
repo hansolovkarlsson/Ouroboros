@@ -1584,7 +1584,8 @@ The small open tails those arcs deliberately left:
 >       same defect as ERSTSZ/ERSTBA in the same function. Linux keeps them
 >       (`CMD_RING_RSVD_BITS`; CONFIG read and `HCS_SLOTS_MASK` replaced).
 >       Fix with one helper that reads, keeps a mask and masks the new value
->       to its field (`portsc_preserve` is the existing shape), then move
+>       to its field (`portsc_preserve` is the existing shape; it was replaced
+>       by `reg::PortStatus` on 2026-10-05), then move
 >       ERSTSZ/ERSTBA onto it. Spec form, nothing seen; a board round of
 >       its own. Found by the review of `pi4/erst-rsvdp`. *Built 2026-10-04
 >       on `pi4/rsvdp-preserve`: `write32_rsvdp`/`write64_rsvdp` (read, keep
@@ -1774,7 +1775,7 @@ The small open tails those arcs deliberately left:
 >       one generic block type for the three, and the timeout dump's reads
 >       through the handles. Merged as #207. Done; no board round, the same
 >       instructions through the same two stores.*
-> - [ ] **fix** **PORTSC's RW1C bits and PED are masked by convention.**
+> - [x] **fix** **PORTSC's RW1C bits and PED are masked by convention.**
 >       `reg::portsc` is a `Whole32`, and every write must go through
 >       `portsc_preserve` or it writes back PED (disabling the port) and
 >       clears pending change bits; nothing makes the bare write
@@ -1784,6 +1785,31 @@ The small open tails those arcs deliberately left:
 >       its second review adds that PORTSC and the doorbells share
 >       `Whole32` (DCBAAP and ERDP share `Whole64`), so a port function
 >       takes a doorbell. A PORTSC type of its own closes both.
+>       *Built 2026-10-05 on `xhci/portsc-type`: `reg::PortStatus`, made
+>       only by `reg::portsc`, with `read` and `write(current, set,
+>       clear)`, which writes `portsc_merge`: by inclusion, as Linux's
+>       `xhci_port_state_to_neutral`, only `current`'s read-only and
+>       setting bits (`PORTSC_KEPT`), every other bit 0, so PED, the change
+>       bits, PR and RsvdZ are never written back as read; then `set`, held
+>       to PR and WPR (`PORTSC_SETTABLE`), and a 1 in each change bit in
+>       `clear`. `current` is the caller's own read, so the write and the
+>       decision see one state and the reads are as before. Out-of-range
+>       bits stop a debug build and are dropped in a release one;
+>       `portsc_merge` is a `const fn` with build-time asserts. It goes
+>       through `Whole32::write`, so the barrier check is unchanged.
+>       `portsc_preserve` and `Whole32::read` are gone. Shown unspellable
+>       from outside `mod reg` by mutation: a one-value write (E0061), a
+>       doorbell passed for a port (E0308) and a hand-built handle (E0603)
+>       fail to compile, a legal write compiles, and a merge that writes
+>       back PR or the change bits fails the asserts (E0080). Its review
+>       (`/code-review high`, seven findings) moved it from a blacklist to
+>       the inclusion mask and a settable list, and put the caller's read
+>       back. At today's two writes PR reads 0, so the merge differs from
+>       the old one only where a RsvdZ bit reads 1, now written 0; no
+>       capture shows one, and no board round has run it. `make test` green, `test-usb-hub` 19 ok
+>       with the same reset lines, `test-el1-drop` PASS. Left: DCBAAP and
+>       ERDP still share `Whole64`; WPR on a USB2 port is refused only by
+>       the caller's link-state check.*
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
