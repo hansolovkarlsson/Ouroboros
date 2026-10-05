@@ -1112,7 +1112,7 @@ be reviewed after the fact from the saved screenshots.
 >
 > **The small C compiler has a plan since 2026-09-29.** The workspace chose
 > Ouroboros as the destination of its C toolchain arc: hello.c edited,
-> compiled, linked and run here, by CPP (the preprocessor), a compiler that
+> compiled, linked and run here, by Proem (the preprocessor), a compiler that
 > Phoenix generates and an assembler Futamura describes. All three are C11
 > with no dependencies, so the path above carries them. The order and the gaps
 > are in `~/Projects/docs/c-compiler-toolchain.md`, outside this repository.
@@ -1121,12 +1121,12 @@ be reviewed after the fact from the saved screenshots.
 > of its own; and **an editor**, whose catch is that the console offers no
 > termios for one in the kilo style, so a line editor comes first.
 >
-> **A third came before either, found when CPP was the first tool to port
-> (2026-09-29): the C runtime is not yet a Unix command's.** `crt0.c` calls
-> `main(void)`, so a C program gets no argv although the kernel has had
+> **A third came before either, found when CPP (now Proem) was the first tool
+> to port (2026-09-29): the C runtime is not yet a Unix command's.** `crt0.c`
+> calls `main(void)`, so a C program gets no argv although the kernel has had
 > `GET_ARGC`/`GET_ARG` since the standalone-binaries arc; `file.c` sets no
-> `errno`, which CPP's include search depends on; and picolibc's `environ`,
-> `stat` and `gettimeofday` have no port, so CPP does not even link. Add the
+> `errno`, which Proem's include search depends on; and picolibc's `environ`,
+> `stat` and `gettimeofday` have no port, so Proem does not even link. Add the
 > headers on the disk and the fixed 64-page heap, and this is an arc of its
 > own, first in the chain and useful to every C program. Eight steps with a
 > check each: [`roadmap-c-hosting.md`](roadmap/roadmap-c-hosting.md).

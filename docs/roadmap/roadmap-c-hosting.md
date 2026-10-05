@@ -1,19 +1,23 @@
-# C programs as full citizens: what CPP needs from the C runtime
+# C programs as full citizens: what Proem needs from the C runtime
 
 **Scoping, written 2026-09-29 from the workspace session, before any code.**
 The work belongs to the Ouroboros session. Grounded in the tree at `e8e328e`
-and in CPP at `2aae9ee`, by reading the code and not the comments above it.
+and in CPP (now Proem) at `2aae9ee`, by reading the code and not the comments
+above it. CPP was renamed Proem on 2026-10-01 (`~/Projects/Proem`, its driver
+`driver/proem.c`); the plan below uses the new name throughout, and keeps the
+old one only where it records what was read on 2026-09-29.
 
 ## Why this exists
 
 The workspace chose Ouroboros as the destination of its C toolchain arc:
 hello.c edited, compiled, linked and run here (the plan is in
 `~/Projects/docs/c-compiler-toolchain.md`, outside this repository). The first
-tool to arrive is CPP, the C preprocessor in `~/Projects/CPP`. It is C11 with
-no dependencies, so it was expected to be "port one more program" on top of
-the picolibc path that `/bin/CPICO` proved.
+tool to arrive is Proem, the C preprocessor in `~/Projects/Proem` (named CPP
+when this plan was written). It is C11 with no dependencies, so it was
+expected to be "port one more program" on top of the picolibc path that
+`/bin/CPICO` proved.
 
-It is not quite that. CPICO proved picolibc's *library* runs here. CPP is
+It is not quite that. CPICO proved picolibc's *library* runs here. Proem is
 the first C program that behaves like a Unix command: it takes arguments,
 searches directories for files and tells a missing file from a broken one,
 reads the environment and the clock. The C runtime under picolibc does none
@@ -23,13 +27,13 @@ standalone-binaries arc; the C side was never wired to them. Each C program
 since has noted it: `libc/cremote.c`, `cbig.c`, `cwrite.c` and `nsdemo.c` all
 say "C programs get no argv yet".
 
-So this is a runtime arc, not a CPP arc. Every later tool in the chain (the
+So this is a runtime arc, not a Proem arc. Every later tool in the chain (the
 compiler, the assembler, the linker, an editor) needs the same things, and
-CPP is the first customer and the test.
+Proem is the first customer and the test.
 
-## What CPP calls
+## What Proem calls
 
-Counted from CPP's sources: `main(argc, argv)`; `fopen`, `fread`, `fstat`,
+Counted from Proem's sources: `main(argc, argv)`; `fopen`, `fread`, `fstat`,
 `fclose` on each source file, read whole and closed; `errno` compared with
 `ENOENT` and `ENOTDIR` to walk the include path; `fprintf`/`fputs` to stdout
 and stderr; `malloc`/`calloc`/`realloc`/`free`; `getenv("SOURCE_DATE_EPOCH")`
@@ -39,7 +43,7 @@ and `time`/`localtime`/`gmtime` for `__DATE__` and `__TIME__`; `exit` and
 And what picolibc's `libc.a` leaves undefined for the port to supply, from
 `llvm-nm`: `open` and `stat`, `gettimeofday` (behind `time`), and `environ`
 (behind `getenv`). `file.c` supplies `open`; the other three are missing, so
-the link of CPP fails today before anything runs.
+the link of Proem fails today before anything runs.
 
 ## The gaps, in the order to close them
 
@@ -51,9 +55,9 @@ Each step has its check.
    vector the same as the Rust one, and the "no argv yet" notes in the four
    `libc/*.c` files come out, with the fixed paths they forced.
 2. **errno from the file layer.** `file.c` sets no `errno` ("this libc has
-   none"), but picolibc does have one, and CPP's include search depends on
+   none"), but picolibc does have one, and Proem's include search depends on
    it. A header not found in the first `-I` directory must fail with
-   `ENOENT` for CPP to try the next; any other value is reported as an error
+   `ENOENT` for Proem to try the next; any other value is reported as an error
    and the search stops. Map the fsd status (`ouro_last_fs_status`) to
    `ENOENT`, `ENOTDIR`, `EACCES`, `EISDIR`, `EMFILE` at least, in `open`,
    `read`, `close` and `fstat`. `ouro_fs_strerror` can stay for what errno
@@ -67,15 +71,15 @@ Each step has its check.
 5. **A clock.** `gettimeofday` is missing, and the kernel has only
    `MONOTONIC_US`, time since boot, with no wall clock. Two levels:
    - *Enough for the link:* `gettimeofday` from `MONOTONIC_US`, so a C
-     program's `time()` says 1970 plus uptime. Honest, and CPP then prints a
-     wrong but well-formed `__DATE__`. CPP also honours `SOURCE_DATE_EPOCH`,
+     program's `time()` says 1970 plus uptime. Honest, and Proem then prints a
+     wrong but well-formed `__DATE__`. Proem also honours `SOURCE_DATE_EPOCH`,
      so with step 3 a shell can set the date explicitly.
    - *The real thing:* a wall clock from the platform RTC (PL031 on QEMU
      `virt`; the Pi and Parallels differ). It is its own item, and nothing in
      the toolchain arc waits on it.
 
    **Check:** a C program prints `time(NULL)` and `ctime`.
-6. **Headers on the disk.** CPP on Ouroboros reads picolibc's headers from
+6. **Headers on the disk.** Proem on Ouroboros reads picolibc's headers from
    Ouroboros's filesystem, so they must be in the image: the 112 headers
    under `third_party/picolibc-prebuilt/include`, clang's freestanding
    headers that `CFLAGS_OS` compiles against (`stddef.h`, `stdarg.h`,
@@ -88,31 +92,32 @@ Each step has its check.
    `/include` being the obvious one. **Check:** `cat /include/stdio.h` and
    `ls /include/sys` on a booted image.
 7. **Room to run.** The loader gives every program `HEAP_PAGES` 64 and
-   `STACK_PAGES` 14, fixed in `kernel/src/loader.rs`. CPP keeps every file of
+   `STACK_PAGES` 14, fixed in `kernel/src/loader.rs`. Proem keeps every file of
    an include tree in memory with its tokens and macro table; `stdio.h`
    alone pulls in a dozen headers. Whether 64 pages is enough is unknown, and
    the first run of step 8 finds out. If it is not, the choice is a larger
    fixed heap or a per-program size carried in the ELF, and the second
    serves the compiler later. Smaller limits to watch on the same run:
-   `MAX_FILES` 8 in `file.c` (CPP holds one file open at a time, so it
+   `MAX_FILES` 8 in `file.c` (Proem holds one file open at a time, so it
    should be fine) and `PATH_MAX_C` 96 (an `-I` directory plus a nested
    header name).
-8. **Build and stage `/bin/CPP`.** A `cpp-bin` target beside `cpico-bin`,
-   compiling CPP's `lib/*.c` and `driver/cpp.c` from `$(CPP_DIR)`
-   (`../CPP` by default, as CPP's `pico-check` finds Ouroboros at
-   `../Ouroboros`), linked like CPICO, and staged into `ESP_DIR/bin`. This
+8. **Build and stage `/bin/proem`.** A `proem-bin` target beside `cpico-bin`,
+   compiling Proem's `lib/*.c` (which Proem's own build archives as
+   `libproem.a`) and `driver/proem.c` from `$(PROEM_DIR)` (`../Proem` by
+   default, as Proem's `pico-check` finds Ouroboros at `../Ouroboros`),
+   linked like CPICO, and staged into `ESP_DIR/bin`. This
    keeps the link knowledge in one Makefile. **Check, and the arc's finish
-   line:** on a booted image, `cpp -include /include/target.h -I /include
+   line:** on a booted image, `proem -include /include/target.h -I /include
    hello.c > hello.i` gives the same bytes as `clang $(CFLAGS_OS) -E` of the
    same file on the host, and the same for CPICO's `picodemo.c`.
 
-Steps 1 to 4 are small, independent of CPP and useful to every C program;
+Steps 1 to 4 are small, independent of Proem and useful to every C program;
 they go first. Step 5's first level is a few lines. Step 6 is the one with a
 design decision in it, and step 7 is the one nobody can answer before trying.
 
-## What stays in CPP's session
+## What stays in Proem's session
 
-CPP's side is recorded in CPP's own roadmap: that its sources build with
+Proem's side is recorded in Proem's own roadmap: that its sources build with
 Ouroboros's flags and warnings clean, how the default include directory and
 `target.h` are named on the command line (or built in), and that
 `__STDC_VERSION__` stays `201112L` while `CFLAGS_OS` names no `-std` and
