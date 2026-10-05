@@ -88,8 +88,9 @@ growing the stack - the shell's `exec` path forced 8KB->16KB, and the
 network server forced 16KB->24KB->32KB->40KB as it gained TCP buffers,
 then concurrent connections, then the remote-mount session path; the size
 today is the loader's `STACK_PAGES`, and `heap_info` reports it at runtime).
-Below the guard is a 256KB **raw heap area** the program reaches via the
-`heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
+Below the guard is a 1 MiB **raw heap area** (the loader's `HEAP_PAGES`;
+256KB until 2026-10-05), zeroed at load like the rest of the region, which
+the program reaches via the `heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
 "Binary format" for why `alloc`'s `Vec`/`String` can't be used here) - the
 shell uses it to hold a redirect/pipe capture far larger than its stack, so
 `cat big > file` works. `.bss`/`.data` are now supported too (see "Binary
@@ -574,7 +575,7 @@ Worth knowing before building further on this:
   with `SPAWN_ERR_NO_FREE_SLOT` rather than growing the scheduler
   further.
 - **No `alloc`-backed heap, and no `.bss`** — so no dynamic collections
-  (`Vec`/`String`/`Box`) and no static mutable state. There **is** a 256KB
+  (`Vec`/`String`/`Box`) and no static mutable state. There **is** a 1 MiB
   *raw* heap area per program (`heap_info` syscall, a `&mut [u8]`), which
   lifts fixed-buffer caps (the shell's redirect/pipe capture uses it) - but
   a real `GlobalAlloc` heap is blocked: prebuilt lib`alloc` has
@@ -626,7 +627,7 @@ Worth knowing before building further on this:
   reads/writes to `SAFECOPY_MAX` (2048) per op and lets `cat` stream any
   size. What remains: the 512-byte inline cap still bounds directory
   *listings* (`ls`); a single non-streaming transfer is
-  userland-memory-bound, but a program has a 256KB raw heap area now
+  userland-memory-bound, but a program has a 1 MiB raw heap area now
   (`heap_info`) on top of its fixed stack, which the shell uses to capture
   large redirect/pipe output; and the stack now has a
   *guard page* (an overflow faults cleanly and kills just that task,

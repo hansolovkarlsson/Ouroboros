@@ -1,13 +1,13 @@
 //! `sort [-r] [-n] [-u] [-f]` - the one line filter that *can't* stream: it
 //! must read all of stdin before it can emit a single line. Unlike the other
 //! filters (which keep only a fixed line buffer or a small ring), `sort`
-//! buffers the whole input, so it uses this program's 256KB heap
-//! (`ulib::heap`) rather than the stack - the input bytes in the front, a
-//! line index (start+len per line) reinterpreted from the heap's tail.
+//! buffers the whole input, so it uses this program's heap (`ulib::heap`)
+//! rather than the stack - the input bytes in the front three quarters, a
+//! line index (start+len per line) reinterpreted from the last quarter.
 //!
 //! **Bounded, with a documented cap** (the roadmap's requirement): input is
-//! held in `DATA_CAP` bytes and up to `MAX_LINES` lines; a larger input is
-//! **truncated** at the cap, sorted, and emitted, with a one-line warning to
+//! held in `data_cap` bytes and up to `max_lines` lines, both sized from the
+//! heap `HEAP_INFO` reports; a larger input is **truncated** at the cap, sorted, and emitted, with a one-line warning to
 //! the console (not into the sorted output). This is the "documented size cap"
 //! rather than an unbounded (impossible here) sort.
 //!
@@ -23,11 +23,13 @@
 
 use core::cmp::Ordering;
 
-/// Most lines we index (the heap tail holds this many start+len `u32` pairs).
-/// 8192 * 8 bytes = 64KB of the 256KB heap reserved for the index.
-const MAX_LINES: usize = 8192;
-/// Bytes of the heap reserved for the line index (`MAX_LINES` * two `u32`).
-const INDEX_BYTES: usize = MAX_LINES * 8;
+/// The share of the heap kept for the line index, one start+len `u32` pair
+/// (8 bytes) per line: a quarter, so 32,768 lines of a 1 MiB heap, and an
+/// average line of 24 bytes fills the data and the index together. A fixed
+/// 8,192 lines until 2026-10-05, a quarter of the 256 KiB heap then, which
+/// a 1 MiB heap left as the limit on any input of short lines (the review
+/// of #210).
+const INDEX_DIVISOR: usize = 4;
 
 struct Flags {
     reverse: bool,
@@ -46,14 +48,17 @@ pub extern "C" fn _start() -> ! {
     let flags = parse_flags(target);
 
     let heap = ulib::heap();
-    if heap.len() <= INDEX_BYTES {
+    // A multiple of 8, so the data before it ends 4-aligned for the index.
+    let index_bytes = (heap.len() / INDEX_DIVISOR) & !7;
+    let max_lines = index_bytes / 8;
+    if max_lines == 0 {
         ulib::con_write(b"sort: no heap available\r\n");
         ulib::end_of_stream(target);
         ulib::exit(1);
     }
     // Split the heap: data in the front, the line index in the (4-aligned)
     // tail. `data_cap` is a multiple of 4 so the index view aligns cleanly.
-    let data_cap = (heap.len() - INDEX_BYTES) & !3;
+    let data_cap = (heap.len() - index_bytes) & !3;
     let (data, idx_bytes) = heap.split_at_mut(data_cap);
     // SAFETY: the heap base is page-aligned and `data_cap` is 4-aligned, so the
     // tail starts u32-aligned - `align_to_mut` yields no prefix, the whole tail
@@ -85,7 +90,7 @@ pub extern "C" fn _start() -> ! {
     let mut i = 0usize;
     while i < data_len {
         if data[i] == b'\n' {
-            if nlines >= MAX_LINES {
+            if nlines >= max_lines {
                 truncated = true;
                 break;
             }
@@ -97,7 +102,7 @@ pub extern "C" fn _start() -> ! {
         i += 1;
     }
     // Trailing partial line (no final newline) - only if we didn't hit the cap.
-    if start < data_len && nlines < MAX_LINES {
+    if start < data_len && nlines < max_lines {
         index[2 * nlines] = start as u32;
         index[2 * nlines + 1] = (data_len - start) as u32;
         nlines += 1;

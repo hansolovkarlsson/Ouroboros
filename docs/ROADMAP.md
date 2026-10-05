@@ -672,8 +672,8 @@ the microkernel arc itself still leaves open):
 
 The stack **guard page** (a guarded stack, which on the day it arrived caught
 a real silent overflow in the shell's own `exec` path; the size today is the
-loader's `STACK_PAGES`) and the 256KB raw
-**userland heap** (`heap_info` — a real `alloc`-backed heap stays blocked on
+loader's `STACK_PAGES`) and the raw
+**userland heap** (256KB then, 1 MiB since 2026-10-05) (`heap_info` — a real `alloc`-backed heap stays blocked on
 stable: prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link
 rejects, and `-Z build-std` is nightly-only), formerly tracked here, both
 shipped 2026-08-20. See `CHANGELOG.md`.
@@ -2235,7 +2235,7 @@ be reviewed after the fact from the saved screenshots.
 > in `handoffs/closed/`. Each note carries its evidence, its **Done when**
 > and the reply below in full.
 >
-> - [ ] **new** **A user heap of at least 1 MiB, ideally sized per program.**
+> - [x] **new** **A user heap of at least 1 MiB, ideally sized per program.**
 >       `HEAP_PAGES` is 64 (256 KiB, `kernel/src/loader.rs`) for every
 >       program; an empty file with Proem's `target.h` already takes 152 KB
 >       of live `malloc`. Proem's figures, remeasured on 2026-10-01 after it
@@ -2256,6 +2256,55 @@ be reviewed after the fact from the saved screenshots.
 >       [`handoffs/2026-10-01-from-proem-heap-growth.md`](handoffs/2026-10-01-from-proem-heap-growth.md)
 >       and, for the numbers,
 >       [`handoffs/closed/2026-10-01-from-proem-heap-numbers.md`](handoffs/closed/2026-10-01-from-proem-heap-numbers.md).
+>       *Built 2026-10-05 on `loader/heap-1mib`: `HEAP_PAGES` 256, so every
+>       program's heap is 1 MiB and its image may be 241 pages (964 KiB,
+>       `HEAP_INFO_IMAGE_MAX`); every user of the heap reads its size from
+>       `HEAP_INFO`, so nothing else changed but the documents that stated
+>       256KB. `/bin/CMEM` (`libc/cmem.c`, picolibc) mallocs 16 KiB blocks
+>       until refused, writes and reads back every byte, and prints the
+>       heap beside what malloc held: `heap 1048576 bytes, malloc held
+>       1032192 bytes live in 63 blocks of 16384, 0 bad` on QEMU, and with
+>       64 pages, the control, `heap 262144`. `cpico`, pipes, `sort` and a
+>       143 KB redirect unchanged. The per-program size and regions past
+>       one slot are the item below. Its review (`/code-review high`,
+>       eight findings) added: `populate_region` zeroes the whole region
+>       before loading, since a spawned program gets the slot the last one
+>       gave back and read its heap and stack (a mutation without it: the
+>       first `cmem` found 568,878 nonzero bytes, the second 1,043,155);
+>       `cmem` exits 1 unless the heap is at least 1 MiB, malloc held it
+>       within 64 KiB, and it read 0 before the first malloc, run twice in
+>       one boot by `make test-heap` (both mutations, no zeroing and 64
+>       pages, fail it); `sort`'s line index a quarter of the heap rather
+>       than a fixed 8,192 lines; "costs no RAM" corrected, since a
+>       boot-loaded program frees the rest of its slot, so the five boot
+>       programs keep 768 KiB more each; the stale 256KB mentions. Its
+>       first finding holds the merge: a redirect between 256 KiB and 1 MiB
+>       now reaches the `fsd` stall below and leaves a short file where it
+>       was refused, so the stall is fixed first. It was, by #211 (the
+>       supervisor no longer restarts a busy `fsd`) and #212 (a FAT-sector
+>       cache, so a write's cost no longer grows with the offset); with both
+>       merged, the 758 KB redirect writes whole (below).*
+> - [ ] **new** **A heap sized per program, and regions past one 2 MB
+>       slot.** For Proem's 112-header picolibc test (2,031 KB live) and the
+>       compiler later. A size carried in the ELF, read by the loader, and
+>       `mmu.rs`/`tasks.rs` mapping a region of more than one slot. Split
+>       from the item above, which met the handoff's **Done when**.
+> - [x] **fix** **A FAT32 write past about 170 KB stalls `fsd` long enough
+>       to be restarted.** *Fixed by #211 and #212, 2026-10-05: no request
+>       was slow; the supervisor saw a busy `fsd` runnable at every tick
+>       (see "A server busy with a stream of requests is restarted as
+>       wedged" above), and the per-request cost grew with the offset. The
+>       guess below about one long request was wrong, and is kept as
+>       written.* `cp /EFI/BOOT/BOOTAA64.EFI /k.bin` (758 KB) on
+>       `make image` under QEMU: `server slot 2 wedged - no progress
+>       (runnable) - restarting`, and `/k.bin` is left at 169,984 bytes
+>       (176,128 in a second boot with the 256 KiB heap, so it predates the
+>       1 MiB heap). A redirect of the same file stops at 243,712. So one
+>       request runs longer than the supervisor's `WEDGE_TICKS` (2.5 s),
+>       and the cost grows with the offset: a chain walk or a free-cluster
+>       scan per request, to be measured before it is guessed. Newly
+>       reachable by a redirect, which a 256 KiB capture refused; and it is
+>       how Proem's `-o FILE` will write a large output. Found 2026-10-05.
 > - [ ] **new** **Stage the headers in two directories, and build `proem`
 >       with them built in.** Steps 6 and 8 of the C-hosting plan, decided:
 >       `/include` holds picolibc's 136 headers and a `target.h` generated at
