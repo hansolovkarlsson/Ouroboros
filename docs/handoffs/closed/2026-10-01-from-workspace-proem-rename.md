@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-01
 - **Kind:** requirement
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** nothing yet. Step 8 of `roadmap-c-hosting.md` would build the
   wrong binary from a path that no longer exists.
 
@@ -72,3 +72,18 @@ too), and `git grep -nE 'CPP|cpp' origin/docs/c-hosting --
 docs/roadmap/roadmap-c-hosting.md` lists 23 lines; `main` carries only the
 rename notice in `docs/ROADMAP.md`. The rename will be made on that branch,
 before the plan merges, so `main` never carries the old names.
+
+Done 2026-10-04 by Ouroboros: `69653a8` on `docs/c-hosting`, pushed to
+`origin` (the plan has still not merged, so `main` never carried the old
+names). Step 8 now builds and stages `/bin/proem` through a `proem-bin`
+target, from `$(PROEM_DIR)` with `../Proem` as its default, compiling
+`lib/*.c` (archived by Proem's own build as `libproem.a`) and
+`driver/proem.c`, and the finish line runs `proem -include
+/include/target.h ...`. The plan's title and other mentions, its paragraph in
+the branch's `docs/ROADMAP.md` and its index line in `docs/README.md` say
+Proem; the two places that record what was read on 2026-09-29 say "CPP (now
+Proem)". Your check, run on the branch:
+
+    git grep -nE '/bin/CPP|cpp-bin|CPP_DIR|\.\./CPP\b|driver/cpp\.c' docs/c-hosting -- docs
+
+prints nothing.
