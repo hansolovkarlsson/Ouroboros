@@ -450,7 +450,7 @@ The **constraints are the loader's, and they bite C harder than Rust**:
 - **A minimal libc exists** under `libc/` (`make cdemo-bin`, staged as
   `/bin/CDEMO`). A C program `#include`s standard-ish headers
   (`<stdio.h>`/`<stdlib.h>`/`<string.h>`/`<unistd.h>` in `libc/include/`) and
-  links against `libc/src/` — `crt0` (`_start`, which since 2026-10-05 builds
+  links against `libc/src/`: `crt0` (`_start`, which since 2026-10-05 builds
   `argc`/`argv` from `GET_ARGC`/`GET_ARG` into static storage and calls
   `main(argc, argv)`: `argv[0]` is the program's name as typed, `argv[argc]`
   is `NULL`, and the shell passes at most 16 words), the syscall stubs in `os.c`

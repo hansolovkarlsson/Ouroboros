@@ -2,7 +2,8 @@
  * docs/roadmap/roadmap-fid-verbs.md, and the thing that could not be done before.
  *
  * The remote file is the first argument, `/mnt/a/HELLO.TXT` when there is
- * none. Run it after `mount -r <host>:<port> /mnt/a`.
+ * none; an absolute path on a remote mount, or the program refuses to run.
+ * Run it after `mount -r <host>:<port> /mnt/a`.
  *
  * The local path is checked FIRST and deliberately: every existing C program
  * takes that route, so a change that fixed the remote case by breaking the
@@ -14,6 +15,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "sys.h"
+#include "nsresolve.h"
 
 static int try_read(const char *path) {
     int fd = open(path, O_RDONLY);
@@ -71,8 +73,27 @@ static int must_leave(const char *what, unsigned long expected) {
     return 1;
 }
 
+/* Whether `path` names a file on a REMOTE mount, through the same namespace
+ * resolver open() uses. The path argument must: given a local one, the remote
+ * checks below would test the local route and pass, proving nothing. */
+static int is_remote(const char *path) {
+    char out[96];
+    unsigned long n = 0;
+    unsigned target = 0;
+    unsigned char ep[NS_ENDPOINT_LEN];
+    if (path[0] != '/' ||
+        ouro_ns_resolve(path, strlen(path), out, sizeof out, &n, &target, ep) != 0) {
+        return 0;
+    }
+    return (target & 0xff) == NS_TARGET_REMOTE;
+}
+
 int main(int argc, char **argv) {
     const char *remote = argc > 1 ? argv[1] : "/mnt/a/HELLO.TXT";
+    if (!is_remote(remote)) {
+        printf("cremote: %s is not on a remote mount; usage: cremote [/remote/file]\r\n", remote);
+        return 2;
+    }
     int bad = 0;
     bad |= try_read("/EFI/ORBS/INIT.CFG");  /* local - the no-regression check */
     bad |= try_read(remote);                /* remote - the new capability */

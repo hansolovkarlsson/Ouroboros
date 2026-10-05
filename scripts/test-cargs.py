@@ -4,15 +4,21 @@
     python3 scripts/test-cargs.py        (or `make test-cargs`, which builds the image)
 
 Step 1 of docs/roadmap/roadmap-c-hosting.md: crt0 builds `main(argc, argv)`
-from GET_ARGC/GET_ARG. `/bin/CARGS` (libc/cargs.c, picolibc) prints the
-vector in exactly `/bin/ARGS`'s format, so each pair of runs below must print
-the same lines apart from argv[0], which is each program's name as typed.
-Three pairs: a few arguments, none, and the fifteen the shell can pass at
-most, so the vector is as long as a command line can make it.
+from GET_ARGC/GET_ARG. libc/cargs.c prints the vector in exactly `/bin/ARGS`'s
+format, built twice because crt0 is compiled into both C libraries:
+`/bin/CARGS` through picolibc and `/bin/CARGSH` through the hand-rolled libc.
+Each case runs all three with the same arguments, and they must print the
+same lines apart from argv[0], each program's name as typed. Three cases: a
+few arguments, none, and fifteen, the most the shell passes (it keeps 16
+words). The shell's 128-byte line keeps every blob far below ARGV_MAX (512),
+so crt0's byte bound is not reached here; only a program staging its own blob
+could reach it.
 
-Graded per pair: the Rust lines and the C lines equal once argv[0] is set
-aside, the C argv[0] naming CARGS, its `argv[argc] is NULL` line, and its
-exit code 0; and no fault line in QEMU's own trace. One boot, about a minute.
+Graded per C program and case: argc and argv[1..] equal ARGS's, argv[0] the
+name typed, the `argv[argc] is NULL` line, and its exit code 0; and no fault
+line in QEMU's own trace. And `cremote` and `cbig`, which take a remote path
+as their argument, must refuse a local one with exit code 2. One boot, about
+a minute.
 Run it whenever crt0.c or the kernel's argv store changes.
 """
 import importlib.util
@@ -31,11 +37,15 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-cargs.txt")
 CASES = [
     "alpha b 12345678901234567890",
     "",
-    # The most the shell passes: it keeps 16 words (MAX_ARGS in
-    # programs/shell/src/main.rs) and drops the rest without a word, so 15
-    # arguments, each six letters, the longest vector a command line can stage.
+    # The most arguments the shell passes: it keeps 16 words (MAX_ARGS in
+    # programs/shell/src/main.rs) and drops the rest without a word.
     " ".join(chr(ord("a") + i) * 6 for i in range(15)),
 ]
+# The C programs, each compared with the Rust ARGS.
+C_PROGRAMS = ["cargs", "cargsh"]
+# The programs that take a remote path from argv and must refuse a local one:
+# given one, their remote checks would test the local route and pass.
+REFUSALS = [("cremote", "/EFI/ORBS/INIT.CFG"), ("cbig", "/man/grep")]
 # Marks each command's output off from the next one's in the transcript.
 FENCE = "echo ==fence=="
 
@@ -48,8 +58,8 @@ def vector(block):
 
 
 def exit_code(block):
-    """CARGS's exit code: the first exit line after its last output line. The
-    block also holds the fence echo's exit line, which comes before."""
+    """A C program's exit code: the first exit line after its last output line.
+    The block also holds the fence echo's exit line, which comes before."""
     m = re.search(r"^argv\[argc\] is.*?^Ouroboros kernel: task \d+ exited \(code (\d+)\)",
                   block, re.M | re.S)
     return m.group(1) if m else None
@@ -60,8 +70,10 @@ def main() -> int:
     try:
         steps = [("login:", "root"), ("assword", "root")]
         for args in CASES:
-            steps += [("# ", FENCE), ("# ", f"args {args}".rstrip()),
-                      ("# ", FENCE), ("# ", f"cargs {args}".rstrip())]
+            for prog in ["args"] + C_PROGRAMS:
+                steps += [("# ", FENCE), ("# ", f"{prog} {args}".rstrip())]
+        for prog, path in REFUSALS:
+            steps += [("# ", FENCE), ("# ", f"{prog} {path}")]
         steps += [("# ", FENCE), ("# ", "")]
         driven = guest.run(steps)
         out = guest.transcript()
@@ -72,27 +84,34 @@ def main() -> int:
         fh.write(out)
 
     # The fence's own output lines split the transcript into the blocks
-    # between them: the first block is the login, then Rust, C, Rust, C...
+    # between them: the login, then per case ARGS and each C program in turn.
+    per_case = 1 + len(C_PROGRAMS)
     blocks = re.split(r"^==fence==\r?$", out, flags=re.M)[1:]
     checks = [("driven to the end", driven),
-              (f"{2 * len(CASES)} fenced blocks", len(blocks) >= 2 * len(CASES))]
+              (f"{per_case * len(CASES)} fenced blocks", len(blocks) >= per_case * len(CASES))]
     for n, args in enumerate(CASES):
-        if len(blocks) < 2 * n + 2:
+        if len(blocks) < per_case * (n + 1):
             break
-        rust, c = blocks[2 * n], blocks[2 * n + 1]
+        rust = blocks[per_case * n]
         r_argc, r_argv, _ = vector(rust)
-        c_argc, c_argv, c_zero = vector(c)
         want = str(1 + len(args.split()))
         label = f"case {n + 1} ({want} args)"
-        checks += [
-            (f"{label}: ARGS argc={want}", r_argc == [want]),
-            (f"{label}: CARGS argc and argv[1..] equal ARGS's", (c_argc, c_argv) == (r_argc, r_argv)),
-            (f"{label}: CARGS argv[0] names CARGS", c_zero is not None and c_zero.upper().endswith("CARGS")),
-            (f"{label}: argv[argc] is NULL", "argv[argc] is NULL" in c),
-            # CARGS's own exit line: the first one after its last output line.
-            # The block also holds the fence echo's exit, which comes before.
-            (f"{label}: CARGS exited 0", exit_code(c) == "0"),
-        ]
+        checks.append((f"{label}: ARGS argc={want}", r_argc == [want]))
+        for k, prog in enumerate(C_PROGRAMS):
+            c = blocks[per_case * n + 1 + k]
+            c_argc, c_argv, c_zero = vector(c)
+            checks += [
+                (f"{label}: {prog} argc and argv[1..] equal ARGS's", (c_argc, c_argv) == (r_argc, r_argv)),
+                (f"{label}: {prog} argv[0] = {prog}", c_zero == prog),
+                (f"{label}: {prog} argv[argc] is NULL", "argv[argc] is NULL" in c),
+                (f"{label}: {prog} exited 0", exit_code(c) == "0"),
+            ]
+    for k, (prog, path) in enumerate(REFUSALS):
+        i = per_case * len(CASES) + k
+        block = blocks[i] if i < len(blocks) else ""
+        m = re.search(rf"^{prog}: {re.escape(path)} is not on a remote mount.*?"
+                      r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)", block, re.M | re.S)
+        checks.append((f"{prog} {path}: refused, exit 2", m is not None and m.group(1) == "2"))
     checks += [
         ("no fault lines", faults == 0),
     ]

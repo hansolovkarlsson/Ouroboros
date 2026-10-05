@@ -2432,7 +2432,7 @@ be reviewed after the fact from the saved screenshots.
 >       ordinary program on both backends (`CON_INFO` is gated to `cond`,
 >       and `more` assumes 24 rows); (4) a per-program opt-out of the
 >       Ctrl-C kill, so 0x03 reaches it as a key (WordStar's page down);
->       (5) `main(argc, argv)` in `crt0.c`, which calls `main(void)`
+>       (5) `main(argc, argv)` in `crt0.c`, which called `main(void)`
 >       (*(5) done 2026-10-05, step 1 of the C-hosting plan; `make
 >       test-cargs`*). Done
 >       when a program in this tree, on the framebuffer console, writes
