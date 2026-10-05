@@ -7,6 +7,52 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Not yet released
+
+**Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
+version is held for a go-ahead. So far one day's work, 2026-10-05, #209 to
+#216: the storage server made safe under large writes and double mounts, and
+the C library made able to host Proem and Edit. The day's record is
+`docs/work-journal/2026-10-05.md`.
+
+**A large file no longer gets `fsd` restarted part way through (#211, #212).**
+`cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
+and leave the file short. No request was slow: the supervisor saw a busy
+`fsd` runnable at every tick, because a tick fired during a disk read lands
+as it returns to EL0. A server that comes back to `msg_recv` now counts as
+making progress. A FAT-sector cache and a free-cluster hint then keep each
+write's cost flat (32 disk reads at 640 KB, where it was 353 at 160 KB), the
+scan bounded by the volume's real cluster count, which the first version was
+not.
+
+**A partition is mounted once, and `unmount` clears every disk mount (#213,
+#214).** `mount <n> <path>` on a partition that is already mounted binds the
+same tree rather than a second filesystem over it; a partition mount needs
+`/` first and never takes its slot. `unmount` drops `/` and every partition
+mount, and the shell's own bindings to them; a file left open answers "no
+filesystem" until closed, and its number is not handed to the next opener.
+`erase`, `partition` and `format`, which had refused since `/proc` landed,
+run after `unmount` again.
+
+**Every program gets a 1 MiB heap, zeroed (#210).** Up from 256 KiB, so the
+shell's redirect capture is 1 MiB too, and a program's region is zeroed
+before it loads: a spawned program could read what the last one left in its
+heap and stack. `make test-heap` checks both.
+
+**`unlink`, `rmdir`, `rename`, `remove` and a sound `fstat` in the C port
+(#215, #216).** Over operations `fsd` already had, with `errno` in picolibc
+programs. `rename` replaces an existing file, answers `EXDEV` across mounts,
+and `fsd` now refuses a directory moved into itself, which on ext2 had cut
+the subtree off (the shell's `mv` included). `fstat` had written a picolibc
+program's file size into `st_dev`/`st_ino`, the port having been built
+against the wrong `struct stat`; it now zeroes what it does not fill, and
+reports the file type everywhere. `make test-crename` checks all of it on
+FAT32 and ext2.
+
+**PORTSC a register type of its own (#209).** Its write keeps only the bits
+meant to persist, as Linux does, so it cannot clear a pending change or
+restart a reset by writing a bit back as read.
+
 ## v0.22.0: the Raspberry Pi 4 runs a full session, and per-user keys below the wire (2026-10-04)
 
 The Raspberry Pi bring-up, desk work for the Pi 400 and then the Pi 4 on the

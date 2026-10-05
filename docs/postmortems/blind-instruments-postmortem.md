@@ -1181,3 +1181,65 @@ It was caught because the count had not moved. A mutation test has an
 observer of its own, here the image the script reads, and it has to be shown
 to be looking at the mutated build: the rerun through `make`, output shown,
 said 1 caller.
+
+## Six more, from the storage and C-library day (2026-10-05)
+
+Eight PRs (#209 to #216), each reviewed, and the reviews kept finding the
+same thing: a check written alongside the change that could not have failed.
+One instrument was the system's own.
+
+**The supervisor's heartbeat saw only what its sampling let it see.** `cp`
+of a 758 KB file had `fsd` restarted as wedged near 170 KB. The first account,
+written into the roadmap, was one request too slow for the 2.5 s limit.
+Counters put into `fsd` said each 2 KiB write finished inside two ticks. The
+heartbeat samples task state at the tick, and the tick reaches the CPU only
+at EL0, so a tick fired during a disk-read syscall is taken as `fsd` returns
+to EL0, when it is runnable by definition. A server busy in the kernel looks
+like a wedged one to that observer, every time. Found by measuring the thing
+the observer was judging, not the observer's verdict (#211).
+
+**A program that printed the number and exited 0 whatever it was.** The
+first `cmem` mallocd the heap and printed its size, `heap 1048576`, and
+returned success on any size. With 64 pages it printed `heap 262144` and
+still exited 0, so only a person reading the line would see the regression.
+Found by the review of #210; `cmem` now fails under 1 MiB, and `make
+test-heap` reads its exit.
+
+**A summary that every passing line also contained.** `test-crename` graded
+`"crename: ok" in out`, and every passing check line begins `crename: ok`.
+A run cut short after its first check would have passed, and the rig typed
+`ls /` on that first line instead of waiting for the end. Found by the
+review of #215; the rig now waits for and grades the summary line exactly.
+
+**A value compared with itself.** `cfstat` built the struct it expected from
+the zero struct plus the four fields `fstat` fills, copying `st_uid` and
+`st_gid` from the result itself, and `/etc/passwd` happened to be 0:0. Had
+`fstat` never filled them, or filled them from the wrong offset, the check
+still matched. Found by the review of #216; the rig now compares them with
+`ls -l /etc/passwd`, which reads them through the shell's own path, and a
+mutation reading uid from the gid offset fails it.
+
+**A path that the layer below fixed anyway.** The `..` collapse in libc was
+tested with `rename("/etc/../x", ...)`. With the collapse removed by
+mutation, the test still passed: `fsd` follows `..` entries on disk itself.
+The library's part only shows where `..` climbs out of a MOUNT, which no
+disk can resolve, so the check now uses `/mnt/f/../..`, and the mutation
+fails it on both formats. The mutation was run because the check was new;
+had it not been, the check would have been believed.
+
+**A test image that could not show the bug.** The review of #212 found the
+free-cluster scan bounded by the FAT's capacity, not the volume's clusters,
+so the zeroed entries a rounded-up FAT holds past its last cluster read as
+free. The test image's FAT is exactly the size of its volume, so no rig on
+it could ever reach them. A copy with 1,000 sectors cut from its recorded
+size, filled from the Mac, made the bug reachable: the old bound wrote about
+500 KB past the volume while `cp` said only `disk full`, and `fsck_msdos`
+named the chain out of range.
+
+And the one that worked the other way: `cfstat`, written to check that
+`fstat` zeroes what it does not fill, failed before the zeroing was even
+in, and the reason was larger than its subject. The picolibc port had been
+built against the hand-rolled `struct stat`, so `fstat` wrote a program's
+file size into `st_dev`/`st_ino`, and Proem's file identity had been the
+file size. A check that compares the whole struct, not the fields under
+test, saw what a field check would have passed.
