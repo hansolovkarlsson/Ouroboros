@@ -194,11 +194,27 @@ fn verify_password(acct: &accounts::Account<'_>, name: &[u8], password: &[u8]) -
     // ONE line, streamed off the disk rather than the whole file into a buffer:
     // the size of /etc/shadow must not decide whether anyone can log in. See
     // find_account_line for the lockout that a whole-file read caused here.
+    //
+    // Each way the lookup can fail says so on the console, so a bare `Login
+    // incorrect` means a wrong password and nothing else. The lines name no
+    // password and nothing about the account that /etc/passwd, readable by
+    // everyone, does not already say. The verdict is unchanged: each still
+    // falls through to the legacy check below.
     let mut sline = [0u8; SHADOW_LINE_MAX];
-    if let Some(n) = crate::find_account_line(SHADOW_PATH, name, &mut sline) {
-        if let Some(secret) = accounts::find_secret_by_name(&sline[..n], name) {
-            let upgradable = secret.version == accounts::SecretVersion::V1 && secret.salt_len == 8;
-            return secret.verify(password).then_some(upgradable);
+    match crate::find_account_line(SHADOW_PATH, name, &mut sline) {
+        Ok(Some(n)) => match accounts::find_secret_by_name(&sline[..n], name) {
+            Some(secret) => {
+                let upgradable = secret.version == accounts::SecretVersion::V1 && secret.salt_len == 8;
+                return secret.verify(password).then_some(upgradable);
+            }
+            None => crate::print_line("login: this account's /etc/shadow entry does not parse"),
+        },
+        Ok(None) => crate::print_line("login: no /etc/shadow entry for this account"),
+        Err(code) => {
+            crate::print_str("login: /etc/shadow could not be read (u64::MAX-");
+            crate::print_u64(u64::MAX - code);
+            crate::print_str(")");
+            crate::print_fs_error("", code);
         }
     }
     // A legacy inline secret, or false when there is none. Never upgraded here:

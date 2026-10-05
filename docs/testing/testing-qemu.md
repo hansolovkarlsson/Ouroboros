@@ -30,6 +30,21 @@ prints "no filesystem mounted" there. Use **`make run-image`** whenever you want
 `make image` (re)builds `build/esp.img` on its own; the `run-image*` targets depend
 on it, so they rebuild it as needed.
 
+```sh
+make run-el2      # `run` with the firmware handing off at EL2 (virtualization=on)
+```
+
+**`run-el2` is the Raspberry Pi's handoff on QEMU.** With `-machine
+virt,virtualization=on` the guest has an EL2 and the firmware runs there, so
+the kernel is entered at EL2 as the Pi's pftf firmware enters it, and every
+`_EL1` register write after the exit would install nothing for the running
+level. The kernel logs `running at EL2 after the exit` and then `dropped from
+EL2 to EL1, on our own tables and vectors` (`kernel/src/el2.rs`); on a plain
+`make run` the first line says EL1 and there is no second. QEMU's FADT names
+`smc` as the PSCI conduit on this machine and `hvc` on the plain one, so
+`shutdown` powers off on both. `make test-el1-drop` is the graded version
+(the quick reference at the end).
+
 ---
 
 ## 1b. Driving the shell unattended (`scripts/drive-qemu.py`)
@@ -535,6 +550,28 @@ far past the supervisor's 2.56 s wedge threshold, and it must **succeed** —
 that is what distinguishes a capability denial (fails instantly, no packets)
 from a server restart (`server slot 4 wedged` on the console).
 
+**A busy server is not a wedged one.** Until 2026-10-05 `cp` of a large
+file had `fsd` restarted part way through: the heartbeat saw it `Runnable` at
+128 ticks in a row while it served a stream of 2 KiB writes, because a tick
+taken during a disk read lands as `fsd` returns to EL0. Since then reaching
+`msg_recv` clears the count (`supervisor::note_progress`). The check copies the
+758 KB kernel and compares the copy from the host:
+
+```sh
+make image
+python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
+  '# @@cp /EFI/BOOT/BOOTAA64.EFI /k.bin' '# @@ls -l /k.bin' '# @@'
+hdiutil attach -readonly -nobrowse -mountpoint /tmp/esp build/esp.img
+cmp /tmp/esp/k.bin /tmp/esp/EFI/BOOT/BOOTAA64.EFI; hdiutil detach /tmp/esp
+```
+
+Expected: no `wedged` line, `/k.bin` 758272 bytes, `cmp` silent. Before the
+fix the copy stopped near 170 KB. The other half, that a real wedge is still
+caught, needs a **temporary mutation**: at the top of `fat32.rs`'s `find`,
+`if path.as_bytes().windows(7).any(|w| w == b"WEDGEME") { loop {
+core::hint::spin_loop() } }`, then `ls -l /WEDGEME` after the copy must print
+`server slot 2 wedged` and `restarted (attempt 1/3)`. Revert it after.
+
 **A client alive across a `netd` restart.** A spawned program reaches `netd`
 only through the `TO_NET` grant the shell makes once, at spawn; until
 2026-09-06 the server's crash teardown stripped that grant from every live
@@ -1010,7 +1047,7 @@ python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
 make run-usb-kbd     # + an xHCI controller & a USB keyboard (HMP monitor sendkey)
 make run-usb-multi   # + a USB tablet and a storage stick (the 3-device xHCI rig)
 make run-usb-hub     # the keyboard and the stick BEHIND a usb-hub (the Raspberry Pi's layout)
-make test-usb-hub    # the same layout, driven and graded, plus a boot FROM a stick behind the hub (scripts/test-usb-hub.py)
+make test-usb-hub    # the same layout, driven and graded, plus a boot FROM a stick behind the hub, and that boot again with injected Stalls (scripts/test-usb-hub.py)
 make run-gicv3       # force GICv3 instead of QEMU's default GICv2
 ```
 
@@ -1070,7 +1107,10 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `run-usb-kbd` | xHCI + USB keyboard |
 | `run-usb-multi` | xHCI + tablet + storage stick |
 | `run-usb-hub` | xHCI + a usb-hub with the keyboard and stick behind it, tablet on a root port |
-| `test-usb-hub` | the hub layout driven: keyboard ready, stick configured, a line typed through USB runs; then `--usb-boot`, booted from a stick behind the hub and mounted through it. `--direct` is the control |
+| `test-usb-hub` | the hub layout driven: keyboard ready, stick configured, a line typed through USB runs; then `--usb-boot`, booted from a stick behind the hub and mounted through it; then `--stall`, that boot from `build/usb-hub-stall.img` (`make image-stall`, the image with the `MSDSTALL` flag file), so QEMU's stick stalls on every seventh CBW (about 30 by QEMU's own count, each recovered by its first retry) and on a short CSW read for another (about 30, each recovered in place by clearing the halt and reading the CSW again). `--direct` is the control. A boot where QEMU's own firmware stalls in its USB boot (the transcript ends in `UsbBootExecCmd`, the kernel printed nothing, the fault trace is clean) is reported INCONCLUSIVE (exit 100), not as failed checks; the target still fails, and says to run it again only when no layout really failed. Every run's verdict is appended to `scratch/usb-hub-runs.log` (outside `build/`, so `make clean` keeps it) and an INCONCLUSIVE run prints its layout's stalls out of all its runs, since a retry until green would hide a change that makes the stall likelier; each stalled transcript is kept in `scratch/usb-hub-inconclusive/`, because the rerun overwrites `build/usb-hub-<layout>.txt`. `make test` checks the classifier (`--self-test`) |
+| `test-early-fault` | the early fault reporter (`kernel/src/earlyfault.rs`): a boot with the `EARLYFAULT` flag file, where the kernel asks the firmware's CopyMem to write at an unmapped address before the xHCI takeover, must end in the kernel's dump of that fault (taken in the DXE core, with the firmware's vectors installed): ESR decoded, the register rows before the first frame, the firmware's tables walked for the address down to an invalid entry at the ESR's level, the PC placed in `DxeCore.dll`, a frame placed in the kernel; a boot with `EARLYFAULT` and `WALKFAULT`, where the report faults inside its own image walk and must have printed the rows and then the nested-fault line with `far` and the image under read; then a boot without the flag, which must reach the shell with the reporter armed, say it was handed off at EL1, and answer `help` typed after a five-second dwell. The case is the Raspberry Pi 4's first serial boot, where the RELEASE firmware printed one line and no registers |
+| `run-el2` | `run` on `-machine virt,virtualization=on`: the firmware hands the kernel off at EL2, as the Raspberry Pi's does. The log must say `running at EL2 after the exit` and then `dropped from EL2 to EL1, on our own tables and vectors` (`kernel/src/el2.rs`). Section 1 |
+| `test-el1-drop` | `test-early-fault.py --el2`: the same two boots handed off at EL2. The control must show the handoff level, the drop, the identity map line, and the shell answering `help` after the dwell, with no kernel `EXCEPTION` line; before the drop this boot reached `shell ready` and then faulted at address 0 through the firmware's vectors, because the first `eret` into task 0, made at EL2, restored the firmware's stale `ELR_EL2` and landed there (see `el2.rs`). Both boots also grade QEMU's own trace: the control requires zero fault lines and a missing trace fails. With the drop disabled (a mutation) the control fails on three checks. Run it whenever `el2.rs`, `mmu.rs`'s switch or `exceptions::install` changes |
 | `run-gicv3` | force GICv3 |
 | `test-parallels` | scripted real-hardware smoke test (Parallels, not QEMU) |
 

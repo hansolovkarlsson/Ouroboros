@@ -29,6 +29,15 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+/* `errno` where the C library has one: picolibc does, and the Makefile builds
+ * this file for a picolibc program (`$(BUILD_DIR)/pico/file.o`) with
+ * -DOURO_HAVE_ERRNO, said by the build rather than guessed from the include
+ * path (the review of #215). The hand-rolled libc has none, so there `unlink`,
+ * `rename` and `rmdir` report through `ouro_last_fs_status` alone, as every
+ * other call here does. */
+#ifdef OURO_HAVE_ERRNO
+#include <errno.h>
+#endif
 
 /* How many files this LIBRARY can hold open. No longer tied to fsd's MAX_FIDS:
  * that number justified the old fd==fid identity, which is retired (see the
@@ -196,7 +205,58 @@ static long np_request(unsigned target, const unsigned char *endpoint,
  * file, O_WRONLY|O_TRUNC emptied it, exit 0, no message. A cwd the kernel
  * reports as too long fails the same way rather than being replaced by "/";
  * only a cwd the kernel does not know at all falls back to the root. */
+static int resolve_path_raw(const char *path, char *out);
+
+/* Collapses `out` in place: empty and `.` components dropped, `..` removing
+ * the one before it (never above the root), so `/mnt/f/../x` is `/x`, the
+ * path it means, before the namespace picks its mount. `ulib::resolve` does
+ * the same for Rust programs; without it, a `..` could choose the wrong tree,
+ * and a rename's same-mount check compare the wrong ones (the review of
+ * #215). */
+static void normalize_path(char *out) {
+    size_t r = 0;
+    size_t w = 0;
+    size_t len = strlen(out);
+    while (r < len) {
+        while (r < len && out[r] == '/') {
+            r++;
+        }
+        size_t start = r;
+        while (r < len && out[r] != '/') {
+            r++;
+        }
+        size_t n = r - start;
+        if (n == 0 || (n == 1 && out[start] == '.')) {
+            continue;
+        }
+        if (n == 2 && out[start] == '.' && out[start + 1] == '.') {
+            while (w > 0 && out[w - 1] != '/') {
+                w--;
+            }
+            if (w > 0) {
+                w--;
+            }
+            continue;
+        }
+        out[w++] = '/';
+        memmove(out + w, out + start, n);
+        w += n;
+    }
+    if (w == 0) {
+        out[w++] = '/';
+    }
+    out[w] = 0;
+}
+
 static int resolve_path(const char *path, char *out) {
+    int r = resolve_path_raw(path, out);
+    if (r == 0) {
+        normalize_path(out);
+    }
+    return r;
+}
+
+static int resolve_path_raw(const char *path, char *out) {
     if (path[0] == '/') {
         size_t n = strlen(path);
         if (n >= PATH_MAX_C) {
@@ -229,14 +289,68 @@ static int resolve_path(const char *path, char *out) {
     return 0;
 }
 
-/* ---- open / close / lseek / fstat ---------------------------------------- */
-
-int open(const char *path, int flags, ...) {
+/* Where `path` lives: the server-side path, its length, the target (server,
+ * and the fsd tree in its high bits) and, for a remote mount, the endpoint.
+ * 0, or -1 with FS_ERR_CLIENT recorded (too long, or not resolvable) or
+ * FS_ERR_NO_SUCH_VERB (the console and /net, served by servers with no file
+ * model, where "no such file" would be a lie). Shared by `open`, `unlink`
+ * and `rename`. */
+static int resolve_target(const char *path, char *fspath, unsigned long *fslen,
+                          unsigned *target, unsigned char *endpoint) {
     char abspath[PATH_MAX_C];
+    /* An empty path names nothing (POSIX: ENOENT). It used to resolve to the
+     * cwd, harmless for open, not for unlink or a rename of "" (the review of
+     * #215). */
+    if (path[0] == 0) {
+        g_last_status = FS_ERR_NOT_FOUND;
+        return -1;
+    }
     if (resolve_path(path, abspath) != 0) {
         g_last_status = FS_ERR_CLIENT;
         return -1;
     }
+    memset(endpoint, 0, NS_ENDPOINT_LEN);
+    *fslen = 0;
+    *target = 0;
+    if (ouro_ns_resolve(abspath, strlen(abspath), fspath, FSPATH_MAX_C, fslen,
+                        target, endpoint) != 0) {
+        g_last_status = FS_ERR_CLIENT;
+        return -1;
+    }
+    if ((*target & 0xff) == NS_TARGET_CONSOLE || (*target & 0xff) == NS_TARGET_NETLOCAL) {
+        g_last_status = FS_ERR_NO_SUCH_VERB;
+        return -1;
+    }
+    return 0;
+}
+
+/* Sets `errno` from the status the last request recorded, where there is an
+ * `errno` (see the include above). Only `unlink` and `rename` call it so far;
+ * step 2 of the C-hosting plan gives the rest of this file the same. */
+static void set_errno_from_status(void) {
+#ifdef OURO_HAVE_ERRNO
+    unsigned long s = g_last_status;
+    if (s == FS_ERR_NOT_FOUND) errno = ENOENT;
+    else if (s == FS_ERR_PERM || s == FS_ERR_AUTH || s == MSG_ERR_DENIED) errno = EACCES;
+    else if (s == FS_ERR_NOT_A_FILE) errno = EISDIR;
+    else if (s == FS_ERR_NOT_A_DIRECTORY) errno = ENOTDIR;
+    else if (s == FS_ERR_INVALID_NAME) errno = EINVAL;
+    else if (s == FS_ERR_ALREADY_EXISTS) errno = EEXIST;
+    else if (s == FS_ERR_NOT_EMPTY) errno = ENOTEMPTY;
+    else if (s == FS_ERR_IS_ROOT || s == FS_ERR_BUSY) errno = EBUSY;
+    else if (s == FS_ERR_DISK_FULL) errno = ENOSPC;
+    else if (s == FS_ERR_READ_ONLY) errno = EROFS;
+    else if (s == FS_ERR_CROSS_DEVICE) errno = EXDEV;
+    else if (s == FS_ERR_NO_SUCH_VERB) errno = ENOSYS;
+    else if (s == NO_FS || s == TASK_ERR_NO_SUCH_TASK) errno = ENODEV;
+    else if (s == FS_ERR_CLIENT) errno = ENAMETOOLONG;
+    else errno = EIO;
+#endif
+}
+
+/* ---- open / close / lseek / fstat / unlink / rename ---------------------- */
+
+int open(const char *path, int flags, ...) {
 
     unsigned long oflags = 0;
     int acc = flags & 3; /* O_ACCMODE: O_RDONLY=0, O_WRONLY=1, O_RDWR=2 */
@@ -256,20 +370,10 @@ int open(const char *path, int flags, ...) {
     /* Where does this path live? Until this call existed, the answer was
      * always "fsd", which is why a remote mount was unreachable from C. */
     char fspath[FSPATH_MAX_C];
-    unsigned long fslen = 0;
-    unsigned target = 0;
+    unsigned long fslen;
+    unsigned target;
     unsigned char endpoint[NS_ENDPOINT_LEN];
-    memset(endpoint, 0, sizeof endpoint);
-    if (ouro_ns_resolve(abspath, strlen(abspath), fspath, sizeof fspath, &fslen,
-                        &target, endpoint) != 0) {
-        g_last_status = FS_ERR_CLIENT;
-        return -1;
-    }
-    /* The console and /net are not openable files: both are served by other
-     * servers with no fid model at all, and answering "no such file" for them
-     * would be the same lie this arc has been removing. */
-    if ((target & 0xff) == NS_TARGET_CONSOLE || (target & 0xff) == NS_TARGET_NETLOCAL) {
-        g_last_status = FS_ERR_NO_SUCH_VERB;
+    if (resolve_target(path, fspath, &fslen, &target, endpoint) != 0) {
         return -1;
     }
 
@@ -302,6 +406,105 @@ int open(const char *path, int flags, ...) {
     g_files[idx].target = target;
     memcpy(g_files[idx].endpoint, endpoint, NS_ENDPOINT_LEN);
     return FID_BASE + idx;
+}
+
+/* Removes the file at `path` (`NP_RM`, as `rm` sends it), so picolibc's
+ * `remove` links and works: Proem removes its `-o` output after a failed run.
+ * 0, or -1 with `errno` set where there is one (ENOENT for a missing file). A
+ * directory is refused (`rmdir` is its verb). Since 2026-10-05. */
+int unlink(const char *path) {
+    char fspath[FSPATH_MAX_C];
+    unsigned long fslen;
+    unsigned target;
+    unsigned char endpoint[NS_ENDPOINT_LEN];
+    if (resolve_target(path, fspath, &fslen, &target, endpoint) != 0) {
+        set_errno_from_status();
+        return -1;
+    }
+    long s = np_request(target, endpoint, NP_RM, fslen, 0, 0, fspath, (size_t)fslen, 0, 0);
+    if ((unsigned long)s >= FS_ERR_MIN) {
+        set_errno_from_status();
+        return -1;
+    }
+    return 0;
+}
+
+/* Renames `oldpath` to `newpath` (`NP_MV`, the two paths back to back), and
+ * when `newpath` is an existing ordinary file, replaces it: on ext2 that is one
+ * directory-entry write, on FAT32 and exFAT two, ordered so that the name
+ * always finds one of the two files (`mv`'s replace, 2026-09-02). Edit saves
+ * through it, writing a temp file and renaming it over the original. Both
+ * paths must live on the same server and tree, or -1 with EXDEV, as POSIX
+ * answers a rename across mounts. Since 2026-10-05. */
+int rename(const char *oldpath, const char *newpath) {
+    char src[FSPATH_MAX_C];
+    char dst[FSPATH_MAX_C];
+    unsigned long srclen;
+    unsigned long dstlen;
+    unsigned srctarget;
+    unsigned dsttarget;
+    unsigned char srcend[NS_ENDPOINT_LEN];
+    unsigned char dstend[NS_ENDPOINT_LEN];
+    if (resolve_target(oldpath, src, &srclen, &srctarget, srcend) != 0 ||
+        resolve_target(newpath, dst, &dstlen, &dsttarget, dstend) != 0) {
+        set_errno_from_status();
+        return -1;
+    }
+    if (srctarget != dsttarget || memcmp(srcend, dstend, NS_ENDPOINT_LEN) != 0) {
+        /* The code ulib::fs_mv and the shell record for the same refusal, so
+         * a program without errno can tell it from a too-long path. */
+        g_last_status = FS_ERR_CROSS_DEVICE;
+        set_errno_from_status();
+        return -1;
+    }
+    char both[2 * FSPATH_MAX_C];
+    if (srclen + dstlen > FS_DATA_MAX) {
+        g_last_status = FS_ERR_CLIENT;
+        set_errno_from_status();
+        return -1;
+    }
+    memcpy(both, src, srclen);
+    memcpy(both + srclen, dst, dstlen);
+    long s = np_request(srctarget, srcend, NP_MV, srclen, dstlen, 0, both,
+                        (size_t)(srclen + dstlen), 0, 0);
+    if ((unsigned long)s >= FS_ERR_MIN) {
+        set_errno_from_status();
+        return -1;
+    }
+    return 0;
+}
+
+/* Removes the empty directory at `path` (`NP_RMDIR`, as `rmdir` sends it). 0,
+ * or -1 with `errno` (ENOTEMPTY, ENOTDIR, ENOENT). Since 2026-10-05. */
+int rmdir(const char *path) {
+    char fspath[FSPATH_MAX_C];
+    unsigned long fslen;
+    unsigned target;
+    unsigned char endpoint[NS_ENDPOINT_LEN];
+    if (resolve_target(path, fspath, &fslen, &target, endpoint) != 0) {
+        set_errno_from_status();
+        return -1;
+    }
+    long s = np_request(target, endpoint, NP_RMDIR, fslen, 0, 0, fspath, (size_t)fslen, 0, 0);
+    if ((unsigned long)s >= FS_ERR_MIN) {
+        set_errno_from_status();
+        return -1;
+    }
+    return 0;
+}
+
+/* POSIX `remove`: a file through `unlink`, an empty directory through `rmdir`.
+ * picolibc's own calls `unlink` alone, so `remove` of a directory answered
+ * EISDIR; this one, linked ahead of picolibc's archive, replaces it (the
+ * review of #215). */
+int remove(const char *path) {
+    if (unlink(path) == 0) {
+        return 0;
+    }
+    if (g_last_status != FS_ERR_NOT_A_FILE) {
+        return -1;
+    }
+    return rmdir(path);
 }
 
 static struct file_state *file_for(int fd) {
@@ -341,18 +544,48 @@ int close(int fd) {
     return 0;
 }
 
+/* What the server's `NP_FSTAT` record says, and nothing else. The whole
+ * `struct stat` is zeroed first: it used to be left as the caller's stack had
+ * it but for two fields, and Proem, which knows a file by `st_dev` and
+ * `st_ino`, could take two headers for one and skip the second silently (its
+ * fstat-identity handoff, 2026-10-01). So `st_dev` and `st_ino` read 0, "no
+ * identity", until the record carries one (a wire change, on the roadmap).
+ * Mode, uid and gid are the disk's where it records them (ext2,
+ * `STAT_MODEVALID_OFF`). Where it does not (FAT32, exFAT, /proc), `st_mode`
+ * is the file type from the record's directory flag with 0666 for a file and
+ * 0777 for a directory: such a filesystem keeps no owner or mode, and fsd
+ * lets every access through on it, so "anyone may read and write" is the
+ * true answer, where 0000 would have told a ported program it may touch
+ * nothing (the review of #216; Linux's vfat makes the bits up the same way,
+ * from its mount options). uid and gid stay 0 there. Before, `st_mode` was 0
+ * on those, so `S_ISREG` was false for every file. */
 int fstat(int fd, struct stat *st) {
     struct file_state *f = file_for(fd);
     if (!f || !st) {
         return -1;
     }
-    unsigned char info[STAT_INFO_LEN];
+    /* Zeroed: np_request copies only what the reply carries, and a shorter
+     * record (an older peer's 20 bytes) must read as "no mode", not as the
+     * stack's leftovers in the mode-valid byte (the review of #216). */
+    unsigned char info[STAT_INFO_LEN] = {0};
     long s = np_request(f->target, f->endpoint, NP_FSTAT, f->fid, 0, 0, 0, 0, info, sizeof(info));
     if ((unsigned long)s >= FS_ERR_MIN) {
         return -1;
     }
+    memset(st, 0, sizeof *st);
     st->st_size = (long)__rd_u64(info + STAT_SIZE_OFF);
-    st->st_mode = (unsigned)(info[STAT_MODE_OFF] | (info[STAT_MODE_OFF + 1] << 8));
+    if (info[STAT_MODEVALID_OFF]) {
+        st->st_mode = (unsigned)(info[STAT_MODE_OFF] | (info[STAT_MODE_OFF + 1] << 8));
+        st->st_uid = (unsigned)(info[STAT_UID_OFF] | (info[STAT_UID_OFF + 1] << 8));
+        st->st_gid = (unsigned)(info[STAT_GID_OFF] | (info[STAT_GID_OFF + 1] << 8));
+    } else {
+        /* The whole u32, as ulib's stat_is_dir reads it. */
+        unsigned long flags = (unsigned long)info[STAT_FLAGS_OFF] |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 1] << 8) |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 2] << 16) |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 3] << 24);
+        st->st_mode = (flags & STAT_FLAG_DIR) ? (S_IFDIR | 0777) : (S_IFREG | 0666);
+    }
     return 0;
 }
 

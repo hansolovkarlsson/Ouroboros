@@ -88,8 +88,9 @@ growing the stack - the shell's `exec` path forced 8KB->16KB, and the
 network server forced 16KB->24KB->32KB->40KB as it gained TCP buffers,
 then concurrent connections, then the remote-mount session path; the size
 today is the loader's `STACK_PAGES`, and `heap_info` reports it at runtime).
-Below the guard is a 256KB **raw heap area** the program reaches via the
-`heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
+Below the guard is a 1 MiB **raw heap area** (the loader's `HEAP_PAGES`;
+256KB until 2026-10-05), zeroed at load like the rest of the region, which
+the program reaches via the `heap_info` syscall (a `&mut [u8]`, not a `GlobalAlloc`-backed heap - see
 "Binary format" for why `alloc`'s `Vec`/`String` can't be used here) - the
 shell uses it to hold a redirect/pipe capture far larger than its stack, so
 `cat big > file` works. `.bss`/`.data` are now supported too (see "Binary
@@ -458,7 +459,13 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   themselves. `libc/hello.c` remains the self-contained *no-libc* proof (its own
   `svc` stubs) and the `.data`/`.bss` regression test.
 - **File I/O works, via fids** (`libc/src/file.c`, `make cfile-bin` →
-  `/bin/CFILE`): `open`/`read`/`write`/`close`/`lseek`/`fstat`. A **fid** is a
+  `/bin/CFILE`): `open`/`read`/`write`/`close`/`lseek`/`fstat`, and since
+  2026-10-05 `unlink`, `rmdir`, `rename` and `remove` (path verbs
+  `NP_RM`/`NP_RMDIR`/`NP_MV`, no fid; `remove` takes a file or an empty
+  directory; `rename` replaces an existing ordinary file, answers `EXDEV` across
+  mounts and `EINVAL` for a directory moved into itself; all set picolibc's
+  `errno`). Paths collapse `.` and `..` before the namespace picks a mount, and
+  an empty path is `ENOENT`. A **fid** is a
   server-side open-file handle (a POSIX fd *is* a 9P fid) — `open` establishes it
   in `fsd` (`NP_OPEN`, which authorizes the access against the file's mode/owner
   *once*), and the fd the C program holds *is* that fid; `read`/`write`/`fstat`/
@@ -494,7 +501,8 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   `stdin`/`stdout`/`stderr` wire to fd 0/1/2 — i.e. straight to the
   `write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit` stubs we already
   wrote. So a picolibc program links `picolibc.a` + `crt0.o os.o file.o` (the
-  stubs, compiled against picolibc's *own* headers so `struct stat`/flags match)
+  stubs, compiled against picolibc's *own* headers so `struct stat`/flags match; true only since 2026-10-05, when `libc/include` moved to the quote path
+  only (`-iquote`), so an angle-bracket include cannot reach a hand-rolled header: before, `file.o` got the hand-rolled `struct stat`, and `fstat` wrote a picolibc program's size into `st_dev`/`st_ino`)
   + `builtins.o`, and drops our `stdio.c`/`stdlib.c`/`string.c` (picolibc
   supplies `printf`/`malloc`/`memcpy`/…).
 - **Two compiler-rt builtins we carry** (`libc/pico/builtins.c`):
@@ -574,7 +582,7 @@ Worth knowing before building further on this:
   with `SPAWN_ERR_NO_FREE_SLOT` rather than growing the scheduler
   further.
 - **No `alloc`-backed heap, and no `.bss`** — so no dynamic collections
-  (`Vec`/`String`/`Box`) and no static mutable state. There **is** a 256KB
+  (`Vec`/`String`/`Box`) and no static mutable state. There **is** a 1 MiB
   *raw* heap area per program (`heap_info` syscall, a `&mut [u8]`), which
   lifts fixed-buffer caps (the shell's redirect/pipe capture uses it) - but
   a real `GlobalAlloc` heap is blocked: prebuilt lib`alloc` has
@@ -626,7 +634,7 @@ Worth knowing before building further on this:
   reads/writes to `SAFECOPY_MAX` (2048) per op and lets `cat` stream any
   size. What remains: the 512-byte inline cap still bounds directory
   *listings* (`ls`); a single non-streaming transfer is
-  userland-memory-bound, but a program has a 256KB raw heap area now
+  userland-memory-bound, but a program has a 1 MiB raw heap area now
   (`heap_info`) on top of its fixed stack, which the shell uses to capture
   large redirect/pipe output; and the stack now has a
   *guard page* (an overflow faults cleanly and kills just that task,

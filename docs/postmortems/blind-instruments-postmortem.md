@@ -721,3 +721,525 @@ real addresses. Found by the last review of the day: the right check is the
 on the contexts, is sound, and was shown to fail with `MAX_DEVICES` set to 7.
 (Fixed the next morning on #179's branch: the rings are checked against the
 page, and an event ring made larger than a page now fails the build.)
+
+## Three more, from the first boots on the boards (2026-09-28)
+
+The Pi 400 and a 1 GB Pi 4 booted for the first time, watched over HDMI with no
+serial cable, through a phone camera. Every observation came through at least
+two instruments that had never been checked: the screen and the photo of it.
+
+**A screen that stopped updating, read as a machine that stopped.** The first
+boot ended on the firmware's text, partway through the line after the xHCI
+command-register write, and I said it had frozen at that write. Two boots with
+flags later I said the opposite: the firmware's ACPI names a serial port, so
+the kernel's own lines after the exit go to serial only, and the Pi might be at
+the shell with nothing reaching HDMI. Both were readings of the screen, not of
+the machine. What settled it was booting QEMU with `-device ramfb` and looking:
+the console server draws on the framebuffer whenever one exists (`CON_INFO`
+asks `fbdev`, not the kernel's console), so an HDMI screen that never changes
+means the boot never reached it. The fix to the instrument was to make the
+screen report: `\FBCON` puts the kernel's framebuffer console up right after
+the exit, and progress squares cover the stretch before any console exists.
+Each was shown to fail on QEMU with a planted fault or hang.
+
+**A photo read wrong, twice, each time to an answer that looked like one.** The
+firmware printed only `Synchronous Exception at 0x…` on HDMI, and the kernel
+now logs where it was loaded. From a 480×360 photo I read the image base
+`0x376d0000`: the address fell in `.rdata`, on a `core::panic::Location`.
+Correcting one digit by the image's size gave `0x376d7000`: the address fell on
+a stack store between two stack stores that had succeeded. Both were readings
+of blurred hex digits, and both produced a symbol name. The check that caught
+them was a property the answer had to have: the loaded image is exactly
+`SizeOfImage` long (0x1e9000, seen on QEMU), so a base and end read off the
+screen must differ by that. A sharp photo gave `0x376df000..0x378c8000`, which
+does, and an instruction that can fault. I had asked for the sharper photo
+only because the answers were impossible; a plausible wrong one would have
+gone through.
+
+**A disk image that was not the card.** `make sdcard` was tested against
+`hdiutil` FAT32 images, every guard shown to fail. On the first real card it
+stopped with `rm: .Spotlight-V100: Operation not permitted`: Spotlight indexes
+a mounted card and macOS will not let its folder go, and the images were
+never indexed in time. Rerunning the old script on a fresh image passed, so the
+image could not reproduce it at all. It reproduced every time with an `rm`
+shim that refuses that one path: the old script failed, the fix passed. The
+stand-in has to be made to do what the real thing does, not assumed to.
+
+## Two more, from the review of the bench tools (2026-10-01)
+
+The diagnostics built for the first boots went through a review before their
+pull request (#181). Neither of its two real findings had been seen on QEMU,
+because every QEMU run had been set up so that it could not show them.
+
+**A tool built after the lesson, without the lesson in it.** The section above
+ends on the property that caught two misread photos: a base and end read off
+the screen must differ by the image's `SizeOfImage`. `scripts/efi-symbol.py`
+was written the same day, to turn exactly those readings into a function name,
+and it did not check that property. Given a base with one blurred digit it
+printed a confident `symbol + offset`, and the same for a map relinked from a
+different profile than the card's binary. The check had been applied by hand
+and written down as the lesson, but never put into the tool. The script now
+takes the relinked `.efi` as a required argument and refuses before naming
+anything unless the map and the `.efi` share a link timestamp and `<end>-<base>`
+is that `.efi`'s `SizeOfImage`. Both refusals were run: a base off by one digit,
+and an `.efi` whose timestamp was patched.
+
+**A flag that made the screen report could make nothing report.** `\FBCON`
+puts the framebuffer console up instead of the serial one. It dropped the
+serial console whenever the flag was set, whether or not a framebuffer existed,
+so on a board with a UART and no usable GOP the flag removed the only console,
+and every line after the exit went nowhere, the kernel's own `EXCEPTION`
+report included. Every QEMU check of `\FBCON` had run with `-device ramfb`,
+because the point was to see the screen, so the case without a framebuffer
+never ran. The review found it by reading. The fix drops the serial console
+only when there is a framebuffer to replace it with, and the control is the old
+filter put back: with no `ramfb`, that boot's serial log ends at
+`exiting boot services`, where the fixed one reaches the shell.
+
+## Three more, from the storage recovery (2026-10-01, later)
+
+The rest of the day turned two storage defects found by reading into defects
+observed on QEMU, and built a committed test for each (#184 to #186). Three of
+the instruments built along the way passed while blind to the thing they were
+named for, and one more was blind by design and is recorded as such.
+
+**A harness whose every tree had one answer.** The fix for the devicetree's
+missing `/chosen` (#182) was checked by a host harness running the old and the
+new console lookup side by side on hand-built trees. Each tree had one PL011,
+so "`stdout-path` resolved" and "`stdout-path` failed, fell back to the first
+PL011" returned the same node, and a lookup that dropped the last byte of a
+path agreed with one that did not. The review's fix for exactly that byte
+passed the harness before the harness could see it. A decoy PL011 placed
+ahead of the real one in every tree made the two outcomes different; then the
+old code's truncation showed (it fell back to the decoy), and putting either
+old behaviour back was caught.
+
+**A "recovered" check that saw a retry begin.** The first version of
+`test-usb-hub.py --stall` (#185) passed `recovered` on the kernel's `retry 1/3`
+line, which is printed before the reset and the retry run, and passed `no
+transfer timed out` on the absence of a line the kernel stops printing after
+sixteen recoveries, in a boot that has thirty. A recovery that never worked
+would have passed both. The review found it by reading the log limit against
+the measured count. The check became exact: one `retry 1/` line per Stall by
+QEMU's own count, no `retry 2/`, no `giving up`, with the cap lifted while the
+fault is armed. The rewind from before #184 put back then fails it with 56
+first retries and 18 further for 19 Stalls.
+
+**A Stall test that only ever stalled one direction.** The same test
+corrupted CBWs, so only Bulk-OUT ever halted, and at every recovery the IN
+endpoint was Running and its reset was refused and discarded. The max review
+deleted the IN half of the recovery outright and every check stayed green.
+It then moved one Stall from the CBW to the CSW read, and found the driver bug
+the test could not reach: after a Bulk-IN Stall the device still owes its CSW,
+and the driver's fresh CBW is stalled in turn, so the command gave up and
+nothing mounted (fixed in #186). The test now also reads some CSWs short,
+which QEMU stalls with the CSW owed, and the same deletion fails it.
+
+**Blind by design, and said so.** The device-side CLEAR_FEATURE(ENDPOINT_HALT)
+added in #186 is something QEMU does not need: the Stall test passes with it
+removed, and with it sent to the wrong endpoint, since QEMU accepts any
+endpoint address. The one thing QEMU can see is a refusal, and a class-type
+request in its place fails the check with sixty. That reach is written into
+the roadmap entry, so a green `--stall` is not read as evidence that a real
+stick's halt was cleared. It is not; the board decides.
+
+It is this document's spine again: each was found by breaking the thing
+underneath (a decoy, a deletion, a moved Stall) and watching whether the
+instrument noticed, and none by the instrument's own green.
+
+## Three more, from the Pi 4's first boots with serial (2026-10-01, evening)
+
+The early fault reporter (#187) was built so a Pi could say what the
+firmware's one-line exception report does not. Its first dump on the board
+said the kernel was running at EL2, and in doing so named the oldest blind
+instrument in the tree.
+
+**A log line that reported the registers, not the machine.** `identity map
+installed, MMU running on our own tables` has printed on every post-exit boot
+since the MMU milestone, and `mmu.rs` backs it with a check: after the
+switch it asks the hardware walker (`AT S1E1R`, `PAR_EL1`) whether the serial
+console is Device memory. On the Pi both passed, and neither was true of the
+machine, because `TTBR0_EL1`, `TCR_EL1` and `MAIR_EL1` had been written at
+EL2, where they govern nothing, and `AT S1E1R` walks exactly those tables.
+The check confirmed that the tables the kernel wrote describe what the kernel
+wrote. `exceptions.rs` had said since its first day that the kernel "assumes
+EL1, not verified at any other EL", which is the honest form of the claim;
+nothing turned it into a check, and the instrument that finally did was built
+for a different question. The one-line fix that should have existed all
+along, log `CurrentEL` after the exit, is step 0 of the plan.
+
+**A round trip spent on the previous build.** The first boot after the merge
+was staged from the tree before the merge had reached it, and ran the old
+kernel. Nothing on the bench checks which build a card carries. What caught
+it was incidental: the kernel's log lines carry their source line numbers,
+and those did not match the file; the `armed` line the new kernel prints was
+absent. A boot should say what it is: the image range is already logged, and
+a build identity beside it (the commit, or the binary's link timestamp) would
+have made this a one-second check instead of a round trip read backwards.
+
+**A dump that ordered its fragile part before its robust part.** The
+reporter prints the backtrace before the register rows, and on the Pi the
+backtrace's tenth frame led the image-naming walk into a translation fault of
+its own. The reentrancy guard did its job and halted, and the register rows,
+which need nothing but the context the firmware had already saved, were never
+printed. The instrument lost its most reliable output to its least reliable
+one. Rows first, then the walk, and the walk bounded, is on the roadmap.
+
+## Three more, and the one that worked (2026-10-02)
+
+The day the Pi 4's firmware faults were finally read. Four of them in two
+days, at four addresses, in four kernel steps, and the dumps from the
+reporter built the day before were in hand for all but the first.
+
+**A rig blind by platform.** Every check this kernel has ran on QEMU, whose
+firmware gives the loader a 128 KB stack with its page tables somewhere else.
+The Pi firmware gives it 16 KB with the tables directly beneath. The kernel's
+deepest pre-exit calls, a debug build with the firmware's timer interrupt
+landing on top, pushed past that bottom and wrote frames over the tables,
+and the TLB kept the firmware running until a cold page was walked. No rig
+could have seen it, and none did: the two-day search went through the xHCI,
+the exit, the console and the variable store because those were where the
+cold walks happened. The 2026-09-27 section of this document says QEMU
+differs from the Pi exactly where the work lives; this is the sharpest case
+yet, since the difference was in the one thing the kernel never measured
+because it never owned it, the stack it was entered on. The fix is a stack of
+its own; the lesson for the instruments is that a kernel's log should say
+what it was given (`PcdCPUCorePrimaryStackSize` is a number in a public
+file) before it runs on it.
+
+**A bound narrower than it claimed, and honest about it.** The reporter's
+image walk was bounded to the memory map's RAM ranges, capped at 64, and the
+cap was applied before contiguous descriptors were merged. The Pi's map has
+more than 64, so the walk kept the lowest ones and dropped the top of RAM,
+where every firmware image lives, and a dump placed `elr` and three
+firmware frames in no image. What caught it was the instrument's own line:
+`bounded to 3 RAM range(s) ... (the map had more; the rest are outside the
+walk)`. An instrument that states its own narrowing is caught on its first
+bad reading; one that does not is caught on its first wrong one. The cap
+now counts merged ranges, with the smallest giving way at it, and the line
+lists the ranges.
+
+**A diagnosis written six times and measured never.** The fault at address
+0 that the EL1 drop closed was written down as "the firmware's leftover EL2
+timer" in the plan, the rig's docstring, two testing guides, a Makefile
+comment and the module doc, then hedged to "most likely the kernel's own
+tick" in all six, before a reviewer read the dump's fields: `spsr=0x800003c9`,
+EL2h with interrupts masked, `elr=0`, an instruction abort at the same EL.
+No interrupt can produce that. It was the first `eret` into task 0, made at
+EL2, restoring the firmware's stale `ELR_EL2`. The fields had been on the
+screen all along; what was missing was anyone matching them to the
+mechanism rather than reasoning from what the kernel had done last. This is
+[`true-when-written`](true-when-written-postmortem.md)'s class as much as
+this one's, and it is recorded there too.
+
+**And the one that worked.** After the third firmware fault the question was
+whether the firmware's table entry was zero (cleared) or garbage (overwritten),
+and the instrument for it was a line in the dump: walk the firmware's live
+tables for `far` and print each level's entry. It was built and checked on
+QEMU in an afternoon, with the planted test fault moved to the first byte
+past RAM so the walk had entries to read and the rig could require the
+walk's level to agree with the ESR's. Its first boot on the board printed
+`L0[0x0] @ 0x3b3fa000 = 0x3b3fa038 (invalid), neighbours: [0x1]=0x388
+[0x2]=0x0`, a saved frame pointer and a count where descriptors should be,
+and the two-day search ended. The spine of this document is that the
+observer is a check too. Its converse held today: an observer that reads the
+machine, rather than the registers the kernel wrote or the story the kernel
+told, answers in one boot what six written diagnoses could not.
+
+## Three more, from the Pi's USB controller (2026-10-03)
+
+The day the xHCI driver met its first real controller since Parallels: the
+Pi 4's VL805, behind the BCM2711's PCIe bridge. Four board boots, four pull
+requests (#192 to #195), and by the end a full session over a USB keyboard
+and a USB stick. Each stop on the way was a limit or an assumption that
+QEMU had made invisible, and each was found by a different kind of
+instrument.
+
+**A limit sized by the only controller it had met.** The driver reserved
+eight scratchpad pages, and QEMU's controller asks for none, so the number
+was never exercised. The VL805 asks for 31. What caught it was the driver's
+own refusal, `controller wants 31 scratchpad buffers, only 8 are
+supported`: a limit that names itself when it is hit is found on the first
+boot that hits it. The rigs could not have; QEMU reports `scratchpads=0`,
+which the controller line now logs, so the fact is on every boot rather
+than in a comment about QEMU that nothing checked. The compile-time layout
+assertions caught the next mistake, a 256-byte array pushing a ring across
+a page, before anything ran.
+
+**A store that every working driver splits, and this one did not.** With
+the scratchpads in place the first command timed out. The symptom was the
+one predicted for non-coherent DMA, whose fix was in and whose self-check
+passed, so the reading went elsewhere: the driver against the three that
+work on this controller (edk2's, Linux's, U-Boot's), which all write a
+64-bit xHCI register as two 32-bit halves where this one used one 64-bit
+store across the bridge. The first build of the fix also added a barrier
+and a probe that logged what a single 64-bit store read back as. The review
+caught that the probe was the suspect access itself, able to damage the
+register beside it while reading back intact, and that the round now
+changed three things at once. The board round shipped with the split write
+alone and passive logging, and its answer was unambiguous: Enable Slot
+completed. **An instrument built to observe a suspect operation must not
+perform it**; this one would have been the observer that broke the thing.
+
+**A field read at the one instant it is not valid.** A USB 3 stick on a
+SuperSpeed root port came out of every reset with `speed=0`, at boot and on
+rescan, and the log said nothing more. The next build logged the port's
+state before and after the reset and watched it for a second. The first
+boot with it read: enabled at SuperSpeed before the reset, in Polling with
+no speed at the moment the reset-complete bit was set, back at SuperSpeed
+within the watch. The old code had read the speed in exactly that window,
+on every boot. The warm-reset fallback built beside the watch was never
+needed. The logging, not the reasoning, found it: three plausible causes had
+been written down, and the right one was the least interesting.
+
+What the three share is the 2026-10-02 lesson again from a new direction:
+QEMU's controller differs from the board in its scratchpad count, its bus
+and its link timing, and none of those differences can be seen from QEMU.
+What found them was, in order, a limit that says when it is hit, a
+comparison with code that already works on the hardware, and a log of the
+state rather than the conclusion. The one instrument the review stopped,
+the probe, is the one that would have taken the round's answer with it.
+
+
+## Two more, from the ordering fixes (2026-10-03, afternoon)
+
+Two barrier fixes in the xHCI driver after the board was up, #196 (a `dsb`
+before the registers that hand the controller its rings) and
+`pi4/trb-cycle-order` (a TD published whole, its first TRB's cycle bit
+flipped last behind `dmb oshst`). Neither changes anything QEMU can see.
+
+**Rigs that pass either way.** `test-usb-hub` and `test-el1-drop` were green
+on both branches and would have been green without either fix: QEMU's
+controller is emulated in the same process and sees guest memory as the
+CPU last wrote it, with no write buffer between them. A green rig here proves the change broke nothing; it says
+nothing about the change. Both branches said so in their own text, and
+both found a second instrument. For #196 it was the image, the count of
+`dsb sy` up by four. For the TD it was a mutation that can fail: with the
+final flip removed, the rig went red on every device and the timeout dump
+showed the Enable Slot command held in the ring with its cycle bit 0. That
+proves the hold, not the barrier; nothing on QEMU can prove the barrier,
+and the image is the only place it is visible at all.
+
+**An image check written up from a sample.** A count of barriers in the
+image proves they exist, not where. The first roadmap note on the
+cycle-bit fix said each of the 17 `dmb oshst` sat between the `+0x8` and
+`+0xc` stores, written after looking at three. Checking all 17 found five
+with other instructions between the barrier and the store; the property
+that held for all of them, and the one that matters, is that the first
+store after each barrier is the cycle word. The note was narrowed to that.
+And nothing in the tree re-runs either check: the counts were run by hand
+once, and a later edit can drop a barrier with every rig still green. The
+structure narrows that (one function is now the only way a TRB reaches a
+live ring, so there is one barrier to lose rather than one per caller) but
+does not close it: the branch's second review said so, and a scripted
+disassembly check, shown to fail by deleting a barrier, is on the roadmap.
+
+## Two more, from the evening (2026-10-03)
+
+The same day, after the barriers were on the board: the committed check the
+afternoon's section asked for, and the build line the 10-01 section asked
+for. Each turned up an instrument that would have read the wrong thing.
+
+**An image check run on the build the card does not carry.** Every
+disassembly check of the afternoon (the barrier counts, the flip as the
+first store after each `dmb oshst`) was run on the release image, because
+release is where the pattern was tidy. `make sdcard` stages the debug
+build. Writing the committed check showed the difference: in debug, the
+flip after `dmb oshst` is a call into `write_volatile`, not an adjacent
+store, so the afternoon's property was never true of the kernel on the
+card; it was true of a kernel nobody boots. The barrier was there in both,
+and the debug build is still correct, but the check was an observation of
+a different artifact. The fix moved the property out of the compiler's
+hands: each barrier and its store became a naked function of fixed
+instructions (#198), the same in every profile, and
+`scripts/check-xhci-barriers.py` checks the profile `make sdcard` stages.
+Check the artifact that ships, not the one that is easiest to read.
+
+**A build line that would have named the previous commit.** The line that
+says which build is running (#199) is baked in by a build script, and the
+idiomatic `rerun-if-changed=build.rs` was measured before it went in: after
+a commit that changed no source (a new HEAD, the same files), the image
+kept the old commit and cargo did not even recompile. That is the one case
+the line exists for, a card staged right after a commit. So the script
+reruns on every build, at about a second a build, and the QEMU rig reads the
+identity from the staged image and requires the boot to log it and its
+commit to be HEAD's; a stale ESP fails it. An instrument that says which
+build ran has to be the one thing that cannot be stale, so it was mutated
+before it was trusted: the idiom was the mutation.
+
+## Four more, from the register rounds (2026-10-04)
+
+A day of four small xHCI changes, each a board round (#200 to #203), and one
+rig fix (#204). The controller changes were all spec form: on the Pi 4
+every one of them turned out to write what the code before it wrote. That
+is what made the instruments the day's real subject, since the only way to
+know a change was a no-op was to see it.
+
+**A claim with no instrument under it.** The first version of the RsvdP
+change (#201) said in its commit and on the roadmap that the RsvdP bits
+"read 0 after HCRST on every controller seen". Nothing in the tree had ever
+printed them before the write; the only reads were in the command-timeout
+dump, which runs after the writes and only on a timeout. The review asked
+where they had been seen. One line at init printing the kept bits made the
+claim an observation, and the board then confirmed it (`RsvdP kept: ERSTSZ
+0x0, ERSTBA 0x0`). The sentence was true; it had simply never been checked,
+and a sentence like that reads the same either way.
+
+**A check that could not fail, said so by its own author.** The follow-up
+(#202) put five registers behind one merge helper, and its roadmap note
+admitted that no rig could fail on it: QEMU reads 0 in every RsvdP field,
+so a helper that dropped the kept bits passed `test-usb-hub`,
+`test-el1-drop` and `make test` alike. Saying so was honest and not
+enough. The review moved the merge into a pure `const fn` under const
+asserts, and two mutations of it then broke the build. Where the system
+under test cannot produce the condition, move the property to where it can
+be checked: here, the compiler. The same review moved the log line from
+after the writes it reports to before them, since a write that hung the
+board would otherwise have left the capture without the one value the
+round was for.
+
+**An observer shown wrong before it was trusted.** The HCRST question (is
+the controller still running when it is reset?) was answered with a
+read-only line (#203), and QEMU only ever shows a halted controller, so the
+line had only ever printed one answer. It was mutated: with the controller
+started just before the read, both lines said `R/S true ... HCH false`. The
+same mutation showed something no reading could: QEMU accepted the reset
+of a running controller and the rig stayed green, so only the board could
+say whether this mattered. It did not; the Pi's firmware hands the
+controller over halted. The review also caught that the first version read
+HCH and then printed before the write, and a serial line takes long enough
+for a controller that was still halting to finish.
+
+**A rig that failed a kernel that never ran, and then lost the evidence.**
+One `test-usb-hub` run reported five FAILs. The transcript, 667 bytes, had
+no kernel line in it: QEMU's own firmware had stalled in its USB boot. An
+instrument that grades a run it never observed reads exactly like a
+regression. The fix (#204) calls that case INCONCLUSIVE, and only that
+case, because the loose version, "no kernel line", would also have hidden
+a kernel that hangs before printing; a saved passing transcript showed
+such a kernel ends on `BdsDxe: starting`, and the self-test now holds that
+case graded. Its review found two more blind spots in the fix itself: a
+count of stalls has no denominator, so it grows the same at any stall rate
+(every run's verdict is logged now, and the stall prints as a rate); and
+the rerun the rig asks for overwrites the transcript, which is how the
+first stall was lost and why its fixture had to be transcribed from the
+session that saw it. A verdict that says "run it again" has to keep what
+it saw first.
+
+## Four more, from the night (2026-10-04, after the closeout)
+
+The evening closeout ended on *build the observation into the change, and
+review the observation as hard as the change*. Three PRs followed the same
+night (#205 to #207), and each found a blind instrument, two of them built
+that night by the session that had just written that sentence.
+
+**A log field that said what the code meant to do.** The halt before HCRST
+(#205) added a field to the reset line, `halted here first`, set from the
+condition that decided whether to halt. QEMU hands the controller over
+halted, so the halt path was run by mutation: the controller started before
+the handover read. A second mutation then kept it running and skipped the
+halt. The line printed `HCH false` at the reset write, which caught it, and
+beside it `halted here first true`, which lied. The field reported the
+branch, not the act. Renamed `found running`, what was read, so a halt shows
+as `found running true` beside `HCH true` and a missing one as `HCH false`.
+Only the mutation that removed the thing the field described could show the
+field wrong.
+
+**One verdict for three failures.** On the Pi, `root` was refused for the
+first seconds after the prompt and accepted a few seconds later. The login
+says `Login incorrect` for a wrong password, for no `/etc/shadow` entry, and
+for any read error from `fsd` other than "no filesystem yet". Nothing on the
+screen could say which, and the password is not echoed, so the capture
+could not even rule out a typo. #206 gives each lookup failure its own line
+and leaves the verdict alone, each line forced once on QEMU by a mutation.
+Four boots since have not refused, so the instrument is armed and has
+reported nothing yet. That is still better than the old state, where a
+recurrence would have taught us nothing.
+
+**The instrument a refactor quietly blinded.** `check-xhci-barriers.py`
+requires each barrier store in the image exactly once *and at least one call
+to it*. Before #207, `write32` was the store's only caller, so routing a
+write around the barrier left the store uncalled, dead, and the check red.
+#207 split the writes into handles, and `Kept32::write` called the store
+directly beside `Whole32::write`: two callers, so rerouting either left "at
+least one call" true. Nobody had asked. It turned up because the review
+said a docstring example was vague, and the corrected example was tested
+before it was written: callers went from 2 to 1 and the check exited 0. The
+reserved-bit writes now go through the whole writes, one caller per store,
+and a reroute fails (`found 0 times`). The next review then found the claim
+made of that fix still too wide. A reserved-bit write routed around the
+whole write is not seen either, since the doorbells keep calling it. That
+was shown by mutation too, and the comments now say so. A change that alters
+a function's callers can blind a check that counts calls, and nothing in the
+check will say so.
+
+**A mutation read through a stale image.** The first run of that mutation
+called the script directly on the kernel image already in `target/`, built
+before the mutation, while the rebuilding `make` run beside it had its
+output hidden. The result, green with two callers, was about the old code.
+It was caught because the count had not moved. A mutation test has an
+observer of its own, here the image the script reads, and it has to be shown
+to be looking at the mutated build: the rerun through `make`, output shown,
+said 1 caller.
+
+## Six more, from the storage and C-library day (2026-10-05)
+
+Eight PRs (#209 to #216), each reviewed, and the reviews kept finding the
+same thing: a check written alongside the change that could not have failed.
+One instrument was the system's own.
+
+**The supervisor's heartbeat saw only what its sampling let it see.** `cp`
+of a 758 KB file had `fsd` restarted as wedged near 170 KB. The first account,
+written into the roadmap, was one request too slow for the 2.5 s limit.
+Counters put into `fsd` said each 2 KiB write finished inside two ticks. The
+heartbeat samples task state at the tick, and the tick reaches the CPU only
+at EL0, so a tick fired during a disk-read syscall is taken as `fsd` returns
+to EL0, when it is runnable by definition. A server busy in the kernel looks
+like a wedged one to that observer, every time. Found by measuring the thing
+the observer was judging, not the observer's verdict (#211).
+
+**A program that printed the number and exited 0 whatever it was.** The
+first `cmem` mallocd the heap and printed its size, `heap 1048576`, and
+returned success on any size. With 64 pages it printed `heap 262144` and
+still exited 0, so only a person reading the line would see the regression.
+Found by the review of #210; `cmem` now fails under 1 MiB, and `make
+test-heap` reads its exit.
+
+**A summary that every passing line also contained.** `test-crename` graded
+`"crename: ok" in out`, and every passing check line begins `crename: ok`.
+A run cut short after its first check would have passed, and the rig typed
+`ls /` on that first line instead of waiting for the end. Found by the
+review of #215; the rig now waits for and grades the summary line exactly.
+
+**A value compared with itself.** `cfstat` built the struct it expected from
+the zero struct plus the four fields `fstat` fills, copying `st_uid` and
+`st_gid` from the result itself, and `/etc/passwd` happened to be 0:0. Had
+`fstat` never filled them, or filled them from the wrong offset, the check
+still matched. Found by the review of #216; the rig now compares them with
+`ls -l /etc/passwd`, which reads them through the shell's own path, and a
+mutation reading uid from the gid offset fails it.
+
+**A path that the layer below fixed anyway.** The `..` collapse in libc was
+tested with `rename("/etc/../x", ...)`. With the collapse removed by
+mutation, the test still passed: `fsd` follows `..` entries on disk itself.
+The library's part only shows where `..` climbs out of a MOUNT, which no
+disk can resolve, so the check now uses `/mnt/f/../..`, and the mutation
+fails it on both formats. The mutation was run because the check was new;
+had it not been, the check would have been believed.
+
+**A test image that could not show the bug.** The review of #212 found the
+free-cluster scan bounded by the FAT's capacity, not the volume's clusters,
+so the zeroed entries a rounded-up FAT holds past its last cluster read as
+free. The test image's FAT is exactly the size of its volume, so no rig on
+it could ever reach them. A copy with 1,000 sectors cut from its recorded
+size, filled from the Mac, made the bug reachable: the old bound wrote about
+500 KB past the volume while `cp` said only `disk full`, and `fsck_msdos`
+named the chain out of range.
+
+And the one that worked the other way: `cfstat`, written to check that
+`fstat` zeroes what it does not fill, failed before the zeroing was even
+in, and the reason was larger than its subject. The picolibc port had been
+built against the hand-rolled `struct stat`, so `fstat` wrote a program's
+file size into `st_dev`/`st_ino`, and Proem's file identity had been the
+file size. A check that compares the whole struct, not the fields under
+test, saw what a field check would have passed.

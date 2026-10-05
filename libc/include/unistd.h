@@ -14,6 +14,10 @@ ssize_t write(int fd, const void *buf, size_t count);
 ssize_t read(int fd, void *buf, size_t count);
 int close(int fd);
 long lseek(int fd, long offset, int whence);
+/* Removes a file (not a directory); 0 or -1. */
+int unlink(const char *path);
+/* Removes an empty directory; 0 or -1. */
+int rmdir(const char *path);
 void *sbrk(long incr);
 void _exit(int code) __attribute__((noreturn));
 

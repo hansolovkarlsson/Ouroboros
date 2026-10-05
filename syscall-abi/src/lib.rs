@@ -647,7 +647,8 @@ pub const CWD_MAX: u64 = 128;
 /// `bind` needs only to update the caller's own view; and every task reads its
 /// own via [`GET_NS`] to resolve paths the same way its parent did. An empty
 /// namespace means identity-to-tree-0 (the default), so a task that never calls
-/// this behaves exactly as before namespaces existed. Bounded by [`NS_MAX`].
+/// this behaves exactly as before namespaces existed. A length of `0` sets an
+/// empty one (the pointer is not read; since 2026-10-05). Bounded by [`NS_MAX`].
 pub const NS_SET: u64 = 52;
 
 /// `(out pointer, out capacity)` -> the length of the current task's namespace
@@ -1281,10 +1282,13 @@ pub const FSOP_TOUCH: u64 = 7;
 /// directory - use [`FSOP_RMDIR`] for those).
 pub const FSOP_RM: u64 = 8;
 /// params: `(src len, dst len)`; payload: src ++ dst -> `0`. Renames
-/// or moves `src` to `dst`; `dst` must not already exist.
+/// or moves `src` to `dst`. An existing `dst` is replaced when both are
+/// ordinary files (POSIX `rename`, since 2026-09-02; libc's `rename` relies
+/// on it); a directory on either side of an existing name is refused.
 pub const FSOP_MV: u64 = 9;
-/// no params -> `0` (mounted now), [`MOUNT_ALREADY`], or [`NO_FS`] (a
-/// device is present but carries no mountable FAT32). The FS half of
+/// no params -> `0` (mounted now), [`MOUNT_ALREADY`] (tree 0 is mounted,
+/// or the partition found is already another tree), or [`NO_FS`] (a device
+/// is present but carries no mountable filesystem). The FS half of
 /// the `mount` command - the device half is the [`MOUNT`] syscall,
 /// which must succeed (or report already-installed) first.
 pub const FSOP_MOUNT: u64 = 10;
@@ -1348,9 +1352,13 @@ pub const FSOP_MOUNT_INFO: u64 = 14;
 /// resolve "I don't know" toward saying so.
 pub const MOUNT_FLAG_ENFORCES_MODES: u64 = 1 << 0;
 /// no params -> status `0` (was mounted, now dropped) or [`NO_FS`]
-/// (nothing was mounted). Drops the server's mounted filesystem so the
-/// disk can be reformatted or a different volume mounted (disk-tools arc,
-/// milestone 1). The device the kernel holds is untouched - a subsequent
+/// (nothing was mounted). Drops **every** disk mount, the root (tree 0)
+/// and any partition mounts ([`FSOP_MOUNT_AT`]) alike; a fid open on one
+/// stays allocated but answers [`NO_FS`] until its owner clunks it, so the disk can be reformatted or a different volume mounted
+/// (disk-tools arc, milestone 1; every tree since 2026-10-05, tree 0 only
+/// before). The synthetic `/proc` tree stays. A namespace binding to a
+/// cleared tree resolves to nothing until a later mount fills that slot,
+/// possibly with another partition. The device the kernel holds is untouched - a subsequent
 /// [`FSOP_MOUNT`] re-probes and re-mounts it.
 pub const FSOP_UNMOUNT: u64 = 15;
 
@@ -1388,12 +1396,15 @@ pub const FSOP_PARTITION: u64 = 17;
 /// later steps (an unsupported `fstype` returns [`FS_ERROR`]).
 pub const FSOP_FORMAT: u64 = 18;
 
-/// `(partition index)` -> the **tree id** (0..) the mount was placed in, or an
-/// error `>= FS_ERR_MIN`: [`NO_FS`] (no such partition / it mounts as no known
-/// format), [`MOUNT_ALREADY`] (no free mount slot). Mounts the disk's
-/// `index`-th partition (from the same MBR/GPT discovery the boot auto-mount
-/// uses) into a fresh mount slot, so several filesystems can be mounted at once
-/// (cluster Phase 0 multi-mount). The caller `bind`s a namespace prefix to the
+/// `(partition index)` -> the **tree id** (0..) the partition is mounted as, or
+/// an error `>= FS_ERR_MIN`: [`NO_FS`] (no such partition, it mounts as no
+/// known format, or the root mount, tree 0, is not there yet), [`MOUNT_ALREADY`]
+/// (no free mount slot). Mounts the disk's `index`-th partition (from the same
+/// MBR/GPT discovery the boot auto-mount uses), so several filesystems can be
+/// mounted at once (cluster Phase 0 multi-mount). **A partition is mounted
+/// once** (since 2026-10-05): one already mounted returns its existing tree,
+/// which may be tree 0, the root mount every task sees as `/`, so the tree is
+/// shared, not the caller's own. A new mount never takes tree 0. The caller `bind`s a namespace prefix to the
 /// returned tree so paths under it resolve to this mount. Unlike [`FSOP_MOUNT`]
 /// (which mounts the first validating partition at tree 0), this selects a
 /// specific partition and returns where it landed. A small tree id (0..3) is

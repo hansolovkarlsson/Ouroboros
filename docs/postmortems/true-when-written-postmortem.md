@@ -850,6 +850,44 @@ review, neither by a compiler or a test, which is the mechanism this file
 opened with: the falsifying edit is in the same file, and nothing anywhere
 fails.
 
+## A diagnosis in six copies, and a platform claim in three (2026-10-02)
+
+Two cases from the Raspberry Pi work, both claims that were false when
+written, which is the sharper end of this document's class: not a statement
+that rotted, but one that was never checked against the evidence it stood
+next to.
+
+**The timer that was never read.** Under QEMU with the firmware at EL2, the
+boot reached `shell ready` and faulted at address 0 through the firmware's
+vectors. The plan written that night said "the firmware's EL2 timer
+interrupt, which the kernel's EL1 timer setup never stopped"; the rig's
+docstring, two testing guides, a Makefile comment and the module doc said
+it after it, six copies. A review observed that the kernel's own tick fit as
+well, and all six were hedged to "most likely the kernel's own tick"; still
+no one had read the interrupt number, and still no one had read the dump.
+The fifth review did: `esr=0x86000007` is an instruction abort taken at the
+same EL, `elr=0`, `spsr=0x800003c9` is EL2h with every interrupt masked. No
+interrupt produces that; the first `eret` into task 0, made at EL2, restoring
+the firmware's stale `ELR_EL2` of zero, produces exactly that, and the plan's
+own register table had said so in its row for `eret`. Six copies of a
+mechanism were replaced by one reading of three fields that had been printed
+on the first boot. The rule from the 2026-09-22 section applies with its
+object changed: **a diagnosis is a claim about the machine, and the dump is
+its check**; a diagnosis written before its dump is read is the kind of
+claim this document collects, however many files repeat it.
+
+**The address assumed free.** The reporter's planted test fault was moved
+from bit 47 to "the first byte past RAM", and the doc comment, the testing
+guide and the journal all said that on a Pi 4 this is "the GPU's memory,
+which no firmware maps and no read disturbs". A review noted that nothing
+had checked the memory map for a reserved or MMIO descriptor at that
+address, that the board in use caps RAM at 3 GB so the byte past it is not
+GPU memory at all, and that the Pi firmware does map its GPU carve-out. The
+code now chooses the lowest page past RAM that no descriptor of any type
+covers, from the map, and the three records say that instead. The claim had
+the shape of a fact and the provenance of a guess, and three copies of it
+went in on the same afternoon the six copies above came out.
+
 ## What actually worked
 
 Three things, none of them "be more careful".

@@ -183,6 +183,7 @@ const EP_STATE_HALTED: u32 = 2;
 const EP_STATE_STOPPED: u32 = 3;
 
 const COMPLETION_SUCCESS: u32 = 1;
+const COMPLETION_STALL_ERROR: u32 = 6;
 const COMPLETION_CONTEXT_STATE_ERROR: u32 = 19;
 const COMPLETION_STOPPED: u32 = 26;
 const COMPLETION_STOPPED_LENGTH_INVALID: u32 = 27;
@@ -200,6 +201,7 @@ const HCCPARAMS1_CSZ: u32 = 1 << 2;
 // Operational register offsets, from `op_base` (= BAR base + CAPLENGTH).
 const OP_USBCMD: u64 = 0x00;
 const OP_USBSTS: u64 = 0x04;
+const OP_PAGESIZE: u64 = 0x08;
 const OP_CRCR: u64 = 0x18;
 const OP_DCBAAP: u64 = 0x30;
 const OP_CONFIG: u64 = 0x38;
@@ -209,29 +211,77 @@ const USBCMD_RUN: u32 = 1 << 0;
 const USBCMD_HCRST: u32 = 1 << 1;
 
 const USBSTS_HCH: u32 = 1 << 0;
+const USBSTS_HSE: u32 = 1 << 2;
 const USBSTS_CNR: u32 = 1 << 11;
 
 const CRCR_RCS: u64 = 1 << 0;
+const CRCR_CRR: u32 = 1 << 3;
 
-// PORTSC bits/fields. The RW1C status bits (CSC/PEC/WRC/OCC/PRC/PLC/CEC)
-// and PED (R/W, but writing 1 *disables* the port - not a "preserve as
-// read" bit) all have to be masked to 0 whenever writing PORTSC for an
-// unrelated reason, or they'd be spuriously cleared/tripped. See
-// `portsc_preserve` below.
+// PORTSC bits/fields. Most of the register must not be written back as
+// read: the RW1C change bits (CSC/PEC/WRC/OCC/PRC/PLC/CEC) would be
+// cleared, PED (writing 1 *disables* the port) tripped, PR and WPR (RW1S)
+// would start a reset, and RsvdZ must be written 0. The only PORTSC write
+// is `reg::PortStatus::write`, which writes back only `PORTSC_KEPT`.
 const PORTSC_CCS: u32 = 1 << 0;
 const PORTSC_PR: u32 = 1 << 4;
 const PORTSC_PRC: u32 = 1 << 21;
+const PORTSC_PED: u32 = 1 << 1;
+const PORTSC_WRC: u32 = 1 << 19;
+const PORTSC_PLC: u32 = 1 << 22;
+const PORTSC_WPR: u32 = 1 << 31;
+const PORTSC_PLS_SHIFT: u32 = 5;
+const PORTSC_PLS_MASK: u32 = 0xf;
+/// Link states after which a USB3 port needs a Warm Reset, not a Hot one
+/// (xHCI 4.19.1.2; Linux's `hub_port_warm_reset_required`). Neither occurs
+/// on a USB2 port, so seeing one also says the port is USB3, where Warm
+/// Port Reset is defined.
+const PLS_SS_INACTIVE: u32 = 6;
+const PLS_COMPLIANCE: u32 = 10;
 const PORTSC_SPEED_SHIFT: u32 = 10;
 const PORTSC_SPEED_MASK: u32 = 0xf;
-const PORTSC_WRITE_CLEAR_MASK: u32 =
-    (1 << 1) | (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
+/// The RW1C change bits, 23:17: CEC, PLC, PRC, OCC, WRC, PEC, CSC. The
+/// only bits a PORTSC write may clear.
+const PORTSC_RW1C: u32 = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23);
+/// The bits a PORTSC write writes back as read, by inclusion, as Linux's
+/// `xhci_port_state_to_neutral` (its `XHCI_PORT_RO | XHCI_PORT_RWS`): the
+/// read-only CCS, OCA and speed, and the RWS bits that hold settings, PLS
+/// (ignored unless LWS is written 1), PP, PIC 15:14, WCE, WDE and WOE.
+/// Every other bit is written 0.
+const PORTSC_KEPT: u32 = PORTSC_CCS
+    | (1 << 3)
+    | (PORTSC_SPEED_MASK << PORTSC_SPEED_SHIFT)
+    | (PORTSC_PLS_MASK << PORTSC_PLS_SHIFT)
+    | (1 << 9)
+    | (0x3 << 14)
+    | (1 << 25)
+    | (1 << 26)
+    | (1 << 27);
+/// The bits a PORTSC write may set: the two resets, all a caller asks for.
+/// A bit is added here with its caller, once its meaning on both port
+/// protocols is checked (WPR is reserved on a USB2 port; a caller sets it
+/// only after reading a USB3-only link state, `portsc_needs_warm_reset`).
+const PORTSC_SETTABLE: u32 = PORTSC_PR | PORTSC_WPR;
 
 // Runtime interrupter register set 0, from `ir0_base` (= BAR base +
 // RTSOFF + 0x20 - interrupter register sets start at RTSOFF+0x20, register
 // set 0 is always present).
+const IR_IMAN: u64 = 0x00;
 const IR_ERSTSZ: u64 = 0x08;
 const IR_ERSTBA: u64 = 0x10;
 const IR_ERDP: u64 = 0x18;
+// The RsvdP bits of each register written whole, kept by its
+// `reg::Kept32`/`reg::Kept64` handle: ERSTSZ 31:16 and ERSTBA 5:0 (as
+// Linux's `xhci_add_interrupter` and U-Boot keep them), CONFIG 31:10 and
+// CRCR 5:4 (Linux's `xhci.h`). USBCMD keeps only 6:4 and 31:17: Linux's
+// `xhci.h` calls 4:6 and 15:31 reserved and leaves 12 and 13 unmentioned,
+// and xHCI 1.2 is recalled as defining 13:16 (the spec PDF was not read).
+// Bits 12:16, which these sources do not settle, are written 0 as before,
+// so no bit the firmware left set there is kept on a guess.
+const ERSTSZ_RSVDP: u32 = 0xffff_0000;
+const ERSTBA_RSVDP: u64 = 0x3f;
+const CONFIG_RSVDP: u32 = 0xffff_fc00;
+const CRCR_RSVDP: u64 = 0x30;
+const USBCMD_RSVDP: u32 = 0xfffe_0070;
 
 const EP_TYPE_CONTROL: u32 = 4;
 const EP_TYPE_INTERRUPT_IN: u32 = 7;
@@ -239,7 +289,12 @@ const EP_TYPE_BULK_OUT: u32 = 2;
 const EP_TYPE_BULK_IN: u32 = 6;
 
 const MAX_SLOTS_ENABLED: usize = 8;
-const MAX_SCRATCHPAD_BUFFERS: usize = 8;
+/// The most TRBs `Xhci::ring_publish` takes at once: a control transfer's
+/// Setup, Data and Status stages.
+const MAX_PUBLISH: usize = 3;
+// The Pi 4's VL805 asks for 31 (HCSPARAMS2 0xfc000031, 2026-10-03); this
+// held 8 until then. The count each controller asks for is logged at init.
+const MAX_SCRATCHPAD_BUFFERS: usize = 32;
 const CMD_RING_SIZE: usize = 16;
 const EP0_RING_SIZE: usize = 16;
 const INT_RING_SIZE: usize = 16;
@@ -314,6 +369,7 @@ fn poll_deadline() -> u64 {
 #[derive(Debug)]
 pub enum Error {
     ResetTimeout,
+    HaltTimeout(u32),
     StartTimeout,
     NoPortConnected,
     NoKeyboardFound,
@@ -321,29 +377,42 @@ pub enum Error {
     UnsupportedSpeed(u32),
     BadHubDescriptor,
     PortNotEnabled,
+    RootPortNotEnabled(u32),
     TooManyScratchpadBuffers(u32),
+    PageSizeNot4K(u32),
     CommandTimeout,
     CommandFailed(u32),
     TransferTimeout,
     TransferFailed(u32),
 }
 
+impl Error {
+    /// Whether this is a transfer the device answered with a Stall (the
+    /// endpoint is now Halted), as opposed to a timeout or another error.
+    pub(crate) fn is_stall(&self) -> bool {
+        matches!(self, Error::TransferFailed(COMPLETION_STALL_ERROR))
+    }
+}
+
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Error::ResetTimeout => write!(f, "controller reset timed out"),
+            Error::HaltTimeout(usbsts) => write!(f, "controller handed over running did not halt before the reset (USBSTS {usbsts:#x})"),
             Error::StartTimeout => write!(f, "controller failed to start (USBSTS.HCH stuck set)"),
             Error::NoPortConnected => write!(f, "no device connected on any root port"),
             Error::NoKeyboardFound => write!(f, "devices found, but no boot-protocol keyboard among them"),
             Error::PortResetTimeout => write!(f, "port reset timed out"),
             Error::PortNotEnabled => write!(f, "hub port not enabled after reset"),
+            Error::RootPortNotEnabled(portsc) => write!(f, "root port not enabled after reset, PORTSC {}", Portsc(*portsc)),
             Error::BadHubDescriptor => write!(f, "hub descriptor unreadable or out of range (1-15 ports)"),
             Error::UnsupportedSpeed(speed) => write!(f, "unsupported port speed {speed} (only Low/Full/High/SuperSpeed/SuperSpeedPlus are implemented)"),
             Error::TooManyScratchpadBuffers(n) => write!(f, "controller wants {n} scratchpad buffers, only {MAX_SCRATCHPAD_BUFFERS} are supported"),
+            Error::PageSizeNot4K(reg) => write!(f, "controller's PAGESIZE is {reg:#x}, and scratchpad buffers here are 4 KB pages"),
             Error::CommandTimeout => write!(f, "command ring: timed out waiting for a completion event"),
             Error::CommandFailed(code) => write!(f, "command failed, completion code {code}"),
-            Error::TransferTimeout => write!(f, "control transfer: timed out waiting for a transfer event"),
-            Error::TransferFailed(code) => write!(f, "control transfer failed, completion code {code}"),
+            Error::TransferTimeout => write!(f, "transfer: timed out waiting for a transfer event"),
+            Error::TransferFailed(code) => write!(f, "transfer failed, completion code {code}"),
         }
     }
 }
@@ -380,44 +449,43 @@ pub(crate) struct DmaPool {
     output_device_contexts: [Aligned64<[u32; CTX_DWORDS_MAX * 32]>; MAX_DEVICES],
     input_context: Aligned64<[u32; CTX_DWORDS_MAX * 33]>,
     dcbaa: Aligned64<[u64; MAX_SLOTS_ENABLED + 1]>,
-    scratchpad_array: Aligned64<[u64; MAX_SCRATCHPAD_BUFFERS]>,
+    // Here for its 64 bytes, which put the EP0 rings on a 256-byte
+    // boundary so none of them crosses a page (the 8-entry scratchpad
+    // array used to sit here and do the same; the assertions below say
+    // when an order stops working).
+    erst: Aligned64<[ErstEntry; 1]>,
     command_ring: Aligned64<[Trb; CMD_RING_SIZE]>,
     ep0_rings: [Aligned64<[Trb; EP0_RING_SIZE]>; MAX_DEVICES],
     int_ring: Aligned64<[Trb; INT_RING_SIZE]>,
     bulk_in_ring: Aligned64<[Trb; INT_RING_SIZE]>,
     bulk_out_ring: Aligned64<[Trb; INT_RING_SIZE]>,
     event_ring: Aligned64<[Trb; EVENT_RING_SIZE]>,
-    erst: Aligned64<[ErstEntry; 1]>,
     ctrl_buf: Aligned64<[u8; 64]>,
     int_buf: Aligned64<[u8; 8]>,
     usb_cbw: Aligned64<[u8; 31]>,
     usb_csw: Aligned64<[u8; 13]>,
     usb_data: Aligned64<[u8; 512]>,
+    scratchpad_array: Aligned64<[u64; MAX_SCRATCHPAD_BUFFERS]>,
 }
 
 static DMA_POOL: DmaPool = DmaPool {
-    scratchpad_pages: [
-    Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
-    Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
-    Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
-    Page(UnsafeCell::new([0; 4096])), Page(UnsafeCell::new([0; 4096])),
-],
+    scratchpad_pages: [const { Page(UnsafeCell::new([0; 4096])) }; MAX_SCRATCHPAD_BUFFERS],
     output_device_contexts: [const { Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 32])) }; MAX_DEVICES],
     input_context: Aligned64(UnsafeCell::new([0; CTX_DWORDS_MAX * 33])),
     dcbaa: Aligned64(UnsafeCell::new([0; MAX_SLOTS_ENABLED + 1])),
-    scratchpad_array: Aligned64(UnsafeCell::new([0; MAX_SCRATCHPAD_BUFFERS])),
+    erst: Aligned64(UnsafeCell::new([ErstEntry { base: 0, size: 0, _reserved: 0 }])),
     command_ring: Aligned64(UnsafeCell::new([[0; 4]; CMD_RING_SIZE])),
     ep0_rings: [const { Aligned64(UnsafeCell::new([[0; 4]; EP0_RING_SIZE])) }; MAX_DEVICES],
     int_ring: Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE])),
     bulk_in_ring: Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE])),
     bulk_out_ring: Aligned64(UnsafeCell::new([[0; 4]; INT_RING_SIZE])),
     event_ring: Aligned64(UnsafeCell::new([[0; 4]; EVENT_RING_SIZE])),
-    erst: Aligned64(UnsafeCell::new([ErstEntry { base: 0, size: 0, _reserved: 0 }])),
     ctrl_buf: Aligned64(UnsafeCell::new([0; 64])),
     int_buf: Aligned64(UnsafeCell::new([0; 8])),
     usb_cbw: Aligned64(UnsafeCell::new([0; 31])),
     usb_csw: Aligned64(UnsafeCell::new([0; 13])),
     usb_data: Aligned64(UnsafeCell::new([0; 512])),
+    scratchpad_array: Aligned64(UnsafeCell::new([0; MAX_SCRATCHPAD_BUFFERS])),
 };
 
 // xHCI placement rules for the pool's contents (xHCI 1.2 Table 6-1),
@@ -453,6 +521,12 @@ const _: () = {
         "an Output Device Context crosses a page"
     );
     assert!(within(offset_of!(DmaPool, erst), size_of::<[ErstEntry; 1]>(), PAGE), "ERST crosses a page");
+    // ERSTBA's low six bits are RsvdP, kept from the register; the pool is
+    // page-aligned, so this offset is the ERST address's alignment.
+    assert!(offset_of!(DmaPool, erst) % 64 == 0, "ERST not 64-byte aligned");
+    // CRCR's bits 5:4 are RsvdP, kept from the register, so the command
+    // ring's address has to leave them clear.
+    assert!(offset_of!(DmaPool, command_ring) % 64 == 0, "command ring not 64-byte aligned");
     // Transfer, command and event rings: xHCI forbids a ring segment that
     // crosses 64 KB. Checked against the PAGE, not against 64 KB: the pool
     // is only page-aligned, so an offset says where a ring is within its
@@ -578,15 +652,309 @@ static INT_BUF: &Aligned64<[u8; 8]> = &DMA_POOL.int_buf;
 unsafe fn read32(addr: u64) -> u32 {
     unsafe { read_volatile(addr as *const u32) }
 }
-unsafe fn write32(addr: u64, val: u32) {
-    unsafe { write_volatile(addr as *mut u32, val) }
+
+/// `ring_publish`'s flip: `dmb oshst; str w1, [x0]; ret`, the barrier and
+/// the one store that hands a batch of TRBs to the controller. Naked, like
+/// `reg`'s `mmio_write32`, so the image holds these fixed instructions
+/// whatever the profile: no edit can put a store between them, and
+/// `scripts/check-xhci-barriers.py` can find them. Inlining it would leave
+/// that check nothing to find.
+#[unsafe(naked)]
+unsafe extern "C" fn publish_cycle_word(ptr: *mut u32, val: u32) {
+    core::arch::naked_asm!("dmb oshst", "str w1, [x0]", "ret");
 }
-unsafe fn write64(addr: u64, val: u64) {
-    unsafe { write_volatile(addr as *mut u64, val) }
+unsafe fn read64(addr: u64) -> u64 {
+    unsafe { read32(addr) as u64 | ((read32(addr + 4) as u64) << 32) }
 }
 
-fn portsc_preserve(current: u32) -> u32 {
-    current & !PORTSC_WRITE_CLEAR_MASK
+/// What a register write that keeps RsvdP bits writes: `current`'s `rsvdp`
+/// bits, and `val` in the rest. Pure and `const`, so the asserts below
+/// check it at build time: QEMU reads 0 in every RsvdP field, so no rig can
+/// see a merge that drops the kept bits.
+const fn rsvdp_merge(current: u64, rsvdp: u64, val: u64) -> u64 {
+    (current & rsvdp) | (val & !rsvdp)
+}
+/// What a PORTSC write writes: `current`'s [`PORTSC_KEPT`] bits, every
+/// other bit 0, then `set` and a 1 in each change bit named in `clear`. A
+/// `set` bit outside [`PORTSC_SETTABLE`], or a `clear` bit outside the
+/// change bits, is dropped: it would disable the port, start a reset or
+/// clear a change nobody asked to clear. Pure and `const` for the asserts
+/// below, as [`rsvdp_merge`].
+const fn portsc_merge(current: u32, set: u32, clear: u32) -> u32 {
+    (current & PORTSC_KEPT) | (set & PORTSC_SETTABLE) | (clear & PORTSC_RW1C)
+}
+const _: () = {
+    // A port read enabled with every change pending is written with PED
+    // and the changes 0, the rest as read.
+    assert!(portsc_merge(0x00fe_0203, 0, 0) == 0x0000_0201);
+    // A reset sets PR and nothing else moves.
+    assert!(portsc_merge(0x00fe_0203, PORTSC_PR, 0) == 0x0000_0211);
+    // Clearing PRC writes PRC alone of the change bits.
+    assert!(portsc_merge(0x00fe_0203, 0, PORTSC_PRC) == 0x0020_0201);
+    // PED cannot be set, nor cleared through `clear`.
+    assert!(portsc_merge(0x0000_0201, PORTSC_PED, PORTSC_PED) == 0x0000_0201);
+    // A reset in progress (PR reads 1) is not asked for again, and RsvdZ
+    // bits 2 and 29:28 reading 1 are written 0.
+    assert!(portsc_merge(0x3000_0215, 0, 0) == 0x0000_0201);
+    // The settings are kept: PLS 3, PP, PIC 2, WCE/WDE/WOE, with speed 4.
+    assert!(portsc_merge(0x0e00_9267, 0, 0) == 0x0e00_9261);
+};
+const _: () = {
+    // The kept bits survive, the new value fills the rest, and a stray bit
+    // of the new value cannot land in a kept field.
+    assert!(rsvdp_merge(0xffff_0000, 0xffff_0000, 1) == 0xffff_0001);
+    assert!(rsvdp_merge(0x0000_ffff, 0xffff_0000, 1) == 1);
+    assert!(rsvdp_merge(0x30, 0x30, 0x1000_0040) == 0x1000_0070);
+    assert!(rsvdp_merge(0, 0x30, 0x1000_0070) == 0x1000_0040);
+};
+
+/// The xHCI registers, written only through a handle that knows how the
+/// register must be written. A register with RsvdP bits is a [`reg::Kept32`]
+/// or [`reg::Kept64`], whose `write` reads it and keeps those bits (RsvdP
+/// is written back as read); every other register is a
+/// [`reg::Whole32`] or [`reg::Whole64`], written whole. The handles' fields
+/// and the barrier stores are private to this module, so outside it there is
+/// no way to spell a register write that skips either: no bare `write32` to
+/// USBCMD, and no handle for it but the one carrying its RsvdP mask. Until
+/// 2026-10-04 the RsvdP helpers were opt-in beside a plain `write32` that
+/// would take any address. Reads cannot clobber anything, so they are not
+/// held to this: PORTSC and the RsvdP diagnostic read through their
+/// handles, the rest with `read32`/`read64` at a block's `at`.
+///
+/// The handles are built only from their own register block, an
+/// [`reg::OpRegs`], [`reg::Ir0Regs`] or [`reg::Doorbells`], and those only by
+/// [`reg::locate`] from the capability registers, so a handle cannot be built
+/// from another block's base: until the review of #207 a doorbell built
+/// from the operational base was a whole write to USBCMD. Within a block,
+/// a port or doorbell index past its range is checked only by a
+/// `debug_assert` (the card carries a debug build); the callers bound it.
+///
+/// What this does not cover: TRBs and contexts are memory, written with
+/// `write_volatile`, and nothing stops a raw pointer store to a register
+/// address; `publish_cycle_word`, the ring's `dmb oshst; str`, takes any
+/// pointer, so it too would store to a register without the `dsb sy` or the
+/// RsvdP merge; a block's `at` gives a plain address for a read, which can
+/// name another block's offset; and DCBAAP and ERDP are both a `Whole64`,
+/// so a function taking one would take the other. PORTSC is a
+/// [`reg::PortStatus`] of its own, whose write writes back only the
+/// read-only and setting bits (until 2026-10-05 it was a `Whole32`, masked
+/// by convention, and a port function would take a doorbell). Inside this
+/// module any handle can still be built from a bare address, PORTSC's
+/// included. The image check sees a rerouted
+/// `Whole32::write` or `Whole64::write`, but not a `Kept` write routed
+/// around them, since the whole writes keep their other callers.
+mod reg {
+    use super::*;
+
+    /// The operational registers, at BAR + CAPLENGTH.
+    #[derive(Clone, Copy)]
+    pub(super) struct OpRegs(u64);
+    /// Interrupter register set 0, at BAR + RTSOFF + 0x20 (the sets start at
+    /// RTSOFF + 0x20, and set 0 is always present).
+    #[derive(Clone, Copy)]
+    pub(super) struct Ir0Regs(u64);
+    /// The doorbell array, at BAR + DBOFF.
+    #[derive(Clone, Copy)]
+    pub(super) struct Doorbells(u64);
+
+    /// The three register blocks, from the capability registers at
+    /// `bar_base`. The only way to make one.
+    pub(super) unsafe fn locate(bar_base: u64) -> (OpRegs, Ir0Regs, Doorbells) {
+        let caplength = (unsafe { read32(bar_base) } & 0xff) as u64;
+        let dboff = unsafe { read32(bar_base + CAP_DBOFF) } as u64 & !0x3;
+        let rtsoff = unsafe { read32(bar_base + CAP_RTSOFF) } as u64 & !0x1f;
+        (OpRegs(bar_base + caplength), Ir0Regs(bar_base + rtsoff + 0x20), Doorbells(bar_base + dboff))
+    }
+
+    impl OpRegs {
+        /// The address of the register at `off`, for a read.
+        pub(super) fn at(self, off: u64) -> u64 {
+            self.0 + off
+        }
+    }
+    impl Ir0Regs {
+        /// The address of the register at `off`, for a read.
+        pub(super) fn at(self, off: u64) -> u64 {
+            self.0 + off
+        }
+    }
+
+    /// A 32-bit register with no RsvdP bits, written whole.
+    #[derive(Clone, Copy)]
+    pub(super) struct Whole32(u64);
+    /// A 64-bit register with no RsvdP bits, written whole.
+    #[derive(Clone, Copy)]
+    pub(super) struct Whole64(u64);
+    /// A root port's PORTSC, written only through [`portsc_merge`], which
+    /// writes back as read only the read-only and setting bits: written
+    /// back as read, a 1 in PED disables the port, a 1 in a change bit
+    /// clears a change still pending and a 1 in PR starts another reset.
+    /// Its own type, so no doorbell can be passed for it. Like every
+    /// handle here, it is unforgeable only outside this module.
+    #[derive(Clone, Copy)]
+    pub(super) struct PortStatus(u64);
+    /// A 32-bit register with RsvdP bits, written keeping them.
+    #[derive(Clone, Copy)]
+    pub(super) struct Kept32 {
+        addr: u64,
+        rsvdp: u32,
+    }
+    /// A 64-bit register with RsvdP bits, written keeping them.
+    #[derive(Clone, Copy)]
+    pub(super) struct Kept64 {
+        addr: u64,
+        rsvdp: u64,
+    }
+
+    pub(super) fn usbcmd(op: OpRegs) -> Kept32 {
+        Kept32 { addr: op.at(OP_USBCMD), rsvdp: USBCMD_RSVDP }
+    }
+    pub(super) fn config(op: OpRegs) -> Kept32 {
+        Kept32 { addr: op.at(OP_CONFIG), rsvdp: CONFIG_RSVDP }
+    }
+    pub(super) fn crcr(op: OpRegs) -> Kept64 {
+        Kept64 { addr: op.at(OP_CRCR), rsvdp: CRCR_RSVDP }
+    }
+    /// DCBAAP's low 6 bits are RsvdZ: written 0, which a 64-byte-aligned
+    /// array does.
+    pub(super) fn dcbaap(op: OpRegs) -> Whole64 {
+        Whole64(op.at(OP_DCBAAP))
+    }
+    /// A root port's PORTSC, `port` 1-based.
+    pub(super) fn portsc(op: OpRegs, port: u32) -> PortStatus {
+        debug_assert!(port >= 1, "PORTSC: ports are 1-based");
+        PortStatus(op.at(OP_PORTSC_BASE + ((port - 1) as u64) * 0x10))
+    }
+    pub(super) fn erstsz(ir: Ir0Regs) -> Kept32 {
+        Kept32 { addr: ir.at(IR_ERSTSZ), rsvdp: ERSTSZ_RSVDP }
+    }
+    pub(super) fn erstba(ir: Ir0Regs) -> Kept64 {
+        Kept64 { addr: ir.at(IR_ERSTBA), rsvdp: ERSTBA_RSVDP }
+    }
+    /// ERDP has no RsvdP bits; its EHB is RW1C, written 0.
+    pub(super) fn erdp(ir: Ir0Regs) -> Whole64 {
+        Whole64(ir.at(IR_ERDP))
+    }
+    /// Doorbell `n` (0 the command ring, else a slot ID, at most 255).
+    /// Bits 15:8 are RsvdZ.
+    pub(super) fn doorbell(db: Doorbells, n: u32) -> Whole32 {
+        debug_assert!(n <= 255, "doorbell: past the 256-entry array");
+        Whole32(db.0 + (n as u64) * 4)
+    }
+
+    impl Whole32 {
+        /// A register write, with the barrier every one of them needs in front
+        /// of it: `dsb sy`, so each load and store the CPU made before it is
+        /// complete before the controller sees the write. A register write is how
+        /// the controller is told to look at memory (a doorbell after a TRB,
+        /// DCBAAP/CRCR/ERSTBA/Run after the structures they point at) or that
+        /// memory may be reused (ERDP after the event is read), and the pool's
+        /// stores and loads are Normal accesses that nothing orders against a
+        /// Device store without one. In the write itself, so there is no way to
+        /// write a register without it; until 2026-10-03 it was placed by hand
+        /// before each such write, and one site had `dmb sy` instead. Linux's
+        /// `writel` does the same with the lighter `dmb oshst`; `dsb sy` is the
+        /// barrier the Pi 4 has run every doorbell behind.
+        pub(super) unsafe fn write(self, val: u32) {
+            unsafe { mmio_write32(self.0, val) }
+        }
+    }
+
+    impl PortStatus {
+        pub(super) unsafe fn read(self) -> u32 {
+            unsafe { read32(self.0) }
+        }
+        /// Writes the port through [`portsc_merge`]: `current`'s kept bits,
+        /// then `set` (PR or WPR) and a 1 in each change bit in `clear`.
+        /// `current` is the caller's latest read of this port, the value it
+        /// decided on, so the write and the decision see one state; only
+        /// its kept bits reach the register. A `set` outside
+        /// [`PORTSC_SETTABLE`], or a `clear` outside the change bits, is a
+        /// caller's bug: a debug build, which the card carries, stops on
+        /// it; a release build drops it.
+        pub(super) unsafe fn write(self, current: u32, set: u32, clear: u32) {
+            debug_assert!(set & !PORTSC_SETTABLE == 0, "PORTSC: a set bit that is not PR or WPR");
+            debug_assert!(clear & !PORTSC_RW1C == 0, "PORTSC: a clear bit outside the change bits");
+            unsafe { Whole32(self.0).write(portsc_merge(current, set, clear)) }
+        }
+    }
+
+    impl Whole64 {
+        /// A 64-bit register as two 32-bit writes, low half first, the order
+        /// xHCI section 5.1 gives for Dword writes, and what every driver that
+        /// works on the Pi 4's VL805 does: the firmware's own (edk2 `XhciDxe`),
+        /// Linux (`xhci_write_64` is `lo_hi_writeq`) and U-Boot. A single 64-bit
+        /// store crosses the BCM2711's PCIe bridge, which has not been shown to
+        /// carry one intact; the first command timed out on the board while the
+        /// store was 64-bit (2026-10-03).
+        /// One barrier, then both halves: the barrier orders everything before
+        /// the low half, and the high half needs nothing more (ERDP is written on
+        /// every event, so a second `dsb sy` there would be paid on the keyboard's
+        /// hot path for nothing).
+        pub(super) unsafe fn write(self, val: u64) {
+            unsafe { mmio_write64(self.0, val as u32, (val >> 32) as u32) }
+        }
+    }
+
+    impl Kept32 {
+        /// The RsvdP bits as they read now, what a write would keep.
+        pub(super) unsafe fn kept_bits(self) -> u32 {
+            unsafe { read32(self.addr) & self.rsvdp }
+        }
+        /// The write that keeps the register's RsvdP bits: reads it, keeps
+        /// them, puts `val` in the other bits and writes it through
+        /// [`Whole32::write`], so with its barrier. A `val` with a bit in the RsvdP field is
+        /// a caller's bug (an address not aligned enough, say), so a debug
+        /// build, which the card carries, stops on it; a release build
+        /// masks it.
+        pub(super) unsafe fn write(self, val: u32) {
+            debug_assert!(val & self.rsvdp == 0, "a value with bits in the register's RsvdP field");
+            let current = unsafe { read32(self.addr) };
+            let merged = rsvdp_merge(current as u64, self.rsvdp as u64, val as u64) as u32;
+            // Through `Whole32::write`, not `mmio_write32`: one caller per
+            // barrier store, so the image check fails if `Whole32::write`
+            // is routed around it (a second caller kept it green, the
+            // review of #207). Routing THIS write around `Whole32::write`
+            // is not seen by that check: the doorbells and PORTSC still
+            // call it.
+            unsafe { Whole32(self.addr).write(merged) }
+        }
+    }
+
+    impl Kept64 {
+        /// [`Kept32::kept_bits`] for a 64-bit register.
+        pub(super) unsafe fn kept_bits(self) -> u64 {
+            unsafe { read64(self.addr) & self.rsvdp }
+        }
+        /// [`Kept32::write`] for a 64-bit register: two halves, low first,
+        /// as [`Whole64::write`].
+        pub(super) unsafe fn write(self, val: u64) {
+            debug_assert!(val & self.rsvdp == 0, "a value with bits in the register's RsvdP field");
+            let current = unsafe { read64(self.addr) };
+            let merged = rsvdp_merge(current, self.rsvdp, val);
+            unsafe { Whole64(self.addr).write(merged) }
+        }
+    }
+
+    /// The barrier and the register store as fixed instructions, never
+    /// inlined, so the image holds `dsb sy; str w1, [x0]; ret` whatever the
+    /// profile or the compiler does around it: QEMU has no write buffer to show
+    /// the barrier missing, so `scripts/check-xhci-barriers.py` (run by `make
+    /// test`) finds this sequence in the built kernel, and a call to it.
+    /// A Rust `asm!` barrier before a `write_volatile` compiles to different
+    /// shapes in debug and release, and no check can tell its `dsb sy` from
+    /// another module's.
+    #[unsafe(naked)]
+    unsafe extern "C" fn mmio_write32(addr: u64, val: u32) {
+        core::arch::naked_asm!("dsb sy", "str w1, [x0]", "ret");
+    }
+
+    /// [`Whole64::write`]'s form of [`mmio_write32`], fixed for the same
+    /// check: `dsb sy; str w1, [x0]; str w2, [x0, #4]; ret`, low half first.
+    #[unsafe(naked)]
+    unsafe extern "C" fn mmio_write64(addr: u64, lo: u32, hi: u32) {
+        core::arch::naked_asm!("dsb sy", "str w1, [x0]", "str w2, [x0, #4]", "ret");
+    }
 }
 
 /// USB HID boot-protocol keyboard report is 8 bytes: byte 0 = modifier
@@ -663,13 +1031,13 @@ fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
 /// exists - this driver still drives exactly one keyboard, it just no
 /// longer *abandons* every other device to do it.
 struct Xhci {
-    db_base: u64,
-    ir0_base: u64,
+    db_base: reg::Doorbells,
+    ir0_base: reg::Ir0Regs,
     /// Kept for runtime port rescans (`rescan_ports`) - the boot scan's
     /// locals weren't enough once "scan again later" became a real
     /// operation (Parallels attaches passthrough USB seconds after the
     /// boot scan runs).
-    op_base: u64,
+    op_base: reg::OpRegs,
     max_ports: u32,
     /// 8 or 16, from HCCPARAMS1.CSZ - see `CTX_DWORDS_MAX`'s doc comment.
     ctx_dwords: usize,
@@ -677,6 +1045,8 @@ struct Xhci {
     cmd_cycle: bool,
     evt_dequeue: usize,
     evt_cycle: bool,
+    /// Set once the first command timeout has been dumped this boot.
+    timeout_dumped: bool,
     slots: [Option<DeviceSlot>; MAX_DEVICES],
     keyboard: Option<KeyboardState>,
     storage: Option<StorageState>,
@@ -861,11 +1231,33 @@ struct KeyboardState {
 }
 
 impl Xhci {
-    /// Advances `enqueue`/`cycle` after writing `trb` into `ring` at the
-    /// current producer position, wrapping through the ring's fixed Link
-    /// TRB (the last slot) when it reaches the end. Returns the physical
-    /// address `trb` was written to - callers that need to match a later
-    /// Command Completion Event by pointer (see `push_command`) use this.
+    /// Writes `trbs` in order at the current producer position of `ring`,
+    /// advancing `enqueue`/`cycle` and wrapping through the ring's fixed
+    /// Link TRB (the last slot) when it reaches the end, and publishes them
+    /// to the controller at once. Returns each TRB's physical address at
+    /// the same index (the rest zero), for callers that match a later
+    /// completion event by pointer (see `push_command`). A batch is one TD,
+    /// or a control transfer's Setup, Data and Status stage TDs together,
+    /// as Linux's `xhci_queue_ctrl_tx` publishes them; at most
+    /// `MAX_PUBLISH` TRBs, which a caller's wrong count turns into a halt
+    /// before anything is written. The one way a TRB reaches a ring the
+    /// controller may be reading; the only other TRB stores are a ring's
+    /// setup (zeroing it and writing its Link TRB), made before the
+    /// command that gives the controller the ring.
+    ///
+    /// **The order is the contract.** A TRB belongs to the controller as
+    /// soon as its cycle bit matches the ring's, and the controller may
+    /// re-read the dequeue TRB without a new doorbell. So every word of
+    /// the batch is written first with the FIRST TRB's cycle bit still
+    /// software's, then `dmb oshst`, then that one bit flipped: the
+    /// controller sees all of the batch or none of it, never a fresh cycle
+    /// bit over a stale pointer or length, and never a Setup stage whose
+    /// Data and Status TRBs are not there yet. This is Linux's
+    /// `giveback_first_trb`; `dmb oshst` is its `dma_wmb()` on arm64, the
+    /// write-side twin of `event_ring_pop`'s `dmb oshld`. Until 2026-10-03
+    /// each TRB was one `write_volatile` of all four words, which the
+    /// compiler may split into stores in any order, cycle word included,
+    /// and which published the TRB as it was written.
     ///
     /// The Link TRB's own cycle bit is rewritten on every wrap, not just
     /// set once at ring-init time: it's logically "produced" exactly like
@@ -875,22 +1267,46 @@ impl Xhci {
     /// only actually matters once a ring wraps more than once, which the
     /// command ring (at most 2-3 commands ever issued) never does in this
     /// driver's own testing, but the EP0 ring (one `poll_key` per shell
-    /// loop iteration, indefinitely) certainly will.
-    unsafe fn ring_push(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, mut trb: Trb) -> u64 {
-        trb[3] = (trb[3] & !1) | (*cycle as u32);
-        let slot_ptr = unsafe { ring_ptr.add(*enqueue) };
-        unsafe { write_volatile(slot_ptr, trb) };
-        let addr = slot_ptr as u64;
-        *enqueue += 1;
-        if *enqueue == ring_len - 1 {
-            let link_ptr = unsafe { ring_ptr.add(ring_len - 1) };
-            let mut link = unsafe { read_volatile(link_ptr) };
-            link[3] = (link[3] & !1) | (*cycle as u32);
-            unsafe { write_volatile(link_ptr, link) };
-            *cycle = !*cycle;
-            *enqueue = 0;
+    /// loop iteration, indefinitely) certainly will. Only its cycle word
+    /// is written: its pointer words are fixed at ring setup. A wrap inside
+    /// a batch is covered by the same barrier, since the controller stops
+    /// at the held first TRB and reads nothing past it until the flip.
+    unsafe fn ring_publish(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, trbs: &[Trb]) -> [u64; MAX_PUBLISH] {
+        assert!(trbs.len() <= MAX_PUBLISH);
+        let mut addrs = [0u64; MAX_PUBLISH];
+        let Some(first) = trbs.first() else { return addrs };
+        let first_dw3_ptr = unsafe { ring_ptr.add(*enqueue).cast::<u32>().add(3) };
+        let first_dw3 = (first[3] & !1) | (*cycle as u32);
+        for (i, trb) in trbs.iter().enumerate() {
+            let dw3 = (trb[3] & !1) | (*cycle as u32);
+            let slot_ptr = unsafe { ring_ptr.add(*enqueue) };
+            let words = slot_ptr.cast::<u32>();
+            unsafe {
+                write_volatile(words, trb[0]);
+                write_volatile(words.add(1), trb[1]);
+                write_volatile(words.add(2), trb[2]);
+                // The first is held: its cycle bit software's until the flip.
+                write_volatile(words.add(3), if i == 0 { dw3 ^ 1 } else { dw3 });
+            }
+            addrs[i] = slot_ptr as u64;
+            *enqueue += 1;
+            if *enqueue == ring_len - 1 {
+                let link_dw3 = unsafe { ring_ptr.add(ring_len - 1).cast::<u32>().add(3) };
+                let link = unsafe { read_volatile(link_dw3) };
+                unsafe { write_volatile(link_dw3, (link & !1) | (*cycle as u32)) };
+                *cycle = !*cycle;
+                *enqueue = 0;
+            }
         }
-        addr
+        unsafe { publish_cycle_word(first_dw3_ptr, first_dw3) };
+        addrs
+    }
+
+    /// One TRB, through [`ring_publish`](Self::ring_publish); returns its
+    /// physical address.
+    unsafe fn ring_push(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, trb: Trb) -> u64 {
+        let addrs = unsafe { Self::ring_publish(ring_ptr, ring_len, enqueue, cycle, &[trb]) };
+        addrs[0]
     }
 
     /// Undoes a failed setup's hold on pool entry `idx`: if a hardware
@@ -927,10 +1343,7 @@ impl Xhci {
     fn push_command(&mut self, trb: Trb) -> u64 {
         let ring_ptr = COMMAND_RING.0.get().cast::<Trb>();
         let addr = unsafe { Self::ring_push(ring_ptr, CMD_RING_SIZE, &mut self.cmd_enqueue, &mut self.cmd_cycle, trb) };
-        unsafe {
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-            write32(self.db_base, 0); // doorbell 0, target field unused for the command ring
-        }
+        unsafe { reg::doorbell(self.db_base, 0).write(0) }; // doorbell 0, target field unused for the command ring
         addr
     }
 
@@ -939,19 +1352,20 @@ impl Xhci {
     /// (`slots[idx].ep0_enqueue`/`ep0_cycle`). A `None` slot is an
     /// internal caller bug; degrading to a no-op (returning a null
     /// pointer no completion will ever match) beats a panic-handler
-    /// hang.
-    fn push_ep0(&mut self, idx: usize, trb: Trb) -> u64 {
+    /// hang. Published at once by [`ring_publish`](Self::ring_publish): a
+    /// control request's Setup, Data and Status TRBs reach the controller
+    /// together. Returns their addresses, all null for an empty slot.
+    fn push_ep0(&mut self, idx: usize, trbs: &[Trb]) -> [u64; MAX_PUBLISH] {
         let ring_ptr = EP0_RINGS[idx].0.get().cast::<Trb>();
-        let Some(slot) = self.slots[idx].as_mut() else { return 0 };
-        unsafe { Self::ring_push(ring_ptr, EP0_RING_SIZE, &mut slot.ep0_enqueue, &mut slot.ep0_cycle, trb) }
+        let Some(slot) = self.slots[idx].as_mut() else { return [0; MAX_PUBLISH] };
+        unsafe { Self::ring_publish(ring_ptr, EP0_RING_SIZE, &mut slot.ep0_enqueue, &mut slot.ep0_cycle, trbs) }
     }
 
     fn ring_ep0_doorbell(&self, idx: usize) {
         let Some(slot) = self.slots[idx].as_ref() else { return };
         unsafe {
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             // Doorbell target 1 = the default control endpoint (EP0).
-            write32(self.db_base + (slot.slot_id as u64) * 4, 1);
+            reg::doorbell(self.db_base, slot.slot_id).write(1);
         }
     }
 
@@ -977,12 +1391,11 @@ impl Xhci {
                 &mut kb.int_cycle,
                 [buf_addr as u32, (buf_addr >> 32) as u32, 8, (1 << 5) | (TRB_TYPE_NORMAL << 10)], // IOC
             );
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             // Doorbell target = the endpoint's own Device Context Index,
             // per the xHCI spec's doorbell register definition (target
             // values above 1 map 1:1 to DCI - see `db_base`'s other
             // caller, `ring_ep0_doorbell`, for the EP0/DCI=1 case).
-            write32(self.db_base + (slot.slot_id as u64) * 4, kb.int_dci);
+            reg::doorbell(self.db_base, slot.slot_id).write(kb.int_dci);
         }
     }
 
@@ -1017,10 +1430,9 @@ impl Xhci {
             self.evt_cycle = !self.evt_cycle;
         }
         let new_erdp = unsafe { ring_ptr.add(self.evt_dequeue) } as u64;
-        unsafe {
-            core::arch::asm!("dmb sy", options(nostack, preserves_flags));
-            write64(self.ir0_base + IR_ERDP, new_erdp);
-        }
+        // The write's barrier orders the reads of the event above before
+        // the controller is told its slot is free.
+        unsafe { reg::erdp(self.ir0_base).write(new_erdp) };
         Some(trb)
     }
 
@@ -1093,7 +1505,60 @@ impl Xhci {
             }
             return Ok(trb);
         }
+        self.dump_on_command_timeout(cmd_ptr);
         Err(Error::CommandTimeout)
+    }
+
+    /// One dump, the first time a command times out this boot: whether the
+    /// controller saw the rings at all (the register readbacks, CRCR's
+    /// Command Ring Running bit), whether it hit a DMA error (USBSTS.HSE),
+    /// and whether it wrote an event this driver did not see (the event
+    /// ring's memory at the dequeue slot). `cmd_ptr` is the command that
+    /// timed out.
+    fn dump_on_command_timeout(&mut self, cmd_ptr: u64) {
+        if self.timeout_dumped {
+            return;
+        }
+        self.timeout_dumped = true;
+        let (op, ir) = (self.op_base, self.ir0_base);
+        let (usbsts, crcr, dcbaap, iman, erstsz, erstba, erdp) = unsafe {
+            (
+                read32(op.at(OP_USBSTS)),
+                read32(op.at(OP_CRCR)),
+                read64(op.at(OP_DCBAAP)),
+                read32(ir.at(IR_IMAN)),
+                read32(ir.at(IR_ERSTSZ)),
+                read64(ir.at(IR_ERSTBA)),
+                read64(ir.at(IR_ERDP)),
+            )
+        };
+        console::println!(
+            "Ouroboros kernel: xhci: command timeout: USBSTS {usbsts:#x} (HCH {}, HSE {}), CRCR.CRR {}, IMAN {iman:#x}",
+            usbsts & USBSTS_HCH != 0,
+            usbsts & USBSTS_HSE != 0,
+            crcr & CRCR_CRR != 0
+        );
+        console::println!(
+            "Ouroboros kernel: xhci: command timeout: DCBAAP {dcbaap:#x} (pool {:#x}), ERSTSZ {erstsz:#x}, ERSTBA {erstba:#x} (pool {:#x}), ERDP {erdp:#x}",
+            DCBAA.0.get() as u64,
+            ERST.0.get() as u64
+        );
+        let read_words = |p: *const u32, n: usize| {
+            let mut w = [0u32; 4];
+            for (i, slot) in w.iter_mut().enumerate().take(n) {
+                *slot = unsafe { read_volatile(p.add(i)) };
+            }
+            w
+        };
+        let evt = read_words(unsafe { EVENT_RING.0.get().cast::<Trb>().add(self.evt_dequeue) }.cast(), 4);
+        let erst0 = read_words(ERST.0.get().cast(), 3);
+        let cmd = read_words(cmd_ptr as *const u32, 4);
+        console::println!(
+            "Ouroboros kernel: xhci: command timeout: event slot {} {evt:08x?} (cycle wanted {}), ERST[0] {:08x?}, the command @ {cmd_ptr:#x} {cmd:08x?}",
+            self.evt_dequeue,
+            self.evt_cycle as u32,
+            &erst0[..3]
+        );
     }
 
     /// Waits for a Transfer Event *from `expected_slot_id`
@@ -1109,7 +1574,7 @@ impl Xhci {
     /// dependency.)
     ///
     /// **And from the request's own TRBs** (`td`, the addresses
-    /// `ring_push` returned for it): an event from the right slot that
+    /// `ring_push` or `ring_publish` returned for it): an event from the right slot that
     /// points at any other TRB is a leftover from an earlier request - a
     /// late completion after a timeout, or the Stopped event of a request
     /// that recovery cancelled - and is skipped and logged, never taken
@@ -1249,16 +1714,25 @@ impl Xhci {
                 Err(e) => console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 recovery command failed ({e})"),
             }
         }
-        let dequeue = EP0_RINGS[idx].0.get() as u64 + (enqueue as u64) * 16;
-        let set_dequeue = self.push_command([
+        if let Err(e) = self.set_tr_dequeue(EP0_RINGS[idx].0.get() as u64, enqueue, cycle, 1, slot_id) {
+            console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 Set TR Dequeue failed ({e})");
+        }
+    }
+
+    /// Set TR Dequeue Pointer for endpoint `dci` of `slot_id`, to slot
+    /// `enqueue` of the ring at `ring_addr` with DCS `cycle`: the producer's
+    /// current position, so the controller resumes where the next TRB will
+    /// be written. Shared by `recover_ep0` and `reset_storage_endpoint`;
+    /// see `recover_ep0`'s doc comment for why the current position.
+    fn set_tr_dequeue(&mut self, ring_addr: u64, enqueue: usize, cycle: bool, dci: u32, slot_id: u32) -> Result<(), Error> {
+        let dequeue = ring_addr + (enqueue * size_of::<Trb>()) as u64;
+        let ptr = self.push_command([
             (dequeue as u32) | (cycle as u32), // DCS = the cycle the next TRB will carry
             (dequeue >> 32) as u32,
             0,
-            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (1 << 16) | (slot_id << 24),
+            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (dci << 16) | (slot_id << 24),
         ]);
-        if let Err(e) = self.wait_command_completion(set_dequeue) {
-            console::println!("Ouroboros kernel: xhci: slot {slot_id}: EP0 Set TR Dequeue failed ({e})");
-        }
+        self.wait_command_completion(ptr).map(|_| ())
     }
 
     /// Issues Reset Endpoint or Stop Endpoint (`cmd`) for EP0 of `slot_id`
@@ -1277,61 +1751,74 @@ impl Xhci {
     /// stall, and with no recovery the halted endpoint stays halted so every
     /// later command fails permanently.
     ///
-    /// A Reset Endpoint clears the endpoint's Halted state, then a Set TR
-    /// Dequeue Pointer moves hardware's dequeue to the ring's start, and the
-    /// software producer state is reset to match. These are controller
+    /// A Reset Endpoint clears the endpoint's Halted state, CLEAR_FEATURE
+    /// (ENDPOINT_HALT) clears the device's end of it, then a Set TR
+    /// Dequeue Pointer moves hardware's dequeue to the current enqueue
+    /// position, past the failed transfer. The first and last are controller
     /// *commands*, not device *class requests* - so they work on Parallels,
     /// whose passthrough doesn't forward class requests (see
-    /// `control_transfer`'s doc comment).
+    /// `control_transfer`'s doc comment). CLEAR_FEATURE is a *standard*
+    /// request, the kind Parallels does forward (`GET_DESCRIPTOR`,
+    /// `SET_CONFIGURATION`), but it has not been run there.
     ///
-    /// **Known flaw, recorded in `docs/ROADMAP.md` and left for its own
-    /// change:** the ring's start is NOT a known-good position. The slots
-    /// after it still hold earlier TRBs carrying the cycle bit the
-    /// controller expects, so it can run on into a stale TRB once the new
-    /// ones are done. `recover_ep0` dequeues at the current enqueue position
-    /// instead for exactly this reason; this path is the one confirmed on
-    /// Parallels ("Mode A"), so it has not been changed along with it.
+    /// **Why the current position, not the ring's start** (the version
+    /// this replaced rewound to the start): the slots after the start still
+    /// hold earlier TRBs with the cycle bit the controller then expects, so
+    /// it could run on into a stale Normal TRB, a DMA into an old buffer,
+    /// once the new ones were done. At the current enqueue position
+    /// everything ahead carries the previous lap's cycle bit, so the
+    /// controller stops where the next transfer ends. The software ring
+    /// state is left as it is; the two agree by construction. The same
+    /// reasoning as `recover_ep0`'s.
     ///
-    /// Not best-effort, unlike `recover_ep0`: the software ring state is
-    /// reset only *after both commands succeed*, so a Reset Endpoint that
-    /// fails because the endpoint wasn't actually halted (the caller reset
-    /// the healthy direction too, or the failure was a pure timeout with
-    /// the endpoint still Running) leaves software and hardware in sync and
-    /// returns `Err`. A pure timeout is not recovered (the endpoint stays
-    /// Running), but the state is left consistent.
+    /// **Set TR Dequeue is sent after Reset Endpoint succeeds, and also
+    /// after it fails with Context State Error.** That error means the
+    /// endpoint was not Halted: either it is Running (the healthy direction,
+    /// which the caller resets too, or a pure timeout), where Set TR Dequeue
+    /// is refused the same way and changes nothing; or it is Stopped, left
+    /// so by an earlier recovery whose Reset Endpoint took and whose Set TR
+    /// Dequeue did not, where only Set TR Dequeue can move the dequeue
+    /// pointer off the failed transfer. Without it, that endpoint would
+    /// restart on the failed transfer at every later doorbell. Any other
+    /// failure returns `Err` without it. A pure timeout is still not
+    /// recovered (the endpoint stays Running, its transfer queued).
     fn reset_storage_endpoint(&mut self, dir_in: bool) -> Result<(), Error> {
-        let (slot_idx, dci) = {
+        let (slot_idx, dci, enqueue, cycle) = {
             let st = self.storage.as_ref().ok_or(Error::NoPortConnected)?;
-            (st.slot, if dir_in { st.in_dci } else { st.out_dci })
+            if dir_in {
+                (st.slot, st.in_dci, st.in_enqueue, st.in_cycle)
+            } else {
+                (st.slot, st.out_dci, st.out_enqueue, st.out_cycle)
+            }
         };
         let slot_id = self.slots[slot_idx].as_ref().ok_or(Error::NoPortConnected)?.slot_id;
         let ring_addr = if dir_in { BULK_IN_RING.0.get() } else { BULK_OUT_RING.0.get() } as u64;
 
         let reset_ep = self.push_command([0, 0, 0, (TRB_TYPE_RESET_ENDPOINT_CMD << 10) | (dci << 16) | (slot_id << 24)]);
-        self.wait_command_completion(reset_ep)?;
-
-        let set_dequeue = self.push_command([
-            (ring_addr as u32) | 1, // DCS=1, matching the software cycle reset below
-            (ring_addr >> 32) as u32,
-            0,
-            (TRB_TYPE_SET_TR_DEQUEUE_CMD << 10) | (dci << 16) | (slot_id << 24),
-        ]);
-        self.wait_command_completion(set_dequeue)?;
-
-        // Both commands took: now the software producer state can safely be
-        // reset to the ring start to match hardware's new dequeue pointer.
-        // The Link TRB at the ring's end (from activate_storage) is intact, so
-        // only the enqueue index and cycle need resetting.
-        if let Some(st) = self.storage.as_mut() {
-            if dir_in {
-                st.in_enqueue = 0;
-                st.in_cycle = true;
-            } else {
-                st.out_enqueue = 0;
-                st.out_cycle = true;
+        match self.wait_command_completion(reset_ep) {
+            Ok(_) => {
+                // The host endpoint was Halted and Reset Endpoint (sent
+                // without TSP) has put the host's data toggle back to DATA0.
+                // CLEAR_FEATURE(ENDPOINT_HALT) (USB 2.0 9.4.5) puts the
+                // device's toggle there too, and clears the device's halt
+                // when a Stall caused this one; after a Babble or a
+                // Transaction Error the device was never halted, and the
+                // request then only realigns the toggles. Only here: sent
+                // where Reset Endpoint was refused (the endpoint was not
+                // Halted), it would reset the device's toggle and not the
+                // host's. A Reset Endpoint with TSP=1 would keep the host's
+                // toggle, and this would then be wrong. Best-effort: a
+                // refusal is logged (control_transfer recovers EP0) and the
+                // host side is still repaired.
+                let ep_addr = (dci / 2) as u16 | if dir_in { 0x80 } else { 0 };
+                if let Err(e) = self.control_transfer(slot_idx, 0x02, 0x01, 0, ep_addr, &mut [], false) {
+                    console::println!("Ouroboros kernel: xhci: storage endpoint {ep_addr:#04x}: CLEAR_FEATURE(ENDPOINT_HALT) failed ({e})");
+                }
             }
+            Err(Error::CommandFailed(COMPLETION_CONTEXT_STATE_ERROR)) => {}
+            Err(e) => return Err(e),
         }
-        Ok(())
+        self.set_tr_dequeue(ring_addr, enqueue, cycle, dci, slot_id)
     }
 
     /// A standard or class control transfer over EP0: Setup Stage (always
@@ -1365,35 +1852,37 @@ impl Xhci {
         let trt: u32 = if w_length == 0 { 0 } else if data_in { 3 } else { 2 };
         let setup_param_lo = (bm_request_type as u32) | ((b_request as u32) << 8) | ((w_value as u32) << 16);
         let setup_param_hi = (w_index as u32) | ((w_length as u32) << 16);
-        // The request's own TRBs, for `wait_transfer_event` to match its
-        // completion against.
-        let mut td = [0u64; 3];
+        // The request's TRBs, built first and published together; their
+        // addresses are what `wait_transfer_event` matches the completion
+        // against.
+        let mut trbs: [Trb; MAX_PUBLISH] = [[0; 4]; MAX_PUBLISH];
         let mut td_len = 0usize;
-        td[td_len] = self.push_ep0(idx, [
+        trbs[td_len] = [
             setup_param_lo,
             setup_param_hi,
             8, // TRB Transfer Length is always 8 - the setup packet itself, not wLength
             (1 << 6) | (TRB_TYPE_SETUP_STAGE << 10) | (trt << 16), // IDT
-        ]);
+        ];
         td_len += 1;
 
         if w_length != 0 {
             let buf_addr = CTRL_BUF.0.get() as u64;
-            td[td_len] = self.push_ep0(idx, [
+            trbs[td_len] = [
                 buf_addr as u32,
                 (buf_addr >> 32) as u32,
                 w_length as u32,
                 (TRB_TYPE_DATA_STAGE << 10) | ((data_in as u32) << 16),
-            ]);
+            ];
             td_len += 1;
         }
 
         // Status stage direction is the opposite of the data stage's; if
         // there was no data stage, it's always IN.
         let status_dir_in = if w_length == 0 { true } else { !data_in };
-        td[td_len] = self.push_ep0(idx, [0, 0, 0, (1 << 5) | (TRB_TYPE_STATUS_STAGE << 10) | ((status_dir_in as u32) << 16)]); // IOC
+        trbs[td_len] = [0, 0, 0, (1 << 5) | (TRB_TYPE_STATUS_STAGE << 10) | ((status_dir_in as u32) << 16)]; // IOC
         td_len += 1;
 
+        let td = self.push_ep0(idx, &trbs[..td_len]);
         self.ring_ep0_doorbell(idx);
         if let Err(e) = self.wait_transfer_event(slot_id, &td[..td_len]) {
             self.recover_ep0(idx, &e);
@@ -1520,10 +2009,7 @@ impl Xhci {
         let Some(slot_id) = self.slots[slot_idx].as_ref().map(|s| s.slot_id) else {
             return Err(Error::NoPortConnected);
         };
-        unsafe {
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-            write32(self.db_base + (slot_id as u64) * 4, dci);
-        }
+        unsafe { reg::doorbell(self.db_base, slot_id).write(dci) };
         self.wait_transfer_event(slot_id, &[trb_addr]).map(|_| ())
     }
 
@@ -1725,15 +2211,10 @@ impl Scan {
 }
 
 unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
-    let caplength = (unsafe { read32(bar_base) } & 0xff) as u64;
-    let op_base = bar_base + caplength;
+    let (op_base, ir0_base, db_base) = unsafe { reg::locate(bar_base) };
     let hcsparams1 = unsafe { read32(bar_base + CAP_HCSPARAMS1) };
     let hcsparams2 = unsafe { read32(bar_base + CAP_HCSPARAMS2) };
     let hccparams1 = unsafe { read32(bar_base + CAP_HCCPARAMS1) };
-    let dboff = unsafe { read32(bar_base + CAP_DBOFF) } as u64 & !0x3;
-    let rtsoff = unsafe { read32(bar_base + CAP_RTSOFF) } as u64 & !0x1f;
-    let db_base = bar_base + dboff;
-    let ir0_base = bar_base + rtsoff + 0x20;
 
     // 32-byte contexts normally, 64-byte if the controller requires it
     // (HCCPARAMS1.CSZ) - a real, common configuration (QEMU's `qemu-xhci`
@@ -1744,27 +2225,89 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
 
     let max_slots = hcsparams1 & 0xff;
     let max_ports = (hcsparams1 >> 24) & 0xff;
-    console::println!("Ouroboros kernel: xhci: controller @ {bar_base:#x}, max_slots={max_slots} max_ports={max_ports}");
+    let scratchpad_count = (((hcsparams2 >> 27) & 0x1f) | (((hcsparams2 >> 21) & 0x1f) << 5)) as usize;
+    console::println!("Ouroboros kernel: xhci: controller @ {bar_base:#x}, max_slots={max_slots} max_ports={max_ports} scratchpads={scratchpad_count}");
+
+    // The controller as the firmware handed it over, read before anything
+    // is waited on or written, so a capture has it however this goes on:
+    // whether it is still running (R/S, HCH; xHCI 5.4.1 says HCRST is not
+    // to be set while HCHalted is 0, so a running one is halted below
+    // first), whether it is ready (CNR), and the USBCMD RsvdP bits the
+    // reset write keeps. QEMU reads 0 in every RsvdP field; the board is
+    // the only place a kept bit can show. Read only: no probe here
+    // performs the operation in question.
+    let (usbcmd, usbsts) = unsafe { (read32(op_base.at(OP_USBCMD)), read32(op_base.at(OP_USBSTS))) };
+    console::println!(
+        "Ouroboros kernel: xhci: as handed over: USBCMD {usbcmd:#x} (R/S {}, RsvdP {:#x}), USBSTS {usbsts:#x} (HCH {}, CNR {})",
+        usbcmd & USBCMD_RUN != 0,
+        usbcmd & USBCMD_RSVDP,
+        usbsts & USBSTS_HCH != 0,
+        usbsts & USBSTS_CNR != 0
+    );
 
     // Wait for the controller to report ready before touching anything
-    // else, then reset it unconditionally - same "don't assume a clean
+    // else, then halt it if it is running and reset it unconditionally - same "don't assume a clean
     // slate" discipline as virtio_blk.rs::Device::init, since UEFI's own
     // xHCI driver (however it found and booted from this same hardware)
     // may have already initialized it.
-    if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
+    if !unsafe { poll_until(|| read32(op_base.at(OP_USBSTS)) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
-    unsafe { write32(op_base + OP_USBCMD, USBCMD_HCRST) };
-    if !unsafe { poll_until(|| read32(op_base + OP_USBCMD) & USBCMD_HCRST == 0 && read32(op_base + OP_USBSTS) & USBSTS_CNR == 0) } {
+    // xHCI 5.4.1: HCRST is not to be set while HCHalted is 0, so a
+    // controller handed over running is stopped first, as Linux's
+    // `xhci_halt` does: R/S cleared (USBCMD's interrupt enables with it,
+    // which the reset clears anyway), then HCH waited for. After the CNR
+    // wait, since no operational register is written before CNR clears.
+    // Only when HCH is 0: the Pi's firmware hands the controller over
+    // halted (2026-10-04), and there nothing is written here.
+    let found_running = unsafe { read32(op_base.at(OP_USBSTS)) } & USBSTS_HCH == 0;
+    if found_running {
+        unsafe { reg::usbcmd(op_base).write(0) };
+        if !unsafe { poll_until(|| read32(op_base.at(OP_USBSTS)) & USBSTS_HCH != 0) } {
+            return Err(Error::HaltTimeout(unsafe { read32(op_base.at(OP_USBSTS)) }));
+        }
+    }
+    // HCH again with nothing between the read and the reset write, said
+    // after it: a print first would take milliseconds over serial, and a
+    // controller halting as it was handed over could finish meanwhile.
+    // Beside it, whether the controller was found running: the line says
+    // what was read, not that the halt ran, so `found running true` with
+    // `HCH true` is a halt done here, and with `HCH false` one that did
+    // not happen (shown so by a mutation that skipped it, 2026-10-04).
+    let usbsts_at_reset = unsafe { read32(op_base.at(OP_USBSTS)) };
+    unsafe { reg::usbcmd(op_base).write(USBCMD_HCRST) };
+    console::println!(
+        "Ouroboros kernel: xhci: at the reset write: USBSTS {usbsts_at_reset:#x} (HCH {}, found running {found_running})",
+        usbsts_at_reset & USBSTS_HCH != 0
+    );
+    if !unsafe { poll_until(|| read32(op_base.at(OP_USBCMD)) & USBCMD_HCRST == 0 && read32(op_base.at(OP_USBSTS)) & USBSTS_CNR == 0) } {
         return Err(Error::ResetTimeout);
     }
+    let (usbcmd_rsvdp, config_rsvdp, crcr_rsvdp, erstsz_rsvdp, erstba_rsvdp) = unsafe {
+        (
+            reg::usbcmd(op_base).kept_bits(),
+            reg::config(op_base).kept_bits(),
+            reg::crcr(op_base).kept_bits(),
+            reg::erstsz(ir0_base).kept_bits(),
+            reg::erstba(ir0_base).kept_bits(),
+        )
+    };
+    console::println!(
+        "Ouroboros kernel: xhci: RsvdP after the reset, kept by each write: USBCMD {usbcmd_rsvdp:#x}, CONFIG {config_rsvdp:#x}, CRCR {crcr_rsvdp:#x}, ERSTSZ {erstsz_rsvdp:#x}, ERSTBA {erstba_rsvdp:#x}"
+    );
 
     let slots_enabled = (max_slots as usize).min(MAX_SLOTS_ENABLED) as u32;
-    unsafe { write32(op_base + OP_CONFIG, slots_enabled) };
+    unsafe { reg::config(op_base).write(slots_enabled) };
 
-    let scratchpad_count = (((hcsparams2 >> 27) & 0x1f) | (((hcsparams2 >> 21) & 0x1f) << 5)) as usize;
     if scratchpad_count > MAX_SCRATCHPAD_BUFFERS {
         return Err(Error::TooManyScratchpadBuffers(scratchpad_count as u32));
+    }
+    // A scratchpad buffer is one controller page, PAGESIZE-sized and
+    // -aligned; bit 0 is 4 KB, the size of `Page`. A controller that
+    // cannot do 4 KB would write past each one into its neighbour.
+    let pagesize = unsafe { read32(op_base.at(OP_PAGESIZE)) };
+    if scratchpad_count > 0 && pagesize & 1 == 0 {
+        return Err(Error::PageSizeNot4K(pagesize));
     }
     let dcbaa = unsafe { &mut *DCBAA.0.get() };
     if scratchpad_count > 0 {
@@ -1774,7 +2317,10 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         }
         dcbaa[0] = SCRATCHPAD_ARRAY.0.get() as u64;
     }
-    unsafe { write64(op_base + OP_DCBAAP, DCBAA.0.get() as u64) };
+    // Each register below hands the controller a structure just written
+    // to the DMA pool; the write's barrier (`mmio_write32`/`mmio_write64`)
+    // orders those stores first.
+    unsafe { reg::dcbaap(op_base).write(DCBAA.0.get() as u64) };
 
     // Command ring: producer cycle state starts at 1 (RCS=1), the Link
     // TRB (last slot) pre-set to match.
@@ -1783,7 +2329,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let ring_addr = COMMAND_RING.0.get() as u64;
         ring[CMD_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1]; // TC, cycle=1
     }
-    unsafe { write64(op_base + OP_CRCR, (COMMAND_RING.0.get() as u64) | CRCR_RCS) };
+    unsafe { reg::crcr(op_base).write((COMMAND_RING.0.get() as u64) | CRCR_RCS) };
 
     // (Per-device EP0 transfer rings are initialized as each device
     // claims its pool entry during the port scan - see
@@ -1794,15 +2340,31 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         let erst = unsafe { &mut *ERST.0.get() };
         erst[0] = ErstEntry { base: EVENT_RING.0.get() as u64, size: EVENT_RING_SIZE as u32, _reserved: 0 };
     }
-    unsafe {
-        write32(ir0_base + IR_ERSTSZ, 1);
-        write64(ir0_base + IR_ERSTBA, ERST.0.get() as u64);
-        write64(ir0_base + IR_ERDP, EVENT_RING.0.get() as u64);
-    }
+    // ERSTSZ, ERDP, then ERSTBA: edk2's `XhcInitSched` order (the firmware
+    // that drives the Pi 4's VL805 before us), whose comments give it as
+    // the spec's initialization sequence (not checked against the spec
+    // itself); U-Boot also sets ERDP first. The controller
+    // fetches the ERST when ERSTBA is written, so the dequeue pointer is in
+    // place before anything can start on the segment. Until 2026-10-03
+    // ERDP came last, as in Linux's `xhci_add_interrupter`, which works on
+    // the Pi too; this removes the dependence on the controller not
+    // sampling ERDP at the ERSTBA write. ERSTSZ and ERSTBA keep their
+    // RsvdP bits; ERDP has none and is written whole: its EHB is RW1C,
+    // written 0.
+    unsafe { reg::erstsz(ir0_base).write(1) };
+    unsafe { reg::erdp(ir0_base).write(EVENT_RING.0.get() as u64) };
+    unsafe { reg::erstba(ir0_base).write(ERST.0.get() as u64) };
 
-    unsafe { write32(op_base + OP_USBCMD, USBCMD_RUN) };
-    if !unsafe { poll_until(|| read32(op_base + OP_USBSTS) & USBSTS_HCH == 0) } {
+    // And reads the scratchpad array at Run.
+    unsafe { reg::usbcmd(op_base).write(USBCMD_RUN) };
+    if !unsafe { poll_until(|| read32(op_base.at(OP_USBSTS)) & USBSTS_HCH == 0) } {
         return Err(Error::StartTimeout);
+    }
+    // A failed DMA fetch at Run (the ERST, the scratchpad array) sets HSE
+    // and halts the controller; said here, not a command timeout later.
+    let usbsts = unsafe { read32(op_base.at(OP_USBSTS)) };
+    if usbsts & USBSTS_HSE != 0 {
+        console::println!("Ouroboros kernel: xhci: WARNING: Host System Error after Run (USBSTS {usbsts:#x})");
     }
 
     let mut xhci = Xhci {
@@ -1815,6 +2377,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
         cmd_cycle: true,
         evt_dequeue: 0,
         evt_cycle: true,
+        timeout_dumped: false,
         slots: [const { None }; MAX_DEVICES],
         keyboard: None,
         storage: None,
@@ -1846,8 +2409,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     loop {
         let mut mask = 0u64;
         for port in 1..=max_ports {
-            let portsc_addr = op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
-            if unsafe { read32(portsc_addr) } & PORTSC_CCS != 0 {
+            let portsc = reg::portsc(op_base, port);
+            if unsafe { portsc.read() } & PORTSC_CCS != 0 {
                 mask |= 1u64 << (port % 64);
             }
         }
@@ -1884,8 +2447,8 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
     // ordering constraint behind that.
     let mut scan = Scan::default();
     for port in 1..=max_ports {
-        let portsc_addr = op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
-        if unsafe { read32(portsc_addr) } & PORTSC_CCS == 0 {
+        let portsc = reg::portsc(op_base, port);
+        if unsafe { portsc.read() } & PORTSC_CCS == 0 {
             continue;
         }
         let loc = Location::root(port);
@@ -1893,7 +2456,7 @@ unsafe fn init_inner(bar_base: u64) -> Result<(), Error> {
             console::println!("Ouroboros kernel: xhci: more connected devices than the {MAX_DEVICES}-entry pool, skipping port {loc}");
             continue;
         };
-        let result = unsafe { setup_device_on_port(&mut xhci, dcbaa, idx, port, portsc_addr) };
+        let result = unsafe { setup_device_on_port(&mut xhci, dcbaa, idx, port, portsc) };
         scan.note(&mut xhci, dcbaa, idx, loc, result);
     }
 
@@ -2353,6 +2916,99 @@ fn ep0_context(idx: usize, max_packet_size: u32) -> [u32; 5] {
     ]
 }
 
+/// PORTSC decoded for a log line: the raw value, then the fields a port's
+/// bring-up turns on.
+struct Portsc(u32);
+
+impl core::fmt::Display for Portsc {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let v = self.0;
+        write!(
+            f,
+            "{v:#010x} (CCS {}, PED {}, PLS {}, speed {})",
+            v & PORTSC_CCS,
+            (v & PORTSC_PED) >> 1,
+            portsc_pls(v),
+            portsc_speed(v)
+        )
+    }
+}
+
+fn portsc_speed(v: u32) -> u32 {
+    (v >> PORTSC_SPEED_SHIFT) & PORTSC_SPEED_MASK
+}
+fn portsc_pls(v: u32) -> u32 {
+    (v >> PORTSC_PLS_SHIFT) & PORTSC_PLS_MASK
+}
+/// Enabled with a speed: what Address Device needs of a root port.
+fn portsc_enabled(v: u32) -> bool {
+    v & PORTSC_PED != 0 && portsc_speed(v) != 0
+}
+/// In a link state that a Hot Reset cannot leave (see `PLS_SS_INACTIVE`).
+fn portsc_needs_warm_reset(v: u32) -> bool {
+    matches!(portsc_pls(v), PLS_SS_INACTIVE | PLS_COMPLIANCE)
+}
+
+/// Resets root port `port`, Hot (`PR`, waiting for PRC) or Warm (`WPR`,
+/// waiting for WRC and PRC, which a Warm Reset sets both of), then clears
+/// the change bits a reset leaves: PRC, WRC and PLC, each only if it is
+/// set, so a USB2 port, where WRC is reserved, never has a 1 written
+/// there. Returns PORTSC as the reset left it. A timeout is logged with
+/// the port's state before it is returned.
+///
+/// # Safety
+/// `portsc` is the port's PORTSC register.
+unsafe fn reset_root_port(port: u32, portsc: reg::PortStatus, warm: bool) -> Result<u32, Error> {
+    let (set, done, kind) = if warm { (PORTSC_WPR, PORTSC_WRC | PORTSC_PRC, "warm") } else { (PORTSC_PR, PORTSC_PRC, "hot") };
+    let current = unsafe { portsc.read() };
+    unsafe { portsc.write(current, set, 0) };
+    if !unsafe { poll_until(|| portsc.read() & done == done) } {
+        let now = unsafe { portsc.read() };
+        console::println!("Ouroboros kernel: xhci: port {port}: {kind} reset timed out: {}", Portsc(now));
+        return Err(Error::PortResetTimeout);
+    }
+    let after = unsafe { portsc.read() };
+    unsafe { portsc.write(after, 0, after & (PORTSC_PRC | PORTSC_WRC | PORTSC_PLC)) };
+    Ok(after)
+}
+
+/// Watches root port `port` for up to `POLL_TIMEOUT_MS` until it is
+/// enabled with a speed or disconnected, logging each change of its PORTSC (a change,
+/// not every read, and at most `MAX_LOGGED` of them, so a flapping link
+/// cannot flood the console), and returns the last value read. `when`
+/// names the step for the log.
+///
+/// # Safety
+/// `portsc` is the port's PORTSC register.
+unsafe fn watch_port_enable(port: u32, portsc: reg::PortStatus, when: &str) -> u32 {
+    const MAX_LOGGED: u32 = 16;
+    let deadline = poll_deadline();
+    let mut last = unsafe { portsc.read() };
+    let mut changes = 0u32;
+    loop {
+        if portsc_enabled(last) {
+            console::println!("Ouroboros kernel: xhci: port {port}: enabled {when}: {}", Portsc(last));
+            return last;
+        }
+        if last & PORTSC_CCS == 0 {
+            console::println!("Ouroboros kernel: xhci: port {port}: disconnected {when}: {}", Portsc(last));
+            return last;
+        }
+        if crate::timer::now_ticks() >= deadline {
+            console::println!("Ouroboros kernel: xhci: port {port}: not enabled {POLL_TIMEOUT_MS} ms {when} ({changes} changes): {}", Portsc(last));
+            return last;
+        }
+        let now = unsafe { portsc.read() };
+        if now != last {
+            changes += 1;
+            if changes <= MAX_LOGGED {
+                console::println!("Ouroboros kernel: xhci: port {port}: {when}, now {}", Portsc(now));
+            }
+            last = now;
+        }
+    }
+}
+
 /// Resets root port `port` and hands the device on it to
 /// [`address_and_classify`]. The reset is the only root-port-specific
 /// step: a device behind a hub is reset by the hub ([`configure_hub`]).
@@ -2365,18 +3021,44 @@ unsafe fn setup_device_on_port(
     dcbaa: &mut [u64; MAX_SLOTS_ENABLED + 1],
     idx: usize,
     port: u32,
-    portsc_addr: u64,
+    portsc: reg::PortStatus,
 ) -> Result<DeviceClass, Error> {
     console::println!("Ouroboros kernel: xhci: device connected on port {port}");
 
-    // Reset the port, then clear the resulting Port Reset Change bit.
-    let current = unsafe { read32(portsc_addr) };
-    unsafe { write32(portsc_addr, portsc_preserve(current) | PORTSC_PR) };
-    if !unsafe { poll_until(|| read32(portsc_addr) & PORTSC_PRC != 0) } {
-        return Err(Error::PortResetTimeout);
+    // A USB3 port in SS.Inactive or Compliance is Warm Reset at once, as
+    // Linux does; any other port gets a Hot Reset. A port that does not
+    // come out of its reset enabled with a speed is not addressed. On the
+    // Pi 4 a USB3 stick on its SuperSpeed root port came out of a Hot Reset
+    // with speed 0, at boot and on a rescan (2026-10-03), with nothing
+    // logged to say why. Each step below logs the port's state, so a
+    // capture says which one, if any, brought it up: a wait for link
+    // training to finish, then, from a state that requires one, a Warm
+    // Reset.
+    let before = unsafe { portsc.read() };
+    let warm_first = portsc_needs_warm_reset(before);
+    if warm_first {
+        console::println!("Ouroboros kernel: xhci: port {port}: link state {} before the reset, warm reset: {}", portsc_pls(before), Portsc(before));
     }
-    let current = unsafe { read32(portsc_addr) };
-    unsafe { write32(portsc_addr, portsc_preserve(current) | PORTSC_PRC) };
+    let mut current = unsafe { reset_root_port(port, portsc, warm_first)? };
+    if !portsc_enabled(current) {
+        console::println!(
+            "Ouroboros kernel: xhci: port {port}: not enabled after the {} reset; before it {}, after it {}",
+            if warm_first { "warm" } else { "hot" },
+            Portsc(before),
+            Portsc(current)
+        );
+        current = unsafe { watch_port_enable(port, portsc, "after the reset") };
+        if !warm_first && !portsc_enabled(current) && current & PORTSC_CCS != 0 && portsc_needs_warm_reset(current) {
+            console::println!("Ouroboros kernel: xhci: port {port}: link state {}, warm reset", portsc_pls(current));
+            current = unsafe { reset_root_port(port, portsc, true)? };
+            if !portsc_enabled(current) {
+                current = unsafe { watch_port_enable(port, portsc, "after the warm reset") };
+            }
+        }
+        if !portsc_enabled(current) {
+            return Err(Error::RootPortNotEnabled(current));
+        }
+    }
 
     // Default PSIV mapping (no Protocol Speed ID table override present -
     // true for every controller this has been tested against, QEMU's and
@@ -2384,7 +3066,7 @@ unsafe fn setup_device_on_port(
     // 5=SuperSpeedPlus - the same numbering a Slot Context's Speed field
     // uses, which is why a hub child's speed (from its hub port status)
     // is converted to it too.
-    let speed = (current >> PORTSC_SPEED_SHIFT) & PORTSC_SPEED_MASK;
+    let speed = portsc_speed(current);
     console::println!("Ouroboros kernel: xhci: port {port} reset, speed={speed}");
     unsafe { address_and_classify(xhci, dcbaa, idx, Location::root(port), speed) }
 }
@@ -2736,6 +3418,10 @@ unsafe fn activate_keyboard(xhci: &mut Xhci, idx: usize, kb: KeyboardEndpoint) -
     {
         let ring = unsafe { &mut *INT_RING.0.get() };
         let ring_addr = INT_RING.0.get() as u64;
+        // Zeroed like the EP0 and bulk rings: the keyboard's producer
+        // state starts at slot 0 with cycle 1, and a TRB left from an
+        // earlier activation could carry cycle 1 and look owned.
+        *ring = [[0; 4]; INT_RING_SIZE];
         ring[INT_RING_SIZE - 1] = [ring_addr as u32, (ring_addr >> 32) as u32, 0, (1 << 1) | (TRB_TYPE_LINK << 10) | 1];
     }
 
@@ -2892,8 +3578,10 @@ pub(crate) fn storage_bulk(dir_in: bool, buf_addr: u64, len: u32) -> Result<(), 
 }
 
 /// Reset-recover the storage device's IN (`dir_in`) or OUT bulk endpoint
-/// after a stalled/failed transfer - [`Xhci::reset_storage_endpoint`].
-/// `usb_msd.rs`'s BOT reset-recovery step between command retries.
+/// after a stalled/failed transfer - [`Xhci::reset_storage_endpoint`]:
+/// Reset Endpoint, CLEAR_FEATURE(ENDPOINT_HALT) to the device over EP0 when
+/// the endpoint was halted, Set TR Dequeue. `usb_msd.rs` uses it between
+/// command retries and to clear a stalled data stage or CSW read in place.
 pub(crate) fn storage_reset_endpoint(dir_in: bool) -> Result<(), Error> {
     match unsafe { (*XHCI.get()).as_mut() } {
         Some(x) => x.reset_storage_endpoint(dir_in),
@@ -2917,8 +3605,8 @@ pub(crate) fn rescan_ports() {
     };
     let dcbaa = unsafe { &mut *DCBAA.0.get() };
     for port in 1..=x.max_ports {
-        let portsc_addr = x.op_base + OP_PORTSC_BASE + ((port - 1) as u64) * 0x10;
-        if unsafe { read32(portsc_addr) } & PORTSC_CCS == 0 {
+        let portsc = reg::portsc(x.op_base, port);
+        if unsafe { portsc.read() } & PORTSC_CCS == 0 {
             continue;
         }
         if x.slots.iter().flatten().any(|s| s.loc.root_port == port) {
@@ -2928,7 +3616,7 @@ pub(crate) fn rescan_ports() {
             console::println!("Ouroboros kernel: xhci: rescan: device pool full, skipping port {port}");
             break;
         };
-        match unsafe { setup_device_on_port(x, dcbaa, idx, port, portsc_addr) } {
+        match unsafe { setup_device_on_port(x, dcbaa, idx, port, portsc) } {
             Ok(DeviceClass::Storage(ep_in, ep_out, config)) if x.storage.is_none() => {
                 console::println!("Ouroboros kernel: xhci: rescan: port {port}: USB mass storage - activating");
                 if let Err(e) = unsafe { activate_storage(x, idx, ep_in, ep_out, config) } {

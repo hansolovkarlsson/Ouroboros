@@ -7,6 +7,183 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Not yet released
+
+**Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
+version is held for a go-ahead. So far one day's work, 2026-10-05, #209 to
+#216: the storage server made safe under large writes and double mounts, and
+the C library made able to host Proem and Edit. The day's record is
+`docs/work-journal/2026-10-05.md`.
+
+**A large file no longer gets `fsd` restarted part way through (#211, #212).**
+`cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
+and leave the file short. No request was slow: the supervisor saw a busy
+`fsd` runnable at every tick, because a tick fired during a disk read lands
+as it returns to EL0. A server that comes back to `msg_recv` now counts as
+making progress. A FAT-sector cache and a free-cluster hint then keep each
+write's cost flat (32 disk reads at 640 KB, where it was 353 at 160 KB), the
+scan bounded by the volume's real cluster count, which the first version was
+not.
+
+**A partition is mounted once, and `unmount` clears every disk mount (#213,
+#214).** `mount <n> <path>` on a partition that is already mounted binds the
+same tree rather than a second filesystem over it; a partition mount needs
+`/` first and never takes its slot. `unmount` drops `/` and every partition
+mount, and the shell's own bindings to them; a file left open answers "no
+filesystem" until closed, and its number is not handed to the next opener.
+`erase`, `partition` and `format`, which had refused since `/proc` landed,
+run after `unmount` again.
+
+**Every program gets a 1 MiB heap, zeroed (#210).** Up from 256 KiB, so the
+shell's redirect capture is 1 MiB too, and a program's region is zeroed
+before it loads: a spawned program could read what the last one left in its
+heap and stack. `make test-heap` checks both.
+
+**`unlink`, `rmdir`, `rename`, `remove` and a sound `fstat` in the C port
+(#215, #216).** Over operations `fsd` already had, with `errno` in picolibc
+programs. `rename` replaces an existing file, answers `EXDEV` across mounts,
+and `fsd` now refuses a directory moved into itself, which on ext2 had cut
+the subtree off (the shell's `mv` included). `fstat` had written a picolibc
+program's file size into `st_dev`/`st_ino`, the port having been built
+against the wrong `struct stat`; it now zeroes what it does not fill, and
+reports the file type everywhere. `make test-crename` checks all of it on
+FAT32 and ext2.
+
+**PORTSC a register type of its own (#209).** Its write keeps only the bits
+meant to persist, as Linux does, so it cannot clear a pending change or
+restart a reset by writing a bit back as read.
+
+## v0.22.0: the Raspberry Pi 4 runs a full session, and per-user keys below the wire (2026-10-04)
+
+The Raspberry Pi bring-up, desk work for the Pi 400 and then the Pi 4 on the
+bench: thirty-two pull requests (#176 to #207). Beside it, steps 0 to 4 of the
+per-user keys plan (#169 to #174) and the `netd` wedge it uncovered (#175).
+**No wire flag day**, but two changes an installation sees: **root squash**
+(an export refuses a remote uid 0 or gid 0 unless the peer's `authorized` line
+ends with `root`) and **version-2 shadow lines** (written at first login, and
+unreadable by a v0.21.0 kernel). The day-by-day record is
+`docs/work-journal/2026-09-26.md` to `2026-10-04.md`; the board's own record
+is `docs/testing/testing-pi4.md` section 6.
+
+**Every xHCI register write through a typed handle (#207).** A write that
+skips a register's RsvdP bits or the store barrier does not compile, and the
+doorbells are a type of their own, so a doorbell cannot land on USBCMD. Each
+barrier store keeps one caller, which is what lets `check-xhci-barriers` fail
+a rerouted write; its first review found the split had blinded it.
+
+**The login says why it refused (#206).** The shadow read's error code, no
+entry, or an entry that does not parse, each named. Made for the Pi's early
+`root` refusals, which have not recurred since.
+
+**A controller found running is halted before HCRST (#203, #205).** #203 only
+read and logged the state, and on the Pi it was halted; #205 adds the halt,
+spec form. Its log field was renamed `found running` after a mutation showed
+`halted here first` claiming a halt that had not run.
+
+**`test-usb-hub`'s firmware stall is INCONCLUSIVE (#204).** A boot where QEMU's
+own firmware stalls in its USB boot and never loads the kernel is neither a
+pass nor a failed check; every run's verdict goes to
+`scratch/usb-hub-runs.log`, so the stall reads as a rate, and `make test`
+runs the classifier on fixed transcripts.
+
+**RsvdP bits kept, and ERDP before ERSTBA (#200 to #202).** ERSTSZ, ERSTBA,
+CRCR, CONFIG and USBCMD keep their RsvdP bits through one helper, and the board
+logged every kept bit as 0. ERDP is written before ERSTBA, edk2's order, read
+from edk2, U-Boot and Linux. Neither changed anything visible on the Pi; both
+are spec form.
+
+**The boot names its build (#199).** `kernel/build.rs` stamps the commit,
+`+dirty` and the profile into the first log line, and reruns every build, so a
+card staged from the wrong tree says so.
+
+**Ordering on the bus (#196 to #198).** A barrier before each register write
+that hands the controller a ring (#196); a TD published whole, its first TRB's
+cycle bit flipped last, with a mutation that fails the rig (#197); the barrier
+moved into the register write itself, and `scripts/check-xhci-barriers.py`
+finding it in the built image (#198), the one check no QEMU rig could stand in
+for, run by `make test` since 2026-10-03.
+
+**`make stick` (#195).** Stages the USB stick, the Pi's only disk once the
+kernel runs: FAT32 or exFAT on MBR partition 1, a marker first, no `EFI` tree,
+its `/etc` kept by default. Never formats.
+
+**The first full session, 2026-10-03 (#192 to #194).** The VL805 asks for 31
+scratchpad pages and the driver had room for 8 (#192). The first command timed
+out until 64-bit registers were written as two 32-bit stores, low first, with
+a dump on the first command timeout (#193). A USB 3 stick on a root port read
+`speed=0`: the port was already up, the reset sent the link back to Polling,
+and the speed was read before it retrained; the driver logs the port's state
+and waits for it to enable (#194). Then the keyboard behind the VIA hub, the
+stick mounted by `fsd`, `ls`, `man`, `uptime` and `halt`, all on the board.
+
+**A stack of the kernel's own (#191).** The Pi firmware's stack is 16 KB with
+its page tables directly below it, and the kernel overflowed it into them:
+every firmware fault since 2026-10-01 was this. `main` switches to a 256 KB
+stack in `.bss` before any call; the banner names the stack, and the frame
+walk crosses into the firmware's frames.
+
+**The early fault reporter (#187, #189, #190).** A fault before
+`exceptions::install()` goes to the firmware's vectors, and the Pi's RELEASE
+firmware prints one line for it. `earlyfault.rs` registers the kernel's own
+handler through the firmware's CPU protocol and prints the registers first,
+then a backtrace, the loaded image holding each address, a nested-fault line
+with FAR, and the firmware's page tables walked at the faulting address. The
+walk is what showed stack frames in a root table. `make test-early-fault`
+plants faults behind `\EARLYFAULT` and `\WALKFAULT`.
+
+**The drop from EL2 to EL1 (#188).** The Pi's firmware hands off at EL2, where
+every `_EL1` write after the exit went nowhere. The kernel logs its exception
+level on every boot, `mmu.rs`'s install is split into a memory-only build and a
+switch, and at EL2 the switch is `el2.rs`: EL1's regime and vectors prepared
+from EL2 and an `eret` into a running MMU. `make run-el2`, `make
+test-el1-drop`, and a mutation that fails it. Five review rounds.
+
+**USB storage recovery (#184 to #186).** Storage endpoint recovery dequeues at
+the enqueue position, not the ring's start (#184); a committed Stall test,
+whose first checks could not fail (#185); and a Bulk-IN Stall in the data or
+status phase recovered with CLEAR_FEATURE to the device (#186).
+`scripts/test-usb-hub.py --stall` and the `\MSDSTALL` flag make QEMU's stick
+stall about thirty times a boot.
+
+**The bench (#180 to #183).** `make sdcard` stages the Pi boot card: the pinned
+pftf firmware (v1.53, installed once, since the Pi has no NVRAM and its
+settings live in `RPI_EFI.fd`) and the ESP on top; it never formats (#180).
+Boot flag files `\NOXHCI`, `\XHCINOWR` and `\FBCON` switch one step off to
+bisect a hang; the devicetree console is translated through every ancestor's
+`ranges`, since the Pi gives the PL011 at its bus address (#181); a devicetree
+with no `/chosen` no longer panics (#182); the flags are read with one volume
+open (#183). `scripts/efi-symbol.py` turns a firmware-reported address into a
+kernel function.
+
+**The Pi 400 at a desk (#176 to #179).** The xHCI is taken through its own
+`PciIo`, at the firmware's CPU address (the BAR is a bus address on the
+BCM2711), last before `ExitBootServices`; the old exclusive root-bridge open
+had been refused for a month on QEMU, so `make run-usb-kbd` found no keyboard
+(#176). USB 2.0 hubs, since every USB 2 device on the board is behind a VIA
+hub, with `make test-usb-hub` written first and failing (#177). EP0 recovery,
+and completions matched to their own TRBs (#178). The BCM2711's PCIe DMA is
+not cache-coherent: every xHCI buffer lives in one pool mapped Normal
+Non-cacheable where ACPI declares `_CCA 0`, checked at boot through `AT S1E1R`
+on every page, and the framebuffer stays cacheable with writes cleaned to
+memory (#179).
+
+**The `netd` wedge (#175).** A `cpu` spawn's 98 path reads kept `netd` from
+its main loop long enough for the supervisor to call it wedged. A kernel rule
+was built, controlled, and sunk by review (a livelocked callee escaped both
+detectors); `netd` beats once per chunk instead.
+
+**Per-user keys, steps 0 to 4 (#169 to #174).** The plan
+(`roadmap-user-keys.md`), four review rounds. Step 0: the impersonation gate
+served on `main`, and PBKDF2's cost measured on the guest. Step 1: root
+squash, the `authorized` line's `root` flag, true only if every line for the
+key says so. Step 2: PBKDF2-HMAC-SHA-512 in `ed25519`, 210,000 iterations, a
+TCG band of 3.9 to 6.2 µs an iteration. Step 3: the user key, the realm, the
+registry and version-2 shadow lines, each the width of version 1. Step 4:
+derivations moved out of every supervised server; `login` derives and `netd`
+holds the key from login to logout (`NETOP_KEY_HOLD`, `_DROP`, `_DROP_MINE`,
+`_LIST`; `ACCTOP_SALT`, `ACCTOP_UPGRADE`); `passwd` sends hashes; `make
+test-held-keys`. Step 5, the credential on the wire, is next.
+
 ## v0.21.0: held sessions are keyed, a boot identity, and a park that never signs (2026-09-26)
 
 The session-scoped authentication arc, `roadmap-session-auth.md`, all eight

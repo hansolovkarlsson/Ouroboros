@@ -54,12 +54,23 @@ in `kernel/src/main.rs` runs the following, in order:
    world. Nothing after this point may use `log::*`, `alloc`, or any UEFI
    protocol.
 5. **`exceptions::install`**. Points `VBAR_EL1` at the kernel's own vector
-   table before anything else gets a chance to fault.
+   table before anything else gets a chance to fault. On an EL1 handoff
+   (QEMU, Parallels) the vectors are live from here. On an EL2 handoff
+   (the Raspberry Pi) the write installs nothing for the running level
+   until step 7 drops; a fault before that still goes through the
+   firmware's EL2 vectors, where `earlyfault.rs`'s handler is registered.
 6. **Console installation**. If discovery in step 2 succeeded, the driver
    is constructed now and raw MMIO console output becomes available
-   (`console::println!`).
-7. **`mmu::install_identity_map`**. Replaces firmware's translation tables
-   with the kernel's own (see "Memory layout" below).
+   (`console::println!`). The first line after it states the exception
+   level the firmware handed off at (`running at EL{n} after the exit`,
+   `el2.rs`).
+7. **`mmu::install_identity_map`**. Builds the kernel's own translation
+   tables, then switches onto them (see "Memory layout" below). At EL1
+   the switch is a register sequence; at EL2 it is the drop to EL1
+   (`el2::drop_to_el1`): EL1's regime, vectors and hypervisor controls
+   set from EL2, then an `eret` onto the same stack at EL1, logged as
+   `dropped from EL2 to EL1`. Either way the kernel is at EL1 on its own
+   tables and vectors when this returns.
 8. **virtio-console fallback** (`try_virtio_console`), tried only if step
    2's three mechanisms all failed. Has to run here, after step 7, not
    alongside step 6 — see "Console" below for why.
@@ -74,8 +85,14 @@ in `kernel/src/main.rs` runs the following, in order:
 ## Privilege model
 
 Two exception levels are in play: **EL1** (the kernel) and **EL0**
-(userland tasks). There is no EL2/hypervisor use — the kernel has only
-ever been observed booting directly at EL1, typical for a UEFI OS loader.
+(userland tasks). There is no EL2/hypervisor use. QEMU and Parallels hand
+the kernel off at EL1, typical for a UEFI OS loader; the Raspberry Pi's
+firmware hands off at **EL2** (found 2026-10-01), and there the kernel
+drops to EL1 inside the identity-map install, with EL1's tables and
+vectors prepared from EL2 and an `eret` into a running MMU
+(`kernel/src/el2.rs`, 2026-10-02). The log states the handoff level on
+every boot (`running at EL{n} after the exit`) and the drop when it
+happens.
 
 EL0 code cannot access kernel memory, MMIO, or privileged system
 registers; the only way back to EL1 is a trap — a syscall (`svc`), a
@@ -278,6 +295,12 @@ filesystem:
   (idle in `msg_recv`, or briefly busy), so staying continuously
   `Runnable` for ~2.5s (128 ticks) is the wedge signal — no server
   changes, no new ABI. It restarts on the same teardown path as a crash.
+  Since 2026-10-05 a server's call to `msg_recv` also clears the count
+  (`supervisor::note_progress`): a server busy with a stream of requests
+  may never be *seen* blocked, because a tick that fires during its disk
+  read lands as it returns to EL0, and `fsd` was restarted part way
+  through a large `cp` that way. One request longer than the wedge time
+  is still a wedge.
 
 The client whose call the server died under gets a cleanly failed call
 (`fail_calls_to`; the shell shows its no-filesystem message once); the
@@ -581,7 +604,7 @@ something the kernel alone can say.
 | 37 | `fb_clear` | none | `0` | Blanks the whole framebuffer. **Gated to task 3**. Used by the server's startup and its `clear`/ANSI-`2J` handling |
 | 38 | `stdout_target` | none | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable — program-to-program pipes and `exec … > file` |
 | 39 | `self` | none | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
-| 40 | `heap_info` | field (`0`=heap base, `1`=heap size, `2`=stack base, `3`=stack size) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 256KB **raw heap area** (between its code and its stack guard page) it reads/writes via a `&mut [u8]`: space far larger than the stack (whose extent fields `2`/`3` report, so a program never restates the loader's page count), for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap: `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
+| 40 | `heap_info` | field (`0`=heap base, `1`=heap size, `2`=stack base, `3`=stack size, `4`=the largest image a program may load, `HEAP_INFO_IMAGE_MAX`) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 1 MiB **raw heap area** (the loader's `HEAP_PAGES`, 256KB until 2026-10-05), between its code and its stack guard page and zeroed at load, which it reads/writes via a `&mut [u8]`: space far larger than the stack (whose extent fields `2`/`3` report, so a program never restates the loader's page count), for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap: `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
 | 41 | `delegate` | grantee task, target task | `0`, `TASK_ERR_NO_SUCH_TASK` (either slot not a live task, the ordinary way a pipeline link fails, when a stage exited before it was authorized), or `MSG_ERR_DENIED` (a grantee below the spawnable range or not the caller's own child, or a target the caller neither spawned nor holds a send right to; checked in that order) | **Runtime capability delegation**: grant `grantee` the right to initiate sends to `target`, a dynamic addition to `grantee`'s send-mask. One rule: the grantee must be the caller's **own direct child**, and the target a task the caller may itself reach (its children always are). Rights flow one step down and nowhere else, so a nested shell wires its pipelines and passes on the network right it was given exactly as the boot shell does, and no task can reach one it could not reach before. A parent and its child are granted each other at spawn. Cleared when the grantee dies, and when the target's slot is reused by a new spawn; a grant aimed at a supervised server therefore survives its restart (the slot can only ever hold that server again). See "Runtime capability delegation" below |
 | 42 | `net_send` | frame ptr, frame len | `0` or `NET_ERROR` | Transmit one raw Ethernet frame through the kernel's virtio-net driver. **Gated to `NET_TASK`** (the network server) — the DMA-owning NIC driver stays in the kernel (no IOMMU), reached only by the one task that owns the protocol stack, the `block_*` → fsd pattern |
 | 43 | `net_recv` | buf ptr, buf len | the frame's length (copied into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting, or `NET_ERROR` | Non-blocking poll of the virtio-net receive ring. Gated to `NET_TASK` like `net_send` |

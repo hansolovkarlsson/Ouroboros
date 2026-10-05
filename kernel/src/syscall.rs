@@ -689,6 +689,13 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::NS_SET => {
             // arg0 = namespace-blob pointer, arg1 = length. Sets the calling
             // task's own namespace directly; children inherit it at SPAWN.
+            // A length of 0 empties it, the pointer unread: without this a
+            // task could remove bindings but never its last one (the shell's
+            // `unmount` dropping its only `mount <n>` binding, 2026-10-05).
+            if arg1 == 0 {
+                tasks::set_namespace(tasks::current_task(), &[]);
+                return 0;
+            }
             if !valid_stage_range(arg0, arg1, NS_MAX_SIZE) {
                 return SPAWN_ERROR;
             }
@@ -1251,6 +1258,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !valid_msg_range(arg0, arg1) {
                 return FS_ERROR;
             }
+            // A server back at its receive has finished its last request:
+            // progress, for the wedge heartbeat, which may never see it
+            // blocked (`supervisor::note_progress`).
+            crate::supervisor::note_progress(tasks::current_task());
             // Fast path: a message is already queued.
             if let Some(packed) = tasks::try_recv_message(tasks::current_task(), arg0, arg1) {
                 return packed;
@@ -1269,6 +1280,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if !valid_msg_range(arg0, arg1) {
                 return FS_ERROR;
             }
+            // Not progress for the wedge heartbeat, even with a message:
+            // `netd` drains its mailbox with this from inside its own long
+            // loops, so a message taken here says nothing about whether the
+            // loop is still advancing (the review of #211).
             tasks::try_recv_message(tasks::current_task(), arg0, arg1).unwrap_or(syscall_abi::NO_MSG)
         }
         syscall_abi::MSG_CALL => {

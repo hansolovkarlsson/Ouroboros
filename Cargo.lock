@@ -305,12 +305,13 @@ dependencies = [
 
 [[package]]
 name = "ouroboros-kernel"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "fdt",
  "log",
  "syscall-abi",
  "uefi",
+ "uefi-raw",
 ]
 
 [[package]]

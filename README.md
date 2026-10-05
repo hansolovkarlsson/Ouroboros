@@ -96,9 +96,10 @@ from the disk automatically, the same way it does in QEMU.
 The physical target is a **Raspberry Pi 4** running
 [pftf/RPi4](https://github.com/pftf/RPi4) EDK2 UEFI firmware — because the
 kernel boots as a UEFI application, the requirement is not "an ARM board" but
-"an ARM board with usable UEFI firmware," which is a much shorter list. Build
-the ESP tree with `make esp` and copy it onto a FAT32 card over the firmware
-release; do *not* `dd` `esp.img`, which has no room for the firmware.
+"an ARM board with usable UEFI firmware," which is a much shorter list. Format
+a card as FAT32 once, then `make sdcard SDCARD=/Volumes/<card>` puts the pinned
+firmware and the ESP tree on it; do *not* `dd` `esp.img`, which has no room for
+the firmware.
 
 **[Full test plan → `docs/testing/testing-pi4.md`](docs/testing/testing-pi4.md)** — board
 selection, the bench rig and serial wiring, the firmware settings that matter,

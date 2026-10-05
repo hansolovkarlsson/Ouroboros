@@ -20,6 +20,30 @@ a **DONE** marker or ~~strikethrough~~ is finished.
 
 ---
 
+## The Raspberry Pi 4 bring-up ✅ DONE (2026-10-04, v0.22.0)
+
+From desk work on 2026-09-27, with no board, to a full session on a Pi 4 on
+2026-10-03: the kernel booted from the SD card through the pftf firmware, a USB
+keyboard behind the on-board hub, a USB stick mounted by `fsd` and `/bin` run
+from it, and a PSCI power-off. Thirty-two pull requests (#176 to #207), each
+summarized in [`CHANGELOG.md`](CHANGELOG.md); the board's own record, boot by
+boot, is [`testing/testing-pi4.md`](testing/testing-pi4.md) section 6.
+
+**What it came to.** The predictions in `testing-pi4.md` that failed were the
+ones that mattered: the xHCI BAR is a bus address, every USB 2 device sits
+behind a hub, the PCIe DMA is not cache-coherent, the PL011 is given at its
+bus address, the firmware hands off at EL2, and its 16 KB stack sits over its
+own page tables. The last two were found by an early fault reporter built for
+the purpose, after HDMI photographs and one-variable round trips had run out
+of evidence. The register-order work that followed (#193 to #207) is spec form
+more than repair: most of it changed nothing visible on the board, and the
+instruments that watch it (`check-xhci-barriers`, the typed register handles)
+are what it leaves behind. **Not done, and on the roadmap:** networking on the
+Pi, the SD card as a runtime disk, booting from a stick with no card,
+multi-core, and the Pi 400 re-booted since the stack fix.
+
+---
+
 ## Session-scoped authentication ✅ DONE (2026-09-26)
 
 The plan, its eight steps and every measurement are in

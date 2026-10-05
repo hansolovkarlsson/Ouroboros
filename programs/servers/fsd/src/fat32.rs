@@ -281,6 +281,14 @@ pub struct Fs {
     /// copies (`fat_start_lba + i * fat_size_32`) and to bound
     /// [`find_free_cluster`](Self::find_free_cluster)'s scan.
     fat_size_32: u32,
+    /// One past the last cluster the volume has: its data sectors over the
+    /// cluster size, plus 2 (clusters are numbered from 2). The FAT is
+    /// rounded up in size, so it can hold zeroed entries past this that
+    /// read as free and name sectors beyond the volume;
+    /// [`find_free_cluster`](Self::find_free_cluster) stops here, not at
+    /// the FAT's end (the review of #212: with the next-fit hint, ordinary
+    /// use walked the scan into those entries).
+    cluster_end: u32,
     /// Sequential-read cursor - the fix for the "large-read fsd restart"
     /// bug. [`read_at`](Self::read_at)'s seek walks the file's cluster
     /// chain from its *start* to reach `offset`, and [`next_cluster`] reads
@@ -300,6 +308,32 @@ pub struct Fs {
     /// it is invalidated on any FAT mutation ([`write_fat_entry`]), so a
     /// read can never follow a stale chain. `None` = no valid cursor.
     read_cursor: Option<ReadCursor>,
+    /// The last FAT sector read, for [`fat_entry`](Self::fat_entry): one
+    /// FAT sector holds 128 entries, so a chain walk or a free-cluster scan
+    /// that read a sector per entry now reads it once. Before this, `cp` of
+    /// a 758 KB file made 353 disk reads for one 2 KiB `write_at` at
+    /// 160 KB, nearly all of them the same few FAT sectors (2026-10-05).
+    /// Kept across requests, which is sound because this `Fs` is the only
+    /// writer of its FAT: `fsd` mounts a partition at most once
+    /// (`tree_of` in `main.rs`, since 2026-10-05; until then it
+    /// was dropped at every request, since a second tree over the same
+    /// partition could write the FAT between them), the disk tools refuse
+    /// while anything is mounted, and
+    /// [`write_fat_entry`](Self::write_fat_entry) keeps it in step with
+    /// this `Fs`'s own writes.
+    fat_cache: Option<FatSector>,
+    /// Where [`find_free_cluster`](Self::find_free_cluster) starts its
+    /// scan: one past the cluster it last returned. Only a starting point,
+    /// so it may be stale: the scan reads every entry it passes and wraps
+    /// to cluster 2, so a cluster freed below it is still found. Without
+    /// it every allocation rescanned the volume's used clusters from 2.
+    next_free_hint: u32,
+}
+
+/// One sector of the first FAT copy, as cached by [`Fs::fat_cache`].
+struct FatSector {
+    lba: u32,
+    data: [u8; SECTOR_SIZE],
 }
 
 /// A remembered point in a file's cluster chain for [`Fs::read_at`]'s
@@ -356,6 +390,16 @@ impl Fs {
 
         let fat_start_lba = partition_lba + reserved_sectors;
         let data_start_lba = fat_start_lba + num_fats * fat_size_32;
+        let total_sectors_16 = u16::from_le_bytes([bpb[19], bpb[20]]) as u32;
+        let total_sectors_32 = u32::from_le_bytes([bpb[32], bpb[33], bpb[34], bpb[35]]);
+        let total_sectors = if total_sectors_16 != 0 { total_sectors_16 } else { total_sectors_32 };
+        let meta_sectors = reserved_sectors + num_fats * fat_size_32;
+        if sectors_per_cluster == 0 || total_sectors <= meta_sectors {
+            return Err(Error::NotFat32);
+        }
+        let clusters = (total_sectors - meta_sectors) / sectors_per_cluster;
+        // Never past what the FAT can describe either.
+        let cluster_end = (clusters + 2).min(fat_size_32 * (SECTOR_SIZE as u32 / 4));
 
         Ok(Fs {
             disk,
@@ -366,7 +410,10 @@ impl Fs {
             root_cluster,
             num_fats,
             fat_size_32,
+            cluster_end,
             read_cursor: None,
+            fat_cache: None,
+            next_free_hint: 2,
         })
     }
 
@@ -495,23 +542,30 @@ impl Fs {
     /// value `>= 0x0FFFFFF8` marks end-of-chain (values above that up to
     /// `0x0FFFFFFF` are all valid EOC markers per the spec, not just one).
     fn next_cluster(&mut self, cluster: u32) -> Result<Option<u32>, Error> {
-        let fat_byte_offset = cluster * 4;
-        let sector = self.fat_start_lba + fat_byte_offset / SECTOR_SIZE as u32;
-        let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
-        let mut buf = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(sector as u64, &mut buf)?;
-        let raw = u32::from_le_bytes([
-            buf[offset],
-            buf[offset + 1],
-            buf[offset + 2],
-            buf[offset + 3],
-        ]);
-        let value = raw & 0x0fff_ffff;
+        let value = self.fat_entry(cluster)?;
         if value == 0 || value >= END_OF_CHAIN_MIN {
             Ok(None)
         } else {
             Ok(Some(value))
         }
+    }
+
+    /// One FAT entry's low 28 bits, from the first FAT copy, through the
+    /// one-sector cache ([`fat_cache`](Self::fat_cache)).
+    fn fat_entry(&mut self, cluster: u32) -> Result<u32, Error> {
+        let fat_byte_offset = cluster * 4;
+        let lba = self.fat_start_lba + fat_byte_offset / SECTOR_SIZE as u32;
+        let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
+        let data = match &self.fat_cache {
+            Some(c) if c.lba == lba => &c.data,
+            _ => {
+                let mut data = [0u8; SECTOR_SIZE];
+                self.disk.read_sector(lba as u64, &mut data)?;
+                &self.fat_cache.insert(FatSector { lba, data }).data
+            }
+        };
+        let raw = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+        Ok(raw & 0x0fff_ffff)
     }
 
     /// Writes one FAT entry, in every copy of the FAT the volume has (per
@@ -535,7 +589,12 @@ impl Fs {
         for i in 0..self.num_fats {
             let sector = self.fat_start_lba + i * self.fat_size_32 + sector_offset;
             let mut buf = [0u8; SECTOR_SIZE];
-            self.disk.read_sector(sector as u64, &mut buf)?;
+            // Copy 0's sector is often the one just read into the cache
+            // (by the scan or walk that chose this cluster).
+            match &self.fat_cache {
+                Some(c) if i == 0 && c.lba == sector => buf = c.data,
+                _ => self.disk.read_sector(sector as u64, &mut buf)?,
+            }
             let existing = u32::from_le_bytes([
                 buf[offset],
                 buf[offset + 1],
@@ -545,38 +604,30 @@ impl Fs {
             let new = (existing & 0xf000_0000) | (value & 0x0fff_ffff);
             buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
             self.disk.write_sector(sector as u64, &buf)?;
+            // Keep the cache in step: copy 0's sector as now written.
+            if i == 0 {
+                self.fat_cache = Some(FatSector { lba: sector, data: buf });
+            }
         }
         Ok(())
     }
 
-    /// Scans the first FAT copy for a free (`0`) cluster, starting at 2
+    /// Scans the first FAT copy for a free (`0`) cluster, from
+    /// [`next_free_hint`](Self::next_free_hint) to the end and then from 2
     /// (0 and 1 are reserved, real clusters start at 2 - same convention
-    /// [`cluster_to_lba`](Self::cluster_to_lba) already assumes). Bounded
-    /// by the FAT's own size, so a full disk returns
-    /// [`Error::DiskFull`](Error::DiskFull) rather than looping forever.
+    /// [`cluster_to_lba`](Self::cluster_to_lba) already assumes) up to the
+    /// hint, so every cluster is looked at once. Bounded by the volume's
+    /// real cluster count ([`cluster_end`](Self::cluster_end)), so a full
+    /// disk returns [`Error::DiskFull`](Error::DiskFull) rather than a
+    /// cluster past the volume's end.
     fn find_free_cluster(&mut self) -> Result<u32, Error> {
-        let total_clusters = self.fat_size_32 * (SECTOR_SIZE as u32 / 4);
-        let mut cluster = 2u32;
-        let mut current_sector = u32::MAX;
-        let mut buf = [0u8; SECTOR_SIZE];
-        while cluster < total_clusters {
-            let fat_byte_offset = cluster * 4;
-            let sector = self.fat_start_lba + fat_byte_offset / SECTOR_SIZE as u32;
-            if sector != current_sector {
-                self.disk.read_sector(sector as u64, &mut buf)?;
-                current_sector = sector;
-            }
-            let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
-            let value = u32::from_le_bytes([
-                buf[offset],
-                buf[offset + 1],
-                buf[offset + 2],
-                buf[offset + 3],
-            ]) & 0x0fff_ffff;
-            if value == 0 {
+        let end = self.cluster_end;
+        let start = if (2..end).contains(&self.next_free_hint) { self.next_free_hint } else { 2 };
+        for cluster in (start..end).chain(2..start) {
+            if self.fat_entry(cluster)? == 0 {
+                self.next_free_hint = cluster + 1;
                 return Ok(cluster);
             }
-            cluster += 1;
         }
         Err(Error::DiskFull)
     }
@@ -609,6 +660,8 @@ impl Fs {
         loop {
             let next = self.next_cluster(cluster)?;
             self.write_fat_entry(cluster, 0)?;
+            // Freed space is found next, before the scan walks on.
+            self.next_free_hint = self.next_free_hint.min(cluster);
             match next {
                 Some(n) => cluster = n,
                 None => break,

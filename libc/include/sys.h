@@ -67,6 +67,11 @@
 #define NP_BASE 0x100
 #define NP_WRITE_AT (NP_BASE + 4)
 #define NP_TOUCH (NP_BASE + 5)
+/* unlink and rename (file.c): a0 = path length; for NP_MV a0 = src length,
+ * a1 = dst length, the payload src then dst. */
+#define NP_RMDIR (NP_BASE + 7)
+#define NP_RM (NP_BASE + 8)
+#define NP_MV (NP_BASE + 9)
 #define NP_READ_AT (NP_BASE + 10)
 #define NP_WRITE_FILE (NP_BASE + 11)
 #define NP_STAT (NP_BASE + 12)
@@ -88,7 +93,12 @@
 #define MSG_MAX_LEN 768u
 #define STAT_INFO_LEN 27u
 #define STAT_SIZE_OFF 0u
+#define STAT_FLAGS_OFF 8u
 #define STAT_MODE_OFF 20u
+#define STAT_UID_OFF 22u
+#define STAT_GID_OFF 24u
+#define STAT_MODEVALID_OFF 26u
+#define STAT_FLAG_DIR 1u
 
 /* Floor of the reserved error band: any syscall/fs return >= this is an error
  * (mirrors syscall-abi's FS_ERR_MIN = u64::MAX - 43). Hand-mirrored, so it can
@@ -104,6 +114,16 @@
  * reading as "failed". Mirrors syscall-abi's NO_FS. */
 #define NO_FS (~0UL - 1UL)
 #define FS_ERR_NOT_FOUND (~0UL - 2UL)
+/* Mapped to errno by unlink and rename (file.c). */
+#define FS_ERR_NOT_A_FILE (~0UL - 3UL)
+#define FS_ERR_NOT_A_DIRECTORY (~0UL - 4UL)
+#define FS_ERR_INVALID_NAME (~0UL - 5UL)
+#define FS_ERR_ALREADY_EXISTS (~0UL - 6UL)
+#define FS_ERR_NOT_EMPTY (~0UL - 7UL)
+#define FS_ERR_IS_ROOT (~0UL - 8UL)
+#define FS_ERR_DISK_FULL (~0UL - 9UL)
+#define FS_ERR_READ_ONLY (~0UL - 29UL)
+#define FS_ERR_CROSS_DEVICE (~0UL - 33UL)
 #define FS_ERR_PERM (~0UL - 32UL)
 /* A request or reply that did not authenticate: no key for the peer, a reply
  * signature or keyed tag that did not verify. Named so a C caller can tell it
@@ -165,5 +185,12 @@ static inline void __wr_u64(unsigned char *p, unsigned long v) {
         p[i] = (unsigned char)(v >> (i * 8));
     }
 }
+
+/* The port's internal hooks, between os.c's _exit and file.c, declared here
+ * because this header reaches both builds: a picolibc object is compiled with
+ * libc/include on the quote path only, so the hand-rolled <unistd.h> that also
+ * declares them is not seen there. */
+void __libc_end_stdout(void);
+void __libc_close_all(void);
 
 #endif

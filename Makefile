@@ -150,6 +150,7 @@ EXFAT_PART   := $(BUILD_DIR)/exfatpart.img
 EXT2_IMG     := $(BUILD_DIR)/espext2.img
 EXT2_PART    := $(BUILD_DIR)/ext2part.img
 USBSTICK_IMG := $(BUILD_DIR)/usbstick.img
+STALL_IMG := $(BUILD_DIR)/usb-hub-stall.img
 NET_PCAP     := $(BUILD_DIR)/net.pcap
 # mke2fs (ext2 image builder) from Homebrew's keg-only e2fsprogs - macOS has no
 # native ext2 tooling. `brew install e2fsprogs` provides it. Used only by the
@@ -185,6 +186,7 @@ LIBC_CFLAGS  := $(CFLAGS_OS) -Ilibc/include -fno-builtin
 CDEMO_BIN    := $(BUILD_DIR)/cdemo.bin
 CFILE_BIN    := $(BUILD_DIR)/cfile.bin
 CLEAK_BIN    := $(BUILD_DIR)/cleak.bin
+CFIDHOLD_BIN := $(BUILD_DIR)/cfidhold.bin
 NSDEMO_BIN   := $(BUILD_DIR)/nsdemo.bin
 CREMOTE_BIN  := $(BUILD_DIR)/cremote.bin
 CBIG_BIN     := $(BUILD_DIR)/cbig.bin
@@ -219,13 +221,16 @@ PICO_INC     := -I$(PICO_DIR)/include
 PICO_LIBC    := $(PICO_DIR)/lib/libc.a
 PICO_PORT    := $(BUILD_DIR)/pico/crt0.o $(BUILD_DIR)/pico/os.o $(BUILD_DIR)/pico/file.o $(BUILD_DIR)/pico/builtins.o
 CPICO_BIN    := $(BUILD_DIR)/cpico.bin
+CMEM_BIN     := $(BUILD_DIR)/cmem.bin
+CRENAME_BIN  := $(BUILD_DIR)/crename.bin
+CFSTAT_BIN   := $(BUILD_DIR)/cfstat.bin
 
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd release test check-relocs test-parallels test-keyboard-chain test-usb-hub test-reentrant-session test-async-rmount test-held-keys clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -412,7 +417,11 @@ chello-bin:
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/chello.elf $(CHELLO_BIN)
 
 # Compile each minimal-libc source to an object (-fno-builtin, see LIBC_CFLAGS).
-$(BUILD_DIR)/libc/%.o: libc/src/%.c
+# The headers too: a change to sys.h (a wire constant) or sys/stat.h (a
+# struct) must rebuild every object, or a stale one ships beside the new
+# header with nothing to say so.
+LIBC_HDRS    := $(wildcard libc/include/*.h libc/include/sys/*.h)
+$(BUILD_DIR)/libc/%.o: libc/src/%.c $(LIBC_HDRS)
 	mkdir -p $(BUILD_DIR)/libc
 	$(CC) $(LIBC_CFLAGS) -c $< -o $@
 
@@ -429,6 +438,14 @@ cfile-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
 	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/cfile.c -o $(BUILD_DIR)/cfile.o
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cfile.elf $(BUILD_DIR)/cfile.o $(LIBC_OBJS) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cfile.elf $(CFILE_BIN)
+
+# Holds a file open across `unmount` and `mount -a`: the check that a fid on an
+# unmounted filesystem stays allocated, dead, until closed. Driven by
+# scripts/test-unmount.py. See libc/cfidhold.c.
+cfidhold-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
+	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/cfidhold.c -o $(BUILD_DIR)/cfidhold.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cfidhold.elf $(BUILD_DIR)/cfidhold.o $(LIBC_OBJS) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cfidhold.elf $(CFIDHOLD_BIN)
 
 # A C program that LEAKS a fid on purpose (exits through the raw EXIT syscall,
 # past _exit's close-all): the check for fsd's identity-keyed fid reaper. See
@@ -475,15 +492,25 @@ cwrite-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
 # against picolibc's headers so struct/ABI shapes match, plus the 128-bit-shift
 # builtins. Kept apart from LIBC_OBJS (the hand-rolled libc) - a picolibc program
 # does NOT link our stdio.c/stdlib.c/string.c (picolibc supplies those).
-$(BUILD_DIR)/pico/crt0.o: libc/src/crt0.c
+#
+# libc/include is on the QUOTE path only (-iquote), so "sys.h" and
+# "nsresolve.h" resolve and an angle-bracket include can never reach a
+# hand-rolled header: the shapes are picolibc's whatever the flag order. Until
+# 2026-10-05 it was -Ilibc/include, first, so <sys/stat.h> was the hand-rolled
+# struct stat (st_size at 0, st_mode at 8, against picolibc's 16 and 4), and
+# fstat wrote a picolibc program's size into st_dev/st_ino (found by
+# libc/cfstat.c; the review of #216 asked for the wrong header to be
+# unspellable rather than out-ordered).
+PICO_PORT_CFLAGS := $(CFLAGS_OS) $(PICO_INC) -iquote libc/include -fno-builtin
+$(BUILD_DIR)/pico/crt0.o: libc/src/crt0.c $(LIBC_HDRS)
 	@mkdir -p $(BUILD_DIR)/pico
-	$(CC) $(CFLAGS_OS) -Ilibc/include $(PICO_INC) -fno-builtin -c $< -o $@
-$(BUILD_DIR)/pico/os.o: libc/src/os.c
+	$(CC) $(PICO_PORT_CFLAGS) -c $< -o $@
+$(BUILD_DIR)/pico/os.o: libc/src/os.c $(LIBC_HDRS)
 	@mkdir -p $(BUILD_DIR)/pico
-	$(CC) $(CFLAGS_OS) -Ilibc/include $(PICO_INC) -fno-builtin -c $< -o $@
-$(BUILD_DIR)/pico/file.o: libc/src/file.c
+	$(CC) $(PICO_PORT_CFLAGS) -c $< -o $@
+$(BUILD_DIR)/pico/file.o: libc/src/file.c $(LIBC_HDRS)
 	@mkdir -p $(BUILD_DIR)/pico
-	$(CC) $(CFLAGS_OS) -Ilibc/include $(PICO_INC) -fno-builtin -c $< -o $@
+	$(CC) $(PICO_PORT_CFLAGS) -DOURO_HAVE_ERRNO -c $< -o $@
 $(BUILD_DIR)/pico/builtins.o: libc/pico/builtins.c
 	@mkdir -p $(BUILD_DIR)/pico
 	$(CC) $(CFLAGS_OS) -fno-builtin -c $< -o $@
@@ -494,6 +521,29 @@ cpico-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/picodemo.c -o $(BUILD_DIR)/pico/picodemo.o
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpico.elf $(PICO_PORT) $(BUILD_DIR)/pico/picodemo.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpico.elf $(CPICO_BIN)
+
+# The heap a C program gets, held through picolibc's malloc and every byte
+# checked: prints the heap's size beside what malloc held live. The check for
+# the 1 MiB heap Proem asked for. Runs as /bin/CMEM.
+cmem-bin: $(NSRESOLVE_A) $(PICO_PORT)
+	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/cmem.c -o $(BUILD_DIR)/pico/cmem.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cmem.elf $(PICO_PORT) $(BUILD_DIR)/pico/cmem.o $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cmem.elf $(CMEM_BIN)
+
+# unlink and rename through picolibc (`remove`, `rename`): the checks Proem's and
+# Edit's handoff notes name. Driven by scripts/test-crename.py. Runs as
+# /bin/CRENAME.
+crename-bin: $(NSRESOLVE_A) $(PICO_PORT)
+	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/crename.c -o $(BUILD_DIR)/pico/crename.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/crename.elf $(PICO_PORT) $(BUILD_DIR)/pico/crename.o $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/crename.elf $(CRENAME_BIN)
+
+# fstat through picolibc: every field it does not fill comes back zero (Proem's
+# fstat-identity handoff). Driven by scripts/test-crename.py. Runs as /bin/CFSTAT.
+cfstat-bin: $(NSRESOLVE_A) $(PICO_PORT)
+	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/cfstat.c -o $(BUILD_DIR)/pico/cfstat.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cfstat.elf $(PICO_PORT) $(BUILD_DIR)/pico/cfstat.o $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cfstat.elf $(CFSTAT_BIN)
 
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
@@ -630,7 +680,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -688,11 +738,15 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CDEMO_BIN) $(ESP_DIR)/bin/CDEMO
 	cp $(CFILE_BIN) $(ESP_DIR)/bin/CFILE
 	cp $(CLEAK_BIN) $(ESP_DIR)/bin/CLEAK
+	cp $(CFIDHOLD_BIN) $(ESP_DIR)/bin/CFIDHOLD
 	cp $(NSDEMO_BIN) $(ESP_DIR)/bin/NSDEMO
 	cp $(CREMOTE_BIN) $(ESP_DIR)/bin/CREMOTE
 	cp $(CBIG_BIN) $(ESP_DIR)/bin/CBIG
 	cp $(CWRITE_BIN) $(ESP_DIR)/bin/CWRITE
 	cp $(CPICO_BIN) $(ESP_DIR)/bin/CPICO
+	cp $(CMEM_BIN) $(ESP_DIR)/bin/CMEM
+	cp $(CRENAME_BIN) $(ESP_DIR)/bin/CRENAME
+	cp $(CFSTAT_BIN) $(ESP_DIR)/bin/CFSTAT
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
 	cp $(MORE_BIN) $(ESP_DIR)/bin/MORE
@@ -752,9 +806,12 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 # (non-legacy) register interface - QEMU defaults virtio-mmio to legacy
 # mode, confirmed via `-device virtio-mmio,help`'s printed default, kept
 # only for old-guest compatibility this project has no need to imitate.
+# `-machine` for `run`: `run-el2` overrides it (a target-specific variable
+# reaches the prerequisite's recipe), so the two boot one device list.
+MACHINE ?= virt
 run: esp
 	qemu-system-aarch64 \
-		-machine virt \
+		-machine $(MACHINE) \
 		-cpu cortex-a72 \
 		-m 512M \
 		-bios $(OVMF) \
@@ -763,6 +820,15 @@ run: esp
 		-device virtio-rng-device \
 		-global virtio-mmio.force-legacy=false \
 		-nographic
+
+# `run` with the firmware handing the kernel off at EL2, as the Raspberry
+# Pi's does (virtualization=on gives the guest an EL2 and the firmware runs
+# there): the dev loop for the EL1 drop, docs/roadmap/roadmap-el1-drop.md.
+# The kernel's `running at EL2 after the exit` line, then `dropped from EL2
+# to EL1`, is the check. Not a copy of `run`: the same recipe with MACHINE
+# overridden, so a change to `run`'s devices reaches this boot too.
+run-el2: override MACHINE := $(MACHINE),virtualization=on
+run-el2: run
 
 # Same as `run`, plus a virtio-net device on virtio-mmio with QEMU's
 # user-mode (SLIRP) networking - the dev loop for the network stack
@@ -944,6 +1010,19 @@ image: esp
 	find "$$MP" -name '._*' -delete; \
 	hdiutil detach "$$MP" >/dev/null; \
 	rmdir "$$MP"
+
+# build/esp.img again with the MSDSTALL boot flag file at its root, for
+# `test-usb-hub.py --stall` (see bootflags.rs): the same attach, change,
+# strip-sidecars, detach as `image`. The detach is always attempted, forced
+# if it is refused, and a failure at any step fails the target.
+image-stall: image
+	cp $(ESP_DIR).img $(STALL_IMG)
+	@MP=$$(mktemp -d); \
+	hdiutil attach -nobrowse -mountpoint "$$MP" $(STALL_IMG) >/dev/null || { rmdir "$$MP"; exit 1; }; \
+	ok=0; touch "$$MP/MSDSTALL" && find "$$MP" -name '._*' -delete && ok=1; \
+	hdiutil detach "$$MP" >/dev/null || hdiutil detach -force "$$MP" >/dev/null || { echo "image-stall: $$MP is still mounted"; exit 1; }; \
+	rmdir "$$MP"; \
+	test $$ok = 1 || { echo "image-stall: could not stage MSDSTALL"; exit 1; }
 
 # Boots the real build/esp.img (genuine FAT32) instead of `run`'s vvfat
 # passthrough - needed for anything that reads the filesystem at runtime
@@ -1365,6 +1444,44 @@ parallels-hdd: image
 	rm -rf $(ESP_DIR).hdd
 	"$(PDT)" create --hdd "$(CURDIR)/$(ESP_DIR).hdd" --dmg "$(CURDIR)/$(ESP_DIR).dmg"
 
+# Stages the Raspberry Pi 4 / Pi 400 boot card: the pftf UEFI firmware
+# (pinned, checksummed, cached under build/cache) plus build/esp on top, on an
+# already-mounted FAT volume. It never formats; see scripts/sdcard.sh for the
+# guards and docs/testing/testing-pi4.md section 4 for the card itself.
+# The firmware is installed only on a card that has none, since its settings
+# and UEFI variables live inside RPI_EFI.fd.
+#
+#   make sdcard SDCARD=/Volumes/OUROBOROS
+#   make sdcard SDCARD=/Volumes/OUROBOROS KEEP_ETC=1   # keep the card's /etc
+#   make sdcard SDCARD=/Volumes/OUROBOROS FIRMWARE=1   # reinstall the firmware
+#   make sdcard SDCARD=/Volumes/OUROBOROS EJECT=1
+# The SDCARD check runs before the build, so a missing or mistyped path fails
+# in a second rather than after a full rebuild; the script checks it properly.
+sdcard:
+	@test -n "$(SDCARD)" && test -d "$(SDCARD)" || { \
+		echo "sdcard: SDCARD='$(SDCARD)' is not a mounted card, e.g. make sdcard SDCARD=/Volumes/OUROBOROS"; exit 1; }
+	$(MAKE) esp
+	STICK="$(STICK_MODE)" SDCARD="$(SDCARD)" KEEP_ETC="$(KEEP_ETC)" FIRMWARE="$(FIRMWARE)" EJECT="$(EJECT)" \
+		ESP_DIR="$(ESP_DIR)" CACHE_DIR="$(BUILD_DIR)/cache" ./scripts/sdcard.sh
+
+# Stages the same tree on a USB stick, the Pi's only disk once the kernel
+# runs (the SD slot has no driver after exit_boot_services, testing-pi4.md
+# section 6): what `mount -a` mounts and where /bin, /etc and /man come
+# from. The sdcard target with STICK_MODE=1, so one recipe and one script
+# (scripts/sdcard.sh, STICK=1, whose header lists the differences): the same
+# guards, no firmware and no EFI tree, FAT32 or exFAT on partition 1 of an
+# MBR disk, and its /etc kept by default. It never formats; in Disk Utility,
+# MS-DOS (FAT) with the Master Boot Record scheme gives FAT32 on a stick
+# over 2 GB.
+#
+#   make stick STICK=/Volumes/STICK
+#   make stick STICK=/Volumes/STICK KEEP_ETC=0   # re-stage the stick's /etc
+#   make stick STICK=/Volumes/STICK EJECT=1
+stick:
+	@test -n "$(STICK)" && test -d "$(STICK)" || { \
+		echo "stick: STICK='$(STICK)' is not a mounted stick, e.g. make stick STICK=/Volumes/STICK"; exit 1; }
+	$(MAKE) sdcard SDCARD="$(STICK)" STICK_MODE=1
+
 # Cut a release: build the release-profile disk images and package the
 # downloadable artifacts (esp.img.zip + esp.hdd.zip + SHA256SUMS) under
 # build/release/. Local and repeatable. The outward-facing publish step
@@ -1406,20 +1523,60 @@ test-parallels:
 test-keyboard-chain: image
 	PROFILE="$(PROFILE)" ./scripts/test-keyboard-chain.sh
 
-# The USB hub check (scripts/test-usb-hub.py): two driven boots with a
+# The USB hub check (scripts/test-usb-hub.py): three driven boots with a
 # keyboard and a storage stick behind a usb-hub, graded on outcomes (keyboard
 # ready, stick configured, a line typed through the USB keyboard runs). The
 # second, --usb-boot, boots build/esp.img FROM the stick behind the hub with
-# no other disk, so it must also mount through the hub. `python3
-# scripts/test-usb-hub.py --direct` is the control, the same devices on root
-# ports. About two minutes, so not in `make test`; run it when xhci.rs's port
-# scan or device setup changes. Both boots always run (a failure in the first
-# must not hide the second's result); the target fails if either did.
+# no other disk, so it must also mount through the hub. The third, --stall,
+# is --usb-boot from build/usb-hub-stall.img (`make image-stall`, the image
+# with the MSDSTALL boot flag): QEMU's stick stalls on every seventh CBW
+# (Bulk-OUT) and on a short CSW read for another (Bulk-IN), about 30 of
+# each, and the bulk-endpoint recovery must carry the boot through. Its
+# image is built just before that boot, so a failure there costs only that
+# boot. `python3 scripts/test-usb-hub.py --direct` is the control, the same
+# devices on root ports. About three minutes, so not in
+# `make test`; run it when xhci.rs's port scan, device setup or storage
+# recovery changes, or usb_msd.rs's retry. Every boot always runs (a failure
+# in one must not hide the next's result); the target fails if any did.
 test-usb-hub: image $(USBSTICK_IMG)
-	@fail=0; \
-	python3 scripts/test-usb-hub.py || fail=1; \
-	python3 scripts/test-usb-hub.py --usb-boot || fail=1; \
+	@fail=0; inc=0; hard=0; \
+	python3 scripts/test-usb-hub.py; s=$$?; [ $$s -eq 100 ] && inc=1; [ $$s -ne 0 ] && fail=1; [ $$s -ne 0 ] && [ $$s -ne 100 ] && hard=1; \
+	python3 scripts/test-usb-hub.py --usb-boot; s=$$?; [ $$s -eq 100 ] && inc=1; [ $$s -ne 0 ] && fail=1; [ $$s -ne 0 ] && [ $$s -ne 100 ] && hard=1; \
+	if $(MAKE) --no-print-directory image-stall; then \
+		python3 scripts/test-usb-hub.py --stall; s=$$?; [ $$s -eq 100 ] && inc=1; [ $$s -ne 0 ] && fail=1; [ $$s -ne 0 ] && [ $$s -ne 100 ] && hard=1; \
+	else fail=1; hard=1; fi; \
+	if [ $$hard -eq 1 ]; then echo "test-usb-hub: a layout FAILED its checks"; \
+	elif [ $$inc -eq 1 ]; then echo "test-usb-hub: a layout was INCONCLUSIVE (QEMU's firmware never loaded the kernel) and none failed, so this is not a pass: run it again"; fi; \
 	exit $$fail
+
+# The early fault reporter (kernel/src/earlyfault.rs) exercised on QEMU
+# (scripts/test-early-fault.py): one boot with the EARLYFAULT flag file at the
+# ESP root, where the kernel asks the firmware's CopyMem to write at an
+# unmapped address just before the xHCI takeover, so the fault is taken in
+# the firmware's own code with the firmware's vectors installed, as on the
+# Pi 4; the serial console must show the reporter's dump (ESR decoded, the
+# register rows before the first frame, the faulting PC placed in the DXE
+# core by name, a frame placed in the kernel) and not the firmware's one
+# line. A boot with EARLYFAULT and WALKFAULT, where the report faults inside
+# its own image walk and must have printed the rows and then the one line a
+# nested fault prints, with FAR and the image under read. Then a boot without
+# a flag, which must reach the shell with the reporter armed and answer
+# `help`. Every boot's QEMU trace is graded too. About ninety seconds. Run it
+# when earlyfault.rs, the console discovery it prints through, or the
+# kernel's frame-pointer setting (.cargo/config.toml) changes.
+test-early-fault: esp
+	python3 scripts/test-early-fault.py
+
+# The EL1 drop (kernel/src/el2.rs, docs/roadmap/roadmap-el1-drop.md): the
+# same three boots handed off at EL2 (virtualization=on, as the Raspberry
+# Pi's firmware does). The control must say `running at EL2`, `dropped
+# from EL2 to EL1`, reach the shell and answer `help` after a dwell, where
+# before the drop the first eret into task 0, made at EL2, restored the
+# firmware's stale ELR_EL2 and landed at address 0. About a minute; run it
+# whenever el2.rs, mmu.rs's switch or
+# exceptions::install changes.
+test-el1-drop: esp
+	python3 scripts/test-early-fault.py --el2
 
 # The re-entrant session check (scripts/test-reentrant-session.sh): a remote
 # fid op arriving at netd while it is inside a cpu run, on the two-node ext2
@@ -1441,6 +1598,32 @@ test-async-rmount: image
 # session loop or netd's held-key table changes.
 test-held-keys: image
 	python3 scripts/test-held-keys.py
+
+# The user heap on a booted image: /bin/CMEM twice in one boot
+# (scripts/test-heap.py). Each run checks its heap is at least 1 MiB, that
+# malloc holds nearly all of it with every byte read back, and that the heap
+# read 0 before its first malloc; the second run starts in the slot the first
+# gave back, so it is the check on the loader zeroing a region. One boot, about
+# a minute; run it whenever HEAP_PAGES, populate_region or the runtime region
+# allocator changes.
+test-heap: image
+	python3 scripts/test-heap.py
+
+# `unmount` with a partition mount and an open file, on a copy of the ext2
+# image (scripts/test-unmount.py): both trees cleared, a held fid answering
+# NO_FS and never handed to the next opener, the shell's partition binding
+# dropped, and `erase` allowed after. One boot, about a minute and a half; run
+# it whenever FSOP_UNMOUNT, the fid table or the shell's mount code changes.
+test-unmount: image-ext2
+	python3 scripts/test-unmount.py
+
+# unlink, rename and fstat in the C port (scripts/test-crename.py, /bin/CRENAME
+# and /bin/CFSTAT): two boots, FAT32 and ext2 (with a partition at /mnt/f for
+# EXDEV), the checks Proem's and Edit's handoff notes name. About two
+# minutes; run it whenever libc's unlink/rename/fstat, its headers, or fsd's
+# NP_RM/NP_MV/NP_FSTAT changes.
+test-crename: image image-ext2
+	python3 scripts/test-crename.py
 
 # Host unit tests for the PURE crates - the ones with no I/O, no syscalls and no
 # target dependency, so they run natively on the build machine. This exists
@@ -1466,6 +1649,19 @@ PURE_CRATES := accounts regex ed25519 clusterkeys ninep-abi
 # why it also fails when the tool reports NO relocations at all.
 check-relocs:
 	@./scripts/check-relocs.sh
+
+# The xHCI driver's two DMA barriers in the built kernel (2026-10-03). No QEMU
+# rig can fail for a missing one: QEMU's controller sees guest memory as the
+# CPU last wrote it, and only the Pi's non-coherent PCIe controller needs
+# them. xhci.rs keeps each barrier and its store as a naked function of fixed
+# instructions, and the script finds each in the image, once, and a call to it.
+# Shown to fail by deleting a barrier, putting a `nop` before the store, and
+# routing write32 itself around its function. It does NOT see one new raw
+# register write added beside the others (see the script's docstring). PART
+# OF `test`, since a check outside the default suite decays; checks the
+# PROFILE that `make sdcard` stages (debug unless PROFILE says otherwise).
+check-xhci-barriers: build
+	@python3 scripts/check-xhci-barriers.py $(KERNEL) $(dir $(OBJCOPY))
 
 # The published website vs the documents it abridges. docs/ is served live by
 # GitHub Pages and docs/site/*.html is hand-written - an abridgement, not a
@@ -1520,6 +1716,14 @@ test:
 	@# public page keeps serving a confident, stale answer. See check-site above.
 	@echo "== published site vs its sources"
 	@python3 scripts/check-site-freshness.py || exit 1
+	@# test-usb-hub reports one firmware stall as INCONCLUSIVE rather than as
+	@# failed checks; a classifier that grew too broad would turn a kernel
+	@# that never starts into that verdict, so it is checked on fixed
+	@# transcripts here, where it runs in a second.
+	@echo "== test-usb-hub's INCONCLUSIVE classifier"
+	@python3 scripts/test-usb-hub.py --self-test || exit 1
+	@echo "== xHCI barriers in the kernel image"
+	@$(MAKE) --no-print-directory check-xhci-barriers || exit 1
 	@echo "== all pure-crate host tests passed, and clippy clean including tests"
 
 clean:

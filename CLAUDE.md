@@ -104,7 +104,15 @@ a separate kernel binary. That split hasn't happened yet.
 
 `main()` never returns `Status::SUCCESS` — it logs a boot message and parks
 the core in a `wfe` spin loop (`halt()` in `kernel/src/main.rs`) instead.
-Returning to firmware is a dead end for kernel code.
+Returning to firmware is a dead end for kernel code. **Since 2026-10-02 its
+first act is to leave the firmware's stack for the kernel's own** (256 KB
+in the image's `.bss`, `KERNEL_STACK`), then `kernel_main` runs there and
+never returns: on the Raspberry Pi the firmware's stack is 16 KB with its
+page tables directly below it, and the kernel overflowed it into them,
+which was every firmware fault the board showed (`testing-pi4.md`
+section 6). The first log line says which build it is (the commit, `+dirty`,
+the profile, from `kernel/build.rs`, which reruns every build) and which
+stack it is on.
 
 `main()` now calls `boot::exit_boot_services(None)` partway through and
 permanently leaves the UEFI environment. Everything before that call may use
@@ -221,7 +229,8 @@ real address for.
 
 `kernel/src/exceptions.rs` installs a minimal AArch64 vector table (VBAR_EL1)
 right after `exit_boot_services`, before anything else gets a chance to
-fault. On any synchronous exception, IRQ, FIQ, or SError, it reports
+fault (on an EL2 handoff the write is made then but is live only from the
+drop to EL1; see the 2026-10-02 update at the end of this section). On any synchronous exception, IRQ, FIQ, or SError, it reports
 `ESR_EL1`/`FAR_EL1`/`ELR_EL1` and the vector index through the global
 console (`kernel/src/console.rs` — a `Sync`-wrapped
 `UnsafeCell<Option<Console>>` shared between `main()` and the exception
@@ -232,6 +241,17 @@ object would need to allocate, and the console is only ever installed after
 and no longer usable) and halts, rather than leaving a bad access to run
 into whatever an unconfigured VBAR_EL1 does. This kernel has only ever been
 observed at EL1 (typical for a UEFI OS loader) — not verified at any other EL.
+**Update 2026-10-01: the Raspberry Pi's firmware hands off at EL2**, and
+every `_EL1` write after the exit (this table, the MMU switch, the timer)
+then goes to a register the running level does not use; found by the early
+fault reporter (`earlyfault.rs`), reproduced on QEMU with `-machine
+virt,virtualization=on`. The plan is `docs/roadmap/roadmap-el1-drop.md`.
+**Built 2026-10-02 (`el2.rs`): the kernel logs the level it was handed off
+at, and at EL2 `mmu::switch_to_identity_map` drops to EL1 instead of
+switching**, with EL1's tables and vectors prepared from EL2 and an `eret`
+into a running MMU; this table's `VBAR_EL1` write, made from EL2, takes
+effect at that `eret`. Proven on QEMU (`make test-el1-drop`); the Pi 4
+boot is pending.
 
 **A real gotcha hit and fixed while building this, worth not repeating:**
 the vector table was first placed in a custom section (`.section
@@ -261,6 +281,13 @@ console + deliberate fault) was removed after confirming this; don't expect
 to find it in `main()`.
 
 ### MMU: identity-mapped on our own tables, not firmware's — a real starting-level bug, worth reading before touching this again
+
+**Update 2026-10-02: the install is two halves now** (`build_identity_map`,
+memory only, then `switch_to_identity_map`), and on the Raspberry Pi's EL2
+handoff the switch is not the TTBR0 swap described below but the drop to
+EL1 in `el2.rs`: EL1's regime and `SCTLR_EL1` are written from EL2 and an
+`eret` lands on the tables; a handoff at any other level halts with a line.
+The paragraphs below describe the EL1 path, which is unchanged.
 
 `kernel/src/mmu.rs` replaces firmware's translation tables with our own
 right after `exit_boot_services` + `exceptions::install()`. Firmware runs
@@ -490,19 +517,28 @@ make run-image-2vm-b         # two-VM cluster: machine B - connects the shared l
 make run-usb-kbd             # same as `run`, plus an xHCI controller + USB keyboard + HMP monitor socket for sendkey keystroke injection (see "USB HID keyboard driver" above)
 make run-usb-multi           # same as `run-usb-kbd`, plus a usb-tablet and a usb-storage stick on the same controller - the three-device rig for xhci.rs's multi-device scan (see "xHCI multi-device support" above)
 make run-usb-hub             # the Raspberry Pi's USB layout on QEMU: keyboard + stick BEHIND a usb-hub, tablet on a root port (QEMU's hub is full-speed, so the Pi's transaction-translator case is not modelled)
-make test-usb-hub            # the hub layout driven and graded (scripts/test-usb-hub.py): two boots, about two minutes - keyboard + stick behind the hub, then --usb-boot (booted FROM a stick behind the hub, mounted through it); `--direct` is the control with the same devices on root ports - run it whenever xhci.rs's port scan or device setup changes
+make test-usb-hub            # the hub layout driven and graded (scripts/test-usb-hub.py): three boots, about three minutes - keyboard + stick behind the hub, then --usb-boot (booted FROM a stick behind the hub, mounted through it), then --stall (the same, from `make image-stall`'s copy carrying the \MSDSTALL flag, so QEMU's stick stalls on every seventh CBW and on a short CSW read for another, about 30 of each, and each must be recovered: the CBW by its first retry, the CSW in place); `--direct` is the control with the same devices on root ports; a boot where QEMU's own firmware stalls in its USB boot (`UsbBootExecCmd`) and never loads the kernel is INCONCLUSIVE, not failed checks, still not a pass; every run's verdict goes to scratch/usb-hub-runs.log so the stall reads as a rate, and a stalled transcript is kept in scratch/usb-hub-inconclusive/ - run it whenever xhci.rs's port scan, device setup or storage recovery changes
 make image                  # build build/esp.img, a raw MBR+FAT32 disk image (not directly usable by Parallels - see below)
 make run-image               # boot build/esp.img (genuine FAT32) instead of run's vvfat - needed for anything that reads the filesystem at runtime (the fsd server and every disk command)
 make run-image-gpt           # build build/espgpt.img (build/esp.img's FAT32 wrapped in a bootable GPT disk via scripts/mkgpt.py) and boot it - exercises fsd's GPT partition discovery (the disk has no real MBR table)
 make run-image-exfat         # build build/espexfat.img (two-partition MBR: exFAT partition 1 + FAT32 ESP partition 2, via newfs_exfat + scripts/mkexfat.py) and boot it - fsd mounts the exFAT partition (FAT32 probe fails, exFAT probe succeeds), UEFI boots the FAT32 ESP; exercises fsd/src/exfat.rs (the exFAT read-write arm)
 make run-image-ext2          # build build/espext2.img (two-partition MBR: ext2 partition 1 + FAT32 ESP partition 2, via e2fsprogs' mke2fs + scripts/mkext2.py) and boot it - fsd mounts the ext2 partition (FAT32 + exFAT probes fail, ext2 succeeds), UEFI boots the FAT32 ESP; exercises fsd/src/ext2.rs (the ext2 read-write arm). Needs `brew install e2fsprogs`
 make parallels-hdd          # wrap build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk
+make sdcard SDCARD=/Volumes/OUROBOROS  # stage the Pi 4 / Pi 400 boot card on an already-formatted FAT volume: pinned pftf firmware (installed once, since its settings live in RPI_EFI.fd) + build/esp on top. Never formats. KEEP_ETC=1 keeps the card's /etc (default re-stages it, resetting Pi-made accounts), FIRMWARE=1 reinstalls the firmware, EJECT=1 ejects. See docs/testing/testing-pi4.md section 4
+make stick STICK=/Volumes/STICK       # the USB stick, the Pi's only disk once the kernel runs (no SD driver after the exit): `make sdcard` in stick mode, no firmware and no EFI tree, FAT32 or exFAT on partition 1 of an MBR disk, its /etc KEPT by default (KEEP_ETC=0 re-stages), never formats. Stage card and stick from the same build. testing-pi4.md section 4, "The USB stick"
 make test-parallels          # scripted real-hardware round trip via prlctl - see below
+make test-early-fault        # the early fault reporter on QEMU (scripts/test-early-fault.py), three boots: with \EARLYFAULT the kernel's own dump of a fault taken in the firmware's code (the register rows before the first frame, the firmware's tables walked to an invalid entry at the ESR's level, the DXE core named, a kernel frame in the backtrace); with \EARLYFAULT and \WALKFAULT the report faulting inside its own image walk, the rows and then the nested-fault line with FAR and the image under read; and with no flag the shell, answering `help`; about ninety seconds - run it whenever earlyfault.rs or console discovery changes
+make run-el2                 # `run` with the firmware handing off at EL2 (-machine virt,virtualization=on), as the Raspberry Pi's does: the dev loop for the EL1 drop (kernel/src/el2.rs); the log must say `running at EL2 after the exit` then `dropped from EL2 to EL1`
+make test-el1-drop           # the EL1 drop's rig: test-early-fault.py --el2, the same three boots handed off at EL2; the control must show the drop and the shell answering `help` after a dwell, where before the drop the first eret into task 0, made at EL2, restored the firmware's stale ELR_EL2 and landed at address 0; about a minute - run it whenever el2.rs, mmu.rs's switch or exceptions::install changes
 make test-async-rmount       # rebuilds the image, then three driven QEMU boots against host-run 9P peers (scripts/test-async-rmount.sh): the parked remote mount is served, a parked reply never reaches a recycled slot, and a live peer is served while a silent one is parked - run it whenever netd's client paths or the kernel's MSG_SEND arm change
 make test-held-keys          # rebuilds the image, then five driven QEMU boots of the held user keys (scripts/test-held-keys.py): login holds, logout and a killed shell drop, an ordinary user is refused; minutes, so not in `make test` - run it whenever login, the shell's session loop or netd's held-key table changes
+make test-heap               # the user heap on a booted image (scripts/test-heap.py): /bin/CMEM twice in one boot, each checking a heap of at least 1 MiB, malloc holding nearly all of it, and every byte 0 before the first malloc (the second run starts in the slot the first gave back); about a minute - run it whenever HEAP_PAGES, populate_region or the runtime region allocator changes
+make test-unmount            # `unmount` with a partition mount and a held file, on a copy of the ext2 image (scripts/test-unmount.py, /bin/CFIDHOLD): both trees cleared, the held fid answering NO_FS and never handed to the next opener, the shell's own partition binding dropped, `erase` allowed after; about a minute and a half - run it whenever FSOP_UNMOUNT, the fid table or the shell's mount code changes
+make test-crename            # unlink, rename and fstat in the C port (scripts/test-crename.py, /bin/CRENAME, /bin/CFSTAT): two boots, FAT32 and ext2 (a partition at /mnt/f for EXDEV), the checks Proem's and Edit's handoff notes name; about two minutes - run it whenever libc's unlink/rename/fstat, its headers, or fsd's NP_RM/NP_MV/NP_FSTAT changes
 make test-keyboard-chain     # rebuilds the image, then four driven QEMU boots through the nested-shell keyboard-chain recipes (scripts/test-keyboard-chain.sh); minutes, so not in `make test` - run it whenever tasks.rs's keyboard ownership changes
-make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi) + the cross-language wire-constant check
+make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi) + the cross-language wire-constant check + check-site + test-usb-hub's INCONCLUSIVE classifier on fixed transcripts (`--self-test`) + check-xhci-barriers (so it also builds the kernel)
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary
+make check-xhci-barriers    # the xHCI driver's two DMA barriers found in the built kernel image (scripts/check-xhci-barriers.py); no QEMU rig can see one missing - ALSO RUN BY `make test` since 2026-10-03
 make check-site             # the published GitHub Pages site vs the documents it abridges - ALSO RUN BY `make test` since 2026-09-05
 make clean
 ```
@@ -529,7 +565,10 @@ two Python peers), the 9P host peer's verb-dispatch self-test
 after a range test silently swallowed five verbs its docstring claimed; since
 2026-09-23 also a KEYED session against `np9p_client.py` over loopback, every
 verb plus the refusals on both sides, which is most of the suite's ~20 s), and
-`check-site` (above). It exists because such a crate can otherwise have
+`check-site` (above), and since 2026-10-03 `check-xhci-barriers` (above),
+which builds the kernel and finds the xHCI driver's two DMA barriers in its
+image, the one check here no QEMU rig could stand in for. The suite exists
+because such a crate can otherwise have
 **no build coverage at all**: it is a workspace member but not a
 default-member, so until something depends on it, `cargo build`, `make
 build` and `make esp` all stay green while it is broken. Run it before
@@ -600,7 +639,8 @@ docs/                every document is annotated in full in `docs/README.md` - r
   CHANGELOG.md       the milestone record, phase 0 to the present, newest first - what was built, and why it works the way it does
   ROADMAP.md         the forward-looking plan (finished arcs live in roadmap-completed.md; the cluster direction in roadmap-cluster.md)
   roadmap/           the sub-plans: the seven cluster documents (roadmap-cluster*.md), roadmap-fid-verbs.md,
-                     roadmap-async-rmount.md, roadmap-session-auth.md, roadmap-user-keys.md and roadmap-c-hosting.md
+                     roadmap-async-rmount.md, roadmap-session-auth.md, roadmap-user-keys.md, roadmap-el1-drop.md
+                     (the Pi hands off at EL2; the kernel assumes EL1) and roadmap-c-hosting.md (a C program as a Unix command)
   work-journal/      chronological dev-log, one file per day plus an index README - a lighter companion to CHANGELOG.md
   testing/           testing-qemu.md (every `make run-*` target, the test images, the 9P host peers, the two-node
                      cluster rig), testing-parallels.md and testing-pi4.md (the real-hardware guides, sharing one
@@ -611,10 +651,13 @@ docs/                every document is annotated in full in `docs/README.md` - r
   research/          synthesis notes on MINIX/Plan 9/Helix/Redox, the GUI stack, and where the design should go next
 
 kernel/              every file annotated in full in `docs/source-map.md`; each also carries its own `//!`
-  src/main.rs        #[entry]: UEFI init, console/MADT/PSCI discovery, loader, ExitBootServices, then exceptions/mmu/xhci/storage/net/gic/timer/tasks
+  build.rs           the build identity (commit, +dirty, profile) the boot logs; reruns every build on purpose
+  src/main.rs        #[entry]: the switch to the kernel's own 256 KB stack first (the Pi firmware's is 16 KB over its page tables), then
+                     UEFI init, console/MADT/PSCI discovery, loader, ExitBootServices, then exceptions/mmu/xhci/storage/net/gic/timer/tasks
   src/uart.rs        PL011 console driver (post-ExitBootServices only)
   src/uart16550.rs   16550 console driver - PCI-discovered consoles, genuinely different hardware
   src/devicetree.rs  console discovery via the UEFI devicetree (dead end on QEMU and Parallels)
+  src/dtranges.rs    devicetree address translation through `ranges` (bus -> CPU; the Pi 4's PL011 is 0x7e201000 on the bus, 0xfe201000 for the CPU)
   src/acpi.rs        console discovery via RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels) + the shared find_table walk
   src/madt.rs        GIC version/address discovery via the ACPI MADT - where gic.rs's addresses actually come from
   src/power.rs       POWER syscall backend: PSCI SYSTEM_OFF via the FADT-discovered conduit, else halt
@@ -624,8 +667,17 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/font.rs        embedded 8x8 bitmap font, printable ASCII only (cond keeps its own copy)
   src/fbconsole.rs   framebuffer text console - the kernel's EMERGENCY/boot console only; steady state is cond
   src/fbdev.rs       dumb framebuffer primitives for cond (FB_BLIT/FB_SCROLL/FB_CLEAR), gated to CON_TASK
+  src/el2.rs         the exception level the firmware hands off at (logged on every boot) and the drop from EL2 to EL1 when it is 2:
+                     EL1's regime set to the built identity map, SCTLR_EL1 whole, HCR_EL2 to el2.rs's HCR_EL2_VALUE (RW, HCD,
+                     no traps, interrupts to EL1), the EL1 timer allowed, the firmware's EL2 timer off, then eret on the same stack. The Pi hands off at EL2; QEMU does with
+                     virtualization=on (`make run-el2`). Called from mmu::switch_to_identity_map, so main.rs has one install
+  src/earlyfault.rs  the early fault reporter: a fault BEFORE exceptions::install() goes through the firmware's vectors, and a RELEASE
+                     firmware (the Pi's) prints one line for it; this registers the kernel's own handler through the firmware's CPU
+                     protocol and prints ESR/FAR/ELR, a backtrace and the loaded image holding each address, on the serial
+                     console, or on the framebuffer when there is none
   src/exceptions.rs  VBAR_EL1 vector table + fault reporting, and the three resumable paths (IRQ, SVC, EL0 fault)
-  src/mmu.rs         per-task translation tables. READ ITS MODULE DOC FIRST: the L0 start level is a fixed bug, not a style choice
+  src/mmu.rs         per-task translation tables, built (memory only) then switched (registers, or the EL2 drop) as two halves.
+                     READ ITS MODULE DOC FIRST: the L0 start level is a fixed bug, not a style choice
   src/gic.rs         version-dispatching facade over gicv2/gicv3, selected by madt.rs
   src/gicv2.rs       GICv2 backend: distributor + memory-mapped CPU interface
   src/gicv3.rs       GICv3 backend: redistributor + ICC_* sysreg CPU interface - confirmed on QEMU and Parallels
@@ -643,6 +695,10 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is
   src/virtio_rng.rs  virtio-rng, backing the RANDOM syscall; absent on Parallels/Pi and that is a supported case
+  src/bootflags.rs   boot flag files at the ESP root: \NOXHCI, \XHCINOWR, \FBCON switch off one boot step to bisect a hang on hardware;
+                     \MSDSTALL is a QEMU test fault (QEMU's stick only) for test-usb-hub.py --stall; \EARLYFAULT plants a fault in
+                     the firmware's own code before the exit, and \WALKFAULT one inside the reporter's own image walk, both for
+                     test-early-fault.py
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
   src/xhci.rs        from-scratch xHCI: rings, multi-device port scan, HID interrupt endpoint, storage endpoint reset

@@ -42,14 +42,18 @@ pub enum DiscoveryError {
     NoDtb,
     /// A devicetree pointer was found, but `fdt` couldn't parse it.
     MalformedDtb,
-    /// Parsed fine, but neither `/chosen/stdout` nor a `compatible =
-    /// "arm,pl011"` node exists.
+    /// Parsed fine, but `/chosen`'s `stdout-path` names no node (or there
+    /// is no `/chosen`, or no `stdout-path` in it), and no `compatible =
+    /// "arm,pl011"` node exists either.
     NoConsoleNode,
     /// A console node exists but isn't PL011-compatible — this driver
     /// doesn't know its register layout.
     UnsupportedConsole,
     /// A PL011 node exists but has no usable `reg` property.
     NoRegProperty,
+    /// The `reg` address could not be translated to a CPU address through
+    /// the ancestors' `ranges` (`dtranges.rs`).
+    Untranslatable,
 }
 
 /// Parses `dtb` (if present) and resolves it to a PL011 UART base address.
@@ -68,9 +72,19 @@ pub unsafe fn discover_pl011(dtb: Option<*const u8>) -> Result<usize, DiscoveryE
     let dtb = dtb.ok_or(DiscoveryError::NoDtb)?;
     let fdt = unsafe { Fdt::from_ptr(dtb) }.map_err(|_| DiscoveryError::MalformedDtb)?;
 
-    let node = fdt
-        .chosen()
-        .stdout()
+    // Not `fdt.chosen().stdout()`: the crate panics when the tree has no
+    // `/chosen`, and again when `stdout-path` is empty. The tree is
+    // firmware's, so a missing node has to fall through, not halt the boot.
+    // An empty path is skipped too: `find_node("")` returns the root, which
+    // would end the search as `UnsupportedConsole` with a PL011 in the tree.
+    let stdout = fdt
+        .find_node("/chosen")
+        .and_then(|chosen| chosen.property("stdout-path"))
+        .and_then(|prop| core::str::from_utf8(prop.value).ok())
+        .map(|path| path.trim_end_matches('\0'))
+        .filter(|path| !path.is_empty())
+        .and_then(|path| fdt.find_node(path));
+    let node = stdout
         .or_else(|| fdt.find_compatible(&["arm,pl011"]))
         .ok_or(DiscoveryError::NoConsoleNode)?;
 
@@ -85,5 +99,10 @@ pub unsafe fn discover_pl011(dtb: Option<*const u8>) -> Result<usize, DiscoveryE
         .reg()
         .and_then(|mut regs| regs.next())
         .ok_or(DiscoveryError::NoRegProperty)?;
-    Ok(region.starting_address as usize)
+    // `reg` is in the parent bus's address space; the CPU's can differ (the
+    // Pi 4's PL011 is at bus 0x7e201000, CPU 0xfe201000). No translation,
+    // no console: never the bus address as a guess.
+    crate::dtranges::to_cpu(&fdt, node, region.starting_address as u64)
+        .map(|a| a as usize)
+        .ok_or(DiscoveryError::Untranslatable)
 }

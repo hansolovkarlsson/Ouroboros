@@ -29,6 +29,18 @@
 > from Linux's and FreeBSD's drivers), and `xhci.rs` assumes it is. Until
 > that is fixed, expect no USB at all on the board, so no keyboard and no
 > disk: plan the first boot around the serial console.
+>
+> **Update 2026-10-01: the two notes above are superseded, and the boards
+> have booted.** Everything they say is missing is now on `main`: the BAR
+> translation and the exclusive open (#176), hub support (#177) and the
+> non-cacheable DMA pool under ACPI `_CCA 0` (#179). So the keyboard and USB
+> storage are expected to work, and are not yet seen to. On 2026-09-28 a Pi 400
+> and a Pi 4 booted over HDMI alone, with no serial cable, and neither reached
+> the shell: the Pi 400 faults in firmware once the xHCI is taken, and the
+> Pi 4 stops after the early console's clear (§6, "Bisecting a hang with boot
+> flag files", and the roadmap's "First boots on the boards"). The next session
+> is serial, through a Raspberry Pi Debug Probe (§3), and it is the one that
+> starts turning this plan into a log.
 
 The practical guide to booting Ouroboros on a **real Raspberry Pi 4** under UEFI
 firmware. Companion to [`testing-qemu.md`](testing-qemu.md) (the fast dev loop,
@@ -217,8 +229,9 @@ Per board:
   you are also debugging a kernel.
 - **2× microSD cards** (A2, 32 GB) plus a reader. Two per board so there is
   always a known-good card to fall back to.
-- **A 3.3 V USB-TTL serial adapter** (CP2102 or FT232). This is the single most
-  important item in the list.
+- **A 3.3 V USB serial adapter.** This is the single most important item in
+  the list. The one on order is the **Raspberry Pi Debug Probe**; a CP2102 or
+  FT232 USB-TTL adapter does the same job.
 - **micro-HDMI cable** — the GOP framebuffer console (`fbconsole.rs`) is a
   separate output path from serial and needs its own verification.
 - **A FAT32-formatted USB 3 (SuperSpeed) stick**, for a blue port: the
@@ -247,10 +260,22 @@ TX and RX cross. **Do not connect the adapter's VCC to the Pi** — the Pi is
 powered by its own supply, and back-feeding it through the header while the
 USB-C supply is also connected is how boards die.
 
-On macOS, `ls /dev/tty.usbserial-*` after plugging the adapter in, then:
+With the Debug Probe, the wires are its UART cable on the port marked **U**:
+orange is the probe's TX (to Pi pin 10), yellow its RX (to Pi pin 8), black
+GND (to Pi pin 6). The cable carries no VCC, so there is nothing to leave
+off. (confirmed: Raspberry Pi's Debug Probe documentation, see Sources)
+
+The device name depends on the adapter. The Debug Probe is a USB CDC device
+and appears as `/dev/tty.usbmodem*` (its documentation names the
+`/dev/cu.usbmodem*` twin, and either works for `screen`); a CP2102 or FT232
+appears as
+`/dev/tty.usbserial-*`. `ls` both after plugging it in, then capture the whole
+session to a file (`-L` writes `screenlog.0` in the current directory), since
+the log is the evidence §6 and §8 work from:
 
 ```sh
-screen /dev/tty.usbserial-XXXXXXXX 115200
+screen -L /dev/tty.usbmodemXXXX 115200          # Debug Probe
+screen -L /dev/tty.usbserial-XXXXXXXX 115200    # CP2102 / FT232
 ```
 
 115200 8N1 is the pftf firmware default (confirmed: pftf/RPi4 readme). Exit
@@ -263,45 +288,123 @@ screen /dev/tty.usbserial-XXXXXXXX 115200
 The Pi's boot medium holds two things that do not collide: the firmware at the
 root of the FAT partition, and Ouroboros's ESP tree underneath `EFI/`. The
 firmware boots `RPI_EFI.fd` via `armstub`, which then boots
-`\EFI\BOOT\BOOTAA64.EFI` from that same partition — the well-known removable-media
-path `make esp` already writes to (confirmed: `Makefile`'s `esp` target).
-
-```sh
-make esp     # populates build/esp/ - do NOT use `make image` here
-```
+`\EFI\BOOT\BOOTAA64.EFI` from that same partition, the well-known
+removable-media path `make esp` already writes to (confirmed: `Makefile`'s `esp`
+target).
 
 **Do not `dd` `build/esp.img` onto the card.** It is a fixed 64 MB `hdiutil`
 image (confirmed: `Makefile`'s `image` target) with no room for the firmware,
-and writing it would leave the rest of the card unusable. Copy the tree instead:
+and writing it would leave the rest of the card unusable. `make sdcard` copies
+the tree instead.
 
 ```sh
-# 1. Format the card as MS-DOS (FAT32) with an MBR partition map.
+# 1. Once per card, BY HAND: format it as MS-DOS (FAT32) with an MBR map.
 #    Disk Utility: "MS-DOS (FAT)" + "Master Boot Record". Or:
 #    diskutil eraseDisk MS-DOS OUROBOROS MBRFormat /dev/diskN     # CHECK diskN FIRST
 
-# 2. Firmware first.
-curl -LO https://github.com/pftf/RPi4/releases/latest/download/RPi4_UEFI_Firmware_v1.42.zip
-unzip -o RPi4_UEFI_Firmware_v1.42.zip -d /Volumes/OUROBOROS
-rm -f /Volumes/OUROBOROS/Readme.md
-
-# 3. Ouroboros on top.
-cp -R build/esp/ /Volumes/OUROBOROS/
-
-# 4. Strip the AppleDouble sidecars, same reason `make image` does
-#    (FAT holds no xattrs, so macOS spills them into ._* files that show up
-#    in `ls` as mangled 8.3 aliases).
-find /Volumes/OUROBOROS -name '._*' -delete
-find /Volumes/OUROBOROS -name '.DS_Store' -delete
-diskutil eject /Volumes/OUROBOROS
+# 2. Every time after that:
+make sdcard SDCARD=/Volumes/OUROBOROS            # add EJECT=1 to eject when done
 ```
 
-Check the release tag against [the releases page](https://github.com/pftf/RPi4/releases)
-rather than trusting the version pinned above. Keep the firmware files' names
-exactly as shipped — the readme is explicit that renaming them breaks boot.
+**The target never formats.** Erasing takes a `/dev/diskN`, and a wrong N
+erases some other disk, so step 1 stays manual. `scripts/sdcard.sh` refuses a
+path that is not a volume's mount point under `/Volumes`, a volume that is not
+FAT, one on fixed internal media, and one that is neither empty nor already a
+Pi card (no `RPI_EFI.fd`). Each refusal was seen once: against a disk image
+built to trip it, except fixed internal media, which an attached image never
+reports, so that one was tripped through a `diskutil` shim that reports it.
+`make sdcard` checks that `SDCARD` names a directory before it builds anything.
 
-Once this stabilises it is worth a `make sdcard SDCARD=/Volumes/OUROBOROS`
-target next to `parallels-hdd`, so the round trip is one command like every
-other target in this project.
+**The firmware is pinned, checksummed and installed once.** The release
+(pftf v1.53) and its SHA-256 are constants in `scripts/sdcard.sh`; the zip is
+cached in `build/cache/` and checked on every use. It is unzipped onto a card
+only when the card has no `RPI_EFI.fd`, because this firmware has no NVRAM: the
+§5 settings and every UEFI variable, the boot counter's included, are stored
+inside `RPI_EFI.fd` itself (edk2-platforms' `Platform/RaspberryPi/RPi4/Readme.md`,
+"NVRAM"; the readme in the pftf zip does not say). Rewriting it on each update
+would silently reset them. `FIRMWARE=1` reinstalls it deliberately, and even
+then keeps an existing `config.txt`, since Risk 3's UART overlay is set there
+by hand. The
+firmware's files keep the names they ship with; the readme is explicit that
+renaming them breaks boot. To move to a newer release, bump the version and the
+checksum together (`gh release view --repo pftf/RPi4` prints the asset's).
+
+**Ouroboros's entries are replaced whole on every run.** Which entries those
+are is computed from `build/esp`: each top-level entry and each entry under
+`EFI/`. A program dropped from the tree therefore leaves the card too. Two of
+them are state rather than build output:
+
+- `etc` is re-staged by default (the dev passwd, shadow, group and cluster
+  files, as every other image target stages them; the cluster keys are
+  deterministic, so the identity does not change). That resets accounts and
+  passwords made on the Pi, and the script says so. `KEEP_ETC=1` keeps the
+  card's files and adds only the ones a newer tree introduced.
+- `Users` (the home directories) only gains the directories it is missing.
+  What was made on the Pi is never replaced.
+
+Each is copied beside the old one and swapped in afterwards, so a copy that
+fails (a full card, a pulled reader) leaves the old `EFI/BOOT` bootable.
+Anything else on the card, the firmware's files or a file of your own at the
+root, is left alone. Re-staging `EFI/ORBS/BOOTID.TXT` rolls the boot counter's
+file store back, as every image does; the counter's preferred store is the
+UEFI variable, which lives in `RPI_EFI.fd` and so survives.
+
+### The USB stick
+
+The card stops being readable once the kernel runs (see "The storage
+surprise" in §6), so the stick is the only disk the system has: `mount -a`
+mounts it, and `/bin`, `/etc` and `/man` come from it.
+
+```sh
+make stick STICK=/Volumes/<stick>          # KEEP_ETC=0 re-stages its /etc, EJECT=1 ejects
+```
+
+Format it once by hand: in Disk Utility, **MS-DOS (FAT) or ExFAT with the
+Master Boot Record scheme**. MS-DOS (FAT) gives FAT32 on a stick over 2 GB.
+The default GUID scheme puts a hidden EFI partition first, and `fsd` mounts
+the first partition it can, so `make stick` refuses a volume that is not
+partition 1 of an MBR disk. FAT16 is refused too: `fsd` mounts FAT32 and
+exFAT.
+
+`make stick` is `make sdcard` in stick mode (`scripts/sdcard.sh` with
+`STICK=1`): the same guards (a mounted volume under `/Volumes` on removable
+or external media, never formatted, empty or already ours) and the same
+copy-and-swap. What differs:
+
+- **No firmware and no `EFI` tree.** The kernel and the boot programs are
+  the card's, and nothing at runtime reads `EFI` from the disk. A stick
+  carrying its own `EFI/BOOT/BOOTAA64.EFI` could be booted by the firmware
+  in the card's place, running whatever kernel was last staged on it.
+- **"Ours" is a `.ouroboros-stick` file at the root**, written before
+  anything is copied, so a run that stops partway leaves a stick the next
+  run accepts. A volume with `RPI_EFI.fd` is a card and is refused.
+- **`etc` is kept by default**, since the stick is where accounts and
+  passwords made on the Pi live; files a newer tree adds are still copied.
+  `KEEP_ETC=0` re-stages it and says so.
+
+**Stage the card and the stick from the same build.** Nothing checks that
+they match yet (roadmap: "A Pi boot from a card and a stick of different
+builds"), and old programs on a stick under a new kernel look like a kernel
+bug.
+
+**Which kernel the card carries is in the capture** since 2026-10-03: the
+first line, `UEFI stage alive, build <commit>[+dirty] <profile>, ...`, and
+again in the line that announces the console after the exit (`boot services
+exited, console live, build ...` on serial; the `\FBCON` and fallback lines
+carry it too).
+Compare it with `git rev-parse --short=12 HEAD` of the tree you staged from;
+`+dirty` means the tree differed from that commit when it was built (a
+tracked file changed, or an untracked one not ignored). It says nothing about the stick, which has no kernel.
+
+*Built 2026-10-03, checked only on `hdiutil` images:* FAT32 and exFAT staged
+(no `EFI`, the marker present); a restage keeping `etc`; `KEEP_ETC=0`
+re-staging it; a stick with its marker but half its tree accepted; refused
+were a GUID-scheme volume (partition 2), a FAT16 volume, a volume holding a
+foreign file, `make stick` on a staged card and `make sdcard` on a staged
+stick. `make sdcard` on a fresh image still installs the firmware once. A
+real stick may differ in what macOS does to a mounted volume, as the first
+real card did (`blind-instruments-postmortem.md`, "A disk image that was not
+the card").
 
 ---
 
@@ -335,9 +438,20 @@ localises the failure without any guessing.
 
 1. **Firmware splash, then the Ouroboros banner** over the UEFI boot-services
    console — which the firmware mirrors to both serial and HDMI. Reaching here
-   proves the card layout and the firmware handoff, nothing else.
+   proves the card layout and the firmware handoff, nothing else. *(Since
+   2026-10-02 the banner line says `on its own stack (sp ..., the kernel's
+   stack ..., the firmware's sp was ...)`: the kernel left the firmware's
+   16 KB stack, whose page tables lie beneath it, as its first act. A line
+   saying `the FIRMWARE'S stack` means the switch did not happen.)*
 
-2. **`console @ {base:#x} (via {source})`.** *(predicted: `via acpi`)* — the
+2. **`console @ {base:#x} (via {source})`.** *(predicted: `via acpi`; observed
+   2026-09-28 on a Pi 4 with the firmware set to ACPI + Devicetree:
+   `console @ 0x7e201000 (via devicetree)`. The devicetree is tried first and
+   its `reg` is a VideoCore bus address; the PL011 is at `0xfe201000` for the
+   ARM. `dtranges.rs` now translates through the ancestors' `ranges`, so the
+   line should read `0xfe201000`. Checked on the host against
+   `bcm2711-rpi-4-b.dtb` and `bcm2711-rpi-400.dtb` from the pinned firmware,
+   not yet on a board.)* The
    RPi4 EDK2 firmware ships a real SPCR table, so the ACPI branch should
    resolve a PL011 base. **If this line is missing**, `pci::log_all_devices`
    runs instead as a diagnostic, and after `exit_boot_services` there is no
@@ -388,6 +502,39 @@ localises the failure without any guessing.
    `gicv2.rs` were written to make that impossible. A third platform with a
    genuinely different GIC address is the first real test of that claim.
 
+5b. **After the exit, three lines in this order** *(predicted 2026-10-02,
+   from `pi4/el1-drop`; the first line's fact is confirmed, the other two
+   are the drop's first run on a board)*:
+   - `running at EL2 after the exit`. The 2026-10-01 `NOXHCI` dump showed
+     SPSR in EL2h, so EL2 is what this board hands off at; QEMU says EL1,
+     and EL2 only under `make run-el2`.
+   - `dropped from EL2 to EL1, on our own tables and vectors (GIC system
+     registers: not implemented)`: `el2.rs` set EL1's regime to the built
+     identity map, wrote `HCR_EL2` to `el2.rs`'s `HCR_EL2_VALUE` (`RW`,
+     `HCD`, no traps, interrupts to EL1), switched the firmware's EL2
+     timer off, and `eret`ed. The GIC-400 is a GICv2, so
+     `ID_AA64PFR0_EL1.GIC` is 0 and `ICC_SRE_EL2` is left alone; QEMU
+     under `gic-version=3` prints `enabled for EL1` here instead.
+   - `identity map installed, MMU running on our own tables`, which before
+     the drop was true of the registers and false of the machine
+     (`blind-instruments-postmortem.md`, 2026-10-01).
+
+   **If the second line is missing** the `eret` did not land: the first
+   suspect is the L0 start level (`mmu.rs`'s module doc; the EL1 regime
+   starts from nothing here, with no firmware configuration to match), and
+   the reporter's dump, still registered through the firmware's EL2
+   vectors at that point, is what to read. After the second line a fault
+   reports through the kernel's own `EXCEPTION vector=...` line, the first
+   time that has been possible on this board; the virtio-mmio scan at
+   `0xa000000` (Risk 1) is expected to be the first. Also read, before the
+   exit: `PSCI conduit: smc` or `hvc` (the FADT's flag, logged since
+   2026-10-02). TF-A answers `smc`. An `hvc` conduit would be unusable: the
+   drop sets `HCR_EL2.HCD`, so an `hvc` at EL1 is an undefined instruction
+   reported by the kernel's own vectors, and on a boot that drops
+   `power.rs` treats an `hvc` conduit as none and `shutdown` halts, saying
+   so in this line. Neither branch has run on a board; both were run on
+   QEMU by forcing the conduit.
+
 6. **Timer, preemption, task start** — `cond`, `fsd`, `netd`, the supervisor.
 
 7. **`netd`: "no NIC this boot."** Expected (§2). It is a pass, not a failure —
@@ -421,8 +568,877 @@ it are unreachable from then on: running a program goes through `fsd`
 (`spawn_stage` in the shell reports `NO_FS` without a disk), so with no stick
 the shell has its builtins and nothing else. Every runtime filesystem test:
 `ls`, `cat`, `write`, `mount`, `erase disk`, `partition`, `format` — needs the
-**USB 3 stick in a blue port**, as on Parallels. This is not a Pi limitation; it is the
+**USB 3 stick in a blue port**, as on Parallels, staged with `make stick`
+(§4) so that `/bin` is there to run. This is not a Pi limitation; it is the
 same architecture that made USB-MSD necessary there in the first place.
+
+### Bisecting a hang with boot flag files
+
+An empty file at the card's root switches off one boot step
+(`kernel/src/bootflags.rs`), so a hang can be narrowed without a rebuild or a
+serial cable: `touch /Volumes/OUROBOROS/NOXHCI`, eject, boot; delete it for the
+next round. `make sdcard` leaves files at the root alone. The boot log names a
+flag when it is set.
+
+| Flag | What it switches off | A boot that reaches `shell ready` means |
+|---|---|---|
+| `NOXHCI` | xHCI discovery and bring-up: no USB at all | the hang is inside `pci::discover_xhci` |
+| `XHCINOWR` | only the PCI command-register write in discovery (the takeover from firmware still happens), and the bring-up after the exit | the hang is the write or the bring-up after the exit, not the takeover; `NOXHCI` cannot split those two either, so a boot that reaches the shell under both flags leaves both open |
+| `FBCON` | installing the SPCR serial console after the exit; the kernel's framebuffer console is installed instead, right after `exceptions::install()`, on the firmware's page tables | (not a bisection) every post-exit line, the MMU switch and the kernel's own `EXCEPTION …` report included, appears on HDMI, so the last one shows where the boot stops |
+
+One flag per bisection boot; `FBCON` combines with either of the others.
+They exist for the first Pi 400 boots (2026-09-28), which all ended on HDMI
+with the firmware's text console: first partway through
+`xhci: PCI command register was`, then under `NOXHCI` at the
+`xHCI discovery failed (skipped…)` line, and under `XHCINOWR` at the earlier
+MADT line.
+
+Three more flags are test faults for QEMU and not diagnostics (`WALKFAULT`,
+2026-10-02, makes the reporter's own report fault inside its image walk,
+with `EARLYFAULT`; the rows must survive it). `EARLYFAULT`
+(2026-10-01) asks the firmware's own `CopyMem` to write at an address nothing
+maps, just before the xHCI takeover, so the fault is taken in the firmware's
+code with the firmware's vectors installed, the shape of the Pi 4's first
+serial boot below; what follows on serial is the early fault reporter's dump
+(`kernel/src/earlyfault.rs`, checked by `make test-early-fault`). On a card it
+only ends the boot in that dump. `MSDSTALL` (2026-10-01) is the other: it corrupts every seventh CBW so QEMU's stick stalls
+(`test-usb-hub.py --stall`). The kernel honours it only for a stick whose
+INQUIRY vendor is `QEMU`, but it has no place on a card.
+
+**Why HDMI shows nothing after the firmware's text, without `FBCON`.** The
+firmware describes a serial port in ACPI SPCR, so the kernel installs the
+PL011 console after the exit (checkpoint 2) and every kernel line from there
+on goes to serial only. The framebuffer is not idle, though: `cond` draws on
+it whenever a framebuffer was discovered (`CON_INFO` asks `fbdev`, not the
+kernel's console), which QEMU with `-device ramfb` confirms. So HDMI that
+never changes after the firmware's text means the boot did not reach `cond`,
+or the framebuffer does not show what is written to it. `NOXHCI` did not
+change that, so it is not the xHCI step alone.
+
+**`FBCON`'s first boot ended in the firmware's own exception handler**:
+`xhci: PCI command register was 0x0140, wrote+read back 0x0146`, blank lines,
+then `Synchronous Exception at 0x0000000039F31A40`. That message is EDK2's, not
+the kernel's (the kernel reports `EXCEPTION vector=… esr_el1=…`), so the fault
+came while the firmware's vectors were still installed: after that line and
+before `exceptions::install()` just past `exit_boot_services`. The
+`xHCI controller @ …` line that normally follows did not appear.
+
+**Placing a firmware-reported address.** The kernel logs where the firmware
+loaded it (`image @ <base>..<end>`, printed at startup and again, so that it
+is still on screen, just before the xHCI step), and
+`exiting boot services` right before the exit. With the address from HDMI:
+
+```sh
+cargo rustc -p ouroboros-kernel --target aarch64-unknown-uefi -- \
+    -C link-arg=/MAP:build/BOOTAA64.map          # the same tree as the card
+scripts/efi-symbol.py build/BOOTAA64.map \
+    target/aarch64-unknown-uefi/debug/BOOTAA64.efi <base>..<end> <pc>
+```
+
+The build is deterministic apart from the PE timestamp and debug record, so
+the relinked map fits the card's binary. The script refuses before naming
+anything unless `<end>-<base>` is the relinked `.efi`'s `SizeOfImage` (a
+misread digit, or a card built with another profile or tree) and the map and
+`.efi` come from the same link. Checked on QEMU with a planted
+pre-exit fault: its firmware printed the same `Synchronous Exception at`
+line, and the script named the planted write. An address outside the image
+is firmware code, and only the serial dump names that module.
+
+**The second `FBCON` boot placed it** (build `b5bf5b3`): `image @
+0x376df000..0x378c8000` (0x1e9000 bytes, matching the binary, which is the
+check that the digits were read right: an earlier misreading of a low-resolution
+photo landed in `.rdata`, and another on a stack store between two stack stores
+that had succeeded), and `Synchronous Exception at 0x37758628`, offset
+0x79628: `core::sync::atomic::atomic_load` (instantiated in `log`) + 0x5c, the
+`ldr x8, [x8]` of a Relaxed load through the pointer the debug build had
+spilled to the stack four instructions earlier. Its three callers are the
+`AtomicUsize::load` wrappers of the kernel, `uefi` and `log`, and every
+`AtomicUsize` among them is a static in the image, so the pointer should always
+be valid. This time the fault came before the `was …` line, right after
+`boot flag \FBCON is set`; the first `FBCON` boot faulted after it. A fault
+that moves, on a load whose address cannot be wrong, points at memory changing
+underneath the kernel (the stack slot overwritten, or the image's pages made
+unreadable) rather than at one bad instruction, and nothing in the kernel
+changes memory attributes before the exit. Unresolved: the firmware's serial
+dump (ESR, FAR and a backtrace naming the caller) is what settles it.
+**Update 2026-10-01: the firmware has no such dump.** EDK2's default handler
+prints the one line through the serial port and everything after it with
+`DEBUG()`, which a RELEASE build compiles out, and pftf's release zip ships
+only the RELEASE firmware (its workflow builds DEBUG too and does not package
+it). The Pi 4's first serial boot, below, showed exactly the one line, twice.
+The kernel now prints the dump itself: see "The early fault reporter" below.
+
+**`NOXHCI` + `FBCON` got through the exit** (`exiting boot services`, no
+firmware exception), so the firmware-phase fault needs the xHCI takeover. Then
+HDMI showed nothing more, not even `framebuffer console live`: something
+between the exit and the MMU switch, with no console yet for an exception
+report. `FBCON` now installs the framebuffer console right after
+`exceptions::install()` and the kernel prints `installing our own identity
+map` just before the switch, so that stretch is on screen. Checked on QEMU
+(`-device ramfb`): a fault planted just before the switch shows
+`EXCEPTION vector=4 esr_el1=0x96000047 far_el1=0x10` on the framebuffer, and
+without the plant the boot reaches the shell.
+
+**The Pi 4 then stopped at `exiting boot services` without the clear** (build
+`0602ca3`, `NOXHCI` + `FBCON`), where an earlier build's boot of the same board
+had cleared the screen: the same step behaving differently between boots, as
+on the Pi 400. Nothing prints between the exit and that clear, so under
+`FBCON` the kernel now draws solid white squares at the top-right, with plain
+stores and no console: **square 1** when `exit_boot_services` has returned,
+**square 2** when the exception vectors are written (on this board's EL2
+handoff they are live only from the drop to EL1, checkpoint 5b). The early console's
+clear wipes them, so squares still on screen mean the boot stopped before it,
+and none at all means inside the firmware's `ExitBootServices`. Checked on
+QEMU with a hang planted after each: one square, then two.
+
+**Where the Pi 4 stops, as far as HDMI can say** (build `3da3cad`,
+`NOXHCI` + `FBCON`): the screen cleared, with no squares and no text. The
+clear is the early console's, and it wipes the squares, so the exit returned,
+the vectors went in, and the whole-screen clear (one `write_bytes` and one
+cache clean) reached the display; the first line after it
+(`framebuffer console live early …`, drawn a pixel at a time with a clean per
+glyph) never appeared. The stop is between the clear and that line, or the
+line was drawn and never reached the display. Testing paused here on
+2026-09-28 until the serial cable arrives: boot without flags first, since
+the console is now at the translated `0xfe201000` and every line after the
+exit goes to serial.
+
+**The Pi 4's first serial boot (2026-10-01, build `b8aaf33`, no flag, the
+Debug Probe on the PL011, `screen -L`).** Three things it settled:
+
+- `console @ 0xfe201000 (via devicetree)`: the translation through `ranges`
+  (#181) holds on the board. The item is closed.
+- The boot got further than any HDMI session had shown: the GOP framebuffer,
+  `_CCA 0`, the MADT (GIC V2, GICD `0xff841000`), all five programs loaded,
+  the boot identity (`boot 1`, the UEFI variable absent, the file present, 32
+  bytes of entropy), and `image @ 0x376e1000..0x378d0000, taking the xHCI
+  controller next`. Then, with none of `discover_xhci`'s own lines (no
+  `skipping`, no `PCI command register`, no `xHCI controller @`), the firmware
+  printed `Synchronous Exception at 0x0000000039F2D1A0` twice and nothing
+  else: no ESR, no FAR, no registers, no module. The address is above the
+  image, so firmware code, during the takeover, which is where the Pi 400's
+  first `FBCON` boot faulted too (`0x39F31A40`, 18 KB away, after its
+  command-register write; the Pi 4's came before that line).
+- The firmware's one line is all a RELEASE build prints (see the update
+  above), so the "serial dump" the Pi 400 item waited for was never going to
+  arrive from the firmware.
+
+**The early fault reporter** (`kernel/src/earlyfault.rs`, the same day) is the
+answer: right after console discovery the kernel registers its own handler for
+synchronous exceptions through the firmware's `EFI_CPU_ARCH_PROTOCOL`, the
+mechanism the firmware's GIC driver uses for IRQs, so VBAR_EL1 and the
+firmware's interrupt handling are untouched. From then until
+`exceptions::install()` a fault prints, on the serial console with raw writes
+(or, with no serial console, on a framebuffer console made at that moment,
+which clears the screen first: the HDMI-only case the Pi 400's first boots
+were), the ESR decoded (class, fault status and level, read or write), FAR, ELR, SP,
+LR, FP, every x register, a frame-pointer backtrace (the kernel is now built
+with frame records, `.cargo/config.toml`), and for each code address the
+loaded image holding it, from the firmware's debug image info table: the
+kernel by offset, a firmware driver by the module name in its PE debug entry
+(`XhciDxe.dll`, say) and the firmware-file GUID of its device path. Checked on
+QEMU by `make test-early-fault`: a fault planted in the DXE core's `CopyMem`
+(`EARLYFAULT`) prints `elr ... = DxeCore.dll ... + 0x1dd00`, then the kernel's
+own frames, then the firmware's frames that called the kernel; and with the
+registration deleted the test fails and the firmware's bare line comes back.
+The frame walk believes a record only between the faulting SP and the end of
+the stack's memory-map descriptor, so a clobbered frame pointer cannot make
+the report fault and cut itself short. The framebuffer fallback is not
+exercised by the test: QEMU's firmware always describes a serial console, so
+the serial path wins there.
+A second Pi 4 boot the same evening (17:40), meant to carry the reporter but
+staged from the tree before #187 merged (the kernel's line numbers in the log
+say so, and no `armed` line), showed the same shape at a third address:
+`Synchronous Exception at 0x0000000039F36E14`, twice, after `taking the xHCI
+controller next`, with the image at `0x376c4000..0x378b3000` this time. Three
+boots, three firmware addresses, one step: the fault moves.
+
+**The first boot with the reporter (17:44, build `b51b022`, no flag) went
+silent instead.** `early fault reporter armed: a fault before the kernel's own
+vectors reports on the serial console` printed where expected, every line up
+to `taking the xHCI controller next` matched the earlier boots (the image at
+`0x376ab000..0x378a700`, the console at `0xfe201000`), and then nothing at
+all: no firmware line, no dump, the capture ends on that line. The one change
+from the boot before was the registration, and with it the firmware's one line
+is gone too, so the firmware's dispatcher took the registered path and what
+came of it never reached the UART. Three readings, not yet told apart: the
+handler ran and its console was empty or its writes went nowhere (the kernel's
+own PL011 driver has never printed on a Pi, since every boot died before the
+exit); the handler was never reached, the fault having wrecked the
+dispatcher's data or the stack before the call (the memory-damage suspect,
+which the moving address already favours); or there was no fault this time
+and the takeover hangs, the memory-map read `arm` adds having moved the
+firmware's allocations. The next boot asks the first question alone: `NOXHCI`
+on the same card, which skips the takeover and should print the kernel's
+post-exit lines through that driver.
+
+**`NOXHCI` with the reporter (17:55): the kernel's PL011 driver works, the
+reporter works, and the kernel is running at EL2.** The boot left boot
+services and printed, through the kernel's own driver at `0xfe201000`,
+`boot services exited, console live`, `installing our own identity map`, the
+map's ranges (RAM `0x3b0000-0x3b400000`, device `0x0-0x3fffffff`, the six EL0
+regions) and `identity map installed, MMU running on our own tables`. The
+next thing on serial was the reporter's dump:
+
+```
+EARLY EXCEPTION (firmware vectors) type=0 esr=0x96000006 far=0xa000000 elr=0x376c923c sp=0x3b3fceb0 lr=0x376c9234 fp=0x3b3fced0 spsr=0x400003c9
+  esr: ec=0x25 (data abort, same EL), fsc=0x06 (translation fault at level 2), read
+```
+
+Three facts in it. The fault was delivered through the FIRMWARE's vectors,
+after `exceptions::install()` had written VBAR_EL1: so VBAR_EL1 is not the
+vector base in use. `SPSR` mode bits are `0b1001`, EL2h: the firmware hands
+the kernel off at EL2 (TF-A's BL31 enters UEFI at EL2 on this board), and
+`exceptions.rs`'s "assumes EL1, not verified at any other EL" is the case that
+was never tested. And the faulting read is at `0xa000000`, the first
+virtio-mmio slot, a translation fault: the identity map that "installed" is
+in TTBR0_EL1/TCR_EL1/MAIR_EL1, which do not govern translation at EL2, so the
+MMU is still on the firmware's EL2 tables, where nothing maps that address.
+Every EL1 system register the kernel writes after the exit (VBAR, TTBR0, TCR,
+MAIR, SCTLR, the EL1 timer) has been written to a register the running
+exception level does not use. That is also the shape of "the Pi 4 stops after
+the early console's clear": a fault to the firmware's EL2 vectors with the
+firmware's text console gone.
+
+The dump itself was cut short: at frame 10 (the records below the kernel's
+own, a return address inside the firmware volume at `0x26e28`) the image
+naming walk took a translation fault of its own (`esr=0x96000007` in
+`pe_codeview_name`), and the reentrancy guard halted before the register
+rows. The register rows belong before the walk, and the walk needs a bound
+on what it reads.
+
+What follows is a kernel decision, not a boot: drop to EL1 right after
+`exit_boot_services`, as Linux's entry does (`HCR_EL2.RW` for AArch64 EL1,
+no traps, no stage 2, the EL1 physical timer allowed through `CNTHCTL_EL2`,
+`SP_EL1` set, `eret`), and let `mmu.rs` enable the EL1 MMU from off rather
+than swap tables under one that is on. Until then nothing after the exit on
+a Pi means what its log line says. If it still shows only the line, the fault corrupted the firmware's
+dispatcher or stack before the handler ran, which is itself the answer the
+memory-damage suspect predicts.
+
+**2026-10-02, the drop on the board: two `NOXHCI` boots from a card staged
+off `main` at `367ceda` (#188 merged).** The first died inside
+`ExitBootServices`; the second ran the drop and reached the shell.
+
+*Boot 1 (boot identity 1).* Every line to `exiting boot services` as before,
+then the reporter's dump, with the controller untouched:
+
+```
+EARLY EXCEPTION (firmware vectors) type=0 esr=0x96000047 far=0x38670810 elr=0x39f36e14 sp=0x3b3fcd90 lr=0x39f2ebb4 fp=0x3b3fcd90 spsr=0x60000309
+  esr: ec=0x25 (data abort, same EL), fsc=0x07 (translation fault at level 3), write
+  elr 0x39f36e14 = DxeCore.dll @ 0x39f2c000 + 0xae14
+  lr  0x39f2ebb4 = DxeCore.dll @ 0x39f2c000 + 0x2bb4
+  frames 1-9: DxeCore + 0x2d44, 0x3c94, 0xda20, 0xda48, 0xdc88, 0x5b00, 0x608c, 0x66b0, 0x6898
+  frames 10-12: kernel + 0x7007c, 0x6f9b8, 0xd4ac
+  frames 13-16: DxeCore + 0x943c, BdsDxe + 0x8c08, 0xa100, DxeCore + 0x918c
+```
+
+Read: a firmware write, nine frames below the kernel's call into
+`ExitBootServices` (the `uefi` crate's `exit_boot_services`, which allocates
+a pool buffer for the memory map and calls the service twice at most), to a
+RAM address (`0x38670810`, in the firmware's own region below the kernel's
+image) that the firmware's tables do not map at level 3. `x2` is
+`0x38670808`, `x3` is `0x1100`, `x0` is `0x38660708`: a copy or fill of
+0x1100 bytes, one write past `0x38670808`. **The same instruction,
+`0x39F36E14`, is where the two 17:40 boots of 2026-10-01 died, inside the
+xHCI takeover, before any `exiting boot services` line.** So the faulting
+firmware routine is reached both from the PCI protocol and from
+`ExitBootServices`, and it faults without the takeover: the memory-damage
+suspect that named the xHCI is weakened, and the fault is now "a DxeCore
+routine at `+0xae14`, writing into a page its own tables do not map,
+intermittently". The pftf build's `RPi4.dsc` sets no heap guard, so the
+unmapped page is not EDK2's freed-memory guard. The register rows printed
+in full this time, and the walk reached the firmware's BDS frames: the
+rows-first fix is still owed but was not needed here.
+
+*Boot 2 (boot identity 2), the same card, power-cycled.* Checkpoint 5b's
+three lines, in order, through the kernel's PL011 driver:
+
+```
+boot services exited, console live
+running at EL2 after the exit
+installing our own identity map
+identity map RAM 0x3b0000-0x3b400000, device 0x0-0x3fffffff, per-task EL0 regions [...]
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+identity map installed, MMU running on our own tables
+virtio-blk discovery failed (no virtio-mmio block device found)
+MADT: GIC V2, GICD @ 0xff841000, GICC/GICR @ 0xff842000 (size 0x0)
+mmu: 0x377b4000-0x377c2000 mapped Normal Non-cacheable
+mmu: 0x377b4000-0x377c2000 walks as Normal Non-cacheable (attr 0x44) on every page in all 11 views, its neighbours and kernel data do not
+shell ready - type and press Enter
+```
+
+**(confirmed)** The drop lands on the Pi 4: the `eret` into the kernel's
+own EL1 regime from the L0-start tables worked first time, the GIC-400
+came up at the MADT's addresses, the tick runs (the shell was served), and
+every post-exit line now describes the machine. **Risk 1 did not fire the
+way it was predicted to:** the virtio-mmio scan at `0xa000000` ran under the
+kernel's own tables, where the low 1GB is a Device block, and reported no
+device instead of faulting; under the firmware's EL2 tables on 2026-10-01
+the same read faulted. So the scan is harmless on this board and the
+premise of `virtio_mmio_probe_safe` is false but not dangerous; the item
+to retire it stands on honesty, not safety. The shell prompt appeared on
+HDMI: with a GOP framebuffer the console server draws there and the
+kernel's serial console goes quiet after `shell ready`, so typing on the
+serial terminal reaches the shell (the UART is the keyboard under
+`NOXHCI`) and its echo lands on the monitor. The capture ends on the shell
+line for that reason, not because the board stopped.
+
+Next on this board: the `+0xae14` fault wants a second dump at the same
+address, to compare `far` and the registers; and the no-flag boot, now
+with the kernel's own vectors live after the exit, to see the takeover's
+fault reported in full.
+
+**2026-10-02, afternoon: four `NOXHCI` boots of a card from `main` at
+`a9672d1` (#189, the reporter's rows first and its walk bounded).** Boots 1
+to 3 went through the drop to the shell, as in the morning. Boot 4 died
+BEFORE the exit, between `loaded account server` and the boot-identity
+line, with the rows intact:
+
+```
+EARLY EXCEPTION (firmware vectors) type=0 esr=0x96000046 far=0x3e98fe00 elr=0x39f43b60 sp=0x3b3fbf40 lr=0x385b2fe0 fp=0x3b3fbf40 spsr=0x80000309
+  esr: ec=0x25 (data abort, same EL), fsc=0x06 (translation fault at level 2), write
+  x0 =0x3e98fe00 x1 =0x37fee018 x2 =0x20 ...
+  elr 0x39f43b60 (in no loaded image)        <- DxeCore + 0x17b60, see below
+  lr  0x385b2fe0 (in no loaded image)
+  frames 1-3 in no loaded image; frames 4-16 in the kernel
+```
+
+A firmware `CopyMem` of 32 bytes from `0x37fee018` to `0x3e98fe00`, which
+is inside the GOP framebuffer (`0x3e402000`, size `0x7e9000`): the
+firmware's text console drawing a glyph row onto HDMI, as it had for every
+line of this boot and the three before. The 2 MB block holding that part
+of the framebuffer took a translation fault at level 2 in the firmware's
+own tables. The images are unnamed because the reporter's walk was
+bounded to three ranges, `0x3b0000..0x3e0000`, `0x400000..0x380b0000`,
+`0x38120000..0x387b0000`, with "the map had more": the Pi's map has more
+than 64 descriptors and the cap was applied before the merge, dropping
+the top of RAM where every image lives (fixed on `pi4/reporter-tables`;
+`elr` is `DxeCore + 0x17b60` by the morning's base). One fact the bound
+gave anyway: the lowest RAM range starts at `0x3b0000`, so the 2026-10-01
+entry claiming to hold `0x26e28` lies outside the walk, as the fix
+intended.
+
+**Three firmware faults today, read together.** Each is a write by the
+firmware's DXE core to memory the firmware had mapped and was using,
+taken as a translation fault in its own tables: at `0x38670810` (level 3,
+in `ExitBootServices`), at `0x3e98fe00` (level 2, the framebuffer, while
+printing), and on 2026-10-01 at `0x39F36E14`'s target inside the xHCI
+takeover. Different kernel steps, different addresses, one of two to one
+of four boots. What they share is the firmware's translation tables having
+an invalid entry where a valid one was: a cleared or clobbered table page,
+not a missing mapping. Whether the entry is zero (cleared) or garbage
+(overwritten) is what the next instrument reads: the reporter walking the
+firmware's live tables for `far` at the moment of the fault, printing each
+level's entry (built the same afternoon on `pi4/reporter-tables`: a
+`tables for far:` line after the rows, each level's entry down to the
+invalid one and its four neighbours, and whether the level agrees with the
+ESR's; on QEMU the planted fault reads `L0[0x0] ... (table), L1[0x1] ...
+(table), L2[0x100] @ 0x47ffd800 = 0x0 (invalid), neighbours: [0xfe]=...003
+[0xff]=...003 [0x101]=0x0 [0x102]=0x0; the ESR's level 2 agrees`, which is
+the Pi's framebuffer fault's shape, with the answer the Pi's line will
+give in the entry's value; the test faults land on the lowest page past
+RAM that no descriptor of any type covers, chosen from the map at arm
+time, not on an address assumed free). Suspects, in order: the kernel's own pre-exit writes landing
+outside what it owns (its allocations move a little per boot, which fits
+the intermittence); the firmware's own break-before-make on a split block;
+the VideoCore writing into ARM memory. The dump's frames 4 to 16 are in the
+kernel: with the linker map (`scripts/efi-symbol.py`) they say which
+kernel call the firmware was printing for.
+
+**2026-10-02, evening: the answer, from a card at `185a137` (#190, the
+tables walked at the fault).** First `NOXHCI` boot, a fault inside the
+boot-identity variable read, with the walk's line:
+
+```
+EARLY EXCEPTION (firmware vectors) type=0 esr=0x96000007 far=0x3b0038 elr=0x39be0384 sp=0x3b3fc930 ...
+  esr: ec=0x25 (data abort, same EL), fsc=0x07 (translation fault at level 3), read
+  tables for far: TTBR0 0x3b3fa000, T0SZ 20, 4K, from L0: L0[0x0] @ 0x3b3fa000 = 0x3b3fa038 (invalid), neighbours: [0x1]=0x388 [0x2]=0x0; the ESR says level 3, which DISAGREES
+  elr 0x39be0384 = VarBlockServiceDxe.dll @ 0x39bd0000 + 0x10384
+  frames 1-5 VariableRuntimeDxe.dll, 6-9 kernel, 10-13 DxeCore/BdsDxe, 14-15 at 0x26e28/0x26f88 (in no loaded image)
+```
+
+Read: the firmware's ROOT translation table, at `0x3b3fa000`, does not hold
+page-table entries. Its first entry is `0x3b3fa038`, a pointer into the
+same page 0x38 further on, the second is `0x388`, the third 0: the shape of
+stack frames (a saved frame pointer, a small count), not descriptors. The
+firmware's stack is 16 KB (`PcdCPUCorePrimaryStackSize` is `0x4000` in
+pftf's `RPi4.dsc`) at the top of RAM, `0x3b3fc000..0x3b400000` (`sp` is
+`0x3b3fc930` here, the DXE core's frames at `0x3b3ff7xx`), and its page
+tables lie directly below it, the root two pages down. The kernel runs on
+that stack, a debug build with large frames, and its deepest calls (plus
+the firmware's timer interrupt landing on top, which is the intermittence)
+push below `0x3b3fc000` and write stack frames over the tables. The TLB
+keeps the firmware running on cached translations until some cold page is
+walked, and that walk fails at whatever level's page the overflow reached:
+level 3 on 10-01 and this morning, level 2 this afternoon (the
+framebuffer), level 0 now. The ESR's "level 3" against the walk's "level
+0" is the TLB too: the hardware walk that faulted used the still-cached
+upper levels and failed at a clobbered L3 page; by the time the reporter
+walked from memory, the root itself read as garbage.
+
+So the suspect is the kernel, as the morning's list had first: not a write
+outside what it owns, but its stack, which was never its own. QEMU's
+firmware gives it 128 KB with the tables elsewhere, so no rig could see
+this. Frames 14 and 15, at `0x26e28` and `0x26f88` below RAM, are the same
+unplaceable addresses as 10-01's: the firmware's own entry stack frames in
+TF-A or the FD at `0x0..0x3b0000`, outside the walk's bound and correctly
+refused now.
+
+**The fix is a stack the kernel owns**, switched to as its first act,
+before anything the firmware or the kernel pushes can reach the tables;
+until then every boot of a debug kernel on this board is a dice roll, and
+even a release build only shrinks the frames. Everything after the exit
+runs on the same stack today too (the drop sets `SP_EL1` to it), so the
+switch matters past the exit as well. *Built the same evening on
+`pi4/own-stack`: `KERNEL_STACK`, 256 KB in the image, entered before any
+call; the banner line names the stack; the reporter's frame walk crosses
+from it into the firmware's frames that called the kernel. The check on
+this board: `NOXHCI` boots that never again fault in firmware code, and a
+`tables for far:` line, if any fault comes, that shows entries and not
+frames.*
+
+**2026-10-03: the fix on the board. Four `NOXHCI` boots of a card at
+`c8492ad` (#191), four shells, no fault.** The banner line each time:
+
+```
+UEFI stage alive, on its own stack (sp 0x3787c340, the kernel's stack 0x3783e870..0x3787e870, the entry's sp on the firmware's was 0x3b3ff730)
+```
+
+So the kernel's stack is in its image (`0x37788000..0x379cb000`), and the
+firmware's SP at entry was `0x3b3ff730`, 0x8d0 below the top of its 16 KB
+stack, with the root table at `0x3b3fa000` a further 0x5730 down: the
+margin the whole boot used to run in. Every boot then went `running at EL2
+after the exit`, `dropped from EL2 to EL1`, `identity map installed`, and
+reached the shell, where the day before a boot faulted in firmware code one
+time in two to one time in four. Two more facts from the same capture. The
+card before the fix faulted once more before it was re-staged, in the
+variable store's write this time (`far=0x3b7f38`, VarBlockServiceDxe +
+0x11468), with the identical root-table garbage (`0x3b3fa038`, `0x388`,
+`0`): the same overflow, same signature. And `shutdown` from the shell
+printed `powering off` and the board went down: the first PSCI power-off on
+this board, through the `smc` conduit the FADT names, as `power.rs` was
+written to do.
+
+These boots had no HDMI display (`GOP framebuffer discovery failed`), so
+the console server took the serial backend and the shell's own lines came
+over the cable: `login: no /etc/passwd - starting a root session`, and
+`unknown command: ls`. Both are the known limit of `NOXHCI` on this board,
+not defects: after the exit the kernel has no block device (the SD card is
+the firmware's, and USB storage is what the flag skips), so `fsd` has no
+disk, no `/etc` and no `/bin`. The disk arrives with the takeover.
+
+**Next: the no-flag boot**, the xHCI takeover with the kernel's own stack
+under it and the reporter still armed, which is the one pre-exit step
+whose fault the overflow may or may not have been. The 2026-10-01 takeover
+faults showed the same stack-frame shape in the firmware's one line
+(`0x39F36E14` is the same DxeCore instruction the exit faulted at), so the
+expectation is a clean takeover and the first USB keyboard and stick on
+the board; if it faults, the dump now carries the tables and the canary.
+
+**2026-10-03, later: the no-flag boot. The takeover is clean, and the
+driver stops at a limit of its own.** Same card, `NOXHCI` removed, serial
+capture in `screenlog.0`. Before the exit, in order: `taking the xHCI
+controller next`, the PCI command register `0x0140 -> 0x0146`, the
+controller at `0x600000000` (BAR `0xf8000000` plus the translation read from
+`PciIo.GetBarAttributes`, here `0xfffffffaf8000000`), `exiting boot
+services`. After it: `running at EL2`,
+`dropped from EL2 to EL1`, `identity map installed`, and then the driver
+itself, under the kernel's tables:
+
+```
+xhci: DMA pool @ 0x378e8000, 0xe000 bytes
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5
+xhci: keyboard not available (controller wants 31 scratchpad buffers, only 8 are supported)
+```
+
+No fault anywhere in the boot, which closes the question this step was
+for: the 2026-10-01 takeover faults were the stack overflow too. The
+controller came out of its reset and its registers read sanely
+(`max_slots=32`, `max_ports=5`) at the translated address, the first
+nonzero translation seen working, and the driver
+then refused it on purpose: `HCSPARAMS2` is `0xfc000031`, whose Max
+Scratchpad Buffers field (bits 31:27, high bits 25:21) is 31, and
+`xhci.rs` reserves `MAX_SCRATCHPAD_BUFFERS = 8` pages in its DMA pool.
+QEMU's controller asks for few enough that the limit was never reached
+before. The rest of the boot is what no xHCI means on this board: the
+non-cacheable plan and its self-check pass on the pool (`walks as Normal
+Non-cacheable ... in all 11 views`), the shell comes up over the serial
+backend as root with no `/etc/passwd`, and `mount -a` finds no USB storage.
+
+**Next: give the pool 32 scratchpad pages** (128 KB; the spec allows up to
+1023, the VL805 asks for 31), and boot this card again. That is the first
+time the board's controller is run past `DCBAAP`, so the port scan, the
+keyboard and the stick are all new on this hardware from there.
+*(Built on `pi4/scratchpad-32`, which also logs the count as
+`scratchpads=` on the controller line and refuses a controller whose
+`PAGESIZE` lacks 4 KB. Merged as #192.)*
+
+**2026-10-03, later still: two boots of #192. The controller is accepted,
+and the first command times out.** Both captures, the same lines:
+
+```
+xhci: DMA pool @ 0x378d0000, 0x26000 bytes
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: device connected on port 1
+xhci: port 1 reset, speed=3
+xhci: port 1 setup failed (command ring: timed out waiting for a completion event), continuing with other ports
+xhci: keyboard not available (command ring: timed out waiting for a completion event)
+```
+
+Then, as before, `mmu: 0x378d0000-0x378f6000 walks as Normal Non-cacheable
+(attr 0x44) on every page in all 11 views`, and a shell with no disk. The
+scratchpad fix did its part: the driver programmed the controller, started
+it, and reset a High Speed device on port 1. The timeout is the signature
+Risk 8 predicted for non-coherent DMA, but that fix is in and its self-check
+passes, so the cause is elsewhere. Two places where `xhci.rs` differed from
+every driver that works on this controller (edk2 `XhciDxe`, Linux's
+`xhci_write_64`, U-Boot):
+
+- **64-bit registers were written as one 64-bit store** (DCBAAP, CRCR,
+  ERSTBA, ERDP), across a PCIe bridge not shown to carry one intact. The
+  others write the low half, then the high half, which xHCI section 5.1
+  allows.
+- **No barrier between the ring setup and the registers that hand it
+  over.** The DCBAA, the command ring's Link TRB and the ERST are stores to
+  the pool (Normal Non-cacheable); the register writes are Device stores,
+  and nothing orders the two kinds without a barrier. Writing ERSTBA makes
+  the controller fetch the ERST at once. Linux's `writel` has a barrier
+  before every MMIO write; QEMU has no write buffer to show the miss.
+
+**Built on `pi4/xhci-mmio-order`, one variable: the 64-bit store.**
+`write64` writes the low half, then the high half; the barrier is held for
+the round after, so the board answers one question. Two passive lines to
+read: `xhci: WARNING: Host System Error after Run` if the controller
+failed a DMA fetch when it started; and, on the first command timeout of a
+boot, a dump of `USBSTS` (HCH, HSE), `CRCR.CRR` (whether the controller
+took the command ring), `IMAN`, the DCBAAP/ERSTSZ/ERSTBA/ERDP readbacks
+beside the pool's addresses, the event ring's slot at the dequeue pointer,
+`ERST[0]` and the command that timed out. Checked on QEMU with the command
+doorbell removed: `CRCR.CRR false`, readbacks equal to the pool's
+addresses, an empty event slot, the Enable Slot TRB. (A probe that logged
+what one 64-bit store to DCBAAP reads back was built and taken out at
+review: it was the suspect access itself, and a mangled store could damage
+CONFIG beside DCBAAP while the readback looked intact.)
+
+**Read on the board:** success is the port scan getting past Enable Slot on
+port 1, which names the 64-bit store as the cause. A timeout again refutes
+it, and the dump says where to look: readbacks that differ from the pool's
+addresses mean the registers still do not hold the rings; `CRCR.CRR false`
+with correct readbacks means the controller never took the ring; `CRR true`
+and an empty event slot means it ran the command and its event did not
+reach the ring the CPU reads (the barrier is next); `HSE true` is a DMA
+fault.
+
+**2026-10-03: the board boot of #193. The controller runs commands, and
+the keyboard comes up.** One boot, no `NOXHCI`:
+
+```
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: device connected on port 1
+xhci: port 1 reset, speed=3
+xhci: slot 1 enabled
+xhci: slot 1 addressed (port 1)
+xhci: GET_DESCRIPTOR(Device) -> [12, 01, 10, 02, 09, 00, 01, 40, 09, 21, 31, 34, 21, 04, 00, 01, 00, 01]
+xhci: port 1: hub - its ports are brought up after the root ports
+xhci: device connected on port 3
+xhci: port 3 reset, speed=0
+xhci: port 3 setup failed (unsupported port speed 0 (only Low/Full/High/SuperSpeed/SuperSpeedPlus are implemented)), continuing with other ports
+xhci: port 1: hub with 4 ports (speed=3, TT think time 3)
+xhci: port 1.4: device connected, reset, speed=1
+xhci: slot 2 enabled
+...
+xhci: port 1.4: boot-protocol keyboard - activating after the scan
+...
+xhci: keyboard ready
+```
+
+No dump, no HSE line: Enable Slot completed, so **the 64-bit store was the
+cause**, the one variable of the round. Root port 1 is the VL805's USB 2
+port, wired to a VIA hub (`2109:3431`, 4 ports) that carries the USB 2
+lines of all four sockets; the keyboard, a Full Speed device, is on its
+port 4 and reached `keyboard ready`, the first USB device brought up on
+this board. The stick did not: it showed up on root port 3, one of the
+VL805's SuperSpeed ports (a USB 2 device would have appeared behind the
+hub), and came out of its reset with speed 0, at boot and again when
+`mount -a` rescanned, so there was still no disk and `ls` was unknown.
+
+**Built on `pi4/usb3-port-state`.** A port already in SS.Inactive (`PLS
+6`) or Compliance (`PLS 10`) before its reset gets a Warm Reset instead of
+a Hot one, as Linux does. A port that is not enabled after its reset gets
+its PORTSC before and after, decoded (`CCS`, `PED`, `PLS`, `speed`); a
+watch of up to a second for it to enable, logging each change; then, from
+those two link states, a Warm Reset and the same watch; and it is refused
+with its PORTSC rather than addressed if none of that brought it up. **Read
+on the board:** `link state … before the reset, warm reset` means the port
+was waiting for a Warm Reset from the start; `enabled after the reset`
+means the link was still training and only needed time; `link state 6`
+or `10, warm reset` then `enabled after the warm reset` means the Warm
+Reset after the Hot one was the answer; `root port not enabled after
+reset` means none of these, and the decoded PORTSC values say what the
+port did instead.
+
+**2026-10-03: a whole session on the board.** Card and stick staged from
+`main` at #195 (`make sdcard`, `make stick`, the stick exFAT), no
+`NOXHCI`, the keyboard and the stick plugged in:
+
+```
+xhci: port 1: hub with 4 ports (speed=3, TT think time 3)
+xhci: port 1.2: device connected, reset, speed=3
+xhci: port 1.2: USB mass storage - activating after the scan
+xhci: port 1.4: device connected, reset, speed=1
+xhci: port 1.4: boot-protocol keyboard - activating after the scan
+xhci: storage bulk endpoints configured (IN 0x81 DCI 3, OUT 0x02 DCI 4)
+xhci: keyboard ready
+usb-msd: INQUIRY -> vendor='Lexar' product='USB Flash Drive'
+usb-msd: capacity 243404800 sectors (512-byte blocks)
+usb-msd block device installed
+```
+
+Then `fsd` mounted the stick (`exFAT mounted, disk commands available`, the
+line interleaved with the other servers' on the serial console) and warned,
+correctly, that exFAT cannot enforce permissions. `login:` asked for a user
+from the stick's `/etc/passwd`; a mistyped first attempt said `Login
+incorrect`, then `root` logged in. Typed on the USB keyboard, Hans
+confirmed: `ls` showed `bin/ etc/ man/ Users/` (the `.ouroboros-stick`
+marker hidden as a dot file), `ls bin` the programs, `man rev` its page,
+`uptime` its ticks, Ctrl+C ended a waiting `rev`, and `halt` halted.
+**The first full session on the Pi 4: USB keyboard in, USB disk mounted,
+programs run from it.**
+
+The stick came up behind the hub at High Speed (port 1.2), the USB 2 path,
+not on a SuperSpeed root port as the stick of the earlier boots did, so the
+root-port recovery built for that (#194) did not run, and the transaction
+translator path (a Full or Low Speed device behind the High Speed hub) has
+still only carried the keyboard's interrupt endpoint, not bulk storage. Open:
+a stick on a SuperSpeed root port.
+
+**2026-10-03: the stick on a SuperSpeed root port, and the reason for
+`speed=0`.** The same Lexar stick (reformatted, re-staged), this time on
+root port 2:
+
+```
+xhci: port 2: not enabled after the hot reset; before it 0x00281203 (CCS 1, PED 1, PLS 0, speed 4), after it 0x00200311 (CCS 1, PED 0, PLS 8, speed 0)
+xhci: port 2: enabled after the reset: 0x00201203 (CCS 1, PED 1, PLS 0, speed 4)
+xhci: port 2 reset, speed=4
+...
+xhci: port 2: USB mass storage - activating after the scan
+usb-msd block device installed
+```
+
+The port was already enabled in U0 at SuperSpeed before the driver touched
+it; the Hot Reset sent the link back through Polling (`PLS 8`), and PRC was
+set while it was still there, with `PED 0` and speed 0. The old code read
+the speed at that moment, which is every `port 3 reset, speed=0` of the
+earlier boots. Waiting for the port to enable was the whole fix; the Warm
+Reset path was not needed. The descriptor now says `bcdUSB 0x0320` (it said
+`0x0210` behind the hub, the same stick at High Speed). Then the session as
+before: `exFAT mounted`, `login: root`, `ls` from the stick, `halt`.
+
+Which path a USB 3 stick takes is decided by the link, not by what is on
+it: in a blue socket it trains SuperSpeed and appears on a root port (2 or
+3, one per blue socket); in a black socket, or a blue one whose SuperSpeed
+pins did not make contact or whose link did not train, it appears at High
+Speed behind the hub. The reformat between the boots cannot have changed
+that, since enumeration reads no sector.
+
+**2026-10-03, evening: the ordering fixes on the board.** Card and stick
+staged from `main` at `e738302`, which carries #196 (a `dsb sy` before the
+registers that hand the controller its rings) and #197 (TRBs published as
+a batch, the first one's cycle bit flipped last behind `dmb oshst`). The
+stick in a blue socket, the keyboard behind the hub. That the card carried
+this build is read from the image, since a boot does not yet say which
+build it is: `image @ 0x37760000..0x379bd000` is `0x25d000` bytes, the
+`SizeOfImage` of the `BOOTAA64.EFI` built for the staging, after both
+merges.
+
+```
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: port 3: not enabled after the hot reset; before it 0x00281203 (CCS 1, PED 1, PLS 0, speed 4), after it 0x00200311 (CCS 1, PED 0, PLS 8, speed 0)
+xhci: port 3: enabled after the reset: 0x00201203 (CCS 1, PED 1, PLS 0, speed 4)
+xhci: port 3 reset, speed=4
+xhci: port 1: hub with 4 ports (speed=3, TT think time 3)
+xhci: port 1.4: device connected, reset, speed=1
+xhci: storage bulk endpoints configured (IN 0x81 DCI 3, OUT 0x02 DCI 4)
+xhci: keyboard ready
+usb-msd: INQUIRY -> vendor='Lexar' product='USB Flash Drive'
+usb-msd block device installed
+```
+
+The same session as the two boots before it: the stick on SuperSpeed root
+port 3, through the same Polling window #194 waits out; the keyboard on
+port 1.4; `exFAT mounted at partition LBA 2048`; `login: root`; `ls`,
+`mount`, `man ls`, `ls Users/` from the stick; `shutdown` powered the board
+off. No fault, no timeout, no `WARNING`. Every request on the way went
+through the batch publish: Enable Slot and Address Device for three slots,
+each device's descriptors and configuration as control transfers (Setup,
+Data and Status published together), the hub's, the keyboard's and the
+storage endpoints' commands, and every bulk transfer `fsd` made. **#196 and
+#197 break nothing on the board.** That is all a boot can say about them:
+the board ran without them too, and what they fix is a window this boot did
+not have to hit.
+
+**2026-10-03, later: #198 on the board, and the first boot that names its
+build.** Card and stick staged from `main` at `08d3b4e` (#198, every xHCI
+register write through `mmio_write32`/`mmio_write64`, a call and a `dsb sy`
+each; #199, the build line). The capture says which build it is, so this
+time nothing was inferred:
+
+```
+UEFI stage alive, build 08d3b4e27601 debug, on its own stack (sp 0...
+boot services exited, console live, build 08d3b4e27601 debug
+running at EL2 after the exit
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: port 3 reset, speed=4
+xhci: keyboard ready
+usb-msd block device installed
+```
+
+Then the same session as the boots before it: the stick on SuperSpeed root
+port 3 through #194's wait, the keyboard on port 1.4 behind the hub, `exFAT
+mounted`, `login: root` (a first attempt with an empty name said `Login
+incorrect`, as it should), `ls` from the stick, `shutdown` powered off. No
+fault, no timeout, no `WARNING`. **The barrier on every register write costs
+nothing visible on the board.** (`netd: boot identity: boot 1`: the card was
+restaged, so its boot counter started again.) `screen -L` appends, so the
+capture also holds the previous boot above this one; the build line is what
+tells the two apart.
+
+**2026-10-04: #200 on the board, ERDP before ERSTBA.** Card and stick staged
+together from `main` at `d89908f`, which is #200's kernel (`097da77`) plus a
+docs-only commit, so the build line names `d89908f` and the ERDP order is
+the round's only variable. `screenlog.0` was moved aside first, so the
+capture holds these two boots and nothing older:
+
+```
+UEFI stage alive, build d89908f1d0ab debug, on its own stack (sp 0...
+boot services exited, console live, build d89908f1d0ab debug
+running at EL2 after the exit
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: port 3 reset, speed=4
+usb-msd block device installed
+```
+
+Two boots, both to the shell: the stick on SuperSpeed root port 3 through
+#194's wait, `exFAT mounted`, `login: root`, then `ls`, `ls -l`, `ls etc`,
+`ls bin`, `cat etc/passwd`, `man`, `chello`, `bootid` and `shutdown`, which
+powered off both times. `bootid` said `boot 1` and then `boot 2`: the card
+was restaged, so its counter started again. No fault, no command timeout,
+no `Host System Error`, no `WARNING`. **The ERDP order costs nothing visible
+on the board.** No keyboard and no display this time, on purpose: Hans typed
+over the serial console, so the hub reported four ports and nothing behind
+them (`keyboard not available`), which is the empty hub and not a finding.
+The keyboard behind the hub was last seen working on `08d3b4e`, the boot
+above.
+
+**2026-10-04, later: #201 on the board, ERSTSZ and ERSTBA keeping their
+RsvdP bits.** Stick then card staged from `main` at `c07804a` (#201's
+merge), the card's `BOOTAA64.EFI` compared byte for byte with `build/esp`'s
+before the eject. One boot, over the serial console:
+
+```
+UEFI stage alive, build c07804a040e7 debug, on its own stack (sp 0...
+boot services exited, console live, build c07804a040e7 debug
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: RsvdP kept: ERSTSZ 0x0, ERSTBA 0x0
+xhci: port 3 reset, speed=4
+usb-msd block device installed
+```
+
+**The VL805's RsvdP bits read 0 after HCRST**, as on QEMU, so this change
+writes exactly what the code before it wrote: the read-modify-write is spec
+form on this controller, and now observed to be. Then `exFAT mounted`,
+`login: root`, `ls`, `ls etc`, `ls bin`, `bootid` (`boot 1`, the card
+restaged), `shutdown`, powered off. No fault, no command timeout, no `Host
+System Error`, no `WARNING`; no keyboard, by choice.
+
+**2026-10-04, later still: #202 on the board, every RsvdP write logged.**
+Stick then card staged from `main` at `9ff7e4a` (#202's merge), the card's
+kernel compared byte for byte with `build/esp`'s. One boot over serial:
+
+```
+UEFI stage alive, build 9ff7e4a9831b debug, on its own stack (sp 0...
+boot services exited, console live, build 9ff7e4a9831b debug
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+xhci: controller @ 0x600000000, max_slots=32 max_ports=5 scratchpads=31
+xhci: RsvdP before the reset: USBCMD 0x0
+xhci: RsvdP after the reset, kept by each write: USBCMD 0x0, CONFIG 0x0, CRCR 0x0, ERSTSZ 0x0, ERSTBA 0x0
+xhci: port 3 reset, speed=4
+usb-msd block device installed
+```
+
+**Every RsvdP bit the driver now keeps reads 0 on the VL805, USBCMD's even
+before the reset, where the firmware's state is**, so #202 writes what the
+code before it wrote. Then `exFAT mounted` and `login: root` (the account
+files read off the stick), and the shell answering three empty lines; no
+commands beyond that this time, and no `shutdown` in the capture. No fault,
+no command timeout, no `Host System Error`, no `WARNING`.
+
+**2026-10-04, evening: #203 on the board, the controller as handed over.**
+Stick then card staged from `main` at `7f39b6e` (#203's merge), the card's
+kernel compared byte for byte with `build/esp`'s. One boot over serial:
+
+```
+UEFI stage alive, build 7f39b6ea226c debug, on its own stack (sp 0x37...
+boot services exited, console live, build 7f39b6ea226c debug
+xhci: as handed over: USBCMD 0x8 (R/S false, RsvdP 0x0), USBSTS 0x19 (HCH true, CNR false)
+xhci: at the reset write: USBSTS 0x19 (HCH true)
+xhci: RsvdP after the reset, kept by each write: USBCMD 0x0, CONFIG 0x0, CRCR 0x0, ERSTSZ 0x0, ERSTBA 0x0
+usb-msd block device installed
+```
+
+**The firmware hands the VL805 over halted**: R/S 0 and HCH 1 both as
+handed over and at the HCRST write, so the kernel does not reset a running
+controller on this board. What the firmware leaves set is not a running
+controller but its traces: USBCMD's HSEE (bit 3), and in USBSTS a pending
+EINT (bit 3) and a Port Change Detect (bit 4), all cleared by the reset.
+Then `exFAT mounted`, `login: root`, `ls`, `ls bin`, `man ls`, `shutdown`,
+powered off. No fault, no command timeout, no `Host System Error`, no
+`WARNING`.
+
+**2026-10-04, night: #205 on the board, the halt before HCRST.** Stick then
+card staged from `main` at `676797f` (#205's merge and its records), the
+card's kernel compared byte for byte with `build/esp`'s. Two boots over
+serial in one capture: the firmware's settings had been reset, its boot
+order now starting with the network, so the first boot sat a long time at
+the network attempt before it reached the card; Hans set the SD card first
+in the firmware's menu and booted again.
+
+```
+boot services exited, console live, build 676797f83e01 debug
+xhci: as handed over: USBCMD 0x8 (R/S false, RsvdP 0x0), USBSTS 0x19 (HCH true, CNR false)
+xhci: at the reset write: USBSTS 0x19 (HCH true, found running false)
+xhci: RsvdP after the reset, kept by each write: USBCMD 0x0, CONFIG 0x0, CRCR 0x0, ERSTSZ 0x0, ERSTBA 0x0
+usb-msd block device installed
+```
+
+**Handed over halted, so nothing was written before the reset, as
+predicted.** Both boots, from `boot services exited` to the first `login:`,
+match #203's line for line but for the new field and one task region a page
+higher. The RAM span is #203's (`0x3b0000-0x3b400000`), so the firmware's
+reset left "Limit RAM to 3 GB" on. No fault, no command timeout, no `Host
+System Error`, no `WARNING`.
+
+**New, and not the kernel's change: `root` was refused at first.** Boot 1:
+`login: root`, `Login incorrect`, twice, then a reboot into the firmware.
+Boot 2: `root` refused once, then `user` logged in, `exit`, and `root`
+logged in. Every earlier capture logs `root` in on the first try. The
+staged secrets are version 2, so no login rewrites `/etc/shadow`; the
+likelier path is that the shadow read failed and nothing said so:
+`find_account_line` retries only `NO_FS`, and any other error from `fsd`
+reads as a wrong password. Unconfirmed: the password is not echoed and the
+refusal does not say why. On the roadmap.
+
+Narrowed in the same session: after a logout `root` logged in; after a
+reboot it was refused 5 s after the prompt and accepted 5 s later, nothing
+printed between. **#206 then made the login say why** (a read error with its
+code, no entry, an entry that does not parse; a bare `Login incorrect` is a
+wrong password). On the board with it (`build 0af55b5c3b81 debug`, stick and
+card re-staged): four boots, `root` typed at once each time, logged in every
+time, no line, the boot counter 1 to 4. Not reproduced; the line stays armed.
 
 ---
 
@@ -798,3 +1814,6 @@ fix are all above, which is the whole reason for writing them down first.
   (a DMA tag without `BUS_DMA_COHERENT`).
 - This repository: `kernel/src/main.rs`, `virtio_mmio.rs`, `pci.rs`, `madt.rs`,
   `block.rs`, `loader.rs`, and the `Makefile`'s `esp`/`image` targets.
+- [Raspberry Pi Debug Probe](https://www.raspberrypi.com/documentation/microcontrollers/debug-probe.html):
+  the UART cable's colours (orange TX, yellow RX, black GND, no VCC) and the
+  macOS device name, the basis for §3's wiring.
