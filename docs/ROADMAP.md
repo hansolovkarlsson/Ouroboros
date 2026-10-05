@@ -1809,7 +1809,13 @@ The small open tails those arcs deliberately left:
 >       capture shows one, and no board round has run it. `make test` green, `test-usb-hub` 19 ok
 >       with the same reset lines, `test-el1-drop` PASS. Left: DCBAAP and
 >       ERDP still share `Whole64`; WPR on a USB2 port is refused only by
->       the caller's link-state check.*
+>       the caller's link-state check. Merged as #209. Done; the next board
+>       round runs it, with the RsvdZ bits as its only difference on the
+>       wire.*
+> - [ ] **fix** **DCBAAP and ERDP share `Whole64`**, so a function taking
+>       one takes the other, as PORTSC took a doorbell until #209. A type
+>       each, or a type for ERDP whose write takes the dequeue pointer and
+>       the EHB clear apart (EHB is RW1C, written 0 today). Left by #209.
 > - [ ] **fix** **The xHCI rings stay off page boundaries by field order.**
 >       The EP0 rings sit on a 256-byte boundary only because the 64-byte
 >       ERST precedes them; the compile-time assertions catch a bad order,
