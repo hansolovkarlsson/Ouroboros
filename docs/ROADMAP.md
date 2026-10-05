@@ -2230,9 +2230,10 @@ be reviewed after the fact from the saved screenshots.
 > mention of CPP in older records means Proem.
 >
 > **What Proem asks of Ouroboros, accepted 2026-10-01 and 2026-10-02, for
-> later.** Five handoff notes, triaged and accepted; none is started. A sixth,
-> a notice with Proem's smaller heap numbers, was taken on 2026-10-02 and is
-> in `handoffs/closed/`. Each note carries its evidence, its **Done when**
+> later.** Five handoff notes, triaged and accepted. The heap one is done
+> (#210, 2026-10-05) and its note closed; the others are not started. A
+> sixth, a notice with Proem's smaller heap numbers, was taken on 2026-10-02
+> and is in `handoffs/closed/`. Each note carries its evidence, its **Done when**
 > and the reply below in full.
 >
 > - [x] **new** **A user heap of at least 1 MiB, ideally sized per program.**
@@ -2253,7 +2254,7 @@ be reviewed after the fact from the saved screenshots.
 >       with multi-slot regions past 2 MB, wanted for that one test and for
 >       the compiler later. Blocks step 8 of `roadmap-c-hosting.md` (branch
 >       `docs/c-hosting`). Notes:
->       [`handoffs/2026-10-01-from-proem-heap-growth.md`](handoffs/2026-10-01-from-proem-heap-growth.md)
+>       [`handoffs/closed/2026-10-01-from-proem-heap-growth.md`](handoffs/closed/2026-10-01-from-proem-heap-growth.md)
 >       and, for the numbers,
 >       [`handoffs/closed/2026-10-01-from-proem-heap-numbers.md`](handoffs/closed/2026-10-01-from-proem-heap-numbers.md).
 >       *Built 2026-10-05 on `loader/heap-1mib`: `HEAP_PAGES` 256, so every
@@ -2283,7 +2284,8 @@ be reviewed after the fact from the saved screenshots.
 >       was refused, so the stall is fixed first. It was, by #211 (the
 >       supervisor no longer restarts a busy `fsd`) and #212 (a FAT-sector
 >       cache, so a write's cost no longer grows with the offset); with both
->       merged, the 758 KB redirect writes whole (below).*
+>       merged, the 758 KB redirect writes whole (below). Merged as #210
+>       (`b38cee0`); the handoff note is done and in `handoffs/closed/`.*
 > - [ ] **new** **A heap sized per program, and regions past one 2 MB
 >       slot.** For Proem's 112-header picolibc test (2,031 KB live) and the
 >       compiler later. A size carried in the ELF, read by the loader, and

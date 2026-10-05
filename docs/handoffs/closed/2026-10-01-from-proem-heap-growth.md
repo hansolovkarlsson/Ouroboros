@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-01
 - **Kind:** requirement
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** Proem running on Ouroboros: `proem` preprocessing any program
   that includes `<stdio.h>`. Step 8 of `roadmap-c-hosting.md`.
 
@@ -90,3 +90,23 @@ roadmap item.
 
 The redirect capture's 256 KiB limit is noted and not taken up here; Proem's
 `-o FILE` avoids it.
+
+Done 2026-10-05, merged as #210 (`b38cee0`). `HEAP_PAGES` is 256 in
+`kernel/src/loader.rs`, so every program's heap is 1 MiB, and its image may
+be up to 241 pages (964 KiB, `HEAP_INFO_IMAGE_MAX`). The test you asked for
+exists: `/bin/CMEM` (`libc/cmem.c`, picolibc) mallocs 16 KiB blocks until
+refused, writes and reads back every byte, and exits 1 unless the heap is
+at least 1 MiB and malloc held it to within 64 KiB; `make test-heap` runs it
+twice in one boot and prints `heap 1048576 bytes, 0 nonzero at start, malloc
+held 1032192 bytes live in 63 blocks of 16384, 0 bad: ok`.
+
+Three things came with it that touch Proem. A loaded program's region is
+now zeroed, so its heap starts at 0 (before, a spawned program could read
+what the last one left). The shell's redirect capture is 1 MiB too, so
+`proem hello.c > hello.i` can save up to 1 MiB. And a large file write no
+longer gets `fsd` restarted part way through (#211, #212): before, writing
+a file past about 170 KB, by `cp` or a redirect, could leave it short, which
+is how `-o FILE` would have written a large output.
+
+Not done here, and on our roadmap as its own item: a heap sized per program,
+and regions past one 2 MB slot, for your 2,031 KB picolibc-headers test.
