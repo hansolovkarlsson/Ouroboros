@@ -870,7 +870,63 @@ The small open tails those arcs deliberately left:
   160 KB (the walk, plus `find_free_cluster` scanning from cluster 2 for
   each new cluster), each request still inside two ticks on QEMU. On the
   Pi, where a read is a USB transfer, it is the same count at a higher
-  price.
+  price. **The FAT-sector cache built 2026-10-05 on `fsd/fat-cache`**:
+  `fat32::Fs` keeps the last FAT sector read (`fat_entry`, used by
+  `next_cluster` and `find_free_cluster`), kept in step by
+  `write_fat_entry` and dropped at the start of every request
+  (`begin_request`, from `handle`), since the same partition can be
+  mounted as two trees; and `find_free_cluster` starts at a hint one past
+  its last answer and wraps to cluster 2. The same `cp` now makes 17
+  reads for its first `write_at` and 32 at 640 KB. Checked on QEMU: the
+  758 KB copy, a second copy after an `rm`, a copy into a new directory
+  and a `>>` append all read back identical from the Mac, and
+  `fsck_msdos -n` finds no chain error or orphan; interleaved copies
+  through `/` and `mount 0 /mnt/a` likewise. Not shown: that the
+  per-request drop is needed. With it removed, two interleaving sequences
+  stayed clean, because a request's directory walk reads FAT sector 0
+  before anything else and so replaces a stale sector first. It stays, on
+  reasoning. The read-by-fid cure for `cpu` spawn is still open; reads
+  benefit from the cache too, untimed. Its review (`/code-review high`,
+  six findings) found a real bug in it: `find_free_cluster` was bounded by
+  the FAT's capacity, not the volume's clusters, and a FAT rounded up in
+  size holds zeroed entries past the last cluster that read as free. At
+  cluster 2 the scan reached them only on a full disk; with the hint,
+  ordinary use walked it there. Now `mount_at` computes `cluster_end` from
+  the BPB's total sectors and the scan stops at it. Shown on a copy of the
+  image with 1,000 sectors cut from its recorded size and filled from the
+  Mac to 196 KiB free: `cp` of 758 KB says `disk full` and `fsck_msdos`
+  finds nothing out of range; with the old bound, the same run writes
+  about 500 KB past the volume (`fsck`: `chain ... continues with cluster
+  out of range`). Also from the review: `free_chain` lowers the hint, so
+  freed space is found next; `write_fat_entry` takes copy 0's sector from
+  the cache and leaves it there. Not taken: refusing a second mount of a
+  mounted partition (the item below), and seeding the hint from FSInfo's
+  next-free (the FSInfo item below).
+
+- **A write that runs out of space leaves the file's chain longer than its
+  size (seen 2026-10-05).** On the filled image above, `cp` stopped with
+  `disk full` and left `/K.BIN` at 198,656 bytes with 200,192 allocated:
+  `write_at` extends the chain cluster by cluster as it writes and fails
+  before it records the size, and `cp` leaves the partial file. Not lost
+  space (the clusters belong to the file), but `fsck_msdos` flags it.
+  `write_at` could free the clusters it added when it fails; whether `cp`
+  should remove a partial destination is a policy question.
+
+- **`fsd` never updates FAT32's FSInfo free count (seen 2026-10-05).**
+  `fsck_msdos -n` on any image `fsd` has written says `Free space in
+  FSInfo block (124129) not correct`: FSInfo is written by `format` and
+  never again. Harmless to `fsd`, which scans; another OS reading the
+  stick may trust the stale count. Update it on allocation and free, or
+  write `0xFFFFFFFF` (unknown) once at mount, as the spec allows.
+
+- **Two trees over one partition share nothing (seen 2026-10-05).**
+  `mount 0 /mnt/a` mounts the boot partition a second time, so two
+  `fat32::Fs` each keep their own `read_cursor` (and, within a request, a
+  FAT cache) over the same FAT. The cache is request-scoped for this
+  reason; the read cursor is not, and a write through one tree can leave
+  the other's cursor on a stale chain. Refusing a second mount of a
+  mounted partition would close both; whether a double mount is ever
+  wanted is the question.
 
 - ~~**A server busy with a stream of requests is restarted as wedged
   (found 2026-10-05).**~~ **FIXED 2026-10-05** on `fsd/large-write`: `cp`
