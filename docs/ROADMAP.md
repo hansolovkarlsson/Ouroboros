@@ -2091,12 +2091,13 @@ be reviewed after the fact from the saved screenshots.
 >       exFAT have none, so the directory entry's location; `/proc`'s own)
 >       and an `st_dev` per server and per remote mount. Note:
 >       [`handoffs/2026-10-01-from-proem-fstat-identity.md`](handoffs/2026-10-01-from-proem-fstat-identity.md).
-> - [ ] **Rename CPP to Proem in the C-hosting plan** on the branch that
->       carries it (`docs/c-hosting`, `f060b8d`, not on `main`): `/bin/proem`,
+> - [x] **Rename CPP to Proem in the C-hosting plan** on the branch that
+>       carries it (`docs/c-hosting`, not on `main`): `/bin/proem`,
 >       `proem-bin`, `PROEM_DIR` defaulting to `../Proem`, `driver/proem.c`,
->       the finish line's command, and the plan's index line. Before the
->       plan merges, so `main` never carries the old names. Note:
->       [`handoffs/2026-10-01-from-workspace-proem-rename.md`](handoffs/2026-10-01-from-workspace-proem-rename.md).
+>       the finish line's command, and the plan's index line. **Done
+>       2026-10-04, `69653a8`**, before the plan merges, so `main` never
+>       carries the old names. Note:
+>       [`handoffs/closed/2026-10-01-from-workspace-proem-rename.md`](handoffs/closed/2026-10-01-from-workspace-proem-rename.md).
 > - [ ] **new** **`unlink` in the C port.** picolibc's `remove` calls
 >       `unlink`, which nothing in `libc/src` defines, so linking Proem (which
 >       removes its `-o` output after a failed run, as Clang does) fails on
