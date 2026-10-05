@@ -2201,6 +2201,17 @@ be reviewed after the fact from the saved screenshots.
 >       (`syscall.rs`'s Ctrl-C interception), so it needs its own design
 >       note first. Note:
 >       [`handoffs/2026-10-05-from-edit-editor-console.md`](handoffs/2026-10-05-from-edit-editor-console.md).
+> - [ ] **new** **`rename` in the C port.** picolibc declares it and
+>       nothing defines it, so a C program calling it fails to link. One
+>       `np_request` in `libc/src/file.c`, `NP_MV` on the two resolved
+>       paths, which already replaces an existing ordinary file (fixed
+>       2026-09-02); 0, or -1 with `errno` once step 2 of the C-hosting
+>       plan gives one. Same shape as Proem's `unlink` above; land them
+>       together. While there, `FSOP_MV`'s doc comment in `syscall-abi`
+>       still says the destination must not exist. Done when, on FAT32, a
+>       C program's `rename("a.tmp", "a.txt")` with both present returns 0,
+>       `a.txt` holds what `a.tmp` held, and `a.tmp` is gone. Note:
+>       [`handoffs/2026-10-05-from-edit-rename.md`](handoffs/2026-10-05-from-edit-rename.md).
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
