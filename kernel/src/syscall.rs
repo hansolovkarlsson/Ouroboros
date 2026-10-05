@@ -689,6 +689,13 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::NS_SET => {
             // arg0 = namespace-blob pointer, arg1 = length. Sets the calling
             // task's own namespace directly; children inherit it at SPAWN.
+            // A length of 0 empties it, the pointer unread: without this a
+            // task could remove bindings but never its last one (the shell's
+            // `unmount` dropping its only `mount <n>` binding, 2026-10-05).
+            if arg1 == 0 {
+                tasks::set_namespace(tasks::current_task(), &[]);
+                return 0;
+            }
             if !valid_stage_range(arg0, arg1, NS_MAX_SIZE) {
                 return SPAWN_ERROR;
             }

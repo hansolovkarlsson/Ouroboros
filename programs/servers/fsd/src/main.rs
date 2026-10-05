@@ -343,13 +343,20 @@ struct Fid {
     /// the fid for the task's lifetime (review of #130).
     owner_uid: u32,
     tree: usize,
+    /// Its filesystem was unmounted under it (`FSOP_UNMOUNT`). The slot stays
+    /// `used`, so its number is not handed to the next opener while the
+    /// owner may still use it: freeing it let a remote session's cached fid,
+    /// or a C program's old descriptor, reach whoever opened next (the
+    /// review of #214). Every op on it answers `NO_FS`; `NP_CLUNK` frees it,
+    /// as does the reaper once its owner is gone.
+    dead: bool,
     path_len: usize,
     path: [u8; FID_PATH_MAX],
 }
 
 impl Fid {
     const fn empty() -> Self {
-        Fid { used: false, owner: 0, flags: 0, owner_uid: 0, tree: 0, path_len: 0, path: [0u8; FID_PATH_MAX] }
+        Fid { used: false, owner: 0, flags: 0, owner_uid: 0, tree: 0, dead: false, path_len: 0, path: [0u8; FID_PATH_MAX] }
     }
     fn path_str(&self) -> Option<&str> {
         core::str::from_utf8(&self.path[..self.path_len]).ok()
@@ -417,8 +424,8 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         // return the tree id, so a client can bind a namespace prefix to it.
         // A partition that is already a tree is not mounted again: its tree
         // id is returned, so every shell that mounts it binds the same tree
-        // (`tree_of`). Trees above 0 are never unmounted, so a refusal here
-        // would have shut every later shell out of that partition.
+        // (`tree_of`). A refusal here would shut every other shell out of a
+        // partition one shell has mounted, until the next `unmount`.
         //
         // Tree 0 is the root mount's alone, and must be there first: a
         // partition mount while `/` is unmounted could take slot 0 (and so
@@ -470,11 +477,29 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         if !is_root(&who) {
             return status_reply(reply, syscall_abi::FS_ERR_PERM);
         }
-        // Unmount tree 0 (the primary mount).
-        if mounts[0].is_none() {
+        // Unmount EVERY disk tree, not just tree 0 (since 2026-10-05). Trees
+        // above 0 have no unmount of their own, so clearing only tree 0 left
+        // them for the boot: the disk tools stayed refused, and a `mount -a`
+        // that replaced the device left them describing the old disk over
+        // the new one, a write through them landing at the old disk's
+        // offsets. The synthetic /proc tree stays. A fid on a now-empty tree
+        // is marked dead, not freed (see `Fid::dead`): it holds a tree number
+        // and a path, and the slot may later hold another partition.
+        let mut any = false;
+        for m in mounts.iter_mut() {
+            if m.as_ref().is_some_and(|fs| fs.is_disk()) {
+                *m = None;
+                any = true;
+            }
+        }
+        if !any {
             return status_reply(reply, syscall_abi::NO_FS);
         }
-        mounts[0] = None;
+        for fid in fids.iter_mut() {
+            if fid.used && mounts[fid.tree].is_none() {
+                fid.dead = true;
+            }
+        }
         status_reply(reply, 0)
     } else if op == syscall_abi::FSOP_ERASE
         || op == syscall_abi::FSOP_PARTITION
@@ -934,8 +959,11 @@ fn handle_fid_op(
         }
     }
     if verb == ninep_abi::NP_CLUNK {
-        fids[idx].used = false;
+        fids[idx] = Fid::empty();
         return status_reply(reply, 0);
+    }
+    if fids[idx].dead {
+        return status_reply(reply, syscall_abi::NO_FS);
     }
     // Honour what the fid was opened FOR. These ops skip check_access on the
     // grounds that the open was authorized - so the open's access mode IS the
