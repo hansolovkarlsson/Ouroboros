@@ -2110,7 +2110,21 @@ be reviewed after the fact from the saved screenshots.
 >       1032192 bytes live in 63 blocks of 16384, 0 bad` on QEMU, and with
 >       64 pages, the control, `heap 262144`. `cpico`, pipes, `sort` and a
 >       143 KB redirect unchanged. The per-program size and regions past
->       one slot are the item below.*
+>       one slot are the item below. Its review (`/code-review high`,
+>       eight findings) added: `populate_region` zeroes the whole region
+>       before loading, since a spawned program gets the slot the last one
+>       gave back and read its heap and stack (a mutation without it: the
+>       first `cmem` found 568,878 nonzero bytes, the second 1,043,155);
+>       `cmem` exits 1 unless the heap is at least 1 MiB, malloc held it
+>       within 64 KiB, and it read 0 before the first malloc, run twice in
+>       one boot by `make test-heap` (both mutations, no zeroing and 64
+>       pages, fail it); `sort`'s line index a quarter of the heap rather
+>       than a fixed 8,192 lines; "costs no RAM" corrected, since a
+>       boot-loaded program frees the rest of its slot, so the five boot
+>       programs keep 768 KiB more each; the stale 256KB mentions. Its
+>       first finding holds the merge: a redirect between 256 KiB and 1 MiB
+>       now reaches the `fsd` stall below and leaves a short file where it
+>       was refused, so the stall is fixed first.*
 > - [ ] **new** **A heap sized per program, and regions past one 2 MB
 >       slot.** For Proem's 112-header picolibc test (2,031 KB live) and the
 >       compiler later. A size carried in the ELF, read by the loader, and
