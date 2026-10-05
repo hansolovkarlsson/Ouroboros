@@ -2148,6 +2148,30 @@ be reviewed after the fact from the saved screenshots.
 >       program on a booted image removes a file it made, `ls` no longer
 >       shows it, and a second `remove` gives -1 and `ENOENT`. Note:
 >       [`handoffs/2026-10-01-from-proem-unlink.md`](handoffs/2026-10-01-from-proem-unlink.md).
+>
+> **What Edit asks of Ouroboros, accepted 2026-10-05, for later.** One
+> handoff note, a full-screen editor's needs, which is item c below (a text
+> editor and full-screen terminal control) made concrete. Not started.
+>
+> - [ ] **new** **A console and keyboard a full-screen editor can use.**
+>       Five parts, in Edit's order: (1) `cond`'s framebuffer backend
+>       interprets `ESC [ r ; c H` (it ignores the parameters today and
+>       goes home), `ESC [ K`, `ESC [ 2 J`, `ESC [ 7 m`/`ESC [ 0 m`/`ESC [
+>       m`, and swallows `ESC [ ? 25 l/h` without drawing; (2) the USB
+>       keyboard sends the VT100/xterm sequences for the arrows, Home, End,
+>       Page Up, Page Down, Delete, F2 and F3, which `xhci.rs`'s
+>       `keycode_to_ascii` drops; (3) the screen size readable by an
+>       ordinary program on both backends (`CON_INFO` is gated to `cond`,
+>       and `more` assumes 24 rows); (4) a per-program opt-out of the
+>       Ctrl-C kill, so 0x03 reaches it as a key (WordStar's page down);
+>       (5) `main(argc, argv)` in `crt0.c`, which calls `main(void)`. Done
+>       when a program in this tree, on the framebuffer console, writes
+>       each sequence of (1) and prints the bytes each key of (2) sends,
+>       and a C program's `main` receives its arguments. (4) touches the
+>       one choke point every keyboard path funnels through
+>       (`syscall.rs`'s Ctrl-C interception), so it needs its own design
+>       note first. Note:
+>       [`handoffs/2026-10-05-from-edit-editor-console.md`](handoffs/2026-10-05-from-edit-editor-console.md).
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
