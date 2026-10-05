@@ -2675,9 +2675,12 @@ pub unsafe fn on_tick(frame: *mut Context) {
 
     // Heartbeat: catch a supervised server (fsd/cond) wedged in a loop -
     // it never returns to a Blocked state and never faults, so the crash
-    // path can't see it. A healthy server (idle in recv, or briefly busy)
-    // is observed Blocked; a wedged one stays Runnable. On a wedge,
-    // restart it on the exact teardown path the fault handler uses.
+    // path can't see it. A healthy server is observed Blocked (idle in
+    // recv, or in a sub-call) or comes back to its `MSG_RECV`, which clears
+    // the count (`supervisor::note_progress`): a busy one may never be SEEN
+    // blocked, since a tick fired during its syscall lands as it returns to
+    // EL0. A wedged one stays Runnable and never reaches its receive. On a
+    // wedge, restart it on the exact teardown path the fault handler uses.
     for server in TaskIndex::all() {
         let slot = server.index();
         if !crate::supervisor::is_supervised(slot) {
@@ -2685,8 +2688,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
         }
         let blocked = matches!(unsafe { *STATES[slot].get() }, TaskState::Blocked(_));
 
-        // Passive heartbeat: a server observed continuously `Runnable` is a
-        // non-faulting loop wedge.
+        // Passive heartbeat: a server observed `Runnable` at every tick with
+        // no receive or ack between is a non-faulting loop wedge.
         let runnable_wedge = crate::supervisor::heartbeat(slot, blocked);
 
         // Active ping: catches the failure the passive heartbeat can't - a

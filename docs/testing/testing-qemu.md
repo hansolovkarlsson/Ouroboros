@@ -550,6 +550,28 @@ far past the supervisor's 2.56 s wedge threshold, and it must **succeed** —
 that is what distinguishes a capability denial (fails instantly, no packets)
 from a server restart (`server slot 4 wedged` on the console).
 
+**A busy server is not a wedged one.** Until 2026-10-05 `cp` of a large
+file had `fsd` restarted part way through: the heartbeat saw it `Runnable` at
+128 ticks in a row while it served a stream of 2 KiB writes, because a tick
+taken during a disk read lands as `fsd` returns to EL0. Since then reaching
+`msg_recv` clears the count (`supervisor::note_progress`). The check copies the
+758 KB kernel and compares the copy from the host:
+
+```sh
+make image
+python3 scripts/drive-qemu.py build/esp.img 'login:@@root' 'assword@@root' \
+  '# @@cp /EFI/BOOT/BOOTAA64.EFI /k.bin' '# @@ls -l /k.bin' '# @@'
+hdiutil attach -readonly -nobrowse -mountpoint /tmp/esp build/esp.img
+cmp /tmp/esp/k.bin /tmp/esp/EFI/BOOT/BOOTAA64.EFI; hdiutil detach /tmp/esp
+```
+
+Expected: no `wedged` line, `/k.bin` 758272 bytes, `cmp` silent. Before the
+fix the copy stopped near 170 KB. The other half, that a real wedge is still
+caught, needs a **temporary mutation**: at the top of `fat32.rs`'s `find`,
+`if path.as_bytes().windows(7).any(|w| w == b"WEDGEME") { loop {
+core::hint::spin_loop() } }`, then `ls -l /WEDGEME` after the copy must print
+`server slot 2 wedged` and `restarted (attempt 1/3)`. Revert it after.
+
 **A client alive across a `netd` restart.** A spawned program reaches `netd`
 only through the `TO_NET` grant the shell makes once, at spawn; until
 2026-09-06 the server's crash teardown stripped that grant from every live

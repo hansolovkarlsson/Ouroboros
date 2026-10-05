@@ -3134,6 +3134,32 @@ fn np_remote(endpoint: &[u8; ninep_abi::NS_ENDPOINT_LEN], verb: u64, params: [u6
 /// `false` if a path is too long or the namespace is full. Shared by `bind`
 /// (tree 0, target = an existing subtree) and `mount` (a fresh tree from
 /// `FSOP_MOUNT_AT`, target = `/` - the mounted volume's root).
+/// Removes every namespace entry bound to a partition tree (1 up to, not
+/// including, `/proc`'s), keeping the root's, `/proc`'s and the remote,
+/// network and console ones. See [`cmd_unmount`].
+fn ns_drop_partition_trees() {
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
+    let mut kept = [0u8; syscall_abi::NS_MAX as usize];
+    let mut klen = 0;
+    let mut i = 0;
+    while i + 3 <= nlen {
+        let entry = 3 + ns[i + 1] as usize + ns[i + 2] as usize;
+        if i + entry > nlen {
+            break;
+        }
+        let tree = ns[i];
+        if !(1..ninep_abi::NS_PROC_TREE).contains(&tree) {
+            kept[klen..klen + entry].copy_from_slice(&ns[i..i + entry]);
+            klen += entry;
+        }
+        i += entry;
+    }
+    if klen != nlen && syscall4(syscall_abi::NS_SET, kept.as_ptr() as u64, klen as u64, 0, 0) != 0 {
+        print_line("unmount: could not drop this shell's partition bindings");
+    }
+}
+
 fn ns_add(prefix: &[u8], target: &[u8], tree: u8) -> bool {
     if prefix.len() > 255 || target.len() > 255 {
         return false;
@@ -3881,8 +3907,9 @@ fn cmd_cpu(line: &str, out: &mut Output) {
 
 /// `mount <partition> <path>` - mount the disk's Nth partition and make it
 /// visible at `<path>` in this shell's namespace (cluster Phase 0 multi-mount).
-/// `fsd` mounts the partition into a fresh tree (`FSOP_MOUNT_AT`) and returns
-/// its tree id; we `bind` `<path>` onto that tree's root. A path under `<path>`
+/// `fsd` mounts the partition (`FSOP_MOUNT_AT`) and returns its tree id, an
+/// existing tree if the partition is already mounted (even tree 0, `/`
+/// itself); we `bind` `<path>` onto that tree's root. A path under `<path>`
 /// then resolves to that filesystem - a **second disk visible alongside** the
 /// boot mount at `/`, which the old single-mount model physically couldn't
 /// express. Per-task, like every namespace change.
@@ -3910,6 +3937,16 @@ fn cmd_mount_at(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Outp
     // fsd mounts the partition into a tree and returns the tree id (a small
     // number < FS_ERR_MIN; an error is >= FS_ERR_MIN).
     let tree = fs_call(syscall_abi::FSOP_MOUNT_AT, [index, 0, 0, 0], &[], &[], &mut []);
+    if tree == MOUNT_ALREADY {
+        // A partition already mounted comes back as its existing tree, so
+        // this means only that every tree slot is taken.
+        out.put_line("mount: every mount slot is in use");
+        return;
+    }
+    if tree == NO_FS {
+        out.put_line("mount: no such partition, no filesystem on it, or `/` not mounted yet (`mount -a` first)");
+        return;
+    }
     if tree >= FS_ERR_MIN {
         print_fs_error("mount", tree);
         return;
@@ -4039,13 +4076,23 @@ fn mount_disk() {
     }
 }
 
-/// `unmount` - drops the filesystem server's mounted volume (FSOP_UNMOUNT)
-/// so the disk can be reformatted or a different volume mounted. The
-/// kernel's block device is untouched; `mount -a` re-probes and remounts
-/// it. The disk-tools arc, milestone 1.
+/// `unmount` - drops every disk filesystem the server has mounted, `/` and
+/// any `mount <n> <path>` partitions (FSOP_UNMOUNT), so the disk can be
+/// reformatted or a different volume mounted; files open on them answer
+/// `NO_FS` from then on. The kernel's block device is untouched; `mount -a`
+/// re-probes and remounts it. The disk-tools arc, milestone 1.
+///
+/// Also removes this shell's own bindings to partition trees: a binding
+/// holds a bare tree number, and a later `mount <n>` may put another
+/// partition in that slot, which the stale path would then reach. Only
+/// this shell's namespace (and what its later children inherit); another
+/// shell's bindings stay until a per-tree generation exists (roadmap).
 fn cmd_unmount() {
     match fs_call(syscall_abi::FSOP_UNMOUNT, [0; 4], &[], &[], &mut []) {
-        0 => print_line("unmounted"),
+        0 => {
+            ns_drop_partition_trees();
+            print_line("unmounted")
+        }
         NO_FS => print_line("unmount: nothing was mounted"),
         _ => print_line("unmount: unexpected return"),
     }

@@ -865,7 +865,163 @@ The small open tails those arcs deliberately left:
   `heartbeat()` per chunk in `cpu_spawn`), and it is still slow. Two
   independent cures: read by fid (`NP_OPEN` once, then `NP_PREAD`), and a
   small FAT-sector cache in `fat32.rs`. Neither is needed for correctness
-  now.
+  now. The write side, measured 2026-10-05 with counters in `fsd`: `cp` of
+  a 758 KB file made 23 reads for its first 2 KiB `write_at` and 353 at
+  160 KB (the walk, plus `find_free_cluster` scanning from cluster 2 for
+  each new cluster), each request still inside two ticks on QEMU. On the
+  Pi, where a read is a USB transfer, it is the same count at a higher
+  price. **The FAT-sector cache built 2026-10-05 on `fsd/fat-cache`, merged as #212**:
+  `fat32::Fs` keeps the last FAT sector read (`fat_entry`, used by
+  `next_cluster` and `find_free_cluster`), kept in step by
+  `write_fat_entry` (dropped at the start of every request until the
+  double-mount fix below made `fsd` its FAT's only writer, so it now
+  lasts across requests); and `find_free_cluster` starts at a hint one past
+  its last answer and wraps to cluster 2. The same `cp` now makes 17
+  reads for its first `write_at` and 32 at 640 KB. Checked on QEMU: the
+  758 KB copy, a second copy after an `rm`, a copy into a new directory
+  and a `>>` append all read back identical from the Mac, and
+  `fsck_msdos -n` finds no chain error or orphan; interleaved copies
+  through `/` and `mount 0 /mnt/a` likewise (since the double-mount fix
+  below, `/mnt/a` is tree 0 itself and the drop is gone). Not shown: that
+  the per-request drop was needed. With it removed, two interleaving sequences
+  stayed clean, because a request's directory walk reads FAT sector 0
+  before anything else and so replaces a stale sector first. It stays, on
+  reasoning. The read-by-fid cure for `cpu` spawn is still open; reads
+  benefit from the cache too, untimed. Its review (`/code-review high`,
+  six findings) found a real bug in it: `find_free_cluster` was bounded by
+  the FAT's capacity, not the volume's clusters, and a FAT rounded up in
+  size holds zeroed entries past the last cluster that read as free. At
+  cluster 2 the scan reached them only on a full disk; with the hint,
+  ordinary use walked it there. Now `mount_at` computes `cluster_end` from
+  the BPB's total sectors and the scan stops at it. Shown on a copy of the
+  image with 1,000 sectors cut from its recorded size and filled from the
+  Mac to 196 KiB free: `cp` of 758 KB says `disk full` and `fsck_msdos`
+  finds nothing out of range; with the old bound, the same run writes
+  about 500 KB past the volume (`fsck`: `chain ... continues with cluster
+  out of range`). Also from the review: `free_chain` lowers the hint, so
+  freed space is found next; `write_fat_entry` takes copy 0's sector from
+  the cache and leaves it there. Not taken: refusing a second mount of a
+  mounted partition (the item below), and seeding the hint from FSInfo's
+  next-free (the FSInfo item below).
+
+- **A write that runs out of space leaves the file's chain longer than its
+  size (seen 2026-10-05).** On the filled image above, `cp` stopped with
+  `disk full` and left `/K.BIN` at 198,656 bytes with 200,192 allocated:
+  `write_at` extends the chain cluster by cluster as it writes and fails
+  before it records the size, and `cp` leaves the partial file. Not lost
+  space (the clusters belong to the file), but `fsck_msdos` flags it.
+  `write_at` could free the clusters it added when it fails; whether `cp`
+  should remove a partial destination is a policy question.
+
+- **`fsd` never updates FAT32's FSInfo free count (seen 2026-10-05).**
+  `fsck_msdos -n` on any image `fsd` has written says `Free space in
+  FSInfo block (124129) not correct`: FSInfo is written by `format` and
+  never again. Harmless to `fsd`, which scans; another OS reading the
+  stick may trust the stale count. Update it on allocation and free, or
+  write `0xFFFFFFFF` (unknown) once at mount, as the spec allows.
+
+- ~~**`unmount` clears tree 0 only, and partition mounts outlive it (seen
+  2026-10-05, in review).**~~ **FIXED 2026-10-05** on `fsd/unmount-all`, merged as #214,
+  option (a), Hans's choice: `FSOP_UNMOUNT` clears every disk tree and
+  drops the fids on them (a fid holds a tree number and a path, and the
+  slot may later hold another partition). Shown on a copy of the ext2
+  image: `mount 1 /mnt/f`, `unmount`, then `erase disk` erases; with the
+  old `unmount` the same run is refused. Its review (`/code-review high`,
+  six findings) found the fid drop itself unsafe: a freed slot's number
+  went to the next opener, so a remote session's cached fid, or a C
+  program's old descriptor, reached someone else's file, and `NP_CLUNK` on
+  it failed. Now the fid stays allocated with `Fid::dead` set, answers
+  `NO_FS`, and is freed by `NP_CLUNK` or the reaper. The shell's `unmount`
+  also drops its own partition bindings, which needed the kernel to accept
+  an `NS_SET` of length 0 (it refused one, so a task could never remove
+  its last binding). `make test-unmount` (`scripts/test-unmount.py`, with
+  `/bin/CFIDHOLD`, `libc/cfidhold.c`) holds a file open across `unmount`
+  and `mount -a` on the ext2 image: the new open gets fd 4 not 3, the old
+  fd reads -1 and closes with 0, `/mnt/f` is not found after the remount,
+  and `erase disk` runs. Mutations: freeing the fid fails it (`cfidhold:
+  FAIL`), and so does skipping the binding drop. Its cost is the next
+  item, narrowed to other shells' bindings. The text as found: Trees above 0 are never unmounted. So after
+  `mount 1 /mnt/f`, the disk tools stay refused for the rest of the boot
+  (`unmount` cannot clear tree 1), and a `mount -a` that replaces the
+  device (the shell's USB-rescan path, "safe because nothing is
+  mounted", which holds for tree 0 only) leaves tree 1 describing the old
+  disk, its geometry and its cached FAT sector, over the new one: a write
+  through `/mnt/f` then lands on the new disk at the old disk's offsets.
+  Older than the double-mount fix; the cache lasting across requests
+  raises the stakes. `unmount` clearing every disk tree closes both, at
+  the cost that a binding to a cleared tree may later point at a
+  partition mounted into the same slot. A decision for Hans.
+
+- **A binding to a cleared tree can later reach another partition (left
+  by the fix above, 2026-10-05).** A namespace entry holds a bare tree
+  number. The shell that runs `unmount` drops its own partition bindings,
+  but another shell's (or a running program's) stay. After `unmount`
+  clears tree 1, a shell that had `/mnt/f` bound to it sees nothing
+  there, until some later `mount <n>` puts another
+  partition in slot 1, when `/mnt/f` silently resolves to that. The cure
+  is a generation per tree: `fsd` counts each mount into a slot,
+  `FSOP_MOUNT_AT` returns it with the tree id, the namespace entry keeps
+  it, and a request whose generation no longer matches is refused rather
+  than served. An ABI change (the namespace entry and the `NP_*` request
+  carry it), so its own step.
+
+- ~~**Two trees over one partition share nothing (seen 2026-10-05).**~~
+  **FIXED 2026-10-05** on `fsd/no-double-mount`, merged as #213 (Hans chose it over
+  keeping double mounts): `FSOP_MOUNT_AT` on a partition that is already
+  a tree returns that tree's id instead of mounting it again (`tree_of`
+  in `fsd`'s `main.rs`), and the tree-0 auto-mount refuses a partition
+  another tree holds. A plain refusal was built first and dropped before
+  it was pushed: trees above 0 are never unmounted, so one shell's
+  `mount 1 /mnt/f` would have shut every later shell out of partition 1
+  for the boot. With one `Fs` per partition, the FAT cache now lasts
+  across requests (`begin_request` is gone) and the read cursor cannot go
+  stale under another tree. Shown on the ext2 image: `mount 0 /mnt/a`
+  then a write through `/mnt/a` appears at `/`; `mount 1` five times at
+  five paths all bind one tree; with the reuse removed, the third `mount
+  1` gets `every mount slot is in use`. The FAT32 rigs (interleaved
+  copies through `/` and `/mnt/a`, the spare-entries image) stay clean
+  under `fsck_msdos`. Its review (`/code-review high`, nine findings):
+  with reuse, `mount 0 /mnt/a` is tree 0 itself, so after `unmount` a
+  partition mount could take slot 0 and become everyone's `/`, or hold
+  the partition the next `mount -a` picks. Now `FSOP_MOUNT_AT` is refused
+  while tree 0 is empty and never takes slot 0. And `erase`, `partition`
+  and `format` counted the always-present `/proc` tree as a mount, so
+  they had refused every time since `/proc` landed; they count disk
+  trees now (shown: `unmount` then `erase disk` erases, on a copy, where
+  the build before refused). Left: the item below on what `unmount`
+  clears, and the cost of a repeat `mount <n>` (a full probe of the
+  partition to learn its LBA, then thrown away). The text as found:
+  `mount 0 /mnt/a` mounts the boot partition a second time, so two
+  `fat32::Fs` each keep their own `read_cursor` (and, within a request, a
+  FAT cache) over the same FAT. The cache is request-scoped for this
+  reason; the read cursor is not, and a write through one tree can leave
+  the other's cursor on a stale chain. Refusing a second mount of a
+  mounted partition would close both; whether a double mount is ever
+  wanted is the question.
+
+- ~~**A server busy with a stream of requests is restarted as wedged
+  (found 2026-10-05).**~~ **FIXED 2026-10-05** on `fsd/large-write`, merged as #211: `cp`
+  of a 758 KB file had `fsd` restarted at about 170 KB (`server slot 2
+  wedged - no progress (runnable)`), the copy left short, with or without
+  #210's 1 MiB heap. No request was slow: counters in `fsd` showed each
+  2 KiB write inside two ticks. The heartbeat samples state at the tick,
+  and the tick reaches the CPU only at EL0, so a tick fired during a disk
+  read is taken when `fsd` returns to EL0, `Runnable`, and 128 such ticks
+  in a row restarted it. Now the `MSG_RECV` arm calls
+  `supervisor::note_progress` on every call (not `MSG_TRY_RECV`, which
+  `netd` polls from inside its long loops), which clears the passive
+  count: a server back at its
+  receive has finished its last request, and one wedged in a loop never
+  gets there. Shown: the copy completes, 758,272 bytes, `cmp`-identical to
+  the source from the host; a temporary mutation that spins `fsd` on a
+  path holding `WEDGEME` is still restarted after the wedge time, in the
+  same boot; without the change the copy is cut short. This is a partial
+  answer to the open question below for the passive arm only; the ping
+  arm is unchanged. Its review (`/code-review high`, seven findings) took
+  `MSG_TRY_RECV` out, and left one: a single request longer than the
+  wedge time is still a wedge, and `write_at`'s cost grows with the
+  offset (the item above), so a large enough file, or a slow enough
+  disk such as the Pi's USB stick, can still be restarted mid-write.
 
 - **A long loop's acks let pings pile up in the mailbox (found 2026-09-27,
   in review).** A server clears `ping_outstanding` when it is seen
@@ -2124,14 +2280,22 @@ be reviewed after the fact from the saved screenshots.
 >       programs keep 768 KiB more each; the stale 256KB mentions. Its
 >       first finding holds the merge: a redirect between 256 KiB and 1 MiB
 >       now reaches the `fsd` stall below and leaves a short file where it
->       was refused, so the stall is fixed first.*
+>       was refused, so the stall is fixed first. It was, by #211 (the
+>       supervisor no longer restarts a busy `fsd`) and #212 (a FAT-sector
+>       cache, so a write's cost no longer grows with the offset); with both
+>       merged, the 758 KB redirect writes whole (below).*
 > - [ ] **new** **A heap sized per program, and regions past one 2 MB
 >       slot.** For Proem's 112-header picolibc test (2,031 KB live) and the
 >       compiler later. A size carried in the ELF, read by the loader, and
 >       `mmu.rs`/`tasks.rs` mapping a region of more than one slot. Split
 >       from the item above, which met the handoff's **Done when**.
-> - [ ] **fix** **A FAT32 write past about 170 KB stalls `fsd` long enough
->       to be restarted.** `cp /EFI/BOOT/BOOTAA64.EFI /k.bin` (758 KB) on
+> - [x] **fix** **A FAT32 write past about 170 KB stalls `fsd` long enough
+>       to be restarted.** *Fixed by #211 and #212, 2026-10-05: no request
+>       was slow; the supervisor saw a busy `fsd` runnable at every tick
+>       (see "A server busy with a stream of requests is restarted as
+>       wedged" above), and the per-request cost grew with the offset. The
+>       guess below about one long request was wrong, and is kept as
+>       written.* `cp /EFI/BOOT/BOOTAA64.EFI /k.bin` (758 KB) on
 >       `make image` under QEMU: `server slot 2 wedged - no progress
 >       (runnable) - restarting`, and `/k.bin` is left at 169,984 bytes
 >       (176,128 in a second boot with the 256 KiB heap, so it predates the
@@ -2189,6 +2353,41 @@ be reviewed after the fact from the saved screenshots.
 >       program on a booted image removes a file it made, `ls` no longer
 >       shows it, and a second `remove` gives -1 and `ENOENT`. Note:
 >       [`handoffs/2026-10-01-from-proem-unlink.md`](handoffs/2026-10-01-from-proem-unlink.md).
+>
+> **What Edit asks of Ouroboros, accepted 2026-10-05, for later.** One
+> handoff note, a full-screen editor's needs, which is item c below (a text
+> editor and full-screen terminal control) made concrete. Not started.
+>
+> - [ ] **new** **A console and keyboard a full-screen editor can use.**
+>       Five parts, in Edit's order: (1) `cond`'s framebuffer backend
+>       interprets `ESC [ r ; c H` (it ignores the parameters today and
+>       goes home), `ESC [ K`, `ESC [ 2 J`, `ESC [ 7 m`/`ESC [ 0 m`/`ESC [
+>       m`, and swallows `ESC [ ? 25 l/h` without drawing; (2) the USB
+>       keyboard sends the VT100/xterm sequences for the arrows, Home, End,
+>       Page Up, Page Down, Delete, F2 and F3, which `xhci.rs`'s
+>       `keycode_to_ascii` drops; (3) the screen size readable by an
+>       ordinary program on both backends (`CON_INFO` is gated to `cond`,
+>       and `more` assumes 24 rows); (4) a per-program opt-out of the
+>       Ctrl-C kill, so 0x03 reaches it as a key (WordStar's page down);
+>       (5) `main(argc, argv)` in `crt0.c`, which calls `main(void)`. Done
+>       when a program in this tree, on the framebuffer console, writes
+>       each sequence of (1) and prints the bytes each key of (2) sends,
+>       and a C program's `main` receives its arguments. (4) touches the
+>       one choke point every keyboard path funnels through
+>       (`syscall.rs`'s Ctrl-C interception), so it needs its own design
+>       note first. Note:
+>       [`handoffs/2026-10-05-from-edit-editor-console.md`](handoffs/2026-10-05-from-edit-editor-console.md).
+> - [ ] **new** **`rename` in the C port.** picolibc declares it and
+>       nothing defines it, so a C program calling it fails to link. One
+>       `np_request` in `libc/src/file.c`, `NP_MV` on the two resolved
+>       paths, which already replaces an existing ordinary file (fixed
+>       2026-09-02); 0, or -1 with `errno` once step 2 of the C-hosting
+>       plan gives one. Same shape as Proem's `unlink` above; land them
+>       together. While there, `FSOP_MV`'s doc comment in `syscall-abi`
+>       still says the destination must not exist. Done when, on FAT32, a
+>       C program's `rename("a.tmp", "a.txt")` with both present returns 0,
+>       `a.txt` holds what `a.tmp` held, and `a.tmp` is gone. Note:
+>       [`handoffs/2026-10-05-from-edit-rename.md`](handoffs/2026-10-05-from-edit-rename.md).
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

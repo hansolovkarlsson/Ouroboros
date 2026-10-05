@@ -61,6 +61,11 @@ pub struct Stat {
 }
 
 /// A mounted filesystem, whatever its on-disk format.
+// FAT32's arm carries a one-sector FAT cache (`fat32::Fs::fat_cache`), 512
+// bytes the others lack. `fsd` has no heap to box it in, and the mount table
+// (`MAX_MOUNTS`, five) lives on its stack: about 2.7 KB of the 56 KB the
+// loader gives it, taken knowingly.
+#[allow(clippy::large_enum_variant)]
 pub enum Filesystem {
     Fat32(fat32::Fs),
     /// exFAT, read-write (see [`exfat`]).
@@ -145,6 +150,12 @@ impl Filesystem {
             Filesystem::Ext2(_) => "ext2",
             Filesystem::Proc(_) => "proc",
         }
+    }
+
+    /// Whether this filesystem lives on a disk partition (every arm but the
+    /// synthetic `/proc`), so that `partition_lba` names a real place.
+    pub fn is_disk(&self) -> bool {
+        !matches!(self, Filesystem::Proc(_))
     }
 
     /// The first sector of the mounted volume - `mount`-info reporting only

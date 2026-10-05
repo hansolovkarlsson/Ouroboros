@@ -295,6 +295,12 @@ filesystem:
   (idle in `msg_recv`, or briefly busy), so staying continuously
   `Runnable` for ~2.5s (128 ticks) is the wedge signal — no server
   changes, no new ABI. It restarts on the same teardown path as a crash.
+  Since 2026-10-05 a server's call to `msg_recv` also clears the count
+  (`supervisor::note_progress`): a server busy with a stream of requests
+  may never be *seen* blocked, because a tick that fires during its disk
+  read lands as it returns to EL0, and `fsd` was restarted part way
+  through a large `cp` that way. One request longer than the wedge time
+  is still a wedge.
 
 The client whose call the server died under gets a cleanly failed call
 (`fail_calls_to`; the shell shows its no-filesystem message once); the

@@ -186,6 +186,7 @@ LIBC_CFLAGS  := $(CFLAGS_OS) -Ilibc/include -fno-builtin
 CDEMO_BIN    := $(BUILD_DIR)/cdemo.bin
 CFILE_BIN    := $(BUILD_DIR)/cfile.bin
 CLEAK_BIN    := $(BUILD_DIR)/cleak.bin
+CFIDHOLD_BIN := $(BUILD_DIR)/cfidhold.bin
 NSDEMO_BIN   := $(BUILD_DIR)/nsdemo.bin
 CREMOTE_BIN  := $(BUILD_DIR)/cremote.bin
 CBIG_BIN     := $(BUILD_DIR)/cbig.bin
@@ -227,7 +228,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-unmount clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -431,6 +432,14 @@ cfile-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
 	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/cfile.c -o $(BUILD_DIR)/cfile.o
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cfile.elf $(BUILD_DIR)/cfile.o $(LIBC_OBJS) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cfile.elf $(CFILE_BIN)
+
+# Holds a file open across `unmount` and `mount -a`: the check that a fid on an
+# unmounted filesystem stays allocated, dead, until closed. Driven by
+# scripts/test-unmount.py. See libc/cfidhold.c.
+cfidhold-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
+	$(CC) $(CFLAGS_OS) -Ilibc/include -c libc/cfidhold.c -o $(BUILD_DIR)/cfidhold.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cfidhold.elf $(BUILD_DIR)/cfidhold.o $(LIBC_OBJS) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cfidhold.elf $(CFIDHOLD_BIN)
 
 # A C program that LEAKS a fid on purpose (exits through the raw EXIT syscall,
 # past _exit's close-all): the check for fsd's identity-keyed fid reaper. See
@@ -640,7 +649,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -698,6 +707,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CDEMO_BIN) $(ESP_DIR)/bin/CDEMO
 	cp $(CFILE_BIN) $(ESP_DIR)/bin/CFILE
 	cp $(CLEAK_BIN) $(ESP_DIR)/bin/CLEAK
+	cp $(CFIDHOLD_BIN) $(ESP_DIR)/bin/CFIDHOLD
 	cp $(NSDEMO_BIN) $(ESP_DIR)/bin/NSDEMO
 	cp $(CREMOTE_BIN) $(ESP_DIR)/bin/CREMOTE
 	cp $(CBIG_BIN) $(ESP_DIR)/bin/CBIG
@@ -1565,6 +1575,14 @@ test-held-keys: image
 # allocator changes.
 test-heap: image
 	python3 scripts/test-heap.py
+
+# `unmount` with a partition mount and an open file, on a copy of the ext2
+# image (scripts/test-unmount.py): both trees cleared, a held fid answering
+# NO_FS and never handed to the next opener, the shell's partition binding
+# dropped, and `erase` allowed after. One boot, about a minute and a half; run
+# it whenever FSOP_UNMOUNT, the fid table or the shell's mount code changes.
+test-unmount: image-ext2
+	python3 scripts/test-unmount.py
 
 # Host unit tests for the PURE crates - the ones with no I/O, no syscalls and no
 # target dependency, so they run natively on the build machine. This exists
