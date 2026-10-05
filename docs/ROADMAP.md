@@ -2266,8 +2266,9 @@ be reviewed after the fact from the saved screenshots.
 >       data included): 256 pages is the cheap first step and meets the
 >       request. A size carried per program in the ELF is what goes further,
 >       with multi-slot regions past 2 MB, wanted for that one test and for
->       the compiler later. Blocks step 8 of `roadmap-c-hosting.md` (branch
->       `docs/c-hosting`). Notes:
+>       the compiler later. Blocks step 8 of
+>       [`roadmap-c-hosting.md`](roadmap/roadmap-c-hosting.md) (on `main`
+>       since #217). Notes:
 >       [`handoffs/closed/2026-10-01-from-proem-heap-growth.md`](handoffs/closed/2026-10-01-from-proem-heap-growth.md)
 >       and, for the numbers,
 >       [`handoffs/closed/2026-10-01-from-proem-heap-numbers.md`](handoffs/closed/2026-10-01-from-proem-heap-numbers.md).
