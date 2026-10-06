@@ -2366,7 +2366,12 @@ be reviewed after the fact from the saved screenshots.
 >       The stage has its own check (`cat /include/stdio.h`, `ls
 >       /include/sys`, `ls /include/clang` on a booted image); the build
 >       waits on steps 1 to 5 and the heap above, and its **Done when** is
->       the arc's finish line. Note:
+>       the arc's finish line. *The stage is done, 2026-10-06 (step 6;
+>       `make test-include` on FAT32, ext2 and exFAT); steps 7 and 8 are
+>       left, the build and whether the 1 MiB heap is room enough, which
+>       only the build's first run can tell. `target.h` is generated with `$(CFLAGS_OS)
+>       $(PICO_INC)`, the flags a picolibc program here is compiled with.*
+>       Note:
 >       [`handoffs/2026-10-01-from-proem-system-dirs.md`](handoffs/2026-10-01-from-proem-system-dirs.md).
 > - [x] **fix** **`fstat` leaves every field but two as it found them.**
 >       `libc/src/file.c`'s `fstat` sets `st_size` and `st_mode` only, so a
@@ -4006,6 +4011,35 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   no message, so a program run with 40 arguments sees 15 and cannot tell.
   Found 2026-10-05 by `make test-cargs` (the C-hosting plan's step 1). The
   fix is a refusal or a larger vector bounded by `ARGV_MAX`, not silence.
+- **`mv` refuses a case-only rename on FAT32 and exFAT without `-f`.**
+  `mv FOO.TXT foo.txt` answers "foo.txt exists": the lookup is case-insensitive
+  there, so the destination is the source itself, and `mv` will not replace a
+  present destination without `-f`. `mv -f` does it, for a FILE (fsd's rename
+  sees the same entry and re-links it). `mv` cannot tell on its own, since ext2
+  is case-sensitive and there the two are different files; the server would
+  have to say. Found 2026-10-06 by `make test-include`.
+- **A case-only rename of a DIRECTORY is refused on FAT32 and exFAT, even with
+  `-f`.** `mkdir /Lowdir; mv -f /Lowdir /lowdir` answers "exists": the
+  rename's "the destination is a directory" guard (`fat32.rs`, `exfat.rs`)
+  fires although the destination is the source itself. The guard should let
+  the same entry through. Found by the second review of #225, 2026-10-06.
+- **fsd's FAT32 rename rebuilds the entry, losing its attributes and date.**
+  `rename` re-inserts the name with only the directory bit in its attribute
+  byte and zeroed timestamps, so a file's read-only, hidden, system and
+  archive bits and its modified time are gone after any `mv`, a case-only one
+  included. A rename should carry the rest of the entry across. Found by the
+  second review of #225.
+- **A directory listing is cut at one reply, with no sign of it.**
+  `NP_READDIR` has no offset: fsd writes `name\n` per entry into the reply
+  window, skips any name that no longer fits and goes on walking, so a
+  shorter name further on can still get in; `ls` asks for 512 bytes. So `ls
+  /include` shows about 60 of its 72 names and `ls /include/clang` 30 of 31,
+  and what is left out can be anywhere in the walk: the listing has holes,
+  it is not a prefix, which a paged design must not assume. Tab completion,
+  globs and `tree` read the same way. A paged verb (an offset in the request,
+  "more" in the reply) is a wire change: fsd, `netd`'s export, both host
+  peers and `ulib`. cpp is not affected: it opens headers by path. Found
+  2026-10-06 staging the C headers (step 6 of the C-hosting plan).
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970

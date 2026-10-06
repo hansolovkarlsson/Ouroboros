@@ -224,6 +224,17 @@ PICO_DIR     := third_party/picolibc-prebuilt
 # without this <time.h> names no CLOCK_MONOTONIC, which libc/pico/clock.c
 # answers (step 5 of the C-hosting plan). On every picolibc compile line.
 PICO_INC     := -I$(PICO_DIR)/include -D_POSIX_MONOTONIC_CLOCK=200112L
+# clang's own headers, the freestanding ones CFLAGS_OS compiles against, are
+# the second system directory the image stages (step 6 of the C-hosting plan).
+# Their directory is asked of clang once, inside the esp recipe, so no other
+# make runs clang for it and a failure there stops the stage with a message.
+# The eleven by name, and the helpers they include by glob, so a toolchain
+# update that adds a helper is staged without a kept list going stale; a
+# family the toolchain does not have (older clangs have no __float_*.h) is
+# skipped rather than failing the stage.
+CLANG_HDRS   := stddef.h stdarg.h stdbool.h float.h limits.h stdatomic.h stdint.h \
+                inttypes.h stdnoreturn.h stdalign.h iso646.h
+CLANG_GLOBS  := __stddef_*.h __stdarg_*.h __float_*.h
 PICO_LIBC    := $(PICO_DIR)/lib/libc.a
 PICO_PORT    := $(BUILD_DIR)/pico/crt0.o $(BUILD_DIR)/pico/os.o $(BUILD_DIR)/pico/file.o $(BUILD_DIR)/pico/builtins.o $(BUILD_DIR)/pico/clock.o
 CPICO_BIN    := $(BUILD_DIR)/cpico.bin
@@ -242,7 +253,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-cargs test-cerrno test-cenv test-cclock test-unmount test-crename clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-cargs test-cerrno test-cenv test-cclock test-include test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -753,6 +764,23 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 		exit 1; }
 	rm -rf "$(ESP_DIR)"
 	mkdir -p $(ESP_DIR)/EFI/BOOT $(ESP_DIR)/EFI/ORBS $(ESP_DIR)/bin $(ESP_DIR)/man $(ESP_DIR)/etc
+	# The C headers, in two system directories (step 6 of the C-hosting plan,
+	# and the accepted 2026-10-01-from-proem-system-dirs.md): /include holds
+	# picolibc's tree and target.h, the predefined macros of exactly the flags
+	# a picolibc program here is compiled with (there is no clang here to ask);
+	# /include/clang holds clang's freestanding headers. Two because
+	# inttypes.h, limits.h, stdint.h and stdnoreturn.h exist on both sides and
+	# picolibc's limits.h reaches clang's by #include_next. The ext2 and exFAT
+	# images copy this tree too.
+	mkdir -p $(ESP_DIR)/include/clang
+	cp -R $(PICO_DIR)/include/. $(ESP_DIR)/include/
+	$(CC) $(CFLAGS_OS) $(PICO_INC) -dM -E -x c /dev/null > $(ESP_DIR)/include/target.h
+	res=$$($(CC) -print-resource-dir) && [ -n "$$res" ] && [ -d "$$res/include" ] || { \
+		echo "esp: no clang resource directory from '$(CC) -print-resource-dir'"; exit 1; }; \
+	cd "$$res/include" && cp $(CLANG_HDRS) "$(abspath $(ESP_DIR))/include/clang/" && \
+	for f in $(CLANG_GLOBS); do \
+		[ ! -e "$$f" ] || cp "$$f" "$(abspath $(ESP_DIR))/include/clang/" || exit 1; \
+	done
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
 	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN
@@ -1151,6 +1179,7 @@ run-image-gpt: image-gpt
 $(EXFAT_PART): esp
 	rm -rf $(BUILD_DIR)/exfat-src && mkdir -p $(BUILD_DIR)/exfat-src/bin
 	cp $(ESP_DIR)/bin/* $(BUILD_DIR)/exfat-src/bin/
+	cp -R $(ESP_DIR)/include $(BUILD_DIR)/exfat-src/include
 	# Manual pages, read by /bin/MAN as /man/<command> (exFAT matches case-
 	# insensitively, like FAT, so the lowercase source names stage as-is).
 	mkdir -p $(BUILD_DIR)/exfat-src/man
@@ -1218,6 +1247,9 @@ $(EXT2_PART): esp
 	# exFAT images, whose 8.3-heritage uppercase names only work because those
 	# filesystems match case-insensitively.
 	for f in $(ESP_DIR)/bin/*; do cp "$$f" "$(BUILD_DIR)/ext2-src/bin/$$(basename "$$f" | tr A-Z a-z)"; done
+	# The C headers as the ESP stages them: already lowercase, and ext2 is
+	# case-sensitive, so they copy as they are.
+	cp -R $(ESP_DIR)/include $(BUILD_DIR)/ext2-src/include
 	# Manual pages, read by /bin/MAN as /man/<command>. The source filenames are
 	# already lowercase and `man <cmd>` reads the name verbatim, so - unlike /bin
 	# (uppercase, lowercased above) - these stage as-is and resolve case-sensitively.
@@ -1713,6 +1745,16 @@ test-cenv: image
 # libc/pico/clock.c or the kernel's MONOTONIC_US changes.
 test-cclock: image
 	python3 scripts/test-cclock.py
+
+# The C headers on the disk (scripts/test-include.py): on FAT32, ext2 and
+# exFAT, every staged file is there by path with its size; each directory
+# small enough for one NP_READDIR reply lists exactly build/esp/include's names
+# and sizes, and each larger one lists only staged names, in their case;
+# three files cat to the host's bytes; and names made on the guest keep their
+# case, on all three (FAT32 by byte 12's case flags). Three boots, about five minutes; run it whenever the header
+# staging, or a filesystem's directory listing or naming, changes.
+test-include: image image-ext2 image-exfat
+	python3 scripts/test-include.py
 
 # `unmount` with a partition mount and an open file, on a copy of the ext2
 # image (scripts/test-unmount.py): both trees cleared, a held fid answering

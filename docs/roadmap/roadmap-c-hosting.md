@@ -244,6 +244,31 @@ tree at `4dcbddd` leaves of them, read from the code.
   pace, and so does one 5% fast (22.11 s against 21.08 s). Not ported:
   `times` (behind `clock()`), `clock_getres`, `nanosleep`. The second level,
   a wall clock from the platform's RTC, is an item in `ROADMAP.md`.
+- **Step 6, headers on the disk: done 2026-10-06.** `make esp` stages
+  picolibc's 136 headers in `/include` with a `target.h` generated from
+  `$(CC) $(CFLAGS_OS) $(PICO_INC) -dM -E`, the flags a picolibc program here
+  is compiled with (so it carries `_POSIX_MONOTONIC_CLOCK`, step 5's flag),
+  and clang's eleven freestanding headers and their 20 `__stddef_*`,
+  `__stdarg_*` and `__float_*` helpers (by glob) in `/include/clang`: 168
+  files, as the system-dirs note asked. The ext2 and exFAT images copy the
+  same tree. Two things found on the way. FAT32: macOS writes a lowercase
+  name that fits 8.3 as a short entry with byte 12's case flags and no long
+  name, and fsd ignored the flags, so `stdio.h` listed as `STDIO.H` (lookup,
+  being case-insensitive, was never affected); fsd now reads them, and
+  writes them too: a name it creates keeps its case, all-lowercase halves
+  flagged, a mixed-case name as a long name, so `touch foo.txt` and a
+  case-only `mv -f` of a file no longer turn uppercase (the review of #225;
+  a directory's case-only rename is still refused, an item in `ROADMAP.md`).
+  And `ls` of `/include` (72 names) or `/include/clang` (31) shows only what
+  fits one 512-byte `NP_READDIR` reply, with no sign of the rest, an older
+  gap now in `ROADMAP.md`; it does not touch cpp, which opens headers by
+  path. `make test-include` checks all three images: every staged file
+  exists by path with its size (168 of 168, `ls -l` with file operands, no
+  listing); the whole listing of each directory that fits one reply, names
+  and case included (seven of nine), and for the other two that every name
+  listed is a staged one in its case; three files `cat` to the host's bytes;
+  and names made on the guest keep their case. The card (`make sdcard`)
+  skips `/include`, which only the stick can serve.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against
   picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real
@@ -258,7 +283,8 @@ tree at `4dcbddd` leaves of them, read from the code.
   handoff (`docs/handoffs/2026-10-01-from-proem-system-dirs.md`, accepted).
 
 So the order stands: steps 1 to 5 next, each small, then 6 and 8. *(As of
-2026-10-06, steps 1 to 5 are done, #219 to #224: 6 to 8 are next.)*
+2026-10-06, steps 1 to 6 are done, #219 to #224 and the header stage: 7 and
+8 are next.)*
 
 ## What stays in Proem's session
 

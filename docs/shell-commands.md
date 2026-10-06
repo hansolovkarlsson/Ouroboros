@@ -72,9 +72,10 @@ a machine whose public key the other does not list is refused.
   name that doesn't fit 8.3 (too long, extra dots, spaces, non-8.3
   characters) and lay down a generated `NAME~N` short alias plus the LFN
   entries carrying the real name — so `index.html` both reads back and can
-  be created by its real name. A name that *does* fit 8.3 still becomes a
-  plain uppercased short entry (`File.txt` is stored and shown as
-  `FILE.TXT`; case-preservation for those is the one remaining nicety).
+  be created by its real name. A name that *does* fit 8.3 keeps its case
+  too (since 2026-10-06): `foo.txt` is a short entry carrying FAT's
+  lowercase flags and lists as `foo.txt`, and `File.txt`, whose base is in
+  mixed case, is stored as a long name and lists as `File.txt`.
   Deleting a long-named file frees its LFN entries too, so `rm`/`rmdir`/`mv`
   leave no orphaned entries behind.
 

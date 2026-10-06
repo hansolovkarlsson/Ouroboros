@@ -11,9 +11,10 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
 version is held for a go-ahead. So far two days' work, 2026-10-05 and
-2026-10-06, #209 to #224: the storage server made safe under large writes and
+2026-10-06, #209 to #225: the storage server made safe under large writes and
 double mounts, and the C library made able to host Proem (now cpp) and Edit,
-steps 1 to 5 of the C-hosting plan among it. The days' records are in
+steps 1 to 6 of the C-hosting plan among it, the C headers on the disk and
+FAT32 names that keep their case. The days' records are in
 `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
@@ -75,6 +76,14 @@ C-hosting plan.
 from the kernel's time since boot, so `time()` links and says 1970 plus
 uptime: there is no wall clock yet. `make test-cclock` checks `/bin/CCLOCK`'s
 clock against the host's over a timed gap. Step 5 of the C-hosting plan.
+
+**The C headers are on the disk (#225).** `/include` holds picolibc's headers and a
+generated `target.h`, `/include/clang` clang's freestanding ones, on the ESP
+and the ext2 and exFAT images; `make test-include` checks every file on all
+three. On FAT32, a name keeps its case: `fsd` reads the case flags macOS
+writes for a lowercase 8.3 name, and writes them for one it creates, a
+mixed-case name going to a long name, so `touch foo.txt` no longer lists as
+`FOO.TXT`. Step 6 of the C-hosting plan.
 
 **Reading a per-task store back accepts any buffer (#222).** `GET_ARG`,
 `GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at most one entry, through
