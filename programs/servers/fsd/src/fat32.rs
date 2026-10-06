@@ -1040,6 +1040,7 @@ impl Fs {
         write_raw_entry(
             &mut first_sector[0..DIR_ENTRY_SIZE],
             &dot_name(),
+            0,
             ATTR_DIRECTORY,
             new_cluster,
             0,
@@ -1047,6 +1048,7 @@ impl Fs {
         write_raw_entry(
             &mut first_sector[DIR_ENTRY_SIZE..2 * DIR_ENTRY_SIZE],
             &dotdot_name(),
+            0,
             ATTR_DIRECTORY,
             dotdot_cluster,
             0,
@@ -1671,6 +1673,7 @@ impl Fs {
         &mut self,
         start_cluster: u32,
         short_name: &[u8; 11],
+        ntres: u8,
         attr: u8,
         cluster: u32,
         size: u32,
@@ -1686,6 +1689,7 @@ impl Fs {
                         write_raw_entry(
                             &mut buf[i * DIR_ENTRY_SIZE..(i + 1) * DIR_ENTRY_SIZE],
                             short_name,
+                            ntres,
                             attr,
                             cluster,
                             size,
@@ -1741,9 +1745,9 @@ impl Fs {
         cluster: u32,
         size: u32,
     ) -> Result<(), Error> {
-        if let Some(short) = make_short_name(name) {
-            // Fits 8.3 - plain short entry, no LFN (unchanged behavior).
-            return self.insert_dir_entry(dir_cluster, &short, attr, cluster, size);
+        if let Some((short, ntres)) = make_short_name(name) {
+            // Fits 8.3 - plain short entry, no LFN, its case in byte 12.
+            return self.insert_dir_entry(dir_cluster, &short, ntres, attr, cluster, size);
         }
 
         let short = self.generate_short_alias(name, dir_cluster)?;
@@ -2037,12 +2041,15 @@ impl Fs {
     }
 }
 
-/// Writes one 32-byte on-disk directory entry into `dst`. No RTC on this
-/// kernel, so timestamps/NTRes are left zeroed rather than faked.
-fn write_raw_entry(dst: &mut [u8], short_name: &[u8; 11], attr: u8, cluster: u32, size: u32) {
+/// Writes one 32-byte on-disk directory entry into `dst`. `ntres` is byte 12,
+/// the short name's case flags ([`make_short_name`]; 0 for `.`, `..` and a
+/// long name's alias). No RTC on this kernel, so the timestamps are left
+/// zeroed rather than faked.
+fn write_raw_entry(dst: &mut [u8], short_name: &[u8; 11], ntres: u8, attr: u8, cluster: u32, size: u32) {
     dst[0..11].copy_from_slice(short_name);
     dst[11] = attr;
-    dst[12..20].fill(0); // NTRes, creation time/date, last access date
+    dst[12] = ntres;
+    dst[13..20].fill(0); // creation time/date, last access date
     dst[20..22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
     dst[22..26].fill(0); // write time/date
     dst[26..28].copy_from_slice(&(cluster as u16).to_le_bytes());
@@ -2120,7 +2127,7 @@ pub(crate) fn split_parent(path: &str) -> Option<(&str, &str)> {
 /// formatter/OS) and [`Fs::find`]/[`walk_dir`](Fs::walk_dir) will read it
 /// back fine - this limitation only applies to names *this kernel*
 /// creates via `mkdir`.
-fn make_short_name(name: &str) -> Option<[u8; 11]> {
+fn make_short_name(name: &str) -> Option<([u8; 11], u8)> {
     if name.is_empty() || name.len() > MAX_NAME_LEN {
         return None;
     }
@@ -2141,6 +2148,14 @@ fn make_short_name(name: &str) -> Option<[u8; 11]> {
         return None;
     }
 
+    // The case each half is written in, for byte 12's flags: all lowercase
+    // sets the half's flag, all uppercase (or no letters) leaves it clear,
+    // and a MIXED half cannot be said by a short entry, so it takes the long
+    // name path, which keeps the case (as Windows and Linux's vfat do). Until
+    // 2026-10-06 every name was uppercased here and the flags written 0, so
+    // `touch foo.txt` listed as `FOO.TXT` (the review of #225).
+    let base_lower = half_case(base)?;
+    let ext_lower = half_case(ext)?;
     let mut short = [b' '; 11];
     for (i, b) in base.bytes().enumerate() {
         short[i] = b.to_ascii_uppercase();
@@ -2148,7 +2163,25 @@ fn make_short_name(name: &str) -> Option<[u8; 11]> {
     for (i, b) in ext.bytes().enumerate() {
         short[8 + i] = b.to_ascii_uppercase();
     }
-    Some(short)
+    let mut ntres = 0u8;
+    if base_lower {
+        ntres |= SHORT_LOWER_BASE;
+    }
+    if ext_lower {
+        ntres |= SHORT_LOWER_EXT;
+    }
+    Some((short, ntres))
+}
+
+/// Whether one half of an 8.3 name is lowercase: `Some(true)` all lowercase,
+/// `Some(false)` all uppercase or without letters, `None` mixed.
+fn half_case(half: &str) -> Option<bool> {
+    let lower = half.bytes().any(|b| b.is_ascii_lowercase());
+    let upper = half.bytes().any(|b| b.is_ascii_uppercase());
+    match (lower, upper) {
+        (true, true) => None,
+        (lower, _) => Some(lower),
+    }
 }
 
 fn is_valid_short_name_byte(b: u8) -> bool {
@@ -2280,7 +2313,7 @@ fn build_name_entries(
         put_lfn_chars(e, name, (seq - 1) * LFN_CHARS_PER_ENTRY);
     }
     let so = num_lfn * DIR_ENTRY_SIZE;
-    write_raw_entry(&mut out[so..so + DIR_ENTRY_SIZE], short, attr, cluster, size);
+    write_raw_entry(&mut out[so..so + DIR_ENTRY_SIZE], short, 0, attr, cluster, size);
     num_lfn + 1
 }
 

@@ -2367,8 +2367,9 @@ be reviewed after the fact from the saved screenshots.
 >       /include/sys`, `ls /include/clang` on a booted image); the build
 >       waits on steps 1 to 5 and the heap above, and its **Done when** is
 >       the arc's finish line. *The stage is done, 2026-10-06 (step 6;
->       `make test-include` on FAT32, ext2 and exFAT); the build, step 8,
->       is what is left. `target.h` is generated with `$(CFLAGS_OS)
+>       `make test-include` on FAT32, ext2 and exFAT); steps 7 and 8 are
+>       left, the build and whether the 1 MiB heap is room enough, which
+>       only the build's first run can tell. `target.h` is generated with `$(CFLAGS_OS)
 >       $(PICO_INC)`, the flags a picolibc program here is compiled with.*
 >       Note:
 >       [`handoffs/2026-10-01-from-proem-system-dirs.md`](handoffs/2026-10-01-from-proem-system-dirs.md).
@@ -4010,6 +4011,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   no message, so a program run with 40 arguments sees 15 and cannot tell.
   Found 2026-10-05 by `make test-cargs` (the C-hosting plan's step 1). The
   fix is a refusal or a larger vector bounded by `ARGV_MAX`, not silence.
+- **`mv` refuses a case-only rename on FAT32 and exFAT without `-f`.**
+  `mv FOO.TXT foo.txt` answers "foo.txt exists": the lookup is case-insensitive
+  there, so the destination is the source itself, and `mv` will not replace a
+  present destination without `-f`. `mv -f` does it (fsd's rename sees the
+  same entry and re-links it). `mv` cannot tell on its own, since ext2 is
+  case-sensitive and there the two are different files; the server would have
+  to say. Found 2026-10-06 by `make test-include`.
 - **A directory listing is cut at one reply, with no sign of it.**
   `NP_READDIR` has no offset: fsd writes `name\n` per entry into the reply
   window and stops at the first name that does not fit, and `ls` asks for

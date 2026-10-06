@@ -79,8 +79,10 @@ clock against the host's over a timed gap. Step 5 of the C-hosting plan.
 **The C headers are on the disk.** `/include` holds picolibc's headers and a
 generated `target.h`, `/include/clang` clang's freestanding ones, on the ESP
 and the ext2 and exFAT images; `make test-include` checks every file on all
-three. On FAT32, a lowercase name that fits 8.3 now lists in lowercase:
-`fsd` reads the case flags macOS writes. Step 6 of the C-hosting plan.
+three. On FAT32, a name keeps its case: `fsd` reads the case flags macOS
+writes for a lowercase 8.3 name, and writes them for one it creates, a
+mixed-case name going to a long name, so `touch foo.txt` no longer lists as
+`FOO.TXT`. Step 6 of the C-hosting plan.
 
 **Reading a per-task store back accepts any buffer (#222).** `GET_ARG`,
 `GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at most one entry, through

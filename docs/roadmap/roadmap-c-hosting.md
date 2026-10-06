@@ -254,14 +254,20 @@ tree at `4dcbddd` leaves of them, read from the code.
   same tree. Two things found on the way. FAT32: macOS writes a lowercase
   name that fits 8.3 as a short entry with byte 12's case flags and no long
   name, and fsd ignored the flags, so `stdio.h` listed as `STDIO.H` (lookup,
-  being case-insensitive, was never affected); fsd now honours them. And
-  `ls` of `/include` (72 names) or `/include/clang` (31) shows only what
-  fits one 512-byte `NP_READDIR` reply, with no sign of the rest, an older
-  gap now in `ROADMAP.md`; it does not touch cpp, which opens headers by
-  path. `make test-include` checks all three images: every staged file by
-  path with its size (168 of 168, `ls -l` with file operands, no listing),
-  the whole listing of each directory that fits one reply, names and case
-  included (seven of nine), and three files `cat` to the host's bytes.
+  being case-insensitive, was never affected); fsd now reads them, and
+  writes them too: a name it creates keeps its case, all-lowercase halves
+  flagged, a mixed-case name as a long name, so `touch foo.txt` and a
+  case-only `mv` no longer turn uppercase (the review of #225). And `ls` of
+  `/include` (72 names) or `/include/clang` (31) shows only what fits one
+  512-byte `NP_READDIR` reply, with no sign of the rest, an older gap now in
+  `ROADMAP.md`; it does not touch cpp, which opens headers by path. `make
+  test-include` checks all three images: every staged file exists by path
+  with its size (168 of 168, `ls -l` with file operands, no listing); the
+  whole listing of each directory that fits one reply, names and case
+  included (seven of nine), and for the other two that every name listed is
+  a staged one in its case; three files `cat` to the host's bytes; and names
+  made on the guest keep their case. The card (`make sdcard`) skips
+  `/include`, which only the stick can serve.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against
   picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real

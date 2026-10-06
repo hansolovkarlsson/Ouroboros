@@ -10,14 +10,21 @@ and the ext2 and exFAT images copy the same tree. One boot of each image
 (FAT32 build/esp.img, ext2 build/espext2.img, exFAT build/espexfat.img):
 
 - every staged file, by path: `ls -l` with file operands stats each one
-  (no directory listing involved), and the size must be the host's;
-- the whole listing, `ls -l` of a directory, for each directory small enough
-  to come back in one NP_READDIR reply (LISTING_MAX): names with their case,
-  `__` and `_` prefixes, subdirectories, exactly the host's. A larger one is
-  cut at that size with no sign of it, a gap of its own in docs/ROADMAP.md,
-  so its listing is not compared;
+  (no directory listing involved), and the size must be the host's. This
+  proves existence and size only: `ls` echoes an operand as typed, and FAT32
+  and exFAT look names up regardless of case;
+- the listing, `ls -l` of each directory: names with their case, `__` and `_`
+  prefixes, subdirectories. One small enough to come back in one NP_READDIR
+  reply (LISTING_MAX) must list exactly the host's names and sizes; a larger
+  one is cut at that size with no sign of it (a gap of its own in
+  docs/ROADMAP.md), so every name it does list must be a staged one, in its
+  case, with its size;
 - `cat` of three files, a nested one, a `__` one and target.h, must give the
-  host's bytes.
+  host's bytes;
+- names the guest's fsd creates keep their case: a lowercase file, a mixed
+  case one, a directory, and a case-only `mv`, read back by `ls /` (on FAT32
+  a lowercase 8.3 name is stored with byte 12's case flags, a mixed one as a
+  long name).
 
 No fault line in QEMU's trace. About five minutes. Run it whenever the
 header staging in the Makefile, or a filesystem's directory listing,
@@ -38,6 +45,13 @@ _spec.loader.exec_module(drive_qemu)
 STAGED = os.path.join(ROOT, "build", "esp", "include")
 IMAGES = [("fat32", "esp.img"), ("ext2", "espext2.img"), ("exfat", "espexfat.img")]
 CATS = ["sys/_types.h", "clang/__stddef_null.h", "target.h"]
+# Names made on the guest, then `ls /`: each must list exactly so, and its
+# uppercase form must not. CASE.TXT is renamed to case.txt, a case-only mv:
+# with -f, since on FAT32 and exFAT the destination answers "present" (it is
+# the source), and mv will not replace one without it (a gap in ROADMAP.md).
+MADE = ["touch /lower.txt", "touch /Mixed.Txt", "mkdir /lowdir", "touch /CASE.TXT",
+        "mv -f /CASE.TXT /case.txt"]
+MADE_NAMES = ["lower.txt", "Mixed.Txt", "lowdir", "case.txt"]
 FENCE = "echo ==fence=="
 # mode, owner, group, size, then a date and time or a lone `-` (ext2 records
 # none here), then the name.
@@ -108,7 +122,9 @@ def boot(name, image, dirs, operands):
         steps += [("# ", FENCE), ("# ", cmd)]
     for f in CATS:
         steps += [("# ", FENCE), ("# ", f"cat /include/{f}")]
-    steps += [("# ", "cd /")]
+    steps += [("# ", "cd /"), ("# ", FENCE)]
+    steps += [("# ", c) for c in MADE]
+    steps += [("# ", FENCE), ("# ", "ls /")]
     steps += [("# ", FENCE), ("# ", "")]
     guest = drive_qemu.Guest(copy, label=f"test-include {name}: ")
     try:
@@ -124,26 +140,34 @@ def boot(name, image, dirs, operands):
 
 
 def cat_text(block, command):
-    """What `cat` printed: the lines after its command echo, up to the exit line."""
-    after = block.split(command, 1)[-1]
-    body = after.split("Ouroboros kernel: task", 1)[0]
-    return body.replace("\r\n", "\n").lstrip("\n")
+    """What `cat` printed: the lines after its command echo's own line ending,
+    up to the exit line. Only that one line ending is dropped, so a file that
+    begins with a blank line still compares (the review of #225)."""
+    after = block.split(command, 1)[-1].replace("\r\n", "\n")
+    if after.startswith("\n"):
+        after = after[1:]
+    return after.split("Ouroboros kernel: task", 1)[0]
 
 
 def main() -> int:
     want = host_dirs()
-    dirs = sorted(d for d in want if listing_bytes(want[d]) <= LISTING_MAX)
+    dirs = sorted(want)
+    whole = {d for d in dirs if listing_bytes(want[d]) <= LISTING_MAX}
     operands = operand_commands(want)
     nfiles = sum(len(names) for _, _, names in operands)
-    print(f"     {nfiles} staged files; whole listings compared for {', '.join(dirs)}")
+    nblocks = len(dirs) + len(operands) + len(CATS) + 2
+    print(f"     {nfiles} staged files; whole listings compared for {', '.join(sorted(whole))}")
     checks = [("the staged tree has /include and /include/clang",
                "/include" in want and "/include/clang" in want),
-              ("some directory's listing fits one reply, so listings are compared at all",
-               len(dirs) > 0)]
+              ("some directory's listing fits one reply, so whole listings are compared at all",
+               len(whole) > 0)]
     for name, image in IMAGES:
         driven, out, faults = boot(name, image, dirs, operands)
         blocks = re.split(r"^==fence==\r?$", out, flags=re.M)[1:]
         checks.append((f"{name}: driven to the end", driven))
+        # Every fenced block came back, so no check below is dropped by a
+        # short zip (the review of #225).
+        checks.append((f"{name}: all {nblocks} fenced blocks came back", len(blocks) >= nblocks))
         stated, wrong = 0, []
         for (d, _, names), block in zip(operands, blocks[len(dirs):]):
             got = guest_listing(block)
@@ -152,21 +176,32 @@ def main() -> int:
                     stated += 1
                 else:
                     wrong.append(f"{d}/{n}")
-        checks.append((f"{name}: every staged file is there by path with its size ({stated}/{nfiles})"
+        checks.append((f"{name}: every staged file exists by path with its size ({stated}/{nfiles})"
                        + (f", not {wrong[:4]}" if wrong else ""), stated == nfiles))
         for d, block in zip(dirs, blocks):
             got = guest_listing(block)
             missing = sorted(set(want[d]) - set(got))
             extra = sorted(set(got) - set(want[d]))
             wrong = sorted(n for n in want[d] if n in got and got[n] != want[d][n])
-            ok = not (missing or extra or wrong)
+            if d in whole:
+                ok = not (missing or extra or wrong)
+                what = f"{len(want[d])} names and sizes as staged"
+            else:
+                # Cut at one reply: what it lists must be staged, as staged.
+                ok = bool(got) and not (extra or wrong)
+                what = f"{len(got)} of {len(want[d])} names listed (one reply), each staged, in its case"
             detail = "" if ok else f" (missing {missing[:3]}, extra {extra[:3]}, wrong size {wrong[:3]})"
-            checks.append((f"{name}: ls -l {d}: {len(want[d])} names and sizes as staged{detail}", ok))
+            checks.append((f"{name}: ls -l {d}: {what}{detail}", ok))
         for f, block in zip(CATS, blocks[len(dirs) + len(operands):]):
             with open(os.path.join(STAGED, f)) as fh:
                 host = fh.read()
             checks.append((f"{name}: cat /include/{f} gives the staged bytes",
                            cat_text(block, f"cat /include/{f}") == host))
+        root = blocks[len(dirs) + len(operands) + len(CATS) + 1] if len(blocks) >= nblocks else ""
+        listed = [w.rstrip("/") for w in root.split("ls /", 1)[-1].split("Ouroboros kernel", 1)[0].split()]
+        for n in MADE_NAMES:
+            checks.append((f"{name}: a name made on the guest keeps its case: {n}",
+                           n in listed and (n == n.upper() or n.upper() not in listed)))
         checks.append((f"{name}: no fault lines", faults == 0))
     failed = 0
     for what, ok in checks:

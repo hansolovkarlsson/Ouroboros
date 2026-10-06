@@ -171,6 +171,12 @@ fi
 place() {
     [ -n "$1" ] || die "internal: empty entry name"
     case "$1" in
+        include)
+            # The C headers (step 6 of the C-hosting plan) are read through
+            # fsd, which has no SD driver after the exit, so only the stick
+            # holds them; the card would carry 168 files nothing reads (the
+            # review of #225).
+            [ "$STICK" = 1 ] || return 0 ;;
         etc)
             if [ "$KEEP_ETC" = 1 ] && [ -e "$CARD/etc" ]; then
                 # Only files the card lacks are added. Not `cp -n`: macOS's

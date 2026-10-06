@@ -226,9 +226,13 @@ PICO_DIR     := third_party/picolibc-prebuilt
 PICO_INC     := -I$(PICO_DIR)/include -D_POSIX_MONOTONIC_CLOCK=200112L
 # clang's own headers, the freestanding ones CFLAGS_OS compiles against: the
 # second system directory the image stages (step 6 of the C-hosting plan).
-CLANG_INC    := $(shell $(CC) -print-resource-dir)/include
+# Deferred (`=`), so clang is asked only by the recipe that stages them, not
+# by every make that parses this file.
+CLANG_INC     = $(shell $(CC) -print-resource-dir)/include
 # The eleven by name, and the helpers they include by glob, so a toolchain
-# update that adds a helper is staged without a kept list going stale.
+# update that adds a helper is staged without a kept list going stale; a
+# family the toolchain does not have (older clangs have no __float_*.h) is
+# skipped rather than failing the stage.
 CLANG_HDRS   := stddef.h stdarg.h stdbool.h float.h limits.h stdatomic.h stdint.h \
                 inttypes.h stdnoreturn.h stdalign.h iso646.h
 CLANG_GLOBS  := __stddef_*.h __stdarg_*.h __float_*.h
@@ -772,7 +776,8 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	mkdir -p $(ESP_DIR)/include/clang
 	cp -R $(PICO_DIR)/include/. $(ESP_DIR)/include/
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -dM -E -x c /dev/null > $(ESP_DIR)/include/target.h
-	cd "$(CLANG_INC)" && cp $(CLANG_HDRS) $(CLANG_GLOBS) "$(abspath $(ESP_DIR))/include/clang/"
+	cd "$(CLANG_INC)" && cp $(CLANG_HDRS) "$(abspath $(ESP_DIR))/include/clang/"
+	cd "$(CLANG_INC)" && for f in $(CLANG_GLOBS); do [ -e "$$f" ] && cp "$$f" "$(abspath $(ESP_DIR))/include/clang/"; done; true
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
 	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN
@@ -1739,10 +1744,12 @@ test-cclock: image
 	python3 scripts/test-cclock.py
 
 # The C headers on the disk (scripts/test-include.py): on FAT32, ext2 and
-# exFAT, `ls -l` of every directory under /include gives the names and sizes
-# build/esp/include has, and three files `cat` to the host's bytes. Three
-# boots, about three minutes; run it whenever the header staging, or a
-# filesystem's directory listing, changes.
+# exFAT, every staged file is there by path with its size; each directory
+# small enough for one NP_READDIR reply lists exactly build/esp/include's names
+# and sizes, and each larger one lists only staged names, in their case;
+# three files cat to the host's bytes; and on FAT32, names fsd creates keep
+# their case. Three boots, about five minutes; run it whenever the header
+# staging, or a filesystem's directory listing or naming, changes.
 test-include: image image-ext2 image-exfat
 	python3 scripts/test-include.py
 
