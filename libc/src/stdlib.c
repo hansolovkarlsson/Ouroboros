@@ -1,6 +1,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+/* The environment, which crt0 points at the kernel's env store before main.
+ * Weak, so a ported program that defines `char **environ;` itself, as older
+ * Unix sources do, links with its own definition rather than a duplicate. */
+__attribute__((weak)) char **environ;
+
 void exit(int code) {
     __libc_flush_stdout(); /* push any buffered stdout out first */
     __libc_end_stdout();   /* then mark end-of-stream if our output is piped */

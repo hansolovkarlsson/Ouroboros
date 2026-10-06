@@ -342,6 +342,8 @@ CHECKED = [
     # wrong NO_ARG would read every argument as present or none as present.
     "NO_ARG",
     "ARGV_MAX",
+    # crt0's environ (step 3): the store bound it sizes its buffer by.
+    "ENV_MAX",
     # NP_OPEN's a0. The server has spelled all four since step 2 and the C
     # header since step 3b, unpinned until step 5 (2026-09-12) gave the client
     # a reason to spell OPEN_READ too. A drift here is the quiet kind: a peer
@@ -432,7 +434,7 @@ PEER_BASELINE = {
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 58,  # counted 2026-10-05 (run, not added up): 58 with NO_ARG and ARGV_MAX for crt0's argv; 56 with fstat's six STAT_* names; 50 with NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
+    "libc/include/sys.h": 59,  # counted 2026-10-05 (run, not added up): 59 with ENV_MAX for crt0's environ; 58 with NO_ARG and ARGV_MAX for crt0's argv; 56 with fstat's six STAT_* names; 50 with NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 
@@ -607,6 +609,32 @@ def check_fid_gate_budget(problems, rust):
             "clunk-on-close check could no longer fail - raise FID_BUDGET_ROUNDS")
 
 
+# The syscall NUMBERS sys.h spells, as `SYS_<name>` for syscall-abi's `<name>`.
+# CHECKED matches names exactly, so the prefix kept every one of them out of
+# this script until the review of #221 found SYS_GET_ENVC and SYS_GET_ENV
+# unchecked: a wrong number there makes crt0 call another syscall at the start
+# of every C program, and only a booted rig would see it. A floor, as for the
+# peers, so a header reformatted out of the parser's reach is not a pass.
+SYSCALL_BASELINE = 15  # counted 2026-10-06 (run): PUTC to GET_ENV
+
+
+def check_syscall_numbers(problems, rust, origin, header):
+    """Every SYS_* in the C header against syscall-abi's number of that name.
+    Returns how many were compared."""
+    numbers = {k: v for k, v in header.items() if k.startswith("SYS_")}
+    for cname, val in sorted(numbers.items()):
+        name = cname[len("SYS_"):]
+        if origin.get(name) != "syscall-abi":
+            problems.append(f"{cname}: syscall-abi has no {name} (renamed? then rename it here)")
+        elif rust[name] != val:
+            problems.append(f"{cname}: syscall-abi has {name} = {rust[name]}, "
+                            f"libc/include/sys.h has {val}")
+    if len(numbers) < SYSCALL_BASELINE:
+        problems.append(f"libc/include/sys.h: matched {len(numbers)} SYS_* number(s), "
+                        f"expected at least {SYSCALL_BASELINE} - did its formatting change?")
+    return len(numbers)
+
+
 def main():
     problems_early = []
     # BOTH crates: the verb/frame constants are ninep-abi's, the status codes
@@ -700,6 +728,7 @@ def main():
     check_dev_user_keys(problems)
     check_userkey_count(problems)
     check_fid_gate_budget(problems, rust)
+    syscalls = check_syscall_numbers(problems, rust, origin, peers["libc/include/sys.h"])
 
     if problems:
         print("check-wire-constants: DISAGREEMENT")
@@ -711,6 +740,7 @@ def main():
     # same restatement-goes-stale shape this file warns about twice already.
     print(f"check-wire-constants: {compared} constant(s) agree across Rust and "
           f"{len(peers)} peer(s) ({', '.join(sorted(peers))}), "
+          f"{syscalls} syscall number(s) in libc/include/sys.h agree with syscall-abi, "
           "and the dev peer labels, root flags and user keys agree, and the fid gate's budget exceeds MAX_FIDS")
     return 0
 

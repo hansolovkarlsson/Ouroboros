@@ -42,9 +42,13 @@ and `time`/`localtime`/`gmtime` for `__DATE__` and `__TIME__`; `exit` and
 `abort`.
 
 And what picolibc's `libc.a` leaves undefined for the port to supply, from
-`llvm-nm`: `open` and `stat`, `gettimeofday` (behind `time`), and `environ`
-(behind `getenv`). `file.c` supplies `open`; the other three are missing, so
-the link of Proem fails today before anything runs.
+`llvm-nm`: `open` and `stat`, and `gettimeofday` (behind `time`). `file.c`
+supplies `open`; the other two are missing, so the link of Proem fails today
+before anything runs. *Corrected 2026-10-06, in the review of #221:* this
+listed `environ` as a third. It is not undefined: `libc.a` defines it
+(`libc_stdlib_environ.c.o`, `D environ`) as an empty vector, so `getenv`
+linked all along and answered every name as unset. Step 3 is a wrong answer
+fixed, not a link failure.
 
 ## The gaps, in the order to close them
 
@@ -157,8 +161,28 @@ tree at `4dcbddd` leaves of them, read from the code.
   already answered `ENOTDIR` for a path through a file, on both. Controls:
   `main`'s `file.c` fails every check, and dropping the `EBADF` naming fails
   exactly the two mode checks, with `EACCES`.
-- **Steps 3 to 5, environ, `stat`, a clock: open.** Nothing in `libc/src`
-  defines `environ`, `stat` or `gettimeofday`.
+- **Step 3, the environment: done 2026-10-05.** `crt0.c` builds `environ`
+  from `GET_ENVC`/`GET_ENV` into static storage (`ENV_MAX`, 2048 bytes),
+  through the same reader as argv, one entry per copy since the kernel
+  refuses an out buffer over 512 bytes; an entry longer than that is left
+  out rather than cut, since a cut `NAME=VALUE` is a different value.
+  picolibc's `getenv`, which linked before and found nothing (picolibc's own
+  `environ` is an empty vector), now answers what `set` made. crt0 declares
+  `environ` and assigns it; picolibc defines it, and the hand-rolled libc
+  weakly in `stdlib.c`, so a ported program that defines its own still
+  links. `libc/cenv.c` prints `environ` in
+  `/bin/PRINTENV`'s format, built through picolibc (`/bin/CENV`, with
+  `getenv` answers) and the hand-rolled libc (`/bin/CENVH`); `make
+  test-cenv` compares both with `printenv` before and after four `set`s,
+  the last a 128-byte value (the shell's longest), and checks `getenv` for
+  `SOURCE_DATE_EPOCH`, `PATH`, the long value, a set name and an unset one,
+  against values the rig sets rather than printenv's. Control: an
+  environment cut to one entry fails both comparisons and two `getenv`
+  checks. Not reached by any rig: the skip of an entry over 512 bytes, which
+  no shell spawn can stage; the kernel-side bound that removes it is its
+  own PR.
+- **Steps 4 and 5, `stat`, a clock: open.** Nothing in `libc/src` defines
+  `stat` or `gettimeofday`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against
   picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real

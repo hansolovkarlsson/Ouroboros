@@ -22,6 +22,8 @@
 #define SYS_GET_ARG 49
 #define SYS_GET_CWD 51
 #define SYS_YIELD 57
+#define SYS_GET_ENVC 59
+#define SYS_GET_ENV 60
 
 /* Transient MSG_SEND failures worth retrying (mirrors syscall-abi). */
 #define MSG_ERR_FULL (~0UL - 20UL)
@@ -64,6 +66,12 @@
  * in the error band's form so the wire check reads it. */
 #define NO_ARG (~0UL - 0UL)
 #define ARGV_MAX 512u
+/* The environment (crt0.c): the most bytes its staged blob may hold, and the
+ * largest out buffer the kernel accepts for one copy (MAX_USER_LEN in
+ * kernel/src/syscall.rs; GET_ENV refuses a larger one, so the store is read
+ * one entry at a time). */
+#define ENV_MAX 2048u
+#define USER_COPY_MAX 512u
 
 #define HEAP_INFO_BASE 0
 #define HEAP_INFO_SIZE 1
