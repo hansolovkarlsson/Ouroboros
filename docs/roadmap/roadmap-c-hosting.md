@@ -185,7 +185,7 @@ tree at `4dcbddd` leaves of them, read from the code.
   first `GET_ENV` asks for 2047 bytes, so with the blanket refusal back
   every `getenv` answers unset, and `/bin/RDPROBE` reads all five stores
   through a 4 KiB buffer.
-- **Step 4, `stat(path)`: done 2026-10-06.** `file.c`'s `stat` sends one
+- **Step 4, `stat(path)`: done 2026-10-06, #223.** `file.c`'s `stat` sends one
   `NP_STAT`, the path verb `ls -l` uses, which fsd, `netd`'s export and the
   host peer all serve, and decodes the record through the same function as
   `fstat`. Not `open` + `fstat` + `close`, as step 4 first said: that asks

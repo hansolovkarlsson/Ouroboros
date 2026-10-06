@@ -63,7 +63,7 @@ every name as unset. Proem reads `SOURCE_DATE_EPOCH` through it. `make
 test-cenv` compares a C `printenv` with `/bin/PRINTENV`. Step 3 of the
 C-hosting plan.
 
-**`stat(path)` in the C library.** One `NP_STAT`, the request `ls -l` makes,
+**`stat(path)` in the C library (#223).** One `NP_STAT`, the request `ls -l` makes,
 so `stat` needs no read permission on the file and no free fd, as POSIX
 says, and works on directories and the console binding; a path ending in
 `/` must name a directory. `/net` answers `ENOSYS` until `netd` serves the
