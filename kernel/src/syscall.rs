@@ -286,25 +286,33 @@ fn valid_stage_range(ptr: u64, len: u64, max: usize) -> bool {
 
 /// A **read** of one per-task store (`GET_ARG`, `GET_ENV`, `GET_CWD`,
 /// `GET_NS`, and `TASK_NAME`, which reads another task's `argv[0]` from its
-/// argv store) into the caller's out buffer: the capacity to copy with, or
-/// `None` for a buffer that is not the caller's.
+/// argv store): copies `entry` to the caller's out buffer `(ptr, cap)` and
+/// returns the entry's true length, or `None` for a buffer that is not the
+/// caller's. The one place those five reads bound and write their copy, so an
+/// arm cannot pair a checked range with a different write.
 ///
-/// The capacity is CAPPED at the store's size (`store`, the `syscall-abi`
-/// maximum the per-task store in `tasks.rs` is sized by), not refused above
-/// it: what is copied is at most one entry, and an entry is no longer than its
-/// store, so a larger buffer only has room the kernel never writes. Containment
-/// is checked on the capped length, the bytes that can be written, which is
-/// the check that carries the safety. An input is still refused when too long
-/// (the staging calls above); an output buffer larger than the answer is not
-/// an error.
+/// The copy is `min(entry, cap)` bytes, and containment in the caller's region
+/// is checked over exactly those bytes, the check that carries the safety. A
+/// capacity larger than the entry is not an error, however large: an input is
+/// still refused when too long (the staging calls above), but an output buffer
+/// with room to spare only has bytes the kernel never writes.
 ///
 /// Until 2026-10-06 the reads used [`valid_user_range`], so `GET_ENV` refused a
 /// buffer the size of the environment it reads, and a refusal came back as
 /// `NO_ARG`, which reads as "no such entry": libc's crt0 carried a copy of
 /// `MAX_USER_LEN` to stay under it. Found by the reviews of #221 and #222.
-fn read_capacity(ptr: u64, cap: u64, store: u64) -> Option<u64> {
-    let cap = cap.min(store);
-    (ptr != 0 && cap != 0 && in_caller_region(ptr, cap)).then_some(cap)
+fn copy_out(ptr: u64, cap: u64, entry: &[u8]) -> Option<u64> {
+    let n = (entry.len() as u64).min(cap);
+    // A zero-length copy still needs a pointer that is the caller's (the
+    // region check takes one byte for it), so garbage is refused alike.
+    if ptr == 0 || cap == 0 || !in_caller_region(ptr, n) {
+        return None;
+    }
+    // SAFETY: [ptr, ptr + n) lies inside the calling task's own region,
+    // checked just above; n is at most entry.len().
+    let dst = unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, n as usize) };
+    dst.copy_from_slice(&entry[..n as usize]);
+    Some(entry.len() as u64)
 }
 
 /// Sized generously for a real userland program - the default shell is
@@ -699,15 +707,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::GET_CWD => {
             // arg0 = out pointer, arg1 = out capacity. Copies up to capacity
             // bytes of the current task's cwd, returns its true length.
-            let Some(cap) = read_capacity(arg0, arg1, syscall_abi::CWD_MAX) else {
-                return 0;
-            };
-            let cwd = tasks::cwd_path(tasks::current_task());
-            let n = (cwd.len() as u64).min(cap) as usize;
-            // SAFETY: out range validated above.
-            let dst = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, n) };
-            dst.copy_from_slice(&cwd[..n]);
-            cwd.len() as u64
+            copy_out(arg0, arg1, tasks::cwd_path(tasks::current_task())).unwrap_or(0)
         }
         syscall_abi::NS_SET => {
             // arg0 = namespace-blob pointer, arg1 = length. Sets the calling
@@ -732,15 +732,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::GET_NS => {
             // arg0 = out pointer, arg1 = out capacity. Copies up to capacity
             // bytes of the current task's namespace, returns its true length.
-            let Some(cap) = read_capacity(arg0, arg1, syscall_abi::NS_MAX) else {
-                return 0;
-            };
-            let ns = tasks::namespace(tasks::current_task());
-            let n = (ns.len() as u64).min(cap) as usize;
-            // SAFETY: out range validated above.
-            let dst = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, n) };
-            dst.copy_from_slice(&ns[..n]);
-            ns.len() as u64
+            copy_out(arg0, arg1, tasks::namespace(tasks::current_task())).unwrap_or(0)
         }
         syscall_abi::ARGS_STAGE => {
             // arg0 = blob pointer, arg1 = blob length. Copies the whole argv
@@ -762,22 +754,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::GET_ARG => {
             // arg0 = index, arg1 = out pointer, arg2 = out capacity. Copies up
             // to capacity bytes of argument `index`, returns its true length,
-            // or NO_ARG if out of range. The capacity is capped at the argv
-            // store (see read_capacity).
-            let Some(cap) = read_capacity(arg1, arg2, syscall_abi::ARGV_MAX) else {
-                return syscall_abi::NO_ARG;
-            };
+            // or NO_ARG if out of range or the buffer is not the caller's.
             let blob = tasks::argv_blob(tasks::current_task());
-            match argv_get(blob, arg0 as usize) {
-                Some(bytes) => {
-                    let n = (bytes.len() as u64).min(cap) as usize;
-                    // SAFETY: out range validated above.
-                    let dst = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, n) };
-                    dst.copy_from_slice(&bytes[..n]);
-                    bytes.len() as u64
-                }
-                None => syscall_abi::NO_ARG,
-            }
+            argv_get(blob, arg0 as usize)
+                .and_then(|bytes| copy_out(arg1, arg2, bytes))
+                .unwrap_or(syscall_abi::NO_ARG)
         }
         syscall_abi::ENV_STAGE => {
             // arg0 = blob pointer, arg1 = blob length. Copies the env blob into
@@ -798,22 +779,12 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::GET_ENV => {
             // arg0 = index, arg1 = out pointer, arg2 = out capacity. Same shape
             // as GET_ARG (the env blob reuses the argv encoding), returning the
-            // index-th NAME=VALUE string or NO_ARG if out of range. The
-            // capacity is capped at the env store (see read_capacity).
-            let Some(cap) = read_capacity(arg1, arg2, syscall_abi::ENV_MAX) else {
-                return syscall_abi::NO_ARG;
-            };
+            // index-th NAME=VALUE string or NO_ARG if out of range or the
+            // buffer is not the caller's.
             let blob = tasks::env_blob(tasks::current_task());
-            match argv_get(blob, arg0 as usize) {
-                Some(bytes) => {
-                    let n = (bytes.len() as u64).min(cap) as usize;
-                    // SAFETY: out range validated above.
-                    let dst = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, n) };
-                    dst.copy_from_slice(&bytes[..n]);
-                    bytes.len() as u64
-                }
-                None => syscall_abi::NO_ARG,
-            }
+            argv_get(blob, arg0 as usize)
+                .and_then(|bytes| copy_out(arg1, arg2, bytes))
+                .unwrap_or(syscall_abi::NO_ARG)
         }
         syscall_abi::STDOUT_TARGET => tasks::stdout_target_of(tasks::current_task()),
         syscall_abi::SELF => tasks::current_task() as u64,
@@ -1075,24 +1046,13 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // arg0 = task index, arg1 = out pointer, arg2 = out capacity.
             // Copies up to capacity bytes of task `index`'s name (argv[0]),
             // returns its true length, or 0 if the slot has no name. The
-            // read-only companion to TASK_STATE (see the shell's `ps`). The
-            // capacity is capped at the argv store (see read_capacity).
-            let Some(cap) = read_capacity(arg1, arg2, syscall_abi::ARGV_MAX) else {
-                return 0;
-            };
+            // read-only companion to TASK_STATE (see the shell's `ps`).
             let Some(t) = tasks::TaskIndex::new(arg0 as usize) else {
                 return 0;
             };
-            match argv_get(tasks::argv_blob(t.index()), 0) {
-                Some(name) => {
-                    let n = (name.len() as u64).min(cap) as usize;
-                    // SAFETY: out range validated above.
-                    let dst = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, n) };
-                    dst.copy_from_slice(&name[..n]);
-                    name.len() as u64
-                }
-                None => 0,
-            }
+            argv_get(tasks::argv_blob(t.index()), 0)
+                .and_then(|name| copy_out(arg1, arg2, name))
+                .unwrap_or(0)
         }
         syscall_abi::TASK_EXIT_CODE => {
             // arg0 = task index. The exit status of a zombie (peeked, NOT

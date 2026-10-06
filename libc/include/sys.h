@@ -66,9 +66,9 @@
  * in the error band's form so the wire check reads it. */
 #define NO_ARG (~0UL - 0UL)
 #define ARGV_MAX 512u
-/* The environment (crt0.c): the most bytes its staged blob may hold. GET_ENV
- * caps a larger capacity at it rather than refusing one, so a buffer of
- * ENV_MAX bytes holds any entry. */
+/* The environment (crt0.c): the most bytes its staged blob may hold, so a
+ * GET_ENV buffer of ENV_MAX bytes holds any entry (the kernel refuses no
+ * capacity as too large). */
 #define ENV_MAX 2048u
 
 #define HEAP_INFO_BASE 0

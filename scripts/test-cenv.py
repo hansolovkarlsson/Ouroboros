@@ -24,7 +24,14 @@ changes.
 
 crt0 asks GET_ENV for up to 2047 bytes on its first entry, more than the
 kernel's blanket 512-byte cap, so this rig also fails if GET_ENV's capacity is
-refused above that cap rather than capped at ENV_MAX (the control in #222).
+refused above that cap (the control in #222).
+
+A third block runs /bin/RDPROBE after `cd /EFI` and `bind /mnt /EFI`: it reads
+all five per-task stores (GET_ARG, GET_ENV, GET_CWD, GET_NS, TASK_NAME)
+through a 4 KiB buffer, and GET_ENV once with a capacity of u64::MAX, and
+each answer is checked against what this script set up. Every other reader
+passes 512 bytes or less, so this block is the only check that the kernel
+accepts a buffer larger than a store.
 
 Not reached: crt0's skip of an entry longer than the room left in its buffer.
 The strings of any blob the kernel holds fit in ENV_MAX bytes, so only a
@@ -56,6 +63,7 @@ SETS = [
 EXPECT = {name: stored for name, _, stored in SETS} | {"PATH": DEFAULT_PATH}
 ASK = ["FOO", "SOURCE_DATE_EPOCH", "PATH", "LONGVAL", "NOSUCHVAR"]
 PROGRAMS = ["printenv", "cenvh", f"cenv {' '.join(ASK)}"]
+PROBE_DIR, PROBE_BIND, PROBE_ARG = "/EFI", "/mnt", "hello"
 
 
 def env_lines(block):
@@ -79,6 +87,8 @@ def main() -> int:
             steps += [("# ", f"set {name}={typed}")]
         for prog in PROGRAMS:
             steps += [("# ", FENCE), ("# ", prog)]
+        steps += [("# ", FENCE), ("# ", f"cd {PROBE_DIR}"), ("# ", f"bind {PROBE_BIND} {PROBE_DIR}"),
+                  ("# ", f"rdprobe {PROBE_ARG}")]
         steps += [("# ", FENCE), ("# ", "")]
         driven = guest.run(steps)
         out = guest.transcript()
@@ -90,7 +100,7 @@ def main() -> int:
 
     blocks = re.split(r"^==fence==\r?$", out, flags=re.M)[1:]
     n = len(PROGRAMS)
-    checks = [("driven to the end", driven), (f"{2 * n} fenced blocks", len(blocks) >= 2 * n)]
+    checks = [("driven to the end", driven), (f"{2 * n + 1} fenced blocks", len(blocks) >= 2 * n + 1)]
     rounds = [("before set", blocks[0:n]), ("after set", blocks[n:2 * n])]
     for label, (rust, h, c) in [(lbl, b) for lbl, b in rounds if len(b) == n]:
         want = env_lines(rust)
@@ -113,6 +123,27 @@ def main() -> int:
                 checks.append((f"getenv {name} answers its value", ok))
             else:
                 checks.append((f"getenv {name} answers unset", f"getenv {name} unset" in c))
+    if len(blocks) >= 2 * n + 1:
+        probe = blocks[2 * n]
+        got = re.findall(r"^(arg1|env|envmax|cwd|ns|name)(=.*?| refused)\r?$", probe, re.M)
+        lines = [k + v for k, v in got]
+        envs = [v[1:] for k, v in got if k == "env" and v.startswith("=")]
+        def one(key):
+            vals = [v for k, v in got if k == key]
+            return vals[0] if len(vals) == 1 else None
+        checks += [
+            ("rdprobe: GET_ARG through 4 KiB answers argument 1", one("arg1") == f"={PROBE_ARG}"),
+            ("rdprobe: GET_ENV through 4 KiB answers every variable set",
+             all(f"{k}={v}" in envs for k, v in EXPECT.items())),
+            ("rdprobe: GET_ENV with capacity u64::MAX answers entry 0",
+             bool(envs) and one("envmax") == f"={envs[0]}"),
+            ("rdprobe: GET_CWD through 4 KiB answers the directory", one("cwd") == f"={PROBE_DIR}"),
+            ("rdprobe: GET_NS through 4 KiB answers the binding",
+             (one("ns") or "").startswith("=") and PROBE_BIND in one("ns") and PROBE_DIR in one("ns")),
+            ("rdprobe: TASK_NAME through 4 KiB answers its own name", one("name") == "=rdprobe"),
+            ("rdprobe: nothing refused", lines != [] and not any(l.endswith(" refused") for l in lines)),
+            ("rdprobe exited 0", exit_code(probe) == "0"),
+        ]
     checks.append(("no fault lines", faults == 0))
     failed = 0
     for name, ok in checks:

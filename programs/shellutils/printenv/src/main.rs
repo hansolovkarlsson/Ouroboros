@@ -22,10 +22,12 @@ pub extern "C" fn _start() -> ! {
     let mut buf = [0u8; ulib::ENV_ENTRY_BUF];
     let mut i = 0;
     while i < n {
-        if let Some(entry) = ulib::env_at(i, &mut buf) {
-            ulib::write_out(target, entry);
-            ulib::write_out(target, b"\r\n");
-        }
+        // The entries are contiguous, so the first one missing ends them.
+        let Some(entry) = ulib::env_at(i, &mut buf) else {
+            break;
+        };
+        ulib::write_out(target, entry);
+        ulib::write_out(target, b"\r\n");
         i += 1;
     }
     ulib::end_of_stream(target);
