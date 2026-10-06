@@ -466,7 +466,9 @@ The **constraints are the loader's, and they bite C harder than Rust**:
 - **File I/O works, via fids** (`libc/src/file.c`, `make cfile-bin` →
   `/bin/CFILE`): `open`/`read`/`write`/`close`/`lseek`/`fstat`, since
   2026-10-06 `stat` (path verb `NP_STAT`, no fid, so no read permission on
-  the file is needed), and since 2026-10-05 `unlink`, `rmdir`, `rename` and
+  the file is needed) and, in the picolibc port (`libc/pico/clock.c`),
+  `gettimeofday` and `clock_gettime` from `MONOTONIC_US` (1970 plus uptime:
+  no wall clock), and since 2026-10-05 `unlink`, `rmdir`, `rename` and
   `remove` (path verbs
   `NP_RM`/`NP_RMDIR`/`NP_MV`, no fid; `remove` takes a file or an empty
   directory; `rename` replaces an existing ordinary file, answers `EXDEV` across

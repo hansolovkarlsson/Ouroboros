@@ -71,6 +71,11 @@ request under `/net/tcp`. `lstat` is the same, with no symbolic links here. pico
 test-cerrno` checks it as root and as an ordinary user. Step 4 of the
 C-hosting plan.
 
+**A C program can read the clock.** `gettimeofday` and `clock_gettime` come
+from the kernel's time since boot, so `time()` links and says 1970 plus
+uptime: there is no wall clock yet. `make test-cclock` checks `/bin/CCLOCK`'s
+clock against the host's over a timed gap. Step 5 of the C-hosting plan.
+
 **Reading a per-task store back accepts any buffer (#222).** `GET_ARG`,
 `GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at most one entry, through
 one kernel helper that checks containment over the bytes it copies. Until now

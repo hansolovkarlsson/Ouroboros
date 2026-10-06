@@ -615,7 +615,7 @@ def check_fid_gate_budget(problems, rust):
 # unchecked: a wrong number there makes crt0 call another syscall at the start
 # of every C program, and only a booted rig would see it. A floor, as for the
 # peers, so a header reformatted out of the parser's reach is not a pass.
-SYSCALL_BASELINE = 15  # counted 2026-10-06 (run): PUTC to GET_ENV
+SYSCALL_BASELINE = 16  # counted 2026-10-06 (run): PUTC to GET_ENV, 16 with MONOTONIC_US for the C clock
 
 
 def check_syscall_numbers(problems, rust, origin, header):
