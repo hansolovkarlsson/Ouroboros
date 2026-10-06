@@ -10,8 +10,10 @@
  *   `/bin/CARGS`), argv[argc] NULL.
  * - environ (GET_ENVC/GET_ENV, since 2026-10-05, step 3 of the C-hosting
  *   plan): the `NAME=VALUE` strings `set` made, NULL-terminated, which is what
- *   picolibc's getenv reads. Until then nothing defined `environ`, so a
- *   picolibc program calling getenv did not link.
+ *   picolibc's getenv reads. Until then a picolibc program calling getenv
+ *   linked and was always told the variable was unset: picolibc's own libc.a
+ *   defines `environ` (libc_stdlib_environ.c.o) as an empty vector, and
+ *   nothing pointed it anywhere else.
  *
  * Built into static storage rather than the heap, so a program that never
  * mallocs keeps all of its heap, and so this file is the same for the
@@ -23,9 +25,12 @@
 extern int main(int argc, char **argv);
 
 /* Both blobs are [count: u32] then [len: u32][bytes] per entry, so every entry
- * costs at least 4 bytes of the blob and the count can be at most
- * (MAX - 4) / 4. The strings here take len + 1 each (the NUL for the length
- * prefix), so they always fit in MAX bytes.
+ * costs at least 4 bytes of the blob and argv's count can be at most
+ * (ARGV_MAX - 4) / 4: an empty argument is a real one. An environment entry
+ * is `NAME=VALUE`, at least two bytes, so 6 of the blob and a count of at
+ * most (ENV_MAX - 4) / 6; a blob of shorter entries is not an environment,
+ * and the vector stops at the cap. The strings here take len + 1 each (the
+ * NUL for the length prefix), so they always fit in MAX bytes.
  *
  * The kernel stores a staged blob as given and the count call answers its
  * header, unchecked, so a spawner can claim any count. Both guards in
@@ -33,26 +38,27 @@ extern int main(int argc, char **argv);
  * could hold, and the vector stops at the first entry the kernel cannot find,
  * so the vector counts the entries that exist. */
 #define ARGC_CAP ((ARGV_MAX - 4) / 4)
-#define ENVC_CAP ((ENV_MAX - 4) / 4)
+#define ENVC_CAP ((ENV_MAX - 4) / 6)
 static char *g_argv[ARGC_CAP + 1];
 static char g_argbuf[ARGV_MAX];
 static char *g_envp[ENVC_CAP + 1];
 static char g_envbuf[ENV_MAX];
 
-/* The environment picolibc's getenv walks. Set before main runs. */
-char **environ;
+/* The environment getenv walks, set before main runs. Declared, not defined:
+ * picolibc's libc.a defines it, and the hand-rolled libc in stdlib.c, weakly,
+ * so a ported program that defines `char **environ;` itself still links. */
+extern char **environ;
 
 /* Reads the kernel's vector with `count_call`/`get_call` into `buf`, pointers
  * into `vec` (at most `cap` of them, then NULL), and returns how many.
  *
  * One copy per entry, at most USER_COPY_MAX bytes: the kernel refuses an out
  * buffer larger than that, so the whole store cannot be asked for at once.
- * An entry longer than the copy is cut when `drop_long` is 0, which argv
- * never reaches (its whole blob is ARGV_MAX), and left out when it is 1: a
- * `NAME=VALUE` cut short is a different value, and getenv returning it would
- * be worse than the variable being unset. */
+ * An entry longer than the copy is left out, not cut: a `NAME=VALUE` cut
+ * short is a different value, and getenv returning it would be worse than the
+ * variable being unset. argv never has one (its whole blob is ARGV_MAX). */
 static int read_vec(long count_call, long get_call, char *buf, unsigned long size,
-                    char **vec, unsigned long cap, int drop_long) {
+                    char **vec, unsigned long cap) {
     unsigned long n = (unsigned long)__os_syscall1(count_call, 0);
     if (n > cap) {
         n = cap; /* a header claiming more than the blob can hold */
@@ -71,10 +77,7 @@ static int read_vec(long count_call, long get_call, char *buf, unsigned long siz
             break;
         }
         if (len > room) {
-            if (drop_long) {
-                continue;
-            }
-            len = room; /* the kernel copied only room bytes */
+            continue;
         }
         dst[len] = '\0';
         vec[count++] = dst;
@@ -85,9 +88,9 @@ static int read_vec(long count_call, long get_call, char *buf, unsigned long siz
 }
 
 __attribute__((section(".text.start"), used, noreturn)) void _start(void) {
-    int argc = read_vec(SYS_GET_ARGC, SYS_GET_ARG, g_argbuf, sizeof g_argbuf, g_argv,
-                        ARGC_CAP, 0);
-    read_vec(SYS_GET_ENVC, SYS_GET_ENV, g_envbuf, sizeof g_envbuf, g_envp, ENVC_CAP, 1);
+    int argc =
+        read_vec(SYS_GET_ARGC, SYS_GET_ARG, g_argbuf, sizeof g_argbuf, g_argv, ARGC_CAP);
+    read_vec(SYS_GET_ENVC, SYS_GET_ENV, g_envbuf, sizeof g_envbuf, g_envp, ENVC_CAP);
     environ = g_envp;
     exit(main(argc, g_argv));
 }

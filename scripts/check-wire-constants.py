@@ -609,6 +609,32 @@ def check_fid_gate_budget(problems, rust):
             "clunk-on-close check could no longer fail - raise FID_BUDGET_ROUNDS")
 
 
+# The syscall NUMBERS sys.h spells, as `SYS_<name>` for syscall-abi's `<name>`.
+# CHECKED matches names exactly, so the prefix kept every one of them out of
+# this script until the review of #221 found SYS_GET_ENVC and SYS_GET_ENV
+# unchecked: a wrong number there makes crt0 call another syscall at the start
+# of every C program, and only a booted rig would see it. A floor, as for the
+# peers, so a header reformatted out of the parser's reach is not a pass.
+SYSCALL_BASELINE = 15  # counted 2026-10-06 (run): PUTC to GET_ENV
+
+
+def check_syscall_numbers(problems, rust, origin, header):
+    """Every SYS_* in the C header against syscall-abi's number of that name.
+    Returns how many were compared."""
+    numbers = {k: v for k, v in header.items() if k.startswith("SYS_")}
+    for cname, val in sorted(numbers.items()):
+        name = cname[len("SYS_"):]
+        if origin.get(name) != "syscall-abi":
+            problems.append(f"{cname}: syscall-abi has no {name} (renamed? then rename it here)")
+        elif rust[name] != val:
+            problems.append(f"{cname}: syscall-abi has {name} = {rust[name]}, "
+                            f"libc/include/sys.h has {val}")
+    if len(numbers) < SYSCALL_BASELINE:
+        problems.append(f"libc/include/sys.h: matched {len(numbers)} SYS_* number(s), "
+                        f"expected at least {SYSCALL_BASELINE} - did its formatting change?")
+    return len(numbers)
+
+
 def main():
     problems_early = []
     # BOTH crates: the verb/frame constants are ninep-abi's, the status codes
@@ -702,6 +728,7 @@ def main():
     check_dev_user_keys(problems)
     check_userkey_count(problems)
     check_fid_gate_budget(problems, rust)
+    syscalls = check_syscall_numbers(problems, rust, origin, peers["libc/include/sys.h"])
 
     if problems:
         print("check-wire-constants: DISAGREEMENT")
@@ -713,6 +740,7 @@ def main():
     # same restatement-goes-stale shape this file warns about twice already.
     print(f"check-wire-constants: {compared} constant(s) agree across Rust and "
           f"{len(peers)} peer(s) ({', '.join(sorted(peers))}), "
+          f"{syscalls} syscall number(s) in libc/include/sys.h agree with syscall-abi, "
           "and the dev peer labels, root flags and user keys agree, and the fid gate's budget exceeds MAX_FIDS")
     return 0
 

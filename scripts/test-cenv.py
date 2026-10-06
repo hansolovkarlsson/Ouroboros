@@ -10,13 +10,21 @@ through picolibc, then getenv's answer for each argument, and `/bin/CENVH`
 through the hand-rolled libc, which has no getenv.
 
 Two rounds in one boot, each running printenv, cenvh and cenv: before any
-`set` (the shell's own environment), and after three, one of them a value of
-100 characters. Graded per round: both C programs' NAME=VALUE lines equal
-printenv's, in order, and each exited 0; and after the sets, cenv's getenv
-answers FOO, SOURCE_DATE_EPOCH (Proem's reason for this step) and PATH with
-printenv's values, and a name never set as unset. No fault line in QEMU's
-trace. About a minute. Run it whenever crt0.c or the kernel's env store
+`set` (the shell's own environment), and after four, the last a value of 128
+bytes, the shell's longest (ENV_VALUE_SIZE), made by expanding a 64-byte one
+twice since the input line is itself 128 bytes. Graded per round: both C
+programs' NAME=VALUE lines equal printenv's, in order, and each exited 0; and
+after the sets, printenv and cenv's getenv both answer FOO, SOURCE_DATE_EPOCH
+(Proem's reason for this step) and PATH with the values this script set or the
+shell's default, and a name never set as unset. The expected values are this
+file's, never printenv's: taken from printenv, a variable it lost would turn
+the check into "unset" and pass a C side lost the same way. No fault line in
+QEMU's trace. About a minute. Run it whenever crt0.c or the kernel's env store
 changes.
+
+Not reached: crt0's skipping of an entry longer than one copy (USER_COPY_MAX,
+512 bytes). The shell's longest entry is 7 + 1 + 128 bytes here, 24 + 1 + 128
+at most, so no spawn the shell makes can reach it.
 """
 import importlib.util
 import os
@@ -32,9 +40,17 @@ _spec.loader.exec_module(drive_qemu)
 IMAGE = os.path.join(ROOT, "build", "esp.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-cenv.txt")
 FENCE = "echo ==fence=="
-LONG = "".join(chr(ord("a") + i % 26) for i in range(100))
-SETS = [("FOO", "bar"), ("SOURCE_DATE_EPOCH", "1700000000"), ("LONGVAL", LONG)]
-ASK = ["FOO", "SOURCE_DATE_EPOCH", "PATH", "NOSUCHVAR"]
+HALF = "".join(chr(ord("a") + i % 26) for i in range(64))
+DEFAULT_PATH = "/bin"  # the shell's own (programs/shell/src/main.rs)
+# (name, as typed, as stored). LONGVAL is HALF expanded twice: 128 bytes.
+SETS = [
+    ("FOO", "bar", "bar"),
+    ("SOURCE_DATE_EPOCH", "1700000000", "1700000000"),
+    ("HALF", HALF, HALF),
+    ("LONGVAL", "$HALF$HALF", HALF + HALF),
+]
+EXPECT = {name: stored for name, _, stored in SETS} | {"PATH": DEFAULT_PATH}
+ASK = ["FOO", "SOURCE_DATE_EPOCH", "PATH", "LONGVAL", "NOSUCHVAR"]
 PROGRAMS = ["printenv", "cenvh", f"cenv {' '.join(ASK)}"]
 
 
@@ -55,8 +71,8 @@ def main() -> int:
         steps = [("login:", "root"), ("assword", "root")]
         for prog in PROGRAMS:
             steps += [("# ", FENCE), ("# ", prog)]
-        for name, value in SETS:
-            steps += [("# ", f"set {name}={value}")]
+        for name, typed, _ in SETS:
+            steps += [("# ", f"set {name}={typed}")]
         for prog in PROGRAMS:
             steps += [("# ", FENCE), ("# ", prog)]
         steps += [("# ", FENCE), ("# ", "")]
@@ -84,12 +100,13 @@ def main() -> int:
     if len(blocks) >= 2 * n:
         rust, c = blocks[n], blocks[2 * n - 1]
         env = dict(line.split("=", 1) for line in env_lines(rust))
-        for name, value in SETS:
-            checks.append((f"after set: printenv shows {name}", env.get(name) == value))
+        for name, value in EXPECT.items():
+            checks.append((f"after set: printenv shows {name} ({len(value)} bytes)",
+                           env.get(name) == value))
         for name in ASK:
-            if name in env:
-                ok = f"getenv {name} = [{env[name]}]" in c
-                checks.append((f"getenv {name} answers printenv's value", ok))
+            if name in EXPECT:
+                ok = f"getenv {name} = [{EXPECT[name]}]" in c
+                checks.append((f"getenv {name} answers its value", ok))
             else:
                 checks.append((f"getenv {name} answers unset", f"getenv {name} unset" in c))
     checks.append(("no fault lines", faults == 0))
