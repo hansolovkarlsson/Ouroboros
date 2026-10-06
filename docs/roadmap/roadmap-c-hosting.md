@@ -170,18 +170,16 @@ tree at `4dcbddd` leaves of them, read from the code.
   `environ` is an empty vector), now answers what `set` made. crt0 declares
   `environ` and assigns it; picolibc defines it, and the hand-rolled libc
   weakly in `stdlib.c`, so a ported program that defines its own still
-  links. `libc/cenv.c` prints `environ` in
-  `/bin/PRINTENV`'s format, built through picolibc (`/bin/CENV`, with
-  `getenv` answers) and the hand-rolled libc (`/bin/CENVH`); `make
-  test-cenv` compares both with `printenv` before and after four `set`s,
-  the last a 128-byte value (the shell's longest), and checks `getenv` for
-  `SOURCE_DATE_EPOCH`, `PATH`, the long value, a set name and an unset one,
-  against values the rig sets rather than printenv's. Control: an
-  environment cut to one entry fails both comparisons and two `getenv`
-  checks. The kernel's
-  cap has its own control in the same rig: crt0's first `GET_ENV` asks
-  for 2047 bytes, so with the blanket refusal back every `getenv` answers
-  unset.
+  links. `libc/cenv.c` prints `environ` in `/bin/PRINTENV`'s format, built
+  through picolibc (`/bin/CENV`, with `getenv` answers) and the hand-rolled
+  libc (`/bin/CENVH`); `make test-cenv` compares both with `printenv` before
+  and after four `set`s, the last a 128-byte value (the shell's longest),
+  and checks `getenv` for `SOURCE_DATE_EPOCH`, `PATH`, the long value, a set
+  name and an unset one, against values the rig sets rather than printenv's.
+  Control: an environment cut to one entry fails both comparisons and two
+  `getenv` checks. The kernel's cap has its own control in the same rig:
+  crt0's first `GET_ENV` asks for 2047 bytes, so with the blanket refusal
+  back every `getenv` answers unset.
 - **Steps 4 and 5, `stat`, a clock: open.** Nothing in `libc/src` defines
   `stat` or `gettimeofday`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:

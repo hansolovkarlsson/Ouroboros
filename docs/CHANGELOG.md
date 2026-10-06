@@ -58,17 +58,19 @@ C-hosting plan, and item 5 of Edit's console note.
 **A C program has its environment.** `crt0` builds `environ` from the
 kernel's store, so picolibc's `getenv` answers what the shell's `set` made;
 until then it linked against picolibc's own empty `environ` and answered
-every name as unset. Proem reads `SOURCE_DATE_EPOCH` through it.
+every name as unset. Proem reads `SOURCE_DATE_EPOCH` through it. `make
+test-cenv` compares a C `printenv` with `/bin/PRINTENV`. Step 3 of the
+C-hosting plan.
 
 **Reading a per-task store back caps the buffer instead of refusing it
-(#222).** `GET_ARG`, `GET_ENV`, `GET_CWD` and `GET_NS` copy at most one entry,
-so a buffer larger than the store is capped at the store's size and checked
-for containment over that length. Until now a capacity over the blanket 512
-bytes was refused, which for `GET_ENV` meant a buffer the size of the
-environment, and the refusal answered "no such entry". `ulib::env_at` returns
-an entry's true length, so `getenv` and `printenv` no longer pass off a cut
-entry as a whole one. `make test-cenv`
-compares a C `printenv` with `/bin/PRINTENV`. Step 3 of the C-hosting plan.
+(#222).** `GET_ARG`, `GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at
+most one entry, so a buffer larger than the store is capped at the store's
+size and checked for containment over that length. Until now a capacity over
+the blanket 512 bytes was refused, which for `GET_ENV` meant a buffer the
+size of the environment, and the refusal answered "no such entry".
+`ulib::env_at` takes a buffer the size of the store and returns the whole
+entry, so `getenv` and `printenv` can no longer pass off a cut entry as a
+whole one.
 
 **Every failure in the C file layer sets `errno` (#220).** `open`, `read`,
 `write`, `close`, `fstat` and `lseek` now set it in a picolibc program, as

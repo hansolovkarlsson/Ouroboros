@@ -123,13 +123,21 @@ pub fn env_count() -> u64 {
     syscall(syscall_abi::GET_ENVC, 0)
 }
 
-/// Copy the `index`-th inherited environment entry - a `NAME=VALUE` string -
-/// into `buf`, returning its TRUE length, or `None` if `index` is out of
-/// range. A length over `buf.len()` means only `buf.len()` bytes were copied,
-/// so the caller can tell a cut entry from a whole one: a `NAME=VALUE` cut
-/// short is a different value. A `buf` of [`syscall_abi::ENV_MAX`] bytes holds
-/// any entry. The entry point for iterating the environment (e.g. `printenv`).
-pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
+/// The size of buffer [`env_at`] takes: the whole env store, so it holds any
+/// entry.
+pub const ENV_ENTRY_BUF: usize = syscall_abi::ENV_MAX as usize;
+
+/// The `index`-th inherited environment entry, a whole `NAME=VALUE` string read
+/// into `buf`, or `None` if `index` is out of range. The entry point for
+/// iterating the environment (e.g. `printenv`).
+///
+/// `buf` is the size of the store, so no entry can be cut, and the answer is
+/// the entry itself rather than a length a caller could slice past. A smaller
+/// buffer is not spellable: until 2026-10-06 this took any `&mut [u8]` and
+/// returned a length clamped to it, so a cut `NAME=VALUE`, a different value,
+/// read as a whole one; returning the true length instead (the first version
+/// of #222) made `&buf[..len]` panic on a long entry.
+pub fn env_at(index: u64, buf: &mut [u8; ENV_ENTRY_BUF]) -> Option<&[u8]> {
     let n = syscall4(
         syscall_abi::GET_ENV,
         index,
@@ -138,10 +146,12 @@ pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
         0,
     );
     if n == syscall_abi::NO_ARG {
-        None
-    } else {
-        Some(n as usize)
+        return None;
     }
+    // The kernel caps the copy at ENV_MAX and an entry is shorter than its
+    // store, so this is always Some for a real entry; `get` keeps the slice
+    // from being a panic site if a kernel ever answered otherwise.
+    buf.get(..n as usize)
 }
 
 /// Look up an inherited environment variable by `name`, copying its value into
@@ -149,21 +159,18 @@ pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
 /// Scans the environment (`env_count`/`env_at`), splitting each entry on its
 /// first `=`. A `getenv`-shaped helper for programs that want one variable.
 pub fn getenv(name: &[u8], buf: &mut [u8]) -> Option<usize> {
-    // One entry at a time, into a buffer the size of the whole store, so no
-    // entry is cut: until 2026-10-06 this was 256 bytes and a longer entry,
-    // which any spawner can stage, came back as a shorter value.
-    let mut entry = [0u8; syscall_abi::ENV_MAX as usize];
+    // One whole entry at a time (env_at's buffer is the store's size): until
+    // 2026-10-06 this was 256 bytes and a longer entry, which any spawner can
+    // stage, came back as a shorter value.
+    let mut ebuf = [0u8; ENV_ENTRY_BUF];
     let n = env_count();
     for i in 0..n {
-        let Some(len) = env_at(i, &mut entry) else {
+        let Some(entry) = env_at(i, &mut ebuf) else {
             continue;
         };
-        if len > entry.len() {
-            continue; // cannot happen: no entry is longer than its store
-        }
         // Split NAME=VALUE on the first '='.
         let mut eq = None;
-        for (j, &b) in entry[..len].iter().enumerate() {
+        for (j, &b) in entry.iter().enumerate() {
             if b == b'=' {
                 eq = Some(j);
                 break;
@@ -171,7 +178,7 @@ pub fn getenv(name: &[u8], buf: &mut [u8]) -> Option<usize> {
         }
         if let Some(eq) = eq {
             if &entry[..eq] == name {
-                let val = &entry[eq + 1..len];
+                let val = &entry[eq + 1..];
                 let m = val.len().min(buf.len());
                 buf[..m].copy_from_slice(&val[..m]);
                 return Some(val.len());

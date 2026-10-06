@@ -16,18 +16,15 @@ pub extern "C" fn _start() -> ! {
     );
     let target = ulib::stdout_target();
     let n = ulib::env_count();
-    // One entry (NAME=VALUE) at a time, into a buffer the size of the whole
-    // store, so no entry is printed cut: until 2026-10-06 this was 256 bytes,
-    // and a longer entry (any spawner can stage one) printed as a shorter one.
-    let mut buf = [0u8; syscall_abi::ENV_MAX as usize];
+    // One whole entry (NAME=VALUE) at a time, env_at's buffer being the
+    // store's size: until 2026-10-06 this was 256 bytes, and a longer entry
+    // (any spawner can stage one) printed as a shorter one.
+    let mut buf = [0u8; ulib::ENV_ENTRY_BUF];
     let mut i = 0;
     while i < n {
-        if let Some(len) = ulib::env_at(i, &mut buf) {
-            // Never longer than the store; a cut entry is left out, not printed.
-            if let Some(entry) = buf.get(..len) {
-                ulib::write_out(target, entry);
-                ulib::write_out(target, b"\r\n");
-            }
+        if let Some(entry) = ulib::env_at(i, &mut buf) {
+            ulib::write_out(target, entry);
+            ulib::write_out(target, b"\r\n");
         }
         i += 1;
     }

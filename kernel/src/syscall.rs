@@ -285,7 +285,8 @@ fn valid_stage_range(ptr: u64, len: u64, max: usize) -> bool {
 }
 
 /// A **read** of one per-task store (`GET_ARG`, `GET_ENV`, `GET_CWD`,
-/// `GET_NS`) into the caller's out buffer: the capacity to copy with, or
+/// `GET_NS`, and `TASK_NAME`, which reads another task's `argv[0]` from its
+/// argv store) into the caller's out buffer: the capacity to copy with, or
 /// `None` for a buffer that is not the caller's.
 ///
 /// The capacity is CAPPED at the store's size (`store`, the `syscall-abi`
@@ -1074,16 +1075,17 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // arg0 = task index, arg1 = out pointer, arg2 = out capacity.
             // Copies up to capacity bytes of task `index`'s name (argv[0]),
             // returns its true length, or 0 if the slot has no name. The
-            // read-only companion to TASK_STATE (see the shell's `ps`).
-            if !valid_user_range(arg1, arg2) {
+            // read-only companion to TASK_STATE (see the shell's `ps`). The
+            // capacity is capped at the argv store (see read_capacity).
+            let Some(cap) = read_capacity(arg1, arg2, syscall_abi::ARGV_MAX) else {
                 return 0;
-            }
+            };
             let Some(t) = tasks::TaskIndex::new(arg0 as usize) else {
                 return 0;
             };
             match argv_get(tasks::argv_blob(t.index()), 0) {
                 Some(name) => {
-                    let n = (name.len() as u64).min(arg2) as usize;
+                    let n = (name.len() as u64).min(cap) as usize;
                     // SAFETY: out range validated above.
                     let dst = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, n) };
                     dst.copy_from_slice(&name[..n]);

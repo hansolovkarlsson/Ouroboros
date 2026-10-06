@@ -3975,6 +3975,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   no message, so a program run with 40 arguments sees 15 and cannot tell.
   Found 2026-10-05 by `make test-cargs` (the C-hosting plan's step 1). The
   fix is a refusal or a larger vector bounded by `ARGV_MAX`, not silence.
+- **`ulib::arg` cuts a long argument and says nothing.** It returns the
+  length clamped to the caller's buffer (`ulib/src/lib.rs`), so a 200-byte
+  path read into a 128-byte buffer comes back as a different, shorter path,
+  and `rm`, `cp` or `writeat` acts on the wrong file. Not reachable from the
+  shell (its 128-byte input line bounds every word), but any spawner can stage
+  an argument up to `ARGV_MAX`, `netd`'s `cpu` among them. `ulib::env_at` had
+  the same defect and was fixed in #222 by taking a buffer the size of the
+  store and returning the whole entry; `arg` has a caller in almost every
+  `/bin` tool, so its contract change is its own PR. Found by the second
+  review of #222, 2026-10-06.
 - **Two error tables name the same codes.** The shell's `print_fs_error` and
   `ulib::fs_error_msg` are hand-kept copies, and they have already disagreed
   once (the stale 8.3 filename message, journal 2026-09-05). The split exists

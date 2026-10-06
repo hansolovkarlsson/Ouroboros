@@ -610,8 +610,9 @@ pub const GET_ARGC: u64 = 48;
 /// `index` (copying up to `out capacity` of its bytes into the buffer), or
 /// [`NO_ARG`] if `index >= argc`. A zero-length real argument returns `0`
 /// (distinct from [`NO_ARG`]). A capacity past [`ARGV_MAX`] is capped at it,
-/// not refused (the same for [`GET_ENV`], [`GET_CWD`] and [`GET_NS`] at their
-/// own stores' sizes, since 2026-10-06).
+/// not refused (the same for [`GET_ENV`], [`GET_CWD`], [`GET_NS`] and
+/// [`TASK_NAME`] at their own stores' sizes, since 2026-10-06), and only the
+/// capped length must lie in the caller's region.
 pub const GET_ARG: u64 = 49;
 
 /// [`GET_ARG`]'s return for an out-of-range index. `u64::MAX` is safely
@@ -669,7 +670,8 @@ pub const NS_MAX: u64 = 256;
 /// or `0` if the slot has no name (empty/unused). Read-only, like [`TASK_STATE`]:
 /// the companion that turns `ps`'s slot list into named processes. Boot-loaded
 /// tasks (idle/`fsd`/`cond`/`netd`/init) are named by the loader; spawned tasks
-/// carry their `argv[0]`.
+/// carry their `argv[0]`. A capacity past [`ARGV_MAX`] is capped at it, as for
+/// [`GET_ARG`].
 pub const TASK_NAME: u64 = 54;
 
 /// Maximum name length [`TASK_NAME`] will report - a process name is short, and
