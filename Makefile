@@ -226,13 +226,14 @@ CRENAME_BIN  := $(BUILD_DIR)/crename.bin
 CFSTAT_BIN   := $(BUILD_DIR)/cfstat.bin
 CARGS_BIN    := $(BUILD_DIR)/cargs.bin
 CARGSH_BIN   := $(BUILD_DIR)/cargsh.bin
+CERRNO_BIN   := $(BUILD_DIR)/cerrno.bin
 
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-cargs test-unmount test-crename clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-cargs test-cerrno test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -561,6 +562,14 @@ cargsh-bin: $(LIBC_OBJS) $(NSRESOLVE_A)
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cargsh.elf $(BUILD_DIR)/cargsh.o $(LIBC_OBJS) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cargsh.elf $(CARGSH_BIN)
 
+# errno from the file layer: every failure a C program can provoke there,
+# checked for POSIX's errno (step 2 of docs/roadmap/roadmap-c-hosting.md).
+# Driven by scripts/test-cerrno.py. Runs as /bin/CERRNO.
+cerrno-bin: $(NSRESOLVE_A) $(PICO_PORT)
+	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/cerrno.c -o $(BUILD_DIR)/pico/cerrno.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cerrno.elf $(PICO_PORT) $(BUILD_DIR)/pico/cerrno.o $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cerrno.elf $(CERRNO_BIN)
+
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(WRITE_ELF) $(WRITE_BIN)
@@ -696,7 +705,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -765,6 +774,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CFSTAT_BIN) $(ESP_DIR)/bin/CFSTAT
 	cp $(CARGS_BIN) $(ESP_DIR)/bin/CARGS
 	cp $(CARGSH_BIN) $(ESP_DIR)/bin/CARGSH
+	cp $(CERRNO_BIN) $(ESP_DIR)/bin/CERRNO
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
 	cp $(MORE_BIN) $(ESP_DIR)/bin/MORE
@@ -1633,6 +1643,13 @@ test-heap: image
 # libc/src/crt0.c or the kernel's argv store changes.
 test-cargs: image
 	python3 scripts/test-cargs.py
+
+# errno from the C file layer (scripts/test-cerrno.py, /bin/CERRNO): two boots,
+# FAT32 as root and ext2 as root and then as `user`, who must get EACCES for
+# /etc/shadow. About two minutes; run it whenever libc/src/file.c's error
+# paths, or fsd's answers to them, change.
+test-cerrno: image image-ext2
+	python3 scripts/test-cerrno.py
 
 # `unmount` with a partition mount and an open file, on a copy of the ext2
 # image (scripts/test-unmount.py): both trees cleared, a held fid answering

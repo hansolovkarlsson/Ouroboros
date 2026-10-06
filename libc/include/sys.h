@@ -122,7 +122,7 @@
  * reading as "failed". Mirrors syscall-abi's NO_FS. */
 #define NO_FS (~0UL - 1UL)
 #define FS_ERR_NOT_FOUND (~0UL - 2UL)
-/* Mapped to errno by unlink and rename (file.c). */
+/* Mapped to errno by every call in file.c that fails (set_errno_from_status). */
 #define FS_ERR_NOT_A_FILE (~0UL - 3UL)
 #define FS_ERR_NOT_A_DIRECTORY (~0UL - 4UL)
 #define FS_ERR_INVALID_NAME (~0UL - 5UL)

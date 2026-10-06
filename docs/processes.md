@@ -466,9 +466,13 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   2026-10-05 `unlink`, `rmdir`, `rename` and `remove` (path verbs
   `NP_RM`/`NP_RMDIR`/`NP_MV`, no fid; `remove` takes a file or an empty
   directory; `rename` replaces an existing ordinary file, answers `EXDEV` across
-  mounts and `EINVAL` for a directory moved into itself; all set picolibc's
-  `errno`). Paths collapse `.` and `..` before the namespace picks a mount, and
-  an empty path is `ENOENT`. A **fid** is a
+  mounts and `EINVAL` for a directory moved into itself). Every one of them
+  that fails sets picolibc's `errno`, since 2026-10-05 the fd calls too: the
+  server's status mapped (`ENOENT`, `ENOTDIR`, `EACCES`, `EISDIR`, ...), and
+  the library's own refusals named as POSIX names them (`EBADF` for a bad fd
+  or one used against its open mode, `EMFILE` for a full fd table, `EINVAL`
+  for a bad `lseek`); `make test-cerrno` checks each. Paths collapse `.` and
+  `..` before the namespace picks a mount, and an empty path is `ENOENT`. A **fid** is a
   server-side open-file handle (a POSIX fd *is* a 9P fid) — `open` establishes it
   in `fsd` (`NP_OPEN`, which authorizes the access against the file's mode/owner
   *once*), and the fd the C program holds *is* that fid; `read`/`write`/`fstat`/

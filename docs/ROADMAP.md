@@ -2233,9 +2233,10 @@ be reviewed after the fact from the saved screenshots.
 > headers on the disk and the fixed 64-page heap, and this is an arc of its
 > own, first in the chain and useful to every C program. Eight steps with a
 > check each: [`roadmap-c-hosting.md`](roadmap/roadmap-c-hosting.md). Since it
-> was written, the heap became 1 MiB (#210) and `errno` reached `unlink`,
-> `rmdir`, `rename` and `remove` (#215); the plan's "Where it stands" says
-> what that leaves.
+> was written, the heap became 1 MiB (#210), `errno` reached `unlink`,
+> `rmdir`, `rename` and `remove` (#215) and then every call in the file layer
+> (step 2), and `main` receives argv (step 1, #219); the plan's "Where it
+> stands" says what that leaves.
 >
 > **CPP is now Proem, since 2026-10-01.** The workspace's C preprocessor was
 > renamed: the folder is `~/Projects/Proem` and the repository
