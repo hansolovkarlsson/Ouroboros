@@ -3990,6 +3990,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   no message, so a program run with 40 arguments sees 15 and cannot tell.
   Found 2026-10-05 by `make test-cargs` (the C-hosting plan's step 1). The
   fix is a refusal or a larger vector bounded by `ARGV_MAX`, not silence.
+- **`netd` answers `NP_STAT` wrongly under `/net/tcp`.** It serves the verb
+  for `/net`, `/net/ip` and `/net/mac`; under `/tcp` the request reaches
+  `dial_file_op`, which has no arm for it, so `/net/tcp` gets
+  `FS_ERR_NOT_A_FILE`, `clone` `FS_ERROR`, and a live connection's `ctl`,
+  `status`, `listen` and `data` `FS_ERR_NOT_FOUND` (and `data` bumps the
+  connection's idle clock). So C's `stat` refuses every `/net` path with
+  `ENOSYS` for now (#223), and `ls -l /net/tcp` would meet the same. Found by
+  the third review of #223, 2026-10-06.
+- **`..` is lexical in the C library and `ulib`.** `normalize_path` collapses
+  `.` and `..` as text before the namespace picks a mount (#215), as Plan 9
+  does, so `stat("/NOSUCH/../etc/passwd")` succeeds and
+  `open("/etc/passwd/../group")` opens `/etc/group`, where POSIX says
+  `ENOENT` and `ENOTDIR`. Choosing POSIX would mean walking each `..` on the
+  server; it is a decision for the whole library, not one call. A trailing
+  `/` is checked by `stat` since #223. Found by the third review of #223.
 - **`ulib::arg` cuts a long argument and says nothing.** It returns the
   length clamped to the caller's buffer (`ulib/src/lib.rs`), so a 200-byte
   path read into a 128-byte buffer comes back as a different, shorter path,

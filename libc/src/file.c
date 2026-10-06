@@ -134,13 +134,7 @@ static long np_request(unsigned target, const unsigned char *endpoint,
     /* Only the header needs clearing - the payload region is written by the
      * memcpy below or not sent at all. Zeroing all 768 bytes per call cost
      * ~150K pointless byte stores on a 100 KB read (200 chunks x 768). */
-    if ((target & 0xff) == NS_TARGET_NETLOCAL) {
-        /* This machine's `/net`, served by netd itself: the NP message goes
-         * to it as it is, as ulib::np_netlocal sends it, with no
-         * NETOP_RMOUNT around it. Only `stat` sends one (resolve_target
-         * refuses the target for every other verb). */
-        dest = NET_TASK;
-    } else if ((target & 0xff) == NS_TARGET_REMOTE) {
+    if ((target & 0xff) == NS_TARGET_REMOTE) {
         dest = NET_TASK;
         base = NETOP_RMOUNT_MSG;
         __wr_u64(req + 0, NETOP_RMOUNT);
@@ -301,8 +295,8 @@ static int resolve_path_raw(const char *path, char *out) {
  * and the fsd tree in its high bits) and, for a remote mount, the endpoint.
  * 0, or -1 with FS_ERR_CLIENT recorded (too long, or not resolvable), or
  * FS_ERR_NOT_FOUND for an empty path. Every target a binding can name, the
- * console and `/net` included: `stat` takes those, and resolve_target below
- * refuses them for the verbs that need a file. */
+ * console and `/net` included: `stat` answers the console itself, and
+ * resolve_target below refuses both for the verbs that need a file. */
 static int resolve_any(const char *path, char *fspath, unsigned long *fslen,
                        unsigned *target, unsigned char *endpoint) {
     char abspath[PATH_MAX_C];
@@ -672,10 +666,19 @@ static void stat_from_record(struct stat *st, const unsigned char *info) {
  * of a file the caller may not read succeeds, as it must, and works with every
  * fd in use. A directory needs no open either.
  *
- * Every target a path can resolve to answers, unlike open: a console binding
- * (`mount -c`) is the character device fstat(1) reports, and a `/net` binding
- * (`mount -n`) goes to netd, which serves NP_STAT for `/`, `ip` and `mac` as
- * it does for `ls -l /net` (the review of #223). */
+ * A console binding (`mount -c`) is the character device fstat(1) reports,
+ * at the binding itself only: a path below it names nothing (ENOENT). A
+ * `/net` binding (`mount -n`) answers ENOSYS, as for open: netd serves
+ * NP_STAT for `/`, `ip` and `mac` but not under `/tcp`, where the request
+ * reaches the dial files' handler and gets EISDIR, EIO or ENOENT for files
+ * that exist (and bumps a connection's idle clock). Until netd answers there
+ * (on the roadmap), no answer beats a wrong one (the reviews of #223).
+ *
+ * A path ending in `/` or `/.` names a directory, so anything else answers
+ * ENOTDIR (POSIX). The library collapses `.` and `..` as text before the
+ * server sees the path (normalize_path), which drops that ending, so it is
+ * checked here against the path as given. `..` stays lexical, as in Plan 9
+ * and as for every call here: `/NOSUCH/../x` is `/x` (on the roadmap). */
 int stat(const char *path, struct stat *st) {
     if (!path || !st) {
         return client_fail(EFAULT);
@@ -688,11 +691,30 @@ int stat(const char *path, struct stat *st) {
         set_errno_from_status();
         return -1;
     }
+    size_t plen = strlen(path);
+    int want_dir = path[plen - 1] == '/' ||
+                   (path[plen - 1] == '.' && (plen == 1 || path[plen - 2] == '/'));
     if ((target & 0xff) == NS_TARGET_CONSOLE) {
+        /* The binding resolves to "/"; anything longer is below it. */
+        if (fslen != 1 || fspath[0] != '/') {
+            g_last_status = FS_ERR_NOT_FOUND;
+            set_errno_from_status();
+            return -1;
+        }
+        if (want_dir) {
+            g_last_status = FS_ERR_NOT_A_DIRECTORY;
+            set_errno_from_status();
+            return -1;
+        }
         memset(st, 0, sizeof *st);
         st->st_mode = S_IFCHR | 0666; /* as fstat of a console fd */
         g_last_status = 0;
         return 0;
+    }
+    if ((target & 0xff) == NS_TARGET_NETLOCAL) {
+        g_last_status = FS_ERR_NO_SUCH_VERB;
+        set_errno_from_status();
+        return -1;
     }
     unsigned char info[STAT_INFO_LEN] = {0};
     long s = np_request(target, endpoint, NP_STAT, fslen, 0, 0, fspath, (size_t)fslen, info,
@@ -702,6 +724,11 @@ int stat(const char *path, struct stat *st) {
         return -1;
     }
     stat_from_record(st, info);
+    if (want_dir && !S_ISDIR(st->st_mode)) {
+        g_last_status = FS_ERR_NOT_A_DIRECTORY;
+        set_errno_from_status();
+        return -1;
+    }
     return 0;
 }
 

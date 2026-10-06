@@ -65,8 +65,9 @@ C-hosting plan.
 
 **`stat(path)` in the C library.** One `NP_STAT`, the request `ls -l` makes,
 so `stat` needs no read permission on the file and no free fd, as POSIX
-says, and works on directories, the console binding and `/net`; `lstat` is
-the same, with no symbolic links here. picolibc references both. `make
+says, and works on directories and the console binding; a path ending in
+`/` must name a directory. `/net` answers `ENOSYS` until `netd` serves the
+request under `/net/tcp`. `lstat` is the same, with no symbolic links here. picolibc references both. `make
 test-cerrno` checks it as root and as an ordinary user. Step 4 of the
 C-hosting plan.
 

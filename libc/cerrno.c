@@ -6,7 +6,7 @@
  * stops the search.
  *
  * Run as root with no argument for the checks that hold on any filesystem,
- * stat(path)'s among them since step 4; four of those need `mount -c
+ * stat(path)'s among them since step 4; three of those need `mount -c
  * /dev/cons` and `mount -n /net` made first. With a path, it checks only that
  * opening it for reading fails with EACCES and that stat of it succeeds (no
  * read permission is needed for that), then each further `<path> <octal
@@ -130,15 +130,19 @@ static void as_root(void) {
               lstat("/etc/passwd", &viol) == 0 && viol.st_mode == st.st_mode &&
                   viol.st_size == st.st_size);
     }
-    /* The targets open refuses and stat answers. These need the bindings
-     * scripts/test-cerrno.py makes before running this: `mount -c /dev/cons`
-     * and `mount -n /net`. */
+    /* A trailing `/` or `/.` names a directory (POSIX), though the library
+     * collapses the path as text before the server sees it. */
+    check("stat of a directory with a trailing slash", stat("/etc/", &st) == 0 && S_ISDIR(st.st_mode));
+    TRY("stat of a file with a trailing slash", stat("/etc/passwd/", &st), r_ < 0, ENOTDIR);
+    TRY("stat of a file with a trailing /.", stat("/etc/passwd/.", &st), r_ < 0, ENOTDIR);
+    /* The console and /net bindings. These need scripts/test-cerrno.py's
+     * `mount -c /dev/cons` and `mount -n /net` first. */
     check("stat of the console binding: a character device",
           stat("/dev/cons", &st) == 0 && S_ISCHR(st.st_mode));
-    check("stat of /net: a directory, from netd", stat("/net", &st) == 0 && S_ISDIR(st.st_mode));
-    check("stat of /net/ip: a file with content, from netd",
-          stat("/net/ip", &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0);
-    TRY("stat of a missing /net file", stat("/net/NOSUCH", &st), r_ < 0, ENOENT);
+    TRY("stat of a path below the console binding", stat("/dev/cons/NOSUCH", &st), r_ < 0, ENOENT);
+    /* netd answers NP_STAT wrongly under /net/tcp, so stat answers no /net
+     * path yet, as open does not (on the roadmap). */
+    TRY("stat of a /net path, not answered yet", stat("/net/ip", &st), r_ < 0, ENOSYS);
 
     /* A full fd table: the library's own limit, not a server's. */
     int fds[16];
@@ -224,11 +228,18 @@ int main(int argc, char **argv) {
             unsigned mode = (unsigned)strtoul(argv[i + 1], NULL, 8);
             unsigned uid = (unsigned)strtoul(argv[i + 2], NULL, 10);
             unsigned gid = (unsigned)strtoul(argv[i + 3], NULL, 10);
-            int ok = stat(argv[i], &st) == 0 && S_ISREG(st.st_mode) &&
-                     (st.st_mode & 07777) == mode && st.st_uid == uid && st.st_gid == gid;
-            printf("cerrno: stat %s: mode %o uid %u gid %u\r\n", argv[i], st.st_mode & 07777,
-                   st.st_uid, st.st_gid);
-            check("stat of a file: the mode and owner the image gave it", ok);
+            errno = 0;
+            if (stat(argv[i], &st) != 0) {
+                /* The values in `st` are the previous file's: say why. */
+                printf("cerrno: stat %s failed: %s\r\n", argv[i], name(errno));
+                check("stat of a file: the mode and owner the image gave it", 0);
+                continue;
+            }
+            printf("cerrno: stat %s: mode %o uid %u gid %u, want %o %u %u\r\n", argv[i],
+                   st.st_mode & 07777, st.st_uid, st.st_gid, mode, uid, gid);
+            check("stat of a file: the mode and owner the image gave it",
+                  S_ISREG(st.st_mode) && (st.st_mode & 07777) == mode && st.st_uid == uid &&
+                      st.st_gid == gid);
         }
     } else {
         as_root();
