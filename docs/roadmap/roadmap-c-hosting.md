@@ -156,8 +156,20 @@ tree at `4dcbddd` leaves of them, read from the code.
   already answered `ENOTDIR` for a path through a file, on both. Controls:
   `main`'s `file.c` fails every check, and dropping the `EBADF` naming fails
   exactly the two mode checks, with `EACCES`.
-- **Steps 3 to 5, environ, `stat`, a clock: open.** Nothing in `libc/src`
-  defines `environ`, `stat` or `gettimeofday`.
+- **Step 3, the environment: done 2026-10-05.** `crt0.c` builds `environ`
+  from `GET_ENVC`/`GET_ENV` into static storage (`ENV_MAX`, 2048 bytes),
+  through the same reader as argv, one entry per copy since the kernel
+  refuses an out buffer over 512 bytes; an entry longer than that is left
+  out rather than cut, since a cut `NAME=VALUE` is a different value.
+  picolibc's `getenv` links and works. `libc/cenv.c` prints `environ` in
+  `/bin/PRINTENV`'s format, built through picolibc (`/bin/CENV`, with
+  `getenv` answers) and the hand-rolled libc (`/bin/CENVH`); `make
+  test-cenv` compares both with `printenv` before and after three `set`s,
+  one a 100-character value, and checks `getenv` for `SOURCE_DATE_EPOCH`,
+  `PATH`, a set name and an unset one. Control: an environment cut to one
+  entry fails both comparisons and two `getenv` checks.
+- **Steps 4 and 5, `stat`, a clock: open.** Nothing in `libc/src` defines
+  `stat` or `gettimeofday`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against
   picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real
