@@ -247,13 +247,18 @@ CERRNO_BIN   := $(BUILD_DIR)/cerrno.bin
 CENV_BIN     := $(BUILD_DIR)/cenv.bin
 CENVH_BIN    := $(BUILD_DIR)/cenvh.bin
 CCLOCK_BIN   := $(BUILD_DIR)/cclock.bin
+# DevTools's C preprocessor, built here for Ouroboros (step 8 of the C-hosting
+# plan): its sources are read from CPP_DIR, a sibling checkout by default.
+CPP_DIR      ?= ../DevTools/cpp
+CPP_BIN      := $(BUILD_DIR)/cpp.bin
+HAVE_CPP      = $(wildcard $(CPP_DIR)/driver/cpp.c)
 
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-cargs test-cerrno test-cenv test-cclock test-include test-unmount test-crename clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cpp-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -622,6 +627,22 @@ cclock-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cclock.elf $(PICO_PORT) $(BUILD_DIR)/pico/cclock.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cclock.elf $(CCLOCK_BIN)
 
+# The C preprocessor, cpp, from DevTools (step 8 of the C-hosting plan, and the
+# build half of the accepted 2026-10-01-from-proem-system-dirs.md): its lib/
+# and driver/cpp.c, compiled as every picolibc program here is and linked like
+# CPICO, with the two system directories make esp stages built in, so `cpp
+# hello.c` on Ouroboros needs no options (it reads /include/target.h first).
+# Its sources are DevTools's and are only read here; the link is ours.
+cpp-bin: $(NSRESOLVE_A) $(PICO_PORT)
+	@[ -f "$(CPP_DIR)/driver/cpp.c" ] || { echo "cpp-bin: no cpp sources at $(CPP_DIR) (set CPP_DIR)"; exit 1; }
+	rm -rf $(BUILD_DIR)/cpp && mkdir -p $(BUILD_DIR)/cpp
+	for f in $(CPP_DIR)/lib/*.c $(CPP_DIR)/driver/cpp.c; do \
+		$(CC) $(CFLAGS_OS) $(PICO_INC) -I$(CPP_DIR)/lib '-DCPP_SYSTEM_DIRS="/include:/include/clang"' \
+			-c "$$f" -o $(BUILD_DIR)/cpp/$$(basename "$$f" .c).o || exit 1; \
+	done
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(BUILD_DIR)/cpp/*.o $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpp.elf $(CPP_BIN)
+
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(WRITE_ELF) $(WRITE_BIN)
@@ -757,7 +778,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin)
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -848,6 +869,9 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CENV_BIN) $(ESP_DIR)/bin/CENV
 	cp $(CENVH_BIN) $(ESP_DIR)/bin/CENVH
 	cp $(CCLOCK_BIN) $(ESP_DIR)/bin/CCLOCK
+	# /bin/cpp, when CPP_DIR has DevTools's sources; a checkout of this tree
+	# alone still builds an image, without it.
+	$(if $(HAVE_CPP),cp $(CPP_BIN) $(ESP_DIR)/bin/CPP,@echo "esp: no cpp sources at $(CPP_DIR); /bin/cpp not staged (set CPP_DIR)")
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
 	cp $(MORE_BIN) $(ESP_DIR)/bin/MORE
@@ -1755,6 +1779,17 @@ test-cclock: image
 # staging, or a filesystem's directory listing or naming, changes.
 test-include: image image-ext2 image-exfat
 	python3 scripts/test-include.py
+
+# The C preprocessor on Ouroboros, the C-hosting plan's finish line
+# (scripts/test-cpp.py): `cpp -o` of hello.c and CPICO's picodemo.c, with no
+# options, on a copy of the FAT32 image; the host reads the .i files back off
+# it and compares them byte for byte with the same cpp built for the Mac, and
+# clang for this target compiles them. One boot, about a minute and a half;
+# needs DevTools's cpp at CPP_DIR. Run it whenever the C runtime, the header
+# stage or cpp-bin changes.
+test-cpp: image
+	@[ -n "$(HAVE_CPP)" ] || { echo "test-cpp: no cpp sources at $(CPP_DIR) (set CPP_DIR)"; exit 1; }
+	CPP_DIR="$(CPP_DIR)" CFLAGS_OS="$(CFLAGS_OS)" PICO_INC="$(PICO_INC)" python3 scripts/test-cpp.py
 
 # `unmount` with a partition mount and an open file, on a copy of the ext2
 # image (scripts/test-unmount.py): both trees cleared, a held fid answering
