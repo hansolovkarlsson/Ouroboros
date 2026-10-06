@@ -34,6 +34,10 @@ const SECTOR_SIZE: usize = 512;
 const DIR_ENTRY_SIZE: usize = 32;
 const ATTR_DIRECTORY: u8 = 0x10;
 const ATTR_VOLUME_ID: u8 = 0x08;
+/// A short entry's byte 12 (NTRes): the base name, and the extension, are
+/// lowercase on disk although stored in uppercase. Read only.
+const SHORT_LOWER_BASE: u8 = 0x08;
+const SHORT_LOWER_EXT: u8 = 0x10;
 const ATTR_LFN: u8 = 0x0f;
 const DIR_ENTRY_FREE: u8 = 0xe5;
 const DIR_ENTRY_END: u8 = 0x00;
@@ -152,19 +156,30 @@ impl DirEntry {
             name[..n].copy_from_slice(&long[..n]);
             n
         } else {
+            // Byte 12's case flags: a lowercase name that fits 8.3 is written
+            // as a short entry alone, with these bits saying which half is
+            // lowercase, and no long name (macOS, Windows and Linux all do
+            // this). Ignored until 2026-10-06, so `stdio.h` listed as
+            // `STDIO.H` while `syslimits.h`, which needs a long name, kept its
+            // case (found staging the C headers, step 6 of the C-hosting
+            // plan). Lookup was never affected: it is case-insensitive.
+            let lower_base = raw[12] & SHORT_LOWER_BASE != 0;
+            let lower_ext = raw[12] & SHORT_LOWER_EXT != 0;
             let mut len = 0usize;
             for &b in &raw[0..8] {
                 if b == b' ' {
                     break;
                 }
-                name[len] = b;
+                name[len] = if lower_base { b.to_ascii_lowercase() } else { b };
                 len += 1;
             }
             let ext_len = raw[8..11].iter().take_while(|&&b| b != b' ').count();
             if ext_len > 0 {
                 name[len] = b'.';
                 len += 1;
-                name[len..len + ext_len].copy_from_slice(&raw[8..8 + ext_len]);
+                for (i, &b) in raw[8..8 + ext_len].iter().enumerate() {
+                    name[len + i] = if lower_ext { b.to_ascii_lowercase() } else { b };
+                }
                 len += ext_len;
             }
             len

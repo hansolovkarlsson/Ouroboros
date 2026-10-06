@@ -2366,7 +2366,11 @@ be reviewed after the fact from the saved screenshots.
 >       The stage has its own check (`cat /include/stdio.h`, `ls
 >       /include/sys`, `ls /include/clang` on a booted image); the build
 >       waits on steps 1 to 5 and the heap above, and its **Done when** is
->       the arc's finish line. Note:
+>       the arc's finish line. *The stage is done, 2026-10-06 (step 6;
+>       `make test-include` on FAT32, ext2 and exFAT); the build, step 8,
+>       is what is left. `target.h` is generated with `$(CFLAGS_OS)
+>       $(PICO_INC)`, the flags a picolibc program here is compiled with.*
+>       Note:
 >       [`handoffs/2026-10-01-from-proem-system-dirs.md`](handoffs/2026-10-01-from-proem-system-dirs.md).
 > - [x] **fix** **`fstat` leaves every field but two as it found them.**
 >       `libc/src/file.c`'s `fstat` sets `st_size` and `st_mode` only, so a
@@ -4006,6 +4010,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   no message, so a program run with 40 arguments sees 15 and cannot tell.
   Found 2026-10-05 by `make test-cargs` (the C-hosting plan's step 1). The
   fix is a refusal or a larger vector bounded by `ARGV_MAX`, not silence.
+- **A directory listing is cut at one reply, with no sign of it.**
+  `NP_READDIR` has no offset: fsd writes `name\n` per entry into the reply
+  window and stops at the first name that does not fit, and `ls` asks for
+  512 bytes. So `ls /include` shows about 60 of its 72 names, picked by
+  directory order, and `ls /include/clang` 30 of 31; tab completion, globs
+  and `tree` read the same way. A paged verb (an offset in the request,
+  "more" in the reply) is a wire change: fsd, `netd`'s export, both host
+  peers and `ulib`. cpp is not affected: it opens headers by path. Found
+  2026-10-06 staging the C headers (step 6 of the C-hosting plan).
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970
