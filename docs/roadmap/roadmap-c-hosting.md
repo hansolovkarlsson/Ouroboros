@@ -7,6 +7,14 @@ above it. CPP was renamed Proem on 2026-10-01 (`~/Projects/Proem`, its driver
 `driver/proem.c`); the plan below uses the new name throughout, and keeps the
 old one only where it records what was read on 2026-09-29.
 
+**On 2026-10-06 the preprocessor moved into DevTools and took the name cpp
+back** (`~/Projects/DevTools/cpp/`, its driver `driver/cpp.c`, its library
+`build/libcpp.a`, the macro `CPP_SYSTEM_DIRS`; `~/Projects/Proem` is archived
+at `~/Projects/archive/Proem`). Step 8 below names the new build; elsewhere
+"Proem" in this plan means that tool, as it did when written. Notes:
+`handoffs/closed/2026-10-06-from-devtools-proem-moved.md` and
+`handoffs/closed/2026-10-06-from-devtools-cpp-renamed.md`.
+
 ## Why this exists
 
 The workspace chose Ouroboros as the destination of its C toolchain arc:
@@ -108,15 +116,17 @@ Each step has its check.
    `MAX_FILES` 8 in `file.c` (Proem holds one file open at a time, so it
    should be fine) and `PATH_MAX_C` 96 (an `-I` directory plus a nested
    header name).
-8. **Build and stage `/bin/proem`.** A `proem-bin` target beside `cpico-bin`,
-   compiling Proem's `lib/*.c` (which Proem's own build archives as
-   `libproem.a`) and `driver/proem.c` from `$(PROEM_DIR)` (`../Proem` by
-   default, as Proem's `pico-check` finds Ouroboros at `../Ouroboros`),
-   linked like CPICO, and staged into `ESP_DIR/bin`. This
-   keeps the link knowledge in one Makefile. **Check, and the arc's finish
-   line:** on a booted image, `proem -include /include/target.h -I /include
-   hello.c > hello.i` gives the same bytes as `clang $(CFLAGS_OS) -E` of the
-   same file on the host, and the same for CPICO's `picodemo.c`.
+8. **Build and stage `/bin/cpp`.** A `cpp-bin` target beside `cpico-bin`,
+   compiling the preprocessor's `lib/*.c` (which its own build archives as
+   `build/libcpp.a`) and `driver/cpp.c` from `$(CPP_DIR)`
+   (`../DevTools/cpp` by default, as its `pico-check` finds this tree at
+   `../../Ouroboros`), linked like CPICO, and staged into `ESP_DIR/bin`.
+   This keeps the link knowledge in one Makefile. *(Was `/bin/proem`,
+   `proem-bin`, `PROEM_DIR` and `../Proem` until 2026-10-06.)* **Check, and
+   the arc's finish line:** on a booted image, `cpp -include
+   /include/target.h -I /include hello.c > hello.i` gives the same bytes as
+   `clang $(CFLAGS_OS) -E` of the same file on the host, and the same for
+   CPICO's `picodemo.c`.
 
 Steps 1 to 4 are small, independent of Proem and useful to every C program;
 they go first. Step 5's first level is a few lines. Step 6 is the one with a

@@ -2251,7 +2251,14 @@ be reviewed after the fact from the saved screenshots.
 > **CPP is now Proem, since 2026-10-01.** The workspace's C preprocessor was
 > renamed: the folder is `~/Projects/Proem` and the repository
 > `github.com/hansolovkarlsson/Proem`. `~/Projects/CPP` no longer exists. A
-> mention of CPP in older records means Proem.
+> mention of CPP in older records means Proem. **And since 2026-10-06 it is
+> cpp again**, in DevTools (`~/Projects/DevTools/cpp/`, driver
+> `driver/cpp.c`, macro `CPP_SYSTEM_DIRS`, command `cpp`); `~/Projects/Proem`
+> is archived at `~/Projects/archive/Proem`, and Proem's notes here are
+> DevTools's requests. "Proem" in the records below means that tool (notes
+> [`handoffs/closed/2026-10-06-from-devtools-proem-moved.md`](handoffs/closed/2026-10-06-from-devtools-proem-moved.md)
+> and
+> [`handoffs/closed/2026-10-06-from-devtools-cpp-renamed.md`](handoffs/closed/2026-10-06-from-devtools-cpp-renamed.md)).
 >
 > **What Proem asks of Ouroboros, accepted 2026-10-01 and 2026-10-02, for
 > later.** Five handoff notes, triaged and accepted. The heap one (#210),
@@ -2333,8 +2340,8 @@ be reviewed after the fact from the saved screenshots.
 >       scan per request, to be measured before it is guessed. Newly
 >       reachable by a redirect, which a 256 KiB capture refused; and it is
 >       how Proem's `-o FILE` will write a large output. Found 2026-10-05.
-> - [ ] **new** **Stage the headers in two directories, and build `proem`
->       with them built in.** Steps 6 and 8 of the C-hosting plan, decided:
+> - [ ] **new** **Stage the headers in two directories, and build `cpp`
+>       with them built in** (`proem` until 2026-10-06). Steps 6 and 8 of the C-hosting plan, decided:
 >       `/include` holds picolibc's 136 headers and a `target.h` generated at
 >       build time with exactly `$(CFLAGS_OS)`; `/include/clang` holds
 >       clang's eleven freestanding headers plus their `__float_*.h`,
@@ -2342,9 +2349,9 @@ be reviewed after the fact from the saved screenshots.
 >       -print-resource-dir)/include` by glob, not by a kept list. Two
 >       directories because `inttypes.h`, `limits.h`, `stdint.h` and
 >       `stdnoreturn.h` exist on both sides and picolibc's `limits.h` reaches
->       clang's by `#include_next` (its line 143). `driver/proem.c` is then
->       compiled with `-DPROEM_SYSTEM_DIRS='"/include:/include/clang"'`, so
->       `proem hello.c` needs no options. To check on the way: the FAT32 ESP
+>       clang's by `#include_next` (its line 143). `driver/cpp.c` is then
+>       compiled with `-DCPP_SYSTEM_DIRS='"/include:/include/clang"'`, so
+>       `cpp hello.c` needs no options. To check on the way: the FAT32 ESP
 >       takes the lowercase, nested and `__`-prefixed names through `fsd`'s
 >       long-name path, and the ext2 and exFAT images stage the tree too.
 >       The stage has its own check (`cat /include/stdio.h`, `ls

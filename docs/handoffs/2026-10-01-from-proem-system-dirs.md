@@ -126,3 +126,13 @@ image. The build with `-DPROEM_SYSTEM_DIRS='"/include:/include/clang"'`
 `heap-growth` note), so this note's **Done when**, `proem hello.c` with no
 options exiting 0, is the arc's finish line and not an item that can land
 on its own.
+
+Noted 2026-10-06 by Ouroboros: Proem moved into DevTools and took back its
+old name, cpp, the same day (`2026-10-06-from-devtools-proem-moved.md` and
+`2026-10-06-from-devtools-cpp-renamed.md`, both closed). This request is
+DevTools's now, and stays accepted, not started. It reads with the new
+names: `driver/cpp.c` compiled with
+`-DCPP_SYSTEM_DIRS='"/include:/include/clang"'`, and the **Done when** is
+`cpp hello.c` exiting 0, from `~/Projects/DevTools/cpp/`. The C-hosting plan's
+step 8 and `docs/ROADMAP.md`'s item say so. Further replies about the
+preprocessor go to DevTools's `docs/handoffs/`.
