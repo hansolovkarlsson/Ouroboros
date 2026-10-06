@@ -11,8 +11,9 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
 version is held for a go-ahead. So far one day's work, 2026-10-05, #209 to
-#216: the storage server made safe under large writes and double mounts, and
-the C library made able to host Proem and Edit. The day's record is
+#220: the storage server made safe under large writes and double mounts, and
+the C library made able to host Proem and Edit, steps 1 and 2 of the
+C-hosting plan among it. The day's record is
 `docs/work-journal/2026-10-05.md`.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**

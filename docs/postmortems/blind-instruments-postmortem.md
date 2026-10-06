@@ -1244,3 +1244,40 @@ built against the hand-rolled `struct stat`, so `fstat` wrote a program's
 file size into `st_dev`/`st_ino`, and Proem's file identity had been the
 file size. A check that compares the whole struct, not the fields under
 test, saw what a field check would have passed.
+
+## Four more, from the C runtime (2026-10-05, evening)
+
+Steps 1 to 3 of the C-hosting plan (#219 to #221), each with a rig that
+passed on its first run. Three of the four were found by the review, one
+while writing the check.
+
+**An exit check that read every exit line.** `test-cargs` first graded "every
+CARGS exited 0" by counting `exited (code 0)` lines in the whole transcript.
+The fence's `echo` and the Rust `ARGS` each supply one, so a C program that
+exited 1 would still have been counted among enough zeros. Found while
+writing the next change to the rig, before any boot relied on it; it now
+reads the exit line that follows the C program's own last output.
+
+**A remote check given a local path.** `cremote` and `cbig` gained their path
+as an argument, defaulting to the old remote one. Given a local path, the
+remote read became a local read, the "remote write is refused" check was
+refused for the read-only fd rather than for being remote, and `cbig`
+compared a local file with itself. Every line said ok. Found by the review
+of #219; both now refuse a path that does not resolve to a remote mount,
+and a mutation making that test always say "remote" fails both refusal
+checks.
+
+**A check whose setup failed into its own expected answer.** `cerrno`'s two
+mode checks opened a file and then wrote to the read-only fd or read the
+write-only one, expecting `EBADF`. The `open` was never checked, and a failed
+`open` returns -1, for which the library answers `EBADF` itself, without
+asking the server. So a broken `open` would have passed the two checks meant
+to reach fsd. Found by the review of #220; each `open` is a check of its own
+now.
+
+**A bound named as tested that the rig cannot reach.** `test-cargs` called
+its fifteen-argument case "the longest vector a command line can stage". It
+is the most arguments, but 163 bytes of the 512 `crt0` sizes its buffer by,
+so the code at that bound never ran. Found by the review of #219; the
+docstring and the plan now say the byte bound is not reached, and why: the
+shell's 128-byte line keeps every blob far below it.
