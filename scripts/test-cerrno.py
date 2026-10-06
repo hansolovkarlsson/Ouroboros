@@ -15,7 +15,8 @@ read. Two boots, each of a COPY of the image:
   modes fsd enforces.
 
 Graded on cerrno's own summary line (`cerrno: N checks, 0 failed`, matched
-whole, with N at least the count below so a run cut short cannot pass), and
+whole, with N exactly ROOT_CHECKS below: fewer is a run cut short, and more
+means cerrno.c gained a check this count must be raised for), and
 no fault line in QEMU's trace. About two minutes. Run it whenever
 libc/src/file.c's error paths, or fsd's answers to them, change.
 """
@@ -33,7 +34,7 @@ _spec.loader.exec_module(drive_qemu)
 
 # How many checks cerrno runs as root. A summary with fewer is a run that
 # skipped some, which must not pass.
-ROOT_CHECKS = 21
+ROOT_CHECKS = 27
 SUMMARY = r"cerrno: (\d+) checks, (\d+) failed\r?\n"
 
 

@@ -59,8 +59,10 @@ C-hosting plan, and item 5 of Edit's console note.
 `write`, `close`, `fstat` and `lseek` now set it in a picolibc program, as
 the path verbs already did: `ENOENT` and `ENOTDIR` from the server, which
 Proem's include search reads, and the library's own refusals as POSIX names
-them (`EBADF`, `EMFILE`, `EINVAL`, `EFAULT`). An unknown `lseek` whence is
-refused rather than taken as `SEEK_SET`. `make test-cerrno` checks every
+them (`EBADF`, `EMFILE`, `EINVAL`, `EOVERFLOW`, `ESPIPE`, `EFAULT`). An
+unknown `lseek` whence is refused rather than taken as `SEEK_SET`, `close`
+reports a server's refusal, and `fstat` of a console fd says a character
+device. `make test-cerrno` checks every
 case on FAT32 and ext2. Step 2 of the C-hosting plan.
 
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits

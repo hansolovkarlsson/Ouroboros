@@ -142,12 +142,17 @@ tree at `4dcbddd` leaves of them, read from the code.
   `EBADF` for a bad fd, `EMFILE` for a full fd table (it had shared
   `FS_ERR_CLIENT` with a long path, so it would have read `ENAMETOOLONG`),
   `EINVAL` for an unknown `whence` or a seek before the start (an unknown
-  `whence` used to be taken as `SEEK_SET`), `EFAULT` for a null `struct
-  stat`. A read or write against an fd's open mode is still sent, since fsd
-  is the authority on a fid's flags, and its refusal is named `EBADF`
-  rather than the `EACCES` the status maps to. `/bin/CERRNO`
+  `whence` used to be taken as `SEEK_SET`), `EOVERFLOW` for one past
+  `LONG_MAX` (tested before the sum, which would be undefined), `EFAULT`
+  for a null `struct stat`. A read or write against an fd's open mode is
+  still sent, since fsd is the authority on a fid's flags, and only its
+  permission refusal is renamed `EBADF`; any other status keeps its own
+  name. The console fds 0 to 2 are valid descriptors with no file: `fstat`
+  says a character device, `lseek` `ESPIPE`, `close` succeeds. `close`
+  reports a refused `NP_CLUNK` as -1 with `errno`, the slot released
+  either way. `/bin/CERRNO`
   (`libc/cerrno.c`) provokes each case; `make test-cerrno` runs it on FAT32
-  and ext2 as root (21 checks each) and as `user` on ext2 for `EACCES`. fsd
+  and ext2 as root (27 checks each) and as `user` on ext2 for `EACCES`. fsd
   already answered `ENOTDIR` for a path through a file, on both. Controls:
   `main`'s `file.c` fails every check, and dropping the `EBADF` naming fails
   exactly the two mode checks, with `EACCES`.

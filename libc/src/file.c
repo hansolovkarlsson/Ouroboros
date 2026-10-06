@@ -36,14 +36,8 @@
  * call reports through `ouro_last_fs_status` alone. */
 #ifdef OURO_HAVE_ERRNO
 #include <errno.h>
-#else
-/* The names client_fail takes, so one call site serves both builds; with no
- * errno to store them in, their values are never used. */
-#define EBADF 0
-#define EFAULT 0
-#define EINVAL 0
-#define EMFILE 0
 #endif
+#include <limits.h>
 
 /* How many files this LIBRARY can hold open. No longer tied to fsd's MAX_FIDS:
  * that number justified the old fd==fid identity, which is retired (see the
@@ -106,7 +100,7 @@ const char *ouro_fs_strerror(void) {
     if (s == MSG_ERR_DENIED) return "not allowed to reach that server (capability)";
     if (s == FS_ERR_BUSY) return "that server is out of room for this right now (try again later)";
     if (s == TASK_ERR_NO_SUCH_TASK) return "that server is not running (it died with this request in flight, or was absent this boot)";
-    if (s == FS_ERR_CLIENT) return "never sent (no free fd, or the path could not be resolved)";
+    if (s == FS_ERR_CLIENT) return "never sent (refused by the library: a bad fd or argument, no free fd, or a path too long)";
     if (s >= FS_ERR_MIN) return "failed";
     return "no error recorded";
 }
@@ -363,7 +357,7 @@ static void set_errno_from_status(void) {
  * table, a bad argument): POSIX's own errno for it, and FS_ERR_CLIENT for
  * ouro_last_fs_status, which says "never sent" and must not keep the status
  * of whatever request came before. Always -1, for the caller to return. */
-static int client_fail(int e) {
+static int client_fail_(int e) {
     g_last_status = FS_ERR_CLIENT;
 #ifdef OURO_HAVE_ERRNO
     errno = e;
@@ -372,14 +366,30 @@ static int client_fail(int e) {
 #endif
     return -1;
 }
-
-/* A server's refusal of a read or write on an fd not opened for it: fsd
- * refuses it (the fid's flags are its authority, and a raw 9P peer has no
- * library in front), and POSIX names it EBADF, not the EACCES the status
- * maps to. So the request is still sent, and only the name changes. */
-static void set_errno_wrong_mode(void) {
+/* A macro so the hand-rolled build, which has no <errno.h>, never expands the
+ * errno name at all, rather than this file defining stand-ins for names a
+ * header could later define for real (the review of #220). */
 #ifdef OURO_HAVE_ERRNO
-    errno = EBADF;
+#define client_fail(e) client_fail_(e)
+#else
+#define client_fail(e) client_fail_(0)
+#endif
+
+/* errno for a failed read or write on an fd opened without that mode. fsd
+ * refuses such a request (the fid's flags are its authority, and a raw 9P
+ * peer has no library in front), and POSIX names that refusal EBADF, not the
+ * EACCES FS_ERR_PERM maps to. So the request is still sent, and only that
+ * answer is renamed: any other status (the disk unmounted, the server gone,
+ * the peer unreachable) is mapped as it is, since it says something else
+ * (the review of #220). */
+static void set_errno_mode(int opened_for_it) {
+    set_errno_from_status();
+#ifdef OURO_HAVE_ERRNO
+    if (!opened_for_it && g_last_status == FS_ERR_PERM) {
+        errno = EBADF;
+    }
+#else
+    (void)opened_for_it;
 #endif
 }
 
@@ -570,13 +580,26 @@ void __libc_close_all(void) {
     }
 }
 
+/* The slot is released whatever the server answers, as POSIX close releases
+ * the descriptor even when it reports an error; a refused NP_CLUNK (a peer
+ * gone, a server restarted) is then -1 with errno, where it used to be lost
+ * (the review of #220). The console fds have no server state: closing one
+ * succeeds and changes nothing, since write(1) and write(2) route by the
+ * task's stdout target, not by a slot. */
 int close(int fd) {
+    if (fd >= 0 && fd < FID_BASE) {
+        return 0;
+    }
     struct file_state *f = file_for(fd);
     if (!f) {
         return client_fail(EBADF);
     }
-    np_request(f->target, f->endpoint, NP_CLUNK, f->fid, 0, 0, 0, 0, 0, 0);
+    long s = np_request(f->target, f->endpoint, NP_CLUNK, f->fid, 0, 0, 0, 0, 0, 0);
     f->used = 0;
+    if ((unsigned long)s >= FS_ERR_MIN) {
+        set_errno_from_status();
+        return -1;
+    }
     return 0;
 }
 
@@ -596,12 +619,20 @@ int close(int fd) {
  * from its mount options). uid and gid stay 0 there. Before, `st_mode` was 0
  * on those, so `S_ISREG` was false for every file. */
 int fstat(int fd, struct stat *st) {
+    if (!st) {
+        return client_fail(EFAULT);
+    }
+    /* The console fds are valid and have no file behind them: a character
+     * device, as a terminal is, rather than EBADF for a descriptor that
+     * exists (the review of #220). */
+    if (fd >= 0 && fd < FID_BASE) {
+        memset(st, 0, sizeof *st);
+        st->st_mode = S_IFCHR | 0666;
+        return 0;
+    }
     struct file_state *f = file_for(fd);
     if (!f) {
         return client_fail(EBADF);
-    }
-    if (!st) {
-        return client_fail(EFAULT);
     }
     /* Zeroed: np_request copies only what the reply carries, and a shorter
      * record (an older peer's 20 bytes) must read as "no mode", not as the
@@ -629,10 +660,14 @@ int fstat(int fd, struct stat *st) {
     return 0;
 }
 
-/* POSIX: EBADF for a bad fd, EINVAL for an unknown `whence` or a result
- * before the start of the file, which leaves the offset where it was. A
- * `whence` other than the three used to be taken as SEEK_SET. */
+/* POSIX: EBADF for a bad fd, ESPIPE for the console fds, EINVAL for an
+ * unknown `whence` or a result before the start of the file, EOVERFLOW for
+ * one past LONG_MAX; a refusal leaves the offset where it was. A `whence`
+ * other than the three used to be taken as SEEK_SET. */
 long lseek(int fd, long offset, int whence) {
+    if (fd >= 0 && fd < FID_BASE) {
+        return client_fail(ESPIPE);
+    }
     struct file_state *f = file_for(fd);
     if (!f) {
         return client_fail(EBADF);
@@ -648,6 +683,13 @@ long lseek(int fd, long offset, int whence) {
         base = s.st_size;
     } else if (whence != SEEK_SET) {
         return client_fail(EINVAL);
+    }
+    /* base is never negative (an offset or a size), so only a positive
+     * offset can overflow, and the test must come before the sum: a signed
+     * overflow is undefined, and the compiler may drop a check written after
+     * it (the review of #220). */
+    if (offset > 0 && base > LONG_MAX - offset) {
+        return client_fail(EOVERFLOW);
     }
     if (base + offset < 0) {
         return client_fail(EINVAL);
@@ -839,11 +881,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
             if (off > 0) {
                 return (ssize_t)off; /* POSIX: the short count, errno untouched */
             }
-            if ((f->flags & 3) == O_RDONLY) {
-                set_errno_wrong_mode();
-            } else {
-                set_errno_from_status();
-            }
+            set_errno_mode((f->flags & 3) != O_RDONLY);
             return -1;
         }
         /* Advance by what was ACTUALLY written (fsd's NP_PWRITE status is the
@@ -888,11 +926,7 @@ ssize_t read(int fd, void *buf, size_t count) {
             if (got > 0) {
                 return (ssize_t)got; /* POSIX: the short count, errno untouched */
             }
-            if ((f->flags & 3) == O_WRONLY) {
-                set_errno_wrong_mode();
-            } else {
-                set_errno_from_status();
-            }
+            set_errno_mode((f->flags & 3) != O_WRONLY);
             return -1;
         }
         if (n == 0) {

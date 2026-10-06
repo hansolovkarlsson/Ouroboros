@@ -15,6 +15,7 @@
  * failure. Runs as /bin/CERRNO, through picolibc. */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -37,6 +38,8 @@ static const char *name(int e) {
     case EFAULT: return "EFAULT";
     case EIO: return "EIO";
     case ENOSYS: return "ENOSYS";
+    case ESPIPE: return "ESPIPE";
+    case EOVERFLOW: return "EOVERFLOW";
     case ENODEV: return "ENODEV";
     default: return "another";
     }
@@ -128,18 +131,29 @@ static void as_root(void) {
         TRY("close of an fd already closed", close(fd), r_ < 0, EBADF);
     }
 
-    /* An fd used against the mode it was opened in. */
+    /* An fd used against the mode it was opened in. Each open is checked
+     * first: on a failed one the call below would get EBADF for fd -1 and
+     * pass without reaching the server (the review of #220). */
     fd = open("/etc/passwd", O_RDONLY);
+    check("open O_RDONLY for the mode check", fd >= 0);
     TRY("write to an O_RDONLY fd", write(fd, "x", 1), r_ < 0, EBADF);
     TRY("lseek with an unknown whence", lseek(fd, 0, 7), r_ < 0, EINVAL);
     TRY("lseek before the start", lseek(fd, -1, SEEK_SET), r_ < 0, EINVAL);
+    TRY("lseek past LONG_MAX", (lseek(fd, 1, SEEK_SET), lseek(fd, LONG_MAX, SEEK_CUR)), r_ < 0, EOVERFLOW);
+    lseek(fd, 0, SEEK_SET);
+    TRY("lseek of a console fd", lseek(1, 0, SEEK_CUR), r_ < 0, ESPIPE);
     check("lseek's refusals left the offset at 0", lseek(fd, 0, SEEK_CUR) == 0);
     TRY("fstat into a null struct", fstat(fd, NULL), r_ < 0, EFAULT);
     close(fd);
     fd = open("/CERRNO.TMP", O_WRONLY | O_CREAT | O_TRUNC);
+    check("open O_WRONLY|O_CREAT for the mode check", fd >= 0);
     TRY("read from an O_WRONLY fd", read(fd, buf, sizeof buf), r_ < 0, EBADF);
     close(fd);
     unlink("/CERRNO.TMP");
+
+    /* The console fds are valid descriptors with no file behind them. */
+    check("fstat of a console fd: a character device", fstat(1, &st) == 0 && S_ISCHR(st.st_mode));
+    check("close of a console fd succeeds", close(0) == 0);
 
     /* A directory opened for reading, then read. */
     fd = open("/etc", O_RDONLY);
