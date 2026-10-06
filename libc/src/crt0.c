@@ -52,11 +52,14 @@ extern char **environ;
 /* Reads the kernel's vector with `count_call`/`get_call` into `buf`, pointers
  * into `vec` (at most `cap` of them, then NULL), and returns how many.
  *
- * One copy per entry, at most USER_COPY_MAX bytes: the kernel refuses an out
- * buffer larger than that, so the whole store cannot be asked for at once.
- * An entry longer than the copy is left out, not cut: a `NAME=VALUE` cut
- * short is a different value, and getenv returning it would be worse than the
- * variable being unset. argv never has one (its whole blob is ARGV_MAX). */
+ * One copy per entry, into the rest of `buf`. The kernel caps the capacity
+ * at its store's size rather than refusing a larger one, so NO_ARG means the
+ * index is past the end (a refusal would need a buffer outside this task's
+ * region, and these are its own statics). The strings of a blob the kernel
+ * holds always fit in MAX bytes, so an entry never exceeds the room; should
+ * one, it is left out rather than cut, and the entries after it are still
+ * read: a `NAME=VALUE` cut short is a different value. No rig reaches that
+ * branch (scripts/test-cenv.py says why). */
 static int read_vec(long count_call, long get_call, char *buf, unsigned long size,
                     char **vec, unsigned long cap) {
     unsigned long n = (unsigned long)__os_syscall1(count_call, 0);
@@ -68,9 +71,6 @@ static int read_vec(long count_call, long get_call, char *buf, unsigned long siz
     for (unsigned long i = 0; i < n && used + 1 < size; i++) {
         char *dst = buf + used;
         unsigned long room = size - used - 1; /* room for the NUL */
-        if (room > USER_COPY_MAX) {
-            room = USER_COPY_MAX;
-        }
         unsigned long len =
             (unsigned long)__os_syscall4(get_call, (long)i, (long)dst, (long)room, 0);
         if (len == NO_ARG) {

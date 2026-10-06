@@ -66,12 +66,10 @@
  * in the error band's form so the wire check reads it. */
 #define NO_ARG (~0UL - 0UL)
 #define ARGV_MAX 512u
-/* The environment (crt0.c): the most bytes its staged blob may hold, and the
- * largest out buffer the kernel accepts for one copy (MAX_USER_LEN in
- * kernel/src/syscall.rs; GET_ENV refuses a larger one, so the store is read
- * one entry at a time). */
+/* The environment (crt0.c): the most bytes its staged blob may hold, so a
+ * GET_ENV buffer of ENV_MAX bytes holds any entry (the kernel refuses no
+ * capacity as too large). */
 #define ENV_MAX 2048u
-#define USER_COPY_MAX 512u
 
 #define HEAP_INFO_BASE 0
 #define HEAP_INFO_SIZE 1

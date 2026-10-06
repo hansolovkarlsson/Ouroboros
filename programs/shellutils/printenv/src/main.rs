@@ -16,16 +16,18 @@ pub extern "C" fn _start() -> ! {
     );
     let target = ulib::stdout_target();
     let n = ulib::env_count();
-    // One entry (NAME=VALUE) at a time - bounded well under the syscall's
-    // MAX_USER_LEN (512) out-capacity, which ENV_MAX (the whole-blob size)
-    // would exceed.
-    let mut buf = [0u8; 256];
+    // One whole entry (NAME=VALUE) at a time, env_at's buffer being the
+    // store's size: until 2026-10-06 this was 256 bytes, and a longer entry
+    // (any spawner can stage one) printed as a shorter one.
+    let mut buf = [0u8; ulib::ENV_ENTRY_BUF];
     let mut i = 0;
     while i < n {
-        if let Some(len) = ulib::env_at(i, &mut buf) {
-            ulib::write_out(target, &buf[..len]);
-            ulib::write_out(target, b"\r\n");
-        }
+        // The entries are contiguous, so the first one missing ends them.
+        let Some(entry) = ulib::env_at(i, &mut buf) else {
+            break;
+        };
+        ulib::write_out(target, entry);
+        ulib::write_out(target, b"\r\n");
         i += 1;
     }
     ulib::end_of_stream(target);

@@ -119,15 +119,31 @@ pub fn arg(index: u64, buf: &mut [u8]) -> Option<usize> {
 /// Number of environment variables this program inherited from its spawner
 /// (`GET_ENVC`). `0` for a program not spawned by the shell (or spawned with no
 /// environment).
+///
+/// Capped at what the env store can hold: the kernel answers the blob's count
+/// header as the spawner staged it, unchecked, so a header claiming four
+/// billion entries over one real one would otherwise have every loop over the
+/// environment make four billion syscalls. A `NAME=VALUE` entry takes at least
+/// 6 bytes of the blob (a 4-byte length and two bytes), as in libc's crt0.
 pub fn env_count() -> u64 {
-    syscall(syscall_abi::GET_ENVC, 0)
+    syscall(syscall_abi::GET_ENVC, 0).min((syscall_abi::ENV_MAX - 4) / 6)
 }
 
-/// Copy the `index`-th inherited environment entry - a `NAME=VALUE` string -
-/// into `buf`, returning its true length (which may exceed `buf.len()`), or
-/// `None` if `index` is out of range. Mirrors [`arg`]; the entry point for
+/// The size of buffer [`env_at`] takes: the whole env store, so it holds any
+/// entry.
+pub const ENV_ENTRY_BUF: usize = syscall_abi::ENV_MAX as usize;
+
+/// The `index`-th inherited environment entry, a whole `NAME=VALUE` string read
+/// into `buf`, or `None` if `index` is out of range. The entry point for
 /// iterating the environment (e.g. `printenv`).
-pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
+///
+/// `buf` is the size of the store, so no entry can be cut, and the answer is
+/// the entry itself rather than a length a caller could slice past. A smaller
+/// buffer is not spellable: until 2026-10-06 this took any `&mut [u8]` and
+/// returned a length clamped to it, so a cut `NAME=VALUE`, a different value,
+/// read as a whole one; returning the true length instead (the first version
+/// of #222) made `&buf[..len]` panic on a long entry.
+pub fn env_at(index: u64, buf: &mut [u8; ENV_ENTRY_BUF]) -> Option<&[u8]> {
     let n = syscall4(
         syscall_abi::GET_ENV,
         index,
@@ -136,44 +152,38 @@ pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
         0,
     );
     if n == syscall_abi::NO_ARG {
-        None
-    } else {
-        Some((n as usize).min(buf.len()))
+        return None;
     }
+    // The kernel caps the copy at ENV_MAX and an entry is shorter than its
+    // store, so this is always Some for a real entry; `get` keeps the slice
+    // from being a panic site if a kernel ever answered otherwise.
+    buf.get(..n as usize)
 }
 
-/// Look up an inherited environment variable by `name`, copying its value into
-/// `buf` and returning the value's true length, or `None` if it isn't set.
-/// Scans the environment (`env_count`/`env_at`), splitting each entry on its
-/// first `=`. A `getenv`-shaped helper for programs that want one variable.
-pub fn getenv(name: &[u8], buf: &mut [u8]) -> Option<usize> {
-    // One entry at a time. 256 bytes holds any NAME=VALUE (a name plus a
-    // 128-byte value) and stays under the syscall's MAX_USER_LEN out-capacity
-    // (512) - the whole-blob ENV_MAX (2048) would be rejected by the range check.
-    let mut entry = [0u8; 256];
-    let n = env_count();
-    for i in 0..n {
-        let Some(len) = env_at(i, &mut entry) else {
-            continue;
-        };
+/// Look up an inherited environment variable by `name`: its whole value,
+/// read into `buf`, or `None` if it isn't set. Scans the environment
+/// (`env_count`/`env_at`), splitting each entry on its first `=`.
+///
+/// Returns the value itself, not a length: until 2026-10-06 this copied what
+/// fit of the value into a caller's buffer of any size and returned the value's
+/// full length, so `&buf[..len]` panicked on a long value and a cut one read as
+/// whole, the hazard [`env_at`] had too.
+pub fn getenv<'a>(name: &[u8], buf: &'a mut [u8; ENV_ENTRY_BUF]) -> Option<&'a [u8]> {
+    let mut found = None;
+    for i in 0..env_count() {
+        // The entries are contiguous in the blob, so the first one missing
+        // ends the environment.
+        let entry = env_at(i, buf)?;
         // Split NAME=VALUE on the first '='.
-        let mut eq = None;
-        for (j, &b) in entry[..len].iter().enumerate() {
-            if b == b'=' {
-                eq = Some(j);
+        if let Some(eq) = entry.iter().position(|&b| b == b'=') {
+            if &entry[..eq] == name {
+                found = Some((eq + 1, entry.len()));
                 break;
             }
         }
-        if let Some(eq) = eq {
-            if &entry[..eq] == name {
-                let val = &entry[eq + 1..len];
-                let m = val.len().min(buf.len());
-                buf[..m].copy_from_slice(&val[..m]);
-                return Some(val.len());
-            }
-        }
     }
-    None
+    let (start, end) = found?;
+    buf.get(start..end)
 }
 
 /// Where this program's output should go: the console server by default, or -

@@ -394,6 +394,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdprobe"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "readkey"
 version = "0.1.0"
 dependencies = [

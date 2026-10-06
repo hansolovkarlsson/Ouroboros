@@ -609,7 +609,10 @@ pub const GET_ARGC: u64 = 48;
 /// `(index, out pointer, out capacity)` -> the true length of argument
 /// `index` (copying up to `out capacity` of its bytes into the buffer), or
 /// [`NO_ARG`] if `index >= argc`. A zero-length real argument returns `0`
-/// (distinct from [`NO_ARG`]).
+/// (distinct from [`NO_ARG`]). Since 2026-10-06 no capacity is too large: the
+/// copy is at most the argument, and only the bytes copied must lie in the
+/// caller's region (the same for [`GET_ENV`], [`GET_CWD`], [`GET_NS`] and
+/// [`TASK_NAME`]).
 pub const GET_ARG: u64 = 49;
 
 /// [`GET_ARG`]'s return for an out-of-range index. `u64::MAX` is safely
@@ -667,11 +670,13 @@ pub const NS_MAX: u64 = 256;
 /// or `0` if the slot has no name (empty/unused). Read-only, like [`TASK_STATE`]:
 /// the companion that turns `ps`'s slot list into named processes. Boot-loaded
 /// tasks (idle/`fsd`/`cond`/`netd`/init) are named by the loader; spawned tasks
-/// carry their `argv[0]`.
+/// carry their `argv[0]`, which can be up to [`ARGV_MAX`] bytes. No capacity is
+/// too large, as for [`GET_ARG`].
 pub const TASK_NAME: u64 = 54;
 
-/// Maximum name length [`TASK_NAME`] will report - a process name is short, and
-/// this caps the `ps` buffer without pulling in the full `ARGV_MAX`.
+/// The size of the shell's `ps` name buffer: a process name is short, so `ps`
+/// shows at most this many bytes of one. NOT a bound [`TASK_NAME`] enforces; it
+/// reports `argv[0]`'s true length, up to [`ARGV_MAX`].
 pub const TASK_NAME_MAX: u64 = 32;
 
 /// `(task index)` -> the exit status (`0..=255`) of a zombie task, **without
@@ -725,14 +730,15 @@ pub const GET_ENVC: u64 = 59;
 /// `(index, out pointer, out capacity)` -> the true length of environment
 /// entry `index` as a `NAME=VALUE` string (copying up to `out capacity` bytes
 /// into the buffer), or [`NO_ARG`] if `index >= envc`. Mirrors [`GET_ARG`];
-/// `ulib::getenv` splits the `NAME=VALUE` on the first `=`. Note the out buffer
-/// is validated like every user pointer, so its capacity must be `<=` the
-/// syscall boundary's user-range cap (512) - read **one entry at a time** into
-/// a small buffer, not one of [`ENV_MAX`] (which is the whole-blob store size).
+/// `ulib::getenv` splits the `NAME=VALUE` on the first `=`. No capacity is too
+/// large: the copy is at most the entry, and only the bytes copied must lie in
+/// the caller's region, so a buffer that holds the whole environment
+/// ([`ENV_MAX`]) holds any one entry (since 2026-10-06; until then a capacity
+/// over the blanket 512-byte user-range cap was refused, as `NO_ARG`).
 pub const GET_ENV: u64 = 60;
 
-/// Maximum size of a staged environment **blob** (and the per-task env store) -
-/// *not* a per-entry read size (see [`GET_ENV`]). The shell's env holds up to
+/// Maximum size of a staged environment **blob** (and the per-task env store),
+/// so a [`GET_ENV`] buffer of this size holds any entry. The shell's env holds up to
 /// 16 vars of a name + a 128-byte value each; 2048 bytes covers a realistic
 /// environment (a maximally-full one truncates, dropping trailing vars,
 /// documented in `ulib`/the shell).

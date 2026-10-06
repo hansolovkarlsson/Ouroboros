@@ -59,8 +59,20 @@ C-hosting plan, and item 5 of Edit's console note.
 **A C program has its environment (#221).** `crt0` builds `environ` from the
 kernel's store, so picolibc's `getenv` answers what the shell's `set` made;
 until then it linked against picolibc's own empty `environ` and answered
-every name as unset. Proem reads `SOURCE_DATE_EPOCH` through it. `make test-cenv`
-compares a C `printenv` with `/bin/PRINTENV`. Step 3 of the C-hosting plan.
+every name as unset. Proem reads `SOURCE_DATE_EPOCH` through it. `make
+test-cenv` compares a C `printenv` with `/bin/PRINTENV`. Step 3 of the
+C-hosting plan.
+
+**Reading a per-task store back accepts any buffer (#222).** `GET_ARG`,
+`GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at most one entry, through
+one kernel helper that checks containment over the bytes it copies. Until now
+a capacity over the blanket 512 bytes was refused, which for `GET_ENV` meant a
+buffer the size of the environment, and the refusal answered "no such entry".
+`ulib::env_at` and `ulib::getenv` take a buffer the size of the store and
+return the entry or value itself, so neither can pass off a cut one as whole,
+and a spawner's count header claiming more entries than the store holds no
+longer stalls them. `/bin/RDPROBE` reads all five with a 4 KiB buffer, and
+`make test-cenv` checks its answers.
 
 **Every failure in the C file layer sets `errno` (#220).** `open`, `read`,
 `write`, `close`, `fstat` and `lseek` now set it in a picolibc program, as
