@@ -3,8 +3,10 @@
 
 /* Minimal stat: the fields the ninep NP_STAT record carries (size, and the
  * POSIX mode, uid and gid where the filesystem records them), and `st_dev` /
- * `st_ino`, which fstat zeroes: the record carries no file identity yet, and
- * 0 says so. Grows toward a full struct stat as file I/O matures. */
+ * `st_ino`, which stat, lstat and fstat all zero: the record carries no file
+ * identity yet, and 0 says so, so two files compare equal by (st_dev, st_ino)
+ * and a program must not test sameness that way. Grows toward a full struct
+ * stat as file I/O matures. */
 struct stat {
     unsigned long st_dev;
     unsigned long st_ino;
@@ -25,5 +27,6 @@ struct stat {
 
 int fstat(int fd, struct stat *st);
 int stat(const char *path, struct stat *st);
+int lstat(const char *path, struct stat *st);
 
 #endif

@@ -6,11 +6,12 @@
  * stops the search.
  *
  * Run as root with no argument for the checks that hold on any filesystem,
- * stat(path)'s among them since step 4. With a path, it checks only that
+ * stat(path)'s among them since step 4; four of those need `mount -c
+ * /dev/cons` and `mount -n /net` made first. With a path, it checks only that
  * opening it for reading fails with EACCES and that stat of it succeeds (no
- * read permission is needed for that): scripts/test-cerrno.py runs `cerrno
- * /etc/shadow` as an ordinary user on ext2, the one image whose modes fsd
- * enforces.
+ * read permission is needed for that), then each further `<path> <octal
+ * mode> <uid> <gid>` group against stat: scripts/test-cerrno.py runs it so
+ * as an ordinary user on ext2, the one image whose modes fsd enforces.
  *
  * One line per check, `cerrno: ok <what>: <errno name>` or `cerrno: FAIL
  * <what>: got <name>, want <name>`, then a summary line; exit 1 on any
@@ -19,6 +20,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -123,7 +125,20 @@ static void as_root(void) {
         if (sfd >= 0) {
             close(sfd);
         }
+        struct stat viol;
+        check("lstat of a file: what stat says (no symbolic links here)",
+              lstat("/etc/passwd", &viol) == 0 && viol.st_mode == st.st_mode &&
+                  viol.st_size == st.st_size);
     }
+    /* The targets open refuses and stat answers. These need the bindings
+     * scripts/test-cerrno.py makes before running this: `mount -c /dev/cons`
+     * and `mount -n /net`. */
+    check("stat of the console binding: a character device",
+          stat("/dev/cons", &st) == 0 && S_ISCHR(st.st_mode));
+    check("stat of /net: a directory, from netd", stat("/net", &st) == 0 && S_ISDIR(st.st_mode));
+    check("stat of /net/ip: a file with content, from netd",
+          stat("/net/ip", &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0);
+    TRY("stat of a missing /net file", stat("/net/NOSUCH", &st), r_ < 0, ENOENT);
 
     /* A full fd table: the library's own limit, not a server's. */
     int fds[16];
@@ -136,9 +151,13 @@ static void as_root(void) {
         }
         n++;
     }
+    /* Whether the table really filled, read before expect() reports it: a
+     * first open failing for another reason also leaves n < 16 (the review
+     * of #223). */
+    int full = n < 16 && errno == EMFILE;
     expect("open with every fd in use", n < 16, EMFILE);
     /* stat takes no fd, so a full table does not stop it. */
-    check("stat with every fd in use", n < 16 && stat("/etc/passwd", &st) == 0);
+    check("stat with every fd in use", full && stat("/etc/passwd", &st) == 0);
     for (int i = 0; i < n; i++) {
         close(fds[i]);
     }
@@ -197,6 +216,20 @@ int main(int argc, char **argv) {
         struct stat st;
         check("stat of that file succeeds, a regular file",
               stat(argv[1], &st) == 0 && S_ISREG(st.st_mode));
+        /* Then `<path> <octal mode> <uid> <gid>` groups: values the caller
+         * knows independently of this library (the image's build sets them),
+         * so a decoding mistake shared by stat and fstat is caught here,
+         * where comparing the two could not (the review of #223). */
+        for (int i = 2; i + 3 < argc; i += 4) {
+            unsigned mode = (unsigned)strtoul(argv[i + 1], NULL, 8);
+            unsigned uid = (unsigned)strtoul(argv[i + 2], NULL, 10);
+            unsigned gid = (unsigned)strtoul(argv[i + 3], NULL, 10);
+            int ok = stat(argv[i], &st) == 0 && S_ISREG(st.st_mode) &&
+                     (st.st_mode & 07777) == mode && st.st_uid == uid && st.st_gid == gid;
+            printf("cerrno: stat %s: mode %o uid %u gid %u\r\n", argv[i], st.st_mode & 07777,
+                   st.st_uid, st.st_gid);
+            check("stat of a file: the mode and owner the image gave it", ok);
+        }
     } else {
         as_root();
     }

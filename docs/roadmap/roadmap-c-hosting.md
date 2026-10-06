@@ -192,13 +192,22 @@ tree at `4dcbddd` leaves of them, read from the code.
   for read permission on the file and an fd slot, and POSIX's `stat` needs
   neither. fsd authorizes `NP_STAT` by the ancestor walk alone, so `stat` of
   a file the caller may not read succeeds, a directory needs no open, and a
-  full fd table does not stop it. `make test-cerrno` checks it: seven checks
-  as root on FAT32 and ext2 (a missing path, a path through a file, an empty
-  path, a null struct, a directory, a file against `fstat`'s record, every
-  fd in use), and as `user` on ext2 `stat` of `/etc/shadow` succeeding where
-  `open` is refused. Not observed: `stat` through a remote mount (the rig is
-  one machine), and a refusal for a directory above that is not searchable
-  (the ext2 image has none).
+  full fd table does not stop it. Unlike `open`, it answers for every target
+  a binding can name: a console binding is the character device `fstat(1)`
+  reports, and a `/net` binding goes to `netd`, which serves `NP_STAT` for
+  `/`, `ip` and `mac`. `lstat` is `stat`, there being no symbolic links.
+  `make test-cerrno` checks it: twelve checks as root on FAT32 and ext2 (a
+  missing path, a path through a file, an empty path, a null struct, a
+  directory, a file against `fstat`'s record, `lstat`, every fd in use, the
+  console binding, `/net`, `/net/ip`, a missing `/net` file), and as `user`
+  on ext2 `stat` of `/etc/shadow` succeeding where `open` is refused, and the
+  mode and owner the image's build gave two files (`/etc/shadow`'s owner is
+  the host user who built the image, uid 501 gid 20 here, since `mke2fs -d`
+  carries it: the carried "ext2 uid 501" item, which this check found again;
+  its uid and gid differ, so a swap is caught). Not observed: `stat` through
+  a remote mount (the rig is one machine), a refusal for a directory above
+  that is not searchable (the ext2 image has none), and the hand-rolled
+  libc's `stat` (only `cerrno`'s picolibc build runs).
 - **Step 5, a clock: open.** Nothing in `libc/src` defines `gettimeofday`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against

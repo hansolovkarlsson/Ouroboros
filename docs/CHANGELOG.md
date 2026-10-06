@@ -65,8 +65,10 @@ C-hosting plan.
 
 **`stat(path)` in the C library.** One `NP_STAT`, the request `ls -l` makes,
 so `stat` needs no read permission on the file and no free fd, as POSIX
-says, and works on directories; picolibc references it. `make test-cerrno`
-checks it as root and as an ordinary user. Step 4 of the C-hosting plan.
+says, and works on directories, the console binding and `/net`; `lstat` is
+the same, with no symbolic links here. picolibc references both. `make
+test-cerrno` checks it as root and as an ordinary user. Step 4 of the
+C-hosting plan.
 
 **Reading a per-task store back accepts any buffer (#222).** `GET_ARG`,
 `GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at most one entry, through
