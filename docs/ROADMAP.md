@@ -2245,8 +2245,9 @@ be reviewed after the fact from the saved screenshots.
 > was written, the heap became 1 MiB (#210), `errno` reached `unlink`,
 > `rmdir`, `rename` and `remove` (#215) and then every call in the file layer
 > (step 2, #220), `main` receives argv (step 1, #219), and `environ` exists
-> (step 3, #221), and `stat(path)` exists (step 4, #223); the plan's "Where it
-> stands" says what that leaves.
+> (step 3, #221), `stat(path)` exists (step 4, #223), and `time()` links,
+> saying 1970 plus uptime (step 5); the plan's "Where it stands" says what
+> that leaves.
 >
 > **CPP is now Proem, since 2026-10-01.** The workspace's C preprocessor was
 > renamed: the folder is `~/Projects/Proem` and the repository
@@ -3997,6 +3998,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   no message, so a program run with 40 arguments sees 15 and cannot tell.
   Found 2026-10-05 by `make test-cargs` (the C-hosting plan's step 1). The
   fix is a refusal or a larger vector bounded by `ARGV_MAX`, not silence.
+- **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
+  and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
+  none and Parallels exposes its own), so a C program's `time()` says 1970
+  plus uptime (step 5 of the C-hosting plan) and `SOURCE_DATE_EPOCH` is the
+  way to give a tool a real date. A wall clock would be a kernel driver per
+  platform and a syscall; the cluster's ticket expiry wants the same thing
+  (time sync between machines on top). Recorded 2026-10-06 with step 5.
 - **`netd` answers `NP_STAT` wrongly under `/net/tcp`.** It serves the verb
   for `/net`, `/net/ip` and `/net/mac`; under `/tcp` the request reaches
   `dial_file_op`, which has no arm for it, so `/net/tcp` gets

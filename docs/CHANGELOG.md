@@ -10,11 +10,11 @@ here actually works today, see [`architecture.md`](architecture.md) and
 ## Unreleased: the storage server under large writes, and the C library for Proem and Edit
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
-version is held for a go-ahead. So far one day's work, 2026-10-05, #209 to
-#220: the storage server made safe under large writes and double mounts, and
-the C library made able to host Proem and Edit, steps 1 and 2 of the
-C-hosting plan among it. The day's record is
-`docs/work-journal/2026-10-05.md`.
+version is held for a go-ahead. So far two days' work, 2026-10-05 and
+2026-10-06, #209 to #224: the storage server made safe under large writes and
+double mounts, and the C library made able to host Proem (now cpp) and Edit,
+steps 1 to 5 of the C-hosting plan among it. The days' records are in
+`docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
 `cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
@@ -70,6 +70,11 @@ says, and works on directories and the console binding; a path ending in
 request under `/net/tcp`. `lstat` is the same, with no symbolic links here. picolibc references both. `make
 test-cerrno` checks it as root and as an ordinary user. Step 4 of the
 C-hosting plan.
+
+**A C program can read the clock (#224).** `gettimeofday` and `clock_gettime` come
+from the kernel's time since boot, so `time()` links and says 1970 plus
+uptime: there is no wall clock yet. `make test-cclock` checks `/bin/CCLOCK`'s
+clock against the host's over a timed gap. Step 5 of the C-hosting plan.
 
 **Reading a per-task store back accepts any buffer (#222).** `GET_ARG`,
 `GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at most one entry, through
