@@ -466,9 +466,7 @@ The **constraints are the loader's, and they bite C harder than Rust**:
 - **File I/O works, via fids** (`libc/src/file.c`, `make cfile-bin` →
   `/bin/CFILE`): `open`/`read`/`write`/`close`/`lseek`/`fstat`, since
   2026-10-06 `stat` (path verb `NP_STAT`, no fid, so no read permission on
-  the file is needed) and, in the picolibc port (`libc/pico/clock.c`),
-  `gettimeofday` and `clock_gettime` from `MONOTONIC_US` (1970 plus uptime:
-  no wall clock), and since 2026-10-05 `unlink`, `rmdir`, `rename` and
+  the file is needed), and since 2026-10-05 `unlink`, `rmdir`, `rename` and
   `remove` (path verbs
   `NP_RM`/`NP_RMDIR`/`NP_MV`, no fid; `remove` takes a file or an empty
   directory; `rename` replaces an existing ordinary file, answers `EXDEV` across
@@ -493,6 +491,13 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   flushed on newline / full buffer / a read from stdin / exit) rather than one
   `write` per char, and the pipe send **yields and retries** on a full consumer
   mailbox (`MSG_ERR_FULL`) instead of dropping bytes.
+- **The clock is time since boot** (`libc/pico/clock.c`, picolibc programs
+  only, since 2026-10-06): `gettimeofday` and `clock_gettime` read
+  `MONOTONIC_US`, so `time()` says 1970 plus uptime; there is no wall clock.
+  `CLOCK_MONOTONIC` is visible only because the Makefile's `PICO_INC` defines
+  `_POSIX_MONOTONIC_CLOCK`, which picolibc's own `features.h` leaves to RTEMS;
+  a C program built outside that Makefile needs the same flag. `make
+  test-cclock` checks it against the host's clock.
 - **Watch the relocations** the same way (`llvm-readobj --dyn-relocations`, or
   `llvm-objdump -R`): an `R_AARCH64_ABS64` is unloadable. Simple code is
   PC-relative and needs none; richer code emits `R_AARCH64_RELATIVE`, which the

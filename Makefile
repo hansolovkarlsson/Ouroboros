@@ -219,7 +219,11 @@ LDFLAGS_RUSTSHIM := $(LDFLAGS_OS) --gc-sections
 # (the two compiler-rt 128-bit shifts picolibc's float printf needs). picolibc is
 # built -fPIC, so it self-relocates (R_AARCH64_RELATIVE only) under our loader.
 PICO_DIR     := third_party/picolibc-prebuilt
-PICO_INC     := -I$(PICO_DIR)/include
+# picolibc's headers, and the one POSIX feature they hide here that the port
+# has: picolibc's features.h defines _POSIX_MONOTONIC_CLOCK for RTEMS only, so
+# without this <time.h> names no CLOCK_MONOTONIC, which libc/pico/clock.c
+# answers (step 5 of the C-hosting plan). On every picolibc compile line.
+PICO_INC     := -I$(PICO_DIR)/include -D_POSIX_MONOTONIC_CLOCK=200112L
 PICO_LIBC    := $(PICO_DIR)/lib/libc.a
 PICO_PORT    := $(BUILD_DIR)/pico/crt0.o $(BUILD_DIR)/pico/os.o $(BUILD_DIR)/pico/file.o $(BUILD_DIR)/pico/builtins.o $(BUILD_DIR)/pico/clock.o
 CPICO_BIN    := $(BUILD_DIR)/cpico.bin

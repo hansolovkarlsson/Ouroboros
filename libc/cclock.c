@@ -19,12 +19,6 @@
 #include <sys/time.h>
 #include <time.h>
 
-/* picolibc's header hides it on this target (libc/pico/clock.c says why);
- * this is the number it would have. */
-#ifndef CLOCK_MONOTONIC
-#define CLOCK_MONOTONIC 4
-#endif
-
 static int g_checks;
 static int g_failed;
 
@@ -67,8 +61,18 @@ int main(void) {
           mr == 0 && mr2 == 0 &&
               (mono2.tv_sec > mono.tv_sec ||
                (mono2.tv_sec == mono.tv_sec && mono2.tv_nsec >= mono.tv_nsec)));
+    struct timezone z = {77, 77};
+    struct timeval c;
+    check("gettimeofday fills a timezone with UTC, no daylight time",
+          gettimeofday(&c, &z) == 0 && z.tz_minuteswest == 0 && z.tz_dsttime == 0);
+    struct timespec raw;
+    check("clock_gettime(5, the raw monotonic id) is answered",
+          clock_gettime(5, &raw) == 0 && raw.tv_sec >= mono.tv_sec);
     errno = 0;
     check("clock_gettime of an unknown clock: EINVAL", clock_gettime(99, &rt) < 0 && errno == EINVAL);
+    errno = 0;
+    check("clock_gettime of the process CPU-time id: EINVAL",
+          clock_gettime(2, &rt) < 0 && errno == EINVAL);
     errno = 0;
     check("clock_gettime into a null timespec: EFAULT",
           clock_gettime(CLOCK_MONOTONIC, NULL) < 0 && errno == EFAULT);

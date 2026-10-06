@@ -1,7 +1,8 @@
 /* The clock a picolibc program reads: `gettimeofday`, which picolibc's
- * `time()` calls, and `clock_gettime` for CLOCK_REALTIME and CLOCK_MONOTONIC
- * (whose name picolibc hides here, see below), which picolibc declares and
- * nothing defined. Step 5 of docs/roadmap/roadmap-c-hosting.md, since
+ * `time()` calls, and `clock_gettime`, which picolibc declares and nothing
+ * defined, for every clock id its <time.h> names: CLOCK_REALTIME and
+ * CLOCK_MONOTONIC, and under _GNU_SOURCE the coarse, raw and boot-time
+ * variants. All of them are one source here. Step 5 of docs/roadmap/roadmap-c-hosting.md, since
  * 2026-10-06; until then a program calling `time()` did not link.
  *
  * The kernel has no wall clock, only MONOTONIC_US, microseconds since boot. So
@@ -20,12 +21,12 @@
 #include <sys/time.h>
 #include <time.h>
 
-/* picolibc's <time.h> names CLOCK_MONOTONIC only where its features.h defines
- * _POSIX_MONOTONIC_CLOCK, which is on RTEMS alone, so on this target a
- * program cannot spell it from the header. It is still answered, by the
- * number picolibc gives it, for a ported program that defines it itself. */
+/* picolibc's <time.h> names CLOCK_MONOTONIC only where _POSIX_MONOTONIC_CLOCK
+ * is defined, which its features.h does for RTEMS alone; the Makefile's
+ * PICO_INC defines it for every picolibc program here, since the clock
+ * exists. Without it this file would not build, which is the point. */
 #ifndef CLOCK_MONOTONIC
-#define CLOCK_MONOTONIC 4
+#error "CLOCK_MONOTONIC hidden: build with the Makefile's PICO_INC"
 #endif
 
 static unsigned long uptime_us(void) {
@@ -33,7 +34,13 @@ static unsigned long uptime_us(void) {
 }
 
 int gettimeofday(struct timeval *restrict tv, void *restrict tz) {
-    (void)tz; /* POSIX leaves a non-null tz unspecified; there is no zone here */
+    /* POSIX leaves a non-null tz unspecified, and BSD-style programs read it:
+     * UTC with no daylight time, the only zone there is (the review of #224). */
+    if (tz) {
+        struct timezone *z = tz;
+        z->tz_minuteswest = 0;
+        z->tz_dsttime = 0;
+    }
     if (tv) {
         unsigned long us = uptime_us();
         tv->tv_sec = (time_t)(us / 1000000UL);
@@ -43,7 +50,11 @@ int gettimeofday(struct timeval *restrict tv, void *restrict tz) {
 }
 
 int clock_gettime(clockid_t id, struct timespec *ts) {
-    if (id != CLOCK_REALTIME && id != CLOCK_MONOTONIC) {
+    /* By number, as picolibc's <time.h> gives them: realtime-coarse 0,
+     * realtime 1, monotonic 4, monotonic-raw 5, monotonic-coarse 6, boottime
+     * 7. The ids from 2 and 3 (process and thread CPU time) and 8 (an alarm)
+     * are not this clock, so they are refused. */
+    if (id != 0 && id != CLOCK_REALTIME && (id < CLOCK_MONOTONIC || id > 7)) {
         errno = EINVAL;
         return -1;
     }

@@ -224,19 +224,26 @@ tree at `4dcbddd` leaves of them, read from the code.
   ext2 image has none), and the hand-rolled libc's `stat` (only `cerrno`'s
   picolibc build runs). `..` is lexical, as for every call in the library:
   `stat("/NOSUCH/../etc/passwd")` succeeds (an item in `ROADMAP.md`).
-- **Step 5, a clock: done 2026-10-06, the first level.** `libc/pico/clock.c`,
-  in the picolibc port beside `builtins.c` (the hand-rolled libc has no
-  `<time.h>`), gives `gettimeofday` and `clock_gettime` for `CLOCK_REALTIME`
-  and `CLOCK_MONOTONIC` from `MONOTONIC_US`, so `time()` links and says 1970
-  plus uptime. picolibc hides the name `CLOCK_MONOTONIC` on this target (its
-  `features.h` defines `_POSIX_MONOTONIC_CLOCK` for RTEMS only), so it is
-  answered by its number, 4, for a program that defines it. `/bin/CCLOCK`
-  (`libc/cclock.c`) runs nine checks of its own, and `make test-cclock`
+- **Step 5, a clock: done 2026-10-06, the first level.**
+  `libc/pico/clock.c`, in the picolibc port beside `builtins.c` (the
+  hand-rolled libc has no `<time.h>`), gives `gettimeofday` and
+  `clock_gettime` from `MONOTONIC_US`, so `time()` links and says 1970 plus
+  uptime. `clock_gettime` answers every clock id picolibc's `<time.h>` names
+  that is this clock: realtime and monotonic, and under `_GNU_SOURCE` the
+  coarse, raw and boot-time ids; `gettimeofday` fills a `struct timezone`
+  with UTC. picolibc's `features.h` defines `_POSIX_MONOTONIC_CLOCK` for
+  RTEMS only, which hides the name `CLOCK_MONOTONIC`; the Makefile's
+  `PICO_INC` defines it for every picolibc program here, since the clock
+  exists, and `clock.c` refuses to build without it. `/bin/CCLOCK`
+  (`libc/cclock.c`) runs twelve checks of its own, and `make test-cclock`
   runs it twice in one boot with a gap the host times: each `ctime` line
-  must be Python's formatting of its second, and the guest clock must keep
-  the host's pace across the gap (9.12 s against 9.13 s, within 2). Not
-  ported: `times` (behind `clock()`), `clock_getres`, `nanosleep`. The second
-  level, a wall clock from the platform's RTC, is an item in `ROADMAP.md`.
+  must be Python's formatting of its second, each run must exit 0 (read from
+  its own block), and the guest clock must keep the host's pace across the
+  gap within half a second plus 3% (9.07 s against 9.08 s). Control: a clock
+  1000 times slow passes every check of `CCLOCK`'s own and fails only the
+  pace. Not ported: `times` (behind `clock()`), `clock_getres`, `nanosleep`.
+  The second level, a wall clock from the platform's RTC, is an item in
+  `ROADMAP.md`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against
   picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real
@@ -250,7 +257,8 @@ tree at `4dcbddd` leaves of them, read from the code.
 - **Steps 6 and 8** are not started; they are Proem's system-directories
   handoff (`docs/handoffs/2026-10-01-from-proem-system-dirs.md`, accepted).
 
-So the order stands: steps 1 to 5 next, each small, then 6 and 8.
+So the order stands: steps 1 to 5 next, each small, then 6 and 8. *(As of
+2026-10-06, steps 1 to 5 are done, #219 to #224: 6 to 8 are next.)*
 
 ## What stays in Proem's session
 
