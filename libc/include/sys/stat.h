@@ -24,5 +24,6 @@ struct stat {
 #define S_ISCHR(m) (((m) & S_IFMT) == S_IFCHR)
 
 int fstat(int fd, struct stat *st);
+int stat(const char *path, struct stat *st);
 
 #endif

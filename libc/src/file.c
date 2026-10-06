@@ -618,6 +618,62 @@ int close(int fd) {
  * nothing (the review of #216; Linux's vfat makes the bits up the same way,
  * from its mount options). uid and gid stay 0 there. Before, `st_mode` was 0
  * on those, so `S_ISREG` was false for every file. */
+/* `st` from an NP_STAT/NP_FSTAT record, the one decoding `fstat` and `stat`
+ * share. `info` must be zeroed before the request: the reply copies only what
+ * it carries, and a shorter record (an older peer's 20 bytes) must read as
+ * "no mode", not as the stack's leftovers in the mode-valid byte (the review
+ * of #216). */
+static void stat_from_record(struct stat *st, const unsigned char *info) {
+    memset(st, 0, sizeof *st);
+    st->st_size = (long)__rd_u64(info + STAT_SIZE_OFF);
+    if (info[STAT_MODEVALID_OFF]) {
+        st->st_mode = (unsigned)(info[STAT_MODE_OFF] | (info[STAT_MODE_OFF + 1] << 8));
+        st->st_uid = (unsigned)(info[STAT_UID_OFF] | (info[STAT_UID_OFF + 1] << 8));
+        st->st_gid = (unsigned)(info[STAT_GID_OFF] | (info[STAT_GID_OFF + 1] << 8));
+    } else {
+        /* The whole u32, as ulib's stat_is_dir reads it. */
+        unsigned long flags = (unsigned long)info[STAT_FLAGS_OFF] |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 1] << 8) |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 2] << 16) |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 3] << 24);
+        st->st_mode = (flags & STAT_FLAG_DIR) ? (S_IFDIR | 0777) : (S_IFREG | 0666);
+    }
+}
+
+/* The metadata of the file at `path`, without opening it: one NP_STAT, the
+ * path verb `ls -l` uses, served by fsd, netd's export and the host peer
+ * alike. 0, or -1 with errno set where there is one. Step 4 of
+ * docs/roadmap/roadmap-c-hosting.md, since 2026-10-06; picolibc references it.
+ *
+ * Not open + fstat + close, which the plan first said. That would ask for
+ * READ permission on the file and an fd slot, where POSIX's stat needs
+ * neither: fsd authorizes NP_STAT by the ancestor walk alone (every directory
+ * above must be searchable) and does not check the file's own mode, so `stat`
+ * of a file the caller may not read succeeds, as it must, and works with every
+ * fd in use. A directory needs no open either. */
+int stat(const char *path, struct stat *st) {
+    if (!path || !st) {
+        return client_fail(EFAULT);
+    }
+    char fspath[FSPATH_MAX_C];
+    unsigned long fslen;
+    unsigned target;
+    unsigned char endpoint[NS_ENDPOINT_LEN];
+    if (resolve_target(path, fspath, &fslen, &target, endpoint) != 0) {
+        set_errno_from_status();
+        return -1;
+    }
+    unsigned char info[STAT_INFO_LEN] = {0};
+    long s = np_request(target, endpoint, NP_STAT, fslen, 0, 0, fspath, (size_t)fslen, info,
+                        sizeof(info));
+    if ((unsigned long)s >= FS_ERR_MIN) {
+        set_errno_from_status();
+        return -1;
+    }
+    stat_from_record(st, info);
+    return 0;
+}
+
 int fstat(int fd, struct stat *st) {
     if (!st) {
         return client_fail(EFAULT);
@@ -634,29 +690,13 @@ int fstat(int fd, struct stat *st) {
     if (!f) {
         return client_fail(EBADF);
     }
-    /* Zeroed: np_request copies only what the reply carries, and a shorter
-     * record (an older peer's 20 bytes) must read as "no mode", not as the
-     * stack's leftovers in the mode-valid byte (the review of #216). */
-    unsigned char info[STAT_INFO_LEN] = {0};
+    unsigned char info[STAT_INFO_LEN] = {0}; /* zeroed: see stat_from_record */
     long s = np_request(f->target, f->endpoint, NP_FSTAT, f->fid, 0, 0, 0, 0, info, sizeof(info));
     if ((unsigned long)s >= FS_ERR_MIN) {
         set_errno_from_status();
         return -1;
     }
-    memset(st, 0, sizeof *st);
-    st->st_size = (long)__rd_u64(info + STAT_SIZE_OFF);
-    if (info[STAT_MODEVALID_OFF]) {
-        st->st_mode = (unsigned)(info[STAT_MODE_OFF] | (info[STAT_MODE_OFF + 1] << 8));
-        st->st_uid = (unsigned)(info[STAT_UID_OFF] | (info[STAT_UID_OFF + 1] << 8));
-        st->st_gid = (unsigned)(info[STAT_GID_OFF] | (info[STAT_GID_OFF + 1] << 8));
-    } else {
-        /* The whole u32, as ulib's stat_is_dir reads it. */
-        unsigned long flags = (unsigned long)info[STAT_FLAGS_OFF] |
-                              ((unsigned long)info[STAT_FLAGS_OFF + 1] << 8) |
-                              ((unsigned long)info[STAT_FLAGS_OFF + 2] << 16) |
-                              ((unsigned long)info[STAT_FLAGS_OFF + 3] << 24);
-        st->st_mode = (flags & STAT_FLAG_DIR) ? (S_IFDIR | 0777) : (S_IFREG | 0666);
-    }
+    stat_from_record(st, info);
     return 0;
 }
 

@@ -73,6 +73,8 @@ Each step has its check.
    `printenv` matches `/bin/PRINTENV`.
 4. **`stat(path)`.** picolibc references it; supply it over the same fid path
    as `open` + `fstat` + `close`. **Check:** part of the step 2 program.
+   *(Built 2026-10-06 over the path verb `NP_STAT` instead: see "Where it
+   stands".)*
 5. **A clock.** `gettimeofday` is missing, and the kernel has only
    `MONOTONIC_US`, time since boot, with no wall clock. Two levels:
    - *Enough for the link:* `gettimeofday` from `MONOTONIC_US`, so a C
@@ -183,8 +185,21 @@ tree at `4dcbddd` leaves of them, read from the code.
   first `GET_ENV` asks for 2047 bytes, so with the blanket refusal back
   every `getenv` answers unset, and `/bin/RDPROBE` reads all five stores
   through a 4 KiB buffer.
-- **Steps 4 and 5, `stat`, a clock: open.** Nothing in `libc/src` defines
-  `stat` or `gettimeofday`.
+- **Step 4, `stat(path)`: done 2026-10-06.** `file.c`'s `stat` sends one
+  `NP_STAT`, the path verb `ls -l` uses, which fsd, `netd`'s export and the
+  host peer all serve, and decodes the record through the same function as
+  `fstat`. Not `open` + `fstat` + `close`, as step 4 first said: that asks
+  for read permission on the file and an fd slot, and POSIX's `stat` needs
+  neither. fsd authorizes `NP_STAT` by the ancestor walk alone, so `stat` of
+  a file the caller may not read succeeds, a directory needs no open, and a
+  full fd table does not stop it. `make test-cerrno` checks it: seven checks
+  as root on FAT32 and ext2 (a missing path, a path through a file, an empty
+  path, a null struct, a directory, a file against `fstat`'s record, every
+  fd in use), and as `user` on ext2 `stat` of `/etc/shadow` succeeding where
+  `open` is refused. Not observed: `stat` through a remote mount (the rig is
+  one machine), and a refusal for a directory above that is not searchable
+  (the ext2 image has none).
+- **Step 5, a clock: open.** Nothing in `libc/src` defines `gettimeofday`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against
   picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real

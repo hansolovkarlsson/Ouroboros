@@ -5,10 +5,12 @@
  * where ENOENT or ENOTDIR means "try the next directory" and anything else
  * stops the search.
  *
- * Run as root with no argument for the checks that hold on any filesystem.
- * With a path, it checks only that opening it for reading fails with EACCES:
- * scripts/test-cerrno.py runs `cerrno /etc/shadow` as an ordinary user on
- * ext2, the one image whose modes fsd enforces.
+ * Run as root with no argument for the checks that hold on any filesystem,
+ * stat(path)'s among them since step 4. With a path, it checks only that
+ * opening it for reading fails with EACCES and that stat of it succeeds (no
+ * read permission is needed for that): scripts/test-cerrno.py runs `cerrno
+ * /etc/shadow` as an ordinary user on ext2, the one image whose modes fsd
+ * enforces.
  *
  * One line per check, `cerrno: ok <what>: <errno name>` or `cerrno: FAIL
  * <what>: got <name>, want <name>`, then a summary line; exit 1 on any
@@ -103,6 +105,26 @@ static void as_root(void) {
         fclose(fp);
     }
 
+    /* stat(path), step 4: the answers open gives for a path that is not
+     * there, and fstat's record for one that is. */
+    TRY("stat of a missing file", stat("/NOSUCH.TXT", &st), r_ < 0, ENOENT);
+    TRY("stat through a file as a directory", stat("/etc/passwd/X.H", &st), r_ < 0, ENOTDIR);
+    TRY("stat of an empty path", stat("", &st), r_ < 0, ENOENT);
+    TRY("stat into a null struct", stat("/etc/passwd", NULL), r_ < 0, EFAULT);
+    check("stat of a directory: a directory", stat("/etc", &st) == 0 && S_ISDIR(st.st_mode));
+    {
+        struct stat byfd;
+        int sfd = open("/etc/passwd", O_RDONLY);
+        int ok = sfd >= 0 && fstat(sfd, &byfd) == 0 && stat("/etc/passwd", &st) == 0;
+        check("stat of a file: a regular file, the record fstat reads",
+              ok && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size == byfd.st_size &&
+                  st.st_mode == byfd.st_mode && st.st_uid == byfd.st_uid &&
+                  st.st_gid == byfd.st_gid);
+        if (sfd >= 0) {
+            close(sfd);
+        }
+    }
+
     /* A full fd table: the library's own limit, not a server's. */
     int fds[16];
     int n = 0;
@@ -115,6 +137,8 @@ static void as_root(void) {
         n++;
     }
     expect("open with every fd in use", n < 16, EMFILE);
+    /* stat takes no fd, so a full table does not stop it. */
+    check("stat with every fd in use", n < 16 && stat("/etc/passwd", &st) == 0);
     for (int i = 0; i < n; i++) {
         close(fds[i]);
     }
@@ -168,6 +192,11 @@ static void as_root(void) {
 int main(int argc, char **argv) {
     if (argc > 1) {
         TRY("open of a file the user may not read", open(argv[1], O_RDONLY), r_ < 0, EACCES);
+        /* POSIX's stat needs no read permission on the file, only search on
+         * the directories above it, which is fsd's rule for NP_STAT. */
+        struct stat st;
+        check("stat of that file succeeds, a regular file",
+              stat(argv[1], &st) == 0 && S_ISREG(st.st_mode));
     } else {
         as_root();
     }

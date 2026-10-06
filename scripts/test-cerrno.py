@@ -7,12 +7,14 @@ Step 2 of docs/roadmap/roadmap-c-hosting.md. `/bin/CERRNO` (libc/cerrno.c,
 picolibc) provokes every failure a C program can reach in the file layer and
 checks the errno POSIX names for it: a missing file, a path through a file, a
 full fd table, a bad fd, an fd used against its mode, a bad lseek, a directory
-read. Two boots, each of a COPY of the image:
+read; and stat(path) (step 4): a missing path, a path through a file, a
+directory, a file against fstat's record, and a full fd table. Two boots, each
+of a COPY of the image:
 
 - FAT32 (build/esp.img), as root.
 - ext2 (build/espext2.img), as root, then as the ordinary `user`, which must
-  get EACCES opening /etc/shadow (mode 0600): ext2 is the one image whose
-  modes fsd enforces.
+  get EACCES opening /etc/shadow (mode 0600) and yet stat it, as POSIX's stat
+  needs no read permission: ext2 is the one image whose modes fsd enforces.
 
 Graded on cerrno's own summary line (`cerrno: N checks, 0 failed`, matched
 whole, with N exactly ROOT_CHECKS below: fewer is a run cut short, and more
@@ -34,7 +36,7 @@ _spec.loader.exec_module(drive_qemu)
 
 # How many checks cerrno runs as root. A summary with fewer is a run that
 # skipped some, which must not pass.
-ROOT_CHECKS = 27
+ROOT_CHECKS = 34
 SUMMARY = r"cerrno: (\d+) checks, (\d+) failed\r?\n"
 
 
@@ -80,7 +82,7 @@ def main() -> int:
     checks += [
         ("ext2: driven to the end", d),
         (f"ext2: root, {ROOT_CHECKS} checks, 0 failed", got[:1] == [(ROOT_CHECKS, 0)]),
-        ("ext2: user, /etc/shadow refused with EACCES", got[1:2] == [(1, 0)]),
+        ("ext2: user, /etc/shadow refused with EACCES and stat of it allowed", got[1:2] == [(2, 0)]),
         ("ext2: no fault lines", f == 0),
     ]
     for name, text in (("fat32", fat32), ("ext2", out)):
