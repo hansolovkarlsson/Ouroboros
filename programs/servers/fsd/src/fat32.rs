@@ -16,9 +16,11 @@
 //! code was written for.
 //!
 //! Long filenames (LFN) are **read and written** now. A name that fits an
-//! 8.3 short name still becomes a plain short entry (unchanged behavior,
-//! uppercased); a name that doesn't - too long, mixed dots, spaces, or
-//! any character 8.3 can't hold - gets a generated `NAME~N` short alias
+//! 8.3 short name in one case per half becomes a plain short entry, stored
+//! uppercase with byte 12's case flags saying which half is lowercase (since
+//! 2026-10-06; it was uppercased with the flags 0 until then); a name that
+//! doesn't - too long, mixed dots, spaces, a half in mixed case, or any
+//! character 8.3 can't hold - gets a generated `NAME~N` short alias
 //! plus a run of LFN entries carrying the real name (see
 //! [`Fs::insert_named_entry`]). `make_short_name` is the 8.3 fast-path
 //! test; [`generate_short_alias`] builds the `~N` alias when it fails.
@@ -34,8 +36,10 @@ const SECTOR_SIZE: usize = 512;
 const DIR_ENTRY_SIZE: usize = 32;
 const ATTR_DIRECTORY: u8 = 0x10;
 const ATTR_VOLUME_ID: u8 = 0x08;
-/// A short entry's byte 12 (NTRes): the base name, and the extension, are
-/// lowercase on disk although stored in uppercase. Read only.
+/// A short entry's byte 12 (NTRes): set, the base name (`0x08`) or the
+/// extension (`0x10`) is lowercase, its bytes being stored in uppercase as 8.3
+/// requires. Read by `DirEntry::parse`, and written by `make_short_name` for a
+/// name fsd creates.
 const SHORT_LOWER_BASE: u8 = 0x08;
 const SHORT_LOWER_EXT: u8 = 0x10;
 const ATTR_LFN: u8 = 0x0f;
@@ -1721,8 +1725,10 @@ impl Fs {
     /// representation by whether the name fits an 8.3 short name:
     ///
     /// - **Fits 8.3** ([`make_short_name`] succeeds): a single short entry,
-    ///   exactly as before - no LFN entries, the name uppercased. This is
-    ///   the common case and its on-disk shape is unchanged.
+    ///   no LFN entries, the name stored uppercase with its case in byte 12
+    ///   (all-lowercase halves flagged; until 2026-10-06 it was uppercased
+    ///   with the flags 0). This is the common case. A half in mixed case
+    ///   (`Makefile`) does not fit, and takes the path below.
     /// - **Doesn't fit** (too long, extra dots, spaces, mixed case that must
     ///   be preserved, or any non-8.3 character): a generated `NAME~N` short
     ///   alias ([`generate_short_alias`], unique within this directory) plus
@@ -2127,6 +2133,11 @@ pub(crate) fn split_parent(path: &str) -> Option<(&str, &str)> {
 /// formatter/OS) and [`Fs::find`]/[`walk_dir`](Fs::walk_dir) will read it
 /// back fine - this limitation only applies to names *this kernel*
 /// creates via `mkdir`.
+///
+/// Also returns the entry's byte 12: the case flags for each half that is
+/// all lowercase. A half in MIXED case is `None`, since a short entry cannot
+/// keep it, so the name goes to the long-name path, as Windows and Linux's
+/// vfat do.
 fn make_short_name(name: &str) -> Option<([u8; 11], u8)> {
     if name.is_empty() || name.len() > MAX_NAME_LEN {
         return None;

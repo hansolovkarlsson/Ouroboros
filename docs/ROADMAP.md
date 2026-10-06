@@ -4014,16 +4014,29 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - **`mv` refuses a case-only rename on FAT32 and exFAT without `-f`.**
   `mv FOO.TXT foo.txt` answers "foo.txt exists": the lookup is case-insensitive
   there, so the destination is the source itself, and `mv` will not replace a
-  present destination without `-f`. `mv -f` does it (fsd's rename sees the
-  same entry and re-links it). `mv` cannot tell on its own, since ext2 is
-  case-sensitive and there the two are different files; the server would have
-  to say. Found 2026-10-06 by `make test-include`.
+  present destination without `-f`. `mv -f` does it, for a FILE (fsd's rename
+  sees the same entry and re-links it). `mv` cannot tell on its own, since ext2
+  is case-sensitive and there the two are different files; the server would
+  have to say. Found 2026-10-06 by `make test-include`.
+- **A case-only rename of a DIRECTORY is refused on FAT32 and exFAT, even with
+  `-f`.** `mkdir /Lowdir; mv -f /Lowdir /lowdir` answers "exists": the
+  rename's "the destination is a directory" guard (`fat32.rs`, `exfat.rs`)
+  fires although the destination is the source itself. The guard should let
+  the same entry through. Found by the second review of #225, 2026-10-06.
+- **fsd's FAT32 rename rebuilds the entry, losing its attributes and date.**
+  `rename` re-inserts the name with only the directory bit in its attribute
+  byte and zeroed timestamps, so a file's read-only, hidden, system and
+  archive bits and its modified time are gone after any `mv`, a case-only one
+  included. A rename should carry the rest of the entry across. Found by the
+  second review of #225.
 - **A directory listing is cut at one reply, with no sign of it.**
   `NP_READDIR` has no offset: fsd writes `name\n` per entry into the reply
-  window and stops at the first name that does not fit, and `ls` asks for
-  512 bytes. So `ls /include` shows about 60 of its 72 names, picked by
-  directory order, and `ls /include/clang` 30 of 31; tab completion, globs
-  and `tree` read the same way. A paged verb (an offset in the request,
+  window, skips any name that no longer fits and goes on walking, so a
+  shorter name further on can still get in; `ls` asks for 512 bytes. So `ls
+  /include` shows about 60 of its 72 names and `ls /include/clang` 30 of 31,
+  and what is left out can be anywhere in the walk: the listing has holes,
+  it is not a prefix, which a paged design must not assume. Tab completion,
+  globs and `tree` read the same way. A paged verb (an offset in the request,
   "more" in the reply) is a wire change: fsd, `netd`'s export, both host
   peers and `ulib`. cpp is not affected: it opens headers by path. Found
   2026-10-06 staging the C headers (step 6 of the C-hosting plan).

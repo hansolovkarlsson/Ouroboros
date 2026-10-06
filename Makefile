@@ -224,11 +224,10 @@ PICO_DIR     := third_party/picolibc-prebuilt
 # without this <time.h> names no CLOCK_MONOTONIC, which libc/pico/clock.c
 # answers (step 5 of the C-hosting plan). On every picolibc compile line.
 PICO_INC     := -I$(PICO_DIR)/include -D_POSIX_MONOTONIC_CLOCK=200112L
-# clang's own headers, the freestanding ones CFLAGS_OS compiles against: the
-# second system directory the image stages (step 6 of the C-hosting plan).
-# Deferred (`=`), so clang is asked only by the recipe that stages them, not
-# by every make that parses this file.
-CLANG_INC     = $(shell $(CC) -print-resource-dir)/include
+# clang's own headers, the freestanding ones CFLAGS_OS compiles against, are
+# the second system directory the image stages (step 6 of the C-hosting plan).
+# Their directory is asked of clang once, inside the esp recipe, so no other
+# make runs clang for it and a failure there stops the stage with a message.
 # The eleven by name, and the helpers they include by glob, so a toolchain
 # update that adds a helper is staged without a kept list going stale; a
 # family the toolchain does not have (older clangs have no __float_*.h) is
@@ -776,8 +775,12 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	mkdir -p $(ESP_DIR)/include/clang
 	cp -R $(PICO_DIR)/include/. $(ESP_DIR)/include/
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -dM -E -x c /dev/null > $(ESP_DIR)/include/target.h
-	cd "$(CLANG_INC)" && cp $(CLANG_HDRS) "$(abspath $(ESP_DIR))/include/clang/"
-	cd "$(CLANG_INC)" && for f in $(CLANG_GLOBS); do [ -e "$$f" ] && cp "$$f" "$(abspath $(ESP_DIR))/include/clang/"; done; true
+	res=$$($(CC) -print-resource-dir) && [ -n "$$res" ] && [ -d "$$res/include" ] || { \
+		echo "esp: no clang resource directory from '$(CC) -print-resource-dir'"; exit 1; }; \
+	cd "$$res/include" && cp $(CLANG_HDRS) "$(abspath $(ESP_DIR))/include/clang/" && \
+	for f in $(CLANG_GLOBS); do \
+		[ ! -e "$$f" ] || cp "$$f" "$(abspath $(ESP_DIR))/include/clang/" || exit 1; \
+	done
 	cp $(KERNEL) $(ESP_DIR)/EFI/BOOT/BOOTAA64.EFI
 	cp $(SHELL_BIN) $(ESP_DIR)/EFI/ORBS/SH.BIN
 	cp $(HELLO_BIN) $(ESP_DIR)/EFI/ORBS/HELLO.BIN
@@ -1747,8 +1750,8 @@ test-cclock: image
 # exFAT, every staged file is there by path with its size; each directory
 # small enough for one NP_READDIR reply lists exactly build/esp/include's names
 # and sizes, and each larger one lists only staged names, in their case;
-# three files cat to the host's bytes; and on FAT32, names fsd creates keep
-# their case. Three boots, about five minutes; run it whenever the header
+# three files cat to the host's bytes; and names made on the guest keep their
+# case, on all three (FAT32 by byte 12's case flags). Three boots, about five minutes; run it whenever the header
 # staging, or a filesystem's directory listing or naming, changes.
 test-include: image image-ext2 image-exfat
 	python3 scripts/test-include.py
