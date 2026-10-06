@@ -16,9 +16,8 @@ pub extern "C" fn _start() -> ! {
     );
     let target = ulib::stdout_target();
     let n = ulib::env_count();
-    // One entry (NAME=VALUE) at a time - bounded well under the syscall's
-    // MAX_USER_LEN (512) out-capacity, which ENV_MAX (the whole-blob size)
-    // would exceed.
+    // One entry (NAME=VALUE) at a time: 256 bytes holds any entry the shell
+    // makes (GET_ENV would accept up to ENV_MAX, 2048).
     let mut buf = [0u8; 256];
     let mut i = 0;
     while i < n {

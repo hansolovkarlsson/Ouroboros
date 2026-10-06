@@ -609,7 +609,7 @@ pub const GET_ARGC: u64 = 48;
 /// `(index, out pointer, out capacity)` -> the true length of argument
 /// `index` (copying up to `out capacity` of its bytes into the buffer), or
 /// [`NO_ARG`] if `index >= argc`. A zero-length real argument returns `0`
-/// (distinct from [`NO_ARG`]).
+/// (distinct from [`NO_ARG`]). The capacity may be up to [`ARGV_MAX`].
 pub const GET_ARG: u64 = 49;
 
 /// [`GET_ARG`]'s return for an out-of-range index. `u64::MAX` is safely
@@ -725,14 +725,14 @@ pub const GET_ENVC: u64 = 59;
 /// `(index, out pointer, out capacity)` -> the true length of environment
 /// entry `index` as a `NAME=VALUE` string (copying up to `out capacity` bytes
 /// into the buffer), or [`NO_ARG`] if `index >= envc`. Mirrors [`GET_ARG`];
-/// `ulib::getenv` splits the `NAME=VALUE` on the first `=`. Note the out buffer
-/// is validated like every user pointer, so its capacity must be `<=` the
-/// syscall boundary's user-range cap (512) - read **one entry at a time** into
-/// a small buffer, not one of [`ENV_MAX`] (which is the whole-blob store size).
+/// `ulib::getenv` splits the `NAME=VALUE` on the first `=`. The capacity may be
+/// up to [`ENV_MAX`], the store's own size, so a buffer that holds the whole
+/// environment holds any one entry (since 2026-10-06; it was the blanket
+/// 512-byte user-range cap until then, and a larger buffer was refused).
 pub const GET_ENV: u64 = 60;
 
-/// Maximum size of a staged environment **blob** (and the per-task env store) -
-/// *not* a per-entry read size (see [`GET_ENV`]). The shell's env holds up to
+/// Maximum size of a staged environment **blob** (and the per-task env store),
+/// and the largest capacity [`GET_ENV`] accepts. The shell's env holds up to
 /// 16 vars of a name + a 128-byte value each; 2048 bytes covers a realistic
 /// environment (a maximally-full one truncates, dropping trailing vars,
 /// documented in `ulib`/the shell).

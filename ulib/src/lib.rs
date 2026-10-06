@@ -147,9 +147,9 @@ pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
 /// Scans the environment (`env_count`/`env_at`), splitting each entry on its
 /// first `=`. A `getenv`-shaped helper for programs that want one variable.
 pub fn getenv(name: &[u8], buf: &mut [u8]) -> Option<usize> {
-    // One entry at a time. 256 bytes holds any NAME=VALUE (a name plus a
-    // 128-byte value) and stays under the syscall's MAX_USER_LEN out-capacity
-    // (512) - the whole-blob ENV_MAX (2048) would be rejected by the range check.
+    // One entry at a time. 256 bytes holds any NAME=VALUE the shell makes (a
+    // name of up to 24 bytes plus a 128-byte value); GET_ENV would accept up
+    // to ENV_MAX (2048), so this is a stack budget, not the kernel's limit.
     let mut entry = [0u8; 256];
     let n = env_count();
     for i in 0..n {

@@ -280,6 +280,14 @@ fn valid_msg_range(ptr: u64, len: u64) -> bool {
 /// says it means. Containment in the caller's region is unchanged and is the
 /// check that actually matters for safety; `max` only bounds the copy into a
 /// buffer already sized for it.
+///
+/// The READS of one entry, `GET_ARG` and `GET_ENV`, take it too, with the
+/// store's size as `max`: the copy out is at most one entry, and an entry is
+/// shorter than its store. Under the blanket cap `GET_ENV` refused a buffer
+/// the size of the environment, so every reader had to copy one entry into a
+/// 512-byte window and decide what to do with a longer one; libc's crt0
+/// carried a copy of `MAX_USER_LEN` and a skip for exactly that, which no rig
+/// could reach. Found by the review of #221, 2026-10-06.
 fn valid_stage_range(ptr: u64, len: u64, max: usize) -> bool {
     ptr != 0 && len != 0 && len <= max as u64 && in_caller_region(ptr, len)
 }
@@ -739,8 +747,9 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::GET_ARG => {
             // arg0 = index, arg1 = out pointer, arg2 = out capacity. Copies up
             // to capacity bytes of argument `index`, returns its true length,
-            // or NO_ARG if out of range.
-            if !valid_user_range(arg1, arg2) {
+            // or NO_ARG if out of range. The capacity is bounded by the argv
+            // store, not the blanket cap (see valid_stage_range).
+            if !valid_stage_range(arg1, arg2, ARGS_STAGING_SIZE) {
                 return syscall_abi::NO_ARG;
             }
             let blob = tasks::argv_blob(tasks::current_task());
@@ -774,8 +783,10 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::GET_ENV => {
             // arg0 = index, arg1 = out pointer, arg2 = out capacity. Same shape
             // as GET_ARG (the env blob reuses the argv encoding), returning the
-            // index-th NAME=VALUE string or NO_ARG if out of range.
-            if !valid_user_range(arg1, arg2) {
+            // index-th NAME=VALUE string or NO_ARG if out of range. The
+            // capacity is bounded by the env store (ENV_MAX), not the blanket
+            // 512: a buffer the size of the whole environment is accepted.
+            if !valid_stage_range(arg1, arg2, ENV_STAGING_SIZE) {
                 return syscall_abi::NO_ARG;
             }
             let blob = tasks::env_blob(tasks::current_task());

@@ -22,9 +22,10 @@ the check into "unset" and pass a C side lost the same way. No fault line in
 QEMU's trace. About a minute. Run it whenever crt0.c or the kernel's env store
 changes.
 
-Not reached: crt0's skipping of an entry longer than one copy (USER_COPY_MAX,
-512 bytes). The shell's longest entry is 7 + 1 + 128 bytes here, 24 + 1 + 128
-at most, so no spawn the shell makes can reach it.
+crt0 asks GET_ENV for up to 2047 bytes on its first entry, more than the
+kernel's blanket 512-byte cap, so this rig also fails if GET_ENV's capacity is
+checked against that cap rather than ENV_MAX (the control in the PR that made
+it so, 2026-10-06).
 """
 import importlib.util
 import os
