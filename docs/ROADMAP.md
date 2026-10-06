@@ -2246,7 +2246,7 @@ be reviewed after the fact from the saved screenshots.
 > `rmdir`, `rename` and `remove` (#215) and then every call in the file layer
 > (step 2, #220), `main` receives argv (step 1, #219), and `environ` exists
 > (step 3, #221), `stat(path)` exists (step 4, #223), and `time()` links,
-> saying 1970 plus uptime (step 5); the plan's "Where it stands" says what
+> saying 1970 plus uptime (step 5, #224); the plan's "Where it stands" says what
 > that leaves.
 >
 > **CPP is now Proem, since 2026-10-01.** The workspace's C preprocessor was

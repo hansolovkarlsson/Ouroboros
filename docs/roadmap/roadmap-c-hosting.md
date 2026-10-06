@@ -224,7 +224,7 @@ tree at `4dcbddd` leaves of them, read from the code.
   ext2 image has none), and the hand-rolled libc's `stat` (only `cerrno`'s
   picolibc build runs). `..` is lexical, as for every call in the library:
   `stat("/NOSUCH/../etc/passwd")` succeeds (an item in `ROADMAP.md`).
-- **Step 5, a clock: done 2026-10-06, the first level.**
+- **Step 5, a clock: done 2026-10-06, the first level, #224.**
   `libc/pico/clock.c`, in the picolibc port beside `builtins.c` (the
   hand-rolled libc has no `<time.h>`), gives `gettimeofday` and
   `clock_gettime` from `MONOTONIC_US`, so `time()` links and says 1970 plus
