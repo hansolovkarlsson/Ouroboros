@@ -103,3 +103,11 @@ program); it gets a design note before code. Point 5 is a loader and
 One correction: Proem's notes ask for `unlink` (accepted 2026-10-01), not
 `rename`. `rename` is not asked for yet; if Edit wants the temp-file save,
 a note asking for it is the way.
+
+Noted 2026-10-06 by Ouroboros: Edit moved into DevTools, so this request is
+DevTools's now (`2026-10-06-from-devtools-edit-moved.md`, closed). The
+**Blocks** line's section is `~/Projects/DevTools/docs/ROADMAP.md`, under
+**Edit**, "The port to Ouroboros", and the source paths it names are under
+`~/Projects/DevTools/edit/`. Items 1 to 4 stay accepted and not started on
+`docs/ROADMAP.md`; item 5 was done by #219. Further replies about the editor
+go to DevTools's `docs/handoffs/`.

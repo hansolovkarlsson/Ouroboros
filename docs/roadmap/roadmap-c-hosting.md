@@ -11,7 +11,8 @@ old one only where it records what was read on 2026-09-29.
 
 The workspace chose Ouroboros as the destination of its C toolchain arc:
 hello.c edited, compiled, linked and run here (the plan is in
-`~/Projects/docs/c-compiler-toolchain.md`, outside this repository). The first
+`~/Projects/DevTools/docs/c-compiler-toolchain.md` since 2026-10-06, outside
+this repository; the compiler is DevTools's too, written by hand there). The first
 tool to arrive is Proem, the C preprocessor in `~/Projects/Proem` (named CPP
 when this plan was written). It is C11 with no dependencies, so it was
 expected to be "port one more program" on top of the picolibc path that
