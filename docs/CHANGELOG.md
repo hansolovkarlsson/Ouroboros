@@ -49,11 +49,21 @@ against the wrong `struct stat`; it now zeroes what it does not fill, and
 reports the file type everywhere. `make test-crename` checks all of it on
 FAT32 and ext2.
 
-**A C program's `main` receives its arguments.** `crt0` builds `argc` and
+**A C program's `main` receives its arguments (#219).** `crt0` builds `argc` and
 `argv` from the kernel's store, the one Rust programs read, and calls
 `main(argc, argv)`; until now it called `main(void)`. `/bin/CARGS` prints the
 vector as `/bin/ARGS` does and `make test-cargs` compares them. Step 1 of the
 C-hosting plan, and item 5 of Edit's console note.
+
+**Every failure in the C file layer sets `errno`.** `open`, `read`,
+`write`, `close`, `fstat` and `lseek` now set it in a picolibc program, as
+the path verbs already did: `ENOENT` and `ENOTDIR` from the server, which
+Proem's include search reads, and the library's own refusals as POSIX names
+them (`EBADF`, `EMFILE`, `EINVAL`, `EOVERFLOW`, `ESPIPE`, `EFAULT`). An
+unknown `lseek` whence is refused rather than taken as `SEEK_SET`, `close`
+reports a server's refusal, and `fstat` of a console fd says a character
+device. `make test-cerrno` checks every
+case on FAT32 and ext2. Step 2 of the C-hosting plan.
 
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or

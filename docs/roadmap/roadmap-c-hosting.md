@@ -121,7 +121,7 @@ The plan sat on its branch for a week while Proem's handoff notes were met on
 `main` by other routes. The steps above are kept as written; this is what the
 tree at `4dcbddd` leaves of them, read from the code.
 
-- **Step 1, argv: done 2026-10-05.** `crt0.c` builds the vector from
+- **Step 1, argv: done 2026-10-05, #219.** `crt0.c` builds the vector from
   `GET_ARGC`/`GET_ARG` into static storage (no heap, so the hand-rolled
   libc and the picolibc port share it) and calls `main(argc, argv)`.
   `libc/cargs.c` prints it in `/bin/ARGS`'s format, built through picolibc
@@ -135,10 +135,27 @@ tree at `4dcbddd` leaves of them, read from the code.
   target. Found on the
   way: the shell keeps 16 words and drops the rest without a word
   (`MAX_ARGS`), an item in `ROADMAP.md`.
-- **Step 2, errno: begun.** `file.c` has `set_errno_from_status`, built for
-  picolibc programs only (`-DOURO_HAVE_ERRNO`), and `unlink`, `rmdir`,
-  `rename` and `remove` call it (#215). `open`, `read`, `close` and `fstat`
-  do not, and those are the ones Proem's include search needs.
+- **Step 2, errno: done 2026-10-05.** Every call in `file.c` that returns
+  -1 sets `errno` in a picolibc program: the server's status through
+  `set_errno_from_status` (begun by #215 for the path verbs), and the
+  library's own refusals through `client_fail`, named as POSIX names them:
+  `EBADF` for a bad fd, `EMFILE` for a full fd table (it had shared
+  `FS_ERR_CLIENT` with a long path, so it would have read `ENAMETOOLONG`),
+  `EINVAL` for an unknown `whence` or a seek before the start (an unknown
+  `whence` used to be taken as `SEEK_SET`), `EOVERFLOW` for one past
+  `LONG_MAX` (tested before the sum, which would be undefined), `EFAULT`
+  for a null `struct stat`. A read or write against an fd's open mode is
+  still sent, since fsd is the authority on a fid's flags, and only its
+  permission refusal is renamed `EBADF`; any other status keeps its own
+  name. The console fds 0 to 2 are valid descriptors with no file: `fstat`
+  says a character device, `lseek` `ESPIPE`, `close` succeeds. `close`
+  reports a refused `NP_CLUNK` as -1 with `errno`, the slot released
+  either way. `/bin/CERRNO`
+  (`libc/cerrno.c`) provokes each case; `make test-cerrno` runs it on FAT32
+  and ext2 as root (27 checks each) and as `user` on ext2 for `EACCES`. fsd
+  already answered `ENOTDIR` for a path through a file, on both. Controls:
+  `main`'s `file.c` fails every check, and dropping the `EBADF` naming fails
+  exactly the two mode checks, with `EACCES`.
 - **Steps 3 to 5, environ, `stat`, a clock: open.** Nothing in `libc/src`
   defines `environ`, `stat` or `gettimeofday`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:

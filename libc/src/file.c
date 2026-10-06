@@ -32,12 +32,12 @@
 /* `errno` where the C library has one: picolibc does, and the Makefile builds
  * this file for a picolibc program (`$(BUILD_DIR)/pico/file.o`) with
  * -DOURO_HAVE_ERRNO, said by the build rather than guessed from the include
- * path (the review of #215). The hand-rolled libc has none, so there `unlink`,
- * `rename` and `rmdir` report through `ouro_last_fs_status` alone, as every
- * other call here does. */
+ * path (the review of #215). The hand-rolled libc has none, so there every
+ * call reports through `ouro_last_fs_status` alone. */
 #ifdef OURO_HAVE_ERRNO
 #include <errno.h>
 #endif
+#include <limits.h>
 
 /* How many files this LIBRARY can hold open. No longer tied to fsd's MAX_FIDS:
  * that number justified the old fd==fid identity, which is retired (see the
@@ -65,11 +65,13 @@ struct file_state {
 };
 static struct file_state g_files[MAX_FILES];
 
-/* The status of the last failed request. open()/read()/write() return -1 with
- * no errno (this libc has none), so without this a C program cannot tell "no
- * such file" from "that server does not implement this request" - the exact
- * confusion FS_ERR_NO_SUCH_VERB was reserved to end, stopping one layer short
- * of C. Not errno: one value, no thread story, no claim to be more.
+/* The status of the last failed request. Written when the hand-rolled libc
+ * was the only one and had no errno, so without this a C program could not
+ * tell "no such file" from "that server does not implement this request" -
+ * the exact confusion FS_ERR_NO_SUCH_VERB was reserved to end, stopping one
+ * layer short of C. Still the only report there; a picolibc program has errno
+ * as well (set_errno_from_status), and this keeps the server's own code where
+ * errno can only say EIO. Not errno: one value, no thread story.
  *
  * Cleared to 0 by every request a server answers without error (np_request's
  * success arm), or a later failure that sets nothing reports whatever the
@@ -98,7 +100,7 @@ const char *ouro_fs_strerror(void) {
     if (s == MSG_ERR_DENIED) return "not allowed to reach that server (capability)";
     if (s == FS_ERR_BUSY) return "that server is out of room for this right now (try again later)";
     if (s == TASK_ERR_NO_SUCH_TASK) return "that server is not running (it died with this request in flight, or was absent this boot)";
-    if (s == FS_ERR_CLIENT) return "never sent (no free fd, or the path could not be resolved)";
+    if (s == FS_ERR_CLIENT) return "never sent (refused by the library: a bad fd or argument, no free fd, or a path too long)";
     if (s >= FS_ERR_MIN) return "failed";
     return "no error recorded";
 }
@@ -325,8 +327,11 @@ static int resolve_target(const char *path, char *fspath, unsigned long *fslen,
 }
 
 /* Sets `errno` from the status the last request recorded, where there is an
- * `errno` (see the include above). Only `unlink` and `rename` call it so far;
- * step 2 of the C-hosting plan gives the rest of this file the same. */
+ * `errno` (see the include above). Every call in this file that returns -1
+ * sets it, through this or through client_fail below (step 2 of the C-hosting
+ * plan, 2026-10-05; until then only the path verbs did). Proem's include
+ * search depends on it: ENOENT or ENOTDIR means "try the next directory", and
+ * anything else stops the search as an error. */
 static void set_errno_from_status(void) {
 #ifdef OURO_HAVE_ERRNO
     unsigned long s = g_last_status;
@@ -345,6 +350,46 @@ static void set_errno_from_status(void) {
     else if (s == NO_FS || s == TASK_ERR_NO_SUCH_TASK) errno = ENODEV;
     else if (s == FS_ERR_CLIENT) errno = ENAMETOOLONG;
     else errno = EIO;
+#endif
+}
+
+/* A failure the library finds without asking a server (a bad fd, a full fd
+ * table, a bad argument): POSIX's own errno for it, and FS_ERR_CLIENT for
+ * ouro_last_fs_status, which says "never sent" and must not keep the status
+ * of whatever request came before. Always -1, for the caller to return. */
+static int client_fail_(int e) {
+    g_last_status = FS_ERR_CLIENT;
+#ifdef OURO_HAVE_ERRNO
+    errno = e;
+#else
+    (void)e;
+#endif
+    return -1;
+}
+/* A macro so the hand-rolled build, which has no <errno.h>, never expands the
+ * errno name at all, rather than this file defining stand-ins for names a
+ * header could later define for real (the review of #220). */
+#ifdef OURO_HAVE_ERRNO
+#define client_fail(e) client_fail_(e)
+#else
+#define client_fail(e) client_fail_(0)
+#endif
+
+/* errno for a failed read or write on an fd opened without that mode. fsd
+ * refuses such a request (the fid's flags are its authority, and a raw 9P
+ * peer has no library in front), and POSIX names that refusal EBADF, not the
+ * EACCES FS_ERR_PERM maps to. So the request is still sent, and only that
+ * answer is renamed: any other status (the disk unmounted, the server gone,
+ * the peer unreachable) is mapped as it is, since it says something else
+ * (the review of #220). */
+static void set_errno_mode(int opened_for_it) {
+    set_errno_from_status();
+#ifdef OURO_HAVE_ERRNO
+    if (!opened_for_it && g_last_status == FS_ERR_PERM) {
+        errno = EBADF;
+    }
+#else
+    (void)opened_for_it;
 #endif
 }
 
@@ -374,6 +419,7 @@ int open(const char *path, int flags, ...) {
     unsigned target;
     unsigned char endpoint[NS_ENDPOINT_LEN];
     if (resolve_target(path, fspath, &fslen, &target, endpoint) != 0) {
+        set_errno_from_status();
         return -1;
     }
 
@@ -387,8 +433,7 @@ int open(const char *path, int flags, ...) {
         }
     }
     if (idx < 0) {
-        g_last_status = FS_ERR_CLIENT;
-        return -1;
+        return client_fail(EMFILE);
     }
 
     /* NP_OPEN's a0 is the FLAGS and a1 the path length - the reverse of every
@@ -397,6 +442,7 @@ int open(const char *path, int flags, ...) {
     long fid = np_request(target, endpoint, NP_OPEN, oflags, fslen, 0,
                           fspath, (size_t)fslen, 0, 0);
     if ((unsigned long)fid >= FS_ERR_MIN || fid < FID_BASE) {
+        set_errno_from_status(); /* EIO for a fid below FID_BASE: no status */
         return -1;
     }
     g_files[idx].used = 1;
@@ -534,13 +580,26 @@ void __libc_close_all(void) {
     }
 }
 
+/* The slot is released whatever the server answers, as POSIX close releases
+ * the descriptor even when it reports an error; a refused NP_CLUNK (a peer
+ * gone, a server restarted) is then -1 with errno, where it used to be lost
+ * (the review of #220). The console fds have no server state: closing one
+ * succeeds and changes nothing, since write(1) and write(2) route by the
+ * task's stdout target, not by a slot. */
 int close(int fd) {
+    if (fd >= 0 && fd < FID_BASE) {
+        return 0;
+    }
     struct file_state *f = file_for(fd);
     if (!f) {
+        return client_fail(EBADF);
+    }
+    long s = np_request(f->target, f->endpoint, NP_CLUNK, f->fid, 0, 0, 0, 0, 0, 0);
+    f->used = 0;
+    if ((unsigned long)s >= FS_ERR_MIN) {
+        set_errno_from_status();
         return -1;
     }
-    np_request(f->target, f->endpoint, NP_CLUNK, f->fid, 0, 0, 0, 0, 0, 0);
-    f->used = 0;
     return 0;
 }
 
@@ -560,9 +619,20 @@ int close(int fd) {
  * from its mount options). uid and gid stay 0 there. Before, `st_mode` was 0
  * on those, so `S_ISREG` was false for every file. */
 int fstat(int fd, struct stat *st) {
+    if (!st) {
+        return client_fail(EFAULT);
+    }
+    /* The console fds are valid and have no file behind them: a character
+     * device, as a terminal is, rather than EBADF for a descriptor that
+     * exists (the review of #220). */
+    if (fd >= 0 && fd < FID_BASE) {
+        memset(st, 0, sizeof *st);
+        st->st_mode = S_IFCHR | 0666;
+        return 0;
+    }
     struct file_state *f = file_for(fd);
-    if (!f || !st) {
-        return -1;
+    if (!f) {
+        return client_fail(EBADF);
     }
     /* Zeroed: np_request copies only what the reply carries, and a shorter
      * record (an older peer's 20 bytes) must read as "no mode", not as the
@@ -570,6 +640,7 @@ int fstat(int fd, struct stat *st) {
     unsigned char info[STAT_INFO_LEN] = {0};
     long s = np_request(f->target, f->endpoint, NP_FSTAT, f->fid, 0, 0, 0, 0, info, sizeof(info));
     if ((unsigned long)s >= FS_ERR_MIN) {
+        set_errno_from_status();
         return -1;
     }
     memset(st, 0, sizeof *st);
@@ -589,10 +660,17 @@ int fstat(int fd, struct stat *st) {
     return 0;
 }
 
+/* POSIX: EBADF for a bad fd, ESPIPE for the console fds, EINVAL for an
+ * unknown `whence` or a result before the start of the file, EOVERFLOW for
+ * one past LONG_MAX; a refusal leaves the offset where it was. A `whence`
+ * other than the three used to be taken as SEEK_SET. */
 long lseek(int fd, long offset, int whence) {
+    if (fd >= 0 && fd < FID_BASE) {
+        return client_fail(ESPIPE);
+    }
     struct file_state *f = file_for(fd);
     if (!f) {
-        return -1;
+        return client_fail(EBADF);
     }
     long base = 0;
     if (whence == SEEK_CUR) {
@@ -603,6 +681,18 @@ long lseek(int fd, long offset, int whence) {
             return -1;
         }
         base = s.st_size;
+    } else if (whence != SEEK_SET) {
+        return client_fail(EINVAL);
+    }
+    /* base is never negative (an offset or a size), so only a positive
+     * offset can overflow, and the test must come before the sum: a signed
+     * overflow is undefined, and the compiler may drop a check written after
+     * it (the review of #220). */
+    if (offset > 0 && base > LONG_MAX - offset) {
+        return client_fail(EOVERFLOW);
+    }
+    if (base + offset < 0) {
+        return client_fail(EINVAL);
     }
     f->offset = base + offset;
     return f->offset;
@@ -761,7 +851,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
     }
     struct file_state *f = file_for(fd);
     if (!f) {
-        return -1;
+        return client_fail(EBADF);
     }
     /* A REMOTE write and a LOCAL write differ only in how the data reaches
      * fsd: a LOCAL fid grants the buffer to fsd (which SAFECOPYs from it, so
@@ -788,7 +878,11 @@ ssize_t write(int fd, const void *buf, size_t count) {
                             (unsigned long)f->offset, chunk, 0, 0, 0, 0);
         }
         if ((unsigned long)st >= FS_ERR_MIN) {
-            return (off > 0) ? (ssize_t)off : -1;
+            if (off > 0) {
+                return (ssize_t)off; /* POSIX: the short count, errno untouched */
+            }
+            set_errno_mode((f->flags & 3) != O_RDONLY);
+            return -1;
         }
         /* Advance by what was ACTUALLY written (fsd's NP_PWRITE status is the
          * byte count), not by the whole chunk. A short or zero write (the far
@@ -817,7 +911,7 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
     struct file_state *f = file_for(fd);
     if (!f) {
-        return -1;
+        return client_fail(EBADF);
     }
     unsigned char *p = (unsigned char *)buf;
     size_t got = 0;
@@ -829,7 +923,11 @@ ssize_t read(int fd, void *buf, size_t count) {
         long n = np_request(f->target, f->endpoint, NP_PREAD, f->fid,
                             (unsigned long)f->offset, want, 0, 0, p + got, want);
         if ((unsigned long)n >= FS_ERR_MIN) {
-            return (got > 0) ? (ssize_t)got : -1;
+            if (got > 0) {
+                return (ssize_t)got; /* POSIX: the short count, errno untouched */
+            }
+            set_errno_mode((f->flags & 3) != O_WRONLY);
+            return -1;
         }
         if (n == 0) {
             break; /* EOF */
