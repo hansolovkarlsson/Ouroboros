@@ -464,8 +464,10 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   themselves. `libc/hello.c` remains the self-contained *no-libc* proof (its own
   `svc` stubs) and the `.data`/`.bss` regression test.
 - **File I/O works, via fids** (`libc/src/file.c`, `make cfile-bin` →
-  `/bin/CFILE`): `open`/`read`/`write`/`close`/`lseek`/`fstat`, and since
-  2026-10-05 `unlink`, `rmdir`, `rename` and `remove` (path verbs
+  `/bin/CFILE`): `open`/`read`/`write`/`close`/`lseek`/`fstat`, since
+  2026-10-06 `stat` (path verb `NP_STAT`, no fid, so no read permission on
+  the file is needed), and since 2026-10-05 `unlink`, `rmdir`, `rename` and
+  `remove` (path verbs
   `NP_RM`/`NP_RMDIR`/`NP_MV`, no fid; `remove` takes a file or an empty
   directory; `rename` replaces an existing ordinary file, answers `EXDEV` across
   mounts and `EINVAL` for a directory moved into itself). Every one of them

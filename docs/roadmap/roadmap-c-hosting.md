@@ -73,6 +73,8 @@ Each step has its check.
    `printenv` matches `/bin/PRINTENV`.
 4. **`stat(path)`.** picolibc references it; supply it over the same fid path
    as `open` + `fstat` + `close`. **Check:** part of the step 2 program.
+   *(Built 2026-10-06 over the path verb `NP_STAT` instead: see "Where it
+   stands".)*
 5. **A clock.** `gettimeofday` is missing, and the kernel has only
    `MONOTONIC_US`, time since boot, with no wall clock. Two levels:
    - *Enough for the link:* `gettimeofday` from `MONOTONIC_US`, so a C
@@ -183,8 +185,36 @@ tree at `4dcbddd` leaves of them, read from the code.
   first `GET_ENV` asks for 2047 bytes, so with the blanket refusal back
   every `getenv` answers unset, and `/bin/RDPROBE` reads all five stores
   through a 4 KiB buffer.
-- **Steps 4 and 5, `stat`, a clock: open.** Nothing in `libc/src` defines
-  `stat` or `gettimeofday`.
+- **Step 4, `stat(path)`: done 2026-10-06.** `file.c`'s `stat` sends one
+  `NP_STAT`, the path verb `ls -l` uses, which fsd, `netd`'s export and the
+  host peer all serve, and decodes the record through the same function as
+  `fstat`. Not `open` + `fstat` + `close`, as step 4 first said: that asks
+  for read permission on the file and an fd slot, and POSIX's `stat` needs
+  neither. fsd authorizes `NP_STAT` by the ancestor walk alone, so `stat` of
+  a file the caller may not read succeeds, a directory needs no open, and a
+  full fd table does not stop it. A console binding is the character device
+  `fstat(1)` reports, at the binding only; a path ending in `/` or `/.` must
+  name a directory (`ENOTDIR` otherwise), checked against the path as given,
+  since the library collapses it as text first. A `/net` binding answers
+  `ENOSYS`, as `open` does: `netd` serves `NP_STAT` for `/`, `ip` and `mac`
+  but not under `/tcp`, where existing files get `EISDIR`, `EIO` or
+  `ENOENT` (an item in `ROADMAP.md`). `lstat` is `stat`, there being no
+  symbolic links. `make test-cerrno` checks it: fourteen checks as root on
+  FAT32 and ext2 (a missing path, a path through a file, an empty path, a
+  null struct, a directory, a file against `fstat`'s record, `lstat`, every
+  fd in use, a trailing slash on a directory and on a file, a trailing `/.`,
+  the console binding, a path below it, a `/net` path), and as `user` on
+  ext2 `stat` of `/etc/shadow` succeeding where `open` is refused, and the
+  mode and owner of two files as `debugfs` reads them off the image
+  (`/etc/shadow`'s owner is the host user who built the image, uid 501 gid
+  20 here, since `mke2fs -d` carries it: the carried "ext2 uid 501" item,
+  which this check found again; its uid and gid differ, so a swap is
+  caught). Not observed: `stat` through a remote mount (the rig is one
+  machine), a refusal for a directory above that is not searchable (the
+  ext2 image has none), and the hand-rolled libc's `stat` (only `cerrno`'s
+  picolibc build runs). `..` is lexical, as for every call in the library:
+  `stat("/NOSUCH/../etc/passwd")` succeeds (an item in `ROADMAP.md`).
+- **Step 5, a clock: open.** Nothing in `libc/src` defines `gettimeofday`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against
   picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real

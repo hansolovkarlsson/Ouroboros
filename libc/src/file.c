@@ -293,12 +293,12 @@ static int resolve_path_raw(const char *path, char *out) {
 
 /* Where `path` lives: the server-side path, its length, the target (server,
  * and the fsd tree in its high bits) and, for a remote mount, the endpoint.
- * 0, or -1 with FS_ERR_CLIENT recorded (too long, or not resolvable) or
- * FS_ERR_NO_SUCH_VERB (the console and /net, served by servers with no file
- * model, where "no such file" would be a lie). Shared by `open`, `unlink`
- * and `rename`. */
-static int resolve_target(const char *path, char *fspath, unsigned long *fslen,
-                          unsigned *target, unsigned char *endpoint) {
+ * 0, or -1 with FS_ERR_CLIENT recorded (too long, or not resolvable), or
+ * FS_ERR_NOT_FOUND for an empty path. Every target a binding can name, the
+ * console and `/net` included: `stat` answers the console itself, and
+ * resolve_target below refuses both for the verbs that need a file. */
+static int resolve_any(const char *path, char *fspath, unsigned long *fslen,
+                       unsigned *target, unsigned char *endpoint) {
     char abspath[PATH_MAX_C];
     /* An empty path names nothing (POSIX: ENOENT). It used to resolve to the
      * cwd, harmless for open, not for unlink or a rename of "" (the review of
@@ -317,6 +317,17 @@ static int resolve_target(const char *path, char *fspath, unsigned long *fslen,
     if (ouro_ns_resolve(abspath, strlen(abspath), fspath, FSPATH_MAX_C, fslen,
                         target, endpoint) != 0) {
         g_last_status = FS_ERR_CLIENT;
+        return -1;
+    }
+    return 0;
+}
+
+/* resolve_any, refusing the targets with no file model, the console and
+ * `/net`, where "no such file" would be a lie (FS_ERR_NO_SUCH_VERB). For the
+ * verbs that need a file: open, unlink, rename and the rest. */
+static int resolve_target(const char *path, char *fspath, unsigned long *fslen,
+                          unsigned *target, unsigned char *endpoint) {
+    if (resolve_any(path, fspath, fslen, target, endpoint) != 0) {
         return -1;
     }
     if ((*target & 0xff) == NS_TARGET_CONSOLE || (*target & 0xff) == NS_TARGET_NETLOCAL) {
@@ -393,7 +404,7 @@ static void set_errno_mode(int opened_for_it) {
 #endif
 }
 
-/* ---- open / close / lseek / fstat / unlink / rename ---------------------- */
+/* ---- open / close / lseek / stat / fstat / unlink / rename -------------- */
 
 int open(const char *path, int flags, ...) {
 
@@ -603,12 +614,15 @@ int close(int fd) {
     return 0;
 }
 
-/* What the server's `NP_FSTAT` record says, and nothing else. The whole
+/* `st` from an `NP_STAT`/`NP_FSTAT` record: what the server's record says, and
+ * nothing else, the one decoding `stat` and `fstat` share. The whole
  * `struct stat` is zeroed first: it used to be left as the caller's stack had
  * it but for two fields, and Proem, which knows a file by `st_dev` and
  * `st_ino`, could take two headers for one and skip the second silently (its
  * fstat-identity handoff, 2026-10-01). So `st_dev` and `st_ino` read 0, "no
- * identity", until the record carries one (a wire change, on the roadmap).
+ * identity", until the record carries one (a wire change, on the roadmap):
+ * for `stat` as for `fstat`, two different files compare EQUAL by the usual
+ * same-file test, (st_dev, st_ino), and a ported program must not use it.
  * Mode, uid and gid are the disk's where it records them (ext2,
  * `STAT_MODEVALID_OFF`). Where it does not (FAT32, exFAT, /proc), `st_mode`
  * is the file type from the record's directory flag with 0666 for a file and
@@ -617,7 +631,116 @@ int close(int fd) {
  * true answer, where 0000 would have told a ported program it may touch
  * nothing (the review of #216; Linux's vfat makes the bits up the same way,
  * from its mount options). uid and gid stay 0 there. Before, `st_mode` was 0
- * on those, so `S_ISREG` was false for every file. */
+ * on those, so `S_ISREG` was false for every file.
+ *
+ * `info` must be zeroed before the request: the reply copies only what it
+ * carries, and a shorter record (an older peer's 20 bytes) must read as "no
+ * mode", not as the stack's leftovers in the mode-valid byte (the review of
+ * #216). */
+static void stat_from_record(struct stat *st, const unsigned char *info) {
+    memset(st, 0, sizeof *st);
+    st->st_size = (long)__rd_u64(info + STAT_SIZE_OFF);
+    if (info[STAT_MODEVALID_OFF]) {
+        st->st_mode = (unsigned)(info[STAT_MODE_OFF] | (info[STAT_MODE_OFF + 1] << 8));
+        st->st_uid = (unsigned)(info[STAT_UID_OFF] | (info[STAT_UID_OFF + 1] << 8));
+        st->st_gid = (unsigned)(info[STAT_GID_OFF] | (info[STAT_GID_OFF + 1] << 8));
+    } else {
+        /* The whole u32, as ulib's stat_is_dir reads it. */
+        unsigned long flags = (unsigned long)info[STAT_FLAGS_OFF] |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 1] << 8) |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 2] << 16) |
+                              ((unsigned long)info[STAT_FLAGS_OFF + 3] << 24);
+        st->st_mode = (flags & STAT_FLAG_DIR) ? (S_IFDIR | 0777) : (S_IFREG | 0666);
+    }
+}
+
+/* The metadata of the file at `path`, without opening it: one NP_STAT, the
+ * path verb `ls -l` uses, served by fsd, netd's export and the host peer
+ * alike. 0, or -1 with errno set where there is one. Step 4 of
+ * docs/roadmap/roadmap-c-hosting.md, since 2026-10-06; picolibc references it.
+ *
+ * Not open + fstat + close, which the plan first said. That would ask for
+ * READ permission on the file and an fd slot, where POSIX's stat needs
+ * neither: fsd authorizes NP_STAT by the ancestor walk alone (every directory
+ * above must be searchable) and does not check the file's own mode, so `stat`
+ * of a file the caller may not read succeeds, as it must, and works with every
+ * fd in use. A directory needs no open either.
+ *
+ * A console binding (`mount -c`) is the character device fstat(1) reports,
+ * at the binding itself only: a path below it names nothing (ENOENT). A
+ * `/net` binding (`mount -n`) answers ENOSYS, as for open: netd serves
+ * NP_STAT for `/`, `ip` and `mac` but not under `/tcp`, where the request
+ * reaches the dial files' handler and gets EISDIR, EIO or ENOENT for files
+ * that exist (and bumps a connection's idle clock). Until netd answers there
+ * (on the roadmap), no answer beats a wrong one (the reviews of #223).
+ *
+ * A path ending in `/` or `/.` names a directory, so anything else answers
+ * ENOTDIR (POSIX). The library collapses `.` and `..` as text before the
+ * server sees the path (normalize_path), which drops that ending, so it is
+ * checked here against the path as given. `..` stays lexical, as in Plan 9
+ * and as for every call here: `/NOSUCH/../x` is `/x` (on the roadmap). */
+int stat(const char *path, struct stat *st) {
+    if (!path || !st) {
+        return client_fail(EFAULT);
+    }
+    char fspath[FSPATH_MAX_C];
+    unsigned long fslen;
+    unsigned target;
+    unsigned char endpoint[NS_ENDPOINT_LEN];
+    if (resolve_any(path, fspath, &fslen, &target, endpoint) != 0) {
+        set_errno_from_status();
+        return -1;
+    }
+    size_t plen = strlen(path);
+    int want_dir = path[plen - 1] == '/' ||
+                   (path[plen - 1] == '.' && (plen == 1 || path[plen - 2] == '/'));
+    if ((target & 0xff) == NS_TARGET_CONSOLE) {
+        /* The binding resolves to "/"; anything longer is below it. */
+        if (fslen != 1 || fspath[0] != '/') {
+            g_last_status = FS_ERR_NOT_FOUND;
+            set_errno_from_status();
+            return -1;
+        }
+        if (want_dir) {
+            g_last_status = FS_ERR_NOT_A_DIRECTORY;
+            set_errno_from_status();
+            return -1;
+        }
+        memset(st, 0, sizeof *st);
+        st->st_mode = S_IFCHR | 0666; /* as fstat of a console fd */
+        g_last_status = 0;
+        return 0;
+    }
+    if ((target & 0xff) == NS_TARGET_NETLOCAL) {
+        g_last_status = FS_ERR_NO_SUCH_VERB;
+        set_errno_from_status();
+        return -1;
+    }
+    unsigned char info[STAT_INFO_LEN] = {0};
+    long s = np_request(target, endpoint, NP_STAT, fslen, 0, 0, fspath, (size_t)fslen, info,
+                        sizeof(info));
+    if ((unsigned long)s >= FS_ERR_MIN) {
+        set_errno_from_status();
+        return -1;
+    }
+    stat_from_record(st, info);
+    if (want_dir && !S_ISDIR(st->st_mode)) {
+        g_last_status = FS_ERR_NOT_A_DIRECTORY;
+        set_errno_from_status();
+        return -1;
+    }
+    return 0;
+}
+
+/* stat: no Ouroboros filesystem has symbolic links, so there is no link for
+ * lstat to stop at. picolibc declares it, and a ported program that calls it
+ * would otherwise fail to link (the review of #223). */
+int lstat(const char *path, struct stat *st) {
+    return stat(path, st);
+}
+
+/* The metadata of an open fd: one NP_FSTAT on its fid, decoded as stat's. The
+ * console fds 0 to 2 answer a character device without a request. */
 int fstat(int fd, struct stat *st) {
     if (!st) {
         return client_fail(EFAULT);
@@ -634,29 +757,13 @@ int fstat(int fd, struct stat *st) {
     if (!f) {
         return client_fail(EBADF);
     }
-    /* Zeroed: np_request copies only what the reply carries, and a shorter
-     * record (an older peer's 20 bytes) must read as "no mode", not as the
-     * stack's leftovers in the mode-valid byte (the review of #216). */
-    unsigned char info[STAT_INFO_LEN] = {0};
+    unsigned char info[STAT_INFO_LEN] = {0}; /* zeroed: see stat_from_record */
     long s = np_request(f->target, f->endpoint, NP_FSTAT, f->fid, 0, 0, 0, 0, info, sizeof(info));
     if ((unsigned long)s >= FS_ERR_MIN) {
         set_errno_from_status();
         return -1;
     }
-    memset(st, 0, sizeof *st);
-    st->st_size = (long)__rd_u64(info + STAT_SIZE_OFF);
-    if (info[STAT_MODEVALID_OFF]) {
-        st->st_mode = (unsigned)(info[STAT_MODE_OFF] | (info[STAT_MODE_OFF + 1] << 8));
-        st->st_uid = (unsigned)(info[STAT_UID_OFF] | (info[STAT_UID_OFF + 1] << 8));
-        st->st_gid = (unsigned)(info[STAT_GID_OFF] | (info[STAT_GID_OFF + 1] << 8));
-    } else {
-        /* The whole u32, as ulib's stat_is_dir reads it. */
-        unsigned long flags = (unsigned long)info[STAT_FLAGS_OFF] |
-                              ((unsigned long)info[STAT_FLAGS_OFF + 1] << 8) |
-                              ((unsigned long)info[STAT_FLAGS_OFF + 2] << 16) |
-                              ((unsigned long)info[STAT_FLAGS_OFF + 3] << 24);
-        st->st_mode = (flags & STAT_FLAG_DIR) ? (S_IFDIR | 0777) : (S_IFREG | 0666);
-    }
+    stat_from_record(st, info);
     return 0;
 }
 

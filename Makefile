@@ -1673,10 +1673,11 @@ test-cargs: image
 
 # errno from the C file layer (scripts/test-cerrno.py, /bin/CERRNO): two boots,
 # FAT32 as root and ext2 as root and then as `user`, who must get EACCES for
-# /etc/shadow. About two minutes; run it whenever libc/src/file.c's error
-# paths, or fsd's answers to them, change.
+# /etc/shadow and yet stat it; stat(path)'s checks are here too (step 4). About
+# two minutes; run it whenever libc/src/file.c's error paths or stat, or fsd's
+# answers to them, change.
 test-cerrno: image image-ext2
-	python3 scripts/test-cerrno.py
+	DEBUGFS="$(DEBUGFS)" python3 scripts/test-cerrno.py
 
 # The environment in a C program (scripts/test-cenv.py, /bin/CENV and CENVH):
 # after `set`, both C programs print /bin/PRINTENV's lines, and CENV's getenv

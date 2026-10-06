@@ -5,10 +5,13 @@
  * where ENOENT or ENOTDIR means "try the next directory" and anything else
  * stops the search.
  *
- * Run as root with no argument for the checks that hold on any filesystem.
- * With a path, it checks only that opening it for reading fails with EACCES:
- * scripts/test-cerrno.py runs `cerrno /etc/shadow` as an ordinary user on
- * ext2, the one image whose modes fsd enforces.
+ * Run as root with no argument for the checks that hold on any filesystem,
+ * stat(path)'s among them since step 4; three of those need `mount -c
+ * /dev/cons` and `mount -n /net` made first. With a path, it checks only that
+ * opening it for reading fails with EACCES and that stat of it succeeds (no
+ * read permission is needed for that), then each further `<path> <octal
+ * mode> <uid> <gid>` group against stat: scripts/test-cerrno.py runs it so
+ * as an ordinary user on ext2, the one image whose modes fsd enforces.
  *
  * One line per check, `cerrno: ok <what>: <errno name>` or `cerrno: FAIL
  * <what>: got <name>, want <name>`, then a summary line; exit 1 on any
@@ -17,6 +20,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -103,6 +107,43 @@ static void as_root(void) {
         fclose(fp);
     }
 
+    /* stat(path), step 4: the answers open gives for a path that is not
+     * there, and fstat's record for one that is. */
+    TRY("stat of a missing file", stat("/NOSUCH.TXT", &st), r_ < 0, ENOENT);
+    TRY("stat through a file as a directory", stat("/etc/passwd/X.H", &st), r_ < 0, ENOTDIR);
+    TRY("stat of an empty path", stat("", &st), r_ < 0, ENOENT);
+    TRY("stat into a null struct", stat("/etc/passwd", NULL), r_ < 0, EFAULT);
+    check("stat of a directory: a directory", stat("/etc", &st) == 0 && S_ISDIR(st.st_mode));
+    {
+        struct stat byfd;
+        int sfd = open("/etc/passwd", O_RDONLY);
+        int ok = sfd >= 0 && fstat(sfd, &byfd) == 0 && stat("/etc/passwd", &st) == 0;
+        check("stat of a file: a regular file, the record fstat reads",
+              ok && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size == byfd.st_size &&
+                  st.st_mode == byfd.st_mode && st.st_uid == byfd.st_uid &&
+                  st.st_gid == byfd.st_gid);
+        if (sfd >= 0) {
+            close(sfd);
+        }
+        struct stat viol;
+        check("lstat of a file: what stat says (no symbolic links here)",
+              lstat("/etc/passwd", &viol) == 0 && viol.st_mode == st.st_mode &&
+                  viol.st_size == st.st_size);
+    }
+    /* A trailing `/` or `/.` names a directory (POSIX), though the library
+     * collapses the path as text before the server sees it. */
+    check("stat of a directory with a trailing slash", stat("/etc/", &st) == 0 && S_ISDIR(st.st_mode));
+    TRY("stat of a file with a trailing slash", stat("/etc/passwd/", &st), r_ < 0, ENOTDIR);
+    TRY("stat of a file with a trailing /.", stat("/etc/passwd/.", &st), r_ < 0, ENOTDIR);
+    /* The console and /net bindings. These need scripts/test-cerrno.py's
+     * `mount -c /dev/cons` and `mount -n /net` first. */
+    check("stat of the console binding: a character device",
+          stat("/dev/cons", &st) == 0 && S_ISCHR(st.st_mode));
+    TRY("stat of a path below the console binding", stat("/dev/cons/NOSUCH", &st), r_ < 0, ENOENT);
+    /* netd answers NP_STAT wrongly under /net/tcp, so stat answers no /net
+     * path yet, as open does not (on the roadmap). */
+    TRY("stat of a /net path, not answered yet", stat("/net/ip", &st), r_ < 0, ENOSYS);
+
     /* A full fd table: the library's own limit, not a server's. */
     int fds[16];
     int n = 0;
@@ -114,7 +155,13 @@ static void as_root(void) {
         }
         n++;
     }
+    /* Whether the table really filled, read before expect() reports it: a
+     * first open failing for another reason also leaves n < 16 (the review
+     * of #223). */
+    int full = n < 16 && errno == EMFILE;
     expect("open with every fd in use", n < 16, EMFILE);
+    /* stat takes no fd, so a full table does not stop it. */
+    check("stat with every fd in use", full && stat("/etc/passwd", &st) == 0);
     for (int i = 0; i < n; i++) {
         close(fds[i]);
     }
@@ -168,6 +215,32 @@ static void as_root(void) {
 int main(int argc, char **argv) {
     if (argc > 1) {
         TRY("open of a file the user may not read", open(argv[1], O_RDONLY), r_ < 0, EACCES);
+        /* POSIX's stat needs no read permission on the file, only search on
+         * the directories above it, which is fsd's rule for NP_STAT. */
+        struct stat st;
+        check("stat of that file succeeds, a regular file",
+              stat(argv[1], &st) == 0 && S_ISREG(st.st_mode));
+        /* Then `<path> <octal mode> <uid> <gid>` groups: values the caller
+         * knows independently of this library (the image's build sets them),
+         * so a decoding mistake shared by stat and fstat is caught here,
+         * where comparing the two could not (the review of #223). */
+        for (int i = 2; i + 3 < argc; i += 4) {
+            unsigned mode = (unsigned)strtoul(argv[i + 1], NULL, 8);
+            unsigned uid = (unsigned)strtoul(argv[i + 2], NULL, 10);
+            unsigned gid = (unsigned)strtoul(argv[i + 3], NULL, 10);
+            errno = 0;
+            if (stat(argv[i], &st) != 0) {
+                /* The values in `st` are the previous file's: say why. */
+                printf("cerrno: stat %s failed: %s\r\n", argv[i], name(errno));
+                check("stat of a file: the mode and owner the image gave it", 0);
+                continue;
+            }
+            printf("cerrno: stat %s: mode %o uid %u gid %u, want %o %u %u\r\n", argv[i],
+                   st.st_mode & 07777, st.st_uid, st.st_gid, mode, uid, gid);
+            check("stat of a file: the mode and owner the image gave it",
+                  S_ISREG(st.st_mode) && (st.st_mode & 07777) == mode && st.st_uid == uid &&
+                      st.st_gid == gid);
+        }
     } else {
         as_root();
     }
