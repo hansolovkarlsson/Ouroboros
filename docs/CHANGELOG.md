@@ -56,7 +56,7 @@ FAT32 and ext2.
 vector as `/bin/ARGS` does and `make test-cargs` compares them. Step 1 of the
 C-hosting plan, and item 5 of Edit's console note.
 
-**A C program has its environment.** `crt0` builds `environ` from the
+**A C program has its environment (#221).** `crt0` builds `environ` from the
 kernel's store, so picolibc's `getenv` answers what the shell's `set` made;
 until then it linked against picolibc's own empty `environ` and answered
 every name as unset. Proem reads `SOURCE_DATE_EPOCH` through it. `make test-cenv`

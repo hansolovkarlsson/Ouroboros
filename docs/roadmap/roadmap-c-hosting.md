@@ -161,7 +161,7 @@ tree at `4dcbddd` leaves of them, read from the code.
   already answered `ENOTDIR` for a path through a file, on both. Controls:
   `main`'s `file.c` fails every check, and dropping the `EBADF` naming fails
   exactly the two mode checks, with `EACCES`.
-- **Step 3, the environment: done 2026-10-05.** `crt0.c` builds `environ`
+- **Step 3, the environment: done 2026-10-05, #221.** `crt0.c` builds `environ`
   from `GET_ENVC`/`GET_ENV` into static storage (`ENV_MAX`, 2048 bytes),
   through the same reader as argv, one entry per copy since the kernel
   refuses an out buffer over 512 bytes; an entry longer than that is left
