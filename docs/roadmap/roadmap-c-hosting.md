@@ -244,7 +244,7 @@ tree at `4dcbddd` leaves of them, read from the code.
   pace, and so does one 5% fast (22.11 s against 21.08 s). Not ported:
   `times` (behind `clock()`), `clock_getres`, `nanosleep`. The second level,
   a wall clock from the platform's RTC, is an item in `ROADMAP.md`.
-- **Step 6, headers on the disk: done 2026-10-06.** `make esp` stages
+- **Step 6, headers on the disk: done 2026-10-06, #225.** `make esp` stages
   picolibc's 136 headers in `/include` with a `target.h` generated from
   `$(CC) $(CFLAGS_OS) $(PICO_INC) -dM -E`, the flags a picolibc program here
   is compiled with (so it carries `_POSIX_MONOTONIC_CLOCK`, step 5's flag),
@@ -283,8 +283,7 @@ tree at `4dcbddd` leaves of them, read from the code.
   handoff (`docs/handoffs/2026-10-01-from-proem-system-dirs.md`, accepted).
 
 So the order stands: steps 1 to 5 next, each small, then 6 and 8. *(As of
-2026-10-06, steps 1 to 6 are done, #219 to #224 and the header stage: 7 and
-8 are next.)*
+2026-10-06, steps 1 to 6 are done, #219 to #225: 7 and 8 are next.)*
 
 ## What stays in Proem's session
 

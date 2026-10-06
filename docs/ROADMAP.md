@@ -2254,8 +2254,8 @@ be reviewed after the fact from the saved screenshots.
 > `rmdir`, `rename` and `remove` (#215) and then every call in the file layer
 > (step 2, #220), `main` receives argv (step 1, #219), and `environ` exists
 > (step 3, #221), `stat(path)` exists (step 4, #223), and `time()` links,
-> saying 1970 plus uptime (step 5, #224); the plan's "Where it stands" says what
-> that leaves.
+> saying 1970 plus uptime (step 5, #224), and the C headers are on the disk
+> (step 6, #225); the plan's "Where it stands" says what that leaves.
 >
 > **CPP is now Proem, since 2026-10-01.** The workspace's C preprocessor was
 > renamed: the folder is `~/Projects/Proem` and the repository
@@ -2366,7 +2366,7 @@ be reviewed after the fact from the saved screenshots.
 >       The stage has its own check (`cat /include/stdio.h`, `ls
 >       /include/sys`, `ls /include/clang` on a booted image); the build
 >       waits on steps 1 to 5 and the heap above, and its **Done when** is
->       the arc's finish line. *The stage is done, 2026-10-06 (step 6;
+>       the arc's finish line. *The stage is done, 2026-10-06 (step 6, #225;
 >       `make test-include` on FAT32, ext2 and exFAT); steps 7 and 8 are
 >       left, the build and whether the 1 MiB heap is room enough, which
 >       only the build's first run can tell. `target.h` is generated with `$(CFLAGS_OS)
