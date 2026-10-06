@@ -124,9 +124,11 @@ pub fn env_count() -> u64 {
 }
 
 /// Copy the `index`-th inherited environment entry - a `NAME=VALUE` string -
-/// into `buf`, returning its true length (which may exceed `buf.len()`), or
-/// `None` if `index` is out of range. Mirrors [`arg`]; the entry point for
-/// iterating the environment (e.g. `printenv`).
+/// into `buf`, returning its TRUE length, or `None` if `index` is out of
+/// range. A length over `buf.len()` means only `buf.len()` bytes were copied,
+/// so the caller can tell a cut entry from a whole one: a `NAME=VALUE` cut
+/// short is a different value. A `buf` of [`syscall_abi::ENV_MAX`] bytes holds
+/// any entry. The entry point for iterating the environment (e.g. `printenv`).
 pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
     let n = syscall4(
         syscall_abi::GET_ENV,
@@ -138,7 +140,7 @@ pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
     if n == syscall_abi::NO_ARG {
         None
     } else {
-        Some((n as usize).min(buf.len()))
+        Some(n as usize)
     }
 }
 
@@ -147,15 +149,18 @@ pub fn env_at(index: u64, buf: &mut [u8]) -> Option<usize> {
 /// Scans the environment (`env_count`/`env_at`), splitting each entry on its
 /// first `=`. A `getenv`-shaped helper for programs that want one variable.
 pub fn getenv(name: &[u8], buf: &mut [u8]) -> Option<usize> {
-    // One entry at a time. 256 bytes holds any NAME=VALUE the shell makes (a
-    // name of up to 24 bytes plus a 128-byte value); GET_ENV would accept up
-    // to ENV_MAX (2048), so this is a stack budget, not the kernel's limit.
-    let mut entry = [0u8; 256];
+    // One entry at a time, into a buffer the size of the whole store, so no
+    // entry is cut: until 2026-10-06 this was 256 bytes and a longer entry,
+    // which any spawner can stage, came back as a shorter value.
+    let mut entry = [0u8; syscall_abi::ENV_MAX as usize];
     let n = env_count();
     for i in 0..n {
         let Some(len) = env_at(i, &mut entry) else {
             continue;
         };
+        if len > entry.len() {
+            continue; // cannot happen: no entry is longer than its store
+        }
         // Split NAME=VALUE on the first '='.
         let mut eq = None;
         for (j, &b) in entry[..len].iter().enumerate() {

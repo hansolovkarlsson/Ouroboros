@@ -163,10 +163,9 @@ tree at `4dcbddd` leaves of them, read from the code.
 - **Step 3, the environment: done 2026-10-05.** `crt0.c` builds `environ`
   from `GET_ENVC`/`GET_ENV` into static storage (`ENV_MAX`, 2048 bytes),
   through the same reader as argv, one entry per copy into the rest of the
-  buffer: since 2026-10-06 the kernel bounds `GET_ENV`'s capacity by
-  `ENV_MAX` rather than its blanket 512 bytes, which until then forced a
-  512-byte window, a mirrored `USER_COPY_MAX` and a skip of longer entries
-  that no rig could reach.
+  buffer: since 2026-10-06 (#222) the kernel caps `GET_ENV`'s capacity at
+  `ENV_MAX` where it refused anything over its blanket 512 bytes, which had
+  forced a 512-byte window and a mirrored `USER_COPY_MAX` in crt0.
   picolibc's `getenv`, which linked before and found nothing (picolibc's own
   `environ` is an empty vector), now answers what `set` made. crt0 declares
   `environ` and assigns it; picolibc defines it, and the hand-rolled libc
@@ -180,8 +179,8 @@ tree at `4dcbddd` leaves of them, read from the code.
   against values the rig sets rather than printenv's. Control: an
   environment cut to one entry fails both comparisons and two `getenv`
   checks. The kernel's
-  bound has its own control in the same rig: crt0's first `GET_ENV` asks
-  for 2047 bytes, so with the blanket cap back every `getenv` answers
+  cap has its own control in the same rig: crt0's first `GET_ENV` asks
+  for 2047 bytes, so with the blanket refusal back every `getenv` answers
   unset.
 - **Steps 4 and 5, `stat`, a clock: open.** Nothing in `libc/src` defines
   `stat` or `gettimeofday`.

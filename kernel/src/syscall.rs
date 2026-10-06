@@ -280,16 +280,30 @@ fn valid_msg_range(ptr: u64, len: u64) -> bool {
 /// says it means. Containment in the caller's region is unchanged and is the
 /// check that actually matters for safety; `max` only bounds the copy into a
 /// buffer already sized for it.
-///
-/// The READS of one entry, `GET_ARG` and `GET_ENV`, take it too, with the
-/// store's size as `max`: the copy out is at most one entry, and an entry is
-/// shorter than its store. Under the blanket cap `GET_ENV` refused a buffer
-/// the size of the environment, so every reader had to copy one entry into a
-/// 512-byte window and decide what to do with a longer one; libc's crt0
-/// carried a copy of `MAX_USER_LEN` and a skip for exactly that, which no rig
-/// could reach. Found by the review of #221, 2026-10-06.
 fn valid_stage_range(ptr: u64, len: u64, max: usize) -> bool {
     ptr != 0 && len != 0 && len <= max as u64 && in_caller_region(ptr, len)
+}
+
+/// A **read** of one per-task store (`GET_ARG`, `GET_ENV`, `GET_CWD`,
+/// `GET_NS`) into the caller's out buffer: the capacity to copy with, or
+/// `None` for a buffer that is not the caller's.
+///
+/// The capacity is CAPPED at the store's size (`store`, the `syscall-abi`
+/// maximum the per-task store in `tasks.rs` is sized by), not refused above
+/// it: what is copied is at most one entry, and an entry is no longer than its
+/// store, so a larger buffer only has room the kernel never writes. Containment
+/// is checked on the capped length, the bytes that can be written, which is
+/// the check that carries the safety. An input is still refused when too long
+/// (the staging calls above); an output buffer larger than the answer is not
+/// an error.
+///
+/// Until 2026-10-06 the reads used [`valid_user_range`], so `GET_ENV` refused a
+/// buffer the size of the environment it reads, and a refusal came back as
+/// `NO_ARG`, which reads as "no such entry": libc's crt0 carried a copy of
+/// `MAX_USER_LEN` to stay under it. Found by the reviews of #221 and #222.
+fn read_capacity(ptr: u64, cap: u64, store: u64) -> Option<u64> {
+    let cap = cap.min(store);
+    (ptr != 0 && cap != 0 && in_caller_region(ptr, cap)).then_some(cap)
 }
 
 /// Sized generously for a real userland program - the default shell is
@@ -684,11 +698,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::GET_CWD => {
             // arg0 = out pointer, arg1 = out capacity. Copies up to capacity
             // bytes of the current task's cwd, returns its true length.
-            if !valid_user_range(arg0, arg1) {
+            let Some(cap) = read_capacity(arg0, arg1, syscall_abi::CWD_MAX) else {
                 return 0;
-            }
+            };
             let cwd = tasks::cwd_path(tasks::current_task());
-            let n = (cwd.len() as u64).min(arg1) as usize;
+            let n = (cwd.len() as u64).min(cap) as usize;
             // SAFETY: out range validated above.
             let dst = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, n) };
             dst.copy_from_slice(&cwd[..n]);
@@ -717,11 +731,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::GET_NS => {
             // arg0 = out pointer, arg1 = out capacity. Copies up to capacity
             // bytes of the current task's namespace, returns its true length.
-            if !valid_user_range(arg0, arg1) {
+            let Some(cap) = read_capacity(arg0, arg1, syscall_abi::NS_MAX) else {
                 return 0;
-            }
+            };
             let ns = tasks::namespace(tasks::current_task());
-            let n = (ns.len() as u64).min(arg1) as usize;
+            let n = (ns.len() as u64).min(cap) as usize;
             // SAFETY: out range validated above.
             let dst = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, n) };
             dst.copy_from_slice(&ns[..n]);
@@ -747,15 +761,15 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::GET_ARG => {
             // arg0 = index, arg1 = out pointer, arg2 = out capacity. Copies up
             // to capacity bytes of argument `index`, returns its true length,
-            // or NO_ARG if out of range. The capacity is bounded by the argv
-            // store, not the blanket cap (see valid_stage_range).
-            if !valid_stage_range(arg1, arg2, ARGS_STAGING_SIZE) {
+            // or NO_ARG if out of range. The capacity is capped at the argv
+            // store (see read_capacity).
+            let Some(cap) = read_capacity(arg1, arg2, syscall_abi::ARGV_MAX) else {
                 return syscall_abi::NO_ARG;
-            }
+            };
             let blob = tasks::argv_blob(tasks::current_task());
             match argv_get(blob, arg0 as usize) {
                 Some(bytes) => {
-                    let n = (bytes.len() as u64).min(arg2) as usize;
+                    let n = (bytes.len() as u64).min(cap) as usize;
                     // SAFETY: out range validated above.
                     let dst = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, n) };
                     dst.copy_from_slice(&bytes[..n]);
@@ -784,15 +798,14 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // arg0 = index, arg1 = out pointer, arg2 = out capacity. Same shape
             // as GET_ARG (the env blob reuses the argv encoding), returning the
             // index-th NAME=VALUE string or NO_ARG if out of range. The
-            // capacity is bounded by the env store (ENV_MAX), not the blanket
-            // 512: a buffer the size of the whole environment is accepted.
-            if !valid_stage_range(arg1, arg2, ENV_STAGING_SIZE) {
+            // capacity is capped at the env store (see read_capacity).
+            let Some(cap) = read_capacity(arg1, arg2, syscall_abi::ENV_MAX) else {
                 return syscall_abi::NO_ARG;
-            }
+            };
             let blob = tasks::env_blob(tasks::current_task());
             match argv_get(blob, arg0 as usize) {
                 Some(bytes) => {
-                    let n = (bytes.len() as u64).min(arg2) as usize;
+                    let n = (bytes.len() as u64).min(cap) as usize;
                     // SAFETY: out range validated above.
                     let dst = unsafe { core::slice::from_raw_parts_mut(arg1 as *mut u8, n) };
                     dst.copy_from_slice(&bytes[..n]);

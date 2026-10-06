@@ -35,7 +35,11 @@ fn main() -> ! {
     // "argv[<i>] = <bytes>\r\n" for each argument.
     let mut i = 0;
     while i < argc {
-        let mut abuf = [0u8; 512];
+        // Twice the argv store, on purpose: GET_ARG caps a capacity past
+        // ARGV_MAX rather than refusing it, and a refusal would print every
+        // argument empty, so scripts/test-cargs.py is that cap's check. A
+        // 512-byte buffer could not tell the cap from the old blanket refusal.
+        let mut abuf = [0u8; 2 * syscall_abi::ARGV_MAX as usize];
         let alen = syscall4(syscall_abi::GET_ARG, i, abuf.as_mut_ptr() as u64, abuf.len() as u64, 0);
         let mut line = [0u8; 640];
         let mut n = 0;

@@ -52,12 +52,14 @@ extern char **environ;
 /* Reads the kernel's vector with `count_call`/`get_call` into `buf`, pointers
  * into `vec` (at most `cap` of them, then NULL), and returns how many.
  *
- * One copy per entry, into the rest of `buf`: the kernel accepts a capacity
- * up to the store's own size (ARGV_MAX, ENV_MAX), and the strings of a blob
- * it holds always fit in that many bytes, so an entry never exceeds the room.
- * The check against it stops the vector rather than cut an entry, should a
- * kernel ever answer otherwise: a `NAME=VALUE` cut short is a different
- * value. */
+ * One copy per entry, into the rest of `buf`. The kernel caps the capacity
+ * at its store's size rather than refusing a larger one, so NO_ARG means the
+ * index is past the end (a refusal would need a buffer outside this task's
+ * region, and these are its own statics). The strings of a blob the kernel
+ * holds always fit in MAX bytes, so an entry never exceeds the room; should
+ * one, it is left out rather than cut, and the entries after it are still
+ * read: a `NAME=VALUE` cut short is a different value. No rig reaches that
+ * branch (scripts/test-cenv.py says why). */
 static int read_vec(long count_call, long get_call, char *buf, unsigned long size,
                     char **vec, unsigned long cap) {
     unsigned long n = (unsigned long)__os_syscall1(count_call, 0);
@@ -75,7 +77,7 @@ static int read_vec(long count_call, long get_call, char *buf, unsigned long siz
             break;
         }
         if (len > room) {
-            break;
+            continue;
         }
         dst[len] = '\0';
         vec[count++] = dst;

@@ -24,8 +24,11 @@ changes.
 
 crt0 asks GET_ENV for up to 2047 bytes on its first entry, more than the
 kernel's blanket 512-byte cap, so this rig also fails if GET_ENV's capacity is
-checked against that cap rather than ENV_MAX (the control in the PR that made
-it so, 2026-10-06).
+refused above that cap rather than capped at ENV_MAX (the control in #222).
+
+Not reached: crt0's skip of an entry longer than the room left in its buffer.
+The strings of any blob the kernel holds fit in ENV_MAX bytes, so only a
+kernel answering a length past what it stores could take that branch.
 """
 import importlib.util
 import os

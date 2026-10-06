@@ -534,8 +534,9 @@ number in `x8`, up to four arguments in `x0`–`x3`, return value in
 longer buffers are rejected, not truncated. **512** (`MAX_USER_LEN`) is
 the default bound, not a universal one: the message syscalls take 768
 (`MSG_MAX_LEN`), and each staging call is bounded by its own published
-maximum instead (argv 512, cwd 128, namespace 256, environment 2048), as
-are the reads of one argument or one environment entry.
+maximum instead (argv 512, cwd 128, namespace 256, environment 2048). An
+out buffer for reading one of those stores back is the exception: one larger
+than the store is capped at the store's size, not refused.
 Every one of them is additionally required to lie inside the caller's own
 loaded region, which is the check that carries the safety. Reading 512 as
 universal is what once left `ENV_STAGE`'s own 2048 limit unenforced.
