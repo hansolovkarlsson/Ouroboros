@@ -238,12 +238,12 @@ tree at `4dcbddd` leaves of them, read from the code.
   (`libc/cclock.c`) runs twelve checks of its own, and `make test-cclock`
   runs it twice in one boot with a gap the host times: each `ctime` line
   must be Python's formatting of its second, each run must exit 0 (read from
-  its own block), and the guest clock must keep the host's pace across the
-  gap within half a second plus 3% (9.07 s against 9.08 s). Control: a clock
+  its own block), and the guest clock must keep the host's pace across a 20
+  s gap within 0.3 s plus 1% (21.08 s against 21.09 s). Controls: a clock
   1000 times slow passes every check of `CCLOCK`'s own and fails only the
-  pace. Not ported: `times` (behind `clock()`), `clock_getres`, `nanosleep`.
-  The second level, a wall clock from the platform's RTC, is an item in
-  `ROADMAP.md`.
+  pace, and so does one 5% fast (22.11 s against 21.08 s). Not ported:
+  `times` (behind `clock()`), `clock_getres`, `nanosleep`. The second level,
+  a wall clock from the platform's RTC, is an item in `ROADMAP.md`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against
   picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real

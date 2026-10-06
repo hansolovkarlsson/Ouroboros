@@ -15,9 +15,10 @@ checks. One boot, run twice with a gap the HOST times between the two:
   second (a foreign formatter, not picolibc's);
 - each run exits 0, read from its own block;
 - the guest clock advanced across the gap by what the host's clock did,
-  within half a second plus 3% (typing, echo and TCG make up the slack).
+  within 0.3 s plus 1% over a 20 s gap, so a clock more than about 2.5% wrong
+  fails.
 
-No fault line in QEMU's trace. About a minute. Run it whenever
+No fault line in QEMU's trace. About a minute and a half. Run it whenever
 libc/pico/clock.c or the kernel's MONOTONIC_US changes.
 """
 import importlib.util
@@ -36,12 +37,14 @@ IMAGE = os.path.join(ROOT, "build", "esp.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-cclock.txt")
 CCLOCK_CHECKS = 12
 SUMMARY = r"cclock: (\d+) checks, (\d+) failed\r?\n"
-GAP = 8.0  # seconds the host waits between the two runs
-# How far the guest's gap may differ from the host's: half a second for
-# typing, echo and the harness's settle, plus 3% for emulation. Measured: 9.12 s
-# against 9.13 s. A flat 2 s let a clock 20% wrong pass (the review of #224).
+GAP = 20.0  # seconds the host waits between the two runs
+# How far the guest's gap may differ from the host's: 0.3 s for the harness
+# (it polls every 0.15 s and settles after each match), plus 1%. A correct
+# clock measured within 0.01 s over 9 s. A flat 2 s let a clock 20% wrong pass
+# (the review of #224), and half a second plus 3% over 9 s still passed one 5%
+# fast; over 20 s this catches an error past about 2.5%.
 def slack(host_gap):
-    return 0.5 + 0.03 * host_gap
+    return 0.3 + 0.01 * host_gap
 
 
 def runs(out):
