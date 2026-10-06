@@ -55,7 +55,7 @@ FAT32 and ext2.
 vector as `/bin/ARGS` does and `make test-cargs` compares them. Step 1 of the
 C-hosting plan, and item 5 of Edit's console note.
 
-**Every failure in the C file layer sets `errno`.** `open`, `read`,
+**Every failure in the C file layer sets `errno` (#220).** `open`, `read`,
 `write`, `close`, `fstat` and `lseek` now set it in a picolibc program, as
 the path verbs already did: `ENOENT` and `ENOTDIR` from the server, which
 Proem's include search reads, and the library's own refusals as POSIX names

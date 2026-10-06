@@ -135,7 +135,7 @@ tree at `4dcbddd` leaves of them, read from the code.
   target. Found on the
   way: the shell keeps 16 words and drops the rest without a word
   (`MAX_ARGS`), an item in `ROADMAP.md`.
-- **Step 2, errno: done 2026-10-05.** Every call in `file.c` that returns
+- **Step 2, errno: done 2026-10-05, #220.** Every call in `file.c` that returns
   -1 sets `errno` in a picolibc program: the server's status through
   `set_errno_from_status` (begun by #215 for the path verbs), and the
   library's own refusals through `client_fail`, named as POSIX names them:
