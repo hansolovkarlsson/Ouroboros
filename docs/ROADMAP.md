@@ -2336,7 +2336,9 @@ be reviewed after the fact from the saved screenshots.
 >       Ctrl-C kill, so 0x03 reaches it as a key (WordStar's page down);
 >       (5) `main(argc, argv)` in `crt0.c`, which called `main(void)`
 >       (*(5) done 2026-10-05 by #219, step 1 of the C-hosting plan; `make
->       test-cargs`*). Done
+>       test-cargs`*) (*(1) done 2026-10-07 by PR_COND, `/bin/VTPROBE` drawing
+>       each sequence and `make test-cond-vt` reading the screen back by
+>       pixel; on top of #227, the FP/SIMD save it turned up*). Done
 >       when a program in this tree, on the framebuffer console, writes
 >       each sequence of (1) and prints the bytes each key of (2) sends,
 >       and a C program's `main` receives its arguments. (4) touches the
