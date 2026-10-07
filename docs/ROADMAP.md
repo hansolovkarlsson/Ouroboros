@@ -2255,7 +2255,7 @@ be reviewed after the fact from the saved screenshots.
 > (step 2, #220), `main` receives argv (step 1, #219), and `environ` exists
 > (step 3, #221), `stat(path)` exists (step 4, #223), and `time()` links,
 > saying 1970 plus uptime (step 5, #224), the C headers are on the disk
-> (step 6, #225), and **`/bin/cpp` runs here** (steps 7 and 8, 2026-10-06):
+> (step 6, #225), and **`/bin/cpp` runs here** (steps 7 and 8, #226):
 > `cpp hello.c` on a booted image prints the program, byte for byte what the
 > same cpp writes on the Mac (`make test-cpp`). The arc is finished; the
 > plan's "Where it stands" records it.
@@ -2374,11 +2374,11 @@ be reviewed after the fact from the saved screenshots.
 >       left, the build and whether the 1 MiB heap is room enough, which
 >       only the build's first run can tell. `target.h` is generated with `$(CFLAGS_OS)
 >       $(PICO_INC)`, the flags a picolibc program here is compiled with.*
->       *The build is done too, 2026-10-06 (steps 7 and 8): `make cpp-bin`
+>       *The build is done too, 2026-10-06 (steps 7 and 8, #226): `make cpp-bin`
 >       from `CPP_DIR`, `/bin/CPP` staged, and `cpp hello.c` on a booted
 >       image prints the program (`make test-cpp`).*
 >       Note:
->       [`handoffs/2026-10-01-from-proem-system-dirs.md`](handoffs/2026-10-01-from-proem-system-dirs.md).
+>       [`handoffs/closed/2026-10-01-from-proem-system-dirs.md`](handoffs/closed/2026-10-01-from-proem-system-dirs.md).
 > - [x] **fix** **`fstat` leaves every field but two as it found them.**
 >       `libc/src/file.c`'s `fstat` sets `st_size` and `st_mode` only, so a
 >       caller's `struct stat` keeps stack garbage in `st_dev` and `st_ino`,

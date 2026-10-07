@@ -11,10 +11,10 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
 version is held for a go-ahead. So far two days' work, 2026-10-05 and
-2026-10-06, #209 to #225: the storage server made safe under large writes and
+2026-10-06, #209 to #226: the storage server made safe under large writes and
 double mounts, and the C library made able to host Proem (now cpp) and Edit,
-steps 1 to 6 of the C-hosting plan among it, the C headers on the disk and
-FAT32 names that keep their case. The days' records are in
+the whole C-hosting plan among it, ending in DevTools's preprocessor running
+here, with the C headers on the disk and FAT32 names that keep their case. The days' records are in
 `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
@@ -85,7 +85,7 @@ writes for a lowercase 8.3 name, and writes them for one it creates, a
 mixed-case name going to a long name, so `touch foo.txt` no longer lists as
 `FOO.TXT`. Step 6 of the C-hosting plan.
 
-**The C preprocessor runs on Ouroboros.** `/bin/cpp` is DevTools's cpp,
+**The C preprocessor runs on Ouroboros (#226).** `/bin/cpp` is DevTools's cpp,
 built here by `make cpp-bin` with `/include` and `/include/clang` built in,
 so `cpp hello.c` needs no options. Its output is byte for byte what the same
 cpp writes on the Mac, and clang compiles it (`make test-cpp`). Steps 7 and 8

@@ -269,7 +269,7 @@ tree at `4dcbddd` leaves of them, read from the code.
   listed is a staged one in its case; three files `cat` to the host's bytes;
   and names made on the guest keep their case. The card (`make sdcard`)
   skips `/include`, which only the stick can serve.
-- **Steps 7 and 8, room to run and `/bin/cpp`: done 2026-10-06, the arc's
+- **Steps 7 and 8, room to run and `/bin/cpp`: done 2026-10-06, #226, the arc's
   finish line.** `make cpp-bin` compiles DevTools's cpp (`lib/*.c` and
   `driver/cpp.c`, read from `CPP_DIR`, `../DevTools/cpp` by default) as
   every picolibc program here is, with
@@ -301,11 +301,12 @@ tree at `4dcbddd` leaves of them, read from the code.
   program, and regions past one 2 MB slot" in `ROADMAP.md`. `MAX_FILES`
   (8) and `PATH_MAX_C` (96) are unchanged.
 - **Steps 6 and 8** are not started; they are Proem's system-directories
-  handoff (`docs/handoffs/2026-10-01-from-proem-system-dirs.md`, accepted).
+  handoff (`docs/handoffs/closed/2026-10-01-from-proem-system-dirs.md`, done in
+  #226).
 
 So the order stands: steps 1 to 5 next, each small, then 6 and 8. *(As of
-2026-10-06, all eight steps are done, #219 to #225 and `/bin/cpp`: the arc
-is finished.)*
+2026-10-06, all eight steps are done, #219 to #226: the arc is
+finished.)*
 
 ## What stays in Proem's session
 
