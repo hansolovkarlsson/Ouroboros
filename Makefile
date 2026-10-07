@@ -636,8 +636,8 @@ cclock-bin: $(NSRESOLVE_A) $(PICO_PORT)
 cpp-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	@[ -f "$(CPP_DIR)/driver/cpp.c" ] || { echo "cpp-bin: no cpp sources at $(CPP_DIR) (set CPP_DIR)"; exit 1; }
 	rm -rf $(BUILD_DIR)/cpp && mkdir -p $(BUILD_DIR)/cpp
-	for f in $(CPP_DIR)/lib/*.c $(CPP_DIR)/driver/cpp.c; do \
-		$(CC) $(CFLAGS_OS) $(PICO_INC) -I$(CPP_DIR)/lib '-DCPP_SYSTEM_DIRS="/include:/include/clang"' \
+	for f in "$(CPP_DIR)"/lib/*.c "$(CPP_DIR)/driver/cpp.c"; do \
+		$(CC) $(CFLAGS_OS) $(PICO_INC) -I"$(CPP_DIR)/lib" '-DCPP_SYSTEM_DIRS="/include:/include/clang"' \
 			-c "$$f" -o $(BUILD_DIR)/cpp/$$(basename "$$f" .c).o || exit 1; \
 	done
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(BUILD_DIR)/cpp/*.o $(PICO_LIBC) $(NSRESOLVE_A)
@@ -1787,8 +1787,14 @@ test-include: image image-ext2 image-exfat
 # clang for this target compiles them. One boot, about a minute and a half;
 # needs DevTools's cpp at CPP_DIR. Run it whenever the C runtime, the header
 # stage or cpp-bin changes.
+# Without cpp's sources there is nothing to test: stop before the image is
+# built, not after (the review of #226).
+ifneq ($(filter test-cpp,$(MAKECMDGOALS)),)
+ifeq ($(HAVE_CPP),)
+$(error test-cpp: no cpp sources at $(CPP_DIR) (set CPP_DIR))
+endif
+endif
 test-cpp: image
-	@[ -n "$(HAVE_CPP)" ] || { echo "test-cpp: no cpp sources at $(CPP_DIR) (set CPP_DIR)"; exit 1; }
 	CPP_DIR="$(CPP_DIR)" CFLAGS_OS="$(CFLAGS_OS)" PICO_INC="$(PICO_INC)" python3 scripts/test-cpp.py
 
 # `unmount` with a partition mount and an open file, on a copy of the ext2

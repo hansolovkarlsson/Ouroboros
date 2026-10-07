@@ -47,6 +47,10 @@ cmd_build() {
 	make image PROFILE=release
 
 	[ -f build/esp.img ] || die "build/esp.img missing after 'make image'"
+	# make image stages /bin/cpp only when DevTools's sources are there, so
+	# a development image builds without them; a release must not, since the
+	# CHANGELOG says the preprocessor runs here (the review of #226).
+	[ -f build/esp/bin/CPP ] || die "the image has no /bin/cpp: a release needs DevTools's cpp sources at CPP_DIR (../DevTools/cpp by default)"
 
 	# The self-contained UDZO .dmg is the portable Parallels form (see the
 	# DMG_OUT comment above): it embeds the disk data, unlike the .hdd

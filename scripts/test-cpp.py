@@ -66,8 +66,21 @@ def attach(image, readonly):
 
 
 def detach(mp):
-    subprocess.run(["hdiutil", "detach", mp], check=True, capture_output=True)
+    """Detach, forcing it if macOS holds the volume (Spotlight, fseventsd), as
+    the Makefile's image-stall does; the mount point is removed either way."""
+    r = subprocess.run(["hdiutil", "detach", mp], capture_output=True)
+    if r.returncode != 0:
+        subprocess.run(["hdiutil", "detach", "-force", mp], check=True, capture_output=True)
     os.rmdir(mp)
+
+
+def strip_sidecars(mp):
+    """macOS's AppleDouble `._*` files, which `make image` strips too: fsd
+    would list them, and they are not the inputs."""
+    for dirpath, _, files in os.walk(mp):
+        for f in files:
+            if f.startswith("._"):
+                os.remove(os.path.join(dirpath, f))
 
 
 def host_cpp(cpp_dir):
@@ -84,6 +97,15 @@ def host_cpp(cpp_dir):
 
 
 def main() -> int:
+    try:
+        return run()
+    finally:
+        # The image copy goes whatever happened (the review of #226).
+        if os.path.exists(COPY):
+            os.remove(COPY)
+
+
+def run() -> int:
     cpp_dir = env("CPP_DIR")
     flags = shlex.split(env("CFLAGS_OS")) + shlex.split(env("PICO_INC"))
     checks = []
@@ -96,6 +118,7 @@ def main() -> int:
         for name, text in SOURCES.items():
             with open(os.path.join(mp, "src", name), "w") as fh:
                 fh.write(text)
+        strip_sidecars(mp)
     finally:
         detach(mp)
 
@@ -119,13 +142,13 @@ def main() -> int:
     with open(TRANSCRIPT, "w") as fh:
         fh.write(out)
     checks.append(("driven to the end", driven))
-    for name in SOURCES:
-        stem = name[:-2]
-        cmd = f"cpp -o /{stem}.i /src/{name}"
-        # This command's own exit line, after its own echo: with no echo there
-        # is no exit to read (a check of the WHOLE transcript passed for a
-        # command never typed, on the first run of this rig).
-        code = re.search(r"exited \(code (\d+)\)", out.split(cmd, 1)[1]) if cmd in out else None
+    cmds = [f"cpp -o /{n[:-2]}.i /src/{n}" for n in SOURCES] + ["cpp /src/hello.c"]
+    for name, cmd, nxt in zip(SOURCES, cmds, cmds[1:]):
+        # This command's own exit line: after its own echo and before the next
+        # command's, so a run that faulted (no exit line) cannot borrow the
+        # next one's (the reviews of this rig).
+        block = out.split(cmd, 1)[1].split(nxt, 1)[0] if cmd in out else ""
+        code = re.search(r"exited \(code (\d+)\)", block)
         checks.append((f"cpp {name} on Ouroboros exited 0", bool(code) and code.group(1) == "0"))
 
     plain = out.split("cpp /src/hello.c", 1)[1] if "cpp /src/hello.c" in out else ""
@@ -143,7 +166,6 @@ def main() -> int:
             got[name] = open(path, "rb").read() if os.path.exists(path) else None
     finally:
         detach(mp)
-        os.remove(COPY)
 
     # The same cpp on the Mac, from the same staged headers and the same
     # sources, under a host directory that stands in for the guest's root.
@@ -161,6 +183,10 @@ def main() -> int:
         r = subprocess.run([cpp, "-include", f"{root}/include/target.h", "-I", f"{root}/include",
                             "-I", f"{root}/include/clang", "-o", host_out, f"{root}/src/{name}"],
                            env={**os.environ, "SOURCE_DATE_EPOCH": EPOCH}, capture_output=True)
+        if r.returncode != 0:
+            # A failure of the REFERENCE, said as such, not as the port's.
+            print(f"     host cpp failed on {name} (exit {r.returncode}):\n{r.stderr.decode()[-600:]}")
+        checks.append((f"{name}: the host cpp, the reference, ran", r.returncode == 0))
         want = open(host_out, "rb").read().replace(root.encode(), b"") if r.returncode == 0 else None
         g = got[name]
         checks.append((f"{name}: the guest wrote /{stem}.i ({len(g) if g else 0} bytes)", bool(g)))
@@ -170,7 +196,10 @@ def main() -> int:
             guest_i = os.path.join(HOST, stem + ".guest.i")
             with open(guest_i, "wb") as fh:
                 fh.write(g)
-            c = subprocess.run(["clang", *flags, "-fsyntax-only", "-x", "c", guest_i],
+            # cpp-output: clang takes the text as already preprocessed, so an
+            # #include the guest left unexpanded is an error here, not quietly
+            # resolved from the host's include path (the review of #226).
+            c = subprocess.run(["clang", *flags, "-fsyntax-only", "-x", "cpp-output", guest_i],
                                capture_output=True, text=True)
             checks.append((f"{name}: clang compiles the guest's output", c.returncode == 0))
             if c.returncode != 0:
