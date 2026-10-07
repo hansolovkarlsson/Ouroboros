@@ -145,3 +145,6 @@ a key arrives while Edit is running rather than waiting in a read (busy
 redrawing), the kernel's tick consumes one byte of it, looking for Ctrl-C,
 and drops it; a sequence can then reach Edit as `[A` or `A`. Items 3 and 4
 are still open.
+
+Merged 2026-10-07 (#229, `cec028c`), and DevTools told by notice:
+`~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-editor-keys-item-2.md`.
