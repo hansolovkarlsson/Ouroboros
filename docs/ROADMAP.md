@@ -2363,7 +2363,10 @@ be reviewed after the fact from the saved screenshots.
 >       2026-10-07 by #229, `/bin/READKEY` printing each key's bytes and
 >       `make test-nav-keys` pressing them on QEMU's USB keyboard; the
 >       shell and login now drop the sequences instead of inserting their
->       tails*). Done
+>       tails*) (*(3) done 2026-10-07 by #230: `CON_INFO`'s size fields
+>       open to every task, `ioctl(TIOCGWINSZ)` in the C library (0 by 0 on
+>       a serial console, whose size is unknown), `ulib::screen_size`, and
+>       `more` paging by the real height; `make test-cwinsz`*). Done
 >       when a program in this tree, on the framebuffer console, writes
 >       each sequence of (1) and prints the bytes each key of (2) sends,
 >       and a C program's `main` receives its arguments. (4) touches the

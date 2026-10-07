@@ -16,6 +16,7 @@
 #define SYS_MSG_SEND 23
 #define SYS_MSG_CALL 29
 #define SYS_GRANT 31
+#define SYS_CON_INFO 34
 #define SYS_STDOUT_TARGET 38
 #define SYS_HEAP_INFO 40
 #define SYS_MONOTONIC_US 46
@@ -72,6 +73,11 @@
  * capacity as too large). */
 #define ENV_MAX 2048u
 
+/* CON_INFO's field selectors: the console's size in character cells, 0 on
+ * a byte-stream console, whose size the kernel cannot know (ioctl's
+ * TIOCGWINSZ, file.c). */
+#define CON_INFO_COLS 1
+#define CON_INFO_ROWS 2
 #define HEAP_INFO_BASE 0
 #define HEAP_INFO_SIZE 1
 #define HEAP_INFO_STACK_BASE 2

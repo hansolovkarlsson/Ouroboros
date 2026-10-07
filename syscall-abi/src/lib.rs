@@ -412,10 +412,13 @@ pub const CON_WRITE: u64 = 33;
 
 /// `(field)` -> the requested geometry value, or `0`. Lets the console
 /// server discover which backend it has and how big the screen is at
-/// startup. **Gated to [`CON_TASK`]**. Fields: [`CON_INFO_KIND`]
+/// startup, and any program read the screen size. **Open to every task**
+/// since 2026-10-07 (it was gated to [`CON_TASK`]): three numbers fixed at
+/// boot, which grant nothing. Fields: [`CON_INFO_KIND`]
 /// ([`CON_KIND_BYTESTREAM`] or [`CON_KIND_FRAMEBUFFER`]),
 /// [`CON_INFO_COLS`], [`CON_INFO_ROWS`] (the framebuffer's character-cell
-/// grid, `0` on a byte-stream backend).
+/// grid, `0` on a byte-stream backend, whose terminal's size the kernel
+/// cannot know). An unknown field answers `0`.
 pub const CON_INFO: u64 = 34;
 
 /// `(glyphs ptr, count, col, row)` -> `0`, or a reserved-band error.

@@ -13,8 +13,10 @@
 #![no_std]
 #![no_main]
 
-/// Lines per screen before pausing (~24-row console, one kept for the prompt).
-const PAGE_ROWS: usize = 23;
+/// The size assumed when the console's is unknown (a serial terminal): the
+/// conventional 80 by 24.
+const DEFAULT_COLS: usize = 80;
+const DEFAULT_ROWS: usize = 24;
 
 #[no_mangle]
 #[link_section = ".text.start"]
@@ -81,25 +83,40 @@ fn page(content: &[u8]) {
     }
     let total = content.len();
     let mut pos = 0usize;
-    let mut to_show = PAGE_ROWS;
+    // Screen rows per page before pausing: the console's rows, one kept for
+    // the prompt (`ulib::screen_size`; 80 by 24 when the size is unknown).
+    // Counted in ROWS, not lines: a line wider than the screen wraps onto
+    // more than one, and a page of lines that filled the screen exactly
+    // would then scroll its own top away before the prompt.
+    let (cols, rows) = ulib::screen_size().unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
+    let page_rows = rows.max(2) - 1;
+    let mut to_show = page_rows;
     loop {
-        let mut printed = 0usize;
-        while printed < to_show && pos < total {
+        let mut used = 0usize;
+        while pos < total {
             let start = pos;
-            while pos < total && content[pos] != b'\n' {
-                pos += 1;
+            let mut end = start;
+            while end < total && content[end] != b'\n' {
+                end += 1;
             }
+            let next = if end < total { end + 1 } else { end };
             // Drop a trailing '\r' (DOS endings); we add our own CRLF.
-            let mut end = pos;
             if end > start && content[end - 1] == b'\r' {
                 end -= 1;
             }
+            let need = screen_rows(&content[start..end], cols);
+            // A line that does not fit waits for the next page, unless it
+            // is the first: one taller than the whole page is shown anyway.
+            if used > 0 && used + need > to_show {
+                break;
+            }
             ulib::con_write(&content[start..end]);
             ulib::con_write(b"\r\n");
-            if pos < total {
-                pos += 1; // step past the '\n'
+            pos = next;
+            used += need;
+            if used >= to_show {
+                break;
             }
-            printed += 1;
         }
         if pos >= total {
             break; // everything shown
@@ -111,8 +128,18 @@ fn page(content: &[u8]) {
         ulib::con_write(b"\r        \r"); // erase the prompt (CR, spaces, CR)
         match key {
             ulib::keyseq::Fed::Byte(b'q' | b'Q') => break,
-            ulib::keyseq::Fed::Byte(b'\r' | b'\n') => to_show = 1, // one more line
-            _ => to_show = PAGE_ROWS, // space (or any key) = next screen
+            ulib::keyseq::Fed::Byte(b'\r' | b'\n') => to_show = 1, // one more line (however many rows it takes)
+            _ => to_show = page_rows, // space (or any key) = next screen
         }
     }
 }
+
+/// The screen rows `line` takes on a console `cols` wide: its printable
+/// bytes (the console server draws nothing for the rest), wrapped, at least
+/// one. A line of exactly `cols` is one row: the console wraps late, at the
+/// next glyph, and the CRLF after it comes first.
+fn screen_rows(line: &[u8], cols: usize) -> usize {
+    let width = line.iter().filter(|&&b| (0x20..0x7f).contains(&b)).count();
+    width.div_ceil(cols.max(1)).max(1)
+}
+

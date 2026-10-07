@@ -4,8 +4,11 @@
 //! `docs/handoffs/2026-10-05-from-edit-editor-console.md` (DevTools's Edit);
 //! `scripts/test-cond-vt.py` runs it and models the expected screen.
 //!
-//! The size comes as arguments because an ordinary program cannot ask for it
-//! yet (`CON_INFO` is gated to the console server; item 3 of the same note).
+//! The size comes as arguments, from the rig's screendump, so the screen
+//! the probe draws and the model it is checked against share one source
+//! that is not the system's own answer (an ordinary program can ask since
+//! 2026-10-07, `ulib::screen_size`, and `make test-cwinsz` checks that
+//! answer against the same screendump).
 //! The steps, in order, with 1-based positions as on the wire:
 //!
 //! 1. `CSI 2 J`, `CSI H`, then every row filled through its last column
