@@ -2273,161 +2273,21 @@ be reviewed after the fact from the saved screenshots.
 > [`handoffs/closed/2026-10-06-from-devtools-cpp-renamed.md`](handoffs/closed/2026-10-06-from-devtools-cpp-renamed.md)).
 >
 > **What Proem asks of Ouroboros, accepted 2026-10-01 and 2026-10-02, for
-> later.** Five handoff notes, triaged and accepted. The heap one (#210),
-> `unlink` (#215) and `fstat`'s fallback (#216) are done, 2026-10-05, and their
-> notes closed; the system directories are not started. A
-> sixth, a notice with Proem's smaller heap numbers, was taken on 2026-10-02
-> and is in `handoffs/closed/`. Each note carries its evidence, its **Done when**
-> and the reply below in full.
+> later.** Proem is DevTools's `cpp` since 2026-10-06, and its requests are
+> DevTools's. Six notes were triaged; all are done and in `handoffs/closed/`,
+> the system directories last (#225, #226), and the six finished items moved
+> to [`roadmap-completed.md`](roadmap-completed.md) on 2026-10-06. What is
+> left are two follow-ups split from them:
 >
-> - [x] **new** **A user heap of at least 1 MiB, ideally sized per program.**
->       `HEAP_PAGES` is 64 (256 KiB, `kernel/src/loader.rs`) for every
->       program; an empty file with Proem's `target.h` already takes 152 KB
->       of live `malloc`. Proem's figures, remeasured on 2026-10-01 after it
->       freed each file's text and shrank its tables: 342 KB for
->       `libc/picodemo.c`, 667 KB for its C11-header test, 2,031 KB for its
->       112-header picolibc test (down from 697, 1,459 and 3,560). The bound
->       is the one 2 MB region slot that holds code, heap, guard and stack:
->       1 MiB now holds everything but the picolibc test, which needs regions
->       larger than one slot, `mmu.rs` and `tasks.rs` work. Within one slot a
->       larger `HEAP_PAGES` costs no RAM (`allocate_runtime_region` rounds
->       every region to a whole slot already), only code room in every
->       program, the largest of which loads at 135 KiB today (`netd`, static
->       data included): 256 pages is the cheap first step and meets the
->       request. A size carried per program in the ELF is what goes further,
->       with multi-slot regions past 2 MB, wanted for that one test and for
->       the compiler later. Blocks step 8 of
->       [`roadmap-c-hosting.md`](roadmap/roadmap-c-hosting.md) (on `main`
->       since #217). Notes:
->       [`handoffs/closed/2026-10-01-from-proem-heap-growth.md`](handoffs/closed/2026-10-01-from-proem-heap-growth.md)
->       and, for the numbers,
->       [`handoffs/closed/2026-10-01-from-proem-heap-numbers.md`](handoffs/closed/2026-10-01-from-proem-heap-numbers.md).
->       *Built 2026-10-05 on `loader/heap-1mib`: `HEAP_PAGES` 256, so every
->       program's heap is 1 MiB and its image may be 241 pages (964 KiB,
->       `HEAP_INFO_IMAGE_MAX`); every user of the heap reads its size from
->       `HEAP_INFO`, so nothing else changed but the documents that stated
->       256KB. `/bin/CMEM` (`libc/cmem.c`, picolibc) mallocs 16 KiB blocks
->       until refused, writes and reads back every byte, and prints the
->       heap beside what malloc held: `heap 1048576 bytes, malloc held
->       1032192 bytes live in 63 blocks of 16384, 0 bad` on QEMU, and with
->       64 pages, the control, `heap 262144`. `cpico`, pipes, `sort` and a
->       143 KB redirect unchanged. The per-program size and regions past
->       one slot are the item below. Its review (`/code-review high`,
->       eight findings) added: `populate_region` zeroes the whole region
->       before loading, since a spawned program gets the slot the last one
->       gave back and read its heap and stack (a mutation without it: the
->       first `cmem` found 568,878 nonzero bytes, the second 1,043,155);
->       `cmem` exits 1 unless the heap is at least 1 MiB, malloc held it
->       within 64 KiB, and it read 0 before the first malloc, run twice in
->       one boot by `make test-heap` (both mutations, no zeroing and 64
->       pages, fail it); `sort`'s line index a quarter of the heap rather
->       than a fixed 8,192 lines; "costs no RAM" corrected, since a
->       boot-loaded program frees the rest of its slot, so the five boot
->       programs keep 768 KiB more each; the stale 256KB mentions. Its
->       first finding holds the merge: a redirect between 256 KiB and 1 MiB
->       now reaches the `fsd` stall below and leaves a short file where it
->       was refused, so the stall is fixed first. It was, by #211 (the
->       supervisor no longer restarts a busy `fsd`) and #212 (a FAT-sector
->       cache, so a write's cost no longer grows with the offset); with both
->       merged, the 758 KB redirect writes whole (below). Merged as #210
->       (`b38cee0`); the handoff note is done and in `handoffs/closed/`.*
 > - [ ] **new** **A heap sized per program, and regions past one 2 MB
 >       slot.** For Proem's 112-header picolibc test (2,031 KB live) and the
 >       compiler later. A size carried in the ELF, read by the loader, and
 >       `mmu.rs`/`tasks.rs` mapping a region of more than one slot. Split
->       from the item above, which met the handoff's **Done when**.
-> - [x] **fix** **A FAT32 write past about 170 KB stalls `fsd` long enough
->       to be restarted.** *Fixed by #211 and #212, 2026-10-05: no request
->       was slow; the supervisor saw a busy `fsd` runnable at every tick
->       (see "A server busy with a stream of requests is restarted as
->       wedged" above), and the per-request cost grew with the offset. The
->       guess below about one long request was wrong, and is kept as
->       written.* `cp /EFI/BOOT/BOOTAA64.EFI /k.bin` (758 KB) on
->       `make image` under QEMU: `server slot 2 wedged - no progress
->       (runnable) - restarting`, and `/k.bin` is left at 169,984 bytes
->       (176,128 in a second boot with the 256 KiB heap, so it predates the
->       1 MiB heap). A redirect of the same file stops at 243,712. So one
->       request runs longer than the supervisor's `WEDGE_TICKS` (2.5 s),
->       and the cost grows with the offset: a chain walk or a free-cluster
->       scan per request, to be measured before it is guessed. Newly
->       reachable by a redirect, which a 256 KiB capture refused; and it is
->       how Proem's `-o FILE` will write a large output. Found 2026-10-05.
-> - [x] **new** **Stage the headers in two directories, and build `cpp`
->       with them built in** (`proem` until 2026-10-06). Steps 6 and 8 of the C-hosting plan, decided:
->       `/include` holds picolibc's 136 headers and a `target.h` generated at
->       build time with exactly `$(CFLAGS_OS)`; `/include/clang` holds
->       clang's eleven freestanding headers plus their `__float_*.h`,
->       `__stddef_*.h` and `__stdarg_*.h` helpers, copied from `$(clang
->       -print-resource-dir)/include` by glob, not by a kept list. Two
->       directories because `inttypes.h`, `limits.h`, `stdint.h` and
->       `stdnoreturn.h` exist on both sides and picolibc's `limits.h` reaches
->       clang's by `#include_next` (its line 143). `driver/cpp.c` is then
->       compiled with `-DCPP_SYSTEM_DIRS='"/include:/include/clang"'`, so
->       `cpp hello.c` needs no options. To check on the way: the FAT32 ESP
->       takes the lowercase, nested and `__`-prefixed names through `fsd`'s
->       long-name path, and the ext2 and exFAT images stage the tree too.
->       The stage has its own check (`cat /include/stdio.h`, `ls
->       /include/sys`, `ls /include/clang` on a booted image); the build
->       waits on steps 1 to 5 and the heap above, and its **Done when** is
->       the arc's finish line. *The stage is done, 2026-10-06 (step 6, #225;
->       `make test-include` on FAT32, ext2 and exFAT); steps 7 and 8 are
->       left, the build and whether the 1 MiB heap is room enough, which
->       only the build's first run can tell. `target.h` is generated with `$(CFLAGS_OS)
->       $(PICO_INC)`, the flags a picolibc program here is compiled with.*
->       *The build is done too, 2026-10-06 (steps 7 and 8, #226): `make cpp-bin`
->       from `CPP_DIR`, `/bin/CPP` staged, and `cpp hello.c` on a booted
->       image prints the program (`make test-cpp`).*
->       Note:
->       [`handoffs/closed/2026-10-01-from-proem-system-dirs.md`](handoffs/closed/2026-10-01-from-proem-system-dirs.md).
-> - [x] **fix** **`fstat` leaves every field but two as it found them.**
->       `libc/src/file.c`'s `fstat` sets `st_size` and `st_mode` only, so a
->       caller's `struct stat` keeps stack garbage in `st_dev` and `st_ino`,
->       and Proem's `#pragma once` and include-guard skipping can take two
->       headers for one. First, and small: zero every field `fstat` does not
->       fill, which Proem reads as "no identity". Then a real identity: the
->       `NP_FSTAT` record (27 bytes, `ninep-abi`) has no inode or qid, so it
->       is a wire change across `ninep-abi`, both C headers and the Python
->       peers, plus an identity per filesystem (ext2's inode; FAT32 and
->       exFAT have none, so the directory entry's location; `/proc`'s own)
->       and an `st_dev` per server and per remote mount. Note:
->       [`handoffs/closed/2026-10-01-from-proem-fstat-identity.md`](handoffs/closed/2026-10-01-from-proem-fstat-identity.md).
->       *The first half built 2026-10-05 on `libc/fstat-fields`, and it
->       found worse than garbage: picolibc programs' `file.o` was compiled
->       with `-Ilibc/include` first, so against the hand-rolled `struct
->       stat` (`st_size` at 0, `st_mode` at 8) while the caller's is
->       picolibc's (`st_mode` at 4, `st_size` at 16). `fstat` wrote the
->       file SIZE into `st_dev`/`st_ino` and left `st_size` unset, so
->       Proem's identity was the size: two headers of one size were one
->       file. Now every picolibc port object is built with `libc/include`
->       on the quote path only (`-iquote`), so an angle-bracket include
->       cannot reach a hand-rolled header, and `fstat` zeroes the whole
->       struct, then fills size, and mode, uid and gid where the disk
->       records them (ext2); where it does not (FAT32, exFAT), the type
->       with 0666 or 0777, since `fsd` enforces nothing there (`S_ISREG`
->       was false there). `st_dev`
->       and `st_ino` read 0, "no identity". The hand-rolled `struct stat`
->       grew the same fields and the `S_IF*`/`S_IS*` macros, and the libc
->       objects now depend on the headers, so a header change rebuilds
->       them. `make test-crename` runs `/bin/CFSTAT` (`libc/cfstat.c`) on
->       both formats: a struct filled with 0xA5 must come back equal to
->       zero plus the four filled fields, mode 100644 on ext2 and 100000
->       on FAT32. It failed on both before the header order was fixed, and
->       fails without the zeroing. Its review (`/code-review high`, ten
->       findings) made the uid/gid check one that can fail (compared with
->       `ls -l /etc/passwd`, read through the shell's own path, not with
->       themselves), added a directory (`S_ISDIR` on `/etc`), zeroed the
->       reply buffer (a shorter record left the mode-valid byte to the
->       stack), read the flags as the full u32, put the remaining `STAT_*`
->       offsets on `check-wire-constants.py`'s list, made `-iquote` the
->       rule for all three port objects (`crt0.o` and `os.o` still had the
->       hand-rolled headers first; the port's internal hooks moved to
->       `sys.h`), and chose the 0666/0777 above over 0000. Mutations: uid
->       read from the gid offset, and the directory test inverted, each
->       fail it. Merged as #216 (`8e132c3`); the note is done and closed,
->       its reply warning Proem that `st_dev`/`st_ino` carried the file
->       size until then.*
+>       from the 1 MiB heap item (#210, now in `roadmap-completed.md`), which
+>       met the handoff's **Done when**.
 > - [ ] **new** **A real file identity in `fstat` (`st_dev`, `st_ino`).**
->       The second half of the item above: the `NP_FSTAT` record carries
+>       The second half of the `fstat` fallback (#216, now in
+>       `roadmap-completed.md`): the `NP_FSTAT` record carries
 >       no inode or qid, so it is a wire change (`ninep-abi`, both C
 >       headers, the Python peers, all compared by `make test`), plus an
 >       identity per filesystem (ext2's inode; FAT32 and exFAT have none,
@@ -2436,23 +2296,6 @@ be reviewed after the fact from the saved screenshots.
 >       remote mount. Until then Proem reads the zero pair as "no
 >       identity" and rereads headers. Proem's fstat note asked for it
 >       first; the fallback met its **Done when**.
-> - [x] **Rename CPP to Proem in the C-hosting plan** on the branch that
->       carries it (`docs/c-hosting`, not on `main`): `/bin/proem`,
->       `proem-bin`, `PROEM_DIR` defaulting to `../Proem`, `driver/proem.c`,
->       the finish line's command, and the plan's index line. **Done
->       2026-10-04, `69653a8`**, before the plan merges, so `main` never
->       carries the old names. Note:
->       [`handoffs/closed/2026-10-01-from-workspace-proem-rename.md`](handoffs/closed/2026-10-01-from-workspace-proem-rename.md).
-> - [x] **new** **`unlink` in the C port.** picolibc's `remove` calls
->       `unlink`, which nothing in `libc/src` defines, so linking Proem (which
->       removes its `-o` output after a failed run, as Clang does) fails on
->       the undefined symbol. One more `np_request` in `libc/src/file.c`,
->       `NP_RM` on the resolved path beside `open`'s `NP_OPEN`; 0 on success,
->       -1 with `errno` (`ENOENT` for a missing file) from step 2 of the
->       C-hosting plan, so it lands with or after that step. Done when a C
->       program on a booted image removes a file it made, `ls` no longer
->       shows it, and a second `remove` gives -1 and `ENOENT`. Note:
->       [`handoffs/closed/2026-10-01-from-proem-unlink.md`](handoffs/closed/2026-10-01-from-proem-unlink.md).
 >
 > **What Edit asks of Ouroboros, accepted 2026-10-05.** Edit moved into
 > DevTools (`~/Projects/DevTools/edit/`) on 2026-10-06, so these are DevTools's

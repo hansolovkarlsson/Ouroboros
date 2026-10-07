@@ -1281,3 +1281,92 @@ is the most arguments, but 163 bytes of the 512 `crt0` sizes its buffer by,
 so the code at that bound never ran. Found by the review of #219; the
 docstring and the plan now say the byte bound is not reached, and why: the
 shell's 128-byte line keeps every blob far below it.
+
+## Nine more, from the C-hosting finish (2026-10-06)
+
+Steps 3 to 8 of the C-hosting plan (#221 to #226), each reviewed until a
+round found nothing. Seven of the nine were found by a review, two by a
+control run on purpose. Four of the nine were made by the previous round's
+own fix, which is
+[`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md)'s
+spine meeting this one's: the repair added an instrument, and nobody mutated
+the instrument.
+
+**A wire check that never saw a syscall number.** `check-wire-constants.py`
+matches names exactly, and the C header spells the syscall numbers
+`SYS_GET_ENV` where `syscall-abi` says `GET_ENV`. So none of the fifteen was
+ever compared, and a typo in one would have made every C program call
+another syscall at start-up with `make test` green. Found by the review of
+#221; the script now pairs every `SYS_*` with its Rust name, with a floor,
+and a mutated number, a renamed one and a deleted one each fail it.
+
+**An expectation copied from the program under comparison.** `test-cenv`
+checked `getenv`'s answers against the values `printenv` printed. Had
+`printenv` lost `PATH`, the check would have expected "unset", and a C side
+broken the same way would have passed. Found by the review of #221; the
+expected values are the rig's own, and a control with the shell's default
+`PATH` changed fails exactly the two `PATH` checks.
+
+**A comparison of two outputs from one decoder.** #223's `stat` check
+compared its record with `fstat`'s, both decoded by the new shared
+`stat_from_record`, so a decoding mistake would have agreed with itself.
+Found by its review; `cerrno` now checks the mode and owner of two files as
+`debugfs` reads them off the ext2 image. A control swapping uid and gid in
+the decoder passed the old comparison and failed the new one. The new check
+found something on its first run: `/etc/shadow` on that image is owned by
+the build host's user (501:20), the carried "ext2 uid 501" item.
+
+**A routing check that two servers answer alike.** With `stat` of a `/net`
+path sent to fsd instead of `netd` (a control), "`/net` is a directory" and
+"a missing `/net` file is `ENOENT`" both still passed: fsd also has a `/`,
+and also says a missing file is missing. Only `/net/ip` told the servers
+apart. Found by running the control, not by a review; the `/net` routing was
+later taken back out for another reason.
+
+**A tolerance wider than the error it was for.** `test-cclock` allowed the
+guest's clock 2 s across a 9 s gap, so a clock 20% wrong passed. Found by the
+review of #224. The first tightening, half a second plus 3%, still passed a
+control clock made 5% fast (9.55 s against 9.09 s); the gap is 20 s now and
+the slack 0.3 s plus 1%, and the 5% clock fails (22.11 s against 21.08 s)
+while a correct one passes with 0.01 s to spare. A clock 1000 times slow
+passed all nine of `CCLOCK`'s own checks: only the host's clock could see it.
+
+**A by-path check that echoes what it was given.** `test-include` proved
+every staged header there by `ls -l` with the file names as operands. `ls`
+prints an operand as typed, and FAT32 and exFAT look names up regardless of
+case, so the check proved existence and size and nothing about a name's
+case, which is what the day's FAT32 fix was about. Found by the review of
+#225; the report says what it proves, and the listings carry the case check.
+
+**An observer that quietly finished the job.** `test-cpp` had clang compile
+the guest's preprocessed output as `-x c`, with picolibc's include path. A
+guest `cpp` that left `#include <stdio.h>` unexpanded would have passed,
+clang resolving it from the host. Found by the review of #226; it is
+`-x cpp-output` now, and a file with an `#include` left in is a fatal error
+there, where `-x c` passed it.
+
+**An exit read for a command never typed, then one borrowed from the next.**
+`test-cpp`'s first run reported "cpp picodemo.c exited 0" for a command the
+harness never typed: with no echo of it in the transcript, the search read
+the whole transcript and found `hello`'s exit. Fixed on that run to read
+after the command's own echo; the review of #226 then found it unbounded
+the other way, so a run that faulted (no exit line) would borrow the next
+command's. It stops at the next command's echo now.
+
+**The fault count, read from a buffer that a kill throws away.** Every QEMU
+rig counts fault lines in QEMU's `-d int` trace. Most read it while QEMU ran,
+though `drive-qemu.py`'s own `main` warned that QEMU buffers it; the second
+review of #226 moved four rigs' reads after `stop()`, and the third found
+that `stop()` sent SIGKILL, which discards the buffer anyway. So a fault in a
+rig's last command could have been missed in every rig the project has.
+Fixed once, in the harness: `stop()` sends SIGTERM, whose exit flushes the
+log, and `aborts()` stops the guest itself before reading, so no rig can read
+it early.
+
+One more from the same day belongs to this family though it is no observer:
+a high-byte input added to catch a lexer leaning on `char`'s sign, with the
+reference forced to unsigned `char` like the target, so the one difference it
+was for could not show. The third review of #226 found it; the reference is
+built both ways now, and the guest must match both. Built both ways, the two
+give the same output for those bytes: `cpp` does not lean on the sign there,
+and the input proves the bytes survive, not that a sign bug would be caught.

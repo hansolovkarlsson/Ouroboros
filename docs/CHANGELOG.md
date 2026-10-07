@@ -14,8 +14,8 @@ version is held for a go-ahead. So far two days' work, 2026-10-05 and
 2026-10-06, #209 to #226: the storage server made safe under large writes and
 double mounts, and the C library made able to host Proem (now cpp) and Edit,
 the whole C-hosting plan among it, ending in DevTools's preprocessor running
-here, with the C headers on the disk and FAT32 names that keep their case. The days' records are in
-`docs/work-journal/`, one file a day.
+here, with the C headers on the disk and FAT32 names that keep their case. The
+days' records are in `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
 `cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
@@ -57,12 +57,33 @@ FAT32 and ext2.
 vector as `/bin/ARGS` does and `make test-cargs` compares them. Step 1 of the
 C-hosting plan, and item 5 of Edit's console note.
 
+**Every failure in the C file layer sets `errno` (#220).** `open`, `read`,
+`write`, `close`, `fstat` and `lseek` now set it in a picolibc program, as
+the path verbs already did: `ENOENT` and `ENOTDIR` from the server, which
+Proem's include search reads, and the library's own refusals as POSIX names
+them (`EBADF`, `EMFILE`, `EINVAL`, `EOVERFLOW`, `ESPIPE`, `EFAULT`). An
+unknown `lseek` whence is refused rather than taken as `SEEK_SET`, `close`
+reports a server's refusal, and `fstat` of a console fd says a character
+device. `make test-cerrno` checks every
+case on FAT32 and ext2. Step 2 of the C-hosting plan.
+
 **A C program has its environment (#221).** `crt0` builds `environ` from the
 kernel's store, so picolibc's `getenv` answers what the shell's `set` made;
 until then it linked against picolibc's own empty `environ` and answered
 every name as unset. Proem reads `SOURCE_DATE_EPOCH` through it. `make
 test-cenv` compares a C `printenv` with `/bin/PRINTENV`. Step 3 of the
 C-hosting plan.
+
+**Reading a per-task store back accepts any buffer (#222).** `GET_ARG`,
+`GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at most one entry, through
+one kernel helper that checks containment over the bytes it copies. Until now
+a capacity over the blanket 512 bytes was refused, which for `GET_ENV` meant a
+buffer the size of the environment, and the refusal answered "no such entry".
+`ulib::env_at` and `ulib::getenv` take a buffer the size of the store and
+return the entry or value itself, so neither can pass off a cut one as whole,
+and a spawner's count header claiming more entries than the store holds no
+longer stalls them. `/bin/RDPROBE` reads all five with a 4 KiB buffer, and
+`make test-cenv` checks its answers.
 
 **`stat(path)` in the C library (#223).** One `NP_STAT`, the request `ls -l` makes,
 so `stat` needs no read permission on the file and no free fd, as POSIX
@@ -90,27 +111,6 @@ built here by `make cpp-bin` with `/include` and `/include/clang` built in,
 so `cpp hello.c` needs no options. Its output is byte for byte what the same
 cpp writes on the Mac, and clang compiles it (`make test-cpp`). Steps 7 and 8
 of the C-hosting plan: the arc's finish line.
-
-**Reading a per-task store back accepts any buffer (#222).** `GET_ARG`,
-`GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at most one entry, through
-one kernel helper that checks containment over the bytes it copies. Until now
-a capacity over the blanket 512 bytes was refused, which for `GET_ENV` meant a
-buffer the size of the environment, and the refusal answered "no such entry".
-`ulib::env_at` and `ulib::getenv` take a buffer the size of the store and
-return the entry or value itself, so neither can pass off a cut one as whole,
-and a spawner's count header claiming more entries than the store holds no
-longer stalls them. `/bin/RDPROBE` reads all five with a 4 KiB buffer, and
-`make test-cenv` checks its answers.
-
-**Every failure in the C file layer sets `errno` (#220).** `open`, `read`,
-`write`, `close`, `fstat` and `lseek` now set it in a picolibc program, as
-the path verbs already did: `ENOENT` and `ENOTDIR` from the server, which
-Proem's include search reads, and the library's own refusals as POSIX names
-them (`EBADF`, `EMFILE`, `EINVAL`, `EOVERFLOW`, `ESPIPE`, `EFAULT`). An
-unknown `lseek` whence is refused rather than taken as `SEEK_SET`, `close`
-reports a server's refusal, and `fstat` of a console fd says a character
-device. `make test-cerrno` checks every
-case on FAT32 and ext2. Step 2 of the C-hosting plan.
 
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or
