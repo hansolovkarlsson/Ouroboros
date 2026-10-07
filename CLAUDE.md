@@ -370,7 +370,13 @@ the resumable path.** The kernel never runs at EL1 with IRQs unmasked
 unmasks, for EL0 only), so an IRQ at EL1h is a broken invariant and slot 5
 reports and halts like the other diverging vectors; slot 9 (the tick
 arriving from EL0) is the one resumable IRQ path. See `synccell.rs` for
-why the invariant is load-bearing.
+why the invariant is load-bearing. **Update (2026-10-07): FP/SIMD is
+saved now**, `q0`-`q31`, `FPCR` and `FPSR` on every resumable path and in
+`Context` (800 bytes). The premise above had stopped being true long
+before: the kernel's memcpy runs through `q0` and every userland program
+keeps values in vector registers, so a register live across a syscall came
+back changed. Found by `cond`'s reverse video drawing wrong rows; checked
+by `make test-fpsimd`.
 
 **Verified as sustained, not just "it prints once":** ran under QEMU for
 20+ seconds, confirmed 14 consecutive ticks at the correct ~1-second
@@ -487,10 +493,9 @@ and not itself a bug), and zero aborts across the whole run.
 
 **Still coarse, worth knowing before building on it:** exactly two tasks,
 hardcoded, no task creation/destruction API; no priorities or blocking, just
-round-robin; FP/SIMD state still isn't part of `Context` (inherited
-limitation from `exceptions.rs`, see its module doc comment) — fine since
-neither task's hand-written code touches it, but a real limitation for
-whatever runs here next; and both tasks still share the one 8KB region's W^X
+round-robin; FP/SIMD state wasn't part of `Context` (inherited
+limitation from `exceptions.rs`; it is since 2026-10-07, see the update in
+the timer section above); and both tasks still share the one 8KB region's W^X
 weakness noted in the syscall-boundary section (code and stack are both
 executable, no separation) — now doubled, since it's true per-task rather
 than a one-off.
@@ -533,6 +538,7 @@ make test-el1-drop           # the EL1 drop's rig: test-early-fault.py --el2, th
 make test-async-rmount       # rebuilds the image, then three driven QEMU boots against host-run 9P peers (scripts/test-async-rmount.sh): the parked remote mount is served, a parked reply never reaches a recycled slot, and a live peer is served while a silent one is parked - run it whenever netd's client paths or the kernel's MSG_SEND arm change
 make test-held-keys          # rebuilds the image, then five driven QEMU boots of the held user keys (scripts/test-held-keys.py): login holds, logout and a killed shell drop, an ordinary user is refused; minutes, so not in `make test` - run it whenever login, the shell's session loop or netd's held-key table changes
 make test-heap               # the user heap on a booted image (scripts/test-heap.py): /bin/CMEM twice in one boot, each checking a heap of at least 1 MiB, malloc holding nearly all of it, and every byte 0 before the first malloc (the second run starts in the slot the first gave back); about a minute - run it whenever HEAP_PAGES, populate_region or the runtime region allocator changes
+make test-fpsimd            # a task's FP/SIMD registers across the kernel (scripts/test-fpsimd.py, /bin/FPPROBE): all 32 vector registers and FPCR loaded in one asm block, then a YIELD and a spin the tick preempts (at least two ticks), alone and as `fpprobe | fpprobe -` (two probes side by side, different rounding modes); fails on a kernel without the save and on one missing only the FPCR restore; one boot, about a minute - run it whenever exceptions.rs's trampolines, Context or tasks.rs's switch paths change
 make test-cargs             # argv in a C program (scripts/test-cargs.py): /bin/ARGS and libc/cargs.c built twice, /bin/CARGS (picolibc) and /bin/CARGSH (the hand-rolled libc), run with the same arguments in three cases (a few, none, and 15, the most the shell passes); the C programs must print ARGS's lines apart from argv[0]; one boot, about a minute - run it whenever libc/src/crt0.c or the kernel's argv store changes
 make test-cerrno            # errno from the C file layer (scripts/test-cerrno.py, /bin/CERRNO): two boots, FAT32 as root and ext2 as root and then as `user`, 39 checks each as root (ENOENT, ENOTDIR, ENAMETOOLONG, EMFILE, EBADF, EINVAL, EOVERFLOW, ESPIPE, EFAULT, EISDIR, the console fds, and stat(path) against fstat's record, with every fd in use, and of the console and /net bindings) and, as `user`, EACCES opening /etc/shadow while stat of it succeeds, and the modes and owners the image gave two files; about two minutes - run it whenever libc/src/file.c's error paths or stat, or fsd's answers to them, change
 make test-cenv              # the environment in a C program (scripts/test-cenv.py, /bin/CENV and /bin/CENVH): before and after four `set`s (the last a 128-byte value, the shell's longest), both C programs print /bin/PRINTENV's lines, and CENV's getenv answers SOURCE_DATE_EPOCH, PATH, the long value, a set name and an unset one, against the rig's own values, and /bin/RDPROBE reads all five per-task stores through a 4 KiB buffer (the only check that the kernel accepts a buffer larger than a store); one boot, about a minute - run it whenever libc/src/crt0.c or the kernel's env store changes

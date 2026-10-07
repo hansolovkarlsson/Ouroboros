@@ -17,6 +17,18 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
+**A task's vector registers survive the kernel (2026-10-07).** The
+kernel saved only `x0`-`x30` on a syscall, a tick or an EL0 fault, on the
+old reasoning that nothing used FP/SIMD. Everything did: the kernel's own
+memcpy and struct copies run through `q0`, and every userland program keeps
+values in vector registers, so one live across a syscall or a task switch
+came back changed. Every resumable path now saves `q0`-`q31`, `FPCR` and
+`FPSR`, and a task's `Context` carries them (800 bytes, was 272). Found
+while building `cond`'s reverse video, whose second reversed glyph had two
+rows wrong; `make test-fpsimd` (`/bin/FPPROBE`) checks it across a `YIELD`
+and across preemption between two probes, and fails on a kernel without the
+save (`q0` changed every round) and on one that drops only the FPCR restore.
+
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
 `cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
 and leave the file short. No request was slow: the supervisor saw a busy

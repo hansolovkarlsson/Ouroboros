@@ -205,8 +205,14 @@ meaningful survives those. If the dead task is the filesystem server,
 the kernel restarts it from an image kept at boot (see "The filesystem
 server" below).
 
-FP/SIMD registers are not part of the saved context. Fine today (nothing
-running touches them), a real limitation for whatever runs next.
+FP/SIMD state is part of the saved context: every resumable path saves
+`q0`-`q31`, `FPCR` and `FPSR` after the general registers (an 800-byte
+frame, `Context`'s layout, held to its offsets by compile-time asserts),
+so a syscall and a task switch both carry it. Until 2026-10-07 it was
+not saved, on the reasoning that nothing used it, while the kernel's own
+memcpy ran through `q0` and every userland program kept values in vector
+registers; `make test-fpsimd` (`/bin/FPPROBE`) checks it across a syscall
+and across preemption between two tasks that both hold vector state.
 
 ## Process model
 
