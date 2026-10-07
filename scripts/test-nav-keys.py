@@ -88,7 +88,8 @@ def main() -> int:
         if ok:
             guest.type_line("root")
             ok = guest.wait_for("# ")
-            steps_done.append("login")
+            if ok:
+                steps_done.append("login")
         if ok:
             guest.type_line("readkey")
             ok = guest.wait_for("press keys")
@@ -98,18 +99,21 @@ def main() -> int:
             # the farewell alone marks the prompt as seen too, and a second
             # wait for it then never matches.
             ok = guest.wait_for(r"readkey: bye[\s\S]*# ", timeout=30)
-            steps_done.append("readkey")
+            if ok:
+                steps_done.append("readkey")
         if ok:
             type_raw(guest, b"echo a")
             time.sleep(drive_qemu.SETTLE)
             sendkeys(IN_LINE)
             guest.type_line("b")
             ok = guest.wait_for("# ")
-            steps_done.append("usb line")
+            if ok:
+                steps_done.append("usb line")
         if ok:
             type_raw(guest, b"echo c\x1b[A\x1b[5~d\n")
             ok = guest.wait_for("# ")
-            steps_done.append("serial line")
+            if ok:
+                steps_done.append("serial line")
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -124,7 +128,7 @@ def main() -> int:
     lines = [l.strip() for l in out.splitlines()]
     checks = [
         ("driven to the end", len(steps_done) == 4),
-        ("login took `ro ESC[D ot` as root", "login" in steps_done),
+        ("login took `ro ESC[D ot` as root", "login" in steps_done and "Login incorrect" not in out),
         (f"readkey read the eleven sequences ({len(want)} bytes)", got == want),
         ("the shell printed `ab` (USB keys in the line)", "ab" in lines),
         ("the shell printed `cd` (serial sequences in the line)", "cd" in lines),

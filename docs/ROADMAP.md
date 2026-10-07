@@ -813,6 +813,14 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **Tab and Escape send nothing on the USB keyboard (found 2026-10-07,
+  building the navigation keys).** `xhci.rs`'s `keycode_to_ascii` has no
+  arm for Tab (HID 0x2b) or Escape (0x29), so the shell's filename
+  completion, which the line editor runs on Tab, cannot be reached from a
+  Parallels or Pi keyboard, only over QEMU's serial line. Tab is one arm.
+  Escape needs a decision first: a bare ESC is also how every sequence
+  starts, and the shell's `keyseq` filter would swallow the key after it.
+
 - **Two tails of `cond`'s escape sequences (found 2026-10-07, the high
   review of #228).** (1) Reverse video is one setting in `cond` shared by
   every client, and nothing resets it when a program ends, so a program
@@ -2351,7 +2359,11 @@ be reviewed after the fact from the saved screenshots.
 >       (*(5) done 2026-10-05 by #219, step 1 of the C-hosting plan; `make
 >       test-cargs`*) (*(1) done 2026-10-07 by #228, `/bin/VTPROBE` drawing
 >       each sequence and `make test-cond-vt` reading the screen back by
->       pixel; on top of #227, the FP/SIMD save it turned up*). Done
+>       pixel; on top of #227, the FP/SIMD save it turned up*) (*(2) done
+>       2026-10-07 by PR_NAV, `/bin/READKEY` printing each key's bytes and
+>       `make test-nav-keys` pressing them on QEMU's USB keyboard; the
+>       shell and login now drop the sequences instead of inserting their
+>       tails*). Done
 >       when a program in this tree, on the framebuffer console, writes
 >       each sequence of (1) and prints the bytes each key of (2) sends,
 >       and a C program's `main` receives its arguments. (4) touches the
