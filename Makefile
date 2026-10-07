@@ -1892,7 +1892,7 @@ test-crename: image image-ext2
 # Native target, not the workspace default (aarch64-unknown-uefi), which cannot
 # run a test binary.
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
-PURE_CRATES := accounts regex ed25519 clusterkeys ninep-abi
+PURE_CRATES := accounts regex ed25519 clusterkeys ninep-abi keyseq
 # `ninep-abi` joined the list at the flag day. It had always qualified - pure
 # consts plus `resolve_ns`, no I/O and no syscalls - and was simply never listed,
 # so its thirteen assertions about the WIRE FORMAT, including the one pinning

@@ -62,7 +62,6 @@
 #![no_std]
 #![no_main]
 
-mod keyseq;
 mod login;
 
 use core::arch::asm;
@@ -683,10 +682,9 @@ fn main() -> ! {
             // Genuinely blocks (READ_CHAR suspends this task at the scheduler
             // level until a byte is available) rather than busy-polling; never
             // `wfe` (a confirmed real-Parallels EL0 hang - see tasks.rs).
-            let byte = read_char();
-            if !keys.passes(byte) {
+            let keyseq::Fed::Byte(byte) = keys.feed(read_char()) else {
                 continue; // part of an arrow or function key's sequence
-            }
+            };
             on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len, &mut env);
         }
 

@@ -6,19 +6,27 @@
 Item 2 of docs/handoffs/2026-10-05-from-edit-editor-console.md: the USB
 keyboard sends the VT100/xterm sequences for Up, Down, Right, Left, Home, End,
 Page Up, Page Down, Delete, F2 and F3 (kernel/src/xhci.rs, keycode_to_bytes),
-which it dropped before. Three checks in one boot:
+which it dropped before. Five checks in one boot:
 
 1. **The bytes.** `/bin/READKEY` prints every byte it reads with its value.
    The eleven keys are pressed through the QEMU monitor's `sendkey`, which
    reaches the guest ONLY as a USB keyboard report, then `q`; the values
    printed must be the eleven sequences, in order, and nothing else.
-2. **The shell's line editor swallows them** (programs/shell/src/keyseq.rs).
-   `echo a` typed on the serial line, then Up, Left, Delete, Home, End and F2
-   on the USB keyboard, then `b` and Enter: the shell must print `ab`, where
-   without the filter it printed the sequences' tails as text.
+2. **The shell's line editor swallows them** (the `keyseq` crate). `echo a`
+   typed on the serial line, then Up, Left, `x`, Delete, Home, End and F2 on
+   the USB keyboard, then `b` and Enter: the shell must print `axb`. The `x`
+   is what proves the USB keys reached the shell at all; without the filter
+   it printed the sequences' tails as text.
 3. **Login and the serial path.** The user name is typed on the serial line as
    `ro`, `ESC [ D`, `ot`, so login succeeds only if its reader swallows the
    sequence; and `echo c`, `ESC [ A`, `ESC [ 5 ~`, `d` must print `cd`.
+4. **`more` takes a sequence as one key** (`ulib::read_key`): one Down at
+   `--More--` shows one more screen, where byte by byte it showed three, and
+   leaves nothing for the shell.
+5. **`ulib::read_line` agrees with login**: `useradd navu` with the password
+   typed as `pa`, `ESC [ D`, `ss`, then a login as navu typing `pass`, which
+   succeeds only if both readers drop the sequence. The run boots a copy of
+   the image, so the user never reaches `build/esp.img`.
 
 QEMU's own trace must hold no fault line. One boot, about a minute. Run it
 whenever xhci.rs's key mapping, the shell's line editor or login's reader
@@ -27,6 +35,7 @@ changes.
 import importlib.util
 import os
 import re
+import shutil
 import socket
 import sys
 import time
@@ -49,7 +58,10 @@ KEYS = [
     ("home", b"\x1b[H"), ("end", b"\x1b[F"), ("pgup", b"\x1b[5~"), ("pgdn", b"\x1b[6~"),
     ("delete", b"\x1b[3~"), ("f2", b"\x1bOQ"), ("f3", b"\x1bOR"),
 ]
-IN_LINE = ["up", "left", "delete", "home", "end", "f2"]
+# A USB letter among them, so `axb` proves the USB keys reached the shell
+# (an `ab` alone would also pass if none of them had).
+IN_LINE = ["up", "left", "x", "delete", "home", "end", "f2"]
+COPY = os.path.join(ROOT, "build", "test-nav-keys.img")
 
 
 def sendkeys(names):
@@ -71,8 +83,11 @@ def type_raw(guest, data):
 def main() -> int:
     if os.path.exists(MONITOR):
         os.remove(MONITOR)
+    # A copy: the run adds a user, which must not reach the image other
+    # rigs boot.
+    shutil.copy(IMAGE, COPY)
     guest = drive_qemu.Guest(
-        IMAGE, label="test-nav-keys: ",
+        COPY, label="test-nav-keys: ",
         extra_args=[
             "-device", "qemu-xhci,id=xhci0",
             "-device", "usb-kbd,bus=xhci0.0",
@@ -114,6 +129,41 @@ def main() -> int:
             ok = guest.wait_for("# ")
             if ok:
                 steps_done.append("serial line")
+        if ok:
+            # One Down at the pager is one key: one more screen, then q.
+            guest.type_line("more /include/elf.h")
+            ok = guest.wait_for("--More--")
+            if ok:
+                sendkeys(["down"])
+                ok = guest.wait_for("--More--")
+            if ok:
+                time.sleep(1.5)  # time for any further screens to show
+                sendkeys(["q"])
+                ok = guest.wait_for("# ")
+            if ok:
+                steps_done.append("more")
+        if ok:
+            # A password set through ulib::read_line with an arrow typed in
+            # it, then typed plain at login: the two readers must agree.
+            guest.type_line("useradd navu")
+            ok = guest.wait_for("assword")
+            if ok:
+                type_raw(guest, b"pa\x1b[Dss\n")
+                ok = guest.wait_for("assword")
+            if ok:
+                type_raw(guest, b"pa\x1b[Dss\n")
+                ok = guest.wait_for("# ")
+            if ok:
+                guest.type_line("logout")
+                ok = guest.wait_for("login:")
+            if ok:
+                guest.type_line("navu")
+                ok = guest.wait_for("assword")
+            if ok:
+                guest.type_line("pass")
+                ok = guest.wait_for(r"\$ |Login incorrect")
+            if ok:
+                steps_done.append("useradd")
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -126,12 +176,19 @@ def main() -> int:
     got = [int(v) for v in re.findall(r"key: .  \((\d+)\)", readkey_part)]
     want = list(b"".join(seq for _, seq in KEYS))
     lines = [l.strip() for l in out.splitlines()]
+    more_part = out[out.find("more /include/elf.h"):] if "more /include/elf.h" in out else ""
+    more_part = more_part[:more_part.find("useradd navu")] if "useradd navu" in more_part else more_part
+    after_useradd = out[out.find("useradd navu"):] if "useradd navu" in out else ""
     checks = [
-        ("driven to the end", len(steps_done) == 4),
+        ("driven to the end", len(steps_done) == 6),
         ("login took `ro ESC[D ot` as root", "login" in steps_done and "Login incorrect" not in out),
         (f"readkey read the eleven sequences ({len(want)} bytes)", got == want),
-        ("the shell printed `ab` (USB keys in the line)", "ab" in lines),
+        ("the shell printed `axb` (USB keys in the line)", "axb" in lines),
         ("the shell printed `cd` (serial sequences in the line)", "cd" in lines),
+        ("one Down at `more` is one screen (two prompts)", more_part.count("--More--") == 2),
+        ("nothing of the Down left for the shell", "[B" not in out),
+        ("a password typed with ESC [ D at useradd logs in typed plain",
+         "useradd" in steps_done and "Login incorrect" not in after_useradd and "$ " in after_useradd),
         ("no fault lines", faults == 0),
     ]
     if got != want:

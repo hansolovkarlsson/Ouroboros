@@ -144,9 +144,10 @@
 //! re-arms the ring, without the Reset Endpoint/Set TR Dequeue Pointer
 //! sequence real recovery needs); no auto-repeat (a held key reports once
 //! per press, not repeatedly, by design - see [`poll_key`]);
-//! unmapped keys (function keys, arrows, ...) are silently ignored; only
-//! the first of up to 6 simultaneously-pressed keys in a report is ever
-//! surfaced; only the *first* interrupt IN endpoint found in the
+//! unmapped keys (Tab, Escape, the function keys other than F2 and F3,
+//! ...) are silently ignored, while the arrows, Home, End, Page Up/Down,
+//! Delete, F2 and F3 send their VT100 sequences (`keycode_to_bytes`,
+//! since 2026-10-07); only the *first* interrupt IN endpoint found in the
 //! configuration descriptor is ever configured, so a composite
 //! keyboard+something-else device with more than one would only get its
 //! first endpoint driven.
@@ -967,16 +968,6 @@ const MOD_LSHIFT: u8 = 1 << 1;
 const MOD_RCTRL: u8 = 1 << 4;
 const MOD_RSHIFT: u8 = 1 << 5;
 
-/// USB HID keycode -> ASCII, boot-protocol Usage IDs 0x04-0x38 (letters,
-/// digits, and the punctuation/whitespace keys this shell's line editor
-/// cares about). `None` for anything unmapped (function keys, arrows,
-/// modifiers themselves, ...) - a real, documented gap, not a bug; see
-/// module doc comment. A held Ctrl maps letters to the classic C0
-/// control bytes (Ctrl+A = 0x01 ... Ctrl+Z = 0x1a) - added for the
-/// `fg` escape hatch specifically (Ctrl+C = 0x03, ETX, intercepted
-/// kernel-side to reclaim the keyboard - see
-/// `syscall.rs::poll_keyboard_byte`), general because the general
-/// mapping is the same three lines.
 /// The bytes one key press sends: a single byte for the keys
 /// [`keycode_to_ascii`] maps, or the VT100/xterm sequence for a navigation
 /// or function key (DevTools's editor note, item 2,
@@ -1015,6 +1006,17 @@ fn keycode_to_bytes(keycode: u8, shift: bool, ctrl: bool) -> Option<KeyBytes> {
     Some(KeyBytes { bytes, len: seq.len() })
 }
 
+/// USB HID keycode -> ASCII, boot-protocol Usage IDs 0x04-0x38 (letters,
+/// digits, and the punctuation/whitespace keys this shell's line editor
+/// cares about). `None` for anything unmapped (Tab, Escape, the modifiers
+/// themselves, ...; the navigation and function keys are
+/// [`keycode_to_bytes`]'s) - a real, documented gap, not a bug; see
+/// module doc comment. A held Ctrl maps letters to the classic C0
+/// control bytes (Ctrl+A = 0x01 ... Ctrl+Z = 0x1a) - added for the
+/// `fg` escape hatch specifically (Ctrl+C = 0x03, ETX, intercepted
+/// kernel-side to reclaim the keyboard - see
+/// `syscall.rs::poll_keyboard_byte`), general because the general
+/// mapping is the same three lines.
 fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
     if ctrl {
         return match keycode {
@@ -2129,10 +2131,16 @@ impl Xhci {
             let Some(key) = keycode_to_bytes(keycode, shift, ctrl) else {
                 continue;
             };
-            // Can't overflow: at most 6 keycodes total in buf[2..8], each
-            // at most KEY_BYTES_MAX bytes, pending sized for that and
-            // drained before each event pop. A sequence goes in whole or
-            // not at all, so a reader never sees half of one.
+            // A report holds at most 6 keycodes (buf[2..8]), each at most
+            // KEY_BYTES_MAX bytes, and pending is sized for that. It is
+            // drained before each event pop in `poll_key`, but not between
+            // reports handled inside `wait_transfer_event` during a bulk
+            // transfer, so several reports can pile up there; once it is
+            // full a further key is dropped, unlogged. A sequence goes in
+            // whole or not at all, so the queue never holds half of one
+            // (delivery is a byte at a time, so a reader can still be
+            // handed part of one and lose the rest; see the editor note's
+            // item 4 on ROADMAP.md).
             if kb.pending_len + key.len <= kb.pending.len() {
                 kb.pending[kb.pending_len..kb.pending_len + key.len].copy_from_slice(&key.bytes[..key.len]);
                 kb.pending_len += key.len;
