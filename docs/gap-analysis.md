@@ -54,7 +54,7 @@ set; roadmap arcs are cited by their `ROADMAP.md` section.
 | Time | ◐ | `GET_TICKS` (20 ms tick) + `MONOTONIC_US` (µs since boot). **No wall-clock/RTC** (no real date). |
 | Namespaces / `bind` | ✅ | `NS_SET`/`GET_NS` — per-task Plan 9 namespaces, inherited at spawn. Ahead of most Unixes here. |
 | Memory / `brk`/`mmap` | ◐ | A fixed raw heap area (`HEAP_INFO`), no `sbrk` growth, no `mmap`. |
-| `ioctl`, `fcntl`, `poll`/`select` (general) | ✗ | No general fd-control or multiplexing syscalls; `NET_WAIT` is a *netd-only* two-source wait, not a general `poll`. |
+| `ioctl`, `fcntl`, `poll`/`select` (general) | ✗ | No general fd-control or multiplexing syscalls; `NET_WAIT` is a *netd-only* two-source wait, not a general `poll`. The C library's `ioctl` answers one request, `TIOCGWINSZ` (the console's size, 2026-10-07), and nothing else. |
 
 ## 3. Filesystem, VFS & file handles
 

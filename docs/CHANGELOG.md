@@ -17,6 +17,15 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
+**A program can read the screen size (PR_SIZE).** Item 3 of DevTools's
+editor note. `CON_INFO`'s size fields, gated to `cond` until now, are open to
+every task: three numbers fixed at boot, which grant nothing. A C program
+asks the POSIX way, `ioctl(fd, TIOCGWINSZ, &ws)` from a new `<sys/ioctl.h>`,
+which answers 0 by 0 on a serial console (its size is unknown, as on Linux)
+and `ENOTTY` for a pipe or a file. Rust programs have `ulib::screen_size`,
+and `more` now pages by the real height instead of assuming 24 rows. `make
+test-cwinsz` checks both backends, the framebuffer read back by pixel.
+
 **The arrow and function keys reach programs (#229).** Item 2 of
 DevTools's editor note: the USB keyboard sends the VT100/xterm sequences for
 Up, Down, Right, Left, Home, End, Page Up, Page Down, Delete, F2 and F3, which
