@@ -27,6 +27,8 @@
 #include "nsresolve.h"
 #include <fcntl.h>
 #include <string.h>
+#include <stdarg.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 /* `errno` where the C library has one: picolibc does, and the Makefile builds
@@ -936,6 +938,46 @@ void __libc_end_stdout(void) {
     }
     unsigned char dummy = 0;
     __os_syscall4(SYS_MSG_SEND, t, (long)&dummy, 0, 0);
+}
+
+/* ---- ioctl ---------------------------------------------------------------- */
+
+/* TIOCGWINSZ only: the console's size (sys/ioctl.h). fd 0 is the console's
+ * keyboard; fds 1 and 2 are the console only while stdout is routed there,
+ * and a pipe is not a terminal. */
+int ioctl(int fd, unsigned long request, ...) {
+    if (fd < 0) {
+        return client_fail(EBADF);
+    }
+    int console = fd == 0 || ((fd == 1 || fd == 2) && stdout_target() == CON_TASK);
+    if (!console) {
+        if (fd > 2 && !file_for(fd)) {
+            return client_fail(EBADF);
+        }
+        return client_fail(ENOTTY);
+    }
+    if (request != TIOCGWINSZ) {
+        return client_fail(ENOTTY);
+    }
+    va_list ap;
+    va_start(ap, request);
+    struct winsize *ws = va_arg(ap, struct winsize *);
+    va_end(ap);
+    if (!ws) {
+        return client_fail(EFAULT);
+    }
+    long cols = __os_syscall1(SYS_CON_INFO, CON_INFO_COLS);
+    long rows = __os_syscall1(SYS_CON_INFO, CON_INFO_ROWS);
+    /* 0 is "unknown" (a byte-stream console), and so is a refusal. */
+    if ((unsigned long)cols >= FS_ERR_MIN || (unsigned long)rows >= FS_ERR_MIN || cols > 0xffff || rows > 0xffff) {
+        cols = 0;
+        rows = 0;
+    }
+    ws->ws_row = (unsigned short)rows;
+    ws->ws_col = (unsigned short)cols;
+    ws->ws_xpixel = 0;
+    ws->ws_ypixel = 0;
+    return 0;
 }
 
 /* ---- read / write -------------------------------------------------------- */

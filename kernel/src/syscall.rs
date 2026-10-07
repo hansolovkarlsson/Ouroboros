@@ -634,10 +634,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::CON_INFO => {
             // Lets the console server discover its backend (byte-stream vs
-            // framebuffer) and the framebuffer's cell grid at startup.
-            if !con_access_allowed() {
-                return syscall_abi::FS_ERROR;
-            }
+            // framebuffer) and the framebuffer's cell grid at startup, and
+            // any program read the screen size (DevTools's editor note,
+            // item 3). Open to every task since 2026-10-07: it reads three
+            // numbers fixed at boot and grants nothing; drawing (FB_*) and
+            // CON_WRITE stay gated to the console server.
             match arg0 {
                 syscall_abi::CON_INFO_KIND => {
                     if crate::fbdev::is_present() {

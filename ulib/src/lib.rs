@@ -495,6 +495,21 @@ pub fn read_line(buf: &mut [u8], echo: bool) -> usize {
 
 pub use keyseq;
 
+/// The console's size as `(columns, rows)` of character cells, or `None`
+/// when it cannot be known: on a byte-stream console (QEMU's serial line)
+/// the terminal at the far end has whatever size it has, and the kernel
+/// never hears it. A caller then assumes the conventional 80 by 24, as a
+/// Unix program does when `TIOCGWINSZ` fails. `CON_INFO`, open to every
+/// task since 2026-10-07 (DevTools's editor note, item 3).
+pub fn screen_size() -> Option<(usize, usize)> {
+    let cols = syscall(syscall_abi::CON_INFO, syscall_abi::CON_INFO_COLS);
+    let rows = syscall(syscall_abi::CON_INFO, syscall_abi::CON_INFO_ROWS);
+    if cols == 0 || rows == 0 || cols >= syscall_abi::FS_ERR_MIN || rows >= syscall_abi::FS_ERR_MIN {
+        return None;
+    }
+    Some((cols as usize, rows as usize))
+}
+
 /// One key press: [`keyseq::Fed::Byte`] for an ordinary byte, or
 /// [`keyseq::Fed::Sequence`] once a navigation or function key's whole
 /// escape sequence has been read (never [`keyseq::Fed::Pending`]). For a

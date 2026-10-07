@@ -13,8 +13,9 @@
 #![no_std]
 #![no_main]
 
-/// Lines per screen before pausing (~24-row console, one kept for the prompt).
-const PAGE_ROWS: usize = 23;
+/// Rows assumed when the console's size is unknown (a serial terminal):
+/// the conventional 24.
+const DEFAULT_ROWS: usize = 24;
 
 #[no_mangle]
 #[link_section = ".text.start"]
@@ -81,7 +82,10 @@ fn page(content: &[u8]) {
     }
     let total = content.len();
     let mut pos = 0usize;
-    let mut to_show = PAGE_ROWS;
+    // Lines per screen before pausing: the console's rows, one kept for the
+    // prompt (`ulib::screen_size`; 24 when the size is unknown).
+    let page_rows = ulib::screen_size().map_or(DEFAULT_ROWS, |(_, rows)| rows).max(2) - 1;
+    let mut to_show = page_rows;
     loop {
         let mut printed = 0usize;
         while printed < to_show && pos < total {
@@ -112,7 +116,7 @@ fn page(content: &[u8]) {
         match key {
             ulib::keyseq::Fed::Byte(b'q' | b'Q') => break,
             ulib::keyseq::Fed::Byte(b'\r' | b'\n') => to_show = 1, // one more line
-            _ => to_show = PAGE_ROWS, // space (or any key) = next screen
+            _ => to_show = page_rows, // space (or any key) = next screen
         }
     }
 }
