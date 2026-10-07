@@ -48,9 +48,10 @@
 //! that nothing used it; by then everything did. The kernel's own memcpy
 //! and struct copies run through `q0`, and every userland program keeps
 //! values in vector registers, so a register live across a syscall came
-//! back changed. Found by `scripts/test-cond-vt.py`: `cond` keeps shift
-//! constants in `q0`-`q3` across its `FB_BLIT` calls, and the second
-//! reversed glyph it drew had two rows wrong.
+//! back changed. Found while building `cond`'s reverse video (#228), whose
+//! second reversed glyph had two rows wrong: `cond` keeps shift constants
+//! in `q0`-`q3` across its `FB_BLIT` calls. `make test-fpsimd` is the
+//! check (`/bin/FPPROBE`).
 //!
 //! ## The tick is taken from EL0 only; an IRQ at EL1 is a fault
 //!

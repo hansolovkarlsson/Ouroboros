@@ -744,7 +744,7 @@ programs/            ALL userland programs, grouped by role. Annotated in full i
   textutils/         the pipeline filters: upper wc grep head tail nl rev uniq sort (sort is the one that
                      cannot stream, so it is the one that uses the heap)
   netutils/          ping resolve fetch dial serve - reach netd via the TO_NET cap the shell delegates at spawn
-  shellutils/        echo uptime clear pwd readkey send recv selftest bootid man printenv id args edtest rdprobe
+  shellutils/        echo uptime clear pwd readkey send recv selftest bootid man printenv id args edtest rdprobe fpprobe
   admin/             passwd useradd groupadd usermod clusterkey - root-only account + cluster-identity tools
   demos/             hello (how a program ends itself), pong (the IPC echo-server shape)
 

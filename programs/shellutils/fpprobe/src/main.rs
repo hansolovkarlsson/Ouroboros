@@ -8,10 +8,12 @@
 //! Two crossings, each inside ONE `asm!` block, since between two blocks
 //! the compiler may use the vector registers itself:
 //!
-//! 1. **A syscall.** All 32 registers loaded with a pattern and `FPCR` set
-//!    to a rounding mode other than the reset value, then `YIELD`, which runs
-//!    the kernel's switch path and hands the core to another task; then all
-//!    of it read back.
+//! 1. **A syscall.** All 32 registers loaded with a pattern, `FPCR` set to
+//!    a rounding mode other than the reset value and `FPSR` to a pattern of
+//!    cumulative flags, then `YIELD`; then all of it read back. Run alone,
+//!    nothing else is runnable and `YIELD` returns to the caller without a
+//!    switch, so this is the check on the trampoline and the kernel's own
+//!    code (its memcpy runs through `q0`), not on the switch path.
 //! 2. **Preemption.** The same, around a spin with no syscall, long enough
 //!    to span timer ticks; the tick count before and after is printed, and
 //!    the check needs at least two, so the spin cannot pass by being short.
@@ -21,8 +23,11 @@
 //!
 //! `fpprobe -` then copies its piped input to its output, so in
 //! `fpprobe | fpprobe -` both probes' lines reach the console and the two
-//! spins run side by side, each preempted in favour of the other
-//! (`scripts/test-fpsimd.py`).
+//! spins run side by side (`scripts/test-fpsimd.py`). The two probes hold
+//! different FPCR and FPSR values, so a register that crossed from one to
+//! the other is seen. That they do interleave is shown by a control, not by
+//! anything the probe prints: with the kernel's FPCR restore removed, the
+//! pipelined probes fail with `first: fpcr` and the lone one passes.
 
 #![no_std]
 #![no_main]
@@ -35,6 +40,11 @@ const ROUNDS: u64 = 8;
 const RMODE_MASK: u64 = 0b11 << 22;
 const FPCR_RZ: u64 = 0b11 << 22;
 const FPCR_RP: u64 = 0b01 << 22;
+/// `FPSR`'s cumulative flags, a different set per probe: IOC and QC alone,
+/// DZC and IXC with `-`. The kernel's integer SIMD sets none of them.
+const FPSR_MASK: u64 = (1 << 27) | 0b1001_1111;
+const FPSR_ALONE: u64 = (1 << 27) | 1;
+const FPSR_PIPED: u64 = 0b1_0010;
 /// Iterations of the preemption spin: under QEMU's emulation 20 million
 /// finished inside one 20 ms tick, so this is generous; the tick count
 /// printed is what proves the spin was preempted, not this number.
@@ -47,6 +57,7 @@ pub extern "C" fn _start() -> ! {
     let mut arg = [0u8; 2];
     let forward = ulib::arg(1, &mut arg) == Some(1) && arg[0] == b'-';
     let fpcr_want = if forward { FPCR_RP } else { FPCR_RZ };
+    let fpsr_want = if forward { FPSR_PIPED } else { FPSR_ALONE };
     let mut failures = 0u64;
     let mut out = Out { buf: [0; 512], len: 0 };
     for (name, spin) in [(&b"syscall"[..], false), (&b"preemption"[..], true)] {
@@ -61,7 +72,7 @@ pub extern "C" fn _start() -> ! {
             }
             let mut dst = [0u128; 32];
             let before = ulib::syscall(syscall_abi::GET_TICKS, 0);
-            let fpcr = cross(&src, &mut dst, spin, fpcr_want);
+            let (fpcr, fpsr) = cross(&src, &mut dst, spin, fpcr_want, fpsr_want);
             let after = ulib::syscall(syscall_abi::GET_TICKS, 0);
             ticks = ticks.min(after - before);
             for i in 0..32 {
@@ -73,6 +84,10 @@ pub extern "C" fn _start() -> ! {
             if fpcr & RMODE_MASK != fpcr_want {
                 bad += 1;
                 first_bad.get_or_insert(32);
+            }
+            if fpsr & FPSR_MASK != fpsr_want {
+                bad += 1;
+                first_bad.get_or_insert(33);
             }
         }
         let ok = bad == 0 && (!spin || ticks >= 2);
@@ -89,6 +104,8 @@ pub extern "C" fn _start() -> ! {
         if let Some(i) = first_bad {
             if i == 32 {
                 out.put(b" (first: fpcr)");
+            } else if i == 33 {
+                out.put(b" (first: fpsr)");
             } else {
                 out.put(b" (first: q");
                 out.dec(i as u64);
@@ -112,15 +129,18 @@ pub extern "C" fn _start() -> ! {
     ulib::exit(failures);
 }
 
-/// Loads `src` into q0-q31 and `fpcr` into FPCR, crosses the kernel
+/// Loads `src` into q0-q31, `fpcr` into FPCR and `fpsr` into FPSR, crosses the kernel
 /// (`YIELD`, or a spin the tick preempts), stores q0-q31 to `dst`, and
-/// returns FPCR as it came back, restoring the caller's.
-fn cross(src: &[u128; 32], dst: &mut [u128; 32], spin: bool, fpcr: u64) -> u64 {
+/// returns FPCR and FPSR as they came back, restoring the caller's.
+fn cross(src: &[u128; 32], dst: &mut [u128; 32], spin: bool, fpcr: u64, fpsr: u64) -> (u64, u64) {
     let fpcr_after: u64;
+    let fpsr_after: u64;
     unsafe {
         core::arch::asm!(
             "mrs {saved}, fpcr",
             "msr fpcr, {rz}",
+            "mrs {saved_sr}, fpsr",
+            "msr fpsr, {sr}",
             "ldp q0, q1, [{src}, #0]",
             "ldp q2, q3, [{src}, #32]",
             "ldp q4, q5, [{src}, #64]",
@@ -163,9 +183,14 @@ fn cross(src: &[u128; 32], dst: &mut [u128; 32], spin: bool, fpcr: u64) -> u64 {
             "stp q30, q31, [{dst}, #480]",
             "mrs {after}, fpcr",
             "msr fpcr, {saved}",
+            "mrs {after_sr}, fpsr",
+            "msr fpsr, {saved_sr}",
             src = in(reg) src.as_ptr(),
             dst = in(reg) dst.as_mut_ptr(),
             rz = in(reg) fpcr,
+            sr = in(reg) fpsr,
+            saved_sr = out(reg) _,
+            after_sr = out(reg) fpsr_after,
             spin = inout(reg) if spin { SPIN } else { 0 } => _,
             yield_nr = const syscall_abi::YIELD,
             saved = out(reg) _,
@@ -179,7 +204,7 @@ fn cross(src: &[u128; 32], dst: &mut [u128; 32], spin: bool, fpcr: u64) -> u64 {
             options(nostack),
         );
     }
-    fpcr_after
+    (fpcr_after, fpsr_after)
 }
 
 /// Copies piped input (`MSG_RECV`, EOF the empty message) to `target`,
