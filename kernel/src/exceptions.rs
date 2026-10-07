@@ -42,11 +42,16 @@
 //! when the interrupted code was `halt()`'s `wfe` loop at EL1; since
 //! 2026-09-20 it is slot 9 alone (IRQ from EL0), see the next section.
 //!
-//! Floating-point/SIMD (Q0-Q31) registers are deliberately *not* saved
-//! here. Nothing running today uses them, and the interrupted context is
-//! only ever `halt()`'s trivial spin loop or one of `tasks.rs`'s EL0 tasks
-//! — this stops being safe the moment there's real interruptible work with
-//! FP/SIMD state.
+//! Floating-point/SIMD state (`q0`-`q31`, `FPCR`, `FPSR`) is saved and
+//! restored by every resumable path too, and is part of [`Context`], so a
+//! task switch carries it. Until 2026-10-07 it was not, on the reasoning
+//! that nothing used it; by then everything did. The kernel's own memcpy
+//! and struct copies run through `q0`, and every userland program keeps
+//! values in vector registers, so a register live across a syscall came
+//! back changed. Found while building `cond`'s reverse video (#228), whose
+//! second reversed glyph had two rows wrong: `cond` keeps shift constants
+//! in `q0`-`q3` across its `FB_BLIT` calls. `make test-fpsimd` is the
+//! check (`/bin/FPPROBE`).
 //!
 //! ## The tick is taken from EL0 only; an IRQ at EL1 is a fault
 //!
@@ -113,14 +118,14 @@ use crate::syscall;
 use crate::tasks;
 use crate::timer;
 
-/// The register state a resumable exception (`2:`/`3:` below) saves and
-/// restores — `x0`-`x30`, `SP_EL0`, `ELR_EL1`, `SPSR_EL1`, in exactly this
-/// field order, matching the trampoline's stack offsets byte for byte
-/// (`gpr[30]` i.e. `x30` at offset 240, `sp_el0` at 248, `elr_el1`/
-/// `spsr_el1` at 256/264 — 272 bytes total, matching `sub sp, sp, #272`).
-/// This is also a full task's saved context (`tasks.rs`) — a suspended
-/// task *is* exactly this much state, nothing more, since nothing here
-/// saves FP/SIMD (see module doc comment).
+/// The register state a resumable exception (`2:`/`3:`/`4:` below) saves
+/// and restores, in exactly this field order, matching the trampolines'
+/// stack offsets byte for byte: `x0`-`x30` at 0 (`gpr[30]` at 240),
+/// `sp_el0` at 248, `elr_el1`/`spsr_el1` at 256/264, then the FP/SIMD
+/// state, `q0`-`q31` at 272 to 784 and `fpcr`/`fpsr` at 784/792: 800
+/// bytes, matching `sub sp, sp, #800`. The asserts below hold the layout
+/// to those numbers. This is also a full task's saved context
+/// (`tasks.rs`): a suspended task is exactly this much state.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Context {
@@ -128,17 +133,79 @@ pub struct Context {
     pub sp_el0: u64,
     pub elr_el1: u64,
     pub spsr_el1: u64,
+    pub fpsimd: [u128; 32],
+    pub fpcr: u64,
+    pub fpsr: u64,
 }
+
+const _: () = assert!(core::mem::offset_of!(Context, sp_el0) == 248);
+const _: () = assert!(core::mem::offset_of!(Context, elr_el1) == 256);
+const _: () = assert!(core::mem::offset_of!(Context, fpsimd) == 272);
+const _: () = assert!(core::mem::offset_of!(Context, fpcr) == 784);
+const _: () = assert!(core::mem::offset_of!(Context, fpsr) == 792);
+const _: () = assert!(core::mem::size_of::<Context>() == 800);
 
 impl Context {
     pub const fn zeroed() -> Self {
-        Context { gpr: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0 }
+        Context { gpr: [0; 31], sp_el0: 0, elr_el1: 0, spsr_el1: 0, fpsimd: [0; 32], fpcr: 0, fpsr: 0 }
     }
 
 }
 
 global_asm!(
     r#"
+// The FP/SIMD half of a resumable frame: q0-q31 at offsets 272..784,
+// then FPCR and FPSR at 784/792, matching Context's `fpsimd`, `fpcr` and
+// `fpsr`. Every resumable path saves it after the general registers and
+// restores it before them, so the two scratch registers it is given are
+// already saved, or about to be reloaded. Without it a task's vector
+// registers did not survive a syscall: the kernel's own code uses them
+// (memcpy, struct copies), and so does every userland program's.
+.macro SAVE_FPSIMD a, b
+stp q0, q1, [sp, #272]
+stp q2, q3, [sp, #304]
+stp q4, q5, [sp, #336]
+stp q6, q7, [sp, #368]
+stp q8, q9, [sp, #400]
+stp q10, q11, [sp, #432]
+stp q12, q13, [sp, #464]
+stp q14, q15, [sp, #496]
+stp q16, q17, [sp, #528]
+stp q18, q19, [sp, #560]
+stp q20, q21, [sp, #592]
+stp q22, q23, [sp, #624]
+stp q24, q25, [sp, #656]
+stp q26, q27, [sp, #688]
+stp q28, q29, [sp, #720]
+stp q30, q31, [sp, #752]
+mrs \a, fpcr
+mrs \b, fpsr
+str \a, [sp, #784]   // past stp's reach for x registers (504)
+str \b, [sp, #792]
+.endm
+.macro RESTORE_FPSIMD a, b
+ldp q0, q1, [sp, #272]
+ldp q2, q3, [sp, #304]
+ldp q4, q5, [sp, #336]
+ldp q6, q7, [sp, #368]
+ldp q8, q9, [sp, #400]
+ldp q10, q11, [sp, #432]
+ldp q12, q13, [sp, #464]
+ldp q14, q15, [sp, #496]
+ldp q16, q17, [sp, #528]
+ldp q18, q19, [sp, #560]
+ldp q20, q21, [sp, #592]
+ldp q22, q23, [sp, #624]
+ldp q24, q25, [sp, #656]
+ldp q26, q27, [sp, #688]
+ldp q28, q29, [sp, #720]
+ldp q30, q31, [sp, #752]
+ldr \a, [sp, #784]
+ldr \b, [sp, #792]
+msr fpcr, \a
+msr fpsr, \b
+.endm
+
 .text
 .balign 0x800
 .global exception_vector_table
@@ -237,7 +304,7 @@ mrs x2, elr_el1
 b   {rust_handler}
 
 2:
-sub sp, sp, #272
+sub sp, sp, #800
 stp x0, x1, [sp, #0]
 stp x2, x3, [sp, #16]
 stp x4, x5, [sp, #32]
@@ -259,8 +326,10 @@ str x0, [sp, #248]
 mrs x0, elr_el1
 mrs x1, spsr_el1
 stp x0, x1, [sp, #256]
+SAVE_FPSIMD x0, x1
 mov x0, sp   // frame pointer -> rust_irq_handler's argument
 bl  {rust_irq_handler}
+RESTORE_FPSIMD x0, x1
 ldr x0, [sp, #248]
 msr sp_el0, x0
 ldp x0, x1, [sp, #256]
@@ -282,7 +351,7 @@ ldp x24, x25, [sp, #192]
 ldp x26, x27, [sp, #208]
 ldp x28, x29, [sp, #224]
 ldr x30, [sp, #240]
-add sp, sp, #272
+add sp, sp, #800
 eret
 
 3:
@@ -290,7 +359,7 @@ eret
 // before it clobbered the live register - see that check's own comment.
 ldr x9, [sp]
 add sp, sp, #16
-sub sp, sp, #272
+sub sp, sp, #800
 stp x0, x1, [sp, #0]
 stp x2, x3, [sp, #16]
 stp x4, x5, [sp, #32]
@@ -326,6 +395,7 @@ str x9, [sp, #248]
 mrs x9, elr_el1
 mrs x10, spsr_el1
 stp x9, x10, [sp, #256]
+SAVE_FPSIMD x9, x10
 // dispatch()'s AAPCS64 argument registers: syscall number in x0 (from
 // the original x8), up to 4 syscall arguments in x1-x4 (from the
 // original x0-x3) - reloaded from the stack rather than shuffled live,
@@ -342,6 +412,7 @@ ldp x3, x4, [sp, #16]
 mov x5, sp
 bl  {rust_syscall_handler}
 str x0, [sp, #0]   // dispatch()'s return value becomes EL0's new x0
+RESTORE_FPSIMD x2, x3
 ldr x2, [sp, #248]
 msr sp_el0, x2
 ldp x2, x3, [sp, #256]
@@ -363,7 +434,7 @@ ldp x24, x25, [sp, #192]
 ldp x26, x27, [sp, #208]
 ldp x28, x29, [sp, #224]
 ldr x30, [sp, #240]
-add sp, sp, #272
+add sp, sp, #800
 eret
 
 4:
@@ -376,7 +447,7 @@ eret
 // scratch slot first.
 ldr x9, [sp]
 add sp, sp, #16
-sub sp, sp, #272
+sub sp, sp, #800
 stp x0, x1, [sp, #0]
 stp x2, x3, [sp, #16]
 stp x4, x5, [sp, #32]
@@ -398,8 +469,10 @@ str x0, [sp, #248]
 mrs x0, elr_el1
 mrs x1, spsr_el1
 stp x0, x1, [sp, #256]
+SAVE_FPSIMD x0, x1
 mov x0, sp   // frame pointer -> rust_el0_fault_handler's argument
 bl  {rust_el0_fault_handler}
+RESTORE_FPSIMD x0, x1
 ldr x0, [sp, #248]
 msr sp_el0, x0
 ldp x0, x1, [sp, #256]
@@ -421,7 +494,7 @@ ldp x24, x25, [sp, #192]
 ldp x26, x27, [sp, #208]
 ldp x28, x29, [sp, #224]
 ldr x30, [sp, #240]
-add sp, sp, #272
+add sp, sp, #800
 eret
 "#,
     rust_handler = sym rust_exception_handler,

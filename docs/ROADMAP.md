@@ -813,6 +813,22 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **Three tails of the FP/SIMD save (found 2026-10-07, the high review of
+  #227).** (1) `tasks::start`'s first `eret` loads task 0's FP state but
+  never its `x0`-`x30`, so the boot shell starts holding whatever the
+  kernel left in them; that predates #227, and the clean fix is to enter
+  task 0 through the trampolines' own restore-and-`eret` tail, so both
+  halves are loaded in one place. (2) Every syscall and EL0 IRQ now
+  stores and reloads 512 bytes of vector state and writes `FPCR`, also on
+  the many that neither switch nor touch it; a lazy scheme (trap EL0's
+  first FP use through `CPACR_EL1.FPEN` after a switch) or a kernel built
+  without SIMD would pay it only on a switch. Measure before choosing.
+  (3) Between the save and the restore the kernel runs under the task's
+  `FPCR`, so its trap-enable, flush-to-zero and default-NaN bits apply to
+  kernel code; harmless while the kernel does no float arithmetic, and a
+  fixed kernel `FPCR` after the save is one instruction, but no rig can
+  see it missing today, so it waits for a kernel that does float work.
+
 - ~~**`netd` blocked on an `fsd` reply that never came (found 2026-09-26).**~~
   **FIXED 2026-09-27 on `main` (#175).** Not a lost reply: `fsd` was busy on
   it, and the supervisor restarted a healthy `netd` because a `cpu` spawn's 98

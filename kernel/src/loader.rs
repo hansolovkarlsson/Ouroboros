@@ -556,7 +556,7 @@ impl LoadedProgram {
     /// layout it derives from, so a change to how a program starts is
     /// found in the file that owns the layout.
     pub fn initial_context(&self) -> Context {
-        Context { gpr: [0; 31], sp_el0: self.stack_top(), elr_el1: self.entry, spsr_el1: 0 }
+        Context { gpr: [0; 31], sp_el0: self.stack_top(), elr_el1: self.entry, spsr_el1: 0, ..Context::zeroed() }
     }
 }
 

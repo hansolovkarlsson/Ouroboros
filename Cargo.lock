@@ -167,6 +167,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fpprobe"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "fsd"
 version = "0.1.0"
 dependencies = [
