@@ -149,7 +149,7 @@ are still open.
 Merged 2026-10-07 (#229, `cec028c`), and DevTools told by notice:
 `~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-editor-keys-item-2.md`.
 
-Progress 2026-10-07, Ouroboros: item 3 is built (PR_SIZE). A C program asks
+Progress 2026-10-07, Ouroboros: item 3 is built (#230). A C program asks
 the POSIX way, `ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws)` with `<sys/ioctl.h>`,
 so Edit's `plat_screen_size` in `platform_posix.c` works unchanged. On the
 framebuffer it answers the screen's character grid (100 by 75 on QEMU's

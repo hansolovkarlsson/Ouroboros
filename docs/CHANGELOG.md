@@ -17,7 +17,7 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
-**A program can read the screen size (PR_SIZE).** Item 3 of DevTools's
+**A program can read the screen size (#230).** Item 3 of DevTools's
 editor note. `CON_INFO`'s size fields, gated to `cond` until now, are open to
 every task: three numbers fixed at boot, which grant nothing. A C program
 asks the POSIX way, `ioctl(fd, TIOCGWINSZ, &ws)` from a new `<sys/ioctl.h>`,
