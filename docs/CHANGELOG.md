@@ -27,7 +27,8 @@ came back changed. Every resumable path now saves `q0`-`q31`, `FPCR` and
 while building `cond`'s reverse video, whose second reversed glyph had two
 rows wrong; `make test-fpsimd` (`/bin/FPPROBE`) checks it across a `YIELD`
 and across preemption between two probes, and fails on a kernel without the
-save (`q0` changed every round) and on one that drops only the FPCR restore.
+save (`q0` changed every round) and on one that drops only the FPCR or
+only the FPSR restore.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
 `cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
