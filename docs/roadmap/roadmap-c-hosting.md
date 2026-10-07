@@ -269,6 +269,27 @@ tree at `4dcbddd` leaves of them, read from the code.
   listed is a staged one in its case; three files `cat` to the host's bytes;
   and names made on the guest keep their case. The card (`make sdcard`)
   skips `/include`, which only the stick can serve.
+- **Steps 7 and 8, room to run and `/bin/cpp`: done 2026-10-06, the arc's
+  finish line.** `make cpp-bin` compiles DevTools's cpp (`lib/*.c` and
+  `driver/cpp.c`, read from `CPP_DIR`, `../DevTools/cpp` by default) as
+  every picolibc program here is, with
+  `-DCPP_SYSTEM_DIRS='"/include:/include/clang"'`, and links it like CPICO:
+  it linked first time, 104 KB, no warnings, every call it makes met by
+  steps 1 to 5. `make esp` stages it as `/bin/CPP` when `CPP_DIR` has the
+  sources, and says so and goes on when it does not, so this tree alone
+  still builds. On a booted image, `cpp hello.c` with no options prints the
+  program, and `make test-cpp` checks the rest: `cpp -o` of `hello.c`,
+  CPICO's `picodemo.c` (a dozen headers deep) and `high.c` (UTF-8, raw bytes
+  past 0x7f, and `__DATE__`/`__TIME__`, so `SOURCE_DATE_EPOCH` is read) exit
+  0; the host reads the `.i` files back off the image and each is byte for
+  byte what the same cpp, built for the Mac from the same sources with
+  signed and with unsigned `char`, writes from the same staged headers
+  (paths mapped, `SOURCE_DATE_EPOCH` set on both); and clang for this target
+  compiles all three. Step 7 needed nothing: the 1 MiB heap held
+  `picodemo.c`. The finish line was written as "the same bytes as `clang
+  $(CFLAGS_OS) -E`"; clang's spacing and line markers differ from cpp's, so
+  the check compares with cpp on the host, and cpp against clang token for
+  token is DevTools's own `make pico-check`.
 - **`fstat` itself** was wrong before this plan touched it, and is fixed:
   #216 zeroes what it does not fill and builds the picolibc port against
   picolibc's headers, which had put the size in `st_dev`/`st_ino`. A real
@@ -283,7 +304,8 @@ tree at `4dcbddd` leaves of them, read from the code.
   handoff (`docs/handoffs/2026-10-01-from-proem-system-dirs.md`, accepted).
 
 So the order stands: steps 1 to 5 next, each small, then 6 and 8. *(As of
-2026-10-06, steps 1 to 6 are done, #219 to #225: 7 and 8 are next.)*
+2026-10-06, all eight steps are done, #219 to #225 and `/bin/cpp`: the arc
+is finished.)*
 
 ## What stays in Proem's session
 

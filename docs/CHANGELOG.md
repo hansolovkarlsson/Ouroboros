@@ -85,6 +85,12 @@ writes for a lowercase 8.3 name, and writes them for one it creates, a
 mixed-case name going to a long name, so `touch foo.txt` no longer lists as
 `FOO.TXT`. Step 6 of the C-hosting plan.
 
+**The C preprocessor runs on Ouroboros.** `/bin/cpp` is DevTools's cpp,
+built here by `make cpp-bin` with `/include` and `/include/clang` built in,
+so `cpp hello.c` needs no options. Its output is byte for byte what the same
+cpp writes on the Mac, and clang compiles it (`make test-cpp`). Steps 7 and 8
+of the C-hosting plan: the arc's finish line.
+
 **Reading a per-task store back accepts any buffer (#222).** `GET_ARG`,
 `GET_ENV`, `GET_CWD`, `GET_NS` and `TASK_NAME` copy at most one entry, through
 one kernel helper that checks containment over the bytes it copies. Until now

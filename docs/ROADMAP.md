@@ -2254,8 +2254,11 @@ be reviewed after the fact from the saved screenshots.
 > `rmdir`, `rename` and `remove` (#215) and then every call in the file layer
 > (step 2, #220), `main` receives argv (step 1, #219), and `environ` exists
 > (step 3, #221), `stat(path)` exists (step 4, #223), and `time()` links,
-> saying 1970 plus uptime (step 5, #224), and the C headers are on the disk
-> (step 6, #225); the plan's "Where it stands" says what that leaves.
+> saying 1970 plus uptime (step 5, #224), the C headers are on the disk
+> (step 6, #225), and **`/bin/cpp` runs here** (steps 7 and 8, 2026-10-06):
+> `cpp hello.c` on a booted image prints the program, byte for byte what the
+> same cpp writes on the Mac (`make test-cpp`). The arc is finished; the
+> plan's "Where it stands" records it.
 >
 > **CPP is now Proem, since 2026-10-01.** The workspace's C preprocessor was
 > renamed: the folder is `~/Projects/Proem` and the repository
@@ -2349,7 +2352,7 @@ be reviewed after the fact from the saved screenshots.
 >       scan per request, to be measured before it is guessed. Newly
 >       reachable by a redirect, which a 256 KiB capture refused; and it is
 >       how Proem's `-o FILE` will write a large output. Found 2026-10-05.
-> - [ ] **new** **Stage the headers in two directories, and build `cpp`
+> - [x] **new** **Stage the headers in two directories, and build `cpp`
 >       with them built in** (`proem` until 2026-10-06). Steps 6 and 8 of the C-hosting plan, decided:
 >       `/include` holds picolibc's 136 headers and a `target.h` generated at
 >       build time with exactly `$(CFLAGS_OS)`; `/include/clang` holds
@@ -2371,6 +2374,9 @@ be reviewed after the fact from the saved screenshots.
 >       left, the build and whether the 1 MiB heap is room enough, which
 >       only the build's first run can tell. `target.h` is generated with `$(CFLAGS_OS)
 >       $(PICO_INC)`, the flags a picolibc program here is compiled with.*
+>       *The build is done too, 2026-10-06 (steps 7 and 8): `make cpp-bin`
+>       from `CPP_DIR`, `/bin/CPP` staged, and `cpp hello.c` on a booted
+>       image prints the program (`make test-cpp`).*
 >       Note:
 >       [`handoffs/2026-10-01-from-proem-system-dirs.md`](handoffs/2026-10-01-from-proem-system-dirs.md).
 > - [x] **fix** **`fstat` leaves every field but two as it found them.**
@@ -4029,6 +4035,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   archive bits and its modified time are gone after any `mv`, a case-only one
   included. A rename should carry the rest of the entry across. Found by the
   second review of #225.
+- ~~**Most QEMU rigs count fault lines before QEMU has flushed its trace.**~~
+  *Done 2026-10-06, in #226:* `drive-qemu.py`'s `Guest.stop()` shuts QEMU
+  down with SIGTERM (its exit flushes the `-d int` log) and kills it only
+  after five seconds, where it used SIGKILL, which dropped what the log still
+  held; and `Guest.aborts()` stops the guest itself before reading, so no rig
+  can read the trace early. Every rig gets it without an edit of its own.
 - **A directory listing is cut at one reply, with no sign of it.**
   `NP_READDIR` has no offset: fsd writes `name\n` per entry into the reply
   window, skips any name that no longer fits and goes on walking, so a
