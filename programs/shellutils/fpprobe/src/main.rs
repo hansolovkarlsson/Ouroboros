@@ -48,6 +48,7 @@ pub extern "C" fn _start() -> ! {
     let forward = ulib::arg(1, &mut arg) == Some(1) && arg[0] == b'-';
     let fpcr_want = if forward { FPCR_RP } else { FPCR_RZ };
     let mut failures = 0u64;
+    let mut out = Out { buf: [0; 512], len: 0 };
     for (name, spin) in [(&b"syscall"[..], false), (&b"preemption"[..], true)] {
         let mut bad = 0u64;
         let mut first_bad = None;
@@ -78,28 +79,32 @@ pub extern "C" fn _start() -> ! {
         if !ok {
             failures += 1;
         }
-        ulib::write_out(target, if ok { b"[ok]   " } else { b"[FAIL] " });
-        ulib::write_out(target, name);
-        ulib::write_out(target, b": ");
-        put_dec(target, ROUNDS);
-        ulib::write_out(target, b" rounds, ");
-        put_dec(target, bad);
-        ulib::write_out(target, b" registers changed");
+        out.put(if ok { b"[ok]   " } else { b"[FAIL] " });
+        out.put(name);
+        out.put(b": ");
+        out.dec(ROUNDS);
+        out.put(b" rounds, ");
+        out.dec(bad);
+        out.put(b" registers changed");
         if let Some(i) = first_bad {
             if i == 32 {
-                ulib::write_out(target, b" (first: fpcr)");
+                out.put(b" (first: fpcr)");
             } else {
-                ulib::write_out(target, b" (first: q");
-                put_dec(target, i as u64);
-                ulib::write_out(target, b")");
+                out.put(b" (first: q");
+                out.dec(i as u64);
+                out.put(b")");
             }
         }
         if spin {
-            ulib::write_out(target, b", fewest ticks spanned ");
-            put_dec(target, ticks);
+            out.put(b", fewest ticks spanned ");
+            out.dec(ticks);
         }
-        ulib::write_out(target, b"\r\n");
+        out.put(b"\r\n");
     }
+    // Written once, after both crossings: a write into a pipe whose reader
+    // is still in its own checks blocks, and a probe blocked there is not
+    // spinning beside the other one (the FPCR mutation showed it).
+    ulib::write_out(target, &out.buf[..out.len]);
     if forward {
         forward_stdin(target);
     }
@@ -194,17 +199,31 @@ fn forward_stdin(target: u64) {
     }
 }
 
-fn put_dec(target: u64, n: u64) {
-    let mut digits = [0u8; 20];
-    let mut len = 0;
-    let mut v = n;
-    loop {
-        digits[19 - len] = b'0' + (v % 10) as u8;
-        len += 1;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
+/// The probe's report, held until both crossings are done.
+struct Out {
+    buf: [u8; 512],
+    len: usize,
+}
+
+impl Out {
+    fn put(&mut self, bytes: &[u8]) {
+        let n = bytes.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
+        self.len += n;
     }
-    ulib::write_out(target, &digits[20 - len..]);
+
+    fn dec(&mut self, n: u64) {
+        let mut digits = [0u8; 20];
+        let mut len = 0;
+        let mut v = n;
+        loop {
+            digits[19 - len] = b'0' + (v % 10) as u8;
+            len += 1;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        self.put(&digits[20 - len..]);
+    }
 }
