@@ -161,3 +161,11 @@ piped, an open file) is `ENOTTY`. `/bin/CWINSZ` prints every answer, and
 
 Merged 2026-10-07 (#230, `363913f`), and DevTools told by notice:
 `~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-editor-size-item-3.md`.
+
+Progress 2026-10-07, Ouroboros: item 4 has its design note,
+`docs/roadmap/roadmap-ctrl-c.md`, and no code yet. In short: `tcsetattr`
+with `ISIG` cleared puts the program in a raw mode where 0x03 reaches it
+(so `plat_raw_on` would work unchanged), and Ctrl+\ stays the way out in
+every mode, so it would never reach Edit. Hans settled its four decisions
+the same day, and DevTools is asked whether Edit binds ^\ before any of it
+is built: `~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-ctrl-backslash.md`.
