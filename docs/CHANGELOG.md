@@ -17,7 +17,7 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
-**The arrow and function keys reach programs (PR_NAV).** Item 2 of
+**The arrow and function keys reach programs (#229).** Item 2 of
 DevTools's editor note: the USB keyboard sends the VT100/xterm sequences for
 Up, Down, Right, Left, Home, End, Page Up, Page Down, Delete, F2 and F3, which
 `xhci.rs` dropped before. The shell's line editor and login's prompts drop

@@ -132,7 +132,7 @@ cell by cell, against a model. Items 2 to 4 are still open.
 Merged 2026-10-07 (#228, `379b898`), and DevTools told by notice:
 `~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-editor-console-item-1.md`.
 
-Progress 2026-10-07, Ouroboros: item 2 is built (PR_NAV). The USB keyboard
+Progress 2026-10-07, Ouroboros: item 2 is built (#229). The USB keyboard
 sends `ESC [ A`/`B`/`C`/`D` for Up, Down, Right and Left, `ESC [ H` and
 `ESC [ F` for Home and End, `ESC [ 5 ~`, `ESC [ 6 ~` and `ESC [ 3 ~` for Page
 Up, Page Down and Delete, and `ESC O Q` and `ESC O R` for F2 and F3, each

@@ -2360,7 +2360,7 @@ be reviewed after the fact from the saved screenshots.
 >       test-cargs`*) (*(1) done 2026-10-07 by #228, `/bin/VTPROBE` drawing
 >       each sequence and `make test-cond-vt` reading the screen back by
 >       pixel; on top of #227, the FP/SIMD save it turned up*) (*(2) done
->       2026-10-07 by PR_NAV, `/bin/READKEY` printing each key's bytes and
+>       2026-10-07 by #229, `/bin/READKEY` printing each key's bytes and
 >       `make test-nav-keys` pressing them on QEMU's USB keyboard; the
 >       shell and login now drop the sequences instead of inserting their
 >       tails*). Done
