@@ -158,3 +158,6 @@ Linux does for a terminal whose size was never set, and Edit's existing
 fallback to 80 by 24 applies. A descriptor that is not the console (stdout
 piped, an open file) is `ENOTTY`. `/bin/CWINSZ` prints every answer, and
 `make test-cwinsz` checks them on both backends. Item 4 is still open.
+
+Merged 2026-10-07 (#230, `363913f`), and DevTools told by notice:
+`~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-editor-size-item-3.md`.
