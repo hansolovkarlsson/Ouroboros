@@ -17,7 +17,7 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
-**The framebuffer console takes cursor addressing (PR_COND).** Item 1 of
+**The framebuffer console takes cursor addressing (#228).** Item 1 of
 DevTools's editor note: `cond` acts on `CSI row;col H`, `CSI K` and `CSI J`
 in all three forms, and reverse video (`CSI 7 m`, off with `0`, `27` or a
 bare `CSI m`), and parses `CSI ? 25 l/h` to nothing. Before, it acted on `H`

@@ -112,7 +112,7 @@ DevTools's now (`2026-10-06-from-devtools-edit-moved.md`, closed). The
 `docs/ROADMAP.md`; item 5 was done by #219. Further replies about the editor
 go to DevTools's `docs/handoffs/`.
 
-Progress 2026-10-07, Ouroboros: item 1 is built (PR_COND, on top of #227).
+Progress 2026-10-07, Ouroboros: item 1 is built (#228, on top of #227).
 `cond`'s framebuffer backend acts on `CSI row;col H` (1-based, either
 omitted means 1, clamped to the screen), `CSI K` and `CSI J` in all three
 forms (0, 1, 2; `J` does not move the cursor, as on a VT100), and `CSI m`
