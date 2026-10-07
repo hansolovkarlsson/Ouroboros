@@ -108,7 +108,12 @@ fn detect_backend() -> Backend {
             rows: rows.max(1),
             col: 0,
             row: 0,
+            wrap_pending: false,
+            reverse: false,
             ansi: Ansi::Ground,
+            params: [0; MAX_PARAMS],
+            nparams: 0,
+            private: false,
         })
     } else {
         Backend::ByteStream
@@ -129,18 +134,56 @@ fn write_text(backend: &mut Backend, bytes: &[u8]) {
 /// The framebuffer backend's rendering state - a character-cell cursor and
 /// a small ANSI escape parser. No pixels here: it looks glyphs up in
 /// `font` and drives the kernel's `FB_*` primitives.
+///
+/// The escape sequences it acts on are the set a full-screen program needs
+/// (DevTools's Edit asked for them, `docs/handoffs/2026-10-05-from-edit-
+/// editor-console.md`, item 1): `CSI row;col H`, `CSI Ps K`, `CSI Ps J`,
+/// `CSI Ps m` for reverse video (7 on, 0 and 27 off), and the private
+/// `CSI ? ... h/l` forms, which are parsed and drawn as nothing. Every other
+/// sequence is consumed and dropped, so none of it prints: any CSI to its
+/// final byte, `ESC` with intermediates (`ESC ( B`) to its final byte, and
+/// the string sequences (OSC `ESC ]`, and DCS, SOS, PM, APC) to BEL or
+/// `ESC \`.
 struct Fb {
     cols: usize,
     rows: usize,
     col: usize,
     row: usize,
+    /// A glyph went into the last column and the cursor stayed on it; the
+    /// wrap happens when the next glyph arrives, not now (VT100's deferred
+    /// wrap). Without it, writing the last cell of the last row scrolls the
+    /// screen, which a full-screen program's bottom line always does.
+    wrap_pending: bool,
+    /// SGR 7: glyphs are drawn with their bits inverted. Erasing ignores
+    /// it and always blanks to the background.
+    reverse: bool,
     ansi: Ansi,
+    /// The CSI sequence being parsed: its numeric parameters, how many
+    /// were started (`;` starts the next), and whether it had a private
+    /// marker (`?`, as in `CSI ? 25 l`).
+    params: [u32; MAX_PARAMS],
+    nparams: usize,
+    private: bool,
 }
+
+/// Parameters kept per CSI sequence; any past this are parsed and ignored.
+const MAX_PARAMS: usize = 8;
+
+/// Blank glyph bitmaps for erasing, blitted `BLANK_CELLS` at a time. 64
+/// is the most one `FB_BLIT` takes: the kernel checks its buffer against
+/// `MAX_USER_LEN` (512 bytes, eight per glyph) and refuses a larger one, so
+/// a 256-cell run tried on 2026-10-07 erased nothing, silently.
+const BLANK_CELLS: usize = 64;
+static BLANK: [u8; BLANK_CELLS * 8] = [0; BLANK_CELLS * 8];
 
 enum Ansi {
     Ground,
     Esc,
     Csi,
+    /// After `ESC` and an intermediate byte (0x20-0x2f), as in `ESC ( B`.
+    EscIntermediate,
+    /// Inside a string sequence (`ESC ]` and the like), until BEL or ST.
+    Str,
 }
 
 impl Fb {
@@ -148,21 +191,49 @@ impl Fb {
         match self.ansi {
             Ansi::Ground => match c {
                 0x1b => self.ansi = Ansi::Esc, // ESC
-                b'\r' => self.col = 0,
-                b'\n' => self.newline(),
-                0x08 => self.col = self.col.saturating_sub(1), // backspace
+                b'\r' => {
+                    self.col = 0;
+                    self.wrap_pending = false;
+                }
+                b'\n' => {
+                    self.newline();
+                    self.wrap_pending = false;
+                }
+                // Backspace. With a wrap pending the cursor is still on the
+                // glyph just drawn, so it only cancels the wrap: the shell's
+                // `BS ' ' BS` then erases that glyph and lands back on it.
+                // Not what xterm does: it moves to the column before, so
+                // the same three bytes erase the wrong glyph there.
+                0x08 => {
+                    if self.wrap_pending {
+                        self.wrap_pending = false;
+                    } else {
+                        self.col = self.col.saturating_sub(1);
+                    }
+                }
                 _ => {
                     if let Some(glyph) = font::glyph(c) {
+                        if self.wrap_pending {
+                            self.newline();
+                            self.wrap_pending = false;
+                        }
+                        let mut cell = *glyph;
+                        if self.reverse {
+                            for bits in cell.iter_mut() {
+                                *bits = !*bits;
+                            }
+                        }
                         syscall4(
                             syscall_abi::FB_BLIT,
-                            glyph.as_ptr() as u64,
+                            cell.as_ptr() as u64,
                             1,
                             self.col as u64,
                             self.row as u64,
                         );
-                        self.col += 1;
-                        if self.col >= self.cols {
-                            self.newline();
+                        if self.col + 1 < self.cols {
+                            self.col += 1;
+                        } else {
+                            self.wrap_pending = true;
                         }
                     }
                     // Non-printable, non-control bytes are dropped rather
@@ -171,33 +242,135 @@ impl Fb {
                     // printable text plus \r\n\b and ANSI.
                 }
             },
-            Ansi::Esc => {
-                // Only the CSI form (ESC [) is understood; anything else
-                // ends the sequence.
-                self.ansi = if c == b'[' { Ansi::Csi } else { Ansi::Ground };
-            }
-            Ansi::Csi => {
-                // Collect (and ignore) parameter bytes until the final
-                // letter. Handle the two the shell's `clear` uses; ignore
-                // the rest. This is what finally makes `clear` actually
-                // clear on a framebuffer (the kernel's fbconsole never
-                // parsed ANSI - see its module doc comment).
-                if (0x40..=0x7e).contains(&c) {
-                    match c {
-                        b'J' => {
-                            syscall4(syscall_abi::FB_CLEAR, 0, 0, 0, 0);
-                            self.col = 0;
-                            self.row = 0;
-                        }
-                        b'H' => {
-                            self.col = 0;
-                            self.row = 0;
-                        }
-                        _ => {}
+            Ansi::Esc => match c {
+                b'[' => {
+                    self.params = [0; MAX_PARAMS];
+                    self.nparams = 0;
+                    self.private = false;
+                    self.ansi = Ansi::Csi;
+                }
+                b']' | b'P' | b'X' | b'^' | b'_' => self.ansi = Ansi::Str,
+                0x20..=0x2f => self.ansi = Ansi::EscIntermediate,
+                0x1b => {}
+                // A final byte (this includes the `\` of an ST that ends a
+                // string): the sequence is over, and nothing is drawn.
+                _ => self.ansi = Ansi::Ground,
+            },
+            Ansi::EscIntermediate => match c {
+                0x1b => self.ansi = Ansi::Esc,
+                0x30..=0x7e => self.ansi = Ansi::Ground,
+                _ => {}
+            },
+            Ansi::Str => match c {
+                0x07 => self.ansi = Ansi::Ground,
+                // ESC begins the ST (`ESC \`); the Esc state consumes the `\`.
+                0x1b => self.ansi = Ansi::Esc,
+                _ => {}
+            },
+            Ansi::Csi => match c {
+                // An ESC inside a sequence abandons it and starts another.
+                0x1b => self.ansi = Ansi::Esc,
+                b'0'..=b'9' => {
+                    if self.nparams == 0 {
+                        self.nparams = 1;
+                    }
+                    if let Some(p) = self.params.get_mut(self.nparams - 1) {
+                        *p = p.saturating_mul(10).saturating_add((c - b'0') as u32);
+                    }
+                }
+                b';' => {
+                    // An empty field before the `;` is a parameter too (0).
+                    self.nparams = (self.nparams.max(1) + 1).min(MAX_PARAMS + 1);
+                }
+                b'<'..=b'?' => self.private = true,
+                0x40..=0x7e => {
+                    if !self.private {
+                        self.csi(c);
                     }
                     self.ansi = Ansi::Ground;
                 }
+                // Intermediate bytes and C0 controls inside a sequence.
+                _ => {}
+            },
+        }
+    }
+
+    /// Parameter `i` of the sequence just parsed, 0 when it was not given.
+    fn param(&self, i: usize) -> usize {
+        if i < self.nparams.min(MAX_PARAMS) {
+            self.params[i] as usize
+        } else {
+            0
+        }
+    }
+
+    /// Acts on a CSI sequence's final byte. Positions are 1-based on the
+    /// wire, 0 or absent meaning 1, and clamp to the screen.
+    fn csi(&mut self, final_byte: u8) {
+        match final_byte {
+            b'H' => {
+                self.row = self.param(0).clamp(1, self.rows) - 1;
+                self.col = self.param(1).clamp(1, self.cols) - 1;
+                self.wrap_pending = false;
             }
+            b'K' => {
+                match self.param(0) {
+                    0 => self.blank(self.col, self.row, self.cols - self.col),
+                    1 => self.blank(0, self.row, self.col + 1),
+                    2 => self.blank(0, self.row, self.cols),
+                    _ => {}
+                }
+                self.wrap_pending = false;
+            }
+            b'J' => {
+                // Erasing does not move the cursor; `clear` sends `CSI H`
+                // after `CSI 2 J` for that.
+                match self.param(0) {
+                    0 => {
+                        self.blank(self.col, self.row, self.cols - self.col);
+                        for r in self.row + 1..self.rows {
+                            self.blank(0, r, self.cols);
+                        }
+                    }
+                    1 => {
+                        for r in 0..self.row {
+                            self.blank(0, r, self.cols);
+                        }
+                        self.blank(0, self.row, self.col + 1);
+                    }
+                    2 => {
+                        syscall4(syscall_abi::FB_CLEAR, 0, 0, 0, 0);
+                    }
+                    // 3 erases the scrollback (xterm), and there is none.
+                    _ => {}
+                }
+                self.wrap_pending = false;
+            }
+            b'm' => {
+                if self.nparams == 0 {
+                    self.reverse = false;
+                }
+                for i in 0..self.nparams.min(MAX_PARAMS) {
+                    match self.params[i] {
+                        0 | 27 => self.reverse = false,
+                        7 => self.reverse = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Blanks `n` cells of `row` from `col`, clipped to the line.
+    fn blank(&self, col: usize, row: usize, n: usize) {
+        let mut col = col;
+        let mut left = n.min(self.cols.saturating_sub(col));
+        while left > 0 {
+            let run = left.min(BLANK_CELLS);
+            syscall4(syscall_abi::FB_BLIT, BLANK.as_ptr() as u64, run as u64, col as u64, row as u64);
+            col += run;
+            left -= run;
         }
     }
 

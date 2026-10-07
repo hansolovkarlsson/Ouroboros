@@ -111,3 +111,20 @@ DevTools's now (`2026-10-06-from-devtools-edit-moved.md`, closed). The
 `~/Projects/DevTools/edit/`. Items 1 to 4 stay accepted and not started on
 `docs/ROADMAP.md`; item 5 was done by #219. Further replies about the editor
 go to DevTools's `docs/handoffs/`.
+
+Progress 2026-10-07, Ouroboros: item 1 is built (#228, on top of #227).
+`cond`'s framebuffer backend acts on `CSI row;col H` (1-based, either
+omitted means 1, clamped to the screen), `CSI K` and `CSI J` in all three
+forms (0, 1, 2; `J` does not move the cursor, as on a VT100), and `CSI m`
+with 7 for reverse video and 0, 27 or no parameter for normal; any private
+sequence such as `CSI ? 25 l/h` is parsed and draws nothing, and so does
+any other escape: `ESC ( B`, an OSC up to BEL or `ESC \`, and `CSI 3 J`
+(there is no scrollback). Three things Edit should know. Erasing blanks to
+black even with reverse on. The last column wraps late, as on xterm: a
+glyph in the last column leaves the cursor there and the wrap happens at
+the next glyph, so Edit can fill the bottom row without the screen
+scrolling. And a backspace while that wrap is pending is NOT xterm's: it
+only cancels the wrap and leaves the cursor on the last column, where xterm
+moves to the column before; the shell's `BS ' ' BS` erase depends on it. `/bin/VTPROBE COLS ROWS`
+writes every sequence, and `make test-cond-vt` checks the screen it draws,
+cell by cell, against a model. Items 2 to 4 are still open.

@@ -664,6 +664,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vtprobe"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "wc"
 version = "0.1.0"
 dependencies = [

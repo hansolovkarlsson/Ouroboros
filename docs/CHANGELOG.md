@@ -17,6 +17,19 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
+**The framebuffer console takes cursor addressing (#228).** Item 1 of
+DevTools's editor note: `cond` acts on `CSI row;col H`, `CSI K` and `CSI J`
+in all three forms, and reverse video (`CSI 7 m`, off with `0`, `27` or a
+bare `CSI m`), and parses `CSI ? 25 l/h`, `ESC ( B`, OSC strings and
+`CSI 3 J` to nothing. Before, it acted on `H`
+and `J` only and ignored their parameters. A glyph in the last column now
+wraps late, at the next glyph, so a full-screen program can write the bottom
+right cell without the screen scrolling. `make test-cond-vt` boots QEMU with
+`-device ramfb`, where the shell's output reaches only the framebuffer, and
+reads the screen back over QMP's `screendump`. It decodes each 8x8 cell with
+`cond`'s own font and compares what `/bin/VTPROBE` drew with a model. It
+fails with `main`'s `cond` and with the old immediate wrap.
+
 **A task's vector registers survive the kernel (#227).** The
 kernel saved only `x0`-`x30` on a syscall, a tick or an EL0 fault, on the
 old reasoning that nothing used FP/SIMD. Everything did: the kernel's own
