@@ -105,12 +105,14 @@ fn page(content: &[u8]) {
             break; // everything shown
         }
         ulib::con_write(b"--More--");
-        let key = ulib::read_char();
+        // One key, not one byte: an arrow's three bytes are one press, so
+        // it moves one screen, and none of it is left for the shell.
+        let key = ulib::read_key();
         ulib::con_write(b"\r        \r"); // erase the prompt (CR, spaces, CR)
         match key {
-            b'q' | b'Q' => break,
-            b'\r' | b'\n' => to_show = 1, // one more line
-            _ => to_show = PAGE_ROWS,      // space (or anything) = next screen
+            ulib::keyseq::Fed::Byte(b'q' | b'Q') => break,
+            ulib::keyseq::Fed::Byte(b'\r' | b'\n') => to_show = 1, // one more line
+            _ => to_show = PAGE_ROWS, // space (or any key) = next screen
         }
     }
 }

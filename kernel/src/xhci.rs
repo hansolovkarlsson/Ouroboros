@@ -144,9 +144,10 @@
 //! re-arms the ring, without the Reset Endpoint/Set TR Dequeue Pointer
 //! sequence real recovery needs); no auto-repeat (a held key reports once
 //! per press, not repeatedly, by design - see [`poll_key`]);
-//! unmapped keys (function keys, arrows, ...) are silently ignored; only
-//! the first of up to 6 simultaneously-pressed keys in a report is ever
-//! surfaced; only the *first* interrupt IN endpoint found in the
+//! unmapped keys (Tab, Escape, the function keys other than F2 and F3,
+//! ...) are silently ignored, while the arrows, Home, End, Page Up/Down,
+//! Delete, F2 and F3 send their VT100 sequences (`keycode_to_bytes`,
+//! since 2026-10-07); only the *first* interrupt IN endpoint found in the
 //! configuration descriptor is ever configured, so a composite
 //! keyboard+something-else device with more than one would only get its
 //! first endpoint driven.
@@ -967,10 +968,49 @@ const MOD_LSHIFT: u8 = 1 << 1;
 const MOD_RCTRL: u8 = 1 << 4;
 const MOD_RSHIFT: u8 = 1 << 5;
 
+/// The bytes one key press sends: a single byte for the keys
+/// [`keycode_to_ascii`] maps, or the VT100/xterm sequence for a navigation
+/// or function key (DevTools's editor note, item 2,
+/// `docs/handoffs/2026-10-05-from-edit-editor-console.md`). Modifiers do not
+/// change a navigation key's sequence: xterm's modified forms
+/// (`ESC [ 1 ; 5 A` for Ctrl+Up) are not sent.
+#[derive(Clone, Copy)]
+struct KeyBytes {
+    bytes: [u8; KEY_BYTES_MAX],
+    len: usize,
+}
+
+/// The longest sequence a key sends (`ESC [ 5 ~`).
+const KEY_BYTES_MAX: usize = 4;
+
+fn keycode_to_bytes(keycode: u8, shift: bool, ctrl: bool) -> Option<KeyBytes> {
+    let seq: &[u8] = match keycode {
+        0x52 => b"\x1b[A",  // Up
+        0x51 => b"\x1b[B",  // Down
+        0x4f => b"\x1b[C",  // Right
+        0x50 => b"\x1b[D",  // Left
+        0x4a => b"\x1b[H",  // Home
+        0x4d => b"\x1b[F",  // End
+        0x4b => b"\x1b[5~", // Page Up
+        0x4e => b"\x1b[6~", // Page Down
+        0x4c => b"\x1b[3~", // Delete (forward)
+        0x3b => b"\x1bOQ",  // F2
+        0x3c => b"\x1bOR",  // F3
+        _ => {
+            let byte = keycode_to_ascii(keycode, shift, ctrl)?;
+            return Some(KeyBytes { bytes: [byte, 0, 0, 0], len: 1 });
+        }
+    };
+    let mut bytes = [0u8; KEY_BYTES_MAX];
+    bytes[..seq.len()].copy_from_slice(seq);
+    Some(KeyBytes { bytes, len: seq.len() })
+}
+
 /// USB HID keycode -> ASCII, boot-protocol Usage IDs 0x04-0x38 (letters,
 /// digits, and the punctuation/whitespace keys this shell's line editor
-/// cares about). `None` for anything unmapped (function keys, arrows,
-/// modifiers themselves, ...) - a real, documented gap, not a bug; see
+/// cares about). `None` for anything unmapped (Tab, Escape, the modifiers
+/// themselves, ...; the navigation and function keys are
+/// [`keycode_to_bytes`]'s) - a real, documented gap, not a bug; see
 /// module doc comment. A held Ctrl maps letters to the classic C0
 /// control bytes (Ctrl+A = 0x01 ... Ctrl+Z = 0x1a) - added for the
 /// `fg` escape hatch specifically (Ctrl+C = 0x03, ETX, intercepted
@@ -1226,7 +1266,9 @@ struct KeyboardState {
     /// mass-storage milestone - a report can be processed from *inside*
     /// a bulk-transfer wait (see `wait_transfer_event`), where there's
     /// no caller to hand the first key to, so all 6 may need to queue.
-    pending: [u8; 6],
+    /// Bytes, not keys: a navigation key is a sequence of up to
+    /// `KEY_BYTES_MAX`, so the queue holds six of the longest.
+    pending: [u8; 6 * KEY_BYTES_MAX],
     pending_len: usize,
 }
 
@@ -2086,14 +2128,22 @@ impl Xhci {
             if previous[2..8].contains(&keycode) {
                 continue; // already down last poll - not a new press
             }
-            let Some(ascii) = keycode_to_ascii(keycode, shift, ctrl) else {
+            let Some(key) = keycode_to_bytes(keycode, shift, ctrl) else {
                 continue;
             };
-            // Can't overflow: at most 6 keycodes total in buf[2..8],
-            // pending sized 6 and drained before each event pop.
-            if kb.pending_len < kb.pending.len() {
-                kb.pending[kb.pending_len] = ascii;
-                kb.pending_len += 1;
+            // A report holds at most 6 keycodes (buf[2..8]), each at most
+            // KEY_BYTES_MAX bytes, and pending is sized for that. It is
+            // drained before each event pop in `poll_key`, but not between
+            // reports handled inside `wait_transfer_event` during a bulk
+            // transfer, so several reports can pile up there; once it is
+            // full a further key is dropped, unlogged. A sequence goes in
+            // whole or not at all, so the queue never holds half of one
+            // (delivery is a byte at a time, so a reader can still be
+            // handed part of one and lose the rest; see the editor note's
+            // item 4 on ROADMAP.md).
+            if kb.pending_len + key.len <= kb.pending.len() {
+                kb.pending[kb.pending_len..kb.pending_len + key.len].copy_from_slice(&key.bytes[..key.len]);
+                kb.pending_len += key.len;
             }
         }
     }
@@ -3349,7 +3399,7 @@ unsafe fn activate_keyboard(xhci: &mut Xhci, idx: usize, kb: KeyboardEndpoint) -
         int_cycle: true,
         last_report: [0; 8],
         had_error: false,
-        pending: [0; 6],
+        pending: [0; 6 * KEY_BYTES_MAX],
         pending_len: 0,
     });
     console::println!(

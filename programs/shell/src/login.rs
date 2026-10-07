@@ -375,8 +375,14 @@ fn warn_if_unprotected() {
 /// when `echo` is set (the username); a password is read silently.
 fn read_field(buf: &mut [u8], echo: bool) -> usize {
     let mut len = 0usize;
+    let mut keys = keyseq::KeySeq::new();
     loop {
-        let b = crate::read_char();
+        // An arrow or function key is not part of a name or password, and
+        // `ulib::read_line` (passwd, useradd) drops it the same way, so a
+        // password set there and typed here agree.
+        let keyseq::Fed::Byte(b) = keys.feed(crate::read_char()) else {
+            continue;
+        };
         match b {
             CR | LF => return len,
             BS | DEL => {

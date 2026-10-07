@@ -455,15 +455,20 @@ pub fn random_bytes8() -> Option<[u8; 8]> {
 /// username); a password is read silently (`echo == false`). The interactive
 /// `/bin` account tools (`passwd`/`useradd`) use this — they only receive
 /// keystrokes while foreground (the shell hands a spawned command the keyboard,
-/// like the pager). Mirrors the shell's own `login::read_field`.
+/// like the pager). Mirrors the shell's own `login::read_field`, through the
+/// same [`keyseq`] filter: an arrow or function key's sequence is dropped
+/// whole, so a password set here and typed at login agree.
 pub fn read_line(buf: &mut [u8], echo: bool) -> usize {
     const CR: u8 = 13;
     const LF: u8 = 10;
     const BS: u8 = 8;
     const DEL: u8 = 127;
     let mut len = 0usize;
+    let mut keys = keyseq::KeySeq::new();
     loop {
-        let b = read_char();
+        let keyseq::Fed::Byte(b) = keys.feed(read_char()) else {
+            continue;
+        };
         match b {
             CR | LF => return len,
             BS | DEL => {
@@ -484,6 +489,23 @@ pub fn read_line(buf: &mut [u8], echo: bool) -> usize {
                     }
                 }
             }
+        }
+    }
+}
+
+pub use keyseq;
+
+/// One key press: [`keyseq::Fed::Byte`] for an ordinary byte, or
+/// [`keyseq::Fed::Sequence`] once a navigation or function key's whole
+/// escape sequence has been read (never [`keyseq::Fed::Pending`]). For a
+/// reader that acts on single keys, so that one arrow is one key rather
+/// than three or four bytes (`more`).
+pub fn read_key() -> keyseq::Fed {
+    let mut keys = keyseq::KeySeq::new();
+    loop {
+        match keys.feed(read_char()) {
+            keyseq::Fed::Pending => continue,
+            key => return key,
         }
     }
 }

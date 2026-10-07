@@ -9,6 +9,8 @@ ninep-abi = { path = "../../ninep-abi" }
 accounts = { path = "../../accounts" }
 # The realm and the user-key derivation `login` runs (docs/roadmap/roadmap-user-keys.md, step 4).
 clusterkeys = { path = "../../clusterkeys" }
+# The one filter every keyboard reader uses for escape sequences.
+keyseq = { path = "../../keyseq" }
 
 [[bin]]
 name = "shell"

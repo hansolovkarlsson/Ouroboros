@@ -675,13 +675,16 @@ fn main() -> ! {
         // Export HOME = the login home dir, so `~` expands and children see it.
         env.set("HOME", &cwd[..cwd_len]);
         let mut len = 0usize;
+        let mut keys = keyseq::KeySeq::new();
 
         print_prompt();
         while !env.logout {
             // Genuinely blocks (READ_CHAR suspends this task at the scheduler
             // level until a byte is available) rather than busy-polling; never
             // `wfe` (a confirmed real-Parallels EL0 hang - see tasks.rs).
-            let byte = read_char();
+            let keyseq::Fed::Byte(byte) = keys.feed(read_char()) else {
+                continue; // part of an arrow or function key's sequence
+            };
             on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len, &mut env);
         }
 

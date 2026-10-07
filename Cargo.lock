@@ -234,6 +234,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyseq"
+version = "0.1.0"
+
+[[package]]
 name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,6 +496,7 @@ version = "0.1.0"
 dependencies = [
  "accounts",
  "clusterkeys",
+ "keyseq",
  "ninep-abi",
  "syscall-abi",
 ]
@@ -610,6 +615,7 @@ checksum = "0c8352f8c05e47892e7eaf13b34abd76a7f4aeaf817b716e88789381927f199c"
 name = "ulib"
 version = "0.1.0"
 dependencies = [
+ "keyseq",
  "ninep-abi",
  "syscall-abi",
 ]
