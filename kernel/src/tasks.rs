@@ -58,9 +58,9 @@
 //! That swap is the entire scheduler: strict round-robin between exactly
 //! two tasks, no priorities, no blocking, no queue.
 //!
-//! FP/SIMD state still isn't part of a task's [`Context`] (see
-//! `exceptions.rs`'s module doc comment) — fine for these tasks, since
-//! neither touches it, but a real limitation for whatever runs here next.
+//! A task's FP/SIMD registers are part of its [`Context`] since
+//! 2026-10-07 (see `exceptions.rs`'s module doc comment), so a switch
+//! carries them like the general registers.
 
 use core::arch::{asm, global_asm};
 use crate::synccell::SyncCell;
@@ -2400,6 +2400,7 @@ pub unsafe fn init(
         sp_el0: idle_addr + IDLE_REGION_SIZE as u64,
         elr_el1: idle_addr,
         spsr_el1: 0,
+        ..Context::zeroed()
     };
     unsafe { *REGIONS[1].get() = (idle_addr, IDLE_REGION_SIZE as u64) };
     set_name(1, b"idle");
@@ -2546,8 +2547,29 @@ pub unsafe fn start() -> ! {
     // that ordering.
     crate::mmu::activate_task(TaskIndex::FIRST);
     let ctx = unsafe { *TASKS[TaskIndex::FIRST.index()].get() };
+    // Task 0's FP/SIMD state too, as every later entry restores a task's
+    // from its frame: without it task 0 would start holding whatever the
+    // kernel's own code left in q0-q31.
     unsafe {
         asm!(
+            "ldp q0, q1, [{fp}, #0]",
+            "ldp q2, q3, [{fp}, #32]",
+            "ldp q4, q5, [{fp}, #64]",
+            "ldp q6, q7, [{fp}, #96]",
+            "ldp q8, q9, [{fp}, #128]",
+            "ldp q10, q11, [{fp}, #160]",
+            "ldp q12, q13, [{fp}, #192]",
+            "ldp q14, q15, [{fp}, #224]",
+            "ldp q16, q17, [{fp}, #256]",
+            "ldp q18, q19, [{fp}, #288]",
+            "ldp q20, q21, [{fp}, #320]",
+            "ldp q22, q23, [{fp}, #352]",
+            "ldp q24, q25, [{fp}, #384]",
+            "ldp q26, q27, [{fp}, #416]",
+            "ldp q28, q29, [{fp}, #448]",
+            "ldp q30, q31, [{fp}, #480]",
+            "msr fpcr, {fpcr}",
+            "msr fpsr, {fpsr}",
             "msr sp_el0, {sp_el0}",
             "msr elr_el1, {elr}",
             "msr spsr_el1, {spsr}",
@@ -2555,6 +2577,9 @@ pub unsafe fn start() -> ! {
             sp_el0 = in(reg) ctx.sp_el0,
             elr = in(reg) ctx.elr_el1,
             spsr = in(reg) ctx.spsr_el1,
+            fp = in(reg) ctx.fpsimd.as_ptr(),
+            fpcr = in(reg) ctx.fpcr,
+            fpsr = in(reg) ctx.fpsr,
             options(noreturn),
         );
     }
