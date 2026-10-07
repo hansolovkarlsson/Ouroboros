@@ -7,15 +7,17 @@ Step 8 of docs/roadmap/roadmap-c-hosting.md: `/bin/CPP` is DevTools's cpp,
 built by `make cpp-bin` with /include:/include/clang built in. One boot of a
 copy of build/esp.img, onto which the host first writes the inputs (/src):
 
-- `cpp -o` of each input, with no options, must exit 0: hello.c includes
-  <stdio.h>; picodemo.c is CPICO's source, a dozen headers deep; high.c has
-  UTF-8 and bytes past 0x7f in a comment, a string and a character, where a
-  lexer's `char` (unsigned here, signed on the Mac) could tell;
-- after the boot the host reads the two .i files off the image, and each must
-  be byte for byte what the SAME cpp, built for the Mac from CPP_DIR, writes
-  there from the same staged headers (build/esp/include, its paths mapped to
-  the guest's) and built with -funsigned-char as the target's char is, with
-  SOURCE_DATE_EPOCH set on both sides: the port changes nothing;
+- `cpp -o` of each of the three inputs, with no options, must exit 0:
+  hello.c includes <stdio.h>; picodemo.c is CPICO's source, a dozen headers
+  deep; high.c has UTF-8 and bytes past 0x7f in a comment, a string and a
+  character constant, where a lexer's `char` (unsigned here, signed on the
+  Mac) could tell, and __DATE__ and __TIME__, which read SOURCE_DATE_EPOCH;
+- after the boot the host reads the three .i files off the image, and each
+  must be byte for byte what the SAME cpp, built for the Mac from CPP_DIR,
+  writes there from the same staged headers (build/esp/include, its paths
+  mapped to the guest's), built twice, with signed and with unsigned char,
+  and SOURCE_DATE_EPOCH set on both sides: the port changes nothing, and a
+  dependence on char's sign shows as the two references disagreeing;
 - clang, for this target (CFLAGS_OS, PICO_INC), must compile what the guest
   wrote: a foreign observer that the output is the program;
 - and `cpp /src/hello.c`, the handoff's Done when, prints it and exits 0.
@@ -50,9 +52,21 @@ HELLO = '#include <stdio.h>\n\nint main(void) {\n    printf("hello, world\\n");\
 # Bytes past ASCII, which a lexer reads through `char`: signed on the Mac,
 # unsigned for this target, so a lexer that leans on the sign would differ
 # here and only with input like this (the review of #226).
+# The date macros too, so SOURCE_DATE_EPOCH, set on both sides, is read: the
+# guest cpp's getenv and its gmtime of the epoch are then part of the
+# comparison (the third review of #226).
 HIGH = ('/* caf\u00e9, na\u00efve, \u00fcber: UTF-8 in a comment */\n'
         '#define GREETING "h\u00e9llo \\xff\\x80 \u00e5"\n'
-        'const char *g = GREETING;\nconst char c = \'\\xe9\';\n')
+        # One raw byte, 0xE9, not UTF-8 (whose two bytes no char holds):
+        # written through surrogateescape, see as_bytes.
+        'const char *g = GREETING;\nconst char c = \'\udce9\';\n'
+        'const char *built = __DATE__ " " __TIME__;\n')
+def as_bytes(text):
+    """A source as the bytes written to disk: UTF-8, with a lone surrogate
+    (U+DC80..U+DCFF) standing for the raw byte it escapes."""
+    return text.encode("utf-8", "surrogateescape")
+
+
 SOURCES = {"hello.c": HELLO, "picodemo.c": open(os.path.join(ROOT, "libc", "picodemo.c")).read(),
            "high.c": HIGH}
 
@@ -92,22 +106,24 @@ def strip_sidecars(mp):
                 os.remove(os.path.join(dirpath, f))
 
 
-def host_cpp(cpp_dir):
+def host_cpp(cpp_dir, sign):
     """The same cpp, for the Mac, from the same sources: no system directories
     built in, so the host run passes them, and target.h, as the guest's
     build does (the first system directory's target.h, read first). Built
-    with -funsigned-char, as `char` is for this target and not on the Mac, so
-    the two can differ only where the port does. Rebuilt only when a source
-    (or this script) is newer than it."""
+    with `sign` char, "signed" (the Mac's own) or "unsigned" (this target's):
+    the guest must match BOTH, so a lexer leaning on char's sign shows on the
+    high-byte input as a disagreement (the third review of #226; a single
+    reference forced unsigned, as it was, could not tell). Rebuilt only when
+    a source (or this script) is newer than it."""
     os.makedirs(HOST, exist_ok=True)
-    out = os.path.join(HOST, "cpp")
+    out = os.path.join(HOST, f"cpp-{sign}")
     lib = os.path.join(cpp_dir, "lib")
     srcs = sorted(os.path.join(lib, f) for f in os.listdir(lib) if f.endswith(".c")) + \
         [os.path.join(cpp_dir, "driver", "cpp.c")]
     inputs = srcs + [os.path.join(lib, f) for f in os.listdir(lib) if f.endswith(".h")] + [__file__]
     if os.path.exists(out) and os.path.getmtime(out) > max(os.path.getmtime(f) for f in inputs):
         return out
-    subprocess.run(["cc", "-std=c11", "-O2", "-funsigned-char", "-I", lib, *srcs, "-o", out],
+    subprocess.run(["cc", "-std=c11", "-O2", f"-f{sign}-char", "-I", lib, *srcs, "-o", out],
                    check=True)
     return out
 
@@ -132,8 +148,8 @@ def run() -> int:
     try:
         os.makedirs(os.path.join(mp, "src"), exist_ok=True)
         for name, text in SOURCES.items():
-            with open(os.path.join(mp, "src", name), "w", encoding="utf-8") as fh:
-                fh.write(text)
+            with open(os.path.join(mp, "src", name), "wb") as fh:
+                fh.write(as_bytes(text))
         strip_sidecars(mp)
     finally:
         detach(mp)
@@ -199,24 +215,26 @@ def run() -> int:
     os.makedirs(os.path.join(root, "src"))
     shutil.copytree(os.path.join(STAGED, "include"), os.path.join(root, "include"))
     for name, text in SOURCES.items():
-        with open(os.path.join(root, "src", name), "w", encoding="utf-8") as fh:
-            fh.write(text)
-    cpp = host_cpp(cpp_dir)
+        with open(os.path.join(root, "src", name), "wb") as fh:
+            fh.write(as_bytes(text))
+    refs = {sign: host_cpp(cpp_dir, sign) for sign in ("signed", "unsigned")}
     for name in SOURCES:
         stem = name[:-2]
-        host_out = os.path.join(HOST, stem + ".i")
-        r = subprocess.run([cpp, "-include", f"{root}/include/target.h", "-I", f"{root}/include",
-                            "-I", f"{root}/include/clang", "-o", host_out, f"{root}/src/{name}"],
-                           env={**os.environ, "SOURCE_DATE_EPOCH": EPOCH}, capture_output=True)
-        if r.returncode != 0:
-            # A failure of the REFERENCE, said as such, not as the port's.
-            print(f"     host cpp failed on {name} (exit {r.returncode}):\n{r.stderr.decode()[-600:]}")
-        checks.append((f"{name}: the host cpp, the reference, ran", r.returncode == 0))
-        want = open(host_out, "rb").read().replace(root.encode(), b"") if r.returncode == 0 else None
         g = got[name]
         checks.append((f"{name}: the guest wrote /{stem}.i ({len(g) if g else 0} bytes)", bool(g)))
-        checks.append((f"{name}: the guest's output is the host cpp's, byte for byte",
-                       g is not None and want is not None and g == want))
+        for sign, cpp in refs.items():
+            host_out = os.path.join(HOST, f"{stem}.{sign}.i")
+            r = subprocess.run([cpp, "-include", f"{root}/include/target.h", "-I", f"{root}/include",
+                                "-I", f"{root}/include/clang", "-o", host_out, f"{root}/src/{name}"],
+                               env={**os.environ, "SOURCE_DATE_EPOCH": EPOCH}, capture_output=True)
+            if r.returncode != 0:
+                # A failure of the REFERENCE, said as such, not as the port's.
+                print(f"     host cpp ({sign} char) failed on {name} (exit {r.returncode}):\n"
+                      f"{r.stderr.decode()[-600:]}")
+            checks.append((f"{name}: the host cpp, {sign} char, the reference, ran", r.returncode == 0))
+            want = open(host_out, "rb").read().replace(root.encode(), b"") if r.returncode == 0 else None
+            checks.append((f"{name}: the guest's output is the host cpp's ({sign} char), byte for byte",
+                           g is not None and want is not None and g == want))
         if g:
             guest_i = os.path.join(HOST, stem + ".guest.i")
             with open(guest_i, "wb") as fh:

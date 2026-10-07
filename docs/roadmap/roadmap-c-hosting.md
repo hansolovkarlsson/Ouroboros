@@ -278,12 +278,14 @@ tree at `4dcbddd` leaves of them, read from the code.
   steps 1 to 5. `make esp` stages it as `/bin/CPP` when `CPP_DIR` has the
   sources, and says so and goes on when it does not, so this tree alone
   still builds. On a booted image, `cpp hello.c` with no options prints the
-  program, and `make test-cpp` checks the rest: `cpp -o` of `hello.c` and
-  CPICO's `picodemo.c` (a dozen headers deep) exit 0; the host reads the
-  `.i` files back off the image and each is byte for byte what the same cpp,
-  built for the Mac from the same sources, writes from the same staged
-  headers (paths mapped, `SOURCE_DATE_EPOCH` set on both); and clang for
-  this target compiles both. Step 7 needed nothing: the 1 MiB heap held
+  program, and `make test-cpp` checks the rest: `cpp -o` of `hello.c`,
+  CPICO's `picodemo.c` (a dozen headers deep) and `high.c` (UTF-8, raw bytes
+  past 0x7f, and `__DATE__`/`__TIME__`, so `SOURCE_DATE_EPOCH` is read) exit
+  0; the host reads the `.i` files back off the image and each is byte for
+  byte what the same cpp, built for the Mac from the same sources with
+  signed and with unsigned `char`, writes from the same staged headers
+  (paths mapped, `SOURCE_DATE_EPOCH` set on both); and clang for this target
+  compiles all three. Step 7 needed nothing: the 1 MiB heap held
   `picodemo.c`. The finish line was written as "the same bytes as `clang
   $(CFLAGS_OS) -E`"; clang's spacing and line markers differ from cpp's, so
   the check compares with cpp on the host, and cpp against clang token for

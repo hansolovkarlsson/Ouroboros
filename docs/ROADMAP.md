@@ -4035,13 +4035,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   archive bits and its modified time are gone after any `mv`, a case-only one
   included. A rename should carry the rest of the entry across. Found by the
   second review of #225.
-- **Most QEMU rigs count fault lines before QEMU has flushed its trace.**
-  `drive-qemu.py`'s own `main` reads `-d int` only after `stop()`, since QEMU
-  buffers it, but `test-cargs`, `test-cerrno`, `test-crename`, `test-heap` and
-  `test-unmount` read it inside the `try`, so a fault in the last command can
-  be missed. `test-cpp`, `test-cenv`, `test-cclock` and `test-include` read it
-  after `stop()` since the second review of #226, 2026-10-06; the rest want
-  the same one-line move.
+- ~~**Most QEMU rigs count fault lines before QEMU has flushed its trace.**~~
+  *Done 2026-10-06, in #226:* `drive-qemu.py`'s `Guest.stop()` shuts QEMU
+  down with SIGTERM (its exit flushes the `-d int` log) and kills it only
+  after five seconds, where it used SIGKILL, which dropped what the log still
+  held; and `Guest.aborts()` stops the guest itself before reading, so no rig
+  can read the trace early. Every rig gets it without an edit of its own.
 - **A directory listing is cut at one reply, with no sign of it.**
   `NP_READDIR` has no offset: fsd writes `name\n` per entry into the reply
   window, skips any name that no longer fits and goes on walking, so a

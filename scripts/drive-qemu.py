@@ -168,7 +168,14 @@ class Guest:
         - **A missing log is `None`, not `0`.** No trace is "I did not check",
           which reads identically to "I checked and it was clean" if both are 0 -
           and that is the single signal a two-node run has.
+
+        It STOPS the guest first. QEMU buffers the trace, so a count read while
+        it runs can miss the last faults, and every rig used to choose its own
+        order (several read it before stopping). Stopping here makes the early
+        read impossible to write (the third review of #226); `stop()` is
+        idempotent and `transcript()` still works after it.
         """
+        self.stop()
         try:
             with open(self.intlog, "rb") as fh:
                 return sum(
@@ -179,8 +186,18 @@ class Guest:
             return None
 
     def stop(self):
-        self.proc.kill()
-        self.proc.wait()
+        """Shut QEMU down, gracefully first: on SIGTERM it exits through its
+        own shutdown, which flushes the -d int log, where SIGKILL (all this
+        did until 2026-10-06) drops whatever the log still had buffered, a
+        fault in the last command among it. Killed only if it does not go
+        within five seconds. Safe to call more than once."""
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
 
 
 def fault_line(guest) -> str:

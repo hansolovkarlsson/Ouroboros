@@ -256,16 +256,21 @@ HAVE_CPP     := $(wildcard $(CPP_DIR)/driver/cpp.c)
 CPP_OBJS     := $(if $(HAVE_CPP),$(patsubst $(CPP_DIR)/lib/%.c,$(BUILD_DIR)/cpp/%.o,$(wildcard $(CPP_DIR)/lib/*.c)) $(BUILD_DIR)/cpp/cpp.o)
 # Whether an image without /bin/cpp is acceptable: `optional` (the default,
 # for development, so this tree alone builds) or `required`, which stops at
-# once when CPP_DIR has no sources. A release passes CPP=required, and
-# test-cpp implies it: one switch rather than a guard in each (the review of
-# #226).
-CPP          ?= optional
-ifneq ($(filter test-cpp,$(MAKECMDGOALS)),)
-CPP          := required
+# once when CPP_DIR has no sources. A release passes NEED_CPP=required, and
+# cpp-bin and test-cpp imply it, with `override` so no command-line value can
+# switch it off: one switch rather than a guard in each (the reviews of
+# #226). Not named CPP: make predefines that as the C preprocessor command,
+# so `CPP ?=` never took and `CPP=required` would reach every tool that runs
+# $CPP. `make clean` is never stopped by it.
+NEED_CPP     ?= optional
+ifneq ($(filter cpp-bin test-cpp,$(MAKECMDGOALS)),)
+override NEED_CPP := required
 endif
-ifeq ($(CPP),required)
+ifeq ($(NEED_CPP),required)
 ifeq ($(HAVE_CPP),)
-$(error CPP=required: no cpp sources at $(CPP_DIR) (set CPP_DIR))
+ifneq ($(filter-out clean,$(or $(MAKECMDGOALS),all)),)
+$(error NEED_CPP=required: no cpp sources at $(CPP_DIR) (set CPP_DIR))
+endif
 endif
 endif
 
@@ -651,16 +656,21 @@ cclock-bin: $(NSRESOLVE_A) $(PICO_PORT)
 # Its sources are DevTools's and are only read here; the link is ours.
 # Real objects with their header dependencies (-MMD), so a `make run` rebuilds
 # only what changed in cpp's sources, not all of them every time.
+# Without sources, `make cpp-bin` stops at parse time (NEED_CPP above), before
+# any link is tried.
 cpp-bin: $(CPP_BIN)
-	@[ -n "$(HAVE_CPP)" ] || { echo "cpp-bin: no cpp sources at $(CPP_DIR) (set CPP_DIR)"; exit 1; }
 CPP_CFLAGS := $(CFLAGS_OS) $(PICO_INC) -I$(CPP_DIR)/lib '-DCPP_SYSTEM_DIRS="/include:/include/clang"' -MMD -MP
-$(BUILD_DIR)/cpp/%.o: $(CPP_DIR)/lib/%.c
+# The Makefile itself is a prerequisite (CFLAGS_OS, PICO_INC and the system
+# directories are spelled here), and the link's are the libc, the port and
+# the linker script, so a change to any of them rebuilds /bin/cpp rather than
+# shipping it stale (the third review of #226).
+$(BUILD_DIR)/cpp/%.o: $(CPP_DIR)/lib/%.c Makefile
 	@mkdir -p $(BUILD_DIR)/cpp
 	$(CC) $(CPP_CFLAGS) -c $< -o $@
-$(BUILD_DIR)/cpp/cpp.o: $(CPP_DIR)/driver/cpp.c
+$(BUILD_DIR)/cpp/cpp.o: $(CPP_DIR)/driver/cpp.c Makefile
 	@mkdir -p $(BUILD_DIR)/cpp
 	$(CC) $(CPP_CFLAGS) -c $< -o $@
-$(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A)
+$(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(CPP_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpp.elf $(CPP_BIN)
 -include $(wildcard $(BUILD_DIR)/cpp/*.d)
@@ -1803,14 +1813,15 @@ test-include: image image-ext2 image-exfat
 	python3 scripts/test-include.py
 
 # The C preprocessor on Ouroboros, the C-hosting plan's finish line
-# (scripts/test-cpp.py): `cpp -o` of hello.c and CPICO's picodemo.c, with no
-# options, on a copy of the FAT32 image; the host reads the .i files back off
-# it and compares them byte for byte with the same cpp built for the Mac, and
-# clang for this target compiles them. One boot, about a minute and a half;
+# (scripts/test-cpp.py): `cpp -o` of hello.c, CPICO's picodemo.c and a
+# high-byte input, with no options, on a copy of the FAT32 image; the host
+# reads the .i files back off it and compares them byte for byte with the same
+# cpp built for the Mac, with signed and with unsigned char, and clang for this
+# target compiles them. One boot, about a minute and a half;
 # needs DevTools's cpp at CPP_DIR. Run it whenever the C runtime, the header
 # stage or cpp-bin changes.
-# Without cpp's sources there is nothing to test: test-cpp sets CPP=required
-# (above), which stops before the image is built, not after.
+# Without cpp's sources there is nothing to test: test-cpp sets
+# NEED_CPP=required (above), which stops before the image is built, not after.
 test-cpp: image
 	CPP_DIR="$(CPP_DIR)" CFLAGS_OS="$(CFLAGS_OS)" PICO_INC="$(PICO_INC)" python3 scripts/test-cpp.py
 
