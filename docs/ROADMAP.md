@@ -2372,7 +2372,11 @@ be reviewed after the fact from the saved screenshots.
 >       and a C program's `main` receives its arguments. (4) touches the
 >       one choke point every keyboard path funnels through
 >       (`syscall.rs`'s Ctrl-C interception), so it needs its own design
->       note first. Two hazards for that design, from the high review of
+>       note first. *Design note written 2026-10-07:
+>       [`roadmap/roadmap-ctrl-c.md`](roadmap/roadmap-ctrl-c.md), a per-task
+>       `KBD_MODE` with Ctrl+\ as the way out, `termios` in the C library,
+>       and a kernel input queue for the two hazards below; four decisions
+>       (D1 to D4) wait on Hans.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
 >       time, so a change of keyboard owner (a program killed between the
 >       ESC and the rest) hands the tail to the next owner, and a serial
