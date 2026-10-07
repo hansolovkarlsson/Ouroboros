@@ -128,3 +128,6 @@ only cancels the wrap and leaves the cursor on the last column, where xterm
 moves to the column before; the shell's `BS ' ' BS` erase depends on it. `/bin/VTPROBE COLS ROWS`
 writes every sequence, and `make test-cond-vt` checks the screen it draws,
 cell by cell, against a model. Items 2 to 4 are still open.
+
+Merged 2026-10-07 (#228, `379b898`), and DevTools told by notice:
+`~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-editor-console-item-1.md`.
