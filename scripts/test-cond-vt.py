@@ -139,7 +139,7 @@ def text(rows):
 
 def expected(cols, rows):
     """The screen VTPROBE draws, 0-based, built from its doc comment's steps."""
-    g = [[("#", False)] * cols for _ in range(rows)]
+    g = [[(chr(ord("a") + r % 26), False)] * cols for r in range(rows)]
 
     def put(r, c, s, rev=False):
         for i, ch in enumerate(s):
@@ -171,7 +171,8 @@ def expected(cols, rows):
         blank(r, 0, cols)
     put(10, cols - 1, "P")                  # 9. the deferred wrap, taken
     put(11, 0, "Q")
-    put(rows - 1, cols - 1, "c")            # 10. clamped to the bottom-right cell
+    put(12, 0, "e")                         # 10. sequences that draw nothing
+    put(rows - 1, cols - 1, "c")            # 11. clamped to the bottom-right cell
     return g
 
 

@@ -140,7 +140,10 @@ fn write_text(backend: &mut Backend, bytes: &[u8]) {
 /// editor-console.md`, item 1): `CSI row;col H`, `CSI Ps K`, `CSI Ps J`,
 /// `CSI Ps m` for reverse video (7 on, 0 and 27 off), and the private
 /// `CSI ? ... h/l` forms, which are parsed and drawn as nothing. Every other
-/// sequence is parsed to its final byte and dropped, so it never prints.
+/// sequence is consumed and dropped, so none of it prints: any CSI to its
+/// final byte, `ESC` with intermediates (`ESC ( B`) to its final byte, and
+/// the string sequences (OSC `ESC ]`, and DCS, SOS, PM, APC) to BEL or
+/// `ESC \`.
 struct Fb {
     cols: usize,
     rows: usize,
@@ -166,7 +169,10 @@ struct Fb {
 /// Parameters kept per CSI sequence; any past this are parsed and ignored.
 const MAX_PARAMS: usize = 8;
 
-/// Blank glyph bitmaps for erasing, blitted `BLANK_CELLS` at a time.
+/// Blank glyph bitmaps for erasing, blitted `BLANK_CELLS` at a time. 64
+/// is the most one `FB_BLIT` takes: the kernel checks its buffer against
+/// `MAX_USER_LEN` (512 bytes, eight per glyph) and refuses a larger one, so
+/// a 256-cell run tried on 2026-10-07 erased nothing, silently.
 const BLANK_CELLS: usize = 64;
 static BLANK: [u8; BLANK_CELLS * 8] = [0; BLANK_CELLS * 8];
 
@@ -174,6 +180,10 @@ enum Ansi {
     Ground,
     Esc,
     Csi,
+    /// After `ESC` and an intermediate byte (0x20-0x2f), as in `ESC ( B`.
+    EscIntermediate,
+    /// Inside a string sequence (`ESC ]` and the like), until BEL or ST.
+    Str,
 }
 
 impl Fb {
@@ -192,6 +202,8 @@ impl Fb {
                 // Backspace. With a wrap pending the cursor is still on the
                 // glyph just drawn, so it only cancels the wrap: the shell's
                 // `BS ' ' BS` then erases that glyph and lands back on it.
+                // Not what xterm does: it moves to the column before, so
+                // the same three bytes erase the wrong glyph there.
                 0x08 => {
                     if self.wrap_pending {
                         self.wrap_pending = false;
@@ -230,18 +242,31 @@ impl Fb {
                     // printable text plus \r\n\b and ANSI.
                 }
             },
-            Ansi::Esc => {
-                // Only the CSI form (ESC [) is understood; anything else
-                // ends the sequence.
-                if c == b'[' {
+            Ansi::Esc => match c {
+                b'[' => {
                     self.params = [0; MAX_PARAMS];
                     self.nparams = 0;
                     self.private = false;
                     self.ansi = Ansi::Csi;
-                } else {
-                    self.ansi = Ansi::Ground;
                 }
-            }
+                b']' | b'P' | b'X' | b'^' | b'_' => self.ansi = Ansi::Str,
+                0x20..=0x2f => self.ansi = Ansi::EscIntermediate,
+                0x1b => {}
+                // A final byte (this includes the `\` of an ST that ends a
+                // string): the sequence is over, and nothing is drawn.
+                _ => self.ansi = Ansi::Ground,
+            },
+            Ansi::EscIntermediate => match c {
+                0x1b => self.ansi = Ansi::Esc,
+                0x30..=0x7e => self.ansi = Ansi::Ground,
+                _ => {}
+            },
+            Ansi::Str => match c {
+                0x07 => self.ansi = Ansi::Ground,
+                // ESC begins the ST (`ESC \`); the Esc state consumes the `\`.
+                0x1b => self.ansi = Ansi::Esc,
+                _ => {}
+            },
             Ansi::Csi => match c {
                 // An ESC inside a sequence abandons it and starts another.
                 0x1b => self.ansi = Ansi::Esc,
@@ -313,9 +338,10 @@ impl Fb {
                         }
                         self.blank(0, self.row, self.col + 1);
                     }
-                    2 | 3 => {
+                    2 => {
                         syscall4(syscall_abi::FB_CLEAR, 0, 0, 0, 0);
                     }
+                    // 3 erases the scrollback (xterm), and there is none.
                     _ => {}
                 }
                 self.wrap_pending = false;
