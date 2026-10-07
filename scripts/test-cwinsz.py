@@ -18,7 +18,11 @@ with `ioctl(fd, TIOCGWINSZ, &ws)` (libc/src/file.c), and a Rust one with
    grid, the screendump's width and height over 8; and `more /include/elf.h`
    must fill the screen, the file's first line on the top row and `--More--`
    on the bottom one, where a fixed 23-line page left the shell's output
-   above it.
+   above it. Then a file whose first line is 110 characters, wider than the
+   screen, then elf.h: the long line must fill the top two rows, the page
+   end a row sooner, and nothing scroll off, since `more` counts screen rows
+   and not lines. This boot writes that file, so it boots a copy of the
+   image.
 
 QEMU's own trace must hold no fault line in either boot. Two boots, about a
 minute and a half. Run it whenever CON_INFO, ioctl, ulib::screen_size or
@@ -27,6 +31,7 @@ more's paging changes.
 import importlib.util
 import os
 import re
+import shutil
 import sys
 import time
 
@@ -47,6 +52,9 @@ vt = load("test_cond_vt", "test-cond-vt.py")
 IMAGE = os.path.join(ROOT, "build", "esp.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-cwinsz.txt")
 ELF_H = os.path.join(ROOT, "build", "esp", "include", "elf.h")
+# The framebuffer boot writes a file, so it boots a copy.
+COPY = os.path.join(ROOT, "build", "test-cwinsz.img")
+LONG = 110  # wider than the 100-column screen: the line takes two rows
 
 
 def serial_boot():
@@ -82,12 +90,13 @@ def framebuffer_boot():
     font = vt.load_font()
     if os.path.exists(vt.QMP):
         os.remove(vt.QMP)
+    shutil.copy(IMAGE, COPY)
     guest = drive_qemu.Guest(
-        IMAGE, label="test-cwinsz framebuffer: ",
+        COPY, label="test-cwinsz framebuffer: ",
         extra_args=["-device", "ramfb", "-qmp", f"unix:{vt.QMP},server,nowait"],
     )
     cols = rows = 0
-    sizes = more_screen = None
+    sizes = more_screen = wide_screen = None
     try:
         qmp = vt.Qmp(vt.QMP)
 
@@ -132,6 +141,18 @@ def framebuffer_boot():
                             more_screen = lines
                             guest.type_line("q")
                             wait_screen(r"^#$")
+                            # A first line wider than the screen: it takes
+                            # two rows, so the page must end a row sooner.
+                            guest.type_line("echo " + "x" * LONG + " > /w.txt")
+                            wait_screen(r"^#$")
+                            guest.type_line("cat /include/elf.h >> /w.txt")
+                            wait_screen(r"^#$")
+                            guest.type_line("more /w.txt")
+                            lines = wait_screen(r"^--More--")
+                            if lines:
+                                wide_screen = lines
+                                guest.type_line("q")
+                                wait_screen(r"^#$")
         faults = guest.aborts()
     finally:
         guest.stop()
@@ -146,9 +167,13 @@ def framebuffer_boot():
         ("framebuffer: more fills the screen (elf.h's line 1 on top, --More-- at the bottom)",
          more_screen is not None and more_screen[-1] == "--More--"
          and more_screen[0] == elf[0][:cols].rstrip() and more_screen[rows - 2] == elf[rows - 2][:cols].rstrip()),
+        ("framebuffer: a line wider than the screen takes two rows, and the page still starts with it",
+         wide_screen is not None and wide_screen[0] == "x" * cols and wide_screen[1] == "x" * (LONG - cols)
+         and wide_screen[-1] == "--More--" and wide_screen[rows - 2] == elf[rows - 4][:cols].rstrip()),
         ("framebuffer: no fault lines", faults == 0),
     ]
     detail = (sizes or []) + ([f"top: {more_screen[0]!r}", f"bottom: {more_screen[-1]!r}"] if more_screen else [])
+    detail += [f"wide top: {wide_screen[0][:20]!r}... ({len(wide_screen[0])}), next: {wide_screen[1]!r}"] if wide_screen else []
     return checks, detail
 
 

@@ -227,10 +227,12 @@ PICO_DIR     := third_party/picolibc-prebuilt
 # has: picolibc's features.h defines _POSIX_MONOTONIC_CLOCK for RTEMS only, so
 # without this <time.h> names no CLOCK_MONOTONIC, which libc/pico/clock.c
 # answers (step 5 of the C-hosting plan). On every picolibc compile line.
-# -idirafter: the headers picolibc has no copy of (sys/ioctl.h) come from
-# libc/include, searched only after picolibc's own, so none of picolibc's is
-# shadowed.
-PICO_INC     := -I$(PICO_DIR)/include -idirafter libc/include -D_POSIX_MONOTONIC_CLOCK=200112L
+# libc/pico/include holds the headers picolibc has no copy of (sys/ioctl.h)
+# and nothing else: every header in it is picolibc-shaped, so it may sit on
+# the angle-bracket path, where libc/include (the hand-rolled shapes) never
+# may (see PICO_PORT_CFLAGS below). After picolibc's own, so it adds and never
+# replaces.
+PICO_INC     := -I$(PICO_DIR)/include -I libc/pico/include -D_POSIX_MONOTONIC_CLOCK=200112L
 # clang's own headers, the freestanding ones CFLAGS_OS compiles against, are
 # the second system directory the image stages (step 6 of the C-hosting plan).
 # Their directory is asked of clang once, inside the esp recipe, so no other
@@ -491,7 +493,7 @@ chello-bin:
 # The headers too: a change to sys.h (a wire constant) or sys/stat.h (a
 # struct) must rebuild every object, or a stale one ships beside the new
 # header with nothing to say so.
-LIBC_HDRS    := $(wildcard libc/include/*.h libc/include/sys/*.h)
+LIBC_HDRS    := $(wildcard libc/include/*.h libc/include/sys/*.h libc/pico/include/sys/*.h)
 $(BUILD_DIR)/libc/%.o: libc/src/%.c $(LIBC_HDRS)
 	mkdir -p $(BUILD_DIR)/libc
 	$(CC) $(LIBC_CFLAGS) -c $< -o $@
@@ -851,6 +853,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	# images copy this tree too.
 	mkdir -p $(ESP_DIR)/include/clang
 	cp -R $(PICO_DIR)/include/. $(ESP_DIR)/include/
+	cp -R libc/pico/include/. $(ESP_DIR)/include/
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -dM -E -x c /dev/null > $(ESP_DIR)/include/target.h
 	res=$$($(CC) -print-resource-dir) && [ -n "$$res" ] && [ -d "$$res/include" ] || { \
 		echo "esp: no clang resource directory from '$(CC) -print-resource-dir'"; exit 1; }; \

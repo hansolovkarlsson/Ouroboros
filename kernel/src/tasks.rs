@@ -222,7 +222,8 @@ pub const FIRST_SPAWNABLE: usize = 6;
 /// filesystem server holds it - the "supervised" in "supervised EL0
 /// process".
 pub(crate) const CAP_BLOCK: u32 = 1 << 16;
-/// `CAP_CON`: may use `CON_WRITE`/`CON_INFO`/`FB_*` (the console device).
+/// `CAP_CON`: may use `CON_WRITE`/`FB_*` (the console device; `CON_INFO`,
+/// the screen's size, is open to every task since 2026-10-07).
 /// Only the console server holds it - ordinary tasks reach the console
 /// only through it (a `DSPOP_WRITE` message).
 pub(crate) const CAP_CON: u32 = 1 << 17;

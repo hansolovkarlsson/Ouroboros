@@ -500,7 +500,8 @@ pub use keyseq;
 /// the terminal at the far end has whatever size it has, and the kernel
 /// never hears it. A caller then assumes the conventional 80 by 24, as a
 /// Unix program does when `TIOCGWINSZ` fails. `CON_INFO`, open to every
-/// task since 2026-10-07 (DevTools's editor note, item 3).
+/// task since 2026-10-07 (DevTools's editor note, item 3). A refusal is
+/// also `None` here, where the C library's `ioctl` makes it `EIO`.
 pub fn screen_size() -> Option<(usize, usize)> {
     let cols = syscall(syscall_abi::CON_INFO, syscall_abi::CON_INFO_COLS);
     let rows = syscall(syscall_abi::CON_INFO, syscall_abi::CON_INFO_ROWS);

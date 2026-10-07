@@ -16,8 +16,8 @@
 #define SYS_MSG_SEND 23
 #define SYS_MSG_CALL 29
 #define SYS_GRANT 31
-#define SYS_STDOUT_TARGET 38
 #define SYS_CON_INFO 34
+#define SYS_STDOUT_TARGET 38
 #define SYS_HEAP_INFO 40
 #define SYS_MONOTONIC_US 46
 #define SYS_GET_ARGC 48

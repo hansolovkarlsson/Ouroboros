@@ -186,7 +186,8 @@ fn block_access_allowed() -> bool {
     tasks::cap_has(tasks::current_task(), tasks::CAP_BLOCK)
 }
 
-/// Whether the calling task may use [`syscall_abi::CON_WRITE`]/`CON_INFO`/`FB_*`:
+/// Whether the calling task may use [`syscall_abi::CON_WRITE`]/`FB_*`
+/// (not `CON_INFO`, open to every task since 2026-10-07):
 /// whoever holds `CAP_CON`, which by the capability policy is the console
 /// server alone. The console analogue of [`block_access_allowed`] - the
 /// kernel owns the console, and exactly one task is allowed to push

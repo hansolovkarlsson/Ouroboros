@@ -604,7 +604,7 @@ something the kernel alone can say.
 | 31 | `grant` | grantee task, buf ptr, buf len, dir | `0` or `GRANT_ERR` | Records, in the caller's own single per-task grant slot, that `grantee` may bulk-copy the exact `buf` (which must lie in the caller's own region) in direction `dir` (`GRANT_READ`/`GRANT_WRITE`). The capability half of the enforced bulk-transfer primitive — `buf len` capped at `SAFECOPY_MAX` (2048). See "Grant/safecopy" below |
 | 32 | `safecopy` | client task, client offset, local buf ptr, len, **dir (5th arg, from the saved frame's x4)** | `len` or `SAFECOPY_ERR` | A *server* copies `len` bytes between a client's granted buffer and its own `local buf`, in direction `dir`. Authorized only when the client's grant names this server and permits the direction, the client is *currently* blocked in a `msg_call` to it, and both ranges are in bounds. Not task-gated (unlike `block_*`): the grant plus the active call is the whole capability. See "Grant/safecopy" below |
 | 33 | `con_write` | buf ptr, len | `0` or an error | The console server's byte-stream backend: writes `len` bytes to the kernel's console. **Gated to task 3** (`CON_TASK`), like `block_*` to task 2 — ordinary tasks reach the console only through the server (a `DSPOP_WRITE` message); the kernel's own `console::*` stays the emergency/boot path. See "Console" below |
-| 34 | `con_info` | field | the geometry value | Lets the console server discover its backend and framebuffer size at startup. **Gated to task 3**. Fields: kind (`CON_KIND_BYTESTREAM`/`CON_KIND_FRAMEBUFFER`), cols, rows |
+| 34 | `con_info` | field | the geometry value | Lets the console server discover its backend and framebuffer size at startup, and any program read the screen size. **Open to every task** since 2026-10-07 (it was gated to task 3); C reaches it through `ioctl(TIOCGWINSZ)`, Rust through `ulib::screen_size`. Fields: kind (`CON_KIND_BYTESTREAM`/`CON_KIND_FRAMEBUFFER`), cols, rows (both 0 on a byte-stream console, whose size is unknown) |
 | 35 | `fb_blit` | glyphs ptr, count, col, row | `0` or an error | Plots `count` 8-byte glyph bitmaps (from the server's own font, in its own region) at framebuffer cells `(col..col+count, row)`. **Gated to task 3**. The dumb blit half of the framebuffer backend — the server owns the font/cursor/wrap/scroll/ANSI, this just puts pixels on screen (`fbdev.rs`) |
 | 36 | `fb_scroll` | count | `0` | Scrolls the framebuffer up `count` character rows (a `ptr::copy` memmove), blanking the exposed bottom. **Gated to task 3** |
 | 37 | `fb_clear` | none | `0` | Blanks the whole framebuffer. **Gated to task 3**. Used by the server's startup and its `clear`/ANSI-`2J` handling |
@@ -711,8 +711,9 @@ capabilities allow. Because task-slot roles are static (0 shell, 1 idle,
 slot** — no stored table, no runtime state — living entirely in
 `tasks::caps_for_slot(slot)`. A slot's capability word packs a **send-mask**
 (which slots it may initiate IPC to) plus resource bits (`CAP_BLOCK` gates
-`block_*` to the filesystem server; `CAP_CON` gates `con_write`/`con_info`/
-`fb_*` to the console server; `CAP_NET` gates `net_send`/`net_recv`/`net_mac`
+`block_*` to the filesystem server; `CAP_CON` gates `con_write`/`fb_*` to
+the console server, while `con_info` is open to every task since
+2026-10-07; `CAP_NET` gates `net_send`/`net_recv`/`net_mac`
 to the network server — the three device gates, formerly hardcoded
 `== FSD_TASK`/`== CON_TASK` checks, are the resource half of this same
 model).

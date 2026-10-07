@@ -28,7 +28,10 @@
 #include <fcntl.h>
 #include <string.h>
 #include <stdarg.h>
-#include <sys/ioctl.h>
+/* By its path, not <sys/ioctl.h>: the one copy lives with the picolibc-side
+ * headers (libc/pico/include), which the hand-rolled build of this file does
+ * not search, and libc/include must stay off a picolibc build's angle path. */
+#include "../pico/include/sys/ioctl.h"
 #include <sys/stat.h>
 #include <unistd.h>
 /* `errno` where the C library has one: picolibc does, and the Makefile builds
@@ -968,8 +971,13 @@ int ioctl(int fd, unsigned long request, ...) {
     }
     long cols = __os_syscall1(SYS_CON_INFO, CON_INFO_COLS);
     long rows = __os_syscall1(SYS_CON_INFO, CON_INFO_ROWS);
-    /* 0 is "unknown" (a byte-stream console), and so is a refusal. */
-    if ((unsigned long)cols >= FS_ERR_MIN || (unsigned long)rows >= FS_ERR_MIN || cols > 0xffff || rows > 0xffff) {
+    /* 0 is "unknown" (a byte-stream console). A refusal is not: CON_INFO is
+     * open to every task, so one means the kernel broke that, and saying
+     * "unknown" would hide it. */
+    if ((unsigned long)cols >= FS_ERR_MIN || (unsigned long)rows >= FS_ERR_MIN) {
+        return client_fail(EIO);
+    }
+    if (cols > 0xffff || rows > 0xffff) {
         cols = 0;
         rows = 0;
     }

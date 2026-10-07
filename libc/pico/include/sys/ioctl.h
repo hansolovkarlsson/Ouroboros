@@ -9,7 +9,10 @@
  * answers 0 rows and 0 columns, as Linux does for a terminal whose size was
  * never set; a caller then assumes 80 by 24. Any descriptor that is not the
  * console (a pipe on stdout, an open file) is ENOTTY, and so is any other
- * request. */
+ * request; EIO if the kernel refuses the question.
+ *
+ * Picolibc-side (libc/pico/include): a picolibc program finds it as
+ * <sys/ioctl.h>, and it is staged under /include on the image. */
 
 struct winsize {
     unsigned short ws_row;
