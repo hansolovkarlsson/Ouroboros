@@ -20,11 +20,14 @@ days' records are in `docs/work-journal/`, one file a day.
 **The arrow and function keys reach programs (#229).** Item 2 of
 DevTools's editor note: the USB keyboard sends the VT100/xterm sequences for
 Up, Down, Right, Left, Home, End, Page Up, Page Down, Delete, F2 and F3, which
-`xhci.rs` dropped before. The shell's line editor and login's prompts drop
-each sequence whole; until now an arrow typed on QEMU's serial line put `[A`
-into the command. `make test-nav-keys` presses the keys through QEMU's USB
-keyboard and checks the bytes `/bin/READKEY` reads, and that the shell and
-login take them as nothing.
+`xhci.rs` dropped before. Every keyboard reader now goes through one filter,
+the new pure `keyseq` crate: the shell's line editor and login's prompts and
+`ulib::read_line` (`passwd`, `useradd`) drop each sequence whole, so a
+password typed with an arrow in it means the same at both, and `more` takes
+a sequence as one key. Until now an arrow typed on QEMU's serial line put
+`[A` into the command. `make test-nav-keys` presses the keys through QEMU's
+USB keyboard and checks the bytes `/bin/READKEY` reads, the shell, login,
+`more`, and a password set at `useradd` with an arrow in it.
 
 **The framebuffer console takes cursor addressing (#228).** Item 1 of
 DevTools's editor note: `cond` acts on `CSI row;col H`, `CSI K` and `CSI J`

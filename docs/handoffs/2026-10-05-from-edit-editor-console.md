@@ -140,4 +140,8 @@ sequence queued whole. Shift, Ctrl and Alt do not change them (xterm's
 `ESC [ 1 ; 5 A` forms are not sent). The Escape key itself still sends
 nothing, and neither does Tab. `/bin/READKEY` prints each byte a key sends,
 and `make test-nav-keys` presses the eleven keys on QEMU's USB keyboard and
-checks the bytes. Items 3 and 4 are still open.
+checks the bytes. One hazard Edit should know until item 4 is designed: if
+a key arrives while Edit is running rather than waiting in a read (busy
+redrawing), the kernel's tick consumes one byte of it, looking for Ctrl-C,
+and drops it; a sequence can then reach Edit as `[A` or `A`. Items 3 and 4
+are still open.

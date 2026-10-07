@@ -540,7 +540,7 @@ make test-held-keys          # rebuilds the image, then five driven QEMU boots o
 make test-heap               # the user heap on a booted image (scripts/test-heap.py): /bin/CMEM twice in one boot, each checking a heap of at least 1 MiB, malloc holding nearly all of it, and every byte 0 before the first malloc (the second run starts in the slot the first gave back); about a minute - run it whenever HEAP_PAGES, populate_region or the runtime region allocator changes
 make test-fpsimd            # a task's FP/SIMD registers across the kernel (scripts/test-fpsimd.py, /bin/FPPROBE): all 32 vector registers, FPCR and FPSR loaded in one asm block, then a YIELD and a spin the tick preempts (at least two ticks), alone and as `fpprobe | fpprobe -` (two probes side by side, different rounding modes); fails on a kernel without the save and on one missing only the FPCR or only the FPSR restore; one boot, about a minute - run it whenever exceptions.rs's trampolines, Context or tasks.rs's switch paths change
 make test-cond-vt           # cond's escape sequences on the framebuffer (scripts/test-cond-vt.py, /bin/VTPROBE): QEMU with -device ramfb (the shell's output then reaches ONLY the framebuffer), the screen taken by QMP screendump and decoded per 8x8 cell with cond's own font, VTPROBE's screen (cursor addressing, K and J, reverse video, the deferred wrap) compared with a model cell by cell; one boot, under a minute - run it whenever cond's framebuffer backend, its font or the FB_* primitives change
-make test-nav-keys          # the navigation and function keys on QEMU's USB keyboard (scripts/test-nav-keys.py): the eleven keys pressed by monitor sendkey, /bin/READKEY must read exactly their VT100 sequences; then the shell must take arrows typed mid-line (USB and serial) as nothing, and login a user name typed with ESC [ D in it; one boot, about a minute - run it whenever xhci.rs's key mapping, the shell's line editor or login's reader changes
+make test-nav-keys          # the navigation and function keys on QEMU's USB keyboard (scripts/test-nav-keys.py): the eleven keys pressed by monitor sendkey, /bin/READKEY must read exactly their VT100 sequences; then the shell must take arrows typed mid-line (USB and serial) as nothing (a USB letter among them proves delivery), login a user name typed with ESC [ D in it, `more` one Down as one screen, and a password set at useradd with ESC [ D in it must log in typed plain (the run boots a copy of the image); one boot, about a minute - run it whenever xhci.rs's key mapping, the shell's line editor or login's reader changes
 make test-cargs             # argv in a C program (scripts/test-cargs.py): /bin/ARGS and libc/cargs.c built twice, /bin/CARGS (picolibc) and /bin/CARGSH (the hand-rolled libc), run with the same arguments in three cases (a few, none, and 15, the most the shell passes); the C programs must print ARGS's lines apart from argv[0]; one boot, about a minute - run it whenever libc/src/crt0.c or the kernel's argv store changes
 make test-cerrno            # errno from the C file layer (scripts/test-cerrno.py, /bin/CERRNO): two boots, FAT32 as root and ext2 as root and then as `user`, 39 checks each as root (ENOENT, ENOTDIR, ENAMETOOLONG, EMFILE, EBADF, EINVAL, EOVERFLOW, ESPIPE, EFAULT, EISDIR, the console fds, and stat(path) against fstat's record, with every fd in use, and of the console and /net bindings) and, as `user`, EACCES opening /etc/shadow while stat of it succeeds, and the modes and owners the image gave two files; about two minutes - run it whenever libc/src/file.c's error paths or stat, or fsd's answers to them, change
 make test-cenv              # the environment in a C program (scripts/test-cenv.py, /bin/CENV and /bin/CENVH): before and after four `set`s (the last a 128-byte value, the shell's longest), both C programs print /bin/PRINTENV's lines, and CENV's getenv answers SOURCE_DATE_EPOCH, PATH, the long value, a set name and an unset one, against the rig's own values, and /bin/RDPROBE reads all five per-task stores through a 4 KiB buffer (the only check that the kernel accepts a buffer larger than a store); one boot, about a minute - run it whenever libc/src/crt0.c or the kernel's env store changes
@@ -550,7 +550,7 @@ make test-cpp                # the C-hosting arc's finish line (scripts/test-cpp
 make test-unmount            # `unmount` with a partition mount and a held file, on a copy of the ext2 image (scripts/test-unmount.py, /bin/CFIDHOLD): both trees cleared, the held fid answering NO_FS and never handed to the next opener, the shell's own partition binding dropped, `erase` allowed after; about a minute and a half - run it whenever FSOP_UNMOUNT, the fid table or the shell's mount code changes
 make test-crename            # unlink, rename and fstat in the C port (scripts/test-crename.py, /bin/CRENAME, /bin/CFSTAT): two boots, FAT32 and ext2 (a partition at /mnt/f for EXDEV), the checks Proem's and Edit's handoff notes name; about two minutes - run it whenever libc's unlink/rename/fstat, its headers, or fsd's NP_RM/NP_MV/NP_FSTAT changes
 make test-keyboard-chain     # rebuilds the image, then four driven QEMU boots through the nested-shell keyboard-chain recipes (scripts/test-keyboard-chain.sh); minutes, so not in `make test` - run it whenever tasks.rs's keyboard ownership changes
-make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi) + the cross-language wire-constant check + check-site + test-usb-hub's INCONCLUSIVE classifier on fixed transcripts (`--self-test`) + check-xhci-barriers (so it also builds the kernel)
+make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi, keyseq) + the cross-language wire-constant check + check-site + test-usb-hub's INCONCLUSIVE classifier on fixed transcripts (`--self-test`) + check-xhci-barriers (so it also builds the kernel)
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary
 make check-xhci-barriers    # the xHCI driver's two DMA barriers found in the built kernel image (scripts/check-xhci-barriers.py); no QEMU rig can see one missing - ALSO RUN BY `make test` since 2026-10-03
 make check-site             # the published GitHub Pages site vs the documents it abridges - ALSO RUN BY `make test` since 2026-09-05
@@ -570,7 +570,7 @@ pre-alpha code that mostly proves it boots, and most of it can only run on
 the target. The **pure crates are the exception and now have one**:
 `make test` runs the host unit tests for every crate with no I/O, no
 syscalls and no target dependency (`accounts`, `regex`, `ed25519`,
-`clusterkeys`, `ninep-abi`: 152 tests as of 2026-09-23, and the number is
+`clusterkeys`, `ninep-abi`, `keyseq`: 152 tests as of 2026-09-23, and the number is
 checked by running it, not by incrementing), clippy over those crates' test
 targets too, the cross-language wire-constant check
 (`scripts/check-wire-constants.py`: Rust against the two C headers and the
@@ -760,6 +760,8 @@ ed25519/             hand-rolled Ed25519: SHA-512, field, curve, scalar, sign/ve
 clusterkeys/         the /etc/cluster/{id,id.pub,authorized} file format. No trust-on-first-use
 accounts/            /etc/{passwd,shadow,group} parsing/formatting, SHA-256 hashing, salts, lookups, rewrites
 regex/               a small POSIX-ERE engine behind grep. An explicit backtracking stack, not host recursion
+keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses
+                     (the shell's line editor, login, ulib::read_line and read_key), so two readers never disagree on what was typed
 libc/                the C-portability arc: crt0 + syscall stubs + a narrow waist (write/read/open/sbrk/_exit)
                      that BOTH a hand-rolled libc and a real PICOLIBC link against unchanged
                      (third_party/picolibc-prebuilt; regenerate with scripts/build-picolibc.sh)
@@ -773,8 +775,8 @@ scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py
                      FOREIGN OBSERVER for both directions of the export)
 ```
 
-Sixty-two-crate workspace. `kernel` and the shared libs (`ulib`,
-`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `nsresolve`) sit at the repo root; **every userland
+Sixty-eight-crate workspace (`cargo metadata`'s count, 2026-10-07). `kernel` and the shared libs (`ulib`,
+`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `keyseq`, `nsresolve`) sit at the repo root; **every userland
 program lives under `programs/`, grouped by role** (`programs/shell`,
 `programs/servers/{fsd,cond,netd,accountd}`, `programs/demos/{hello,pong}`,
 `programs/fileutils/*`, `programs/textutils/*`, `programs/netutils/*`,

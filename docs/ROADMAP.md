@@ -2369,7 +2369,16 @@ be reviewed after the fact from the saved screenshots.
 >       and a C program's `main` receives its arguments. (4) touches the
 >       one choke point every keyboard path funnels through
 >       (`syscall.rs`'s Ctrl-C interception), so it needs its own design
->       note first. Note:
+>       note first. Two hazards for that design, from the high review of
+>       #229: a key's sequence is queued whole but delivered a byte at a
+>       time, so a change of keyboard owner (a program killed between the
+>       ESC and the rest) hands the tail to the next owner, and a serial
+>       byte can land inside a USB sequence; and `on_tick`, which consumes
+>       one byte from a running foreground program's keyboard to watch for
+>       Ctrl-C, now drops a byte from the middle of a sequence rather than a
+>       whole key, so an editor busy redrawing can read `[A` as text. A peek
+>       at that choke point, consuming only a Ctrl-C, fixes the second.
+>       Note:
 >       [`handoffs/2026-10-05-from-edit-editor-console.md`](handoffs/2026-10-05-from-edit-editor-console.md).
 > - [x] **new** **`rename` in the C port.** picolibc declares it and
 >       nothing defines it, so a C program calling it fails to link. One
