@@ -10,8 +10,11 @@ per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
-**Status 2026-10-07: written, not started. Four decisions below are Hans's
-(D1 to D4); each has a recommendation.** Grounded in the code at `cec028c`.
+**Status 2026-10-07: written, not started. The four decisions (D1 to D4)
+were settled by Hans the same day, each as recommended. Before step 1,
+DevTools is asked whether Edit binds ^\ (D1's condition):
+`~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-ctrl-backslash.md`.**
+Grounded in the code at `cec028c`.
 
 ## How Ctrl-C works today
 
@@ -108,25 +111,25 @@ review of #228). When the shell's `WAIT` returns `TASK_KILLED_STATUS`, it
 writes `ESC [ 0 m` before its prompt. Cheap, and right on a serial terminal
 too. Not a kernel job: the kernel does not know what the program wrote.
 
-## Decisions (Hans's)
+## Decisions (settled by Hans, 2026-10-07, each as recommended)
 
-- **D1. The way out in raw mode.** *Recommended: Ctrl+\ (0x1c), always.* The
+- **D1. The way out in raw mode.** *Settled: Ctrl+\ (0x1c), always.* The
   alternatives: three Ctrl-C within a second (no new key to learn, but Edit's
   ^C is page down, and holding it to scroll would kill the editor); or no way
   out (the opt-out ends with the program, and a runaway raw program is ended
   only by `kill` from another shell, which needs a second session the
   console does not have). Before building, ask DevTools whether Edit binds ^\
   (WordStar does not).
-- **D2. Ctrl+\ reserved in cooked mode too.** *Recommended: yes*, so the way
+- **D2. Ctrl+\ reserved in cooked mode too.** *Settled: yes*, so the way
   out is one key whatever the mode, and a user never has to know which mode
   a program is in. The cost is that 0x1c never reaches any program.
-- **D3. What happens to type-ahead when the owner dies.** *Recommended:
-  keep complete keys, drop only an incomplete sequence at the head.* The
+- **D3. What happens to type-ahead when the owner dies.** *Settled: keep
+  complete keys, drop only an incomplete sequence at the head.* The
   alternatives: flush everything (simplest, and loses what the user typed
   for the shell while the program ran); or keep everything (the current
   behaviour, and the second hazard).
-- **D4. Who may set raw.** *Recommended: a task sets its own mode, whether
-  or not it owns the keyboard now*, so a program can set raw before it is
+- **D4. Who may set raw.** *Settled: a task sets its own mode, whether or
+  not it owns the keyboard now*, so a program can set raw before it is
   handed the keyboard. The alternative, only the current owner, is
   stricter, but buys nothing: the mode has no effect until the task owns the
   keyboard, and ends with it.
