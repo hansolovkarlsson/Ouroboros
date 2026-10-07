@@ -62,6 +62,7 @@
 #![no_std]
 #![no_main]
 
+mod keyseq;
 mod login;
 
 use core::arch::asm;
@@ -675,6 +676,7 @@ fn main() -> ! {
         // Export HOME = the login home dir, so `~` expands and children see it.
         env.set("HOME", &cwd[..cwd_len]);
         let mut len = 0usize;
+        let mut keys = keyseq::KeySeq::new();
 
         print_prompt();
         while !env.logout {
@@ -682,6 +684,9 @@ fn main() -> ! {
             // level until a byte is available) rather than busy-polling; never
             // `wfe` (a confirmed real-Parallels EL0 hang - see tasks.rs).
             let byte = read_char();
+            if !keys.passes(byte) {
+                continue; // part of an arrow or function key's sequence
+            }
             on_byte(byte, &mut buf, &mut len, &mut cwd, &mut cwd_len, &mut env);
         }
 
