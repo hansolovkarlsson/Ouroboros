@@ -81,7 +81,7 @@ set; roadmap arcs are cited by their `ROADMAP.md` section.
 |---|---|---|
 | Console output | ✅ | Via `cond` (byte-stream on QEMU UART, framebuffer glyph-rendering on Parallels). |
 | Keyboard input | ✅ | USB HID (xHCI) on real hardware; kernel delivers bytes to the input owner. |
-| ANSI / VT100 escape codes | ◐ | cond has a **small** ANSI parser (cursor/wrap/scroll). No SGR color, cursor addressing, erase-region, scroll regions — and **no return channel** for query sequences. The terminal arc (roadmap item 1). |
+| ANSI / VT100 escape codes | ◐ | cond's framebuffer backend does cursor addressing (`CSI row;col H`), erase in line and screen (`K`, `J`), reverse video (SGR 7), a late wrap at the last column, and consumes every other escape without drawing it (#228, the editor's set). No SGR color, bold or underline, no save/restore cursor, no scroll regions, and **no return channel** for query sequences. The terminal arc (roadmap item 1). |
 | Output redirection `>` / `>>` | ✅ | Shell-side, for every builtin/command. |
 | Pipelines `a \| b \| c` | ◐ | Real N-stage pipelines of `/bin` programs (IPC + capability delegation); **`a \| b > file`/`>> file` compose** (last stage captured to the file); and a **single builtin may sit at any position** (`cat f \| ps`, `ls \| ps \| grep x` — a non-first builtin drains its upstream and becomes the source). Still no job control / `&` backgrounding of a whole pipeline. |
 | `select`/`poll`/`epoll` (general multiplexing) | ✗ | Only `NET_WAIT` (netd's two sources). A program can't wait on "stdin *or* a socket." A pager/editor needs this (roadmap item 3). |

@@ -20,7 +20,8 @@ days' records are in `docs/work-journal/`, one file a day.
 **The framebuffer console takes cursor addressing (#228).** Item 1 of
 DevTools's editor note: `cond` acts on `CSI row;col H`, `CSI K` and `CSI J`
 in all three forms, and reverse video (`CSI 7 m`, off with `0`, `27` or a
-bare `CSI m`), and parses `CSI ? 25 l/h` to nothing. Before, it acted on `H`
+bare `CSI m`), and parses `CSI ? 25 l/h`, `ESC ( B`, OSC strings and
+`CSI 3 J` to nothing. Before, it acted on `H`
 and `J` only and ignored their parameters. A glyph in the last column now
 wraps late, at the next glyph, so a full-screen program can write the bottom
 right cell without the screen scrolling. `make test-cond-vt` boots QEMU with

@@ -813,6 +813,19 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **Two tails of `cond`'s escape sequences (found 2026-10-07, the high
+  review of #228).** (1) Reverse video is one setting in `cond` shared by
+  every client, and nothing resets it when a program ends, so a program
+  killed between `CSI 7 m` and `CSI 0 m` leaves the shell drawing inverted.
+  A real terminal does the same, but here the kill that causes it is
+  Ctrl-C's, so it belongs with the Ctrl-C opt-out (the editor note's item
+  4): whoever ends a foreground program could send `CSI 0 m`. (2) Each glyph
+  is its own `FB_BLIT`, with its own cache clean, so a full-screen redraw of
+  128x96 cells is about 12,000 syscalls. Batching a row's run of glyphs is
+  the fix, but a blit is capped at 64 glyphs by `valid_user_range`'s
+  `MAX_USER_LEN` (512 bytes), which also caps `cond`'s erase at 64 cells a
+  call; a larger cap for `FB_BLIT` is a kernel change to weigh with it.
+
 - **Three tails of the FP/SIMD save (found 2026-10-07, the high review of
   #227).** (1) `tasks::start`'s first `eret` loads task 0's FP state but
   never its `x0`-`x30`, so the boot shell starts holding whatever the
@@ -2494,6 +2507,12 @@ cluster-auth crypto, `ulib`, and the POSIX-libc plan above), which is the point
 of writing them down now rather than from scratch later.
 
 ### 1. Terminal escape codes / VT100 (scoped-ish, the nearest of these)
+
+> **Part built 2026-10-07 (#228), the subset DevTools's editor asked for:**
+> cursor positioning, line and screen erase, SGR 7 reverse video, a late
+> wrap at the last column, and every other escape consumed without drawing.
+> Still to do from the list below: colour, bold and underline, save and
+> restore cursor, scroll regions, and a return channel.
 
 cond already renders a **small ANSI parser** in the framebuffer backend
 (cursor, wrap, scroll — see `CLAUDE.md`'s "Driver isolation, part 3"), so
