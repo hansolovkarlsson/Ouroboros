@@ -9,7 +9,7 @@
 //! the compiler may use the vector registers itself:
 //!
 //! 1. **A syscall.** All 32 registers loaded with a pattern and `FPCR` set
-//!    to round toward zero (not the reset value), then `YIELD`, which runs
+//!    to a rounding mode other than the reset value, then `YIELD`, which runs
 //!    the kernel's switch path and hands the core to another task; then all
 //!    of it read back.
 //! 2. **Preemption.** The same, around a spin with no syscall, long enough
@@ -28,8 +28,13 @@
 #![no_main]
 
 const ROUNDS: u64 = 8;
-/// `FPCR.RMode` = 0b11, round toward zero; the reset value is 0.
+/// `FPCR.RMode`, which each probe sets to a value other than the reset
+/// value 0: round toward zero alone, toward plus infinity with `-`. Two
+/// probes side by side then hold different FPCRs, so one that leaked
+/// across a switch is seen.
+const RMODE_MASK: u64 = 0b11 << 22;
 const FPCR_RZ: u64 = 0b11 << 22;
+const FPCR_RP: u64 = 0b01 << 22;
 /// Iterations of the preemption spin: under QEMU's emulation 20 million
 /// finished inside one 20 ms tick, so this is generous; the tick count
 /// printed is what proves the spin was preempted, not this number.
@@ -39,6 +44,9 @@ const SPIN: u64 = 400_000_000;
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
     let target = ulib::stdout_target();
+    let mut arg = [0u8; 2];
+    let forward = ulib::arg(1, &mut arg) == Some(1) && arg[0] == b'-';
+    let fpcr_want = if forward { FPCR_RP } else { FPCR_RZ };
     let mut failures = 0u64;
     for (name, spin) in [(&b"syscall"[..], false), (&b"preemption"[..], true)] {
         let mut bad = 0u64;
@@ -52,7 +60,7 @@ pub extern "C" fn _start() -> ! {
             }
             let mut dst = [0u128; 32];
             let before = ulib::syscall(syscall_abi::GET_TICKS, 0);
-            let fpcr = cross(&src, &mut dst, spin);
+            let fpcr = cross(&src, &mut dst, spin, fpcr_want);
             let after = ulib::syscall(syscall_abi::GET_TICKS, 0);
             ticks = ticks.min(after - before);
             for i in 0..32 {
@@ -61,7 +69,7 @@ pub extern "C" fn _start() -> ! {
                     first_bad.get_or_insert(i);
                 }
             }
-            if fpcr & (0b11 << 22) != FPCR_RZ {
+            if fpcr & RMODE_MASK != fpcr_want {
                 bad += 1;
                 first_bad.get_or_insert(32);
             }
@@ -92,18 +100,17 @@ pub extern "C" fn _start() -> ! {
         }
         ulib::write_out(target, b"\r\n");
     }
-    let mut arg = [0u8; 2];
-    if ulib::arg(1, &mut arg) == Some(1) && arg[0] == b'-' {
+    if forward {
         forward_stdin(target);
     }
     ulib::end_of_stream(target);
     ulib::exit(failures);
 }
 
-/// Loads `src` into q0-q31 and `FPCR_RZ` into FPCR, crosses the kernel
+/// Loads `src` into q0-q31 and `fpcr` into FPCR, crosses the kernel
 /// (`YIELD`, or a spin the tick preempts), stores q0-q31 to `dst`, and
 /// returns FPCR as it came back, restoring the caller's.
-fn cross(src: &[u128; 32], dst: &mut [u128; 32], spin: bool) -> u64 {
+fn cross(src: &[u128; 32], dst: &mut [u128; 32], spin: bool, fpcr: u64) -> u64 {
     let fpcr_after: u64;
     unsafe {
         core::arch::asm!(
@@ -153,7 +160,7 @@ fn cross(src: &[u128; 32], dst: &mut [u128; 32], spin: bool) -> u64 {
             "msr fpcr, {saved}",
             src = in(reg) src.as_ptr(),
             dst = in(reg) dst.as_mut_ptr(),
-            rz = in(reg) FPCR_RZ,
+            rz = in(reg) fpcr,
             spin = inout(reg) if spin { SPIN } else { 0 } => _,
             yield_nr = const syscall_abi::YIELD,
             saved = out(reg) _,
