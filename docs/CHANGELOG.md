@@ -17,7 +17,7 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
-**A task's vector registers survive the kernel (2026-10-07).** The
+**A task's vector registers survive the kernel (#227).** The
 kernel saved only `x0`-`x30` on a syscall, a tick or an EL0 fault, on the
 old reasoning that nothing used FP/SIMD. Everything did: the kernel's own
 memcpy and struct copies run through `q0`, and every userland program keeps
