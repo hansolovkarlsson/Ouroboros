@@ -43,14 +43,13 @@ cmd_build() {
 	log "building Ouroboros ${TAG} (release profile)"
 
 	# Real shipped bits are the release profile, not debug.
-	log "make image PROFILE=release"
-	make image PROFILE=release
+	# CPP=required: a release image must carry /bin/cpp (the CHANGELOG says
+	# the preprocessor runs here), so make stops at once without its sources.
+	log "make image PROFILE=release CPP=required"
+	make image PROFILE=release CPP=required
 
 	[ -f build/esp.img ] || die "build/esp.img missing after 'make image'"
-	# make image stages /bin/cpp only when DevTools's sources are there, so
-	# a development image builds without them; a release must not, since the
-	# CHANGELOG says the preprocessor runs here (the review of #226).
-	[ -f build/esp/bin/CPP ] || die "the image has no /bin/cpp: a release needs DevTools's cpp sources at CPP_DIR (../DevTools/cpp by default)"
+	[ -f build/esp/bin/CPP ] || die "the image has no /bin/cpp, though CPP=required was passed"
 
 	# The self-contained UDZO .dmg is the portable Parallels form (see the
 	# DMG_OUT comment above): it embeds the disk data, unlike the .hdd

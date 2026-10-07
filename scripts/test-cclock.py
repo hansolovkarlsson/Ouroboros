@@ -81,9 +81,11 @@ def main() -> int:
                 and time.monotonic() < deadline:
             time.sleep(0.2)
         out = guest.transcript()
-        faults = guest.aborts()
     finally:
         guest.stop()
+    # After stop: QEMU buffers its -d int trace, so a fault in the last
+    # command is only in the file once QEMU is gone (drive-qemu.py's main).
+    faults = guest.aborts()
     with open(TRANSCRIPT, "w") as fh:
         fh.write(out)
 

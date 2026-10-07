@@ -130,10 +130,12 @@ def boot(name, image, dirs, operands):
     try:
         driven = guest.run(steps)
         out = guest.transcript()
-        faults = guest.aborts()
     finally:
         guest.stop()
         os.remove(copy)
+    # After stop: QEMU buffers its -d int trace, so a fault in the last
+    # command is only in the file once QEMU is gone (drive-qemu.py's main).
+    faults = guest.aborts()
     with open(os.path.join(ROOT, "build", f"test-include-{name}.txt"), "w") as fh:
         fh.write(out)
     return driven, out, faults

@@ -249,9 +249,25 @@ CENVH_BIN    := $(BUILD_DIR)/cenvh.bin
 CCLOCK_BIN   := $(BUILD_DIR)/cclock.bin
 # DevTools's C preprocessor, built here for Ouroboros (step 8 of the C-hosting
 # plan): its sources are read from CPP_DIR, a sibling checkout by default.
+# CPP_DIR must not contain spaces: its files are make prerequisites.
 CPP_DIR      ?= ../DevTools/cpp
 CPP_BIN      := $(BUILD_DIR)/cpp.bin
-HAVE_CPP      = $(wildcard $(CPP_DIR)/driver/cpp.c)
+HAVE_CPP     := $(wildcard $(CPP_DIR)/driver/cpp.c)
+CPP_OBJS     := $(if $(HAVE_CPP),$(patsubst $(CPP_DIR)/lib/%.c,$(BUILD_DIR)/cpp/%.o,$(wildcard $(CPP_DIR)/lib/*.c)) $(BUILD_DIR)/cpp/cpp.o)
+# Whether an image without /bin/cpp is acceptable: `optional` (the default,
+# for development, so this tree alone builds) or `required`, which stops at
+# once when CPP_DIR has no sources. A release passes CPP=required, and
+# test-cpp implies it: one switch rather than a guard in each (the review of
+# #226).
+CPP          ?= optional
+ifneq ($(filter test-cpp,$(MAKECMDGOALS)),)
+CPP          := required
+endif
+ifeq ($(CPP),required)
+ifeq ($(HAVE_CPP),)
+$(error CPP=required: no cpp sources at $(CPP_DIR) (set CPP_DIR))
+endif
+endif
 
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
@@ -633,15 +649,21 @@ cclock-bin: $(NSRESOLVE_A) $(PICO_PORT)
 # CPICO, with the two system directories make esp stages built in, so `cpp
 # hello.c` on Ouroboros needs no options (it reads /include/target.h first).
 # Its sources are DevTools's and are only read here; the link is ours.
-cpp-bin: $(NSRESOLVE_A) $(PICO_PORT)
-	@[ -f "$(CPP_DIR)/driver/cpp.c" ] || { echo "cpp-bin: no cpp sources at $(CPP_DIR) (set CPP_DIR)"; exit 1; }
-	rm -rf $(BUILD_DIR)/cpp && mkdir -p $(BUILD_DIR)/cpp
-	for f in "$(CPP_DIR)"/lib/*.c "$(CPP_DIR)/driver/cpp.c"; do \
-		$(CC) $(CFLAGS_OS) $(PICO_INC) -I"$(CPP_DIR)/lib" '-DCPP_SYSTEM_DIRS="/include:/include/clang"' \
-			-c "$$f" -o $(BUILD_DIR)/cpp/$$(basename "$$f" .c).o || exit 1; \
-	done
-	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(BUILD_DIR)/cpp/*.o $(PICO_LIBC) $(NSRESOLVE_A)
+# Real objects with their header dependencies (-MMD), so a `make run` rebuilds
+# only what changed in cpp's sources, not all of them every time.
+cpp-bin: $(CPP_BIN)
+	@[ -n "$(HAVE_CPP)" ] || { echo "cpp-bin: no cpp sources at $(CPP_DIR) (set CPP_DIR)"; exit 1; }
+CPP_CFLAGS := $(CFLAGS_OS) $(PICO_INC) -I$(CPP_DIR)/lib '-DCPP_SYSTEM_DIRS="/include:/include/clang"' -MMD -MP
+$(BUILD_DIR)/cpp/%.o: $(CPP_DIR)/lib/%.c
+	@mkdir -p $(BUILD_DIR)/cpp
+	$(CC) $(CPP_CFLAGS) -c $< -o $@
+$(BUILD_DIR)/cpp/cpp.o: $(CPP_DIR)/driver/cpp.c
+	@mkdir -p $(BUILD_DIR)/cpp
+	$(CC) $(CPP_CFLAGS) -c $< -o $@
+$(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A)
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(CPP_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpp.elf $(CPP_BIN)
+-include $(wildcard $(BUILD_DIR)/cpp/*.d)
 
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
@@ -1787,13 +1809,8 @@ test-include: image image-ext2 image-exfat
 # clang for this target compiles them. One boot, about a minute and a half;
 # needs DevTools's cpp at CPP_DIR. Run it whenever the C runtime, the header
 # stage or cpp-bin changes.
-# Without cpp's sources there is nothing to test: stop before the image is
-# built, not after (the review of #226).
-ifneq ($(filter test-cpp,$(MAKECMDGOALS)),)
-ifeq ($(HAVE_CPP),)
-$(error test-cpp: no cpp sources at $(CPP_DIR) (set CPP_DIR))
-endif
-endif
+# Without cpp's sources there is nothing to test: test-cpp sets CPP=required
+# (above), which stops before the image is built, not after.
 test-cpp: image
 	CPP_DIR="$(CPP_DIR)" CFLAGS_OS="$(CFLAGS_OS)" PICO_INC="$(PICO_INC)" python3 scripts/test-cpp.py
 

@@ -7,14 +7,15 @@ Step 8 of docs/roadmap/roadmap-c-hosting.md: `/bin/CPP` is DevTools's cpp,
 built by `make cpp-bin` with /include:/include/clang built in. One boot of a
 copy of build/esp.img, onto which the host first writes the inputs (/src):
 
-- `cpp -o /hello.i /src/hello.c` and `cpp -o /picodemo.i /src/picodemo.c`, with
-  no options, must exit 0 (hello.c includes <stdio.h>; picodemo.c is CPICO's
-  source, a dozen headers deep);
+- `cpp -o` of each input, with no options, must exit 0: hello.c includes
+  <stdio.h>; picodemo.c is CPICO's source, a dozen headers deep; high.c has
+  UTF-8 and bytes past 0x7f in a comment, a string and a character, where a
+  lexer's `char` (unsigned here, signed on the Mac) could tell;
 - after the boot the host reads the two .i files off the image, and each must
   be byte for byte what the SAME cpp, built for the Mac from CPP_DIR, writes
   there from the same staged headers (build/esp/include, its paths mapped to
-  the guest's), with SOURCE_DATE_EPOCH set on both sides: the port changes
-  nothing;
+  the guest's) and built with -funsigned-char as the target's char is, with
+  SOURCE_DATE_EPOCH set on both sides: the port changes nothing;
 - clang, for this target (CFLAGS_OS, PICO_INC), must compile what the guest
   wrote: a foreign observer that the output is the program;
 - and `cpp /src/hello.c`, the handoff's Done when, prints it and exits 0.
@@ -31,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -45,7 +47,14 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-cpp.txt")
 HOST = os.path.join(ROOT, "build", "test-cpp")
 EPOCH = "1700000000"
 HELLO = '#include <stdio.h>\n\nint main(void) {\n    printf("hello, world\\n");\n    return 0;\n}\n'
-SOURCES = {"hello.c": HELLO, "picodemo.c": open(os.path.join(ROOT, "libc", "picodemo.c")).read()}
+# Bytes past ASCII, which a lexer reads through `char`: signed on the Mac,
+# unsigned for this target, so a lexer that leans on the sign would differ
+# here and only with input like this (the review of #226).
+HIGH = ('/* caf\u00e9, na\u00efve, \u00fcber: UTF-8 in a comment */\n'
+        '#define GREETING "h\u00e9llo \\xff\\x80 \u00e5"\n'
+        'const char *g = GREETING;\nconst char c = \'\\xe9\';\n')
+SOURCES = {"hello.c": HELLO, "picodemo.c": open(os.path.join(ROOT, "libc", "picodemo.c")).read(),
+           "high.c": HIGH}
 
 
 def env(name):
@@ -86,12 +95,19 @@ def strip_sidecars(mp):
 def host_cpp(cpp_dir):
     """The same cpp, for the Mac, from the same sources: no system directories
     built in, so the host run passes them, and target.h, as the guest's
-    build does (the first system directory's target.h, read first)."""
+    build does (the first system directory's target.h, read first). Built
+    with -funsigned-char, as `char` is for this target and not on the Mac, so
+    the two can differ only where the port does. Rebuilt only when a source
+    (or this script) is newer than it."""
     os.makedirs(HOST, exist_ok=True)
     out = os.path.join(HOST, "cpp")
-    srcs = sorted(os.path.join(cpp_dir, "lib", f) for f in os.listdir(os.path.join(cpp_dir, "lib"))
-                  if f.endswith(".c")) + [os.path.join(cpp_dir, "driver", "cpp.c")]
-    subprocess.run(["cc", "-std=c11", "-O2", "-I", os.path.join(cpp_dir, "lib"), *srcs, "-o", out],
+    lib = os.path.join(cpp_dir, "lib")
+    srcs = sorted(os.path.join(lib, f) for f in os.listdir(lib) if f.endswith(".c")) + \
+        [os.path.join(cpp_dir, "driver", "cpp.c")]
+    inputs = srcs + [os.path.join(lib, f) for f in os.listdir(lib) if f.endswith(".h")] + [__file__]
+    if os.path.exists(out) and os.path.getmtime(out) > max(os.path.getmtime(f) for f in inputs):
+        return out
+    subprocess.run(["cc", "-std=c11", "-O2", "-funsigned-char", "-I", lib, *srcs, "-o", out],
                    check=True)
     return out
 
@@ -116,7 +132,7 @@ def run() -> int:
     try:
         os.makedirs(os.path.join(mp, "src"), exist_ok=True)
         for name, text in SOURCES.items():
-            with open(os.path.join(mp, "src", name), "w") as fh:
+            with open(os.path.join(mp, "src", name), "w", encoding="utf-8") as fh:
                 fh.write(text)
         strip_sidecars(mp)
     finally:
@@ -135,10 +151,19 @@ def run() -> int:
         # markers it prints (`# 29 "/include/..."`).
         steps += [("# ", "cpp /src/hello.c"), (r"exited \(code \d+\)", "")]
         driven = guest.run(steps)
+        # cpp's output reaches the transcript through the console server,
+        # the exit line straight from the kernel, so the printed tail can come
+        # after the exit line: poll for it rather than snapshot at once.
+        deadline = time.monotonic() + 15
+        while 'printf("hello, world' not in guest.transcript().split("cpp /src/hello.c", 1)[-1] \
+                and time.monotonic() < deadline:
+            time.sleep(0.2)
         out = guest.transcript()
-        faults = guest.aborts()
     finally:
         guest.stop()
+    # After stop: QEMU buffers its -d int trace, so a fault in the last
+    # command is only in the file once QEMU is gone (drive-qemu.py's main).
+    faults = guest.aborts()
     with open(TRANSCRIPT, "w") as fh:
         fh.write(out)
     checks.append(("driven to the end", driven))
@@ -174,7 +199,7 @@ def run() -> int:
     os.makedirs(os.path.join(root, "src"))
     shutil.copytree(os.path.join(STAGED, "include"), os.path.join(root, "include"))
     for name, text in SOURCES.items():
-        with open(os.path.join(root, "src", name), "w") as fh:
+        with open(os.path.join(root, "src", name), "w", encoding="utf-8") as fh:
             fh.write(text)
     cpp = host_cpp(cpp_dir)
     for name in SOURCES:
