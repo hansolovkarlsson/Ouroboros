@@ -10,9 +10,9 @@ per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
-**Status 2026-10-07: step 0 built (#232), step 3 half built (#233: whole
-keys in the queue; the tail on a change of owner not yet); steps 1, 2 and 4
-not started. The four decisions (D1 to D4)
+**Status 2026-10-08: step 0 built (#232), step 1 built (2026-10-08), step 3
+half built (#233: whole keys in the queue; the tail on a change of owner not
+yet); steps 2 and 4 not started. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
 met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
 use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so
@@ -175,7 +175,23 @@ too. Not a kernel job: the kernel does not know what the program wrote.
 1. **`KBD_MODE`, Ctrl+\ (design 1 and 2).** Check: `/bin/READKEY raw` (a new
    mode of the existing probe) prints 3 for Ctrl-C and dies on Ctrl+\;
    cooked, Ctrl-C still kills; a raw program's child starts cooked; the mode
-   ends with the task. Each fails with its part removed.
+   ends with the task. Each fails with its part removed. *Built 2026-10-08:
+   `KBD_MODE` (70) with `KBD_COOKED`, `KBD_RAW` and `KBD_QUERY`, the mode in
+   `tasks.rs`'s `KBD_RAW`, reset in `end_task`; `interrupt_key_check` acts
+   on 0x1c always and on 0x03 only for a cooked owner; xhci.rs maps Ctrl+\
+   (HID 0x31); `keyboard_interrupts_wait` takes 0x1c too, so it interrupts
+   the boot shell's stuck `wait` as Ctrl+C does. At the boot shell both
+   bytes still pass through to the line editor, which ignores them, so D2's
+   "0x1c never reaches any program" holds for every program but the boot
+   shell. `/bin/READKEY raw` and `readkey mode` are the observers and `make
+   test-kbd-mode` the rig: raw reads Ctrl+C as 3 from the serial line and
+   the USB keyboard, Ctrl+\ ends it from either, `readkey mode` in the same
+   slot afterwards is cooked, cooked Ctrl+C and Ctrl+\ both end it, and
+   the boot shell ignores both. Four mutation controls, each failing its
+   check: the raw test, the 0x1c arm, the USB mapping, the reset in
+   `end_task`. "A raw program's child starts cooked" is checked as the
+   slot's next occupant: `SPAWN` copies no mode, so a child is a fresh
+   occupant like any other, and no probe spawns from a raw task.*
 2. **`termios` (design 3).** Check: a C probe sets raw through `tcsetattr`,
    reads Ctrl-C as 3, restores, and is killed by Ctrl-C; `tcgetattr` reads
    back every flag it set; `ENOTTY` on a file.

@@ -2387,8 +2387,10 @@ be reviewed after the fact from the saved screenshots.
 >       `KBD_MODE` with Ctrl+\ as the way out, `termios` in the C library,
 >       and a kernel input queue for the two hazards below; its four
 >       decisions settled by Hans the same day, as recommended. DevTools
->       answered 2026-10-08 that Edit does not bind ^\, so step 1 waits on
->       nothing:
+>       answered 2026-10-08 that Edit does not bind ^\, and step 1
+>       (`KBD_MODE`, Ctrl+\ as the way out, `make test-kbd-mode`) was
+>       built the same day; steps 2 (`termios`), 3's second half and 4
+>       remain:
 >       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
 >       time, so a change of keyboard owner (a program killed between the
