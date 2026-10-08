@@ -2149,10 +2149,10 @@ impl Xhci {
             // reports handled inside `wait_transfer_event` during a bulk
             // transfer, so several reports can pile up there; once it is
             // full a further key is dropped, unlogged. A sequence goes in
-            // whole or not at all, so the queue never holds half of one
-            // (delivery is a byte at a time, so a reader can still be
-            // handed part of one and lose the rest; see the editor note's
-            // item 4 on ROADMAP.md).
+            // whole or not at all, so the queue never holds half of one;
+            // the kernel's keyboard queue (`keyseq::KeyQueue`) relies on
+            // that, reading a USB key's rest from here before the serial
+            // line and never expiring a USB key as a bare Escape.
             if kb.pending_len + key.len <= kb.pending.len() {
                 kb.pending[kb.pending_len..kb.pending_len + key.len].copy_from_slice(&key.bytes[..key.len]);
                 kb.pending_len += key.len;

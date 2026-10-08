@@ -2414,7 +2414,12 @@ be reviewed after the fact from the saved screenshots.
 >       to that server, which gets the wrong reply. Older than #235 (since
 >       #232 the waits read the keyboard); found by its fourth high review.
 >       #235 narrowed it (a reply already waiting is delivered before an
->       interrupt is looked for) but did not close it. Two shapes to
+>       interrupt is looked for) but did not close it. The third high
+>       review of #238 found the same root costs keys at the prompt: the
+>       shell's echo is a call to `cond`, so a Ctrl+C typed right after a
+>       letter can interrupt that call and flush the letter, a loss that
+>       depends on timing. Never interrupting a call's reply wait would end
+>       both. Two shapes to
 >       weigh: a call's reply wait is never interrupted (the stuck `recv`
 >       and the wedged server are what interruption is for, and a call to a
 >       wedged server is the second), or calls carry a sequence number the

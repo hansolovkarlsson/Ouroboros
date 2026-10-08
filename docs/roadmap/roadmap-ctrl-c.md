@@ -289,7 +289,20 @@ byte inside an open USB key, since the USB Escape key sends nothing and
 every other USB key arrives whole. Neither the one-byte read nor the
 flush's full read has a deterministic rig check (the serial line takes no
 byte faster than 20 ms, and a release event behind a press cannot be
-placed), so they are argued from the code. One declined: an interrupt inside a full-queue key,
+placed), so they are argued from the code. Its third review found the
+interval expiring USB keys, whose rest is certain to come (a USB key no
+longer expires; host test), and a read that answered "nothing" when the byte
+it took was dropped (a read now takes bytes until one is there); it made the
+read, the read-ahead and the flush one step, `take_one`, where the flush had
+been a copy. It also showed the one-byte read cannot keep every Ctrl+C typed
+after a line for the program that line starts, since the tick and the waits
+read ahead too: a Ctrl+C typed ahead of a program, before it sets its mode,
+is judged under whoever owns the keyboard when it is read. That race is in
+the nature of type-ahead (Unix sends the signal to the foreground group of
+the moment), and is documented rather than chased. The boot shell's echo
+being interruptible, and flushing a letter, belongs to the roadmap's
+"stale reply after an interrupted call", which is older; `KBD_FLUSH` alone
+setting cooked, and its 64-read bound, are written into the ABI. One declined: an interrupt inside a full-queue key,
 which a terminal's in-order burst cannot produce.*
 
 ## Steps, each with its check

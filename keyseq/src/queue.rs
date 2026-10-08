@@ -74,11 +74,14 @@ impl KeyQueue {
         self.inside && self.inside_usb
     }
 
-    /// A key left open for `esc_alone` (a bare `ESC`, from a host terminal's
-    /// Escape key) is complete: its rest is not coming, and what arrives
-    /// next starts a key of its own.
+    /// A key from the serial line left open for more than `esc_alone` (a bare
+    /// `ESC`, from a host terminal's Escape key) is complete: its rest is not
+    /// coming, and what arrives next starts a key of its own. Not a USB key:
+    /// a report's bytes wait whole in the driver, so its rest is certain to
+    /// come however late it is read, and expiring it would let that rest
+    /// through as text after a trim (the third high review of #238).
     fn expire(&mut self, now: u64) {
-        if self.inside && now.saturating_sub(self.fed_at) > self.esc_alone {
+        if self.inside && !self.inside_usb && now.saturating_sub(self.fed_at) > self.esc_alone {
             self.keys = KeySeq::new();
             self.inside = false;
             self.partial = 0;
@@ -349,10 +352,18 @@ mod tests {
     }
 
     #[test]
-    fn a_usb_key_left_open_stops_pinning_the_reads() {
+    fn a_usb_key_never_expires() {
+        // A program took ESC of a USB arrow and exited; the shell reads the
+        // rest long after the interval. It is still the arrow's rest.
         let mut q = KeyQueue::new(ESC_ALONE);
         q.push(0x1b, true, 0);
-        assert!(!q.inside_usb_key(ESC_ALONE + 1));
+        assert_eq!(q.pop(), Some(0x1b));
+        q.trim_cut_key(100);
+        assert!(q.inside_usb_key(100), "the rest is still read from USB first");
+        q.push(b'[', true, 100);
+        q.push(b'A', true, 100);
+        q.push(b'x', true, 100);
+        assert_eq!(drain(&mut q), b"x");
     }
 
     #[test]
