@@ -230,7 +230,21 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    `readkey spin 100 raw` (a busy raw owner's Ctrl+C read back as 3); nine
    mutation controls: the eight above with the mark's replaced by two, the
    boot-shell condition for any reader (a busy raw owner's Ctrl+C dropped)
-   and the boot interrupt queued instead of answered.*
+   and the boot interrupt queued instead of answered. A fourth high review
+   found four more, all fixed: the waits looked for an interrupt before
+   an ended child or an arrived reply, so a second Ctrl+\ at a hung
+   program could end a finished `WAIT` as interrupted (now the child or
+   the reply first; no rig check, since it needs a key in the gap between
+   a program ending and the shell's next poll); the boot shell's interrupt
+   byte no longer reached the key parser, so an Esc then Ctrl+\ ate the
+   next key queued (`KbdQueue::flush_at_control`); `KBD_MODE_BAD` equalled
+   the unknown-syscall answer (now `u64::MAX - 1`); and the boot-shell
+   decision was spelled twice (now one `KeyVerdict` from
+   `interrupt_key_check`). It also showed this step's "the boot shell
+   ignores both bytes" to be wrong: either interrupts the boot shell's
+   waits, its calls to the servers included, as Ctrl+C did before; the
+   stale reply that leaves is older than this step and is on
+   `docs/ROADMAP.md`. Ten mutation controls in the end.*
 2. **`termios` (design 3).** Check: a C probe sets raw through `tcsetattr`,
    reads Ctrl-C as 3, restores, and is killed by Ctrl-C; `tcgetattr` reads
    back every flag it set; `ENOTTY` on a file.
