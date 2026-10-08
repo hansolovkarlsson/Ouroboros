@@ -223,7 +223,8 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
         return Some(byte);
     }
     let byte = keyboard_device_byte()?;
-    // The Ctrl+C escape hatch - see tasks::interrupt_key_check's doc comment.
+    // The Ctrl+C escape hatch (and the queue was empty, or the pop above
+    // would have answered, so there is nothing to flush) - see tasks::interrupt_key_check's doc comment.
     // Intercepted here, the single choke point every keyboard path funnels
     // through (the wake-check, READ_CHAR's fast path, and TRY_READ_CHAR alike),
     // so Ctrl+C is caught no matter which path would have consumed it. It marks
@@ -241,20 +242,25 @@ fn keyboard_device_byte() -> Option<u8> {
     console::read_byte().or_else(crate::xhci::poll_key)
 }
 
-/// The tick's read for a RUNNING foreground task (one not blocked in a
-/// read, so no read syscall or wake-check will look): every byte waiting on
-/// the devices is read, so a Ctrl+C behind type-ahead still ends a runaway
-/// loop, and each other byte is kept in [`KBD_QUEUE`] for the owner's next
-/// read. Until 2026-10-07 the tick read one byte and threw it away, which
-/// lost a key typed while a program was busy, and since the navigation
-/// keys (#229) could cut a key's escape sequence in two
-/// (`docs/roadmap/roadmap-ctrl-c.md`, step 0). It stops at a Ctrl+C, which
-/// [`tasks::interrupt_key_check`] has acted on. With the queue full it
-/// still reads and checks every byte, so Ctrl+C can never be stuck behind
-/// type-ahead; only an ordinary byte that does not fit is dropped. At most
-/// [`READ_AHEAD_MAX`] bytes a tick: this runs in the tick with interrupts
-/// masked, and a device that never said "empty" would otherwise hold the
-/// core here for good, where the old one-byte read could not.
+/// Reads ahead for the keyboard owner, for every path that looks at the
+/// keyboard without reading from it: the tick, for an owner that is not
+/// blocked in a read, and the waits for a child's exit and for a message
+/// ([`keyboard_interrupts_wait`]). Every byte waiting on the devices is
+/// read, so a Ctrl+C behind type-ahead is still found at once, and each
+/// other byte is kept in [`KBD_QUEUE`] for the owner's next read. Until
+/// 2026-10-07 those paths read one byte and threw it away, which lost keys
+/// typed while a program was busy (an editor redrawing is mostly blocked
+/// in `con_write`'s message call), and since the navigation keys (#229)
+/// could cut a key's escape sequence in two (`docs/roadmap/roadmap-ctrl-c.md`,
+/// step 0). A Ctrl+C that [`tasks::interrupt_key_check`] acts on also
+/// FLUSHES the queue: what was typed before it is what the user just
+/// interrupted, and handing a typed `rm foo` and Enter to the shell after
+/// the kill would run it (Unix flushes pending input on an interrupt the
+/// same way). With the queue full it still reads and checks every byte, so
+/// Ctrl+C can never be stuck behind type-ahead; an ordinary byte that does
+/// not fit is dropped. At most [`READ_AHEAD_MAX`] bytes a call: it runs
+/// with interrupts masked, where a device that never said "empty" would
+/// hold the core.
 pub(crate) fn read_keyboard_ahead(reader: usize) {
     if reader != tasks::input_owner() {
         return;
@@ -264,6 +270,8 @@ pub(crate) fn read_keyboard_ahead(reader: usize) {
             return;
         };
         if tasks::interrupt_key_check(byte) {
+            // SAFETY: as in poll_keyboard_byte.
+            unsafe { (*KBD_QUEUE.get()).clear() };
             return;
         }
         // SAFETY: as in poll_keyboard_byte.
@@ -271,10 +279,31 @@ pub(crate) fn read_keyboard_ahead(reader: usize) {
     }
 }
 
-/// The most bytes [`read_keyboard_ahead`] reads in one tick: twice the
-/// queue, so a Ctrl+C up to a full queue's length behind the last kept byte
-/// is still found.
-const READ_AHEAD_MAX: usize = 2 * KBD_QUEUE_LEN;
+/// The most bytes [`read_keyboard_ahead`] reads in one call; the devices
+/// give far fewer (one USB report, up to 24 bytes, or one serial byte).
+const READ_AHEAD_MAX: usize = KBD_QUEUE_LEN;
+
+/// For a task blocked waiting on a child's exit or on a message: whether a
+/// Ctrl+C typed now should interrupt that wait. It reads ahead first (so
+/// the wait never throws a typed byte away, and a Ctrl+C for any owner but
+/// the boot shell is acted on there, killing or detaching it). The boot
+/// shell's Ctrl+C is an ordinary byte to `interrupt_key_check`, and the one
+/// that must interrupt its wait, or a `wait` on a task that never ends
+/// would hold the only typist for good: if one is queued for it, the queue
+/// is flushed (as an interrupt does) and the answer is yes.
+pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
+    read_keyboard_ahead(waiter);
+    if waiter != tasks::TaskIndex::FIRST.index() || waiter != tasks::input_owner() {
+        return false;
+    }
+    // SAFETY: as in poll_keyboard_byte.
+    let queue = unsafe { &mut *KBD_QUEUE.get() };
+    if queue.contains(0x03) {
+        queue.clear();
+        return true;
+    }
+    false
+}
 
 /// Keyboard bytes read ahead by the tick, oldest first, for whoever owns
 /// the keyboard when they are read. Sized for a burst of typing while a
@@ -298,6 +327,15 @@ impl KbdQueue {
             self.buf[(self.head + self.len) % KBD_QUEUE_LEN] = byte;
             self.len += 1;
         }
+    }
+
+    fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+
+    fn contains(&self, byte: u8) -> bool {
+        (0..self.len).any(|i| self.buf[(self.head + i) % KBD_QUEUE_LEN] == byte)
     }
 
     fn pop(&mut self) -> Option<u8> {

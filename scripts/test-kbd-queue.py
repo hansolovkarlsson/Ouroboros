@@ -8,7 +8,7 @@ RUNNING foreground program (one not blocked in a read), so that Ctrl+C ends a
 runaway loop; until 2026-10-07 it threw away every other byte it read. Now it
 keeps them in a 64-byte queue (kernel/src/syscall.rs, read_keyboard_ahead) for
 the program's next read. `/bin/READKEY spin` runs three seconds without
-reading, then prints every byte waiting. Four runs in one boot, with QEMU's
+reading, then prints every byte waiting. Six runs in one boot, with QEMU's
 USB keyboard pressed through the monitor's `sendkey`:
 
 1. **USB keys during the spin.** `hello`, Up and `x` must come back as all
@@ -21,9 +21,18 @@ USB keyboard pressed through the monitor's `sendkey`:
 4. **Ctrl+C behind a full queue.** 72 letters, more than the queue holds,
    then Ctrl+C, inside a thirteen-second spin (`readkey spin 650`): it must
    still end the program, so the way out can never be stuck behind
-   type-ahead.
+   type-ahead, and none of the letters may reach the shell after it: a
+   Ctrl+C flushes what was typed before it.
+5. **Keys typed while the program is blocked in a message wait**
+   (`readkey spin 150 io`, writing to the console every five ticks): `abc`
+   and Down must all come back. Until the review of #232 that wait threw a
+   byte away at every tick.
+6. **Type-ahead left by a program that exits** (`readkey spin 150 keep`):
+   `echo kept` and Enter typed on the serial line during the spin must reach
+   the shell whole and run. The shell's wait for its child also threw the
+   first byte away until that review.
 
-QEMU's own trace must hold no fault line. One boot, about a minute and a half.
+QEMU's own trace must hold no fault line. One boot, about two minutes.
 Run it whenever the keyboard path in syscall.rs, the tick's read in tasks.rs,
 or Ctrl+C's handling changes.
 """
@@ -47,12 +56,12 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-kbd-queue.txt")
 KEY_DELAY = 0.15
 # The flood's pace. The driver takes one keyboard report per poll (one
 # interrupt buffer, re-armed after each), a key is two reports (press and
-# release), and the tick reads ahead only when the foreground program is the
-# task it interrupted, about every other tick with the servers taking turns:
-# some 12 keys a second. Faster, QEMU's own keyboard queue overflows and drops
-# keys before the kernel sees them, which tests QEMU, not this queue (found
-# 2026-10-07: 25 ms a key delivered 24 of 72, 60 ms delivered 42, and each
-# lost the Ctrl+C). The limit is recorded on docs/ROADMAP.md.
+# release), and the kernel reads ahead once a tick: some 25 keys a second.
+# Faster, QEMU's own keyboard queue overflows and drops keys before the kernel
+# sees them, which tests QEMU, not this queue (found 2026-10-07, when the tick
+# read only for an owner it had interrupted: 25 ms a key delivered 24 of 72,
+# 60 ms delivered 42, and each lost the Ctrl+C). The limit is recorded on
+# docs/ROADMAP.md.
 FAST_DELAY = 0.12
 FLOOD = 72
 
@@ -79,15 +88,17 @@ def main() -> int:
     )
     got = {}
     killed = {}
+    parts = {}
     try:
         ok = guest.run([("login:", "root"), ("assword", "root"), ("# ", "")])
 
-        def spin(name, during, ticks=None):
+        def spin(name, during, ticks=None, how=None):
             """Runs `readkey spin`, does `during` while it spins, and records
             the bytes it printed (None if no `got` line) and whether the kernel
             reported a Ctrl+C termination."""
             start = len(guest.transcript())
-            guest.type_line("readkey spin" + (f" {ticks}" if ticks else ""))
+            cmd = "readkey spin" + (f" {ticks or 150}" if ticks or how else "") + (f" {how}" if how else "")
+            guest.type_line(cmd)
             if not guest.wait_for("readkey: spinning"):
                 return False
             during()
@@ -97,19 +108,32 @@ def main() -> int:
             m = re.search(r"readkey: got([ \d]*)", part)
             got[name] = [int(v) for v in m.group(1).split()] if m else None
             killed[name] = "Ctrl+C - foreground task" in part
+            parts[name] = part
             return True
 
-        def serial_abc():
-            for ch in b"abc":
+        def serial_type(data):
+            for ch in data:
                 guest.proc.stdin.write(bytes([ch]))
                 guest.proc.stdin.flush()
                 time.sleep(0.1)
 
+        def serial_abc():
+            serial_type(b"abc")
+
         ok = ok and spin("usb", lambda: sendkeys(["h", "e", "l", "l", "o", "up", "x"]))
         ok = ok and spin("serial", serial_abc)
         ok = ok and spin("ctrl-c", lambda: sendkeys(["ctrl-c"]))
+        # Blocked in con_write's call to the console server most of the time.
+        ok = ok and spin("io", lambda: sendkeys(["a", "b", "c", "down"]), how="io")
+        # Exits without reading: the shell must get every byte, the first too.
+        ok = ok and spin("keep", lambda: serial_type(b"echo kept\n"), how="keep")
         # Thirteen seconds, so the whole flood lands inside the spin.
         ok = ok and spin("flood", lambda: (sendkeys(["a"] * FLOOD, FAST_DELAY, hold=10), sendkeys(["ctrl-c"])), ticks=650)
+        if ok:
+            # What the flood left must not reach the shell: Ctrl+C flushes it.
+            # An empty line, then the shell's answer to it, is the check.
+            guest.type_line("")
+            ok = guest.wait_for(r"\n# ", timeout=15)
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -125,6 +149,11 @@ def main() -> int:
         ("Ctrl+C during the spin still ends it", killed.get("ctrl-c") is True and got.get("ctrl-c") is None),
         (f"Ctrl+C behind {FLOOD} queued letters still ends it",
          killed.get("flood") is True and got.get("flood") is None),
+        ("Ctrl+C flushes what was queued: none of the flood reaches the shell",
+         "aaa" not in out[out.find("readkey spin 650"):].split("terminated", 1)[-1]),
+        ("keys typed while blocked in con_write kept (abc, Down: 6 bytes)", got.get("io") == list(b"abc\x1b[B")),
+        ("type-ahead left by a program that exits reaches the shell whole (`echo kept` runs)",
+         "keep" in parts and re.search(r"^kept\r?$", parts["keep"], re.M) is not None),
         ("no fault lines", faults == 0),
     ]
     for name in ("usb", "serial"):
