@@ -8,7 +8,7 @@ RUNNING foreground program (one not blocked in a read), so that Ctrl+C ends a
 runaway loop; until 2026-10-07 it threw away every other byte it read. Now it
 keeps them in a 64-byte queue (kernel/src/syscall.rs, read_keyboard_ahead) for
 the program's next read. `/bin/READKEY spin` runs three seconds without
-reading, then prints every byte waiting. Six runs in one boot, with QEMU's
+reading, then prints every byte waiting. Seven runs in one boot, with QEMU's
 USB keyboard pressed through the monitor's `sendkey`:
 
 1. **USB keys during the spin.** `hello`, Up and `x` must come back as all
@@ -34,7 +34,14 @@ USB keyboard pressed through the monitor's `sendkey`:
    the shell whole and run. The shell's wait for its child also threw the
    first byte away until that review.
 
-QEMU's own trace must hold no fault line. One boot, about two minutes.
+7. **A full queue keeps keys whole.** 63 letters, then Up, then `b`, during
+   a spin: Up's ESC takes the last place, its `[` finds the queue full, so
+   the ESC is taken back out and the rest of Up dropped as it arrives; `b`
+   then fits. The spin reads the letters and `b`, with nothing of Up. Part
+   of step 3 of the Ctrl-C plan.
+
+QEMU's own trace must hold no fault line. One boot, about two and a half
+minutes.
 Run it whenever the keyboard path in syscall.rs, the tick's read in tasks.rs,
 or Ctrl+C's handling changes.
 """
@@ -66,6 +73,7 @@ KEY_DELAY = 0.15
 # docs/ROADMAP.md.
 FAST_DELAY = 0.12
 FLOOD = 72
+FULL = 63
 
 
 def sendkeys(names, delay=KEY_DELAY, hold=None):
@@ -132,6 +140,10 @@ def main() -> int:
         ok = ok and spin("keep", lambda: serial_type(b"echo kept\n"), how="keep")
         # Thirteen seconds, so the whole flood lands inside the spin.
         ok = ok and spin("flood", lambda: (sendkeys(["a"] * FLOOD, FAST_DELAY, hold=10), sendkeys(["ctrl-c"])), ticks=650)
+        # A full queue keeps keys whole: 63 letters leave one place, Up's ESC
+        # takes it, its `[` finds the queue full, so the ESC is taken back out
+        # and the rest of Up dropped as it comes; `b` then fits and is kept.
+        ok = ok and spin("full", lambda: (sendkeys(["a"] * FULL, FAST_DELAY, hold=10), sendkeys(["up", "b"])), ticks=650)
         if ok:
             # What the flood left must not reach the shell: Ctrl+C flushes it.
             # An empty line, then the shell's answer to it, is the check.
@@ -157,6 +169,8 @@ def main() -> int:
         ("keys typed while the owner is blocked in a message wait kept (abc, Down: 6 bytes)", got.get("msg") == list(b"abc\x1b[B")),
         ("type-ahead left by a program that exits reaches the shell whole (`echo kept` runs)",
          "keep" in parts and re.search(r"^kept\r?$", parts["keep"], re.M) is not None),
+        ("a full queue drops a whole key (63 letters, Up, b: the letters and b, nothing of Up)",
+         got.get("full") == [97] * FULL + [98]),
         ("no fault lines", faults == 0),
     ]
     for name in ("usb", "serial"):

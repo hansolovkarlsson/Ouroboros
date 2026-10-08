@@ -307,31 +307,79 @@ pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
 
 /// Keyboard bytes read ahead by the tick, oldest first, for whoever owns
 /// the keyboard when they are read. Sized for a burst of typing while a
-/// program is busy: 64 bytes is 16 navigation keys.
+/// program is busy: 64 bytes is 16 navigation keys. It keeps keys whole: a
+/// key's sequence that does not fit is dropped entirely, its front taken
+/// back out, rather than kept cut (step 3 of the Ctrl-C plan, from the
+/// review of #232).
 struct KbdQueue {
     buf: [u8; KBD_QUEUE_LEN],
     head: usize,
     len: usize,
+    /// The bytes pushed, parsed as keys.
+    keys: keyseq::KeySeq,
+    /// How many bytes at the back belong to the key still being pushed.
+    partial: usize,
+    /// The rest of the key being pushed is dropped: its front did not fit.
+    dropping: bool,
 }
 
 const KBD_QUEUE_LEN: usize = 64;
 
 impl KbdQueue {
     const fn new() -> Self {
-        KbdQueue { buf: [0; KBD_QUEUE_LEN], head: 0, len: 0 }
+        KbdQueue { buf: [0; KBD_QUEUE_LEN], head: 0, len: 0, keys: keyseq::KeySeq::new(), partial: 0, dropping: false }
     }
 
-    /// Appends `byte`, or drops it when the queue is full.
+    /// Appends `byte`. When it does not fit, an ordinary byte is dropped,
+    /// and a byte of a key's sequence drops the whole key: the bytes of it
+    /// already queued are taken back out, and the rest is dropped as it
+    /// comes.
     fn push(&mut self, byte: u8) {
-        if self.len < KBD_QUEUE_LEN {
-            self.buf[(self.head + self.len) % KBD_QUEUE_LEN] = byte;
-            self.len += 1;
+        let fed = self.keys.feed(byte);
+        if self.dropping {
+            match fed {
+                keyseq::Fed::Pending => return,
+                keyseq::Fed::Sequence => {
+                    self.dropping = false;
+                    return;
+                }
+                // A control byte ends a cut sequence and is a key of its own
+                // (keyseq passes it through the same way): kept, if it fits.
+                keyseq::Fed::Byte(_) => self.dropping = false,
+            }
+        } else if self.len == KBD_QUEUE_LEN {
+            // Taken back only as far as it is still queued: if a reader has
+            // already read the front of this key, it holds a cut key, which
+            // a full queue cannot prevent (it has no room for the rest).
+            self.len -= self.partial.min(self.len);
+            self.partial = 0;
+            match fed {
+                keyseq::Fed::Pending => {
+                    self.dropping = true;
+                    return;
+                }
+                keyseq::Fed::Sequence => return,
+                // A control byte ending the key that did not fit, or an
+                // ordinary byte: kept if taking the key back made room.
+                keyseq::Fed::Byte(_) => {}
+            }
         }
+        if self.len == KBD_QUEUE_LEN {
+            return;
+        }
+        self.buf[(self.head + self.len) % KBD_QUEUE_LEN] = byte;
+        self.len += 1;
+        self.partial = if fed == keyseq::Fed::Pending { self.partial + 1 } else { 0 };
     }
 
+    /// Empties the queue (a Ctrl+C's flush). If that cut a key in two, the
+    /// rest of it is dropped as it arrives, not queued as text.
     fn clear(&mut self) {
+        let mid_key = self.partial > 0 || self.dropping;
         self.head = 0;
         self.len = 0;
+        self.partial = 0;
+        self.dropping = mid_key;
     }
 
     fn contains(&self, byte: u8) -> bool {

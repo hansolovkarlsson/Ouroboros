@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
 version is held for a go-ahead. So far three days' work, 2026-10-05 to
-2026-10-07, #209 to #232: the storage server made safe under large writes and
+2026-10-07, #209 to #233: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the
@@ -174,6 +174,14 @@ flushes the queue, so what was typed before it never runs in the shell
 after the kill. `make test-kbd-queue` types during `/bin/READKEY spin`, also
 while the keyboard owner is blocked waiting for a message and while it exits
 without reading, on QEMU's USB keyboard and serial line.
+
+**The keyboard queue keeps keys whole (#233).** Half of step 3 of the
+Ctrl-C plan. A key that does not fit in the full keyboard queue is dropped
+whole rather than kept cut, and a Ctrl+C flush that cuts a key drops its
+rest instead of queueing it as text. The kernel now uses the `keyseq` crate,
+the filter userland's readers share. The other half, dropping a key's rest
+when the keyboard changes owner mid-key, was built, found fragile in review
+and taken out; its design is in the plan.
 
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or
