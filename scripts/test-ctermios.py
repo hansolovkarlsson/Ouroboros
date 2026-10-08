@@ -10,7 +10,9 @@ a key. /bin/CTERMIOS (libc/ctermios.c) uses Edit's own recipe, flag for flag.
 One boot:
 
 1. **`ctermios check`**: the initial settings (ISIG set, VMIN 1, VINTR 3,
-   VQUIT 28), Edit's recipe set with TCSADRAIN, every flag read back, the
+   VQUIT 28), Edit's recipe set with TCSADRAIN, every flag read back, flags
+   the console never has (ECHO, ICANON, ICRNL, OPOST, VTIME 5) set and read
+   back, so stored settings are told from the fixed state, the
    saved settings restored with TCSAFLUSH and read back, ISIG following the
    kernel's mode when it is set directly with KBD_MODE, and the errors:
    EBADF on fd 9, ENOTTY on an open file, EINVAL for an unknown action,
@@ -40,7 +42,7 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-ctermios.txt")
 PROMPT = "# "
 ETX = b"\x03"
 CHECK_LINES = [
-    "initial ok", "set ok", "readback ok", "restore ok", "kernel ok",
+    "initial ok", "set ok", "readback ok", "stored ok", "restore ok", "kernel ok",
     "fd 9 EBADF", "file ENOTTY", "action EINVAL", "null EFAULT",
 ]
 

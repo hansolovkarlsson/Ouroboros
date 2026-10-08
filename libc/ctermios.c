@@ -8,6 +8,8 @@
  *     ctermios: initial ok             (ISIG set, VMIN 1, VINTR 3, VQUIT 28)
  *     ctermios: set ok                 (Edit's raw recipe, TCSADRAIN)
  *     ctermios: readback ok            (tcgetattr gives back every flag set)
+ *     ctermios: stored ok              (flags the console never has, set and
+ *                                       read back: stored, not the fixed state)
  *     ctermios: restore ok             (the saved settings, TCSAFLUSH)
  *     ctermios: kernel ok              (ISIG follows KBD_MODE set directly)
  *     ctermios: fd 9 EBADF
@@ -67,6 +69,16 @@ static int check(void) {
     edit_raw(&t);
     result("set", tcsetattr(0, TCSADRAIN, &t) == 0);
     result("readback", tcgetattr(0, &back) == 0 && same(&back, &t));
+    /* Edit's recipe only clears flags the console already lacks, so its
+     * readback cannot tell stored settings from the fixed ones: set some the
+     * fixed state never has. */
+    struct termios odd = t;
+    odd.c_iflag |= ICRNL | IXON;
+    odd.c_oflag |= OPOST | ONLCR;
+    odd.c_lflag |= ECHO | ICANON;
+    odd.c_cc[VERASE] = 0x7f;
+    odd.c_cc[VTIME] = 5;
+    result("stored", tcsetattr(0, TCSANOW, &odd) == 0 && tcgetattr(0, &back) == 0 && same(&back, &odd));
     result("restore", tcsetattr(0, TCSAFLUSH, &saved) == 0 && tcgetattr(0, &back) == 0
                           && same(&back, &saved));
     /* ISIG is the kernel's answer, not the copy last set: the mode changed
