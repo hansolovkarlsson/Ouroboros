@@ -8,8 +8,8 @@
  *     ctermios: initial ok             (ISIG set, VMIN 1, VINTR 3, VQUIT 28)
  *     ctermios: set ok                 (Edit's raw recipe, TCSADRAIN)
  *     ctermios: readback ok            (tcgetattr gives back every flag set)
- *     ctermios: stored ok              (flags the console never has, set and
- *                                       read back: stored, not the fixed state)
+ *     ctermios: honest ok              (flags the console cannot apply are
+ *                                       accepted, and tcgetattr says they are off)
  *     ctermios: restore ok             (the saved settings, TCSAFLUSH)
  *     ctermios: kernel ok              (ISIG follows KBD_MODE set directly)
  *     ctermios: fd 9 EBADF
@@ -31,11 +31,8 @@
 #include <termios.h>
 #include <unistd.h>
 #include "include/sys.h"
+#include "probe_errno.h"
 
-static const char *err_name(int e) {
-    return e == ENOTTY ? "ENOTTY" : e == EBADF ? "EBADF" : e == EFAULT ? "EFAULT"
-         : e == EINVAL ? "EINVAL" : e == EIO ? "EIO" : "other";
-}
 
 /* Edit's plat_raw_on, flag for flag (DevTools edit/src/platform_posix.c). */
 static void edit_raw(struct termios *t) {
@@ -62,23 +59,26 @@ static void expect_err(const char *label, int rc) {
 
 static int check(void) {
     struct termios saved, t, back;
-    int got = tcgetattr(0, &saved) == 0;
-    result("initial", got && (saved.c_lflag & ISIG) && saved.c_cc[VMIN] == 1
+    if (tcgetattr(0, &saved) < 0) {
+        printf("ctermios: initial FAIL (tcgetattr %s)\r\n", err_name(errno));
+        printf("ctermios: check done\r\n");
+        return 1;
+    }
+    result("initial", (saved.c_lflag & ISIG) && saved.c_cc[VMIN] == 1
                           && saved.c_cc[VINTR] == 3 && saved.c_cc[VQUIT] == 28);
     t = saved;
     edit_raw(&t);
     result("set", tcsetattr(0, TCSADRAIN, &t) == 0);
     result("readback", tcgetattr(0, &back) == 0 && same(&back, &t));
-    /* Edit's recipe only clears flags the console already lacks, so its
-     * readback cannot tell stored settings from the fixed ones: set some the
-     * fixed state never has. */
+    /* Flags the console cannot apply: accepted (POSIX: success when any
+     * change was made), and tcgetattr shows what is in force, which is the
+     * raw settings above, not these. */
     struct termios odd = t;
     odd.c_iflag |= ICRNL | IXON;
     odd.c_oflag |= OPOST | ONLCR;
     odd.c_lflag |= ECHO | ICANON;
-    odd.c_cc[VERASE] = 0x7f;
     odd.c_cc[VTIME] = 5;
-    result("stored", tcsetattr(0, TCSANOW, &odd) == 0 && tcgetattr(0, &back) == 0 && same(&back, &odd));
+    result("honest", tcsetattr(0, TCSANOW, &odd) == 0 && tcgetattr(0, &back) == 0 && same(&back, &t));
     result("restore", tcsetattr(0, TCSAFLUSH, &saved) == 0 && tcgetattr(0, &back) == 0
                           && same(&back, &saved));
     /* ISIG is the kernel's answer, not the copy last set: the mode changed

@@ -250,13 +250,18 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    back every flag it set; `ENOTTY` on a file. *Built 2026-10-08 (#236):
    `tcgetattr` and `tcsetattr` in `libc/src/file.c`,
    `libc/pico/include/sys/termios.h` with Linux's values; `ISIG` maps onto
-   `KBD_MODE`, every other flag is stored and read back, and `tcgetattr`
-   takes `ISIG` from the kernel. `TCSAFLUSH` cannot discard pending input
-   (no flush a program can ask for), which the header says. The probe is
-   `/bin/CTERMIOS` with Edit's own recipe copied flag for flag, the rig
-   `make test-ctermios`; seven mutation controls, one of which (settings
-   not stored) survived until a check set flags the console never has,
-   since Edit's recipe clears only flags it already lacks.*
+   `KBD_MODE`, and `tcgetattr` takes `ISIG` from the kernel. `TCSAFLUSH`
+   cannot discard pending input (no flush a program can ask for), which the
+   header says. The probe is `/bin/CTERMIOS` with Edit's own recipe copied
+   flag for flag, the rig `make test-ctermios`. **One departure from design
+   3 above**, made by the high review of #236: every other flag is accepted
+   and has no effect, but is NOT read back; `tcgetattr` reports the console
+   as it is, because POSIX has a program confirm with `tcgetattr` what its
+   `tcsetattr` took effect, and a stored `ECHO` read back would say echo is
+   on when it is not. Edit's recipe clears only flags the console already
+   lacks, so it reads back exactly as set either way. The same review found
+   that `platform_posix.c` as a whole also needs `sigaction` and `<poll.h>`,
+   which this C library lacks (told to DevTools in the editor note's reply).*
 3. **The cut sequence (design 5).** Check: a probe reads only the ESC of an
    arrow, is killed, and the shell's next line holds nothing of the tail.
    Also here: a full queue must refuse a whole key rather than keep the

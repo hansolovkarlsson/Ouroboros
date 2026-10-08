@@ -11,8 +11,11 @@
  * it is the way out no program can take away, which is the one difference
  * from Unix, where clearing ISIG makes ^\ a key too.
  *
- * Every other flag and c_cc entry is stored and read back, and changes
- * nothing, because the console already behaves one fixed way:
+ * Every other flag and c_cc entry is accepted and changes nothing, because
+ * the console behaves one fixed way, and tcgetattr reports that way (with
+ * ISIG as the kernel has it), not what was last set: POSIX has a program
+ * confirm with tcgetattr what its tcsetattr took effect, and reading back a
+ * stored ECHO would say echo is on when it is not. The fixed way:
  *   - ICANON, ECHO, ECHOE, ECHOK, ECHONL, IEXTEN: input is a byte at a time,
  *     with no echo and no line editing in the kernel (programs do their own).
  *   - ICRNL, INLCR, IGNCR: Enter arrives as 13 and nothing is translated.
@@ -22,8 +25,13 @@
  *     serial line settings reach the hardware.
  *   - VINTR and VQUIT: the keys are fixed at Ctrl+C (3) and Ctrl+\ (28).
  *   - VMIN and VTIME: a read of fd 0 blocks for one byte and returns it.
- * tcgetattr answers the flags in that fixed state, with ISIG from the
- * kernel, and then whatever the program last set.
+ *   - VERASE: reported as 0x7f, what a serial terminal's Backspace sends;
+ *     the USB keyboard's Backspace sends 8, so a program should take both.
+ * So Edit's raw recipe, which clears flags the console already lacks, reads
+ * back exactly as it was set, and saving and restoring the settings works.
+ *
+ * tcgetattr and tcsetattr answer ENOSYS on a kernel without KBD_MODE, and
+ * tcsetattr EINVAL if the kernel refuses the mode.
  *
  * TCSANOW and TCSADRAIN are the same (output is never held back). TCSAFLUSH
  * does not discard pending input: the kernel's keyboard queue has no flush a
