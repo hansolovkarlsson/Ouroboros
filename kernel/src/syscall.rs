@@ -225,7 +225,7 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
     if let Some(byte) = unsafe { (*KBD_QUEUE.get()).pop() } {
         return Some(byte);
     }
-    read_keyboard_ahead(reader);
+    read_ahead(reader, false);
     // SAFETY: as above.
     unsafe { (*KBD_QUEUE.get()).pop() }
 }
@@ -283,6 +283,17 @@ fn keyboard_device_byte() -> Option<(u8, bool)> {
 /// queued as a byte and stays one, so it never interrupts the shell that
 /// gets the keyboard next.
 pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
+    read_ahead(reader, true)
+}
+
+/// [`read_keyboard_ahead`], with the boot shell's interrupt honoured only when
+/// `boot_waits`: for a wait. When the boot shell is reading its line (the
+/// read in [`poll_keyboard_byte`]) there is nothing to interrupt, and a flush
+/// would only lose keys typed just before the Ctrl+C that the shell had not
+/// read yet, a loss that depends on how fast it reads (seen by
+/// `test-kbd-mode`'s `ef` check after the review of #238 made it flush there):
+/// the byte is queued as data, which the line editor ignores, as before #238.
+fn read_ahead(reader: usize, boot_waits: bool) -> bool {
     if reader != tasks::input_owner() {
         return false;
     }
@@ -297,11 +308,12 @@ pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
                 unsafe { (*KBD_QUEUE.get()).flush(Some(byte)) };
                 return false;
             }
-            tasks::KeyVerdict::BootInterrupt => {
+            tasks::KeyVerdict::BootInterrupt if boot_waits => {
                 // SAFETY: as in poll_keyboard_byte.
                 unsafe { (*KBD_QUEUE.get()).flush(Some(byte)) };
                 return true;
             }
+            tasks::KeyVerdict::BootInterrupt => {}
         }
         // SAFETY: as in poll_keyboard_byte.
         unsafe { (*KBD_QUEUE.get()).push(byte, from_usb, crate::exceptions::ticks()) };

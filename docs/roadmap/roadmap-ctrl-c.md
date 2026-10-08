@@ -272,7 +272,10 @@ has `TCSAFLUSH`); an `ESC` inside a key was not marked as a key start, so a
 trim could drop a complete key typed ahead; the bare-`ESC` interval compared
 whole ticks with `>=`, as little as 20 ms (now `>`, at least 40); a stale USB
 key could double every xHCI poll; and `BootInterrupt`'s doc said the line
-editor gets the byte. One declined: an interrupt inside a full-queue key,
+editor gets the byte (the first answer, a flush at the prompt as Unix has
+it, lost keys typed just before the Ctrl+C that the shell had not read yet,
+and `test-kbd-mode` caught it; now the boot shell's interrupt flushes only
+for its waits, and at the prompt is a byte the line editor ignores). One declined: an interrupt inside a full-queue key,
 which a terminal's in-order burst cannot produce.*
 
 ## Steps, each with its check
