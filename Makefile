@@ -676,7 +676,8 @@ cwinsz-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cwinsz.elf $(CWINSZ_BIN)
 
 # Terminal settings in a C program (libc/ctermios.c): tcgetattr and tcsetattr
-# with Edit's raw recipe, read back, restored, and their errors; `raw` reads
+# with Edit's raw recipe, read back (tcgetattr reports the console as it is),
+# restored, and their errors; `raw` reads
 # Ctrl+C as a key. Runs as /bin/CTERMIOS, driven by scripts/test-ctermios.py.
 ctermios-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/ctermios.c -o $(BUILD_DIR)/pico/ctermios.o
@@ -1863,8 +1864,9 @@ test-kbd-mode: image
 
 # Terminal settings in a C program (scripts/test-ctermios.py, /bin/CTERMIOS):
 # Edit's raw recipe through tcsetattr reads Ctrl+C as 3, restoring it lets
-# Ctrl+C end the program again, tcgetattr gives back every flag set, and the
-# errors (EBADF, ENOTTY on a file, EINVAL, EFAULT). One boot, about a minute;
+# Ctrl+C end the program again, tcgetattr reports what is in force (flags the
+# console cannot apply read back off), and the errors (EBADF, ENOTTY on a
+# file, EINVAL, EFAULT). One boot, about a minute;
 # run it whenever libc's termios, sys/termios.h or KBD_MODE changes.
 test-ctermios: image
 	python3 scripts/test-ctermios.py

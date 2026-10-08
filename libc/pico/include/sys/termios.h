@@ -30,8 +30,9 @@
  * So Edit's raw recipe, which clears flags the console already lacks, reads
  * back exactly as it was set, and saving and restoring the settings works.
  *
- * tcgetattr and tcsetattr answer ENOSYS on a kernel without KBD_MODE, and
- * tcsetattr EINVAL if the kernel refuses the mode.
+ * On a kernel without KBD_MODE, tcgetattr reports the cooked settings (that
+ * kernel has no other mode) and tcsetattr answers ENOSYS; tcsetattr answers
+ * EINVAL if the kernel refuses the mode.
  *
  * TCSANOW and TCSADRAIN are the same (output is never held back). TCSAFLUSH
  * does not discard pending input: the kernel's keyboard queue has no flush a

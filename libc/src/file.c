@@ -1021,7 +1021,9 @@ static void termios_fixed(struct termios *t) {
 
 /* KBD_MODE(mode): 0 with the mode now in force, or -1 with ENOSYS (a kernel
  * without KBD_MODE answers the unknown-syscall u64::MAX), EINVAL (the kernel
- * refused the mode, KBD_MODE_BAD), or EIO (anything else). */
+ * refused the mode, KBD_MODE_BAD), or EIO (anything else). A query on a
+ * kernel without KBD_MODE answers cooked: that kernel has no other mode, so
+ * tcgetattr can still tell the truth and only tcsetattr has to refuse. */
 static int kbd_mode(unsigned long mode, unsigned long *now) {
     unsigned long got = (unsigned long)__os_syscall1(SYS_KBD_MODE, (long)mode);
     if (got == KBD_COOKED || got == KBD_RAW) {
@@ -1029,6 +1031,10 @@ static int kbd_mode(unsigned long mode, unsigned long *now) {
         return 0;
     }
     if (got == ~0UL) {
+        if (mode == KBD_QUERY) {
+            *now = KBD_COOKED;
+            return 0;
+        }
         return client_fail(ENOSYS);
     }
     if (got == KBD_MODE_BAD) {
@@ -1072,13 +1078,7 @@ int tcsetattr(int fd, int optional_actions, const struct termios *t) {
     }
     unsigned long want = (t->c_lflag & ISIG) ? KBD_COOKED : KBD_RAW;
     unsigned long now;
-    if (kbd_mode(want, &now) < 0) {
-        return -1;
-    }
-    if (now != want) {
-        return client_fail(EIO);
-    }
-    return 0;
+    return kbd_mode(want, &now);
 }
 
 /* ---- read / write -------------------------------------------------------- */

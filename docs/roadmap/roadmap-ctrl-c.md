@@ -261,7 +261,12 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    on when it is not. Edit's recipe clears only flags the console already
    lacks, so it reads back exactly as set either way. The same review found
    that `platform_posix.c` as a whole also needs `sigaction` and `<poll.h>`,
-   which this C library lacks (told to DevTools in the editor note's reply).*
+   which this C library lacks (told to DevTools in the editor note's reply).
+   Its second review raised `TCSAFLUSH` again: it should discard keys typed
+   ahead (a raw program's queued Ctrl+C reaches the shell as a byte after
+   Edit's restore). That needs a flush of the kernel's queue a program can
+   ask for, and how the queue empties is step 3's open question (the
+   `clear()` finding above), so it waits for step 3.*
 3. **The cut sequence (design 5).** Check: a probe reads only the ESC of an
    arrow, is killed, and the shell's next line holds nothing of the tail.
    Also here: a full queue must refuse a whole key rather than keep the

@@ -7,7 +7,8 @@
  *
  *     ctermios: initial ok             (ISIG set, VMIN 1, VINTR 3, VQUIT 28)
  *     ctermios: set ok                 (Edit's raw recipe, TCSADRAIN)
- *     ctermios: readback ok            (tcgetattr gives back every flag set)
+ *     ctermios: readback ok            (Edit's recipe reads back as set: it
+ *                                       clears only flags the console lacks)
  *     ctermios: honest ok              (flags the console cannot apply are
  *                                       accepted, and tcgetattr says they are off)
  *     ctermios: restore ok             (the saved settings, TCSAFLUSH)
