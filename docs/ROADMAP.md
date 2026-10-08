@@ -813,6 +813,16 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **A busy program keeps up with about 25 keys a second (found 2026-10-07,
+  building the keyboard queue).** The xHCI driver keeps one interrupt
+  buffer and re-arms it after each report, so a poll takes one report, and
+  a key is two (press and release); the kernel reads ahead for the owner
+  once a tick. Faster typing overflows QEMU's own keyboard queue, and a
+  Ctrl+C can be among what it drops (`scripts/test-kbd-queue.py`'s pacing
+  note). The fix to weigh is more than one interrupt buffer in flight. (It
+  was 12 a second until #232's review made the tick read ahead for the
+  owner whoever it interrupted.)
+
 - **Tab and Escape send nothing on the USB keyboard (found 2026-10-07,
   building the navigation keys).** `xhci.rs`'s `keycode_to_ascii` has no
   arm for Tab (HID 0x2b) or Escape (0x29), so the shell's filename

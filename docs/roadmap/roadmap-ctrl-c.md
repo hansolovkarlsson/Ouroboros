@@ -10,7 +10,7 @@ per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
-**Status 2026-10-07: written, not started. The four decisions (D1 to D4)
+**Status 2026-10-07: step 0 built (#232); steps 1 to 4 not started. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. Before step 1,
 DevTools is asked whether Edit binds ^\ (D1's condition):
 `~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-ctrl-backslash.md`.**
@@ -150,7 +150,23 @@ too. Not a kernel job: the kernel does not know what the program wrote.
 0. **The input queue (design 4).** The tick's byte goes into the queue.
    Check: a C probe that spins between reads, keys pressed during the spin
    by QEMU's `sendkey`, every byte read back; fails with the tick's drop
-   restored.
+   restored. *Built 2026-10-07 (#232): `syscall.rs`'s
+   `read_keyboard_ahead` and `KBD_QUEUE`, bounded per call because it runs
+   with interrupts masked; the probe is `/bin/READKEY spin [ticks]
+   [io|keep]` rather than a C program, and `make test-kbd-queue` its rig.
+   Its high review found that the waits for a child's exit and for a
+   message also read the keyboard for the owner and threw each byte away,
+   so an editor blocked in `con_write` still lost keys: both now read ahead
+   (`keyboard_interrupts_wait`), and the tick reads ahead for the owner
+   whoever it interrupted. **A Ctrl+C now flushes the queue**, as Unix
+   flushes pending input on an interrupt: a typed `rm foo` and Enter, then
+   Ctrl+C, must not run in the shell after the kill. That refines D3, which
+   keeps type-ahead when a program ENDS; it is flagged for Hans. A full
+   queue can still cut a sequence (a byte dropped mid-key); that is step
+   3's, which brings `keyseq` into the kernel. Found on the way: the driver
+   takes one USB keyboard report per poll, so a busy program keeps up with
+   about 25 keys a second, and QEMU's keyboard drops what is faster
+   (recorded on `docs/ROADMAP.md`).*
 1. **`KBD_MODE`, Ctrl+\ (design 1 and 2).** Check: `/bin/READKEY raw` (a new
    mode of the existing probe) prints 3 for Ctrl-C and dies on Ctrl+\;
    cooked, Ctrl-C still kills; a raw program's child starts cooked; the mode
@@ -160,6 +176,8 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    back every flag it set; `ENOTTY` on a file.
 3. **The cut sequence (design 5).** Check: a probe reads only the ESC of an
    arrow, is killed, and the shell's next line holds nothing of the tail.
+   Also here: a full queue must refuse a whole key rather than keep the
+   front of one (found by the high review of #232).
 4. **The shell's reset (design 6).** Check: on `ramfb`, a probe killed in
    reverse video, then the prompt drawn normal (`test-cond-vt.py`'s decoder).
 

@@ -1800,11 +1800,12 @@ impl WaitReason {
                 // interrupts the wait (the
                 // target keeps running); any other typed byte is
                 // deliberately discarded, same spirit as typing at a
-                // busy foreground job in `sh`.
-                if let Some(byte) = crate::syscall::poll_keyboard_byte(waiter) {
-                    if byte == 0x03 {
-                        return Some(syscall_abi::WAIT_INTERRUPTED);
-                    }
+                // busy foreground job in `sh`. Since 2026-10-07 nothing is
+                // discarded: `keyboard_interrupts_wait` reads ahead into the
+                // keyboard queue, so a byte typed while the child ran (or
+                // after it ended) reaches whoever reads next, here the shell.
+                if crate::syscall::keyboard_interrupts_wait(waiter) {
+                    return Some(syscall_abi::WAIT_INTERRUPTED);
                 }
                 match unsafe { *STATES[target].get() } {
                     TaskState::Zombie(status) => {
@@ -1821,11 +1822,11 @@ impl WaitReason {
                 // Same Ctrl+C escape hatch as TaskExit's, with the same
                 // reach (task 0 only; any other owner is marked instead) - a `recv`
                 // (or a call to a wedged server) with no reply coming
-                // must not brick the session.
-                if let Some(byte) = crate::syscall::poll_keyboard_byte(waiter) {
-                    if byte == 0x03 {
-                        return Some(syscall_abi::RECV_INTERRUPTED);
-                    }
+                // must not brick the session. Reads ahead rather than
+                // discarding: an editor blocked in `con_write`'s call to the
+                // console server keeps the keys typed meanwhile.
+                if crate::syscall::keyboard_interrupts_wait(waiter) {
+                    return Some(syscall_abi::RECV_INTERRUPTED);
                 }
                 try_recv_message_from(waiter, buf, len, from)
             }
@@ -2648,22 +2649,20 @@ pub unsafe fn on_tick(frame: *mut Context) {
         }
     }
 
-    // Ctrl+C from a *running* foreground child (a compute loop that isn't
-    // reading input - the wake-check loop above only polls the keyboard for a
-    // child blocked *on* it). Poll once when the foreground owner is the
-    // interrupted (running) task; `interrupt_key_check` inside the poll marks a
-    // Ctrl+C for the kill below. A non-Ctrl+C byte here is type-ahead the busy
-    // child wasn't reading and is dropped - rare (a program that reads input is
-    // Blocked, not running, at the tick), and the price of catching Ctrl+C in a
-    // runaway loop with no read to piggyback on. A nested shell is the owner
-    // between its commands too now, so its type-ahead can be lost while it
-    // runs (parsing, printing a prompt) where the boot shell's, exempt below,
-    // is not: the same "is the owner a foreground program" question as the
-    // Ctrl+C-kills-a-nested-shell item in docs/ROADMAP.md, and decided there.
-    // (The poll itself answers None unless `current` is the owner, so
-    // this asks only "is the running task not the boot shell".)
-    if current != TaskIndex::FIRST {
-        let _ = crate::syscall::poll_keyboard_byte(current.index());
+    // Ctrl+C from a foreground child that is not blocked in a read (a compute
+    // loop - the wake-check loop above polls the keyboard only for a child
+    // blocked *on* it, or in a wait that reads ahead). Read ahead for the
+    // keyboard owner, whoever the tick interrupted; `interrupt_key_check` inside the read
+    // marks a Ctrl+C for the kill below. Every other byte is type-ahead the
+    // owner wasn't reading, and is kept for its next read (`read_keyboard_ahead`'s
+    // queue, 2026-10-07; until then it was dropped, cutting a key's escape
+    // sequence in two). For the owner, not only when it is `current`: an owner
+    // preempted at this tick reads at the same rate as a running one (the
+    // review of #232). The boot shell is exempt, as before: its type-ahead
+    // waits on the devices for its own read.
+    let owner = input_owner();
+    if owner != TaskIndex::FIRST.index() {
+        crate::syscall::read_keyboard_ahead(owner);
     }
 
     // Honor a Ctrl+C kill (marked by `interrupt_key_check` from either poll

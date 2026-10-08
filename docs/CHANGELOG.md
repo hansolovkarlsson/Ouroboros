@@ -17,6 +17,19 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
+**Keys typed while a program is busy are kept (#232).** Step 0 of the
+Ctrl-C plan (`docs/roadmap/roadmap-ctrl-c.md`). The tick reads the keyboard
+for a foreground program that is running rather than reading, so that
+Ctrl+C ends a runaway loop, and until now it threw away every other byte it
+read, and the waits for a child's exit and for a message did the same: a
+key typed while an editor redrew was lost, and since #229 an arrow could
+arrive as `[A`. Those bytes now wait in a 64-byte kernel queue for the
+program's next read. Ctrl+C is still found behind a full queue, and it
+flushes the queue, so what was typed before it never runs in the shell
+after the kill. `make test-kbd-queue` types during `/bin/READKEY spin`, also
+while it is blocked writing to the console and while it exits without
+reading, on QEMU's USB keyboard and serial line.
+
 **A program can read the screen size (#230).** Item 3 of DevTools's
 editor note. `CON_INFO`'s size fields, gated to `cond` until now, are open to
 every task: three numbers fixed at boot, which grant nothing. A C program
