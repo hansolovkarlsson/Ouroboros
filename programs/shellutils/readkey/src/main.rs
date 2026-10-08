@@ -27,6 +27,20 @@
 //! shell; with `msg` it then blocks in `MSG_RECV` until a message comes, so
 //! `readkey spin 150 keep | readkey spin 0 msg` holds the keyboard owner (a
 //! pipeline's last stage) in a message wait for three seconds.
+//!
+//! `readkey spin [ticks] raw` spins and drains in raw mode, so a Ctrl+C typed
+//! during the spin comes back as 3; `readkey spin [ticks] rawkeep` is `keep`
+//! in raw mode: a Ctrl+C typed during the spin is queued as a byte and left
+//! unread when it exits.
+//!
+//! `readkey raw` is the observer for the keyboard modes
+//! (`docs/roadmap/roadmap-ctrl-c.md`, step 1): it puts itself in raw mode
+//! (`KBD_MODE`) and then echoes keys as the default mode does, so Ctrl+C
+//! shows as `(3)` instead of ending it; Ctrl+\ still ends it, in every
+//! mode. `readkey mode` prints the mode this task starts in, `readkey: mode
+//! cooked in slot N` or `readkey: mode raw in slot N`, and exits: run after a
+//! `readkey raw` ended in the same slot (it prints its slot too), it shows the
+//! mode did not outlive the task.
 
 #![no_std]
 #![no_main]
@@ -34,19 +48,33 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: readkey [poll|spin]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg]: run three seconds without reading, then print every byte typed meanwhile)\r\n");
+    ulib::usage_if_requested(b"usage: readkey [poll|spin|raw|mode]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg|raw|rawkeep]: run three seconds without reading, then print every byte typed meanwhile; raw: Ctrl+C is a key, Ctrl+\\ ends it; mode: print this task's keyboard mode)\r\n");
     let mut mode = [0u8; 8];
+    let mut raw = false;
     let poll = match ulib::arg(1, &mut mode) {
         None => false,
         Some(n) if &mode[..n] == b"poll" => true,
         Some(n) if &mode[..n] == b"spin" => spin_then_drain(),
+        Some(n) if &mode[..n] == b"mode" => print_mode(),
+        Some(n) if &mode[..n] == b"raw" => {
+            if ulib::kbd_mode(syscall_abi::KBD_RAW) != syscall_abi::KBD_RAW {
+                ulib::con_write(b"readkey: the kernel refused raw mode\r\n");
+                ulib::exit(1);
+            }
+            raw = true;
+            false
+        }
         Some(_) => {
-            ulib::con_write(b"readkey: unknown mode (`poll` or `spin`)\r\n");
+            ulib::con_write(b"readkey: unknown mode (`poll`, `spin`, `raw` or `mode`)\r\n");
             ulib::exit(1);
         }
     };
     if poll {
         ulib::con_write(b"readkey: polling (in the foreground: q to quit, Ctrl+C to abort; in the background it never owns the keyboard, so kill it from the shell)\r\n");
+    } else if raw {
+        ulib::con_write(b"readkey: raw in slot ");
+        write_dec(ulib::self_task());
+        ulib::con_write(b", press keys (q to quit, Ctrl+\\ to abort; Ctrl+C is a key)\r\n");
     } else {
         ulib::con_write(b"readkey: press keys (q to quit, Ctrl+C to abort)\r\n");
     }
@@ -81,14 +109,34 @@ pub extern "C" fn _start() -> ! {
             ulib::con_write(b"?");
         }
         ulib::con_write(b"  (");
-        let mut buf = [0u8; 8];
-        let mut n = 0usize;
-        ulib::emit_dec(&mut buf, &mut n, c as u64);
-        ulib::con_write(&buf[..n]);
+        write_dec(c as u64);
         ulib::con_write(b")\r\n");
     }
     ulib::con_write(b"readkey: bye\r\n");
     ulib::exit(0);
+}
+
+/// `readkey mode`: print the keyboard mode this task is in, and exit.
+/// The slot is printed so a rig can tell that a later `readkey mode` ran
+/// where a `readkey raw` did: only then does "starts cooked" show the mode
+/// ending with the task rather than a slot that was never raw.
+fn print_mode() -> ! {
+    match ulib::kbd_mode(syscall_abi::KBD_QUERY) {
+        syscall_abi::KBD_RAW => ulib::con_write(b"readkey: mode raw in slot "),
+        syscall_abi::KBD_COOKED => ulib::con_write(b"readkey: mode cooked in slot "),
+        _ => ulib::con_write(b"readkey: mode unknown in slot "),
+    }
+    write_dec(ulib::self_task());
+    ulib::con_write(b"\r\n");
+    ulib::exit(0);
+}
+
+/// `v` in decimal, to the console.
+fn write_dec(v: u64) {
+    let mut buf = [0u8; 20];
+    let mut n = 0usize;
+    ulib::emit_dec(&mut buf, &mut n, v);
+    ulib::con_write(&buf[..n]);
 }
 
 /// Ticks `readkey spin` runs without reading unless told otherwise
@@ -106,7 +154,18 @@ fn spin_then_drain() -> ! {
     let mut how = [0u8; 8];
     let how_len = ulib::arg(3, &mut how).unwrap_or(0);
     let msg = &how[..how_len] == b"msg";
-    let keep = &how[..how_len] == b"keep";
+    // `rawkeep`: `keep`, in raw mode, so a Ctrl+C typed during the spin is
+    // queued as a byte and left unread when it exits: the case where the
+    // keyboard reverts to the shell with a raw owner's Ctrl+C still queued.
+    let rawkeep = &how[..how_len] == b"rawkeep";
+    // `raw`: the spin and the drain in raw mode, so a Ctrl+C typed during the
+    // spin must come back as 3: read ahead by the tick, queued as a byte.
+    let raw = &how[..how_len] == b"raw";
+    if (rawkeep || raw) && ulib::kbd_mode(syscall_abi::KBD_RAW) != syscall_abi::KBD_RAW {
+        ulib::con_write(b"readkey: the kernel refused raw mode\r\n");
+        ulib::exit(1);
+    }
+    let keep = rawkeep || &how[..how_len] == b"keep";
     ulib::con_write(b"readkey: spinning\r\n");
     let started = ulib::get_ticks();
     while ulib::get_ticks().wrapping_sub(started) < ticks {
@@ -139,12 +198,9 @@ fn spin_then_drain() -> ! {
         }
     }
     ulib::con_write(b"\r\nreadkey: got");
-    let mut buf = [0u8; 8];
     for &c in &got[..n_got] {
-        let mut n = 0usize;
-        ulib::emit_dec(&mut buf, &mut n, c as u64);
         ulib::con_write(b" ");
-        ulib::con_write(&buf[..n]);
+        write_dec(c as u64);
     }
     ulib::con_write(b"\r\n");
     ulib::exit(0);

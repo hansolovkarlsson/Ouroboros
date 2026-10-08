@@ -10,9 +10,9 @@ per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
-**Status 2026-10-07: step 0 built (#232), step 3 half built (#233: whole
-keys in the queue; the tail on a change of owner not yet); steps 1, 2 and 4
-not started. The four decisions (D1 to D4)
+**Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 3
+half built (#233: whole keys in the queue; the tail on a change of owner not
+yet); steps 2 and 4 not started. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
 met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
 use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so
@@ -175,7 +175,76 @@ too. Not a kernel job: the kernel does not know what the program wrote.
 1. **`KBD_MODE`, Ctrl+\ (design 1 and 2).** Check: `/bin/READKEY raw` (a new
    mode of the existing probe) prints 3 for Ctrl-C and dies on Ctrl+\;
    cooked, Ctrl-C still kills; a raw program's child starts cooked; the mode
-   ends with the task. Each fails with its part removed.
+   ends with the task. Each fails with its part removed. *Built 2026-10-08 (#235):
+   `KBD_MODE` (70) with `KBD_COOKED`, `KBD_RAW` and `KBD_QUERY`, the mode in
+   `tasks.rs`'s `KBD_RAW`, reset in `end_task`; `interrupt_key_check` acts
+   on 0x1c always and on 0x03 only for a cooked owner; xhci.rs maps Ctrl+\
+   (HID 0x31); `keyboard_interrupts_wait` takes 0x1c too, so it interrupts
+   the boot shell's stuck `wait` as Ctrl+C does. At the boot shell both
+   bytes still pass through to the line editor, which ignores them, so D2's
+   "0x1c never reaches any program" holds for every program but the boot
+   shell. `/bin/READKEY raw` and `readkey mode` are the observers and `make
+   test-kbd-mode` the rig: raw reads Ctrl+C as 3 from the serial line and
+   the USB keyboard, Ctrl+\ ends it from either, `readkey mode` in the same
+   slot afterwards is cooked, cooked Ctrl+C and Ctrl+\ both end it, and
+   the boot shell ignores both. "A raw program's child starts cooked" is
+   checked as the slot's next occupant: `SPAWN` copies no mode, so a child
+   is a fresh occupant like any other, and no probe spawns from a raw task.
+   Its high review added: the two interrupt bytes spelled once
+   (`tasks::KEY_INTERRUPT`, `KEY_QUIT`); Ctrl+\ from both ISO backslash
+   keys (0x32, 0x64), since a Swedish, UK or German keyboard has no 0x31
+   and the way out must be typable on it; the kill line naming the key
+   pressed; and a rule written down rather than changed, that a key's
+   meaning is settled when it is read, as on Unix (a Ctrl+C queued for a
+   raw owner stays a byte if the owner turns cooked or dies), since judging
+   it again on delivery would let a stale Ctrl+C detach the nested shell
+   that gets the keyboard next. The rig gained the stuck `wait` interrupted
+   by Ctrl+\, the ISO key, the key in each kill line, and the slot of
+   `readkey mode` matched against the raw runs'. Seven mutation controls,
+   each failing its check: the raw test, the 0x1c arm, the USB mapping, the
+   ISO mapping, the reset in `end_task`, Ctrl+\ in the stuck wait, and the
+   kill line's key. A second high review found the review's own fixes
+   wanting in three ways, all fixed: the boot shell's waits still looked
+   for the interrupt BYTE in the queue, so a raw owner's Ctrl+C left queued
+   when it exited ended the shell's `WAIT` on it as interrupted and leaked
+   the zombie (now a mark set when the byte is read for the shell,
+   `KbdQueue::boot_interrupt`); Ctrl on 0x64, the ISO `<>` key, made
+   Ctrl+< an uncatchable kill (0x64 is unmapped again, and 0x32, the ISO key
+   in the backslash position, is mapped as 0x31 throughout, typing `\` and
+   `|` too, so the kill key is the key that shows a backslash); and the
+   kill line's key was a second atomic beside `PENDING_KILL` (now a bit
+   packed into it). Eight mutation controls in the end: the raw test, the
+   0x1c arm, the USB 0x31 mapping, Ctrl+< made the quit key, the reset in
+   `end_task`, Ctrl+\ in the stuck wait, every interrupt byte marked (the
+   old scan, which the zombie check catches), and the kill line's key. The
+   0x32 mapping cannot be sent from QEMU and is checked only on hardware.
+   A third high review found the mark itself lost: the queue drops a byte
+   when full, mark and all, so the boot shell's stuck `wait` could not be
+   interrupted behind 64 queued bytes, and keys typed after the interrupt
+   in the same batch were flushed with it. Now `read_keyboard_ahead`
+   answers whether it read an interrupt key for the boot shell, stops
+   there and queues nothing of it (the reviewer's form; the mark is gone).
+   A raw owner's Ctrl+C left queued and handed to the next cooked owner as
+   the byte 3 was raised again and declined: that is the read-time rule, as
+   on Unix. The rig gained 70 letters before the stuck wait's Ctrl+\, and
+   `readkey spin 100 raw` (a busy raw owner's Ctrl+C read back as 3); nine
+   mutation controls: the eight above with the mark's replaced by two, the
+   boot-shell condition for any reader (a busy raw owner's Ctrl+C dropped)
+   and the boot interrupt queued instead of answered. A fourth high review
+   found four more, all fixed: the waits looked for an interrupt before
+   an ended child or an arrived reply, so a second Ctrl+\ at a hung
+   program could end a finished `WAIT` as interrupted (now the child or
+   the reply first; no rig check, since it needs a key in the gap between
+   a program ending and the shell's next poll); the boot shell's interrupt
+   byte no longer reached the key parser, so an Esc then Ctrl+\ ate the
+   next key queued (`KbdQueue::flush_at_control`); `KBD_MODE_BAD` equalled
+   the unknown-syscall answer (now `u64::MAX - 1`); and the boot-shell
+   decision was spelled twice (now one `KeyVerdict` from
+   `interrupt_key_check`). It also showed this step's "the boot shell
+   ignores both bytes" to be wrong: either interrupts the boot shell's
+   waits, its calls to the servers included, as Ctrl+C did before; the
+   stale reply that leaves is older than this step and is on
+   `docs/ROADMAP.md`. Ten mutation controls in the end.*
 2. **`termios` (design 3).** Check: a C probe sets raw through `tcsetattr`,
    reads Ctrl-C as 3, restores, and is killed by Ctrl-C; `tcgetattr` reads
    back every flag it set; `ENOTTY` on a file.
@@ -198,7 +267,23 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    starts; every byte reaches readers through the queue; an owner change
    trims the queue's front to the next key start, and drops a key's rest as
    it arrives only within the same tick, since a bare ESC's next key comes
-   later and a sequence's rest does not.*
+   later and a sequence's rest does not.* *Four findings from the fifth
+   high review of #235 belong here, older than #235 (the parser is #233's)
+   and left for this step because they are its design question: (a) the
+   kill and detach flush (`clear()`) neither feeds the interrupt byte to
+   the parser nor lets it end a key, so a bare Esc read ahead and then
+   Ctrl+C or Ctrl+\ sets `dropping`, and the next letter read ahead is
+   eaten as the Esc's rest; #233 chose that, so a cut arrow's tail does not
+   arrive as text, and the two cases cannot be told apart without knowing
+   where each key started and when its bytes came; (b) the parser is fed
+   only on push, not on the direct read, and `pop` never resets `partial`,
+   so a drained queue can still look mid-key to a later flush; (c) the
+   direct read path's kill leaves the parser as it was; (d) `clear()` and
+   `flush_at_control` are two flushes for one event, which #235 kept apart
+   on purpose: its boot-shell path restores what that path did before
+   #235 (the byte was queued, so the parser saw it), and changing the kill
+   path is this step's decision. The design above, every byte through the
+   queue and one parser recording key starts, answers all four.*
 4. **The shell's reset (design 6).** Check: on `ramfb`, a probe killed in
    reverse video, then the prompt drawn normal (`test-cond-vt.py`'s decoder).
 

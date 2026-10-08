@@ -2387,8 +2387,10 @@ be reviewed after the fact from the saved screenshots.
 >       `KBD_MODE` with Ctrl+\ as the way out, `termios` in the C library,
 >       and a kernel input queue for the two hazards below; its four
 >       decisions settled by Hans the same day, as recommended. DevTools
->       answered 2026-10-08 that Edit does not bind ^\, so step 1 waits on
->       nothing:
+>       answered 2026-10-08 that Edit does not bind ^\, and step 1
+>       (`KBD_MODE`, Ctrl+\ as the way out, `make test-kbd-mode`) was
+>       built the same day; steps 2 (`termios`), 3's second half and 4
+>       remain:
 >       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
 >       time, so a change of keyboard owner (a program killed between the
@@ -2400,6 +2402,21 @@ be reviewed after the fact from the saved screenshots.
 >       at that choke point, consuming only a Ctrl-C, fixes the second.
 >       Note:
 >       [`handoffs/2026-10-05-from-edit-editor-console.md`](handoffs/2026-10-05-from-edit-editor-console.md).
+> - [ ] **new** **A stale reply after an interrupted call.** Ctrl+C (and
+>       since #235 Ctrl+\) interrupts the boot shell's message waits, its
+>       `MSG_CALL`s to the servers included (`RECV_INTERRUPTED`); the
+>       server's reply, still on its way, then lands in the shell's mailbox
+>       and `try_recv_message_from` takes it as the answer to the NEXT call
+>       to that server, which gets the wrong reply. Older than #235 (since
+>       #232 the waits read the keyboard); found by its fourth high review.
+>       #235 narrowed it (a reply already waiting is delivered before an
+>       interrupt is looked for) but did not close it. Two shapes to
+>       weigh: a call's reply wait is never interrupted (the stuck `recv`
+>       and the wedged server are what interruption is for, and a call to a
+>       wedged server is the second), or calls carry a sequence number the
+>       reply echoes, so a late reply is recognised and dropped. Done when a
+>       rig interrupts the boot shell during a call held open by a slow
+>       server and the shell's next call to that server gets its own reply.
 > - [x] **new** **`rename` in the C port.** picolibc declares it and
 >       nothing defines it, so a C program calling it fails to link. One
 >       `np_request` in `libc/src/file.c`, `NP_MV` on the two resolved

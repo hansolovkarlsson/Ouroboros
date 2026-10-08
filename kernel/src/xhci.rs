@@ -1016,11 +1016,16 @@ fn keycode_to_bytes(keycode: u8, shift: bool, ctrl: bool) -> Option<KeyBytes> {
 /// `fg` escape hatch specifically (Ctrl+C = 0x03, ETX, intercepted
 /// kernel-side to reclaim the keyboard - see
 /// `syscall.rs::poll_keyboard_byte`), general because the general
-/// mapping is the same three lines.
+/// mapping is the same three lines. Ctrl+\ = 0x1c too, the way out a
+/// program in raw keyboard mode cannot opt out of (`KBD_MODE`).
 fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
     if ctrl {
         return match keycode {
             0x04..=0x1d => Some(1 + (keycode - 0x04)), // Ctrl+A..Ctrl+Z
+            // Ctrl+\, the way out in every keyboard mode, on the backslash
+            // key: 0x31, or 0x32, the same position on an ISO keyboard (see
+            // the 0x32 arm below).
+            0x31 | 0x32 => Some(crate::tasks::KEY_QUIT),
             _ => None,
         };
     }
@@ -1049,7 +1054,14 @@ fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
         // real-hardware smoke test (the chord arrived, the keymap
         // dropped it), which means no physical keyboard could type a
         // pipeline on Parallels either.
-        0x31 => Some(if shift { b'|' } else { b'\\' }),
+        // 0x32 is the ISO keyboard's key in the backslash position, beside
+        // Enter (Swedish, UK, German); PS/2 cannot tell the two apart, and
+        // keys here are mapped by their US position, so it types what 0x31
+        // does. Without it an ISO keyboard typed nothing there, and could not
+        // type Ctrl+\, the way out of a raw program. 0x64, the ISO key beside
+        // left Shift, has no US position and stays unmapped: making Ctrl+<
+        // the uncatchable kill would be a trap (second high review of #235).
+        0x31 | 0x32 => Some(if shift { b'|' } else { b'\\' }),
         0x33 => Some(if shift { b':' } else { b';' }),
         0x34 => Some(if shift { b'"' } else { b'\'' }),
         0x36 => Some(if shift { b'<' } else { b',' }),

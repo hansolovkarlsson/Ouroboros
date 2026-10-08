@@ -285,6 +285,14 @@ pub fn getgid() -> u32 {
     (task_id(self_task()) >> 32) as u32
 }
 
+/// Sets this task's keyboard mode (`KBD_MODE`): `syscall_abi::KBD_COOKED`,
+/// `KBD_RAW` (Ctrl+C arrives as the byte 3; Ctrl+\ still ends the program),
+/// or `KBD_QUERY` to only read it. Returns the mode in effect after the call,
+/// or `KBD_MODE_BAD` for an unknown `mode`.
+pub fn kbd_mode(mode: u64) -> u64 {
+    syscall(syscall_abi::KBD_MODE, mode)
+}
+
 /// This boot's counter (`BOOT_ID`), or `None` when the kernel could not vouch
 /// for one this boot (no store held a counter from before it). See
 /// `syscall_abi::BOOT_ID` for the rules.

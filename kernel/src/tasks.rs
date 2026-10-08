@@ -585,8 +585,63 @@ static FOREGROUND_COMMAND: [AtomicBool; NUM_TASKS] = [const { AtomicBool::new(fa
 /// names a task). The kill is deferred to `on_tick` rather than done inline
 /// in the keyboard poll because the poll runs in contexts (a wake-check pass,
 /// a syscall) where switching away from a task isn't safe - `on_tick` already
-/// owns that.
+/// owns that. The key that marked it rides in the same value
+/// ([`PENDING_KILL_BY_QUIT`]), so the mark and the key the kill line names
+/// are one store and one swap, and cannot disagree.
 static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
+
+/// Set in [`PENDING_KILL`] beside the identity when Ctrl+\ made the mark
+/// rather than Ctrl+C, so the kill line names the key the user pressed: in
+/// raw mode Ctrl+C never kills, and a line saying it did would point at the
+/// wrong way out. The top bit: a packed identity never reaches it (the
+/// generation would need 2^55 spawns).
+const PENDING_KILL_BY_QUIT: u64 = 1 << 63;
+
+/// Ctrl+C (ETX): ends or detaches a cooked keyboard owner, and is an ordinary
+/// byte to a raw one (`KBD_MODE`). With [`KEY_QUIT`], the one spelling of
+/// the interrupt bytes for the kernel's own decisions:
+/// [`interrupt_key_check`] and `syscall.rs`'s read-ahead name these. xhci.rs
+/// names [`KEY_QUIT`] for Ctrl+\ but makes Ctrl+C by the general Ctrl+letter
+/// rule (`1 + (keycode - 0x04)`), as a serial terminal does, so this value
+/// is the byte those devices send for Ctrl+C, not a choice the kernel can
+/// change here.
+pub(crate) const KEY_INTERRUPT: u8 = 0x03;
+/// Ctrl+\ (FS): ends or detaches the keyboard owner in every mode, the way
+/// out no program can opt out of.
+pub(crate) const KEY_QUIT: u8 = 0x1c;
+
+/// What a keyboard byte means as it is read, decided once, by
+/// [`interrupt_key_check`], for both readers in `syscall.rs` (the direct read
+/// and the read-ahead), so the boot shell's case has one spelling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyVerdict {
+    /// An ordinary byte for the reader.
+    Byte,
+    /// An interrupt the kernel acted on (a kill marked or a session
+    /// detached): the byte is swallowed and pending input flushed.
+    Consumed,
+    /// Ctrl+C or Ctrl+\ with the boot shell owning the keyboard: no kill,
+    /// but the interrupt for the boot shell's waits
+    /// (`syscall::keyboard_interrupts_wait`). Its line editor, reading
+    /// directly, gets the byte and ignores it.
+    BootInterrupt,
+}
+
+/// Each task's keyboard mode (`KBD_MODE`): `true` = raw, where Ctrl+C is an
+/// ordinary byte for [`interrupt_key_check`]; `false` = cooked, the default.
+/// Indexed by slot and reset by [`end_task`], so the mode ends with the
+/// task and the slot's next occupant starts cooked.
+static KBD_RAW: [AtomicBool; NUM_TASKS] = [const { AtomicBool::new(false) }; NUM_TASKS];
+
+/// Sets task `task`'s keyboard mode (`KBD_MODE`): raw when `raw`.
+pub(crate) fn set_kbd_raw(task: usize, raw: bool) {
+    KBD_RAW[task].store(raw, Ordering::Relaxed);
+}
+
+/// Whether task `task` is in raw keyboard mode.
+pub(crate) fn kbd_raw(task: usize) -> bool {
+    KBD_RAW[task].load(Ordering::Relaxed)
+}
 
 /// `FG`'s effect: hand the keyboard to task `owner`, keeping
 /// [`PREVIOUS_OWNERS`] a stack: a push if `owner` is not in the chain below
@@ -691,7 +746,10 @@ fn task_waited_on(target: usize) -> bool {
     })
 }
 
-/// The Ctrl+C escape hatch. When `byte` is Ctrl+C (`0x03`, ETX) and a task
+/// The escape hatch. When `byte` is an interrupt key the owner's mode
+/// honours (Ctrl+\, [`KEY_QUIT`], always; Ctrl+C, [`KEY_INTERRUPT`], only
+/// for a cooked owner: a raw one gets it as an ordinary byte,
+/// [`KeyVerdict::Byte`]) and a task
 /// other than the boot shell owns the keyboard, it does one of two things by
 /// whether the owner is a foreground command (its [`FOREGROUND_COMMAND`] flag,
 /// OR a live task blocked in `WAIT` on it - see the body): a foreground
@@ -699,11 +757,12 @@ fn task_waited_on(target: usize) -> bool {
 /// death ([`PENDING_KILL`], killed by [`on_tick`]); a SESSION handed over with
 /// a bare `fg` is DETACHED, the keyboard reverting to whoever handed it over
 /// without killing it, so a stray Ctrl+C at a nested shell's prompt does not
-/// throw away its login, cwd and env. Either way the byte is swallowed (returns
-/// `true`). On a terminate, when the task dies the keyboard reverts the same
-/// way. When task 0 (the boot shell) already owns the keyboard, Ctrl+C is not
-/// special: it passes through as an ordinary byte the line editor ignores
-/// (returns `false`), so the normal single-shell case is unchanged.
+/// throw away its login, cwd and env. Either way the byte is swallowed
+/// ([`KeyVerdict::Consumed`]). On a terminate, when the task dies the keyboard
+/// reverts the same way. When task 0 (the boot shell) already owns the
+/// keyboard, neither key kills: it is [`KeyVerdict::BootInterrupt`], which
+/// interrupts the boot shell's waits and is otherwise a byte its line editor
+/// ignores.
 ///
 /// The opening summary applies here: a foreground COMMAND is marked for death,
 /// a `fg`-handed SESSION is detached. Which of the two `owner` is comes from
@@ -729,14 +788,26 @@ fn task_waited_on(target: usize) -> bool {
 /// a stray Ctrl+C would throw away a live login, cwd and env. So Ctrl+C
 /// **detaches** it instead: the keyboard reverts to that previous owner, `owner`
 /// stays alive, and a later `fg` resumes it. Non-destructive and escapable -
-/// the byte is still consumed here either way (returns `true`), it is the
-/// effect that differs. Task 0 (the boot shell) is never an `owner` here (the
-/// guard below), so its Ctrl+C stays an ordinary ignored byte.
-pub(crate) fn interrupt_key_check(byte: u8) -> bool {
-    const ETX: u8 = 0x03; // Ctrl+C
+/// the byte is still consumed here either way ([`KeyVerdict::Consumed`]), it
+/// is the effect that differs. Task 0 (the boot shell) is never an `owner`
+/// here (the guard below answers [`KeyVerdict::BootInterrupt`] first).
+///
+/// **Ctrl+\ (`0x1c`, FS) does the same in every mode, and Ctrl+C only in
+/// cooked mode**: an owner in raw mode ([`KBD_RAW`], `KBD_MODE`) gets Ctrl+C
+/// as an ordinary byte, so Ctrl+\ is the way out no program can opt out of
+/// (`docs/roadmap/roadmap-ctrl-c.md`, D1 and D2). At the boot shell either
+/// is [`KeyVerdict::BootInterrupt`]: it never kills there, it interrupts the
+/// boot shell's waits (for a child, or for a message, its calls to the
+/// servers included), and its line editor ignores the byte.
+pub(crate) fn interrupt_key_check(byte: u8) -> KeyVerdict {
     let owner = input_owner();
-    if byte != ETX || owner == 0 {
-        return false;
+    if owner == 0 {
+        return if byte == KEY_INTERRUPT || byte == KEY_QUIT { KeyVerdict::BootInterrupt } else { KeyVerdict::Byte };
+    }
+    match byte {
+        KEY_QUIT => {}
+        KEY_INTERRUPT if !kbd_raw(owner) => {}
+        _ => return KeyVerdict::Byte,
     }
     // The occupant, not the slot: see PENDING_KILL. An owner that is not a
     // task (an Unused slot) cannot happen, since ownership reverts on
@@ -746,7 +817,7 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
         crate::console::println_force!(
             "Ouroboros kernel: keyboard owner slot {owner} holds no task - a kernel bug (its two writers are set_input_owner and revert_input_owner_if)"
         );
-        return false;
+        return KeyVerdict::Byte;
     };
     // Terminate a foreground COMMAND; detach a `fg`-handed SESSION. Two signals,
     // OR'd, because each covers a case the other misses (both found by the
@@ -764,8 +835,9 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     if FOREGROUND_COMMAND[owner].load(Ordering::Relaxed) || task_waited_on(owner) {
         // Terminate: a task is, or is about to be, blocked in `WAIT` on `owner`,
         // and its `WAIT` wakes with `TASK_KILLED_STATUS`.
-        PENDING_KILL.store(id, Ordering::Relaxed);
-        return true;
+        let by_quit = if byte == KEY_QUIT { PENDING_KILL_BY_QUIT } else { 0 };
+        PENDING_KILL.store(id | by_quit, Ordering::Relaxed);
+        return KeyVerdict::Consumed;
     }
     // Detach: hand the keyboard back to whoever handed it over (or task 0 if
     // none is live) without killing `owner`. This only flips the ownership
@@ -775,7 +847,7 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     // (`set_input_owner` re-records the same link).
     let target = live_occupant(PREVIOUS_OWNERS[owner].load(Ordering::Relaxed)).map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
-    true
+    KeyVerdict::Consumed
 }
 
 /// One queued IPC message: who sent it, how long it is, and the bytes
@@ -1795,7 +1867,7 @@ impl WaitReason {
                 // byte if available. Ctrl+C reaches this
                 // branch only when the waiter is task 0 (the one owner
                 // interrupt_key_check leaves alone - any other owner it
-                // terminates or detaches in the poll, returning true, so
+                // terminates or detaches in the poll, KeyVerdict::Consumed, so
                 // the byte never reaches here for them). For task 0 it
                 // interrupts the wait (the
                 // target keeps running); any other typed byte is
@@ -1804,19 +1876,25 @@ impl WaitReason {
                 // discarded: `keyboard_interrupts_wait` reads ahead into the
                 // keyboard queue, so a byte typed while the child ran (or
                 // after it ended) reaches whoever reads next, here the shell.
-                if crate::syscall::keyboard_interrupts_wait(waiter) {
-                    return Some(syscall_abi::WAIT_INTERRUPTED);
-                }
+                //
+                // An ended target first: a Ctrl+C or Ctrl+\ typed just after
+                // it died (a second press at a hung program, say) must not
+                // turn a finished wait into an interrupted one, which would
+                // leave the zombie unreaped (the fourth high review of #235).
                 match unsafe { *STATES[target].get() } {
                     TaskState::Zombie(status) => {
                         // Collecting the status is the reap - the slot
                         // becomes spawnable again here and only here.
                         unsafe { *STATES[target].get() = TaskState::Unused };
-                        Some(status)
+                        return Some(status);
                     }
-                    TaskState::Unused => Some(syscall_abi::TASK_KILLED_STATUS),
-                    _ => None,
+                    TaskState::Unused => return Some(syscall_abi::TASK_KILLED_STATUS),
+                    _ => {}
                 }
+                if crate::syscall::keyboard_interrupts_wait(waiter) {
+                    return Some(syscall_abi::WAIT_INTERRUPTED);
+                }
+                None
             }
             WaitReason::Message { buf, len, from } => {
                 // Same Ctrl+C escape hatch as TaskExit's, with the same
@@ -1824,11 +1902,17 @@ impl WaitReason {
                 // (or a call to a wedged server) with no reply coming
                 // must not brick the session. Reads ahead rather than
                 // discarding: an editor blocked in `con_write`'s call to the
-                // console server keeps the keys typed meanwhile.
+                // console server keeps the keys typed meanwhile. A message
+                // already waiting is delivered first, as an ended target is
+                // in TaskExit's arm: the wait is done, and an interrupt
+                // would leave the reply for the next call.
+                if let Some(got) = try_recv_message_from(waiter, buf, len, from) {
+                    return Some(got);
+                }
                 if crate::syscall::keyboard_interrupts_wait(waiter) {
                     return Some(syscall_abi::RECV_INTERRUPTED);
                 }
-                try_recv_message_from(waiter, buf, len, from)
+                None
             }
             WaitReason::NetInput { deadline } => {
                 // Woken by a frame, a message, or the deadline (a bare timer
@@ -2141,6 +2225,7 @@ fn end_task(i: TaskIndex, final_state: TaskState) {
     clear_argv(i);
     clear_cwd(i);
     clear_env(i);
+    set_kbd_raw(i, false);
     clear_namespace(i);
     reset_stdout_target(i);
     reset_id(i);
@@ -2671,7 +2756,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // like the supervised-server restart below but without a restart. Its death
     // reverts the keyboard to the shell that ran it, whose `WAIT` wakes with
     // `TASK_KILLED_STATUS`.
-    let pending = PENDING_KILL.swap(0, Ordering::Relaxed);
+    let marked = PENDING_KILL.swap(0, Ordering::Relaxed);
+    let pending = marked & !PENDING_KILL_BY_QUIT;
     // Only a spawnable slot (>= FIRST_SPAWNABLE) may be terminated - the same
     // protected set KILL/EXIT/FG enforce (never the shell, idle, or a
     // supervised server). FG refuses to foreground any slot from 1 up to
@@ -2688,7 +2774,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // is_spawnable and occupant_is alike; no separate guard is needed.
     let victim = live_occupant(pending).filter(|v| v.is_spawnable());
     if let Some(victim_slot) = victim {
-        crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {} terminated", victim_slot.index());
+        let key = if marked & PENDING_KILL_BY_QUIT != 0 { "Ctrl+\\" } else { "Ctrl+C" };
+        crate::console::println!("Ouroboros kernel: {key} - foreground task {} terminated", victim_slot.index());
         if victim_slot == current {
             unsafe { kill_current_and_switch(frame) };
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
