@@ -15,6 +15,14 @@
 //! It spins (a syscall per iteration, no yield exists yet), so it takes every
 //! timeslice it is given; it gives up on its own after a tick budget, and is
 //! an observer to run for the witness and kill after regardless.
+//!
+//! `readkey spin [ticks]` is the observer for the kernel's keyboard queue
+//! (`docs/roadmap/roadmap-ctrl-c.md`, step 0): it prints `readkey: spinning`,
+//! runs for `ticks` ticks (default `SPIN_TICKS`) without reading the keyboard, so every tick
+//! finds it running rather than blocked in a read, then reads everything
+//! waiting and prints it on one line, `readkey: got <byte> <byte> ...` in
+//! decimal. Keys pressed during the spin reach it only if the tick kept the
+//! bytes it read; until 2026-10-07 it threw them away.
 
 #![no_std]
 #![no_main]
@@ -22,13 +30,14 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: readkey [poll]  (poll: spin on try_read_char instead of blocking; an observer for the keyboard-owner gate, kill it when done)\r\n");
+    ulib::usage_if_requested(b"usage: readkey [poll|spin]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin: run three seconds without reading, then print every byte typed meanwhile)\r\n");
     let mut mode = [0u8; 8];
     let poll = match ulib::arg(1, &mut mode) {
         None => false,
         Some(n) if &mode[..n] == b"poll" => true,
+        Some(n) if &mode[..n] == b"spin" => spin_then_drain(),
         Some(_) => {
-            ulib::con_write(b"readkey: unknown mode (the only one is `poll`)\r\n");
+            ulib::con_write(b"readkey: unknown mode (`poll` or `spin`)\r\n");
             ulib::exit(1);
         }
     };
@@ -75,5 +84,34 @@ pub extern "C" fn _start() -> ! {
         ulib::con_write(b")\r\n");
     }
     ulib::con_write(b"readkey: bye\r\n");
+    ulib::exit(0);
+}
+
+/// Ticks `readkey spin` runs without reading unless told otherwise
+/// (`readkey spin <ticks>`): three seconds at the 20 ms tick, time for a rig
+/// to press a few keys.
+const SPIN_TICKS: u64 = 150;
+
+/// `readkey spin`: see the module doc. Never returns.
+fn spin_then_drain() -> ! {
+    let mut arg = [0u8; 8];
+    let ticks = ulib::arg(2, &mut arg)
+        .and_then(|n| core::str::from_utf8(&arg[..n]).ok())
+        .and_then(ulib::parse_u64)
+        .unwrap_or(SPIN_TICKS);
+    ulib::con_write(b"readkey: spinning\r\n");
+    let started = ulib::get_ticks();
+    while ulib::get_ticks().wrapping_sub(started) < ticks {
+        core::hint::spin_loop();
+    }
+    ulib::con_write(b"readkey: got");
+    let mut buf = [0u8; 8];
+    while let Some(c) = ulib::try_read_char() {
+        let mut n = 0usize;
+        ulib::emit_dec(&mut buf, &mut n, c as u64);
+        ulib::con_write(b" ");
+        ulib::con_write(&buf[..n]);
+    }
+    ulib::con_write(b"\r\n");
     ulib::exit(0);
 }

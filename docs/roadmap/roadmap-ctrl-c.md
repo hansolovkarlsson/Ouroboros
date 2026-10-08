@@ -10,7 +10,7 @@ per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
-**Status 2026-10-07: written, not started. The four decisions (D1 to D4)
+**Status 2026-10-07: step 0 built (PR_QUEUE); steps 1 to 4 not started. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. Before step 1,
 DevTools is asked whether Edit binds ^\ (D1's condition):
 `~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-ctrl-backslash.md`.**
@@ -150,7 +150,14 @@ too. Not a kernel job: the kernel does not know what the program wrote.
 0. **The input queue (design 4).** The tick's byte goes into the queue.
    Check: a C probe that spins between reads, keys pressed during the spin
    by QEMU's `sendkey`, every byte read back; fails with the tick's drop
-   restored.
+   restored. *Built 2026-10-07 (PR_QUEUE): `syscall.rs`'s
+   `read_keyboard_ahead` and `KBD_QUEUE`, bounded at 128 bytes a tick
+   because it runs with interrupts masked; the probe is `/bin/READKEY spin
+   [ticks]` rather than a C program, and `make test-kbd-queue` its rig.
+   Found on the way: the driver takes one USB keyboard report per poll and
+   the tick reads ahead about every other tick, so a busy program keeps up
+   with about 12 keys a second, and QEMU's keyboard drops what is faster
+   (recorded on `docs/ROADMAP.md`).*
 1. **`KBD_MODE`, Ctrl+\ (design 1 and 2).** Check: `/bin/READKEY raw` (a new
    mode of the existing probe) prints 3 for Ctrl-C and dies on Ctrl+\;
    cooked, Ctrl-C still kills; a raw program's child starts cooked; the mode

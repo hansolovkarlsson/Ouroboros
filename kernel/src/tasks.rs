@@ -2651,19 +2651,16 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // Ctrl+C from a *running* foreground child (a compute loop that isn't
     // reading input - the wake-check loop above only polls the keyboard for a
     // child blocked *on* it). Poll once when the foreground owner is the
-    // interrupted (running) task; `interrupt_key_check` inside the poll marks a
-    // Ctrl+C for the kill below. A non-Ctrl+C byte here is type-ahead the busy
-    // child wasn't reading and is dropped - rare (a program that reads input is
-    // Blocked, not running, at the tick), and the price of catching Ctrl+C in a
-    // runaway loop with no read to piggyback on. A nested shell is the owner
-    // between its commands too now, so its type-ahead can be lost while it
-    // runs (parsing, printing a prompt) where the boot shell's, exempt below,
-    // is not: the same "is the owner a foreground program" question as the
-    // Ctrl+C-kills-a-nested-shell item in docs/ROADMAP.md, and decided there.
-    // (The poll itself answers None unless `current` is the owner, so
-    // this asks only "is the running task not the boot shell".)
+    // interrupted (running) task; `interrupt_key_check` inside the read marks a
+    // Ctrl+C for the kill below. Every other byte is type-ahead the busy child
+    // wasn't reading, and is kept for its next read (`read_keyboard_ahead`'s
+    // queue, 2026-10-07; until then it was dropped, cutting a key's escape
+    // sequence in two). The boot shell is exempt, as before: its type-ahead
+    // waits on the devices for its own read.
+    // (The read does nothing unless `current` is the owner, so this asks
+    // only "is the running task not the boot shell".)
     if current != TaskIndex::FIRST {
-        let _ = crate::syscall::poll_keyboard_byte(current.index());
+        crate::syscall::read_keyboard_ahead(current.index());
     }
 
     // Honor a Ctrl+C kill (marked by `interrupt_key_check` from either poll

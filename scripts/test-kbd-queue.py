@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""The kernel's keyboard queue: keys typed while a program is busy are kept.
+
+    python3 scripts/test-kbd-queue.py   (or `make test-kbd-queue`, which builds the image)
+
+Step 0 of docs/roadmap/roadmap-ctrl-c.md. The tick reads the keyboard for a
+RUNNING foreground program (one not blocked in a read), so that Ctrl+C ends a
+runaway loop; until 2026-10-07 it threw away every other byte it read. Now it
+keeps them in a 64-byte queue (kernel/src/syscall.rs, read_keyboard_ahead) for
+the program's next read. `/bin/READKEY spin` runs three seconds without
+reading, then prints every byte waiting. Four runs in one boot, with QEMU's
+USB keyboard pressed through the monitor's `sendkey`:
+
+1. **USB keys during the spin.** `hello`, Up and `x` must come back as all
+   nine bytes, the arrow's three among them.
+2. **Serial bytes during the spin.** `abc`, typed on the serial line a tenth
+   of a second apart, must come back too (the PL011 has no receive FIFO, so a
+   byte the tick read was the only copy).
+3. **Ctrl+C during the spin still ends it.** The kernel says the foreground
+   task was terminated, and READKEY prints no `got` line.
+4. **Ctrl+C behind a full queue.** 72 letters, more than the queue holds,
+   then Ctrl+C, inside a thirteen-second spin (`readkey spin 650`): it must
+   still end the program, so the way out can never be stuck behind
+   type-ahead.
+
+QEMU's own trace must hold no fault line. One boot, about a minute and a half.
+Run it whenever the keyboard path in syscall.rs, the tick's read in tasks.rs,
+or Ctrl+C's handling changes.
+"""
+import importlib.util
+import os
+import re
+import socket
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+_spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
+drive_qemu = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(drive_qemu)
+
+IMAGE = os.path.join(ROOT, "build", "esp.img")
+# In build/, not a temp directory: macOS caps a socket path at 104 bytes.
+MONITOR = os.path.join(ROOT, "build", "test-kbd-queue.monitor")
+TRANSCRIPT = os.path.join(ROOT, "build", "test-kbd-queue.txt")
+KEY_DELAY = 0.15
+# The flood's pace. The driver takes one keyboard report per poll (one
+# interrupt buffer, re-armed after each), a key is two reports (press and
+# release), and the tick reads ahead only when the foreground program is the
+# task it interrupted, about every other tick with the servers taking turns:
+# some 12 keys a second. Faster, QEMU's own keyboard queue overflows and drops
+# keys before the kernel sees them, which tests QEMU, not this queue (found
+# 2026-10-07: 25 ms a key delivered 24 of 72, 60 ms delivered 42, and each
+# lost the Ctrl+C). The limit is recorded on docs/ROADMAP.md.
+FAST_DELAY = 0.12
+FLOOD = 72
+
+
+def sendkeys(names, delay=KEY_DELAY, hold=None):
+    """`hold` is sendkey's hold time in ms (QEMU's default is 100)."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mon:
+        mon.connect(MONITOR)
+        for name in names:
+            mon.sendall(f"sendkey {name}{'' if hold is None else f' {hold}'}\n".encode())
+            time.sleep(delay)
+
+
+def main() -> int:
+    if os.path.exists(MONITOR):
+        os.remove(MONITOR)
+    guest = drive_qemu.Guest(
+        IMAGE, label="test-kbd-queue: ",
+        extra_args=[
+            "-device", "qemu-xhci,id=xhci0",
+            "-device", "usb-kbd,bus=xhci0.0",
+            "-monitor", f"unix:{MONITOR},server,nowait",
+        ],
+    )
+    got = {}
+    killed = {}
+    try:
+        ok = guest.run([("login:", "root"), ("assword", "root"), ("# ", "")])
+
+        def spin(name, during, ticks=None):
+            """Runs `readkey spin`, does `during` while it spins, and records
+            the bytes it printed (None if no `got` line) and whether the kernel
+            reported a Ctrl+C termination."""
+            start = len(guest.transcript())
+            guest.type_line("readkey spin" + (f" {ticks}" if ticks else ""))
+            if not guest.wait_for("readkey: spinning"):
+                return False
+            during()
+            if not guest.wait_for(r"\n# ", timeout=30):
+                return False
+            part = guest.transcript()[start:]
+            m = re.search(r"readkey: got([ \d]*)", part)
+            got[name] = [int(v) for v in m.group(1).split()] if m else None
+            killed[name] = "Ctrl+C - foreground task" in part
+            return True
+
+        def serial_abc():
+            for ch in b"abc":
+                guest.proc.stdin.write(bytes([ch]))
+                guest.proc.stdin.flush()
+                time.sleep(0.1)
+
+        ok = ok and spin("usb", lambda: sendkeys(["h", "e", "l", "l", "o", "up", "x"]))
+        ok = ok and spin("serial", serial_abc)
+        ok = ok and spin("ctrl-c", lambda: sendkeys(["ctrl-c"]))
+        # Thirteen seconds, so the whole flood lands inside the spin.
+        ok = ok and spin("flood", lambda: (sendkeys(["a"] * FLOOD, FAST_DELAY, hold=10), sendkeys(["ctrl-c"])), ticks=650)
+        out = guest.transcript()
+        faults = guest.aborts()
+    finally:
+        guest.stop()
+    with open(TRANSCRIPT, "w") as fh:
+        fh.write(out)
+
+    checks = [
+        ("driven to the end", ok),
+        ("USB keys typed during the spin all kept (hello, Up, x: 9 bytes)",
+         got.get("usb") == list(b"hello\x1b[Ax")),
+        ("serial bytes typed during the spin kept (abc)", got.get("serial") == list(b"abc")),
+        ("Ctrl+C during the spin still ends it", killed.get("ctrl-c") is True and got.get("ctrl-c") is None),
+        (f"Ctrl+C behind {FLOOD} queued letters still ends it",
+         killed.get("flood") is True and got.get("flood") is None),
+        ("no fault lines", faults == 0),
+    ]
+    for name in ("usb", "serial"):
+        print(f"     {name}: {got.get(name)}")
+    failed = 0
+    for name, good in checks:
+        print(f"{'ok  ' if good else 'FAIL'} {name}")
+        failed += 0 if good else 1
+    print(f"transcript: {os.path.relpath(TRANSCRIPT, ROOT)}; {drive_qemu.fault_text(faults)}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -211,11 +211,18 @@ fn con_access_allowed() -> bool {
 /// Falls back to the USB keyboard (xhci.rs) when the byte-stream console
 /// has nothing waiting; `crate::xhci::poll_key()` is a no-op returning
 /// `None` if no keyboard was ever found this boot.
+///
+/// Bytes the tick read ahead of the owner wait in [`KBD_QUEUE`] and come
+/// first; they passed the Ctrl+C check when they were read.
 pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
     if reader != tasks::input_owner() {
         return None;
     }
-    let byte = console::read_byte().or_else(crate::xhci::poll_key)?;
+    // SAFETY: the synccell argument (one core, interrupts masked in EL1).
+    if let Some(byte) = unsafe { (*KBD_QUEUE.get()).pop() } {
+        return Some(byte);
+    }
+    let byte = keyboard_device_byte()?;
     // The Ctrl+C escape hatch - see tasks::interrupt_key_check's doc comment.
     // Intercepted here, the single choke point every keyboard path funnels
     // through (the wake-check, READ_CHAR's fast path, and TRY_READ_CHAR alike),
@@ -227,6 +234,84 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
     }
     Some(byte)
 }
+
+/// The next byte from a keyboard device: the byte-stream console first,
+/// then the USB keyboard's queue.
+fn keyboard_device_byte() -> Option<u8> {
+    console::read_byte().or_else(crate::xhci::poll_key)
+}
+
+/// The tick's read for a RUNNING foreground task (one not blocked in a
+/// read, so no read syscall or wake-check will look): every byte waiting on
+/// the devices is read, so a Ctrl+C behind type-ahead still ends a runaway
+/// loop, and each other byte is kept in [`KBD_QUEUE`] for the owner's next
+/// read. Until 2026-10-07 the tick read one byte and threw it away, which
+/// lost a key typed while a program was busy, and since the navigation
+/// keys (#229) could cut a key's escape sequence in two
+/// (`docs/roadmap/roadmap-ctrl-c.md`, step 0). It stops at a Ctrl+C, which
+/// [`tasks::interrupt_key_check`] has acted on. With the queue full it
+/// still reads and checks every byte, so Ctrl+C can never be stuck behind
+/// type-ahead; only an ordinary byte that does not fit is dropped. At most
+/// [`READ_AHEAD_MAX`] bytes a tick: this runs in the tick with interrupts
+/// masked, and a device that never said "empty" would otherwise hold the
+/// core here for good, where the old one-byte read could not.
+pub(crate) fn read_keyboard_ahead(reader: usize) {
+    if reader != tasks::input_owner() {
+        return;
+    }
+    for _ in 0..READ_AHEAD_MAX {
+        let Some(byte) = keyboard_device_byte() else {
+            return;
+        };
+        if tasks::interrupt_key_check(byte) {
+            return;
+        }
+        // SAFETY: as in poll_keyboard_byte.
+        unsafe { (*KBD_QUEUE.get()).push(byte) };
+    }
+}
+
+/// The most bytes [`read_keyboard_ahead`] reads in one tick: twice the
+/// queue, so a Ctrl+C up to a full queue's length behind the last kept byte
+/// is still found.
+const READ_AHEAD_MAX: usize = 2 * KBD_QUEUE_LEN;
+
+/// Keyboard bytes read ahead by the tick, oldest first, for whoever owns
+/// the keyboard when they are read. Sized for a burst of typing while a
+/// program is busy: 64 bytes is 16 navigation keys.
+struct KbdQueue {
+    buf: [u8; KBD_QUEUE_LEN],
+    head: usize,
+    len: usize,
+}
+
+const KBD_QUEUE_LEN: usize = 64;
+
+impl KbdQueue {
+    const fn new() -> Self {
+        KbdQueue { buf: [0; KBD_QUEUE_LEN], head: 0, len: 0 }
+    }
+
+    /// Appends `byte`, or drops it when the queue is full.
+    fn push(&mut self, byte: u8) {
+        if self.len < KBD_QUEUE_LEN {
+            self.buf[(self.head + self.len) % KBD_QUEUE_LEN] = byte;
+            self.len += 1;
+        }
+    }
+
+    fn pop(&mut self) -> Option<u8> {
+        if self.len == 0 {
+            return None;
+        }
+        let byte = self.buf[self.head];
+        self.head = (self.head + 1) % KBD_QUEUE_LEN;
+        self.len -= 1;
+        Some(byte)
+    }
+}
+
+static KBD_QUEUE: crate::synccell::SyncCell<KbdQueue> = crate::synccell::SyncCell::new(KbdQueue::new());
 
 /// Size cap for a userland `(pointer, length)` argument pair.
 const MAX_USER_LEN: u64 = 512;
