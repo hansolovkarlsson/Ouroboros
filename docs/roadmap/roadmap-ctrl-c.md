@@ -10,7 +10,8 @@ per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
-**Status 2026-10-07: step 0 built (#232); steps 1 to 4 not started. The four decisions (D1 to D4)
+**Status 2026-10-07: steps 0 (#232) and 3 (PR_CUT) built; steps 1, 2 and 4
+not started. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. Before step 1,
 DevTools is asked whether Edit binds ^\ (D1's condition):
 `~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-ctrl-backslash.md`.**
@@ -177,7 +178,12 @@ too. Not a kernel job: the kernel does not know what the program wrote.
 3. **The cut sequence (design 5).** Check: a probe reads only the ESC of an
    arrow, is killed, and the shell's next line holds nothing of the tail.
    Also here: a full queue must refuse a whole key rather than keep the
-   front of one (found by the high review of #232).
+   front of one (found by the high review of #232). *Built 2026-10-07
+   (PR_CUT, on #232): the kernel parses with `keyseq` the bytes it hands to
+   readers, and when the keyboard changes owner inside a key, drops the rest
+   of that key from the queue or the device; the queue takes a key that does
+   not fit back out whole. The probe is `/bin/READKEY one`; the checks are
+   in `make test-kbd-queue`.*
 4. **The shell's reset (design 6).** Check: on `ramfb`, a probe killed in
    reverse video, then the prompt drawn normal (`test-cond-vt.py`'s decoder).
 
