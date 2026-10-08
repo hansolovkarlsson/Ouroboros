@@ -22,6 +22,10 @@ is printed. QEMU's own trace must hold no fault line. One boot, about a
 minute. Run it whenever cond's framebuffer backend, its font, or the kernel's
 FB_* primitives change.
 
+After the model's check, `vtprobe hold` writes `CSI 7 m` and `held` and
+waits for a key; Ctrl+C kills it, and the shell's next prompt must be drawn in
+normal video (its reset after a kill, step 4 of docs/roadmap/roadmap-ctrl-c.md).
+
 `--keep DIR` leaves the final screendump (PPM) in DIR for a look by eye.
 """
 import importlib.util
