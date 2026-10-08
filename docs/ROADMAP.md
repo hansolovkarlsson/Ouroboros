@@ -2391,8 +2391,10 @@ be reviewed after the fact from the saved screenshots.
 >       (`KBD_MODE`, Ctrl+\ as the way out, `make test-kbd-mode`) was
 >       built the same day (#235), step 2, `tcgetattr` and `tcsetattr` in
 >       the C library (#236), and step 4, the shell's reset after a kill
->       (#237); step 3's second half remains, designed 2026-10-08 in the
->       plan, its four decisions (E1 to E4) settled the same day:
+>       (#237); and step 3's second half the same day, designed in the
+>       plan with its four decisions (E1 to E4) settled by Hans and built
+>       (the queue now `keyseq::KeyQueue`, host-tested). Every step is
+>       built; the notice to DevTools remains:
 >       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
 >       time, so a change of keyboard owner (a program killed between the

@@ -11,9 +11,9 @@ the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
 **Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 2
-built (#236), step 3 half built (#233: whole keys in the queue; the tail on
-a change of owner not yet, designed 2026-10-08 below, decisions E1 to E4
-settled by Hans the same day); step 4 built (#237). The four decisions (D1 to D4)
+built (#236), step 3 built (#233, and its second half 2026-10-08, designed
+below with decisions E1 to E4 settled by Hans the same day); step 4 built
+(#237). Every step is built; the notice to DevTools is what remains. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
 met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
 use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so
@@ -251,6 +251,20 @@ the queue knows where each key starts.
   restore: none reach the shell; with `TCSADRAIN`, all do.
 - (4) has no deterministic check (it needs a serial byte to arrive between
   two reads of one USB report); it is argued from the code.
+
+*Built 2026-10-08, as designed. The queue moved out of the kernel into the
+`keyseq` crate as `KeyQueue`, with the time passed in, so `make test` checks
+it on the host; the kernel keeps one (`KBD_QUEUE`) and the read paths
+around it. The reason is the first finding of the build: at typing pace E2's
+interval resets the parser before the next key, so reverting E1 alone left
+every QEMU check green, and E1 could only be shown by pushing bytes at
+chosen ticks. Eleven host tests, each the target of a mutation (E1, E2, the
+trim, a cut key marked by `pop`, a key still arriving, the requested flush,
+the full queue, the USB affinity); `make test-kbd-cut` (`readkey one`,
+`ctermios flush` and `drain`) checks the same end to end, and its own
+mutation controls (the trim removed, E2 removed, E1 and E2 together, the
+flush ignored, the direct read restored, `pop` never marking, TCSADRAIN
+flushing) each fail it.*
 
 ## Steps, each with its check
 
