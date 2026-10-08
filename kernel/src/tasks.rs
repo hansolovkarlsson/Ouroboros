@@ -65,7 +65,7 @@
 use core::arch::{asm, global_asm};
 use crate::synccell::SyncCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::exceptions::Context;
 use crate::loader::{LoadedProgram, SLOT_ALIGN};
@@ -585,19 +585,26 @@ static FOREGROUND_COMMAND: [AtomicBool; NUM_TASKS] = [const { AtomicBool::new(fa
 /// names a task). The kill is deferred to `on_tick` rather than done inline
 /// in the keyboard poll because the poll runs in contexts (a wake-check pass,
 /// a syscall) where switching away from a task isn't safe - `on_tick` already
-/// owns that.
+/// owns that. The key that marked it rides in the same value
+/// ([`PENDING_KILL_BY_QUIT`]), so the mark and the key the kill line names
+/// are one store and one swap, and cannot disagree.
 static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 
-/// The key that marked [`PENDING_KILL`] ([`KEY_INTERRUPT`] or [`KEY_QUIT`]),
-/// so the kill line names the key the user pressed: in raw mode Ctrl+C never
-/// kills, and a line saying it did would point at the wrong way out.
-static PENDING_KILL_KEY: AtomicU8 = AtomicU8::new(KEY_INTERRUPT);
+/// Set in [`PENDING_KILL`] beside the identity when Ctrl+\ made the mark
+/// rather than Ctrl+C, so the kill line names the key the user pressed: in
+/// raw mode Ctrl+C never kills, and a line saying it did would point at the
+/// wrong way out. The top bit: a packed identity never reaches it (the
+/// generation would need 2^55 spawns).
+const PENDING_KILL_BY_QUIT: u64 = 1 << 63;
 
 /// Ctrl+C (ETX): ends or detaches a cooked keyboard owner, and is an ordinary
-/// byte to a raw one (`KBD_MODE`). The one spelling of the interrupt bytes:
-/// [`interrupt_key_check`], `syscall.rs`'s `keyboard_interrupts_wait` and
-/// xhci.rs's key map all name these, so a change to which bytes interrupt
-/// cannot reach one site and miss another.
+/// byte to a raw one (`KBD_MODE`). With [`KEY_QUIT`], the one spelling of
+/// the interrupt bytes for the kernel's own decisions:
+/// [`interrupt_key_check`] and `syscall.rs`'s read-ahead name these. xhci.rs
+/// names [`KEY_QUIT`] for Ctrl+\ but makes Ctrl+C by the general Ctrl+letter
+/// rule (`1 + (keycode - 0x04)`), as a serial terminal does, so this value
+/// is the byte those devices send for Ctrl+C, not a choice the kernel can
+/// change here.
 pub(crate) const KEY_INTERRUPT: u8 = 0x03;
 /// Ctrl+\ (FS): ends or detaches the keyboard owner in every mode, the way
 /// out no program can opt out of.
@@ -812,8 +819,8 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     if FOREGROUND_COMMAND[owner].load(Ordering::Relaxed) || task_waited_on(owner) {
         // Terminate: a task is, or is about to be, blocked in `WAIT` on `owner`,
         // and its `WAIT` wakes with `TASK_KILLED_STATUS`.
-        PENDING_KILL_KEY.store(byte, Ordering::Relaxed);
-        PENDING_KILL.store(id, Ordering::Relaxed);
+        let by_quit = if byte == KEY_QUIT { PENDING_KILL_BY_QUIT } else { 0 };
+        PENDING_KILL.store(id | by_quit, Ordering::Relaxed);
         return true;
     }
     // Detach: hand the keyboard back to whoever handed it over (or task 0 if
@@ -2721,7 +2728,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // like the supervised-server restart below but without a restart. Its death
     // reverts the keyboard to the shell that ran it, whose `WAIT` wakes with
     // `TASK_KILLED_STATUS`.
-    let pending = PENDING_KILL.swap(0, Ordering::Relaxed);
+    let marked = PENDING_KILL.swap(0, Ordering::Relaxed);
+    let pending = marked & !PENDING_KILL_BY_QUIT;
     // Only a spawnable slot (>= FIRST_SPAWNABLE) may be terminated - the same
     // protected set KILL/EXIT/FG enforce (never the shell, idle, or a
     // supervised server). FG refuses to foreground any slot from 1 up to
@@ -2738,7 +2746,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // is_spawnable and occupant_is alike; no separate guard is needed.
     let victim = live_occupant(pending).filter(|v| v.is_spawnable());
     if let Some(victim_slot) = victim {
-        let key = if PENDING_KILL_KEY.load(Ordering::Relaxed) == KEY_QUIT { "Ctrl+\\" } else { "Ctrl+C" };
+        let key = if marked & PENDING_KILL_BY_QUIT != 0 { "Ctrl+\\" } else { "Ctrl+C" };
         crate::console::println!("Ouroboros kernel: {key} - foreground task {} terminated", victim_slot.index());
         if victim_slot == current {
             unsafe { kill_current_and_switch(frame) };

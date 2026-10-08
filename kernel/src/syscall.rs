@@ -277,8 +277,14 @@ pub(crate) fn read_keyboard_ahead(reader: usize) {
             unsafe { (*KBD_QUEUE.get()).clear() };
             return;
         }
+        // A Ctrl+C or Ctrl+\ read for the boot shell is the interrupt for
+        // its waits, settled now: marked, so a wait looks for the mark, not
+        // the byte, and a raw owner's Ctrl+C left queued when it ended (a
+        // byte, by the same rule) never interrupts the shell that gets the
+        // keyboard next.
+        let boot_interrupt = reader == tasks::TaskIndex::FIRST.index() && tasks::is_interrupt_key(byte);
         // SAFETY: as in poll_keyboard_byte.
-        unsafe { (*KBD_QUEUE.get()).push(byte) };
+        unsafe { (*KBD_QUEUE.get()).push(byte, boot_interrupt) };
     }
 }
 
@@ -294,7 +300,12 @@ const READ_AHEAD_MAX: usize = KBD_QUEUE_LEN;
 /// that must interrupt its wait, or a `wait` on a task that never ends
 /// would hold the only typist for good: if one is queued for it, the queue
 /// is flushed (as an interrupt does) and the answer is yes. Ctrl+\ (`0x1c`)
-/// does the same, since it is the way out wherever Ctrl+C is.
+/// does the same, since it is the way out wherever Ctrl+C is. "Queued for
+/// it" is the mark [`read_keyboard_ahead`] sets when it reads the byte for
+/// the boot shell, not the byte's value: a Ctrl+C read for a raw owner is a
+/// byte, and stays one when that owner ends and the keyboard reverts here
+/// (found by the second high review of #235: it ended the shell's `WAIT` on
+/// that very program as interrupted, and the zombie held its slot).
 pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
     read_keyboard_ahead(waiter);
     if waiter != tasks::TaskIndex::FIRST.index() || waiter != tasks::input_owner() {
@@ -302,7 +313,7 @@ pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
     }
     // SAFETY: as in poll_keyboard_byte.
     let queue = unsafe { &mut *KBD_QUEUE.get() };
-    if queue.any(tasks::is_interrupt_key) {
+    if queue.has_boot_interrupt() {
         queue.clear();
         return true;
     }
@@ -319,6 +330,10 @@ struct KbdQueue {
     buf: [u8; KBD_QUEUE_LEN],
     head: usize,
     len: usize,
+    /// Per position: the byte there is an interrupt read for the boot shell
+    /// (see [`read_keyboard_ahead`]). A control byte, so never part of a key
+    /// taken back out.
+    boot_interrupt: [bool; KBD_QUEUE_LEN],
     /// The bytes pushed, parsed as keys.
     keys: keyseq::KeySeq,
     /// How many bytes at the back belong to the key still being pushed.
@@ -331,14 +346,22 @@ const KBD_QUEUE_LEN: usize = 64;
 
 impl KbdQueue {
     const fn new() -> Self {
-        KbdQueue { buf: [0; KBD_QUEUE_LEN], head: 0, len: 0, keys: keyseq::KeySeq::new(), partial: 0, dropping: false }
+        KbdQueue {
+            buf: [0; KBD_QUEUE_LEN],
+            boot_interrupt: [false; KBD_QUEUE_LEN],
+            head: 0,
+            len: 0,
+            keys: keyseq::KeySeq::new(),
+            partial: 0,
+            dropping: false,
+        }
     }
 
     /// Appends `byte`. When it does not fit, an ordinary byte is dropped,
     /// and a byte of a key's sequence drops the whole key: the bytes of it
     /// already queued are taken back out, and the rest is dropped as it
-    /// comes.
-    fn push(&mut self, byte: u8) {
+    /// comes. `boot_interrupt` marks the byte as the boot shell's interrupt.
+    fn push(&mut self, byte: u8, boot_interrupt: bool) {
         let fed = self.keys.feed(byte);
         if self.dropping {
             match fed {
@@ -371,7 +394,9 @@ impl KbdQueue {
         if self.len == KBD_QUEUE_LEN {
             return;
         }
-        self.buf[(self.head + self.len) % KBD_QUEUE_LEN] = byte;
+        let at = (self.head + self.len) % KBD_QUEUE_LEN;
+        self.buf[at] = byte;
+        self.boot_interrupt[at] = boot_interrupt;
         self.len += 1;
         self.partial = if fed == keyseq::Fed::Pending { self.partial + 1 } else { 0 };
     }
@@ -386,8 +411,9 @@ impl KbdQueue {
         self.dropping = mid_key;
     }
 
-    fn any(&self, pred: impl Fn(u8) -> bool) -> bool {
-        (0..self.len).any(|i| pred(self.buf[(self.head + i) % KBD_QUEUE_LEN]))
+    /// Whether a byte marked as the boot shell's interrupt is queued.
+    fn has_boot_interrupt(&self) -> bool {
+        (0..self.len).any(|i| self.boot_interrupt[(self.head + i) % KBD_QUEUE_LEN])
     }
 
     fn pop(&mut self) -> Option<u8> {

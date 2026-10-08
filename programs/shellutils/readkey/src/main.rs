@@ -28,6 +28,9 @@
 //! `readkey spin 150 keep | readkey spin 0 msg` holds the keyboard owner (a
 //! pipeline's last stage) in a message wait for three seconds.
 //!
+//! `readkey spin [ticks] rawkeep` is `keep` in raw mode: a Ctrl+C typed
+//! during the spin is queued as a byte and left unread when it exits.
+//!
 //! `readkey raw` is the observer for the keyboard modes
 //! (`docs/roadmap/roadmap-ctrl-c.md`, step 1): it puts itself in raw mode
 //! (`KBD_MODE`) and then echoes keys as the default mode does, so Ctrl+C
@@ -152,7 +155,14 @@ fn spin_then_drain() -> ! {
     let mut how = [0u8; 8];
     let how_len = ulib::arg(3, &mut how).unwrap_or(0);
     let msg = &how[..how_len] == b"msg";
-    let keep = &how[..how_len] == b"keep";
+    // `rawkeep`: `keep`, in raw mode, so a Ctrl+C typed during the spin is
+    // queued as a byte and left unread when it exits: the case where the
+    // keyboard reverts to the shell with a raw owner's Ctrl+C still queued.
+    let rawkeep = &how[..how_len] == b"rawkeep";
+    if rawkeep {
+        ulib::kbd_mode(syscall_abi::KBD_RAW);
+    }
+    let keep = rawkeep || &how[..how_len] == b"keep";
     ulib::con_write(b"readkey: spinning\r\n");
     let started = ulib::get_ticks();
     while ulib::get_ticks().wrapping_sub(started) < ticks {

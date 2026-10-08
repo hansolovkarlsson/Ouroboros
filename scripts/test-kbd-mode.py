@@ -24,14 +24,21 @@ on QEMU's USB keyboard through the monitor's `sendkey`:
    blocks for good, then `wait` on it and Ctrl+\\; the wait must print
    `wait: interrupted`.
 
-Every kill must also name the key pressed in the kernel's kill line, and
-step 2 is repeated with Ctrl on the ISO key beside left Shift (`less`, HID
-0x64). Step 3 checks that `readkey mode` ran in a slot a raw `readkey` ran
+Every kill must also name the key pressed in the kernel's kill line. Ctrl
+on the ISO key beside left Shift (`less`, HID 0x64) must NOT end a raw
+program: that key has no US position, and an uncatchable kill on Ctrl+<
+would be a trap. `readkey spin 100 rawkeep` exits in raw mode with a
+Ctrl+C typed during its spin still queued: the shell's wait on it must
+collect its exit (no zombie in `ps`), since that Ctrl+C was a byte when it
+was read and must not interrupt the shell. Step 3 checks that `readkey mode` ran in a slot a raw `readkey` ran
 in, since otherwise a cooked answer proves nothing.
 
 Each check fails with its part of the kernel removed: the raw test in
 `interrupt_key_check` (1), the 0x1c arm there (1, 2 and 4), the USB mapping
-(2), the reset in `end_task` (3), Ctrl+\\ in `keyboard_interrupts_wait` (6).
+(2), the reset in `end_task` (3), Ctrl+\\ in `keyboard_interrupts_wait` (6),
+the boot-shell mark on queued interrupts (the zombie check), and 0x64 in the
+USB map (the `<>` check). The ISO backslash key, 0x32, cannot be sent by
+QEMU, so its mapping is checked only on hardware.
 QEMU's own trace must hold no fault line.
 About a minute. Run it whenever `interrupt_key_check`, `KBD_MODE`, xhci.rs's
 Ctrl mapping or the death path's per-task resets change.
@@ -117,10 +124,26 @@ def main() -> int:
         ok = ok and guest.run([("", "root"), ("assword", "root")]) and guest.wait_for(PROMPT)
         ok = ok and step("raw", "readkey raw", "readkey: raw", serial_then_usb_ctrl_c_then_serial_fs)
         ok = ok and step("raw usb", "readkey raw", "readkey: raw", lambda: sendkeys(["ctrl-backslash"]))
-        # QEMU's `less` is the ISO key beside left Shift (HID 0x64). The other
-        # ISO backslash position (0x32) has no sendkey of its own: QEMU sends
-        # 0x31 for it, so it is not reachable from here.
-        ok = ok and step("raw iso", "readkey raw", "readkey: raw", lambda: sendkeys(["ctrl-less"]))
+        # QEMU's `less` is the ISO key beside left Shift (HID 0x64), which
+        # has no US position: Ctrl on it must NOT be the way out, so readkey
+        # lives on to read `q`. (The ISO key in the backslash position, 0x32,
+        # is Ctrl+\ but has no sendkey: QEMU sends 0x31 for it.)
+        ok = ok and step("raw iso", "readkey raw", "readkey: raw", lambda: sendkeys(["ctrl-less", "q"]))
+        # A raw owner's Ctrl+C left queued when it exits is a byte (settled
+        # when read), not an interrupt for the shell that gets the keyboard
+        # back: the shell's WAIT on the program must collect its exit, so no
+        # zombie is left for `ps` to show.
+        if ok:
+            start = len(guest.transcript())
+            guest.type_line("readkey spin 100 rawkeep")
+            ok = guest.wait_for("readkey: spinning")
+            if ok:
+                type_raw(guest, ETX)
+                ok = guest.wait_for(r"readkey: kept[\s\S]*" + PROMPT, timeout=30)
+            if ok:
+                guest.type_line("ps")
+                ok = guest.wait_for(r"task 10:[^\n]*\n[\s\S]*" + PROMPT)
+            seg["rawkeep"] = guest.transcript()[start:]
         ok = ok and step("mode", "readkey mode", "readkey: mode", None)
         ok = ok and step("cooked c", "readkey", "press keys", lambda: type_raw(guest, ETX))
         ok = ok and step("cooked fs", "readkey", "press keys", lambda: type_raw(guest, FS))
@@ -175,7 +198,10 @@ def main() -> int:
         ("raw: serial Ctrl+\\ ended it, never read", ended("raw", "Ctrl+\\") and "(28)" not in raw),
         ("raw: USB Ctrl+\\ ended it, never read",
          ended("raw usb", "Ctrl+\\") and "(28)" not in seg.get("raw usb", "")),
-        ("raw: Ctrl on the ISO key (HID 0x64) ended it", ended("raw iso", "Ctrl+\\")),
+        ("raw: Ctrl on the ISO `<>` key (HID 0x64) did not end it",
+         "readkey: bye" in seg.get("raw iso", "") and "foreground task" not in seg.get("raw iso", "")),
+        ("a raw owner's queued Ctrl+C left no zombie (the shell's wait collected the exit)",
+         "task 10:" in seg.get("rawkeep", "") and ": exited" not in seg.get("rawkeep", "")),
         ("the next task in a raw task's slot starts cooked",
          mode is not None and mode.group(1) == "cooked" and mode.group(2) in raw_slots),
         ("cooked: Ctrl+C ended it, never read",
