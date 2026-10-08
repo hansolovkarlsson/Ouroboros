@@ -218,20 +218,10 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
     if reader != tasks::input_owner() {
         return None;
     }
-    loop {
-        // SAFETY: the synccell argument (one core, interrupts masked in EL1).
-        let byte = match unsafe { (*KBD_QUEUE.get()).pop() } {
-            Some(byte) => byte,
-            None => device_byte_checked()?,
-        };
-        if let Some(byte) = deliver(byte) {
-            return Some(byte);
-        }
+    // SAFETY: the synccell argument (one core, interrupts masked in EL1).
+    if let Some(byte) = unsafe { (*KBD_QUEUE.get()).pop() } {
+        return Some(byte);
     }
-}
-
-/// A byte straight from a device for a reader, through the Ctrl+C check.
-fn device_byte_checked() -> Option<u8> {
     let byte = keyboard_device_byte()?;
     // The Ctrl+C escape hatch (and the queue was empty, or the pop above
     // would have answered, so there is nothing to flush) - see tasks::interrupt_key_check's doc comment.
@@ -244,53 +234,6 @@ fn device_byte_checked() -> Option<u8> {
         return None;
     }
     Some(byte)
-}
-
-/// The bytes handed to readers, parsed as keys, and whether the rest of the
-/// key in progress is to be dropped. See [`keyboard_owner_changed`].
-struct Delivered {
-    keys: keyseq::KeySeq,
-    drop_tail: bool,
-}
-
-static DELIVERED: crate::synccell::SyncCell<Delivered> =
-    crate::synccell::SyncCell::new(Delivered { keys: keyseq::KeySeq::new(), drop_tail: false });
-
-/// `byte` on its way to a reader: `None` while it is the tail of a key the
-/// previous owner started.
-fn deliver(byte: u8) -> Option<u8> {
-    // SAFETY: as in poll_keyboard_byte.
-    let d = unsafe { &mut *DELIVERED.get() };
-    let fed = d.keys.feed(byte);
-    if !d.drop_tail {
-        return Some(byte);
-    }
-    match fed {
-        keyseq::Fed::Pending => None,
-        keyseq::Fed::Sequence => {
-            d.drop_tail = false;
-            None
-        }
-        // A control byte ends a cut sequence and is a key of its own.
-        keyseq::Fed::Byte(_) => {
-            d.drop_tail = false;
-            Some(byte)
-        }
-    }
-}
-
-/// Called by `tasks.rs` whenever the keyboard changes owner. If the bytes
-/// handed out so far stop inside a key's sequence (the old owner read the
-/// ESC of an arrow and died, or was detached), the rest of that key, in the
-/// queue or still on the device, is dropped rather than read by the new
-/// owner as text (`docs/roadmap/roadmap-ctrl-c.md`, step 3, decision D3).
-/// Complete keys typed ahead are kept.
-pub(crate) fn keyboard_owner_changed() {
-    // SAFETY: as in poll_keyboard_byte.
-    let d = unsafe { &mut *DELIVERED.get() };
-    if !d.keys.between_keys() {
-        d.drop_tail = true;
-    }
 }
 
 /// The next byte from a keyboard device: the byte-stream console first,
@@ -394,17 +337,34 @@ impl KbdQueue {
     fn push(&mut self, byte: u8) {
         let fed = self.keys.feed(byte);
         if self.dropping {
-            if fed != keyseq::Fed::Pending {
-                self.dropping = false;
+            match fed {
+                keyseq::Fed::Pending => return,
+                keyseq::Fed::Sequence => {
+                    self.dropping = false;
+                    return;
+                }
+                // A control byte ends a cut sequence and is a key of its own
+                // (keyseq passes it through the same way): kept, if it fits.
+                keyseq::Fed::Byte(_) => self.dropping = false,
             }
-            return;
+        } else if self.len == KBD_QUEUE_LEN {
+            // Taken back only as far as it is still queued: if a reader has
+            // already read the front of this key, it holds a cut key, which
+            // a full queue cannot prevent (it has no room for the rest).
+            self.len -= self.partial.min(self.len);
+            self.partial = 0;
+            match fed {
+                keyseq::Fed::Pending => {
+                    self.dropping = true;
+                    return;
+                }
+                keyseq::Fed::Sequence => return,
+                // A control byte ending the key that did not fit, or an
+                // ordinary byte: kept if taking the key back made room.
+                keyseq::Fed::Byte(_) => {}
+            }
         }
         if self.len == KBD_QUEUE_LEN {
-            // Taken back only as far as it is still queued (a reader may
-            // have read the front already).
-            self.len -= self.partial.min(self.len);
-            self.dropping = fed == keyseq::Fed::Pending;
-            self.partial = 0;
             return;
         }
         self.buf[(self.head + self.len) % KBD_QUEUE_LEN] = byte;
@@ -412,8 +372,14 @@ impl KbdQueue {
         self.partial = if fed == keyseq::Fed::Pending { self.partial + 1 } else { 0 };
     }
 
+    /// Empties the queue (a Ctrl+C's flush). If that cut a key in two, the
+    /// rest of it is dropped as it arrives, not queued as text.
     fn clear(&mut self) {
-        *self = KbdQueue::new();
+        let mid_key = self.partial > 0 || self.dropping;
+        self.head = 0;
+        self.len = 0;
+        self.partial = 0;
+        self.dropping = mid_key;
     }
 
     fn contains(&self, byte: u8) -> bool {

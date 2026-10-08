@@ -27,11 +27,6 @@
 //! shell; with `msg` it then blocks in `MSG_RECV` until a message comes, so
 //! `readkey spin 150 keep | readkey spin 0 msg` holds the keyboard owner (a
 //! pipeline's last stage) in a message wait for three seconds.
-//!
-//! `readkey one` reads exactly one byte, prints `readkey: read <byte>`, and
-//! exits: given an arrow, it takes the ESC and leaves the rest of the key,
-//! which the kernel must then drop rather than hand to the shell (step 3 of
-//! the Ctrl-C plan).
 
 #![no_std]
 #![no_main]
@@ -39,15 +34,14 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: readkey [poll|spin|one]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg]: run three seconds without reading, then print every byte typed meanwhile)\r\n");
+    ulib::usage_if_requested(b"usage: readkey [poll|spin]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg]: run three seconds without reading, then print every byte typed meanwhile)\r\n");
     let mut mode = [0u8; 8];
     let poll = match ulib::arg(1, &mut mode) {
         None => false,
         Some(n) if &mode[..n] == b"poll" => true,
         Some(n) if &mode[..n] == b"spin" => spin_then_drain(),
-        Some(n) if &mode[..n] == b"one" => read_one(),
         Some(_) => {
-            ulib::con_write(b"readkey: unknown mode (`poll`, `spin` or `one`)\r\n");
+            ulib::con_write(b"readkey: unknown mode (`poll` or `spin`)\r\n");
             ulib::exit(1);
         }
     };
@@ -156,15 +150,3 @@ fn spin_then_drain() -> ! {
     ulib::exit(0);
 }
 
-/// `readkey one`: see the module doc. Never returns.
-fn read_one() -> ! {
-    ulib::con_write(b"readkey: waiting for one byte\r\n");
-    let c = ulib::read_char();
-    let mut buf = [0u8; 8];
-    let mut n = 0usize;
-    ulib::emit_dec(&mut buf, &mut n, c as u64);
-    ulib::con_write(b"readkey: read ");
-    ulib::con_write(&buf[..n]);
-    ulib::con_write(b"\r\n");
-    ulib::exit(0);
-}

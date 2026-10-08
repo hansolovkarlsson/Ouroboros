@@ -8,7 +8,7 @@ RUNNING foreground program (one not blocked in a read), so that Ctrl+C ends a
 runaway loop; until 2026-10-07 it threw away every other byte it read. Now it
 keeps them in a 64-byte queue (kernel/src/syscall.rs, read_keyboard_ahead) for
 the program's next read. `/bin/READKEY spin` runs three seconds without
-reading, then prints every byte waiting. Eight runs in one boot, with QEMU's
+reading, then prints every byte waiting. Seven runs in one boot, with QEMU's
 USB keyboard pressed through the monitor's `sendkey`:
 
 1. **USB keys during the spin.** `hello`, Up and `x` must come back as all
@@ -34,13 +34,11 @@ USB keyboard pressed through the monitor's `sendkey`:
    the shell whole and run. The shell's wait for its child also threw the
    first byte away until that review.
 
-7. **A full queue keeps keys whole.** 62 letters, then Up, then `b`, during
-   a spin: Up's three bytes do not fit in the two places left and the whole
-   key is dropped, and `b` is kept; the spin reads the letters and `b`, with
-   no `ESC [` cut from Up.
-8. **The tail of a key does not outlive its owner.** `readkey one` reads
-   only the ESC of Up and exits; `echo tail` typed next must run, with no
-   `[A` before it. Steps 7 and 8 are step 3 of the Ctrl-C plan.
+7. **A full queue keeps keys whole.** 63 letters, then Up, then `b`, during
+   a spin: Up's ESC takes the last place, its `[` finds the queue full, so
+   the ESC is taken back out and the rest of Up dropped as it arrives; `b`
+   then fits. The spin reads the letters and `b`, with nothing of Up. Part
+   of step 3 of the Ctrl-C plan.
 
 QEMU's own trace must hold no fault line. One boot, about two and a half
 minutes.
@@ -75,7 +73,7 @@ KEY_DELAY = 0.15
 # docs/ROADMAP.md.
 FAST_DELAY = 0.12
 FLOOD = 72
-FULL = 62
+FULL = 63
 
 
 def sendkeys(names, delay=KEY_DELAY, hold=None):
@@ -142,23 +140,10 @@ def main() -> int:
         ok = ok and spin("keep", lambda: serial_type(b"echo kept\n"), how="keep")
         # Thirteen seconds, so the whole flood lands inside the spin.
         ok = ok and spin("flood", lambda: (sendkeys(["a"] * FLOOD, FAST_DELAY, hold=10), sendkeys(["ctrl-c"])), ticks=650)
-        # A full queue keeps keys whole: 62 letters fill all but two places,
-        # Up (three bytes) does not fit and is dropped entirely, and `b`,
-        # which does, is kept.
+        # A full queue keeps keys whole: 63 letters leave one place, Up's ESC
+        # takes it, its `[` finds the queue full, so the ESC is taken back out
+        # and the rest of Up dropped as it comes; `b` then fits and is kept.
         ok = ok and spin("full", lambda: (sendkeys(["a"] * FULL, FAST_DELAY, hold=10), sendkeys(["up", "b"])), ticks=650)
-        if ok:
-            # The tail of a key the last owner started never reaches the next:
-            # `readkey one` takes the ESC of Up and exits.
-            start = len(guest.transcript())
-            guest.type_line("readkey one")
-            ok = guest.wait_for("waiting for one byte")
-            if ok:
-                sendkeys(["up"])
-                ok = guest.wait_for(r"readkey: read 27[\s\S]*\n# ", timeout=15)
-            if ok:
-                guest.type_line("echo tail")
-                ok = guest.wait_for(r"\n# ", timeout=15)
-            parts["one"] = guest.transcript()[start:]
         if ok:
             # What the flood left must not reach the shell: Ctrl+C flushes it.
             # An empty line, then the shell's answer to it, is the check.
@@ -184,10 +169,8 @@ def main() -> int:
         ("keys typed while the owner is blocked in a message wait kept (abc, Down: 6 bytes)", got.get("msg") == list(b"abc\x1b[B")),
         ("type-ahead left by a program that exits reaches the shell whole (`echo kept` runs)",
          "keep" in parts and re.search(r"^kept\r?$", parts["keep"], re.M) is not None),
-        ("a full queue drops a whole key (62 letters, Up, b: the letters and b, nothing of Up)",
+        ("a full queue drops a whole key (63 letters, Up, b: the letters and b, nothing of Up)",
          got.get("full") == [97] * FULL + [98]),
-        ("the tail of a key the last owner started never reaches the shell (`echo tail` runs)",
-         "one" in parts and re.search(r"^tail\r?$", parts["one"], re.M) is not None and "[A" not in parts["one"]),
         ("no fault lines", faults == 0),
     ]
     for name in ("usb", "serial"):

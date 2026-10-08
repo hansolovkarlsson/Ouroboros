@@ -602,9 +602,6 @@ pub(crate) fn set_input_owner(owner: usize, foreground_command: bool) {
         FOREGROUND_COMMAND[owner].store(foreground_command, Ordering::Relaxed);
     }
     let previous = INPUT_OWNER.swap(owner, Ordering::Relaxed);
-    if previous != owner {
-        crate::syscall::keyboard_owner_changed();
-    }
     if previous == owner {
         return;
     }
@@ -681,9 +678,6 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
     // occupant_is and falls back to task 0 like any stale entry.
     let target = live_occupant(previous).map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
-    if target != dying {
-        crate::syscall::keyboard_owner_changed();
-    }
 }
 
 /// Whether any live task is blocked in [`WaitReason::TaskExit`] on slot
@@ -781,9 +775,6 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     // (`set_input_owner` re-records the same link).
     let target = live_occupant(PREVIOUS_OWNERS[owner].load(Ordering::Relaxed)).map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
-    if target != owner {
-        crate::syscall::keyboard_owner_changed();
-    }
     true
 }
 

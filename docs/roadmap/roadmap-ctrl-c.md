@@ -10,7 +10,8 @@ per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
-**Status 2026-10-07: steps 0 (#232) and 3 (#233) built; steps 1, 2 and 4
+**Status 2026-10-07: step 0 built (#232), step 3 half built (#233: whole
+keys in the queue; the tail on a change of owner not yet); steps 1, 2 and 4
 not started. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. Before step 1,
 DevTools is asked whether Edit binds ^\ (D1's condition):
@@ -178,12 +179,23 @@ too. Not a kernel job: the kernel does not know what the program wrote.
 3. **The cut sequence (design 5).** Check: a probe reads only the ESC of an
    arrow, is killed, and the shell's next line holds nothing of the tail.
    Also here: a full queue must refuse a whole key rather than keep the
-   front of one (found by the high review of #232). *Built 2026-10-07
-   (#233, on #232): the kernel parses with `keyseq` the bytes it hands to
-   readers, and when the keyboard changes owner inside a key, drops the rest
-   of that key from the queue or the device; the queue takes a key that does
-   not fit back out whole. The probe is `/bin/READKEY one`; the checks are
-   in `make test-kbd-queue`.*
+   front of one (found by the high review of #232). *Half built 2026-10-07
+   (#233): the queue parses what it holds with `keyseq` (now a kernel
+   dependency) and takes a key that does not fit back out whole, a control
+   byte ending a cut key kept, and a Ctrl+C flush that cuts a key drops its
+   rest; checked in `make test-kbd-queue`. **The tail on a change of owner
+   is not built.** A first version kept a second parse of the bytes handed
+   to readers and dropped a key's rest when the owner changed; its high
+   review found that state going stale (a Ctrl+C flush left it mid-key, so
+   the shell lost the first letter typed after a kill; a serial terminal's
+   bare Escape left it waiting for a tail that never came, so the next key
+   was swallowed; and its drop loop ran unbounded with interrupts masked),
+   and it was taken out rather than patched. The design to build instead,
+   the review's: one parser, the queue's, which records where each key
+   starts; every byte reaches readers through the queue; an owner change
+   trims the queue's front to the next key start, and drops a key's rest as
+   it arrives only within the same tick, since a bare ESC's next key comes
+   later and a sequence's rest does not.*
 4. **The shell's reset (design 6).** Check: on `ramfb`, a probe killed in
    reverse video, then the prompt drawn normal (`test-cond-vt.py`'s decoder).
 

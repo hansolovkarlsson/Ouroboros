@@ -17,12 +17,13 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
-**A key arrives whole or not at all (#233).** Step 3 of the Ctrl-C plan.
-When the keyboard changes owner in the middle of a key (a program read the
-ESC of an arrow and exited), the kernel drops the rest of that key rather
-than hand `[A` to the shell, and a key that does not fit in the full
-keyboard queue is dropped whole rather than kept cut. The kernel now uses
-the `keyseq` crate, the filter userland's readers share.
+**The keyboard queue keeps keys whole (#233).** Half of step 3 of the
+Ctrl-C plan. A key that does not fit in the full keyboard queue is dropped
+whole rather than kept cut, and a Ctrl+C flush that cuts a key drops its
+rest instead of queueing it as text. The kernel now uses the `keyseq` crate,
+the filter userland's readers share. The other half, dropping a key's rest
+when the keyboard changes owner mid-key, was built, found fragile in review
+and taken out; its design is in the plan.
 
 **Keys typed while a program is busy are kept (#232).** Step 0 of the
 Ctrl-C plan (`docs/roadmap/roadmap-ctrl-c.md`). The tick reads the keyboard
