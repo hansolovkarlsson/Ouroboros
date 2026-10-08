@@ -27,6 +27,14 @@
 //! shell; with `msg` it then blocks in `MSG_RECV` until a message comes, so
 //! `readkey spin 150 keep | readkey spin 0 msg` holds the keyboard owner (a
 //! pipeline's last stage) in a message wait for three seconds.
+//!
+//! `readkey raw` is the observer for the keyboard modes
+//! (`docs/roadmap/roadmap-ctrl-c.md`, step 1): it puts itself in raw mode
+//! (`KBD_MODE`) and then echoes keys as the default mode does, so Ctrl+C
+//! shows as `(3)` instead of ending it; Ctrl+\ still ends it, in every
+//! mode. `readkey mode` prints the mode this task starts in, `readkey: mode
+//! cooked` or `readkey: mode raw`, and exits: run after a `readkey raw`
+//! ended, it shows the mode did not outlive the task.
 
 #![no_std]
 #![no_main]
@@ -34,19 +42,31 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: readkey [poll|spin]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg]: run three seconds without reading, then print every byte typed meanwhile)\r\n");
+    ulib::usage_if_requested(b"usage: readkey [poll|spin|raw|mode]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg]: run three seconds without reading, then print every byte typed meanwhile; raw: Ctrl+C is a key, Ctrl+\\ ends it; mode: print this task's keyboard mode)\r\n");
     let mut mode = [0u8; 8];
+    let mut raw = false;
     let poll = match ulib::arg(1, &mut mode) {
         None => false,
         Some(n) if &mode[..n] == b"poll" => true,
         Some(n) if &mode[..n] == b"spin" => spin_then_drain(),
+        Some(n) if &mode[..n] == b"mode" => print_mode(),
+        Some(n) if &mode[..n] == b"raw" => {
+            if ulib::kbd_mode(syscall_abi::KBD_RAW) != syscall_abi::KBD_RAW {
+                ulib::con_write(b"readkey: the kernel refused raw mode\r\n");
+                ulib::exit(1);
+            }
+            raw = true;
+            false
+        }
         Some(_) => {
-            ulib::con_write(b"readkey: unknown mode (`poll` or `spin`)\r\n");
+            ulib::con_write(b"readkey: unknown mode (`poll`, `spin`, `raw` or `mode`)\r\n");
             ulib::exit(1);
         }
     };
     if poll {
         ulib::con_write(b"readkey: polling (in the foreground: q to quit, Ctrl+C to abort; in the background it never owns the keyboard, so kill it from the shell)\r\n");
+    } else if raw {
+        ulib::con_write(b"readkey: raw, press keys (q to quit, Ctrl+\\ to abort; Ctrl+C is a key)\r\n");
     } else {
         ulib::con_write(b"readkey: press keys (q to quit, Ctrl+C to abort)\r\n");
     }
@@ -88,6 +108,16 @@ pub extern "C" fn _start() -> ! {
         ulib::con_write(b")\r\n");
     }
     ulib::con_write(b"readkey: bye\r\n");
+    ulib::exit(0);
+}
+
+/// `readkey mode`: print the keyboard mode this task is in, and exit.
+fn print_mode() -> ! {
+    match ulib::kbd_mode(syscall_abi::KBD_QUERY) {
+        syscall_abi::KBD_RAW => ulib::con_write(b"readkey: mode raw\r\n"),
+        syscall_abi::KBD_COOKED => ulib::con_write(b"readkey: mode cooked\r\n"),
+        _ => ulib::con_write(b"readkey: mode unknown\r\n"),
+    }
     ulib::exit(0);
 }
 

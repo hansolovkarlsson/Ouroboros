@@ -1016,11 +1016,13 @@ fn keycode_to_bytes(keycode: u8, shift: bool, ctrl: bool) -> Option<KeyBytes> {
 /// `fg` escape hatch specifically (Ctrl+C = 0x03, ETX, intercepted
 /// kernel-side to reclaim the keyboard - see
 /// `syscall.rs::poll_keyboard_byte`), general because the general
-/// mapping is the same three lines.
+/// mapping is the same three lines. Ctrl+\ = 0x1c too, the way out a
+/// program in raw keyboard mode cannot opt out of (`KBD_MODE`).
 fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
     if ctrl {
         return match keycode {
             0x04..=0x1d => Some(1 + (keycode - 0x04)), // Ctrl+A..Ctrl+Z
+            0x31 => Some(0x1c),                        // Ctrl+\, the way out in every keyboard mode
             _ => None,
         };
     }

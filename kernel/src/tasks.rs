@@ -588,6 +588,22 @@ static FOREGROUND_COMMAND: [AtomicBool; NUM_TASKS] = [const { AtomicBool::new(fa
 /// owns that.
 static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 
+/// Each task's keyboard mode (`KBD_MODE`): `true` = raw, where Ctrl+C is an
+/// ordinary byte for [`interrupt_key_check`]; `false` = cooked, the default.
+/// Indexed by slot and reset by [`end_task`], so the mode ends with the
+/// task and the slot's next occupant starts cooked.
+static KBD_RAW: [AtomicBool; NUM_TASKS] = [const { AtomicBool::new(false) }; NUM_TASKS];
+
+/// Sets task `task`'s keyboard mode (`KBD_MODE`): raw when `raw`.
+pub(crate) fn set_kbd_raw(task: usize, raw: bool) {
+    KBD_RAW[task].store(raw, Ordering::Relaxed);
+}
+
+/// Whether task `task` is in raw keyboard mode.
+pub(crate) fn kbd_raw(task: usize) -> bool {
+    KBD_RAW[task].load(Ordering::Relaxed)
+}
+
 /// `FG`'s effect: hand the keyboard to task `owner`, keeping
 /// [`PREVIOUS_OWNERS`] a stack: a push if `owner` is not in the chain below
 /// the task that held it, a pop of everything above `owner` if it is.
@@ -732,11 +748,23 @@ fn task_waited_on(target: usize) -> bool {
 /// the byte is still consumed here either way (returns `true`), it is the
 /// effect that differs. Task 0 (the boot shell) is never an `owner` here (the
 /// guard below), so its Ctrl+C stays an ordinary ignored byte.
+///
+/// **Ctrl+\ (`0x1c`, FS) does the same in every mode, and Ctrl+C only in
+/// cooked mode**: an owner in raw mode ([`KBD_RAW`], `KBD_MODE`) gets Ctrl+C
+/// as an ordinary byte, so Ctrl+\ is the way out no program can opt out of
+/// (`docs/roadmap/roadmap-ctrl-c.md`, D1 and D2). At the boot shell both
+/// pass through, as Ctrl+C always has.
 pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     const ETX: u8 = 0x03; // Ctrl+C
+    const FS: u8 = 0x1c; // Ctrl+\
     let owner = input_owner();
-    if byte != ETX || owner == 0 {
+    if owner == 0 {
         return false;
+    }
+    match byte {
+        FS => {}
+        ETX if !kbd_raw(owner) => {}
+        _ => return false,
     }
     // The occupant, not the slot: see PENDING_KILL. An owner that is not a
     // task (an Unused slot) cannot happen, since ownership reverts on
@@ -2141,6 +2169,7 @@ fn end_task(i: TaskIndex, final_state: TaskState) {
     clear_argv(i);
     clear_cwd(i);
     clear_env(i);
+    set_kbd_raw(i, false);
     clear_namespace(i);
     reset_stdout_target(i);
     reset_id(i);

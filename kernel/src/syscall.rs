@@ -290,7 +290,8 @@ const READ_AHEAD_MAX: usize = KBD_QUEUE_LEN;
 /// shell's Ctrl+C is an ordinary byte to `interrupt_key_check`, and the one
 /// that must interrupt its wait, or a `wait` on a task that never ends
 /// would hold the only typist for good: if one is queued for it, the queue
-/// is flushed (as an interrupt does) and the answer is yes.
+/// is flushed (as an interrupt does) and the answer is yes. Ctrl+\ (`0x1c`)
+/// does the same, since it is the way out wherever Ctrl+C is.
 pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
     read_keyboard_ahead(waiter);
     if waiter != tasks::TaskIndex::FIRST.index() || waiter != tasks::input_owner() {
@@ -298,7 +299,7 @@ pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
     }
     // SAFETY: as in poll_keyboard_byte.
     let queue = unsafe { &mut *KBD_QUEUE.get() };
-    if queue.contains(0x03) {
+    if queue.contains(0x03) || queue.contains(0x1c) {
         queue.clear();
         return true;
     }
@@ -1106,6 +1107,21 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                     // SAFETY: the device was installed after a successful init.
                     unsafe { dev.fill(out) as u64 }
                 }
+            }
+        }
+        syscall_abi::KBD_MODE => {
+            // arg0 = mode; the caller's own mode only. See the ABI doc.
+            let me = tasks::current_task();
+            match arg0 {
+                syscall_abi::KBD_COOKED => tasks::set_kbd_raw(me, false),
+                syscall_abi::KBD_RAW => tasks::set_kbd_raw(me, true),
+                syscall_abi::KBD_QUERY => {}
+                _ => return syscall_abi::KBD_MODE_BAD,
+            }
+            if tasks::kbd_raw(me) {
+                syscall_abi::KBD_RAW
+            } else {
+                syscall_abi::KBD_COOKED
             }
         }
         syscall_abi::BOOT_ID => {

@@ -177,7 +177,9 @@ pub const KILL: u64 = 19;
 /// over as a SESSION (`foreground` = 0) it is DETACHED instead: ownership
 /// reverts to whoever handed it over and the session survives, to be
 /// resumed with another `fg`. It is a terminate or a detach, not a
-/// signal: nothing is delivered for the task to catch. Index 0 is
+/// signal: nothing is delivered for the task to catch. A task in
+/// [`KBD_RAW`] mode receives Ctrl+C as a byte instead; **Ctrl+\
+/// (`0x1c`)** does all of the above in every mode. Index 0 is
 /// allowed as an explicit "give it back".
 pub const FG: u64 = 20;
 
@@ -925,6 +927,33 @@ pub const BOOT_ID_NONE: u64 = u64::MAX;
 /// [`BOOT_ID_ENTROPY`] from the network server with a buffer that cannot take
 /// the entropy. Distinct from [`BOOT_ID_NONE`], the refusal.
 pub const BOOT_ID_BAD_BUFFER: u64 = u64::MAX - 1;
+
+/// `(mode)` -> the calling task's keyboard mode after the call:
+/// [`KBD_COOKED`] or [`KBD_RAW`], or [`KBD_MODE_BAD`] for any other `mode`
+/// (nothing changed). `mode` is [`KBD_COOKED`], [`KBD_RAW`], or
+/// [`KBD_QUERY`] to read the mode without changing it.
+///
+/// **Raw mode lets Ctrl+C (`0x03`) through as an ordinary byte**, for a
+/// program that binds it as a key (an editor's page down; step 1 of
+/// `docs/roadmap/roadmap-ctrl-c.md`). **Ctrl+\ (`0x1c`) is the way out in
+/// every mode**: typed while a task other than the boot shell owns the
+/// keyboard, it does what Ctrl+C does in cooked mode (see [`FG`]), so no
+/// program can take the way out away, and `0x1c` never reaches any program
+/// but the boot shell, whose line editor ignores it as it ignores `0x03`.
+///
+/// A task sets only its own mode, whether or not it owns the keyboard (the
+/// mode has no effect until it does). Every task starts cooked, and the mode
+/// ends with the task: its death resets it, so the next occupant of the
+/// slot, a spawned child included, is cooked.
+pub const KBD_MODE: u64 = 70;
+/// [`KBD_MODE`]'s default: Ctrl+C and Ctrl+\ both end or detach the owner.
+pub const KBD_COOKED: u64 = 0;
+/// [`KBD_MODE`]: Ctrl+C is an ordinary byte; Ctrl+\ still ends or detaches.
+pub const KBD_RAW: u64 = 1;
+/// [`KBD_MODE`] argument: answer the mode, change nothing.
+pub const KBD_QUERY: u64 = 2;
+/// [`KBD_MODE`]'s answer to an unknown mode.
+pub const KBD_MODE_BAD: u64 = u64::MAX;
 
 /// Width of the slot field in a packed task identity: the slot is the low
 /// [`TASK_ID_SLOT_BITS`] bits, the generation everything above.
