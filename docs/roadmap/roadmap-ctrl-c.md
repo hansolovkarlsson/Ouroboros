@@ -275,7 +275,21 @@ key could double every xHCI poll; and `BootInterrupt`'s doc said the line
 editor gets the byte (the first answer, a flush at the prompt as Unix has
 it, lost keys typed just before the Ctrl+C that the shell had not read yet,
 and `test-kbd-mode` caught it; now the boot shell's interrupt flushes only
-for its waits, and at the prompt is a byte the line editor ignores). One declined: an interrupt inside a full-queue key,
+for its waits, and at the prompt is a byte the line editor ignores). Its second high
+review found that draining the devices at every read had moved keys typed
+after a line into the reader's hands: a Ctrl+C after a command's Enter was
+read as the shell's data and handed to the command as a byte. A read now
+takes one byte from the devices (the rest of a USB key on the next read),
+so what follows a line stays on the line for the next owner; every byte
+still goes through the queue. The same review found an `ESC` that starts a
+new key swallowed by a drop in progress (a whole arrow lost; host test),
+and `TCSAFLUSH` stopping at the first USB event that is not a key, with key
+presses behind it (now every read the bound allows). Declined: a serial
+byte inside an open USB key, since the USB Escape key sends nothing and
+every other USB key arrives whole. Neither the one-byte read nor the
+flush's full read has a deterministic rig check (the serial line takes no
+byte faster than 20 ms, and a release event behind a press cannot be
+placed), so they are argued from the code. One declined: an interrupt inside a full-queue key,
 which a terminal's in-order burst cannot produce.*
 
 ## Steps, each with its check

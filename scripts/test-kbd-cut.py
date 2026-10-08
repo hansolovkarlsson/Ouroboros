@@ -24,7 +24,11 @@ case the shell must run a line typed next, whole:
 5. **TCSADRAIN keeps them.** `ctermios drain`, `echo k5` typed during its
    spin, then Enter: `k5`.
 
-Each fails with its part of the kernel removed. That a USB key is read whole
+Each fails with its part of the kernel removed, except E1's rule alone in
+check 3: the 0.3 s before the Ctrl+C is past E2's interval, so E2 already
+closed the ESC, and check 3 fails only with E1 and E2 removed together. E1 is
+checked on the host, where bytes can be pushed at chosen ticks
+(`keyseq::KeyQueue`'s tests, in `make test`). That a USB key is read whole
 (no serial byte inside it) has no check here: it needs a serial byte to
 arrive between two reads of one USB report. QEMU's own trace must hold no
 fault line. One boot, about a minute and a half. Run it whenever the

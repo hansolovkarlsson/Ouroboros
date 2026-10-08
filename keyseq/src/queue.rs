@@ -106,6 +106,11 @@ impl KeyQueue {
             self.inside_usb = from_usb;
         }
         self.fed_at = now;
+        if self.dropping && abandons {
+            // A new key, not the dropped key's rest: the drop ends here and
+            // the new key is queued (second high review of #238).
+            self.dropping = false;
+        }
         if self.dropping {
             match fed {
                 Fed::Pending => return,
@@ -348,6 +353,19 @@ mod tests {
         let mut q = KeyQueue::new(ESC_ALONE);
         q.push(0x1b, true, 0);
         assert!(!q.inside_usb_key(ESC_ALONE + 1));
+    }
+
+    #[test]
+    fn a_new_key_ends_a_drop() {
+        // A program read a bare ESC and lost the keyboard inside the
+        // interval, so the ESC's rest is being dropped; an arrow typed then
+        // is a key of its own and is kept.
+        let mut q = KeyQueue::new(ESC_ALONE);
+        push_all(&mut q, b"\x1b", 0);
+        assert_eq!(q.pop(), Some(0x1b));
+        q.trim_cut_key(0);
+        push_all(&mut q, b"\x1b[A", 1);
+        assert_eq!(drain(&mut q), b"\x1b[A");
     }
 
     #[test]

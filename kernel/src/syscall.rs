@@ -225,7 +225,13 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
     if let Some(byte) = unsafe { (*KBD_QUEUE.get()).pop() } {
         return Some(byte);
     }
-    read_ahead(reader, false);
+    // One byte from the devices, not everything waiting: what was typed after
+    // the reader's line (a Ctrl+C after a command's Enter) stays on the line
+    // for whoever reads next, the command, under its own owner and mode (the
+    // second high review of #238: draining here judged that Ctrl+C under the
+    // shell and handed it to the command as a byte). The rest of a USB key
+    // comes on the next read, from `xhci`'s `pending`, before the serial line.
+    read_ahead(reader, false, 1);
     // SAFETY: as above.
     unsafe { (*KBD_QUEUE.get()).pop() }
 }
@@ -283,7 +289,7 @@ fn keyboard_device_byte() -> Option<(u8, bool)> {
 /// queued as a byte and stays one, so it never interrupts the shell that
 /// gets the keyboard next.
 pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
-    read_ahead(reader, true)
+    read_ahead(reader, true, READ_AHEAD_MAX)
 }
 
 /// [`read_keyboard_ahead`], with the boot shell's interrupt honoured only when
@@ -293,11 +299,12 @@ pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
 /// read yet, a loss that depends on how fast it reads (seen by
 /// `test-kbd-mode`'s `ef` check after the review of #238 made it flush there):
 /// the byte is queued as data, which the line editor ignores, as before #238.
-fn read_ahead(reader: usize, boot_waits: bool) -> bool {
+/// At most `max` bytes are read.
+fn read_ahead(reader: usize, boot_waits: bool, max: usize) -> bool {
     if reader != tasks::input_owner() {
         return false;
     }
-    for _ in 0..READ_AHEAD_MAX {
+    for _ in 0..max {
         let Some((byte, from_usb)) = keyboard_device_byte() else {
             return false;
         };
@@ -323,7 +330,7 @@ fn read_ahead(reader: usize, boot_waits: bool) -> bool {
 
 /// The most bytes [`read_keyboard_ahead`] reads in one call; the devices
 /// give far fewer (one USB report, up to 24 bytes, or one serial byte).
-const READ_AHEAD_MAX: usize = KBD_QUEUE_LEN;
+const READ_AHEAD_MAX: usize = keyseq::QUEUE_LEN;
 
 /// For a task blocked waiting on a child's exit or on a message: whether a
 /// key typed now interrupts that wait. It reads ahead for the waiter, so
@@ -345,8 +352,8 @@ pub(crate) fn keyboard_owner_changed() {
 }
 
 /// `KBD_MODE`'s flush (`KBD_FLUSH`, what `tcsetattr`'s `TCSAFLUSH` asks
-/// for): what waits on the devices is read ahead, through the parser, and
-/// then the queue is emptied, for `reader`, the keyboard owner (anyone else
+/// for): what waits on the devices is read, through the parser, and then the
+/// queue is emptied, for `reader`, the keyboard owner (anyone else
 /// gets nothing, as with every read). An interrupt among the bytes read still
 /// acts, and its own flush is the one every interrupt gets: a Ctrl+\ typed
 /// before the flush is not lost with the type-ahead (the review of #238
@@ -355,7 +362,28 @@ pub(crate) fn keyboard_flush_input(reader: usize) {
     if reader != tasks::input_owner() {
         return;
     }
-    read_keyboard_ahead(reader);
+    // Every read the bound allows, past a `None`: the USB keyboard answers
+    // `None` for an event that is not a key (a release, a port change) with
+    // presses still behind it on the event ring, and stopping at the first
+    // would leave those for the shell (the second high review of #238).
+    for _ in 0..READ_AHEAD_MAX {
+        let Some((byte, from_usb)) = keyboard_device_byte() else {
+            continue;
+        };
+        match tasks::interrupt_key_check(byte) {
+            tasks::KeyVerdict::Byte => {
+                // Through the parser, so a USB key is read whole.
+                // SAFETY: as in poll_keyboard_byte.
+                unsafe { (*KBD_QUEUE.get()).push(byte, from_usb, crate::exceptions::ticks()) };
+            }
+            tasks::KeyVerdict::Consumed | tasks::KeyVerdict::BootInterrupt => {
+                // The flush every interrupt gets; the requested one is done.
+                // SAFETY: as in poll_keyboard_byte.
+                unsafe { (*KBD_QUEUE.get()).flush(Some(byte)) };
+                return;
+            }
+        }
+    }
     // SAFETY: as in poll_keyboard_byte.
     unsafe { (*KBD_QUEUE.get()).flush(None) };
 }
@@ -376,7 +404,6 @@ const ESC_ALONE_TICKS: u64 = 2;
 static KBD_QUEUE: crate::synccell::SyncCell<keyseq::KeyQueue> =
     crate::synccell::SyncCell::new(keyseq::KeyQueue::new(ESC_ALONE_TICKS));
 
-const KBD_QUEUE_LEN: usize = keyseq::QUEUE_LEN;
 
 /// Size cap for a userland `(pointer, length)` argument pair.
 const MAX_USER_LEN: u64 = 512;
