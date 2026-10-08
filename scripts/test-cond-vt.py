@@ -196,6 +196,7 @@ def main() -> int:
         extra_args=["-device", "ramfb", "-qmp", f"unix:{QMP},server,nowait"],
     )
     screen = None
+    held_screen = None
     driven = False
     try:
         qmp = Qmp(QMP)
@@ -249,6 +250,26 @@ def main() -> int:
                                 driven = True
                                 break
                             time.sleep(0.5)
+                    # Step 4 of the Ctrl-C plan: a program killed with reverse
+                    # video on. `vtprobe hold` writes CSI 7 m and `held`, then
+                    # waits for a key; Ctrl+C kills it, and the shell must
+                    # draw its next prompt in normal video.
+                    if driven:
+                        guest.type_line("clear")
+                        if wait_screen(r"^#$"):
+                            guest.type_line("vtprobe hold")
+                            if wait_screen(r"held"):
+                                guest.proc.stdin.write(b"\x03")
+                                guest.proc.stdin.flush()
+                                deadline = time.time() + 30
+                                while time.time() < deadline:
+                                    rows = snap()
+                                    lines = text(rows)
+                                    at = next((i for i, l in enumerate(lines) if "held" in l), None)
+                                    if at is not None and "#" in lines[at + 1:]:
+                                        held_screen = rows
+                                        break
+                                    time.sleep(0.5)
         faults = guest.aborts()
     finally:
         guest.stop()
@@ -271,9 +292,21 @@ def main() -> int:
                 bad.append(f"row {r + 1} col {c + 1}: {show(screen[r][c])}, expected {show(want[r][c])}")
         for line in text(screen)[:CHECKED_ROWS]:
             print(f"     |{line}")
+    held_reversed = prompt_normal = False
+    if held_screen:
+        lines = text(held_screen)
+        at = next(i for i, l in enumerate(lines) if "held" in l)
+        col = lines[at].index("held")
+        held_reversed = all(held_screen[at][col + k][1] for k in range(4))
+        prompt_at = max(i for i, l in enumerate(lines) if l == "#")
+        prompt_normal = prompt_at > at and held_screen[prompt_at][0] == ("#", False)
+        print(f"     |{lines[at]}")
+        print(f"     |{lines[prompt_at]}  (prompt reversed: {held_screen[prompt_at][0][1]})")
     checks = [
-        ("driven to the end", driven),
+        ("driven to the end", driven and held_screen is not None),
         (f"rows 1-{CHECKED_ROWS} and the bottom-right cell as modelled", driven and not bad),
+        ("vtprobe hold drew `held` reversed", held_reversed),
+        ("after Ctrl+C killed it, the shell's prompt is in normal video", prompt_normal),
         ("no fault lines", faults == 0),
     ]
     for line in bad[:40]:

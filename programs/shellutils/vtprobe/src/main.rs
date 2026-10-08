@@ -31,6 +31,12 @@
 //!     the `e` shows, in column 1, and nothing else on the screen changes.
 //! 11. `CSI 999;999 H` then `c`: clamped to the bottom-right cell, no scroll.
 //! 12. `CSI 14;1 H`, so what the shell prints next lands below the checks.
+//!
+//! `vtprobe hold` is the other probe, for step 4 of
+//! `docs/roadmap/roadmap-ctrl-c.md`: it writes `CSI 7 m` and `held`, then
+//! waits for a key, so Ctrl+C kills it with reverse video still on. The
+//! shell must reset it (`CSI 0 m`) before its prompt; without that, cond
+//! draws the prompt and everything after it inverted.
 
 #![no_std]
 #![no_main]
@@ -39,6 +45,13 @@
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
     let target = ulib::stdout_target();
+    let mut first = [0u8; 8];
+    if ulib::arg(1, &mut first).is_some_and(|n| &first[..n] == b"hold") {
+        ulib::write_out(target, b"\x1b[7mheld");
+        ulib::read_char();
+        ulib::write_out(target, b"\x1b[0m\r\n");
+        ulib::exit(0);
+    }
     let (Some(cols), Some(rows)) = (number_arg(1), number_arg(2)) else {
         ulib::write_out(target, b"usage: vtprobe COLS ROWS\r\n");
         ulib::end_of_stream(target);
