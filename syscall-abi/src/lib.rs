@@ -968,8 +968,9 @@ pub const KBD_QUERY: u64 = 2;
 /// `TCSAFLUSH` asks. For the keyboard owner only; anyone else's flush does
 /// nothing. An interrupt among the discarded keys still acts. `KBD_COOKED` is
 /// 0, so `KBD_FLUSH` alone also sets cooked mode: to flush without a change,
-/// pass `KBD_QUERY | KBD_FLUSH`. At most 64 reads of the devices, with
-/// interrupts masked, so a burst of more than 64 bytes can outlast it.
+/// pass `KBD_QUERY | KBD_FLUSH`. A bounded number of reads of the devices
+/// (`keyseq::QUEUE_LEN`), with interrupts masked, so a burst longer than
+/// that can outlast it.
 pub const KBD_FLUSH: u64 = 0x100;
 /// [`KBD_MODE`]'s answer to an unknown mode. Not `u64::MAX`, which a kernel
 /// without `KBD_MODE` answers for the unknown syscall, so a caller (step 2's

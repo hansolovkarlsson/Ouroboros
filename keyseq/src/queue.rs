@@ -39,6 +39,7 @@ pub struct KeyQueue {
     /// The time the last byte was fed, for `esc_alone`.
     fed_at: u64,
     esc_alone: u64,
+    usb_alone: u64,
     /// How many bytes at the back belong to the key still arriving.
     partial: usize,
     /// The rest of the key arriving is dropped: its front did not fit, or a
@@ -49,7 +50,7 @@ pub struct KeyQueue {
 }
 
 impl KeyQueue {
-    pub const fn new(esc_alone: u64) -> Self {
+    pub const fn new(esc_alone: u64, usb_alone: u64) -> Self {
         KeyQueue {
             buf: [0; QUEUE_LEN],
             starts: [false; QUEUE_LEN],
@@ -60,6 +61,7 @@ impl KeyQueue {
             inside_usb: false,
             fed_at: 0,
             esc_alone,
+            usb_alone,
             partial: 0,
             dropping: false,
             taken_mid: false,
@@ -80,8 +82,13 @@ impl KeyQueue {
     /// a report's bytes wait whole in the driver, so its rest is certain to
     /// come however late it is read, and expiring it would let that rest
     /// through as text after a trim (the third high review of #238).
+    ///
+    /// A USB key has a bound of its own, `usb_alone`, far longer: only a
+    /// keyboard gone mid-report leaves one open that long, and without a
+    /// bound it would hold the queue open for good.
     fn expire(&mut self, now: u64) {
-        if self.inside && !self.inside_usb && now.saturating_sub(self.fed_at) > self.esc_alone {
+        let alone = if self.inside_usb { self.usb_alone } else { self.esc_alone };
+        if self.inside && now.saturating_sub(self.fed_at) > alone {
             self.keys = KeySeq::new();
             self.inside = false;
             self.partial = 0;
@@ -132,6 +139,10 @@ impl KeyQueue {
             self.len -= self.partial.min(self.len);
             self.partial = 0;
             match fed {
+                // An ESC that abandoned the key it cut short: taking that key
+                // back made room, and this ESC starts a new key that fits
+                // (fourth high review of #238).
+                Fed::Pending if abandons && self.len < QUEUE_LEN => {}
                 Fed::Pending => {
                     self.dropping = true;
                     return;
@@ -226,6 +237,7 @@ mod tests {
     use std::vec::Vec;
 
     const ESC_ALONE: u64 = 2;
+    const USB_ALONE: u64 = 50;
 
     fn push_all(q: &mut KeyQueue, bytes: &[u8], now: u64) {
         for &b in bytes {
@@ -243,7 +255,7 @@ mod tests {
 
     #[test]
     fn bytes_come_out_in_order() {
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"ab\x1b[Ac", 0);
         assert_eq!(drain(&mut q), b"ab\x1b[Ac");
     }
@@ -251,7 +263,7 @@ mod tests {
     #[test]
     fn a_cut_key_is_not_handed_to_the_next_owner() {
         // E3: a reader took ESC of an arrow, then lost the keyboard.
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b[Ax", 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(0);
@@ -260,7 +272,7 @@ mod tests {
 
     #[test]
     fn a_key_still_arriving_is_dropped_as_it_comes() {
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b", 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(0);
@@ -270,7 +282,7 @@ mod tests {
 
     #[test]
     fn complete_keys_typed_ahead_stay() {
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"ab\x1b[A", 0);
         assert_eq!(q.pop(), Some(b'a'));
         q.trim_cut_key(0);
@@ -281,7 +293,7 @@ mod tests {
     fn a_bare_escape_ends_after_the_interval() {
         // E2: a program read a bare ESC and exited; a letter typed later
         // starts a key of its own and is kept.
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b", 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(ESC_ALONE + 1);
@@ -291,7 +303,7 @@ mod tests {
 
     #[test]
     fn within_the_interval_the_escape_is_still_open() {
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b", 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(ESC_ALONE);
@@ -303,7 +315,7 @@ mod tests {
     fn nothing_typed_after_an_interrupt_is_eaten() {
         // E1: ESC queued, then Ctrl+C acted on, then a letter at once,
         // inside the interval, so only the flush's own rule can save it.
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b", 0);
         q.flush(Some(0x03));
         push_all(&mut q, b"e", 0);
@@ -312,7 +324,7 @@ mod tests {
 
     #[test]
     fn a_requested_flush_drops_the_rest_of_a_key_in_flight() {
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"ab\x1b[", 0);
         q.flush(None);
         push_all(&mut q, b"Az", 0);
@@ -321,7 +333,7 @@ mod tests {
 
     #[test]
     fn a_requested_flush_between_keys_keeps_what_comes_after() {
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"ab", 0);
         q.flush(None);
         push_all(&mut q, b"z", 0);
@@ -330,7 +342,7 @@ mod tests {
 
     #[test]
     fn a_full_queue_drops_a_whole_key() {
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         let letters = [b'x'; QUEUE_LEN - 1];
         push_all(&mut q, &letters, 0);
         push_all(&mut q, b"\x1b[Ab", 0);
@@ -341,7 +353,7 @@ mod tests {
 
     #[test]
     fn a_usb_key_is_read_whole() {
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         q.push(0x1b, true, 0);
         assert!(q.inside_usb_key(0));
         q.push(b'[', true, 0);
@@ -355,14 +367,14 @@ mod tests {
     fn a_usb_key_never_expires() {
         // A program took ESC of a USB arrow and exited; the shell reads the
         // rest long after the interval. It is still the arrow's rest.
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         q.push(0x1b, true, 0);
         assert_eq!(q.pop(), Some(0x1b));
-        q.trim_cut_key(100);
-        assert!(q.inside_usb_key(100), "the rest is still read from USB first");
-        q.push(b'[', true, 100);
-        q.push(b'A', true, 100);
-        q.push(b'x', true, 100);
+        q.trim_cut_key(USB_ALONE);
+        assert!(q.inside_usb_key(USB_ALONE), "the rest is still read from USB first");
+        q.push(b'[', true, USB_ALONE);
+        q.push(b'A', true, USB_ALONE);
+        q.push(b'x', true, USB_ALONE);
         assert_eq!(drain(&mut q), b"x");
     }
 
@@ -371,7 +383,7 @@ mod tests {
         // A program read a bare ESC and lost the keyboard inside the
         // interval, so the ESC's rest is being dropped; an arrow typed then
         // is a key of its own and is kept.
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b", 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(0);
@@ -380,10 +392,32 @@ mod tests {
     }
 
     #[test]
+    fn a_usb_key_whose_rest_never_comes_is_given_up() {
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
+        q.push(0x1b, true, 0);
+        assert!(q.inside_usb_key(USB_ALONE));
+        assert!(!q.inside_usb_key(USB_ALONE + 1));
+    }
+
+    #[test]
+    fn a_full_queue_keeps_a_new_key_that_abandons_a_cut_one() {
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
+        // Full with a three-byte cut key at the back, so the arrow fits
+        // exactly once that key is taken back out.
+        let letters = [b'x'; QUEUE_LEN - 3];
+        push_all(&mut q, &letters, 0);
+        push_all(&mut q, b"\x1b[5", 0);
+        push_all(&mut q, b"\x1b[A", 0);
+        let mut want = letters.to_vec();
+        want.extend_from_slice(b"\x1b[A");
+        assert_eq!(drain(&mut q), want, "the cut key gone, the arrow after it kept");
+    }
+
+    #[test]
     fn an_escape_inside_a_key_starts_a_new_one() {
         // A cut sequence, then a whole arrow behind it: a reader takes the
         // first ESC and loses the keyboard; the cut key goes, the arrow stays.
-        let mut q = KeyQueue::new(ESC_ALONE);
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b[5\x1b[Ax", 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(0);

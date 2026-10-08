@@ -302,7 +302,16 @@ the nature of type-ahead (Unix sends the signal to the foreground group of
 the moment), and is documented rather than chased. The boot shell's echo
 being interruptible, and flushing a letter, belongs to the roadmap's
 "stale reply after an interrupted call", which is older; `KBD_FLUSH` alone
-setting cooked, and its 64-read bound, are written into the ABI. One declined: an interrupt inside a full-queue key,
+setting cooked, and its 64-read bound, are written into the ABI. A fourth
+review found a program marked for the kill still reading at the tick's
+wake-check, before the kill, so a key typed after Ctrl+C could go to it
+(now a marked task reads nothing, `tasks::kill_pending_for`); a full queue
+dropping a new key that the cut key's take-back had made room for (host
+test); a USB key whose rest never comes holding the queue open for good
+(now a bound of its own, a second; host test); and a flush making all 64
+reads when nothing was typed (now it stops after 8 empty ones). The
+kill-pending read has no deterministic rig check (a key must land between
+the interrupt and the tick's kill), so it is argued from the code. One declined: an interrupt inside a full-queue key,
 which a terminal's in-order burst cannot produce.*
 
 ## Steps, each with its check

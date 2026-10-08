@@ -223,10 +223,10 @@ fn con_access_allowed() -> bool {
 /// it without closing it. A byte's meaning is settled when it is read, under
 /// the owner and keyboard mode of that moment, and is not judged again.
 pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
-    if reader != tasks::input_owner() {
+    if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
         return None;
     }
-    for _ in 0..READ_AHEAD_MAX {
+    for _ in 0..READ_DROPPED_MAX {
         // SAFETY: the synccell argument (one core, interrupts masked in EL1).
         if let Some(byte) = unsafe { (*KBD_QUEUE.get()).pop() } {
             return Some(byte);
@@ -234,13 +234,17 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
         // The boot shell reading its line has nothing to interrupt: its
         // Ctrl+C is a byte the line editor ignores, not a flush that would
         // lose keys typed just before it (test-kbd-mode's `ef` check).
-        if take_one(false) != Took::Byte {
+        if take_one(false) != Took::Byte || tasks::kill_pending_for(reader) {
             return None;
         }
     }
-    // SAFETY: as above.
-    unsafe { (*KBD_QUEUE.get()).pop() }
+    None
 }
+
+/// How many bytes one read may take from the devices before it answers
+/// nothing: enough to read past the bytes the queue drops (a cut key's rest
+/// is at most a few), a bound because the read runs with interrupts masked.
+const READ_DROPPED_MAX: usize = 8;
 
 /// The next byte from a keyboard device, and whether it came from the USB
 /// keyboard: the byte-stream console first, then the USB keyboard's queue,
@@ -326,7 +330,7 @@ fn take_one(boot_waits: bool) -> Took {
 /// shell's interrupt ([`Took::BootInterrupt`]), and stops there, so the keys
 /// typed after it stay on the devices.
 pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
-    if reader != tasks::input_owner() {
+    if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
         return false;
     }
     for _ in 0..READ_AHEAD_MAX {
@@ -342,6 +346,9 @@ pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
 /// The most bytes one read-ahead or flush takes from the devices; they hold
 /// far fewer (one USB report, up to 24 bytes, or one serial byte).
 const READ_AHEAD_MAX: usize = keyseq::QUEUE_LEN;
+
+/// How many empty reads in a row end a flush ([`keyboard_flush_input`]).
+const FLUSH_EMPTY_MAX: usize = 8;
 
 /// For a task blocked waiting on a child's exit or on a message: whether a
 /// key typed now interrupts that wait. It reads ahead for the waiter, so
@@ -376,15 +383,32 @@ pub(crate) fn keyboard_flush_input(reader: usize) {
     if reader != tasks::input_owner() {
         return;
     }
+    // Stops after FLUSH_EMPTY_MAX reads in a row that found nothing: enough
+    // to pass the non-key events the USB keyboard answers `None` for, without
+    // making all READ_AHEAD_MAX reads, masked, when nothing was typed.
+    let mut empty = 0;
     for _ in 0..READ_AHEAD_MAX {
         match take_one(true) {
-            Took::Nothing | Took::Byte => {}
+            Took::Nothing => {
+                empty += 1;
+                if empty == FLUSH_EMPTY_MAX {
+                    break;
+                }
+            }
+            Took::Byte => empty = 0,
             Took::Interrupted | Took::BootInterrupt => return,
         }
     }
     // SAFETY: as in poll_keyboard_byte.
     unsafe { (*KBD_QUEUE.get()).flush(None) };
 }
+
+/// How long a USB key whose rest has not come is held open before the queue
+/// gives up on it: a second, far past any real read of `xhci`'s `pending`,
+/// where a USB key's rest always waits whole, so only a keyboard gone
+/// mid-report (unplugged, reset) ever reaches it (the fourth high review of
+/// #238: with no bound such a key held the queue open for good).
+const USB_ALONE_TICKS: u64 = 50;
 
 /// How long a bare `ESC` waits alone before the queue counts it as a
 /// complete key (decision E2 of the Ctrl-C plan): more than 2 ticks, so at
@@ -400,7 +424,7 @@ const ESC_ALONE_TICKS: u64 = 2;
 /// where each key starts, whole keys kept, a cut key trimmed on a change of
 /// owner, one flush, and a bare `ESC` complete after [`ESC_ALONE_TICKS`].
 static KBD_QUEUE: crate::synccell::SyncCell<keyseq::KeyQueue> =
-    crate::synccell::SyncCell::new(keyseq::KeyQueue::new(ESC_ALONE_TICKS));
+    crate::synccell::SyncCell::new(keyseq::KeyQueue::new(ESC_ALONE_TICKS, USB_ALONE_TICKS));
 
 
 /// Size cap for a userland `(pointer, length)` argument pair.

@@ -597,6 +597,16 @@ static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 /// generation would need 2^55 spawns).
 const PENDING_KILL_BY_QUIT: u64 = 1 << 63;
 
+/// Whether task `slot` is marked for the Ctrl+C or Ctrl+\ kill that
+/// [`on_tick`] has not carried out yet: such a task reads no more keys, so
+/// nothing typed after the interrupt goes to the program it ends (the
+/// fourth high review of #238: the tick's wake-check ran before the kill
+/// and handed the doomed program the next key).
+pub(crate) fn kill_pending_for(slot: usize) -> bool {
+    let marked = PENDING_KILL.load(Ordering::Relaxed) & !PENDING_KILL_BY_QUIT;
+    marked != 0 && task_id_of(slot) == Some(marked)
+}
+
 /// Ctrl+C (ETX): ends or detaches a cooked keyboard owner, and is an ordinary
 /// byte to a raw one (`KBD_MODE`). With [`KEY_QUIT`], the one spelling of
 /// the interrupt bytes for the kernel's own decisions:
