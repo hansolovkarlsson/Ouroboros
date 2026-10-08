@@ -320,6 +320,7 @@ name = "ouroboros-kernel"
 version = "0.22.0"
 dependencies = [
  "fdt",
+ "keyseq",
  "log",
  "syscall-abi",
  "uefi",

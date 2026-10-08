@@ -60,6 +60,14 @@ impl KeySeq {
         KeySeq { state: State::Ground }
     }
 
+    /// Whether the bytes fed so far end between keys, not inside a
+    /// sequence. The kernel asks it of the bytes handed to readers when the
+    /// keyboard changes owner (`kernel/src/syscall.rs`), so the tail of a
+    /// key the old owner started never reaches the new one.
+    pub fn between_keys(&self) -> bool {
+        self.state == State::Ground
+    }
+
     pub fn feed(&mut self, b: u8) -> Fed {
         if self.state == State::Ground {
             if b == ESC {
@@ -167,6 +175,20 @@ mod tests {
     fn a_new_escape_abandons_the_sequence_in_progress() {
         assert_eq!(run(b"\x1b[5\x1b[Ax"), (b"x".to_vec(), 1));
         assert_eq!(run(b"\x1b\x1b[Bx"), (b"x".to_vec(), 1));
+    }
+
+    #[test]
+    fn between_keys_is_false_only_inside_a_sequence() {
+        let mut k = KeySeq::new();
+        assert!(k.between_keys());
+        for &b in b"\x1b[5" {
+            k.feed(b);
+            assert!(!k.between_keys());
+        }
+        k.feed(b'~');
+        assert!(k.between_keys());
+        k.feed(b'x');
+        assert!(k.between_keys());
     }
 
     #[test]
