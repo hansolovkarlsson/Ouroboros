@@ -17,7 +17,7 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
-**Keys typed while a program is busy are kept (PR_QUEUE).** Step 0 of the
+**Keys typed while a program is busy are kept (#232).** Step 0 of the
 Ctrl-C plan (`docs/roadmap/roadmap-ctrl-c.md`). The tick reads the keyboard
 for a foreground program that is running rather than reading, so that
 Ctrl+C ends a runaway loop, and until now it threw away every other byte it
