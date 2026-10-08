@@ -32,6 +32,7 @@
  * headers (libc/pico/include), which the hand-rolled build of this file does
  * not search, and libc/include must stay off a picolibc build's angle path. */
 #include "../pico/include/sys/ioctl.h"
+#include "../pico/include/sys/termios.h"
 #include <sys/stat.h>
 #include <unistd.h>
 /* `errno` where the C library has one: picolibc does, and the Makefile builds
@@ -945,19 +946,27 @@ void __libc_end_stdout(void) {
 
 /* ---- ioctl ---------------------------------------------------------------- */
 
-/* TIOCGWINSZ only: the console's size (sys/ioctl.h). fd 0 is the console's
- * keyboard; fds 1 and 2 are the console only while stdout is routed there,
- * and a pipe is not a terminal. */
-int ioctl(int fd, unsigned long request, ...) {
+/* 0 when `fd` is the console, else -1 with EBADF (not open) or ENOTTY (open,
+ * but not a terminal). fd 0 is the console's keyboard; fds 1 and 2 are the
+ * console only while stdout is routed there, and a pipe is not a terminal.
+ * The one test for ioctl and the termios calls. */
+static int console_fd(int fd) {
     if (fd < 0) {
         return client_fail(EBADF);
     }
-    int console = fd == 0 || ((fd == 1 || fd == 2) && stdout_target() == CON_TASK);
-    if (!console) {
-        if (fd > 2 && !file_for(fd)) {
-            return client_fail(EBADF);
-        }
-        return client_fail(ENOTTY);
+    if (fd == 0 || ((fd == 1 || fd == 2) && stdout_target() == CON_TASK)) {
+        return 0;
+    }
+    if (fd > 2 && !file_for(fd)) {
+        return client_fail(EBADF);
+    }
+    return client_fail(ENOTTY);
+}
+
+/* TIOCGWINSZ only: the console's size (sys/ioctl.h). */
+int ioctl(int fd, unsigned long request, ...) {
+    if (console_fd(fd) < 0) {
+        return -1;
     }
     if (request != TIOCGWINSZ) {
         return client_fail(ENOTTY);
@@ -985,6 +994,78 @@ int ioctl(int fd, unsigned long request, ...) {
     ws->ws_col = (unsigned short)cols;
     ws->ws_xpixel = 0;
     ws->ws_ypixel = 0;
+    return 0;
+}
+
+/* ---- termios --------------------------------------------------------------- */
+
+/* The settings the program last set, or none yet. One per process: the
+ * console is the only terminal, so every console fd shares them. */
+static struct termios g_termios;
+static int g_termios_set;
+
+/* The console as it behaves (sys/termios.h): bytes as typed, one at a time,
+ * no echo, no translation, Ctrl+C and Ctrl+\ the interrupt keys. */
+static void termios_fixed(struct termios *t) {
+    memset(t, 0, sizeof *t);
+    t->c_cflag = CS8 | CREAD;
+    t->c_lflag = ISIG;
+    t->c_cc[VINTR] = 3;
+    t->c_cc[VQUIT] = 28;
+    t->c_cc[VERASE] = 8; /* what the USB keyboard's Backspace sends */
+    t->c_cc[VKILL] = 21;
+    t->c_cc[VEOF] = 4;
+    t->c_cc[VSUSP] = 26;
+    t->c_cc[VMIN] = 1;
+    t->c_cc[VTIME] = 0;
+}
+
+/* The flags last set (or the fixed ones), with ISIG from the kernel's
+ * keyboard mode: the kernel is the authority on whether Ctrl+C is a key. */
+int tcgetattr(int fd, struct termios *t) {
+    if (console_fd(fd) < 0) {
+        return -1;
+    }
+    if (!t) {
+        return client_fail(EFAULT);
+    }
+    unsigned long mode = (unsigned long)__os_syscall1(SYS_KBD_MODE, KBD_QUERY);
+    if (mode != KBD_COOKED && mode != KBD_RAW) {
+        return client_fail(EIO);
+    }
+    if (g_termios_set) {
+        *t = g_termios;
+    } else {
+        termios_fixed(t);
+    }
+    if (mode == KBD_RAW) {
+        t->c_lflag &= ~(tcflag_t)ISIG;
+    } else {
+        t->c_lflag |= ISIG;
+    }
+    return 0;
+}
+
+/* ISIG is the one flag that acts: cleared is raw keyboard mode (KBD_MODE),
+ * where Ctrl+C reaches the program as 3. The rest are stored for tcgetattr.
+ * The three actions behave alike (sys/termios.h). EIO if the kernel does not
+ * take the mode, with nothing stored. */
+int tcsetattr(int fd, int optional_actions, const struct termios *t) {
+    if (console_fd(fd) < 0) {
+        return -1;
+    }
+    if (!t) {
+        return client_fail(EFAULT);
+    }
+    if (optional_actions != TCSANOW && optional_actions != TCSADRAIN && optional_actions != TCSAFLUSH) {
+        return client_fail(EINVAL);
+    }
+    unsigned long want = (t->c_lflag & ISIG) ? KBD_COOKED : KBD_RAW;
+    if ((unsigned long)__os_syscall1(SYS_KBD_MODE, (long)want) != want) {
+        return client_fail(EIO);
+    }
+    g_termios = *t;
+    g_termios_set = 1;
     return 0;
 }
 

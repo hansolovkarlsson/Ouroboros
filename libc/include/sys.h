@@ -26,6 +26,7 @@
 #define SYS_YIELD 57
 #define SYS_GET_ENVC 59
 #define SYS_GET_ENV 60
+#define SYS_KBD_MODE 70
 
 /* Transient MSG_SEND failures worth retrying (mirrors syscall-abi). */
 #define MSG_ERR_FULL (~0UL - 20UL)
@@ -83,6 +84,12 @@
 #define HEAP_INFO_STACK_BASE 2
 #define HEAP_INFO_STACK_SIZE 3
 #define HEAP_INFO_IMAGE_MAX 4
+/* KBD_MODE's modes and answers (termios, file.c): raw lets Ctrl+C through
+ * to the program as the byte 3; Ctrl+\ ends it in every mode. */
+#define KBD_COOKED 0
+#define KBD_RAW 1
+#define KBD_QUERY 2
+#define KBD_MODE_BAD (~0UL - 1UL)
 
 /* ninep verbs (ninep-abi; NP_BASE = 0x100). */
 #define NP_BASE 0x100

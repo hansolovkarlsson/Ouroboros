@@ -257,6 +257,7 @@ CENV_BIN     := $(BUILD_DIR)/cenv.bin
 CENVH_BIN    := $(BUILD_DIR)/cenvh.bin
 CCLOCK_BIN   := $(BUILD_DIR)/cclock.bin
 CWINSZ_BIN   := $(BUILD_DIR)/cwinsz.bin
+CTERMIOS_BIN := $(BUILD_DIR)/ctermios.bin
 # DevTools's C preprocessor, built here for Ouroboros (step 8 of the C-hosting
 # plan): its sources are read from CPP_DIR, a sibling checkout by default.
 # CPP_DIR must not contain spaces: its files are make prerequisites.
@@ -289,7 +290,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin cpp-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-fpsimd test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpp-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-fpsimd test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-ctermios test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -674,6 +675,14 @@ cwinsz-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cwinsz.elf $(PICO_PORT) $(BUILD_DIR)/pico/cwinsz.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cwinsz.elf $(CWINSZ_BIN)
 
+# Terminal settings in a C program (libc/ctermios.c): tcgetattr and tcsetattr
+# with Edit's raw recipe, read back, restored, and their errors; `raw` reads
+# Ctrl+C as a key. Runs as /bin/CTERMIOS, driven by scripts/test-ctermios.py.
+ctermios-bin: $(NSRESOLVE_A) $(PICO_PORT)
+	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/ctermios.c -o $(BUILD_DIR)/pico/ctermios.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/ctermios.elf $(PICO_PORT) $(BUILD_DIR)/pico/ctermios.o $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/ctermios.elf $(CTERMIOS_BIN)
+
 # The C preprocessor, cpp, from DevTools (step 8 of the C-hosting plan, and the
 # build half of the accepted 2026-10-01-from-proem-system-dirs.md): its lib/
 # and driver/cpp.c, compiled as every picolibc program here is and linked like
@@ -836,7 +845,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin)
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin)
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -931,6 +940,7 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CENVH_BIN) $(ESP_DIR)/bin/CENVH
 	cp $(CCLOCK_BIN) $(ESP_DIR)/bin/CCLOCK
 	cp $(CWINSZ_BIN) $(ESP_DIR)/bin/CWINSZ
+	cp $(CTERMIOS_BIN) $(ESP_DIR)/bin/CTERMIOS
 	# /bin/cpp, when CPP_DIR has DevTools's sources; a checkout of this tree
 	# alone still builds an image, without it.
 	$(if $(HAVE_CPP),cp $(CPP_BIN) $(ESP_DIR)/bin/CPP,@echo "esp: no cpp sources at $(CPP_DIR); /bin/cpp not staged (set CPP_DIR)")
@@ -1850,6 +1860,14 @@ test-kbd-queue: image
 # xhci.rs's Ctrl mapping or end_task's per-task resets change.
 test-kbd-mode: image
 	python3 scripts/test-kbd-mode.py
+
+# Terminal settings in a C program (scripts/test-ctermios.py, /bin/CTERMIOS):
+# Edit's raw recipe through tcsetattr reads Ctrl+C as 3, restoring it lets
+# Ctrl+C end the program again, tcgetattr gives back every flag set, and the
+# errors (EBADF, ENOTTY on a file, EINVAL, EFAULT). One boot, about a minute;
+# run it whenever libc's termios, sys/termios.h or KBD_MODE changes.
+test-ctermios: image
+	python3 scripts/test-ctermios.py
 
 # argv in a C program (scripts/test-cargs.py, /bin/CARGS): three pairs of runs,
 # the Rust /bin/ARGS and its C twin with the same arguments, which must print
