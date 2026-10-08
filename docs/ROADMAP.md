@@ -2389,9 +2389,10 @@ be reviewed after the fact from the saved screenshots.
 >       decisions settled by Hans the same day, as recommended. DevTools
 >       answered 2026-10-08 that Edit does not bind ^\, and step 1
 >       (`KBD_MODE`, Ctrl+\ as the way out, `make test-kbd-mode`) was
->       built the same day (#235), and step 2, `tcgetattr` and
->       `tcsetattr` in the C library (#236), after it; step 3's second half
->       and step 4 remain:
+>       built the same day (#235), step 2, `tcgetattr` and `tcsetattr` in
+>       the C library (#236), and step 4, the shell's reset after a kill
+>       (#237); step 3's second half remains, designed 2026-10-08 in the
+>       plan with its four decisions (E1 to E4) open:
 >       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
 >       time, so a change of keyboard owner (a program killed between the
