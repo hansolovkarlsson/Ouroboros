@@ -11,7 +11,7 @@ the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
 **Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 2
-built (#236), step 3 built (#233, and its second half 2026-10-08, designed
+built (#236), step 3 built (#233, and its second half in #238, designed
 below with decisions E1 to E4 settled by Hans the same day); step 4 built
 (#237). Every step is built; the notice to DevTools is what remains. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
@@ -252,7 +252,7 @@ the queue knows where each key starts.
 - (4) has no deterministic check (it needs a serial byte to arrive between
   two reads of one USB report); it is argued from the code.
 
-*Built 2026-10-08, as designed. The queue moved out of the kernel into the
+*Built 2026-10-08 (#238), as designed. The queue moved out of the kernel into the
 `keyseq` crate as `KeyQueue`, with the time passed in, so `make test` checks
 it on the host; the kernel keeps one (`KBD_QUEUE`) and the read paths
 around it. The reason is the first finding of the build: at typing pace E2's

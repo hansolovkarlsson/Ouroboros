@@ -203,3 +203,15 @@ Ouroboros platform file would leave those out; a note asking for something
 else is the way, if Edit needs it.
 `/bin/CTERMIOS` runs Edit's recipe flag for flag, and `make test-ctermios`
 checks it. Item 4 stays open until steps 3 and 4 of the plan are built.
+
+Merged 2026-10-08 (#236, `b4408c5`), and step 4 of the plan, the shell's
+reset to normal video after a killed program (#237, `db7762f`).
+
+Progress 2026-10-08, Ouroboros: the last step of item 4 is built (#238).
+The kernel's keyboard queue no longer hands a key's rest to the next
+program (an arrow read in part by a program that exits leaves nothing for
+the shell), nothing typed after a Ctrl+C or Ctrl+\ is eaten, a bare Escape
+from a serial terminal counts as a key of its own after 40 ms, and
+`TCSAFLUSH` now discards keys typed ahead, as POSIX has it, so Edit's
+`plat_raw_off` leaves nothing it was typed for to the shell. When #238 is
+merged, item 4 is done, and DevTools gets the plan's notice.
