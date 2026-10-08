@@ -1397,6 +1397,7 @@ fn wait_pipe_stage(label: &str, slot: u64) {
             print_line(" wait interrupted (it may still be running - see ps)");
         }
         TASK_KILLED_STATUS => {
+            reset_after_kill();
             print_str("pipe: ");
             print_str(label);
             print_line(" was killed");
@@ -2496,9 +2497,10 @@ fn run_found_command(
                 syscall4(syscall_abi::FG, slot, 1, 0, 0);
                 // Foreground: wait for it (also reaps the slot). A Ctrl+C now
                 // *terminates* the program (the kernel kills it and the wait
-                // returns TASK_KILLED_STATUS); print a newline so the next
-                // prompt starts clean.
+                // returns TASK_KILLED_STATUS); normal video and a newline, so
+                // the next prompt starts clean.
                 if syscall(syscall_abi::WAIT, slot) == TASK_KILLED_STATUS {
+                    reset_after_kill();
                     print_line("");
                 }
             }
@@ -2809,6 +2811,16 @@ impl Output<'_> {
 
 fn print_str(s: &str) {
     con_write(s.as_bytes());
+}
+
+/// After a program this shell waited on was killed: normal video again
+/// (`CSI 0 m`), before anything else is printed. A program killed between
+/// `ESC [ 7 m` and `ESC [ 0 m` (an editor drawing its status line) leaves the
+/// console drawing inverted, and only the shell knows the program is gone
+/// (step 4 of `docs/roadmap/roadmap-ctrl-c.md`; the kernel does not know what
+/// the program wrote). Right on a serial terminal too.
+fn reset_after_kill() {
+    con_write(b"\x1b[0m");
 }
 
 /// Append `bytes` to `buf[..*n]`, bounded. The shell's own copy: it does not
@@ -3517,6 +3529,7 @@ fn cmd_wait(arg: &str) {
     match syscall(syscall_abi::WAIT, n) {
         WAIT_INTERRUPTED => print_line("wait: interrupted (the task keeps running)"),
         TASK_KILLED_STATUS => {
+            reset_after_kill();
             print_str("task ");
             print_u64(n);
             print_line(" was killed");

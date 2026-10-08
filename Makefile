@@ -1823,8 +1823,10 @@ test-fpsimd: image
 # cond's escape sequences on a framebuffer, read off the pixels
 # (scripts/test-cond-vt.py): QEMU with -device ramfb, the screen taken by QMP
 # screendump and decoded cell by cell with cond's own font, /bin/VTPROBE's
-# screen compared with a model. One boot, under a minute; run it whenever
-# cond's framebuffer backend, its font or the kernel's FB_* primitives change.
+# screen compared with a model, then `vtprobe hold` killed in reverse video
+# and the shell's next prompt read as normal. One boot, under a minute; run it
+# whenever cond's framebuffer backend, its font, the kernel's FB_* primitives
+# or the shell's reset after a kill change.
 test-cond-vt: image
 	python3 scripts/test-cond-vt.py
 

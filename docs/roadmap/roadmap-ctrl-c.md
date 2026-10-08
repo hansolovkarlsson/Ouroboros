@@ -12,7 +12,7 @@ an opt-out must keep a way out.
 
 **Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 2
 built (#236), step 3 half built (#233: whole keys in the queue; the tail on
-a change of owner not yet); step 4 not started. The four decisions (D1 to D4)
+a change of owner not yet); step 4 built (#237). The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
 met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
 use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so
@@ -305,6 +305,13 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    queue and one parser recording key starts, answers all four.*
 4. **The shell's reset (design 6).** Check: on `ramfb`, a probe killed in
    reverse video, then the prompt drawn normal (`test-cond-vt.py`'s decoder).
+   *Built 2026-10-08 (#237): `reset_after_kill` in the shell writes `CSI 0 m` at the
+   three places a wait comes back killed (a foreground command, a pipeline
+   stage, the `wait` builtin); `vtprobe hold` writes `CSI 7 m` and `held`
+   and waits for a key, and `make test-cond-vt` kills it with Ctrl+C and
+   reads the prompt's cell off the screendump. Removing the reset at the
+   foreground site draws the prompt reversed and fails the check; the other
+   two sites call the same helper and no rig drives them.*
 
 Then a notice to DevTools: items 1 to 4 done, the ^\ difference, and how
 `plat_raw_on` behaves here.
