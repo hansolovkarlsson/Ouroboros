@@ -10,80 +10,15 @@ here actually works today, see [`architecture.md`](architecture.md) and
 ## Unreleased: the storage server under large writes, and the C library for Proem and Edit
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
-version is held for a go-ahead. So far two days' work, 2026-10-05 and
-2026-10-06, #209 to #226: the storage server made safe under large writes and
-double mounts, and the C library made able to host Proem (now cpp) and Edit,
-the whole C-hosting plan among it, ending in DevTools's preprocessor running
-here, with the C headers on the disk and FAT32 names that keep their case. The
-days' records are in `docs/work-journal/`, one file a day.
-
-**The keyboard queue keeps keys whole (#233).** Half of step 3 of the
-Ctrl-C plan. A key that does not fit in the full keyboard queue is dropped
-whole rather than kept cut, and a Ctrl+C flush that cuts a key drops its
-rest instead of queueing it as text. The kernel now uses the `keyseq` crate,
-the filter userland's readers share. The other half, dropping a key's rest
-when the keyboard changes owner mid-key, was built, found fragile in review
-and taken out; its design is in the plan.
-
-**Keys typed while a program is busy are kept (#232).** Step 0 of the
-Ctrl-C plan (`docs/roadmap/roadmap-ctrl-c.md`). The tick reads the keyboard
-for a foreground program that is running rather than reading, so that
-Ctrl+C ends a runaway loop, and until now it threw away every other byte it
-read, and the waits for a child's exit and for a message did the same: a
-key typed while an editor redrew was lost, and since #229 an arrow could
-arrive as `[A`. Those bytes now wait in a 64-byte kernel queue for the
-program's next read. Ctrl+C is still found behind a full queue, and it
-flushes the queue, so what was typed before it never runs in the shell
-after the kill. `make test-kbd-queue` types during `/bin/READKEY spin`, also
-while it is blocked writing to the console and while it exits without
-reading, on QEMU's USB keyboard and serial line.
-
-**A program can read the screen size (#230).** Item 3 of DevTools's
-editor note. `CON_INFO`'s size fields, gated to `cond` until now, are open to
-every task: three numbers fixed at boot, which grant nothing. A C program
-asks the POSIX way, `ioctl(fd, TIOCGWINSZ, &ws)` from a new `<sys/ioctl.h>`,
-which answers 0 by 0 on a serial console (its size is unknown, as on Linux)
-and `ENOTTY` for a pipe or a file. Rust programs have `ulib::screen_size`,
-and `more` now pages by the real height instead of assuming 24 rows. `make
-test-cwinsz` checks both backends, the framebuffer read back by pixel.
-
-**The arrow and function keys reach programs (#229).** Item 2 of
-DevTools's editor note: the USB keyboard sends the VT100/xterm sequences for
-Up, Down, Right, Left, Home, End, Page Up, Page Down, Delete, F2 and F3, which
-`xhci.rs` dropped before. Every keyboard reader now goes through one filter,
-the new pure `keyseq` crate: the shell's line editor and login's prompts and
-`ulib::read_line` (`passwd`, `useradd`) drop each sequence whole, so a
-password typed with an arrow in it means the same at both, and `more` takes
-a sequence as one key. Until now an arrow typed on QEMU's serial line put
-`[A` into the command. `make test-nav-keys` presses the keys through QEMU's
-USB keyboard and checks the bytes `/bin/READKEY` reads, the shell, login,
-`more`, and a password set at `useradd` with an arrow in it.
-
-**The framebuffer console takes cursor addressing (#228).** Item 1 of
-DevTools's editor note: `cond` acts on `CSI row;col H`, `CSI K` and `CSI J`
-in all three forms, and reverse video (`CSI 7 m`, off with `0`, `27` or a
-bare `CSI m`), and parses `CSI ? 25 l/h`, `ESC ( B`, OSC strings and
-`CSI 3 J` to nothing. Before, it acted on `H`
-and `J` only and ignored their parameters. A glyph in the last column now
-wraps late, at the next glyph, so a full-screen program can write the bottom
-right cell without the screen scrolling. `make test-cond-vt` boots QEMU with
-`-device ramfb`, where the shell's output reaches only the framebuffer, and
-reads the screen back over QMP's `screendump`. It decodes each 8x8 cell with
-`cond`'s own font and compares what `/bin/VTPROBE` drew with a model. It
-fails with `main`'s `cond` and with the old immediate wrap.
-
-**A task's vector registers survive the kernel (#227).** The
-kernel saved only `x0`-`x30` on a syscall, a tick or an EL0 fault, on the
-old reasoning that nothing used FP/SIMD. Everything did: the kernel's own
-memcpy and struct copies run through `q0`, and every userland program keeps
-values in vector registers, so one live across a syscall or a task switch
-came back changed. Every resumable path now saves `q0`-`q31`, `FPCR` and
-`FPSR`, and a task's `Context` carries them (800 bytes, was 272). Found
-while building `cond`'s reverse video, whose second reversed glyph had two
-rows wrong; `make test-fpsimd` (`/bin/FPPROBE`) checks it across a `YIELD`
-and across preemption between two probes, and fails on a kernel without the
-save (`q0` changed every round) and on one that drops only the FPCR or
-only the FPSR restore.
+version is held for a go-ahead. So far three days' work, 2026-10-05 to
+2026-10-07, #209 to #233: the storage server made safe under large writes and
+double mounts; the C library made able to host Proem (now cpp) and Edit, the
+whole C-hosting plan among it, ending in DevTools's preprocessor running here,
+with the C headers on the disk and FAT32 names that keep their case; and the
+console and keyboard made fit for a full-screen editor (Edit's items 1 to 3:
+cursor addressing, the navigation keys, the screen size), with a task's
+FP/SIMD registers saved across the kernel and keys typed while a program is
+busy kept. The days' records are in `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
 `cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
@@ -179,6 +114,74 @@ built here by `make cpp-bin` with `/include` and `/include/clang` built in,
 so `cpp hello.c` needs no options. Its output is byte for byte what the same
 cpp writes on the Mac, and clang compiles it (`make test-cpp`). Steps 7 and 8
 of the C-hosting plan: the arc's finish line.
+
+**A task's vector registers survive the kernel (#227).** The
+kernel saved only `x0`-`x30` on a syscall, a tick or an EL0 fault, on the
+old reasoning that nothing used FP/SIMD. Everything did: the kernel's own
+memcpy and struct copies run through `q0`, and every userland program keeps
+values in vector registers, so one live across a syscall or a task switch
+came back changed. Every resumable path now saves `q0`-`q31`, `FPCR` and
+`FPSR`, and a task's `Context` carries them (800 bytes, was 272). Found
+while building `cond`'s reverse video, whose second reversed glyph had two
+rows wrong; `make test-fpsimd` (`/bin/FPPROBE`) checks it across a `YIELD`
+and across preemption between two probes, and fails on a kernel without the
+save (`q0` changed every round) and on one that drops only the FPCR or
+only the FPSR restore.
+
+**The framebuffer console takes cursor addressing (#228).** Item 1 of
+DevTools's editor note: `cond` acts on `CSI row;col H`, `CSI K` and `CSI J`
+in all three forms, and reverse video (`CSI 7 m`, off with `0`, `27` or a
+bare `CSI m`), and parses `CSI ? 25 l/h`, `ESC ( B`, OSC strings and
+`CSI 3 J` to nothing. Before, it acted on `H`
+and `J` only and ignored their parameters. A glyph in the last column now
+wraps late, at the next glyph, so a full-screen program can write the bottom
+right cell without the screen scrolling. `make test-cond-vt` boots QEMU with
+`-device ramfb`, where the shell's output reaches only the framebuffer, and
+reads the screen back over QMP's `screendump`. It decodes each 8x8 cell with
+`cond`'s own font and compares what `/bin/VTPROBE` drew with a model. It
+fails with `main`'s `cond` and with the old immediate wrap.
+
+**The arrow and function keys reach programs (#229).** Item 2 of
+DevTools's editor note: the USB keyboard sends the VT100/xterm sequences for
+Up, Down, Right, Left, Home, End, Page Up, Page Down, Delete, F2 and F3, which
+`xhci.rs` dropped before. Every keyboard reader now goes through one filter,
+the new pure `keyseq` crate: the shell's line editor and login's prompts and
+`ulib::read_line` (`passwd`, `useradd`) drop each sequence whole, so a
+password typed with an arrow in it means the same at both, and `more` takes
+a sequence as one key. Until now an arrow typed on QEMU's serial line put
+`[A` into the command. `make test-nav-keys` presses the keys through QEMU's
+USB keyboard and checks the bytes `/bin/READKEY` reads, the shell, login,
+`more`, and a password set at `useradd` with an arrow in it.
+
+**A program can read the screen size (#230).** Item 3 of DevTools's
+editor note. `CON_INFO`'s size fields, gated to `cond` until now, are open to
+every task: three numbers fixed at boot, which grant nothing. A C program
+asks the POSIX way, `ioctl(fd, TIOCGWINSZ, &ws)` from a new `<sys/ioctl.h>`,
+which answers 0 by 0 on a serial console (its size is unknown, as on Linux)
+and `ENOTTY` for a pipe or a file. Rust programs have `ulib::screen_size`,
+and `more` now pages by the real height instead of assuming 24 rows. `make
+test-cwinsz` checks both backends, the framebuffer read back by pixel.
+
+**Keys typed while a program is busy are kept (#232).** Step 0 of the
+Ctrl-C plan (`docs/roadmap/roadmap-ctrl-c.md`). The tick reads the keyboard
+for a foreground program that is running rather than reading, so that
+Ctrl+C ends a runaway loop, and until now it threw away every other byte it
+read, and the waits for a child's exit and for a message did the same: a
+key typed while an editor redrew was lost, and since #229 an arrow could
+arrive as `[A`. Those bytes now wait in a 64-byte kernel queue for the
+program's next read. Ctrl+C is still found behind a full queue, and it
+flushes the queue, so what was typed before it never runs in the shell
+after the kill. `make test-kbd-queue` types during `/bin/READKEY spin`, also
+while the keyboard owner is blocked waiting for a message and while it exits
+without reading, on QEMU's USB keyboard and serial line.
+
+**The keyboard queue keeps keys whole (#233).** Half of step 3 of the
+Ctrl-C plan. A key that does not fit in the full keyboard queue is dropped
+whole rather than kept cut, and a Ctrl+C flush that cuts a key drops its
+rest instead of queueing it as text. The kernel now uses the `keyseq` crate,
+the filter userland's readers share. The other half, dropping a key's rest
+when the keyboard changes owner mid-key, was built, found fragile in review
+and taken out; its design is in the plan.
 
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or

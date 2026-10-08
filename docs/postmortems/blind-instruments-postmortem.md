@@ -1370,3 +1370,74 @@ was for could not show. The third review of #226 found it; the reference is
 built both ways now, and the guest must match both. Built both ways, the two
 give the same output for those bytes: `cpp` does not lean on the sign there,
 and the input proves the bytes survive, not that a sign bug would be caught.
+
+## Ten more, from the editor's console (2026-10-07)
+
+Three of Edit's four items and the first steps of the fourth (#227 to #233),
+each reviewed high and then low. Six of the ten were found by a review, four
+by a control run on purpose. The day's best instrument went the other way: a
+rig that reads the framebuffer back by pixel, decoding each cell with `cond`'s
+own font, found a kernel bug no other rig could have seen (#227, the FP/SIMD
+registers never saved), because it was the first observer that looked at what
+a program had actually drawn.
+
+**A control whose two halves never met.** `fpprobe | fpprobe -` was meant to
+switch between two tasks that both held live vector state, and the FPCR
+control (the kernel's FPCR restore removed) passed. The first probe wrote its
+first line into the pipe and blocked until the second read it, which was after
+the second had finished, so the two spins never ran side by side. Found by
+running the control; the probe reports once, at the end, and the control fails
+with `first: fpcr`.
+
+**A register saved and never checked.** The same probe compared all 32 vector
+registers and FPCR, and not FPSR, so removing FPSR's restore left `make
+test-fpsimd` green. Found by the high review of #227; each probe sets its own
+FPSR flags now, and that control fails with `first: fpsr`.
+
+**A fill that looks the same scrolled.** `test-cond-vt`'s first step filled
+every row with `#` and claimed that the bottom row's last glyph must not
+scroll the screen. A scroll there shifts identical rows. Found by the high
+review of #228; each row is its own letter, and a mutation scrolling only on
+the bottom-right cell turns 873 cells red.
+
+**A refusal folded into "unknown".** `ioctl(TIOCGWINSZ)` and
+`ulib::screen_size` turned a kernel refusal into "size unknown", which on a
+serial console is also the right answer, so `test-cwinsz`'s serial boot could
+not see the `CON_INFO` gate closed again. Found by the high review of #230; a
+refusal is `EIO` now, and the gate control fails both serial checks.
+
+**A step counted done whatever its wait said.** `test-nav-keys` appended each
+step to its done list after the wait, not on the wait's success, so the login
+check passed with login's filter removed and `Login incorrect` on the screen.
+Found by running that control; a step counts only when its wait matched.
+
+**A check that an undelivered key passes.** The same rig typed `echo a`, six
+navigation keys on USB, then `b`, and looked for `ab`. If no USB key reached
+the shell at all, `ab` printed just the same. Found by the high review of
+#229; a USB `x` among them makes it `axb`.
+
+**A leak check on a program that never exits.** "Nothing of the Down left for
+the shell" could only fail if `more` exited right after the key, and with a
+3147-line file it never did. Found by running the `more` control (it passed
+that check while failing the real one); the check was removed.
+
+**A wait the probe was never in.** `test-kbd-queue`'s message-wait check had
+the probe write to the console during its spin, so it would be blocked in
+`con_write`'s call to `cond`. `cond` answers within the tick, so the probe
+was almost never in the wait when a tick landed, and the check passed with
+the waits discarding bytes again. Found by running that control; the probe is
+now a pipeline's last stage blocked in `MSG_RECV` for three seconds.
+
+**A probe that drained its own input.** `readkey spin` read every byte
+waiting before it exited, so the bytes the kernel's exit and message waits
+threw away were never missed, and #232's rig could not see that the PR's
+headline case, an editor redrawing, was still losing keys. Found by the high
+review of #232, by reading; `readkey spin keep` exits without reading, and
+`echo kept` typed meanwhile must run whole in the shell.
+
+**A full queue the check never filled.** #233's whole-key check sent 62
+letters then Up: ESC and `[` fit in the two places left and only `A` met a
+full queue, so the branch that drops the rest of a key whose front did not fit
+was never reached, and could be broken with the check green. Found by the high
+review of #233; 63 letters reach it, and both the no-take-back and the
+never-drop mutations fail.

@@ -888,6 +888,32 @@ covers, from the map, and the three records say that instead. The claim had
 the shape of a fact and the provenance of a guess, and three copies of it
 went in on the same afternoon the six copies above came out.
 
+## A comment that named its own expiry (2026-10-07)
+
+`exceptions.rs`'s module doc said FP/SIMD state is "deliberately *not*
+saved here. Nothing running today uses them ... this stops being safe the
+moment there's real interruptible work with FP/SIMD state." `tasks.rs`,
+`architecture.md` and CLAUDE.md (twice) repeated it. It was true when written: the only EL0 code
+was two hand-written assembly loops. It stopped being true the day the first
+Rust program ran, because `aarch64-unknown-none` emits vector instructions
+freely (`shell` has 1329 of them) and the kernel's own memcpy runs through
+`q0`, so a vector register live across any syscall came back changed. It
+stayed false for weeks, guarding behaviour, in four files.
+
+What makes this one sharper than the rest of this document is that the
+comment did everything this document asks: it stated its premise, and it
+named the condition under which it would become false. Nobody checked the
+condition when it was met, because meeting it was not an edit to any of the
+four files; it was a compiler doing what compilers do in a crate that did
+not exist yet. The condition was observable in one command at any time
+(`llvm-objdump -d` of any userland binary, counting `q` and `v` registers).
+It surfaced only when `cond`'s reverse video drew wrong rows under a rig that
+reads pixels (#227). The rule from the end of this document applies with one
+addition: **a comment that names its own expiry condition is a check with
+the test written out in English**, and the condition should be turned into a
+check the day the comment is written. Here that check is `make
+test-fpsimd`, and it came after the damage.
+
 ## What actually worked
 
 Three things, none of them "be more careful".
