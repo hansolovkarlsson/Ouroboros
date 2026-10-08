@@ -12,8 +12,8 @@ an opt-out must keep a way out.
 
 **Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 2
 built (#236), step 3 half built (#233: whole keys in the queue; the tail on
-a change of owner not yet, designed 2026-10-08 below with decisions E1 to E4
-open); step 4 built (#237). The four decisions (D1 to D4)
+a change of owner not yet, designed 2026-10-08 below, decisions E1 to E4
+settled by Hans the same day); step 4 built (#237). The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
 met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
 use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so
@@ -151,7 +151,7 @@ too. Not a kernel job: the kernel does not know what the program wrote.
 - **Escape on the USB keyboard.** It sends nothing, and mapping it collides
   with every sequence's first byte; recorded on the roadmap separately.
 
-## Step 3's second half: the design (2026-10-08, decisions open)
+## Step 3's second half: the design (2026-10-08, decisions settled)
 
 What is left of step 3, and what the reviews of #235 and #236 added to it,
 is one question: what the kernel's keyboard queue (`KbdQueue`,
@@ -212,25 +212,25 @@ the queue knows where each key starts.
   to the kernel, which discards what is queued and what waits on the
   devices (5); `TCSANOW` and `TCSADRAIN` keep it, as now.
 
-**Decisions to settle (each with a recommendation):**
+**Decisions (settled by Hans, 2026-10-08, each as recommended):**
 
-- **E1. The kill flush follows `keyseq`.** *Recommended: yes*, no
+- **E1. The kill flush follows `keyseq`.** *Settled: yes*, no
   `dropping` after an interrupt. This reverses #233's choice, which dropped
   a cut key's rest after a flush so that an arrow's tail would not arrive as
   text. With whole USB keys (point 4) a Ctrl+C can no longer land inside a
   key, so that case is gone, and only the cost (a letter eaten after Esc)
   remained. The alternative keeps #233's choice and its cost.
-- **E2. The bare-`ESC` interval.** *Recommended: 2 ticks (40 ms)*, about what
+- **E2. The bare-`ESC` interval.** *Settled: 2 ticks (40 ms)*, about what
   terminal programs use (vim's `ttimeoutlen` is often 50 to 100 ms). One tick
   is too short: a terminal's `ESC [` can be read across a tick boundary. The
   alternatives: #233's review's rule (a key's rest is dropped only within
   the same tick as the change of owner), which is the same idea with a
   shorter, boundary-sensitive window; or no interval, which drops the letter.
-- **E3. What a change of owner keeps.** *Recommended: complete keys typed
+- **E3. What a change of owner keeps.** *Settled: complete keys typed
   ahead stay, the cut key goes* (D3 as settled, now with the trim). The
   alternative, flush everything on every change of owner, is simpler and
   loses what was typed for the shell while a program ran.
-- **E4. How `TCSAFLUSH` reaches the kernel.** *Recommended: a flag on
+- **E4. How `TCSAFLUSH` reaches the kernel.** *Settled: a flag on
   `KBD_MODE`*, `KBD_FLUSH` (0x100) OR'd into the mode, so the change and the
   flush are one call, as `TCSAFLUSH` is one request. The alternative is a
   syscall of its own (71), cleaner to read but two calls with a window

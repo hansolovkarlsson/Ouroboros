@@ -2392,7 +2392,7 @@ be reviewed after the fact from the saved screenshots.
 >       built the same day (#235), step 2, `tcgetattr` and `tcsetattr` in
 >       the C library (#236), and step 4, the shell's reset after a kill
 >       (#237); step 3's second half remains, designed 2026-10-08 in the
->       plan with its four decisions (E1 to E4) open:
+>       plan, its four decisions (E1 to E4) settled the same day:
 >       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
 >       time, so a change of keyboard owner (a program killed between the
