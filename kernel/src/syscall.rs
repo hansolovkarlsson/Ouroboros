@@ -305,21 +305,10 @@ pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
 const READ_AHEAD_MAX: usize = KBD_QUEUE_LEN;
 
 /// For a task blocked waiting on a child's exit or on a message: whether a
-/// Ctrl+C typed now should interrupt that wait. It reads ahead first (so
-/// the wait never throws a typed byte away, and a Ctrl+C for any owner but
-/// the boot shell is acted on there, killing or detaching it). The boot
-/// shell's Ctrl+C never kills (`interrupt_key_check` answers
-/// `BootInterrupt`), and it is the one that must interrupt its wait, or a `wait` on a task that never ends
-/// would hold the only typist for good: when [`read_keyboard_ahead`] reads
-/// one for it, what was queued before it is flushed (as an interrupt does)
-/// and the answer is yes. Ctrl+\ (`0x1c`) does the same, since it is the
-/// way out wherever Ctrl+C is. The decision is made as the byte is read,
-/// never by looking for the byte in the queue: a Ctrl+C read for a raw
-/// owner is a byte, and stays one when that owner ends and the keyboard
-/// reverts here (the second high review of #235 found the scan ending the
-/// shell's `WAIT` on that very program as interrupted, the zombie holding
-/// its slot; the third found the per-byte mark that replaced it lost to a
-/// full queue).
+/// key typed now interrupts that wait. It reads ahead for the waiter, so
+/// the wait throws no typed byte away; the rule (only the boot shell's
+/// Ctrl+C or Ctrl+\ interrupts, decided as it is read) is
+/// [`read_keyboard_ahead`]'s, stated there once.
 pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
     read_keyboard_ahead(waiter)
 }

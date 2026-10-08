@@ -46,7 +46,7 @@ answer proves nothing.
 
 Each check fails with its part of the kernel removed: the raw test in
 `interrupt_key_check` (1), the 0x1c arm there (1, 2 and 4), the USB mapping
-(2), the reset in `end_task` (3), Ctrl+\\ in `keyboard_interrupts_wait` (6),
+(2), the reset in `end_task` (3), Ctrl+\\ as the boot shell's interrupt in `interrupt_key_check`'s owner-0 arm (6),
 the boot shell's interrupt decided as it is read rather than found in the
 queue (the zombie check; queued, it is lost behind a full queue, check 6),
 0x64 in the USB map (the `<>` check), and the parser fed the boot shell's

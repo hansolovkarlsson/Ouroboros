@@ -945,7 +945,9 @@ pub const BOOT_ID_BAD_BUFFER: u64 = u64::MAX - 1;
 /// ignores the byte.
 ///
 /// A task sets only its own mode, whether or not it owns the keyboard (the
-/// mode has no effect until it does). Every task starts cooked, and the mode
+/// mode has no effect until it does). The boot shell's mode has no effect at
+/// all: with it owning the keyboard neither key ever kills, either
+/// interrupts its waits whatever its mode, so it never sets one. Every task starts cooked, and the mode
 /// ends with the task: its death resets it, so the next occupant of the
 /// slot, a spawned child included, is cooked.
 ///

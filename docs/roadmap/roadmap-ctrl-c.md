@@ -267,7 +267,23 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    starts; every byte reaches readers through the queue; an owner change
    trims the queue's front to the next key start, and drops a key's rest as
    it arrives only within the same tick, since a bare ESC's next key comes
-   later and a sequence's rest does not.*
+   later and a sequence's rest does not.* *Four findings from the fifth
+   high review of #235 belong here, older than #235 (the parser is #233's)
+   and left for this step because they are its design question: (a) the
+   kill and detach flush (`clear()`) neither feeds the interrupt byte to
+   the parser nor lets it end a key, so a bare Esc read ahead and then
+   Ctrl+C or Ctrl+\ sets `dropping`, and the next letter read ahead is
+   eaten as the Esc's rest; #233 chose that, so a cut arrow's tail does not
+   arrive as text, and the two cases cannot be told apart without knowing
+   where each key started and when its bytes came; (b) the parser is fed
+   only on push, not on the direct read, and `pop` never resets `partial`,
+   so a drained queue can still look mid-key to a later flush; (c) the
+   direct read path's kill leaves the parser as it was; (d) `clear()` and
+   `flush_at_control` are two flushes for one event, which #235 kept apart
+   on purpose: its boot-shell path restores what that path did before
+   #235 (the byte was queued, so the parser saw it), and changing the kill
+   path is this step's decision. The design above, every byte through the
+   queue and one parser recording key starts, answers all four.*
 4. **The shell's reset (design 6).** Check: on `ramfb`, a probe killed in
    reverse video, then the prompt drawn normal (`test-cond-vt.py`'s decoder).
 
