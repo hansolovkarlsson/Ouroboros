@@ -23,10 +23,12 @@ USB keyboard pressed through the monitor's `sendkey`:
    still end the program, so the way out can never be stuck behind
    type-ahead, and none of the letters may reach the shell after it: a
    Ctrl+C flushes what was typed before it.
-5. **Keys typed while the program is blocked in a message wait**
-   (`readkey spin 150 io`, writing to the console every five ticks): `abc`
-   and Down must all come back. Until the review of #232 that wait threw a
-   byte away at every tick.
+5. **Keys typed while the keyboard owner is blocked in a message wait**
+   (`readkey spin 150 keep | readkey spin 0 msg`: the last stage, which owns
+   the keyboard, waits in MSG_RECV until the first writes three seconds
+   later): `abc` and Down must all come back. Until the review of #232 that
+   wait threw a byte away at every tick. (A program writing to the console
+   would not test it: the console server answers within the tick.)
 6. **Type-ahead left by a program that exits** (`readkey spin 150 keep`):
    `echo kept` and Enter typed on the serial line during the spin must reach
    the shell whole and run. The shell's wait for its child also threw the
@@ -92,13 +94,13 @@ def main() -> int:
     try:
         ok = guest.run([("login:", "root"), ("assword", "root"), ("# ", "")])
 
-        def spin(name, during, ticks=None, how=None):
+        def spin(name, during, ticks=None, how=None, cmd=None):
             """Runs `readkey spin`, does `during` while it spins, and records
             the bytes it printed (None if no `got` line) and whether the kernel
             reported a Ctrl+C termination."""
             start = len(guest.transcript())
-            cmd = "readkey spin" + (f" {ticks or 150}" if ticks or how else "") + (f" {how}" if how else "")
-            guest.type_line(cmd)
+            line = cmd or ("readkey spin" + (f" {ticks or 150}" if ticks or how else "") + (f" {how}" if how else ""))
+            guest.type_line(line)
             if not guest.wait_for("readkey: spinning"):
                 return False
             during()
@@ -123,8 +125,9 @@ def main() -> int:
         ok = ok and spin("usb", lambda: sendkeys(["h", "e", "l", "l", "o", "up", "x"]))
         ok = ok and spin("serial", serial_abc)
         ok = ok and spin("ctrl-c", lambda: sendkeys(["ctrl-c"]))
-        # Blocked in con_write's call to the console server most of the time.
-        ok = ok and spin("io", lambda: sendkeys(["a", "b", "c", "down"]), how="io")
+        # The keyboard owner blocked in a message wait for three seconds: a
+        # pipeline's last stage waiting in MSG_RECV for the first to write.
+        ok = ok and spin("msg", lambda: sendkeys(["a", "b", "c", "down"]), cmd="readkey spin 150 keep | readkey spin 0 msg")
         # Exits without reading: the shell must get every byte, the first too.
         ok = ok and spin("keep", lambda: serial_type(b"echo kept\n"), how="keep")
         # Thirteen seconds, so the whole flood lands inside the spin.
@@ -151,7 +154,7 @@ def main() -> int:
          killed.get("flood") is True and got.get("flood") is None),
         ("Ctrl+C flushes what was queued: none of the flood reaches the shell",
          "aaa" not in out[out.find("readkey spin 650"):].split("terminated", 1)[-1]),
-        ("keys typed while blocked in con_write kept (abc, Down: 6 bytes)", got.get("io") == list(b"abc\x1b[B")),
+        ("keys typed while the owner is blocked in a message wait kept (abc, Down: 6 bytes)", got.get("msg") == list(b"abc\x1b[B")),
         ("type-ahead left by a program that exits reaches the shell whole (`echo kept` runs)",
          "keep" in parts and re.search(r"^kept\r?$", parts["keep"], re.M) is not None),
         ("no fault lines", faults == 0),

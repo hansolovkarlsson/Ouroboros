@@ -16,16 +16,17 @@
 //! timeslice it is given; it gives up on its own after a tick budget, and is
 //! an observer to run for the witness and kill after regardless.
 //!
-//! `readkey spin [ticks] [io|keep]` is the observer for the kernel's keyboard
+//! `readkey spin [ticks] [keep|msg]` is the observer for the kernel's keyboard
 //! queue (`docs/roadmap/roadmap-ctrl-c.md`, step 0): it prints `readkey:
 //! spinning`, runs for `ticks` ticks (default `SPIN_TICKS`) without reading
 //! the keyboard, then reads everything waiting and prints it on one line,
 //! `readkey: got <byte> <byte> ...` in decimal. Keys pressed during the spin
 //! reach it only if the kernel kept the bytes it read meanwhile; until
-//! 2026-10-07 it threw them away. With `io` it writes a dot to the console
-//! every five ticks while it spins, so it is mostly blocked in the console
-//! server's call, as an editor redrawing is; with `keep` it exits without
-//! reading, saying `readkey: kept`, and leaves what was typed to the shell.
+//! 2026-10-07 it threw them away. With `keep` it exits without reading,
+//! writing `readkey: kept` to its stdout, and leaves what was typed to the
+//! shell; with `msg` it then blocks in `MSG_RECV` until a message comes, so
+//! `readkey spin 150 keep | readkey spin 0 msg` holds the keyboard owner (a
+//! pipeline's last stage) in a message wait for three seconds.
 
 #![no_std]
 #![no_main]
@@ -33,7 +34,7 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: readkey [poll|spin]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [io|keep]: run three seconds without reading, then print every byte typed meanwhile)\r\n");
+    ulib::usage_if_requested(b"usage: readkey [poll|spin]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg]: run three seconds without reading, then print every byte typed meanwhile)\r\n");
     let mut mode = [0u8; 8];
     let poll = match ulib::arg(1, &mut mode) {
         None => false,
@@ -95,7 +96,7 @@ pub extern "C" fn _start() -> ! {
 /// to press a few keys.
 const SPIN_TICKS: u64 = 150;
 
-/// `readkey spin [ticks] [io|keep]`: see the module doc. Never returns.
+/// `readkey spin [ticks] [keep|msg]`: see the module doc. Never returns.
 fn spin_then_drain() -> ! {
     let mut arg = [0u8; 8];
     let ticks = ulib::arg(2, &mut arg)
@@ -104,25 +105,28 @@ fn spin_then_drain() -> ! {
         .unwrap_or(SPIN_TICKS);
     let mut how = [0u8; 8];
     let how_len = ulib::arg(3, &mut how).unwrap_or(0);
-    let io = &how[..how_len] == b"io";
+    let msg = &how[..how_len] == b"msg";
     let keep = &how[..how_len] == b"keep";
     ulib::con_write(b"readkey: spinning\r\n");
     let started = ulib::get_ticks();
-    let mut last_dot = started;
     while ulib::get_ticks().wrapping_sub(started) < ticks {
-        // `io`: a dot every five ticks, so the spin spends its time blocked
-        // in con_write's call to the console server, the wait an editor
-        // redrawing is in.
-        if io && ulib::get_ticks().wrapping_sub(last_dot) >= 5 {
-            ulib::con_write(b".");
-            last_dot = ulib::get_ticks();
-        }
         core::hint::spin_loop();
     }
     if keep {
-        // `keep`: leave what was typed for the shell.
-        ulib::con_write(b"\r\nreadkey: kept\r\n");
+        // `keep`: leave what was typed for the shell. To stdout, so that a
+        // `msg` stage after it in a pipeline wakes on it.
+        let target = ulib::stdout_target();
+        ulib::write_out(target, b"readkey: kept\r\n");
+        ulib::end_of_stream(target);
         ulib::exit(0);
+    }
+    if msg {
+        // `msg`: block in MSG_RECV until the stage before it in a pipeline
+        // writes, so the keyboard owner (a pipeline's last stage) sits in a
+        // message wait the whole time, the wait a program blocked on a
+        // server is in.
+        let mut m = [0u8; syscall_abi::MSG_MAX_LEN as usize];
+        ulib::syscall4(syscall_abi::MSG_RECV, m.as_mut_ptr() as u64, m.len() as u64, 0, 0);
     }
     // Everything first, then the printing: printing is con_write, and a read
     // between two of those must not depend on what a wait does meanwhile.

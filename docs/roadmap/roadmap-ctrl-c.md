@@ -151,12 +151,21 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    Check: a C probe that spins between reads, keys pressed during the spin
    by QEMU's `sendkey`, every byte read back; fails with the tick's drop
    restored. *Built 2026-10-07 (#232): `syscall.rs`'s
-   `read_keyboard_ahead` and `KBD_QUEUE`, bounded at 128 bytes a tick
-   because it runs with interrupts masked; the probe is `/bin/READKEY spin
-   [ticks]` rather than a C program, and `make test-kbd-queue` its rig.
-   Found on the way: the driver takes one USB keyboard report per poll and
-   the tick reads ahead about every other tick, so a busy program keeps up
-   with about 12 keys a second, and QEMU's keyboard drops what is faster
+   `read_keyboard_ahead` and `KBD_QUEUE`, bounded per call because it runs
+   with interrupts masked; the probe is `/bin/READKEY spin [ticks]
+   [io|keep]` rather than a C program, and `make test-kbd-queue` its rig.
+   Its high review found that the waits for a child's exit and for a
+   message also read the keyboard for the owner and threw each byte away,
+   so an editor blocked in `con_write` still lost keys: both now read ahead
+   (`keyboard_interrupts_wait`), and the tick reads ahead for the owner
+   whoever it interrupted. **A Ctrl+C now flushes the queue**, as Unix
+   flushes pending input on an interrupt: a typed `rm foo` and Enter, then
+   Ctrl+C, must not run in the shell after the kill. That refines D3, which
+   keeps type-ahead when a program ENDS; it is flagged for Hans. A full
+   queue can still cut a sequence (a byte dropped mid-key); that is step
+   3's, which brings `keyseq` into the kernel. Found on the way: the driver
+   takes one USB keyboard report per poll, so a busy program keeps up with
+   about 25 keys a second, and QEMU's keyboard drops what is faster
    (recorded on `docs/ROADMAP.md`).*
 1. **`KBD_MODE`, Ctrl+\ (design 1 and 2).** Check: `/bin/READKEY raw` (a new
    mode of the existing probe) prints 3 for Ctrl-C and dies on Ctrl+\;
@@ -167,6 +176,8 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    back every flag it set; `ENOTTY` on a file.
 3. **The cut sequence (design 5).** Check: a probe reads only the ESC of an
    arrow, is killed, and the shell's next line holds nothing of the tail.
+   Also here: a full queue must refuse a whole key rather than keep the
+   front of one (found by the high review of #232).
 4. **The shell's reset (design 6).** Check: on `ramfb`, a probe killed in
    reverse video, then the prompt drawn normal (`test-cond-vt.py`'s decoder).
 
