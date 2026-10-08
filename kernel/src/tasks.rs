@@ -736,7 +736,10 @@ fn task_waited_on(target: usize) -> bool {
     })
 }
 
-/// The Ctrl+C escape hatch. When `byte` is Ctrl+C (`0x03`, ETX) and a task
+/// The escape hatch. When `byte` is an interrupt key the owner's mode
+/// honours (Ctrl+\, [`KEY_QUIT`], always; Ctrl+C, [`KEY_INTERRUPT`], only
+/// for a cooked owner: a raw one gets it as an ordinary byte, and `false`)
+/// and a task
 /// other than the boot shell owns the keyboard, it does one of two things by
 /// whether the owner is a foreground command (its [`FOREGROUND_COMMAND`] flag,
 /// OR a live task blocked in `WAIT` on it - see the body): a foreground

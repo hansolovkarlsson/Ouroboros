@@ -21,7 +21,8 @@ on QEMU's USB keyboard through the monitor's `sendkey`:
 5. **The boot shell ignores both bytes**: `echo e`, Ctrl+\\, Ctrl+C, `f`
    typed on one line prints `ef`.
 6. **Ctrl+\\ interrupts the boot shell's stuck `wait`**: `exec /bin/recv`, which
-   blocks for good, then `wait` on it and Ctrl+\\; the wait must print
+   blocks for good, then `wait` on it, 70 letters (the wait reads them into
+   the 64-byte keyboard queue, which fills) and Ctrl+\\; the wait must print
    `wait: interrupted`.
 
 Every kill must also name the key pressed in the kernel's kill line. Ctrl
@@ -30,15 +31,17 @@ program: that key has no US position, and an uncatchable kill on Ctrl+<
 would be a trap. `readkey spin 100 rawkeep` exits in raw mode with a
 Ctrl+C typed during its spin still queued: the shell's wait on it must
 collect its exit (no zombie in `ps`), since that Ctrl+C was a byte when it
-was read and must not interrupt the shell. Step 3 checks that `readkey mode` ran in a slot a raw `readkey` ran
-in, since otherwise a cooked answer proves nothing.
+was read and must not interrupt the shell. Step 3 checks that `readkey
+mode` ran in a slot a raw `readkey` ran in, since otherwise a cooked
+answer proves nothing.
 
 Each check fails with its part of the kernel removed: the raw test in
 `interrupt_key_check` (1), the 0x1c arm there (1, 2 and 4), the USB mapping
 (2), the reset in `end_task` (3), Ctrl+\\ in `keyboard_interrupts_wait` (6),
-the boot-shell mark on queued interrupts (the zombie check), and 0x64 in the
-USB map (the `<>` check). The ISO backslash key, 0x32, cannot be sent by
-QEMU, so its mapping is checked only on hardware.
+the boot shell's interrupt decided as it is read rather than found in the
+queue (the zombie check; queued, it is lost behind a full queue, check 6),
+and 0x64 in the USB map (the `<>` check). The ISO backslash key, 0x32,
+cannot be sent by QEMU, so its mapping is checked only on hardware.
 QEMU's own trace must hold no fault line.
 About a minute. Run it whenever `interrupt_key_check`, `KBD_MODE`, xhci.rs's
 Ctrl mapping or the death path's per-task resets change.
@@ -142,7 +145,9 @@ def main() -> int:
                 ok = guest.wait_for(r"readkey: kept[\s\S]*" + PROMPT, timeout=30)
             if ok:
                 guest.type_line("ps")
-                ok = guest.wait_for(r"task 10:[^\n]*\n[\s\S]*" + PROMPT)
+                # Up to the prompt, so every slot `ps` lists is looked at,
+                # however many there are.
+                ok = guest.wait_for(r"task 0:[\s\S]*" + PROMPT)
             seg["rawkeep"] = guest.transcript()[start:]
         ok = ok and step("mode", "readkey mode", "readkey: mode", None)
         ok = ok and step("cooked c", "readkey", "press keys", lambda: type_raw(guest, ETX))
@@ -169,6 +174,10 @@ def main() -> int:
                 start = len(guest.transcript())
                 guest.type_line(f"wait {recv_slot}")
                 time.sleep(1.5)
+                # 70 letters first: the wait reads them ahead into the
+                # keyboard queue (64 bytes), so the Ctrl+\ arrives with the
+                # queue full and must still interrupt.
+                type_raw(guest, b"x" * 70)
                 type_raw(guest, FS)
                 ok = guest.wait_for(r"wait: interrupted[\s\S]*" + PROMPT, timeout=20)
                 seg["wait"] = guest.transcript()[start:]
@@ -201,14 +210,15 @@ def main() -> int:
         ("raw: Ctrl on the ISO `<>` key (HID 0x64) did not end it",
          "readkey: bye" in seg.get("raw iso", "") and "foreground task" not in seg.get("raw iso", "")),
         ("a raw owner's queued Ctrl+C left no zombie (the shell's wait collected the exit)",
-         "task 10:" in seg.get("rawkeep", "") and ": exited" not in seg.get("rawkeep", "")),
+         "task 0:" in seg.get("rawkeep", "") and ": exited" not in seg.get("rawkeep", "")),
         ("the next task in a raw task's slot starts cooked",
          mode is not None and mode.group(1) == "cooked" and mode.group(2) in raw_slots),
         ("cooked: Ctrl+C ended it, never read",
          ended("cooked c", "Ctrl+C") and "(3)" not in seg.get("cooked c", "")),
         ("cooked: Ctrl+\\ ended it, never read",
          ended("cooked fs", "Ctrl+\\") and "(28)" not in seg.get("cooked fs", "")),
-        ("Ctrl+\\ interrupted the boot shell's stuck wait", "wait: interrupted" in seg.get("wait", "")),
+        ("Ctrl+\\ interrupted the boot shell's stuck wait, behind a full queue",
+         "wait: interrupted" in seg.get("wait", "")),
         ("the boot shell ignored both bytes (`ef`)",
          "ef" in [l.strip() for l in seg.get("shell", "").splitlines()]),
         ("no fault lines", faults == 0),

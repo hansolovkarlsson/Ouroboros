@@ -46,7 +46,7 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: readkey [poll|spin|raw|mode]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg]: run three seconds without reading, then print every byte typed meanwhile; raw: Ctrl+C is a key, Ctrl+\\ ends it; mode: print this task's keyboard mode)\r\n");
+    ulib::usage_if_requested(b"usage: readkey [poll|spin|raw|mode]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg|rawkeep]: run three seconds without reading, then print every byte typed meanwhile; raw: Ctrl+C is a key, Ctrl+\\ ends it; mode: print this task's keyboard mode)\r\n");
     let mut mode = [0u8; 8];
     let mut raw = false;
     let poll = match ulib::arg(1, &mut mode) {
@@ -159,8 +159,9 @@ fn spin_then_drain() -> ! {
     // queued as a byte and left unread when it exits: the case where the
     // keyboard reverts to the shell with a raw owner's Ctrl+C still queued.
     let rawkeep = &how[..how_len] == b"rawkeep";
-    if rawkeep {
-        ulib::kbd_mode(syscall_abi::KBD_RAW);
+    if rawkeep && ulib::kbd_mode(syscall_abi::KBD_RAW) != syscall_abi::KBD_RAW {
+        ulib::con_write(b"readkey: the kernel refused raw mode\r\n");
+        ulib::exit(1);
     }
     let keep = rawkeep || &how[..how_len] == b"keep";
     ulib::con_write(b"readkey: spinning\r\n");

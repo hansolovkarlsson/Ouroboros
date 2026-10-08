@@ -244,7 +244,7 @@ its login and cwd, and `fg` resumes it), and the boot shell ignores it).
 reads Ctrl+C as a key (raw keyboard mode, `kbd_mode`, syscall 70: an editor
 that binds ^C). An
 exited task holds its slot as a zombie until `wait`ed (`ps` shows it); `kill`
-reaps immediately. Ctrl+C also interrupts a stuck `wait` in the boot shell; in
+reaps immediately. Ctrl+C (or Ctrl+\) also interrupts a stuck `wait` in the boot shell; in
 a nested shell it detaches that shell to its parent (the wait keeps running;
 `kill` it from the parent, or `fg` back).
 
