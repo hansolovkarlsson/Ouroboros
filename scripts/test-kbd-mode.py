@@ -28,7 +28,9 @@ on QEMU's USB keyboard through the monitor's `sendkey`:
 Every kill must also name the key pressed in the kernel's kill line. Ctrl
 on the ISO key beside left Shift (`less`, HID 0x64) must NOT end a raw
 program: that key has no US position, and an uncatchable kill on Ctrl+<
-would be a trap. `readkey spin 100 rawkeep` exits in raw mode with a
+would be a trap. `readkey spin 100 raw`, busy in raw mode when Ctrl+C is
+typed, must read it back as 3: the tick read it ahead and queued it as a
+byte. `readkey spin 100 rawkeep` exits in raw mode with a
 Ctrl+C typed during its spin still queued: the shell's wait on it must
 collect its exit (no zombie in `ps`), since that Ctrl+C was a byte when it
 was read and must not interrupt the shell. Step 3 checks that `readkey
@@ -132,6 +134,16 @@ def main() -> int:
         # lives on to read `q`. (The ISO key in the backslash position, 0x32,
         # is Ctrl+\ but has no sendkey: QEMU sends 0x31 for it.)
         ok = ok and step("raw iso", "readkey raw", "readkey: raw", lambda: sendkeys(["ctrl-less", "q"]))
+        # A raw owner busy when Ctrl+C is typed: the tick reads it ahead and
+        # must queue it as the byte 3, for the program's next read.
+        if ok:
+            start = len(guest.transcript())
+            guest.type_line("readkey spin 100 raw")
+            ok = guest.wait_for("readkey: spinning")
+            if ok:
+                type_raw(guest, ETX)
+                ok = guest.wait_for(r"readkey: got[^\n]*\n[\s\S]*" + PROMPT, timeout=30)
+            seg["rawspin"] = guest.transcript()[start:]
         # A raw owner's Ctrl+C left queued when it exits is a byte (settled
         # when read), not an interrupt for the shell that gets the keyboard
         # back: the shell's WAIT on the program must collect its exit, so no
@@ -209,6 +221,8 @@ def main() -> int:
          ended("raw usb", "Ctrl+\\") and "(28)" not in seg.get("raw usb", "")),
         ("raw: Ctrl on the ISO `<>` key (HID 0x64) did not end it",
          "readkey: bye" in seg.get("raw iso", "") and "foreground task" not in seg.get("raw iso", "")),
+        ("raw and busy: a Ctrl+C read ahead by the tick is queued as 3",
+         re.search(r"readkey: got 3\s", seg.get("rawspin", "")) is not None),
         ("a raw owner's queued Ctrl+C left no zombie (the shell's wait collected the exit)",
          "task 0:" in seg.get("rawkeep", "") and ": exited" not in seg.get("rawkeep", "")),
         ("the next task in a raw task's slot starts cooked",

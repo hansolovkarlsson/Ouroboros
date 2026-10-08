@@ -28,8 +28,10 @@
 //! `readkey spin 150 keep | readkey spin 0 msg` holds the keyboard owner (a
 //! pipeline's last stage) in a message wait for three seconds.
 //!
-//! `readkey spin [ticks] rawkeep` is `keep` in raw mode: a Ctrl+C typed
-//! during the spin is queued as a byte and left unread when it exits.
+//! `readkey spin [ticks] raw` spins and drains in raw mode, so a Ctrl+C typed
+//! during the spin comes back as 3; `readkey spin [ticks] rawkeep` is `keep`
+//! in raw mode: a Ctrl+C typed during the spin is queued as a byte and left
+//! unread when it exits.
 //!
 //! `readkey raw` is the observer for the keyboard modes
 //! (`docs/roadmap/roadmap-ctrl-c.md`, step 1): it puts itself in raw mode
@@ -46,7 +48,7 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: readkey [poll|spin|raw|mode]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg|rawkeep]: run three seconds without reading, then print every byte typed meanwhile; raw: Ctrl+C is a key, Ctrl+\\ ends it; mode: print this task's keyboard mode)\r\n");
+    ulib::usage_if_requested(b"usage: readkey [poll|spin|raw|mode]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg|raw|rawkeep]: run three seconds without reading, then print every byte typed meanwhile; raw: Ctrl+C is a key, Ctrl+\\ ends it; mode: print this task's keyboard mode)\r\n");
     let mut mode = [0u8; 8];
     let mut raw = false;
     let poll = match ulib::arg(1, &mut mode) {
@@ -159,7 +161,10 @@ fn spin_then_drain() -> ! {
     // queued as a byte and left unread when it exits: the case where the
     // keyboard reverts to the shell with a raw owner's Ctrl+C still queued.
     let rawkeep = &how[..how_len] == b"rawkeep";
-    if rawkeep && ulib::kbd_mode(syscall_abi::KBD_RAW) != syscall_abi::KBD_RAW {
+    // `raw`: the spin and the drain in raw mode, so a Ctrl+C typed during the
+    // spin must come back as 3: read ahead by the tick, queued as a byte.
+    let raw = &how[..how_len] == b"raw";
+    if (rawkeep || raw) && ulib::kbd_mode(syscall_abi::KBD_RAW) != syscall_abi::KBD_RAW {
         ulib::con_write(b"readkey: the kernel refused raw mode\r\n");
         ulib::exit(1);
     }
