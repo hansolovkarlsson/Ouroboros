@@ -213,7 +213,10 @@ fn con_access_allowed() -> bool {
 /// `None` if no keyboard was ever found this boot.
 ///
 /// Bytes the tick read ahead of the owner wait in [`KBD_QUEUE`] and come
-/// first; they passed the Ctrl+C check when they were read.
+/// first; they passed the Ctrl+C check when they were read, under the owner
+/// and keyboard mode of that moment, and are not judged again (as on Unix,
+/// where a byte's meaning is settled on receipt): a Ctrl+C queued for a raw
+/// owner stays a byte if the owner turns cooked or dies before reading it.
 pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
     if reader != tasks::input_owner() {
         return None;
@@ -299,7 +302,7 @@ pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
     }
     // SAFETY: as in poll_keyboard_byte.
     let queue = unsafe { &mut *KBD_QUEUE.get() };
-    if queue.contains(0x03) || queue.contains(0x1c) {
+    if queue.any(tasks::is_interrupt_key) {
         queue.clear();
         return true;
     }
@@ -383,8 +386,8 @@ impl KbdQueue {
         self.dropping = mid_key;
     }
 
-    fn contains(&self, byte: u8) -> bool {
-        (0..self.len).any(|i| self.buf[(self.head + i) % KBD_QUEUE_LEN] == byte)
+    fn any(&self, pred: impl Fn(u8) -> bool) -> bool {
+        (0..self.len).any(|i| pred(self.buf[(self.head + i) % KBD_QUEUE_LEN]))
     }
 
     fn pop(&mut self) -> Option<u8> {

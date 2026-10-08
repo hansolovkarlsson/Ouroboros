@@ -945,6 +945,12 @@ pub const BOOT_ID_BAD_BUFFER: u64 = u64::MAX - 1;
 /// mode has no effect until it does). Every task starts cooked, and the mode
 /// ends with the task: its death resets it, so the next occupant of the
 /// slot, a spawned child included, is cooked.
+///
+/// **A key's meaning is settled when the kernel reads it**, as on Unix,
+/// where `ISIG` acts on receipt: a Ctrl+C read ahead (by the tick, while the
+/// owner was busy) for a raw owner is queued as a byte, and stays one if the
+/// owner then turns cooked or ends before reading it. Changing the mode
+/// affects only keys read after the change.
 pub const KBD_MODE: u64 = 70;
 /// [`KBD_MODE`]'s default: Ctrl+C and Ctrl+\ both end or detach the owner.
 pub const KBD_COOKED: u64 = 0;

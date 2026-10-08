@@ -1022,7 +1022,12 @@ fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
     if ctrl {
         return match keycode {
             0x04..=0x1d => Some(1 + (keycode - 0x04)), // Ctrl+A..Ctrl+Z
-            0x31 => Some(0x1c),                        // Ctrl+\, the way out in every keyboard mode
+            // Ctrl+\, the way out in every keyboard mode: 0x31 is the ANSI
+            // backslash key; an ISO keyboard (Swedish, UK, German) has none,
+            // and its two keys in the backslash positions are 0x32 (beside
+            // Enter) and 0x64 (beside left Shift), so Ctrl on either sends it
+            // too, or a raw program could not be left from those keyboards.
+            0x31 | 0x32 | 0x64 => Some(crate::tasks::KEY_QUIT),
             _ => None,
         };
     }

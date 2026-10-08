@@ -33,8 +33,9 @@
 //! (`KBD_MODE`) and then echoes keys as the default mode does, so Ctrl+C
 //! shows as `(3)` instead of ending it; Ctrl+\ still ends it, in every
 //! mode. `readkey mode` prints the mode this task starts in, `readkey: mode
-//! cooked` or `readkey: mode raw`, and exits: run after a `readkey raw`
-//! ended, it shows the mode did not outlive the task.
+//! cooked in slot N` or `readkey: mode raw in slot N`, and exits: run after a
+//! `readkey raw` ended in the same slot (it prints its slot too), it shows the
+//! mode did not outlive the task.
 
 #![no_std]
 #![no_main]
@@ -66,7 +67,9 @@ pub extern "C" fn _start() -> ! {
     if poll {
         ulib::con_write(b"readkey: polling (in the foreground: q to quit, Ctrl+C to abort; in the background it never owns the keyboard, so kill it from the shell)\r\n");
     } else if raw {
-        ulib::con_write(b"readkey: raw, press keys (q to quit, Ctrl+\\ to abort; Ctrl+C is a key)\r\n");
+        ulib::con_write(b"readkey: raw in slot ");
+        write_slot();
+        ulib::con_write(b", press keys (q to quit, Ctrl+\\ to abort; Ctrl+C is a key)\r\n");
     } else {
         ulib::con_write(b"readkey: press keys (q to quit, Ctrl+C to abort)\r\n");
     }
@@ -112,13 +115,26 @@ pub extern "C" fn _start() -> ! {
 }
 
 /// `readkey mode`: print the keyboard mode this task is in, and exit.
+/// The slot is printed so a rig can tell that a later `readkey mode` ran
+/// where a `readkey raw` did: only then does "starts cooked" show the mode
+/// ending with the task rather than a slot that was never raw.
 fn print_mode() -> ! {
     match ulib::kbd_mode(syscall_abi::KBD_QUERY) {
-        syscall_abi::KBD_RAW => ulib::con_write(b"readkey: mode raw\r\n"),
-        syscall_abi::KBD_COOKED => ulib::con_write(b"readkey: mode cooked\r\n"),
-        _ => ulib::con_write(b"readkey: mode unknown\r\n"),
+        syscall_abi::KBD_RAW => ulib::con_write(b"readkey: mode raw in slot "),
+        syscall_abi::KBD_COOKED => ulib::con_write(b"readkey: mode cooked in slot "),
+        _ => ulib::con_write(b"readkey: mode unknown in slot "),
     }
+    write_slot();
+    ulib::con_write(b"\r\n");
     ulib::exit(0);
+}
+
+/// This task's slot, in decimal.
+fn write_slot() {
+    let mut buf = [0u8; 8];
+    let mut n = 0usize;
+    ulib::emit_dec(&mut buf, &mut n, ulib::self_task());
+    ulib::con_write(&buf[..n]);
 }
 
 /// Ticks `readkey spin` runs without reading unless told otherwise

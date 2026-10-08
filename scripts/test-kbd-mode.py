@@ -20,15 +20,25 @@ on QEMU's USB keyboard through the monitor's `sendkey`:
    `readkey`s, neither printing `(3)` or `(28)`.
 5. **The boot shell ignores both bytes**: `echo e`, Ctrl+\\, Ctrl+C, `f`
    typed on one line prints `ef`.
+6. **Ctrl+\\ interrupts the boot shell's stuck `wait`**: `exec /bin/recv`, which
+   blocks for good, then `wait` on it and Ctrl+\\; the wait must print
+   `wait: interrupted`.
+
+Every kill must also name the key pressed in the kernel's kill line, and
+step 2 is repeated with Ctrl on the ISO key beside left Shift (`less`, HID
+0x64). Step 3 checks that `readkey mode` ran in a slot a raw `readkey` ran
+in, since otherwise a cooked answer proves nothing.
 
 Each check fails with its part of the kernel removed: the raw test in
 `interrupt_key_check` (1), the 0x1c arm there (1, 2 and 4), the USB mapping
-(2), the reset in `end_task` (3). QEMU's own trace must hold no fault line.
+(2), the reset in `end_task` (3), Ctrl+\\ in `keyboard_interrupts_wait` (6).
+QEMU's own trace must hold no fault line.
 About a minute. Run it whenever `interrupt_key_check`, `KBD_MODE`, xhci.rs's
 Ctrl mapping or the death path's per-task resets change.
 """
 import importlib.util
 import os
+import re
 import socket
 import sys
 import time
@@ -107,6 +117,10 @@ def main() -> int:
         ok = ok and guest.run([("", "root"), ("assword", "root")]) and guest.wait_for(PROMPT)
         ok = ok and step("raw", "readkey raw", "readkey: raw", serial_then_usb_ctrl_c_then_serial_fs)
         ok = ok and step("raw usb", "readkey raw", "readkey: raw", lambda: sendkeys(["ctrl-backslash"]))
+        # QEMU's `less` is the ISO key beside left Shift (HID 0x64). The other
+        # ISO backslash position (0x32) has no sendkey of its own: QEMU sends
+        # 0x31 for it, so it is not reachable from here.
+        ok = ok and step("raw iso", "readkey raw", "readkey: raw", lambda: sendkeys(["ctrl-less"]))
         ok = ok and step("mode", "readkey mode", "readkey: mode", None)
         ok = ok and step("cooked c", "readkey", "press keys", lambda: type_raw(guest, ETX))
         ok = ok and step("cooked fs", "readkey", "press keys", lambda: type_raw(guest, FS))
@@ -115,6 +129,28 @@ def main() -> int:
             type_raw(guest, b"echo e" + FS + ETX + b"f\n")
             ok = guest.wait_for(PROMPT)
             seg["shell"] = guest.transcript()[start:]
+        if ok:
+            # The boot shell's stuck `wait`: `recv` blocks for good, and
+            # Ctrl+\ must interrupt the wait as Ctrl+C does
+            # (keyboard_interrupts_wait), the target left running.
+            guest.type_line("exec /bin/recv")
+            ok = guest.wait_for(PROMPT)
+            start = len(guest.transcript())
+            guest.type_line("ps")
+            ok = ok and guest.wait_for(r"recv[\s\S]*" + PROMPT)
+            found = re.search(r"task (\d+): blocked \(waiting\)\s+\S*recv",
+                              guest.transcript()[start:], re.IGNORECASE)
+            ok = ok and found is not None
+            if ok:
+                recv_slot = found.group(1)
+                start = len(guest.transcript())
+                guest.type_line(f"wait {recv_slot}")
+                time.sleep(1.5)
+                type_raw(guest, FS)
+                ok = guest.wait_for(r"wait: interrupted[\s\S]*" + PROMPT, timeout=20)
+                seg["wait"] = guest.transcript()[start:]
+                guest.type_line(f"kill {recv_slot}")
+                ok = guest.wait_for(PROMPT) and ok
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -122,21 +158,31 @@ def main() -> int:
     with open(TRANSCRIPT, "w") as fh:
         fh.write(out)
 
-    def ended(name):
-        """The step's readkey ended without its own farewell: it was killed."""
+    def ended(name, key):
+        """The step's readkey ended without its own farewell, killed by the
+        kernel, whose kill line names `key`, the key that was pressed."""
         s = seg.get(name, "")
-        return bool(s) and "readkey: bye" not in s and PROMPT in s
+        return (bool(s) and "readkey: bye" not in s and PROMPT in s
+                and f"{key} - foreground task" in s)
+
+    raw_slots = set(re.findall(r"readkey: raw in slot (\d+)", out))
+    mode = re.search(r"readkey: mode (\w+) in slot (\d+)", seg.get("mode", ""))
 
     raw = seg.get("raw", "")
     checks = [
         ("driven to the end", ok),
         ("raw: Ctrl+C read as 3, serial and USB", raw.count("(3)") == 2),
-        ("raw: serial Ctrl+\\ ended it, never read", ended("raw") and "(28)" not in raw),
+        ("raw: serial Ctrl+\\ ended it, never read", ended("raw", "Ctrl+\\") and "(28)" not in raw),
         ("raw: USB Ctrl+\\ ended it, never read",
-         ended("raw usb") and "(28)" not in seg.get("raw usb", "")),
-        ("the next task in the slot starts cooked", "readkey: mode cooked" in seg.get("mode", "")),
-        ("cooked: Ctrl+C ended it, never read", ended("cooked c") and "(3)" not in seg.get("cooked c", "")),
-        ("cooked: Ctrl+\\ ended it, never read", ended("cooked fs") and "(28)" not in seg.get("cooked fs", "")),
+         ended("raw usb", "Ctrl+\\") and "(28)" not in seg.get("raw usb", "")),
+        ("raw: Ctrl on the ISO key (HID 0x64) ended it", ended("raw iso", "Ctrl+\\")),
+        ("the next task in a raw task's slot starts cooked",
+         mode is not None and mode.group(1) == "cooked" and mode.group(2) in raw_slots),
+        ("cooked: Ctrl+C ended it, never read",
+         ended("cooked c", "Ctrl+C") and "(3)" not in seg.get("cooked c", "")),
+        ("cooked: Ctrl+\\ ended it, never read",
+         ended("cooked fs", "Ctrl+\\") and "(28)" not in seg.get("cooked fs", "")),
+        ("Ctrl+\\ interrupted the boot shell's stuck wait", "wait: interrupted" in seg.get("wait", "")),
         ("the boot shell ignored both bytes (`ef`)",
          "ef" in [l.strip() for l in seg.get("shell", "").splitlines()]),
         ("no fault lines", faults == 0),

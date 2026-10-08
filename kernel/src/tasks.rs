@@ -65,7 +65,7 @@
 use core::arch::{asm, global_asm};
 use crate::synccell::SyncCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::exceptions::Context;
 use crate::loader::{LoadedProgram, SLOT_ALIGN};
@@ -588,6 +588,28 @@ static FOREGROUND_COMMAND: [AtomicBool; NUM_TASKS] = [const { AtomicBool::new(fa
 /// owns that.
 static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 
+/// The key that marked [`PENDING_KILL`] ([`KEY_INTERRUPT`] or [`KEY_QUIT`]),
+/// so the kill line names the key the user pressed: in raw mode Ctrl+C never
+/// kills, and a line saying it did would point at the wrong way out.
+static PENDING_KILL_KEY: AtomicU8 = AtomicU8::new(KEY_INTERRUPT);
+
+/// Ctrl+C (ETX): ends or detaches a cooked keyboard owner, and is an ordinary
+/// byte to a raw one (`KBD_MODE`). The one spelling of the interrupt bytes:
+/// [`interrupt_key_check`], `syscall.rs`'s `keyboard_interrupts_wait` and
+/// xhci.rs's key map all name these, so a change to which bytes interrupt
+/// cannot reach one site and miss another.
+pub(crate) const KEY_INTERRUPT: u8 = 0x03;
+/// Ctrl+\ (FS): ends or detaches the keyboard owner in every mode, the way
+/// out no program can opt out of.
+pub(crate) const KEY_QUIT: u8 = 0x1c;
+
+/// Whether `byte` is one of the two interrupt keys, either of which
+/// interrupts the boot shell's stuck wait (`keyboard_interrupts_wait`),
+/// where the keyboard mode plays no part.
+pub(crate) fn is_interrupt_key(byte: u8) -> bool {
+    byte == KEY_INTERRUPT || byte == KEY_QUIT
+}
+
 /// Each task's keyboard mode (`KBD_MODE`): `true` = raw, where Ctrl+C is an
 /// ordinary byte for [`interrupt_key_check`]; `false` = cooked, the default.
 /// Indexed by slot and reset by [`end_task`], so the mode ends with the
@@ -755,15 +777,13 @@ fn task_waited_on(target: usize) -> bool {
 /// (`docs/roadmap/roadmap-ctrl-c.md`, D1 and D2). At the boot shell both
 /// pass through, as Ctrl+C always has.
 pub(crate) fn interrupt_key_check(byte: u8) -> bool {
-    const ETX: u8 = 0x03; // Ctrl+C
-    const FS: u8 = 0x1c; // Ctrl+\
     let owner = input_owner();
     if owner == 0 {
         return false;
     }
     match byte {
-        FS => {}
-        ETX if !kbd_raw(owner) => {}
+        KEY_QUIT => {}
+        KEY_INTERRUPT if !kbd_raw(owner) => {}
         _ => return false,
     }
     // The occupant, not the slot: see PENDING_KILL. An owner that is not a
@@ -792,6 +812,7 @@ pub(crate) fn interrupt_key_check(byte: u8) -> bool {
     if FOREGROUND_COMMAND[owner].load(Ordering::Relaxed) || task_waited_on(owner) {
         // Terminate: a task is, or is about to be, blocked in `WAIT` on `owner`,
         // and its `WAIT` wakes with `TASK_KILLED_STATUS`.
+        PENDING_KILL_KEY.store(byte, Ordering::Relaxed);
         PENDING_KILL.store(id, Ordering::Relaxed);
         return true;
     }
@@ -2717,7 +2738,8 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // is_spawnable and occupant_is alike; no separate guard is needed.
     let victim = live_occupant(pending).filter(|v| v.is_spawnable());
     if let Some(victim_slot) = victim {
-        crate::console::println!("Ouroboros kernel: Ctrl+C - foreground task {} terminated", victim_slot.index());
+        let key = if PENDING_KILL_KEY.load(Ordering::Relaxed) == KEY_QUIT { "Ctrl+\\" } else { "Ctrl+C" };
+        crate::console::println!("Ouroboros kernel: {key} - foreground task {} terminated", victim_slot.index());
         if victim_slot == current {
             unsafe { kill_current_and_switch(frame) };
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
