@@ -264,7 +264,16 @@ the full queue, the USB affinity); `make test-kbd-cut` (`readkey one`,
 `ctermios flush` and `drain`) checks the same end to end, and its own
 mutation controls (the trim removed, E2 removed, E1 and E2 together, the
 flush ignored, the direct read restored, `pop` never marking, TCSADRAIN
-flushing) each fail it.*
+flushing) each fail it. Its high review found six more, fixed: the
+`KBD_FLUSH` path ended an interrupt with the wrong flush (now read ahead,
+then empty); the flush ran after the mode change, so a raw Ctrl+C still on
+the line could kill a program restoring cooked mode (now before, as POSIX
+has `TCSAFLUSH`); an `ESC` inside a key was not marked as a key start, so a
+trim could drop a complete key typed ahead; the bare-`ESC` interval compared
+whole ticks with `>=`, as little as 20 ms (now `>`, at least 40); a stale USB
+key could double every xHCI poll; and `BootInterrupt`'s doc said the line
+editor gets the byte. One declined: an interrupt inside a full-queue key,
+which a terminal's in-order burst cannot produce.*
 
 ## Steps, each with its check
 
