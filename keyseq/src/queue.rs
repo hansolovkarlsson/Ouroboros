@@ -19,9 +19,11 @@ pub const QUEUE_LEN: usize = 64;
 /// taken back out, rather than kept cut; and a key a reader took part of is
 /// not handed to the next owner ([`KeyQueue::trim_cut_key`]).
 ///
-/// Times are in the caller's ticks: `esc_alone` is how many of them a bare
-/// `ESC` waits alone before it counts as a complete key (decision E2 of the
-/// Ctrl-C plan), and every call that can end a key takes `now`.
+/// Times are in the caller's ticks: a bare `ESC` with nothing after it for
+/// MORE than `esc_alone` of them counts as a complete key (decision E2 of the
+/// Ctrl-C plan), and every call that can end a key takes `now`. More than,
+/// not at least: ticks are whole, so `esc_alone` ticks apart can be as little
+/// as `esc_alone - 1` ticks of real time, and the interval is a floor.
 pub struct KeyQueue {
     buf: [u8; QUEUE_LEN],
     /// Per position: the byte starts a key (the parser was between keys).
@@ -67,7 +69,8 @@ impl KeyQueue {
     /// Whether the next byte must come from the USB keyboard: the parser is
     /// inside a key that began there, and a report's bytes wait whole, so
     /// reading its rest first keeps a serial byte out of it.
-    pub fn inside_usb_key(&self) -> bool {
+    pub fn inside_usb_key(&mut self, now: u64) -> bool {
+        self.expire(now);
         self.inside && self.inside_usb
     }
 
@@ -75,7 +78,7 @@ impl KeyQueue {
     /// Escape key) is complete: its rest is not coming, and what arrives
     /// next starts a key of its own.
     fn expire(&mut self, now: u64) {
-        if self.inside && now.saturating_sub(self.fed_at) >= self.esc_alone {
+        if self.inside && now.saturating_sub(self.fed_at) > self.esc_alone {
             self.keys = KeySeq::new();
             self.inside = false;
             self.partial = 0;
@@ -92,7 +95,11 @@ impl KeyQueue {
     /// taken back out, and the rest is dropped as it comes.
     pub fn push(&mut self, byte: u8, from_usb: bool, now: u64) {
         self.expire(now);
-        let starts = !self.inside;
+        // An ESC inside a key starts a new one: keyseq abandons the sequence
+        // in progress (review of #238; it was marked as the old key's rest,
+        // so a trim dropped a complete key typed ahead behind it).
+        let abandons = self.inside && byte == crate::ESC;
+        let starts = !self.inside || abandons;
         let fed = self.keys.feed(byte);
         self.inside = fed == Fed::Pending;
         if starts {
@@ -135,7 +142,11 @@ impl KeyQueue {
         // A control byte that ended a cut sequence starts a key of its own.
         self.starts[at] = starts || matches!(fed, Fed::Byte(_));
         self.len += 1;
-        self.partial = if fed == Fed::Pending { self.partial + 1 } else { 0 };
+        self.partial = match fed {
+            Fed::Pending if abandons => 1,
+            Fed::Pending => self.partial + 1,
+            _ => 0,
+        };
     }
 
     /// The one flush, at every interrupt (`Some(byte)`, the interrupt key)
@@ -265,8 +276,8 @@ mod tests {
         let mut q = KeyQueue::new(ESC_ALONE);
         push_all(&mut q, b"\x1b", 0);
         assert_eq!(q.pop(), Some(0x1b));
-        q.trim_cut_key(ESC_ALONE);
-        push_all(&mut q, b"echo", ESC_ALONE);
+        q.trim_cut_key(ESC_ALONE + 1);
+        push_all(&mut q, b"echo", ESC_ALONE + 1);
         assert_eq!(drain(&mut q), b"echo");
     }
 
@@ -275,8 +286,8 @@ mod tests {
         let mut q = KeyQueue::new(ESC_ALONE);
         push_all(&mut q, b"\x1b", 0);
         assert_eq!(q.pop(), Some(0x1b));
-        q.trim_cut_key(ESC_ALONE - 1);
-        push_all(&mut q, b"[A", ESC_ALONE - 1);
+        q.trim_cut_key(ESC_ALONE);
+        push_all(&mut q, b"[A", ESC_ALONE);
         assert_eq!(drain(&mut q), b"", "the arrow's rest, inside the interval, is dropped");
     }
 
@@ -324,11 +335,29 @@ mod tests {
     fn a_usb_key_is_read_whole() {
         let mut q = KeyQueue::new(ESC_ALONE);
         q.push(0x1b, true, 0);
-        assert!(q.inside_usb_key());
+        assert!(q.inside_usb_key(0));
         q.push(b'[', true, 0);
         q.push(b'A', true, 0);
-        assert!(!q.inside_usb_key());
+        assert!(!q.inside_usb_key(0));
         q.push(0x1b, false, 0);
-        assert!(!q.inside_usb_key(), "a serial key does not pin the reads to USB");
+        assert!(!q.inside_usb_key(0), "a serial key does not pin the reads to USB");
+    }
+
+    #[test]
+    fn a_usb_key_left_open_stops_pinning_the_reads() {
+        let mut q = KeyQueue::new(ESC_ALONE);
+        q.push(0x1b, true, 0);
+        assert!(!q.inside_usb_key(ESC_ALONE + 1));
+    }
+
+    #[test]
+    fn an_escape_inside_a_key_starts_a_new_one() {
+        // A cut sequence, then a whole arrow behind it: a reader takes the
+        // first ESC and loses the keyboard; the cut key goes, the arrow stays.
+        let mut q = KeyQueue::new(ESC_ALONE);
+        push_all(&mut q, b"\x1b[5\x1b[Ax", 0);
+        assert_eq!(q.pop(), Some(0x1b));
+        q.trim_cut_key(0);
+        assert_eq!(drain(&mut q), b"\x1b[Ax");
     }
 }

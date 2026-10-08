@@ -622,8 +622,10 @@ pub(crate) enum KeyVerdict {
     Consumed,
     /// Ctrl+C or Ctrl+\ with the boot shell owning the keyboard: no kill,
     /// but the interrupt for the boot shell's waits
-    /// (`syscall::keyboard_interrupts_wait`). Its line editor, reading
-    /// directly, gets the byte and ignores it.
+    /// (`syscall::keyboard_interrupts_wait`). Like every interrupt it
+    /// flushes the keys typed ahead of it, at the prompt too, as Unix does,
+    /// and is not itself delivered: since every byte goes through the queue
+    /// (#238), the line editor never sees it.
     BootInterrupt,
 }
 

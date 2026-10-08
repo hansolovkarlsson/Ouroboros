@@ -963,7 +963,7 @@ pub const KBD_COOKED: u64 = 0;
 pub const KBD_RAW: u64 = 1;
 /// [`KBD_MODE`] argument: answer the mode, change nothing.
 pub const KBD_QUERY: u64 = 2;
-/// [`KBD_MODE`] flag, OR'd into any mode: after the mode is set, discard the
+/// [`KBD_MODE`] flag, OR'd into any mode: before the mode is set, discard the
 /// keys typed ahead (queued, and waiting on the devices), as `tcsetattr`'s
 /// `TCSAFLUSH` asks. For the keyboard owner only; anyone else's flush does
 /// nothing. An interrupt among the discarded keys still acts.

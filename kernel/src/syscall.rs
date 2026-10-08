@@ -238,14 +238,20 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
 /// inside it (the hazard the review of #229 found).
 fn keyboard_device_byte() -> Option<(u8, bool)> {
     // SAFETY: as in poll_keyboard_byte.
-    if unsafe { (*KBD_QUEUE.get()).inside_usb_key() } {
+    let usb_first = unsafe { (*KBD_QUEUE.get()).inside_usb_key(crate::exceptions::ticks()) };
+    if usb_first {
         if let Some(byte) = crate::xhci::poll_key() {
             return Some((byte, true));
         }
     }
-    console::read_byte()
-        .map(|byte| (byte, false))
-        .or_else(|| crate::xhci::poll_key().map(|byte| (byte, true)))
+    if let Some(byte) = console::read_byte() {
+        return Some((byte, false));
+    }
+    if usb_first {
+        // Polled just above, and it had nothing.
+        return None;
+    }
+    crate::xhci::poll_key().map(|byte| (byte, true))
 }
 
 /// Reads ahead for the keyboard owner, for every path that looks at the
@@ -327,34 +333,24 @@ pub(crate) fn keyboard_owner_changed() {
 }
 
 /// `KBD_MODE`'s flush (`KBD_FLUSH`, what `tcsetattr`'s `TCSAFLUSH` asks
-/// for): what waits on the devices is read and dropped, and the queue is
-/// emptied, for `reader`, the keyboard owner (anyone else gets nothing, as
-/// with every read). An interrupt among the bytes read still acts: a
-/// Ctrl+\ typed before the flush is not lost with the type-ahead.
+/// for): what waits on the devices is read ahead, through the parser, and
+/// then the queue is emptied, for `reader`, the keyboard owner (anyone else
+/// gets nothing, as with every read). An interrupt among the bytes read still
+/// acts, and its own flush is the one every interrupt gets: a Ctrl+\ typed
+/// before the flush is not lost with the type-ahead (the review of #238
+/// found the first form ending such a flush with a key left open).
 pub(crate) fn keyboard_flush_input(reader: usize) {
     if reader != tasks::input_owner() {
         return;
     }
-    for _ in 0..READ_AHEAD_MAX {
-        let Some((byte, from_usb)) = keyboard_device_byte() else {
-            break;
-        };
-        match tasks::interrupt_key_check(byte) {
-            tasks::KeyVerdict::Byte => {
-                // Through the parser, so a USB key in flight is read whole
-                // and dropped whole.
-                // SAFETY: as in poll_keyboard_byte.
-                unsafe { (*KBD_QUEUE.get()).push(byte, from_usb, crate::exceptions::ticks()) };
-            }
-            tasks::KeyVerdict::Consumed | tasks::KeyVerdict::BootInterrupt => break,
-        }
-    }
+    read_keyboard_ahead(reader);
     // SAFETY: as in poll_keyboard_byte.
     unsafe { (*KBD_QUEUE.get()).flush(None) };
 }
 
 /// How long a bare `ESC` waits alone before the queue counts it as a
-/// complete key (decision E2 of the Ctrl-C plan): 2 ticks, 40 ms. A
+/// complete key (decision E2 of the Ctrl-C plan): more than 2 ticks, so at
+/// least 40 ms and under 60 (ticks are whole; `keyseq::KeyQueue`). A
 /// sequence's bytes arrive together (a USB report, a host terminal's burst),
 /// a person's next key much later; one tick is too short, since a
 /// terminal's `ESC [` can be read either side of a tick.
@@ -1083,14 +1079,21 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // arg0 = mode, with KBD_FLUSH optionally OR'd in; the caller's
             // own mode only. See the ABI doc.
             let me = tasks::current_task();
-            match arg0 & !syscall_abi::KBD_FLUSH {
-                syscall_abi::KBD_COOKED => tasks::set_kbd_raw(me, false),
-                syscall_abi::KBD_RAW => tasks::set_kbd_raw(me, true),
-                syscall_abi::KBD_QUERY => {}
+            let raw = match arg0 & !syscall_abi::KBD_FLUSH {
+                syscall_abi::KBD_COOKED => Some(false),
+                syscall_abi::KBD_RAW => Some(true),
+                syscall_abi::KBD_QUERY => None,
                 _ => return syscall_abi::KBD_MODE_BAD,
-            }
+            };
+            // The flush first, under the mode the keys were typed in, then
+            // the change, as POSIX has TCSAFLUSH: a Ctrl+C typed as a key
+            // in raw mode and still on the line must not kill the program
+            // that is restoring cooked mode (the review of #238).
             if arg0 & syscall_abi::KBD_FLUSH != 0 {
                 keyboard_flush_input(me);
+            }
+            if let Some(raw) = raw {
+                tasks::set_kbd_raw(me, raw);
             }
             if tasks::kbd_raw(me) {
                 syscall_abi::KBD_RAW

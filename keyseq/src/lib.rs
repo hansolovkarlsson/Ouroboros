@@ -45,7 +45,7 @@ enum State {
     Ss3,
 }
 
-const ESC: u8 = 0x1b;
+pub(crate) const ESC: u8 = 0x1b;
 const DEL: u8 = 0x7f;
 
 pub struct KeySeq {
