@@ -217,7 +217,20 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    0x1c arm, the USB 0x31 mapping, Ctrl+< made the quit key, the reset in
    `end_task`, Ctrl+\ in the stuck wait, every interrupt byte marked (the
    old scan, which the zombie check catches), and the kill line's key. The
-   0x32 mapping cannot be sent from QEMU and is checked only on hardware.*
+   0x32 mapping cannot be sent from QEMU and is checked only on hardware.
+   A third high review found the mark itself lost: the queue drops a byte
+   when full, mark and all, so the boot shell's stuck `wait` could not be
+   interrupted behind 64 queued bytes, and keys typed after the interrupt
+   in the same batch were flushed with it. Now `read_keyboard_ahead`
+   answers whether it read an interrupt key for the boot shell, stops
+   there and queues nothing of it (the reviewer's form; the mark is gone).
+   A raw owner's Ctrl+C left queued and handed to the next cooked owner as
+   the byte 3 was raised again and declined: that is the read-time rule, as
+   on Unix. The rig gained 70 letters before the stuck wait's Ctrl+\, and
+   `readkey spin 100 raw` (a busy raw owner's Ctrl+C read back as 3); nine
+   mutation controls: the eight above with the mark's replaced by two, the
+   boot-shell condition for any reader (a busy raw owner's Ctrl+C dropped)
+   and the boot interrupt queued instead of answered.*
 2. **`termios` (design 3).** Check: a C probe sets raw through `tcsetattr`,
    reads Ctrl-C as 3, restores, and is killed by Ctrl-C; `tcgetattr` reads
    back every flag it set; `ENOTTY` on a file.
