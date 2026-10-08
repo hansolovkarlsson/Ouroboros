@@ -73,7 +73,7 @@ pub extern "C" fn _start() -> ! {
         ulib::con_write(b"readkey: polling (in the foreground: q to quit, Ctrl+C to abort; in the background it never owns the keyboard, so kill it from the shell)\r\n");
     } else if raw {
         ulib::con_write(b"readkey: raw in slot ");
-        write_slot();
+        write_dec(ulib::self_task());
         ulib::con_write(b", press keys (q to quit, Ctrl+\\ to abort; Ctrl+C is a key)\r\n");
     } else {
         ulib::con_write(b"readkey: press keys (q to quit, Ctrl+C to abort)\r\n");
@@ -109,10 +109,7 @@ pub extern "C" fn _start() -> ! {
             ulib::con_write(b"?");
         }
         ulib::con_write(b"  (");
-        let mut buf = [0u8; 8];
-        let mut n = 0usize;
-        ulib::emit_dec(&mut buf, &mut n, c as u64);
-        ulib::con_write(&buf[..n]);
+        write_dec(c as u64);
         ulib::con_write(b")\r\n");
     }
     ulib::con_write(b"readkey: bye\r\n");
@@ -129,16 +126,16 @@ fn print_mode() -> ! {
         syscall_abi::KBD_COOKED => ulib::con_write(b"readkey: mode cooked in slot "),
         _ => ulib::con_write(b"readkey: mode unknown in slot "),
     }
-    write_slot();
+    write_dec(ulib::self_task());
     ulib::con_write(b"\r\n");
     ulib::exit(0);
 }
 
-/// This task's slot, in decimal.
-fn write_slot() {
-    let mut buf = [0u8; 8];
+/// `v` in decimal, to the console.
+fn write_dec(v: u64) {
+    let mut buf = [0u8; 20];
     let mut n = 0usize;
-    ulib::emit_dec(&mut buf, &mut n, ulib::self_task());
+    ulib::emit_dec(&mut buf, &mut n, v);
     ulib::con_write(&buf[..n]);
 }
 
@@ -201,12 +198,9 @@ fn spin_then_drain() -> ! {
         }
     }
     ulib::con_write(b"\r\nreadkey: got");
-    let mut buf = [0u8; 8];
     for &c in &got[..n_got] {
-        let mut n = 0usize;
-        ulib::emit_dec(&mut buf, &mut n, c as u64);
         ulib::con_write(b" ");
-        ulib::con_write(&buf[..n]);
+        write_dec(c as u64);
     }
     ulib::con_write(b"\r\n");
     ulib::exit(0);

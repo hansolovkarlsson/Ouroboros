@@ -33,7 +33,14 @@ typed, must read it back as 3: the tick read it ahead and queued it as a
 byte. `readkey spin 100 rawkeep` exits in raw mode with a
 Ctrl+C typed during its spin still queued: the shell's wait on it must
 collect its exit (no zombie in `ps`), since that Ctrl+C was a byte when it
-was read and must not interrupt the shell. Step 3 checks that `readkey
+was read and must not interrupt the shell; `echo qk` typed behind the Ctrl+C
+must then run as the shell's next line, which proves the queue held both.
+A second stuck `wait` takes an Esc and then Ctrl+\\; `echo zq`, typed while
+`readkey spin 100 keep` is busy afterwards, must reach the shell whole: the
+key parser saw the interrupt byte end the Esc, so no `e` is eaten as its
+rest. The order of the waits' checks (an ended child, or a reply already
+there, before an interrupt) has no check here: it needs a key in the gap
+between a program ending and the shell's next poll. Step 3 checks that `readkey
 mode` ran in a slot a raw `readkey` ran in, since otherwise a cooked
 answer proves nothing.
 
@@ -42,7 +49,8 @@ Each check fails with its part of the kernel removed: the raw test in
 (2), the reset in `end_task` (3), Ctrl+\\ in `keyboard_interrupts_wait` (6),
 the boot shell's interrupt decided as it is read rather than found in the
 queue (the zombie check; queued, it is lost behind a full queue, check 6),
-and 0x64 in the USB map (the `<>` check). The ISO backslash key, 0x32,
+0x64 in the USB map (the `<>` check), and the parser fed the boot shell's
+interrupt byte (the `zq` check). The ISO backslash key, 0x32,
 cannot be sent by QEMU, so its mapping is checked only on hardware.
 QEMU's own trace must hold no fault line.
 About a minute. Run it whenever `interrupt_key_check`, `KBD_MODE`, xhci.rs's
@@ -153,8 +161,14 @@ def main() -> int:
             guest.type_line("readkey spin 100 rawkeep")
             ok = guest.wait_for("readkey: spinning")
             if ok:
-                type_raw(guest, ETX)
+                # `echo qk` behind the Ctrl+C: kept in the queue past the
+                # exit, the shell reads it as its next line, which proves the
+                # queue held the Ctrl+C too when the shell's wait ran.
+                type_raw(guest, ETX + b"echo qk")
                 ok = guest.wait_for(r"readkey: kept[\s\S]*" + PROMPT, timeout=30)
+            if ok:
+                type_raw(guest, b"\n")
+                ok = guest.wait_for(PROMPT)
             if ok:
                 guest.type_line("ps")
                 # Up to the prompt, so every slot `ps` lists is looked at,
@@ -193,6 +207,29 @@ def main() -> int:
                 type_raw(guest, FS)
                 ok = guest.wait_for(r"wait: interrupted[\s\S]*" + PROMPT, timeout=20)
                 seg["wait"] = guest.transcript()[start:]
+            if ok:
+                # An Esc read ahead into the queue, then Ctrl+\: the key
+                # parser must see the interrupt byte, or it is left inside
+                # the Esc and eats the next byte queued, here the `e` of
+                # `echo zq` typed while `readkey spin 100 keep` is busy.
+                guest.type_line(f"wait {recv_slot}")
+                time.sleep(1.5)
+                type_raw(guest, b"\x1b")
+                time.sleep(0.5)
+                type_raw(guest, FS)
+                ok = guest.wait_for(r"wait: interrupted[\s\S]*" + PROMPT, timeout=20)
+            if ok:
+                start = len(guest.transcript())
+                guest.type_line("readkey spin 100 keep")
+                ok = guest.wait_for("readkey: spinning")
+                if ok:
+                    type_raw(guest, b"echo zq")
+                    ok = guest.wait_for(r"readkey: kept[\s\S]*" + PROMPT, timeout=30)
+                if ok:
+                    type_raw(guest, b"\n")
+                    ok = guest.wait_for(PROMPT)
+                seg["esc"] = guest.transcript()[start:]
+            if found is not None:
                 guest.type_line(f"kill {recv_slot}")
                 ok = guest.wait_for(PROMPT) and ok
         out = guest.transcript()
@@ -224,7 +261,8 @@ def main() -> int:
         ("raw and busy: a Ctrl+C read ahead by the tick is queued as 3",
          re.search(r"readkey: got 3\s", seg.get("rawspin", "")) is not None),
         ("a raw owner's queued Ctrl+C left no zombie (the shell's wait collected the exit)",
-         "task 0:" in seg.get("rawkeep", "") and ": exited" not in seg.get("rawkeep", "")),
+         "task 0:" in seg.get("rawkeep", "") and ": exited" not in seg.get("rawkeep", "")
+         and "qk" in [l.strip() for l in seg.get("rawkeep", "").splitlines()]),
         ("the next task in a raw task's slot starts cooked",
          mode is not None and mode.group(1) == "cooked" and mode.group(2) in raw_slots),
         ("cooked: Ctrl+C ended it, never read",
@@ -233,6 +271,8 @@ def main() -> int:
          ended("cooked fs", "Ctrl+\\") and "(28)" not in seg.get("cooked fs", "")),
         ("Ctrl+\\ interrupted the boot shell's stuck wait, behind a full queue",
          "wait: interrupted" in seg.get("wait", "")),
+        ("after Esc then Ctrl+\\ at the wait, the next key queued is not eaten (`zq`)",
+         "zq" in [l.strip() for l in seg.get("esc", "").splitlines()]),
         ("the boot shell ignored both bytes (`ef`)",
          "ef" in [l.strip() for l in seg.get("shell", "").splitlines()]),
         ("no fault lines", faults == 0),

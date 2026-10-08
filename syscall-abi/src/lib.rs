@@ -939,7 +939,10 @@ pub const BOOT_ID_BAD_BUFFER: u64 = u64::MAX - 1;
 /// every mode**: typed while a task other than the boot shell owns the
 /// keyboard, it does what Ctrl+C does in cooked mode (see [`FG`]), so no
 /// program can take the way out away, and `0x1c` never reaches any program
-/// but the boot shell, whose line editor ignores it as it ignores `0x03`.
+/// but the boot shell. There neither key kills: either interrupts the boot
+/// shell's waits (for a child, `WAIT_INTERRUPTED`; for a message, its calls
+/// to the servers included, `RECV_INTERRUPTED`), and its line editor
+/// ignores the byte.
 ///
 /// A task sets only its own mode, whether or not it owns the keyboard (the
 /// mode has no effect until it does). Every task starts cooked, and the mode
@@ -958,8 +961,10 @@ pub const KBD_COOKED: u64 = 0;
 pub const KBD_RAW: u64 = 1;
 /// [`KBD_MODE`] argument: answer the mode, change nothing.
 pub const KBD_QUERY: u64 = 2;
-/// [`KBD_MODE`]'s answer to an unknown mode.
-pub const KBD_MODE_BAD: u64 = u64::MAX;
+/// [`KBD_MODE`]'s answer to an unknown mode. Not `u64::MAX`, which a kernel
+/// without `KBD_MODE` answers for the unknown syscall, so a caller (step 2's
+/// `tcsetattr`) can tell "bad mode" from "not supported".
+pub const KBD_MODE_BAD: u64 = u64::MAX - 1;
 
 /// Width of the slot field in a packed task identity: the slot is the low
 /// [`TASK_ID_SLOT_BITS`] bits, the generation everything above.

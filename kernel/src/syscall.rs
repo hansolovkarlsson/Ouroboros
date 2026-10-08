@@ -233,7 +233,7 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
     // so Ctrl+C is caught no matter which path would have consumed it. It marks
     // the foreground program for termination (tasks::on_tick does the kill) and
     // swallows the byte.
-    if tasks::interrupt_key_check(byte) {
+    if tasks::interrupt_key_check(byte) == tasks::KeyVerdict::Consumed {
         return None;
     }
     Some(byte)
@@ -265,12 +265,12 @@ fn keyboard_device_byte() -> Option<u8> {
 /// with interrupts masked, where a device that never said "empty" would
 /// hold the core.
 ///
-/// Returns `true` when it read a Ctrl+C or Ctrl+\ for the boot shell: the
-/// interrupt for the boot shell's waits ([`keyboard_interrupts_wait`]),
-/// settled as it is read. That byte is not queued (the line editor ignores
-/// both) and reading stops there, so it cannot be dropped by a full queue,
-/// and keys typed after it stay on the devices rather than being flushed
-/// with what came before. Only the waits read ahead for the boot shell
+/// Returns `true` when it read a Ctrl+C or Ctrl+\ for the boot shell
+/// ([`tasks::KeyVerdict::BootInterrupt`]): the interrupt for the boot
+/// shell's waits ([`keyboard_interrupts_wait`]), settled as it is read. What
+/// was queued before it is flushed, as any interrupt flushes; the byte itself
+/// is not queued (the line editor ignores both) and reading stops there, so a
+/// full queue cannot drop it, and keys typed after it stay on the devices. Only the waits read ahead for the boot shell
 /// (the tick exempts it). A raw owner's Ctrl+C is queued as a byte and
 /// stays one, so it never interrupts the shell that gets the keyboard next.
 pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
@@ -281,13 +281,18 @@ pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
         let Some(byte) = keyboard_device_byte() else {
             return false;
         };
-        if tasks::interrupt_key_check(byte) {
-            // SAFETY: as in poll_keyboard_byte.
-            unsafe { (*KBD_QUEUE.get()).clear() };
-            return false;
-        }
-        if reader == tasks::TaskIndex::FIRST.index() && tasks::is_interrupt_key(byte) {
-            return true;
+        match tasks::interrupt_key_check(byte) {
+            tasks::KeyVerdict::Byte => {}
+            tasks::KeyVerdict::Consumed => {
+                // SAFETY: as in poll_keyboard_byte.
+                unsafe { (*KBD_QUEUE.get()).clear() };
+                return false;
+            }
+            tasks::KeyVerdict::BootInterrupt => {
+                // SAFETY: as in poll_keyboard_byte.
+                unsafe { (*KBD_QUEUE.get()).flush_at_control(byte) };
+                return true;
+            }
         }
         // SAFETY: as in poll_keyboard_byte.
         unsafe { (*KBD_QUEUE.get()).push(byte) };
@@ -303,8 +308,8 @@ const READ_AHEAD_MAX: usize = KBD_QUEUE_LEN;
 /// Ctrl+C typed now should interrupt that wait. It reads ahead first (so
 /// the wait never throws a typed byte away, and a Ctrl+C for any owner but
 /// the boot shell is acted on there, killing or detaching it). The boot
-/// shell's Ctrl+C is an ordinary byte to `interrupt_key_check`, and the one
-/// that must interrupt its wait, or a `wait` on a task that never ends
+/// shell's Ctrl+C never kills (`interrupt_key_check` answers
+/// `BootInterrupt`), and it is the one that must interrupt its wait, or a `wait` on a task that never ends
 /// would hold the only typist for good: when [`read_keyboard_ahead`] reads
 /// one for it, what was queued before it is flushed (as an interrupt does)
 /// and the answer is yes. Ctrl+\ (`0x1c`) does the same, since it is the
@@ -316,12 +321,7 @@ const READ_AHEAD_MAX: usize = KBD_QUEUE_LEN;
 /// its slot; the third found the per-byte mark that replaced it lost to a
 /// full queue).
 pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
-    if read_keyboard_ahead(waiter) {
-        // SAFETY: as in poll_keyboard_byte.
-        unsafe { (*KBD_QUEUE.get()).clear() };
-        return true;
-    }
-    false
+    read_keyboard_ahead(waiter)
 }
 
 /// Keyboard bytes read ahead by the tick, oldest first, for whoever owns
@@ -396,6 +396,19 @@ impl KbdQueue {
         self.buf[(self.head + self.len) % KBD_QUEUE_LEN] = byte;
         self.len += 1;
         self.partial = if fed == keyseq::Fed::Pending { self.partial + 1 } else { 0 };
+    }
+
+    /// Empties the queue for the boot shell's interrupt, `byte`, which is not
+    /// queued but is fed to the parser first: a control byte ends any key
+    /// in progress (as it did when the byte was queued), so nothing typed
+    /// after it is taken for that key's rest (the fourth high review of
+    /// #235: an Esc, then Ctrl+\, ate the next letter).
+    fn flush_at_control(&mut self, byte: u8) {
+        let _ = self.keys.feed(byte);
+        self.head = 0;
+        self.len = 0;
+        self.partial = 0;
+        self.dropping = false;
     }
 
     /// Empties the queue (a Ctrl+C's flush). If that cut a key in two, the
