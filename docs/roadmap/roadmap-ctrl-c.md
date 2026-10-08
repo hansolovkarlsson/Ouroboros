@@ -187,11 +187,23 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    test-kbd-mode` the rig: raw reads Ctrl+C as 3 from the serial line and
    the USB keyboard, Ctrl+\ ends it from either, `readkey mode` in the same
    slot afterwards is cooked, cooked Ctrl+C and Ctrl+\ both end it, and
-   the boot shell ignores both. Four mutation controls, each failing its
-   check: the raw test, the 0x1c arm, the USB mapping, the reset in
-   `end_task`. "A raw program's child starts cooked" is checked as the
-   slot's next occupant: `SPAWN` copies no mode, so a child is a fresh
-   occupant like any other, and no probe spawns from a raw task.*
+   the boot shell ignores both. "A raw program's child starts cooked" is
+   checked as the slot's next occupant: `SPAWN` copies no mode, so a child
+   is a fresh occupant like any other, and no probe spawns from a raw task.
+   Its high review added: the two interrupt bytes spelled once
+   (`tasks::KEY_INTERRUPT`, `KEY_QUIT`); Ctrl+\ from both ISO backslash
+   keys (0x32, 0x64), since a Swedish, UK or German keyboard has no 0x31
+   and the way out must be typable on it; the kill line naming the key
+   pressed; and a rule written down rather than changed, that a key's
+   meaning is settled when it is read, as on Unix (a Ctrl+C queued for a
+   raw owner stays a byte if the owner turns cooked or dies), since judging
+   it again on delivery would let a stale Ctrl+C detach the nested shell
+   that gets the keyboard next. The rig gained the stuck `wait` interrupted
+   by Ctrl+\, the ISO key, the key in each kill line, and the slot of
+   `readkey mode` matched against the raw runs'. Seven mutation controls,
+   each failing its check: the raw test, the 0x1c arm, the USB mapping, the
+   ISO mapping, the reset in `end_task`, Ctrl+\ in the stuck wait, and the
+   kill line's key.*
 2. **`termios` (design 3).** Check: a C probe sets raw through `tcsetattr`,
    reads Ctrl-C as 3, restores, and is killed by Ctrl-C; `tcgetattr` reads
    back every flag it set; `ENOTTY` on a file.
