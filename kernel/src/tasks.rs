@@ -660,6 +660,7 @@ pub(crate) fn set_input_owner(owner: usize, foreground_command: bool) {
     if previous == owner {
         return;
     }
+    crate::syscall::keyboard_owner_changed();
     // Walk down from `previous`, remembering each link. Reaching `owner`
     // makes this a pop: the links walked are the entries above it.
     let mut walked = [0usize; NUM_TASKS];
@@ -733,6 +734,7 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
     // occupant_is and falls back to task 0 like any stale entry.
     let target = live_occupant(previous).map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
+    crate::syscall::keyboard_owner_changed();
 }
 
 /// Whether any live task is blocked in [`WaitReason::TaskExit`] on slot

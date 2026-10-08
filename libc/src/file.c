@@ -1064,8 +1064,9 @@ int tcgetattr(int fd, struct termios *t) {
 /* ISIG is the one setting that acts: cleared is raw keyboard mode
  * (KBD_MODE), where Ctrl+C reaches the program as 3. Every other flag is
  * accepted and has no effect, as POSIX allows (success when any requested
- * change was made); tcgetattr shows what is in force. The three actions
- * behave alike (sys/termios.h). */
+ * change was made); tcgetattr shows what is in force. TCSAFLUSH also
+ * discards the keys typed ahead (KBD_FLUSH); TCSANOW and TCSADRAIN are the
+ * same (sys/termios.h). */
 int tcsetattr(int fd, int optional_actions, const struct termios *t) {
     if (console_fd(fd) < 0) {
         return -1;
@@ -1078,7 +1079,7 @@ int tcsetattr(int fd, int optional_actions, const struct termios *t) {
     }
     unsigned long want = (t->c_lflag & ISIG) ? KBD_COOKED : KBD_RAW;
     unsigned long now;
-    return kbd_mode(want, &now);
+    return kbd_mode(want | (optional_actions == TCSAFLUSH ? KBD_FLUSH : 0), &now);
 }
 
 /* ---- read / write -------------------------------------------------------- */

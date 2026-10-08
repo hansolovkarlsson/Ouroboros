@@ -34,9 +34,10 @@
  * kernel has no other mode) and tcsetattr answers ENOSYS; tcsetattr answers
  * EINVAL if the kernel refuses the mode.
  *
- * TCSANOW and TCSADRAIN are the same (output is never held back). TCSAFLUSH
- * does not discard pending input: the kernel's keyboard queue has no flush a
- * program can ask for, so keys typed ahead are kept, as with TCSADRAIN.
+ * TCSANOW and TCSADRAIN are the same (output is never held back), and keep
+ * the keys typed ahead. TCSAFLUSH discards them, the kernel's keyboard queue
+ * and what waits on the devices (KBD_MODE's KBD_FLUSH); a Ctrl+\ among
+ * them still ends the program.
  *
  * Only the console is a terminal: fd 0, and fds 1 and 2 while stdout goes to
  * the console. Any other descriptor is ENOTTY (EBADF if it is not open), as
