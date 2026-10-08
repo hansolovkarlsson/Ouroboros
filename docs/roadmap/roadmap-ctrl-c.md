@@ -10,9 +10,9 @@ per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
-**Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 3
-half built (#233: whole keys in the queue; the tail on a change of owner not
-yet); steps 2 and 4 not started. The four decisions (D1 to D4)
+**Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 2
+built (#236), step 3 half built (#233: whole keys in the queue; the tail on
+a change of owner not yet); step 4 not started. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
 met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
 use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so
@@ -247,7 +247,26 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    `docs/ROADMAP.md`. Ten mutation controls in the end.*
 2. **`termios` (design 3).** Check: a C probe sets raw through `tcsetattr`,
    reads Ctrl-C as 3, restores, and is killed by Ctrl-C; `tcgetattr` reads
-   back every flag it set; `ENOTTY` on a file.
+   back every flag it set; `ENOTTY` on a file. *Built 2026-10-08 (#236):
+   `tcgetattr` and `tcsetattr` in `libc/src/file.c`,
+   `libc/pico/include/sys/termios.h` with Linux's values; `ISIG` maps onto
+   `KBD_MODE`, and `tcgetattr` takes `ISIG` from the kernel. `TCSAFLUSH`
+   cannot discard pending input (no flush a program can ask for), which the
+   header says. The probe is `/bin/CTERMIOS` with Edit's own recipe copied
+   flag for flag, the rig `make test-ctermios`. **One departure from design
+   3 above**, made by the high review of #236: every other flag is accepted
+   and has no effect, but is NOT read back; `tcgetattr` reports the console
+   as it is, because POSIX has a program confirm with `tcgetattr` what its
+   `tcsetattr` took effect, and a stored `ECHO` read back would say echo is
+   on when it is not. Edit's recipe clears only flags the console already
+   lacks, so it reads back exactly as set either way. The same review found
+   that `platform_posix.c` as a whole also needs `sigaction` and `<poll.h>`,
+   which this C library lacks (told to DevTools in the editor note's reply).
+   Its second review raised `TCSAFLUSH` again: it should discard keys typed
+   ahead (a raw program's queued Ctrl+C reaches the shell as a byte after
+   Edit's restore). That needs a flush of the kernel's queue a program can
+   ask for, and how the queue empties is step 3's open question (the
+   `clear()` finding above), so it waits for step 3.*
 3. **The cut sequence (design 5).** Check: a probe reads only the ESC of an
    arrow, is killed, and the shell's next line holds nothing of the tail.
    Also here: a full queue must refuse a whole key rather than keep the

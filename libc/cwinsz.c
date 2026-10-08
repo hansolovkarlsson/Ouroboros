@@ -17,10 +17,8 @@
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include "probe_errno.h"
 
-static const char *err_name(int e) {
-    return e == ENOTTY ? "ENOTTY" : e == EBADF ? "EBADF" : e == EFAULT ? "EFAULT" : e == EIO ? "EIO" : "other";
-}
 
 static void ask(const char *label, int fd, unsigned long request) {
     struct winsize ws = {0xffff, 0xffff, 0xffff, 0xffff};

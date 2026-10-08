@@ -182,3 +182,24 @@ foreground program in every mode, and the USB keyboard now sends it.
 `/bin/READKEY raw` shows both, and `make test-kbd-mode` checks them. What
 Edit uses, `tcsetattr` with `ISIG` cleared, is step 2 of
 `docs/roadmap/roadmap-ctrl-c.md` and not built yet, so item 4 stays open.
+
+Merged 2026-10-08 (#235, `346e96b`).
+
+Progress 2026-10-08, Ouroboros: what Edit uses for item 4 is built (#236).
+`tcgetattr` and `tcsetattr` are in the C library, `<termios.h>` (through
+`<sys/termios.h>`, Linux's values), so the termios calls in `plat_raw_on`
+and `plat_raw_off` work unchanged: `ISIG` cleared reads Ctrl+C as 3, and
+restoring the saved settings makes Ctrl+C end the program again. Every
+other flag is accepted and changes nothing, since the console already
+behaves as raw mode asks, and `tcgetattr` reports the console as it is (so
+Edit's recipe reads back exactly as set). Four things Edit should know:
+Ctrl+\ ends Edit in every mode and is never a key; `TCSAFLUSH` keeps keys
+typed ahead, as `TCSADRAIN` does; the rest of `<termios.h>` (speeds,
+`tcflush`) is not provided; and `platform_posix.c` as a whole does not yet
+build here, since `plat_raw_on` also calls `sigaction` (SIGWINCH, SIGHUP,
+SIGTERM) and the file includes `<poll.h>`, neither of which this C library
+has (found by the review of #236). There are no signals to deliver, so an
+Ouroboros platform file would leave those out; a note asking for something
+else is the way, if Edit needs it.
+`/bin/CTERMIOS` runs Edit's recipe flag for flag, and `make test-ctermios`
+checks it. Item 4 stays open until steps 3 and 4 of the plan are built.

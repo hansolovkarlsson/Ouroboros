@@ -32,6 +32,7 @@
  * headers (libc/pico/include), which the hand-rolled build of this file does
  * not search, and libc/include must stay off a picolibc build's angle path. */
 #include "../pico/include/sys/ioctl.h"
+#include "../pico/include/sys/termios.h"
 #include <sys/stat.h>
 #include <unistd.h>
 /* `errno` where the C library has one: picolibc does, and the Makefile builds
@@ -945,19 +946,27 @@ void __libc_end_stdout(void) {
 
 /* ---- ioctl ---------------------------------------------------------------- */
 
-/* TIOCGWINSZ only: the console's size (sys/ioctl.h). fd 0 is the console's
- * keyboard; fds 1 and 2 are the console only while stdout is routed there,
- * and a pipe is not a terminal. */
-int ioctl(int fd, unsigned long request, ...) {
+/* 0 when `fd` is the console, else -1 with EBADF (not open) or ENOTTY (open,
+ * but not a terminal). fd 0 is the console's keyboard; fds 1 and 2 are the
+ * console only while stdout is routed there, and a pipe is not a terminal.
+ * The one test for ioctl and the termios calls. */
+static int console_fd(int fd) {
     if (fd < 0) {
         return client_fail(EBADF);
     }
-    int console = fd == 0 || ((fd == 1 || fd == 2) && stdout_target() == CON_TASK);
-    if (!console) {
-        if (fd > 2 && !file_for(fd)) {
-            return client_fail(EBADF);
-        }
-        return client_fail(ENOTTY);
+    if (fd == 0 || ((fd == 1 || fd == 2) && stdout_target() == CON_TASK)) {
+        return 0;
+    }
+    if (fd > 2 && !file_for(fd)) {
+        return client_fail(EBADF);
+    }
+    return client_fail(ENOTTY);
+}
+
+/* TIOCGWINSZ only: the console's size (sys/ioctl.h). */
+int ioctl(int fd, unsigned long request, ...) {
+    if (console_fd(fd) < 0) {
+        return -1;
     }
     if (request != TIOCGWINSZ) {
         return client_fail(ENOTTY);
@@ -986,6 +995,90 @@ int ioctl(int fd, unsigned long request, ...) {
     ws->ws_xpixel = 0;
     ws->ws_ypixel = 0;
     return 0;
+}
+
+/* ---- termios --------------------------------------------------------------- */
+
+/* The console as it behaves (sys/termios.h): bytes as typed, one at a time,
+ * no echo, no translation, Ctrl+C and Ctrl+\ the interrupt keys. The only
+ * setting a program can change is ISIG, so this is what tcgetattr reports,
+ * with ISIG from the kernel: POSIX has a program confirm with tcgetattr what
+ * its tcsetattr took effect, and a stored ECHO read back as set would say
+ * echo is on when it is not. */
+static void termios_fixed(struct termios *t) {
+    memset(t, 0, sizeof *t);
+    t->c_cflag = CS8 | CREAD;
+    t->c_lflag = ISIG;
+    t->c_cc[VINTR] = 3;
+    t->c_cc[VQUIT] = 28;
+    t->c_cc[VERASE] = 0x7f; /* a serial terminal's Backspace; the USB keyboard sends 8 */
+    t->c_cc[VKILL] = 21;
+    t->c_cc[VEOF] = 4;
+    t->c_cc[VSUSP] = 26;
+    t->c_cc[VMIN] = 1;
+    t->c_cc[VTIME] = 0;
+}
+
+/* KBD_MODE(mode): 0 with the mode now in force, or -1 with ENOSYS (a kernel
+ * without KBD_MODE answers the unknown-syscall u64::MAX), EINVAL (the kernel
+ * refused the mode, KBD_MODE_BAD), or EIO (anything else). A query on a
+ * kernel without KBD_MODE answers cooked: that kernel has no other mode, so
+ * tcgetattr can still tell the truth and only tcsetattr has to refuse. */
+static int kbd_mode(unsigned long mode, unsigned long *now) {
+    unsigned long got = (unsigned long)__os_syscall1(SYS_KBD_MODE, (long)mode);
+    if (got == KBD_COOKED || got == KBD_RAW) {
+        *now = got;
+        return 0;
+    }
+    if (got == ~0UL) {
+        if (mode == KBD_QUERY) {
+            *now = KBD_COOKED;
+            return 0;
+        }
+        return client_fail(ENOSYS);
+    }
+    if (got == KBD_MODE_BAD) {
+        return client_fail(EINVAL);
+    }
+    return client_fail(EIO);
+}
+
+int tcgetattr(int fd, struct termios *t) {
+    if (console_fd(fd) < 0) {
+        return -1;
+    }
+    if (!t) {
+        return client_fail(EFAULT);
+    }
+    unsigned long mode;
+    if (kbd_mode(KBD_QUERY, &mode) < 0) {
+        return -1;
+    }
+    termios_fixed(t);
+    if (mode == KBD_RAW) {
+        t->c_lflag &= ~(tcflag_t)ISIG;
+    }
+    return 0;
+}
+
+/* ISIG is the one setting that acts: cleared is raw keyboard mode
+ * (KBD_MODE), where Ctrl+C reaches the program as 3. Every other flag is
+ * accepted and has no effect, as POSIX allows (success when any requested
+ * change was made); tcgetattr shows what is in force. The three actions
+ * behave alike (sys/termios.h). */
+int tcsetattr(int fd, int optional_actions, const struct termios *t) {
+    if (console_fd(fd) < 0) {
+        return -1;
+    }
+    if (!t) {
+        return client_fail(EFAULT);
+    }
+    if (optional_actions != TCSANOW && optional_actions != TCSADRAIN && optional_actions != TCSAFLUSH) {
+        return client_fail(EINVAL);
+    }
+    unsigned long want = (t->c_lflag & ISIG) ? KBD_COOKED : KBD_RAW;
+    unsigned long now;
+    return kbd_mode(want, &now);
 }
 
 /* ---- read / write -------------------------------------------------------- */
