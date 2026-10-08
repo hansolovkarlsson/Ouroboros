@@ -203,7 +203,21 @@ too. Not a kernel job: the kernel does not know what the program wrote.
    `readkey mode` matched against the raw runs'. Seven mutation controls,
    each failing its check: the raw test, the 0x1c arm, the USB mapping, the
    ISO mapping, the reset in `end_task`, Ctrl+\ in the stuck wait, and the
-   kill line's key.*
+   kill line's key. A second high review found the review's own fixes
+   wanting in three ways, all fixed: the boot shell's waits still looked
+   for the interrupt BYTE in the queue, so a raw owner's Ctrl+C left queued
+   when it exited ended the shell's `WAIT` on it as interrupted and leaked
+   the zombie (now a mark set when the byte is read for the shell,
+   `KbdQueue::boot_interrupt`); Ctrl on 0x64, the ISO `<>` key, made
+   Ctrl+< an uncatchable kill (0x64 is unmapped again, and 0x32, the ISO key
+   in the backslash position, is mapped as 0x31 throughout, typing `\` and
+   `|` too, so the kill key is the key that shows a backslash); and the
+   kill line's key was a second atomic beside `PENDING_KILL` (now a bit
+   packed into it). Eight mutation controls in the end: the raw test, the
+   0x1c arm, the USB 0x31 mapping, Ctrl+< made the quit key, the reset in
+   `end_task`, Ctrl+\ in the stuck wait, every interrupt byte marked (the
+   old scan, which the zombie check catches), and the kill line's key. The
+   0x32 mapping cannot be sent from QEMU and is checked only on hardware.*
 2. **`termios` (design 3).** Check: a C probe sets raw through `tcsetattr`,
    reads Ctrl-C as 3, restores, and is killed by Ctrl-C; `tcgetattr` reads
    back every flag it set; `ENOTTY` on a file.
