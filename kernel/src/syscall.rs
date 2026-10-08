@@ -259,7 +259,7 @@ fn keyboard_device_byte() -> Option<(u8, bool)> {
 /// editor redrawing is mostly blocked in `con_write`'s message call), and
 /// since the navigation keys (#229) could cut a key's escape sequence in two.
 /// An interrupt that [`tasks::interrupt_key_check`] acts on also FLUSHES the
-/// queue ([`KbdQueue::flush`]): what was typed before it is what the user
+/// queue (`keyseq::KeyQueue::flush`): what was typed before it is what the user
 /// just interrupted, and handing a typed `rm foo` and Enter to the shell
 /// after the kill would run it (Unix flushes pending input on an interrupt
 /// the same way). With the queue full it still reads and checks every byte,
@@ -298,7 +298,7 @@ pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
             }
         }
         // SAFETY: as in poll_keyboard_byte.
-        unsafe { (*KBD_QUEUE.get()).push(byte, from_usb) };
+        unsafe { (*KBD_QUEUE.get()).push(byte, from_usb, crate::exceptions::ticks()) };
     }
     false
 }
@@ -344,7 +344,7 @@ pub(crate) fn keyboard_flush_input(reader: usize) {
                 // Through the parser, so a USB key in flight is read whole
                 // and dropped whole.
                 // SAFETY: as in poll_keyboard_byte.
-                unsafe { (*KBD_QUEUE.get()).push(byte, from_usb) };
+                unsafe { (*KBD_QUEUE.get()).push(byte, from_usb, crate::exceptions::ticks()) };
             }
             tasks::KeyVerdict::Consumed | tasks::KeyVerdict::BootInterrupt => break,
         }
@@ -361,190 +361,14 @@ pub(crate) fn keyboard_flush_input(reader: usize) {
 const ESC_ALONE_TICKS: u64 = 2;
 
 /// Keyboard bytes read ahead, oldest first, for whoever owns the keyboard
-/// when they are read; every byte a reader gets passes through it. Sized for
-/// a burst of typing while a program is busy: 64 bytes is 16 navigation
-/// keys. It knows where each key starts, from one parser that sees every
-/// byte once ([`keyseq`]), and keeps keys whole: a key that does not fit is
-/// dropped entirely, its front taken back out, rather than kept cut (step 3
-/// of the Ctrl-C plan, from the review of #232); and a key a reader took
-/// part of is not handed to the next owner ([`KbdQueue::trim_cut_key`]).
-struct KbdQueue {
-    buf: [u8; KBD_QUEUE_LEN],
-    /// Per position: the byte starts a key (the parser was between keys).
-    starts: [bool; KBD_QUEUE_LEN],
-    head: usize,
-    len: usize,
-    /// Every byte read, parsed as keys.
-    keys: keyseq::KeySeq,
-    /// The parser is inside a key: the last byte fed did not end one.
-    inside: bool,
-    /// The key the parser is inside came from the USB keyboard.
-    inside_usb: bool,
-    /// The tick the last byte was fed, for [`ESC_ALONE_TICKS`].
-    fed_at: u64,
-    /// How many bytes at the back belong to the key still arriving.
-    partial: usize,
-    /// The rest of the key arriving is dropped: its front did not fit, or a
-    /// reader that took part of it lost the keyboard.
-    dropping: bool,
-    /// A reader took part of a key: the last byte popped did not end one.
-    taken_mid: bool,
-}
+/// when they are read; every byte a reader gets passes through it. The queue
+/// itself is `keyseq::KeyQueue`, host-tested there: one parser that knows
+/// where each key starts, whole keys kept, a cut key trimmed on a change of
+/// owner, one flush, and a bare `ESC` complete after [`ESC_ALONE_TICKS`].
+static KBD_QUEUE: crate::synccell::SyncCell<keyseq::KeyQueue> =
+    crate::synccell::SyncCell::new(keyseq::KeyQueue::new(ESC_ALONE_TICKS));
 
-const KBD_QUEUE_LEN: usize = 64;
-
-impl KbdQueue {
-    const fn new() -> Self {
-        KbdQueue {
-            buf: [0; KBD_QUEUE_LEN],
-            starts: [false; KBD_QUEUE_LEN],
-            head: 0,
-            len: 0,
-            keys: keyseq::KeySeq::new(),
-            inside: false,
-            inside_usb: false,
-            fed_at: 0,
-            partial: 0,
-            dropping: false,
-            taken_mid: false,
-        }
-    }
-
-    /// Whether the next byte must come from the USB keyboard: the parser is
-    /// inside a key that began there ([`keyboard_device_byte`]).
-    fn inside_usb_key(&self) -> bool {
-        self.inside && self.inside_usb
-    }
-
-    /// A key left open for [`ESC_ALONE_TICKS`] (a bare `ESC`, from a host
-    /// terminal's Escape key) is complete: its rest is not coming, and what
-    /// arrives next starts a key of its own.
-    fn expire(&mut self, now: u64) {
-        if self.inside && now.saturating_sub(self.fed_at) >= ESC_ALONE_TICKS {
-            self.keys = keyseq::KeySeq::new();
-            self.inside = false;
-            self.partial = 0;
-            self.dropping = false;
-            if self.len == 0 {
-                self.taken_mid = false;
-            }
-        }
-    }
-
-    /// Appends `byte`, read from the USB keyboard if `from_usb`. When it does
-    /// not fit, an ordinary byte is dropped, and a byte of a key's sequence
-    /// drops the whole key: the bytes of it already queued are taken back
-    /// out, and the rest is dropped as it comes.
-    fn push(&mut self, byte: u8, from_usb: bool) {
-        let now = crate::exceptions::ticks();
-        self.expire(now);
-        let starts = !self.inside;
-        let fed = self.keys.feed(byte);
-        self.inside = fed == keyseq::Fed::Pending;
-        if starts {
-            self.inside_usb = from_usb;
-        }
-        self.fed_at = now;
-        if self.dropping {
-            match fed {
-                keyseq::Fed::Pending => return,
-                keyseq::Fed::Sequence => {
-                    self.dropping = false;
-                    return;
-                }
-                // A control byte ends a cut sequence and is a key of its own
-                // (keyseq passes it through the same way): kept, if it fits.
-                keyseq::Fed::Byte(_) => self.dropping = false,
-            }
-        } else if self.len == KBD_QUEUE_LEN {
-            // Taken back only as far as it is still queued: if a reader has
-            // already read the front of this key, it holds a cut key, which
-            // a full queue cannot prevent (it has no room for the rest).
-            self.len -= self.partial.min(self.len);
-            self.partial = 0;
-            match fed {
-                keyseq::Fed::Pending => {
-                    self.dropping = true;
-                    return;
-                }
-                keyseq::Fed::Sequence => return,
-                // A control byte ending the key that did not fit, or an
-                // ordinary byte: kept if taking the key back made room.
-                keyseq::Fed::Byte(_) => {}
-            }
-        }
-        if self.len == KBD_QUEUE_LEN {
-            return;
-        }
-        let at = (self.head + self.len) % KBD_QUEUE_LEN;
-        self.buf[at] = byte;
-        // A control byte that ended a cut sequence starts a key of its own.
-        self.starts[at] = starts || matches!(fed, keyseq::Fed::Byte(_));
-        self.len += 1;
-        self.partial = if fed == keyseq::Fed::Pending { self.partial + 1 } else { 0 };
-    }
-
-    /// The one flush, at every interrupt (`Some(byte)`, the interrupt key)
-    /// and for `KBD_FLUSH` (`None`). An interrupt key is fed to the parser
-    /// first: a control byte ends any key in progress, as `keyseq` has it,
-    /// so nothing typed after it is taken for that key's rest (decision E1
-    /// of the Ctrl-C plan; until 2026-10-08 the kill's flush dropped the
-    /// next byte, and a bare Esc then Ctrl+C ate a letter). A requested
-    /// flush has no such byte: a key still arriving is dropped as it comes,
-    /// since its front was discarded.
-    fn flush(&mut self, interrupt: Option<u8>) {
-        if let Some(byte) = interrupt {
-            let _ = self.keys.feed(byte);
-            self.inside = false;
-            self.dropping = false;
-        } else if self.inside {
-            self.dropping = true;
-        }
-        self.head = 0;
-        self.len = 0;
-        self.partial = 0;
-        self.taken_mid = false;
-    }
-
-    /// For a change of owner ([`keyboard_owner_changed`]): if a reader took
-    /// part of a key, the rest of it goes, the queued bytes up to the next
-    /// key's start and, if the key is still arriving, the bytes still to
-    /// come. A bare `ESC` left alone long enough is a whole key first
-    /// ([`KbdQueue::expire`]), so a letter typed after one is never dropped.
-    fn trim_cut_key(&mut self, now: u64) {
-        self.expire(now);
-        if !self.taken_mid {
-            return;
-        }
-        while self.len > 0 && !self.starts[self.head] {
-            self.head = (self.head + 1) % KBD_QUEUE_LEN;
-            self.len -= 1;
-        }
-        if self.len == 0 && self.inside {
-            self.dropping = true;
-        }
-        self.partial = self.partial.min(self.len);
-        self.taken_mid = false;
-    }
-
-    fn pop(&mut self) -> Option<u8> {
-        if self.len == 0 {
-            return None;
-        }
-        let byte = self.buf[self.head];
-        let in_partial = self.len <= self.partial;
-        self.head = (self.head + 1) % KBD_QUEUE_LEN;
-        self.len -= 1;
-        // The reader holds part of a key when what follows is the same key:
-        // a queued byte that does not start one, or, with nothing queued,
-        // the rest of the key still arriving.
-        self.taken_mid = if self.len > 0 { !self.starts[self.head] } else { in_partial };
-        self.partial = self.partial.min(self.len);
-        Some(byte)
-    }
-}
-
-static KBD_QUEUE: crate::synccell::SyncCell<KbdQueue> = crate::synccell::SyncCell::new(KbdQueue::new());
+const KBD_QUEUE_LEN: usize = keyseq::QUEUE_LEN;
 
 /// Size cap for a userland `(pointer, length)` argument pair.
 const MAX_USER_LEN: u64 = 512;

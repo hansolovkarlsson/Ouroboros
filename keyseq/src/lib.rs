@@ -21,6 +21,9 @@
 
 #![no_std]
 
+mod queue;
+pub use queue::{KeyQueue, QUEUE_LEN};
+
 /// What one byte of input turned out to be.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fed {
