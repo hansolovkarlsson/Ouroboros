@@ -17,7 +17,7 @@ the whole C-hosting plan among it, ending in DevTools's preprocessor running
 here, with the C headers on the disk and FAT32 names that keep their case. The
 days' records are in `docs/work-journal/`, one file a day.
 
-**A key arrives whole or not at all (PR_CUT).** Step 3 of the Ctrl-C plan.
+**A key arrives whole or not at all (#233).** Step 3 of the Ctrl-C plan.
 When the keyboard changes owner in the middle of a key (a program read the
 ESC of an arrow and exited), the kernel drops the rest of that key rather
 than hand `[A` to the shell, and a key that does not fit in the full
