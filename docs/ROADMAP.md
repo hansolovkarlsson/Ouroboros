@@ -2386,9 +2386,10 @@ be reviewed after the fact from the saved screenshots.
 >       [`roadmap/roadmap-ctrl-c.md`](roadmap/roadmap-ctrl-c.md), a per-task
 >       `KBD_MODE` with Ctrl+\ as the way out, `termios` in the C library,
 >       and a kernel input queue for the two hazards below; its four
->       decisions settled by Hans the same day, as recommended. Waiting on
->       DevTools, before step 1: does Edit bind ^\?
->       `~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
+>       decisions settled by Hans the same day, as recommended. DevTools
+>       answered 2026-10-08 that Edit does not bind ^\, so step 1 waits on
+>       nothing:
+>       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
 >       time, so a change of keyboard owner (a program killed between the
 >       ESC and the rest) hands the tail to the next owner, and a serial

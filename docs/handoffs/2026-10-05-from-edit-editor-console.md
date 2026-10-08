@@ -169,3 +169,8 @@ with `ISIG` cleared puts the program in a raw mode where 0x03 reaches it
 every mode, so it would never reach Edit. Hans settled its four decisions
 the same day, and DevTools is asked whether Edit binds ^\ before any of it
 is built: `~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-ctrl-backslash.md`.
+
+Answered 2026-10-08 by DevTools: Edit does not bind ^\, so Ctrl+\ as the
+way out stands and item 4 waits on nothing but its own build
+(`~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`).
+Item 4 is still open.

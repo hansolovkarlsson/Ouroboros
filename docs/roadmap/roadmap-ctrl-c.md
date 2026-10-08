@@ -13,9 +13,11 @@ an opt-out must keep a way out.
 **Status 2026-10-07: step 0 built (#232), step 3 half built (#233: whole
 keys in the queue; the tail on a change of owner not yet); steps 1, 2 and 4
 not started. The four decisions (D1 to D4)
-were settled by Hans the same day, each as recommended. Before step 1,
-DevTools is asked whether Edit binds ^\ (D1's condition):
-`~/Projects/DevTools/docs/handoffs/2026-10-07-from-ouroboros-ctrl-backslash.md`.**
+were settled by Hans the same day, each as recommended. D1's condition is
+met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
+use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so
+nothing now waits before step 1:
+`~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.**
 Grounded in the code at `cec028c`.
 
 ## How Ctrl-C works today
@@ -120,8 +122,9 @@ too. Not a kernel job: the kernel does not know what the program wrote.
   ^C is page down, and holding it to scroll would kill the editor); or no way
   out (the opt-out ends with the program, and a runaway raw program is ended
   only by `kill` from another shell, which needs a second session the
-  console does not have). Before building, ask DevTools whether Edit binds ^\
-  (WordStar does not).
+  console does not have). DevTools confirmed 2026-10-08 that Edit does not
+  bind ^\ (WordStar does not); its ^P ^\, which inserts a literal 0x1c,
+  ends Edit here instead, a cost Edit accepts.
 - **D2. Ctrl+\ reserved in cooked mode too.** *Settled: yes*, so the way
   out is one key whatever the mode, and a user never has to know which mode
   a program is in. The cost is that 0x1c never reaches any program.
