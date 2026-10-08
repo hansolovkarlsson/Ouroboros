@@ -174,3 +174,11 @@ Answered 2026-10-08 by DevTools: Edit does not bind ^\, so Ctrl+\ as the
 way out stands and item 4 waits on nothing but its own build
 (`~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`).
 Item 4 is still open.
+
+Progress 2026-10-08, Ouroboros: item 4's first half is built (#235). A
+program in raw mode, `KBD_MODE` (syscall 70) with `KBD_RAW`, reads Ctrl-C
+as the byte 3, on the serial line and the USB keyboard; Ctrl+\ ends a
+foreground program in every mode, and the USB keyboard now sends it.
+`/bin/READKEY raw` shows both, and `make test-kbd-mode` checks them. What
+Edit uses, `tcsetattr` with `ISIG` cleared, is step 2 of
+`docs/roadmap/roadmap-ctrl-c.md` and not built yet, so item 4 stays open.

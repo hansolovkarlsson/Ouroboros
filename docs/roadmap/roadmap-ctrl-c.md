@@ -10,7 +10,7 @@ per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
-**Status 2026-10-08: step 0 built (#232), step 1 built (2026-10-08), step 3
+**Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 3
 half built (#233: whole keys in the queue; the tail on a change of owner not
 yet); steps 2 and 4 not started. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
@@ -175,7 +175,7 @@ too. Not a kernel job: the kernel does not know what the program wrote.
 1. **`KBD_MODE`, Ctrl+\ (design 1 and 2).** Check: `/bin/READKEY raw` (a new
    mode of the existing probe) prints 3 for Ctrl-C and dies on Ctrl+\;
    cooked, Ctrl-C still kills; a raw program's child starts cooked; the mode
-   ends with the task. Each fails with its part removed. *Built 2026-10-08:
+   ends with the task. Each fails with its part removed. *Built 2026-10-08 (#235):
    `KBD_MODE` (70) with `KBD_COOKED`, `KBD_RAW` and `KBD_QUERY`, the mode in
    `tasks.rs`'s `KBD_RAW`, reset in `end_task`; `interrupt_key_check` acts
    on 0x1c always and on 0x03 only for a cooked owner; xhci.rs maps Ctrl+\
