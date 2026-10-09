@@ -20,13 +20,10 @@ IMG=build/esp.img
 [ -f "$IMG" ] || { echo "test-keyboard-chain: $IMG missing - run make image"; exit 2; }
 # A stale image would grade the previous kernel and print ok for a regression
 # its own controls would catch; `make test-keyboard-chain` depends on `image`,
-# and this refuses anyway if the image predates the kernel binary of the
-# profile it was staged from (PROFILE, as the Makefile spells it; debug by
-# default) or the staged copy in the ESP tree.
-for k in "target/aarch64-unknown-uefi/${PROFILE:-debug}/BOOTAA64.efi" build/esp/EFI/BOOT/BOOTAA64.EFI; do
-    [ -f "$k" ] && [ "$k" -nt "$IMG" ] && {
-        echo "test-keyboard-chain: $IMG is older than $k - run make image"; exit 2; }
-done
+# and this refuses anyway an image not built from the tree as it is now
+# (scripts/srcid.py). Asked here, before the boot loop: drive-qemu.py refuses
+# too, but its refusal would read as a boot that failed and be retried.
+python3 scripts/srcid.py require "$IMG" || exit 2
 CTRLC=$(printf '\003')
 fail=0
 

@@ -58,11 +58,9 @@ def main() -> int:
     if not os.path.exists(IMAGE):
         print(f"test-call-interrupt: {IMAGE} missing - run make image")
         return 2
-    for k in ("target/aarch64-unknown-none/release/netd.bin", "build/esp/EFI/BOOT/BOOTAA64.EFI"):
-        k = os.path.join(ROOT, k)
-        if os.path.exists(k) and os.path.getmtime(k) > os.path.getmtime(IMAGE):
-            print(f"test-call-interrupt: {IMAGE} is older than {k} - run make image")
-            return 2
+    # Guest refuses a stale image too, but by then the peers are running; ask
+    # first (scripts/srcid.py).
+    drive_qemu.srcid.require_current(IMAGE, "test-call-interrupt: ")
     peer_logs = [open(os.path.join(ROOT, "build", f"np9p-{p}.log"), "w") for p in PEER_PORTS]
     peers = [
         subprocess.Popen(

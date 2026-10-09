@@ -223,15 +223,8 @@ def main():
         if not os.path.exists(path):
             print(f"test-usb-hub: {path} missing - run {remedy}")
             return 2
-    # A stale image would grade the previous kernel (same guard as
-    # test-keyboard-chain.sh).
-    kernel = os.path.join(ROOT, "build", "esp", "EFI", "BOOT", "BOOTAA64.EFI")
-    # Compared with the kernel, not with each other: the hub boot uses
-    # IMAGE as its writable disk, so the guest's own writes make it newer.
-    for path in needed:
-        if path != STICK and os.path.exists(kernel) and os.path.getmtime(kernel) > os.path.getmtime(path):
-            print(f"test-usb-hub: {path} is older than {kernel} - run {remedy}")
-            return 2
+    # A stale image (one not built from the tree as it is now) is refused by
+    # drive_qemu.Guest (scripts/srcid.py). The stick is data, not a build.
     if os.path.exists(MONITOR):
         os.remove(MONITOR)
 

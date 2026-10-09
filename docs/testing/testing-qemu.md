@@ -80,9 +80,10 @@ too (as `/etc/srcid`). `Guest` reads it from the image's bytes (or from the ESP
 directory a vvfat rig boots), recomputes the tree's once per process, and exits
 2 on a difference, on a missing stamp, or on two different stamps;
 `scripts/run-guest.sh` makes the same check and exits 95. So every rig, both
-drivers and `run-guest.sh` have the guard. It replaced, as the guard that
-counts, the rigs' comparisons of modification times (still in five rigs, now
-redundant), which cannot see the case that matters: a mutation control builds
+drivers and `run-guest.sh` have the guard; the three shell rigs with a boot
+retry loop also ask `srcid.py require` before it, so a refusal is not retried
+as a failed boot. It replaced the rigs' comparisons of modification times
+(removed 2026-10-09), which cannot see the case that matters: a mutation control builds
 the mutant's image, `git checkout` restores the source, and every binary and
 the image are still newer than anything those guards compare, so the next
 direct run grades the mutant (2026-10-09, one hang and six debug runs).
