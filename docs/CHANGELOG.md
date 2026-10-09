@@ -269,6 +269,13 @@ words is now refused with a `too many words` line and nothing runs, a
 pipeline before any stage is spawned. `make test-nav-keys` and `make
 test-cargs` check both, and each check fails with its fix removed.
 
+**A glob past the argument store's 512 bytes is refused as such (#250).** A
+command whose glob expanded past the kernel's argument store (`ARGV_MAX`)
+was refused, but as "not found" or "path too long", for a program that
+existed. The shell now says `arguments too long`, for a command, a pipeline
+stage and `exec`, from the same check that counts the words; `make
+test-cargs` runs a glob landing on exactly 512 bytes and one a byte past it.
+
 **A rig no longer boots an image built from other sources (#247).** The
 rigs refused a stale image by comparing modification times, and a reverted
 mutation defeats that: the mutant's binaries and image are newer than the
