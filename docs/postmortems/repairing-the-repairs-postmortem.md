@@ -470,3 +470,43 @@ rounds earlier for something else, which failed on the next run. It makes a
 cheap habit to set beside the 09-26 one (tell the next review to read what
 has not moved): after a round whose findings are mostly in repairs, run every
 rig the branch touches, not just the ones the repair seems to concern.
+
+## One fix built three times, and the round that named the level (2026-10-09)
+
+*Added from #244, the stale reply after an interrupted call: four high
+reviews and a low one over three designs, each design chosen by Hans
+between rounds. Code, with a rig and its mutation controls beside every
+round.*
+
+| design | rounds | findings | what the review found it cost |
+| --- | --- | --- | --- |
+| a call's wait ignores Ctrl+C | 1 | 8 | a `cpu` that never stops printing held the console for good; a Ctrl+C typed during a program load reached the program as a key |
+| the abandoned answer drained before the next call | 1 | 10 | a stuck `cpu` held every later netd call, and a Ctrl+C at logout's key drop left the user's key held |
+| a reply names its call (`MSG_REPLY`, `SENDER_CALL`) | 2 high, 1 low | 9, 10, 0 | nothing in the design: the call number checked at the wrong level, a fid and a connection nobody heard of, stale comments |
+
+**The spine held in a new shape.** The repairs that drew findings here were
+not patches to a line but whole designs, and each review found the same
+kind of fault in the next one: the cheaper designs each left a caller
+waiting somewhere the session could not reach. Both were the roadmap's own
+candidates or a variation of them, and both looked sound on paper; only the
+built thing, reviewed, showed the cost. The 10-08 section's lesson applied at
+once: when the first review's findings were a trade (liveness against the
+stale answer), the trade went to Hans rather than into the next patch.
+
+**The lesson this section adds: a review's altitude finding is worth acting
+on the second time it points the same way.** The first review's
+counter-proposal and the second's "altitude" finding both said the kernel
+could not tell which call a reply answered; every design that left that
+question unanswered paid for it somewhere else. The design that answered it
+drew findings only at the level below (where the check sat, what a refused
+answer left behind), and by the fourth round only comments and one leak.
+The rounds converged when the fix moved to the level the bug was at, which
+this file's 09-22 remedy says in other words: redesign a repair that keeps
+drawing findings. What this day adds is the signal for when: two reviews
+whose deepest finding is the same missing fact.
+
+**And a smaller one: a review's counter-proposal is a claim like any other.**
+The first review suggested counting abandoned calls and dropping the next
+reply. It assumed a server answers a caller's requests in order, and netd's
+parked requests do not; checked against the code before it was offered on,
+it was set aside.

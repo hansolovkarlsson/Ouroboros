@@ -1996,3 +1996,75 @@ stays on the roadmap.
 >       check: no subtree refusal, no normalization, no empty-path refusal,
 >       each fail `test-crename`. Merged as #215 (`e0c8e09`); both handoff
 >       notes are done and in `handoffs/closed/`.*
+
+The last item, the stale reply after an interrupted call, was done on
+2026-10-09 (#244) and moved here the same day with the roadmap's closing
+note on the block, verbatim:
+
+> **What Edit asked of Ouroboros, accepted 2026-10-05: done 2026-10-08.**
+> Edit is DevTools's editor (`~/Projects/DevTools/edit/`), on the image as
+> `/bin/edit` since #240. Its notes are all in `handoffs/closed/`, and the
+> finished items moved to [`roadmap-completed.md`](roadmap-completed.md) on
+> 2026-10-09. What was left was one follow-up found while building them, now
+> built:
+>
+> - [x] **new** **A stale reply after an interrupted call.** Ctrl+C (and
+>       since #235 Ctrl+\) interrupts the boot shell's message waits, its
+>       `MSG_CALL`s to the servers included (`RECV_INTERRUPTED`); the
+>       server's reply, still on its way, then lands in the shell's mailbox
+>       and `try_recv_message_from` takes it as the answer to the NEXT call
+>       to that server, which gets the wrong reply. Older than #235 (since
+>       #232 the waits read the keyboard); found by its fourth high review.
+>       #235 narrowed it (a reply already waiting is delivered before an
+>       interrupt is looked for) but did not close it. The third high
+>       review of #238 found the same root costs keys at the prompt: the
+>       shell's echo is a call to `cond`, so a Ctrl+C typed right after a
+>       letter can interrupt that call and flush the letter, a loss that
+>       depends on timing. Never interrupting a call's reply wait would end
+>       both. Two shapes to
+>       weigh: a call's reply wait is never interrupted (the stuck `recv`
+>       and the wedged server are what interruption is for, and a call to a
+>       wedged server is the second), or calls carry a sequence number the
+>       reply echoes, so a late reply is recognised and dropped. Done when a
+>       rig interrupts the boot shell during a call held open by a slow
+>       server and the shell's next call to that server gets its own reply.
+>       *Built 2026-10-09 (#244), the second shape, after two others were
+>       built and reviewed out. A server reads the request's call handle
+>       with `SENDER_CALL` (74), `(call number << 8) | slot`, the number
+>       unique within a boot, and answers with `MSG_REPLY` (73), which the
+>       kernel delivers only while the caller is still blocked in that call
+>       (`tasks::reply_target`); `SAFECOPY` takes the same handle, and a
+>       `MSG_SEND` is never taken as a reply (the reply exemption is gone).
+>       fsd, cond, accountd, netd and pong reply this way; netd's parked
+>       requests keep the handle beside the caller's identity. The first
+>       form made a call's wait ignore Ctrl+C: its review found a `cpu`
+>       whose remote command never stops printing held the console for good
+>       (netd answers only at the end or after 30 s of silence), and a
+>       Ctrl+C typed while a program loaded reached the program as a key.
+>       The second recorded the abandoned call and made the next call to
+>       that server wait for the old answer before sending: its review found
+>       a stuck `cpu` then held every netd call, logout's key drop among
+>       them, so a Ctrl+C there left the user's key held. Reading the code
+>       also corrected the account above: no server holds a send right to
+>       slot 0, so a late answer never reached the mailbox; it got in by the
+>       reply exemption while the shell was blocked in its next call, and
+>       that call's own reply was refused. The same window let a `SAFECOPY`
+>       for the old request reach the next call's grant, and a killed
+>       caller's refilled slot calling the same server take its answer
+>       (fsd and cond replied by slot); both are closed with it.
+>       Its own high review found the call number checked only at
+>       `MSG_REPLY`'s gate, while any `MSG_SEND` from the server, direct or
+>       queued, still completed a waiting call: now a call's wait takes only
+>       `deliver_reply`, never the mailbox, and the call number is cleared
+>       when the call ends. Also from it: `REPLY_STALE` moved into the error
+>       band (`MAX-43`, the floor to `MAX-44`, `sys.h` following), each
+>       server reads the handle once on receipt and passes it down, `fsd`
+>       frees an open's fid and `netd` does not count it when the reply is
+>       stale, the supervisor's ack is `MSG_REPLY` only, and `MSG_SEND`'s
+>       packed-identity arm, used only by parked replies, is gone.
+>       `make test-call-interrupt`: two host 9P peers hold every reply
+>       4.5 s; Ctrl+C cuts `cd /mnt/s/SUB` short, `cd /mnt/b/NOPE` then
+>       fails on its own answer while SUB's arrives and is refused, Ctrl+\
+>       cuts a call short too, and `pwd` stays `/`. Controls: the call number
+>       not compared (`cd` took SUB's "exists"), a call's wait not
+>       interruptible; both fail it.*
