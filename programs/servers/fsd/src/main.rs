@@ -84,12 +84,18 @@ fn main() -> ! {
             break;
         }
         let sender = packed >> 32;
+        // The call this request opened, read once, here, before anything
+        // else can receive: the reply and every SAFECOPY name it.
+        let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let reply_len = handle(&mut mounts, &mut fids, sender, &req[..len], &mut reply);
-        // A full/unreachable sender mailbox drops the reply - the
-        // caller's MSG_CALL stays blocked until Ctrl+C; nothing better
-        // exists to do with an undeliverable reply.
-        syscall4(syscall_abi::MSG_SEND, sender, reply.as_ptr() as u64, reply_len as u64, 0);
+        let reply_len = handle(&mut mounts, &mut fids, sender, call, &req[..len], &mut reply);
+        // Delivered only while the caller is still in the call: an answer to
+        // a call that is over (cut short, or its caller dead and the slot
+        // refilled) goes nowhere, REPLY_STALE, and a fid it carried is freed.
+        let r = syscall4(syscall_abi::MSG_REPLY, call, reply.as_ptr() as u64, reply_len as u64, 0);
+        if r == syscall_abi::REPLY_STALE {
+            forget_unheard_fid(&mut fids, &req[..len], &reply[..reply_len]);
+        }
     }
     loop {
         core::hint::spin_loop();
@@ -379,7 +385,7 @@ impl Fid {
 /// ops (`NP_READ`/`NP_WRITE`/`NP_WRITE_AT`) to `SAFECOPY` against the client's
 /// grant (they move their data directly between task regions rather than inline
 /// in the reply).
-fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, call: u64, req: &[u8], reply: &mut [u8]) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -405,7 +411,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         // slot can never be passed where an identity belongs. Read here rather
         // than beside `who`: the FSOP_* control ops below never need it.
         let owner = syscall4(syscall_abi::SENDER_TASK, 0, 0, 0, 0);
-        return handle_ninep(mounts, fids, owner, who, op, req, reply);
+        return handle_ninep(mounts, fids, owner, call, who, op, req, reply);
     }
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
 
@@ -550,11 +556,9 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
 /// namespace resolves it to a real mount in a later step.
 ///
 /// [`NP_REQ_PAYLOAD`]: ninep_abi::NP_REQ_PAYLOAD
-fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], owner: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
+#[allow(clippy::too_many_arguments)]
+fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], owner: u64, call: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
     const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
-    // The slot half of the sender's identity: what a SAFECOPY grant is looked
-    // up by. Derived, never passed, so the two cannot be swapped at a call.
-    let sender = syscall_abi::task_id_slot(owner);
     if req.len() < NP_HDR {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -569,7 +573,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
         verb,
         ninep_abi::NP_PREAD | ninep_abi::NP_PWRITE | ninep_abi::NP_FSTAT | ninep_abi::NP_CLUNK
     ) {
-        return handle_fid_op(mounts, fids, owner, who, verb, &p, reply);
+        return handle_fid_op(mounts, fids, owner, call, who, verb, &p, reply);
     }
     // The `tree` selector picks which mount (cluster Phase 0 multi-mount); an
     // out-of-range tree is a client bug. An unmounted tree replies NO_FS.
@@ -662,7 +666,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                     if copied > 0 {
                         let r = syscall5(
                             syscall_abi::SAFECOPY,
-                            sender,
+                            call,
                             0,
                             chunk.as_ptr() as u64,
                             copied as u64,
@@ -689,7 +693,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             if data_len > 0 {
                 let r = syscall5(
                     syscall_abi::SAFECOPY,
-                    sender,
+                    call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -717,7 +721,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             if data_len > 0 {
                 let r = syscall5(
                     syscall_abi::SAFECOPY,
-                    sender,
+                    call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -900,6 +904,22 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     }
 }
 
+/// The answer to an `NP_OPEN` whose caller left the call (`MSG_REPLY`
+/// answered `REPLY_STALE`: cut short by Ctrl+C, or its caller dead) carried
+/// a fid nobody will learn, so nobody will clunk it: freed here. Every other
+/// verb's answer leaves nothing behind.
+fn forget_unheard_fid(fids: &mut [Fid; MAX_FIDS], req: &[u8], reply: &[u8]) {
+    if req.len() < 8 || reply.len() < 8 || read_u64(req, 0) != ninep_abi::NP_OPEN {
+        return;
+    }
+    let fid = read_u64(reply, 0);
+    if (FID_BASE..syscall_abi::FS_ERR_MIN).contains(&fid) {
+        if let Some(f) = fids.get_mut((fid - FID_BASE) as usize) {
+            *f = Fid::empty();
+        }
+    }
+}
+
 /// A free index in the fid table, or `None` if it is full even after reaping
 /// fids whose owner is gone. Only finds the slot; `NP_OPEN` fills it, after its
 /// side effects, so that a refusal here happens before them.
@@ -947,12 +967,16 @@ fn reap_dead_fids(fids: &mut [Fid; MAX_FIDS]) {
 
 /// Handle a fid op (`a0` = fid): resolve the fid to its owner-checked path +
 /// mount, then read/write/stat/clunk. No per-op permission check - authorized at
-/// open. `owner` is the sender's packed identity, what a fid is owned by; the
-/// slot a grant is looked up by is derived from it.
+/// open. `owner` is the sender's packed identity, what a fid is owned by;
+/// `call` is the handle of the call being answered (`SENDER_CALL`, read on
+/// receipt), what a SAFECOPY names - not a slot, which SAFECOPY no longer
+/// takes.
+#[allow(clippy::too_many_arguments)]
 fn handle_fid_op(
     mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS],
     fids: &mut [Fid; MAX_FIDS],
     owner: u64,
+    call: u64,
     who: Option<Caller>,
     verb: u64,
     p: &[u64; 4],
@@ -1031,7 +1055,7 @@ fn handle_fid_op(
             if data_len > 0 {
                 let r = syscall5(
                     syscall_abi::SAFECOPY,
-                    sender,
+                    call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,

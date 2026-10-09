@@ -98,6 +98,30 @@ pub const KEY_WAIT_UNTIL: u64 = 71;
 /// refused -1; the fourth high review of #240).
 pub const SLEEP_UNTIL: u64 = 72;
 
+/// `(call, reply ptr, len)` -> `0`, [`REPLY_STALE`], or [`FS_ERROR`] for a
+/// bad buffer. **How a server answers a [`MSG_CALL`]** (since 2026-10-09):
+/// `call` is the handle [`SENDER_CALL`] gave for the request, and the reply
+/// is delivered only while the caller is still blocked in that same call.
+/// Otherwise it goes nowhere and [`REPLY_STALE`] is returned: the call was
+/// cut short (the boot shell's Ctrl+C or Ctrl+\), or its caller died, perhaps
+/// with its slot already refilled by a task calling this server. A
+/// [`MSG_SEND`] to a caller is never taken as the reply. For the
+/// supervisor's ping, [`SENDER_CALL`] gives [`KERNEL_SENDER`], and the reply
+/// is the ack. Needs no send right: a server answers whoever called it.
+pub const MSG_REPLY: u64 = 73;
+
+/// `()` -> the call handle of the message this task last received, for
+/// [`MSG_REPLY`] and [`SAFECOPY`]; [`KERNEL_SENDER`] for the supervisor's
+/// ping; [`GET_ID_ERR`] when that message was a plain [`MSG_SEND`] (nothing
+/// to answer) or nothing has been received. Captured at send time, with
+/// [`SENDER_ID`]'s credential, and stable while the request is handled (the
+/// reply to a call the server makes itself never replaces it: replies are
+/// delivered into the call, never received; only another receive does, so
+/// read it on receipt), so a server that answers later (a parked request) keeps it
+/// and replies with it then. A handle is `(call number <<
+/// `[`TASK_ID_SLOT_BITS`]`) | slot`, the call number unique within a boot.
+pub const SENDER_CALL: u64 = 74;
+
 /// `(total staged length, stdout target, argv blob length)` -> **the new
 /// task's slot index** on success (needed to wait on, send to, or kill what
 /// was just started - the shell's pipeline flow does all three), [`SPAWN_ERROR`]
@@ -250,16 +274,15 @@ pub const MOUNT: u64 = 22;
 /// end-of-stream marker in the shell's pipeline convention - a
 /// pipeline child (`left | program`) receives its input as a stream of
 /// 1-to-[`MSG_MAX_LEN`]-byte data messages followed by one empty
-/// message meaning "no more input; finish and exit". **`dest` may be a
-/// packed task identity** (the word [`SENDER_TASK`] answers) instead of
-/// a slot: any value at or above `1 << `[`TASK_ID_SLOT_BITS`] is one,
-/// since every generation is at least 1. It delivers only while that
-/// identity still names the slot's occupant, else
-/// [`TASK_ERR_NO_SUCH_TASK`]. A server that answers a call LATER than
-/// the handler that received it (a parked request) must reply this way:
-/// by then the caller may be dead and its slot recycled to a task that
-/// is itself blocked calling the server, and a reply by slot would
-/// complete the wrong call.
+/// message meaning "no more input; finish and exit". `dest` is a slot.
+/// **A send is never a reply** (since 2026-10-09): the send-mask governs
+/// it even when `dest` is blocked calling the sender, a task in a call
+/// takes nothing but the [`MSG_REPLY`] naming that call (the send waits
+/// in its mailbox for a later [`MSG_RECV`]), and the supervisor's ack is
+/// [`MSG_REPLY`] to [`KERNEL_SENDER`]. Until then such a send was let
+/// through as the reply, a late one completed the caller's next call, and
+/// `dest` could be a packed task identity, the way parked replies were
+/// addressed.
 pub const MSG_SEND: u64 = 23;
 
 /// `(buf ptr, len)` -> `(sender << 32) | copied_len`, or
@@ -280,15 +303,20 @@ pub const MSG_TRY_RECV: u64 = 25;
 /// [`TASK_ERR_SELF`] (calling yourself is a guaranteed deadlock), or a
 /// `MSG_ERR_*` code if the send half fails. The synchronous
 /// request/response primitive (MINIX's `sendrec` shape): sends the
-/// request to `dest`, then blocks until a reply *from `dest`
-/// specifically* arrives - a message from any other task stays queued
-/// for a later [`MSG_RECV`] rather than being mistaken for the reply.
+/// request to `dest`, then blocks until `dest`'s [`MSG_REPLY`] to this
+/// very call arrives - any sent message, from another task or from
+/// `dest` itself, stays queued for a later [`MSG_RECV`] rather than
+/// being mistaken for the reply.
 /// The reply buffer is a fixed [`MSG_MAX_LEN`] bytes - all 768 of
 /// them (implied, not passed - the 4-argument syscall ABI is exactly
 /// full), so a caller must always supply a full-size buffer. With direct
 /// delivery on both hops (see `tasks.rs::send_message`), a call to a
 /// server blocked in [`MSG_RECV`] round-trips without waiting for a
-/// tick on either side.
+/// tick on either side. The reply is the server's [`MSG_REPLY`] to the
+/// call [`SENDER_CALL`] named for it, so only an answer to THIS call
+/// completes it: after an interrupted call (the boot shell's Ctrl+C or
+/// Ctrl+\, [`RECV_INTERRUPTED`]) the server's late answer goes nowhere
+/// rather than to the caller's next call (since 2026-10-09).
 pub const MSG_CALL: u64 = 29;
 
 /// `()` -> the block device's capacity in sectors, or
@@ -374,22 +402,24 @@ pub const SPAWN_STAGE: u64 = 30;
 /// of the enforced capability-based bulk-transfer primitive that lifts
 /// the [`FS_DATA_MAX`] per-op cap: the grant names an exact buffer, and
 /// the kernel enforces the grantee can touch only those bytes, and only
-/// while the granter is actively blocked in a [`MSG_CALL`] to it (see
-/// [`SAFECOPY`]). Each task has exactly one grant slot; a new grant
+/// while the granter is blocked in the [`MSG_CALL`] to it that the copy
+/// names (see [`SAFECOPY`]). Each task has exactly one grant slot; a new grant
 /// overwrites the old, and a task's grant is cleared when it dies.
 /// `buf len` is capped at [`SAFECOPY_MAX`].
 pub const GRANT: u64 = 31;
 
-/// `(client task, client offset, local buf ptr, len, dir)` -> `len` on
+/// `(call, client offset, local buf ptr, len, dir)` -> `len` on
 /// success, or [`SAFECOPY_ERR`]. Issued by a *server* to copy `len`
 /// bytes between a client's granted buffer (at `client offset` within
 /// it) and the server's own `local buf ptr`, in direction `dir`
 /// ([`GRANT_READ`] = server reads client -> local; [`GRANT_WRITE`] =
 /// server writes local -> client). Authorized only when **all** hold:
 /// the client's grant is set with `grantee == caller` and a `dir` that
-/// permits this direction; the client is *currently* blocked in a
-/// [`MSG_CALL`] to the caller (a stale grant is inert - the client is
-/// runnable, not blocked-calling-me, once its call has returned);
+/// permits this direction; the client is *currently* blocked in the
+/// [`MSG_CALL`] to the caller that `call` names ([`SENDER_CALL`]'s handle,
+/// since 2026-10-09; it was the client's slot): a stale grant is inert
+/// once the call returns, and a copy for a call the client left cannot
+/// reach the grant it set for its next one;
 /// `client offset + len` stays within the granted buffer; and
 /// `local buf ptr`/`len` lies inside the caller's own region. `len` is
 /// capped at [`SAFECOPY_MAX`]. Note: takes five arguments - the arm
@@ -872,15 +902,16 @@ pub const RANDOM: u64 = 63;
 /// sent and hands that to the receiver here. Use this - not `GET_ID(sender)` -
 /// wherever an identity is being used to authorize a request.
 ///
-/// Only an **unfiltered** receive ([`MSG_RECV`]/[`MSG_TRY_RECV`] with no sender
-/// filter) updates it. The reply to your own [`MSG_CALL`] does not, so a server
-/// may log to `cond` or read a file through `fsd` in the middle of handling a
-/// request without the reply replacing the credential it is authorizing
-/// against - a request only ever arrives on an unfiltered receive.
+/// Only a receive ([`MSG_RECV`]/[`MSG_TRY_RECV`]) updates it. The reply to your
+/// own [`MSG_CALL`] does not (since 2026-10-09 a reply is delivered into the
+/// call, never received; before, the call's receive was filtered and skipped
+/// it), so a server may log to `cond` or read a file through `fsd` in the
+/// middle of handling a request without the reply replacing the credential it
+/// is authorizing against.
 pub const SENDER_ID: u64 = 65;
 
 /// `()` -> the packed task identity of the sender of the message this task
-/// last received on an unfiltered receive, captured by the kernel at send time
+/// last received ([`MSG_RECV`]/[`MSG_TRY_RECV`]), captured by the kernel at send time
 /// exactly as [`SENDER_ID`] is; [`GET_ID_ERR`] if nothing has been received.
 ///
 /// **A slot number is not an identity.** A slot is recycled the moment its
@@ -891,8 +922,8 @@ pub const SENDER_ID: u64 = 65;
 /// counter that never repeats within a boot), and this returns
 /// `(generation << TASK_ID_SLOT_BITS) | slot` - see [`task_id_slot`]. Compare
 /// the whole word; the slot half alone is the bug this exists to close. The
-/// value is stable for the whole handling of a request (a filtered receive,
-/// i.e. a reply to a call this task made, never replaces it).
+/// value is stable for the whole handling of a request (a reply to a call this
+/// task made is delivered into the call and never replaces it).
 ///
 /// Exposed to servers only for now: `ps`/`wait` still speak in slots.
 pub const SENDER_TASK: u64 = 67;
@@ -1530,11 +1561,11 @@ pub const PARTITION_START_LBA: u64 = 2048;
 /// a server's reply to that ping carries (which the kernel intercepts as
 /// the ack - see [`SYSOP_PING`]). Fits `Message.sender`'s `u8` and sits
 /// clear of every real task index (`0..NUM_TASKS`), so it can never be
-/// mistaken for one. Not a task: an ordinary [`MSG_SEND`] to it never
-/// reaches a mailbox - the kernel treats `dest == KERNEL_SENDER` as "this
-/// task is acking a supervisor ping" and returns `0`. A non-server, or a
-/// server with no ping outstanding, sending to it is a harmless no-op
-/// (the same single-address-space trust model as every other message).
+/// mistaken for one. Not a task: [`SENDER_CALL`] gives it for the ping,
+/// and a [`MSG_REPLY`] to it is "this task is acking a supervisor ping",
+/// returning `0` (a [`MSG_SEND`] to it, the ack until 2026-10-09, now
+/// answers [`TASK_ERR_NO_SUCH_TASK`]). A non-server, or a server with no
+/// ping outstanding, replying to it is a harmless no-op.
 pub const KERNEL_SENDER: u64 = 0xFE;
 
 /// The op the supervisor's liveness ping carries in its message header
@@ -1844,8 +1875,15 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// `MAX-42` is [`TASK_ERR_SELF`] (2026-09-19), the same kind: a task
 /// syscall's answer to its own caller, never a 9P reply. The pattern
 /// each time: the new code takes the floor's old value, and the floor
-/// steps down by one, so the band has no holes.
-pub const FS_ERR_MIN: u64 = u64::MAX - 43;
+/// steps down by one, so the band has no holes. `MAX-43` is
+/// [`REPLY_STALE`] (2026-10-09), the same kind again: [`MSG_REPLY`]'s
+/// answer to the server, with `sys.h`'s mirror and `FS_ERR_CLIENT`
+/// stepping down with it.
+pub const FS_ERR_MIN: u64 = u64::MAX - 44;
+/// [`MSG_REPLY`]: the call is over (cut short, or its caller dead), so the
+/// reply went nowhere. A server that made something for the caller (a fid)
+/// should undo it: nobody will learn of it.
+pub const REPLY_STALE: u64 = u64::MAX - 43;
 
 /// The program parsed, but its loaded image (code, data and `.bss`
 /// together: memory size, not file size) plus the loader's fixed heap,

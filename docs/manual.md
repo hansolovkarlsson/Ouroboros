@@ -574,7 +574,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 26 | `block_info` | none | Block-device capacity in sectors, **task 2 (the fsd server) only**, like all three `block_*` syscalls |
 | 27 | `block_read` | LBA, buf ptr | Read one 512-byte sector (fsd only) |
 | 28 | `block_write` | LBA, buf ptr | Write one 512-byte sector (fsd only) |
-| 29 | `msg_call` | dest, req ptr/len, reply ptr | Synchronous request/response: send + block for a reply *from `dest` specifically*; sub-tick round trips via direct delivery. Reply buffer is a fixed `MSG_MAX_LEN` (768) bytes |
+| 29 | `msg_call` | dest, req ptr/len, reply ptr | Synchronous request/response: send + block for a reply *from `dest` specifically*; sub-tick round trips via direct delivery. Reply buffer is a fixed `MSG_MAX_LEN` (768) bytes. The server answers with `msg_reply` (73) to the call `sender_call` (74) names, so a late answer to a call cut short by Ctrl+C goes nowhere |
 | 30 | `spawn_stage` | offset, chunk ptr/len | Feed one chunk of a program image into the kernel's staging buffer (`SPAWN_STAGING_SIZE`) for `spawn` |
 
 **File operations** are `FSOP_*` requests to the filesystem server
