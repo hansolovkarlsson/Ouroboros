@@ -87,7 +87,6 @@ Exit status: the number of checks that failed, or 100 for INCONCLUSIVE; for
 import importlib.util
 import os
 import re
-import socket
 import sys
 import time
 
@@ -196,14 +195,10 @@ def layout(direct, stick_image):
     ]
 
 
-def sendkeys(text):
+def type_usb(text):
     """Types `text` and Enter through the monitor: USB keyboard only."""
     names = {" ": "spc", "\n": "ret"}
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mon:
-        mon.connect(MONITOR)
-        for ch in text + "\n":
-            mon.sendall(f"sendkey {names.get(ch, ch)}\n".encode())
-            time.sleep(KEY_DELAY)
+    drive_qemu.sendkeys(MONITOR, [names.get(ch, ch) for ch in text + "\n"], KEY_DELAY)
 
 
 def main():
@@ -251,7 +246,7 @@ def main():
     typed = False
     try:
         if g.run([("login:", "root"), ("assword", "root"), ("# ", "")]):
-            sendkeys(f"echo {WORD}")
+            type_usb(f"echo {WORD}")
             # The echoed command line is "echo usbhub"; its output is the word
             # on a line of its own.
             typed = g.wait_for(rf"(?m)^{WORD}\r?$", timeout=20)

@@ -46,13 +46,6 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-cpoll.txt")
 PROMPT = "# "
 
 
-def type_raw(guest, data):
-    for ch in data:
-        guest.proc.stdin.write(bytes([ch]))
-        guest.proc.stdin.flush()
-        time.sleep(drive_qemu.TYPE_DELAY)
-
-
 def main() -> int:
     guest = drive_qemu.Guest(IMAGE, label="test-cpoll: ")
     seg = {}
@@ -70,15 +63,15 @@ def main() -> int:
             ok = guest.wait_for("cpoll: waiting")
             if ok:
                 time.sleep(0.5)
-                type_raw(guest, b"x")
+                guest.type_raw(b"x")
                 ok = guest.wait_for(r"cpoll: key 120")
             if ok:
                 time.sleep(1.0)
-                type_raw(guest, b"y")
+                guest.type_raw(b"y")
                 ok = guest.wait_for("cpoll: type now")
             if ok:
                 time.sleep(0.5)
-                type_raw(guest, b"z")
+                guest.type_raw(b"z")
                 ok = guest.wait_for(PROMPT, timeout=30)
             seg["key"] = guest.transcript()[start:]
         if ok:
@@ -90,7 +83,7 @@ def main() -> int:
             ok = guest.wait_for("cpoll: leave waiting")
             if ok:
                 time.sleep(0.5)
-                type_raw(guest, b"e")
+                guest.type_raw(b"e")
                 ok = guest.wait_for(r"cpoll: leave 1[\s\S]*" + PROMPT, timeout=30)
             if ok:
                 guest.type_line("cho kq")
