@@ -2389,9 +2389,12 @@ be reviewed after the fact from the saved screenshots.
 >       decisions settled by Hans the same day, as recommended. DevTools
 >       answered 2026-10-08 that Edit does not bind ^\, and step 1
 >       (`KBD_MODE`, Ctrl+\ as the way out, `make test-kbd-mode`) was
->       built the same day (#235), and step 2, `tcgetattr` and
->       `tcsetattr` in the C library (#236), after it; step 3's second half
->       and step 4 remain:
+>       built the same day (#235), step 2, `tcgetattr` and `tcsetattr` in
+>       the C library (#236), and step 4, the shell's reset after a kill
+>       (#237); and step 3's second half the same day, designed in the
+>       plan with its four decisions (E1 to E4) settled by Hans and built
+>       (the queue now `keyseq::KeyQueue`, host-tested). Every step is
+>       built; the notice to DevTools remains:
 >       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
 >       time, so a change of keyboard owner (a program killed between the
@@ -2411,7 +2414,12 @@ be reviewed after the fact from the saved screenshots.
 >       to that server, which gets the wrong reply. Older than #235 (since
 >       #232 the waits read the keyboard); found by its fourth high review.
 >       #235 narrowed it (a reply already waiting is delivered before an
->       interrupt is looked for) but did not close it. Two shapes to
+>       interrupt is looked for) but did not close it. The third high
+>       review of #238 found the same root costs keys at the prompt: the
+>       shell's echo is a call to `cond`, so a Ctrl+C typed right after a
+>       letter can interrupt that call and flush the letter, a loss that
+>       depends on timing. Never interrupting a call's reply wait would end
+>       both. Two shapes to
 >       weigh: a call's reply wait is never interrupted (the stuck `recv`
 >       and the wedged server are what interruption is for, and a call to a
 >       wedged server is the second), or calls carry a sequence number the

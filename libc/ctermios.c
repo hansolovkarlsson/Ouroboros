@@ -24,7 +24,13 @@
  * `ctermios raw` turns raw mode on with Edit's own recipe (its plat_raw_on),
  * prints `ctermios: raw`, then `ctermios: byte <n>` for each byte read until
  * `q`; then restores the saved settings, prints `ctermios: restored`, and
- * reads on, cooked, until `q`, so a Ctrl+C there ends it. */
+ * reads on, cooked, until `q`, so a Ctrl+C there ends it.
+ *
+ * `ctermios flush` and `ctermios drain` turn raw mode on, print
+ * `ctermios: spinning`, run two seconds without reading (keys typed then
+ * wait in the kernel's queue), and restore the saved settings with
+ * TCSAFLUSH, which discards those keys, or TCSADRAIN, which keeps them for
+ * the shell; then print `ctermios: flushed` or `ctermios: drained`. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -138,13 +144,44 @@ static int raw(void) {
     return 0;
 }
 
+static int spin_then(int action, const char *done) {
+    struct termios saved, t;
+    if (tcgetattr(0, &saved) < 0) {
+        printf("ctermios: tcgetattr %s\r\n", err_name(errno));
+        return 1;
+    }
+    t = saved;
+    edit_raw(&t);
+    if (tcsetattr(0, TCSADRAIN, &t) < 0) {
+        printf("ctermios: tcsetattr %s\r\n", err_name(errno));
+        return 1;
+    }
+    printf("ctermios: spinning\r\n");
+    fflush(stdout);
+    long start = __os_syscall1(SYS_GET_TICKS, 0);
+    while (__os_syscall1(SYS_GET_TICKS, 0) - start < 100) {
+    }
+    if (tcsetattr(0, action, &saved) < 0) {
+        printf("ctermios: restore %s\r\n", err_name(errno));
+        return 1;
+    }
+    printf("ctermios: %s\r\n", done);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "flush") == 0) {
+        return spin_then(TCSAFLUSH, "flushed");
+    }
+    if (argc > 1 && strcmp(argv[1], "drain") == 0) {
+        return spin_then(TCSADRAIN, "drained");
+    }
     if (argc > 1 && strcmp(argv[1], "raw") == 0) {
         return raw();
     }
     if (argc > 1 && strcmp(argv[1], "check") == 0) {
         return check();
     }
-    printf("usage: ctermios check|raw\r\n");
+    printf("usage: ctermios check|raw|flush|drain\r\n");
     return 2;
 }

@@ -21,6 +21,9 @@
 
 #![no_std]
 
+mod queue;
+pub use queue::{KeyQueue, QUEUE_LEN};
+
 /// What one byte of input turned out to be.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Fed {
@@ -42,7 +45,7 @@ enum State {
     Ss3,
 }
 
-const ESC: u8 = 0x1b;
+pub(crate) const ESC: u8 = 0x1b;
 const DEL: u8 = 0x7f;
 
 pub struct KeySeq {

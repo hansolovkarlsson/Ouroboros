@@ -963,6 +963,15 @@ pub const KBD_COOKED: u64 = 0;
 pub const KBD_RAW: u64 = 1;
 /// [`KBD_MODE`] argument: answer the mode, change nothing.
 pub const KBD_QUERY: u64 = 2;
+/// [`KBD_MODE`] flag, OR'd into any mode: before the mode is set, discard the
+/// keys typed ahead (queued, and waiting on the devices), as `tcsetattr`'s
+/// `TCSAFLUSH` asks. For the keyboard owner only; anyone else's flush does
+/// nothing. An interrupt among the discarded keys still acts. `KBD_COOKED` is
+/// 0, so `KBD_FLUSH` alone also sets cooked mode: to flush without a change,
+/// pass `KBD_QUERY | KBD_FLUSH`. A bounded number of reads of the devices
+/// (`keyseq::QUEUE_LEN`), with interrupts masked, so a burst longer than
+/// that can outlast it.
+pub const KBD_FLUSH: u64 = 0x100;
 /// [`KBD_MODE`]'s answer to an unknown mode. Not `u64::MAX`, which a kernel
 /// without `KBD_MODE` answers for the unknown syscall, so a caller (step 2's
 /// `tcsetattr`) can tell "bad mode" from "not supported".

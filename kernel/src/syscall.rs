@@ -208,220 +208,235 @@ fn con_access_allowed() -> bool {
 /// the six callers four re-stated the rule and the two read syscalls did
 /// not, so a background poller took the owner's bytes (witnessed
 /// 2026-09-19).
-/// Falls back to the USB keyboard (xhci.rs) when the byte-stream console
-/// has nothing waiting; `crate::xhci::poll_key()` is a no-op returning
-/// `None` if no keyboard was ever found this boot.
 ///
-/// Bytes the tick read ahead of the owner wait in [`KBD_QUEUE`] and come
-/// first; they passed the Ctrl+C check when they were read, under the owner
-/// and keyboard mode of that moment, and are not judged again (as on Unix,
-/// where a byte's meaning is settled on receipt): a Ctrl+C queued for a raw
-/// owner stays a byte if the owner turns cooked or dies before reading it.
+/// Every byte reaches a reader through [`KBD_QUEUE`] ([`take_one`]), so the
+/// queue's key parser sees every byte once, in order, whichever path read it
+/// (step 3 of the Ctrl-C plan). When the queue is empty this takes bytes
+/// from the devices one at a time until one is there to return, not
+/// everything waiting: a byte the queue drops (a cut key's rest) is not
+/// mistaken for "nothing typed", and what was typed after the reader's line
+/// mostly stays on the line for the next owner. Mostly: the tick and the
+/// waits read ahead too, so a Ctrl+C typed ahead of a program, before it
+/// sets its mode, is judged under whoever owns the keyboard when it is read.
+/// That race is in the nature of type-ahead (Unix has it: the signal goes to
+/// the foreground group of the moment the byte arrives), and this narrows
+/// it without closing it. A byte's meaning is settled when it is read, under
+/// the owner and keyboard mode of that moment, and is not judged again.
 pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
-    if reader != tasks::input_owner() {
+    if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
         return None;
     }
-    // SAFETY: the synccell argument (one core, interrupts masked in EL1).
-    if let Some(byte) = unsafe { (*KBD_QUEUE.get()).pop() } {
-        return Some(byte);
+    for _ in 0..READ_DROPPED_MAX {
+        // SAFETY: the synccell argument (one core, interrupts masked in EL1).
+        if let Some(byte) = unsafe { (*KBD_QUEUE.get()).pop() } {
+            return Some(byte);
+        }
+        // The boot shell reading its line has nothing to interrupt: its
+        // Ctrl+C is a byte the line editor ignores, not a flush that would
+        // lose keys typed just before it (test-kbd-mode's `ef` check).
+        if take_one(false) != Took::Byte {
+            return None;
+        }
     }
-    let byte = keyboard_device_byte()?;
-    // The Ctrl+C escape hatch (and the queue was empty, or the pop above
-    // would have answered, so there is nothing to flush) - see tasks::interrupt_key_check's doc comment.
-    // Intercepted here, the single choke point every keyboard path funnels
-    // through (the wake-check, READ_CHAR's fast path, and TRY_READ_CHAR alike),
-    // so Ctrl+C is caught no matter which path would have consumed it. It marks
-    // the foreground program for termination (tasks::on_tick does the kill) and
-    // swallows the byte.
-    if tasks::interrupt_key_check(byte) == tasks::KeyVerdict::Consumed {
+    None
+}
+
+/// How many bytes one read may take from the devices before it answers
+/// nothing: enough to read past the bytes the queue drops (a cut key's rest,
+/// which for a long CSI from a host terminal can run past a dozen), a bound
+/// because the read runs with interrupts masked.
+const READ_DROPPED_MAX: usize = keyseq::QUEUE_LEN;
+
+/// The next byte from a keyboard device, and whether it came from the USB
+/// keyboard: the byte-stream console first, then the USB keyboard's queue,
+/// except inside a USB key, whose rest is taken from the USB keyboard
+/// before the console is looked at again. A report's bytes wait whole in
+/// `xhci`'s `pending`, so a USB key is read whole and no serial byte lands
+/// inside it (the hazard the review of #229 found); the USB Escape key sends
+/// nothing, so a USB key is never left open waiting for more.
+fn keyboard_device_byte() -> Option<(u8, bool)> {
+    // SAFETY: as in poll_keyboard_byte.
+    let now = crate::exceptions::ticks();
+    let usb_first = unsafe { (*KBD_QUEUE.get()).inside_usb_key(now) };
+    // SAFETY: as above.
+    let serial_only = unsafe { (*KBD_QUEUE.get()).inside_serial_key(now) };
+    if serial_only {
+        // A serial key still arriving (a host terminal's burst): its rest
+        // comes from the serial line, and a USB byte read now would land
+        // inside it, so the USB keyboard waits, at most the bare-ESC
+        // interval (the fifth high review of #238).
+        return console::read_byte().map(|byte| (byte, false));
+    }
+    if usb_first {
+        if let Some(byte) = crate::xhci::poll_key() {
+            return Some((byte, true));
+        }
+    }
+    if let Some(byte) = console::read_byte() {
+        return Some((byte, false));
+    }
+    if usb_first {
+        // Polled just above, and it had nothing.
         return None;
     }
-    Some(byte)
+    crate::xhci::poll_key().map(|byte| (byte, true))
 }
 
-/// The next byte from a keyboard device: the byte-stream console first,
-/// then the USB keyboard's queue.
-fn keyboard_device_byte() -> Option<u8> {
-    console::read_byte().or_else(crate::xhci::poll_key)
+/// What [`take_one`] did.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Took {
+    /// The devices had nothing.
+    Nothing,
+    /// A byte was read and given to the queue (which may have dropped it, as
+    /// a cut key's rest or for want of room).
+    Byte,
+    /// An interrupt the kernel acted on (a kill or a detach); the queue was
+    /// flushed.
+    Interrupted,
+    /// The boot shell's interrupt, for its waits; the queue was flushed.
+    BootInterrupt,
 }
 
-/// Reads ahead for the keyboard owner, for every path that looks at the
-/// keyboard without reading from it: the tick, for an owner that is not
-/// blocked in a read, and the waits for a child's exit and for a message
-/// ([`keyboard_interrupts_wait`]). Every byte waiting on the devices is
-/// read, so a Ctrl+C behind type-ahead is still found at once, and each
-/// other byte is kept in [`KBD_QUEUE`] for the owner's next read. Until
-/// 2026-10-07 those paths read one byte and threw it away, which lost keys
-/// typed while a program was busy (an editor redrawing is mostly blocked
-/// in `con_write`'s message call), and since the navigation keys (#229)
-/// could cut a key's escape sequence in two (`docs/roadmap/roadmap-ctrl-c.md`,
-/// step 0). A Ctrl+C that [`tasks::interrupt_key_check`] acts on also
-/// FLUSHES the queue: what was typed before it is what the user just
-/// interrupted, and handing a typed `rm foo` and Enter to the shell after
-/// the kill would run it (Unix flushes pending input on an interrupt the
-/// same way). With the queue full it still reads and checks every byte, so
-/// Ctrl+C can never be stuck behind type-ahead; an ordinary byte that does
-/// not fit is dropped. At most [`READ_AHEAD_MAX`] bytes a call: it runs
-/// with interrupts masked, where a device that never said "empty" would
-/// hold the core.
-///
-/// Returns `true` when it read a Ctrl+C or Ctrl+\ for the boot shell
-/// ([`tasks::KeyVerdict::BootInterrupt`]): the interrupt for the boot
-/// shell's waits ([`keyboard_interrupts_wait`]), settled as it is read. What
-/// was queued before it is flushed, as any interrupt flushes; the byte itself
-/// is not queued (the line editor ignores both) and reading stops there, so a
-/// full queue cannot drop it, and keys typed after it stay on the devices. Only the waits read ahead for the boot shell
-/// (the tick exempts it). A raw owner's Ctrl+C is queued as a byte and
-/// stays one, so it never interrupts the shell that gets the keyboard next.
+/// The one step every keyboard read is made of: a byte from the devices,
+/// judged ([`tasks::interrupt_key_check`]) and given to the queue. An
+/// interrupt the kernel acts on FLUSHES the queue (`keyseq::KeyQueue::flush`):
+/// what was typed before it is what the user just interrupted, and handing
+/// a typed `rm foo` and Enter to the shell after the kill would run it (Unix
+/// flushes pending input on an interrupt the same way). The boot shell's
+/// Ctrl+C or Ctrl+\ is an interrupt only when `boot_waits` (the reader is
+/// one of its waits); otherwise it is queued as a byte. The caller has
+/// checked the reader owns the keyboard.
+fn take_one(boot_waits: bool) -> Took {
+    let Some((byte, from_usb)) = keyboard_device_byte() else {
+        return Took::Nothing;
+    };
+    match tasks::interrupt_key_check(byte) {
+        tasks::KeyVerdict::Byte => {}
+        tasks::KeyVerdict::Consumed => {
+            // SAFETY: as in poll_keyboard_byte.
+            unsafe { (*KBD_QUEUE.get()).flush(Some(byte)) };
+            return Took::Interrupted;
+        }
+        tasks::KeyVerdict::BootInterrupt if boot_waits => {
+            // SAFETY: as in poll_keyboard_byte.
+            unsafe { (*KBD_QUEUE.get()).flush(Some(byte)) };
+            return Took::BootInterrupt;
+        }
+        tasks::KeyVerdict::BootInterrupt => {}
+    }
+    // SAFETY: as in poll_keyboard_byte.
+    unsafe { (*KBD_QUEUE.get()).push(byte, from_usb, crate::exceptions::ticks()) };
+    Took::Byte
+}
+
+/// Reads ahead for the keyboard owner, for the paths that look at the
+/// keyboard without a reader waiting on it: the tick, for an owner that is
+/// not blocked in a read, and the waits for a child's exit and for a message
+/// ([`keyboard_interrupts_wait`]). Every byte waiting on the devices is read
+/// (up to [`READ_AHEAD_MAX`]), so a Ctrl+C behind type-ahead is still found
+/// at once, and each other byte is kept in [`KBD_QUEUE`] for the owner's next
+/// read; until 2026-10-07 these paths read one byte and threw it away. It
+/// runs with interrupts masked, where a device that never said "empty" would
+/// hold the core, hence the bound. Returns `true` when it read the boot
+/// shell's interrupt ([`Took::BootInterrupt`]), and stops there, so the keys
+/// typed after it stay on the devices.
 pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
-    if reader != tasks::input_owner() {
+    if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
         return false;
     }
     for _ in 0..READ_AHEAD_MAX {
-        let Some(byte) = keyboard_device_byte() else {
-            return false;
-        };
-        match tasks::interrupt_key_check(byte) {
-            tasks::KeyVerdict::Byte => {}
-            tasks::KeyVerdict::Consumed => {
-                // SAFETY: as in poll_keyboard_byte.
-                unsafe { (*KBD_QUEUE.get()).clear() };
-                return false;
-            }
-            tasks::KeyVerdict::BootInterrupt => {
-                // SAFETY: as in poll_keyboard_byte.
-                unsafe { (*KBD_QUEUE.get()).flush_at_control(byte) };
-                return true;
-            }
+        match take_one(true) {
+            Took::Byte => {}
+            Took::Nothing | Took::Interrupted => return false,
+            Took::BootInterrupt => return true,
         }
-        // SAFETY: as in poll_keyboard_byte.
-        unsafe { (*KBD_QUEUE.get()).push(byte) };
     }
     false
 }
 
-/// The most bytes [`read_keyboard_ahead`] reads in one call; the devices
-/// give far fewer (one USB report, up to 24 bytes, or one serial byte).
-const READ_AHEAD_MAX: usize = KBD_QUEUE_LEN;
+/// The most bytes one read-ahead or flush takes from the devices; they hold
+/// far fewer (one USB report, up to 24 bytes, or one serial byte).
+const READ_AHEAD_MAX: usize = keyseq::QUEUE_LEN;
+
+/// How many empty reads in a row end a flush ([`keyboard_flush_input`]).
+const FLUSH_EMPTY_MAX: usize = 8;
 
 /// For a task blocked waiting on a child's exit or on a message: whether a
 /// key typed now interrupts that wait. It reads ahead for the waiter, so
-/// the wait throws no typed byte away; the rule (only the boot shell's
-/// Ctrl+C or Ctrl+\ interrupts, decided as it is read) is
-/// [`read_keyboard_ahead`]'s, stated there once.
+/// the wait throws no typed byte away; only the boot shell's Ctrl+C or
+/// Ctrl+\ interrupts, decided as it is read ([`take_one`]).
 pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
     read_keyboard_ahead(waiter)
 }
 
-/// Keyboard bytes read ahead by the tick, oldest first, for whoever owns
-/// the keyboard when they are read. Sized for a burst of typing while a
-/// program is busy: 64 bytes is 16 navigation keys. It keeps keys whole: a
-/// key's sequence that does not fit is dropped entirely, its front taken
-/// back out, rather than kept cut (step 3 of the Ctrl-C plan, from the
-/// review of #232).
-struct KbdQueue {
-    buf: [u8; KBD_QUEUE_LEN],
-    head: usize,
-    len: usize,
-    /// The bytes pushed, parsed as keys.
-    keys: keyseq::KeySeq,
-    /// How many bytes at the back belong to the key still being pushed.
-    partial: usize,
-    /// The rest of the key being pushed is dropped: its front did not fit.
-    dropping: bool,
+/// The keyboard passed to another task (a death, or `fg`): if the task that
+/// held it had read part of a key, the rest is not handed on, so the next
+/// owner never reads `[A` as text (decision E3 of the Ctrl-C plan: complete
+/// keys typed ahead stay). A detach needs no call: it is an interrupt, and
+/// its flush already emptied the queue.
+pub(crate) fn keyboard_owner_changed() {
+    // SAFETY: as in poll_keyboard_byte.
+    unsafe { (*KBD_QUEUE.get()).trim_cut_key(crate::exceptions::ticks()) };
 }
 
-const KBD_QUEUE_LEN: usize = 64;
-
-impl KbdQueue {
-    const fn new() -> Self {
-        KbdQueue {
-            buf: [0; KBD_QUEUE_LEN],
-            head: 0,
-            len: 0,
-            keys: keyseq::KeySeq::new(),
-            partial: 0,
-            dropping: false,
-        }
+/// `KBD_MODE`'s flush (`KBD_FLUSH`, what `tcsetattr`'s `TCSAFLUSH` asks
+/// for): what waits on the devices is read, through the parser, and then the
+/// queue is emptied, for `reader`, the keyboard owner (anyone else gets
+/// nothing, as with every read). It reads past a `None`, every read its bound
+/// allows: the USB keyboard answers `None` for an event that is not a key (a
+/// release, a port change) with presses still behind it (the second high
+/// review of #238). The bound, [`READ_AHEAD_MAX`] reads with interrupts
+/// masked, means a burst of more than that many bytes can outlast the
+/// flush. An interrupt among the bytes read still acts, with the flush every
+/// interrupt gets: a Ctrl+\ typed before the flush is not lost with the
+/// type-ahead.
+pub(crate) fn keyboard_flush_input(reader: usize) {
+    if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
+        return;
     }
-
-    /// Appends `byte`. When it does not fit, an ordinary byte is dropped,
-    /// and a byte of a key's sequence drops the whole key: the bytes of it
-    /// already queued are taken back out, and the rest is dropped as it
-    /// comes.
-    fn push(&mut self, byte: u8) {
-        let fed = self.keys.feed(byte);
-        if self.dropping {
-            match fed {
-                keyseq::Fed::Pending => return,
-                keyseq::Fed::Sequence => {
-                    self.dropping = false;
-                    return;
+    // Stops after FLUSH_EMPTY_MAX reads in a row that found nothing: enough
+    // to pass the non-key events the USB keyboard answers `None` for, without
+    // making all READ_AHEAD_MAX reads, masked, when nothing was typed.
+    let mut empty = 0;
+    for _ in 0..READ_AHEAD_MAX {
+        match take_one(true) {
+            Took::Nothing => {
+                empty += 1;
+                if empty == FLUSH_EMPTY_MAX {
+                    break;
                 }
-                // A control byte ends a cut sequence and is a key of its own
-                // (keyseq passes it through the same way): kept, if it fits.
-                keyseq::Fed::Byte(_) => self.dropping = false,
             }
-        } else if self.len == KBD_QUEUE_LEN {
-            // Taken back only as far as it is still queued: if a reader has
-            // already read the front of this key, it holds a cut key, which
-            // a full queue cannot prevent (it has no room for the rest).
-            self.len -= self.partial.min(self.len);
-            self.partial = 0;
-            match fed {
-                keyseq::Fed::Pending => {
-                    self.dropping = true;
-                    return;
-                }
-                keyseq::Fed::Sequence => return,
-                // A control byte ending the key that did not fit, or an
-                // ordinary byte: kept if taking the key back made room.
-                keyseq::Fed::Byte(_) => {}
-            }
+            Took::Byte => empty = 0,
+            Took::Interrupted | Took::BootInterrupt => return,
         }
-        if self.len == KBD_QUEUE_LEN {
-            return;
-        }
-        self.buf[(self.head + self.len) % KBD_QUEUE_LEN] = byte;
-        self.len += 1;
-        self.partial = if fed == keyseq::Fed::Pending { self.partial + 1 } else { 0 };
     }
-
-    /// Empties the queue for the boot shell's interrupt, `byte`, which is not
-    /// queued but is fed to the parser first: a control byte ends any key
-    /// in progress (as it did when the byte was queued), so nothing typed
-    /// after it is taken for that key's rest (the fourth high review of
-    /// #235: an Esc, then Ctrl+\, ate the next letter).
-    fn flush_at_control(&mut self, byte: u8) {
-        let _ = self.keys.feed(byte);
-        self.head = 0;
-        self.len = 0;
-        self.partial = 0;
-        self.dropping = false;
-    }
-
-    /// Empties the queue (a Ctrl+C's flush). If that cut a key in two, the
-    /// rest of it is dropped as it arrives, not queued as text.
-    fn clear(&mut self) {
-        let mid_key = self.partial > 0 || self.dropping;
-        self.head = 0;
-        self.len = 0;
-        self.partial = 0;
-        self.dropping = mid_key;
-    }
-
-    fn pop(&mut self) -> Option<u8> {
-        if self.len == 0 {
-            return None;
-        }
-        let byte = self.buf[self.head];
-        self.head = (self.head + 1) % KBD_QUEUE_LEN;
-        self.len -= 1;
-        Some(byte)
-    }
+    // SAFETY: as in poll_keyboard_byte.
+    unsafe { (*KBD_QUEUE.get()).flush(None) };
 }
 
-static KBD_QUEUE: crate::synccell::SyncCell<KbdQueue> = crate::synccell::SyncCell::new(KbdQueue::new());
+/// How long a USB key whose rest has not come is held open before the queue
+/// gives up on it: a second, far past any real read of `xhci`'s `pending`,
+/// where a USB key's rest always waits whole, so only a keyboard gone
+/// mid-report (unplugged, reset) ever reaches it (the fourth high review of
+/// #238: with no bound such a key held the queue open for good).
+const USB_ALONE_TICKS: u64 = 50;
+
+/// How long a bare `ESC` waits alone before the queue counts it as a
+/// complete key (decision E2 of the Ctrl-C plan): more than 2 ticks, so at
+/// least 40 ms and under 60 (ticks are whole; `keyseq::KeyQueue`). A
+/// sequence's bytes arrive together (a USB report, a host terminal's burst),
+/// a person's next key much later; one tick is too short, since a
+/// terminal's `ESC [` can be read either side of a tick.
+const ESC_ALONE_TICKS: u64 = 2;
+
+/// Keyboard bytes read ahead, oldest first, for whoever owns the keyboard
+/// when they are read; every byte a reader gets passes through it. The queue
+/// itself is `keyseq::KeyQueue`, host-tested there: one parser that knows
+/// where each key starts, whole keys kept, a cut key trimmed on a change of
+/// owner, one flush, and a bare `ESC` complete after [`ESC_ALONE_TICKS`].
+static KBD_QUEUE: crate::synccell::SyncCell<keyseq::KeyQueue> =
+    crate::synccell::SyncCell::new(keyseq::KeyQueue::new(ESC_ALONE_TICKS, USB_ALONE_TICKS));
+
 
 /// Size cap for a userland `(pointer, length)` argument pair.
 const MAX_USER_LEN: u64 = 512;
@@ -1133,13 +1148,24 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             }
         }
         syscall_abi::KBD_MODE => {
-            // arg0 = mode; the caller's own mode only. See the ABI doc.
+            // arg0 = mode, with KBD_FLUSH optionally OR'd in; the caller's
+            // own mode only. See the ABI doc.
             let me = tasks::current_task();
-            match arg0 {
-                syscall_abi::KBD_COOKED => tasks::set_kbd_raw(me, false),
-                syscall_abi::KBD_RAW => tasks::set_kbd_raw(me, true),
-                syscall_abi::KBD_QUERY => {}
+            let raw = match arg0 & !syscall_abi::KBD_FLUSH {
+                syscall_abi::KBD_COOKED => Some(false),
+                syscall_abi::KBD_RAW => Some(true),
+                syscall_abi::KBD_QUERY => None,
                 _ => return syscall_abi::KBD_MODE_BAD,
+            };
+            // The flush first, under the mode the keys were typed in, then
+            // the change, as POSIX has TCSAFLUSH: a Ctrl+C typed as a key
+            // in raw mode and still on the line must not kill the program
+            // that is restoring cooked mode (the review of #238).
+            if arg0 & syscall_abi::KBD_FLUSH != 0 {
+                keyboard_flush_input(me);
+            }
+            if let Some(raw) = raw {
+                tasks::set_kbd_raw(me, raw);
             }
             if tasks::kbd_raw(me) {
                 syscall_abi::KBD_RAW

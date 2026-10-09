@@ -11,8 +11,9 @@ the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
 
 **Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 2
-built (#236), step 3 half built (#233: whole keys in the queue; the tail on
-a change of owner not yet); step 4 built (#237). The four decisions (D1 to D4)
+built (#236), step 3 built (#233, and its second half in #238, designed
+below with decisions E1 to E4 settled by Hans the same day); step 4 built
+(#237). Every step is built; the notice to DevTools is what remains. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
 met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
 use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so
@@ -149,6 +150,176 @@ too. Not a kernel job: the kernel does not know what the program wrote.
   task that owns the keyboard, as today's kill does.
 - **Escape on the USB keyboard.** It sends nothing, and mapping it collides
   with every sequence's first byte; recorded on the roadmap separately.
+
+## Step 3's second half: the design (2026-10-08, decisions settled)
+
+What is left of step 3, and what the reviews of #235 and #236 added to it,
+is one question: what the kernel's keyboard queue (`KbdQueue`,
+`kernel/src/syscall.rs`) should do with a key that is cut, and when. Today
+there are five ways it goes wrong, all older than #235:
+
+1. **A key read in part, then a change of owner.** The queue hands a key out
+   a byte at a time. A program killed after reading `ESC` of an arrow leaves
+   `[A` for the next owner, the shell, which takes it as text.
+2. **A kill flush that disagrees with `keyseq`.** On a kill or a detach the
+   queue is emptied by `clear()`, which neither feeds the interrupt byte to
+   the parser nor lets it end a key, and sets `dropping` if a key was in
+   progress. `keyseq` says the opposite (a control byte ends a sequence and
+   is passed through, its module doc), so a bare `ESC` read ahead and then
+   Ctrl+C or Ctrl+\ eats the next letter typed (#235's fifth review, a).
+3. **The parser does not see every byte.** It is fed only when a byte is
+   queued. The direct read (`poll_keyboard_byte` with the queue empty) takes
+   a byte from the device past it, and `pop` never resets `partial`, so the
+   parser and `partial` can disagree with what readers have taken (b, c).
+4. **A serial byte inside a USB key.** Devices are read a byte at a time,
+   the serial line first, so a serial byte can land between `ESC` and `[A`
+   of a USB key (the review of #229).
+5. **`TCSAFLUSH` cannot flush.** A program cannot ask the kernel to discard
+   keys typed ahead, so Edit's restore keeps a queued Ctrl+C for the shell
+   (#236's second review).
+
+**The design.** One parser, the queue's, sees every byte once, in order, and
+the queue knows where each key starts.
+
+- **Every byte goes through the queue.** `poll_keyboard_byte` reads the
+  devices ahead into the queue and then pops, so the direct read and the
+  read-ahead are one path. The parser's state is then a property of the
+  byte stream, not of which path read it (3).
+- **Each queued byte records whether it starts a key** (the parser was at
+  ground before it). A pop that leaves the head mid-key means the reader
+  holds part of a key.
+- **USB keys are read whole.** Once a byte from the USB keyboard starts a
+  sequence, the read takes the rest from `xhci`'s `pending` (where a report's
+  bytes already sit together) before it looks at the serial line again (4).
+- **One flush, at every interrupt and on request.** It feeds the interrupt
+  byte to the parser (a control byte ends any key, as `keyseq` has it), then
+  empties the queue, and sets no `dropping`: nothing typed after an
+  interrupt is eaten (2). `clear()` and `flush_at_control` become this one
+  function.
+- **A change of owner trims a cut key.** When the keyboard passes to another
+  task (a death, a detach, an `fg`) and the head is mid-key, the queue drops
+  up to the next key start; if that key's rest has not arrived yet, its rest
+  is dropped as it comes (1). Complete keys typed ahead stay (D3).
+- **A bare `ESC` ends after a quiet moment.** A sequence's bytes arrive
+  together (a USB report, or a host terminal's burst at 115200 baud), and a
+  person's next key comes much later. So an `ESC` with nothing after it for
+  E2's interval counts as a complete key to the queue: the trim in the point
+  above then never drops a letter typed after a bare Escape. Userland's
+  `keyseq` is unchanged (a bare `ESC` still swallows the next printable byte
+  when both reach the same reader); this is only where the queue draws its
+  key boundaries.
+- **`TCSAFLUSH` asks for the flush.** `tcsetattr` with `TCSAFLUSH` passes it
+  to the kernel, which discards what is queued and what waits on the
+  devices (5); `TCSANOW` and `TCSADRAIN` keep it, as now.
+
+**Decisions (settled by Hans, 2026-10-08, each as recommended):**
+
+- **E1. The kill flush follows `keyseq`.** *Settled: yes*, no
+  `dropping` after an interrupt. This reverses #233's choice, which dropped
+  a cut key's rest after a flush so that an arrow's tail would not arrive as
+  text. With whole USB keys (point 4) a Ctrl+C can no longer land inside a
+  key, so that case is gone, and only the cost (a letter eaten after Esc)
+  remained. The alternative keeps #233's choice and its cost.
+- **E2. The bare-`ESC` interval.** *Settled: 2 ticks (40 ms)*, about what
+  terminal programs use (vim's `ttimeoutlen` is often 50 to 100 ms). One tick
+  is too short: a terminal's `ESC [` can be read across a tick boundary. The
+  alternatives: #233's review's rule (a key's rest is dropped only within
+  the same tick as the change of owner), which is the same idea with a
+  shorter, boundary-sensitive window; or no interval, which drops the letter.
+- **E3. What a change of owner keeps.** *Settled: complete keys typed
+  ahead stay, the cut key goes* (D3 as settled, now with the trim). The
+  alternative, flush everything on every change of owner, is simpler and
+  loses what was typed for the shell while a program ran.
+- **E4. How `TCSAFLUSH` reaches the kernel.** *Settled: a flag on
+  `KBD_MODE`*, `KBD_FLUSH` (0x100) OR'd into the mode, so the change and the
+  flush are one call, as `TCSAFLUSH` is one request. The alternative is a
+  syscall of its own (71), cleaner to read but two calls with a window
+  between them.
+
+**Checks, each failing with its part removed:**
+
+- (1) `readkey` gains a mode that reads one byte and exits; an arrow typed
+  on the USB keyboard at it, then the shell's next line holds nothing of
+  `[A`.
+- (2) `ESC` on the serial line while a cooked program is busy, then Ctrl+C;
+  the letter typed next reaches the shell.
+- (3) the same with the `ESC` read directly (the program blocked in a read)
+  rather than ahead.
+- (E2) a program that reads a bare `ESC` and exits, then a letter typed half
+  a second later: the shell gets it.
+- (5) `ctermios`: keys typed during a busy raw spin, then a `TCSAFLUSH`
+  restore: none reach the shell; with `TCSADRAIN`, all do.
+- (4) has no deterministic check (it needs a serial byte to arrive between
+  two reads of one USB report); it is argued from the code.
+
+*Built 2026-10-08 (#238), as designed. The queue moved out of the kernel into the
+`keyseq` crate as `KeyQueue`, with the time passed in, so `make test` checks
+it on the host; the kernel keeps one (`KBD_QUEUE`) and the read paths
+around it. The reason is the first finding of the build: at typing pace E2's
+interval resets the parser before the next key, so reverting E1 alone left
+every QEMU check green, and E1 could only be shown by pushing bytes at
+chosen ticks. Eleven host tests at first (more with each review since), each the target of a mutation (E1, E2, the
+trim, a cut key marked by `pop`, a key still arriving, the requested flush,
+the full queue, the USB affinity); `make test-kbd-cut` (`readkey one`,
+`ctermios flush` and `drain`) checks the same end to end, and its own
+mutation controls (the trim removed, E2 removed, E1 and E2 together, the
+flush ignored, the direct read restored, `pop` never marking, TCSADRAIN
+flushing) each fail it. Its high review found six more, fixed: the
+`KBD_FLUSH` path ended an interrupt with the wrong flush (now read ahead,
+then empty); the flush ran after the mode change, so a raw Ctrl+C still on
+the line could kill a program restoring cooked mode (now before, as POSIX
+has `TCSAFLUSH`); an `ESC` inside a key was not marked as a key start, so a
+trim could drop a complete key typed ahead; the bare-`ESC` interval compared
+whole ticks with `>=`, as little as 20 ms (now `>`, at least 40); a stale USB
+key could double every xHCI poll; and `BootInterrupt`'s doc said the line
+editor gets the byte (the first answer, a flush at the prompt as Unix has
+it, lost keys typed just before the Ctrl+C that the shell had not read yet,
+and `test-kbd-mode` caught it; now the boot shell's interrupt flushes only
+for its waits, and at the prompt is a byte the line editor ignores). Its second high
+review found that draining the devices at every read had moved keys typed
+after a line into the reader's hands: a Ctrl+C after a command's Enter was
+read as the shell's data and handed to the command as a byte. A read now
+takes one byte from the devices (the rest of a USB key on the next read),
+so what follows a line stays on the line for the next owner; every byte
+still goes through the queue. The same review found an `ESC` that starts a
+new key swallowed by a drop in progress (a whole arrow lost; host test),
+and `TCSAFLUSH` stopping at the first USB event that is not a key, with key
+presses behind it (now every read the bound allows). Declined: a serial
+byte inside an open USB key, since the USB Escape key sends nothing and
+every other USB key arrives whole. Neither the one-byte read nor the
+flush's full read has a deterministic rig check (the serial line takes no
+byte faster than 20 ms, and a release event behind a press cannot be
+placed), so they are argued from the code. Its third review found the
+interval expiring USB keys, whose rest is certain to come (a USB key no
+longer expires; host test), and a read that answered "nothing" when the byte
+it took was dropped (a read now takes bytes until one is there); it made the
+read, the read-ahead and the flush one step, `take_one`, where the flush had
+been a copy. It also showed the one-byte read cannot keep every Ctrl+C typed
+after a line for the program that line starts, since the tick and the waits
+read ahead too: a Ctrl+C typed ahead of a program, before it sets its mode,
+is judged under whoever owns the keyboard when it is read. That race is in
+the nature of type-ahead (Unix sends the signal to the foreground group of
+the moment), and is documented rather than chased. The boot shell's echo
+being interruptible, and flushing a letter, belongs to the roadmap's
+"stale reply after an interrupted call", which is older; `KBD_FLUSH` alone
+setting cooked, and its 64-read bound, are written into the ABI. A fourth
+review found a program marked for the kill still reading at the tick's
+wake-check, before the kill, so a key typed after Ctrl+C could go to it
+(now a marked task reads nothing, `tasks::kill_pending_for`); a full queue
+dropping a new key that the cut key's take-back had made room for (host
+test); a USB key whose rest never comes holding the queue open for good
+(now a bound of its own, a second; host test); and a flush making all 64
+reads when nothing was typed (now it stops after 8 empty ones). The
+kill-pending read has no deterministic rig check (a key must land between
+the interrupt and the tick's kill), so it is argued from the code. A fifth
+review added: the flush, too, reads nothing for a task marked for the kill;
+a USB byte waits while a serial key is arriving (host test), as a serial
+byte already waited inside a USB key; the read reads past a long dropped
+sequence (its bound the queue's length); the detach calls the owner-change
+hook, so every writer trims; the termios header says a `TCSAFLUSH` from
+cooked mode judges a typed-ahead Ctrl+C as cooked. Declined again: an older
+kernel (the C library ships with it) and the wait's alias. One declined: an interrupt inside a full-queue key,
+which a terminal's in-order burst cannot produce.*
 
 ## Steps, each with its check
 

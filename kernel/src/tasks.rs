@@ -597,6 +597,16 @@ static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 /// generation would need 2^55 spawns).
 const PENDING_KILL_BY_QUIT: u64 = 1 << 63;
 
+/// Whether task `slot` is marked for the Ctrl+C or Ctrl+\ kill that
+/// [`on_tick`] has not carried out yet: such a task reads no more keys, so
+/// nothing typed after the interrupt goes to the program it ends (the
+/// fourth high review of #238: the tick's wake-check ran before the kill
+/// and handed the doomed program the next key).
+pub(crate) fn kill_pending_for(slot: usize) -> bool {
+    let marked = PENDING_KILL.load(Ordering::Relaxed) & !PENDING_KILL_BY_QUIT;
+    marked != 0 && task_id_of(slot) == Some(marked)
+}
+
 /// Ctrl+C (ETX): ends or detaches a cooked keyboard owner, and is an ordinary
 /// byte to a raw one (`KBD_MODE`). With [`KEY_QUIT`], the one spelling of
 /// the interrupt bytes for the kernel's own decisions:
@@ -622,8 +632,9 @@ pub(crate) enum KeyVerdict {
     Consumed,
     /// Ctrl+C or Ctrl+\ with the boot shell owning the keyboard: no kill,
     /// but the interrupt for the boot shell's waits
-    /// (`syscall::keyboard_interrupts_wait`). Its line editor, reading
-    /// directly, gets the byte and ignores it.
+    /// (`syscall::keyboard_interrupts_wait`), which flushes the keys typed
+    /// ahead of it like every interrupt. When the boot shell is reading its
+    /// line instead, it is an ordinary byte its line editor ignores.
     BootInterrupt,
 }
 
@@ -660,6 +671,7 @@ pub(crate) fn set_input_owner(owner: usize, foreground_command: bool) {
     if previous == owner {
         return;
     }
+    crate::syscall::keyboard_owner_changed();
     // Walk down from `previous`, remembering each link. Reaching `owner`
     // makes this a pop: the links walked are the entries above it.
     let mut walked = [0usize; NUM_TASKS];
@@ -733,6 +745,7 @@ pub(crate) fn revert_input_owner_if(dying: usize) {
     // occupant_is and falls back to task 0 like any stale entry.
     let target = live_occupant(previous).map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
+    crate::syscall::keyboard_owner_changed();
 }
 
 /// Whether any live task is blocked in [`WaitReason::TaskExit`] on slot
@@ -847,6 +860,10 @@ pub(crate) fn interrupt_key_check(byte: u8) -> KeyVerdict {
     // (`set_input_owner` re-records the same link).
     let target = live_occupant(PREVIOUS_OWNERS[owner].load(Ordering::Relaxed)).map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
+    // Every change of owner trims a cut key, this one too, though the
+    // interrupt's flush that follows empties the queue anyway: the trim is
+    // the rule, not a side effect of the flush (fifth high review of #238).
+    crate::syscall::keyboard_owner_changed();
     KeyVerdict::Consumed
 }
 

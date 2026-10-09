@@ -89,6 +89,7 @@
 #define KBD_COOKED 0
 #define KBD_RAW 1
 #define KBD_QUERY 2
+#define KBD_FLUSH 0x100
 #define KBD_MODE_BAD (~0UL - 1UL)
 
 /* ninep verbs (ninep-abi; NP_BASE = 0x100). */

@@ -28,6 +28,10 @@
 //! `readkey spin 150 keep | readkey spin 0 msg` holds the keyboard owner (a
 //! pipeline's last stage) in a message wait for three seconds.
 //!
+//! `readkey one` reads one byte, prints `readkey: one <n>` and exits,
+//! leaving the rest of the key it came in (an arrow's `[A`) behind: the
+//! kernel must not hand that rest to the next owner.
+//!
 //! `readkey spin [ticks] raw` spins and drains in raw mode, so a Ctrl+C typed
 //! during the spin comes back as 3; `readkey spin [ticks] rawkeep` is `keep`
 //! in raw mode: a Ctrl+C typed during the spin is queued as a byte and left
@@ -48,7 +52,7 @@
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: readkey [poll|spin|raw|mode]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg|raw|rawkeep]: run three seconds without reading, then print every byte typed meanwhile; raw: Ctrl+C is a key, Ctrl+\\ ends it; mode: print this task's keyboard mode)\r\n");
+    ulib::usage_if_requested(b"usage: readkey [poll|spin|raw|mode|one]  (poll: spin on try_read_char instead of blocking, an observer for the keyboard-owner gate, kill it when done; spin [ticks] [keep|msg|raw|rawkeep]: run three seconds without reading, then print every byte typed meanwhile; raw: Ctrl+C is a key, Ctrl+\\ ends it; mode: print this task's keyboard mode; one: read one byte and exit)\r\n");
     let mut mode = [0u8; 8];
     let mut raw = false;
     let poll = match ulib::arg(1, &mut mode) {
@@ -56,6 +60,7 @@ pub extern "C" fn _start() -> ! {
         Some(n) if &mode[..n] == b"poll" => true,
         Some(n) if &mode[..n] == b"spin" => spin_then_drain(),
         Some(n) if &mode[..n] == b"mode" => print_mode(),
+        Some(n) if &mode[..n] == b"one" => read_one(),
         Some(n) if &mode[..n] == b"raw" => {
             if ulib::kbd_mode(syscall_abi::KBD_RAW) != syscall_abi::KBD_RAW {
                 ulib::con_write(b"readkey: the kernel refused raw mode\r\n");
@@ -65,7 +70,7 @@ pub extern "C" fn _start() -> ! {
             false
         }
         Some(_) => {
-            ulib::con_write(b"readkey: unknown mode (`poll`, `spin`, `raw` or `mode`)\r\n");
+            ulib::con_write(b"readkey: unknown mode (`poll`, `spin`, `raw`, `mode` or `one`)\r\n");
             ulib::exit(1);
         }
     };
@@ -127,6 +132,19 @@ fn print_mode() -> ! {
         _ => ulib::con_write(b"readkey: mode unknown in slot "),
     }
     write_dec(ulib::self_task());
+    ulib::con_write(b"\r\n");
+    ulib::exit(0);
+}
+
+/// `readkey one`: read one byte, print it, exit. Whatever followed it in the
+/// same key is left behind, for the observer of the queue's trim on a change
+/// of owner (step 3 of the Ctrl-C plan): an arrow read this way leaves `[A`,
+/// which must not reach the shell.
+fn read_one() -> ! {
+    ulib::con_write(b"readkey: one?\r\n");
+    let c = ulib::read_char();
+    ulib::con_write(b"readkey: one ");
+    write_dec(c as u64);
     ulib::con_write(b"\r\n");
     ulib::exit(0);
 }
