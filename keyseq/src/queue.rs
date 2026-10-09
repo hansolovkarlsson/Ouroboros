@@ -76,12 +76,21 @@ impl KeyQueue {
         self.inside && self.inside_usb
     }
 
+    /// Whether the next byte must come from the serial line: the parser is
+    /// inside a key that began there and has not expired, so a USB byte read
+    /// now would land inside it.
+    pub fn inside_serial_key(&mut self, now: u64) -> bool {
+        self.expire(now);
+        self.inside && !self.inside_usb
+    }
+
     /// A key from the serial line left open for more than `esc_alone` (a bare
     /// `ESC`, from a host terminal's Escape key) is complete: its rest is not
-    /// coming, and what arrives next starts a key of its own. Not a USB key:
-    /// a report's bytes wait whole in the driver, so its rest is certain to
-    /// come however late it is read, and expiring it would let that rest
-    /// through as text after a trim (the third high review of #238).
+    /// coming, and what arrives next starts a key of its own. A USB key is
+    /// not held to that interval: a report's bytes wait whole in the driver,
+    /// so its rest comes however late it is read, and expiring it then would
+    /// let that rest through as text after a trim (the third high review of
+    /// #238).
     ///
     /// A USB key has a bound of its own, `usb_alone`, far longer: only a
     /// keyboard gone mid-report leaves one open that long, and without a
@@ -352,6 +361,14 @@ mod tests {
     }
 
     #[test]
+    fn a_serial_key_holds_the_usb_keyboard_back() {
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
+        q.push(0x1b, false, 0);
+        assert!(q.inside_serial_key(0));
+        assert!(!q.inside_serial_key(ESC_ALONE + 1), "only for the interval");
+    }
+
+    #[test]
     fn a_usb_key_is_read_whole() {
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         q.push(0x1b, true, 0);
@@ -364,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn a_usb_key_never_expires() {
+    fn a_usb_key_outlasts_the_escape_interval() {
         // A program took ESC of a USB arrow and exited; the shell reads the
         // rest long after the interval. It is still the arrow's rest.
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);

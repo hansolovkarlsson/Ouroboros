@@ -258,7 +258,7 @@ it on the host; the kernel keeps one (`KBD_QUEUE`) and the read paths
 around it. The reason is the first finding of the build: at typing pace E2's
 interval resets the parser before the next key, so reverting E1 alone left
 every QEMU check green, and E1 could only be shown by pushing bytes at
-chosen ticks. Eleven host tests, each the target of a mutation (E1, E2, the
+chosen ticks. Eleven host tests at first (more with each review since), each the target of a mutation (E1, E2, the
 trim, a cut key marked by `pop`, a key still arriving, the requested flush,
 the full queue, the USB affinity); `make test-kbd-cut` (`readkey one`,
 `ctermios flush` and `drain`) checks the same end to end, and its own
@@ -311,7 +311,14 @@ test); a USB key whose rest never comes holding the queue open for good
 (now a bound of its own, a second; host test); and a flush making all 64
 reads when nothing was typed (now it stops after 8 empty ones). The
 kill-pending read has no deterministic rig check (a key must land between
-the interrupt and the tick's kill), so it is argued from the code. One declined: an interrupt inside a full-queue key,
+the interrupt and the tick's kill), so it is argued from the code. A fifth
+review added: the flush, too, reads nothing for a task marked for the kill;
+a USB byte waits while a serial key is arriving (host test), as a serial
+byte already waited inside a USB key; the read reads past a long dropped
+sequence (its bound the queue's length); the detach calls the owner-change
+hook, so every writer trims; the termios header says a `TCSAFLUSH` from
+cooked mode judges a typed-ahead Ctrl+C as cooked. Declined again: an older
+kernel (the C library ships with it) and the wait's alias. One declined: an interrupt inside a full-queue key,
 which a terminal's in-order burst cannot produce.*
 
 ## Steps, each with its check

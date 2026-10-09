@@ -860,6 +860,10 @@ pub(crate) fn interrupt_key_check(byte: u8) -> KeyVerdict {
     // (`set_input_owner` re-records the same link).
     let target = live_occupant(PREVIOUS_OWNERS[owner].load(Ordering::Relaxed)).map_or(0, TaskIndex::index);
     INPUT_OWNER.store(target, Ordering::Relaxed);
+    // Every change of owner trims a cut key, this one too, though the
+    // interrupt's flush that follows empties the queue anyway: the trim is
+    // the rule, not a side effect of the flush (fifth high review of #238).
+    crate::syscall::keyboard_owner_changed();
     KeyVerdict::Consumed
 }
 

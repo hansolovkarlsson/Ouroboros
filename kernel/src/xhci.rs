@@ -2152,7 +2152,8 @@ impl Xhci {
             // whole or not at all, so the queue never holds half of one;
             // the kernel's keyboard queue (`keyseq::KeyQueue`) relies on
             // that, reading a USB key's rest from here before the serial
-            // line and never expiring a USB key as a bare Escape.
+            // line, and holding a USB key open far longer than a bare
+            // Escape (a second: only a keyboard gone mid-report reaches it).
             if kb.pending_len + key.len <= kb.pending.len() {
                 kb.pending[kb.pending_len..kb.pending_len + key.len].copy_from_slice(&key.bytes[..key.len]);
                 kb.pending_len += key.len;

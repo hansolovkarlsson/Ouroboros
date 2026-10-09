@@ -36,8 +36,11 @@
  *
  * TCSANOW and TCSADRAIN are the same (output is never held back), and keep
  * the keys typed ahead. TCSAFLUSH discards them, the kernel's keyboard queue
- * and what waits on the devices (KBD_MODE's KBD_FLUSH); a Ctrl+\ among
- * them still ends the program.
+ * and what waits on the devices (KBD_MODE's KBD_FLUSH), before the change, so
+ * they are judged under the mode in force at the call, as POSIX has it: a
+ * Ctrl+\ among them ends the program, and so does a Ctrl+C if the program is
+ * still cooked (raw mode turned on with TCSAFLUSH while a Ctrl+C was typed
+ * ahead ends it, where TCSADRAIN would hand it the 3 as a key).
  *
  * Only the console is a terminal: fd 0, and fds 1 and 2 while stdout goes to
  * the console. Any other descriptor is ENOTTY (EBADF if it is not open), as
