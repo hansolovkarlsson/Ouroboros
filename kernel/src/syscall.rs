@@ -367,15 +367,13 @@ fn take_one(boot_waits: bool) -> Took {
 /// runs with interrupts masked, where a device that never said "empty" would
 /// hold the core, hence the bound. Returns `true` when it read the boot
 /// shell's interrupt ([`Took::BootInterrupt`]), and stops there, so the keys
-/// typed after it stay on the devices. `boot_waits` is [`take_one`]'s: false
-/// for a call's reply wait, which the boot shell's interrupt never ends (it
-/// is queued as a byte), so this then never returns `true`.
-pub(crate) fn read_keyboard_ahead(reader: usize, boot_waits: bool) -> bool {
+/// typed after it stay on the devices.
+pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
     if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
         return false;
     }
     for _ in 0..READ_AHEAD_MAX {
-        match take_one(boot_waits) {
+        match take_one(true) {
             Took::Byte => {}
             Took::Nothing | Took::Interrupted => return false,
             Took::BootInterrupt => return true,
@@ -391,12 +389,12 @@ const READ_AHEAD_MAX: usize = keyseq::QUEUE_LEN;
 /// How many empty reads in a row end a flush ([`keyboard_flush_input`]).
 const FLUSH_EMPTY_MAX: usize = 8;
 
-/// For a task blocked waiting on a child's exit or on a message other than a
-/// call's reply: whether a key typed now interrupts that wait. It reads ahead for the waiter, so
+/// For a task blocked waiting on a child's exit or on a message: whether a
+/// key typed now interrupts that wait. It reads ahead for the waiter, so
 /// the wait throws no typed byte away; only the boot shell's Ctrl+C or
 /// Ctrl+\ interrupts, decided as it is read ([`take_one`]).
 pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
-    read_keyboard_ahead(waiter, true)
+    read_keyboard_ahead(waiter)
 }
 
 /// The keyboard passed to another task (a death, or `fg`): if the task that
@@ -1502,6 +1500,12 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // Shadowed on purpose, as in MSG_CALL: nothing below can name
             // the unchecked value.
             let dest = dest_index.index();
+            // The answer to a call its caller abandoned (Ctrl+C) is dropped
+            // here, before the reply exemption could hand it to the caller's
+            // next call (tasks::ABANDONED). The sender is told it was sent.
+            if tasks::drop_abandoned_reply(tasks::current_task(), dest) {
+                return 0;
+            }
             // Capability check: may this task send to `dest`? A reply to a
             // pending call is exempt (see may_send); an unsolicited send
             // needs the send-mask bit.
@@ -1574,6 +1578,13 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // reply rides the reply exemption in may_send.)
             if !tasks::may_send(tasks::current_task(), dest) {
                 return syscall_abi::MSG_ERR_DENIED;
+            }
+            // This caller's previous call to `dest` was abandoned and `dest`
+            // has not answered it yet: wait for that answer, which is
+            // dropped, before sending, and the call then runs again from its
+            // `svc` (tasks::ABANDONED, WaitReason::Drain).
+            if tasks::has_abandoned_call(tasks::current_task(), dest) {
+                return unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Drain { server: dest }) };
             }
             // SAFETY: bounds sanity-checked above, same trust model as
             // MSG_SEND.

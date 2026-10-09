@@ -86,9 +86,13 @@ fn main() -> ! {
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
         let reply_len = handle(&mut mounts, &mut fids, sender, &req[..len], &mut reply);
-        // A caller blocked in its call always takes this reply (direct
-        // delivery); one that is not (it died meanwhile) is refused by
-        // the send-mask, and nothing better exists to do with the reply.
+        // A caller still blocked in its call takes this reply (direct
+        // delivery). One that left it takes nothing: a call the boot
+        // shell's Ctrl+C cut short is answered into the kernel's drop
+        // (tasks::ABANDONED), a dead caller's slot refuses it. Not
+        // covered: a dead caller's slot already holding a new task that
+        // is blocked calling this server would take it, since this
+        // replies by slot, not by identity as netd's parked replies do.
         syscall4(syscall_abi::MSG_SEND, sender, reply.as_ptr() as u64, reply_len as u64, 0);
     }
     loop {

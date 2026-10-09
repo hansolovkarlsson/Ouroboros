@@ -236,18 +236,21 @@ edit-bin` builds DevTools's Edit from `EDIT_DIR`, staged as `/bin/edit` and
 required by a release; `make test-edit` opens a file, repeats a command with
 `^Q Q`, moves with an arrow and saves with `^K D`.
 
-**Ctrl+C no longer cuts a call to a server short (#244).** The boot shell's
-Ctrl+C and Ctrl+\ still interrupt its `wait` and its `recv`, but not a call
-waiting for a server's reply: the server went on with the request, and its
-answer, sent after the shell had moved on, was taken as the answer to the
-shell's next call to that server, whose own reply was then refused. A `cd`
-into a remote directory, interrupted and followed by a `cd` to one that does
-not exist, left the shell in the missing one. The same window let a server
-still copying for the old request reach the buffer the shell had granted for
-the next. Keys typed during a call are still read and kept, the two
-interrupt keys among them as bytes the line editor ignores. A server that
-never answers is restarted by the supervisor, which ends the call.
-`make test-call-interrupt` holds a call open on a slow 9P peer.
+**A call cut short by Ctrl+C no longer answers the next one (#244).** The
+boot shell's Ctrl+C or Ctrl+\ interrupts its call to a server, but the
+server goes on with the request, and its answer, sent once the shell was
+waiting in its next call to that server, was taken as that call's answer,
+whose own reply was then refused: a `cd` into a remote directory,
+interrupted and followed by a `cd` to one that does not exist, left the
+shell in the missing one. The same window let a server still copying for the
+old request reach the buffer the shell had granted for the next. The kernel
+now records the abandoned call: the server's late answer is dropped, and the
+next call to that server waits for it before its request goes out, a wait
+Ctrl+C also ends. A first form made a call's wait ignore Ctrl+C altogether,
+and its review found what that cost: a `cpu` whose remote command never
+stops printing held the console for good, and a Ctrl+C typed while a program
+loaded reached the program as a key. `make test-call-interrupt` holds calls
+open on a slow 9P peer.
 
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or

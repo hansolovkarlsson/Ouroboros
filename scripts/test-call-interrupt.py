@@ -1,42 +1,38 @@
 #!/usr/bin/env python3
-"""A call's reply wait is not interrupted, so a late reply answers nobody.
+"""An interrupted call's late answer is dropped, not taken by the next call.
 
     python3 scripts/test-call-interrupt.py    (or `make test-call-interrupt`, which builds the image)
 
-The boot shell's Ctrl+C and Ctrl+\\ interrupt its waits for a child and for a
-message, but since 2026-10-09 not a call's reply wait (`MSG_CALL`): the server
-is still working on the request, and its reply, sent once the shell had moved
-on, was delivered as the answer to the shell's NEXT call to that server. One
-boot with SLIRP, against a host 9P peer (scripts/np9p_server.py) that holds
-every reply for 3.5 s, mounted at /mnt/s:
+The boot shell's Ctrl+C and Ctrl+\\ interrupt its call to a server
+(`MSG_CALL`), but the server still has the request and answers it later.
+Until 2026-10-09 that answer arrived while the shell waited in its NEXT call
+to the same server and was taken as that call's answer. Now the kernel
+records the abandoned call (`tasks::ABANDONED`); the next call to that
+server waits, unsent, for the old answer (`WaitReason::Drain`), which is
+dropped, and then runs. One boot with SLIRP, against a host 9P peer
+(scripts/np9p_server.py) that holds every reply for 4.5 s, mounted at /mnt/s:
 
 1. `cd /mnt/s/SUB`, a builtin whose directory check is a call to netd, held
-   open by the peer; Ctrl+C and Ctrl+\\ are typed on the serial line, and
-   `echo ` and twelve `k`s on QEMU's USB keyboard (monitor `sendkey`), while
-   it waits.
-   The call must finish anyway: no interrupt message, and the prompt comes
-   back only once the peer has answered.
-2. The keys typed meanwhile were read ahead and kept, the two interrupt
-   bytes among them ignored by the line editor: `q` and Enter after the
-   prompt run `echo kkkkkkkkkkkkq`.
-3. `cd /mnt/s/NOPE` must fail (no such directory on the peer).
-4. `pwd` must print `/mnt/s/SUB`.
+   open by the peer; Ctrl+C cuts it short, and the prompt is back at once.
+2. `cd /mnt/s/NOPE`, sent before SUB's answer comes, must fail on its own
+   answer (no such directory on the peer), not succeed on SUB's "exists".
+3. `cd /mnt/s/SUB` and Ctrl+C again, then `cd /mnt/s/NOPE`, which waits to
+   drain SUB's answer, and Ctrl+\\ cuts that wait short too: the prompt is
+   back at once.
+4. `pwd` prints `/`: no late answer moved the shell.
 
-With the interrupt back on a call's reply wait (the mutation control: the
-`from.is_some()` arm in `tasks.rs`'s `WaitReason::Message` poll removed), the
-first `cd` is cut short, SUB's late "exists" answers the NOPE call, and `pwd`
-prints `/mnt/s/NOPE`. With the call's wait not reading the keyboard at all
-(the second control: that arm reduced to `None`), check 2 fails: QEMU's USB
-keyboard queues 16 events, and 17 keys pressed while nothing reads it
-overflow it (with six keys the control passed).
-(Typed on the serial line they would survive, since QEMU holds a serial byte
-until the guest reads it, and the control passed that way.) QEMU's own trace must hold no fault line. About a
-minute. Run it whenever the message wait's poll, the boot shell's interrupt
-or `MSG_CALL` changes.
+Controls, each failing it: the abandoned call not recorded (the bug: check 2's
+`cd` takes SUB's "exists"); the drain wait not interruptible (check 3's
+prompt comes back only after SUB's answer); and the old answer not dropped
+(refused instead, so check 2's `cd` waits for good). A first version of
+this rig interrupted the drain before the plain `cd`, whose answer was then
+the interrupted NOPE's, identical to its own, and the first control passed. The prompt checks read a snapshot one second after the key, far under
+the peer's hold, so a wait the key did not end cannot pass them. QEMU's own
+trace must hold no fault line. About a minute. Run it whenever the message
+waits, the boot shell's interrupt, MSG_CALL or MSG_SEND changes.
 """
 import importlib.util
 import os
-import re
 import subprocess
 import sys
 import time
@@ -49,15 +45,13 @@ _spec.loader.exec_module(drive_qemu)
 
 IMAGE = os.path.join(ROOT, "build", "esp.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-call-interrupt.txt")
-# In build/, not a temp directory: macOS caps a socket path at 104 bytes.
-MONITOR = os.path.join(ROOT, "build", "test-call-interrupt.monitor")
-# test-kbd-queue's fast pace: 17 keys inside the peer's hold, with room.
-KEY_DELAY = 0.12
-WORD = "k" * 12
 PEER_PORT = "5642"
-PEER_DELAY = "3.5"   # under netd's 5 s REMOTE_DEADLINE_TICKS, so the call is answered
+PEER_DELAY = 4.5     # under netd's 5 s REMOTE_DEADLINE_TICKS, so every request is answered
 ETX, FS = b"\x03", b"\x1c"
 PROMPT = "# "
+# How soon after an interrupt key the prompt must be back: the drain check's
+# snapshot falls about 3.8 s into SUB's 4.5 s hold.
+PROMPT_BACK = 0.8
 
 
 def main() -> int:
@@ -68,21 +62,36 @@ def main() -> int:
             return 2
     peer_log = open(os.path.join(ROOT, "build", f"np9p-{PEER_PORT}.log"), "w")
     peer = subprocess.Popen(
-        [sys.executable, os.path.join(HERE, "np9p_server.py"), PEER_PORT, "--delay", PEER_DELAY],
+        [sys.executable, os.path.join(HERE, "np9p_server.py"), PEER_PORT, "--delay", str(PEER_DELAY)],
         cwd=ROOT, stdout=peer_log, stderr=subprocess.STDOUT,
     )
     time.sleep(3)
-    if os.path.exists(MONITOR):
-        os.remove(MONITOR)
     guest = drive_qemu.Guest(
         IMAGE, label="test-call-interrupt: ",
-        extra_args=[
-            "-netdev", "user,id=net0", "-device", "virtio-net-device,netdev=net0",
-            "-device", "qemu-xhci,id=xhci0",
-            "-device", "usb-kbd,bus=xhci0.0",
-            "-monitor", f"unix:{MONITOR},server,nowait",
-        ],
+        extra_args=["-netdev", "user,id=net0", "-device", "virtio-net-device,netdev=net0"],
     )
+    out = {}
+
+    def interrupted(name, command, key):
+        """Type `command`, then `key` while its call waits; whether the prompt
+        is back PROMPT_BACK seconds later, read as a snapshot."""
+        start = len(guest.transcript())
+        guest.type_line(command)
+        time.sleep(0.6)              # netd has the request, the peer holds it
+        guest.type_raw(key)
+        time.sleep(PROMPT_BACK)
+        snap = guest.transcript()[start:]
+        out[name] = snap
+        back = PROMPT in snap.split(command, 1)[-1]
+        return guest.wait_for(PROMPT, timeout=30), back
+
+    def plain(name, command):
+        start = len(guest.transcript())
+        guest.type_line(command)
+        ok = guest.wait_for(r"\n[^\n]*" + PROMPT, timeout=30)
+        out[name] = guest.transcript()[start:]
+        return ok
+
     results = []
     try:
         ok = guest.wait_for("login:", timeout=120)
@@ -90,64 +99,41 @@ def main() -> int:
         if ok:
             guest.type_line(f"mount -r 10.0.2.2:{PEER_PORT} /mnt/s")
             ok = guest.wait_for(PROMPT, timeout=30)
-        cd_start = len(guest.transcript())
         if ok:
-            guest.type_line("cd /mnt/s/SUB")
-            sent = time.time()
-            time.sleep(0.6)          # netd has the request, the peer holds it
-            guest.type_raw(ETX)
-            time.sleep(0.3)
-            guest.type_raw(FS)
-            drive_qemu.sendkeys(MONITOR, ["e", "c", "h", "o", "spc", *WORD], KEY_DELAY, hold=10)
-            ok = guest.wait_for(PROMPT, timeout=30)
-            waited = time.time() - sent
-        cd_out = guest.transcript()[cd_start:]
-        kept_start = len(guest.transcript())
+            ok, back = interrupted("sub", "cd /mnt/s/SUB", ETX)
+            results.append(("Ctrl+C cuts the held call short", back))
         if ok:
-            guest.type_raw(b"q\n")
-            ok = guest.wait_for(r"\n[^\n]*" + PROMPT, timeout=30)
-        kept_out = guest.transcript()[kept_start:]
-        nope_start = len(guest.transcript())
+            ok = plain("nope", "cd /mnt/s/NOPE")
+            results.append(("the next call waits out the old answer and fails on its own",
+                            "no such file" in out["nope"]))
         if ok:
-            guest.type_line("cd /mnt/s/NOPE")
-            ok = guest.wait_for(PROMPT, timeout=30)
-        nope_out = guest.transcript()[nope_start:]
-        pwd_start = len(guest.transcript())
+            ok, _ = interrupted("sub2", "cd /mnt/s/SUB", ETX)
         if ok:
-            guest.type_line("pwd")
-            ok = guest.wait_for(r"\n[^\n]*" + PROMPT, timeout=30)
-        pwd_out = guest.transcript()[pwd_start:]
+            ok, back = interrupted("drain", "cd /mnt/s/NOPE", FS)
+            results.append(("Ctrl+\\ cuts the wait to drain the abandoned answer short", back))
+        if ok:
+            ok = plain("pwd", "pwd")
+            lines = [l.strip() for l in out["pwd"].replace("\r", "").split("\n")]
+            results.append(("pwd is /, not the NOPE a late answer would give", "/" in lines))
         time.sleep(drive_qemu.LINGER)
     finally:
         guest.stop()
         peer.kill()
         peer_log.close()
-    transcript = guest.transcript()
     with open(TRANSCRIPT, "w") as f:
-        f.write(transcript)
+        f.write(guest.transcript())
     faults = drive_qemu.fault_line(guest)
-
-    if not ok:
-        print(f"FAIL the session did not reach its last step ({TRANSCRIPT})")
-        return 1
-    # The prompt after the first cd must wait for the peer: a cut-short call
-    # returns at once, seconds before the 3.5 s hold ends.
-    results.append(("the call ran to the peer's answer, Ctrl+C and Ctrl+\\ queued as bytes",
-                    waited >= float(PEER_DELAY) - 1.0 and not re.search(r"interrupt|cd:", cd_out)))
-    kept = [l.strip() for l in kept_out.replace("\r", "").split("\n")]
-    results.append((f"keys typed during the call kept: `echo {WORD}`, then `q`, ran whole", WORD + "q" in kept))
-    results.append(("cd to a missing remote directory fails", "cd:" in nope_out))
-    lines = [l.strip() for l in pwd_out.replace("\r", "").split("\n")]
-    results.append(("pwd is /mnt/s/SUB, not the NOPE a late reply would give", "/mnt/s/SUB" in lines))
     results.append((f"QEMU's trace: {faults}", "0 fault lines" in faults))
+    if not ok:
+        results.append(("the session reached its last step", False))
     fail = 0
     for name, good in results:
         print(f"{'ok  ' if good else 'FAIL'} {name}")
         fail |= not good
     if fail:
-        print(f"     first cd waited {waited:.1f}s; transcript in {TRANSCRIPT}")
-        for label, out in (("cd SUB", cd_out), ("kept", kept_out), ("cd NOPE", nope_out), ("pwd", pwd_out)):
-            print(f"     -- {label}: {out.strip()!r}")
+        print(f"     transcript in {TRANSCRIPT}")
+        for label, text in out.items():
+            print(f"     -- {label}: {text.strip()!r}")
     return 1 if fail else 0
 
 

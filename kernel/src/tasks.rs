@@ -1048,6 +1048,59 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8]) -> u64 {
     0
 }
 
+/// Calls abandoned by an interrupt, per caller: bit `s` of `ABANDONED[c]` is
+/// set when `c`'s `MSG_CALL` to `s` was cut short (the boot shell's Ctrl+C or
+/// Ctrl+\, the only interrupt a call's wait takes) while `s` still had the
+/// request. `s` will answer it, and without this its answer would arrive
+/// while `c` waits in its NEXT call to `s`, ride the reply exemption into that
+/// call as its answer, and leave the next call's own reply refused; a
+/// `SAFECOPY` for the old request could likewise reach the new call's grant
+/// (2026-10-09). With the bit set, `c`'s next call to `s` waits in
+/// [`WaitReason::Drain`] without sending, `s`'s next message to `c` is
+/// dropped as the old answer, and the call then runs. One call per caller
+/// and server can be abandoned at a time, since the next one waits for it,
+/// so this holds for a server that answers out of order (netd's parked
+/// requests) too. Cleared by the server's death or restart
+/// ([`fail_calls_to`]) and by the caller's ([`end_task`]).
+static ABANDONED: [AtomicU32; NUM_TASKS] = [const { AtomicU32::new(0) }; NUM_TASKS];
+
+/// Whether `caller` has an abandoned call to `server` (see [`ABANDONED`]):
+/// `MSG_CALL` then waits to drain it before sending.
+pub(crate) fn has_abandoned_call(caller: usize, server: usize) -> bool {
+    ABANDONED[caller].load(Ordering::Relaxed) & (1 << server) != 0
+}
+
+/// `server`'s `MSG_SEND` to `caller`, checked before anything else about the
+/// send: if `caller` abandoned a call to `server`, this is that call's answer
+/// (a server sends a caller nothing but answers), and it is dropped, `true`.
+pub(crate) fn drop_abandoned_reply(server: usize, caller: usize) -> bool {
+    if !has_abandoned_call(caller, server) {
+        return false;
+    }
+    forget_abandoned(caller, server);
+    true
+}
+
+/// Clears `caller`'s abandoned call to `server`, and if `caller` is waiting
+/// in [`WaitReason::Drain`] for it, makes that `MSG_CALL` run again: its
+/// saved `x0` is set back to `server` (the call's first argument, which a
+/// wake overwrites with the result) and its saved PC moved back onto the
+/// `svc`, so the call is made afresh with the arguments still in its
+/// registers.
+fn forget_abandoned(caller: usize, server: usize) {
+    ABANDONED[caller].fetch_and(!(1 << server), Ordering::Relaxed);
+    if let TaskState::Blocked(WaitReason::Drain { server: s }) = unsafe { *STATES[caller].get() } {
+        if s == server {
+            // SAFETY: `caller` is blocked, so its context is the saved one in
+            // TASKS (never the live frame), and nothing else writes it now.
+            let ctx = unsafe { &mut *TASKS[caller].get() };
+            ctx.gpr[0] = server as u64;
+            ctx.elr_el1 -= 4; // the `svc` is one 4-byte instruction
+            unsafe { *STATES[caller].get() = TaskState::Runnable };
+        }
+    }
+}
+
 /// Pops `task`'s oldest queued message into `(buf, buf_len)` (raw
 /// copy - single address space, the same trust model as every `fs_*`
 /// buffer), returning the packed `(sender << 32) | copied_len` the
@@ -1864,6 +1917,14 @@ pub(crate) enum WaitReason {
     /// call waiting on that specific task's reply (`MSG_CALL`), so an
     /// unrelated task's message can never be mistaken for the reply.
     Message { buf: u64, len: u64, from: Option<usize> },
+    /// A `MSG_CALL` to `server` that waits, before its request is sent, for
+    /// `server`'s answer to the caller's previous call, which an interrupt
+    /// abandoned ([`ABANDONED`]). That answer is dropped
+    /// ([`drop_abandoned_reply`]) and the call then runs again from its
+    /// `svc` ([`forget_abandoned`]), so the request goes out with nothing of
+    /// the old one left to answer it. Ends early only by the same interrupt
+    /// as `Message`, the request still unsent.
+    Drain { server: usize },
     /// Waiting for network input *or* a message (`NET_WAIT`): satisfied
     /// when the NIC has a frame waiting or the task's mailbox is non-empty.
     /// Unlike `Message` it consumes neither - the waiter drains both
@@ -1932,31 +1993,32 @@ impl WaitReason {
             }
             WaitReason::Message { buf, len, from } => {
                 // Same Ctrl+C escape hatch as TaskExit's, with the same
-                // reach (task 0 only; any other owner is marked instead) - a
-                // `recv` with no message coming must not brick the session.
-                // Reads ahead rather than discarding: an editor blocked in
-                // `con_write`'s call to the console server keeps the keys
-                // typed meanwhile. A message already waiting is delivered
-                // first, as an ended target is in TaskExit's arm.
-                //
-                // A call's reply wait (`from` set) reads ahead too, but the
-                // boot shell's Ctrl+C or Ctrl+\ is queued there as a byte,
-                // never an interrupt (2026-10-09): the server is still
-                // working on the request, so its reply would arrive while
-                // the shell waits on its NEXT call to that server and be
-                // taken as that call's answer, and a SAFECOPY for the old
-                // request would reach the new call's grant. The way out of a
-                // call that never returns is the server's restart
-                // (`fail_calls_to`), and netd's own deadlines.
+                // reach (task 0 only; any other owner is marked instead) - a `recv`
+                // (or a call to a wedged server) with no reply coming
+                // must not brick the session. Reads ahead rather than
+                // discarding: an editor blocked in `con_write`'s call to the
+                // console server keeps the keys typed meanwhile. A message
+                // already waiting is delivered first, as an ended target is
+                // in TaskExit's arm: the wait is done, and an interrupt
+                // would leave the reply for the next call.
                 if let Some(got) = try_recv_message_from(waiter, buf, len, from) {
                     return Some(got);
                 }
-                if from.is_some() {
-                    crate::syscall::read_keyboard_ahead(waiter, false);
-                } else if crate::syscall::keyboard_interrupts_wait(waiter) {
+                if crate::syscall::keyboard_interrupts_wait(waiter) {
+                    // A call cut short: its server still has the request and
+                    // will answer it. Recorded, so that answer is dropped
+                    // rather than taken by the caller's next call to it.
+                    if let Some(server) = from {
+                        ABANDONED[waiter].fetch_or(1 << server, Ordering::Relaxed);
+                    }
                     return Some(syscall_abi::RECV_INTERRUPTED);
                 }
                 None
+            }
+            WaitReason::Drain { .. } => {
+                // The wait ends when the abandoned answer arrives, and that
+                // is done by the sender (`forget_abandoned`), not here.
+                crate::syscall::keyboard_interrupts_wait(waiter).then_some(syscall_abi::RECV_INTERRUPTED)
             }
             WaitReason::NetInput { deadline } => {
                 // Woken by a frame, a message, or the deadline (a bare timer
@@ -2259,6 +2321,7 @@ fn end_task(i: TaskIndex, final_state: TaskState) {
     free_runtime_region(base, size);
     revert_input_owner_if(i);
     fail_calls_to(i);
+    ABANDONED[i].store(0, Ordering::Relaxed);
 
     unsafe { *STATES[i].get() = final_state };
     unsafe { *REGIONS[i].get() = (0, 0) };
@@ -2351,6 +2414,14 @@ fn switch_away_from_dead(frame: &mut Context, dead: TaskIndex) {
 /// `MSG_RECV` waits (`from: None`) are deliberately untouched -
 /// they're not waiting on any particular task.
 pub(crate) fn fail_calls_to(dead: usize) {
+    // An abandoned call to the dead task will never be answered: forgotten,
+    // and a call waiting to drain it runs again (and finds the slot gone or
+    // restarted).
+    for i in 0..NUM_TASKS {
+        if ABANDONED[i].load(Ordering::Relaxed) & (1 << dead) != 0 {
+            forget_abandoned(i, dead);
+        }
+    }
     for i in 0..NUM_TASKS {
         if let TaskState::Blocked(WaitReason::Message { from: Some(target), .. }) =
             unsafe { *STATES[i].get() }
@@ -2791,7 +2862,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // waits on the devices for its own read.
     let owner = input_owner();
     if owner != TaskIndex::FIRST.index() {
-        crate::syscall::read_keyboard_ahead(owner, true);
+        crate::syscall::read_keyboard_ahead(owner);
     }
 
     // Honor a Ctrl+C kill (marked by `interrupt_key_check` from either poll
@@ -2903,6 +2974,9 @@ pub unsafe fn on_tick(frame: *mut Context) {
                 }
                 TaskState::Blocked(WaitReason::NetInput { deadline }) => {
                     crate::console::println!("Ouroboros kernel:   it was blocked on network input (deadline {deadline})")
+                }
+                TaskState::Blocked(WaitReason::Drain { server: s }) => {
+                    crate::console::println!("Ouroboros kernel:   it was waiting to drain an abandoned call to task {s}")
                 }
                 TaskState::Blocked(WaitReason::Keyboard | WaitReason::KeyWait { .. }) => {
                     crate::console::println!("Ouroboros kernel:   it was blocked on the keyboard")
