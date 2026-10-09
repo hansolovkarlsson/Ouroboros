@@ -15,7 +15,7 @@ built (#236), step 3 built (#233, and its second half in #238, designed
 below with decisions E1 to E4 settled by Hans the same day); step 4 built
 (#237). Every step is built and merged (#238 `26ff3ef`), and DevTools was
 told by notice on 2026-10-08:
-`~/Projects/DevTools/docs/handoffs/2026-10-08-from-ouroboros-editor-ctrl-c-item-4.md`. The four decisions (D1 to D4)
+`~/Projects/DevTools/docs/handoffs/closed/2026-10-08-from-ouroboros-editor-ctrl-c-item-4.md`. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
 met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
 use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so

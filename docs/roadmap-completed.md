@@ -1937,7 +1937,7 @@ stays on the roadmap.
 >       plan with its four decisions (E1 to E4) settled by Hans and built
 >       (the queue now `keyseq::KeyQueue`, host-tested). Every step is
 >       built, and DevTools told by notice (2026-10-08,
->       `~/Projects/DevTools/docs/handoffs/2026-10-08-from-ouroboros-editor-ctrl-c-item-4.md`);
+>       `~/Projects/DevTools/docs/handoffs/closed/2026-10-08-from-ouroboros-editor-ctrl-c-item-4.md`);
 >       the note is closed:
 >       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
