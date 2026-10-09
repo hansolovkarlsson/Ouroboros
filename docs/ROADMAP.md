@@ -823,13 +823,13 @@ The small open tails those arcs deliberately left:
   was 12 a second until #232's review made the tick read ahead for the
   owner whoever it interrupted.)
 
-- **Tab and Escape send nothing on the USB keyboard (found 2026-10-07,
-  building the navigation keys).** `xhci.rs`'s `keycode_to_ascii` has no
-  arm for Tab (HID 0x2b) or Escape (0x29), so the shell's filename
-  completion, which the line editor runs on Tab, cannot be reached from a
-  Parallels or Pi keyboard, only over QEMU's serial line. Tab is one arm.
-  Escape needs a decision first: a bare ESC is also how every sequence
-  starts, and the shell's `keyseq` filter would swallow the key after it.
+- **Escape sends nothing on the USB keyboard (found 2026-10-07, building
+  the navigation keys).** `xhci.rs`'s `keycode_to_ascii` has no arm for
+  Escape (HID 0x29), and it needs a decision first: a bare ESC is also how
+  every sequence starts, and the shell's `keyseq` filter would swallow the
+  key after it. Tab, the other half of this item, is DONE (2026-10-09,
+  #248): HID 0x2b sends 9, so filename completion works from a Parallels or
+  Pi keyboard, checked by `make test-nav-keys`.
 
 - **Two tails of `cond`'s escape sequences (found 2026-10-07, the high
   review of #228).** (1) Reverse video is one setting in `cond` shared by
@@ -3830,11 +3830,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `FS_ERROR`** ("bad or not-yours", `programs/servers/fsd/src/main.rs`), which
   every client renders as "no such file or directory" for a request that named
   no path. The same shape `FS_ERR_NO_SUCH_VERB` was reserved to fix for verbs.
-- **The shell drops every word past the sixteenth.** `MAX_ARGS` is 16 in
-  `programs/shell/src/main.rs`, and a longer command line is cut there with
-  no message, so a program run with 40 arguments sees 15 and cannot tell.
-  Found 2026-10-05 by `make test-cargs` (the C-hosting plan's step 1). The
-  fix is a refusal or a larger vector bounded by `ARGV_MAX`, not silence.
+- **~~The shell drops every word past the sixteenth~~: DONE (2026-10-09,
+  #248), by a refusal.** A command, a pipeline stage or an `exec` with more
+  than 16 words now prints `too many words (at most 16, the command's name
+  included); nothing was run`, and a pipeline is refused before any stage is
+  spawned (`split_argv` in `programs/shell/src/main.rs`, the one place an argv
+  is built). `make test-cargs` checks all three. A larger vector bounded by
+  `ARGV_MAX` remains possible if a program needs one.
 - **`mv` refuses a case-only rename on FAT32 and exFAT without `-f`.**
   `mv FOO.TXT foo.txt` answers "foo.txt exists": the lookup is case-insensitive
   there, so the destination is the source itself, and `mv` will not replace a

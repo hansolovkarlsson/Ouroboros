@@ -144,7 +144,7 @@
 //! re-arms the ring, without the Reset Endpoint/Set TR Dequeue Pointer
 //! sequence real recovery needs); no auto-repeat (a held key reports once
 //! per press, not repeatedly, by design - see [`poll_key`]);
-//! unmapped keys (Tab, Escape, the function keys other than F2 and F3,
+//! unmapped keys (Escape, the function keys other than F2 and F3,
 //! ...) are silently ignored, while the arrows, Home, End, Page Up/Down,
 //! Delete, F2 and F3 send their VT100 sequences (`keycode_to_bytes`,
 //! since 2026-10-07); only the *first* interrupt IN endpoint found in the
@@ -1008,7 +1008,7 @@ fn keycode_to_bytes(keycode: u8, shift: bool, ctrl: bool) -> Option<KeyBytes> {
 
 /// USB HID keycode -> ASCII, boot-protocol Usage IDs 0x04-0x38 (letters,
 /// digits, and the punctuation/whitespace keys this shell's line editor
-/// cares about). `None` for anything unmapped (Tab, Escape, the modifiers
+/// cares about). `None` for anything unmapped (Escape, the modifiers
 /// themselves, ...; the navigation and function keys are
 /// [`keycode_to_bytes`]'s) - a real, documented gap, not a bug; see
 /// module doc comment. A held Ctrl maps letters to the classic C0
@@ -1044,6 +1044,11 @@ fn keycode_to_ascii(keycode: u8, shift: bool, ctrl: bool) -> Option<u8> {
         0x27 => Some(if shift { b')' } else { b'0' }),
         0x28 => Some(b'\r'), // Enter
         0x2a => Some(0x08),  // Backspace
+        // Tab, the shell's filename completion; Shift+Tab is a Tab too (no
+        // back-tab sequence is sent). Unmapped until 2026-10-09, so on
+        // Parallels and the Pi, where the USB keyboard is the only one, Tab
+        // completion could not be typed at all.
+        0x2b => Some(b'\t'),
         0x2c => Some(b' '),  // Space
         0x2d => Some(if shift { b'_' } else { b'-' }),
         0x2e => Some(if shift { b'+' } else { b'=' }),

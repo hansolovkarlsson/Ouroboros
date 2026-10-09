@@ -259,6 +259,16 @@ record that made the next call wait for the old answer (a stuck `cpu` then
 held logout's key drop). `make test-call-interrupt` holds calls open on slow
 9P peers.
 
+**Tab works on the USB keyboard, and a command with too many words is
+refused (#248).** Tab (HID 0x2b) was unmapped, so the shell's filename
+completion could not be typed on Parallels or the Pi, where the USB keyboard
+is the only one; it now sends 9. And the shell cut a command at its
+sixteenth word without a message, so a program given twenty arguments ran
+with fifteen; a command, a pipeline stage or an `exec` with more than 16
+words is now refused with a `too many words` line and nothing runs, a
+pipeline before any stage is spawned. `make test-nav-keys` and `make
+test-cargs` check both, and each check fails with its fix removed.
+
 **A rig no longer boots an image built from other sources (#247).** The
 rigs refused a stale image by comparing modification times, and a reverted
 mutation defeats that: the mutant's binaries and image are newer than the

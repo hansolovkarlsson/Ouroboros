@@ -9,8 +9,8 @@ format, built twice because crt0 is compiled into both C libraries:
 `/bin/CARGS` through picolibc and `/bin/CARGSH` through the hand-rolled libc.
 Each case runs all three with the same arguments, and they must print the
 same lines apart from argv[0], each program's name as typed. Three cases: a
-few arguments, none, and fifteen, the most the shell passes (it keeps 16
-words). The shell's 128-byte line keeps every blob far below ARGV_MAX (512),
+few arguments, none, and fifteen, the most the shell passes (16 words with
+the command's name). The shell's 128-byte line keeps every blob far below ARGV_MAX (512),
 so crt0's byte bound is not reached here; only a program staging its own blob
 could reach it.
 
@@ -19,7 +19,15 @@ name typed, the `argv[argc] is NULL` line, and its exit code 0; and no fault
 line in QEMU's own trace. And `cremote` and `cbig`, which take a remote path
 as their argument, must refuse a local one with exit code 2. One boot, about
 a minute.
-Run it whenever crt0.c or the kernel's argv store changes.
+
+And one word past the most is refused, not cut: 17 words (16 arguments) as a
+command, as a pipeline's first stage and after `exec` must each print the
+shell's `too many words` line, and ARGS must not run (no `argc=` line in the
+block). Before 2026-10-09 the shell dropped the seventeenth
+word and ran the rest.
+
+Run it whenever crt0.c, the kernel's argv store or the shell's argv split
+changes.
 """
 import importlib.util
 import os
@@ -37,8 +45,8 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-cargs.txt")
 CASES = [
     "alpha b 12345678901234567890",
     "",
-    # The most arguments the shell passes: it keeps 16 words (MAX_ARGS in
-    # programs/shell/src/main.rs) and drops the rest without a word.
+    # The most arguments the shell passes: 16 words (MAX_ARGS in
+    # programs/shell/src/main.rs); one more is refused (TOO_MANY).
     " ".join(chr(ord("a") + i) * 6 for i in range(15)),
 ]
 # The C programs, each compared with the Rust ARGS.
@@ -46,6 +54,11 @@ C_PROGRAMS = ["cargs", "cargsh"]
 # The programs that take a remote path from argv and must refuse a local one:
 # given one, their remote checks would test the local route and pass.
 REFUSALS = [("cremote", "/EFI/ORBS/INIT.CFG"), ("cbig", "/man/grep")]
+# One word past MAX_ARGS, in each place the shell builds an argv: the line
+# typed, and the command the refusal must name.
+SIXTEEN = " ".join(chr(ord("a") + i) for i in range(16))
+TOO_MANY = [(f"args {SIXTEEN}", "args"), (f"args {SIXTEEN} | upper", "args"),
+            (f"exec args {SIXTEEN}", "exec")]
 # Marks each command's output off from the next one's in the transcript.
 FENCE = "echo ==fence=="
 
@@ -74,6 +87,8 @@ def main() -> int:
                 steps += [("# ", FENCE), ("# ", f"{prog} {args}".rstrip())]
         for prog, path in REFUSALS:
             steps += [("# ", FENCE), ("# ", f"{prog} {path}")]
+        for line, _ in TOO_MANY:
+            steps += [("# ", FENCE), ("# ", line)]
         steps += [("# ", FENCE), ("# ", "")]
         driven = guest.run(steps)
         out = guest.transcript()
@@ -112,6 +127,14 @@ def main() -> int:
         m = re.search(rf"^{prog}: {re.escape(path)} is not on a remote mount.*?"
                       r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)", block, re.M | re.S)
         checks.append((f"{prog} {path}: refused, exit 2", m is not None and m.group(1) == "2"))
+    for k, (line, who) in enumerate(TOO_MANY):
+        i = per_case * len(CASES) + len(REFUSALS) + k
+        block = blocks[i] if i < len(blocks) else ""
+        refused = re.search(rf"^{who}: too many words \(at most 16\b", block, re.M) is not None
+        # The block also holds the fence echo's exit line, so a task exit
+        # proves nothing; ARGS printing its argc is what running looks like.
+        ran = "argc=" in block
+        checks.append((f"`{line}`: refused, nothing run", refused and not ran))
     checks += [
         ("no fault lines", faults == 0),
     ]
