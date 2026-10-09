@@ -126,13 +126,20 @@ and `cat` shows the text. It does not check that a digit typed during
 flushes the C library's buffer for fd 1, the one `write` fills, not stdio's
 above it (as on Unix), so text written with `printf` needs an `fflush`.
 
-Revised 2026-10-08 after #240's two high reviews: a timed `poll` no longer
-spins, and no longer takes the key. A new system call, `KEY_WAIT_UNTIL`
-(71), blocks until a key is waiting, or until the last tick before the
-deadline, and leaves the key in the kernel for `read`; `poll` looks on the
-clock for what is left, under a tick, so a 200 ms wait still measures 200
-ms. With another program busy, the end can be a tick (20 ms) late. A
-program that polls and exits without reading leaves the key for the shell. Descriptors other
+Revised 2026-10-08 after #240's three high reviews: a timed `poll` no
+longer spins and no longer takes the key. A new system call,
+`KEY_WAIT_UNTIL` (71), blocks until a key is waiting or the deadline passes,
+and leaves the key in the kernel for `read`, so a program that polls and
+exits without reading leaves it for the shell. **One departure from the
+note: the timing is to a tick, about 20 ms, not the 10 ms asked for.** The
+kernel looks at a blocked task once a tick, so a wait ends at the first
+tick at or after its deadline (a 200 ms wait measures about 213 ms), and
+later when a tick is delayed or another program is busy. Meeting 10 ms
+meant spinning on the clock for the last stretch, which burned a core
+through `^Q Q`'s 25 ms polls; Hans chose tick precision over that. For
+Edit, the 50 ms escape wait becomes up to about 70 ms, and `^Q Q`'s pace
+steps of 25 ms land on 20 ms ticks. If that is not good enough for Edit, a
+note saying so is the way: a finer kernel timer is the fix, not a spin. Descriptors other
 than 0 are now answered as POSIX has them (fds 1 and 2 ready for `POLLOUT`,
 an open file ready, `POLLNVAL` only for one not open), and fd 0 is answered
 even when another entry is already ready.

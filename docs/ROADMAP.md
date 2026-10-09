@@ -2366,8 +2366,9 @@ be reviewed after the fact from the saved screenshots.
 >       [`handoffs/2026-10-08-from-devtools-edit-poll.md`](handoffs/2026-10-08-from-devtools-edit-poll.md).
 >       *Built 2026-10-08 (#240): `poll` in `libc/src/file.c` over a new
 >       system call, `KEY_WAIT_UNTIL` (71), which blocks until a key is
->       waiting (or the last tick before a deadline) and leaves it in the
->       kernel for `read`. Its first form spun on `YIELD`, a core's worth
+>       waiting or the deadline passes, to a tick's precision (about 20 ms,
+>       not the note's 10: settled by Hans against a spin), and leaves the
+>       key in the kernel for `read`. Its first form spun on `YIELD`, a core's worth
 >       whenever nothing else ran, and took the key into the program, where
 >       it died if the program exited unread (the two high reviews of #240).
 >       Also `make edit-bin`, and the rigs `make test-cpoll` and `make
