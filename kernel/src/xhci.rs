@@ -971,7 +971,7 @@ const MOD_RSHIFT: u8 = 1 << 5;
 /// The bytes one key press sends: a single byte for the keys
 /// [`keycode_to_ascii`] maps, or the VT100/xterm sequence for a navigation
 /// or function key (DevTools's editor note, item 2,
-/// `docs/handoffs/2026-10-05-from-edit-editor-console.md`). Modifiers do not
+/// `docs/handoffs/closed/2026-10-05-from-edit-editor-console.md`). Modifiers do not
 /// change a navigation key's sequence: xterm's modified forms
 /// (`ESC [ 1 ; 5 A` for Ctrl+Up) are not sent.
 #[derive(Clone, Copy)]

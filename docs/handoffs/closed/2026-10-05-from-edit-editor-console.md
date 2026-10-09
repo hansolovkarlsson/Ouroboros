@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-05
 - **Kind:** requirement
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** Edit running on Ouroboros, the port that follows Edit's
   stage 1 (`~/Projects/Edit/docs/ROADMAP.md`, "The port to Ouroboros")
 
@@ -215,3 +215,11 @@ from a serial terminal counts as a key of its own after 40 ms, and
 `TCSAFLUSH` now discards keys typed ahead, as POSIX has it, so Edit's
 `plat_raw_off` leaves nothing it was typed for to the shell. When #238 is
 merged, item 4 is done, and DevTools gets the plan's notice.
+
+Done 2026-10-08 by Ouroboros: every item is built and merged. Item 1 #228
+(`379b898`), item 2 #229 (`cec028c`), item 3 #230 (`363913f`), item 5 #219,
+and item 4 in four steps: #235 (`346e96b`), #236 (`b4408c5`), #237
+(`db7762f`) and #238 (`26ff3ef`). DevTools is told by notice:
+`~/Projects/DevTools/docs/handoffs/2026-10-08-from-ouroboros-editor-ctrl-c-item-4.md`,
+which also says what the rest of `platform_posix.c` would need (`sigaction`,
+`<poll.h>`). The note moves to `docs/handoffs/closed/`.

@@ -4,7 +4,7 @@
     python3 scripts/test-ctermios.py    (or `make test-ctermios`, which builds the image)
 
 Step 2 of docs/roadmap/roadmap-ctrl-c.md, for item 4 of
-docs/handoffs/2026-10-05-from-edit-editor-console.md: a C program turns raw
+docs/handoffs/closed/2026-10-05-from-edit-editor-console.md: a C program turns raw
 mode on the POSIX way, with `tcsetattr` and ISIG cleared, and reads Ctrl+C as
 a key. /bin/CTERMIOS (libc/ctermios.c) uses Edit's own recipe, flag for flag.
 One boot:
