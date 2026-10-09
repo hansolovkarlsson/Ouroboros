@@ -258,6 +258,7 @@ CENVH_BIN    := $(BUILD_DIR)/cenvh.bin
 CCLOCK_BIN   := $(BUILD_DIR)/cclock.bin
 CWINSZ_BIN   := $(BUILD_DIR)/cwinsz.bin
 CTERMIOS_BIN := $(BUILD_DIR)/ctermios.bin
+CPOLL_BIN    := $(BUILD_DIR)/cpoll.bin
 # DevTools's C preprocessor, built here for Ouroboros (step 8 of the C-hosting
 # plan): its sources are read from CPP_DIR, a sibling checkout by default.
 # CPP_DIR must not contain spaces: its files are make prerequisites.
@@ -285,12 +286,34 @@ endif
 endif
 endif
 
+# DevTools's editor, Edit, built here for Ouroboros (the note
+# docs/handoffs/2026-10-08-from-devtools-edit-poll.md), as cpp is: its sources
+# are read from EDIT_DIR, a sibling checkout by default, every src/*.c but the
+# Mac's platform file (platform_ouroboros.c is the one for here). NEED_EDIT
+# is NEED_CPP's twin: optional by default, required for edit-bin and
+# test-edit, so a release can insist. EDIT_DIR must not contain spaces.
+EDIT_DIR     ?= ../DevTools/edit
+EDIT_BIN     := $(BUILD_DIR)/edit.bin
+HAVE_EDIT    := $(wildcard $(EDIT_DIR)/src/platform_ouroboros.c)
+EDIT_OBJS    := $(if $(HAVE_EDIT),$(patsubst $(EDIT_DIR)/src/%.c,$(BUILD_DIR)/edit/%.o,$(filter-out %/platform_posix.c,$(wildcard $(EDIT_DIR)/src/*.c))))
+NEED_EDIT    ?= optional
+ifneq ($(filter edit-bin test-edit,$(MAKECMDGOALS)),)
+override NEED_EDIT := required
+endif
+ifeq ($(NEED_EDIT),required)
+ifeq ($(HAVE_EDIT),)
+ifneq ($(filter-out clean,$(or $(MAKECMDGOALS),all)),)
+$(error NEED_EDIT=required: no Edit sources at $(EDIT_DIR) (set EDIT_DIR))
+endif
+endif
+endif
+
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpp-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-fpsimd test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
+.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-held-keys test-heap test-fpsimd test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -684,6 +707,14 @@ ctermios-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/ctermios.elf $(PICO_PORT) $(BUILD_DIR)/pico/ctermios.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/ctermios.elf $(CTERMIOS_BIN)
 
+# poll for the keyboard in a C program (libc/cpoll.c): timeouts, POLLNVAL, the
+# flush of fd 1 before the wait, the held key. Runs as /bin/CPOLL, driven by
+# scripts/test-cpoll.py.
+cpoll-bin: $(NSRESOLVE_A) $(PICO_PORT)
+	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/cpoll.c -o $(BUILD_DIR)/pico/cpoll.o
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpoll.elf $(PICO_PORT) $(BUILD_DIR)/pico/cpoll.o $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpoll.elf $(CPOLL_BIN)
+
 # The C preprocessor, cpp, from DevTools (step 8 of the C-hosting plan, and the
 # build half of the accepted 2026-10-01-from-proem-system-dirs.md): its lib/
 # and driver/cpp.c, compiled as every picolibc program here is and linked like
@@ -710,6 +741,20 @@ $(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(CPP_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpp.elf $(CPP_BIN)
 -include $(wildcard $(BUILD_DIR)/cpp/*.d)
+
+# /bin/edit, DevTools's editor (the note
+# docs/handoffs/2026-10-08-from-devtools-edit-poll.md). Its sources are only
+# read here, as cpp's are; the link is ours. Without sources, `make edit-bin`
+# stops at parse time (NEED_EDIT above).
+edit-bin: $(EDIT_BIN)
+EDIT_CFLAGS := $(CFLAGS_OS) $(PICO_INC) -I$(EDIT_DIR)/src -MMD -MP
+$(BUILD_DIR)/edit/%.o: $(EDIT_DIR)/src/%.c Makefile
+	@mkdir -p $(BUILD_DIR)/edit
+	$(CC) $(EDIT_CFLAGS) -c $< -o $@
+$(EDIT_BIN): $(EDIT_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld
+	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/edit.elf $(PICO_PORT) $(EDIT_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/edit.elf $(EDIT_BIN)
+-include $(wildcard $(BUILD_DIR)/edit/*.d)
 
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
@@ -846,7 +891,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin)
+esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin) $(if $(HAVE_EDIT),edit-bin)
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -942,9 +987,12 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	cp $(CCLOCK_BIN) $(ESP_DIR)/bin/CCLOCK
 	cp $(CWINSZ_BIN) $(ESP_DIR)/bin/CWINSZ
 	cp $(CTERMIOS_BIN) $(ESP_DIR)/bin/CTERMIOS
+	cp $(CPOLL_BIN) $(ESP_DIR)/bin/CPOLL
 	# /bin/cpp, when CPP_DIR has DevTools's sources; a checkout of this tree
 	# alone still builds an image, without it.
 	$(if $(HAVE_CPP),cp $(CPP_BIN) $(ESP_DIR)/bin/CPP,@echo "esp: no cpp sources at $(CPP_DIR); /bin/cpp not staged (set CPP_DIR)")
+	# /bin/edit, the same way, from EDIT_DIR.
+	$(if $(HAVE_EDIT),cp $(EDIT_BIN) $(ESP_DIR)/bin/EDIT,@echo "esp: no Edit sources at $(EDIT_DIR); /bin/edit not staged (set EDIT_DIR)")
 	cp $(WRITE_BIN) $(ESP_DIR)/bin/WRITE
 	cp $(READKEY_BIN) $(ESP_DIR)/bin/READKEY
 	cp $(MORE_BIN) $(ESP_DIR)/bin/MORE
@@ -1881,6 +1929,20 @@ test-kbd-cut: image
 # run it whenever libc's termios, sys/termios.h or KBD_MODE changes.
 test-ctermios: image
 	python3 scripts/test-ctermios.py
+
+# poll for the keyboard in a C program (scripts/test-cpoll.py, /bin/CPOLL):
+# timeouts 0, 200 ms and -1, POLLNVAL for other fds, a sleep with no fds, fd 1
+# flushed before the wait, the key held for the read after it. One boot, about
+# a minute; run it whenever libc's poll, <poll.h> or the read of fd 0 changes.
+test-cpoll: image
+	python3 scripts/test-cpoll.py
+
+# DevTools's editor on Ouroboros (scripts/test-edit.py, /bin/edit from
+# EDIT_DIR): `edit hello.txt` opens, ^Q Q repeats a delete on poll's timeout,
+# Left through the escape timeout moves the cursor, ^K D saves, cat shows
+# `hXi`. One boot on a copy of the image, about a minute; needs Edit's sources.
+test-edit: image
+	python3 scripts/test-edit.py
 
 # argv in a C program (scripts/test-cargs.py, /bin/CARGS): three pairs of runs,
 # the Rust /bin/ARGS and its C twin with the same arguments, which must print

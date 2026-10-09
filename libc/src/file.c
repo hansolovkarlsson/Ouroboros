@@ -33,6 +33,7 @@
  * not search, and libc/include must stay off a picolibc build's angle path. */
 #include "../pico/include/sys/ioctl.h"
 #include "../pico/include/sys/termios.h"
+#include "../pico/include/poll.h"
 #include <sys/stat.h>
 #include <unistd.h>
 /* `errno` where the C library has one: picolibc does, and the Makefile builds
@@ -997,6 +998,86 @@ int ioctl(int fd, unsigned long request, ...) {
     return 0;
 }
 
+/* ---- poll ------------------------------------------------------------------ */
+
+/* A key poll took from the kernel to answer POLLIN, held for the next
+ * read(0, ...), or -1. One byte is enough: poll answers as soon as there is
+ * one, and read takes it before asking the kernel again. */
+static int g_held_key = -1;
+
+/* Whether a key is waiting for fd 0, taking it from the kernel into
+ * g_held_key if so (TRY_READ_CHAR, which answers NO_CHAR to a task that does
+ * not own the keyboard). */
+static int key_waiting(void) {
+    if (g_held_key >= 0) {
+        return 1;
+    }
+    unsigned long c = (unsigned long)__os_syscall1(SYS_TRY_READ_CHAR, 0);
+    if (c == NO_CHAR) {
+        return 0;
+    }
+    g_held_key = (int)(c & 0xff);
+    return 1;
+}
+
+/* fd 0 and POLLIN only (poll.h): every other descriptor is POLLNVAL at once,
+ * a negative one skipped. -1 waits in READ_CHAR (no spinning); a positive
+ * timeout looks on MONOTONIC_US and gives the core away between looks. */
+int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+    if (nfds > 0 && !fds) {
+        return client_fail(EFAULT);
+    }
+    out_flush();
+    int ready = 0;
+    int want_key = 0;
+    for (nfds_t i = 0; i < nfds; i++) {
+        fds[i].revents = 0;
+        if (fds[i].fd < 0) {
+            continue;
+        }
+        if (fds[i].fd != 0) {
+            fds[i].revents = POLLNVAL;
+            ready++;
+        } else if (fds[i].events & POLLIN) {
+            want_key = 1;
+        }
+    }
+    if (want_key && !ready) {
+        int got = key_waiting();
+        if (!got && timeout < 0) {
+            g_held_key = (int)(__os_syscall1(SYS_READ_CHAR, 0) & 0xff);
+            got = 1;
+        } else if (!got && timeout > 0) {
+            unsigned long deadline = (unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0)
+                                   + (unsigned long)timeout * 1000UL;
+            while (!got && (unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0) < deadline) {
+                __os_syscall1(SYS_YIELD, 0);
+                got = key_waiting();
+            }
+        }
+        if (got) {
+            for (nfds_t i = 0; i < nfds; i++) {
+                if (fds[i].fd == 0 && (fds[i].events & POLLIN)) {
+                    fds[i].revents = POLLIN;
+                    ready++;
+                }
+            }
+        }
+    } else if (!want_key && !ready && timeout != 0) {
+        /* Nothing to watch: poll(NULL, 0, ms) as a sleep. -1 would never
+         * return, so it is refused rather than hung. */
+        if (timeout < 0) {
+            return client_fail(EINVAL);
+        }
+        unsigned long deadline = (unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0)
+                               + (unsigned long)timeout * 1000UL;
+        while ((unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0) < deadline) {
+            __os_syscall1(SYS_YIELD, 0);
+        }
+    }
+    return ready;
+}
+
 /* ---- termios --------------------------------------------------------------- */
 
 /* The console as it behaves (sys/termios.h): bytes as typed, one at a time,
@@ -1079,7 +1160,13 @@ int tcsetattr(int fd, int optional_actions, const struct termios *t) {
     }
     unsigned long want = (t->c_lflag & ISIG) ? KBD_COOKED : KBD_RAW;
     unsigned long now;
-    return kbd_mode(want | (optional_actions == TCSAFLUSH ? KBD_FLUSH : 0), &now);
+    if (kbd_mode(want | (optional_actions == TCSAFLUSH ? KBD_FLUSH : 0), &now) < 0) {
+        return -1;
+    }
+    if (optional_actions == TCSAFLUSH) {
+        g_held_key = -1; /* typed ahead too: poll took it, nobody read it */
+    }
+    return 0;
 }
 
 /* ---- read / write -------------------------------------------------------- */
@@ -1156,6 +1243,11 @@ ssize_t read(int fd, void *buf, size_t count) {
         }
         /* The stdin/stdout tie: show the prompt before waiting for the answer. */
         out_flush();
+        if (g_held_key >= 0) {
+            ((unsigned char *)buf)[0] = (unsigned char)g_held_key;
+            g_held_key = -1;
+            return 1;
+        }
         long c = __os_syscall1(SYS_READ_CHAR, 0);
         ((unsigned char *)buf)[0] = (unsigned char)c;
         return 1;

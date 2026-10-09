@@ -9,6 +9,7 @@
 #include <stddef.h>
 
 /* Syscall numbers (syscall-abi). */
+#define SYS_TRY_READ_CHAR 3
 #define SYS_PUTC 4
 #define SYS_GET_TICKS 6
 #define SYS_READ_CHAR 15
@@ -68,6 +69,8 @@
  * the most bytes the kernel's staged blob may hold. NO_ARG is u64::MAX, spelled
  * in the error band's form so the wire check reads it. */
 #define NO_ARG (~0UL - 0UL)
+/* TRY_READ_CHAR's "nothing waiting" (poll, file.c). */
+#define NO_CHAR (~0UL - 0UL)
 #define ARGV_MAX 512u
 /* The environment (crt0.c): the most bytes its staged blob may hold, so a
  * GET_ENV buffer of ENV_MAX bytes holds any entry (the kernel refuses no
