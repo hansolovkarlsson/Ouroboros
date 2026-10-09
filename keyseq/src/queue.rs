@@ -221,6 +221,11 @@ impl KeyQueue {
         self.taken_mid = false;
     }
 
+    /// Whether no byte is queued.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// The oldest byte, for a reader.
     pub fn pop(&mut self) -> Option<u8> {
         if self.len == 0 {

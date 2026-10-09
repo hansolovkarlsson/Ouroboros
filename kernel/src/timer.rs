@@ -64,7 +64,7 @@ pub(crate) fn now_ticks() -> u64 {
 /// Microseconds since boot from the free-running counter, computed
 /// overflow-safe (a naive `now_ticks() * 1_000_000` overflows a u64 in a few
 /// days at 62.5 MHz): whole seconds plus the sub-second remainder. The one
-/// spelling of the clock `MONOTONIC_US` answers and `READ_CHAR_UNTIL`'s
+/// spelling of the clock `MONOTONIC_US` answers and `KEY_WAIT_UNTIL`'s
 /// deadline is in.
 pub(crate) fn monotonic_us() -> u64 {
     let freq = frequency_hz();

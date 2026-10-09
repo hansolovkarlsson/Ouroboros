@@ -1000,51 +1000,40 @@ int ioctl(int fd, unsigned long request, ...) {
 
 /* ---- poll ------------------------------------------------------------------ */
 
-/* A key poll took from the kernel to answer POLLIN, held for the next
- * read(0, ...), or -1. One byte is enough: poll answers as soon as there is
- * one, and read takes it before asking the kernel again. */
-static int g_held_key = -1;
-
-/* Whether a key is waiting for fd 0, taking it from the kernel into
- * g_held_key if so (TRY_READ_CHAR, which answers NO_CHAR to a task that does
- * not own the keyboard). */
-static int key_waiting(void) {
-    if (g_held_key >= 0) {
-        return 1;
-    }
-    unsigned long c = (unsigned long)__os_syscall1(SYS_TRY_READ_CHAR, 0);
-    if (c == NO_CHAR) {
-        return 0;
-    }
-    g_held_key = (int)(c & 0xff);
-    return 1;
-}
-
 static unsigned long now_us(void) {
     return (unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0);
 }
 
-/* Waits for a key until `deadline` (MONOTONIC_US): blocked in the kernel
- * (READ_CHAR_UNTIL) for all but the last tick before it, which the kernel
- * hands back early, and then a look on the clock for what is left, so the
- * deadline is met to well within a tick without spinning for the whole wait
- * (the review of #240: a YIELD loop spun a core whenever nothing else ran). */
-static int key_until(unsigned long deadline) {
-    if (key_waiting()) {
-        return 1;
-    }
-    unsigned long c = (unsigned long)__os_syscall1(SYS_READ_CHAR_UNTIL, (long)deadline);
-    if (c != NO_CHAR) {
-        g_held_key = (int)(c & 0xff);
-        return 1;
-    }
+/* KEY_WAIT_UNTIL: whether a key is waiting for this task by `deadline`
+ * (MONOTONIC_US), the key left in the kernel's queue for the next read(0),
+ * so a program that polls and then exits without reading loses nothing (the
+ * review of #240: an earlier form took the key into the program). A past
+ * deadline answers at once; ~0UL waits for good. */
+static int key_by(unsigned long deadline) {
+    return (unsigned long)__os_syscall1(SYS_KEY_WAIT_UNTIL, (long)deadline) == 1;
+}
+
+/* Until `deadline`, giving the core away between looks; with `key`, until a
+ * key is waiting too. The end of a timed key wait (under a tick, after the
+ * kernel's early answer) and poll(NULL, 0, ms)'s sleep, which has no key to
+ * block on and so looks on the clock for the whole time. One last look at
+ * the keyboard when the time is up, in case the task was scheduled late. */
+static int spin_until(unsigned long deadline, int key) {
     while (now_us() < deadline) {
         __os_syscall1(SYS_YIELD, 0);
-        if (key_waiting()) {
+        if (key && key_by(0)) {
             return 1;
         }
     }
-    return 0;
+    return key && key_by(0);
+}
+
+/* Waits for a key until `deadline`: blocked in the kernel for all but the
+ * last tick before it, which the kernel answers early, then the rest on the
+ * clock (the review of #240: a YIELD loop for the whole wait spun a core
+ * whenever nothing else ran). */
+static int key_until(unsigned long deadline) {
+    return key_by(deadline) || spin_until(deadline, 1);
 }
 
 /* poll.h. fd 0 with POLLIN waits for a key; fds 1 and 2 are always ready for
@@ -1080,12 +1069,9 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     if (want_key) {
         int got;
         if (ready || timeout == 0) {
-            got = key_waiting();
+            got = key_by(0);
         } else if (timeout < 0) {
-            got = 1;
-            if (!key_waiting()) {
-                g_held_key = (int)(__os_syscall1(SYS_READ_CHAR, 0) & 0xff);
-            }
+            got = key_by(~0UL);
         } else {
             got = key_until(now_us() + (unsigned long)timeout * 1000UL);
         }
@@ -1104,10 +1090,7 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         if (timeout < 0) {
             return client_fail(EINVAL);
         }
-        unsigned long deadline = now_us() + (unsigned long)timeout * 1000UL;
-        while (now_us() < deadline) {
-            __os_syscall1(SYS_YIELD, 0);
-        }
+        spin_until(now_us() + (unsigned long)timeout * 1000UL, 0);
     }
     return ready;
 }
@@ -1194,13 +1177,7 @@ int tcsetattr(int fd, int optional_actions, const struct termios *t) {
     }
     unsigned long want = (t->c_lflag & ISIG) ? KBD_COOKED : KBD_RAW;
     unsigned long now;
-    if (kbd_mode(want | (optional_actions == TCSAFLUSH ? KBD_FLUSH : 0), &now) < 0) {
-        return -1;
-    }
-    if (optional_actions == TCSAFLUSH) {
-        g_held_key = -1; /* typed ahead too: poll took it, nobody read it */
-    }
-    return 0;
+    return kbd_mode(want | (optional_actions == TCSAFLUSH ? KBD_FLUSH : 0), &now);
 }
 
 /* ---- read / write -------------------------------------------------------- */
@@ -1277,11 +1254,6 @@ ssize_t read(int fd, void *buf, size_t count) {
         }
         /* The stdin/stdout tie: show the prompt before waiting for the answer. */
         out_flush();
-        if (g_held_key >= 0) {
-            ((unsigned char *)buf)[0] = (unsigned char)g_held_key;
-            g_held_key = -1;
-            return 1;
-        }
         long c = __os_syscall1(SYS_READ_CHAR, 0);
         ((unsigned char *)buf)[0] = (unsigned char)c;
         return 1;

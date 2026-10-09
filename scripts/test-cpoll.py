@@ -18,6 +18,12 @@ line:
    the timeout -1 wait and the read after it returns 120; `y` typed a second
    into the 3000 ms wait returns 121 in time.
 
+3. **`cpoll key`, then**: `z` typed during a sleep, and a poll of fds 0
+   and 1 together must answer fd 0 POLLIN beside the ready fd 1.
+4. **`cpoll leave`**: it polls, sees `e`, and exits without reading; the
+   shell must still get the `e` (`cho kq` typed next runs `echo kq`), since
+   poll leaves the key in the kernel's queue.
+
 QEMU's own trace must hold no fault line. About a minute. Run it whenever
 libc's poll, <poll.h> or the read of fd 0 changes.
 """
@@ -67,8 +73,27 @@ def main() -> int:
             if ok:
                 time.sleep(1.0)
                 type_raw(guest, b"y")
+                ok = guest.wait_for("cpoll: type now")
+            if ok:
+                time.sleep(0.5)
+                type_raw(guest, b"z")
                 ok = guest.wait_for(PROMPT, timeout=30)
             seg["key"] = guest.transcript()[start:]
+        if ok:
+            # A key poll saw, and the program exited without reading: it is
+            # still the shell's. `e` typed into the poll, the rest of the
+            # line after the prompt; `echo kq` runs only if the `e` was kept.
+            start = len(guest.transcript())
+            guest.type_line("cpoll leave")
+            ok = guest.wait_for("cpoll: leave waiting")
+            if ok:
+                time.sleep(0.5)
+                type_raw(guest, b"e")
+                ok = guest.wait_for(r"cpoll: leave 1[\s\S]*" + PROMPT, timeout=30)
+            if ok:
+                guest.type_line("cho kq")
+                ok = guest.wait_for(PROMPT)
+            seg["leave"] = guest.transcript()[start:]
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -96,6 +121,10 @@ def main() -> int:
         ("fd 1 flushed before the wait (`cpoll: waiting` shown)", "cpoll: waiting" in key),
         ("a key ends the -1 wait, and read returns it", "cpoll: key 120" in key),
         ("a key typed into the 3000 ms wait is read in time", "cpoll: key 121 in time" in key),
+        ("a key typed before a poll of fds 0 and 1 is answered POLLIN beside fd 1",
+         "cpoll: both-typed 2 key=1 out=4" in key),
+        ("a key poll saw, left unread at exit, reaches the shell (`kq`)",
+         "kq" in [l.strip() for l in seg.get("leave", "").splitlines()]),
         ("no fault lines", faults == 0),
     ]
     if wait or sleep:

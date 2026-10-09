@@ -247,6 +247,27 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
 /// because the read runs with interrupts masked.
 const READ_DROPPED_MAX: usize = keyseq::QUEUE_LEN;
 
+/// Whether a key is queued for `reader`, the keyboard owner, without taking
+/// it: what waits on the devices is read into the queue (a byte at a time,
+/// as a read does, past bytes the queue drops) until one is there. For
+/// `KEY_WAIT_UNTIL`, C's `poll`.
+pub(crate) fn keyboard_key_waiting(reader: usize) -> bool {
+    if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
+        return false;
+    }
+    for _ in 0..READ_DROPPED_MAX {
+        // SAFETY: as in poll_keyboard_byte.
+        if !unsafe { (*KBD_QUEUE.get()).is_empty() } {
+            return true;
+        }
+        if take_one(false) != Took::Byte {
+            return false;
+        }
+    }
+    // SAFETY: as in poll_keyboard_byte.
+    !unsafe { (*KBD_QUEUE.get()).is_empty() }
+}
+
 /// The next byte from a keyboard device, and whether it came from the USB
 /// keyboard: the byte-stream console first, then the USB keyboard's queue,
 /// except inside a USB key, whose rest is taken from the USB keyboard
@@ -820,16 +841,18 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         // is what makes that possible; every other arm above ignores it.
         syscall_abi::READ_CHAR => match poll_keyboard_byte(tasks::current_task()) {
             Some(byte) => byte as u64,
-            None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard { until_us: 0 }) },
+            None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard) },
         },
-        syscall_abi::READ_CHAR_UNTIL => match poll_keyboard_byte(tasks::current_task()) {
+        syscall_abi::KEY_WAIT_UNTIL => {
             // arg0 = the deadline, on MONOTONIC_US's clock. See the ABI doc.
-            Some(byte) => byte as u64,
-            None if tasks::keyboard_deadline_near(arg0) => syscall_abi::NO_CHAR,
-            None => unsafe {
-                tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard { until_us: arg0 })
-            },
-        },
+            if keyboard_key_waiting(tasks::current_task()) {
+                1
+            } else if tasks::keyboard_deadline_near(arg0) {
+                syscall_abi::NO_CHAR
+            } else {
+                unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::KeyWait { until_us: arg0 }) }
+            }
+        }
         syscall_abi::PUTC => {
             console::putc(arg0 as u8);
             0
