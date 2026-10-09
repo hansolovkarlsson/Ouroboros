@@ -54,7 +54,7 @@ set; roadmap arcs are cited by their `ROADMAP.md` section.
 | Time | ◐ | `GET_TICKS` (20 ms tick) + `MONOTONIC_US` (µs since boot). **No wall-clock/RTC** (no real date). |
 | Namespaces / `bind` | ✅ | `NS_SET`/`GET_NS` — per-task Plan 9 namespaces, inherited at spawn. Ahead of most Unixes here. |
 | Memory / `brk`/`mmap` | ◐ | A fixed raw heap area (`HEAP_INFO`), no `sbrk` growth, no `mmap`. |
-| `ioctl`, `fcntl`, `poll`/`select` (general) | ✗ | No general fd-control or multiplexing syscalls; `NET_WAIT` is a *netd-only* two-source wait, not a general `poll`. The C library's `ioctl` answers one request, `TIOCGWINSZ` (the console's size, 2026-10-07), and nothing else. `tcgetattr`/`tcsetattr` exist since 2026-10-08, with one flag that acts (`ISIG`, raw keyboard mode); the rest of `<termios.h>` (speeds, `tcflush`, `tcdrain`) is absent. |
+| `ioctl`, `fcntl`, `poll`/`select` (general) | ✗ | No general fd-control or multiplexing syscalls; `NET_WAIT` is a *netd-only* two-source wait, not a general `poll`. The C library's `ioctl` answers one request, `TIOCGWINSZ` (the console's size, 2026-10-07), and nothing else. `tcgetattr`/`tcsetattr` exist since 2026-10-08, with one flag that acts (`ISIG`, raw keyboard mode); the rest of `<termios.h>` (speeds, `tcflush`, `tcdrain`) is absent. `poll` exists since 2026-10-08: fd 0 waits for a key with a timeout (to a tick's precision, for Edit), fds 0 to 2 are ready for `POLLOUT`, a file on a filesystem is ready, a `/net` file is `POLLERR`, and only a closed fd is `POLLNVAL`; there is no `select`, and a wait on anything but the keyboard and the clock (a pipe, a socket) is not possible. |
 
 ## 3. Filesystem, VFS & file handles
 

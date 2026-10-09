@@ -223,22 +223,11 @@ fn con_access_allowed() -> bool {
 /// it without closing it. A byte's meaning is settled when it is read, under
 /// the owner and keyboard mode of that moment, and is not judged again.
 pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
-    if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
+    if !keyboard_key_waiting(reader) {
         return None;
     }
-    for _ in 0..READ_DROPPED_MAX {
-        // SAFETY: the synccell argument (one core, interrupts masked in EL1).
-        if let Some(byte) = unsafe { (*KBD_QUEUE.get()).pop() } {
-            return Some(byte);
-        }
-        // The boot shell reading its line has nothing to interrupt: its
-        // Ctrl+C is a byte the line editor ignores, not a flush that would
-        // lose keys typed just before it (test-kbd-mode's `ef` check).
-        if take_one(false) != Took::Byte {
-            return None;
-        }
-    }
-    None
+    // SAFETY: the synccell argument (one core, interrupts masked in EL1).
+    unsafe { (*KBD_QUEUE.get()).pop() }
 }
 
 /// How many bytes one read may take from the devices before it answers
@@ -246,6 +235,45 @@ pub(crate) fn poll_keyboard_byte(reader: usize) -> Option<u8> {
 /// which for a long CSI from a host terminal can run past a dozen), a bound
 /// because the read runs with interrupts masked.
 const READ_DROPPED_MAX: usize = keyseq::QUEUE_LEN;
+
+/// Whether a key is queued for `reader` without taking it, and the one place
+/// the keyboard owner rule is enforced for a read: `reader` must own the
+/// keyboard and not be marked for the kill. What waits on the devices is read
+/// into the queue a byte at a time until one is there, past bytes the queue
+/// drops (a cut key's rest), not everything waiting. The boot shell reading
+/// its line has nothing to interrupt: its Ctrl+C is a byte the line editor
+/// ignores, not a flush that would lose keys typed just before it
+/// (test-kbd-mode's `ef` check). [`poll_keyboard_byte`] is this and a pop;
+/// `KEY_WAIT_UNTIL` (C's `poll`) is this alone.
+pub(crate) fn keyboard_key_waiting(reader: usize) -> bool {
+    if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
+        return false;
+    }
+    for _ in 0..READ_DROPPED_MAX {
+        // SAFETY: the synccell argument (one core, interrupts masked in EL1).
+        if !unsafe { (*KBD_QUEUE.get()).is_empty() } {
+            return true;
+        }
+        if take_one(false) != Took::Byte {
+            return false;
+        }
+    }
+    // SAFETY: as in poll_keyboard_byte.
+    !unsafe { (*KBD_QUEUE.get()).is_empty() }
+}
+
+/// `KEY_WAIT_UNTIL`'s answer for `task` with deadline `until_us`, the same at
+/// the call and at every wake-check: `Some(1)` when a key is waiting,
+/// `Some(0)` once the deadline is reached, `None` to keep waiting.
+pub(crate) fn key_wait_answer(task: usize, until_us: u64) -> Option<u64> {
+    if keyboard_key_waiting(task) {
+        Some(1)
+    } else if crate::timer::monotonic_us() >= until_us {
+        Some(0)
+    } else {
+        None
+    }
+}
 
 /// The next byte from a keyboard device, and whether it came from the USB
 /// keyboard: the byte-stream console first, then the USB keyboard's queue,
@@ -822,6 +850,19 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             Some(byte) => byte as u64,
             None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard) },
         },
+        syscall_abi::SLEEP_UNTIL => {
+            // arg0 = the deadline, on MONOTONIC_US's clock. See the ABI doc.
+            if crate::timer::monotonic_us() >= arg0 {
+                0
+            } else {
+                unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Sleep { until_us: arg0 }) }
+            }
+        }
+        syscall_abi::KEY_WAIT_UNTIL => match key_wait_answer(tasks::current_task(), arg0) {
+            // arg0 = the deadline, on MONOTONIC_US's clock. See the ABI doc.
+            Some(answer) => answer,
+            None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::KeyWait { until_us: arg0 }) },
+        },
         syscall_abi::PUTC => {
             console::putc(arg0 as u8);
             0
@@ -891,16 +932,8 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             0
         }
         syscall_abi::GET_TICKS => exceptions::ticks(),
-        syscall_abi::MONOTONIC_US => {
-            // Microseconds since boot from the generic timer's free-running
-            // counter, computed overflow-safe (a naive now_ticks * 1_000_000
-            // overflows a u64 in a few days at 62.5 MHz): split into whole
-            // seconds plus the sub-second remainder. Pure system-register
-            // reads (no GIC, no interrupts) - see timer.rs.
-            let freq = crate::timer::frequency_hz();
-            let ticks = crate::timer::now_ticks();
-            (ticks / freq) * 1_000_000 + ((ticks % freq) * 1_000_000) / freq
-        }
+        // Microseconds since boot: see timer::monotonic_us.
+        syscall_abi::MONOTONIC_US => crate::timer::monotonic_us(),
         syscall_abi::SPAWN => spawn_staged(arg0, arg1, arg2, arg3),
         syscall_abi::CWD_STAGE => {
             // arg0 = cwd pointer, arg1 = length. Copies the working-directory

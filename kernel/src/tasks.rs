@@ -1836,7 +1836,22 @@ pub(crate) fn safecopy(
 /// `Option<u64>` (the value to hand back to the task once it's ready).
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum WaitReason {
+    /// Waiting for a key (`READ_CHAR`), which the wake consumes.
     Keyboard,
+    /// Waiting until a key is queued for the task, without taking it
+    /// (`KEY_WAIT_UNTIL`, for C's `poll`): the next read takes it from the
+    /// kernel's queue as any read does, so a program that exits without
+    /// reading leaves the key for the next owner (the review of #240: an
+    /// earlier form took the key into the program, where it died with it).
+    /// `until_us` is a deadline on `MONOTONIC_US`'s clock, ended at the first
+    /// look at or after it, so to a tick's precision; `u64::MAX` waits for
+    /// good.
+    KeyWait { until_us: u64 },
+    /// Waiting for a time and nothing else (`SLEEP_UNTIL`, for C's `poll`
+    /// with nothing it can wait on): ends at the first look at or after
+    /// `until_us` (`MONOTONIC_US`'s clock; `u64::MAX` for good, ended only by
+    /// a kill), blocked rather than spinning.
+    Sleep { until_us: u64 },
     /// Waiting for the task at this slot index to die (`WAIT` syscall).
     /// Satisfied by the target reaching `Zombie` (the poll *reaps* it -
     /// collecting the status is what frees the slot) or `Unused` (it
@@ -1873,6 +1888,8 @@ impl WaitReason {
     fn poll(self, waiter: usize) -> Option<u64> {
         match self {
             WaitReason::Keyboard => crate::syscall::poll_keyboard_byte(waiter).map(u64::from),
+            WaitReason::KeyWait { until_us } => crate::syscall::key_wait_answer(waiter, until_us),
+            WaitReason::Sleep { until_us } => (crate::timer::monotonic_us() >= until_us).then_some(0),
             WaitReason::TaskExit(target) => {
                 // A wait must stay interruptible or one `wait` on a
                 // never-exiting task bricks the whole session (the
@@ -2877,7 +2894,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
                 TaskState::Blocked(WaitReason::NetInput { deadline }) => {
                     crate::console::println!("Ouroboros kernel:   it was blocked on network input (deadline {deadline})")
                 }
-                TaskState::Blocked(WaitReason::Keyboard) => {
+                TaskState::Blocked(WaitReason::Keyboard | WaitReason::KeyWait { .. }) => {
                     crate::console::println!("Ouroboros kernel:   it was blocked on the keyboard")
                 }
                 _ => {}

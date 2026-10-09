@@ -61,6 +61,17 @@ pub(crate) fn now_ticks() -> u64 {
     ticks
 }
 
+/// Microseconds since boot from the free-running counter, computed
+/// overflow-safe (a naive `now_ticks() * 1_000_000` overflows a u64 in a few
+/// days at 62.5 MHz): whole seconds plus the sub-second remainder. The one
+/// spelling of the clock `MONOTONIC_US` answers and `KEY_WAIT_UNTIL`'s
+/// deadline is in.
+pub(crate) fn monotonic_us() -> u64 {
+    let freq = frequency_hz();
+    let ticks = now_ticks();
+    (ticks / freq) * 1_000_000 + ((ticks % freq) * 1_000_000) / freq
+}
+
 /// Arms the timer to fire once, `interval_ms` milliseconds from now.
 /// Re-arming (calling this again) is how a periodic tick is built — see
 /// the IRQ handler in `exceptions.rs`, which calls this again each time the

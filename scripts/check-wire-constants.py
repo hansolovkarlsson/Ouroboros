@@ -447,7 +447,7 @@ PEER_BASELINE = {
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 66,  # counted 2026-10-08 (run, not added up): 66 with KBD_FLUSH for TCSAFLUSH; 65 with the four KBD_* names for termios; 61 on 2026-10-07 with CON_INFO_COLS and CON_INFO_ROWS for ioctl's TIOCGWINSZ; 59 on 2026-10-05 with ENV_MAX for crt0's environ; 58 with NO_ARG and ARGV_MAX for crt0's argv; 56 with fstat's six STAT_* names; 50 with NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
+    "libc/include/sys.h": 66,  # counted 2026-10-08 (run, not added up): 66 with KBD_FLUSH for TCSAFLUSH (NO_CHAR, mirrored for poll's first form, dropped again); 65 with the four KBD_* names for termios; 61 on 2026-10-07 with CON_INFO_COLS and CON_INFO_ROWS for ioctl's TIOCGWINSZ; 59 on 2026-10-05 with ENV_MAX for crt0's environ; 58 with NO_ARG and ARGV_MAX for crt0's argv; 56 with fstat's six STAT_* names; 50 with NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 
@@ -628,7 +628,7 @@ def check_fid_gate_budget(problems, rust):
 # unchecked: a wrong number there makes crt0 call another syscall at the start
 # of every C program, and only a booted rig would see it. A floor, as for the
 # peers, so a header reformatted out of the parser's reach is not a pass.
-SYSCALL_BASELINE = 18  # counted 2026-10-08 (run): 18 with KBD_MODE for termios (and CON_INFO, for ioctl, whose floor had not moved); 16 on 2026-10-06: PUTC to GET_ENV, with MONOTONIC_US for the C clock
+SYSCALL_BASELINE = 20  # counted 2026-10-08 (run): 20 with SLEEP_UNTIL for poll's sleep; 19 with KEY_WAIT_UNTIL for poll (TRY_READ_CHAR, mirrored for poll's first form, dropped again); 18 with KBD_MODE for termios (and CON_INFO, for ioctl, whose floor had not moved); 16 on 2026-10-06: PUTC to GET_ENV, with MONOTONIC_US for the C clock
 
 
 def check_syscall_numbers(problems, rust, origin, header):

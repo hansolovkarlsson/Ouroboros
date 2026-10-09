@@ -73,6 +73,31 @@ pub const GET_TICKS: u64 = 6;
 /// task 0 on the owner's death).
 pub const READ_CHAR: u64 = 15;
 
+/// `(deadline_us)` -> `1` when a key is waiting for the caller, or `0` when
+/// the deadline, on [`MONOTONIC_US`]'s clock, is reached first; `u64::MAX`
+/// waits for good, and a past deadline answers at once. (`u64::MAX` is the
+/// answer of a kernel without this call, so a caller can tell.) The key is
+/// NOT taken: it stays in the kernel's queue for the next [`READ_CHAR`] or
+/// [`TRY_READ_CHAR`], so a program that waits and exits without reading leaves
+/// it for the next owner. For C's `poll`. Blocking, like [`READ_CHAR`]: the
+/// caller is suspended, not spinning, and a blocked task is looked at once a
+/// tick (the timer's `TICK_INTERVAL_MS`), so the wait ends at the first look
+/// at or after the deadline: to a tick's precision, later when a tick is
+/// delayed or another task is busy (settled by Hans 2026-10-08, against a
+/// userland spin for the last stretch that would have burned the core). The
+/// keyboard owner rule is [`READ_CHAR`]'s: a caller that does not own the
+/// keyboard is answered `0` at the deadline.
+pub const KEY_WAIT_UNTIL: u64 = 71;
+
+/// `(deadline_us)` -> `0` once the deadline, on [`MONOTONIC_US`]'s clock, is
+/// reached; `u64::MAX` sleeps for good (a kill, Ctrl+C or Ctrl+\ in the
+/// foreground, still ends the task). Blocking, not spinning, and to a tick's
+/// precision, as [`KEY_WAIT_UNTIL`]. For C's `poll` with nothing it can wait
+/// on: `poll(NULL, 0, ms)` as a sleep, and a `poll(..., -1)` with nothing
+/// waitable, which POSIX has block (its first form spun on the clock, or
+/// refused -1; the fourth high review of #240).
+pub const SLEEP_UNTIL: u64 = 72;
+
 /// `(total staged length, stdout target, argv blob length)` -> **the new
 /// task's slot index** on success (needed to wait on, send to, or kill what
 /// was just started - the shell's pipeline flow does all three), [`SPAWN_ERROR`]
