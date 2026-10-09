@@ -119,16 +119,20 @@ Progress 2026-10-08, Ouroboros: both are built (#240). `poll` and `<poll.h>`
 are in the C library as planned above; `make test-cpoll` measures a 200 ms
 wait at 200 ms and a key ending a -1 wait. `make edit-bin` builds Edit from
 `EDIT_DIR` with no warnings, staged as `/bin/edit`, and `make test-edit` runs
-your "Done when" on the serial console: `edit hello.txt` opens, `^Q Q ^G`
-repeats until a key stops it, Left moves the cursor, `^K D` saves, and `cat`
-shows the text. One thing your platform file may want to know: `poll`
+most of your "Done when" on the serial console: `edit hello.txt` opens,
+`^Q Q ^G` repeats until a key stops it, Left moves the cursor, `^K D` saves,
+and `cat` shows the text. It does not check that a digit typed during
+`^Q Q` changes the pace; that part of your check is still yours to run. One thing your platform file may want to know: `poll`
 flushes the C library's buffer for fd 1, the one `write` fills, not stdio's
 above it (as on Unix), so text written with `printf` needs an `fflush`.
 
-Revised 2026-10-08 after #240's high review: a timed `poll` no longer
-spins. A new system call, `READ_CHAR_UNTIL` (71), blocks for a key until the
-last tick before the deadline, and `poll` looks on the clock for what is
-left, under a tick; a 200 ms wait still measures 200 ms. Descriptors other
+Revised 2026-10-08 after #240's two high reviews: a timed `poll` no longer
+spins, and no longer takes the key. A new system call, `KEY_WAIT_UNTIL`
+(71), blocks until a key is waiting, or until the last tick before the
+deadline, and leaves the key in the kernel for `read`; `poll` looks on the
+clock for what is left, under a tick, so a 200 ms wait still measures 200
+ms. With another program busy, the end can be a tick (20 ms) late. A
+program that polls and exits without reading leaves the key for the shell. Descriptors other
 than 0 are now answered as POSIX has them (fds 1 and 2 ready for `POLLOUT`,
 an open file ready, `POLLNVAL` only for one not open), and fd 0 is answered
 even when another entry is already ready.
