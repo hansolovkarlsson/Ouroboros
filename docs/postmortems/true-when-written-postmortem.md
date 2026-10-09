@@ -1,9 +1,14 @@
 # True when written
 
-*A process retrospective — the twenty-ninth — covering 2026-09-03. Five PRs, no
-new subsystem, and four defects that were all the same defect: a statement that
-was correct on the day someone typed it, and stopped being correct without
-anyone touching the file it lived in.*
+*A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
+through 2026-10-09. Five PRs, no new subsystem, and four defects that were all
+the same defect: a statement that was correct on the day someone typed it, and
+stopped being correct without anyone touching the file it lived in. The later
+sections, each dated, add the variants found since: claims false on arrival, a
+duplicated constant guarded by a comment, a claim of unreachability that
+removed its own test, an authority that was already wrong, a diagnosis written
+before its dump was read, a comment that named its own expiry, and a limit's
+"unreachable" made false by globbing.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the

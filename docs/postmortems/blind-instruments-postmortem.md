@@ -1,8 +1,13 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02. A day of small roadmap items — five PRs,
-one release, no arc — during which five separate tools reported success while
-proving nothing.*
+*A process retrospective, 2026-09-02, extended through 2026-10-09. It began
+with a day of small roadmap items (five PRs, one release, no arc) during which
+five separate tools reported success while proving nothing. Every later day
+that found another instrument of the same kind added a dated section after
+"What shipped": test rigs, mutation harnesses, gate hints, firmware dumps read
+off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
+stale-image guard and the four blind spots in the guard that replaced it. The
+spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
