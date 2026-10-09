@@ -926,7 +926,7 @@ fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<Di
             // or a chained-cpu child) before this frame. So a mount reaching
             // here is top-level, and its park is driven by the serve loop.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            if let Some(rlen) = handle_rmount(packed_mac, buf, len, sessions, remotes, &mut r, auth) {
+            if let Some(rlen) = handle_rmount(packed_mac, call, buf, len, sessions, remotes, &mut r, auth) {
                 reply(call, &r[..rlen]);
             }
         }
@@ -939,7 +939,7 @@ fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<Di
             // imported-namespace callbacks - its `/host` reads come back to our
             // own export - without any of the re-entrant pumping `tcp_run` did.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            if let Some(rlen) = park_run(packed_mac, buf, len, &mut r, remotes, auth, pending) {
+            if let Some(rlen) = park_run(packed_mac, call, buf, len, &mut r, remotes, auth, pending) {
                 reply(call, &r[..rlen]);
             }
         }
@@ -992,7 +992,9 @@ fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<Di
         }
         // Unknown op (including the supervisor's health-ping): any reply acks
         // it. The value is irrelevant to the ping sentinel.
-        _ => reply(call, &0u64.to_le_bytes()),
+        _ => {
+            reply(call, &0u64.to_le_bytes());
+        }
     }
 }
 
@@ -1516,13 +1518,12 @@ impl PendingRun {
 /// The step-1 lesson ("each branch holds its own buffers in its OWN frame")
 /// is about SIBLINGS, not about depth in general.
 #[allow(clippy::too_many_arguments)]
-fn park_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], auth: &Auth, pending: &mut PendingRun) -> Option<usize> {
+fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], auth: &Auth, pending: &mut PendingRun) -> Option<usize> {
     // Captured before any receive: an unfiltered receive replaces the captured
     // sender, so reading this later could name whoever's message was drained
     // last. Nothing here receives any more, but the ordering rule stands and
     // is cheaper to keep than to re-derive.
     let owner = syscall(syscall_abi::SENDER_TASK, 0);
-    let call = syscall(syscall_abi::SENDER_CALL, 0);
     let fail = |out: &mut [u8], msg: &[u8]| -> Option<usize> {
         let n = msg.len().min(out.len());
         out[..n].copy_from_slice(&msg[..n]);
@@ -1827,7 +1828,8 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
 /// not - since #147 that drain refuses every identified sender with
 /// `FS_ERR_BUSY` before `handle_client`'s frame is built.)
 #[inline(never)]
-fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], out: &mut [u8], auth: &Auth) -> Option<usize> {
+#[allow(clippy::too_many_arguments)]
+fn handle_rmount(packed_mac: u64, call: u64, buf: &[u8], len: usize, sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], out: &mut [u8], auth: &Auth) -> Option<usize> {
     // A bare-status failure reply the shell surfaces cleanly. `st` distinguishes
     // an unreachable peer (NO_FS) from an auth failure (FS_ERR_AUTH).
     let fail = |out: &mut [u8], st: u64| -> Option<usize> {
@@ -1860,8 +1862,6 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, sessions: &mut [Option
     // And the caller's full identity, for a parked reply. Read HERE, before
     // the ARP below receives frames: an unfiltered receive replaces it.
     let caller = syscall(syscall_abi::SENDER_TASK, 0);
-    // And the call it opened, which the parked reply must name.
-    let call = syscall(syscall_abi::SENDER_CALL, 0);
 
     // WHOSE SIGNATURE WILL WE ACCEPT ON THE REPLY? Resolved BEFORE sending, so a
     // stale or missing line for the dialled address refuses the request rather
@@ -2183,11 +2183,13 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
             let n = if verified && np_status == 0 { status_only(&mut r, syscall_abi::FS_ERROR) } else { n };
             reply(parked.call, &r[..n]);
         } else {
-            reply(parked.call, &r[..n]);
+            let heard = reply(parked.call, &r[..n]) != syscall_abi::REPLY_STALE;
             // Refcount the fid this verb made or freed. The NP status is the
-            // reply body's first word.
+            // reply body's first word. An open whose caller left the call
+            // (REPLY_STALE) is not counted: nobody will clunk it, and the far
+            // side drops it with the session once nothing else holds that.
             if verified && np_status < syscall_abi::FS_ERR_MIN {
-                if parked.verb == ninep_abi::NP_OPEN {
+                if parked.verb == ninep_abi::NP_OPEN && heard {
                     c.fids = c.fids.saturating_add(1);
                 } else if parked.verb == ninep_abi::NP_CLUNK {
                     c.fids = c.fids.saturating_sub(1);
@@ -7447,11 +7449,11 @@ fn now() -> u64 {
 /// Traced 2026-09-03 - see docs/ROADMAP.md frontier item 3, where the packet
 /// capture showed every TCP connection healthy and the fault here instead.
 ///
-/// The kernel intercepts a `MSG_SEND` to `KERNEL_SENDER` as an ack before any
+/// The kernel takes a `MSG_REPLY` to `KERNEL_SENDER` as an ack before any
 /// argument validation (syscall.rs), so this needs no buffer and cannot fail;
 /// `note_ack` is a no-op for a task the supervisor does not manage.
 fn heartbeat() {
-    syscall4(syscall_abi::MSG_SEND, syscall_abi::KERNEL_SENDER, 0, 0, 0);
+    syscall4(syscall_abi::MSG_REPLY, syscall_abi::KERNEL_SENDER, 0, 0, 0);
 }
 
 /// A wait loop's per-tick heartbeat: beats at most once per tick (20ms) rather
@@ -7528,13 +7530,15 @@ fn recv(buf: &mut [u8]) -> Option<usize> {
     }
 }
 
-/// Reply to a client `MSG_CALL` (or ack the supervisor ping) with `data`.
+/// Reply to a client `MSG_CALL` (or ack the supervisor ping) with `data`;
+/// answers `MSG_REPLY`'s result, [`syscall_abi::REPLY_STALE`] when the caller
+/// had left the call.
 /// `call` is the handle `SENDER_CALL` gave for the request, read when it was
 /// received; the kernel delivers the reply only while the caller is still in
 /// that call, so a parked answer for a caller that left (Ctrl+C) or died goes
 /// nowhere (`REPLY_STALE`).
-fn reply(call: u64, data: &[u8]) {
-    syscall4(syscall_abi::MSG_REPLY, call, data.as_ptr() as u64, data.len() as u64, 0);
+fn reply(call: u64, data: &[u8]) -> u64 {
+    syscall4(syscall_abi::MSG_REPLY, call, data.as_ptr() as u64, data.len() as u64, 0)
 }
 
 /// Log a decimal number.

@@ -84,13 +84,18 @@ fn main() -> ! {
             break;
         }
         let sender = packed >> 32;
-        let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let reply_len = handle(&mut mounts, &mut fids, sender, &req[..len], &mut reply);
-        // To the call this request opened, delivered only while its caller
-        // is still in it: an answer to a call that is over (cut short, or
-        // its caller dead and the slot refilled) goes nowhere, REPLY_STALE.
+        // The call this request opened, read once, here, before anything
+        // else can receive: the reply and every SAFECOPY name it.
         let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
-        syscall4(syscall_abi::MSG_REPLY, call, reply.as_ptr() as u64, reply_len as u64, 0);
+        let len = ((packed & 0xffff_ffff) as usize).min(req.len());
+        let reply_len = handle(&mut mounts, &mut fids, sender, call, &req[..len], &mut reply);
+        // Delivered only while the caller is still in the call: an answer to
+        // a call that is over (cut short, or its caller dead and the slot
+        // refilled) goes nowhere, REPLY_STALE, and a fid it carried is freed.
+        let r = syscall4(syscall_abi::MSG_REPLY, call, reply.as_ptr() as u64, reply_len as u64, 0);
+        if r == syscall_abi::REPLY_STALE {
+            forget_unheard_fid(&mut fids, &req[..len], &reply[..reply_len]);
+        }
     }
     loop {
         core::hint::spin_loop();
@@ -380,7 +385,7 @@ impl Fid {
 /// ops (`NP_READ`/`NP_WRITE`/`NP_WRITE_AT`) to `SAFECOPY` against the client's
 /// grant (they move their data directly between task regions rather than inline
 /// in the reply).
-fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, call: u64, req: &[u8], reply: &mut [u8]) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -406,7 +411,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         // slot can never be passed where an identity belongs. Read here rather
         // than beside `who`: the FSOP_* control ops below never need it.
         let owner = syscall4(syscall_abi::SENDER_TASK, 0, 0, 0, 0);
-        return handle_ninep(mounts, fids, owner, who, op, req, reply);
+        return handle_ninep(mounts, fids, owner, call, who, op, req, reply);
     }
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
 
@@ -551,11 +556,9 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
 /// namespace resolves it to a real mount in a later step.
 ///
 /// [`NP_REQ_PAYLOAD`]: ninep_abi::NP_REQ_PAYLOAD
-fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], owner: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
+#[allow(clippy::too_many_arguments)]
+fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], owner: u64, call: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
     const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
-    // The call this request opened: what a SAFECOPY names, so a copy reaches
-    // only the grant of a caller still blocked in THIS call.
-    let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
     if req.len() < NP_HDR {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -570,7 +573,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
         verb,
         ninep_abi::NP_PREAD | ninep_abi::NP_PWRITE | ninep_abi::NP_FSTAT | ninep_abi::NP_CLUNK
     ) {
-        return handle_fid_op(mounts, fids, owner, who, verb, &p, reply);
+        return handle_fid_op(mounts, fids, owner, call, who, verb, &p, reply);
     }
     // The `tree` selector picks which mount (cluster Phase 0 multi-mount); an
     // out-of-range tree is a client bug. An unmounted tree replies NO_FS.
@@ -904,6 +907,22 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
 /// A free index in the fid table, or `None` if it is full even after reaping
 /// fids whose owner is gone. Only finds the slot; `NP_OPEN` fills it, after its
 /// side effects, so that a refusal here happens before them.
+/// The answer to an `NP_OPEN` whose caller left the call (`MSG_REPLY`
+/// answered `REPLY_STALE`: cut short by Ctrl+C, or its caller dead) carried
+/// a fid nobody will learn, so nobody will clunk it: freed here. Every other
+/// verb's answer leaves nothing behind.
+fn forget_unheard_fid(fids: &mut [Fid; MAX_FIDS], req: &[u8], reply: &[u8]) {
+    if req.len() < 8 || reply.len() < 8 || read_u64(req, 0) != ninep_abi::NP_OPEN {
+        return;
+    }
+    let fid = read_u64(reply, 0);
+    if (FID_BASE..syscall_abi::FS_ERR_MIN).contains(&fid) {
+        if let Some(f) = fids.get_mut((fid - FID_BASE) as usize) {
+            *f = Fid::empty();
+        }
+    }
+}
+
 fn free_fid_slot(fids: &mut [Fid; MAX_FIDS]) -> Option<usize> {
     let mut slot = fids.iter().position(|f| !f.used);
     if slot.is_none() {
@@ -950,10 +969,12 @@ fn reap_dead_fids(fids: &mut [Fid; MAX_FIDS]) {
 /// mount, then read/write/stat/clunk. No per-op permission check - authorized at
 /// open. `owner` is the sender's packed identity, what a fid is owned by; the
 /// slot a grant is looked up by is derived from it.
+#[allow(clippy::too_many_arguments)]
 fn handle_fid_op(
     mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS],
     fids: &mut [Fid; MAX_FIDS],
     owner: u64,
+    call: u64,
     who: Option<Caller>,
     verb: u64,
     p: &[u64; 4],
@@ -968,7 +989,6 @@ fn handle_fid_op(
         return status_reply(reply, syscall_abi::FS_ERROR); // bad or not-yours
     }
     let sender = syscall_abi::task_id_slot(owner);
-    let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
     // ...and, from `netd`, asked for by the same USER, for every verb with
     // NP_CLUNK included: see Fid::owner_uid. A mismatch refuses and KEEPS the
     // fid - the owner is still using it, and the asker was never entitled to

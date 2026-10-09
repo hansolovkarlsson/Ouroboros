@@ -247,8 +247,10 @@ old request reach the buffer the shell had granted for the next. A reply now
 names the call it answers: a server reads the call's handle with a new
 system call, `SENDER_CALL` (74), and answers with another, `MSG_REPLY` (73),
 which the kernel delivers only while the caller is still in that call;
-`SAFECOPY` takes the same handle, and a plain `MSG_SEND` is never taken as a
-reply. Every server answers this way, and the same rule closes an older case:
+`SAFECOPY` takes the same handle, and a plain `MSG_SEND`, from the server or
+anyone else, never completes a call (it waits in the mailbox). A server told
+the caller has left frees what it made for it: `fsd` the fid of an open, and
+`netd` does not count it in its session. Every server answers this way, and the same rule closes an older case:
 a caller killed mid-call whose slot was already refilled by a task calling
 the same server no longer receives the dead caller's answer. Two forms came
 first and were reviewed out: a call's wait that ignored Ctrl+C (a `cpu`

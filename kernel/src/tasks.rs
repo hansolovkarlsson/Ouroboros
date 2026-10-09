@@ -924,8 +924,10 @@ fn cred_of(task: usize) -> Cred {
     Cred { id: id_of(task), task: task_id_of(task).unwrap_or(0), call: 0, groups, n_groups: n as u8, present: true }
 }
 
-/// The call each task is making: the number of its latest `MSG_CALL`, from a
-/// boot-wide counter that never repeats ([`NEXT_CALL`]). A reply names the
+/// The call each task is making: the number of its `MSG_CALL` in progress,
+/// from a boot-wide counter that never repeats ([`NEXT_CALL`]), and 0 once
+/// the call is over (answered, cut short by an interrupt, failed by its
+/// server's death, or its task dead). A reply names the
 /// call it answers by this number (the handle in [`Cred::call`]), and is
 /// delivered only while its task is still blocked in that call
 /// ([`reply_target`]). So the answer to a call the caller left (the boot
@@ -1040,7 +1042,10 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8], call: u64) -
     if let TaskState::Blocked(WaitReason::Message { buf, len, from }) =
         unsafe { *STATES[dest].get() }
     {
-        if from.is_none() || from == Some(sender) {
+        // Only a plain receive takes a send directly. A task in a call
+        // (`from` set) takes nothing but the reply naming that call
+        // (`deliver_reply`); a send to it waits in its mailbox.
+        if from.is_none() {
             let copy_len = data.len().min(len as usize);
             let dst = buf as *mut u8;
             for (i, &b) in data[..copy_len].iter().enumerate() {
@@ -1053,9 +1058,7 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8], call: u64) -
             // No Message exists on this path, so the credential goes straight
             // into the receiver's cell - captured here, at send time, which is
             // the same instant it would have been captured into the queue.
-            if from.is_none() {
-                record_sender_cred(dest, Cred { call, ..cred_of(sender) });
-            }
+            record_sender_cred(dest, Cred { call, ..cred_of(sender) });
             unsafe { *STATES[dest].get() = TaskState::Runnable };
             return 0;
         }
@@ -1088,57 +1091,49 @@ pub(crate) fn send_message(sender: usize, dest: usize, data: &[u8], call: u64) -
 /// copy - single address space, the same trust model as every `fs_*`
 /// buffer), returning the packed `(sender << 32) | copied_len` the
 /// receive syscalls hand to userland - or `None` if the mailbox is
-/// empty. The unfiltered form of [`try_recv_message_from`].
+/// empty. The message's captured credential (and call handle) becomes
+/// `task`'s, for `SENDER_ID`/`SENDER_TASK`/`SENDER_CALL`: every message
+/// taken here is a request or a plain send. A reply is never queued (it is
+/// delivered straight into the waiting call, [`deliver_reply`]), so a
+/// server that calls another server mid-request (logs to `cond`, reads a
+/// file through `fsd`) keeps the credential it is about to authorize
+/// against.
 pub(crate) fn try_recv_message(task: usize, buf: u64, buf_len: u64) -> Option<u64> {
-    try_recv_message_from(task, buf, buf_len, None)
-}
-
-/// [`try_recv_message`] with an optional sender filter: pops the oldest
-/// queued message *from `from`* (any sender when `None`), leaving
-/// non-matching messages queued in their original order - the selective
-/// receive a call-reply wait needs, so an unrelated task's message
-/// can't be mistaken for the reply. Removal from the middle of the
-/// ring shifts the younger entries down one slot - bounded by the
-/// 4-deep queue, so the cost is irrelevant.
-pub(crate) fn try_recv_message_from(
-    task: usize,
-    buf: u64,
-    buf_len: u64,
-    from: Option<usize>,
-) -> Option<u64> {
     let mailbox = unsafe { &mut *MAILBOXES[task].get() };
-    let mut found = None;
-    for i in 0..mailbox.count {
-        let slot = (mailbox.head + i) % MSG_QUEUE_DEPTH;
-        if from.is_none() || from == Some(mailbox.msgs[slot].sender as usize) {
-            found = Some(i);
-            break;
-        }
+    if mailbox.count == 0 {
+        return None;
     }
-    let i = found?;
-    let msg = mailbox.msgs[(mailbox.head + i) % MSG_QUEUE_DEPTH];
-    for j in i..mailbox.count - 1 {
-        let dst_slot = (mailbox.head + j) % MSG_QUEUE_DEPTH;
-        let src_slot = (mailbox.head + j + 1) % MSG_QUEUE_DEPTH;
-        mailbox.msgs[dst_slot] = mailbox.msgs[src_slot];
-    }
+    let msg = mailbox.msgs[mailbox.head];
+    mailbox.head = (mailbox.head + 1) % MSG_QUEUE_DEPTH;
     mailbox.count -= 1;
     let copy_len = (msg.len as u64).min(buf_len) as usize;
     let dst = buf as *mut u8;
     for (k, &b) in msg.data[..copy_len].iter().enumerate() {
         unsafe { core::ptr::write_volatile(dst.add(k), b) };
     }
-    // Only an UNFILTERED receive updates the captured credential. A filtered
-    // one is a `MSG_CALL` collecting the reply to a request this task made
-    // itself, and letting that overwrite the cell would be a live footgun: a
-    // server that logs to `cond` or reads a file through `fsd` mid-request
-    // would silently start authorizing against the credential of the server it
-    // just called. A request always arrives on an unfiltered receive; a reply
-    // never does.
-    if from.is_none() {
-        record_sender_cred(task, msg.cred);
-    }
+    record_sender_cred(task, msg.cred);
     Some(((msg.sender as u64) << 32) | copy_len as u64)
+}
+
+/// `MSG_REPLY`'s delivery, once [`reply_target`] has found `dest` blocked in
+/// the call the reply names: the bytes go straight into the call's reply
+/// buffer, the packed `(server << 32) | copied_len` into its saved `x0`, and
+/// the call is over ([`CURRENT_CALLS`] cleared). The only way a call is
+/// completed: no `MSG_SEND`, direct or queued, ever is.
+pub(crate) fn deliver_reply(server: usize, dest: usize, data: &[u8]) {
+    let TaskState::Blocked(WaitReason::Message { buf, len, from: Some(_) }) = (unsafe { *STATES[dest].get() }) else {
+        return;
+    };
+    let copy_len = data.len().min(len as usize);
+    let dst = buf as *mut u8;
+    for (i, &b) in data[..copy_len].iter().enumerate() {
+        // SAFETY: the caller validated (buf, len) at its MSG_CALL; single
+        // address space, as in send_message.
+        unsafe { core::ptr::write_volatile(dst.add(i), b) };
+    }
+    unsafe { (*TASKS[dest].get()).gpr[0] = ((server as u64) << 32) | copy_len as u64 };
+    CURRENT_CALLS[dest].store(0, Ordering::Relaxed);
+    unsafe { *STATES[dest].get() = TaskState::Runnable };
 }
 
 /// A dead task's queued mail dies with it - called from both teardown
@@ -1970,14 +1965,20 @@ impl WaitReason {
                 // (or a call to a wedged server) with no reply coming
                 // must not brick the session. Reads ahead rather than
                 // discarding: an editor blocked in `con_write`'s call to the
-                // console server keeps the keys typed meanwhile. A message
-                // already waiting is delivered first, as an ended target is
-                // in TaskExit's arm: the wait is done, and an interrupt
-                // would leave the reply for the next call.
-                if let Some(got) = try_recv_message_from(waiter, buf, len, from) {
-                    return Some(got);
+                // console server keeps the keys typed meanwhile. A plain
+                // receive takes a queued message first. A call's wait takes
+                // nothing here: its reply is delivered straight into it by
+                // `deliver_reply`, never queued, and a queued message from
+                // the server is a send, not the answer. A call cut short is
+                // over (CURRENT_CALLS cleared): its server's late answer
+                // names a call nobody is making.
+                if from.is_none() {
+                    if let Some(got) = try_recv_message(waiter, buf, len) {
+                        return Some(got);
+                    }
                 }
                 if crate::syscall::keyboard_interrupts_wait(waiter) {
+                    CURRENT_CALLS[waiter].store(0, Ordering::Relaxed);
                     return Some(syscall_abi::RECV_INTERRUPTED);
                 }
                 None
@@ -2283,6 +2284,7 @@ fn end_task(i: TaskIndex, final_state: TaskState) {
     free_runtime_region(base, size);
     revert_input_owner_if(i);
     fail_calls_to(i);
+    CURRENT_CALLS[i].store(0, Ordering::Relaxed);
 
     unsafe { *STATES[i].get() = final_state };
     unsafe { *REGIONS[i].get() = (0, 0) };
@@ -2380,6 +2382,7 @@ pub(crate) fn fail_calls_to(dead: usize) {
             unsafe { *STATES[i].get() }
         {
             if target == dead {
+                CURRENT_CALLS[i].store(0, Ordering::Relaxed);
                 unsafe { (*TASKS[i].get()).gpr[0] = syscall_abi::TASK_ERR_NO_SUCH_TASK };
                 unsafe { *STATES[i].get() = TaskState::Runnable };
             }

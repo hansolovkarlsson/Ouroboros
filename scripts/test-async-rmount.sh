@@ -48,7 +48,8 @@
 #   ./scripts/test-async-rmount.sh   # by hand, against build/esp.img
 #
 # Six boots, about a minute each. Not part of `make test` (host only,
-# seconds); run it when netd's client paths or the kernel's send arm change.
+# seconds); run it when netd's client paths or the kernel's reply path
+# (MSG_REPLY, SENDER_CALL, tasks::reply_target) change.
 set -u
 cd "$(dirname "$0")/.."
 IMG=build/esp.img

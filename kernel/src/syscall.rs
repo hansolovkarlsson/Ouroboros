@@ -1459,19 +1459,6 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         }
         syscall_abi::MSG_SEND => {
             let dest = arg0 as usize;
-            // A supervised server's reply to a liveness ping is addressed
-            // to KERNEL_SENDER (the sender the ping was injected under -
-            // see supervisor.rs / syscall-abi's SYSOP_PING). That's not a
-            // real task, so intercept it here, before the buffer/dest
-            // validation below, as the ack: the reply payload is
-            // deliberately ignored (we only care that the server got far
-            // enough around its loop to reply at all). A non-server, or a
-            // server with no ping outstanding, is a harmless no-op inside
-            // note_ack.
-            if arg0 == syscall_abi::KERNEL_SENDER {
-                crate::supervisor::note_ack(tasks::current_task());
-                return 0;
-            }
             // A zero-length message is legal - it's the end-of-stream
             // marker in the shell's pipeline convention (see the
             // MSG_SEND doc in syscall-abi). The pointer must still be
@@ -1480,20 +1467,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             if arg1 == 0 || arg2 > syscall_abi::MSG_MAX_LEN || !in_caller_region(arg1, arg2) {
                 return FS_ERROR;
             }
-            // A destination at or above `1 << TASK_ID_SLOT_BITS` is a packed
-            // task IDENTITY (the word `SENDER_TASK` answers), not a slot:
-            // every generation is at least 1, so no slot number reaches it.
-            // Resolved through `live_occupant`, which refuses once the task
-            // that identity named is gone and its slot holds someone else.
-            // That someone may be blocked calling this very sender, and a
-            // reply the server parked for the previous occupant (netd's async
-            // remote mount, docs/roadmap/roadmap-async-rmount.md) would
-            // otherwise complete the stranger's call with the wrong bytes.
-            let dest_index = if dest >= (1usize << syscall_abi::TASK_ID_SLOT_BITS) {
-                tasks::live_occupant(arg0)
-            } else {
-                tasks::live_index(dest)
-            };
+            // A slot, nothing else: a reply to a call is MSG_REPLY's, and
+            // the supervisor's ack is MSG_REPLY to KERNEL_SENDER (until
+            // 2026-10-09 this arm also took both, the reply as a send to a
+            // packed task identity).
+            let dest_index = tasks::live_index(dest);
             let Some(dest_index) = dest_index else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             };
@@ -1605,7 +1583,11 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         syscall_abi::MSG_REPLY => {
             // arg0 = the call (SENDER_CALL's handle), arg1/arg2 = the reply.
             // The supervisor's ping is answered here too: SENDER_CALL gives
-            // KERNEL_SENDER for it, and the reply is the ack.
+            // KERNEL_SENDER for it, and the reply is the ack (its payload is
+            // ignored: the server got round its loop, which is the point).
+            // netd also sends one unprompted from its long loops. A
+            // non-server, or a server with no ping outstanding, is a no-op
+            // inside note_ack.
             if arg0 == syscall_abi::KERNEL_SENDER {
                 crate::supervisor::note_ack(tasks::current_task());
                 return 0;
@@ -1622,7 +1604,8 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             };
             // SAFETY: bounds sanity-checked above, as MSG_SEND's.
             let data = unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) };
-            tasks::send_message(tasks::current_task(), dest, data, 0)
+            tasks::deliver_reply(tasks::current_task(), dest, data);
+            0
         }
         syscall_abi::SENDER_CALL => {
             // No arguments: the call the message this task last received

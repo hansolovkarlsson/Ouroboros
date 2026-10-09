@@ -2395,6 +2395,16 @@ be reviewed after the fact from the saved screenshots.
 >       for the old request reach the next call's grant, and a killed
 >       caller's refilled slot calling the same server take its answer
 >       (fsd and cond replied by slot); both are closed with it.
+>       Its own high review found the call number checked only at
+>       `MSG_REPLY`'s gate, while any `MSG_SEND` from the server, direct or
+>       queued, still completed a waiting call: now a call's wait takes only
+>       `deliver_reply`, never the mailbox, and the call number is cleared
+>       when the call ends. Also from it: `REPLY_STALE` moved into the error
+>       band (`MAX-43`, the floor to `MAX-44`, `sys.h` following), each
+>       server reads the handle once on receipt and passes it down, `fsd`
+>       frees an open's fid and `netd` does not count it when the reply is
+>       stale, the supervisor's ack is `MSG_REPLY` only, and `MSG_SEND`'s
+>       packed-identity arm, used only by parked replies, is gone.
 >       `make test-call-interrupt`: two host 9P peers hold every reply
 >       4.5 s; Ctrl+C cuts `cd /mnt/s/SUB` short, `cd /mnt/b/NOPE` then
 >       fails on its own answer while SUB's arrives and is refused, Ctrl+\

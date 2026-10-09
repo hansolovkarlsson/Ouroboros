@@ -273,16 +273,15 @@ pub const MOUNT: u64 = 22;
 /// end-of-stream marker in the shell's pipeline convention - a
 /// pipeline child (`left | program`) receives its input as a stream of
 /// 1-to-[`MSG_MAX_LEN`]-byte data messages followed by one empty
-/// message meaning "no more input; finish and exit". **`dest` may be a
-/// packed task identity** (the word [`SENDER_TASK`] answers) instead of
-/// a slot: any value at or above `1 << `[`TASK_ID_SLOT_BITS`] is one,
-/// since every generation is at least 1. It delivers only while that
-/// identity still names the slot's occupant, else
-/// [`TASK_ERR_NO_SUCH_TASK`]. **A send is never a reply**: the send-mask
-/// governs it even when `dest` is blocked calling the sender, and a call
-/// is answered with [`MSG_REPLY`] (since 2026-10-09; until then such a
-/// send was let through as the reply, and a late one completed the
-/// caller's next call).
+/// message meaning "no more input; finish and exit". `dest` is a slot.
+/// **A send is never a reply** (since 2026-10-09): the send-mask governs
+/// it even when `dest` is blocked calling the sender, a task in a call
+/// takes nothing but the [`MSG_REPLY`] naming that call (the send waits
+/// in its mailbox for a later [`MSG_RECV`]), and the supervisor's ack is
+/// [`MSG_REPLY`] to [`KERNEL_SENDER`]. Until then such a send was let
+/// through as the reply, a late one completed the caller's next call, and
+/// `dest` could be a packed task identity, the way parked replies were
+/// addressed.
 pub const MSG_SEND: u64 = 23;
 
 /// `(buf ptr, len)` -> `(sender << 32) | copied_len`, or
@@ -303,9 +302,10 @@ pub const MSG_TRY_RECV: u64 = 25;
 /// [`TASK_ERR_SELF`] (calling yourself is a guaranteed deadlock), or a
 /// `MSG_ERR_*` code if the send half fails. The synchronous
 /// request/response primitive (MINIX's `sendrec` shape): sends the
-/// request to `dest`, then blocks until a reply *from `dest`
-/// specifically* arrives - a message from any other task stays queued
-/// for a later [`MSG_RECV`] rather than being mistaken for the reply.
+/// request to `dest`, then blocks until `dest`'s [`MSG_REPLY`] to this
+/// very call arrives - any sent message, from another task or from
+/// `dest` itself, stays queued for a later [`MSG_RECV`] rather than
+/// being mistaken for the reply.
 /// The reply buffer is a fixed [`MSG_MAX_LEN`] bytes - all 768 of
 /// them (implied, not passed - the 4-argument syscall ABI is exactly
 /// full), so a caller must always supply a full-size buffer. With direct
@@ -1559,11 +1559,11 @@ pub const PARTITION_START_LBA: u64 = 2048;
 /// a server's reply to that ping carries (which the kernel intercepts as
 /// the ack - see [`SYSOP_PING`]). Fits `Message.sender`'s `u8` and sits
 /// clear of every real task index (`0..NUM_TASKS`), so it can never be
-/// mistaken for one. Not a task: an ordinary [`MSG_SEND`] to it never
-/// reaches a mailbox - the kernel treats `dest == KERNEL_SENDER` as "this
-/// task is acking a supervisor ping" and returns `0`. A non-server, or a
-/// server with no ping outstanding, sending to it is a harmless no-op
-/// (the same single-address-space trust model as every other message).
+/// mistaken for one. Not a task: [`SENDER_CALL`] gives it for the ping,
+/// and a [`MSG_REPLY`] to it is "this task is acking a supervisor ping",
+/// returning `0` (a [`MSG_SEND`] to it, the ack until 2026-10-09, now
+/// answers [`TASK_ERR_NO_SUCH_TASK`]). A non-server, or a server with no
+/// ping outstanding, replying to it is a harmless no-op.
 pub const KERNEL_SENDER: u64 = 0xFE;
 
 /// The op the supervisor's liveness ping carries in its message header
@@ -1736,9 +1736,7 @@ pub const MSG_ERR_FULL: u64 = u64::MAX - 20;
 pub const MSG_ERR_TOO_BIG: u64 = u64::MAX - 21;
 /// [`MSG_TRY_RECV`]: the mailbox is empty right now.
 pub const NO_MSG: u64 = u64::MAX - 22;
-/// [`MSG_REPLY`]: the call is over (cut short, or its caller dead), so the
-/// reply went nowhere.
-pub const REPLY_STALE: u64 = u64::MAX - 44;
+
 
 /// `BLOCK_*`: no block device has been discovered/installed this boot
 /// (nothing attached, or activation failed).
@@ -1876,8 +1874,15 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// `MAX-42` is [`TASK_ERR_SELF`] (2026-09-19), the same kind: a task
 /// syscall's answer to its own caller, never a 9P reply. The pattern
 /// each time: the new code takes the floor's old value, and the floor
-/// steps down by one, so the band has no holes.
-pub const FS_ERR_MIN: u64 = u64::MAX - 43;
+/// steps down by one, so the band has no holes. `MAX-43` is
+/// [`REPLY_STALE`] (2026-10-09), the same kind again: [`MSG_REPLY`]'s
+/// answer to the server, with `sys.h`'s mirror and `FS_ERR_CLIENT`
+/// stepping down with it.
+pub const FS_ERR_MIN: u64 = u64::MAX - 44;
+/// [`MSG_REPLY`]: the call is over (cut short, or its caller dead), so the
+/// reply went nowhere. A server that made something for the caller (a fid)
+/// should undo it: nobody will learn of it.
+pub const REPLY_STALE: u64 = u64::MAX - 43;
 
 /// The program parsed, but its loaded image (code, data and `.bss`
 /// together: memory size, not file size) plus the loader's fixed heap,
