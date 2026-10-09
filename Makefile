@@ -287,7 +287,7 @@ endif
 endif
 
 # DevTools's editor, Edit, built here for Ouroboros (the note
-# docs/handoffs/2026-10-08-from-devtools-edit-poll.md), as cpp is: its sources
+# docs/handoffs/closed/2026-10-08-from-devtools-edit-poll.md), as cpp is: its sources
 # are read from EDIT_DIR, a sibling checkout by default, every src/*.c but the
 # Mac's platform file (platform_ouroboros.c is the one for here). NEED_EDIT
 # is NEED_CPP's twin: optional by default, required for edit-bin and
@@ -743,7 +743,7 @@ $(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker
 -include $(wildcard $(BUILD_DIR)/cpp/*.d)
 
 # /bin/edit, DevTools's editor (the note
-# docs/handoffs/2026-10-08-from-devtools-edit-poll.md). Its sources are only
+# docs/handoffs/closed/2026-10-08-from-devtools-edit-poll.md). Its sources are only
 # read here, as cpp's are; the link is ours. Without sources, `make edit-bin`
 # stops at parse time (NEED_EDIT above).
 edit-bin: $(EDIT_BIN)

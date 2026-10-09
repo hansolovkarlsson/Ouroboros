@@ -3,7 +3,7 @@
 
     python3 scripts/test-cpoll.py    (or `make test-cpoll`, which builds the image)
 
-DevTools's note docs/handoffs/2026-10-08-from-devtools-edit-poll.md: `poll` on
+DevTools's note docs/handoffs/closed/2026-10-08-from-devtools-edit-poll.md: `poll` on
 fd 0 with a timeout, so Edit can wait a moment for the rest of an escape
 sequence and repeat a command until a key is pressed. One boot, the serial
 line:

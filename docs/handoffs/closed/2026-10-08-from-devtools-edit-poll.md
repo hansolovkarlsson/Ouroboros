@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-08
 - **Kind:** requirement
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** Edit running on Ouroboros
 
 ## What is asked
@@ -145,3 +145,12 @@ note saying so is the way: a finer kernel timer is the fix, not a spin. Descript
 than 0 are now answered as POSIX has them (fds 1 and 2 ready for `POLLOUT`,
 an open file ready, `POLLNVAL` only for one not open), and fd 0 is answered
 even when another entry is already ready.
+
+Done 2026-10-08 by Ouroboros: merged as #240 (`61ec532`). `poll` and
+`<poll.h>` (and `<sys/poll.h>`) are in the C library over two new system
+calls, `KEY_WAIT_UNTIL` (71) and `SLEEP_UNTIL` (72); `/bin/edit` is built
+from `EDIT_DIR` by `make edit-bin` and staged, and `scripts/release.sh`
+requires it. Your "Done when" in Ouroboros's tree is met by `make
+test-edit`, except the pace digits of `^Q Q`, which are yours to check; the
+timing is to a tick (about 20 ms), the departure stated above. The note
+moves to `docs/handoffs/closed/`.

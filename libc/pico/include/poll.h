@@ -4,7 +4,7 @@
 /* poll for the keyboard: fd 0, POLLIN, with a timeout, for a full-screen
  * program that waits a moment for the rest of an escape sequence or repeats
  * a command until a key is pressed (DevTools's note
- * docs/handoffs/2026-10-08-from-devtools-edit-poll.md). libc/src/file.c.
+ * docs/handoffs/closed/2026-10-08-from-devtools-edit-poll.md). libc/src/file.c.
  *
  * What it does: for each entry with fd 0 and POLLIN, a byte waiting for the
  * keyboard's owner makes revents POLLIN, and the read(0, ...) after it

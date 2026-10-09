@@ -2362,7 +2362,7 @@ be reviewed after the fact from the saved screenshots.
 >       `drive-qemu.py`'s `Guest` (found by the fourth high review of #240,
 >       left out of that PR as a change to six rigs). Done when no rig
 >       defines either, and every rig that used them still passes.
-> - [ ] **new** **`poll` and `/bin/edit`.** DevTools asks for `poll` on
+> - [x] **new** **`poll` and `/bin/edit`.** DevTools asks for `poll` on
 >       fd 0 (`<poll.h>`, one `pollfd`, `POLLIN`, a timeout of -1, 0 or
 >       milliseconds to within about 10 ms, fd 1 flushed first) and for Edit
 >       built into the image as cpp is, from `EDIT_DIR`. `poll` is the one
@@ -2371,7 +2371,7 @@ be reviewed after the fact from the saved screenshots.
 >       image from `main` `edit hello.txt` opens full screen, an arrow moves
 >       the cursor, `^Q Q` repeats until a key stops it, and `^K D` saves.
 >       Note:
->       [`handoffs/2026-10-08-from-devtools-edit-poll.md`](handoffs/2026-10-08-from-devtools-edit-poll.md).
+>       [`handoffs/closed/2026-10-08-from-devtools-edit-poll.md`](handoffs/closed/2026-10-08-from-devtools-edit-poll.md).
 >       *Built 2026-10-08 (#240): `poll` in `libc/src/file.c` over a new
 >       system call, `KEY_WAIT_UNTIL` (71), which blocks until a key is
 >       waiting or the deadline passes, to a tick's precision (about 20 ms,
