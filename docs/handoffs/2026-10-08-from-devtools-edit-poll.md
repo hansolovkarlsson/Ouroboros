@@ -104,8 +104,10 @@ Checked against `main` at `5da222c`: there is no `<poll.h>` on the picolibc
 side (and picolibc's prebuilt `libc.a` defines no `poll`), and `open` in
 `libc/src/file.c` ignores `O_EXCL`, as the note says.
 
-The plan. `poll` goes in the C library over what the kernel already has, no
-new system call: fd 0's readiness is a `TRY_READ_CHAR`, and the byte it
+The plan as first written, superseded by the revisions below (a new system
+call, the key left in the kernel, tick precision, and the other descriptors
+answered as POSIX has them): `poll` goes in the C library over what the
+kernel already has, no new system call: fd 0's readiness is a `TRY_READ_CHAR`, and the byte it
 takes is held for the next `read(0, ...)`, so `poll` answering 1 means that
 read does not block; a timeout of -1 is a blocking `READ_CHAR`; a positive
 one waits on `MONOTONIC_US`, giving the core away (`YIELD`) between looks.

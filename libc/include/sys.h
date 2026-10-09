@@ -28,6 +28,7 @@
 #define SYS_GET_ENV 60
 #define SYS_KBD_MODE 70
 #define SYS_KEY_WAIT_UNTIL 71
+#define SYS_SLEEP_UNTIL 72
 
 /* Transient MSG_SEND failures worth retrying (mirrors syscall-abi). */
 #define MSG_ERR_FULL (~0UL - 20UL)

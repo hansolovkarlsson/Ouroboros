@@ -1847,6 +1847,11 @@ pub(crate) enum WaitReason {
     /// look at or after it, so to a tick's precision; `u64::MAX` waits for
     /// good.
     KeyWait { until_us: u64 },
+    /// Waiting for a time and nothing else (`SLEEP_UNTIL`, for C's `poll`
+    /// with nothing it can wait on): ends at the first look at or after
+    /// `until_us` (`MONOTONIC_US`'s clock; `u64::MAX` for good, ended only by
+    /// a kill), blocked rather than spinning.
+    Sleep { until_us: u64 },
     /// Waiting for the task at this slot index to die (`WAIT` syscall).
     /// Satisfied by the target reaching `Zombie` (the poll *reaps* it -
     /// collecting the status is what frees the slot) or `Unused` (it
@@ -1884,6 +1889,7 @@ impl WaitReason {
         match self {
             WaitReason::Keyboard => crate::syscall::poll_keyboard_byte(waiter).map(u64::from),
             WaitReason::KeyWait { until_us } => crate::syscall::key_wait_answer(waiter, until_us),
+            WaitReason::Sleep { until_us } => (crate::timer::monotonic_us() >= until_us).then_some(0),
             WaitReason::TaskExit(target) => {
                 // A wait must stay interruptible or one `wait` on a
                 // never-exiting task bricks the whole session (the

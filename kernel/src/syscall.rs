@@ -850,6 +850,14 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             Some(byte) => byte as u64,
             None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard) },
         },
+        syscall_abi::SLEEP_UNTIL => {
+            // arg0 = the deadline, on MONOTONIC_US's clock. See the ABI doc.
+            if crate::timer::monotonic_us() >= arg0 {
+                0
+            } else {
+                unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Sleep { until_us: arg0 }) }
+            }
+        }
         syscall_abi::KEY_WAIT_UNTIL => match key_wait_answer(tasks::current_task(), arg0) {
             // arg0 = the deadline, on MONOTONIC_US's clock. See the ABI doc.
             Some(answer) => answer,
@@ -924,14 +932,8 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             0
         }
         syscall_abi::GET_TICKS => exceptions::ticks(),
-        syscall_abi::MONOTONIC_US => {
-            // Microseconds since boot from the generic timer's free-running
-            // counter, computed overflow-safe (a naive now_ticks * 1_000_000
-            // overflows a u64 in a few days at 62.5 MHz): split into whole
-            // seconds plus the sub-second remainder. Pure system-register
-            // reads (no GIC, no interrupts) - see timer.rs.
-            crate::timer::monotonic_us()
-        }
+        // Microseconds since boot: see timer::monotonic_us.
+        syscall_abi::MONOTONIC_US => crate::timer::monotonic_us(),
         syscall_abi::SPAWN => spawn_staged(arg0, arg1, arg2, arg3),
         syscall_abi::CWD_STAGE => {
             // arg0 = cwd pointer, arg1 = length. Copies the working-directory

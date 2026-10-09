@@ -2354,6 +2354,14 @@ be reviewed after the fact from the saved screenshots.
 > full-screen terminal control) made concrete, not started; and `rename` in
 > the C port, done in #215 and its note closed.
 >
+> - [ ] **new** **One paced-typing helper for the QEMU rigs.** `type_raw`
+>       (bytes on the serial line at `drive_qemu.TYPE_DELAY`, no Enter) is
+>       copied into six rigs (`test-kbd-mode`, `test-kbd-cut`, `test-ctermios`,
+>       `test-nav-keys`, `test-cpoll`, `test-edit`), and `sendkeys` into four.
+>       A fix to the pacing has to reach all of them. Move both into
+>       `drive-qemu.py`'s `Guest` (found by the fourth high review of #240,
+>       left out of that PR as a change to six rigs). Done when no rig
+>       defines either, and every rig that used them still passes.
 > - [ ] **new** **`poll` and `/bin/edit`.** DevTools asks for `poll` on
 >       fd 0 (`<poll.h>`, one `pollfd`, `POLLIN`, a timeout of -1, 0 or
 >       milliseconds to within about 10 ms, fd 1 flushed first) and for Edit

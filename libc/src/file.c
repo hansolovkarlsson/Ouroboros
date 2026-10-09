@@ -1020,15 +1020,21 @@ static int key_by(unsigned long deadline) {
     return r == ~0UL ? client_fail(ENOSYS) : client_fail(EIO);
 }
 
-/* poll.h. fd 0 with POLLIN waits for a key; fds 0 to 2, the console, are
- * always ready for POLLOUT; an open file is ready for what is asked; a closed
- * fd is POLLNVAL; a negative one is skipped. Every entry is answered, fd 0
- * included when another is already ready (then without waiting). */
+/* poll.h. fd 0 with POLLIN (or POLLRDNORM) waits for a key; fds 0 to 2, the
+ * console, are always ready for POLLOUT (or POLLWRNORM); a file on a
+ * filesystem, local or remote, is ready for both, as POSIX has regular
+ * files; a /net file or another binding, which nothing here can wait on yet,
+ * is POLLERR; a closed fd is POLLNVAL; a negative one is skipped. Every entry
+ * is answered, fd 0 included when another is already ready (then without
+ * waiting). With nothing to wait on, the timeout is a blocked sleep
+ * (SLEEP_UNTIL), -1 for good, as POSIX has it. */
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     if (nfds > 0 && !fds) {
         return client_fail(EFAULT);
     }
     out_flush();
+    const short in = POLLIN | POLLRDNORM;
+    const short out = POLLOUT | POLLWRNORM;
     int ready = 0;
     int want_key = 0;
     for (nfds_t i = 0; i < nfds; i++) {
@@ -1037,15 +1043,16 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         if (p->fd < 0) {
             continue;
         }
-        if (p->fd == 0) {
-            want_key |= (p->events & POLLIN) != 0;
-            p->revents = p->events & POLLOUT;
-        } else if (p->fd == 1 || p->fd == 2) {
-            p->revents = p->events & POLLOUT;
-        } else if (file_for(p->fd)) {
-            p->revents = p->events & (POLLIN | POLLOUT);
-        } else {
+        struct file_state *f = p->fd > 2 ? file_for(p->fd) : NULL;
+        if (p->fd <= 2) {
+            want_key |= p->fd == 0 && (p->events & in);
+            p->revents = p->events & out;
+        } else if (!f) {
             p->revents = POLLNVAL;
+        } else if ((f->target & 0xff) == NS_TARGET_FSD || (f->target & 0xff) == NS_TARGET_REMOTE) {
+            p->revents = p->events & (in | out);
+        } else {
+            p->revents = POLLERR;
         }
         ready += p->revents != 0;
     }
@@ -1063,22 +1070,20 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         }
         if (got) {
             for (nfds_t i = 0; i < nfds; i++) {
-                if (fds[i].fd == 0 && (fds[i].events & POLLIN)) {
+                if (fds[i].fd == 0 && (fds[i].events & in)) {
                     ready += fds[i].revents == 0;
-                    fds[i].revents |= POLLIN;
+                    fds[i].revents |= fds[i].events & in;
                 }
             }
         }
     } else if (!ready && timeout != 0) {
-        /* Nothing that can wait: poll(NULL, 0, ms) as a sleep, which looks on
-         * the clock (there is no key to block on). -1 would never return, so
-         * it is refused rather than hung. */
-        if (timeout < 0) {
-            return client_fail(EINVAL);
-        }
-        unsigned long deadline = now_us() + (unsigned long)timeout * 1000UL;
-        while (now_us() < deadline) {
-            __os_syscall1(SYS_YIELD, 0);
+        /* Nothing to wait on: a blocked sleep, for good with -1 (ended by a
+         * kill), as POSIX has poll block (the fourth high review of #240:
+         * this spun on the clock, and refused -1). */
+        unsigned long until = timeout < 0 ? ~0UL : now_us() + (unsigned long)timeout * 1000UL;
+        unsigned long r = (unsigned long)__os_syscall1(SYS_SLEEP_UNTIL, (long)until);
+        if (r != 0) {
+            return r == ~0UL ? client_fail(ENOSYS) : client_fail(EIO);
         }
     }
     return ready;

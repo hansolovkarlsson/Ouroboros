@@ -89,6 +89,15 @@ pub const READ_CHAR: u64 = 15;
 /// keyboard is answered `0` at the deadline.
 pub const KEY_WAIT_UNTIL: u64 = 71;
 
+/// `(deadline_us)` -> `0` once the deadline, on [`MONOTONIC_US`]'s clock, is
+/// reached; `u64::MAX` sleeps for good (a kill, Ctrl+C or Ctrl+\ in the
+/// foreground, still ends the task). Blocking, not spinning, and to a tick's
+/// precision, as [`KEY_WAIT_UNTIL`]. For C's `poll` with nothing it can wait
+/// on: `poll(NULL, 0, ms)` as a sleep, and a `poll(..., -1)` with nothing
+/// waitable, which POSIX has block (its first form spun on the clock, or
+/// refused -1; the fourth high review of #240).
+pub const SLEEP_UNTIL: u64 = 72;
+
 /// `(total staged length, stdout target, argv blob length)` -> **the new
 /// task's slot index** on success (needed to wait on, send to, or kill what
 /// was just started - the shell's pipeline flow does all three), [`SPAWN_ERROR`]

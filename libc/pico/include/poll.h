@@ -24,13 +24,15 @@
  * poll with -1.
  *
  * The other descriptors: fds 0, 1 and 2, the console, are always ready for
- * POLLOUT; an open
- * file is ready for POLLIN and POLLOUT, as POSIX has regular files; a
- * descriptor that is not open is POLLNVAL; a negative one is skipped. When
- * any entry is ready, fd 0 is looked at without waiting. With nothing to wait
- * on, a positive timeout is a sleep, which spins on the clock for the whole
- * time (there is no key to block on, and no sleep in the kernel yet), and -1
- * is refused with EINVAL rather than hanging for good.
+ * POLLOUT; a file on a filesystem, local or remote, is ready for POLLIN and
+ * POLLOUT, as POSIX has regular files; a /net file (a TCP connection) or
+ * another binding, which nothing here can wait on yet, is POLLERR, rather
+ * than a "ready" whose read would block; a descriptor that is not open is
+ * POLLNVAL; a negative one is skipped. POLLRDNORM and POLLWRNORM are taken
+ * as POLLIN and POLLOUT; the band flags are never ready. When any entry is
+ * ready, fd 0 is looked at without waiting. With nothing to wait on, the
+ * timeout is a sleep, blocked in the kernel (SLEEP_UNTIL), and -1 sleeps for
+ * good, as POSIX has it (Ctrl+C or Ctrl+\ in the foreground still ends it).
  *
  * The values are Linux's. Picolibc-side (libc/pico/include), staged under
  * /include on the image. */
@@ -49,6 +51,10 @@ struct pollfd {
 #define POLLERR 0x008
 #define POLLHUP 0x010
 #define POLLNVAL 0x020
+#define POLLRDNORM 0x040
+#define POLLRDBAND 0x080
+#define POLLWRNORM 0x100
+#define POLLWRBAND 0x200
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout);
 

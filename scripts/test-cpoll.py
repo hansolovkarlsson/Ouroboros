@@ -9,11 +9,11 @@ sequence and repeat a command until a key is pressed. One boot, the serial
 line:
 
 1. **`cpoll timing`**, nothing typed: timeout 0 answers 0 at once; timeout
-   200 answers 0 after 200 to 260 ms (the wait is blocked in the kernel to
-   a tick's precision, 20 ms, settled by Hans 2026-10-08, with room for a
-   delayed tick); fd 1
+   200 answers 0, not before 200 ms (the lower bound is what a wait that
+   does not wait fails; the upper, 400, is only a hang guard, since the wait
+   ends at a tick, later under TCG's late ticks, settled by Hans 2026-10-08); fd 1
    is ready for POLLOUT, a closed fd 9 is POLLNVAL (32), and with fd 1 ready
-   fd 0 is answered too, at once, rather than skipped; no fds and timeout 100 sleeps 100 to 160 ms;
+   fd 0 is answered too, at once, rather than skipped; no fds and timeout 100 sleeps (blocked, SLEEP_UNTIL), not before 100 ms;
    a null array with one entry is EFAULT.
 2. **`cpoll key`**: it writes `cpoll: waiting` with no newline, so the text
    shows only if poll flushed fd 1 before its wait; then `x` typed answers
@@ -110,15 +110,15 @@ def main() -> int:
     checks = [
         ("driven to the end", ok),
         ("timeout 0 answers 0 at once", "cpoll: zero 0" in timing),
-        ("timeout 200 answers 0 after 200-260 ms (to a tick, settled 2026-10-08)",
-         wait is not None and wait.group(1) == "0" and 200 <= int(wait.group(2)) <= 260),
+        ("timeout 200 answers 0, not before 200 ms (and before 400: a tick, or a late one under TCG)",
+         wait is not None and wait.group(1) == "0" and 200 <= int(wait.group(2)) < 400),
         ("fd 1 is ready for POLLOUT", "cpoll: out 1 revents=4" in timing),
         ("a closed fd is POLLNVAL", "cpoll: closed 1 revents=32" in timing),
         ("with fd 1 ready, fd 0 is answered too, without waiting",
          re.search(r"cpoll: both 1 key=0 out=4 ms=(\d+)", timing) is not None
          and int(re.search(r"cpoll: both 1 key=0 out=4 ms=(\d+)", timing).group(1)) < 50),
-        ("no fds, timeout 100: a sleep of 100-160 ms",
-         sleep is not None and sleep.group(1) == "0" and 100 <= int(sleep.group(2)) <= 160),
+        ("no fds, timeout 100: a sleep, not before 100 ms (and before 300)",
+         sleep is not None and sleep.group(1) == "0" and 100 <= int(sleep.group(2)) < 300),
         ("a null array is EFAULT", "cpoll: null EFAULT" in timing),
         ("fd 1 flushed before the wait (`cpoll: waiting` shown)", "cpoll: waiting" in key),
         ("a key ends the -1 wait, and read returns it", "cpoll: key 120" in key),

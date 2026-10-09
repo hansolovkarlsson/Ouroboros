@@ -707,9 +707,9 @@ ctermios-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/ctermios.elf $(PICO_PORT) $(BUILD_DIR)/pico/ctermios.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/ctermios.elf $(CTERMIOS_BIN)
 
-# poll for the keyboard in a C program (libc/cpoll.c): timeouts, POLLNVAL, the
-# flush of fd 1 before the wait, the held key. Runs as /bin/CPOLL, driven by
-# scripts/test-cpoll.py.
+# poll for the keyboard in a C program (libc/cpoll.c): timeouts, the other
+# descriptors, the flush of fd 1 before the wait, a key left in the kernel.
+# Runs as /bin/CPOLL, driven by scripts/test-cpoll.py.
 cpoll-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/cpoll.c -o $(BUILD_DIR)/pico/cpoll.o
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpoll.elf $(PICO_PORT) $(BUILD_DIR)/pico/cpoll.o $(PICO_LIBC) $(NSRESOLVE_A)
@@ -1931,9 +1931,10 @@ test-ctermios: image
 	python3 scripts/test-ctermios.py
 
 # poll for the keyboard in a C program (scripts/test-cpoll.py, /bin/CPOLL):
-# timeouts 0, 200 ms and -1, POLLNVAL for other fds, a sleep with no fds, fd 1
-# flushed before the wait, the key held for the read after it. One boot, about
-# a minute; run it whenever libc's poll, <poll.h> or the read of fd 0 changes.
+# timeouts 0, 200 ms and -1, the other descriptors, a blocked sleep with no
+# fds, fd 1 flushed before the wait, a key poll saw left for the shell. One
+# boot, about a minute; run it whenever libc's poll, <poll.h> or the read of fd
+# 0 changes.
 test-cpoll: image
 	python3 scripts/test-cpoll.py
 
