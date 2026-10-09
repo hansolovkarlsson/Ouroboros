@@ -5,7 +5,7 @@
 ^C is "page down". On Ouroboros a 0x03 never reaches a program: the kernel
 takes it, at the one place every keystroke passes, as the order to end the
 foreground program. The note
-(`docs/handoffs/2026-10-05-from-edit-editor-console.md`) asks for "a
+(`docs/handoffs/closed/2026-10-05-from-edit-editor-console.md`) asks for "a
 per-program opt-out of the kill", and Ouroboros's reply of 2026-10-05 put
 the condition on it: the kill is the only way out of a runaway program, so
 an opt-out must keep a way out.
@@ -13,7 +13,9 @@ an opt-out must keep a way out.
 **Status 2026-10-08: step 0 built (#232), step 1 built (#235), step 2
 built (#236), step 3 built (#233, and its second half in #238, designed
 below with decisions E1 to E4 settled by Hans the same day); step 4 built
-(#237). Every step is built; the notice to DevTools is what remains. The four decisions (D1 to D4)
+(#237). Every step is built and merged (#238 `26ff3ef`), and DevTools was
+told by notice on 2026-10-08:
+`~/Projects/DevTools/docs/handoffs/2026-10-08-from-ouroboros-editor-ctrl-c-item-4.md`. The four decisions (D1 to D4)
 were settled by Hans the same day, each as recommended. D1's condition is
 met: DevTools answered 2026-10-08 that Edit does not bind ^\ and plans no
 use of it (only ^P ^\, a literal 0x1c, is lost, and Edit accepts that), so

@@ -3,7 +3,7 @@
 
     python3 scripts/test-cond-vt.py     (or `make test-cond-vt`, which builds the image)
 
-Item 1 of docs/handoffs/2026-10-05-from-edit-editor-console.md: cond's
+Item 1 of docs/handoffs/closed/2026-10-05-from-edit-editor-console.md: cond's
 framebuffer backend must act on `CSI row;col H`, `CSI K`, `CSI J`, `CSI 7 m` and
 `CSI 0 m`, and draw nothing for `CSI ? 25 l/h`. QEMU gets a framebuffer from
 `-device ramfb`, and then cond renders the shell's output there and nowhere

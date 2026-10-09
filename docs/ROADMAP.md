@@ -2354,7 +2354,7 @@ be reviewed after the fact from the saved screenshots.
 > full-screen terminal control) made concrete, not started; and `rename` in
 > the C port, done in #215 and its note closed.
 >
-> - [ ] **new** **A console and keyboard a full-screen editor can use.**
+> - [x] **new** **A console and keyboard a full-screen editor can use.**
 >       Five parts, in Edit's order: (1) `cond`'s framebuffer backend
 >       interprets `ESC [ r ; c H` (it ignores the parameters today and
 >       goes home), `ESC [ K`, `ESC [ 2 J`, `ESC [ 7 m`/`ESC [ 0 m`/`ESC [
@@ -2394,7 +2394,9 @@ be reviewed after the fact from the saved screenshots.
 >       (#237); and step 3's second half the same day, designed in the
 >       plan with its four decisions (E1 to E4) settled by Hans and built
 >       (the queue now `keyseq::KeyQueue`, host-tested). Every step is
->       built; the notice to DevTools remains:
+>       built, and DevTools told by notice (2026-10-08,
+>       `~/Projects/DevTools/docs/handoffs/2026-10-08-from-ouroboros-editor-ctrl-c-item-4.md`);
+>       the note is closed:
 >       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
 >       #229: a key's sequence is queued whole but delivered a byte at a
 >       time, so a change of keyboard owner (a program killed between the
@@ -2405,7 +2407,7 @@ be reviewed after the fact from the saved screenshots.
 >       whole key, so an editor busy redrawing can read `[A` as text. A peek
 >       at that choke point, consuming only a Ctrl-C, fixes the second.
 >       Note:
->       [`handoffs/2026-10-05-from-edit-editor-console.md`](handoffs/2026-10-05-from-edit-editor-console.md).
+>       [`handoffs/closed/2026-10-05-from-edit-editor-console.md`](handoffs/closed/2026-10-05-from-edit-editor-console.md).
 > - [ ] **new** **A stale reply after an interrupted call.** Ctrl+C (and
 >       since #235 Ctrl+\) interrupts the boot shell's message waits, its
 >       `MSG_CALL`s to the servers included (`RECV_INTERRUPTED`); the

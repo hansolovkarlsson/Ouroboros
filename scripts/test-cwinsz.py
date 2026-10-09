@@ -3,7 +3,7 @@
 
     python3 scripts/test-cwinsz.py      (or `make test-cwinsz`, which builds the image)
 
-Item 3 of docs/handoffs/2026-10-05-from-edit-editor-console.md. `CON_INFO`'s
+Item 3 of docs/handoffs/closed/2026-10-05-from-edit-editor-console.md. `CON_INFO`'s
 size fields are open to every task (kernel/src/syscall.rs); a C program asks
 with `ioctl(fd, TIOCGWINSZ, &ws)` (libc/src/file.c), and a Rust one with
 `ulib::screen_size`, which `more` now pages by.

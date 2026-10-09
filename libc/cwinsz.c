@@ -1,5 +1,5 @@
 /* The console's size in a C program: ioctl(TIOCGWINSZ), libc/src/file.c,
- * item 3 of docs/handoffs/2026-10-05-from-edit-editor-console.md.
+ * item 3 of docs/handoffs/closed/2026-10-05-from-edit-editor-console.md.
  *
  * Prints one line per question, for scripts/test-cwinsz.py to compare with
  * what the console really is:

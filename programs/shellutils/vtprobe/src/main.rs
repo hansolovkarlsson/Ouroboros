@@ -1,7 +1,7 @@
 //! `vtprobe COLS ROWS` - a probe, not a tool: draws a fixed screen with every
 //! escape sequence the console's framebuffer backend acts on, so a screendump
 //! can be compared with the screen that should result. Item 1 of
-//! `docs/handoffs/2026-10-05-from-edit-editor-console.md` (DevTools's Edit);
+//! `docs/handoffs/closed/2026-10-05-from-edit-editor-console.md` (DevTools's Edit);
 //! `scripts/test-cond-vt.py` runs it and models the expected screen.
 //!
 //! The size comes as arguments, from the rig's screendump, so the screen

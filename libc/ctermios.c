@@ -1,6 +1,6 @@
 /* Terminal settings in a C program: tcgetattr and tcsetattr (sys/termios.h,
  * libc/src/file.c), step 2 of docs/roadmap/roadmap-ctrl-c.md, for item 4 of
- * docs/handoffs/2026-10-05-from-edit-editor-console.md. Runs as /bin/CTERMIOS,
+ * docs/handoffs/closed/2026-10-05-from-edit-editor-console.md. Runs as /bin/CTERMIOS,
  * through picolibc, driven by scripts/test-ctermios.py.
  *
  * `ctermios check` prints one line per question:

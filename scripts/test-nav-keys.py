@@ -3,7 +3,7 @@
 
     python3 scripts/test-nav-keys.py    (or `make test-nav-keys`, which builds the image)
 
-Item 2 of docs/handoffs/2026-10-05-from-edit-editor-console.md: the USB
+Item 2 of docs/handoffs/closed/2026-10-05-from-edit-editor-console.md: the USB
 keyboard sends the VT100/xterm sequences for Up, Down, Right, Left, Home, End,
 Page Up, Page Down, Delete, F2 and F3 (kernel/src/xhci.rs, keycode_to_bytes),
 which it dropped before. Five checks in one boot:
