@@ -86,9 +86,9 @@ fn main() -> ! {
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
         let reply_len = handle(&mut mounts, &mut fids, sender, &req[..len], &mut reply);
-        // A full/unreachable sender mailbox drops the reply - the
-        // caller's MSG_CALL stays blocked until Ctrl+C; nothing better
-        // exists to do with an undeliverable reply.
+        // A caller blocked in its call always takes this reply (direct
+        // delivery); one that is not (it died meanwhile) is refused by
+        // the send-mask, and nothing better exists to do with the reply.
         syscall4(syscall_abi::MSG_SEND, sender, reply.as_ptr() as u64, reply_len as u64, 0);
     }
     loop {

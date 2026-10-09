@@ -1932,18 +1932,28 @@ impl WaitReason {
             }
             WaitReason::Message { buf, len, from } => {
                 // Same Ctrl+C escape hatch as TaskExit's, with the same
-                // reach (task 0 only; any other owner is marked instead) - a `recv`
-                // (or a call to a wedged server) with no reply coming
-                // must not brick the session. Reads ahead rather than
-                // discarding: an editor blocked in `con_write`'s call to the
-                // console server keeps the keys typed meanwhile. A message
-                // already waiting is delivered first, as an ended target is
-                // in TaskExit's arm: the wait is done, and an interrupt
-                // would leave the reply for the next call.
+                // reach (task 0 only; any other owner is marked instead) - a
+                // `recv` with no message coming must not brick the session.
+                // Reads ahead rather than discarding: an editor blocked in
+                // `con_write`'s call to the console server keeps the keys
+                // typed meanwhile. A message already waiting is delivered
+                // first, as an ended target is in TaskExit's arm.
+                //
+                // A call's reply wait (`from` set) reads ahead too, but the
+                // boot shell's Ctrl+C or Ctrl+\ is queued there as a byte,
+                // never an interrupt (2026-10-09): the server is still
+                // working on the request, so its reply would arrive while
+                // the shell waits on its NEXT call to that server and be
+                // taken as that call's answer, and a SAFECOPY for the old
+                // request would reach the new call's grant. The way out of a
+                // call that never returns is the server's restart
+                // (`fail_calls_to`), and netd's own deadlines.
                 if let Some(got) = try_recv_message_from(waiter, buf, len, from) {
                     return Some(got);
                 }
-                if crate::syscall::keyboard_interrupts_wait(waiter) {
+                if from.is_some() {
+                    crate::syscall::read_keyboard_ahead(waiter, false);
+                } else if crate::syscall::keyboard_interrupts_wait(waiter) {
                     return Some(syscall_abi::RECV_INTERRUPTED);
                 }
                 None
@@ -2781,7 +2791,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // waits on the devices for its own read.
     let owner = input_owner();
     if owner != TaskIndex::FIRST.index() {
-        crate::syscall::read_keyboard_ahead(owner);
+        crate::syscall::read_keyboard_ahead(owner, true);
     }
 
     // Honor a Ctrl+C kill (marked by `interrupt_key_check` from either poll

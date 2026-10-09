@@ -10,8 +10,8 @@ here actually works today, see [`architecture.md`](architecture.md) and
 ## Unreleased: the storage server under large writes, and the C library for Proem and Edit
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
-version is held for a go-ahead. So far four days' work, 2026-10-05 to
-2026-10-08, #209 to #240: the storage server made safe under large writes and
+version is held for a go-ahead. So far five days' work, 2026-10-05 to
+2026-10-09, #209 to #244: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the
@@ -235,6 +235,19 @@ system calls carry it, `KEY_WAIT_UNTIL` (71) and `SLEEP_UNTIL` (72). `make
 edit-bin` builds DevTools's Edit from `EDIT_DIR`, staged as `/bin/edit` and
 required by a release; `make test-edit` opens a file, repeats a command with
 `^Q Q`, moves with an arrow and saves with `^K D`.
+
+**Ctrl+C no longer cuts a call to a server short (#244).** The boot shell's
+Ctrl+C and Ctrl+\ still interrupt its `wait` and its `recv`, but not a call
+waiting for a server's reply: the server went on with the request, and its
+answer, sent after the shell had moved on, was taken as the answer to the
+shell's next call to that server, whose own reply was then refused. A `cd`
+into a remote directory, interrupted and followed by a `cd` to one that does
+not exist, left the shell in the missing one. The same window let a server
+still copying for the old request reach the buffer the shell had granted for
+the next. Keys typed during a call are still read and kept, the two
+interrupt keys among them as bytes the line editor ignores. A server that
+never answers is restarted by the supervisor, which ends the call.
+`make test-call-interrupt` holds a call open on a slow 9P peer.
 
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or

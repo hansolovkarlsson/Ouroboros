@@ -2348,9 +2348,10 @@ be reviewed after the fact from the saved screenshots.
 > Edit is DevTools's editor (`~/Projects/DevTools/edit/`), on the image as
 > `/bin/edit` since #240. Its notes are all in `handoffs/closed/`, and the
 > finished items moved to [`roadmap-completed.md`](roadmap-completed.md) on
-> 2026-10-09. What is left is one follow-up found while building them:
+> 2026-10-09. What is left is one follow-up found while building them, now
+> built, and the follow-up to that:
 >
-> - [ ] **new** **A stale reply after an interrupted call.** Ctrl+C (and
+> - [x] **new** **A stale reply after an interrupted call.** Ctrl+C (and
 >       since #235 Ctrl+\) interrupts the boot shell's message waits, its
 >       `MSG_CALL`s to the servers included (`RECV_INTERRUPTED`); the
 >       server's reply, still on its way, then lands in the shell's mailbox
@@ -2370,6 +2371,35 @@ be reviewed after the fact from the saved screenshots.
 >       reply echoes, so a late reply is recognised and dropped. Done when a
 >       rig interrupts the boot shell during a call held open by a slow
 >       server and the shell's next call to that server gets its own reply.
+>       *Built 2026-10-09 (#244), the first shape, by Hans's choice: a
+>       call's reply wait reads the keyboard ahead as before, but the boot
+>       shell's Ctrl+C and Ctrl+\ are queued there as bytes, never an
+>       interrupt (`tasks.rs`, `WaitReason::Message`; `read_keyboard_ahead`
+>       with `boot_waits` false). Reading the code corrected the account
+>       above: no server holds a send right to slot 0, so a late reply never
+>       reached the mailbox; it got through by the reply exemption, because
+>       the shell was blocked in its next call to the same server, and that
+>       call's own reply was then refused. The same window let a `SAFECOPY`
+>       for the interrupted request reach the next call's grant (an
+>       interrupted `fs_write_bulk` could write the next one's bytes), found
+>       by reading and closed with it. `make test-call-interrupt`: `cd` into a
+>       remote directory held 3.5 s by a host peer, Ctrl+C and Ctrl+\ typed
+>       during it and 17 keys on the USB keyboard, then `cd` to a missing
+>       directory must fail and `pwd` name the first; with the interrupt put
+>       back, `pwd` printed the missing directory, and with the call's
+>       read-ahead removed, eight of the keys were lost.*
+> - [ ] **new** **A reply that names its call.** The second shape above,
+>       kept for the case the first leaves: a server idle in its `recv` that
+>       answers the supervisor's pings but never replies to one request
+>       holds its caller for good, and since 2026-10-09 nothing typed ends a
+>       call's wait. A sequence number per call, read by the server with the
+>       request's credential and named in a new `MSG_REPLY`, which the kernel
+>       delivers only to a caller still blocked in that call (and `SAFECOPY`
+>       checks too); every server's reply sites and netd's parked requests
+>       change. Not needed while no server drops a request; worth it before a
+>       server that can, or before calls are made interruptible again. Done
+>       when a server made to drop one request leaves its caller able to
+>       Ctrl+C out, and the caller's next call still gets its own reply.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

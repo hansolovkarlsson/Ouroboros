@@ -367,13 +367,15 @@ fn take_one(boot_waits: bool) -> Took {
 /// runs with interrupts masked, where a device that never said "empty" would
 /// hold the core, hence the bound. Returns `true` when it read the boot
 /// shell's interrupt ([`Took::BootInterrupt`]), and stops there, so the keys
-/// typed after it stay on the devices.
-pub(crate) fn read_keyboard_ahead(reader: usize) -> bool {
+/// typed after it stay on the devices. `boot_waits` is [`take_one`]'s: false
+/// for a call's reply wait, which the boot shell's interrupt never ends (it
+/// is queued as a byte), so this then never returns `true`.
+pub(crate) fn read_keyboard_ahead(reader: usize, boot_waits: bool) -> bool {
     if reader != tasks::input_owner() || tasks::kill_pending_for(reader) {
         return false;
     }
     for _ in 0..READ_AHEAD_MAX {
-        match take_one(true) {
+        match take_one(boot_waits) {
             Took::Byte => {}
             Took::Nothing | Took::Interrupted => return false,
             Took::BootInterrupt => return true,
@@ -389,12 +391,12 @@ const READ_AHEAD_MAX: usize = keyseq::QUEUE_LEN;
 /// How many empty reads in a row end a flush ([`keyboard_flush_input`]).
 const FLUSH_EMPTY_MAX: usize = 8;
 
-/// For a task blocked waiting on a child's exit or on a message: whether a
-/// key typed now interrupts that wait. It reads ahead for the waiter, so
+/// For a task blocked waiting on a child's exit or on a message other than a
+/// call's reply: whether a key typed now interrupts that wait. It reads ahead for the waiter, so
 /// the wait throws no typed byte away; only the boot shell's Ctrl+C or
 /// Ctrl+\ interrupts, decided as it is read ([`take_one`]).
 pub(crate) fn keyboard_interrupts_wait(waiter: usize) -> bool {
-    read_keyboard_ahead(waiter)
+    read_keyboard_ahead(waiter, true)
 }
 
 /// The keyboard passed to another task (a death, or `fg`): if the task that

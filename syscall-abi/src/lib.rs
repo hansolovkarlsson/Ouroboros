@@ -276,9 +276,12 @@ pub const MSG_TRY_RECV: u64 = 25;
 
 /// `(dest task, req ptr, req len, reply ptr)` -> the packed
 /// `(sender << 32) | copied_len` of the reply (sender is always
-/// `dest`), [`RECV_INTERRUPTED`] on Ctrl+C, [`TASK_ERR_NO_SUCH_TASK`],
-/// [`TASK_ERR_SELF`] (calling yourself is a guaranteed deadlock), or a
-/// `MSG_ERR_*` code if the send half fails. The synchronous
+/// `dest`), [`TASK_ERR_NO_SUCH_TASK`] (also when `dest` dies or is
+/// restarted during the call), [`TASK_ERR_SELF`] (calling yourself is a
+/// guaranteed deadlock), or a `MSG_ERR_*` code if the send half fails.
+/// Never [`RECV_INTERRUPTED`]: since 2026-10-09 Ctrl+C and Ctrl+\ do not
+/// end a call's reply wait, since the server would still answer, and its
+/// late reply would be taken as the answer to the caller's next call. The synchronous
 /// request/response primitive (MINIX's `sendrec` shape): sends the
 /// request to `dest`, then blocks until a reply *from `dest`
 /// specifically* arrives - a message from any other task stays queued
@@ -965,9 +968,9 @@ pub const BOOT_ID_BAD_BUFFER: u64 = u64::MAX - 1;
 /// keyboard, it does what Ctrl+C does in cooked mode (see [`FG`]), so no
 /// program can take the way out away, and `0x1c` never reaches any program
 /// but the boot shell. There neither key kills: either interrupts the boot
-/// shell's waits (for a child, `WAIT_INTERRUPTED`; for a message, its calls
-/// to the servers included, `RECV_INTERRUPTED`), and its line editor
-/// ignores the byte.
+/// shell's waits (for a child, `WAIT_INTERRUPTED`; for a message,
+/// `RECV_INTERRUPTED`, though not a call's reply, see [`MSG_CALL`]), and its
+/// line editor ignores the byte.
 ///
 /// A task sets only its own mode, whether or not it owns the keyboard (the
 /// mode has no effect until it does). The boot shell's mode has no effect at
