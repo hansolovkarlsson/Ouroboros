@@ -10,9 +10,8 @@ format, built twice because crt0 is compiled into both C libraries:
 Each case runs all three with the same arguments, and they must print the
 same lines apart from argv[0], each program's name as typed. Three cases: a
 few arguments, none, and fifteen, the most the shell passes (16 words with
-the command's name). The shell's 128-byte line keeps every blob far below ARGV_MAX (512),
-so crt0's byte bound is not reached here; only a program staging its own blob
-could reach it.
+the command's name). A typed line (128 bytes) cannot reach ARGV_MAX (512
+bytes of staged argv), but a glob can, and the last checks below do.
 
 Graded per C program and case: argc and argv[1..] equal ARGS's, argv[0] the
 name typed, the `argv[argc] is NULL` line, and its exit code 0; and no fault
@@ -26,12 +25,21 @@ shell's `too many words` line, and ARGS must not run (no `argc=` line in the
 block). Before 2026-10-09 the shell dropped the seventeenth
 word and ran the rest.
 
+And a glob past ARGV_MAX is refused with its own line: six files of 74 and 75
+characters in /g1, /g2 and /g3 (made on a copy of the image, so they never
+reach build/esp.img) expand so that `args /g1/* /g2/* /g3/* y` stages exactly
+512 bytes and runs (its printed argv is summed to prove it was 512), and with
+`yz` in place of `y` stages 513 and is refused as `arguments too long`, alone,
+as a pipeline stage and after `exec`, ARGS not running. Before 2026-10-09 the
+shell refused it under "not found" or "path too long".
+
 Run it whenever crt0.c, the kernel's argv store or the shell's argv split
 changes.
 """
 import importlib.util
 import os
 import re
+import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +49,9 @@ drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
 
 IMAGE = os.path.join(ROOT, "build", "esp.img")
+# A copy: the glob checks make files, which must not reach the image other
+# rigs boot.
+COPY = os.path.join(ROOT, "build", "test-cargs.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-cargs.txt")
 CASES = [
     "alpha b 12345678901234567890",
@@ -59,6 +70,31 @@ REFUSALS = [("cremote", "/EFI/ORBS/INIT.CFG"), ("cbig", "/man/grep")]
 SIXTEEN = " ".join(chr(ord("a") + i) for i in range(16))
 TOO_MANY = [(f"args {SIXTEEN}", "args"), (f"args {SIXTEEN} | upper", "args"),
             (f"exec args {SIXTEEN}", "exec")]
+# The glob files: (directory, name length), two to a directory so each
+# listing stays far under one NP_READDIR reply. Their paths and the words
+# `args` and `y` stage 4 + (4 + 4) + sum(4 + 4 + n) + (4 + 1) = 512 bytes.
+GLOB_FILES = [("g1", 75), ("g1", 74), ("g2", 75), ("g2", 74), ("g3", 75), ("g3", 74)]
+GLOB = "/g1/* /g2/* /g3/*"
+ARGV_MAX = 512
+FITS = (f"args {GLOB} y", 1 + len(GLOB_FILES) + 1)
+TOO_LONG = [(f"args {GLOB} yz", "args"), (f"args {GLOB} yz | upper", "args"),
+            (f"exec args {GLOB} yz", "exec")]
+
+
+def glob_setup():
+    """The steps that make GLOB_FILES, each name one letter repeated."""
+    steps = [("# ", f"mkdir /{d}") for d in sorted({d for d, _ in GLOB_FILES})]
+    for k, (d, n) in enumerate(GLOB_FILES):
+        steps.append(("# ", f"touch /{d}/{chr(ord('a') + k) * n}"))
+    return steps
+
+
+def staged_bytes(argv):
+    """What the shell's stage_argv spends on `argv`: a 4-byte count, then a
+    4-byte length before each word."""
+    return 4 + sum(4 + len(a) for a in argv)
+
+
 # Marks each command's output off from the next one's in the transcript.
 FENCE = "echo ==fence=="
 
@@ -79,15 +115,19 @@ def exit_code(block):
 
 
 def main() -> int:
-    guest = drive_qemu.Guest(IMAGE, label="test-cargs: ")
+    shutil.copy(IMAGE, COPY)
+    guest = drive_qemu.Guest(COPY, label="test-cargs: ")
     try:
-        steps = [("login:", "root"), ("assword", "root")]
+        steps = [("login:", "root"), ("assword", "root")] + glob_setup()
         for args in CASES:
             for prog in ["args"] + C_PROGRAMS:
                 steps += [("# ", FENCE), ("# ", f"{prog} {args}".rstrip())]
         for prog, path in REFUSALS:
             steps += [("# ", FENCE), ("# ", f"{prog} {path}")]
         for line, _ in TOO_MANY:
+            steps += [("# ", FENCE), ("# ", line)]
+        steps += [("# ", FENCE), ("# ", FITS[0])]
+        for line, _ in TOO_LONG:
             steps += [("# ", FENCE), ("# ", line)]
         steps += [("# ", FENCE), ("# ", "")]
         driven = guest.run(steps)
@@ -135,6 +175,18 @@ def main() -> int:
         # proves nothing; ARGS printing its argc is what running looks like.
         ran = "argc=" in block
         checks.append((f"`{line}`: refused, nothing run", refused and not ran))
+    i = per_case * len(CASES) + len(REFUSALS) + len(TOO_MANY)
+    block = blocks[i] if i < len(blocks) else ""
+    argc, rest, zero = vector(block)
+    argv = [zero or ""] + [a for _, a in rest]
+    checks.append((f"`{FITS[0]}`: runs with argc={FITS[1]}", argc == [str(FITS[1])]))
+    checks.append((f"`{FITS[0]}`: stages exactly {ARGV_MAX} bytes (the boundary)",
+                   argc == [str(FITS[1])] and staged_bytes(argv) == ARGV_MAX))
+    for k, (line, who) in enumerate(TOO_LONG):
+        i = per_case * len(CASES) + len(REFUSALS) + len(TOO_MANY) + 1 + k
+        block = blocks[i] if i < len(blocks) else ""
+        refused = re.search(rf"^{who}: arguments too long \(at most {ARGV_MAX} bytes", block, re.M) is not None
+        checks.append((f"`{line}`: refused as too long, nothing run", refused and "argc=" not in block))
     checks += [
         ("no fault lines", faults == 0),
     ]

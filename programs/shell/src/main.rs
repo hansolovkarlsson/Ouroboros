@@ -971,29 +971,61 @@ fn resolve_command<'a>(cmd: &str, env: &Env, buf: &'a mut [u8; PATH_SIZE]) -> Op
     None
 }
 
-/// Split `words` into `buf` as argv. `None` when there are more than
-/// [`MAX_ARGS`]: the caller refuses the command, because running it on the
-/// first sixteen words acts on a command nobody typed (an `rm` of twenty
-/// files removing fifteen and saying nothing). Every place the shell builds
-/// an argv goes through here.
-fn split_argv<'a>(words: impl Iterator<Item = &'a str>, buf: &mut [&'a str; MAX_ARGS]) -> Option<usize> {
+/// Why [`split_argv`] refused a command. The caller refuses the command
+/// whole, because running it on part of its words acts on a command nobody
+/// typed (an `rm` of twenty files removing fifteen and saying nothing).
+enum ArgvRefusal {
+    /// More than [`MAX_ARGS`] words.
+    TooMany,
+    /// More bytes than the kernel's argv store holds (`ARGV_MAX`), as
+    /// [`stage_argv`] encodes them. A typed line cannot reach it, but a glob
+    /// can: the expanded line is up to `GLOB_LINE_SIZE` (1024) bytes.
+    TooLong,
+}
+
+impl ArgvRefusal {
+    fn print(&self, cmd: &str) {
+        print_str(cmd);
+        match self {
+            ArgvRefusal::TooMany => {
+                print_str(": too many words (at most ");
+                print_u64(MAX_ARGS as u64);
+                print_line(", the command's name included); nothing was run");
+            }
+            ArgvRefusal::TooLong => {
+                print_str(": arguments too long (at most ");
+                print_u64(syscall_abi::ARGV_MAX);
+                print_line(" bytes staged, the command's name included); nothing was run");
+            }
+        }
+    }
+}
+
+/// The bytes [`stage_argv`]'s blob spends: a 4-byte count, then a 4-byte
+/// length before each word. One definition, so the refusal in [`split_argv`]
+/// and the bound in [`stage_argv`] cannot disagree on where the limit is.
+const ARGV_COUNT_BYTES: usize = 4;
+fn argv_word_bytes(w: &str) -> usize {
+    4 + w.len()
+}
+
+/// Split `words` into `buf` as argv, or say why the command is refused
+/// ([`ArgvRefusal`]). Every place the shell builds an argv goes through here.
+fn split_argv<'a>(words: impl Iterator<Item = &'a str>, buf: &mut [&'a str; MAX_ARGS]) -> Result<usize, ArgvRefusal> {
     let mut n = 0;
+    let mut bytes = ARGV_COUNT_BYTES;
     for w in words {
         if n == MAX_ARGS {
-            return None;
+            return Err(ArgvRefusal::TooMany);
+        }
+        bytes += argv_word_bytes(w);
+        if bytes > syscall_abi::ARGV_MAX as usize {
+            return Err(ArgvRefusal::TooLong);
         }
         buf[n] = w;
         n += 1;
     }
-    Some(n)
-}
-
-/// The refusal [`split_argv`]'s `None` is reported with.
-fn print_too_many_args(cmd: &str) {
-    print_str(cmd);
-    print_str(": too many words (at most ");
-    print_u64(MAX_ARGS as u64);
-    print_line(", the command's name included); nothing was run");
+    Ok(n)
 }
 
 /// Spawn one program pipeline stage: tokenize `stage` into argv, resolve
@@ -1002,9 +1034,9 @@ fn print_too_many_args(cmd: &str) {
 /// status ([`NO_FS`] or an `FS_ERR_*`/`SPAWN_ERR_*` code).
 fn spawn_stage(stage: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, stdout_target: u64) -> Result<u64, u64> {
     let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
-    // Too many words is refused by the pipeline before any stage is spawned
-    // (run_head_pipeline), so this `None` is not reached from there.
-    let Some(n) = split_argv(stage.split_whitespace(), &mut argv_buf) else {
+    // A refused argv is refused by the pipeline before any stage is spawned
+    // (run_head_pipeline), so this `Err` is not reached from there.
+    let Ok(n) = split_argv(stage.split_whitespace(), &mut argv_buf) else {
         return Err(0);
     };
     if n == 0 {
@@ -1155,12 +1187,13 @@ fn run_head_pipeline(
 
     let prog_stages: &[&str] = if builtin_head { &stages[1..] } else { stages };
 
-    // A stage with too many words refuses the whole pipeline before anything
-    // is spawned, so no stage runs with its input or output half connected.
+    // A stage whose argv is refused refuses the whole pipeline before
+    // anything is spawned, so no stage runs with its input or output half
+    // connected.
     let mut probe: [&str; MAX_ARGS] = [""; MAX_ARGS];
     for stage in prog_stages {
-        if split_argv(stage.split_whitespace(), &mut probe).is_none() {
-            print_too_many_args(stage.split_whitespace().next().unwrap_or("pipe"));
+        if let Err(why) = split_argv(stage.split_whitespace(), &mut probe) {
+            why.print(stage.split_whitespace().next().unwrap_or("pipe"));
             return;
         }
     }
@@ -2037,9 +2070,12 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &m
     // argv = the tokens after "exec": [program path, args...]. argv[0] is both
     // the path to load and the program's own argv[0].
     let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
-    let Some(n) = split_argv(line.split_whitespace().skip(1), &mut argv_buf) else {
-        print_too_many_args("exec");
-        return;
+    let n = match split_argv(line.split_whitespace().skip(1), &mut argv_buf) {
+        Ok(n) => n,
+        Err(why) => {
+            why.print("exec");
+            return;
+        }
     };
     if n == 0 {
         print_line("exec: missing program argument");
@@ -2411,10 +2447,13 @@ fn delegate_net(slot: u64) {
 fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &mut Output) -> bool {
     // argv = every token on the line (argv[0] = the command as typed).
     let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
-    let Some(n) = split_argv(line.split_whitespace(), &mut argv_buf) else {
-        // Handled: refused, not "unknown command".
-        print_too_many_args(command);
-        return true;
+    let n = match split_argv(line.split_whitespace(), &mut argv_buf) {
+        Ok(n) => n,
+        Err(why) => {
+            // Handled: refused, not "unknown command".
+            why.print(command);
+            return true;
+        }
     };
     let argv = &argv_buf[..n];
 
@@ -2589,15 +2628,17 @@ fn capture_program_output(slot: u64, out: &mut Output) {
 /// Encode `argv` into the `ARGS_STAGE` blob format (`[argc: u32 LE]` then
 /// `[len: u32 LE][bytes]` per arg) and stage it in the kernel for the next
 /// `SPAWN` to attach. Returns the blob length (SPAWN's arg2), or `Err(())`
-/// if it doesn't fit `ARGV_MAX` (unreachable with a 128-byte input line).
+/// if it doesn't fit `ARGV_MAX`, which [`split_argv`] has already refused
+/// with its own message for every argv the shell builds (a glob can reach
+/// it; a typed line cannot).
 fn stage_argv(argv: &[&str]) -> Result<u64, ()> {
     const CAP: usize = syscall_abi::ARGV_MAX as usize;
     let mut blob = [0u8; CAP];
-    blob[0..4].copy_from_slice(&(argv.len() as u32).to_le_bytes());
-    let mut off = 4usize;
+    blob[0..ARGV_COUNT_BYTES].copy_from_slice(&(argv.len() as u32).to_le_bytes());
+    let mut off = ARGV_COUNT_BYTES;
     for a in argv {
         let bytes = a.as_bytes();
-        if off + 4 + bytes.len() > CAP {
+        if off + argv_word_bytes(a) > CAP {
             return Err(());
         }
         blob[off..off + 4].copy_from_slice(&(bytes.len() as u32).to_le_bytes());

@@ -49,9 +49,12 @@ a machine whose public key the other does not list is refused.
   literal. Each token can expand to several names, so it pairs best with
   commands that take several arguments.
 - **At most 16 words a command** (the command's name included, counted after
-  glob expansion), for a program, each pipeline stage and `exec`. A longer
-  line is refused with `too many words` and nothing runs; it used to be cut
-  at the sixteenth word without a message.
+  glob expansion), for a program, each pipeline stage and `exec`, and at
+  most 512 bytes of arguments as the kernel stores them (each word costs its
+  length plus 4, plus 4 for the count: only a glob reaches it). A longer line
+  is refused with `too many words` or `arguments too long` and nothing runs;
+  it used to be cut at the sixteenth word without a message, and a glob past
+  512 bytes was reported as "not found" or "path too long".
 - **Tab completion:** Tab completes the last word as a filename, on the
   serial line and, since 2026-10-09, on the USB keyboard. One match
   fills it in (with the filesystem's casing) plus `/` for a directory or a
