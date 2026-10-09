@@ -10,15 +10,16 @@ here actually works today, see [`architecture.md`](architecture.md) and
 ## Unreleased: the storage server under large writes, and the C library for Proem and Edit
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
-version is held for a go-ahead. So far three days' work, 2026-10-05 to
-2026-10-07, #209 to #233: the storage server made safe under large writes and
+version is held for a go-ahead. So far four days' work, 2026-10-05 to
+2026-10-08, #209 to #240: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the
-console and keyboard made fit for a full-screen editor (Edit's items 1 to 3:
-cursor addressing, the navigation keys, the screen size), with a task's
-FP/SIMD registers saved across the kernel and keys typed while a program is
-busy kept. The days' records are in `docs/work-journal/`, one file a day.
+console and keyboard made fit for a full-screen editor (all of Edit's request:
+cursor addressing, the navigation keys, the screen size, Ctrl-C as a key and
+`poll`), with a task's FP/SIMD registers saved across the kernel and keys
+typed while a program is busy kept, ending in DevTools's editor running here
+as `/bin/edit`. The days' records are in `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
 `cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
@@ -182,6 +183,58 @@ rest instead of queueing it as text. The kernel now uses the `keyseq` crate,
 the filter userland's readers share. The other half, dropping a key's rest
 when the keyboard changes owner mid-key, was built, found fragile in review
 and taken out; its design is in the plan.
+
+**A program can take Ctrl-C as a key, and Ctrl+\ is the way out (#235).**
+Step 1 of the Ctrl-C plan, item 4 of DevTools's editor note. A new system
+call, `KBD_MODE` (70), puts a program in raw keyboard mode, where Ctrl-C
+reaches it as the byte 3 (an editor's page down) instead of ending it.
+Ctrl+\ ends a foreground program in every mode, so no program can take the
+way out away; the USB keyboard now sends it, from the US backslash key and
+from the ISO key in the same place. The mode ends with the program. The kill
+line names the key pressed. `make test-kbd-mode` reads Ctrl-C as 3 from the
+serial line and the USB keyboard and ends programs with Ctrl+\ from both.
+
+**`tcgetattr` and `tcsetattr` (#236).** Step 2 of the Ctrl-C plan, what
+Edit's raw-mode code calls. `<termios.h>` with Linux's values; clearing
+`ISIG` is the raw mode above, and every other flag is accepted and changes
+nothing, since the console already reads a byte at a time with no echo.
+`tcgetattr` reports the console as it is, with `ISIG` from the kernel, as
+POSIX has a program confirm what took effect. Speeds, `tcflush` and
+`tcdrain` are not provided and fail to link. `make test-ctermios` runs Edit's
+own recipe flag for flag.
+
+**A killed program no longer leaves the screen inverted (#237).** Step 4 of
+the Ctrl-C plan. The shell writes `ESC [ 0 m` when a program it waited on was
+killed, so one ended between `ESC [ 7 m` and `ESC [ 0 m` (an editor drawing
+its status line) no longer turns the prompt and everything after it into
+reverse video. `make test-cond-vt` kills a probe in reverse video and reads
+the prompt off the screen.
+
+**A key cut in two is never handed on, and `TCSAFLUSH` discards type-ahead
+(#238).** The rest of step 3 of the Ctrl-C plan, its four decisions settled by
+Hans. Every byte a program reads now passes through one queue whose parser
+knows where each key starts: an arrow read in part by a program that exits
+leaves nothing of `[A` for the shell, nothing typed after a Ctrl-C or Ctrl+\
+is eaten, a USB key is read whole so no serial byte lands inside it, and a
+bare Escape from a serial terminal counts as a key after 40 ms. `TCSAFLUSH`
+now discards the keys typed ahead, through a flag on `KBD_MODE`. A program
+marked for the kill reads nothing more. The queue moved into the `keyseq`
+crate, where `make test` checks it on the host (23 tests), because the timing
+cases cannot be set up from QEMU; `make test-kbd-cut` checks the rest end to
+end.
+
+**`poll`, and DevTools's editor on the image (#240).** What DevTools asked so
+Edit could run here. `poll` and `<poll.h>` (and `<sys/poll.h>`): fd 0 waits
+for a key with a timeout, blocked in the kernel without spinning, to a tick's
+precision (about 20 ms, rather than the 10 ms asked, a trade settled by Hans
+against spinning a core), and the key stays in the kernel for the next
+`read`, so a program that polls and exits leaves it for the shell. The
+console is always ready for writing, a file on a filesystem always ready, a
+`/net` file `POLLERR`, and with nothing to wait on `poll` sleeps. Two new
+system calls carry it, `KEY_WAIT_UNTIL` (71) and `SLEEP_UNTIL` (72). `make
+edit-bin` builds DevTools's Edit from `EDIT_DIR`, staged as `/bin/edit` and
+required by a release; `make test-edit` opens a file, repeats a command with
+`^Q Q`, moves with an arrow and saves with `^K D`.
 
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or

@@ -1441,3 +1441,65 @@ full queue, so the branch that drops the rest of a key whose front did not fit
 was never reached, and could be broken with the check green. Found by the high
 review of #233; 63 letters reach it, and both the no-take-back and the
 never-drop mutations fail.
+
+## Nine more, from the Ctrl-C plan and `poll` (2026-10-08)
+
+The rest of Edit's request and the `poll` that followed it (#235 to #240),
+sixteen high reviews. Six of the nine were found by a review, three by a
+control run on purpose or by its output looking wrong. The day's best answer
+to an instrument that could not see went furthest: the keyboard queue moved
+out of the kernel into the `keyseq` crate, where `make test` can push bytes
+at chosen ticks, because no QEMU rig could time the case that mattered.
+
+**A rule masked by its neighbour.** `test-kbd-cut`'s check that nothing typed
+after a kill is eaten (decision E1) passed with E1 reverted, because at typing
+pace E2's 40 ms bare-Escape interval had already reset the parser before the
+next key arrived. Found by running the control: only E1 and E2 removed
+together failed it. The rule is now a host test, `nothing_typed_after_an_interrupt_is_eaten`,
+which pushes the next byte at the same tick.
+
+**A slot assumed.** `test-kbd-mode`'s "the next task in a raw task's slot
+starts cooked" looked for `mode cooked` and never confirmed that `readkey
+mode` ran in the slot the raw run had used. Found by the first high review of
+#235; both modes print their slot, and the check compares them.
+
+**A wait arm with no check.** Ctrl+\ interrupting the boot shell's stuck
+`wait` was a new line in `keyboard_interrupts_wait` that no step exercised.
+Found by the same review; the rig waits on `recv` and presses Ctrl+\, later
+behind 70 queued letters.
+
+**A no-zombie check that never queued anything.** "A raw owner's queued
+Ctrl-C left no zombie" passed whether or not the 0x03 had reached the queue
+when the program exited. Found by the fourth high review of #235; `echo qk`
+typed behind the Ctrl-C must run as the shell's next line, which proves the
+queue held both.
+
+**A readback the recipe could not tell apart.** `test-ctermios` checked that
+`tcgetattr` gave back what Edit's raw recipe set, and the mutation "settings
+not stored" survived: the recipe only clears flags the console already
+lacks, so the fixed settings read back the same. Found by running the
+control; a check now sets flags the console never has.
+
+**A reset both runs made themselves.** "The next program starts with `ISIG`
+set" could not fail, because both earlier `ctermios` runs turned cooked
+before ending, so the kernel's reset at death was never what made the third
+run cooked. Found by the first high review of #236; a run now ends by Ctrl+\
+while still raw.
+
+**A pass that an error message could give.** `test-edit` counted the editor
+open when `hello.txt` appeared after the command, which an error naming the
+file, or the shell's "not found", would also satisfy. Found by the first high
+review of #240; it waits for Edit's status line, `Line 1  Col 1`.
+
+**A check that a skipped fd passes.** `test-cpoll`'s "with fd 1 ready, fd 0 is
+answered too" ran with nothing typed, so a `poll` that skipped fd 0 also
+answered `key=0` at once. Found by the second high review of #240; a key is
+typed before the poll, and the answer must be `POLLIN`.
+
+**A mutation harness that ran nothing.** The mutation run for #240's third
+round wrapped each rig in `timeout 300`, which macOS does not have. Every run
+failed to start, the `grep` for `FAIL` printed nothing, and three mutations
+read as survivors until the emptiness itself looked wrong. Found by that;
+the rerun prints each rig's "driven to the end" line beside the failures, so
+a run that did not happen cannot read as a pass. The family's spine in one
+line: the harness that runs the controls is a check too.
