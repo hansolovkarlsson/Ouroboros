@@ -427,3 +427,46 @@ visibly fragile, and the unchanged core gets less of it. The practical form is
 cheap. After a round whose findings are mostly in repairs, the next review
 should be told to read the parts that have **not** moved as well; they are no
 safer for having survived, only less looked at.
+
+## Three branches in a day, and the round that handed back a choice (2026-10-08)
+
+*Added from the Ctrl-C plan's steps 1 and 3 and DevTools's `poll`
+([`roadmap-ctrl-c.md`](../roadmap/roadmap-ctrl-c.md)), #235, #238 and #240,
+each reviewed high until its findings were older than the branch or about
+completeness rather than defects. Code this time, so the rigs and their
+mutations stood beside the review.*
+
+| branch | rounds | findings by round | the repair a later round found wanting |
+| --- | --- | --- | --- |
+| #235, raw mode | 5 | 8, 6, 8, 7, 8 | the boot shell's interrupt: a queue scan, then a per-byte mark (lost with its byte in a full queue), then a flush at the prompt (lost keys typed just before it, which `test-kbd-mode` caught before the review did) |
+| #238, cut keys | 5 | 7, 7, 9, 9, 9 | "every byte through the queue" first drained the devices at each read, handing a Ctrl-C typed after Enter to the next command as data; its one-byte replacement could not keep that promise either, and was named an inherent race |
+| #240, `poll` | 4 | 10, 9, 10, 10 | the timed wait: a spin on `YIELD`, then a kernel wait that took the key, then a wait that left the key but spun the last stretch, then tick precision |
+
+**The spine held again, and so did both remedies already in this file.** On
+all three branches the middle rounds were mostly about the previous round's
+repairs, and the rounds converged only when a mechanism was replaced rather
+than patched once more: the boot shell's interrupt became a return value of
+the read, not a queued byte or a mark; `poll`'s key stayed in the kernel, not
+in the program. The 09-22 section's advice, redesign a repair that keeps
+drawing findings, was the thing that worked, each time a round later than it
+could have been.
+
+**The lesson this section adds: a repair cycle that keeps returning to the
+same trade-off is a decision, not a defect.** `poll`'s timed wait went round
+three times between precision and cost: the note asked for 10 ms, the kernel
+looks at a blocked task once a 20 ms tick, and every repair that met the
+10 ms spun the core for the last stretch while every review said the spin was
+wrong. No fix could end it, because both sides were requirements. The fourth
+round ended it by asking Hans, who chose tick precision; the reply to DevTools
+says so, with what a finer timer would take. Two more rounds would have found
+the same spin from the other side. When two successive rounds find opposite
+faults in the same line, the next step is to name the trade and hand it to
+whoever owns the requirement.
+
+**And one the rigs added: a repair can be caught by an instrument the round
+never asked about.** The flush-at-the-prompt repair on #235 was not found by
+the next review but by `test-kbd-mode`'s `ef` check, a check written two
+rounds earlier for something else, which failed on the next run. It makes a
+cheap habit to set beside the 09-26 one (tell the next review to read what
+has not moved): after a round whose findings are mostly in repairs, run every
+rig the branch touches, not just the ones the repair seems to concern.

@@ -2344,101 +2344,12 @@ be reviewed after the fact from the saved screenshots.
 >       identity" and rereads headers. Proem's fstat note asked for it
 >       first; the fallback met its **Done when**.
 >
-> **What Edit asks of Ouroboros, accepted 2026-10-05.** Edit moved into
-> DevTools (`~/Projects/DevTools/edit/`) on 2026-10-06, so these are DevTools's
-> requests now, and replies about the editor go to DevTools's
-> `docs/handoffs/` (handoff
-> [`handoffs/closed/2026-10-06-from-devtools-edit-moved.md`](handoffs/closed/2026-10-06-from-devtools-edit-moved.md)).
-> Two handoff notes:
-> a full-screen editor's needs, which is item c below (a text editor and
-> full-screen terminal control) made concrete, not started; and `rename` in
-> the C port, done in #215 and its note closed.
+> **What Edit asked of Ouroboros, accepted 2026-10-05: done 2026-10-08.**
+> Edit is DevTools's editor (`~/Projects/DevTools/edit/`), on the image as
+> `/bin/edit` since #240. Its notes are all in `handoffs/closed/`, and the
+> finished items moved to [`roadmap-completed.md`](roadmap-completed.md) on
+> 2026-10-09. What is left is one follow-up found while building them:
 >
-> - [x] **new** **One paced-typing helper for the QEMU rigs.** `type_raw`
->       (bytes on the serial line at `drive_qemu.TYPE_DELAY`, no Enter) is
->       copied into six rigs (`test-kbd-mode`, `test-kbd-cut`, `test-ctermios`,
->       `test-nav-keys`, `test-cpoll`, `test-edit`), and `sendkeys` into four.
->       A fix to the pacing has to reach all of them. Move both into
->       `drive-qemu.py`'s `Guest` (found by the fourth high review of #240,
->       left out of that PR as a change to six rigs). Done when no rig
->       defines either, and every rig that used them still passes.
->       *Done 2026-10-08: `Guest.type_raw` (which `type_line` now uses) and
->       `drive_qemu.sendkeys(monitor, names, delay, hold=None)`; the eight
->       rigs that had copies use them (`test-usb-hub`'s text typer is now
->       `type_usb`, built on the shared one), and all eight pass.*
-> - [x] **new** **`poll` and `/bin/edit`.** DevTools asks for `poll` on
->       fd 0 (`<poll.h>`, one `pollfd`, `POLLIN`, a timeout of -1, 0 or
->       milliseconds to within about 10 ms, fd 1 flushed first) and for Edit
->       built into the image as cpp is, from `EDIT_DIR`. `poll` is the one
->       symbol Edit's Ouroboros platform file still lacks. Done when
->       DevTools's `make -C edit ouroboros-build` finds every symbol, and on an
->       image from `main` `edit hello.txt` opens full screen, an arrow moves
->       the cursor, `^Q Q` repeats until a key stops it, and `^K D` saves.
->       Note:
->       [`handoffs/closed/2026-10-08-from-devtools-edit-poll.md`](handoffs/closed/2026-10-08-from-devtools-edit-poll.md).
->       *Built 2026-10-08 (#240): `poll` in `libc/src/file.c` over a new
->       system call, `KEY_WAIT_UNTIL` (71), which blocks until a key is
->       waiting or the deadline passes, to a tick's precision (about 20 ms,
->       not the note's 10: settled by Hans against a spin), and leaves the
->       key in the kernel for `read`. Its first form spun on `YIELD`, a core's worth
->       whenever nothing else ran, and took the key into the program, where
->       it died if the program exited unread (the two high reviews of #240).
->       Also `make edit-bin`, and the rigs `make test-cpoll` and `make
->       test-edit`.*
-> - [x] **new** **A console and keyboard a full-screen editor can use.**
->       Five parts, in Edit's order: (1) `cond`'s framebuffer backend
->       interprets `ESC [ r ; c H` (it ignores the parameters today and
->       goes home), `ESC [ K`, `ESC [ 2 J`, `ESC [ 7 m`/`ESC [ 0 m`/`ESC [
->       m`, and swallows `ESC [ ? 25 l/h` without drawing; (2) the USB
->       keyboard sends the VT100/xterm sequences for the arrows, Home, End,
->       Page Up, Page Down, Delete, F2 and F3, which `xhci.rs`'s
->       `keycode_to_ascii` drops; (3) the screen size readable by an
->       ordinary program on both backends (`CON_INFO` is gated to `cond`,
->       and `more` assumes 24 rows); (4) a per-program opt-out of the
->       Ctrl-C kill, so 0x03 reaches it as a key (WordStar's page down);
->       (5) `main(argc, argv)` in `crt0.c`, which called `main(void)`
->       (*(5) done 2026-10-05 by #219, step 1 of the C-hosting plan; `make
->       test-cargs`*) (*(1) done 2026-10-07 by #228, `/bin/VTPROBE` drawing
->       each sequence and `make test-cond-vt` reading the screen back by
->       pixel; on top of #227, the FP/SIMD save it turned up*) (*(2) done
->       2026-10-07 by #229, `/bin/READKEY` printing each key's bytes and
->       `make test-nav-keys` pressing them on QEMU's USB keyboard; the
->       shell and login now drop the sequences instead of inserting their
->       tails*) (*(3) done 2026-10-07 by #230: `CON_INFO`'s size fields
->       open to every task, `ioctl(TIOCGWINSZ)` in the C library (0 by 0 on
->       a serial console, whose size is unknown), `ulib::screen_size`, and
->       `more` paging by the real height; `make test-cwinsz`*). Done
->       when a program in this tree, on the framebuffer console, writes
->       each sequence of (1) and prints the bytes each key of (2) sends,
->       and a C program's `main` receives its arguments. (4) touches the
->       one choke point every keyboard path funnels through
->       (`syscall.rs`'s Ctrl-C interception), so it needs its own design
->       note first. *Design note written 2026-10-07:
->       [`roadmap/roadmap-ctrl-c.md`](roadmap/roadmap-ctrl-c.md), a per-task
->       `KBD_MODE` with Ctrl+\ as the way out, `termios` in the C library,
->       and a kernel input queue for the two hazards below; its four
->       decisions settled by Hans the same day, as recommended. DevTools
->       answered 2026-10-08 that Edit does not bind ^\, and step 1
->       (`KBD_MODE`, Ctrl+\ as the way out, `make test-kbd-mode`) was
->       built the same day (#235), step 2, `tcgetattr` and `tcsetattr` in
->       the C library (#236), and step 4, the shell's reset after a kill
->       (#237); and step 3's second half the same day, designed in the
->       plan with its four decisions (E1 to E4) settled by Hans and built
->       (the queue now `keyseq::KeyQueue`, host-tested). Every step is
->       built, and DevTools told by notice (2026-10-08,
->       `~/Projects/DevTools/docs/handoffs/2026-10-08-from-ouroboros-editor-ctrl-c-item-4.md`);
->       the note is closed:
->       `~/Projects/DevTools/docs/handoffs/closed/2026-10-07-from-ouroboros-ctrl-backslash.md`.* Two hazards for that design, from the high review of
->       #229: a key's sequence is queued whole but delivered a byte at a
->       time, so a change of keyboard owner (a program killed between the
->       ESC and the rest) hands the tail to the next owner, and a serial
->       byte can land inside a USB sequence; and `on_tick`, which consumes
->       one byte from a running foreground program's keyboard to watch for
->       Ctrl-C, now drops a byte from the middle of a sequence rather than a
->       whole key, so an editor busy redrawing can read `[A` as text. A peek
->       at that choke point, consuming only a Ctrl-C, fixes the second.
->       Note:
->       [`handoffs/closed/2026-10-05-from-edit-editor-console.md`](handoffs/closed/2026-10-05-from-edit-editor-console.md).
 > - [ ] **new** **A stale reply after an interrupted call.** Ctrl+C (and
 >       since #235 Ctrl+\) interrupts the boot shell's message waits, its
 >       `MSG_CALL`s to the servers included (`RECV_INTERRUPTED`); the
@@ -2459,52 +2370,6 @@ be reviewed after the fact from the saved screenshots.
 >       reply echoes, so a late reply is recognised and dropped. Done when a
 >       rig interrupts the boot shell during a call held open by a slow
 >       server and the shell's next call to that server gets its own reply.
-> - [x] **new** **`rename` in the C port.** picolibc declares it and
->       nothing defines it, so a C program calling it fails to link. One
->       `np_request` in `libc/src/file.c`, `NP_MV` on the two resolved
->       paths, which already replaces an existing ordinary file (fixed
->       2026-09-02); 0, or -1 with `errno` once step 2 of the C-hosting
->       plan gives one. Same shape as Proem's `unlink` above; land them
->       together. While there, `FSOP_MV`'s doc comment in `syscall-abi`
->       still says the destination must not exist. Done when, on FAT32, a
->       C program's `rename("a.tmp", "a.txt")` with both present returns 0,
->       `a.txt` holds what `a.tmp` held, and `a.tmp` is gone. Note:
->       [`handoffs/closed/2026-10-05-from-edit-rename.md`](handoffs/closed/2026-10-05-from-edit-rename.md).
->       *Built 2026-10-05 with `unlink` above, on `libc/unlink-rename`:
->       both in `libc/src/file.c`, over `NP_RM` and `NP_MV`, resolving
->       their paths through the helper `open` now shares
->       (`resolve_target`), so a path on a partition or remote mount goes
->       where `open` would send it. `rename` across two mounts answers
->       `EXDEV` without a request. Both set `errno` where the C library has
->       one (picolibc; the hand-rolled libc has none and reports through
->       `ouro_last_fs_status`), ENOENT for a missing file; step 2 of the
->       C-hosting plan extends that mapping to the rest of the file.
->       `sys.h` gained `NP_RM`, `NP_MV` and three `FS_ERR_*` codes, all on
->       `check-wire-constants.py`'s list (a mis-numbered `NP_RM` fails it).
->       `make test-crename` (`scripts/test-crename.py`, `/bin/CRENAME`,
->       `libc/crename.c`) runs both notes' checks on FAT32 and on ext2,
->       the ext2 boot with a partition at `/mnt/f` for `EXDEV`, then `ls /`
->       for leftovers. Mutations: an `unlink` that sends nothing, and a
->       `rename` without the cross-mount check, each fail it. `FSOP_MV`'s
->       doc comment no longer says the destination must not exist. Its
->       review (`/code-review high`, ten findings) found the worst one
->       below this layer: no part of `fsd` refused moving a directory into
->       its own subtree, which on ext2 orphans the subtree; `NP_MV` now
->       answers `FS_ERR_INVALID_NAME` for it, for every client (the shell's
->       `mv` included), by the names as sent, so a `..` that hides the
->       overlap from a raw 9P peer is not caught. Also from it: an empty
->       path is ENOENT (it named the cwd); `.` and `..` collapse before the
->       namespace picks a mount (`/mnt/f/../../x` went to the wrong tree);
->       the errno map covers every code (EEXIST, ENOTEMPTY, ENOSPC, EINVAL,
->       EBUSY, ENODEV...), and a cross-mount refusal records
->       `FS_ERR_CROSS_DEVICE`; `errno` is switched on by the build
->       (`-DOURO_HAVE_ERRNO`), not by what is on the include path; `remove`
->       is the port's own, taking an empty directory through a new
->       `rmdir`; and the rig waits for and grades the summary line, which a
->       substring match passed on a run cut short. Mutations for each new
->       check: no subtree refusal, no normalization, no empty-path refusal,
->       each fail `test-crename`. Merged as #215 (`e0c8e09`); both handoff
->       notes are done and in `handoffs/closed/`.*
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
