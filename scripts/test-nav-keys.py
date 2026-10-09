@@ -35,7 +35,6 @@ import importlib.util
 import os
 import re
 import shutil
-import socket
 import sys
 import time
 
@@ -63,22 +62,6 @@ IN_LINE = ["up", "left", "x", "delete", "home", "end", "f2"]
 COPY = os.path.join(ROOT, "build", "test-nav-keys.img")
 
 
-def sendkeys(names):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mon:
-        mon.connect(MONITOR)
-        for name in names:
-            mon.sendall(f"sendkey {name}\n".encode())
-            time.sleep(KEY_DELAY)
-
-
-def type_raw(guest, data):
-    """Bytes on the serial line, paced like Guest.type_line, no Enter added."""
-    for ch in data:
-        guest.proc.stdin.write(bytes([ch]))
-        guest.proc.stdin.flush()
-        time.sleep(drive_qemu.TYPE_DELAY)
-
-
 def main() -> int:
     if os.path.exists(MONITOR):
         os.remove(MONITOR)
@@ -97,7 +80,7 @@ def main() -> int:
     try:
         ok = guest.wait_for("login:", timeout=120)
         if ok:
-            type_raw(guest, b"ro\x1b[Dot\n")
+            guest.type_raw(b"ro\x1b[Dot\n")
             ok = guest.wait_for("assword")
         if ok:
             guest.type_line("root")
@@ -108,7 +91,7 @@ def main() -> int:
             guest.type_line("readkey")
             ok = guest.wait_for("press keys")
         if ok:
-            sendkeys([name for name, _ in KEYS] + ["q"])
+            drive_qemu.sendkeys(MONITOR, [name for name, _ in KEYS] + ["q"], KEY_DELAY)
             # The farewell and the prompt after it in one match: a wait for
             # the farewell alone marks the prompt as seen too, and a second
             # wait for it then never matches.
@@ -116,15 +99,15 @@ def main() -> int:
             if ok:
                 steps_done.append("readkey")
         if ok:
-            type_raw(guest, b"echo a")
+            guest.type_raw(b"echo a")
             time.sleep(drive_qemu.SETTLE)
-            sendkeys(IN_LINE)
+            drive_qemu.sendkeys(MONITOR, IN_LINE, KEY_DELAY)
             guest.type_line("b")
             ok = guest.wait_for("# ")
             if ok:
                 steps_done.append("usb line")
         if ok:
-            type_raw(guest, b"echo c\x1b[A\x1b[5~d\n")
+            guest.type_raw(b"echo c\x1b[A\x1b[5~d\n")
             ok = guest.wait_for("# ")
             if ok:
                 steps_done.append("serial line")
@@ -133,11 +116,11 @@ def main() -> int:
             guest.type_line("more /include/elf.h")
             ok = guest.wait_for("--More--")
             if ok:
-                sendkeys(["down"])
+                drive_qemu.sendkeys(MONITOR, ["down"], KEY_DELAY)
                 ok = guest.wait_for("--More--")
             if ok:
                 time.sleep(1.5)  # time for any further screens to show
-                sendkeys(["q"])
+                drive_qemu.sendkeys(MONITOR, ["q"], KEY_DELAY)
                 ok = guest.wait_for("# ")
             if ok:
                 steps_done.append("more")
@@ -147,10 +130,10 @@ def main() -> int:
             guest.type_line("useradd navu")
             ok = guest.wait_for("assword")
             if ok:
-                type_raw(guest, b"pa\x1b[Dss\n")
+                guest.type_raw(b"pa\x1b[Dss\n")
                 ok = guest.wait_for("assword")
             if ok:
-                type_raw(guest, b"pa\x1b[Dss\n")
+                guest.type_raw(b"pa\x1b[Dss\n")
                 ok = guest.wait_for("# ")
             if ok:
                 guest.type_line("logout")

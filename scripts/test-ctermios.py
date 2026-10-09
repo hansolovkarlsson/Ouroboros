@@ -30,9 +30,7 @@ libc's termios, sys/termios.h or KBD_MODE changes.
 """
 import importlib.util
 import os
-import socket
 import sys
-import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -51,23 +49,6 @@ CHECK_LINES = [
     "initial ok", "set ok", "readback ok", "honest ok", "restore ok", "kernel ok",
     "fd 9 EBADF", "file ENOTTY", "action EINVAL", "null EFAULT",
 ]
-
-
-def type_raw(guest, data):
-    """Bytes on the serial line, paced like Guest.type_line, no Enter added."""
-    for ch in data:
-        guest.proc.stdin.write(bytes([ch]))
-        guest.proc.stdin.flush()
-        time.sleep(drive_qemu.TYPE_DELAY)
-
-
-def sendkeys(names):
-    """Keys on QEMU's USB keyboard, through the monitor's sendkey."""
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mon:
-        mon.connect(MONITOR)
-        for name in names:
-            mon.sendall(f"sendkey {name}\n".encode())
-            time.sleep(KEY_DELAY)
 
 
 def main() -> int:
@@ -95,16 +76,16 @@ def main() -> int:
             guest.type_line("ctermios raw")
             ok = guest.wait_for("ctermios: raw")
             if ok:
-                type_raw(guest, ETX)
+                guest.type_raw(ETX)
                 ok = guest.wait_for("ctermios: byte 3")
             if ok:
-                sendkeys(["ctrl-c"])
+                drive_qemu.sendkeys(MONITOR, ["ctrl-c"], KEY_DELAY)
                 ok = guest.wait_for("ctermios: byte 3")
             if ok:
-                type_raw(guest, b"q")
+                guest.type_raw(b"q")
                 ok = guest.wait_for("ctermios: restored")
             if ok:
-                type_raw(guest, ETX)
+                guest.type_raw(ETX)
                 ok = guest.wait_for(PROMPT, timeout=30)
             seg["raw"] = guest.transcript()[start:]
         if ok:
@@ -116,7 +97,7 @@ def main() -> int:
             guest.type_line("ctermios raw")
             ok = guest.wait_for("ctermios: raw")
             if ok:
-                type_raw(guest, b"\x1c")
+                guest.type_raw(b"\x1c")
                 ok = guest.wait_for(PROMPT, timeout=30)
             seg["died raw"] = guest.transcript()[start:]
         if ok:

@@ -59,7 +59,6 @@ Ctrl mapping or the death path's per-task resets change.
 import importlib.util
 import os
 import re
-import socket
 import sys
 import time
 
@@ -76,22 +75,6 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-kbd-mode.txt")
 KEY_DELAY = 0.3
 ETX, FS = b"\x03", b"\x1c"
 PROMPT = "# "
-
-
-def sendkeys(names):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mon:
-        mon.connect(MONITOR)
-        for name in names:
-            mon.sendall(f"sendkey {name}\n".encode())
-            time.sleep(KEY_DELAY)
-
-
-def type_raw(guest, data):
-    """Bytes on the serial line, paced like Guest.type_line, no Enter added."""
-    for ch in data:
-        guest.proc.stdin.write(bytes([ch]))
-        guest.proc.stdin.flush()
-        time.sleep(drive_qemu.TYPE_DELAY)
 
 
 def main() -> int:
@@ -126,22 +109,22 @@ def main() -> int:
         return ok
 
     def serial_then_usb_ctrl_c_then_serial_fs():
-        type_raw(guest, ETX)
+        guest.type_raw(ETX)
         time.sleep(KEY_DELAY)
-        sendkeys(["ctrl-c"])
+        drive_qemu.sendkeys(MONITOR, ["ctrl-c"], KEY_DELAY)
         time.sleep(KEY_DELAY)
-        type_raw(guest, FS)
+        guest.type_raw(FS)
 
     try:
         ok = guest.wait_for("login:", timeout=120)
         ok = ok and guest.run([("", "root"), ("assword", "root")]) and guest.wait_for(PROMPT)
         ok = ok and step("raw", "readkey raw", "readkey: raw", serial_then_usb_ctrl_c_then_serial_fs)
-        ok = ok and step("raw usb", "readkey raw", "readkey: raw", lambda: sendkeys(["ctrl-backslash"]))
+        ok = ok and step("raw usb", "readkey raw", "readkey: raw", lambda: drive_qemu.sendkeys(MONITOR, ["ctrl-backslash"], KEY_DELAY))
         # QEMU's `less` is the ISO key beside left Shift (HID 0x64), which
         # has no US position: Ctrl on it must NOT be the way out, so readkey
         # lives on to read `q`. (The ISO key in the backslash position, 0x32,
         # is Ctrl+\ but has no sendkey: QEMU sends 0x31 for it.)
-        ok = ok and step("raw iso", "readkey raw", "readkey: raw", lambda: sendkeys(["ctrl-less", "q"]))
+        ok = ok and step("raw iso", "readkey raw", "readkey: raw", lambda: drive_qemu.sendkeys(MONITOR, ["ctrl-less", "q"], KEY_DELAY))
         # A raw owner busy when Ctrl+C is typed: the tick reads it ahead and
         # must queue it as the byte 3, for the program's next read.
         if ok:
@@ -149,7 +132,7 @@ def main() -> int:
             guest.type_line("readkey spin 100 raw")
             ok = guest.wait_for("readkey: spinning")
             if ok:
-                type_raw(guest, ETX)
+                guest.type_raw(ETX)
                 ok = guest.wait_for(r"readkey: got[^\n]*\n[\s\S]*" + PROMPT, timeout=30)
             seg["rawspin"] = guest.transcript()[start:]
         # A raw owner's Ctrl+C left queued when it exits is a byte (settled
@@ -164,10 +147,10 @@ def main() -> int:
                 # `echo qk` behind the Ctrl+C: kept in the queue past the
                 # exit, the shell reads it as its next line, which proves the
                 # queue held the Ctrl+C too when the shell's wait ran.
-                type_raw(guest, ETX + b"echo qk")
+                guest.type_raw(ETX + b"echo qk")
                 ok = guest.wait_for(r"readkey: kept[\s\S]*" + PROMPT, timeout=30)
             if ok:
-                type_raw(guest, b"\n")
+                guest.type_raw(b"\n")
                 ok = guest.wait_for(PROMPT)
             if ok:
                 guest.type_line("ps")
@@ -176,11 +159,11 @@ def main() -> int:
                 ok = guest.wait_for(r"task 0:[\s\S]*" + PROMPT)
             seg["rawkeep"] = guest.transcript()[start:]
         ok = ok and step("mode", "readkey mode", "readkey: mode", None)
-        ok = ok and step("cooked c", "readkey", "press keys", lambda: type_raw(guest, ETX))
-        ok = ok and step("cooked fs", "readkey", "press keys", lambda: type_raw(guest, FS))
+        ok = ok and step("cooked c", "readkey", "press keys", lambda: guest.type_raw(ETX))
+        ok = ok and step("cooked fs", "readkey", "press keys", lambda: guest.type_raw(FS))
         if ok:
             start = len(guest.transcript())
-            type_raw(guest, b"echo e" + FS + ETX + b"f\n")
+            guest.type_raw(b"echo e" + FS + ETX + b"f\n")
             ok = guest.wait_for(PROMPT)
             seg["shell"] = guest.transcript()[start:]
         if ok:
@@ -203,8 +186,8 @@ def main() -> int:
                 # 70 letters first: the wait reads them ahead into the
                 # keyboard queue (64 bytes), so the Ctrl+\ arrives with the
                 # queue full and must still interrupt.
-                type_raw(guest, b"x" * 70)
-                type_raw(guest, FS)
+                guest.type_raw(b"x" * 70)
+                guest.type_raw(FS)
                 ok = guest.wait_for(r"wait: interrupted[\s\S]*" + PROMPT, timeout=20)
                 seg["wait"] = guest.transcript()[start:]
             if ok:
@@ -214,19 +197,19 @@ def main() -> int:
                 # `echo zq` typed while `readkey spin 100 keep` is busy.
                 guest.type_line(f"wait {recv_slot}")
                 time.sleep(1.5)
-                type_raw(guest, b"\x1b")
+                guest.type_raw(b"\x1b")
                 time.sleep(0.5)
-                type_raw(guest, FS)
+                guest.type_raw(FS)
                 ok = guest.wait_for(r"wait: interrupted[\s\S]*" + PROMPT, timeout=20)
             if ok:
                 start = len(guest.transcript())
                 guest.type_line("readkey spin 100 keep")
                 ok = guest.wait_for("readkey: spinning")
                 if ok:
-                    type_raw(guest, b"echo zq")
+                    guest.type_raw(b"echo zq")
                     ok = guest.wait_for(r"readkey: kept[\s\S]*" + PROMPT, timeout=30)
                 if ok:
-                    type_raw(guest, b"\n")
+                    guest.type_raw(b"\n")
                     ok = guest.wait_for(PROMPT)
                 seg["esc"] = guest.transcript()[start:]
             if found is not None:

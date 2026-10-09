@@ -118,7 +118,13 @@ class Guest:
         return False
 
     def type_line(self, text):
-        for ch in text.encode() + b"\n":
+        self.type_raw(text.encode() + b"\n")
+
+    def type_raw(self, data):
+        """Bytes on the serial line, paced at TYPE_DELAY, no Enter added: the
+        one copy of the pacing every rig types with (six rigs had their own
+        until 2026-10-08, the fourth high review of #240)."""
+        for ch in data:
             self.proc.stdin.write(bytes([ch]))
             self.proc.stdin.flush()
             time.sleep(TYPE_DELAY)
@@ -198,6 +204,19 @@ class Guest:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+
+
+def sendkeys(monitor, names, delay, hold=None):
+    """Keys on QEMU's USB keyboard: each name through the monitor's `sendkey`
+    on the unix socket at `monitor`, `delay` seconds apart; `hold` is
+    sendkey's hold time in ms (QEMU's default is 100). The one copy of the
+    monitor loop the USB-keyboard rigs share."""
+    import socket
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mon:
+        mon.connect(monitor)
+        for name in names:
+            mon.sendall(f"sendkey {name}{'' if hold is None else f' {hold}'}\n".encode())
+            time.sleep(delay)
 
 
 def fault_line(guest) -> str:

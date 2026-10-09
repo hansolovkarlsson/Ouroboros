@@ -37,7 +37,6 @@ KBD_MODE's flush changes.
 """
 import importlib.util
 import os
-import socket
 import sys
 import time
 
@@ -53,22 +52,6 @@ MONITOR = os.path.join(ROOT, "build", "test-kbd-cut.monitor")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-kbd-cut.txt")
 KEY_DELAY = 0.3
 PROMPT = "# "
-
-
-def sendkeys(names):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mon:
-        mon.connect(MONITOR)
-        for name in names:
-            mon.sendall(f"sendkey {name}\n".encode())
-            time.sleep(KEY_DELAY)
-
-
-def type_raw(guest, data):
-    """Bytes on the serial line, paced like Guest.type_line, no Enter added."""
-    for ch in data:
-        guest.proc.stdin.write(bytes([ch]))
-        guest.proc.stdin.flush()
-        time.sleep(drive_qemu.TYPE_DELAY)
 
 
 def main() -> int:
@@ -100,7 +83,7 @@ def main() -> int:
             guest.type_line("readkey one")
             ok = guest.wait_for(r"readkey: one\?")
             if ok:
-                sendkeys(["up"])
+                drive_qemu.sendkeys(MONITOR, ["up"], KEY_DELAY)
                 ok = guest.wait_for(r"readkey: one 27[\s\S]*" + PROMPT)
             ok = ok and then_line("cut", "echo k1")
         # 2. A bare Escape ends after a quiet moment.
@@ -108,7 +91,7 @@ def main() -> int:
             guest.type_line("readkey one")
             ok = guest.wait_for(r"readkey: one\?")
             if ok:
-                type_raw(guest, b"\x1b")
+                guest.type_raw(b"\x1b")
                 ok = guest.wait_for(r"readkey: one 27[\s\S]*" + PROMPT)
             if ok:
                 time.sleep(0.5)
@@ -118,9 +101,9 @@ def main() -> int:
             guest.type_line("readkey spin 100 keep")
             ok = guest.wait_for("readkey: spinning")
             if ok:
-                type_raw(guest, b"\x1b")
+                guest.type_raw(b"\x1b")
                 time.sleep(0.3)
-                type_raw(guest, b"\x03")
+                guest.type_raw(b"\x03")
                 ok = guest.wait_for(r"Ctrl\+C - foreground task[\s\S]*" + PROMPT, timeout=30)
             ok = ok and then_line("kill", "echo k3")
         # 4. TCSAFLUSH discards keys typed ahead.
@@ -128,7 +111,7 @@ def main() -> int:
             guest.type_line("ctermios flush")
             ok = guest.wait_for("ctermios: spinning")
             if ok:
-                type_raw(guest, b"echo bad")
+                guest.type_raw(b"echo bad")
                 ok = guest.wait_for(r"ctermios: flushed[\s\S]*" + PROMPT, timeout=30)
             ok = ok and then_line("flush", "echo k4")
         # 5. TCSADRAIN keeps them.
@@ -136,7 +119,7 @@ def main() -> int:
             guest.type_line("ctermios drain")
             ok = guest.wait_for("ctermios: spinning")
             if ok:
-                type_raw(guest, b"echo k5")
+                guest.type_raw(b"echo k5")
                 ok = guest.wait_for(r"ctermios: drained[\s\S]*" + PROMPT, timeout=30)
             ok = ok and then_line("drain", "")
         out = guest.transcript()

@@ -48,7 +48,6 @@ or Ctrl+C's handling changes.
 import importlib.util
 import os
 import re
-import socket
 import sys
 import time
 
@@ -74,15 +73,6 @@ KEY_DELAY = 0.15
 FAST_DELAY = 0.12
 FLOOD = 72
 FULL = 63
-
-
-def sendkeys(names, delay=KEY_DELAY, hold=None):
-    """`hold` is sendkey's hold time in ms (QEMU's default is 100)."""
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as mon:
-        mon.connect(MONITOR)
-        for name in names:
-            mon.sendall(f"sendkey {name}{'' if hold is None else f' {hold}'}\n".encode())
-            time.sleep(delay)
 
 
 def main() -> int:
@@ -130,20 +120,20 @@ def main() -> int:
         def serial_abc():
             serial_type(b"abc")
 
-        ok = ok and spin("usb", lambda: sendkeys(["h", "e", "l", "l", "o", "up", "x"]))
+        ok = ok and spin("usb", lambda: drive_qemu.sendkeys(MONITOR, ["h", "e", "l", "l", "o", "up", "x"], KEY_DELAY))
         ok = ok and spin("serial", serial_abc)
-        ok = ok and spin("ctrl-c", lambda: sendkeys(["ctrl-c"]))
+        ok = ok and spin("ctrl-c", lambda: drive_qemu.sendkeys(MONITOR, ["ctrl-c"], KEY_DELAY))
         # The keyboard owner blocked in a message wait for three seconds: a
         # pipeline's last stage waiting in MSG_RECV for the first to write.
-        ok = ok and spin("msg", lambda: sendkeys(["a", "b", "c", "down"]), cmd="readkey spin 150 keep | readkey spin 0 msg")
+        ok = ok and spin("msg", lambda: drive_qemu.sendkeys(MONITOR, ["a", "b", "c", "down"], KEY_DELAY), cmd="readkey spin 150 keep | readkey spin 0 msg")
         # Exits without reading: the shell must get every byte, the first too.
         ok = ok and spin("keep", lambda: serial_type(b"echo kept\n"), how="keep")
         # Thirteen seconds, so the whole flood lands inside the spin.
-        ok = ok and spin("flood", lambda: (sendkeys(["a"] * FLOOD, FAST_DELAY, hold=10), sendkeys(["ctrl-c"])), ticks=650)
+        ok = ok and spin("flood", lambda: (drive_qemu.sendkeys(MONITOR, ["a"] * FLOOD, FAST_DELAY, hold=10), drive_qemu.sendkeys(MONITOR, ["ctrl-c"], KEY_DELAY)), ticks=650)
         # A full queue keeps keys whole: 63 letters leave one place, Up's ESC
         # takes it, its `[` finds the queue full, so the ESC is taken back out
         # and the rest of Up dropped as it comes; `b` then fits and is kept.
-        ok = ok and spin("full", lambda: (sendkeys(["a"] * FULL, FAST_DELAY, hold=10), sendkeys(["up", "b"])), ticks=650)
+        ok = ok and spin("full", lambda: (drive_qemu.sendkeys(MONITOR, ["a"] * FULL, FAST_DELAY, hold=10), drive_qemu.sendkeys(MONITOR, ["up", "b"], KEY_DELAY)), ticks=650)
         if ok:
             # What the flood left must not reach the shell: Ctrl+C flushes it.
             # An empty line, then the shell's answer to it, is the check.

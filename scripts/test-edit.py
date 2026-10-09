@@ -41,13 +41,6 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-edit.txt")
 PROMPT = "# "
 
 
-def type_raw(guest, data):
-    for ch in data:
-        guest.proc.stdin.write(bytes([ch]))
-        guest.proc.stdin.flush()
-        time.sleep(drive_qemu.TYPE_DELAY)
-
-
 def ctrl(letter):
     return bytes([ord(letter.upper()) - 64])
 
@@ -68,20 +61,20 @@ def main() -> int:
             seg["open"] = guest.transcript()[start:]
         if ok:
             time.sleep(1.0)
-            type_raw(guest, b"abcdef")
+            guest.type_raw(b"abcdef")
             time.sleep(0.3)
-            type_raw(guest, ctrl("q") + b"s")
+            guest.type_raw(ctrl("q") + b"s")
             time.sleep(0.3)
-            type_raw(guest, ctrl("q") + b"q" + ctrl("g"))
+            guest.type_raw(ctrl("q") + b"q" + ctrl("g"))
             time.sleep(2.0)
-            type_raw(guest, ctrl("e"))
+            guest.type_raw(ctrl("e"))
             time.sleep(0.5)
-            type_raw(guest, b"hi")
-            type_raw(guest, b"\x1b[D")
+            guest.type_raw(b"hi")
+            guest.type_raw(b"\x1b[D")
             time.sleep(0.3)
-            type_raw(guest, b"X")
+            guest.type_raw(b"X")
             time.sleep(0.3)
-            type_raw(guest, ctrl("k") + b"d")
+            guest.type_raw(ctrl("k") + b"d")
             ok = guest.wait_for(PROMPT, timeout=30)
         if ok:
             start = len(guest.transcript())
