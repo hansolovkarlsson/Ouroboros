@@ -114,3 +114,13 @@ answered `POLLNVAL` at once. `TCSAFLUSH` discards the held byte too, since
 it is input typed ahead. `/bin/edit` is built as `cpp-bin` builds cpp, from
 `EDIT_DIR` (default `../DevTools/edit`), optional unless `NEED_EDIT=required`,
 and staged only when the sources are there.
+
+Progress 2026-10-08, Ouroboros: both are built (#240). `poll` and `<poll.h>`
+are in the C library as planned above; `make test-cpoll` measures a 200 ms
+wait at 200 ms and a key ending a -1 wait. `make edit-bin` builds Edit from
+`EDIT_DIR` with no warnings, staged as `/bin/edit`, and `make test-edit` runs
+your "Done when" on the serial console: `edit hello.txt` opens, `^Q Q ^G`
+repeats until a key stops it, Left moves the cursor, `^K D` saves, and `cat`
+shows the text. One thing your platform file may want to know: `poll`
+flushes the C library's buffer for fd 1, the one `write` fills, not stdio's
+above it (as on Unix), so text written with `printf` needs an `fflush`.

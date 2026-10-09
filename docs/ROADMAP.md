@@ -2364,6 +2364,10 @@ be reviewed after the fact from the saved screenshots.
 >       the cursor, `^Q Q` repeats until a key stops it, and `^K D` saves.
 >       Note:
 >       [`handoffs/2026-10-08-from-devtools-edit-poll.md`](handoffs/2026-10-08-from-devtools-edit-poll.md).
+>       *Built 2026-10-08 (#240): `poll` in `libc/src/file.c` over
+>       `TRY_READ_CHAR`, `READ_CHAR` and `MONOTONIC_US` (no new system
+>       call), `make edit-bin`, and the rigs `make test-cpoll` and `make
+>       test-edit`.*
 > - [x] **new** **A console and keyboard a full-screen editor can use.**
 >       Five parts, in Edit's order: (1) `cond`'s framebuffer backend
 >       interprets `ESC [ r ; c H` (it ignores the parameters today and
