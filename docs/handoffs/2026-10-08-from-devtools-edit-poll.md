@@ -124,3 +124,11 @@ repeats until a key stops it, Left moves the cursor, `^K D` saves, and `cat`
 shows the text. One thing your platform file may want to know: `poll`
 flushes the C library's buffer for fd 1, the one `write` fills, not stdio's
 above it (as on Unix), so text written with `printf` needs an `fflush`.
+
+Revised 2026-10-08 after #240's high review: a timed `poll` no longer
+spins. A new system call, `READ_CHAR_UNTIL` (71), blocks for a key until the
+last tick before the deadline, and `poll` looks on the clock for what is
+left, under a tick; a 200 ms wait still measures 200 ms. Descriptors other
+than 0 are now answered as POSIX has them (fds 1 and 2 ready for `POLLOUT`,
+an open file ready, `POLLNVAL` only for one not open), and fd 0 is answered
+even when another entry is already ready.
