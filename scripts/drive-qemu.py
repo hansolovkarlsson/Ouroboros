@@ -67,16 +67,18 @@ class Guest:
     should reuse this rather than copy them.
     """
 
-    def __init__(self, image, extra_args=(), intlog=None, label="", virtio_disk=True, machine="virt"):
+    def __init__(self, image, extra_args=(), intlog=None, label="", virtio_disk=True, machine="virt", stamp_from=None):
         """`virtio_disk=False` leaves `image` off the virtio-blk bus, for a
         caller that attaches it some other way (test-usb-hub.py boots it
         from a USB stick); `image` still names where the QEMU trace goes.
         `machine` is QEMU's -machine value: `virt,virtualization=on` makes
         the firmware hand the kernel off at EL2, as the Raspberry Pi's does
-        (test-early-fault.py --el2, the EL1 drop's rig)."""
+        (test-early-fault.py --el2, the EL1 drop's rig). `stamp_from` is what
+        the stale-image guard reads when `image` is not what boots: the ESP
+        directory a caller attaches through vvfat (test-early-fault.py)."""
         # Every boot of an image goes through here, so this is the one place
         # that refuses an image not built from the tree as it is now.
-        srcid.require_current(image, label)
+        srcid.require_current(stamp_from or image, label)
         prefix = subprocess.run(
             ["brew", "--prefix", "qemu"], capture_output=True, text=True
         ).stdout.strip()

@@ -112,7 +112,7 @@ def boot(esp, until, machine, then=None):
         os.path.join(esp, "boot"), virtio_disk=False, label=os.path.basename(esp),
         extra_args=["-drive", f"file=fat:rw:{esp},format=raw,media=disk,if=none,id=hd0",
                     "-device", "virtio-blk-device,drive=hd0"],
-        machine=machine,
+        machine=machine, stamp_from=esp,
     )
     try:
         matched = guest.wait_for(until, timeout=TIMEOUT)

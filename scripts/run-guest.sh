@@ -35,6 +35,11 @@ IMAGE="${IMAGE:-build/esp.img}"
 if [ "${NO_BUILD:-0}" != "1" ] && [ "$IMAGE" = "build/esp.img" ]; then
 	make image >/dev/null || { echo "run-guest: make image failed" >&2; exit 96; }
 fi
+# The stale-image guard every boot goes through (scripts/srcid.py): refuse an
+# image not built from the tree as it is now (exit 95). A mutation run with NO_BUILD=1
+# passes while the mutant is still in the tree; once `git checkout` restores
+# the source, the same image is refused instead of graded as the tree.
+python3 scripts/srcid.py require "$IMAGE" || exit 95
 LOGDIR="${LOGDIR:-${TMPDIR:-/tmp}}"
 # PER PROCESS: two runs share $LOGDIR (the docs show a gate run and a curl run),
 # and fixed names let the second truncate the first's serial log while the first
