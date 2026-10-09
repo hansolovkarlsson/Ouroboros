@@ -243,14 +243,19 @@ waiting in its next call to that server, was taken as that call's answer,
 whose own reply was then refused: a `cd` into a remote directory,
 interrupted and followed by a `cd` to one that does not exist, left the
 shell in the missing one. The same window let a server still copying for the
-old request reach the buffer the shell had granted for the next. The kernel
-now records the abandoned call: the server's late answer is dropped, and the
-next call to that server waits for it before its request goes out, a wait
-Ctrl+C also ends. A first form made a call's wait ignore Ctrl+C altogether,
-and its review found what that cost: a `cpu` whose remote command never
-stops printing held the console for good, and a Ctrl+C typed while a program
-loaded reached the program as a key. `make test-call-interrupt` holds calls
-open on a slow 9P peer.
+old request reach the buffer the shell had granted for the next. A reply now
+names the call it answers: a server reads the call's handle with a new
+system call, `SENDER_CALL` (74), and answers with another, `MSG_REPLY` (73),
+which the kernel delivers only while the caller is still in that call;
+`SAFECOPY` takes the same handle, and a plain `MSG_SEND` is never taken as a
+reply. Every server answers this way, and the same rule closes an older case:
+a caller killed mid-call whose slot was already refilled by a task calling
+the same server no longer receives the dead caller's answer. Two forms came
+first and were reviewed out: a call's wait that ignored Ctrl+C (a `cpu`
+that never stopped printing then held the console for good), and a kernel
+record that made the next call wait for the old answer (a stuck `cpu` then
+held logout's key drop). `make test-call-interrupt` holds calls open on slow
+9P peers.
 
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or

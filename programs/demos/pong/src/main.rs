@@ -44,7 +44,14 @@ fn main() -> ! {
             syscall4(syscall_abi::EXIT, 0, 0, 0, 0);
             break;
         }
-        syscall4(syscall_abi::MSG_SEND, sender, buf.as_ptr() as u64, len as u64, 0);
+        // A call is answered with MSG_REPLY, to the call it names; a plain
+        // send (SENDER_CALL has no call for it) is echoed with MSG_SEND.
+        let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
+        if call != syscall_abi::GET_ID_ERR {
+            syscall4(syscall_abi::MSG_REPLY, call, buf.as_ptr() as u64, len as u64, 0);
+        } else {
+            syscall4(syscall_abi::MSG_SEND, sender, buf.as_ptr() as u64, len as u64, 0);
+        }
     }
     loop {
         core::hint::spin_loop();

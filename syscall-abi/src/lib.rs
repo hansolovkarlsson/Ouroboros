@@ -98,6 +98,29 @@ pub const KEY_WAIT_UNTIL: u64 = 71;
 /// refused -1; the fourth high review of #240).
 pub const SLEEP_UNTIL: u64 = 72;
 
+/// `(call, reply ptr, len)` -> `0`, [`REPLY_STALE`], or [`FS_ERROR`] for a
+/// bad buffer. **How a server answers a [`MSG_CALL`]** (since 2026-10-09):
+/// `call` is the handle [`SENDER_CALL`] gave for the request, and the reply
+/// is delivered only while the caller is still blocked in that same call.
+/// Otherwise it goes nowhere and [`REPLY_STALE`] is returned: the call was
+/// cut short (the boot shell's Ctrl+C or Ctrl+\), or its caller died, perhaps
+/// with its slot already refilled by a task calling this server. A
+/// [`MSG_SEND`] to a caller is never taken as the reply. For the
+/// supervisor's ping, [`SENDER_CALL`] gives [`KERNEL_SENDER`], and the reply
+/// is the ack. Needs no send right: a server answers whoever called it.
+pub const MSG_REPLY: u64 = 73;
+
+/// `()` -> the call handle of the message this task last received, for
+/// [`MSG_REPLY`] and [`SAFECOPY`]; [`KERNEL_SENDER`] for the supervisor's
+/// ping; [`GET_ID_ERR`] when that message was a plain [`MSG_SEND`] (nothing
+/// to answer) or nothing has been received. Captured at send time, with
+/// [`SENDER_ID`]'s credential, and stable while the request is handled (a
+/// filtered receive, the reply to a call the server makes itself, never
+/// replaces it), so a server that answers later (a parked request) keeps it
+/// and replies with it then. A handle is `(call number <<
+/// `[`TASK_ID_SLOT_BITS`]`) | slot`, the call number unique within a boot.
+pub const SENDER_CALL: u64 = 74;
+
 /// `(total staged length, stdout target, argv blob length)` -> **the new
 /// task's slot index** on success (needed to wait on, send to, or kill what
 /// was just started - the shell's pipeline flow does all three), [`SPAWN_ERROR`]
@@ -255,13 +278,11 @@ pub const MOUNT: u64 = 22;
 /// a slot: any value at or above `1 << `[`TASK_ID_SLOT_BITS`] is one,
 /// since every generation is at least 1. It delivers only while that
 /// identity still names the slot's occupant, else
-/// [`TASK_ERR_NO_SUCH_TASK`]. A server that answers a call LATER than
-/// the handler that received it (a parked request) must reply this way:
-/// by then the caller may be dead and its slot recycled to a task that
-/// is itself blocked calling the server, and a reply by slot would
-/// complete the wrong call. **A message to a task that abandoned a call
-/// to the sender** (an interrupted [`MSG_CALL`]) is that call's answer:
-/// it is dropped and `0` returned (since 2026-10-09).
+/// [`TASK_ERR_NO_SUCH_TASK`]. **A send is never a reply**: the send-mask
+/// governs it even when `dest` is blocked calling the sender, and a call
+/// is answered with [`MSG_REPLY`] (since 2026-10-09; until then such a
+/// send was let through as the reply, and a late one completed the
+/// caller's next call).
 pub const MSG_SEND: u64 = 23;
 
 /// `(buf ptr, len)` -> `(sender << 32) | copied_len`, or
@@ -290,12 +311,11 @@ pub const MSG_TRY_RECV: u64 = 25;
 /// full), so a caller must always supply a full-size buffer. With direct
 /// delivery on both hops (see `tasks.rs::send_message`), a call to a
 /// server blocked in [`MSG_RECV`] round-trips without waiting for a
-/// tick on either side. **After an interrupted call** (the boot shell's
-/// Ctrl+C or Ctrl+\ while it waits, [`RECV_INTERRUPTED`]) the server
-/// still answers it; since 2026-10-09 that answer is dropped, and the
-/// caller's next call to the same server first waits, unsent, until it
-/// has come (an interrupt ends that wait too, the request never sent),
-/// so a late answer is never taken as the next call's.
+/// tick on either side. The reply is the server's [`MSG_REPLY`] to the
+/// call [`SENDER_CALL`] named for it, so only an answer to THIS call
+/// completes it: after an interrupted call (the boot shell's Ctrl+C or
+/// Ctrl+\, [`RECV_INTERRUPTED`]) the server's late answer goes nowhere
+/// rather than to the caller's next call (since 2026-10-09).
 pub const MSG_CALL: u64 = 29;
 
 /// `()` -> the block device's capacity in sectors, or
@@ -381,22 +401,24 @@ pub const SPAWN_STAGE: u64 = 30;
 /// of the enforced capability-based bulk-transfer primitive that lifts
 /// the [`FS_DATA_MAX`] per-op cap: the grant names an exact buffer, and
 /// the kernel enforces the grantee can touch only those bytes, and only
-/// while the granter is actively blocked in a [`MSG_CALL`] to it (see
-/// [`SAFECOPY`]). Each task has exactly one grant slot; a new grant
+/// while the granter is blocked in the [`MSG_CALL`] to it that the copy
+/// names (see [`SAFECOPY`]). Each task has exactly one grant slot; a new grant
 /// overwrites the old, and a task's grant is cleared when it dies.
 /// `buf len` is capped at [`SAFECOPY_MAX`].
 pub const GRANT: u64 = 31;
 
-/// `(client task, client offset, local buf ptr, len, dir)` -> `len` on
+/// `(call, client offset, local buf ptr, len, dir)` -> `len` on
 /// success, or [`SAFECOPY_ERR`]. Issued by a *server* to copy `len`
 /// bytes between a client's granted buffer (at `client offset` within
 /// it) and the server's own `local buf ptr`, in direction `dir`
 /// ([`GRANT_READ`] = server reads client -> local; [`GRANT_WRITE`] =
 /// server writes local -> client). Authorized only when **all** hold:
 /// the client's grant is set with `grantee == caller` and a `dir` that
-/// permits this direction; the client is *currently* blocked in a
-/// [`MSG_CALL`] to the caller (a stale grant is inert - the client is
-/// runnable, not blocked-calling-me, once its call has returned);
+/// permits this direction; the client is *currently* blocked in the
+/// [`MSG_CALL`] to the caller that `call` names ([`SENDER_CALL`]'s handle,
+/// since 2026-10-09; it was the client's slot): a stale grant is inert
+/// once the call returns, and a copy for a call the client left cannot
+/// reach the grant it set for its next one;
 /// `client offset + len` stays within the granted buffer; and
 /// `local buf ptr`/`len` lies inside the caller's own region. `len` is
 /// capped at [`SAFECOPY_MAX`]. Note: takes five arguments - the arm
@@ -1714,6 +1736,9 @@ pub const MSG_ERR_FULL: u64 = u64::MAX - 20;
 pub const MSG_ERR_TOO_BIG: u64 = u64::MAX - 21;
 /// [`MSG_TRY_RECV`]: the mailbox is empty right now.
 pub const NO_MSG: u64 = u64::MAX - 22;
+/// [`MSG_REPLY`]: the call is over (cut short, or its caller dead), so the
+/// reply went nowhere.
+pub const REPLY_STALE: u64 = u64::MAX - 44;
 
 /// `BLOCK_*`: no block device has been discovered/installed this boot
 /// (nothing attached, or activation failed).

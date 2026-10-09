@@ -86,14 +86,11 @@ fn main() -> ! {
         let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
         let reply_len = handle(&mut mounts, &mut fids, sender, &req[..len], &mut reply);
-        // A caller still blocked in its call takes this reply (direct
-        // delivery). One that left it takes nothing: a call the boot
-        // shell's Ctrl+C cut short is answered into the kernel's drop
-        // (tasks::ABANDONED), a dead caller's slot refuses it. Not
-        // covered: a dead caller's slot already holding a new task that
-        // is blocked calling this server would take it, since this
-        // replies by slot, not by identity as netd's parked replies do.
-        syscall4(syscall_abi::MSG_SEND, sender, reply.as_ptr() as u64, reply_len as u64, 0);
+        // To the call this request opened, delivered only while its caller
+        // is still in it: an answer to a call that is over (cut short, or
+        // its caller dead and the slot refilled) goes nowhere, REPLY_STALE.
+        let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
+        syscall4(syscall_abi::MSG_REPLY, call, reply.as_ptr() as u64, reply_len as u64, 0);
     }
     loop {
         core::hint::spin_loop();
@@ -556,9 +553,9 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
 /// [`NP_REQ_PAYLOAD`]: ninep_abi::NP_REQ_PAYLOAD
 fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], owner: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
     const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
-    // The slot half of the sender's identity: what a SAFECOPY grant is looked
-    // up by. Derived, never passed, so the two cannot be swapped at a call.
-    let sender = syscall_abi::task_id_slot(owner);
+    // The call this request opened: what a SAFECOPY names, so a copy reaches
+    // only the grant of a caller still blocked in THIS call.
+    let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
     if req.len() < NP_HDR {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -666,7 +663,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                     if copied > 0 {
                         let r = syscall5(
                             syscall_abi::SAFECOPY,
-                            sender,
+                            call,
                             0,
                             chunk.as_ptr() as u64,
                             copied as u64,
@@ -693,7 +690,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             if data_len > 0 {
                 let r = syscall5(
                     syscall_abi::SAFECOPY,
-                    sender,
+                    call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -721,7 +718,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             if data_len > 0 {
                 let r = syscall5(
                     syscall_abi::SAFECOPY,
-                    sender,
+                    call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -971,6 +968,7 @@ fn handle_fid_op(
         return status_reply(reply, syscall_abi::FS_ERROR); // bad or not-yours
     }
     let sender = syscall_abi::task_id_slot(owner);
+    let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
     // ...and, from `netd`, asked for by the same USER, for every verb with
     // NP_CLUNK included: see Fid::owner_uid. A mismatch refuses and KEEPS the
     // fid - the owner is still using it, and the asker was never entitled to
@@ -1035,7 +1033,7 @@ fn handle_fid_op(
             if data_len > 0 {
                 let r = syscall5(
                     syscall_abi::SAFECOPY,
-                    sender,
+                    call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,

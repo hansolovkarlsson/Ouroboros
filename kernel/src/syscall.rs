@@ -1500,22 +1500,15 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // Shadowed on purpose, as in MSG_CALL: nothing below can name
             // the unchecked value.
             let dest = dest_index.index();
-            // The answer to a call its caller abandoned (Ctrl+C) is dropped
-            // here, before the reply exemption could hand it to the caller's
-            // next call (tasks::ABANDONED). The sender is told it was sent.
-            if tasks::drop_abandoned_reply(tasks::current_task(), dest) {
-                return 0;
-            }
-            // Capability check: may this task send to `dest`? A reply to a
-            // pending call is exempt (see may_send); an unsolicited send
-            // needs the send-mask bit.
+            // Capability check: may this task send to `dest`? The send-mask
+            // bit, always; a reply to a call is MSG_REPLY's, not this.
             if !tasks::may_send(tasks::current_task(), dest) {
                 return syscall_abi::MSG_ERR_DENIED;
             }
             // SAFETY: bounds sanity-checked above, same trust model as
             // every fs_* buffer (see the module doc comment).
             let data = unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) };
-            tasks::send_message(tasks::current_task(), dest, data)
+            tasks::send_message(tasks::current_task(), dest, data, 0)
         }
         syscall_abi::MSG_RECV => {
             if !valid_msg_range(arg0, arg1) {
@@ -1575,21 +1568,17 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let dest = dest_index.index();
             // Capability check: may this task call `dest`? (The request half
             // of a call is an unsolicited send, so it's mask-governed; the
-            // reply rides the reply exemption in may_send.)
+            // reply is MSG_REPLY to the call it names.)
             if !tasks::may_send(tasks::current_task(), dest) {
                 return syscall_abi::MSG_ERR_DENIED;
-            }
-            // This caller's previous call to `dest` was abandoned and `dest`
-            // has not answered it yet: wait for that answer, which is
-            // dropped, before sending, and the call then runs again from its
-            // `svc` (tasks::ABANDONED, WaitReason::Drain).
-            if tasks::has_abandoned_call(tasks::current_task(), dest) {
-                return unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Drain { server: dest }) };
             }
             // SAFETY: bounds sanity-checked above, same trust model as
             // MSG_SEND.
             let data = unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) };
-            let sent = tasks::send_message(tasks::current_task(), dest, data);
+            // A fresh call number: the request carries it, and only a reply
+            // naming it completes this call (tasks::CURRENT_CALLS).
+            let call = tasks::begin_call(tasks::current_task());
+            let sent = tasks::send_message(tasks::current_task(), dest, data, call);
             if sent != 0 {
                 return sent;
             }
@@ -1612,6 +1601,34 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
                     Some(dest_index),
                 )
             }
+        }
+        syscall_abi::MSG_REPLY => {
+            // arg0 = the call (SENDER_CALL's handle), arg1/arg2 = the reply.
+            // The supervisor's ping is answered here too: SENDER_CALL gives
+            // KERNEL_SENDER for it, and the reply is the ack.
+            if arg0 == syscall_abi::KERNEL_SENDER {
+                crate::supervisor::note_ack(tasks::current_task());
+                return 0;
+            }
+            if arg1 == 0 || arg2 > syscall_abi::MSG_MAX_LEN || !in_caller_region(arg1, arg2) {
+                return FS_ERROR;
+            }
+            // Only to a task still blocked in the call the handle names: an
+            // answer to a call that is over (cut short by an interrupt, or
+            // its task dead and the slot refilled) goes nowhere, rather than
+            // completing whatever call that task makes next.
+            let Some(dest) = tasks::reply_target(tasks::current_task(), arg0) else {
+                return syscall_abi::REPLY_STALE;
+            };
+            // SAFETY: bounds sanity-checked above, as MSG_SEND's.
+            let data = unsafe { core::slice::from_raw_parts(arg1 as *const u8, arg2 as usize) };
+            tasks::send_message(tasks::current_task(), dest, data, 0)
+        }
+        syscall_abi::SENDER_CALL => {
+            // No arguments: the call the message this task last received
+            // opened, captured with SENDER_ID's credential, for MSG_REPLY and
+            // SAFECOPY. GET_ID_ERR for a plain MSG_SEND, which nobody answers.
+            tasks::sender_call_of(tasks::current_task()).unwrap_or(syscall_abi::GET_ID_ERR)
         }
         syscall_abi::BLOCK_INFO => {
             if !block_access_allowed() {
@@ -1791,18 +1808,18 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             0
         }
         syscall_abi::SAFECOPY => {
-            // arg0 = client, arg1 = client offset, arg2 = local buf ptr,
+            // arg0 = the call (SENDER_CALL's handle; the client is the task
+            // making it), arg1 = client offset, arg2 = local buf ptr,
             // arg3 = len; the 5th argument (direction) doesn't fit the
             // 4-arg dispatch signature - it's read from the saved frame
             // (x4), exactly as the trampoline's doc comment describes.
-            let client = arg0 as usize;
             let local = arg2;
             let len = arg3;
             let dir = unsafe { (*frame).gpr[4] };
             if len == 0 || len > syscall_abi::SAFECOPY_MAX || !in_caller_region(local, len) {
                 return syscall_abi::SAFECOPY_ERR;
             }
-            match tasks::safecopy(tasks::current_task(), client, arg1, local, len, dir) {
+            match tasks::safecopy(tasks::current_task(), arg0, arg1, local, len, dir) {
                 Some(n) => n,
                 None => syscall_abi::SAFECOPY_ERR,
             }

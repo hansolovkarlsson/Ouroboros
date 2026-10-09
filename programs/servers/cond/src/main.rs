@@ -55,10 +55,12 @@ fn main() -> ! {
         if packed >= syscall_abi::FS_ERR_MIN {
             break;
         }
-        let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
         let reply_len = handle(&mut backend, &req[..len], &mut reply);
-        syscall4(syscall_abi::MSG_SEND, sender, reply.as_mut_ptr() as u64, reply_len as u64, 0);
+        // To the call this request opened (MSG_REPLY delivers only while its
+        // caller is still in it).
+        let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
+        syscall4(syscall_abi::MSG_REPLY, call, reply.as_mut_ptr() as u64, reply_len as u64, 0);
     }
     loop {
         core::hint::spin_loop();

@@ -1840,12 +1840,12 @@ test-reentrant-session: images-2vm-ext2
 test-async-rmount: image
 	./scripts/test-async-rmount.sh
 
-# An interrupted call's late answer is dropped (scripts/test-call-interrupt.py):
-# against a host 9P peer that holds every reply 4.5 s, Ctrl+C cuts the boot
-# shell's `cd` into a remote directory short, the next `cd` waits out the old
-# answer and gets its own, and Ctrl+\ cuts that wait short too; one boot,
-# about a minute. Run it whenever the message waits, the boot shell's
-# interrupt, MSG_CALL or MSG_SEND changes.
+# An interrupted call's late answer goes nowhere (scripts/test-call-interrupt.py):
+# against a host 9P peer that holds every reply 4.5 s, Ctrl+C and Ctrl+\ cut the
+# boot shell's `cd` into a remote directory short, and the next `cd` gets its
+# own answer, the late one refused by MSG_REPLY; one boot, about a minute. Run
+# it whenever the message waits, the boot shell's interrupt, MSG_CALL,
+# MSG_REPLY or SENDER_CALL changes.
 test-call-interrupt: image
 	python3 scripts/test-call-interrupt.py
 

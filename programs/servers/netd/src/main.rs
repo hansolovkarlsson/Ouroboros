@@ -735,12 +735,12 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             let is_request = op == syscall_abi::NETOP_RMOUNT
                 || (syscall_abi::NETOP_KEY_HOLD..=syscall_abi::NETOP_KEY_LIST).contains(&op);
             if is_request {
-                handle_client(packed_mac, sender, buf, len, dials, remotes, sessions, auth, pending, held);
+                handle_client(packed_mac, buf, len, dials, remotes, sessions, auth, pending, held);
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
             }
         } else {
-            handle_client(packed_mac, sender, buf, len, dials, remotes, sessions, auth, pending, held);
+            handle_client(packed_mac, buf, len, dials, remotes, sessions, auth, pending, held);
         }
         // A HOLD carried a user's seed, and `buf` is never cleared between
         // messages: a shorter one leaves bytes 16..48 as they were. key_op
@@ -870,7 +870,10 @@ fn key_op(req: &[u8], held: &mut held::Held, r: &mut [u8]) -> usize {
 /// Dispatch one client request (a `MSG_CALL` from the shell) by op, replying
 /// with the op's status. The unknown-op arm also acks the supervisor ping.
 #[allow(clippy::too_many_arguments)]
-fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) {
+fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) {
+    // The call this request opened, for every reply below. Read first: a
+    // handler that receives (an ARP drain) would replace it.
+    let call = syscall(syscall_abi::SENDER_CALL, 0);
     // Too short to carry an op: `buf` is never cleared between messages, so
     // decoding a short one would dispatch the PREVIOUS request's bytes as this
     // sender's. Reachable since 2026-09-06: a remote-exec child orphaned by a
@@ -882,13 +885,13 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &m
     // orphan's fire-and-forget send the reply is refused or ignored, which is
     // fine. The supervisor ping is eight bytes and never takes this path.
     if len < 8 {
-        reply(sender, &0u64.to_le_bytes());
+        reply(call, &0u64.to_le_bytes());
         return;
     }
     match read_u64(buf, 0) {
         syscall_abi::NETOP_PING => {
             let status = handle_ping(packed_mac, read_u64(buf, 8));
-            reply(sender, &status.to_le_bytes());
+            reply(call, &status.to_le_bytes());
         }
         syscall_abi::NETOP_RESOLVE => {
             let end = len.min(buf.len()).max(8);
@@ -896,7 +899,7 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &m
             let mut r = [0u8; 16];
             r[0..8].copy_from_slice(&status.to_le_bytes());
             r[8..16].copy_from_slice(&ip.to_le_bytes());
-            reply(sender, &r);
+            reply(call, &r);
         }
         syscall_abi::NETOP_FETCH => {
             let end = len.min(buf.len()).max(8);
@@ -905,7 +908,7 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &m
             host[..hlen].copy_from_slice(&buf[8..8 + hlen]);
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             let rlen = handle_fetch(packed_mac, &host[..hlen], &mut r);
-            reply(sender, &r[..rlen]);
+            reply(call, &r[..rlen]);
         }
         syscall_abi::NETOP_RMOUNT => {
             // The remote-mount client (cluster Phase 1c): carry the embedded NP
@@ -924,7 +927,7 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &m
             // here is top-level, and its park is driven by the serve loop.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             if let Some(rlen) = handle_rmount(packed_mac, buf, len, sessions, remotes, &mut r, auth) {
-                reply(sender, &r[..rlen]);
+                reply(call, &r[..rlen]);
             }
         }
         syscall_abi::NETOP_RUN => {
@@ -937,7 +940,7 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &m
             // own export - without any of the re-entrant pumping `tcp_run` did.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             if let Some(rlen) = park_run(packed_mac, buf, len, &mut r, remotes, auth, pending) {
-                reply(sender, &r[..rlen]);
+                reply(call, &r[..rlen]);
             }
         }
         syscall_abi::NETOP_KEY_HOLD
@@ -946,7 +949,7 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &m
         | syscall_abi::NETOP_KEY_LIST => {
             let mut r = [0u8; 8 + 8 + 8 * syscall_abi::NET_KEY_MAX];
             let rlen = key_op(&buf[..len.min(buf.len())], held, &mut r);
-            reply(sender, &r[..rlen]);
+            reply(call, &r[..rlen]);
         }
         syscall_abi::NETOP_RUN_MORE => {
             // The shell pulls the next chunk of its last cpu run's output; an
@@ -954,7 +957,7 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &m
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
             let who = syscall(syscall_abi::SENDER_TASK, 0);
             let rlen = pending.next_chunk(who, &mut r);
-            reply(sender, &r[..rlen]);
+            reply(call, &r[..rlen]);
         }
         // An NP read verb from a *local* client: the /net synthetic filesystem
         // (cluster Phase 3), served by netd itself. The client resolved /net to a
@@ -985,11 +988,11 @@ fn handle_client(packed_mac: u64, sender: u64, buf: &[u8], len: usize, dials: &m
             let cap = (r.len() - 8).min(512);
             let (status, dlen) = net_op(op, path, a1, want.min(cap), data_in, &mut r[8..], dials, &mac);
             r[0..8].copy_from_slice(&status.to_le_bytes());
-            reply(sender, &r[..8 + dlen]);
+            reply(call, &r[..8 + dlen]);
         }
         // Unknown op (including the supervisor's health-ping): any reply acks
         // it. The value is irrelevant to the ping sentinel.
-        _ => reply(sender, &0u64.to_le_bytes()),
+        _ => reply(call, &0u64.to_le_bytes()),
     }
 }
 
@@ -1519,6 +1522,7 @@ fn park_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], remotes: &m
     // last. Nothing here receives any more, but the ordering rule stands and
     // is cheaper to keep than to re-derive.
     let owner = syscall(syscall_abi::SENDER_TASK, 0);
+    let call = syscall(syscall_abi::SENDER_CALL, 0);
     let fail = |out: &mut [u8], msg: &[u8]| -> Option<usize> {
         let n = msg.len().min(out.len());
         out[..n].copy_from_slice(&msg[..n]);
@@ -1617,7 +1621,7 @@ fn park_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], remotes: &m
     pending.len = 0;
     pending.cursor = 0;
     pending.owner = owner;
-    match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, &who, &np[..hdr + clen], remotes) {
+    match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, call, &who, &np[..hdr + clen], remotes) {
         Ok(()) => None,
         Err(msg) => fail(out, msg),
     }
@@ -1628,7 +1632,7 @@ fn park_run(packed_mac: u64, buf: &[u8], len: usize, out: &mut [u8], remotes: &m
 /// already refused a machine that cannot sign. `Err` is the text to answer the
 /// caller with.
 #[allow(clippy::too_many_arguments)]
-fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, who: &[u8; ninep_abi::NP_NAME_LEN], np: &[u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), &'static [u8]> {
+fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], np: &[u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), &'static [u8]> {
     let Some(slot) = remotes.iter().position(|r| r.is_none()) else {
         return Err(b"cpu: no free connection for the run (try again)\r\n");
     };
@@ -1648,7 +1652,7 @@ fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // `service_remotes` both of those things; no extra field is needed.
     // `since: 0` for the reason `park_rmount` gives: the clock starts at the
     // first send, never at the park.
-    wire.parked = Some(Parked { caller, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: [0; clusterkeys::KEY_LEN], since: 0, who: *who, verb, opening: false, raw });
+    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: [0; clusterkeys::KEY_LEN], since: 0, who: *who, verb, opening: false, raw });
     Ok(())
 }
 
@@ -1729,7 +1733,7 @@ fn verify_sealed(resp: &[u8], got: usize, nonce: &[u8; ninep_abi::NP_NONCE_LEN],
 /// Not inlined: its own frame, for the reason `park_rmount` gives.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, caller: u64, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, msg: &[u8], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS]) -> Result<(), u64> {
+fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, msg: &[u8], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS]) -> Result<(), u64> {
     let Some(expect_key) = expect_key else {
         return Err(syscall_abi::FS_ERR_AUTH);
     };
@@ -1781,7 +1785,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
         // parked at `now()` would answer FS_ERROR and destroy a live session's
         // fids over a peer that was never asked (review of #152). This is the
         // same rule, and the same reason, as `park_rmount`'s.
-        s.parked = Some(Parked { caller, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, verb, opening: false, raw });
+        s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, verb, opening: false, raw });
         return Ok(());
     }
     let Some(slot) = sessions.iter().position(|s| s.is_none()) else {
@@ -1808,7 +1812,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
     s.state = DialState::Connecting; // the pump sends the SYN
     // since = 0: the deadline clock starts at the first SYN send, in
     // `pump_dials`, for the reason `park_rmount` gives.
-    s.parked = Some(Parked { caller, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, verb, opening: true, raw: SESSION_LEN as u16 });
+    s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, verb, opening: true, raw: SESSION_LEN as u16 });
     Ok(())
 }
 
@@ -1856,6 +1860,8 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, sessions: &mut [Option
     // And the caller's full identity, for a parked reply. Read HERE, before
     // the ARP below receives frames: an unfiltered receive replaces it.
     let caller = syscall(syscall_abi::SENDER_TASK, 0);
+    // And the call it opened, which the parked reply must name.
+    let call = syscall(syscall_abi::SENDER_CALL, 0);
 
     // WHOSE SIGNATURE WILL WE ACCEPT ON THE REPLY? Resolved BEFORE sending, so a
     // stale or missing line for the dialled address refuses the request rather
@@ -1883,9 +1889,9 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, sessions: &mut [Option
     // is parked on its slot's own buffers; each branch is its own frame.
     let verb = if msg.len() >= 8 { read_u64(msg, 0) } else { 0 };
     let parked = if shape(verb) != Shape::Path {
-        park_session(&dst_mac, ip, port, uid, verb, caller, &who, expect_key, auth, msg, sessions)
+        park_session(&dst_mac, ip, port, uid, verb, caller, call, &who, expect_key, auth, msg, sessions)
     } else {
-        park_rmount(&dst_mac, ip, port, verb, caller, &who, expect_key, auth, msg, remotes)
+        park_rmount(&dst_mac, ip, port, verb, caller, call, &who, expect_key, auth, msg, remotes)
     };
     match parked {
         Ok(()) => None,
@@ -1916,7 +1922,7 @@ fn handle_rmount(packed_mac: u64, buf: &[u8], len: usize, sessions: &mut [Option
 /// (their buffers live in the slots), and the attribute keeps them so.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, msg: &[u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), u64> {
+fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, msg: &[u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), u64> {
     // Refused before the send, as the one-shot path did: the reply's signer
     // must be known in advance (Decision 3's client-side asymmetry).
     let Some(expect_key) = expect_key else {
@@ -1957,7 +1963,7 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // the run to return (review of #149). Once the SYN goes out, it ages
     // normally. (A park whose SYN is sent and is THEN starved by a long run can
     // still age; that residual closes at step 3, which removes the run drain.)
-    wire.parked = Some(Parked { caller, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, verb, opening: false, raw });
+    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, verb, opening: false, raw });
     Ok(())
 }
 
@@ -2025,7 +2031,7 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
                 } else {
                     status_only(&mut r, syscall_abi::FS_ERR_AUTH)
                 };
-                reply(parked.caller, &r[..n]);
+                reply(parked.call, &r[..n]);
                 c.held_len = 0;
                 match c.state {
                     DialState::Established => c.state = DialState::Closing,
@@ -2082,7 +2088,7 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
                 r[..msg.len()].copy_from_slice(msg);
                 msg.len()
             };
-            reply(parked.caller, &r[..n]);
+            reply(parked.call, &r[..n]);
             match c.state {
                 DialState::Established => c.state = DialState::Closing,
                 DialState::Closing | DialState::Closed => {}
@@ -2155,7 +2161,7 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
                 Err(st) => {
                     // The caller hears so, and the session closes below.
                     let n = status_only(&mut r, st);
-                    reply(parked.caller, &r[..n]);
+                    reply(parked.call, &r[..n]);
                 }
             }
         } else if parked.opening {
@@ -2175,9 +2181,9 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
                 ka.forget();
             }
             let n = if verified && np_status == 0 { status_only(&mut r, syscall_abi::FS_ERROR) } else { n };
-            reply(parked.caller, &r[..n]);
+            reply(parked.call, &r[..n]);
         } else {
-            reply(parked.caller, &r[..n]);
+            reply(parked.call, &r[..n]);
             // Refcount the fid this verb made or freed. The NP status is the
             // reply body's first word.
             if verified && np_status < syscall_abi::FS_ERR_MIN {
@@ -2625,10 +2631,14 @@ const RUN_DEADLINE_TICKS: u64 = 1500;
 /// be verified and delivered from the event loop long after the handler that
 /// parked it returned.
 struct Parked {
-    /// The caller's full task identity (`SENDER_TASK`), never its slot: the
-    /// reply is sent to THIS, and the kernel refuses it if the slot has been
-    /// recycled meanwhile (the `MSG_SEND` identity arm exists for this record).
+    /// The caller's full task identity (`SENDER_TASK`), never its slot: what
+    /// a run's later `NETOP_RUN_MORE` is matched against (`next_chunk`).
     caller: u64,
+    /// The call the request opened (`SENDER_CALL`): the reply is sent to
+    /// THIS, and the kernel delivers it only while the caller is still in
+    /// that call, so an answer for a caller that left (Ctrl+C) or died, its
+    /// slot perhaps refilled, goes nowhere.
+    call: u64,
     /// The nonce our request carried; the sealed reply is verified over it.
     nonce: [u8; ninep_abi::NP_NONCE_LEN],
     /// The key whose signature the reply must carry: the one for the address
@@ -7519,8 +7529,12 @@ fn recv(buf: &mut [u8]) -> Option<usize> {
 }
 
 /// Reply to a client `MSG_CALL` (or ack the supervisor ping) with `data`.
-fn reply(sender: u64, data: &[u8]) {
-    syscall4(syscall_abi::MSG_SEND, sender, data.as_ptr() as u64, data.len() as u64, 0);
+/// `call` is the handle `SENDER_CALL` gave for the request, read when it was
+/// received; the kernel delivers the reply only while the caller is still in
+/// that call, so a parked answer for a caller that left (Ctrl+C) or died goes
+/// nowhere (`REPLY_STALE`).
+fn reply(call: u64, data: &[u8]) {
+    syscall4(syscall_abi::MSG_REPLY, call, data.as_ptr() as u64, data.len() as u64, 0);
 }
 
 /// Log a decimal number.

@@ -53,7 +53,10 @@ blocked calling us. Today the reply goes out before the handler returns, so the
 caller is the task that asked. A parked request answers later, and in between
 the caller can die (Ctrl+C), its slot be recycled, and the next occupant call
 `netd` itself: the parked reply would then complete the wrong call, with the
-wrong bytes. `SENDER_TASK` gives the caller's full identity (generation and
+wrong bytes. (Since 2026-10-09 a reply is `MSG_REPLY` to the call it answers,
+which the kernel delivers only while that call is still being made, so this
+case is closed for every server; netd's parked requests keep `SENDER_CALL`'s
+handle for it.) `SENDER_TASK` gives the caller's full identity (generation and
 slot) for exactly this class of bug, and `tasks::live_occupant` is the kernel's
 own "is the task I remembered still there"; but `MSG_SEND` takes a slot. A
 deferred reply needs a send that names an identity.

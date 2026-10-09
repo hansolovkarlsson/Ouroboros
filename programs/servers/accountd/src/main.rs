@@ -90,7 +90,6 @@ pub extern "C" fn _start() -> ! {
         if packed >= syscall_abi::FS_ERR_MIN {
             break;
         }
-        let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
         reply[..REPLY_LEN].fill(0);
         let n = handle(&req[..len], &mut reply);
@@ -102,7 +101,10 @@ pub extern "C" fn _start() -> ! {
             // SAFETY: a byte of this server's own receive buffer.
             unsafe { core::ptr::write_volatile(b, 0) };
         }
-        ulib::syscall4(syscall_abi::MSG_SEND, sender, reply.as_mut_ptr() as u64, n as u64, 0);
+        // To the call this request opened (MSG_REPLY delivers only while its
+        // caller is still in it).
+        let call = ulib::syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
+        ulib::syscall4(syscall_abi::MSG_REPLY, call, reply.as_mut_ptr() as u64, n as u64, 0);
     }
     // The receive loop only ends if the kernel refuses to deliver, which means
     // this server is being torn down; park rather than spin the scheduler.

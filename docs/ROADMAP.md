@@ -2348,8 +2348,8 @@ be reviewed after the fact from the saved screenshots.
 > Edit is DevTools's editor (`~/Projects/DevTools/edit/`), on the image as
 > `/bin/edit` since #240. Its notes are all in `handoffs/closed/`, and the
 > finished items moved to [`roadmap-completed.md`](roadmap-completed.md) on
-> 2026-10-09. What is left is one follow-up found while building them, now
-> built, and the follow-up to that:
+> 2026-10-09. What was left was one follow-up found while building them, now
+> built:
 >
 > - [x] **new** **A stale reply after an interrupted call.** Ctrl+C (and
 >       since #235 Ctrl+\) interrupts the boot shell's message waits, its
@@ -2371,45 +2371,36 @@ be reviewed after the fact from the saved screenshots.
 >       reply echoes, so a late reply is recognised and dropped. Done when a
 >       rig interrupts the boot shell during a call held open by a slow
 >       server and the shell's next call to that server gets its own reply.
->       *Built 2026-10-09 (#244), as neither shape above but a third, after
->       the high review of the first: the kernel records an interrupted
->       call per caller and server (`tasks::ABANDONED`); `MSG_SEND` drops
->       the server's late answer to it, and the caller's next call to that
->       server waits, unsent, until that answer has come
->       (`WaitReason::Drain`, interruptible, the call restarted from its
->       `svc`). Kernel only, every wait still interruptible, and right for
->       netd's out-of-order answers since one call per caller and server is
->       abandoned at a time. The first shape was built first and reviewed:
->       a `cpu` whose remote command never stops printing held the console
->       for good (netd answers only at the end or after 30 s of silence),
->       and a Ctrl+C typed while a program loaded, queued as a byte, reached
->       the program as a key. Reading the code also corrected the account
->       above: no server holds a send right to slot 0, so a late answer
->       never reached the mailbox; it got in by the reply exemption while
->       the shell was blocked in its next call, and that call's own reply
->       was refused. The same window let a `SAFECOPY` for the old request
->       reach the next call's grant. `make test-call-interrupt`: a host 9P
->       peer holds every reply 4.5 s; Ctrl+C cuts `cd /mnt/s/SUB` short,
->       `cd /mnt/s/NOPE` then fails on its own answer, and Ctrl+\ cuts a
->       second drain short. Four controls fail it: the call not recorded
->       (`cd` took SUB's "exists"), the drain not interruptible, the
->       answer not dropped (the next `cd` waited for good), and a call not
->       interruptible at all (the first shape).*
-> - [ ] **new** **What the drain leaves.** A server that never answers an
->       abandoned call (a `cpu` run that never ends, or a server that drops
->       a request) cannot be called by that caller again until it answers or
->       restarts: each later call waits to drain, interruptibly, so the
->       session survives but that server is lost to it. A reply that names
->       its call (the second shape above: a sequence number read with the
->       request, a `MSG_REPLY` the kernel delivers only to the call it
->       names) would end that, at the cost of every server's reply sites.
->       And one older case beside it: `fsd` and `cond` reply by slot, so a
->       caller killed mid-call whose slot is already refilled by a task
->       calling the same server hands that task the old answer; replying by
->       identity, as netd's parked replies do, would close it. Done when a
->       server made to drop one abandoned request leaves its caller able to
->       call it again, and a killed caller's refilled slot takes no answer
->       meant for it.
+>       *Built 2026-10-09 (#244), the second shape, after two others were
+>       built and reviewed out. A server reads the request's call handle
+>       with `SENDER_CALL` (74), `(call number << 8) | slot`, the number
+>       unique within a boot, and answers with `MSG_REPLY` (73), which the
+>       kernel delivers only while the caller is still blocked in that call
+>       (`tasks::reply_target`); `SAFECOPY` takes the same handle, and a
+>       `MSG_SEND` is never taken as a reply (the reply exemption is gone).
+>       fsd, cond, accountd, netd and pong reply this way; netd's parked
+>       requests keep the handle beside the caller's identity. The first
+>       form made a call's wait ignore Ctrl+C: its review found a `cpu`
+>       whose remote command never stops printing held the console for good
+>       (netd answers only at the end or after 30 s of silence), and a
+>       Ctrl+C typed while a program loaded reached the program as a key.
+>       The second recorded the abandoned call and made the next call to
+>       that server wait for the old answer before sending: its review found
+>       a stuck `cpu` then held every netd call, logout's key drop among
+>       them, so a Ctrl+C there left the user's key held. Reading the code
+>       also corrected the account above: no server holds a send right to
+>       slot 0, so a late answer never reached the mailbox; it got in by the
+>       reply exemption while the shell was blocked in its next call, and
+>       that call's own reply was refused. The same window let a `SAFECOPY`
+>       for the old request reach the next call's grant, and a killed
+>       caller's refilled slot calling the same server take its answer
+>       (fsd and cond replied by slot); both are closed with it.
+>       `make test-call-interrupt`: two host 9P peers hold every reply
+>       4.5 s; Ctrl+C cuts `cd /mnt/s/SUB` short, `cd /mnt/b/NOPE` then
+>       fails on its own answer while SUB's arrives and is refused, Ctrl+\
+>       cuts a call short too, and `pwd` stays `/`. Controls: the call number
+>       not compared (`cd` took SUB's "exists"), a call's wait not
+>       interruptible; both fail it.*
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
