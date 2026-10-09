@@ -70,8 +70,10 @@ use core::panic::PanicInfo;
 const BUFFER_SIZE: usize = 128;
 const CWD_SIZE: usize = 128;
 const PATH_SIZE: usize = 128;
-// Max argv entries passed to a spawned program (`exec prog a b c ...`). The
-// 128-byte input line can't hold more real tokens than this in practice.
+// Max argv entries passed to a spawned program (`exec prog a b c ...`), the
+// command's own name included. The 128-byte input line holds many more words
+// than this (64 one-letter ones), so a longer command is refused with a line
+// rather than run on its first sixteen words ([`split_argv`]).
 const MAX_ARGS: usize = 16;
 
 // Max stages in a pipeline (`a | b | c | ...`). Generous; the real ceiling is
@@ -969,20 +971,42 @@ fn resolve_command<'a>(cmd: &str, env: &Env, buf: &'a mut [u8; PATH_SIZE]) -> Op
     None
 }
 
+/// Split `words` into `buf` as argv. `None` when there are more than
+/// [`MAX_ARGS`]: the caller refuses the command, because running it on the
+/// first sixteen words acts on a command nobody typed (an `rm` of twenty
+/// files removing fifteen and saying nothing). Every place the shell builds
+/// an argv goes through here.
+fn split_argv<'a>(words: impl Iterator<Item = &'a str>, buf: &mut [&'a str; MAX_ARGS]) -> Option<usize> {
+    let mut n = 0;
+    for w in words {
+        if n == MAX_ARGS {
+            return None;
+        }
+        buf[n] = w;
+        n += 1;
+    }
+    Some(n)
+}
+
+/// The refusal [`split_argv`]'s `None` is reported with.
+fn print_too_many_args(cmd: &str) {
+    print_str(cmd);
+    print_str(": too many words (at most ");
+    print_u64(MAX_ARGS as u64);
+    print_line(", the command's name included); nothing was run");
+}
+
 /// Spawn one program pipeline stage: tokenize `stage` into argv, resolve
 /// `argv[0]` to a program path, and `spawn_path` it with `stdout_target`.
 /// `Err(0)` = not a program / path too long; any other `Err` is a real spawn
 /// status ([`NO_FS`] or an `FS_ERR_*`/`SPAWN_ERR_*` code).
 fn spawn_stage(stage: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, stdout_target: u64) -> Result<u64, u64> {
     let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
-    let mut n = 0;
-    for w in stage.split_whitespace() {
-        if n >= MAX_ARGS {
-            break;
-        }
-        argv_buf[n] = w;
-        n += 1;
-    }
+    // Too many words is refused by the pipeline before any stage is spawned
+    // (run_head_pipeline), so this `None` is not reached from there.
+    let Some(n) = split_argv(stage.split_whitespace(), &mut argv_buf) else {
+        return Err(0);
+    };
     if n == 0 {
         return Err(0);
     }
@@ -1130,6 +1154,16 @@ fn run_head_pipeline(
     }
 
     let prog_stages: &[&str] = if builtin_head { &stages[1..] } else { stages };
+
+    // A stage with too many words refuses the whole pipeline before anything
+    // is spawned, so no stage runs with its input or output half connected.
+    let mut probe: [&str; MAX_ARGS] = [""; MAX_ARGS];
+    for stage in prog_stages {
+        if split_argv(stage.split_whitespace(), &mut probe).is_none() {
+            print_too_many_args(stage.split_whitespace().next().unwrap_or("pipe"));
+            return;
+        }
+    }
 
     // The last stage writes to the console, or - for Redirect/Drain - back to
     // the shell so its output can be captured (then written to a file, or
@@ -2003,14 +2037,10 @@ fn cmd_exec(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &m
     // argv = the tokens after "exec": [program path, args...]. argv[0] is both
     // the path to load and the program's own argv[0].
     let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
-    let mut n = 0;
-    for w in line.split_whitespace().skip(1) {
-        if n >= MAX_ARGS {
-            break;
-        }
-        argv_buf[n] = w;
-        n += 1;
-    }
+    let Some(n) = split_argv(line.split_whitespace().skip(1), &mut argv_buf) else {
+        print_too_many_args("exec");
+        return;
+    };
     if n == 0 {
         print_line("exec: missing program argument");
         return;
@@ -2381,14 +2411,11 @@ fn delegate_net(slot: u64) {
 fn run_path_command(command: &str, line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, out: &mut Output) -> bool {
     // argv = every token on the line (argv[0] = the command as typed).
     let mut argv_buf: [&str; MAX_ARGS] = [""; MAX_ARGS];
-    let mut n = 0;
-    for w in line.split_whitespace() {
-        if n >= MAX_ARGS {
-            break;
-        }
-        argv_buf[n] = w;
-        n += 1;
-    }
+    let Some(n) = split_argv(line.split_whitespace(), &mut argv_buf) else {
+        // Handled: refused, not "unknown command".
+        print_too_many_args(command);
+        return true;
+    };
     let argv = &argv_buf[..n];
 
     // A command containing '/' is a PATHNAME, not a bare name: resolve it

@@ -453,7 +453,8 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   links against `libc/src/`: `crt0` (`_start`, which since 2026-10-05 builds
   `argc`/`argv` from `GET_ARGC`/`GET_ARG` into static storage and calls
   `main(argc, argv)`: `argv[0]` is the program's name as typed, `argv[argc]`
-  is `NULL`, and the shell passes at most 16 words; and `environ` from
+  is `NULL`, and the shell passes at most 16 words (and refuses a longer line
+  rather than cutting it); and `environ` from
   `GET_ENVC`/`GET_ENV`, the `NAME=VALUE` strings the shell's `set` made, so
   picolibc's `getenv` works), the syscall stubs in `os.c`
   (`write`→console via `PUTC`, `read`→keyboard via `READ_CHAR`, `sbrk`→the

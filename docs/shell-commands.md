@@ -48,7 +48,12 @@ a machine whose public key the other does not list is refused.
   with `.` (so `*` skips `.`/`..`); a token matching nothing is left
   literal. Each token can expand to several names, so it pairs best with
   commands that take several arguments.
-- **Tab completion:** Tab completes the last word as a filename. One match
+- **At most 16 words a command** (the command's name included, counted after
+  glob expansion), for a program, each pipeline stage and `exec`. A longer
+  line is refused with `too many words` and nothing runs; it used to be cut
+  at the sixteenth word without a message.
+- **Tab completion:** Tab completes the last word as a filename, on the
+  serial line and, since 2026-10-09, on the USB keyboard. One match
   fills it in (with the filesystem's casing) plus `/` for a directory or a
   space for a file; several matches extend to their common prefix and, if
   that adds nothing, are listed. Handles a directory prefix (`cat sub/pr<Tab>`).
