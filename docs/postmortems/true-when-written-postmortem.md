@@ -914,6 +914,37 @@ the test written out in English**, and the condition should be turned into a
 check the day the comment is written. Here that check is `make
 test-fpsimd`, and it came after the damage.
 
+## Unreachable with a 128-byte line (2026-10-09)
+
+On 2026-08-22, when spawned programs first received arguments, the shell
+gained two comments about the same premise. `stage_argv`, which encodes argv
+into the kernel's 512-byte store, said it fails "if it doesn't fit
+`ARGV_MAX` (unreachable with a 128-byte input line)", and `MAX_ARGS` said
+"the 128-byte input line can't hold more real tokens than this in practice".
+The first was true: 16 words cannot spend 512 bytes from a 128-byte line.
+The second was already loose (seventeen one-letter words fit), hedged by "in
+practice". Five days later globbing arrived, in the same file but another
+function, and expanded the line into a 1024-byte buffer before either
+comment's code ran. Both claims were then false, and both guarded behaviour
+for six weeks: the sixteen-word cut dropped words without a message, and a
+glob past 512 bytes was refused through the same `Err(0)` as a path that does
+not resolve, so the shell said "not found" for a program that existed.
+
+They were found in different ways. The word cut was found on 2026-10-05 by
+`make test-cargs`, written for the C runtime (the C-hosting plan's step 1). The byte case was found on
+2026-10-09 an hour after the word cut was fixed (#248), by asking whether the
+same bug sat one layer down. My first answer to Hans, from memory, was that
+it would be cut silently; reading `stage_argv` corrected it to a refusal
+with the wrong message, and the "unreachable" comment was sitting on that
+refusal. #250 moved the byte count into `split_argv`, from one definition
+shared with `stage_argv`, and a rig stages exactly 512 bytes and then 513.
+
+The lesson this document already draws covers it; what is worth adding is
+where to look. **When a fix lands for one limit, read the comments on every
+neighbouring limit that rests on the same premise**: here both rested on "the
+line is 128 bytes", and the change that broke the premise (globbing) touched
+neither comment's function.
+
 ## What actually worked
 
 Three things, none of them "be more careful".

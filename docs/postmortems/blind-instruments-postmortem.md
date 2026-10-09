@@ -1549,3 +1549,48 @@ goes through `make test-call-interrupt`, which rebuilds the image first.
 the text after the echoed command, and when the echo was not found it took
 the whole snapshot, where any earlier `# ` counted. Found by the second high
 review of #244; the echo must now be present and the prompt must follow it.
+
+## Four more, from the guard that replaced it (2026-10-09, afternoon)
+
+The last case above was fixed the same afternoon (#247): `scripts/srcid.py`
+stamps each ESP with the git tree id of the source it was staged from, and
+`drive-qemu.py`'s `Guest` refuses an image whose stamp is not the tree's. Its
+control was the morning's trap itself, reproduced (a mutant built, `git
+checkout`, the old guard passing and the new one refusing). That control
+proved the case the guard was built for and nothing else, and the guard,
+being an instrument, had blind spots of its own. All four were found by
+Hans's high review of #247, none by a run.
+
+**A guard that broke the rigs it guards.** `test-early-fault` and
+`test-el1-drop` boot an ESP directory through vvfat and hand `Guest` a
+placeholder path that does not exist, so the guard's `open()` raised before
+QEMU started. I had confirmed the guard on `test-heap`, a rig that boots a
+disk image like most of them. Now `Guest` takes `stamp_from`, and the check
+reads `\EFI\ORBS\SRCID.TXT` from a directory; both rigs pass and refuse a
+changed tree.
+
+**A stamp taken at the wrong end.** The tree was hashed after every program
+had been built, so an edit made during the build would be stamped as the
+source of binaries compiled before it: the exact staleness the guard exists
+to refuse, written in by the guard. Now the tree is hashed before the build
+and again at the stamp, and a difference fails the build.
+
+**A boot that never asked.** `run-guest.sh` starts QEMU itself, so it never
+went through `Guest`, while the docs written the same hour said every boot
+did. Its `NO_BUILD=1` mode, kept for mutation runs, was the stale-image case
+left open. Now it asks `srcid.py require` and exits 95.
+
+**A refusal described for a stamp that was not there.** The module doc said
+an image whose data partition came from an older ESP holds two stamps and is
+refused. The ext2 and exFAT payloads copy `/bin` and `/include` from the ESP,
+never the stamp, so such an image held one stamp and passed. Now both
+payloads carry it as `/etc/srcid`.
+
+The four share a shape: each was a rig or a build step of a different shape
+from the one in mind when the guard was written (a directory, not an image;
+an edit during the build, not after it; a script that launches QEMU itself;
+a partition built separately). The control could not see them because it was
+chosen for the case the guard was built for. **A new instrument needs its
+controls chosen against its own blind spots, not against the bug it was
+built to catch**, and for a guard that claims "every boot", the first control
+is to list every boot.
