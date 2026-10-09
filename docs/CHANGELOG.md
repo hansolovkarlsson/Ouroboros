@@ -259,6 +259,15 @@ record that made the next call wait for the old answer (a stuck `cpu` then
 held logout's key drop). `make test-call-interrupt` holds calls open on slow
 9P peers.
 
+**A rig no longer boots an image built from other sources (#247).** The
+rigs refused a stale image by comparing modification times, and a reverted
+mutation defeats that: the mutant's binaries and image are newer than the
+restored source, so a rig run straight after `git checkout` graded the
+mutant as the tree. `make esp` now stages `\EFI\ORBS\SRCID.TXT`, the git
+tree id of the working tree, so every image and every copy of one carries
+it, and `drive-qemu.py`'s `Guest`, which every rig boots through, refuses an
+image whose stamp is not the tree's (`scripts/srcid.py`).
+
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or
 restart a reset by writing a bit back as read.

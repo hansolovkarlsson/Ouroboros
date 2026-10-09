@@ -313,7 +313,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -851,6 +851,17 @@ serve-bin:
 	cargo build -p serve --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(SERVE_ELF) $(SERVE_BIN)
 
+# The tree as the build starts, for `esp`'s source stamp (scripts/srcid.py).
+# The FIRST of esp's prerequisites, so it runs before any program is built
+# (make takes prerequisites in order without -j, and this Makefile is run
+# without it). SRCID_DIRS are the directories another project's programs are
+# compiled from: exactly those, so that project's tests and docs are not part
+# of what an image here was built from.
+SRCID_DIRS := $(if $(HAVE_CPP),$(CPP_DIR)/lib $(CPP_DIR)/driver) $(if $(HAVE_EDIT),$(EDIT_DIR)/src)
+srcid-begin:
+	@mkdir -p $(BUILD_DIR)
+	python3 scripts/srcid.py begin $(BUILD_DIR)/srcid.begin $(SRCID_DIRS)
+
 # Stage the EFI System Partition layout QEMU/Parallels expect: a removable
 # UEFI drive boots \EFI\BOOT\BOOTAA64.EFI automatically, no boot manager
 # entry needed. \EFI\ORBS\ (must fit FAT's 8.3 short-name limit, which
@@ -891,7 +902,7 @@ serve-bin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin) $(if $(HAVE_EDIT),edit-bin)
+esp: srcid-begin build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin) $(if $(HAVE_EDIT),edit-bin)
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -1038,6 +1049,15 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	# expands to it). FAT can't record an owner, so it's world-usable here; on
 	# ext2 the image build chowns it (see the ext2-src staging).
 	mkdir -p $(ESP_DIR)/Users/user $(ESP_DIR)/Users/guest
+	# The source stamp, last: the git tree of this checkout (and the
+	# directories cpp and Edit are compiled from, when staged), hashed again
+	# now and compared with srcid-begin's hash from before the build, so an
+	# edit made during the build fails it instead of being stamped. Every image
+	# built from this tree carries it (the ext2 and exFAT payloads as
+	# /etc/srcid), and drive-qemu.py's Guest refuses to boot an image whose
+	# stamp is not the tree's, which is what stops a rig grading a reverted
+	# mutation's build (scripts/srcid.py).
+	python3 scripts/srcid.py write $(ESP_DIR)/EFI/ORBS/SRCID.TXT $(BUILD_DIR)/srcid.begin $(SRCID_DIRS)
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.
@@ -1338,6 +1358,9 @@ $(EXFAT_PART): esp
 	# the login-time warning.
 	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/exfat-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/exfat-src/etc/group
+	# The ESP's source stamp, so a payload built from an older ESP shows as a
+	# second stamp in the image (scripts/srcid.py).
+	cp $(ESP_DIR)/EFI/ORBS/SRCID.TXT $(BUILD_DIR)/exfat-src/etc/srcid
 	mkdir -p $(BUILD_DIR)/exfat-src/Users/user $(BUILD_DIR)/exfat-src/Users/guest
 	printf 'hello from an exFAT volume\r\n' > $(BUILD_DIR)/exfat-src/HELLO.TXT
 	printf 'line one\r\nline two has several words\r\nthird and final line\r\n' > $(BUILD_DIR)/exfat-src/README.TXT
@@ -1408,6 +1431,8 @@ $(EXT2_PART): esp
 	python3 scripts/mkpasswd.py --shadow > $(BUILD_DIR)/ext2-src/etc/shadow
 	chmod 600 $(BUILD_DIR)/ext2-src/etc/shadow
 	python3 scripts/mkgroup.py > $(BUILD_DIR)/ext2-src/etc/group
+	# The ESP's source stamp, as in the exFAT payload (scripts/srcid.py).
+	cp $(ESP_DIR)/EFI/ORBS/SRCID.TXT $(BUILD_DIR)/ext2-src/etc/srcid
 	# /etc/cluster: the per-machine identity. ext2 is the one image where fsd
 	# ENFORCES modes, so it is also the only one where `id` being 0600 means
 	# anything - and mke2fs -d carries the host's mode onto the guest.
