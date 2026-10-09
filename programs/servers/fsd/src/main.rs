@@ -904,9 +904,6 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     }
 }
 
-/// A free index in the fid table, or `None` if it is full even after reaping
-/// fids whose owner is gone. Only finds the slot; `NP_OPEN` fills it, after its
-/// side effects, so that a refusal here happens before them.
 /// The answer to an `NP_OPEN` whose caller left the call (`MSG_REPLY`
 /// answered `REPLY_STALE`: cut short by Ctrl+C, or its caller dead) carried
 /// a fid nobody will learn, so nobody will clunk it: freed here. Every other
@@ -923,6 +920,9 @@ fn forget_unheard_fid(fids: &mut [Fid; MAX_FIDS], req: &[u8], reply: &[u8]) {
     }
 }
 
+/// A free index in the fid table, or `None` if it is full even after reaping
+/// fids whose owner is gone. Only finds the slot; `NP_OPEN` fills it, after its
+/// side effects, so that a refusal here happens before them.
 fn free_fid_slot(fids: &mut [Fid; MAX_FIDS]) -> Option<usize> {
     let mut slot = fids.iter().position(|f| !f.used);
     if slot.is_none() {
@@ -967,8 +967,10 @@ fn reap_dead_fids(fids: &mut [Fid; MAX_FIDS]) {
 
 /// Handle a fid op (`a0` = fid): resolve the fid to its owner-checked path +
 /// mount, then read/write/stat/clunk. No per-op permission check - authorized at
-/// open. `owner` is the sender's packed identity, what a fid is owned by; the
-/// slot a grant is looked up by is derived from it.
+/// open. `owner` is the sender's packed identity, what a fid is owned by;
+/// `call` is the handle of the call being answered (`SENDER_CALL`, read on
+/// receipt), what a SAFECOPY names - not a slot, which SAFECOPY no longer
+/// takes.
 #[allow(clippy::too_many_arguments)]
 fn handle_fid_op(
     mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS],

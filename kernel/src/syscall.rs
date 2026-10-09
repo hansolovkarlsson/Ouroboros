@@ -1558,6 +1558,8 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             let call = tasks::begin_call(tasks::current_task());
             let sent = tasks::send_message(tasks::current_task(), dest, data, call);
             if sent != 0 {
+                // The call never started: no number stays recorded for it.
+                tasks::end_call(tasks::current_task());
                 return sent;
             }
             // The send above direct-delivers if dest is blocked in a

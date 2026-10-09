@@ -947,6 +947,12 @@ pub(crate) fn begin_call(task: usize) -> u64 {
     (n << syscall_abi::TASK_ID_SLOT_BITS) | task as u64
 }
 
+/// The call `task` was starting is not happening (its request was refused):
+/// [`CURRENT_CALLS`] back to 0, so the number names no call.
+pub(crate) fn end_call(task: usize) {
+    CURRENT_CALLS[task].store(0, Ordering::Relaxed);
+}
+
 /// The slot a reply addressed to call `handle` may go to, if `server` may
 /// answer it now: that task is blocked waiting for `server`'s reply, in the
 /// call `handle` names. `None` for a call that is over (answered, cut short
@@ -1023,9 +1029,8 @@ static MAILBOXES: [SyncCell<Mailbox>; NUM_TASKS] =
 /// `dest` exists; this only enforces the size and depth bounds.
 ///
 /// **Direct delivery first, mailbox second:** if the destination is
-/// already blocked waiting for exactly this message (a plain `recv`,
-/// or a call-reply wait naming this sender - see
-/// [`WaitReason::Message`]'s `from` filter), the mailbox is skipped
+/// already blocked in a plain `recv` (not a call: a call's wait takes only
+/// the reply naming it, [`deliver_reply`]), the mailbox is skipped
 /// entirely - the bytes are copied straight into its waiting buffer,
 /// the packed result stashed in its saved `x0` (the same slot
 /// `on_tick`'s wake-check writes), and the task marked runnable. This
@@ -1449,11 +1454,12 @@ pub(crate) fn groups_of(task: usize, out: &mut [u32]) -> usize {
 /// direct-delivery fast path where no `Message` ever exists - and hands it to
 /// the receiver through `SENDER_ID`/`SENDER_GROUPS`.
 ///
-/// Only an **unfiltered** receive updates this. A filtered one collects the
-/// reply to a `MSG_CALL` this task made itself, and a request never arrives
-/// that way - so a server may call another server mid-request (log to `cond`,
-/// read a file through `fsd`) without the reply quietly replacing the
-/// credential it is about to authorize against. That, plus the fact that
+/// Only a receive ([`try_recv_message`], and `send_message`'s direct delivery
+/// to a plain receiver) updates this. The reply to a `MSG_CALL` this task made
+/// itself is delivered into the call ([`deliver_reply`]) and never recorded -
+/// so a server may call another server mid-request (log to `cond`, read a
+/// file through `fsd`) without the reply quietly replacing the credential, or
+/// the call handle, it is about to use. That, plus the fact that
 /// neither delivery point can fire for a task that is awake and running, is
 /// what makes the value safe to read at any point while handling a request
 /// rather than only immediately after the receive.

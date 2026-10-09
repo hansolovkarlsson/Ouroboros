@@ -23,9 +23,11 @@
 //!   *poke* it. [`poll_ping`], also driven by `on_tick`, does: it has the
 //!   caller inject a `SYSOP_PING` message (sender [`KERNEL_SENDER`]) into a
 //!   server that's been sitting `Blocked`. A server idle in its main
-//!   `msg_recv` is woken by direct delivery and replies; that reply,
-//!   addressed back to `KERNEL_SENDER`, is intercepted by the `MSG_SEND`
-//!   syscall arm as the ack ([`note_ack`]). A server stuck mid-sub-call
+//!   `msg_recv` is woken by direct delivery and replies; that reply, a
+//!   `MSG_REPLY` to the handle `SENDER_CALL` gives for the ping
+//!   (`KERNEL_SENDER`), is taken by the `MSG_REPLY` syscall arm as the ack
+//!   ([`note_ack`]; a `MSG_SEND` to it was the ack until 2026-10-09 and is
+//!   now refused). A server stuck mid-sub-call
 //!   does *not* get woken (the ping just queues, unseen) - so an
 //!   outstanding ping older than [`PING_TIMEOUT`] ⇒ wedged ⇒ restart.
 //!
@@ -34,7 +36,9 @@
 //! blocked-forever server can't be distinguished from a healthy idle one
 //! without a response, so the active ping is the only tool for it. It
 //! needs *no server changes* regardless - a server replies to any unknown
-//! op, and that reply is the ack. `tasks::fail_calls_to` already rescues
+//! op, and that reply is the ack, provided it replies the one way a call is
+//! answered (`MSG_REPLY` to `SENDER_CALL`'s handle), as every server does
+//! since 2026-10-09. `tasks::fail_calls_to` already rescues
 //! callers of a server that *dies*; the ping is what catches a server that
 //! wedges *without* dying while some caller waits on it. On this
 //! single-user, fast-request system a healthy server acks within a tick or
@@ -307,8 +311,8 @@ pub fn heartbeat(slot: usize, blocked: bool) -> bool {
 }
 
 /// Record that `slot` acked a liveness ping - a supervised server replied
-/// to a ping (its reply, addressed to [`KERNEL_SENDER`], is intercepted by
-/// the `MSG_SEND` syscall arm, which calls this). Clears the outstanding
+/// to a ping (its `MSG_REPLY` to [`KERNEL_SENDER`] is taken by the
+/// `MSG_REPLY` syscall arm, which calls this). Clears the outstanding
 /// ping so the poke cadence starts over. A no-op for an unregistered slot
 /// or one with no ping outstanding - so a stray message to `KERNEL_SENDER`
 /// from anyone, at any time, does nothing.

@@ -114,9 +114,10 @@ pub const MSG_REPLY: u64 = 73;
 /// [`MSG_REPLY`] and [`SAFECOPY`]; [`KERNEL_SENDER`] for the supervisor's
 /// ping; [`GET_ID_ERR`] when that message was a plain [`MSG_SEND`] (nothing
 /// to answer) or nothing has been received. Captured at send time, with
-/// [`SENDER_ID`]'s credential, and stable while the request is handled (a
-/// filtered receive, the reply to a call the server makes itself, never
-/// replaces it), so a server that answers later (a parked request) keeps it
+/// [`SENDER_ID`]'s credential, and stable while the request is handled (the
+/// reply to a call the server makes itself never replaces it: replies are
+/// delivered into the call, never received; only another receive does, so
+/// read it on receipt), so a server that answers later (a parked request) keeps it
 /// and replies with it then. A handle is `(call number <<
 /// `[`TASK_ID_SLOT_BITS`]`) | slot`, the call number unique within a boot.
 pub const SENDER_CALL: u64 = 74;
@@ -901,15 +902,16 @@ pub const RANDOM: u64 = 63;
 /// sent and hands that to the receiver here. Use this - not `GET_ID(sender)` -
 /// wherever an identity is being used to authorize a request.
 ///
-/// Only an **unfiltered** receive ([`MSG_RECV`]/[`MSG_TRY_RECV`] with no sender
-/// filter) updates it. The reply to your own [`MSG_CALL`] does not, so a server
-/// may log to `cond` or read a file through `fsd` in the middle of handling a
-/// request without the reply replacing the credential it is authorizing
-/// against - a request only ever arrives on an unfiltered receive.
+/// Only a receive ([`MSG_RECV`]/[`MSG_TRY_RECV`]) updates it. The reply to your
+/// own [`MSG_CALL`] does not (since 2026-10-09 a reply is delivered into the
+/// call, never received; before, the call's receive was filtered and skipped
+/// it), so a server may log to `cond` or read a file through `fsd` in the
+/// middle of handling a request without the reply replacing the credential it
+/// is authorizing against.
 pub const SENDER_ID: u64 = 65;
 
 /// `()` -> the packed task identity of the sender of the message this task
-/// last received on an unfiltered receive, captured by the kernel at send time
+/// last received ([`MSG_RECV`]/[`MSG_TRY_RECV`]), captured by the kernel at send time
 /// exactly as [`SENDER_ID`] is; [`GET_ID_ERR`] if nothing has been received.
 ///
 /// **A slot number is not an identity.** A slot is recycled the moment its
@@ -920,8 +922,8 @@ pub const SENDER_ID: u64 = 65;
 /// counter that never repeats within a boot), and this returns
 /// `(generation << TASK_ID_SLOT_BITS) | slot` - see [`task_id_slot`]. Compare
 /// the whole word; the slot half alone is the bug this exists to close. The
-/// value is stable for the whole handling of a request (a filtered receive,
-/// i.e. a reply to a call this task made, never replaces it).
+/// value is stable for the whole handling of a request (a reply to a call this
+/// task made is delivered into the call and never replaces it).
 ///
 /// Exposed to servers only for now: `ps`/`wait` still speak in slots.
 pub const SENDER_TASK: u64 = 67;
@@ -1736,7 +1738,6 @@ pub const MSG_ERR_FULL: u64 = u64::MAX - 20;
 pub const MSG_ERR_TOO_BIG: u64 = u64::MAX - 21;
 /// [`MSG_TRY_RECV`]: the mailbox is empty right now.
 pub const NO_MSG: u64 = u64::MAX - 22;
-
 
 /// `BLOCK_*`: no block device has been discovered/installed this boot
 /// (nothing attached, or activation failed).

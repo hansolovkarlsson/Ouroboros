@@ -986,9 +986,19 @@ fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<Di
             let mac = if packed_mac == syscall_abi::NET_ERROR { [0u8; 6] } else { unpack_mac(packed_mac) };
             let mut r = [0u8; 8 + 544];
             let cap = (r.len() - 8).min(512);
+            // A clone read takes the first free connection slot; which one is
+            // known before it does, so a reply nobody hears can free it.
+            let clone_slot = if path == b"/tcp/clone" { alloc_dial_slot(dials) } else { None };
             let (status, dlen) = net_op(op, path, a1, want.min(cap), data_in, &mut r[8..], dials, &mac);
             r[0..8].copy_from_slice(&status.to_le_bytes());
-            reply(call, &r[..8 + dlen]);
+            // A caller that left the call (REPLY_STALE: cut short by Ctrl+C,
+            // or dead) never learned the connection a clone made, so nobody
+            // will close it: freed here, as fsd frees an unheard open's fid.
+            if reply(call, &r[..8 + dlen]) == syscall_abi::REPLY_STALE && status < syscall_abi::FS_ERR_MIN {
+                if let Some(i) = clone_slot {
+                    dials[i] = None;
+                }
+            }
         }
         // Unknown op (including the supervisor's health-ping): any reply acks
         // it. The value is irrelevant to the ping sentinel.
