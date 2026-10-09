@@ -3,7 +3,7 @@
 
     python3 scripts/test-edit.py    (or `make test-edit`, which builds the image)
 
-DevTools's note docs/handoffs/2026-10-08-from-devtools-edit-poll.md, its "Done
+DevTools's note docs/handoffs/closed/2026-10-08-from-devtools-edit-poll.md, its "Done
 when", on the serial console (where the screen's size is unknown and Edit
 falls back to 80 by 24). One boot, on a copy of the image, so the file the
 run saves never reaches build/esp.img:

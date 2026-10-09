@@ -1,5 +1,5 @@
 /* poll for the keyboard in a C program (<poll.h>, libc/src/file.c), for
- * DevTools's note docs/handoffs/2026-10-08-from-devtools-edit-poll.md. Runs as
+ * DevTools's note docs/handoffs/closed/2026-10-08-from-devtools-edit-poll.md. Runs as
  * /bin/CPOLL, through picolibc, driven by scripts/test-cpoll.py.
  *
  * `cpoll timing` prints one line per question, with nothing typed:
