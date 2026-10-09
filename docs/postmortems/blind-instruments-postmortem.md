@@ -1503,3 +1503,49 @@ read as survivors until the emptiness itself looked wrong. Found by that;
 the rerun prints each rig's "driven to the end" line beside the failures, so
 a run that did not happen cannot read as a pass. The family's spine in one
 line: the harness that runs the controls is a check too.
+
+## Six more, from the stale reply (2026-10-09)
+
+One fix, #244, built three times over four high reviews, with a new rig,
+`test-call-interrupt`, rebuilt for each design. Three of the six were found
+by running a control and finding it passed, two by review, one by a hang
+that turned out to be the rig's image and not the kernel.
+
+**A control the serial line could not fail.** The first design's read-ahead
+during a call was guarded by keys typed while the call was held, and the
+control (the read-ahead removed) passed: QEMU holds a serial byte until the
+guest reads it, so nothing typed on the serial line is ever lost to a guest
+that is not looking. Found by running the control; the keys moved to QEMU's
+USB keyboard.
+
+**And a control six keys could not fail.** On the USB keyboard the same
+control passed again: QEMU's keyboard queues sixteen events, and six keys,
+pressed and released, fit. Found by running it; seventeen keys overflow the
+queue, and the control then lost eight of twelve `k`s.
+
+**A timing check the script's own sleeps satisfied.** "The call ran to the
+peer's answer" was `waited >= hold - 1 s`, and the script slept and typed
+for longer than that before it began to wait, so a call cut short at 0.6 s
+still read as 3.6 s. Found by the first high review of #244. The checks now
+read a snapshot of the transcript 0.8 s after the key, far inside the hold.
+
+**A control whose wrong answer was the right one.** The drain design's "the
+abandoned call not recorded" control passed: in the rig's first order, the
+late answer the next call took belonged to a second interrupted `cd` to the
+same missing directory, so it said "no such file", exactly what the next
+call's own answer would. Found by running the control; the steps were
+reordered so the late answer ("exists") and the right one differ.
+
+**A guard that compared times, not contents.** One run of the drain design
+hung, and it looked like a kernel bug. It was the rig: run directly instead
+of through `make`, it booted the image the last mutation control had built,
+the "answer not dropped" kernel, whose predicted symptom is a hang. `git
+checkout` had restored the source; nothing rebuilt the image, and the rig's
+staleness guard, which compares modification times, saw nothing newer than
+it. Found by six reruns with debug lines that all passed. Every run since
+goes through `make test-call-interrupt`, which rebuilds the image first.
+
+**A prompt check that searched the wrong text.** "The prompt is back" took
+the text after the echoed command, and when the echo was not found it took
+the whole snapshot, where any earlier `# ` counted. Found by the second high
+review of #244; the echo must now be present and the prompt must follow it.
