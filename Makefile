@@ -517,7 +517,7 @@ chello-bin:
 # The headers too: a change to sys.h (a wire constant) or sys/stat.h (a
 # struct) must rebuild every object, or a stale one ships beside the new
 # header with nothing to say so.
-LIBC_HDRS    := $(wildcard libc/include/*.h libc/include/sys/*.h libc/pico/include/sys/*.h)
+LIBC_HDRS    := $(wildcard libc/include/*.h libc/include/sys/*.h libc/pico/include/*.h libc/pico/include/sys/*.h)
 $(BUILD_DIR)/libc/%.o: libc/src/%.c $(LIBC_HDRS)
 	mkdir -p $(BUILD_DIR)/libc
 	$(CC) $(LIBC_CFLAGS) -c $< -o $@

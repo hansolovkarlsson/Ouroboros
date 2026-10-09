@@ -597,6 +597,15 @@ static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 /// generation would need 2^55 spawns).
 const PENDING_KILL_BY_QUIT: u64 = 1 << 63;
 
+/// Whether a keyboard wait with deadline `until_us` (on `MONOTONIC_US`'s
+/// clock) should end now: the deadline falls before the next tick, the next
+/// time the wait would be looked at. Ending a tick early, rather than a tick
+/// late, lets the caller meet the deadline to well within a tick by looking
+/// itself for the little that is left (`READ_CHAR_UNTIL`'s ABI doc).
+pub(crate) fn keyboard_deadline_near(until_us: u64) -> bool {
+    crate::timer::monotonic_us() + crate::timer::TICK_INTERVAL_MS * 1000 >= until_us
+}
+
 /// Whether task `slot` is marked for the Ctrl+C or Ctrl+\ kill that
 /// [`on_tick`] has not carried out yet: such a task reads no more keys, so
 /// nothing typed after the interrupt goes to the program it ends (the
@@ -1836,7 +1845,13 @@ pub(crate) fn safecopy(
 /// `Option<u64>` (the value to hand back to the task once it's ready).
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum WaitReason {
-    Keyboard,
+    /// Waiting for a key (`READ_CHAR`, and `READ_CHAR_UNTIL` with
+    /// `until_us`, a deadline on `MONOTONIC_US`'s clock; 0 = none). A
+    /// deadline ends the wait with `NO_CHAR` at the last tick before it
+    /// ([`keyboard_deadline_near`]), and the caller looks for a key on its
+    /// own for what is left, less than a tick: blocked, not spinning, for all
+    /// but the end of the wait.
+    Keyboard { until_us: u64 },
     /// Waiting for the task at this slot index to die (`WAIT` syscall).
     /// Satisfied by the target reaching `Zombie` (the poll *reaps* it -
     /// collecting the status is what frees the slot) or `Unused` (it
@@ -1872,7 +1887,9 @@ impl WaitReason {
     /// interrupt check (see below).
     fn poll(self, waiter: usize) -> Option<u64> {
         match self {
-            WaitReason::Keyboard => crate::syscall::poll_keyboard_byte(waiter).map(u64::from),
+            WaitReason::Keyboard { until_us } => crate::syscall::poll_keyboard_byte(waiter)
+                .map(u64::from)
+                .or_else(|| (until_us != 0 && keyboard_deadline_near(until_us)).then_some(syscall_abi::NO_CHAR)),
             WaitReason::TaskExit(target) => {
                 // A wait must stay interruptible or one `wait` on a
                 // never-exiting task bricks the whole session (the
@@ -2877,7 +2894,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
                 TaskState::Blocked(WaitReason::NetInput { deadline }) => {
                     crate::console::println!("Ouroboros kernel:   it was blocked on network input (deadline {deadline})")
                 }
-                TaskState::Blocked(WaitReason::Keyboard) => {
+                TaskState::Blocked(WaitReason::Keyboard { .. }) => {
                     crate::console::println!("Ouroboros kernel:   it was blocked on the keyboard")
                 }
                 _ => {}

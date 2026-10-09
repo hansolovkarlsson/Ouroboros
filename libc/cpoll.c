@@ -6,7 +6,9 @@
  *
  *     cpoll: zero 0                    (timeout 0: answers at once, none)
  *     cpoll: wait 0 ms=<n>             (timeout 200: none, after about 200 ms)
- *     cpoll: other 1 revents=32        (fd 1 is POLLNVAL at once)
+ *     cpoll: out 1 revents=4           (fd 1 is ready for POLLOUT)
+ *     cpoll: closed 1 revents=32       (fd 9, not open, is POLLNVAL)
+ *     cpoll: both 1 key=0 out=4        (fd 1 ready: fd 0 looked at, no wait)
  *     cpoll: sleep 0 ms=<n>            (no fds, timeout 100: a sleep)
  *     cpoll: null EFAULT
  *     cpoll: timing done
@@ -36,9 +38,16 @@ static int timing(void) {
     long t0 = ms_now();
     int n = poll(&p, 1, 200);
     printf("cpoll: wait %d ms=%ld\r\n", n, ms_now() - t0);
-    struct pollfd q = {1, POLLIN, 0};
+    struct pollfd q = {1, POLLOUT, 0};
     n = poll(&q, 1, 0);
-    printf("cpoll: other %d revents=%d\r\n", n, q.revents);
+    printf("cpoll: out %d revents=%d\r\n", n, q.revents);
+    struct pollfd r = {9, POLLIN, 0};
+    n = poll(&r, 1, 0);
+    printf("cpoll: closed %d revents=%d\r\n", n, r.revents);
+    struct pollfd two[2] = {{0, POLLIN, 0}, {1, POLLOUT, 0}};
+    t0 = ms_now();
+    n = poll(two, 2, 2000);
+    printf("cpoll: both %d key=%d out=%d ms=%ld\r\n", n, two[0].revents, two[1].revents, ms_now() - t0);
     t0 = ms_now();
     n = poll(NULL, 0, 100);
     printf("cpoll: sleep %d ms=%ld\r\n", n, ms_now() - t0);

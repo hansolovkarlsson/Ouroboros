@@ -1020,9 +1020,37 @@ static int key_waiting(void) {
     return 1;
 }
 
-/* fd 0 and POLLIN only (poll.h): every other descriptor is POLLNVAL at once,
- * a negative one skipped. -1 waits in READ_CHAR (no spinning); a positive
- * timeout looks on MONOTONIC_US and gives the core away between looks. */
+static unsigned long now_us(void) {
+    return (unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0);
+}
+
+/* Waits for a key until `deadline` (MONOTONIC_US): blocked in the kernel
+ * (READ_CHAR_UNTIL) for all but the last tick before it, which the kernel
+ * hands back early, and then a look on the clock for what is left, so the
+ * deadline is met to well within a tick without spinning for the whole wait
+ * (the review of #240: a YIELD loop spun a core whenever nothing else ran). */
+static int key_until(unsigned long deadline) {
+    if (key_waiting()) {
+        return 1;
+    }
+    unsigned long c = (unsigned long)__os_syscall1(SYS_READ_CHAR_UNTIL, (long)deadline);
+    if (c != NO_CHAR) {
+        g_held_key = (int)(c & 0xff);
+        return 1;
+    }
+    while (now_us() < deadline) {
+        __os_syscall1(SYS_YIELD, 0);
+        if (key_waiting()) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* poll.h. fd 0 with POLLIN waits for a key; fds 1 and 2 are always ready for
+ * POLLOUT; an open file is ready for what is asked; a closed fd is POLLNVAL;
+ * a negative one is skipped. Every entry is answered, fd 0 included when
+ * another is already ready (then without waiting). */
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     if (nfds > 0 && !fds) {
         return client_fail(EFAULT);
@@ -1031,29 +1059,35 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     int ready = 0;
     int want_key = 0;
     for (nfds_t i = 0; i < nfds; i++) {
-        fds[i].revents = 0;
-        if (fds[i].fd < 0) {
+        struct pollfd *p = &fds[i];
+        p->revents = 0;
+        if (p->fd < 0) {
             continue;
         }
-        if (fds[i].fd != 0) {
-            fds[i].revents = POLLNVAL;
-            ready++;
-        } else if (fds[i].events & POLLIN) {
-            want_key = 1;
+        if (p->fd == 0) {
+            want_key |= (p->events & POLLIN) != 0;
+            continue;
         }
+        if (p->fd == 1 || p->fd == 2) {
+            p->revents = p->events & POLLOUT;
+        } else if (file_for(p->fd)) {
+            p->revents = p->events & (POLLIN | POLLOUT);
+        } else {
+            p->revents = POLLNVAL;
+        }
+        ready += p->revents != 0;
     }
-    if (want_key && !ready) {
-        int got = key_waiting();
-        if (!got && timeout < 0) {
-            g_held_key = (int)(__os_syscall1(SYS_READ_CHAR, 0) & 0xff);
+    if (want_key) {
+        int got;
+        if (ready || timeout == 0) {
+            got = key_waiting();
+        } else if (timeout < 0) {
             got = 1;
-        } else if (!got && timeout > 0) {
-            unsigned long deadline = (unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0)
-                                   + (unsigned long)timeout * 1000UL;
-            while (!got && (unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0) < deadline) {
-                __os_syscall1(SYS_YIELD, 0);
-                got = key_waiting();
+            if (!key_waiting()) {
+                g_held_key = (int)(__os_syscall1(SYS_READ_CHAR, 0) & 0xff);
             }
+        } else {
+            got = key_until(now_us() + (unsigned long)timeout * 1000UL);
         }
         if (got) {
             for (nfds_t i = 0; i < nfds; i++) {
@@ -1063,15 +1097,15 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
                 }
             }
         }
-    } else if (!want_key && !ready && timeout != 0) {
-        /* Nothing to watch: poll(NULL, 0, ms) as a sleep. -1 would never
-         * return, so it is refused rather than hung. */
+    } else if (!ready && timeout != 0) {
+        /* Nothing that can wait: poll(NULL, 0, ms) as a sleep, which looks on
+         * the clock (there is no key to block on). -1 would never return, so
+         * it is refused rather than hung. */
         if (timeout < 0) {
             return client_fail(EINVAL);
         }
-        unsigned long deadline = (unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0)
-                               + (unsigned long)timeout * 1000UL;
-        while ((unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0) < deadline) {
+        unsigned long deadline = now_us() + (unsigned long)timeout * 1000UL;
+        while (now_us() < deadline) {
             __os_syscall1(SYS_YIELD, 0);
         }
     }

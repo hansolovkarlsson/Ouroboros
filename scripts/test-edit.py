@@ -62,7 +62,9 @@ def main() -> int:
         if ok:
             start = len(guest.transcript())
             guest.type_line("edit hello.txt")
-            ok = guest.wait_for("hello.txt", timeout=30)
+            # The status line: the name and Edit's `Line 1  Col 1`, which no
+            # error naming the file would print.
+            ok = guest.wait_for(r"hello\.txt[\s\S]*Line 1  Col 1", timeout=30)
             seg["open"] = guest.transcript()[start:]
         if ok:
             time.sleep(1.0)
@@ -96,7 +98,8 @@ def main() -> int:
     cat_lines = [line.strip() for line in seg.get("cat", "").splitlines()]
     checks = [
         ("driven to the end", ok),
-        ("`edit hello.txt` opens the editor (its status line names the file)", "hello.txt" in seg.get("open", "")[len("edit hello.txt"):]),
+        ("`edit hello.txt` opens the editor (its status line: the name, Line 1 Col 1)",
+         "Line 1  Col 1" in seg.get("open", "")),
         ("the saved file holds `hXi`: the repeat, the arrow and the save", "hXi" in cat_lines),
         ("no fault lines", faults == 0),
     ]

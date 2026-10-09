@@ -9,9 +9,9 @@ sequence and repeat a command until a key is pressed. One boot, the serial
 line:
 
 1. **`cpoll timing`**, nothing typed: timeout 0 answers 0 at once; timeout
-   200 answers 0 after 200 to 260 ms (the note asks for about 10 ms; the
-   wait is measured on the monotonic clock, so the slack is the guest's); fd
-   1 is POLLNVAL (32) at once; no fds and timeout 100 sleeps 100 to 160 ms;
+   200 answers 0 after 200 to 215 ms (the note asks for about 10 ms); fd 1
+   is ready for POLLOUT, a closed fd 9 is POLLNVAL (32), and with fd 1 ready
+   fd 0 is answered too, at once, rather than skipped; no fds and timeout 100 sleeps 100 to 160 ms;
    a null array with one entry is EFAULT.
 2. **`cpoll key`**: it writes `cpoll: waiting` with no newline, so the text
    shows only if poll flushed fd 1 before its wait; then `x` typed answers
@@ -83,9 +83,13 @@ def main() -> int:
     checks = [
         ("driven to the end", ok),
         ("timeout 0 answers 0 at once", "cpoll: zero 0" in timing),
-        ("timeout 200 answers 0 after 200-260 ms",
-         wait is not None and wait.group(1) == "0" and 200 <= int(wait.group(2)) <= 260),
-        ("fd 1 is POLLNVAL at once", "cpoll: other 1 revents=32" in timing),
+        ("timeout 200 answers 0 after 200-215 ms (the note asks about 10)",
+         wait is not None and wait.group(1) == "0" and 200 <= int(wait.group(2)) <= 215),
+        ("fd 1 is ready for POLLOUT", "cpoll: out 1 revents=4" in timing),
+        ("a closed fd is POLLNVAL", "cpoll: closed 1 revents=32" in timing),
+        ("with fd 1 ready, fd 0 is answered too, without waiting",
+         re.search(r"cpoll: both 1 key=0 out=4 ms=(\d+)", timing) is not None
+         and int(re.search(r"cpoll: both 1 key=0 out=4 ms=(\d+)", timing).group(1)) < 50),
         ("no fds, timeout 100: a sleep of 100-160 ms",
          sleep is not None and sleep.group(1) == "0" and 100 <= int(sleep.group(2)) <= 160),
         ("a null array is EFAULT", "cpoll: null EFAULT" in timing),

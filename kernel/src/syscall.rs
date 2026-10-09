@@ -820,7 +820,15 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
         // is what makes that possible; every other arm above ignores it.
         syscall_abi::READ_CHAR => match poll_keyboard_byte(tasks::current_task()) {
             Some(byte) => byte as u64,
-            None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard) },
+            None => unsafe { tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard { until_us: 0 }) },
+        },
+        syscall_abi::READ_CHAR_UNTIL => match poll_keyboard_byte(tasks::current_task()) {
+            // arg0 = the deadline, on MONOTONIC_US's clock. See the ABI doc.
+            Some(byte) => byte as u64,
+            None if tasks::keyboard_deadline_near(arg0) => syscall_abi::NO_CHAR,
+            None => unsafe {
+                tasks::block_current_and_switch(frame, tasks::WaitReason::Keyboard { until_us: arg0 })
+            },
         },
         syscall_abi::PUTC => {
             console::putc(arg0 as u8);
@@ -897,9 +905,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // overflows a u64 in a few days at 62.5 MHz): split into whole
             // seconds plus the sub-second remainder. Pure system-register
             // reads (no GIC, no interrupts) - see timer.rs.
-            let freq = crate::timer::frequency_hz();
-            let ticks = crate::timer::now_ticks();
-            (ticks / freq) * 1_000_000 + ((ticks % freq) * 1_000_000) / freq
+            crate::timer::monotonic_us()
         }
         syscall_abi::SPAWN => spawn_staged(arg0, arg1, arg2, arg3),
         syscall_abi::CWD_STAGE => {

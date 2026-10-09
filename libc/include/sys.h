@@ -28,6 +28,7 @@
 #define SYS_GET_ENVC 59
 #define SYS_GET_ENV 60
 #define SYS_KBD_MODE 70
+#define SYS_READ_CHAR_UNTIL 71
 
 /* Transient MSG_SEND failures worth retrying (mirrors syscall-abi). */
 #define MSG_ERR_FULL (~0UL - 20UL)

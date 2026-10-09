@@ -73,6 +73,17 @@ pub const GET_TICKS: u64 = 6;
 /// task 0 on the owner's death).
 pub const READ_CHAR: u64 = 15;
 
+/// `(deadline_us)` -> a key, as [`READ_CHAR`], or [`NO_CHAR`] when the wait
+/// ends at the deadline, given on [`MONOTONIC_US`]'s clock. Blocking, like
+/// [`READ_CHAR`]: the caller is suspended, not spinning. The kernel looks at a
+/// blocked task once a tick (20 ms), so it ends the wait at the last tick
+/// BEFORE the deadline, up to a tick early, never late: a caller that needs
+/// the deadline more closely (C's `poll`, for Edit's 50 ms escape timeout)
+/// then looks for a key with [`TRY_READ_CHAR`] until the deadline, a spin of
+/// less than one tick. A deadline already within a tick answers [`NO_CHAR`]
+/// at once. The keyboard owner rule is [`READ_CHAR`]'s.
+pub const READ_CHAR_UNTIL: u64 = 71;
+
 /// `(total staged length, stdout target, argv blob length)` -> **the new
 /// task's slot index** on success (needed to wait on, send to, or kill what
 /// was just started - the shell's pipeline flow does all three), [`SPAWN_ERROR`]
