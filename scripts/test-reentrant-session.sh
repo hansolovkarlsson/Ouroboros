@@ -47,11 +47,11 @@ B=build/espext2-b.img
 for img in "$A" "$B"; do
     [ -f "$img" ] || { echo "test-reentrant-session: $img missing - run make images-2vm-ext2"; exit 2; }
 done
-# A stale image grades the previous netd; refuse if either image predates the
-# server binary.
-[ -f target/aarch64-unknown-none/release/netd.bin ] && \
-    [ "target/aarch64-unknown-none/release/netd.bin" -nt "$B" ] && {
-        echo "test-reentrant-session: $B is older than netd.bin - run make images-2vm-ext2"; exit 2; }
+# A stale image grades the previous netd: refuse either image if it was not
+# built from the tree as it is now (scripts/srcid.py), before the run loop.
+for img in "$A" "$B"; do
+    python3 scripts/srcid.py require "$img" || exit 2
+done
 fail=0
 n=0
 

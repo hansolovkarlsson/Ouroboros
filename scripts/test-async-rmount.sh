@@ -54,11 +54,10 @@ set -u
 cd "$(dirname "$0")/.."
 IMG=build/esp.img
 [ -f "$IMG" ] || { echo "test-async-rmount: $IMG missing - run make image"; exit 2; }
-# A stale image would grade the previous netd or kernel.
-for k in target/aarch64-unknown-none/release/netd.bin build/esp/EFI/BOOT/BOOTAA64.EFI; do
-    [ -f "$k" ] && [ "$k" -nt "$IMG" ] && {
-        echo "test-async-rmount: $IMG is older than $k - run make image"; exit 2; }
-done
+# A stale image would grade the previous netd or kernel: refuse one not built
+# from the tree as it is now (scripts/srcid.py), before the boot loop, whose
+# retries would otherwise read drive-qemu.py's own refusal as a failed boot.
+python3 scripts/srcid.py require "$IMG" || exit 2
 fail=0
 n=0
 PEER=5641      # the live peer
