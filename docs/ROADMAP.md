@@ -2354,6 +2354,16 @@ be reviewed after the fact from the saved screenshots.
 > full-screen terminal control) made concrete, not started; and `rename` in
 > the C port, done in #215 and its note closed.
 >
+> - [ ] **new** **`poll` and `/bin/edit`.** DevTools asks for `poll` on
+>       fd 0 (`<poll.h>`, one `pollfd`, `POLLIN`, a timeout of -1, 0 or
+>       milliseconds to within about 10 ms, fd 1 flushed first) and for Edit
+>       built into the image as cpp is, from `EDIT_DIR`. `poll` is the one
+>       symbol Edit's Ouroboros platform file still lacks. Done when
+>       DevTools's `make -C edit ouroboros-build` finds every symbol, and on an
+>       image from `main` `edit hello.txt` opens full screen, an arrow moves
+>       the cursor, `^Q Q` repeats until a key stops it, and `^K D` saves.
+>       Note:
+>       [`handoffs/2026-10-08-from-devtools-edit-poll.md`](handoffs/2026-10-08-from-devtools-edit-poll.md).
 > - [x] **new** **A console and keyboard a full-screen editor can use.**
 >       Five parts, in Edit's order: (1) `cond`'s framebuffer backend
 >       interprets `ESC [ r ; c H` (it ignores the parameters today and
