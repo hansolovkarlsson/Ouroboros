@@ -43,6 +43,14 @@ import subprocess
 import sys
 import threading
 import time
+import importlib.util
+
+# The stale-image guard (scripts/srcid.py), loaded by path: the rigs load this
+# file by path too, so scripts/ need not be on sys.path.
+_spec = importlib.util.spec_from_file_location(
+    "srcid", os.path.join(os.path.dirname(os.path.abspath(__file__)), "srcid.py"))
+srcid = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(srcid)
 
 ENTER = "<ENTER>"   # a step whose TYPE is this types an EMPTY line (bare Enter)
 TYPE_DELAY = 0.02   # per character; below this the PL011 drops input
@@ -66,6 +74,9 @@ class Guest:
         `machine` is QEMU's -machine value: `virt,virtualization=on` makes
         the firmware hand the kernel off at EL2, as the Raspberry Pi's does
         (test-early-fault.py --el2, the EL1 drop's rig)."""
+        # Every boot of an image goes through here, so this is the one place
+        # that refuses an image not built from the tree as it is now.
+        srcid.require_current(image, label)
         prefix = subprocess.run(
             ["brew", "--prefix", "qemu"], capture_output=True, text=True
         ).stdout.strip()

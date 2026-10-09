@@ -1038,6 +1038,12 @@ esp: build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin acco
 	# expands to it). FAT can't record an owner, so it's world-usable here; on
 	# ext2 the image build chowns it (see the ext2-src staging).
 	mkdir -p $(ESP_DIR)/Users/user $(ESP_DIR)/Users/guest
+	# The source stamp, last, once every program above is built: the git tree
+	# of this checkout as it is now (and of CPP_DIR and EDIT_DIR when staged).
+	# Every image built from this tree carries it, and drive-qemu.py's Guest
+	# refuses to boot an image whose stamp is not the tree's, which is what
+	# stops a rig grading a reverted mutation's build (scripts/srcid.py).
+	python3 scripts/srcid.py write $(ESP_DIR)/EFI/ORBS/SRCID.TXT $(if $(HAVE_CPP),$(CPP_DIR)) $(if $(HAVE_EDIT),$(EDIT_DIR))
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
 # the aarch64 OVMF firmware installed by `brew install qemu`.
