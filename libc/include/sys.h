@@ -69,8 +69,6 @@
  * the most bytes the kernel's staged blob may hold. NO_ARG is u64::MAX, spelled
  * in the error band's form so the wire check reads it. */
 #define NO_ARG (~0UL - 0UL)
-/* KEY_WAIT_UNTIL's "no key by the deadline" (poll, file.c). */
-#define NO_CHAR (~0UL - 0UL)
 #define ARGV_MAX 512u
 /* The environment (crt0.c): the most bytes its staged blob may hold, so a
  * GET_ENV buffer of ENV_MAX bytes holds any entry (the kernel refuses no

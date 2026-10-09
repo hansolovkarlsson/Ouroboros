@@ -8,7 +8,7 @@
  *     cpoll: wait 0 ms=<n>             (timeout 200: none, after about 200 ms)
  *     cpoll: out 1 revents=4           (fd 1 is ready for POLLOUT)
  *     cpoll: closed 1 revents=32       (fd 9, not open, is POLLNVAL)
- *     cpoll: both 1 key=0 out=4        (fd 1 ready: fd 0 looked at, no wait)
+ *     cpoll: both 1 key=0 out=4 ms=<n> (fd 1 ready: fd 0 looked at, no wait)
  *     cpoll: sleep 0 ms=<n>            (no fds, timeout 100: a sleep)
  *     cpoll: null EFAULT
  *     cpoll: timing done

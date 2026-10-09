@@ -597,16 +597,6 @@ static PENDING_KILL: AtomicU64 = AtomicU64::new(0);
 /// generation would need 2^55 spawns).
 const PENDING_KILL_BY_QUIT: u64 = 1 << 63;
 
-/// Whether a key wait with deadline `until_us` (on `MONOTONIC_US`'s clock)
-/// should end now: the deadline falls before the next tick, the next time
-/// the wait would be looked at. Ending a tick early lets the caller look
-/// itself for the little that is left (`KEY_WAIT_UNTIL`'s ABI doc). It is
-/// not a promise of never late: a woken task runs when it is scheduled, and
-/// with another task busy that can be a tick later.
-pub(crate) fn keyboard_deadline_near(until_us: u64) -> bool {
-    crate::timer::monotonic_us().saturating_add(crate::timer::TICK_INTERVAL_MS * 1000) >= until_us
-}
-
 /// Whether task `slot` is marked for the Ctrl+C or Ctrl+\ kill that
 /// [`on_tick`] has not carried out yet: such a task reads no more keys, so
 /// nothing typed after the interrupt goes to the program it ends (the
@@ -1853,8 +1843,9 @@ pub(crate) enum WaitReason {
     /// kernel's queue as any read does, so a program that exits without
     /// reading leaves the key for the next owner (the review of #240: an
     /// earlier form took the key into the program, where it died with it).
-    /// `until_us` is a deadline on `MONOTONIC_US`'s clock, ended at the last
-    /// tick before it ([`keyboard_deadline_near`]); `u64::MAX` waits for good.
+    /// `until_us` is a deadline on `MONOTONIC_US`'s clock, ended at the first
+    /// look at or after it, so to a tick's precision; `u64::MAX` waits for
+    /// good.
     KeyWait { until_us: u64 },
     /// Waiting for the task at this slot index to die (`WAIT` syscall).
     /// Satisfied by the target reaching `Zombie` (the poll *reaps* it -
@@ -1892,15 +1883,7 @@ impl WaitReason {
     fn poll(self, waiter: usize) -> Option<u64> {
         match self {
             WaitReason::Keyboard => crate::syscall::poll_keyboard_byte(waiter).map(u64::from),
-            WaitReason::KeyWait { until_us } => {
-                if crate::syscall::keyboard_key_waiting(waiter) {
-                    Some(1)
-                } else if keyboard_deadline_near(until_us) {
-                    Some(syscall_abi::NO_CHAR)
-                } else {
-                    None
-                }
-            }
+            WaitReason::KeyWait { until_us } => crate::syscall::key_wait_answer(waiter, until_us),
             WaitReason::TaskExit(target) => {
                 // A wait must stay interruptible or one `wait` on a
                 // never-exiting task bricks the whole session (the

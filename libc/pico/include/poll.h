@@ -11,10 +11,11 @@
  * returns that byte without blocking. The byte stays in the kernel's queue
  * until that read takes it, so a program that polls and exits without
  * reading leaves it for the shell. A timeout of -1 waits for a byte, 0 does
- * not wait, and a positive one waits at most that many milliseconds, blocked
- * in the kernel for all but the last tick (KEY_WAIT_UNTIL) and then on the
- * clock; with another program busy the end can be up to a tick late,
- * the tick being when the kernel next runs the waiter. Output buffered for
+ * not wait, and a positive one waits that many milliseconds, blocked in the
+ * kernel (KEY_WAIT_UNTIL) without spinning, to a tick's precision: the wait
+ * ends at the first tick at or after the time, so up to about a tick (20 ms)
+ * late, and later when a tick is delayed or another program is busy. A
+ * kernel without KEY_WAIT_UNTIL makes poll fail with ENOSYS. Output buffered for
  * fd 1 by the C library (what write fills, not stdio's buffer above it,
  * which the program flushes as on Unix) is written before the wait, as
  * read(0, ...) does. Ctrl+C and Ctrl+\ act as they do for read: in cooked
@@ -22,7 +23,8 @@
  * keyboard is answered 0 by a timed poll, and waits for the keyboard in a
  * poll with -1.
  *
- * The other descriptors: fds 1 and 2 are always ready for POLLOUT; an open
+ * The other descriptors: fds 0, 1 and 2, the console, are always ready for
+ * POLLOUT; an open
  * file is ready for POLLIN and POLLOUT, as POSIX has regular files; a
  * descriptor that is not open is POLLNVAL; a negative one is skipped. When
  * any entry is ready, fd 0 is looked at without waiting. With nothing to wait

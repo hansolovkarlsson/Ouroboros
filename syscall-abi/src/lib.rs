@@ -73,20 +73,20 @@ pub const GET_TICKS: u64 = 6;
 /// task 0 on the owner's death).
 pub const READ_CHAR: u64 = 15;
 
-/// `(deadline_us)` -> `1` when a key is waiting for the caller, or [`NO_CHAR`]
-/// when the wait ends at the deadline, given on [`MONOTONIC_US`]'s clock;
-/// `u64::MAX` waits for good. The key is NOT taken: it stays in the kernel's
-/// queue for the next [`READ_CHAR`] or [`TRY_READ_CHAR`], so a program that
-/// waits and then exits without reading leaves it for the next owner. For
-/// C's `poll`. Blocking, like [`READ_CHAR`]: the caller is suspended, not
-/// spinning. The kernel looks at a blocked task once a tick (the timer's
-/// `TICK_INTERVAL_MS`), so it ends the wait at the last tick before the
-/// deadline, up to a tick early; a caller that needs the deadline more
-/// closely (`poll`, for Edit's 50 ms escape timeout) asks again with a past
-/// deadline, which answers at once, until the deadline. A woken task runs
-/// when it is scheduled, so with another task busy the end can still be up
-/// to a tick late. The keyboard owner rule is [`READ_CHAR`]'s: a caller that
-/// does not own the keyboard is answered `NO_CHAR` at the deadline.
+/// `(deadline_us)` -> `1` when a key is waiting for the caller, or `0` when
+/// the deadline, on [`MONOTONIC_US`]'s clock, is reached first; `u64::MAX`
+/// waits for good, and a past deadline answers at once. (`u64::MAX` is the
+/// answer of a kernel without this call, so a caller can tell.) The key is
+/// NOT taken: it stays in the kernel's queue for the next [`READ_CHAR`] or
+/// [`TRY_READ_CHAR`], so a program that waits and exits without reading leaves
+/// it for the next owner. For C's `poll`. Blocking, like [`READ_CHAR`]: the
+/// caller is suspended, not spinning, and a blocked task is looked at once a
+/// tick (the timer's `TICK_INTERVAL_MS`), so the wait ends at the first look
+/// at or after the deadline: to a tick's precision, later when a tick is
+/// delayed or another task is busy (settled by Hans 2026-10-08, against a
+/// userland spin for the last stretch that would have burned the core). The
+/// keyboard owner rule is [`READ_CHAR`]'s: a caller that does not own the
+/// keyboard is answered `0` at the deadline.
 pub const KEY_WAIT_UNTIL: u64 = 71;
 
 /// `(total staged length, stdout target, argv blob length)` -> **the new

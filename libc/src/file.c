@@ -1004,42 +1004,26 @@ static unsigned long now_us(void) {
     return (unsigned long)__os_syscall1(SYS_MONOTONIC_US, 0);
 }
 
-/* KEY_WAIT_UNTIL: whether a key is waiting for this task by `deadline`
- * (MONOTONIC_US), the key left in the kernel's queue for the next read(0),
- * so a program that polls and then exits without reading loses nothing (the
- * review of #240: an earlier form took the key into the program). A past
- * deadline answers at once; ~0UL waits for good. */
+/* KEY_WAIT_UNTIL: 1 when a key is waiting for this task by `deadline`
+ * (MONOTONIC_US; ~0UL waits for good, a past one answers at once), 0 when
+ * the deadline comes first, -1 with ENOSYS on a kernel without the call. The
+ * key stays in the kernel's queue for the next read(0), so a program that
+ * polls and exits without reading loses nothing (the review of #240). The
+ * wait is blocked in the kernel and ends at the first tick at or after the
+ * deadline: a tick's precision, with no spinning (settled by Hans
+ * 2026-10-08). */
 static int key_by(unsigned long deadline) {
-    return (unsigned long)__os_syscall1(SYS_KEY_WAIT_UNTIL, (long)deadline) == 1;
-}
-
-/* Until `deadline`, giving the core away between looks; with `key`, until a
- * key is waiting too. The end of a timed key wait (under a tick, after the
- * kernel's early answer) and poll(NULL, 0, ms)'s sleep, which has no key to
- * block on and so looks on the clock for the whole time. One last look at
- * the keyboard when the time is up, in case the task was scheduled late. */
-static int spin_until(unsigned long deadline, int key) {
-    while (now_us() < deadline) {
-        __os_syscall1(SYS_YIELD, 0);
-        if (key && key_by(0)) {
-            return 1;
-        }
+    unsigned long r = (unsigned long)__os_syscall1(SYS_KEY_WAIT_UNTIL, (long)deadline);
+    if (r == 1 || r == 0) {
+        return (int)r;
     }
-    return key && key_by(0);
+    return r == ~0UL ? client_fail(ENOSYS) : client_fail(EIO);
 }
 
-/* Waits for a key until `deadline`: blocked in the kernel for all but the
- * last tick before it, which the kernel answers early, then the rest on the
- * clock (the review of #240: a YIELD loop for the whole wait spun a core
- * whenever nothing else ran). */
-static int key_until(unsigned long deadline) {
-    return key_by(deadline) || spin_until(deadline, 1);
-}
-
-/* poll.h. fd 0 with POLLIN waits for a key; fds 1 and 2 are always ready for
- * POLLOUT; an open file is ready for what is asked; a closed fd is POLLNVAL;
- * a negative one is skipped. Every entry is answered, fd 0 included when
- * another is already ready (then without waiting). */
+/* poll.h. fd 0 with POLLIN waits for a key; fds 0 to 2, the console, are
+ * always ready for POLLOUT; an open file is ready for what is asked; a closed
+ * fd is POLLNVAL; a negative one is skipped. Every entry is answered, fd 0
+ * included when another is already ready (then without waiting). */
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
     if (nfds > 0 && !fds) {
         return client_fail(EFAULT);
@@ -1055,9 +1039,8 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         }
         if (p->fd == 0) {
             want_key |= (p->events & POLLIN) != 0;
-            continue;
-        }
-        if (p->fd == 1 || p->fd == 2) {
+            p->revents = p->events & POLLOUT;
+        } else if (p->fd == 1 || p->fd == 2) {
             p->revents = p->events & POLLOUT;
         } else if (file_for(p->fd)) {
             p->revents = p->events & (POLLIN | POLLOUT);
@@ -1073,13 +1056,16 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         } else if (timeout < 0) {
             got = key_by(~0UL);
         } else {
-            got = key_until(now_us() + (unsigned long)timeout * 1000UL);
+            got = key_by(now_us() + (unsigned long)timeout * 1000UL);
+        }
+        if (got < 0) {
+            return -1;
         }
         if (got) {
             for (nfds_t i = 0; i < nfds; i++) {
                 if (fds[i].fd == 0 && (fds[i].events & POLLIN)) {
-                    fds[i].revents = POLLIN;
-                    ready++;
+                    ready += fds[i].revents == 0;
+                    fds[i].revents |= POLLIN;
                 }
             }
         }
@@ -1090,7 +1076,10 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         if (timeout < 0) {
             return client_fail(EINVAL);
         }
-        spin_until(now_us() + (unsigned long)timeout * 1000UL, 0);
+        unsigned long deadline = now_us() + (unsigned long)timeout * 1000UL;
+        while (now_us() < deadline) {
+            __os_syscall1(SYS_YIELD, 0);
+        }
     }
     return ready;
 }
