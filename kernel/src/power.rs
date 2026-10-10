@@ -20,6 +20,10 @@ use core::sync::atomic::{AtomicU8, Ordering};
 /// PSCI `SYSTEM_OFF` function ID (PSCI 0.2+). Powers the machine off; does not
 /// return on success.
 const PSCI_SYSTEM_OFF: u32 = 0x8400_0008;
+/// PSCI `CPU_ON` (SMC64): x1 the target core's affinity (MPIDR affinity
+/// fields, as the MADT records them), x2 the entry address, x3 a context
+/// word the core receives in `x0`. Returns 0, or a negative PSCI error.
+const PSCI_CPU_ON_64: u32 = 0xC400_0003;
 
 /// The FADT `ARM_BOOT_ARCH` field lives at this byte offset from the table
 /// start (ACPI spec: 1 byte `RESET_VALUE` at 128, then this u16 at 129).
@@ -86,6 +90,35 @@ pub unsafe fn discover_conduit(rsdp: Option<*const u8>) {
         if conduit == CONDUIT_HVC { "hvc" } else { "smc" }
     );
     CONDUIT.store(conduit, Ordering::Relaxed);
+}
+
+/// Starts the core `target` (an MPIDR affinity) at `entry` with `context`
+/// in its `x0`, through the discovered conduit. `Err` carries PSCI's
+/// return value (`NOT_SUPPORTED` -1, `INVALID_PARAMETERS` -2, `DENIED` -3,
+/// `ALREADY_ON` -4, ...), or -1 when there is no conduit (none found, or an
+/// `hvc` one unusable after the drop from EL2, which `discover_conduit`
+/// leaves as none).
+///
+/// # Safety
+/// `entry` must be code that can run with the MMU off on a fresh core
+/// (`smp::smp_secondary_entry`), and anything it reads must be clean to
+/// the point of coherency.
+pub unsafe fn cpu_on(target: u64, entry: u64, context: u64) -> Result<(), i64> {
+    let result: u64;
+    match CONDUIT.load(Ordering::Relaxed) {
+        CONDUIT_HVC => unsafe {
+            asm!("hvc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, in("x1") target, in("x2") entry, in("x3") context, options(nomem, nostack));
+        },
+        CONDUIT_SMC => unsafe {
+            asm!("smc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, in("x1") target, in("x2") entry, in("x3") context, options(nomem, nostack));
+        },
+        _ => return Err(-1),
+    }
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(result as i64)
+    }
 }
 
 /// Power the machine off via `PSCI SYSTEM_OFF`, or halt if PSCI is

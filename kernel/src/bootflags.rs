@@ -72,6 +72,12 @@ const EARLY_FAULT: &CStr16 = cstr16!("\\EARLYFAULT");
 /// `scripts/test-early-fault.py`.
 const WALK_FAULT: &CStr16 = cstr16!("\\WALKFAULT");
 
+/// `\SMPFAULT`: core 1 takes an undefined instruction right after its
+/// `core 1 up` line (`smp.rs`), so `make test-smp` can see a secondary's
+/// fault reported with its core number while the boot core's shell goes
+/// on. A test fault, like `\EARLYFAULT`.
+const SMP_FAULT: &CStr16 = cstr16!("\\SMPFAULT");
+
 /// Which boot flags are set, read once by [`read`].
 #[derive(Clone, Copy, Default)]
 pub struct Flags {
@@ -87,6 +93,7 @@ pub struct Flags {
     pub early_fault: bool,
     /// [`WALK_FAULT`]
     pub walk_fault: bool,
+    pub smp_fault: bool,
 }
 
 /// Reads every flag file at the ESP's root, opening the volume once. If the
@@ -117,5 +124,6 @@ pub fn read() -> Flags {
         msd_stall: present(MSD_STALL),
         early_fault: present(EARLY_FAULT),
         walk_fault: present(WALK_FAULT),
+        smp_fault: present(SMP_FAULT),
     }
 }

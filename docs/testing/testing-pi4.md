@@ -618,7 +618,7 @@ change that, so it is not the xHCI step alone.
 **`FBCON`'s first boot ended in the firmware's own exception handler**:
 `xhci: PCI command register was 0x0140, wrote+read back 0x0146`, blank lines,
 then `Synchronous Exception at 0x0000000039F31A40`. That message is EDK2's, not
-the kernel's (the kernel reports `EXCEPTION vector=… esr_el1=…`), so the fault
+the kernel's (the kernel reports `EXCEPTION core=N vector=… esr_el1=…`, the core since multi-core step 2), so the fault
 came while the firmware's vectors were still installed: after that line and
 before `exceptions::install()` just past `exit_boot_services`. The
 `xHCI controller @ …` line that normally follows did not appear.

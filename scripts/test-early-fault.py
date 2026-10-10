@@ -99,7 +99,7 @@ DWELL = 5
 # own report (a fault under its vectors, which halts through a silent loop),
 # an EL0 task's fault, and the halt the drop takes on a level it has no path
 # for. Named so a failed boot ends at its line instead of at TIMEOUT.
-ENDINGS = r"halted in the early fault reporter|while reporting one|Synchronous Exception at|EXCEPTION vector=|EL0 FAULT|system halted"
+ENDINGS = r"halted in the early fault reporter|while reporting one|Synchronous Exception at|EXCEPTION core=\d+ vector=|EL0 FAULT|system halted"
 
 
 def boot(esp, until, machine, then=None):
@@ -257,7 +257,7 @@ def main():
         ("help answered after the dwell", r"^builtins: help"),
     ], [
         ("EARLY EXCEPTION", r"EARLY EXCEPTION"),
-        ("kernel EXCEPTION", r"EXCEPTION vector="),
+        ("kernel EXCEPTION", r"EXCEPTION core=\d+ vector="),
         ("the firmware's stack", r"the FIRMWARE'S stack"),
         ("EL0 fault, kill or restart", r"EL0 FAULT|killed after fault|restarted"),
         ("firmware's own line", r"Synchronous Exception at"),

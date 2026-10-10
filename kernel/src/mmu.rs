@@ -930,8 +930,21 @@ unsafe fn build_identity_map(
 /// [`build_identity_map`] must have returned `planned` on this boot, after
 /// `exit_boot_services`, with IRQs masked and `exceptions::install` done
 /// (at EL2 that write takes effect at the drop).
+/// The EL1 regime the boot core switched to, kept for the secondary cores,
+/// which share its tables (`smp.rs`; class A of the multi-core plan's
+/// inventory, written once at the switch).
+static BOOT_REGIME: SyncCell<Option<El1Regime>> = SyncCell::new(None);
+
+/// The regime [`switch_to_identity_map`] installed on the boot core.
+pub(crate) fn boot_regime() -> El1Regime {
+    // SAFETY: written once at the switch, before any second core runs.
+    unsafe { *BOOT_REGIME.get() }.expect("mmu::boot_regime before the identity map was installed")
+}
+
 unsafe fn switch_to_identity_map(planned: Planned) {
     let view = crate::tasks::current_index();
+    // SAFETY: the one write, on the boot core, before any second core.
+    unsafe { *BOOT_REGIME.get() = Some(el1_regime(view, &planned)) };
     match crate::el2::current_el() {
         1 => unsafe { switch_full(view, &planned) },
         2 => unsafe { crate::el2::drop_to_el1(el1_regime(view, &planned)) },
@@ -1469,6 +1482,7 @@ pub(crate) fn activate_task(view: TaskIndex) {
 /// derivation, so the two paths cannot disagree, and constructible only
 /// with the [`Planned`] a build returned, so the drop, like
 /// [`switch_full`], cannot be spelled without a build.
+#[derive(Clone, Copy)]
 pub(crate) struct El1Regime {
     pub(crate) mair: u64,
     pub(crate) tcr: u64,

@@ -123,6 +123,31 @@ static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
 /// this stays off - those logs interleave harmlessly and are useful for
 /// dev. Fault reports bypass it entirely via [`print_force`] - a fault is
 /// worth showing even if it overwrites the server's screen.
+/// The console lock (class E of the multi-core plan's inventory): held
+/// across one write by whichever core prints, so two cores' lines do not
+/// interleave byte by byte. Taken with a bound, not for good: a fault
+/// handler printing while the same core holds the lock (a fault inside a
+/// print) or while another core holds it must still report, so after
+/// `LOCK_SPINS` tries the write goes ahead without it.
+static CONSOLE_LOCK: AtomicBool = AtomicBool::new(false);
+const LOCK_SPINS: u32 = 50_000_000;
+
+fn lock() -> bool {
+    for _ in 0..LOCK_SPINS {
+        if CONSOLE_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+fn unlock(held: bool) {
+    if held {
+        CONSOLE_LOCK.store(false, Ordering::Release);
+    }
+}
+
 static CONSOLE_QUIET: AtomicBool = AtomicBool::new(false);
 
 /// Installs `console` as the global console. Must only be called after
@@ -160,9 +185,11 @@ pub fn print(args: fmt::Arguments) {
 /// Like [`print`], but ignores [`set_quiet`] - for fault reports, which
 /// must reach a console even after the kernel has otherwise gone quiet.
 pub fn print_force(args: fmt::Arguments) {
+    let held = lock();
     if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
         let _ = fmt::Write::write_fmt(console, args);
     }
+    unlock(held);
 }
 
 macro_rules! println {
@@ -186,9 +213,11 @@ pub(crate) use println_force;
 /// Writes one raw byte to the global console if one has been installed;
 /// silently does nothing otherwise, same as [`print`].
 pub fn putc(byte: u8) {
+    let held = lock();
     if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
         console.write_byte(byte);
     }
+    unlock(held);
 }
 
 /// Non-blocking read of one byte from the global console. `None` if there

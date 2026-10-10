@@ -25,6 +25,7 @@ mod madt;
 mod mmu;
 mod pci;
 mod power;
+mod smp;
 mod supervisor;
 mod syscall;
 mod synccell;
@@ -187,6 +188,8 @@ const BUILD: &str = env!("OUROBOROS_BUILD");
 
 /// The kernel proper, on its own stack. Never returns.
 extern "C" fn kernel_main() -> ! {
+    // Core 0, before anything reads TPIDR_EL1 (every fault line does).
+    smp::set_boot_core_index();
     uefi::helpers::init().unwrap();
 
     let ((stack_base, stack_end), entry_sp) = stacks();
@@ -522,7 +525,7 @@ extern "C" fn kernel_main() -> ! {
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
     // `\FBCON` (`fb_console_forced`): leave the discovered serial console
     // uninstalled after the exit, so the framebuffer console below takes HDMI.
-    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall, early_fault, walk_fault } =
+    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall, early_fault, walk_fault, smp_fault } =
         bootflags::read();
     if msd_stall {
         usb_msd::inject_stalls();
@@ -943,6 +946,9 @@ extern "C" fn kernel_main() -> ! {
                 exceptions::set_net_intid(intid);
             }
         }
+        // The secondary cores, started and parked (smp.rs, multi-core step
+        // 2): after the distributor is up and before the tick is armed.
+        unsafe { smp::start(&madt::cores(), if smp_fault { 1 } else { 0 }) };
         timer::arm(timer::TICK_INTERVAL_MS);
         if let Some(intid) = nic_intid {
             console::println!(

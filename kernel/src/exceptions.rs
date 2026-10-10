@@ -514,6 +514,12 @@ unsafe extern "C" {
 /// once, at EL2 live at the drop (see the module doc). At EL2 under
 /// `HCR_EL2.E2H` the write is skipped: the name would reach `VBAR_EL2`,
 /// and the drop halts on E2H anyway, with a line.
+/// The vector table's address, for a secondary core's `VBAR_EL1`
+/// (`smp.rs`): the same table on every core.
+pub(crate) fn vector_table_addr() -> u64 {
+    &raw const exception_vector_table as u64
+}
+
 pub fn install() {
     if crate::el2::current_el() == 2 {
         const HCR_EL2_E2H: u64 = 1 << 34;
@@ -539,7 +545,8 @@ pub fn install() {
 /// w/ SP_EL0, current EL w/ SP_ELx, lower EL AArch64, lower EL AArch32).
 extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) -> ! {
     console::println_force!(
-        "Ouroboros kernel: EXCEPTION vector={vector} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
+        "Ouroboros kernel: EXCEPTION core={} vector={vector} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}",
+        crate::smp::core_index()
     );
     if !crate::stack_canary_intact() {
         console::println_force!(

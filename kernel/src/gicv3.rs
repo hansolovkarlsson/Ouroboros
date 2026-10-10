@@ -191,11 +191,33 @@ fn find_own_redistributor(gicr_base: usize, gicr_size: usize) -> Option<usize> {
 /// contain a matching frame is a genuine discovery-logic bug, not
 /// something to silently limp past.
 pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
+    GICD_BASE.store(gicd_base, Ordering::Relaxed);
+    unsafe {
+        // Distributor: unlike gicv2.rs, this needs more than one bit -
+        // see GICD_CTLR_INIT's own doc comment for the real bug this
+        // fixed. Wait for the write to actually complete (GICD_CTLR.RWP)
+        // before touching anything else, same "verify, don't assume a
+        // register write took effect" discipline as the ICC_SRE_EL1
+        // read-back in init_this_core.
+        write_reg32(gicd_base, 0x000, GICD_CTLR_INIT);
+        while read_reg32(gicd_base, 0x000) & GICD_CTLR_RWP != 0 {}
+        init_this_core(gicr_base, gicr_size);
+    }
+}
+
+/// This core's redistributor (found by its own `MPIDR_EL1`) woken and its
+/// SGIs/PPIs put in Group 1, and its CPU interface through the system
+/// registers. The per-core half of [`init`], which a secondary core runs
+/// for itself; `SGI_BASE` is this core's frame and so per core (class B of
+/// the multi-core plan's inventory), which step 4 makes an array.
+///
+/// # Safety
+/// As [`init`], after the distributor is up.
+pub unsafe fn init_this_core(gicr_base: usize, gicr_size: usize) {
     let rd_base =
         find_own_redistributor(gicr_base, gicr_size).expect("no matching GICv3 redistributor frame found for this CPU's MPIDR_EL1 in the discovered GICR region");
     let sgi_base = rd_base + SGI_BASE_OFFSET;
     SGI_BASE.store(sgi_base, Ordering::Relaxed);
-    GICD_BASE.store(gicd_base, Ordering::Relaxed);
 
     unsafe {
         // Wake the redistributor before touching anything else in it.
@@ -215,15 +237,6 @@ pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
         // against Linux's own gic_cpu_init (irq-gic-v3.c), which writes
         // this exact value for this exact reason.
         write_reg32(sgi_base, GICR_IGROUPR0, 0xffff_ffff);
-
-        // Distributor: unlike gicv2.rs, this needs more than one bit -
-        // see GICD_CTLR_INIT's own doc comment for the real bug this
-        // fixed. Wait for the write to actually complete (GICD_CTLR.RWP)
-        // before touching anything else, same "verify, don't assume a
-        // register write took effect" discipline as the ICC_SRE_EL1
-        // read-back below.
-        write_reg32(gicd_base, 0x000, GICD_CTLR_INIT);
-        while read_reg32(gicd_base, 0x000) & GICD_CTLR_RWP != 0 {}
 
         // CPU interface: route to system registers, then verify the
         // write actually stuck rather than assuming it did (some
