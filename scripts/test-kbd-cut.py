@@ -12,17 +12,26 @@ case the shell must run a line typed next, whole:
    exits; Up on the USB keyboard gives it `ESC`, and the `[A` behind it must
    not reach the shell: `echo k1` typed next prints `k1`.
 2. **A bare Escape ends after a quiet moment** (E2). `readkey one` reads a
-   bare `ESC` from the serial line and exits; half a second later `echo k2`
-   prints `k2` (without the interval, the `e` was dropped as the Escape's
-   rest).
+   bare `ESC` from the serial line and exits; half a second later `Ok2` must
+   reach the shell whole (`unknown command: Ok2`). Without the interval the
+   `O` and the `k` were dropped as an SS3 sequence's rest. The line starts
+   with `O` because since 2026-10-09 `keyseq` keeps any other letter after a
+   bare ESC whatever the interval.
 3. **The kill's flush eats nothing after it** (E1). `readkey spin 100 keep`
    runs without reading; `ESC` and then Ctrl+C on the serial line end it, and
-   `echo k3` typed next prints `k3`.
+   `Ok3` typed next reaches the shell whole (`unknown command: Ok3`); an `O`
+   for the reason in check 2.
 4. **TCSAFLUSH discards keys typed ahead.** `ctermios flush` spins raw while
    `echo bad` is typed, then restores with TCSAFLUSH: `echo k4` typed next
    prints `k4`, not `badecho k4`.
 5. **TCSADRAIN keeps them.** `ctermios drain`, `echo k5` typed during its
    spin, then Enter: `k5`.
+6. **A USB Escape is a whole key at once.** `readkey one` reads the Escape
+   key on the USB keyboard and exits; `O` (Shift+O), pressed on the USB
+   keyboard 0.3 s after it, well inside the second a USB key may stay open,
+   must reach the shell: `k6` typed next on the serial line gives `unknown
+   command: Ok6`. Without the driver marking the key's last byte, the `O`
+   was trimmed as the start of an SS3 sequence, and the `k` with it.
 
 Each fails with its part of the kernel removed, except E1's rule alone in
 check 3: the 0.3 s before the Ctrl+C is past E2's interval, so E2 already
@@ -95,7 +104,7 @@ def main() -> int:
                 ok = guest.wait_for(r"readkey: one 27[\s\S]*" + PROMPT)
             if ok:
                 time.sleep(0.5)
-                ok = then_line("esc", "echo k2")
+                ok = then_line("esc", "Ok2")
         # 3. The kill's flush eats nothing after it.
         if ok:
             guest.type_line("readkey spin 100 keep")
@@ -105,7 +114,7 @@ def main() -> int:
                 time.sleep(0.3)
                 guest.type_raw(b"\x03")
                 ok = guest.wait_for(r"Ctrl\+C - foreground task[\s\S]*" + PROMPT, timeout=30)
-            ok = ok and then_line("kill", "echo k3")
+            ok = ok and then_line("kill", "Ok3")
         # 4. TCSAFLUSH discards keys typed ahead.
         if ok:
             guest.type_line("ctermios flush")
@@ -122,6 +131,16 @@ def main() -> int:
                 guest.type_raw(b"echo k5")
                 ok = guest.wait_for(r"ctermios: drained[\s\S]*" + PROMPT, timeout=30)
             ok = ok and then_line("drain", "")
+        # 6. A USB Escape is a whole key at once.
+        if ok:
+            guest.type_line("readkey one")
+            ok = guest.wait_for(r"readkey: one\?")
+            if ok:
+                drive_qemu.sendkeys(MONITOR, ["esc", "shift-o"], KEY_DELAY)
+                ok = guest.wait_for(r"readkey: one 27[\s\S]*" + PROMPT)
+            if ok:
+                time.sleep(0.5)
+                ok = then_line("usbesc", "k6")
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -135,11 +154,12 @@ def main() -> int:
     checks = [
         ("driven to the end", ok),
         ("a cut USB key's rest is not handed to the shell (`k1`)", printed("cut", "k1")),
-        ("a letter typed after a bare Escape is kept (`k2`)", printed("esc", "k2")),
-        ("nothing typed after a kill is eaten (`k3`)", printed("kill", "k3")),
+        ("an `O` typed after a bare Escape is kept (`Ok2`)", "unknown command: Ok2" in seg.get("esc", "")),
+        ("nothing typed after a kill is eaten (`Ok3`)", "unknown command: Ok3" in seg.get("kill", "")),
         ("TCSAFLUSH discards keys typed ahead (`k4`, no `bad`)",
          printed("flush", "k4") and "bad" not in seg.get("flush", "")),
         ("TCSADRAIN keeps them (`k5`)", printed("drain", "k5")),
+        ("an `O` typed after a USB Escape is kept (`Ok6`)", "unknown command: Ok6" in seg.get("usbesc", "")),
         ("no fault lines", faults == 0),
     ]
     failed = 0

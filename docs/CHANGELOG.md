@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
 version is held for a go-ahead. So far five days' work, 2026-10-05 to
-2026-10-09, #209 to #250: the storage server made safe under large writes and
+2026-10-09, #209 to #253: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the
@@ -275,6 +275,21 @@ was refused, but as "not found" or "path too long", for a program that
 existed. The shell now says `arguments too long`, for a command, a pipeline
 stage and `exec`, from the same check that counts the words; `make
 test-cargs` runs a glob landing on exactly 512 bytes and one a byte past it.
+
+**Escape works on the USB keyboard (#253).** The Escape key sent nothing, so
+on Parallels, where the USB keyboard is the only one, a program could not be
+given an Escape at all (Edit cancels a prefix with it). It now sends a bare
+ESC, what a terminal sends, and the driver marks the last byte of every key,
+so the kernel's keyboard queue counts the Escape as a whole key at once:
+without that, it held a USB Escape open for a second as the start of a
+sequence, and a letter typed in that second was dropped as its rest when the
+program exited. And every keyboard reader (the shell, login, `passwd`,
+`more`) now keeps the key typed after a bare Escape, from the USB keyboard
+or a host terminal, unless it is `[` or `O`, which start a sequence: before,
+Esc then `root` at login gave `oot`, and Esc then `q` paged `more` instead
+of quitting. A host terminal's Alt+x now types `x`. `make test-nav-keys`
+and `make test-kbd-cut` check it, and each check fails with its part
+removed.
 
 **A rig no longer boots an image built from other sources (#247).** The
 rigs refused a stale image by comparing modification times, and a reverted

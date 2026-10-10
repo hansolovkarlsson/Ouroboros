@@ -209,7 +209,9 @@ the queue knows where each key starts.
   above then never drops a letter typed after a bare Escape. Userland's
   `keyseq` is unchanged (a bare `ESC` still swallows the next printable byte
   when both reach the same reader); this is only where the queue draws its
-  key boundaries.
+  key boundaries. *Update 2026-10-09 (#253): `keyseq` changed after all,
+  with the USB Escape key: a bare `ESC` followed by any byte but `[` or `O`
+  is now Escape and then that byte, so no reader eats it.*
 - **`TCSAFLUSH` asks for the flush.** `tcsetattr` with `TCSAFLUSH` passes it
   to the kernel, which discards what is queued and what waits on the
   devices (5); `TCSANOW` and `TCSADRAIN` keep it, as now.

@@ -12,6 +12,19 @@ use crate::{Fed, KeySeq};
 /// busy, 16 navigation keys.
 pub const QUEUE_LEN: usize = 64;
 
+/// Where a byte came from, for [`KeyQueue::push`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// The serial line: a key's end is known only from its bytes, or, for a
+    /// bare `ESC`, from the quiet after it (`esc_alone`).
+    Serial,
+    /// The USB keyboard, which sends each key whole, so the driver knows
+    /// where it ends: `last` marks the last byte of a key. The Escape key is
+    /// a bare `ESC` with `last` set, a complete key at once, where the
+    /// parser alone would wait for the rest of a sequence.
+    Usb { last: bool },
+}
+
 /// Keyboard bytes read ahead, oldest first, for whoever owns the keyboard
 /// when they are read; every byte a reader gets passes through it. It knows
 /// where each key starts, from one parser that sees every byte once, and
@@ -98,21 +111,42 @@ impl KeyQueue {
     fn expire(&mut self, now: u64) {
         let alone = if self.inside_usb { self.usb_alone } else { self.esc_alone };
         if self.inside && now.saturating_sub(self.fed_at) > alone {
-            self.keys = KeySeq::new();
-            self.inside = false;
-            self.partial = 0;
-            self.dropping = false;
-            if self.len == 0 {
-                self.taken_mid = false;
-            }
+            self.end_key();
         }
     }
 
-    /// Appends `byte`, read at `now`, from the USB keyboard if `from_usb`.
+    /// The key in progress is over, by the quiet after it ([`Self::expire`])
+    /// or by its last USB byte ([`Self::push`]): what arrives next starts a
+    /// key of its own, nothing more of this one is dropped, and with nothing
+    /// queued no reader holds a part of it that a trim could still remove.
+    fn end_key(&mut self) {
+        self.keys = KeySeq::new();
+        self.inside = false;
+        self.partial = 0;
+        self.dropping = false;
+        if self.len == 0 {
+            self.taken_mid = false;
+        }
+    }
+
+    /// Appends `byte`, read at `now` from `from`.
     /// When it does not fit, an ordinary byte is dropped, and a byte of a
     /// key's sequence drops the whole key: the bytes of it already queued are
-    /// taken back out, and the rest is dropped as it comes.
-    pub fn push(&mut self, byte: u8, from_usb: bool, now: u64) {
+    /// taken back out, and the rest is dropped as it comes. The last byte of
+    /// a USB key ends the key whatever the parser makes of it, so a USB
+    /// Escape is complete at once and the key typed after it is a key of its
+    /// own, kept on a change of owner (without it the Escape held the parser
+    /// open for `usb_alone`, and a letter typed within it was trimmed as the
+    /// Escape's rest).
+    pub fn push(&mut self, byte: u8, from: Source, now: u64) {
+        let from_usb = matches!(from, Source::Usb { .. });
+        self.push_byte(byte, from_usb, now);
+        if from == (Source::Usb { last: true }) && self.inside && self.inside_usb {
+            self.end_key();
+        }
+    }
+
+    fn push_byte(&mut self, byte: u8, from_usb: bool, now: u64) {
         self.expire(now);
         // An ESC inside a key starts a new one: keyseq abandons the sequence
         // in progress (review of #238; it was marked as the old key's rest,
@@ -120,6 +154,13 @@ impl KeyQueue {
         let abandons = self.inside && byte == crate::ESC;
         let starts = !self.inside || abandons;
         let fed = self.keys.feed(byte);
+        if matches!(fed, Fed::Byte(b) if b >= 0x20 && b != 0x7f) {
+            // A printable byte is a key of its own: in ground, or after a
+            // bare ESC, which it shows was a whole key (the Escape key), so
+            // the ESC is not this byte's front, to be taken back from a full
+            // queue for it (review of #253).
+            self.partial = 0;
+        }
         self.inside = fed == Fed::Pending;
         if starts {
             self.inside_usb = from_usb;
@@ -138,7 +179,8 @@ impl KeyQueue {
                     return;
                 }
                 // A control byte ends a cut sequence and is a key of its own
-                // (keyseq passes it through the same way): kept, if it fits.
+                // (keyseq passes it through the same way), and so does any
+                // byte after a bare ESC but `[` and `O`: kept, if it fits.
                 Fed::Byte(_) => self.dropping = false,
             }
         } else if self.len == QUEUE_LEN {
@@ -157,8 +199,10 @@ impl KeyQueue {
                     return;
                 }
                 Fed::Sequence => return,
-                // A control byte ending the key that did not fit, or an
-                // ordinary byte: kept if taking the key back made room.
+                // A control byte ending the key that did not fit: kept if
+                // taking the key back made room. An ordinary byte took
+                // nothing back (`partial` is 0 for it, even after a bare
+                // ESC), so it is dropped below.
                 Fed::Byte(_) => {}
             }
         }
@@ -252,10 +296,13 @@ mod tests {
 
     const ESC_ALONE: u64 = 2;
     const USB_ALONE: u64 = 50;
+    /// A USB key's bytes: every one but its last, and its last.
+    const MID: Source = Source::Usb { last: false };
+    const LAST: Source = Source::Usb { last: true };
 
     fn push_all(q: &mut KeyQueue, bytes: &[u8], now: u64) {
         for &b in bytes {
-            q.push(b, false, now);
+            q.push(b, Source::Serial, now);
         }
     }
 
@@ -305,14 +352,16 @@ mod tests {
 
     #[test]
     fn a_bare_escape_ends_after_the_interval() {
-        // E2: a program read a bare ESC and exited; a letter typed later
-        // starts a key of its own and is kept.
+        // E2: a program read a bare ESC and exited; a word typed later
+        // starts a key of its own and is kept. It starts with `O`, which
+        // inside the interval would open an SS3 sequence: any other letter is
+        // kept after a bare ESC whatever the interval.
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b", 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(ESC_ALONE + 1);
-        push_all(&mut q, b"echo", ESC_ALONE + 1);
-        assert_eq!(drain(&mut q), b"echo");
+        push_all(&mut q, b"Oops", ESC_ALONE + 1);
+        assert_eq!(drain(&mut q), b"Oops");
     }
 
     #[test]
@@ -327,13 +376,14 @@ mod tests {
 
     #[test]
     fn nothing_typed_after_an_interrupt_is_eaten() {
-        // E1: ESC queued, then Ctrl+C acted on, then a letter at once,
-        // inside the interval, so only the flush's own rule can save it.
+        // E1: ESC queued, then Ctrl+C acted on, then `Ok` at once, inside
+        // the interval, so only the flush's own rule can save it. An `O`,
+        // because any other letter after a bare ESC is kept by the parser.
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b", 0);
         q.flush(Some(0x03));
-        push_all(&mut q, b"e", 0);
-        assert_eq!(drain(&mut q), b"e");
+        push_all(&mut q, b"Ok", 0);
+        assert_eq!(drain(&mut q), b"Ok");
     }
 
     #[test]
@@ -368,7 +418,7 @@ mod tests {
     #[test]
     fn a_serial_key_holds_the_usb_keyboard_back() {
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
-        q.push(0x1b, false, 0);
+        q.push(0x1b, Source::Serial, 0);
         assert!(q.inside_serial_key(0));
         assert!(!q.inside_serial_key(ESC_ALONE + 1), "only for the interval");
     }
@@ -376,12 +426,12 @@ mod tests {
     #[test]
     fn a_usb_key_is_read_whole() {
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
-        q.push(0x1b, true, 0);
+        q.push(0x1b, MID, 0);
         assert!(q.inside_usb_key(0));
-        q.push(b'[', true, 0);
-        q.push(b'A', true, 0);
+        q.push(b'[', MID, 0);
+        q.push(b'A', LAST, 0);
         assert!(!q.inside_usb_key(0));
-        q.push(0x1b, false, 0);
+        q.push(0x1b, Source::Serial, 0);
         assert!(!q.inside_usb_key(0), "a serial key does not pin the reads to USB");
     }
 
@@ -390,13 +440,13 @@ mod tests {
         // A program took ESC of a USB arrow and exited; the shell reads the
         // rest long after the interval. It is still the arrow's rest.
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
-        q.push(0x1b, true, 0);
+        q.push(0x1b, MID, 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(USB_ALONE);
         assert!(q.inside_usb_key(USB_ALONE), "the rest is still read from USB first");
-        q.push(b'[', true, USB_ALONE);
-        q.push(b'A', true, USB_ALONE);
-        q.push(b'x', true, USB_ALONE);
+        q.push(b'[', MID, USB_ALONE);
+        q.push(b'A', LAST, USB_ALONE);
+        q.push(b'x', LAST, USB_ALONE);
         assert_eq!(drain(&mut q), b"x");
     }
 
@@ -416,7 +466,7 @@ mod tests {
     #[test]
     fn a_usb_key_whose_rest_never_comes_is_given_up() {
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
-        q.push(0x1b, true, 0);
+        q.push(0x1b, MID, 0);
         assert!(q.inside_usb_key(USB_ALONE));
         assert!(!q.inside_usb_key(USB_ALONE + 1));
     }
@@ -444,5 +494,58 @@ mod tests {
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(0);
         assert_eq!(drain(&mut q), b"\x1b[Ax");
+    }
+
+    #[test]
+    fn a_usb_escape_is_a_whole_key_at_once() {
+        // A program read the Escape key and exited; an `O` typed within
+        // `usb_alone` is a key of its own, not the Escape's rest (an SS3
+        // sequence's second byte). Any other letter is kept by the parser.
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
+        q.push(0x1b, LAST, 0);
+        assert!(!q.inside_usb_key(0), "nothing more is read for it");
+        assert_eq!(q.pop(), Some(0x1b));
+        q.trim_cut_key(1);
+        q.push(b'O', LAST, 1);
+        assert_eq!(drain(&mut q), b"O");
+    }
+
+    #[test]
+    fn a_usb_escape_then_an_o_are_two_keys() {
+        // Both queued before a change of owner: the reader took the Escape,
+        // and the `O` behind it starts a key, so the trim keeps it.
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
+        q.push(0x1b, LAST, 0);
+        q.push(b'O', LAST, 0);
+        assert_eq!(q.pop(), Some(0x1b));
+        q.trim_cut_key(0);
+        assert_eq!(drain(&mut q), b"O");
+    }
+
+    #[test]
+    fn a_full_queue_keeps_a_bare_escape_over_the_letter_after_it() {
+        // The ESC is a whole key once a letter follows it: the letter does
+        // not fit and is dropped, as any ordinary byte, and the Escape the
+        // reader may be waiting for (Edit, to cancel a prefix) is kept.
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
+        let letters = [b'x'; QUEUE_LEN - 1];
+        push_all(&mut q, &letters, 0);
+        push_all(&mut q, b"\x1bq", 0);
+        let mut want = letters.to_vec();
+        want.push(0x1b);
+        assert_eq!(drain(&mut q), want);
+    }
+
+    #[test]
+    fn a_usb_escape_ends_a_drop() {
+        // The front of a USB key did not fit, so its rest was being dropped;
+        // its last byte ends the drop, and the next key is kept.
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
+        let letters = [b'x'; QUEUE_LEN];
+        push_all(&mut q, &letters, 0);
+        q.push(0x1b, LAST, 0);
+        assert_eq!(drain(&mut q), letters.to_vec(), "no room for the Escape");
+        q.push(b'O', LAST, 0);
+        assert_eq!(drain(&mut q), b"O");
     }
 }

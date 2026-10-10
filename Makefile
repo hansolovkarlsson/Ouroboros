@@ -1913,9 +1913,11 @@ test-cond-vt: image
 	python3 scripts/test-cond-vt.py
 
 # The navigation and function keys on QEMU's USB keyboard
-# (scripts/test-nav-keys.py): the eleven keys pressed by monitor sendkey, the
-# bytes /bin/READKEY reads checked against their VT100 sequences, then the
-# shell and login taking them as nothing. One boot, about a minute; run it
+# (scripts/test-nav-keys.py): the eleven keys, Tab and Escape pressed by
+# monitor sendkey, the bytes /bin/READKEY reads checked against their VT100
+# sequences, a 9 and a 27, then the shell and login taking them as nothing,
+# `more` quitting on Esc then q, and the shell keeping a letter typed after
+# Escape. One boot, about a minute; run it
 # whenever xhci.rs's key mapping, the shell's line editor or login's reader
 # changes.
 test-nav-keys: image
@@ -1948,8 +1950,9 @@ test-kbd-mode: image
 
 # Cut keys in the kernel's keyboard queue (scripts/test-kbd-cut.py): an arrow
 # read in part by a program that exits leaves nothing for the shell, a letter
-# typed after a bare Escape is kept, nothing typed after a kill is eaten, and
-# TCSAFLUSH discards keys typed ahead where TCSADRAIN keeps them. One boot,
+# typed after a bare Escape is kept, from the serial line and after the USB
+# Escape key, nothing typed after a kill is eaten, and TCSAFLUSH discards keys
+# typed ahead where TCSADRAIN keeps them. One boot,
 # about a minute and a half; run it whenever the keyboard queue in syscall.rs,
 # a change of keyboard owner in tasks.rs or KBD_MODE's flush changes.
 test-kbd-cut: image

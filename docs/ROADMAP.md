@@ -823,13 +823,45 @@ The small open tails those arcs deliberately left:
   was 12 a second until #232's review made the tick read ahead for the
   owner whoever it interrupted.)
 
-- **Escape sends nothing on the USB keyboard (found 2026-10-07, building
-  the navigation keys).** `xhci.rs`'s `keycode_to_ascii` has no arm for
-  Escape (HID 0x29), and it needs a decision first: a bare ESC is also how
-  every sequence starts, and the shell's `keyseq` filter would swallow the
-  key after it. Tab, the other half of this item, is DONE (2026-10-09,
+- **~~Escape sends nothing on the USB keyboard~~ (found 2026-10-07, building
+  the navigation keys): DONE (2026-10-09, #253).** Decided by Hans that day,
+  option 1 of four: Escape (HID 0x29) sends a bare ESC, what a terminal
+  sends, and `xhci.rs` marks the last byte of every key, which the kernel's
+  keyboard queue takes as the key's end (`keyseq::Source::Usb { last }`). So
+  the USB Escape is a whole key at once, where the queue would have held it
+  open for a second and trimmed a letter typed in that second as its rest. A
+  program reading bytes tells it apart by the quiet after it (Edit's 50 ms).
+  Option 2 was added to the same PR after its review found what option 1
+  alone cost (Esc then `q` paged `more` instead of quitting; Esc then `root`
+  at login gave `oot`): `keyseq` now reads a bare ESC followed by any byte
+  but `[` or `O` as Escape and then that byte, for every reader and the
+  kernel's queue alike. Its stated cost: a host terminal's Alt+x types `x`,
+  and an ESC sequence of another shape leaves its tail as text. Checked by
+  `make test-nav-keys` (READKEY reads a 27, Esc then `q` quits `more`, a
+  letter after Esc reaches the shell), `make test-kbd-cut`'s check 6 and
+  host tests in `keyseq`, each failing with its part removed. The controls
+  that used a letter after Esc (`test-kbd-cut` checks 2, 3 and 6, and their
+  host tests) now use `O`, which still opens a sequence, so they can still
+  fail. Tab, the other half of this item, is DONE (2026-10-09,
   #248): HID 0x2b sends 9, so filename completion works from a Parallels or
   Pi keyboard, checked by `make test-nav-keys`.
+
+- **A USB Escape then `O` or `[` is still read as a sequence by every reader
+  (found 2026-10-09, #253's second review).** The driver knows the Escape key
+  is a whole key and the kernel's queue uses that, but the mark stops there:
+  a reader gets bytes, so the shell or login reading Escape and then `Oscar`
+  takes `ESC O s` for an SS3 key and keeps `car`, as a host terminal's would.
+  Carrying key boundaries to readers (a read that returns one key at a time,
+  or an `ESC` that announces itself complete) is an ABI question, left until a
+  case needs it; Esc then `O` at a prompt is rare.
+
+- **`test-kbd-mode`'s `Ozq` check cannot fail (found 2026-10-09, #253).**
+  Its docstring said it fails with the key parser not fed the boot shell's
+  interrupt byte (E1 of the Ctrl-C plan); with that rule removed it passes,
+  on #253's version and on main's (`zq`) alike, and with E2's interval removed
+  as well (on a variant typing the Esc and Ctrl+\ 20 ms apart). Not yet known why: the Esc may never reach the queue during the
+  boot shell's wait, or be closed before the next key is read. E1 itself is
+  checked on the host. Find out which, then make the check real or remove it.
 
 - **Two tails of `cond`'s escape sequences (found 2026-10-07, the high
   review of #228).** (1) Reverse video is one setting in `cond` shared by
