@@ -21,6 +21,7 @@ mod gic;
 mod gicv2;
 mod gicv3;
 mod loader;
+mod lock;
 mod madt;
 mod mmu;
 mod pci;
