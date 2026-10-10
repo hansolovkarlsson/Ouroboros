@@ -192,11 +192,23 @@ the task's registers are.
       up lines and the summary.
       Pi 4 over serial and Parallels: by eye from the boot log, not yet
       done.
-- [ ] **Step 3. The three decisions,** each recorded in the code it
-      governs with its measurement or rig: the FP cost figure in
-      `exceptions.rs`, the tick's jobs in `tasks.rs` and `supervisor.rs`,
-      and task 0 entered through the trampolines with `make test-fpsimd`
-      and `make test-kbd-mode` green.
+- [x] **Step 3. The three decisions. Done 2026-10-10.** (1) FP/SIMD
+      stays eager, on a measurement: `make measure-syscost`
+      (`/bin/SYSCOST`, 200,000 `GET_TICKS` calls, three runs, the median)
+      gave 24,934 ns a syscall on the tree and 25,232 ns with the save and
+      restore macros emptied; under TCG the exception round trip is about
+      25 µs and the save is within its noise, so the figure that would
+      change the decision is the Pi's, owed. Recorded in `exceptions.rs`'s
+      module doc with what a lazy scheme would cost per core. (2) The
+      tick's jobs: the boot core's tick keeps counting, the keyboard
+      read-ahead, the supervisor's checks and timed waits; a secondary's
+      tick (step 4) switches its own tasks and ends their timed waits.
+      Recorded on `tasks::on_tick` and in `supervisor.rs`. (3) Task 0
+      enters through the trampolines' restore tail (`resume_frame`, a
+      global label in `exceptions.rs`'s IRQ path) from a copy of its
+      Context laid out as a frame, so x0-x30 are loaded too and no eret
+      into a task exists outside the trampolines; `make test-fpsimd`,
+      `make test-kbd-mode` and `make test-smp` green.
 - [ ] **Step 4. Tasks on cores.** In order, each its own PR: (a) the
       scheduler lock and the device locks, taken and released on one core,
       with the median 9P verb cycle measured before and after (the figure

@@ -31,6 +31,11 @@
 //!   does *not* get woken (the ping just queues, unseen) - so an
 //!   outstanding ping older than [`PING_TIMEOUT`] ⇒ wedged ⇒ restart.
 //!
+//! Both detectors are driven by the tick, and by ONE tick: multi-core step
+//! 3 (decision 2, `docs/roadmap/roadmap-smp.md`) keeps them on the boot
+//! core's tick when every core has one, reading a server's state wherever
+//! it runs; a secondary's tick switches and ends timed waits, nothing here.
+//!
 //! Why a ping and not just more state-reading: the runnable-wedge detector
 //! is passive (it reads task state, no server cooperation), but a
 //! blocked-forever server can't be distinguished from a healthy idle one

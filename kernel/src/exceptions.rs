@@ -50,7 +50,20 @@
 //! values in vector registers, so a register live across a syscall came
 //! back changed. Found while building `cond`'s reverse video (#228), whose
 //! second reversed glyph had two rows wrong: `cond` keeps shift constants
-//! in `q0`-`q3` across its `FB_BLIT` calls. `make test-fpsimd` is the
+//! in `q0`-`q3` across its `FB_BLIT` calls. **Eager stays: decided
+//! 2026-10-10 (multi-core step 3, decision 1 of
+//! `docs/roadmap/roadmap-smp.md`), on a measurement.** `make
+//! measure-syscost` (`/bin/SYSCOST`, 200,000 `GET_TICKS` calls) gave a
+//! median of 24,934 ns a syscall on this tree and 25,232 ns with
+//! `SAVE_FPSIMD` and `RESTORE_FPSIMD` emptied: under QEMU's TCG the
+//! exception round trip costs about 25 µs and the 64 `stp`/`ldp` of the
+//! save are within its noise. On hardware the round trip is a few hundred
+//! nanoseconds and the save about a hundred cycles, a real fraction but a
+//! small absolute cost, and it buys what a lazy scheme (`CPACR_EL1.FPEN`
+//! trapping the first FP use after a switch) would spend per core: a
+//! trap handler, a per-core "owner of the FP state" word, and the kernel
+//! still running under the task's `FPCR` until the trap. The figure to
+//! revisit is the Pi's, owed with the rest of the hardware checks. `make test-fpsimd` is the
 //! check (`/bin/FPPROBE`).
 //!
 //! ## The tick is taken from EL0 only; an IRQ at EL1 is a fault
@@ -329,6 +342,11 @@ stp x0, x1, [sp, #256]
 SAVE_FPSIMD x0, x1
 mov x0, sp   // frame pointer -> rust_irq_handler's argument
 bl  {rust_irq_handler}
+// The one entry into a task from a frame: restores a full Context at sp,
+// pops it and erets. `tasks::start` enters task 0 here too (multi-core
+// step 3), so no eret into a task exists outside the trampolines.
+.global resume_frame
+resume_frame:
 RESTORE_FPSIMD x0, x1
 ldr x0, [sp, #248]
 msr sp_el0, x0

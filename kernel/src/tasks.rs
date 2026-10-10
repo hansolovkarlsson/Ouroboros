@@ -2710,45 +2710,43 @@ pub unsafe fn start() -> ! {
     // explicitness, so this function's contract doesn't silently depend on
     // that ordering.
     crate::mmu::activate_task(TaskIndex::FIRST);
-    let ctx = unsafe { *TASKS[TaskIndex::FIRST.index()].get() };
-    // Task 0's FP/SIMD state too, as every later entry restores a task's
-    // from its frame: without it task 0 would start holding whatever the
-    // kernel's own code left in q0-q31.
+    // Through the trampolines' own restore tail (`exceptions.rs`'s
+    // `resume_frame`), from a copy of task 0's Context laid out as a frame
+    // on this stack: the one entry into any task, so task 0 starts with
+    // every register its Context holds (x0-x30 included, which the eret
+    // this replaced never loaded, leaving the kernel's leftovers in them)
+    // and a secondary core's first entry, in step 4, has nothing of its
+    // own to get wrong. Multi-core step 3, decision 3.
+    #[repr(C, align(16))]
+    struct Frame(Context);
+    let frame = Frame(unsafe { *TASKS[TaskIndex::FIRST.index()].get() });
     unsafe {
         asm!(
-            "ldp q0, q1, [{fp}, #0]",
-            "ldp q2, q3, [{fp}, #32]",
-            "ldp q4, q5, [{fp}, #64]",
-            "ldp q6, q7, [{fp}, #96]",
-            "ldp q8, q9, [{fp}, #128]",
-            "ldp q10, q11, [{fp}, #160]",
-            "ldp q12, q13, [{fp}, #192]",
-            "ldp q14, q15, [{fp}, #224]",
-            "ldp q16, q17, [{fp}, #256]",
-            "ldp q18, q19, [{fp}, #288]",
-            "ldp q20, q21, [{fp}, #320]",
-            "ldp q22, q23, [{fp}, #352]",
-            "ldp q24, q25, [{fp}, #384]",
-            "ldp q26, q27, [{fp}, #416]",
-            "ldp q28, q29, [{fp}, #448]",
-            "ldp q30, q31, [{fp}, #480]",
-            "msr fpcr, {fpcr}",
-            "msr fpsr, {fpsr}",
-            "msr sp_el0, {sp_el0}",
-            "msr elr_el1, {elr}",
-            "msr spsr_el1, {spsr}",
-            "eret",
-            sp_el0 = in(reg) ctx.sp_el0,
-            elr = in(reg) ctx.elr_el1,
-            spsr = in(reg) ctx.spsr_el1,
-            fp = in(reg) ctx.fpsimd.as_ptr(),
-            fpcr = in(reg) ctx.fpcr,
-            fpsr = in(reg) ctx.fpsr,
+            "mov sp, {frame}",
+            "b {resume}",
+            frame = in(reg) &raw const frame as u64,
+            resume = sym resume_frame,
             options(noreturn),
         );
     }
 }
 
+unsafe extern "C" {
+    /// `exceptions.rs`'s restore-and-eret tail: a full `Context` at `sp`.
+    fn resume_frame();
+}
+
+/// **The tick's jobs, decided for multi-core (step 3, decision 2 of
+/// `docs/roadmap/roadmap-smp.md`, 2026-10-10):** besides switching, this
+/// tick counts (`exceptions::TICKS`), reads the keyboard ahead for its
+/// owner, drives the supervisor's progress and ping checks, and ends
+/// timed waits. When step 4 arms a timer on every core, the BOOT core's
+/// tick keeps all four jobs, and a secondary core's tick only switches the
+/// tasks on that core and ends the timed waits of those tasks; the
+/// supervisor watches a server by its state wherever it runs, not by whose
+/// tick saw it. One owner per job, so none is done twice and none is
+/// missed when a core idles.
+///
 /// The entire scheduler: first, give every `Blocked` task a chance to
 /// wake (see the wake-check below); then save whatever the tick just
 /// interrupted into its task's slot, and load the next *runnable* task's
