@@ -846,6 +846,20 @@ The small open tails those arcs deliberately left:
   #248): HID 0x2b sends 9, so filename completion works from a Parallels or
   Pi keyboard, checked by `make test-nav-keys`.
 
+- **`poll`'s `POLLERR` for a `/net` file has no check, because no `/net` fd
+  can exist (found 2026-10-10, asked to run the check).** The C library's
+  `open` refuses the `/net` binding at `resolve_target` (ENOSYS), so every
+  open fd is fsd's or a remote mount's, and `poll`'s branch for any other
+  target is unreachable: a check of it cannot fail, and the claim in #240's
+  records that a `/net` file "is `POLLERR`" was true of no observable run.
+  The branch stays, as the default an `open` that learns `/net` would fall
+  into rather than a "ready" whose read would block. What exists instead is
+  a tripwire: `cpoll timing` opens `/net/ip` and `/net/tcp/clone` after
+  `mount -n /net` and `make test-cpoll` requires ENOSYS for both, so the day
+  `open` learns `/net` the rig fails. What stays open here is the `POLLERR`
+  check itself, a connection file opened and then polled, owed on that day
+  and not before; the tripwire is what says when.
+
 - **The ISO backslash key (HID 0x32) has no rig and can have none; it is a
   by-hand check on hardware (settled 2026-10-10, asked to run the check).**
   `xhci.rs` maps 0x32, the ISO keyboard's key left of Enter, as the US

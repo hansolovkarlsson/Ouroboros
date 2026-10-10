@@ -229,8 +229,10 @@ for a key with a timeout, blocked in the kernel without spinning, to a tick's
 precision (about 20 ms, rather than the 10 ms asked, a trade settled by Hans
 against spinning a core), and the key stays in the kernel for the next
 `read`, so a program that polls and exits leaves it for the shell. The
-console is always ready for writing, a file on a filesystem always ready, a
-`/net` file `POLLERR`, and with nothing to wait on `poll` sleeps. Two new
+console is always ready for writing, a file on a filesystem always ready,
+and with nothing to wait on `poll` sleeps (a `/net` file would be `POLLERR`,
+but none can be opened, since `open` refuses `/net`: found 2026-10-10, the
+follow-up in `ROADMAP.md` and `cpoll`'s tripwire line). Two new
 system calls carry it, `KEY_WAIT_UNTIL` (71) and `SLEEP_UNTIL` (72). `make
 edit-bin` builds DevTools's Edit from `EDIT_DIR`, staged as `/bin/edit` and
 required by a release; `make test-edit` opens a file, repeats a command with

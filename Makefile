@@ -708,7 +708,8 @@ ctermios-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/ctermios.elf $(CTERMIOS_BIN)
 
 # poll for the keyboard in a C program (libc/cpoll.c): timeouts, the other
-# descriptors, the flush of fd 1 before the wait, a key left in the kernel.
+# descriptors, the flush of fd 1 before the wait, a key left in the kernel,
+# and the tripwire that a /net file cannot be opened (so POLLERR has no check).
 # Runs as /bin/CPOLL, driven by scripts/test-cpoll.py.
 cpoll-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/cpoll.c -o $(BUILD_DIR)/pico/cpoll.o

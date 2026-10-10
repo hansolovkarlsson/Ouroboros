@@ -25,10 +25,12 @@
  *
  * The other descriptors: fds 0, 1 and 2, the console, are always ready for
  * POLLOUT; a file on a filesystem, local or remote, is ready for POLLIN and
- * POLLOUT, as POSIX has regular files; a /net file (a TCP connection) or
- * another binding, which nothing here can wait on yet, is POLLERR, rather
- * than a "ready" whose read would block; a descriptor that is not open is
- * POLLNVAL; a negative one is skipped. POLLRDNORM and POLLWRNORM are taken
+ * POLLOUT, as POSIX has regular files; a descriptor on any other target
+ * would be POLLERR, rather than a "ready" whose read would block, but none
+ * exists yet: open refuses the /net binding (ENOSYS), so a /net file (a TCP
+ * connection) cannot be polled because it cannot be opened; a descriptor
+ * that is not open is POLLNVAL; a negative one is skipped. POLLRDNORM and
+ * POLLWRNORM are taken
  * as POLLIN and POLLOUT; the band flags are never ready. When any entry is
  * ready, fd 0 is looked at without waiting. With nothing to wait on, the
  * timeout is a sleep, blocked in the kernel (SLEEP_UNTIL), and -1 sleeps for
