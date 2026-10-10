@@ -21,6 +21,12 @@
 //! `coreprobe hold` says which core it starts on and spins until it is
 //! killed (Ctrl+C), which is how `make test-smp` ends a program running on
 //! another core than the boot shell's.
+//!
+//! `coreprobe calls` makes [`CALLS`] round trips to `fsd` (a stat of `/`)
+//! and says the mean time of one and the core it ran on. `fsd` runs on the
+//! boot core, so from a secondary each call is a kick to the boot core and
+//! each answer a kick back (`tasks::kick_idle_cores`); without the kicks
+//! each would wait for the other core's tick, 20 ms at a time.
 
 #![no_std]
 #![no_main]
@@ -29,20 +35,24 @@
 const SPAN_TICKS: u64 = 100;
 /// Arithmetic between two looks at `CORE_INFO`, with no syscall inside.
 const ROUND: u64 = 200_000;
+/// Round trips `coreprobe calls` makes to `fsd`.
+const CALLS: u64 = 100;
 
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
     let target = ulib::stdout_target();
     let mut hold = false;
+    let mut calls = false;
     let mut forward = false;
     let mut arg = [0u8; 16];
     for i in 1..ulib::argc() {
         match ulib::arg(i, &mut arg) {
             Some(4) if &arg[..4] == b"hold" => hold = true,
+            Some(5) if &arg[..5] == b"calls" => calls = true,
             Some(1) if arg[0] == b'-' => forward = true,
             _ => {
-                ulib::write_out(target, b"usage: coreprobe [hold] [-]\r\n");
+                ulib::write_out(target, b"usage: coreprobe [hold | calls] [-]\r\n");
                 ulib::end_of_stream(target);
                 ulib::exit(2);
             }
@@ -60,6 +70,30 @@ pub extern "C" fn _start() -> ! {
         loop {
             sink = spin(sink);
         }
+    }
+
+    if calls {
+        let mut info = [0u8; 64];
+        let mut failed = 0u64;
+        let t0 = ulib::monotonic_us();
+        for _ in 0..CALLS {
+            if ulib::fs_stat("/", &mut info) >= syscall_abi::FS_ERR_MIN {
+                failed += 1;
+            }
+        }
+        let us = ulib::monotonic_us() - t0;
+        ulib::emit(&mut out, &mut n, b"coreprobe: ");
+        ulib::emit_dec(&mut out, &mut n, CALLS);
+        ulib::emit(&mut out, &mut n, b" calls to fsd from core ");
+        ulib::emit_dec(&mut out, &mut n, ulib::core_info(syscall_abi::CORE_INFO_THIS));
+        ulib::emit(&mut out, &mut n, b", ");
+        ulib::emit_dec(&mut out, &mut n, us / CALLS);
+        ulib::emit(&mut out, &mut n, b" us each, ");
+        ulib::emit_dec(&mut out, &mut n, failed);
+        ulib::emit(&mut out, &mut n, b" failed\r\n");
+        ulib::write_out(target, &out[..n]);
+        ulib::end_of_stream(target);
+        ulib::exit(failed);
     }
 
     let start = ulib::get_ticks();

@@ -19,7 +19,9 @@ QEMU's own trace. Then (step 4(d), the image boots) /bin/COREPROBE: alone
 it must run on a secondary (on the one core under `-smp 1`) and see one
 program running; `coreprobe | coreprobe -` must run both on secondaries and
 each see two programs running at once (one at a time under `-smp 1`); and
-`coreprobe hold`, started on a secondary, must end at Ctrl+C on that core,
+`coreprobe calls` must reach fsd (on the boot core) from a secondary in
+under CALL_BOUND_US a round trip, which it does only with the idle-core
+kick; and `coreprobe hold`, started on a secondary, must end at Ctrl+C on that core,
 as the boot core's tick asked (`task N ended on core C`), the shell
 answering after. Under `-smp 1` the kill is local and no such line may
 appear.
@@ -77,6 +79,12 @@ UP_RE = re.compile(r"smp: core (\d+) up at EL(\d) \(mpidr 0x[0-9a-f]+, affinity 
 TICK_RE = re.compile(r"smp: core (\d+) ticking \(its first tick, from its idle loop at EL0\)")
 PROBE_RE = re.compile(r"coreprobe: ran on cores? ([\d ]+), up to (\d+) programs running at once, (\d+) cores up, \d+ rounds")
 HOLD_RE = re.compile(r"coreprobe: holding on core (\d+)")
+CALLS_RE = re.compile(r"coreprobe: \d+ calls to fsd from core (\d+), (\d+) us each, (\d+) failed")
+# A round trip to fsd from a secondary: 350-600 us on QEMU with the
+# idle-core kick, about 46,000 us with it removed (each call then waits for
+# the boot core's tick and the answer for the secondary's). The bound sits
+# an order of magnitude from both.
+CALL_BOUND_US = 5000
 SUMMARY_RE = re.compile(r"smp: (\d+) of (\d+) started cores up, (\d+) cores in all")
 KICK_RE = re.compile(r"smp: core (\d+) answered a kick from core (\d+), once the kernel lock was free")
 KICK_FAIL_RE = re.compile(r"smp: core (\d+)(?: \(the boot core\))? (answered a kick while core \d+ held the kernel lock|cannot be kicked|cannot be sent an SGI|did not answer a kick within a second|answered every kick but was never seen waiting with one)")
@@ -194,6 +202,9 @@ def run_probes(guest):
     guest.type_line("coreprobe | coreprobe -")
     got["pair"] = guest.wait_for(r"rounds[\s\S]*rounds[\s\S]*" + PROMPT, timeout=60)
     got["pair_out"] = guest.transcript()
+    guest.type_line("coreprobe calls")
+    got["calls"] = guest.wait_for(r"failed[\s\S]*" + PROMPT, timeout=120)
+    got["calls_out"] = guest.transcript()
     guest.type_line("coreprobe hold")
     held = guest.wait_for(r"holding on core \d+", timeout=30)
     time.sleep(1)
@@ -213,7 +224,9 @@ def probe_checks(name, smp, boot_index, probe):
         return [(f"{name}: the core probes ran (the shell never answered after the dwell)", False)]
     alone_out = probe["alone_out"]
     pair_out = probe["pair_out"][len(alone_out):]
-    hold_out = probe["hold_out"][len(probe["pair_out"]):]
+    calls_out = probe["calls_out"][len(probe["pair_out"]):]
+    hold_out = probe["hold_out"][len(probe["calls_out"]):]
+    calls = CALLS_RE.search(calls_out)
     alone = PROBE_RE.findall(alone_out)
     pair = PROBE_RE.findall(pair_out)
     held = HOLD_RE.search(hold_out)
@@ -230,6 +243,10 @@ def probe_checks(name, smp, boot_index, probe):
         (f"{name}: `coreprobe | coreprobe -` ran " + ("on secondaries, two programs at once" if many else "on the one core, one at a time")
          + (f" (saw {pair})" if len(pair) != 2 else ""),
          probe["pair"] and len(pair) == 2 and placed(pair) and all(r[1] == ("2" if many else "1") for r in pair)),
+        (f"{name}: `coreprobe calls` reached fsd from " + ("a secondary" if many else "the one core")
+         + f" in under {CALL_BOUND_US} us a round trip" + (f" (core {calls.group(1)}, {calls.group(2)} us, {calls.group(3)} failed)" if calls else ""),
+         probe["calls"] and calls is not None and calls.group(1) in secondaries
+         and int(calls.group(2)) < CALL_BOUND_US and calls.group(3) == "0"),
         (f"{name}: `coreprobe hold` started on " + ("a secondary" if many else "the one core") + (f" (core {held.group(1)})" if held else ""),
          held is not None and held.group(1) in secondaries),
         (f"{name}: Ctrl+C ended it and the shell answered after", probe["hold"] and ended is not None),
