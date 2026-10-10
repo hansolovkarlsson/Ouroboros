@@ -880,9 +880,7 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
             // SAFETY: pointer/length sanity-checked in the caller's own
             // region just above.
             let bytes = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
-            for &b in bytes {
-                console::putc(b);
-            }
+            console::write_bytes(bytes);
             0
         }
         syscall_abi::CON_INFO => {

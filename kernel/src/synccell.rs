@@ -19,7 +19,13 @@
 //! virtio, xHCI and USB storage drivers, each class explained below.
 //!
 //! **The argument.** This kernel runs on one core and never unmasks
-//! interrupts while it is itself running: EL1 code executes either at boot
+//! interrupts while it is itself running (since multi-core step 2 the
+//! other cores are started and parked, `smp.rs`: they read a block written
+//! before they ran, bring up their own GIC interface, write the console
+//! through its lock, and then execute `wfe` with everything masked, so
+//! they touch no cell this module guards; step 4 of
+//! `docs/roadmap/roadmap-smp.md` is where this argument ends, one class of
+//! static at a time): EL1 code executes either at boot
 //! (before any task exists, IRQs masked until the first `eret` into task 0
 //! restores that task's SPSR; `main.rs` once unmasked a few instructions
 //! early, the one exception, removed when this argument was written down),

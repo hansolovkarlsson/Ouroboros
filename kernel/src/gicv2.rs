@@ -53,6 +53,18 @@ unsafe fn read_reg(base: usize, offset: usize) -> u32 {
 pub unsafe fn init(gicd_base: usize, gicc_base: usize) {
     unsafe {
         write_reg(gicd_base, GICD_CTLR, GICD_CTLR_ENABLE);
+        init_cpu_interface(gicc_base);
+    }
+}
+
+/// This core's CPU interface (the GICC registers are banked per core at
+/// one address): the priority mask open, the interface enabled. The
+/// per-core half of [`init`], which a secondary core runs for itself.
+///
+/// # Safety
+/// As [`init`].
+pub unsafe fn init_cpu_interface(gicc_base: usize) {
+    unsafe {
         write_reg(gicc_base, GICC_PMR, GICC_PMR_ALLOW_ALL);
         write_reg(gicc_base, GICC_CTLR, GICC_CTLR_ENABLE);
     }

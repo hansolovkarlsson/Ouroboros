@@ -4,7 +4,7 @@
 
 use core::fmt;
 use crate::synccell::SyncCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::fbconsole::FbConsole;
 use crate::uart::Uart;
@@ -112,6 +112,38 @@ impl Console {
 
 static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
 
+/// The console lock (class E of the multi-core plan's inventory): the
+/// index plus one of the core that holds it, 0 when free, held across one
+/// write (a line, or a `CON_WRITE` batch) so two cores' output does not
+/// interleave byte by byte. A core that finds the lock its own proceeds at
+/// once: that is a fault handler printing inside a print the fault cut
+/// short, and the holder never resumes. Any other holder is waited for up
+/// to `LOCK_SPINS` tries, then the writer takes the lock over by owner
+/// word, which makes the stale holder's later `unlock` a no-op (it
+/// compares the owner), so the lock never has two owners and a holder that
+/// died with it costs the bound once. A live holder that was merely slow
+/// then finishes its write unlocked, one interleaved line: the price of
+/// never deadlocking a fault report.
+static CONSOLE_LOCK: AtomicU64 = AtomicU64::new(0);
+const LOCK_SPINS: u32 = 50_000_000;
+
+fn lock() {
+    let me = crate::smp::core_index() + 1;
+    for _ in 0..LOCK_SPINS {
+        match CONSOLE_LOCK.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(owner) if owner == me => return,
+            Err(_) => core::hint::spin_loop(),
+        }
+    }
+    CONSOLE_LOCK.swap(me, Ordering::Acquire);
+}
+
+fn unlock() {
+    let me = crate::smp::core_index() + 1;
+    let _ = CONSOLE_LOCK.compare_exchange(me, 0, Ordering::Release, Ordering::Relaxed);
+}
+
 /// When set, ordinary [`print`]/[`println`] output is suppressed - the
 /// "kernel console goes quiet once `cond` owns the screen" handoff.
 /// `main` sets it only on a framebuffer-only platform where the userland
@@ -160,9 +192,11 @@ pub fn print(args: fmt::Arguments) {
 /// Like [`print`], but ignores [`set_quiet`] - for fault reports, which
 /// must reach a console even after the kernel has otherwise gone quiet.
 pub fn print_force(args: fmt::Arguments) {
+    lock();
     if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
         let _ = fmt::Write::write_fmt(console, args);
     }
+    unlock();
 }
 
 macro_rules! println {
@@ -186,9 +220,20 @@ pub(crate) use println_force;
 /// Writes one raw byte to the global console if one has been installed;
 /// silently does nothing otherwise, same as [`print`].
 pub fn putc(byte: u8) {
+    write_bytes(core::slice::from_ref(&byte));
+}
+
+/// Writes a batch of raw bytes under the lock once: `CON_WRITE`'s path,
+/// so another core's line cannot land inside `cond`'s escape sequence and
+/// a batch costs two atomic operations rather than two per byte.
+pub fn write_bytes(bytes: &[u8]) {
+    lock();
     if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
-        console.write_byte(byte);
+        for &b in bytes {
+            console.write_byte(b);
+        }
     }
+    unlock();
 }
 
 /// Non-blocking read of one byte from the global console. `None` if there

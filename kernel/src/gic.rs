@@ -59,6 +59,28 @@ pub unsafe fn init() {
     }
 }
 
+/// Brings up THIS core's side of the GIC only, on a secondary core: the
+/// GICv2 CPU interface (banked per core at the same address) or this
+/// core's GICv3 redistributor and system registers. The distributor was
+/// enabled once by [`init`] on the boot core. `Err` says why a GICv3 core
+/// could not (no redistributor frame for its MPIDR, or the system
+/// register interface refused), for the caller to log and park on: a
+/// panic on a secondary has no reporting path.
+///
+/// # Safety
+/// After [`init`] ran on the boot core; on a core with its MMU on the
+/// shared tables, IRQs masked.
+pub unsafe fn init_this_core() -> Result<(), &'static str> {
+    let info = info();
+    match info.version {
+        GicVersion::V2 => {
+            unsafe { gicv2::init_cpu_interface(info.gicc_base as usize) };
+            Ok(())
+        }
+        GicVersion::V3 => unsafe { gicv3::init_this_core(info.gicr_base as usize, info.gicr_size as usize) }.map(|_frame| ()),
+    }
+}
+
 /// Enables forwarding of `intid` (e.g. the timer PPI, 30).
 ///
 /// # Safety

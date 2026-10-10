@@ -508,6 +508,12 @@ unsafe extern "C" {
     static exception_vector_table: c_void;
 }
 
+/// The vector table's address, for a secondary core's `VBAR_EL1`
+/// (`smp.rs`): the same table on every core.
+pub(crate) fn vector_table_addr() -> u64 {
+    &raw const exception_vector_table as u64
+}
+
 /// Points VBAR_EL1 at [`exception_vector_table`]. Must be called after
 /// `exit_boot_services`, before anything that could plausibly fault. The
 /// one place the vectors are written, at any handoff level: at EL1 live at
@@ -539,12 +545,13 @@ pub fn install() {
 /// w/ SP_EL0, current EL w/ SP_ELx, lower EL AArch64, lower EL AArch32).
 extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) -> ! {
     console::println_force!(
-        "Ouroboros kernel: EXCEPTION vector={vector} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}"
+        "Ouroboros kernel: EXCEPTION core={} vector={vector} esr_el1={esr:#x} far_el1={far:#x} elr_el1={elr:#x}",
+        crate::smp::core_index()
     );
-    if !crate::stack_canary_intact() {
+    let (canary_intact, stack_base) = crate::smp::this_core_stack_canary();
+    if !canary_intact {
         console::println_force!(
-            "Ouroboros kernel:   the kernel stack's canary is OVERWRITTEN: the stack overflowed below {:#x}",
-            crate::stacks().0.0
+            "Ouroboros kernel:   this core's kernel stack's canary is OVERWRITTEN: the stack overflowed below {stack_base:#x}"
         );
     }
     halt()

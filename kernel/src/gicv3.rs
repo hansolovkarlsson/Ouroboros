@@ -191,11 +191,37 @@ fn find_own_redistributor(gicr_base: usize, gicr_size: usize) -> Option<usize> {
 /// contain a matching frame is a genuine discovery-logic bug, not
 /// something to silently limp past.
 pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
-    let rd_base =
-        find_own_redistributor(gicr_base, gicr_size).expect("no matching GICv3 redistributor frame found for this CPU's MPIDR_EL1 in the discovered GICR region");
-    let sgi_base = rd_base + SGI_BASE_OFFSET;
-    SGI_BASE.store(sgi_base, Ordering::Relaxed);
     GICD_BASE.store(gicd_base, Ordering::Relaxed);
+    unsafe {
+        // Distributor: unlike gicv2.rs, this needs more than one bit -
+        // see GICD_CTLR_INIT's own doc comment for the real bug this
+        // fixed. Wait for the write to actually complete (GICD_CTLR.RWP)
+        // before touching anything else, same "verify, don't assume a
+        // register write took effect" discipline as the ICC_SRE_EL1
+        // read-back in init_this_core.
+        write_reg32(gicd_base, 0x000, GICD_CTLR_INIT);
+        while read_reg32(gicd_base, 0x000) & GICD_CTLR_RWP != 0 {}
+        let sgi_base = init_this_core(gicr_base, gicr_size).expect("GICv3 init on the boot core");
+        SGI_BASE.store(sgi_base, Ordering::Relaxed);
+    }
+}
+
+/// This core's redistributor (found by its own `MPIDR_EL1`) woken and its
+/// SGIs/PPIs put in Group 1, and its CPU interface through the system
+/// registers. The per-core half of [`init`], which a secondary core runs
+/// for itself. Returns this core's SGI_base frame and does NOT store it:
+/// `SGI_BASE` is the boot core's (only [`init`] writes it), since
+/// `enable_interrupt` on the boot core reads it after the secondaries have
+/// started; a per-core array is step 4's, when a secondary enables
+/// anything of its own. `Err` names what refused, for a secondary to log
+/// and park on rather than panic.
+///
+/// # Safety
+/// As [`init`], after the distributor is up.
+pub unsafe fn init_this_core(gicr_base: usize, gicr_size: usize) -> Result<usize, &'static str> {
+    let rd_base = find_own_redistributor(gicr_base, gicr_size)
+        .ok_or("no matching GICv3 redistributor frame found for this CPU's MPIDR_EL1 in the discovered GICR region")?;
+    let sgi_base = rd_base + SGI_BASE_OFFSET;
 
     unsafe {
         // Wake the redistributor before touching anything else in it.
@@ -216,15 +242,6 @@ pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
         // this exact value for this exact reason.
         write_reg32(sgi_base, GICR_IGROUPR0, 0xffff_ffff);
 
-        // Distributor: unlike gicv2.rs, this needs more than one bit -
-        // see GICD_CTLR_INIT's own doc comment for the real bug this
-        // fixed. Wait for the write to actually complete (GICD_CTLR.RWP)
-        // before touching anything else, same "verify, don't assume a
-        // register write took effect" discipline as the ICC_SRE_EL1
-        // read-back below.
-        write_reg32(gicd_base, 0x000, GICD_CTLR_INIT);
-        while read_reg32(gicd_base, 0x000) & GICD_CTLR_RWP != 0 {}
-
         // CPU interface: route to system registers, then verify the
         // write actually stuck rather than assuming it did (some
         // hypervisors trap/restrict this - see this module's doc
@@ -232,14 +249,14 @@ pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
         asm!("msr icc_sre_el1, {0}", "isb", in(reg) ICC_SRE_SRE, options(nostack, preserves_flags));
         let sre: u64;
         asm!("mrs {0}, icc_sre_el1", out(reg) sre, options(nomem, nostack, preserves_flags));
-        assert!(
-            sre & ICC_SRE_SRE != 0,
-            "ICC_SRE_EL1.SRE did not stick - system-register GIC access unavailable"
-        );
+        if sre & ICC_SRE_SRE == 0 {
+            return Err("ICC_SRE_EL1.SRE did not stick - system-register GIC access unavailable");
+        }
 
         asm!("msr icc_pmr_el1, {0}", in(reg) ICC_PMR_ALLOW_ALL, options(nomem, nostack, preserves_flags));
         asm!("msr icc_igrpen1_el1, {0}", "isb", in(reg) ICC_IGRPEN1_ENABLE, options(nostack, preserves_flags));
     }
+    Ok(sgi_base)
 }
 
 /// Enables forwarding of `intid`.

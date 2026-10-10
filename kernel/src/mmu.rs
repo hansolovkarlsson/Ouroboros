@@ -912,6 +912,17 @@ unsafe fn build_identity_map(
     unsafe { build_tables(memory_map, el0_regions, extra_devices, &stored_nc[..nc_count], true) }
 }
 
+/// The EL1 regime the boot core switched to, kept for the secondary cores,
+/// which share its tables (`smp.rs`; class A of the multi-core plan's
+/// inventory, written once at the switch).
+static BOOT_REGIME: SyncCell<Option<El1Regime>> = SyncCell::new(None);
+
+/// The regime [`switch_to_identity_map`] installed on the boot core.
+pub(crate) fn boot_regime() -> El1Regime {
+    // SAFETY: written once at the switch, before any second core runs.
+    unsafe { *BOOT_REGIME.get() }.expect("mmu::boot_regime before the identity map was installed")
+}
+
 /// The switch half of [`install_identity_map`]: onto the current task's
 /// view, then the one-time cache clean of the non-cacheable ranges and the
 /// walker check of every view, both of which need the new tables live.
@@ -932,6 +943,8 @@ unsafe fn build_identity_map(
 /// (at EL2 that write takes effect at the drop).
 unsafe fn switch_to_identity_map(planned: Planned) {
     let view = crate::tasks::current_index();
+    // SAFETY: the one write, on the boot core, before any second core.
+    unsafe { *BOOT_REGIME.get() = Some(el1_regime(view, &planned)) };
     match crate::el2::current_el() {
         1 => unsafe { switch_full(view, &planned) },
         2 => unsafe { crate::el2::drop_to_el1(el1_regime(view, &planned)) },
@@ -1136,11 +1149,19 @@ fn check_attributes(planned: &[(u64, u64)]) {
 /// safety requirements otherwise apply identically) - the same
 /// requirement `main.rs`'s single call site already satisfies for every
 /// caller of this function, since none can run before boot completes.
-/// Must be called with interrupts masked throughout - single-core, so
-/// no other code can observe the table set mid-rebuild. Every caller
-/// today is an exception entry (SVC, IRQ or EL0 fault) or runs inside
-/// one, which is what satisfies this; a caller from ordinary EL1 code
-/// with interrupts enabled would not, and must mask them first.
+/// Must be called with interrupts masked throughout, so no other code on
+/// this core can observe the table set mid-rebuild. Every caller today is
+/// an exception entry (SVC, IRQ or EL0 fault) or runs inside one, which is
+/// what satisfies this; a caller from ordinary EL1 code with interrupts
+/// enabled would not, and must mask them first. Since multi-core step 2
+/// the parked secondary cores walk view 0's tables too (`smp.rs`,
+/// `boot_regime`), while this rewrites them in place: that is sound only
+/// because a parked core executes two instructions in the kernel block
+/// and reads nothing else, every entry it could walk is rewritten with an
+/// equal valid value by one 64-bit store, and the kernel block's
+/// attributes never change; a rebuild that zeroed a table first, or
+/// changed a kernel attribute, would need the inner-shareable
+/// invalidation (`tlbi vmalle1is`) and a shootdown, which are step 4's.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
@@ -1469,6 +1490,7 @@ pub(crate) fn activate_task(view: TaskIndex) {
 /// derivation, so the two paths cannot disagree, and constructible only
 /// with the [`Planned`] a build returned, so the drop, like
 /// [`switch_full`], cannot be spelled without a build.
+#[derive(Clone, Copy)]
 pub(crate) struct El1Regime {
     pub(crate) mair: u64,
     pub(crate) tcr: u64,

@@ -524,7 +524,7 @@ localises the failure without any guessing.
    starts from nothing here, with no firmware configuration to match), and
    the reporter's dump, still registered through the firmware's EL2
    vectors at that point, is what to read. After the second line a fault
-   reports through the kernel's own `EXCEPTION vector=...` line, the first
+   reports through the kernel's own `EXCEPTION core=N vector=...` line, the first
    time that has been possible on this board; the virtio-mmio scan at
    `0xa000000` (Risk 1) is expected to be the first. Also read, before the
    exit: `PSCI conduit: smc` or `hvc` (the FADT's flag, logged since
@@ -618,7 +618,7 @@ change that, so it is not the xHCI step alone.
 **`FBCON`'s first boot ended in the firmware's own exception handler**:
 `xhci: PCI command register was 0x0140, wrote+read back 0x0146`, blank lines,
 then `Synchronous Exception at 0x0000000039F31A40`. That message is EDK2's, not
-the kernel's (the kernel reports `EXCEPTION vector=… esr_el1=…`), so the fault
+the kernel's (the kernel reports `EXCEPTION core=N vector=… esr_el1=…`, the core since multi-core step 2), so the fault
 came while the firmware's vectors were still installed: after that line and
 before `exceptions::install()` just past `exit_boot_services`. The
 `xHCI controller @ …` line that normally follows did not appear.

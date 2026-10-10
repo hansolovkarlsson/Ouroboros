@@ -90,7 +90,7 @@ pub fn drops_to_el1() -> bool {
 /// those registers reach EL1 only through `ICC_SRE_EL2.Enable`, and on a
 /// GICv2 machine (the Raspberry Pi) `ICC_SRE_EL2` does not exist and the
 /// write would be an undefined instruction.
-fn gic_sysregs_implemented() -> bool {
+pub(crate) fn gic_sysregs_implemented() -> bool {
     let pfr0: u64;
     unsafe { asm!("mrs {0}, id_aa64pfr0_el1", out(reg) pfr0, options(nomem, nostack, preserves_flags)) };
     (pfr0 >> 24) & 0xf != 0
@@ -119,7 +119,7 @@ const SCTLR_EL1_I: u64 = 1 << 12;
 /// `SCTLR_EL1` for the drop, composed from the bits above: equal to
 /// `0x30d0198d`, QEMU's firmware's EL1 value (see the module doc), which
 /// the constant is checked against below rather than copied from.
-const SCTLR_EL1_MMU_ON: u64 =
+pub(crate) const SCTLR_EL1_MMU_ON: u64 =
     SCTLR_EL1_RES1 | SCTLR_EL1_M | SCTLR_EL1_C | SCTLR_EL1_SA | SCTLR_EL1_ITD | SCTLR_EL1_SED | SCTLR_EL1_I;
 const _: () = assert!(SCTLR_EL1_MMU_ON == 0x30d0_198d);
 /// `HCR_EL2.RW | HCD`: EL1 is AArch64, and `hvc` is disabled, so one from
@@ -137,7 +137,7 @@ const HCR_EL2_RW_HCD: u64 = (1 << 31) | (1 << 29);
 const HCR_EL2_NO_PAUTH_MTE_TRAPS: u64 = (1 << 41) | (1 << 40) | (1 << 56);
 /// What the drop writes to `HCR_EL2`: `0xa0000000` plus the two feature
 /// bits above. The records cite this constant rather than restating it.
-const HCR_EL2_VALUE: u64 = HCR_EL2_RW_HCD | HCR_EL2_NO_PAUTH_MTE_TRAPS;
+pub(crate) const HCR_EL2_VALUE: u64 = HCR_EL2_RW_HCD | HCR_EL2_NO_PAUTH_MTE_TRAPS;
 /// `MDCR_EL2`'s `HPMN` field (bits 4:0), the one part kept: the rest is
 /// debug and PMU trap bits (`TDRA`, `TDOSA`, `TDA`, `TDE`, `TPM`, `TPMCR`),
 /// all cleared so nothing EL1 does traps to EL2. `HPMN` is kept rather than
@@ -150,7 +150,7 @@ const MDCR_EL2_HPMN_MASK: u64 = 0x1f;
 const HCR_EL2_E2H: u64 = 1 << 34;
 /// `CNTHCTL_EL2.EL1PCTEN | EL1PCEN` (with `HCR_EL2.E2H` 0): EL1 may read
 /// the physical counter and use the physical timer, which `timer.rs` does.
-const CNTHCTL_EL2_EL1_PHYS: u64 = (1 << 0) | (1 << 1);
+pub(crate) const CNTHCTL_EL2_EL1_PHYS: u64 = (1 << 0) | (1 << 1);
 /// `CPTR_EL2` with no FP/SIMD trap: the ARMv8.0 RES1 pattern, `TFP` (bit
 /// 10) clear. Bit 8 is `TZ` on a core with SVE and bit 12 `TSM` on one with
 /// SME, RES1 otherwise, so [`cptr_el2_value`] clears each only when the ID
@@ -166,7 +166,7 @@ const CPTR_EL2_TSM: u64 = 1 << 12;
 /// 35:32) is nonzero and `TSM` clear when `ID_AA64PFR1_EL1.SME` (bits
 /// 27:24) is, so SVE and SME at EL1 or EL0 do not trap to an EL2 with
 /// nobody home.
-fn cptr_el2_value() -> u64 {
+pub(crate) fn cptr_el2_value() -> u64 {
     let (pfr0, pfr1): (u64, u64);
     unsafe {
         asm!("mrs {0}, id_aa64pfr0_el1", "mrs {1}, id_aa64pfr1_el1", out(reg) pfr0, out(reg) pfr1, options(nomem, nostack, preserves_flags));
@@ -182,11 +182,11 @@ fn cptr_el2_value() -> u64 {
 }
 /// `CPACR_EL1.FPEN = 0b11`: EL0 and EL1 may use FP/SIMD. On an EL1 handoff
 /// the firmware had already allowed it; here nobody has.
-const CPACR_EL1_FPEN: u64 = 0b11 << 20;
+pub(crate) const CPACR_EL1_FPEN: u64 = 0b11 << 20;
 /// `SPSR_EL2` for the `eret`: D, A, I, F masked, M = EL1h (`0b0101`). The
 /// kernel never runs at EL1 unmasked; the first `eret` into task 0 is what
 /// unmasks, for EL0 only (`synccell.rs`).
-const SPSR_EL1H_MASKED: u64 = 0x3c5;
+pub(crate) const SPSR_EL1H_MASKED: u64 = 0x3c5;
 /// `ICC_SRE_EL2.SRE | Enable`: the system register interface at EL2, and
 /// EL1's access to its own (`gicv3.rs` writes `ICC_SRE_EL1` later).
 const ICC_SRE_EL2_SRE_ENABLE: u64 = (1 << 0) | (1 << 3);
