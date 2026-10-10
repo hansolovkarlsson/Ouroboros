@@ -1,13 +1,14 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-09. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-10. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
 "What shipped": test rigs, mutation harnesses, gate hints, firmware dumps read
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
-stale-image guard and the four blind spots in the guard that replaced it. The
-spine below has held for all of them.*
+stale-image guard and the four blind spots in the guard that replaced it, and
+on 2026-10-10 the controls a keyboard change blinded. The spine below has held
+for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -1599,3 +1600,48 @@ chosen for the case the guard was built for. **A new instrument needs its
 controls chosen against its own blind spots, not against the bug it was
 built to catch**, and for a guard that claims "every boot", the first control
 is to list every boot.
+
+## Three more, from the Escape key (2026-10-09, evening, to 2026-10-10)
+
+**A change that blinded its own controls.** #253 first made the USB Escape
+key send a bare ESC, then, after its first high review, changed `keyseq` so
+that a bare ESC followed by any byte but `[` or `O` is Escape and then that
+byte. Every control that proved a rule by typing a letter after an Esc and
+checking the letter survived (`test-kbd-cut`'s checks 2, 3 and 6, the E1 and
+E2 host tests, the three new USB tests) now passed whatever the rule did: the
+parser kept the letter itself. Nothing went red, because nothing could. I
+caught it by asking, before running anything, which checks had leaned on the
+old refusal; the fix was to type `O`, which the new rule still treats as a
+sequence's start, and to run each check against its part removed. Every one
+failed as it should. **A change that widens what a system accepts silently
+blinds every check whose control relied on the old refusal**; the question to
+ask is which inputs the new rule still treats specially, and to build the
+controls from those.
+
+**A check that could not fail, on main too.** `test-kbd-mode`'s `zq` check
+was documented as failing with the queue's parser not fed the boot shell's
+interrupt byte (E1). With E1 removed it passed, on #253's branch and on
+main's version alike. The first explanation was E2: the queue closes a bare
+ESC 40 ms after reading it, long before the Ctrl+\ typed 0.5 s later. But it
+also passed with E1 and E2 removed together, which E2 could not explain. A
+first attempt (typing the Esc and the Ctrl+\ 20 ms apart) changed nothing,
+because it reasoned about when bytes arrive, where the queue goes by when
+they are read. The transcript of the E1-and-E2 run showed the answer: the rig
+typed the shell's next command, `readkey spin 100 keep`, between the
+interrupt and the probe, and its `r` ended the Esc under the new `keyseq`.
+#253 printed the check as a note rather than a pass; #254 made `Ozq` the
+shell's next line, and it now fails with E1 and E2 removed together. E1 alone
+no rig can see, since the shell's wake outlasts E2's interval, so its host
+test is the check. The general shape: **the bytes a probe means to test must
+be the first the system reads after the event**; anything typed between is
+an input too, and may do the probe's job for it.
+
+**A verdict that was another verdict.** The new "Escape then q quits `more`"
+line in `test-nav-keys` tested only that the `more` step finished, which
+"driven to the end" already required, so it could not fail on its own; and
+it and the `k7` line pass with Escape unmapped, where only the READKEY check
+sees the mapping, while the records said each check fails with its part
+removed. Both found by the second high review. The line was folded into the
+`--More--` count, and the docstring now says which check sees what. A
+dependent line reads as independent coverage, and a count of passes is only
+as honest as the independence of what it counts.
