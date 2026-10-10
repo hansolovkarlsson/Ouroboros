@@ -124,7 +124,8 @@ pub fn is_boot_core() -> bool {
 
 /// A secondary core's tick (step 4(b)): counted, and said once, the first
 /// time, so a rig can see that the core's timer fires and its IRQ path
-/// round-trips through EL0. The frame goes back unchanged: the idle loop.
+/// round-trips through EL0. The switch among its tasks is
+/// `tasks::on_secondary_tick` (step 4(d)).
 pub fn secondary_tick() {
     let core = core_index() as usize;
     if CORE_TICKS[core].fetch_add(1, Ordering::Relaxed) == 0 {
@@ -144,9 +145,15 @@ pub const KICK_SGI: u32 = 0;
 static KICKS: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(0) }; MAX_CORES];
 
 /// A kick that asks only to be answered: [`start`]'s check that every core
-/// takes an SGI, and takes it under the kernel lock. Step 4(d) adds the
-/// kick that ends a task running on the kicked core.
+/// takes an SGI, and takes it under the kernel lock.
 const KICK_PING: u32 = 1 << 0;
+/// Work this core may run is waiting: an idle core switches to it
+/// (`tasks::reschedule_if_idle`, step 4(d)).
+const KICK_RESCHED: u32 = 1 << 1;
+/// A task this core runs was asked to end (`tasks::kill_task`, step 4(d)).
+/// The ending itself is `tasks::end_if_doomed`, at the start of every entry
+/// on this core; the kick is what brings the core into one now.
+const KICK_KILL: u32 = 1 << 2;
 
 /// Pings each core has answered (class B, the core's own count).
 static PINGS_ANSWERED: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
@@ -186,12 +193,63 @@ fn kick(core: usize, reason: u32) -> Result<(), &'static str> {
 }
 
 /// This core's [`KICK_SGI`], under the kernel lock (`exceptions.rs`'s IRQ
-/// path): every reason recorded for it since its last kick, acted on.
-pub fn on_kick() {
+/// path): every reason recorded for it since its last kick, acted on. A
+/// kill needs nothing here: the entry already ended a doomed task before
+/// this ran (`tasks::end_if_doomed`).
+///
+/// # Safety
+/// `frame` is the live IRQ trap frame.
+pub unsafe fn on_kick(frame: *mut crate::exceptions::Context) {
     let core = core_index() as usize;
     let reasons = KICKS[core].swap(0, Ordering::Relaxed);
     if reasons & KICK_PING != 0 {
         PINGS_ANSWERED[core].fetch_add(1, Ordering::Release);
+    }
+    if reasons & (KICK_RESCHED | KICK_KILL) != 0 {
+        unsafe { crate::tasks::reschedule_if_idle(frame) };
+    }
+}
+
+/// Kicks `core` to look for work (`tasks::kick_idle_cores`), unless a
+/// kick for that is already on its way. Under the kernel lock. A core that
+/// cannot be kicked takes the work up at its next tick.
+pub(crate) fn kick_resched(core: usize) {
+    if core < MAX_CORES && KICKS[core].load(Ordering::Relaxed) & KICK_RESCHED != 0 {
+        return;
+    }
+    let _ = kick(core, KICK_RESCHED);
+}
+
+/// Kicks `core` into the kernel to end the task it runs, which
+/// `tasks::kill_task` has marked. Under the kernel lock. A core that cannot
+/// be kicked ends it at its next tick's entry instead.
+pub(crate) fn kick_kill(core: usize) {
+    let _ = kick(core, KICK_KILL);
+}
+
+/// Whether any secondary core is up and taking work: placement's question
+/// (`tasks::may_run_here`), since with none a program runs on the boot core.
+pub(crate) fn secondaries_up() -> bool {
+    CORE_UP.iter().any(|m| m.load(Ordering::Acquire) == CORE_UP_IDLE)
+}
+
+/// The cores that run tasks: the boot core and every secondary up.
+pub(crate) fn up_cores() -> impl Iterator<Item = usize> {
+    let boot = BOOT_INDEX.load(Ordering::Relaxed) as usize;
+    (0..MAX_CORES).filter(move |&c| c == boot || CORE_UP[c].load(Ordering::Acquire) == CORE_UP_IDLE)
+}
+
+/// Whether `core` is the boot core.
+pub(crate) fn is_boot(core: usize) -> bool {
+    core as u64 == BOOT_INDEX.load(Ordering::Relaxed)
+}
+
+/// This core halts alone (`power::halt`, holding nothing): it takes no
+/// more work, so placement stops counting it and no kick waits on it.
+pub(crate) fn mark_down_here() {
+    let core = core_index() as usize;
+    if core < MAX_CORES && !is_boot_core() {
+        CORE_UP[core].store(CORE_FAILED, Ordering::Release);
     }
 }
 

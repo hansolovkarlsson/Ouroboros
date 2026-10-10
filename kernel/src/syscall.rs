@@ -812,7 +812,17 @@ pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u
     // The kernel lock around the whole syscall (lock.rs): released before
     // the trampoline's eret, whichever task that resumes.
     crate::lock::acquire();
-    let result = dispatch_locked(number, arg0, arg1, arg2, arg3, frame);
+    // A task another core asked to end makes no syscall (step 4(d)): it is
+    // ended here, and the task that replaced it resumes with its own x0,
+    // the contract every switching arm keeps (see exit_current_and_switch).
+    // SAFETY: `frame` is this syscall's live trap frame.
+    let result = if unsafe { tasks::end_if_doomed(frame) } {
+        // SAFETY: as above; the frame now holds the next task.
+        unsafe { (*frame).gpr[0] }
+    } else {
+        dispatch_locked(number, arg0, arg1, arg2, arg3, frame)
+    };
+    tasks::kick_idle_cores();
     crate::lock::release();
     result
 }
@@ -1388,11 +1398,14 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
                 return syscall_abi::TASK_ERR_SELF;
             }
             let i = target.index();
-            console::println!("Ouroboros kernel: task {i} killed");
             // Same teardown as EXIT's arm, minus the context switch (the
             // killed task isn't the one running - refused above - see
-            // tasks::kill_task's doc comment).
-            tasks::kill_task(target);
+            // tasks::kill_task's doc comment), or, for a task running on
+            // another core, that core's to do at its next entry (step 4(d)).
+            match tasks::kill_task(target) {
+                tasks::Ended::Now => console::println!("Ouroboros kernel: task {i} killed"),
+                tasks::Ended::OnCore(core) => console::println!("Ouroboros kernel: task {i} killed (running on core {core}, which ends it)"),
+            }
             // SAFETY: same masked-IRQ single-core contract as
             // spawn_program's and EXIT's rebuilds.
             unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
@@ -1617,6 +1630,7 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             tasks::deliver_reply(tasks::current_task(), dest, data);
             0
         }
+        syscall_abi::CORE_INFO => tasks::core_info(arg0),
         syscall_abi::SENDER_CALL => {
             // No arguments: the call the message this task last received
             // opened, captured with SENDER_ID's credential, for MSG_REPLY and

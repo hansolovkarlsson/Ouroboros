@@ -375,6 +375,11 @@ static STORED_MEMORY_MAP: StoredMapCell = StoredMapCell(UnsafeCell::new(None));
 static STORED_EXTRA_DEVICES: SyncCell<([(u64, u64); MAX_EXTRA_DEVICES], usize)> =
     SyncCell::new(([(0, 0); MAX_EXTRA_DEVICES], 0));
 static STORED_UNCACHED: SyncCell<([(u64, u64); MAX_UNCACHED], usize)> = SyncCell::new(([(0, 0); MAX_UNCACHED], 0));
+/// The EL0 regions the tables were last built for, one per view (class C:
+/// written by every build, under the kernel lock after boot). What
+/// [`rebuild_with_el0_regions`] compares against to find the views a
+/// rebuild changes, which no core may be running (multi-core step 4(d)).
+static BUILT_REGIONS: SyncCell<[(u64, u64); MAX_EL0_REGIONS]> = SyncCell::new([(0, 0); MAX_EL0_REGIONS]);
 
 // One L0 entry (`L1_TABLE` above, always L0 index 0) covers the first
 // 512GB of VA space (512 entries * 1GB each) - enough for every RAM
@@ -906,6 +911,7 @@ unsafe fn build_identity_map(
     stored_nc[..nc_count].copy_from_slice(&uncached[..nc_count]);
     unsafe { *STORED_UNCACHED.get() = (stored_nc, nc_count) };
     unsafe { *STORED_MEMORY_MAP.0.get() = Some(memory_map) };
+    unsafe { *BUILT_REGIONS.get() = el0_regions };
     // Re-borrow from the stash rather than the original parameter (now
     // moved) - the rest of this function is unchanged either way.
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }.unwrap();
@@ -1171,6 +1177,28 @@ fn check_attributes(planned: &[(u64, u64)]) {
 /// equal-or-valid, is owed with step 4(d), where secondaries run tasks of
 /// their own.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
+    // The views this rebuild changes are the slots whose region differs
+    // from the last build's, and the in-place rewrite is sound only if no
+    // core runs one of them (multi-core step 4(d)): every other view is
+    // rewritten with equal entries, which a walk on another core reads as
+    // the old value or the new. A task ended on another core is ended
+    // there for this reason (tasks::kill_task); this is the check that
+    // says so if a path ever tears one down from here.
+    // SAFETY: under the kernel lock, as the rest of this function.
+    let built = unsafe { &mut *BUILT_REGIONS.get() };
+    for slot in crate::tasks::TaskIndex::all() {
+        let i = slot.index();
+        if built[i] != el0_regions[i] {
+            if let Some(core) = crate::tasks::running_core(slot) {
+                crate::console::println_force!(
+                    "Ouroboros kernel: a rebuild changes task {i}'s view while core {core} runs it; halting rather than rewrite tables under it"
+                );
+                crate::lock::halt_kernel();
+                crate::power::halt();
+            }
+        }
+    }
+    *built = el0_regions;
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
     let (extra_devices, count) = unsafe { *STORED_EXTRA_DEVICES.get() };

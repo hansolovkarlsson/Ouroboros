@@ -167,6 +167,7 @@ pub fn halt() -> ! {
         crate::console::println_force!("Ouroboros kernel: system halted");
     } else {
         crate::console::println_force!("Ouroboros kernel: core {} halted alone, holding nothing; the rest go on", crate::smp::core_index());
+        crate::smp::mark_down_here();
     }
     unsafe {
         // DAIFSet: mask Debug/SError/IRQ/FIQ so the timer tick can't wake us.

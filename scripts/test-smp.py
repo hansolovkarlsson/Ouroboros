@@ -13,9 +13,16 @@ ticking, the summary must say all started cores are up, each must answer
 the boot core's kick SGI only once the kernel lock is free (step 4(c): the
 boot core holds the lock 50 ms after the send, and a core whose handler
 ran under it would say so), the shell must come up and answer `help`, and after a dwell
-of DWELL seconds with the other cores parked it must still answer `echo`
-(nothing on a parked core may disturb the boot core), with no fault line in
-QEMU's own trace.
+of DWELL seconds with the other cores idling it must still answer
+(nothing on another core may disturb the boot core), with no fault line in
+QEMU's own trace. Then (step 4(d), the image boots) /bin/COREPROBE: alone
+it must run on a secondary (on the one core under `-smp 1`) and see one
+program running; `coreprobe | coreprobe -` must run both on secondaries and
+each see two programs running at once (one at a time under `-smp 1`); and
+`coreprobe hold`, started on a secondary, must end at Ctrl+C on that core,
+as the boot core's tick asked (`task N ended on core C`), the shell
+answering after. Under `-smp 1` the kill is local and no such line may
+appear.
 
 1. `-smp 4`, the dev-loop machine (an EL1 handoff; the secondaries enter at
    EL1 with the MMU off and turn it on in place).
@@ -68,6 +75,8 @@ COUNT_RE = re.compile(r"MADT: (\d+) cores(, more than fit listed)? \(this core a
 CORE_RE = re.compile(r"MADT: core (\d+): mpidr (0x[0-9a-f]+), (enabled|disabled)")
 UP_RE = re.compile(r"smp: core (\d+) up at EL(\d) \(mpidr 0x[0-9a-f]+, affinity 0x[0-9a-f]+\), idling")
 TICK_RE = re.compile(r"smp: core (\d+) ticking \(its first tick, from its idle loop at EL0\)")
+PROBE_RE = re.compile(r"coreprobe: ran on cores? ([\d ]+), up to (\d+) programs running at once, (\d+) cores up, \d+ rounds")
+HOLD_RE = re.compile(r"coreprobe: holding on core (\d+)")
 SUMMARY_RE = re.compile(r"smp: (\d+) of (\d+) started cores up, (\d+) cores in all")
 KICK_RE = re.compile(r"smp: core (\d+) answered a kick from core (\d+), once the kernel lock was free")
 KICK_FAIL_RE = re.compile(r"smp: core (\d+)(?: \(the boot core\))? (answered a kick while core \d+ held the kernel lock|cannot be kicked|cannot be sent an SGI|did not answer a kick within a second|answered every kick but was never seen waiting with one)")
@@ -85,6 +94,7 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
     else:
         guest = drive_qemu.Guest(IMAGE, label=f"test-smp {name}: ", extra_args=["-smp", str(smp)], machine=machine)
     dwell_ok = False
+    probe = {}
     try:
         if esp:
             # A vvfat boot has no /etc, so the boot shell starts a root
@@ -101,6 +111,8 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
             time.sleep(DWELL)
             guest.type_line("help")
             dwell_ok = guest.wait_for(r"builtins:[\s\S]*" + PROMPT, timeout=20)
+        if dwell_ok and not esp:
+            probe = run_probes(guest)
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -152,6 +164,8 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
          + (f" (saw: {'; '.join(other_fails)})" if other_fails else ""), not other_fails),
         (f"{name}: the shell still answers after a {DWELL} s dwell with the other cores idling and ticking", dwell_ok),
     ]
+    if not esp:
+        checks += probe_checks(name, smp, boot_index, probe)
     if "virtualization=on" in machine:
         checks.append((f"{name}: the boot core dropped from EL2 to EL1", "dropped from EL2 to EL1" in out))
     if fault:
@@ -167,6 +181,66 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
         ]
     else:
         checks.append((f"{name}: no fault lines", faults == 0 and "EXCEPTION" not in out))
+    return checks
+
+
+def run_probes(guest):
+    """Step 4(d): /bin/COREPROBE alone, as a pair, and held then ended by
+    Ctrl+C, each transcript cut out for its own checks."""
+    got = {}
+    guest.type_line("coreprobe")
+    got["alone"] = guest.wait_for(r"rounds[\s\S]*" + PROMPT, timeout=60)
+    got["alone_out"] = guest.transcript()
+    guest.type_line("coreprobe | coreprobe -")
+    got["pair"] = guest.wait_for(r"rounds[\s\S]*rounds[\s\S]*" + PROMPT, timeout=60)
+    got["pair_out"] = guest.transcript()
+    guest.type_line("coreprobe hold")
+    held = guest.wait_for(r"holding on core \d+", timeout=30)
+    time.sleep(1)
+    guest.type_raw(b"\x03")
+    held = held and guest.wait_for(r"terminated[\s\S]*" + PROMPT, timeout=30)
+    guest.type_line("echo after-the-kill")
+    got["hold"] = held and guest.wait_for(r"after-the-kill\s+[\s\S]*" + PROMPT, timeout=30)
+    got["hold_out"] = guest.transcript()
+    return got
+
+
+def probe_checks(name, smp, boot_index, probe):
+    """Every program runs on a secondary when there are any, two programs
+    at once in a pipeline, and a program running on another core is ended
+    there when the boot core's tick takes its Ctrl+C."""
+    if not probe:
+        return [(f"{name}: the core probes ran (the shell never answered after the dwell)", False)]
+    alone_out = probe["alone_out"]
+    pair_out = probe["pair_out"][len(alone_out):]
+    hold_out = probe["hold_out"][len(probe["pair_out"]):]
+    alone = PROBE_RE.findall(alone_out)
+    pair = PROBE_RE.findall(pair_out)
+    held = HOLD_RE.search(hold_out)
+    secondaries = {str(i) for i in range(smp) if i != boot_index} or {str(boot_index)}
+    def placed(reports):
+        return all(set(r[0].split()) <= secondaries for r in reports)
+    ended = re.search(r"Ctrl\+C - foreground task (\d+) terminated", hold_out)
+    remote = re.search(r"task (\d+) ended on core (\d+), as another core asked", hold_out)
+    many = smp > 1
+    checks = [
+        (f"{name}: coreprobe alone ran on " + ("a secondary core" if many else "the one core") + f", one program at once, {smp} cores up"
+         + (f" (saw {alone})" if not (len(alone) == 1 and placed(alone) and alone[0][1:] == ("1", str(smp))) else ""),
+         probe["alone"] and len(alone) == 1 and placed(alone) and alone[0][1:] == ("1", str(smp))),
+        (f"{name}: `coreprobe | coreprobe -` ran " + ("on secondaries, two programs at once" if many else "on the one core, one at a time")
+         + (f" (saw {pair})" if len(pair) != 2 else ""),
+         probe["pair"] and len(pair) == 2 and placed(pair) and all(r[1] == ("2" if many else "1") for r in pair)),
+        (f"{name}: `coreprobe hold` started on " + ("a secondary" if many else "the one core") + (f" (core {held.group(1)})" if held else ""),
+         held is not None and held.group(1) in secondaries),
+        (f"{name}: Ctrl+C ended it and the shell answered after", probe["hold"] and ended is not None),
+    ]
+    if many:
+        checks.append((f"{name}: it was ended on the core it ran on, as the boot core asked"
+                       + (f" (core {remote.group(2)})" if remote else ""),
+                       remote is not None and held is not None and ended is not None
+                       and remote.groups() == (ended.group(1), held.group(1))))
+    else:
+        checks.append((f"{name}: one core, so no kill was sent to another", remote is None))
     return checks
 
 
