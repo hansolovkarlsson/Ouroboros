@@ -40,6 +40,18 @@ This document is the one to update first when direction changes.
 > and the counter from `\EFI\ORBS\BOOTID.TXT` with the UEFI variable absent. A node without entropy keys its sessions with no forward
 > secrecy, which the plan states rather than claims.
 
+> **The arc for the week of 2026-10-12: multi-core (set by Hans,
+> 2026-10-10).** Planned in [`roadmap-smp.md`](roadmap/roadmap-smp.md),
+> which is Pi direction 4 below brought forward while DevTools's C compiler
+> is finished. The sequence: the plan and a check that every mutable static
+> in the kernel is classified (step 0); the cores found in the MADT (1); the
+> cores started through PSCI `CPU_ON`, dropped to EL1 each, and parked with a
+> `core N up` line and `make test-smp` on `-smp 4` (2); the three decisions
+> that are cheaper on one core, FP/SIMD eager or lazy, the tick's jobs, task
+> 0's entry through the trampolines (3); then tasks on cores behind one
+> scheduler lock and per-device locks, measured (4). The week covers 0 to 3
+> and the start of 4; the arc ends when 4 does.
+
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as
 supervised, MMU-isolated userland servers, with a capability model, crash
@@ -733,7 +745,9 @@ not yet checked on this tree are marked (predicted).
       place), so this needs its own mode, say `make bootstick`, and a rule
       for which of card and stick wins when both are present. Also the Pi
       400 (item 6).
-- [ ] **4. Multi-core, on QEMU first.** Today one core runs everything and
+- [ ] **4. Multi-core, on QEMU first. Planned 2026-10-10,
+      [`roadmap-smp.md`](roadmap/roadmap-smp.md), the arc for the week of
+      2026-10-12.** Today one core runs everything and
       the others are never started; the single-core argument is load-bearing
       (`synccell.rs` states it once for every mutable static, and the kernel
       never runs at EL1 with IRQs unmasked). What it needs: the secondary
