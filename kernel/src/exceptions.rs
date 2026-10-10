@@ -690,7 +690,8 @@ extern "C" fn rust_irq_handler(frame: *mut Context) {
 }
 
 fn irq_locked(frame: *mut Context) {
-    let intid = unsafe { gic::acknowledge() };
+    let acked = unsafe { gic::acknowledge() };
+    let intid = acked.intid();
 
     // A secondary core (multi-core step 4(b)) takes its own timer and
     // nothing else: a device interrupt that reached it (a GICv2 SPI routed
@@ -710,7 +711,7 @@ fn irq_locked(frame: *mut Context) {
         timer::arm(timer::TICK_INTERVAL_MS);
         if !boot_core {
             crate::smp::secondary_tick();
-            unsafe { gic::end_of_interrupt(intid) };
+            unsafe { gic::end_of_interrupt(acked) };
             return;
         }
         TICKS.fetch_add(1, Ordering::Relaxed);
@@ -729,6 +730,11 @@ fn irq_locked(frame: *mut Context) {
         // incrementing tick count - e.g. 1526 -> 1976 - across multiple
         // interactive commands, no hang).
         unsafe { tasks::on_tick(frame) };
+    } else if intid == crate::smp::KICK_SGI {
+        // Another core kicked this one (step 4(c)), on any core: under the
+        // kernel lock, like every entry, so the kick's work runs only once
+        // its sender has released the lock (smp::kick).
+        crate::smp::on_kick();
     } else if boot_core && intid == NET_INTID.load(Ordering::Relaxed) {
         // A NIC receive frame arrived (TX completions are suppressed at the
         // device, so this INTID always means receive - see virtio_net.rs).
@@ -741,6 +747,6 @@ fn irq_locked(frame: *mut Context) {
     }
 
     if intid != SPURIOUS_INTID {
-        unsafe { gic::end_of_interrupt(intid) };
+        unsafe { gic::end_of_interrupt(acked) };
     }
 }

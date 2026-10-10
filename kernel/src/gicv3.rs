@@ -314,6 +314,49 @@ pub unsafe fn enable_interrupt(intid: u32) {
     }
 }
 
+// ICC_SGI1R_EL1's fields, from Linux's include/linux/irqchip/arm-gic-v3.h
+// (ICC_SGI1R_*_SHIFT): a target list of Aff0 values within one
+// Aff3.Aff2.Aff1 cluster, the SGI's ID, and a range selector for Aff0
+// values past 15 (16 Aff0 values per range).
+const ICC_SGI1R_AFF1_SHIFT: u32 = 16;
+const ICC_SGI1R_SGI_ID_SHIFT: u32 = 24;
+const ICC_SGI1R_AFF2_SHIFT: u32 = 32;
+const ICC_SGI1R_RS_SHIFT: u32 = 44;
+const ICC_SGI1R_AFF3_SHIFT: u32 = 48;
+/// `ICC_CTLR_EL1.RSS`: the CPU interface takes a range selector, so an
+/// SGI can reach an Aff0 past 15.
+const ICC_CTLR_RSS: u64 = 1 << 18;
+
+/// Sends Group 1 SGI `sgi` (0 to 15) to the one core whose affinity is
+/// `mpidr` (the MADT's value, affinity fields only), through
+/// `ICC_SGI1R_EL1`. Prior stores are made visible first (`dsb ishst`) and
+/// the write is synchronized after (`isb`), as Linux's `gic_ipi_send_mask`
+/// does. `Err` for an Aff0 past 15 on an interface without a range
+/// selector, which no SGI can reach.
+///
+/// # Safety
+/// After [`init`]; `sgi` below 16.
+pub unsafe fn send_sgi(sgi: u32, mpidr: u64) -> Result<(), &'static str> {
+    let aff0 = mpidr & 0xff;
+    if aff0 > 15 {
+        let ctlr: u64;
+        unsafe { asm!("mrs {0}, icc_ctlr_el1", out(reg) ctlr, options(nomem, nostack, preserves_flags)) };
+        if ctlr & ICC_CTLR_RSS == 0 {
+            return Err("its Aff0 is past 15 and this GICv3 interface has no range selector");
+        }
+    }
+    let value = (1u64 << (aff0 & 0xf))
+        | (((mpidr >> 8) & 0xff) << ICC_SGI1R_AFF1_SHIFT)
+        | (u64::from(sgi & 0xf) << ICC_SGI1R_SGI_ID_SHIFT)
+        | (((mpidr >> 16) & 0xff) << ICC_SGI1R_AFF2_SHIFT)
+        | ((aff0 >> 4) << ICC_SGI1R_RS_SHIFT)
+        | (((mpidr >> 32) & 0xff) << ICC_SGI1R_AFF3_SHIFT);
+    unsafe {
+        asm!("dsb ishst", "msr icc_sgi1r_el1, {0}", "isb", in(reg) value, options(nostack, preserves_flags));
+    }
+    Ok(())
+}
+
 /// Reads the highest-priority pending interrupt ID and acknowledges it —
 /// must be paired with [`end_of_interrupt`], same contract as
 /// `gicv2.rs::acknowledge`. Pure system-register access, no memory

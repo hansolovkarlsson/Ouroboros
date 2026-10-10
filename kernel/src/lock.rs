@@ -14,9 +14,19 @@
 //! splitting of this one, measured first (4(a)'s own measurement is `make
 //! measure-syscost`, an uncontended acquire and release per syscall).
 //!
-//! Not reentrant, by design: the Rust half of an entry is the one place
-//! the lock is taken, and nothing inside it enters the kernel again (an
-//! exception at EL1 is a diverging fault, which takes no lock and halts).
+//! Not reentrant, by design: the Rust half of an entry is where the lock is
+//! taken, and nothing inside it enters the kernel again (an exception at
+//! EL1 is a diverging fault, which takes no lock and halts). The one other
+//! taker is `smp::start`'s check of the kick (step 4(c)), on the boot core
+//! before any task runs, which holds it around an SGI to show the kicked
+//! core waits for it.
+//!
+//! A kick's SGI is taken like every IRQ, under this lock, and its sender
+//! holds this lock (`smp::kick` refuses otherwise) and never waits for the
+//! answer: a sender that waited holding the lock for a handler that needs
+//! it would deadlock. The plan first ruled the other way, that an SGI
+//! handler takes no lock and leaves a flag for the next tick; that would
+//! make the SGI no faster than the tick it is meant to beat.
 //! A core that finds the lock its own has broken that rule, and the kernel
 //! says so and halts rather than deadlock in silence. The diverging fault
 //! reporter does not take it either: it halts, and may be reporting from
