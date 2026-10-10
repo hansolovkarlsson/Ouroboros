@@ -590,6 +590,14 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
 /// task is a supervised server (fsd, cond, netd, accountd), the kernel
 /// restarts it from the image kept at boot - see `supervisor::restart`.
 extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
+    // The kernel lock around the whole handler (lock.rs); the halting
+    // arms below keep it, which is right: that core is done.
+    crate::lock::acquire();
+    el0_fault_locked(frame);
+    crate::lock::release();
+}
+
+fn el0_fault_locked(frame: *mut Context) {
     let (esr, far, elr): (u64, u64, u64);
     // SAFETY: pure system-register reads; still valid - nothing has
     // re-trapped since the fault (IRQs are masked from exception entry
@@ -669,6 +677,13 @@ pub fn set_net_intid(intid: u32) {
 /// switch happens. Must return normally (the trampoline restores from
 /// `frame` and `eret`s back) — never halt or diverge from here.
 extern "C" fn rust_irq_handler(frame: *mut Context) {
+    // The kernel lock around the whole tick (lock.rs).
+    crate::lock::acquire();
+    irq_locked(frame);
+    crate::lock::release();
+}
+
+fn irq_locked(frame: *mut Context) {
     let intid = unsafe { gic::acknowledge() };
 
     if intid == timer::INTID {

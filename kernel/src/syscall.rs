@@ -809,6 +809,15 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
 /// interrupts masked (see that function's own doc comment for why this
 /// is the only safe way to block on this kernel).
 pub extern "C" fn dispatch(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, frame: *mut Context) -> u64 {
+    // The kernel lock around the whole syscall (lock.rs): released before
+    // the trampoline's eret, whichever task that resumes.
+    crate::lock::acquire();
+    let result = dispatch_locked(number, arg0, arg1, arg2, arg3, frame);
+    crate::lock::release();
+    result
+}
+
+fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, frame: *mut Context) -> u64 {
     match number {
         syscall_abi::PRINT => {
             console::println!("Ouroboros kernel: syscall from EL0: print(arg0={arg0:#x})");
