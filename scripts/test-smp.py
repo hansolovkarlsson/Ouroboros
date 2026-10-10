@@ -52,8 +52,9 @@ def boot(smp):
     if "Ouroboros kernel" not in out:
         # The firmware stalled in its own boot and never loaded the kernel
         # (seen once here, and a known shape in test-usb-hub.py): not a
-        # result, and not a pass either.
-        print(f"INCONCLUSIVE -smp {smp}: the firmware never started the kernel; boot again")
+        # result, so none of this boot's checks is graded, and not a pass
+        # either, so the run still fails on this one line.
+        return [(f"INCONCLUSIVE -smp {smp}: the firmware never started the kernel; boot again", False)], faults
     count = COUNT_RE.search(out)
     cores = CORE_RE.findall(out)
     mpidrs = [m for _, m, _ in cores]
@@ -78,7 +79,8 @@ def main() -> int:
         checks += c
     failed = 0
     for name, good in checks:
-        print(f"{'ok  ' if good else 'FAIL'} {name}")
+        label = "ok  " if good else ("    " if name.startswith("INCONCLUSIVE") else "FAIL")
+        print(f"{label} {name}")
         failed += 0 if good else 1
     print(f"transcripts: {os.path.relpath(TRANSCRIPT.format(smp='{4,1}'), ROOT)}")
     return 1 if failed else 0
