@@ -22,9 +22,11 @@
 //! and `eret`s into EL1 with the MMU running, or, at EL1, writes the
 //! regime and turns the MMU on in place. Only then does it take its stack
 //! and call [`secondary_main`], which brings up this core's GIC interface,
-//! says `core N up at EL1`, and parks in `wfe` with every interrupt masked.
-//! Nothing is scheduled on a secondary yet; that is step 4. Its timer is
-//! not armed; the boot core's tick keeps every job it has.
+//! says `core N up at EL1`, and (step 4(b)) enters its own idle loop at
+//! EL0 through `resume_frame`, with its timer armed: from then on it
+//! alternates the idle loop and its tick, which only counts
+//! (`CORE_TICKS`) and returns. The boot core's tick keeps every job it
+//! has (step 3, decision 2); placing tasks on a secondary is step 4(d).
 //!
 //! A fault on a secondary halts that core alone: the vector table is the
 //! same, `rust_exception_handler` names the core (`core=N`, the MADT's
@@ -100,6 +102,26 @@ static BOOT_INDEX: AtomicU64 = AtomicU64::new(0);
 /// `STACK_CANARY` at the boot core's: an overflow overwrites it first.
 const STACK_CANARY: u64 = 0x5141_5141_5141_5141;
 
+/// Ticks taken on each core (class B): a secondary's own count, which the
+/// boot core's `TICKS` does not include (step 3, decision 2).
+static CORE_TICKS: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
+
+/// Whether this core is the boot core: the one whose tick does the
+/// scheduler's jobs and whose current task is the scheduler's.
+pub fn is_boot_core() -> bool {
+    core_index() == BOOT_INDEX.load(Ordering::Relaxed)
+}
+
+/// A secondary core's tick (step 4(b)): counted, and said once, the first
+/// time, so a rig can see that the core's timer fires and its IRQ path
+/// round-trips through EL0. The frame goes back unchanged: the idle loop.
+pub fn secondary_tick() {
+    let core = core_index() as usize;
+    if CORE_TICKS[core].fetch_add(1, Ordering::Relaxed) == 0 {
+        crate::console::println!("Ouroboros kernel: smp: core {core} ticking (its first tick, from its idle loop at EL0)");
+    }
+}
+
 /// A secondary core's stack. Smaller than the boot core's 256 KB: a parked
 /// core runs `secondary_main` and a fault report, and step 4 sizes it for
 /// tasks when it comes.
@@ -119,7 +141,7 @@ static STACKS: SyncCell<SecondaryStacks> =
 /// is its `STACKS` entry.
 pub(crate) fn this_core_stack_canary() -> (bool, u64) {
     let core = core_index();
-    if core == BOOT_INDEX.load(Ordering::Relaxed) {
+    if is_boot_core() {
         return (crate::stack_canary_intact(), crate::stacks().0.0);
     }
     let base = STACKS.get() as u64 + core * SECONDARY_STACK_SIZE as u64;
@@ -128,11 +150,11 @@ pub(crate) fn this_core_stack_canary() -> (bool, u64) {
     (unsafe { core::ptr::read_volatile(base as *const u64) } == STACK_CANARY, base)
 }
 
-/// Per core: 0 not started, [`CORE_UP_PARKED`] up and parked,
+/// Per core: 0 not started, [`CORE_UP_IDLE`] up and into its idle loop,
 /// [`CORE_FAILED`] parked without a GIC interface (class B). Written by the
 /// core itself, read by the boot core's wait in [`start`].
 static CORE_UP: [AtomicU8; MAX_CORES] = [const { AtomicU8::new(0) }; MAX_CORES];
-const CORE_UP_PARKED: u8 = 1;
+const CORE_UP_IDLE: u8 = 1;
 const CORE_FAILED: u8 = 2;
 
 /// This core's index, from `TPIDR_EL1`: 0 on the boot core (`main.rs`
@@ -259,32 +281,52 @@ extern "C" fn secondary_main(core: u64) -> ! {
     // A GIC that will not come up on this core is a line and a parked core
     // without one, not a panic: a panic on a secondary after the exit has
     // no path but the firmware's, which is gone.
-    if let Err(why) = unsafe { crate::gic::init_this_core() } {
-        crate::console::println!(
-            "Ouroboros kernel: smp: core {core} (mpidr {mpidr:#x}) has no GIC interface ({why}), parked without one"
-        );
-        CORE_UP[core as usize].store(CORE_FAILED, Ordering::Release);
-        loop {
-            unsafe { asm!("wfe", options(nomem, nostack, preserves_flags)) };
+    let gic = match unsafe { crate::gic::init_this_core() } {
+        Ok(this) => this,
+        Err(why) => {
+            crate::console::println!(
+                "Ouroboros kernel: smp: core {core} (mpidr {mpidr:#x}) has no GIC interface ({why}), parked without one"
+            );
+            CORE_UP[core as usize].store(CORE_FAILED, Ordering::Release);
+            loop {
+                unsafe { asm!("wfe", options(nomem, nostack, preserves_flags)) };
+            }
         }
-    }
+    };
+    // Everything the idle loop needs, before the line that claims it
+    // (step 4(b)): the idle view's tables (slot 1's, which map the loop's
+    // page for EL0; TTBR0 is per core), EL0's wfe allowed, the timer PPI
+    // enabled at this core's own interface and armed (interrupts stay
+    // masked at EL1, so it fires only once the loop runs), this core's
+    // current slot the idle slot.
+    crate::mmu::activate_task(crate::tasks::TaskIndex::IDLE);
+    crate::tasks::allow_el0_wfe();
+    unsafe { crate::gic::enable_ppi_this_core(crate::timer::INTID, gic) };
+    crate::tasks::set_current_idle_here();
+    crate::timer::arm(crate::timer::TICK_INTERVAL_MS);
     crate::console::println!(
-        "Ouroboros kernel: smp: core {core} up at EL{} (mpidr {mpidr:#x}, affinity {:#x}), parked",
+        "Ouroboros kernel: smp: core {core} up at EL{} (mpidr {mpidr:#x}, affinity {:#x}), idling",
         crate::el2::current_el(),
         madt::affinity(mpidr)
     );
-    // The mark after the line: a core counts as up only once it has
-    // survived its first console write, and `main.rs`'s set_quiet, which
-    // comes after `start` returns, cannot then drop a late up line.
-    CORE_UP[core as usize].store(CORE_UP_PARKED, Ordering::Release);
+    // The mark after the line and after the setup: a core counts as up
+    // only once it has survived its first console write and has nothing
+    // left to do but enter the loop, so the boot core's summary vouches
+    // for a state the core has reached (`main.rs`'s set_quiet comes after
+    // `start` returns and cannot drop a late up line; the `ticking` line,
+    // later, is a println and may be quieted: a signal, not a report).
+    CORE_UP[core as usize].store(CORE_UP_IDLE, Ordering::Release);
     // SAFETY: the one write to PARAMS happened before this core started.
     if unsafe { (*PARAMS.get()).fault_core } == core {
         crate::console::println!("Ouroboros kernel: smp: core {core} taking the \\SMPFAULT undefined instruction");
         unsafe { asm!("udf #0", options(nomem, nostack)) };
     }
-    loop {
-        unsafe { asm!("wfe", options(nomem, nostack, preserves_flags)) };
-    }
+    // The one entry into a task, tasks::enter_frame. From here the core
+    // alternates EL0 and its tick, every interrupt masked at EL1; its
+    // registers live in the frame on this stack, saved and restored by
+    // the tick's trampoline; slot 1's Context is the boot core's idle and
+    // is not touched.
+    unsafe { crate::tasks::enter_frame(crate::tasks::idle_context()) }
 }
 
 /// How long [`start`] waits for each core's up mark, in timer ticks of
@@ -295,8 +337,9 @@ fn wait_ticks() -> u64 {
 
 /// Starts every core the MADT lists but this one, and waits for each to
 /// report up. Logs one line per core and a summary. On the boot core,
-/// after the identity map, the vectors and `gic::init`; before the tick is
-/// armed (a secondary never arms its own).
+/// after the identity map, the vectors, `gic::init` and `tasks::init`
+/// (the idle page every core runs), before the console goes quiet; each
+/// secondary arms its own timer.
 ///
 /// # Safety
 /// Once, on the boot core, at EL1, with the console installed.
@@ -312,6 +355,7 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     match (0..n).find(|&i| cores.mpidr[i] == me) {
         Some(mine) => {
             BOOT_INDEX.store(mine as u64, Ordering::Relaxed);
+            crate::tasks::relocate_current(0, mine as u64);
             set_core_index(mine as u64);
         }
         None => {
@@ -382,7 +426,7 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
             core::hint::spin_loop();
         }
         match up_mark.load(Ordering::Acquire) {
-            CORE_UP_PARKED => up += 1,
+            CORE_UP_IDLE => up += 1,
             CORE_FAILED => {} // its own line said why
             _ => crate::console::println!("Ouroboros kernel: smp: core {i} (affinity {aff:#x}) did not report up within a second"),
         }

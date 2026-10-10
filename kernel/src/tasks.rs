@@ -162,19 +162,38 @@ mod task_index {
     /// [`current_index`] can only ever have been a `TaskIndex`'s index,
     /// and rebuilding one from it needs no check and no modulo. Lives in
     /// this module so that nothing outside it can store a bare `usize`.
-    static CURRENT: AtomicUsize = AtomicUsize::new(TaskIndex::FIRST.0);
+    /// One per core since multi-core step 4(b) (class B of the plan's
+    /// inventory), indexed by `smp::core_index()`: the boot core's entry
+    /// is the scheduler's current task; a secondary's is
+    /// [`TaskIndex::IDLE`] while it runs only its idle loop.
+    static CURRENT: [AtomicUsize; crate::madt::MAX_CORES] =
+        [const { AtomicUsize::new(TaskIndex::FIRST.0) }; crate::madt::MAX_CORES];
 
-    /// The running task's slot, as a [`TaskIndex`].
+    /// The running task's slot on this core, as a [`TaskIndex`].
     pub(crate) fn current_index() -> TaskIndex {
-        TaskIndex(CURRENT.load(Ordering::Relaxed))
+        TaskIndex(CURRENT[crate::smp::core_index() as usize].load(Ordering::Relaxed))
     }
 
-    /// The one store to `CURRENT`.
+    /// The one store to this core's `CURRENT`.
     pub(super) fn set_current(slot: TaskIndex) {
-        CURRENT.store(slot.0, Ordering::Relaxed);
+        CURRENT[crate::smp::core_index() as usize].store(slot.0, Ordering::Relaxed);
+    }
+
+    /// The boot core's index changed from 0 to the MADT's (`smp::start`):
+    /// its current slot moves with it.
+    pub(crate) fn relocate_current(from: u64, to: u64) {
+        let slot = CURRENT[from as usize].load(Ordering::Relaxed);
+        CURRENT[to as usize].store(slot, Ordering::Relaxed);
+    }
+
+    /// A secondary core, about to run its idle loop: its current slot is
+    /// the idle slot (the loop's code and nothing else; its registers live
+    /// in the frame on that core's own stack, not in the slot's).
+    pub(crate) fn set_current_idle_here() {
+        set_current(TaskIndex::IDLE);
     }
 }
-pub(crate) use task_index::{current_index, TaskIndex};
+pub(crate) use task_index::{current_index, relocate_current, set_current_idle_here, TaskIndex};
 use task_index::set_current;
 
 /// The send-mask ceiling, checked rather than described. [`caps_for_slot`]
@@ -2559,13 +2578,7 @@ pub unsafe fn init(
     unsafe { core::ptr::copy_nonoverlapping(start, idle_start, len) };
 
     let idle_addr = idle_start as u64;
-    *unsafe { &mut *TASKS[1].get() } = Context {
-        gpr: [0; 31],
-        sp_el0: idle_addr + IDLE_REGION_SIZE as u64,
-        elr_el1: idle_addr,
-        spsr_el1: 0,
-        ..Context::zeroed()
-    };
+    *unsafe { &mut *TASKS[1].get() } = idle_context();
     unsafe { *REGIONS[1].get() = (idle_addr, IDLE_REGION_SIZE as u64) };
     set_name(1, b"idle");
     clean_dcache_range(idle_addr, IDLE_REGION_SIZE as u64);
@@ -2631,17 +2644,7 @@ pub unsafe fn init(
     // EL0's own `wfe`/`wfi` traps to EL1 as a synchronous exception
     // instead of executing. Set once here, globally, for both tasks -
     // not per-task state.
-    unsafe {
-        asm!(
-            "mrs {tmp}, sctlr_el1",
-            "orr {tmp}, {tmp}, {bits}",
-            "msr sctlr_el1, {tmp}",
-            "isb",
-            tmp = out(reg) _,
-            bits = in(reg) (1u64 << 18) | (1u64 << 16),
-            options(nostack),
-        );
-    }
+    allow_el0_wfe();
     // Every slot live at boot gets its generation here: init is the one place
     // a slot becomes live outside `spawn`/`install_task`, and a boot task with
     // no generation has packed identity 0, which `SENDER_TASK` reports as "no
@@ -2696,7 +2699,43 @@ fn clean_dcache_range(addr: u64, len: u64) {
     }
 }
 
-/// Drops from EL1 into task 0. Never returns to its caller — the only way
+/// The idle loop's initial registers: `el0_idle_template` copied into
+/// `IDLE_REGION` by [`init`], a stack the loop never uses at the region's
+/// top, EL0t with interrupts unmasked. Slot 1's first context, and since
+/// multi-core step 4(b) what each secondary core enters its idle loop
+/// from (`smp.rs`, through [`enter_frame`]): every core runs the same two
+/// instructions from the same page.
+pub(crate) fn idle_context() -> Context {
+    let idle_addr = IDLE_REGION.get() as u64;
+    Context {
+        gpr: [0; 31],
+        sp_el0: idle_addr + IDLE_REGION_SIZE as u64,
+        elr_el1: idle_addr,
+        spsr_el1: 0,
+        ..Context::zeroed()
+    }
+}
+
+/// `SCTLR_EL1.nTWE` and `nTWI` (bits 18 and 16: the "n" means trapping is
+/// DISABLED), so EL0's `wfe` and `wfi` do not trap to EL1: the idle loop
+/// is a `wfe`, and before this was set it faulted on the first real
+/// hardware boot (the module doc). `SCTLR_EL1` is per core, so a secondary
+/// sets it for itself before its first `eret` into EL0.
+pub(crate) fn allow_el0_wfe() {
+    unsafe {
+        asm!(
+            "mrs {tmp}, sctlr_el1",
+            "orr {tmp}, {tmp}, {bits}",
+            "msr sctlr_el1, {tmp}",
+            "isb",
+            tmp = out(reg) _,
+            bits = in(reg) (1u64 << 18) | (1u64 << 16),
+            options(nostack),
+        );
+    }
+}
+
+/// Drops from EL1 into task 0. Never returns to its caller: the only way
 /// back to EL1 is a trap (syscall, fault, or the timer tick), handled
 /// entirely through `exceptions.rs`'s vector table from here on; every
 /// subsequent switch happens inside the tick's IRQ trampoline, not here.
@@ -2710,16 +2749,27 @@ pub unsafe fn start() -> ! {
     // explicitness, so this function's contract doesn't silently depend on
     // that ordering.
     crate::mmu::activate_task(TaskIndex::FIRST);
-    // Through the trampolines' own restore tail (`exceptions.rs`'s
-    // `resume_frame`), from a copy of task 0's Context laid out as a frame
-    // on this stack: the one entry into any task, so task 0 starts with
-    // every register its Context holds (x0-x30 included, which the eret
-    // this replaced never loaded, leaving the kernel's leftovers in them)
-    // and a secondary core's first entry, in step 4, has nothing of its
-    // own to get wrong. Multi-core step 3, decision 3.
+    // Through the one entry into any task (`enter_frame`), so task 0
+    // starts with every register its Context holds (x0-x30 included,
+    // which the eret this replaced never loaded, leaving the kernel's
+    // leftovers in them). Multi-core step 3, decision 3.
+    unsafe { enter_frame(*TASKS[TaskIndex::FIRST.index()].get()) }
+}
+
+/// The one entry into a task from this core: `ctx` laid out as a frame on
+/// this stack, `sp` moved to it, and `exceptions.rs`'s `resume_frame`,
+/// the trampolines' own restore-and-eret tail, so a task entered here and
+/// a task resumed after a tick are restored by the same instructions.
+/// Task 0 at boot and each secondary core's idle loop (`smp.rs`) enter
+/// through it; nothing else spells an eret into a task.
+///
+/// # Safety
+/// `ctx` must be a task's valid initial or saved registers for the view
+/// this core's `TTBR0` points at. Never returns.
+pub(crate) unsafe fn enter_frame(ctx: Context) -> ! {
     #[repr(C, align(16))]
     struct Frame(Context);
-    let frame = Frame(unsafe { *TASKS[TaskIndex::FIRST.index()].get() });
+    let frame = Frame(ctx);
     unsafe {
         asm!(
             "mov sp, {frame}",

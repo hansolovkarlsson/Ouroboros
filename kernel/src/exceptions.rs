@@ -126,7 +126,6 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::console;
 use crate::gic;
-use crate::halt;
 use crate::syscall;
 use crate::tasks;
 use crate::timer;
@@ -572,7 +571,11 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
             "Ouroboros kernel:   this core's kernel stack's canary is OVERWRITTEN: the stack overflowed below {stack_base:#x}"
         );
     }
-    halt()
+    // Whose halt: a core inside an entry (holding the kernel lock) or the
+    // boot core halts the kernel, a secondary holding nothing halts alone
+    // (power::halt, lock.rs). main.rs's silent halt was the old end here,
+    // and said nothing about either.
+    crate::power::halt()
 }
 
 /// The resumable EL0-fault path's Rust half, called from the vector
@@ -590,8 +593,9 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
 /// task is a supervised server (fsd, cond, netd, accountd), the kernel
 /// restarts it from the image kept at boot - see `supervisor::restart`.
 extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
-    // The kernel lock around the whole handler (lock.rs); the halting
-    // arms below keep it, which is right: that core is done.
+    // The kernel lock around the whole handler (lock.rs); a halting arm
+    // below halts the kernel with it held (power::halt), every core
+    // stopping at its next entry.
     crate::lock::acquire();
     el0_fault_locked(frame);
     crate::lock::release();
@@ -622,7 +626,7 @@ fn el0_fault_locked(frame: *mut Context) {
         console::println_force!(
             "Ouroboros kernel: task {slot} is the boot shell/idle - nothing to resume, halting"
         );
-        halt();
+        crate::power::halt();
     }
     console::println_force!("Ouroboros kernel: task {slot} killed after fault");
     // Both halves of the teardown (RAM, keyboard, pending calls; then
@@ -637,9 +641,11 @@ fn el0_fault_locked(frame: *mut Context) {
     }
     // One rebuild covers both the dropped region and (if the server
     // was restarted) its fresh one.
-    // SAFETY: IRQs are masked for the whole exception - single core,
-    // nothing else can observe the table set mid-rebuild, the same
-    // contract as the EXIT/KILL arms' rebuilds.
+    // SAFETY: IRQs are masked for the whole exception and this core holds
+    // the kernel lock, so no other kernel entry observes the table set
+    // mid-rebuild, the same contract as the EXIT/KILL arms' rebuilds. The
+    // idling secondary cores (step 4(b)) walk view 1's tables meanwhile;
+    // see rebuild_with_el0_regions for why that is sound today.
     unsafe { crate::mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
 }
 
@@ -686,6 +692,13 @@ extern "C" fn rust_irq_handler(frame: *mut Context) {
 fn irq_locked(frame: *mut Context) {
     let intid = unsafe { gic::acknowledge() };
 
+    // A secondary core (multi-core step 4(b)) takes its own timer and
+    // nothing else: a device interrupt that reached it (a GICv2 SPI routed
+    // by interface number, say) is acknowledged below and dropped, never
+    // acted on, since acting on it (on_net_irq) would switch this core
+    // into a task behind the scheduler's back. Devices are the boot
+    // core's, and so are the tick's jobs (step 3, decision 2).
+    let boot_core = crate::smp::is_boot_core();
     if intid == timer::INTID {
         // No longer logged every tick (used to print "tick N" here): now
         // that task 0 is a real interactive shell (tasks.rs/shell.rs), a
@@ -694,8 +707,13 @@ fn irq_locked(frame: *mut Context) {
         // comment) would constantly interleave with and corrupt whatever
         // the user is typing. TICKS is kept for whenever something wants an
         // uptime/tick-count query.
-        TICKS.fetch_add(1, Ordering::Relaxed);
         timer::arm(timer::TICK_INTERVAL_MS);
+        if !boot_core {
+            crate::smp::secondary_tick();
+            unsafe { gic::end_of_interrupt(intid) };
+            return;
+        }
+        TICKS.fetch_add(1, Ordering::Relaxed);
         // Unconditional again - see tasks.rs's `el0_idle_template` doc
         // comment for the real, found-and-fixed bug this used to work
         // around: the task switch itself hung the very first time it ran
@@ -711,7 +729,7 @@ fn irq_locked(frame: *mut Context) {
         // incrementing tick count - e.g. 1526 -> 1976 - across multiple
         // interactive commands, no hang).
         unsafe { tasks::on_tick(frame) };
-    } else if intid == NET_INTID.load(Ordering::Relaxed) {
+    } else if boot_core && intid == NET_INTID.load(Ordering::Relaxed) {
         // A NIC receive frame arrived (TX completions are suppressed at the
         // device, so this INTID always means receive - see virtio_net.rs).
         // Ack the device so it can raise the next one, then wake the network

@@ -18,16 +18,24 @@ use crate::{gicv2, gicv3};
 
 struct GicCell(Cell<Option<GicInfo>>);
 
-// SAFETY: single-core, no preemption, no interrupts unmasked until after
-// `init` has run - the `synccell` module's argument; this stays a `Cell`
-// rather than a `SyncCell` because its two users want `get`/`set` by value.
+// SAFETY: written once, by `configure` on the boot core before any second
+// core runs (`smp::start` comes after `init`), and read-only after: every
+// core's acknowledge, end-of-interrupt and per-core setup read it, and a
+// second `configure` is refused below, so the one write happens before
+// the first concurrent read. A `Cell` rather than a `SyncCell` because its
+// users want `get`/`set` by value.
 unsafe impl Sync for GicCell {}
 
 static INFO: GicCell = GicCell(Cell::new(None));
 
 /// Records which GIC this platform actually has, from `madt::discover`'s
-/// real MADT parse. Must be called once, before [`init`].
+/// real MADT parse. Once, before [`init`] and before any second core: a
+/// second call is the write-once rule broken, and halts with a line.
 pub fn configure(info: GicInfo) {
+    if INFO.0.get().is_some() {
+        crate::console::println_force!("Ouroboros kernel: gic::configure called twice; the GIC description is written once");
+        crate::power::halt();
+    }
     INFO.0.set(Some(info));
 }
 
@@ -70,14 +78,38 @@ pub unsafe fn init() {
 /// # Safety
 /// After [`init`] ran on the boot core; on a core with its MMU on the
 /// shared tables, IRQs masked.
-pub unsafe fn init_this_core() -> Result<(), &'static str> {
+pub unsafe fn init_this_core() -> Result<ThisCore, &'static str> {
     let info = info();
     match info.version {
         GicVersion::V2 => {
             unsafe { gicv2::init_cpu_interface(info.gicc_base as usize) };
-            Ok(())
+            Ok(ThisCore { sgi_base: 0 })
         }
-        GicVersion::V3 => unsafe { gicv3::init_this_core(info.gicr_base as usize, info.gicr_size as usize) }.map(|_frame| ()),
+        GicVersion::V3 => unsafe { gicv3::init_this_core(info.gicr_base as usize, info.gicr_size as usize) }
+            .map(|sgi_base| ThisCore { sgi_base }),
+    }
+}
+
+/// What [`init_this_core`] found for a secondary core: its GICv3 SGI_base
+/// frame (0 on GICv2), the one place its PPIs are enabled.
+#[derive(Clone, Copy)]
+pub struct ThisCore {
+    sgi_base: usize,
+}
+
+/// Enables the PPI `intid` on THIS core, on a secondary: GICv2's enable
+/// register for interrupts 0-31 is banked per core at one address, GICv3's
+/// is in this core's own redistributor frame, `this`'s. A PPI is per core
+/// by nature (the timer, 30), so [`enable_interrupt`], which the boot core
+/// used for its own, enables nothing for another core.
+///
+/// # Safety
+/// After [`init_this_core`] on this core, `this` being what it returned.
+pub unsafe fn enable_ppi_this_core(intid: u32, this: ThisCore) {
+    let info = info();
+    match info.version {
+        GicVersion::V2 => unsafe { gicv2::enable_interrupt(info.gicd_base as usize, intid) },
+        GicVersion::V3 => unsafe { gicv3::enable_ppi_on(this.sgi_base, intid) },
     }
 }
 

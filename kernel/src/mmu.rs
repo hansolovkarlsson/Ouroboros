@@ -1153,15 +1153,23 @@ fn check_attributes(planned: &[(u64, u64)]) {
 /// this core can observe the table set mid-rebuild. Every caller today is
 /// an exception entry (SVC, IRQ or EL0 fault) or runs inside one, which is
 /// what satisfies this; a caller from ordinary EL1 code with interrupts
-/// enabled would not, and must mask them first. Since multi-core step 2
-/// the parked secondary cores walk view 0's tables too (`smp.rs`,
-/// `boot_regime`), while this rewrites them in place: that is sound only
-/// because a parked core executes two instructions in the kernel block
-/// and reads nothing else, every entry it could walk is rewritten with an
-/// equal valid value by one 64-bit store, and the kernel block's
-/// attributes never change; a rebuild that zeroed a table first, or
-/// changed a kernel attribute, would need the inner-shareable
-/// invalidation (`tlbi vmalle1is`) and a shootdown, which are step 4's.
+/// enabled would not, and must mask them first. Since multi-core step
+/// 4(b) the secondary cores run their idle loop at EL0 from view 1's
+/// idle page and take their ticks through the vectors, their stacks and
+/// the GIC, all under view 1's tables (`smp.rs`), while this rewrites
+/// those tables in place on the boot core. That is sound today for two
+/// reasons, neither of which a check enforces yet: `build_tables` stores
+/// every entry of an existing view with one 64-bit store and never
+/// clears an entry before refilling it, so a secondary's walk sees the
+/// old value or the new, both valid, and the entries a secondary can
+/// touch (the kernel block, the idle region, the device blocks) are
+/// rewritten with EQUAL values, since only the respawned slot's region
+/// changes. `switch_full` ends with `tlbi vmalle1is`, so every core's
+/// stale entries go. A rebuild that cleared first, moved the idle region
+/// or changed a kernel attribute would break a running secondary with no
+/// warning; a double-buffered view, or a check that the rewrite is
+/// equal-or-valid, is owed with step 4(d), where secondaries run tasks of
+/// their own.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
@@ -1564,7 +1572,7 @@ unsafe fn switch_full(view: TaskIndex, built: &Planned) {
             "isb",                    // MAIR/TCR visible before TTBR0 switch
             "msr ttbr0_el1, {ttbr0}",
             "isb",                    // TTBR0 switch takes effect
-            "tlbi vmalle1",           // drop stale entries from firmware's tables
+            "tlbi vmalle1is",         // drop stale entries, on every core: a rebuild rewrites tables the parked cores walk too (step 4(b))
             "ic ialluis",             // drop stale I-cache lines tagged under the old tables
             "dsb ish",
             "isb",

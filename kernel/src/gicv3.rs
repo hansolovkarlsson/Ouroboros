@@ -212,8 +212,8 @@ pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
 /// for itself. Returns this core's SGI_base frame and does NOT store it:
 /// `SGI_BASE` is the boot core's (only [`init`] writes it), since
 /// `enable_interrupt` on the boot core reads it after the secondaries have
-/// started; a per-core array is step 4's, when a secondary enables
-/// anything of its own. `Err` names what refused, for a secondary to log
+/// started; a secondary enables its PPIs through the frame this returns
+/// (`gic::enable_ppi_this_core`), never through `SGI_BASE`. `Err` names what refused, for a secondary to log
 /// and park on rather than panic.
 ///
 /// # Safety
@@ -259,6 +259,17 @@ pub unsafe fn init_this_core(gicr_base: usize, gicr_size: usize) -> Result<usize
     Ok(sgi_base)
 }
 
+/// Enables the PPI `intid` at the redistributor whose SGI_base frame is
+/// `sgi_base`: the boot core's (`SGI_BASE`) from [`enable_interrupt`], a
+/// secondary's own from `gic::enable_ppi_this_core`.
+///
+/// # Safety
+/// `sgi_base` must be a woken redistributor's SGI_base frame.
+pub unsafe fn enable_ppi_on(sgi_base: usize, intid: u32) {
+    let bit = 1u32 << (intid % 32);
+    unsafe { write_reg32(sgi_base, GICR_ISENABLER0, bit) };
+}
+
 /// Enables forwarding of `intid`.
 ///
 /// A PPI (intid < 32, e.g. the timer, 30) is enabled at this CPU's own
@@ -275,9 +286,7 @@ pub unsafe fn init_this_core(gicr_base: usize, gicr_size: usize) -> Result<usize
 /// Must run after [`init`].
 pub unsafe fn enable_interrupt(intid: u32) {
     if intid < 32 {
-        let sgi_base = SGI_BASE.load(Ordering::Relaxed);
-        let bit = 1u32 << (intid % 32);
-        unsafe { write_reg32(sgi_base, GICR_ISENABLER0, bit) };
+        unsafe { enable_ppi_on(SGI_BASE.load(Ordering::Relaxed), intid) };
         return;
     }
     // SPI: distributor.

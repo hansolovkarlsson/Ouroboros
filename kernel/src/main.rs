@@ -947,9 +947,6 @@ extern "C" fn kernel_main() -> ! {
                 exceptions::set_net_intid(intid);
             }
         }
-        // The secondary cores, started and parked (smp.rs, multi-core step
-        // 2): after the distributor is up and before the tick is armed.
-        unsafe { smp::start(&madt::cores(), smp_fault) };
         timer::arm(timer::TICK_INTERVAL_MS);
         if let Some(intid) = nic_intid {
             console::println!(
@@ -968,6 +965,21 @@ extern "C" fn kernel_main() -> ! {
     // nothing to say it through (the framebuffer platforms).
     mmu::report_deferred_warnings();
     unsafe { tasks::init(&program, fsd.as_ref(), cond.as_ref(), netd.as_ref(), accountd.as_ref()) };
+
+    // The secondary cores, started and into their idle loops (smp.rs,
+    // multi-core steps 2 and 4(b)): only with a GIC (each brings up its
+    // own interface and timer; without one gic::info would panic on a
+    // secondary, where a panic has no path), after tasks::init has copied
+    // the idle loop into its page, which every core runs (started before
+    // it, the secondaries fetched zeros from that page and took an
+    // undefined instruction, the first run of 4(b)), and before the
+    // console goes quiet below, so every line start prints reaches a
+    // framebuffer-only console too.
+    if gic_info.is_some() {
+        unsafe { smp::start(&madt::cores(), smp_fault) };
+    } else {
+        console::println!("Ouroboros kernel: smp: no interrupt controller, the other cores are left off");
+    }
 
     console::println!("Ouroboros kernel: shell ready - type and press Enter");
 
@@ -1216,9 +1228,8 @@ fn init_entropy() {
 /// Parks the core forever instead of returning to firmware. `wfe` is a
 /// low-power spin (wait-for-event) rather than a busy loop.
 fn halt() -> ! {
-    loop {
-        unsafe {
-            core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
-        }
-    }
+    // Through power::halt since multi-core step 4(b): a boot-core ending
+    // marks the kernel halted (lock.rs), so a secondary's next entry parks
+    // with a line rather than spinning on a lock nobody will release.
+    power::halt()
 }
