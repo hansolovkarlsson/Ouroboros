@@ -935,6 +935,9 @@ extern "C" fn kernel_main() -> ! {
             gic::configure(info);
             gic::init();
             gic::enable_interrupt(timer::INTID);
+            // The kick SGI (smp.rs, step 4(c)): the boot core can be kicked
+            // too. A secondary enables its own.
+            gic::enable_interrupt(smp::KICK_SGI);
             // IRQ-driven NIC receive: enable the NIC's receive interrupt at
             // the GIC (an SPI - see virtio_net::intid / the GIC backends'
             // SPI paths) and tell the IRQ handler which INTID it is, so a

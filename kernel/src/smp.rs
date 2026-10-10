@@ -28,6 +28,16 @@
 //! (`CORE_TICKS`) and returns. The boot core's tick keeps every job it
 //! has (step 3, decision 2); placing tasks on a secondary is step 4(d).
 //!
+//! Any core can kick another into the kernel (step 4(c)): [`kick`] records
+//! a reason for the core and sends it [`KICK_SGI`], with the kernel lock
+//! held and without waiting; the kicked core takes the SGI through the
+//! ordinary IRQ path, under the same lock, and [`on_kick`] acts on every
+//! reason recorded. [`start`] checks it once per core: kicked with the lock
+//! held, a core must not answer until the lock is released, then must.
+//! There is no kick for a TLB shootdown: `tlbi vmalle1is` and `ic ialluis`
+//! reach every core in the inner-shareable domain in hardware, and every
+//! rewrite of the shared tables already ends with them (`mmu::switch_full`).
+//!
 //! A fault on a secondary halts that core alone: the vector table is the
 //! same, `rust_exception_handler` names the core (`core=N`, the MADT's
 //! index, which the boot core takes as its own once the table is read) and
@@ -39,7 +49,7 @@
 use crate::madt::{self, CoreList, MAX_CORES};
 use crate::synccell::SyncCell;
 use core::arch::{asm, global_asm};
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 /// What [`smp_secondary_entry`] reads with the MMU off: the EL1 regime and
 /// the register values the boot core wants every core to share. Field
@@ -120,6 +130,154 @@ pub fn secondary_tick() {
     if CORE_TICKS[core].fetch_add(1, Ordering::Relaxed) == 0 {
         crate::console::println!("Ouroboros kernel: smp: core {core} ticking (its first tick, from its idle loop at EL0)");
     }
+}
+
+/// The SGI that kicks a core into the kernel (step 4(c)): enabled on every
+/// core, taken by `exceptions.rs`'s IRQ path under the kernel lock like any
+/// other entry, and acted on by [`on_kick`].
+pub const KICK_SGI: u32 = 0;
+
+/// Why each core was kicked, a bit per reason (class B: one word per core,
+/// written by a sender and taken by the core itself, both under the kernel
+/// lock). Kicks merge: two senders before the core takes the SGI are one
+/// interrupt with two bits, and every bit is acted on.
+static KICKS: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(0) }; MAX_CORES];
+
+/// A kick that asks only to be answered: [`start`]'s check that every core
+/// takes an SGI, and takes it under the kernel lock. Step 4(d) adds the
+/// kick that ends a task running on the kicked core.
+const KICK_PING: u32 = 1 << 0;
+
+/// Pings each core has answered (class B, the core's own count).
+static PINGS_ANSWERED: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
+
+/// Kicks the core whose MADT index is `core`, for `reason`: the reason is
+/// recorded for it, then the SGI sent, and nothing waits for it to be
+/// taken. The caller holds the kernel lock, which the kicked core's handler
+/// takes, so the handler runs once the caller has released it and not
+/// before: a sender that waited for the answer while holding the lock
+/// would wait forever (the plan's one deadlock, `roadmap-smp.md`'s risks).
+/// Called without the lock, this halts the kernel with a line, the same
+/// broken rule as `lock.rs`'s. `Err` says why the core cannot be reached,
+/// with the reason taken back.
+fn kick(core: usize, reason: u32) -> Result<(), &'static str> {
+    if !crate::lock::held_by_me() {
+        crate::console::println_force!(
+            "Ouroboros kernel: smp: a kick sent by core {} without the kernel lock",
+            core_index()
+        );
+        crate::lock::halt_kernel();
+        crate::power::halt();
+    }
+    if core >= MAX_CORES {
+        return Err("no such core");
+    }
+    KICKS[core].fetch_or(reason, Ordering::Relaxed);
+    // SAFETY: the GIC is up (a core is started only with one), KICK_SGI is
+    // below 16, and `core` is in range; send_sgi orders the store above
+    // before the SGI.
+    let sent = unsafe { crate::gic::send_sgi(KICK_SGI, core) };
+    if sent.is_err() {
+        // Taken back under the same lock that every sender holds, so no
+        // other sender's bit is lost with it.
+        KICKS[core].fetch_and(!reason, Ordering::Relaxed);
+    }
+    sent
+}
+
+/// This core's [`KICK_SGI`], under the kernel lock (`exceptions.rs`'s IRQ
+/// path): every reason recorded for it since its last kick, acted on.
+pub fn on_kick() {
+    let core = core_index() as usize;
+    let reasons = KICKS[core].swap(0, Ordering::Relaxed);
+    if reasons & KICK_PING != 0 {
+        PINGS_ANSWERED[core].fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Which interrupt each core has acknowledged and is waiting for the
+/// kernel lock with, [`NOT_WAITING`] when none (class B: the core's own
+/// mark, read by [`ping`]). Set by `exceptions.rs`'s IRQ entry between the
+/// acknowledge and the lock, cleared once the lock is taken.
+static WAITING: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(NOT_WAITING) }; MAX_CORES];
+const NOT_WAITING: u32 = u32::MAX;
+
+/// This core has acknowledged `intid` and is about to wait for the kernel
+/// lock with it.
+pub fn note_waiting(intid: u32) {
+    WAITING[core_index() as usize].store(intid, Ordering::Release);
+}
+
+/// This core holds the kernel lock: it waits with nothing.
+pub fn note_in_kernel() {
+    WAITING[core_index() as usize].store(NOT_WAITING, Ordering::Release);
+}
+
+/// How many kicks [`ping`] sends before it gives up on seeing one arrive
+/// while the lock is held. An attempt is indecisive when the core takes
+/// its tick first and waits for the lock with that instead; the kick is
+/// then taken after the release, and the next attempt tries again.
+const PING_ATTEMPTS: usize = 5;
+
+/// [`start`]'s check of the kick, for one started core. Each attempt sends
+/// the kick with the kernel lock held and keeps holding it until the core
+/// is seen waiting for the lock with an interrupt it has acknowledged
+/// ([`WAITING`]). When that interrupt is the kick, the attempt is
+/// decisive: the lock is held a millisecond more, so a handler that acted
+/// before taking the lock would have answered, and the core must not have
+/// answered; then, the lock released, it must answer within a second.
+/// Decisive by observation, not by a timing assumption: a delivery slower
+/// than any fixed hold would otherwise pass a handler that skipped the
+/// lock (the review of #265). One line, which `make test-smp` reads.
+fn ping(core: usize) {
+    let me = core_index();
+    for _ in 0..PING_ATTEMPTS {
+        let before = PINGS_ANSWERED[core].load(Ordering::Acquire);
+        crate::lock::acquire();
+        if let Err(why) = kick(core, KICK_PING) {
+            crate::lock::release();
+            crate::console::println!("Ouroboros kernel: smp: core {core} cannot be kicked ({why})");
+            return;
+        }
+        let deadline = crate::timer::now_ticks() + wait_ticks();
+        let mut seen = NOT_WAITING;
+        while seen == NOT_WAITING && crate::timer::now_ticks() < deadline {
+            seen = WAITING[core].load(Ordering::Acquire);
+            core::hint::spin_loop();
+        }
+        let decisive = seen == KICK_SGI;
+        if decisive {
+            let until = crate::timer::now_ticks() + crate::timer::frequency_hz() / 1000;
+            while crate::timer::now_ticks() < until {
+                core::hint::spin_loop();
+            }
+        }
+        let answered_under_lock = PINGS_ANSWERED[core].load(Ordering::Acquire) != before;
+        crate::lock::release();
+        if answered_under_lock {
+            crate::console::println!(
+                "Ouroboros kernel: smp: core {core} answered a kick while core {me} held the kernel lock: its handler ran outside the lock"
+            );
+            return;
+        }
+        let deadline = crate::timer::now_ticks() + wait_ticks();
+        while PINGS_ANSWERED[core].load(Ordering::Acquire) == before && crate::timer::now_ticks() < deadline {
+            core::hint::spin_loop();
+        }
+        if PINGS_ANSWERED[core].load(Ordering::Acquire) == before {
+            crate::console::println!("Ouroboros kernel: smp: core {core} did not answer a kick within a second");
+            return;
+        }
+        if decisive {
+            crate::console::println!(
+                "Ouroboros kernel: smp: core {core} answered a kick from core {me}, once the kernel lock was free"
+            );
+            return;
+        }
+    }
+    crate::console::println!(
+        "Ouroboros kernel: smp: core {core} answered every kick but was never seen waiting with one while the lock was held ({PING_ATTEMPTS} attempts)"
+    );
 }
 
 /// A secondary core's stack. Smaller than the boot core's 256 KB: a parked
@@ -275,7 +433,9 @@ unsafe extern "C" {
 }
 
 /// A secondary core's Rust half, on its own stack, at EL1 with the MMU on:
-/// this core's GIC interface, the up line, then parked for good.
+/// this core's GIC interface, what another core needs to kick it and the
+/// kick enabled (step 4(c)), its timer, the up line, then (step 4(b)) its
+/// own idle loop at EL0, from which it takes its ticks and its kicks.
 extern "C" fn secondary_main(core: u64) -> ! {
     let mpidr = crate::gicv3::read_mpidr();
     // A GIC that will not come up on this core is a line and a parked core
@@ -302,6 +462,13 @@ extern "C" fn secondary_main(core: u64) -> ! {
     crate::mmu::activate_task(crate::tasks::TaskIndex::IDLE);
     crate::tasks::allow_el0_wfe();
     unsafe { crate::gic::enable_ppi_this_core(crate::timer::INTID, gic) };
+    // The kick (step 4(c)): what another core needs to send this one an
+    // SGI, and the SGI enabled here. A core that cannot be sent one still
+    // idles; the boot core's ping says it cannot be kicked.
+    if let Err(why) = unsafe { crate::gic::note_this_core(core as usize) } {
+        crate::console::println!("Ouroboros kernel: smp: core {core} cannot be sent an SGI ({why})");
+    }
+    unsafe { crate::gic::enable_ppi_this_core(KICK_SGI, gic) };
     crate::tasks::set_current_idle_here();
     crate::timer::arm(crate::timer::TICK_INTERVAL_MS);
     crate::console::println!(
@@ -357,6 +524,15 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
             BOOT_INDEX.store(mine as u64, Ordering::Relaxed);
             crate::tasks::relocate_current(0, mine as u64);
             set_core_index(mine as u64);
+            // The boot core can be kicked too, once its index is the MADT's,
+            // when there is another core to kick it: a uniprocessor GICv2
+            // reads ITARGETSR as zero (RAZ by the architecture), and a
+            // line saying so would be about a sender that does not exist.
+            if n > 1 {
+                if let Err(why) = unsafe { crate::gic::note_this_core(mine) } {
+                    crate::console::println!("Ouroboros kernel: smp: core {mine} (the boot core) cannot be sent an SGI ({why})");
+                }
+            }
         }
         None => {
             crate::console::println!(
@@ -435,4 +611,15 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
         "Ouroboros kernel: smp: {up} of {started} started cores up, {} cores in all",
         cores.count
     );
+    // Every core that came up must take a kick, and only once the kernel
+    // lock is free (step 4(c)). On every boot, not behind a flag: the line
+    // is the one check of SGI delivery a hardware boot log has (the Pi's
+    // and Parallels' are read by eye), and it costs the time a kick takes
+    // to arrive, a few milliseconds per core, plus a second for a core
+    // that is up but cannot take one, which is the case it reports.
+    for (i, up_mark) in CORE_UP.iter().enumerate().take(n) {
+        if up_mark.load(Ordering::Acquire) == CORE_UP_IDLE {
+            ping(i);
+        }
+    }
 }

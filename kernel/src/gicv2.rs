@@ -21,10 +21,14 @@
 //! same discipline as `mmu.rs`'s descriptor bits.
 
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicU8, Ordering};
+
+use crate::madt::MAX_CORES;
 
 const GICD_CTLR: usize = 0x000;
 const GICD_ISENABLER: usize = 0x100; // + 4 * (intid / 32)
 const GICD_ITARGETSR: usize = 0x800; // + intid (one target byte per intid)
+const GICD_SGIR: usize = 0xf00;
 
 const GICC_CTLR: usize = 0x000;
 const GICC_PMR: usize = 0x004;
@@ -74,24 +78,79 @@ pub unsafe fn init_cpu_interface(gicc_base: usize) {
 /// ITARGETSR0 to 7 (interrupts 0 to 31) read back as the reading core's
 /// own mask in every byte, on a core whose byte is nonzero; the first
 /// nonzero byte of the eight is it (Linux's `gic_get_cpumask` scans the
-/// same way). A GIC on which every byte reads 0 gives 0x01, CPU 0, the
-/// constant this used to be, and a line says so, since an SPI routed to a
-/// mask of zero reaches no core and nothing would otherwise report it.
+/// same way). `None` when every byte reads 0.
 ///
 /// # Safety
 /// After [`init`], on the core whose mask is wanted.
-unsafe fn own_target_mask(gicd_base: usize) -> u32 {
+unsafe fn read_own_target_mask(gicd_base: usize) -> Option<u32> {
     for i in 0..8 {
         let word = unsafe { read_reg(gicd_base, GICD_ITARGETSR + 4 * i) };
         for byte in 0..4 {
             let mask = (word >> (8 * byte)) & 0xff;
             if mask != 0 {
-                return mask;
+                return Some(mask);
             }
         }
     }
-    crate::console::println!("Ouroboros kernel: GICv2: this core's target mask reads 0 in ITARGETSR0-7; routing SPIs to CPU 0");
-    0x01
+    None
+}
+
+/// [`read_own_target_mask`] for routing an SPI: a GIC on which every byte
+/// reads 0 gives 0x01, CPU 0, the constant this used to be, and a line
+/// says so, since an SPI routed to a mask of zero reaches no core and
+/// nothing would otherwise report it.
+///
+/// # Safety
+/// As [`read_own_target_mask`].
+unsafe fn own_target_mask(gicd_base: usize) -> u32 {
+    unsafe { read_own_target_mask(gicd_base) }.unwrap_or_else(|| {
+        crate::console::println!("Ouroboros kernel: GICv2: this core's target mask reads 0 in ITARGETSR0-7; routing SPIs to CPU 0");
+        0x01
+    })
+}
+
+/// Each core's CPU interface mask, by MADT index, 0 for unknown (class B
+/// of the plan's inventory: written by each core for itself, by
+/// [`note_this_core`], read by any core that sends it an SGI). GICv2 names
+/// an SGI's target by this mask, not by MPIDR, and only the core itself
+/// can read its own (the banked `ITARGETSR0`-`7`).
+static CPU_MASKS: [AtomicU8; MAX_CORES] = [const { AtomicU8::new(0) }; MAX_CORES];
+
+/// Records this core's interface mask under `core`, its MADT index, for
+/// [`send_sgi`]. `Err` when the GIC gives it none: the core then cannot be
+/// sent an SGI, and its caller says so.
+///
+/// # Safety
+/// After [`init`], on the core whose index is `core`.
+pub unsafe fn note_this_core(gicd_base: usize, core: usize) -> Result<(), &'static str> {
+    match unsafe { read_own_target_mask(gicd_base) } {
+        Some(mask) => {
+            CPU_MASKS[core].store(mask as u8, Ordering::Release);
+            Ok(())
+        }
+        None => Err("its GICv2 target mask reads 0 in ITARGETSR0-7"),
+    }
+}
+
+/// Sends SGI `sgi` (0 to 15) to the core whose MADT index is `core`,
+/// through `GICD_SGIR` with the target-list filter 0 (the listed CPUs
+/// only). `Err` when that core never recorded its mask ([`note_this_core`]).
+/// Prior stores are made visible first (`dsb ishst`), so the target's
+/// handler sees what the sender wrote before the SGI (Linux's
+/// `gic_ipi_send_mask` orders the same way).
+///
+/// # Safety
+/// After [`init`]; `sgi` below 16.
+pub unsafe fn send_sgi(gicd_base: usize, sgi: u32, core: usize) -> Result<(), &'static str> {
+    let mask = u32::from(CPU_MASKS[core].load(Ordering::Acquire));
+    if mask == 0 {
+        return Err("no GICv2 interface mask recorded for that core");
+    }
+    unsafe {
+        core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+        write_reg(gicd_base, GICD_SGIR, (mask << 16) | (sgi & 0xf));
+    }
+    Ok(())
 }
 
 /// Enables forwarding of `intid` from the distributor to CPU interfaces.
@@ -136,7 +195,10 @@ pub unsafe fn enable_interrupt(gicd_base: usize, intid: u32) {
 
 /// Reads the highest-priority pending interrupt ID and acknowledges it
 /// (removing it from the pending set) — must be paired with [`end_of_interrupt`]
-/// once handled, or the GIC will never consider it complete.
+/// once handled, or the GIC will never consider it complete. The whole
+/// `GICC_IAR`: for an SGI, bits 12:10 name the CPU that sent it, and the
+/// end of interrupt must write them back, so the interrupt ID is
+/// [`intid_of`] this value and not the value itself.
 ///
 /// # Safety
 /// Must run after [`init`], from IRQ-handling context.
@@ -144,12 +206,18 @@ pub unsafe fn acknowledge(gicc_base: usize) -> u32 {
     unsafe { read_reg(gicc_base, GICC_IAR) }
 }
 
-/// Signals that the interrupt `intid` (as returned by [`acknowledge`]) has
-/// been fully handled.
+/// Signals that the interrupt `iar` (the whole value [`acknowledge`]
+/// returned, source CPU included) has been fully handled.
 ///
 /// # Safety
-/// Must run after [`init`], with `intid` from a matching [`acknowledge`]
+/// Must run after [`init`], with `iar` from a matching [`acknowledge`]
 /// call.
-pub unsafe fn end_of_interrupt(gicc_base: usize, intid: u32) {
-    unsafe { write_reg(gicc_base, GICC_EOIR, intid) };
+pub unsafe fn end_of_interrupt(gicc_base: usize, iar: u32) {
+    unsafe { write_reg(gicc_base, GICC_EOIR, iar) };
+}
+
+/// The interrupt ID in a `GICC_IAR` value: bits 9:0, without an SGI's
+/// source CPU.
+pub fn intid_of(iar: u32) -> u32 {
+    iar & 0x3ff
 }

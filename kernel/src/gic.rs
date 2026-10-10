@@ -10,6 +10,12 @@
 //! scoping notes for why a facade was chosen over matching
 //! `madt::GicVersion` at every call site instead (more churn for no real
 //! benefit, since every call site would need the match anyway).
+//!
+//! Multi-core step 4(c) changed the IRQ path's two call sites after all:
+//! `acknowledge` returns an [`Acked`], whose ID is [`Acked::intid`] and
+//! whose whole value only [`end_of_interrupt`] reads, since a GICv2 SGI's
+//! acknowledge carries its sending CPU and the end of interrupt must too.
+//! The same step added [`send_sgi`] and [`note_this_core`].
 
 use core::cell::Cell;
 
@@ -97,11 +103,12 @@ pub struct ThisCore {
     sgi_base: usize,
 }
 
-/// Enables the PPI `intid` on THIS core, on a secondary: GICv2's enable
-/// register for interrupts 0-31 is banked per core at one address, GICv3's
-/// is in this core's own redistributor frame, `this`'s. A PPI is per core
-/// by nature (the timer, 30), so [`enable_interrupt`], which the boot core
-/// used for its own, enables nothing for another core.
+/// Enables the PPI or SGI `intid` (below 32) on THIS core, on a secondary:
+/// GICv2's enable register for interrupts 0-31 is banked per core at one
+/// address, GICv3's is in this core's own redistributor frame, `this`'s. A
+/// PPI is per core by nature (the timer, 30), and so is whether a core
+/// takes an SGI (`smp::KICK_SGI`), so [`enable_interrupt`], which the boot
+/// core used for its own, enables nothing for another core.
 ///
 /// # Safety
 /// After [`init_this_core`] on this core, `this` being what it returned.
@@ -125,26 +132,88 @@ pub unsafe fn enable_interrupt(intid: u32) {
     }
 }
 
-/// Reads the highest-priority pending interrupt ID and acknowledges it.
-///
-/// # Safety
-/// Must run after [`init`], from IRQ-handling context.
-pub unsafe fn acknowledge() -> u32 {
-    match info().version {
-        GicVersion::V2 => unsafe { gicv2::acknowledge(info().gicc_base as usize) },
-        GicVersion::V3 => unsafe { gicv3::acknowledge() },
+/// An acknowledged interrupt: what the CPU interface's acknowledge read,
+/// whole, for [`end_of_interrupt`] to write back. On GICv2 an SGI's value
+/// carries the sending CPU in bits 12:10 and the end of interrupt must
+/// carry it too, so the interrupt's ID is [`Acked::intid`], and the raw
+/// value is reachable only through the end of interrupt (step 4(c), the
+/// first interrupt whose acknowledge is not its ID).
+#[derive(Clone, Copy)]
+pub struct Acked {
+    raw: u32,
+    intid: u32,
+}
+
+impl Acked {
+    /// The interrupt's ID (1023 when spurious).
+    pub fn intid(self) -> u32 {
+        self.intid
     }
 }
 
-/// Signals that the interrupt `intid` (as returned by [`acknowledge`]) has
-/// been fully handled.
+/// Reads the highest-priority pending interrupt and acknowledges it.
 ///
 /// # Safety
-/// Must run after [`init`], with `intid` from a matching [`acknowledge`]
+/// Must run after [`init`], from IRQ-handling context.
+pub unsafe fn acknowledge() -> Acked {
+    let info = info();
+    match info.version {
+        GicVersion::V2 => {
+            let raw = unsafe { gicv2::acknowledge(info.gicc_base as usize) };
+            Acked { raw, intid: gicv2::intid_of(raw) }
+        }
+        GicVersion::V3 => {
+            let raw = unsafe { gicv3::acknowledge() };
+            Acked { raw, intid: raw }
+        }
+    }
+}
+
+/// Signals that the interrupt `acked` (from [`acknowledge`]) has been fully
+/// handled.
+///
+/// # Safety
+/// Must run after [`init`], with `acked` from a matching [`acknowledge`]
 /// call.
-pub unsafe fn end_of_interrupt(intid: u32) {
+pub unsafe fn end_of_interrupt(acked: Acked) {
     match info().version {
-        GicVersion::V2 => unsafe { gicv2::end_of_interrupt(info().gicc_base as usize, intid) },
-        GicVersion::V3 => unsafe { gicv3::end_of_interrupt(intid) },
+        GicVersion::V2 => unsafe { gicv2::end_of_interrupt(info().gicc_base as usize, acked.raw) },
+        GicVersion::V3 => unsafe { gicv3::end_of_interrupt(acked.raw) },
+    }
+}
+
+/// Records what another core needs to send THIS core an SGI, under `core`,
+/// this core's MADT index: on GICv2 its CPU interface mask, which only the
+/// core itself can read; on GICv3 nothing, since an SGI names its target by
+/// the MADT's affinity. Every core, the boot core once its index is the
+/// MADT's. `Err` says why this core cannot be sent one.
+///
+/// # Safety
+/// After [`init`] (and on a secondary [`init_this_core`]), on the core
+/// whose index is `core`.
+pub unsafe fn note_this_core(core: usize) -> Result<(), &'static str> {
+    let info = info();
+    match info.version {
+        GicVersion::V2 => unsafe { gicv2::note_this_core(info.gicd_base as usize, core) },
+        GicVersion::V3 => Ok(()),
+    }
+}
+
+/// Sends SGI `sgi` (0 to 15) to the core whose MADT index is `core`. Never
+/// waits for it to be taken: a sender may hold the kernel lock, and the
+/// target's handler takes that lock (`smp::kick`). Stores made before the
+/// call are visible to the target's handler. `Err` says why the core
+/// cannot be reached.
+///
+/// # Safety
+/// After [`init`]; `sgi` below 16; `core` a core [`note_this_core`] ran on.
+pub unsafe fn send_sgi(sgi: u32, core: usize) -> Result<(), &'static str> {
+    let info = info();
+    match info.version {
+        GicVersion::V2 => unsafe { gicv2::send_sgi(info.gicd_base as usize, sgi, core) },
+        GicVersion::V3 => match crate::madt::mpidr(core) {
+            Some(mpidr) => unsafe { gicv3::send_sgi(sgi, info.gicd_base as usize, mpidr) },
+            None => Err("no such core in the MADT"),
+        },
     }
 }

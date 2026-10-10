@@ -136,6 +136,14 @@ pub fn affinity(mpidr: u64) -> u64 {
     mpidr & 0xff_00ff_ffff
 }
 
+/// Core `core`'s affinity as the MADT records it, without copying the
+/// list: `None` past the cores it lists.
+pub fn mpidr(core: usize) -> Option<u64> {
+    // SAFETY: as `cores`.
+    let cores = unsafe { &*CORES.get() };
+    (core < cores.count.min(MAX_CORES)).then(|| cores.mpidr[core])
+}
+
 /// The cores [`discover`] found; empty before it ran or when it failed.
 pub fn cores() -> CoreList {
     // SAFETY: written once by `discover` before the exit and before any

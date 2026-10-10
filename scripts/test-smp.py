@@ -8,8 +8,11 @@ core affinity A, mpidr M)` and one `MADT: core i: mpidr M, enabled` line per
 core (step 1): N must be the `-smp` count, with N distinct MPIDRs, the boot
 core's affinity among them, every core enabled. Then (step 2) the boot core
 starts every other core through PSCI `CPU_ON`, and each must say
-`smp: core i up at EL1 (...), parked`, the summary must say all started
-cores are up, the shell must come up and answer `help`, and after a dwell
+`smp: core i up at EL1 (...), idling` and then (step 4(b)) that it is
+ticking, the summary must say all started cores are up, each must answer
+the boot core's kick SGI only once the kernel lock is free (step 4(c): the
+boot core holds the lock 50 ms after the send, and a core whose handler
+ran under it would say so), the shell must come up and answer `help`, and after a dwell
 of DWELL seconds with the other cores parked it must still answer `echo`
 (nothing on a parked core may disturb the boot core), with no fault line in
 QEMU's own trace.
@@ -34,12 +37,14 @@ QEMU's own trace.
    `halted alone, holding nothing` and never `system halted`, and the boot
    core's shell must still answer: a fault on a core holding no kernel
    lock halts that core alone (a core inside an entry, or the boot core,
-   halts the kernel, and every other core parks at its next entry).
+   halts the kernel, and every other core parks at its next entry). The
+   halted core must not answer its kick, and the boot core must say so.
 
 A boot with no `Ouroboros kernel` line is the firmware stalling in its own
 boot, which happens; the rig says INCONCLUSIVE for that boot and does not
 pass. About seven minutes. Run it whenever smp.rs, el2.rs, madt.rs's GICC
-parse, the GIC backends' per-core init or the console lock changes.
+parse, the GIC backends' per-core init or SGIs, the kernel lock or the
+console lock changes.
 """
 import importlib.util
 import os
@@ -64,6 +69,8 @@ CORE_RE = re.compile(r"MADT: core (\d+): mpidr (0x[0-9a-f]+), (enabled|disabled)
 UP_RE = re.compile(r"smp: core (\d+) up at EL(\d) \(mpidr 0x[0-9a-f]+, affinity 0x[0-9a-f]+\), idling")
 TICK_RE = re.compile(r"smp: core (\d+) ticking \(its first tick, from its idle loop at EL0\)")
 SUMMARY_RE = re.compile(r"smp: (\d+) of (\d+) started cores up, (\d+) cores in all")
+KICK_RE = re.compile(r"smp: core (\d+) answered a kick from core (\d+), once the kernel lock was free")
+KICK_FAIL_RE = re.compile(r"smp: core (\d+)(?: \(the boot core\))? (answered a kick while core \d+ held the kernel lock|cannot be kicked|cannot be sent an SGI|did not answer a kick within a second|answered every kick but was never seen waiting with one)")
 
 
 def boot(name, smp, machine="virt", esp=None, fault=False):
@@ -109,10 +116,20 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
     up_cores = sorted(int(i) for i, _ in ups)
     ticking = sorted(int(i) for i in TICK_RE.findall(out))
     taking = re.search(r"smp: core (\d+) taking the \\SMPFAULT undefined instruction", out)
+    # The boot core's MADT index, from the table, not assumed 0: the kernel
+    # takes whichever index lists its affinity (ACPI fixes no order on ARM).
+    boot_index = next((int(i) for i, m, _ in cores if count and m == count.group(3)), 0)
+    secondaries = [i for i in range(smp) if i != boot_index]
     # The core that takes the \SMPFAULT fault halts before its idle loop,
     # so it is the one core expected not to tick.
-    expected_ticking = [i for i in range(1, smp) if not (taking and i == int(taking.group(1)))]
+    expected_ticking = [i for i in secondaries if not (taking and i == int(taking.group(1)))]
     summary = SUMMARY_RE.search(out)
+    kicked = sorted(int(i) for i, _ in KICK_RE.findall(out))
+    kick_fails = KICK_FAIL_RE.findall(out)
+    # The \SMPFAULT victim halted with every interrupt masked: the one core
+    # expected not to answer, and to be named for it.
+    victim_silent = [(i, why) for i, why in kick_fails if taking and i == taking.group(1) and why.startswith("did not answer")]
+    other_fails = [f"core {i} {why}" for i, why in kick_fails if (i, why) not in victim_silent]
     others = smp - 1
     checks = [
         (f"{name}: driven to the shell, `help` answered", ok),
@@ -122,12 +139,17 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
          len(cores) == smp and len(set(mpidrs)) == smp and [int(i) for i, _, _ in cores] == list(range(smp))),
         (f"{name}: the boot core's affinity is among them", count is not None and count.group(3) in mpidrs),
         (f"{name}: every core enabled", len(cores) == smp and all(e == "enabled" for _, _, e in cores)),
-        (f"{name}: every other core says up at EL1 and idling ({others} of them)" + (f" (saw cores {up_cores})" if up_cores != list(range(1, smp)) else ""),
-         up_cores == list(range(1, smp)) and all(el == "1" for _, el in ups)),
+        (f"{name}: every other core says up at EL1 and idling ({others} of them)" + (f" (saw cores {up_cores})" if up_cores != secondaries else ""),
+         up_cores == secondaries and all(el == "1" for _, el in ups)),
         (f"{name}: every other core took its first tick from its idle loop at EL0 ({len(expected_ticking)} of them)" + (f" (saw cores {ticking})" if ticking != expected_ticking else ""),
          ticking == expected_ticking),
         (f"{name}: the summary says {others} of {others} started cores up, {smp} in all",
          summary is not None and summary.groups() == (str(others), str(others), str(smp))),
+        (f"{name}: every other core answered a kick SGI from the boot core once the kernel lock was free ({len(expected_ticking)} of them)"
+         + (f" (saw cores {kicked})" if kicked != expected_ticking else ""),
+         kicked == expected_ticking and all(src == str(boot_index) for _, src in KICK_RE.findall(out))),
+        (f"{name}: no core answered a kick under the lock, or could not be kicked"
+         + (f" (saw: {'; '.join(other_fails)})" if other_fails else ""), not other_fails),
         (f"{name}: the shell still answers after a {DWELL} s dwell with the other cores idling and ticking", dwell_ok),
     ]
     if "virtualization=on" in machine:
@@ -139,6 +161,7 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
             (f"{name}: the fault line names that core (EXCEPTION core={victim}, an undefined instruction, esr 0x2000000)",
              taking is not None and re.search(rf"EXCEPTION core={victim} vector=\d+ esr_el1=0x2000000 ", out) is not None),
             (f"{name}: no other core's fault line", taking is not None and re.search(rf"EXCEPTION core=(?!{victim} )", out) is None),
+            (f"{name}: the halted core did not answer its kick, and said so", len(victim_silent) == 1),
             (f"{name}: that core halted alone, holding nothing, and the kernel did not halt",
              taking is not None and f"core {victim} halted alone, holding nothing; the rest go on" in out and "system halted" not in out),
         ]
