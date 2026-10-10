@@ -18,16 +18,24 @@ use crate::{gicv2, gicv3};
 
 struct GicCell(Cell<Option<GicInfo>>);
 
-// SAFETY: single-core, no preemption, no interrupts unmasked until after
-// `init` has run - the `synccell` module's argument; this stays a `Cell`
-// rather than a `SyncCell` because its two users want `get`/`set` by value.
+// SAFETY: written once, by `configure` on the boot core before any second
+// core runs (`smp::start` comes after `init`), and read-only after: every
+// core's acknowledge, end-of-interrupt and per-core setup read it, and a
+// second `configure` is refused below, so the one write happens before
+// the first concurrent read. A `Cell` rather than a `SyncCell` because its
+// users want `get`/`set` by value.
 unsafe impl Sync for GicCell {}
 
 static INFO: GicCell = GicCell(Cell::new(None));
 
 /// Records which GIC this platform actually has, from `madt::discover`'s
-/// real MADT parse. Must be called once, before [`init`].
+/// real MADT parse. Once, before [`init`] and before any second core: a
+/// second call is the write-once rule broken, and halts with a line.
 pub fn configure(info: GicInfo) {
+    if INFO.0.get().is_some() {
+        crate::console::println_force!("Ouroboros kernel: gic::configure called twice; the GIC description is written once");
+        crate::power::halt();
+    }
     INFO.0.set(Some(info));
 }
 

@@ -241,8 +241,10 @@ the task's registers are.
       had not: the secondaries were started before `tasks::init` had
       copied the idle loop into its page and executed zeros (now started
       after it), and a core that faulted inside an entry halted holding
-      the kernel lock, so the boot core's shell never came up (`halt`
-      releases it first). `make test-smp` requires each secondary's
+      the kernel lock, so the boot core's shell never came up (a halt now
+      tells two cases apart: a core holding the lock, or the boot core,
+      halts the kernel, `lock::HALTED`, and every other core parks at its
+      next entry; a secondary holding nothing halts alone). `make test-smp` requires each secondary's
       `ticking` line, the `\SMPFAULT` victim excepted, on every boot
       shape. Nothing is placed on a secondary yet. (c) the SGI for kills, owner
       changes and TLB shootdown; (d) placement, round-robin across cores

@@ -694,20 +694,11 @@ fn irq_locked(frame: *mut Context) {
 
     // A secondary core (multi-core step 4(b)) takes its own timer and
     // nothing else: a device interrupt that reached it (a GICv2 SPI routed
-    // by interface number, say) is acknowledged and dropped, never acted
-    // on, since acting on it (on_net_irq) would switch this core into a
-    // task behind the scheduler's back. Devices are the boot core's.
-    if !crate::smp::is_boot_core() {
-        if intid == timer::INTID {
-            timer::arm(timer::TICK_INTERVAL_MS);
-            crate::smp::secondary_tick();
-        }
-        if intid != SPURIOUS_INTID {
-            unsafe { gic::end_of_interrupt(intid) };
-        }
-        return;
-    }
-
+    // by interface number, say) is acknowledged below and dropped, never
+    // acted on, since acting on it (on_net_irq) would switch this core
+    // into a task behind the scheduler's back. Devices are the boot
+    // core's, and so are the tick's jobs (step 3, decision 2).
+    let boot_core = crate::smp::is_boot_core();
     if intid == timer::INTID {
         // No longer logged every tick (used to print "tick N" here): now
         // that task 0 is a real interactive shell (tasks.rs/shell.rs), a
@@ -717,8 +708,11 @@ fn irq_locked(frame: *mut Context) {
         // the user is typing. TICKS is kept for whenever something wants an
         // uptime/tick-count query.
         timer::arm(timer::TICK_INTERVAL_MS);
-        // The tick's jobs are the boot core's (multi-core step 3, decision
-        // 2); a secondary's tick returned above.
+        if !boot_core {
+            crate::smp::secondary_tick();
+            unsafe { gic::end_of_interrupt(intid) };
+            return;
+        }
         TICKS.fetch_add(1, Ordering::Relaxed);
         // Unconditional again - see tasks.rs's `el0_idle_template` doc
         // comment for the real, found-and-fixed bug this used to work
@@ -735,7 +729,7 @@ fn irq_locked(frame: *mut Context) {
         // incrementing tick count - e.g. 1526 -> 1976 - across multiple
         // interactive commands, no hang).
         unsafe { tasks::on_tick(frame) };
-    } else if intid == NET_INTID.load(Ordering::Relaxed) {
+    } else if boot_core && intid == NET_INTID.load(Ordering::Relaxed) {
         // A NIC receive frame arrived (TX completions are suppressed at the
         // device, so this INTID always means receive - see virtio_net.rs).
         // Ack the device so it can raise the next one, then wake the network

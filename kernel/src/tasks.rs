@@ -188,7 +188,7 @@ mod task_index {
 
     /// A secondary core, about to run its idle loop: its current slot is
     /// the idle slot (the loop's code and nothing else; its registers live
-    /// in `smp::IDLE_CONTEXTS`, not in the slot's).
+    /// in the frame on that core's own stack, not in the slot's).
     pub(crate) fn set_current_idle_here() {
         set_current(TaskIndex::IDLE);
     }
@@ -2699,18 +2699,12 @@ fn clean_dcache_range(addr: u64, len: u64) {
     }
 }
 
-/// Drops from EL1 into task 0. Never returns to its caller — the only way
-/// back to EL1 is a trap (syscall, fault, or the timer tick), handled
-/// entirely through `exceptions.rs`'s vector table from here on; every
-/// subsequent switch happens inside the tick's IRQ trampoline, not here.
-///
-/// # Safety
-/// Must be called after [`init`].
 /// The idle loop's initial registers: `el0_idle_template` copied into
 /// `IDLE_REGION` by [`init`], a stack the loop never uses at the region's
 /// top, EL0t with interrupts unmasked. Slot 1's first context, and since
-/// multi-core step 4(b) each secondary core's own (`smp::IDLE_CONTEXTS`):
-/// every core runs the same two instructions from the same page.
+/// multi-core step 4(b) what each secondary core enters its idle loop
+/// from (`smp.rs`, through [`enter_frame`]): every core runs the same two
+/// instructions from the same page.
 pub(crate) fn idle_context() -> Context {
     let idle_addr = IDLE_REGION.get() as u64;
     Context {
@@ -2741,6 +2735,13 @@ pub(crate) fn allow_el0_wfe() {
     }
 }
 
+/// Drops from EL1 into task 0. Never returns to its caller: the only way
+/// back to EL1 is a trap (syscall, fault, or the timer tick), handled
+/// entirely through `exceptions.rs`'s vector table from here on; every
+/// subsequent switch happens inside the tick's IRQ trampoline, not here.
+///
+/// # Safety
+/// Must be called after [`init`].
 pub unsafe fn start() -> ! {
     // The boot-time install already left task 0's view active
     // (mmu::install_identity_map's switch half switches to the current

@@ -1228,9 +1228,8 @@ fn init_entropy() {
 /// Parks the core forever instead of returning to firmware. `wfe` is a
 /// low-power spin (wait-for-event) rather than a busy loop.
 fn halt() -> ! {
-    loop {
-        unsafe {
-            core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
-        }
-    }
+    // Through power::halt since multi-core step 4(b): a boot-core ending
+    // marks the kernel halted (lock.rs), so a secondary's next entry parks
+    // with a line rather than spinning on a lock nobody will release.
+    power::halt()
 }

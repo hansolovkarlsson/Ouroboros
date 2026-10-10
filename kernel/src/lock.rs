@@ -50,6 +50,7 @@ pub fn acquire() {
                     "Ouroboros kernel: the kernel lock re-entered on core {}: an entry inside an entry",
                     me - 1
                 );
+                halt_kernel(); // a broken invariant inside an entry: the kernel's halt, whoever found it
                 crate::power::halt();
             }
             Err(_) => core::hint::spin_loop(),
@@ -62,6 +63,11 @@ pub fn acquire() {
 /// `acquire`, since the state behind the lock may be half-written and
 /// nothing may run over it. Never cleared.
 static HALTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the kernel has halted (`halt_kernel`).
+pub fn is_halted() -> bool {
+    HALTED.load(Ordering::Acquire)
+}
 
 /// Whether this core holds the lock.
 pub fn held_by_me() -> bool {
@@ -83,6 +89,7 @@ pub fn release() {
             "Ouroboros kernel: the kernel lock released on core {} without being held by it",
             me - 1
         );
+        halt_kernel();
         crate::power::halt();
     }
 }

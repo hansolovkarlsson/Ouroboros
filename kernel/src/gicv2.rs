@@ -70,13 +70,39 @@ pub unsafe fn init_cpu_interface(gicc_base: usize) {
     }
 }
 
+/// This core's bit in a `GICD_ITARGETSR` byte: the banked registers
+/// ITARGETSR0 to 7 (interrupts 0 to 31) read back as the reading core's
+/// own mask in every byte, on a core whose byte is nonzero; the first
+/// nonzero byte of the eight is it (Linux's `gic_get_cpumask` scans the
+/// same way). A GIC on which every byte reads 0 gives 0x01, CPU 0, the
+/// constant this used to be, and a line says so, since an SPI routed to a
+/// mask of zero reaches no core and nothing would otherwise report it.
+///
+/// # Safety
+/// After [`init`], on the core whose mask is wanted.
+unsafe fn own_target_mask(gicd_base: usize) -> u32 {
+    for i in 0..8 {
+        let word = unsafe { read_reg(gicd_base, GICD_ITARGETSR + 4 * i) };
+        for byte in 0..4 {
+            let mask = (word >> (8 * byte)) & 0xff;
+            if mask != 0 {
+                return mask;
+            }
+        }
+    }
+    crate::console::println!("Ouroboros kernel: GICv2: this core's target mask reads 0 in ITARGETSR0-7; routing SPIs to CPU 0");
+    0x01
+}
+
 /// Enables forwarding of `intid` from the distributor to CPU interfaces.
 ///
 /// A PPI (intid < 32, e.g. the timer, 30) is per-CPU/banked and needs only
 /// the enable bit - its target is implicitly this CPU. An SPI (intid >= 32,
 /// e.g. a virtio-mmio device) is shared and, until [`GICD_ITARGETSR`] names
-/// a target CPU, is delivered to none - so this routes an SPI to CPU 0
-/// before enabling it. Priority (`GICD_IPRIORITYR`) and trigger mode
+/// a target, reaches no core, so this routes an SPI to the core that
+/// enables it (its own target mask, read back from the banked ITARGETSR
+/// registers by [`own_target_mask`]) before enabling it. Priority
+/// (`GICD_IPRIORITYR`) and trigger mode
 /// (`GICD_ICFGR`) are left at reset: reset priority (0) passes the wide-open
 /// `GICC_PMR` set in [`init`], and QEMU's virtio-mmio drives its line
 /// level-style, matching the level reset default - so no extra config is
@@ -95,7 +121,7 @@ pub unsafe fn enable_interrupt(gicd_base: usize, intid: u32) {
         // that idles outside the scheduler (the high review of 4(b)).
         // Read-modify-write the containing word so the neighbouring intids'
         // targets are preserved.
-        let me = unsafe { read_reg(gicd_base, GICD_ITARGETSR) } & 0xff;
+        let me = unsafe { own_target_mask(gicd_base) };
         let word = GICD_ITARGETSR + ((intid as usize) & !3);
         let shift = (intid % 4) * 8;
         let mut targets = unsafe { read_reg(gicd_base, word) };

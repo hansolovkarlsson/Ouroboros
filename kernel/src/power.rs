@@ -162,7 +162,7 @@ pub fn halt() -> ! {
     // boot core's shell never came up, which is why the two are told
     // apart here rather than the lock handed on to run over the wreck.
     // Forced past a quieted console: a halt is a fault's last word.
-    if crate::lock::held_by_me() || crate::smp::is_boot_core() {
+    if crate::lock::is_halted() || crate::lock::held_by_me() || crate::smp::is_boot_core() {
         crate::lock::halt_kernel();
         crate::console::println_force!("Ouroboros kernel: system halted");
     } else {

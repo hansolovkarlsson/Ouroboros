@@ -293,36 +293,39 @@ extern "C" fn secondary_main(core: u64) -> ! {
             }
         }
     };
+    // Everything the idle loop needs, before the line that claims it
+    // (step 4(b)): the idle view's tables (slot 1's, which map the loop's
+    // page for EL0; TTBR0 is per core), EL0's wfe allowed, the timer PPI
+    // enabled at this core's own interface and armed (interrupts stay
+    // masked at EL1, so it fires only once the loop runs), this core's
+    // current slot the idle slot.
+    crate::mmu::activate_task(crate::tasks::TaskIndex::IDLE);
+    crate::tasks::allow_el0_wfe();
+    unsafe { crate::gic::enable_ppi_this_core(crate::timer::INTID, gic) };
+    crate::tasks::set_current_idle_here();
+    crate::timer::arm(crate::timer::TICK_INTERVAL_MS);
     crate::console::println!(
         "Ouroboros kernel: smp: core {core} up at EL{} (mpidr {mpidr:#x}, affinity {:#x}), idling",
         crate::el2::current_el(),
         madt::affinity(mpidr)
     );
-    // The mark after the line: a core counts as up only once it has
-    // survived its first console write, and `main.rs`'s set_quiet, which
-    // comes after `start` returns, cannot then drop a late up line (the
-    // `ticking` line, later, is a println and may be quieted: a signal,
-    // not a report).
+    // The mark after the line and after the setup: a core counts as up
+    // only once it has survived its first console write and has nothing
+    // left to do but enter the loop, so the boot core's summary vouches
+    // for a state the core has reached (`main.rs`'s set_quiet comes after
+    // `start` returns and cannot drop a late up line; the `ticking` line,
+    // later, is a println and may be quieted: a signal, not a report).
     CORE_UP[core as usize].store(CORE_UP_IDLE, Ordering::Release);
     // SAFETY: the one write to PARAMS happened before this core started.
     if unsafe { (*PARAMS.get()).fault_core } == core {
         crate::console::println!("Ouroboros kernel: smp: core {core} taking the \\SMPFAULT undefined instruction");
         unsafe { asm!("udf #0", options(nomem, nostack)) };
     }
-    // Into this core's idle loop at EL0 (step 4(b)): the idle view's tables
-    // (slot 1's, which map the loop's page for EL0; TTBR0 is per core),
-    // EL0's wfe allowed, the timer PPI enabled at this core's own
-    // interface and armed, this core's current slot the idle slot, and the
-    // one entry into a task, tasks::enter_frame. From here the core
-    // alternates EL0 and its tick, every interrupt masked at EL1.
-    crate::mmu::activate_task(crate::tasks::TaskIndex::IDLE);
-    crate::tasks::allow_el0_wfe();
-    unsafe { crate::gic::enable_ppi_this_core(crate::timer::INTID, gic) };
-    crate::tasks::set_current_idle_here();
-    crate::timer::arm(crate::timer::TICK_INTERVAL_MS);
-    // Its registers live in the frame on this stack from here, saved and
-    // restored by the tick's trampoline; slot 1's Context is the boot
-    // core's idle and is not touched.
+    // The one entry into a task, tasks::enter_frame. From here the core
+    // alternates EL0 and its tick, every interrupt masked at EL1; its
+    // registers live in the frame on this stack, saved and restored by
+    // the tick's trampoline; slot 1's Context is the boot core's idle and
+    // is not touched.
     unsafe { crate::tasks::enter_frame(crate::tasks::idle_context()) }
 }
 
