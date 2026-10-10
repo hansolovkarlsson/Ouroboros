@@ -524,7 +524,7 @@ localises the failure without any guessing.
    starts from nothing here, with no firmware configuration to match), and
    the reporter's dump, still registered through the firmware's EL2
    vectors at that point, is what to read. After the second line a fault
-   reports through the kernel's own `EXCEPTION vector=...` line, the first
+   reports through the kernel's own `EXCEPTION core=N vector=...` line, the first
    time that has been possible on this board; the virtio-mmio scan at
    `0xa000000` (Risk 1) is expected to be the first. Also read, before the
    exit: `PSCI conduit: smc` or `hvc` (the FADT's flag, logged since

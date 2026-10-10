@@ -168,8 +168,8 @@ the task's registers are.
       core (`EXCEPTION core=N ...`, the MADT's index, which the boot core
       takes as its own once the table is read: ACPI fixes no order on
       ARM) and checks that core's own stack canary. `make test-smp` is
-      five boots: `-smp 4` on the dev-loop machine, under
-      `virt,virtualization=on` and under `gic-version=3` (three up lines,
+      six boots: `-smp 4` on the dev-loop machine, under
+      `virt,virtualization=on`, under `gic-version=3` and under both (three up lines,
       the summary `3 of 3`, `help`, a ten-second dwell, `help` again, no
       fault), `-smp 1` (no up line, `0 of 0`), and `-smp 4` with
       `\SMPFAULT` (the first core started takes `udf` after its up line;
@@ -180,8 +180,16 @@ the task's registers are.
       own code was not cleaned to PoC, a secondary's GICv3 init clobbered
       the boot core's redistributor pointer, and a core dying with the
       console lock made every later line pay the bound; each fixed in the
-      same PR, the GICv3 boot added for the third. Control: with `CPU_ON`
-      not called the rig is red on the up lines and the summary.
+      same PR, the GICv3 boot added for the third. A second high review
+      found four more worth the name: `CPU_ON`'s asm let the compiler keep
+      `entry` in a register SMCCC lets the callee scratch; `CON_WRITE` took
+      the console lock per byte, so another core's line could land inside
+      `cond`'s escape sequence; a core counted as up before its first
+      console write; and a panic on a secondary (GICv3's redistributor
+      lookup) had no path but the firmware's. Each fixed, the lock now
+      owned by core so a takeover leaves one owner, and the EL2-with-GICv3
+      boot added. Control: with `CPU_ON` not called the rig is red on the
+      up lines and the summary.
       Pi 4 over serial and Parallels: by eye from the boot log, not yet
       done.
 - [ ] **Step 3. The three decisions,** each recorded in the code it

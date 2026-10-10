@@ -72,10 +72,11 @@ const EARLY_FAULT: &CStr16 = cstr16!("\\EARLYFAULT");
 /// `scripts/test-early-fault.py`.
 const WALK_FAULT: &CStr16 = cstr16!("\\WALKFAULT");
 
-/// `\SMPFAULT`: core 1 takes an undefined instruction right after its
-/// `core 1 up` line (`smp.rs`), so `make test-smp` can see a secondary's
-/// fault reported with its core number while the boot core's shell goes
-/// on. A test fault, like `\EARLYFAULT`.
+/// `\SMPFAULT`: the first core `smp::start` starts takes an undefined
+/// instruction right after its up line, so `make test-smp` can see a
+/// secondary's fault reported with its core number while the boot core's
+/// shell goes on (which core that is, the rig reads from the kernel's own
+/// `taking` line). A test fault, like `\EARLYFAULT`.
 const SMP_FAULT: &CStr16 = cstr16!("\\SMPFAULT");
 
 /// Which boot flags are set, read once by [`read`].

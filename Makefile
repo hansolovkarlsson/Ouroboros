@@ -1976,9 +1976,10 @@ test-ctermios: image
 test-cpoll: image
 	python3 scripts/test-cpoll.py
 
-# Multi-core (docs/roadmap/roadmap-smp.md): the cores the MADT lists, on
-# QEMU -smp 4 and -smp 1, the shell working on both (step 1; step 2 adds
-# the cores started and parked). Two boots, about two minutes.
+# Multi-core (docs/roadmap/roadmap-smp.md): the cores the MADT lists and
+# the other cores started by PSCI and parked, in the boots
+# scripts/test-smp.py's docstring lists (EL1 and EL2 handoffs, GICv2 and
+# GICv3, -smp 1, and a secondary's deliberate fault). About seven minutes.
 test-smp: image
 	python3 scripts/test-smp.py
 

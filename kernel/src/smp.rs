@@ -128,9 +128,12 @@ pub(crate) fn this_core_stack_canary() -> (bool, u64) {
     (unsafe { core::ptr::read_volatile(base as *const u64) } == STACK_CANARY, base)
 }
 
-/// Per core: 0 not started, 1 up and parked (class B). Written by the core
-/// itself, read by the boot core's wait in [`start`].
+/// Per core: 0 not started, [`CORE_UP_PARKED`] up and parked,
+/// [`CORE_FAILED`] parked without a GIC interface (class B). Written by the
+/// core itself, read by the boot core's wait in [`start`].
 static CORE_UP: [AtomicU8; MAX_CORES] = [const { AtomicU8::new(0) }; MAX_CORES];
+const CORE_UP_PARKED: u8 = 1;
+const CORE_FAILED: u8 = 2;
 
 /// This core's index, from `TPIDR_EL1`: 0 on the boot core (`main.rs`
 /// writes it first), the MADT's index on a secondary (the stub writes it
@@ -252,14 +255,28 @@ unsafe extern "C" {
 /// A secondary core's Rust half, on its own stack, at EL1 with the MMU on:
 /// this core's GIC interface, the up line, then parked for good.
 extern "C" fn secondary_main(core: u64) -> ! {
-    unsafe { crate::gic::init_this_core() };
     let mpidr = crate::gicv3::read_mpidr();
-    CORE_UP[core as usize].store(1, Ordering::Release);
+    // A GIC that will not come up on this core is a line and a parked core
+    // without one, not a panic: a panic on a secondary after the exit has
+    // no path but the firmware's, which is gone.
+    if let Err(why) = unsafe { crate::gic::init_this_core() } {
+        crate::console::println!(
+            "Ouroboros kernel: smp: core {core} (mpidr {mpidr:#x}) has no GIC interface ({why}), parked without one"
+        );
+        CORE_UP[core as usize].store(CORE_FAILED, Ordering::Release);
+        loop {
+            unsafe { asm!("wfe", options(nomem, nostack, preserves_flags)) };
+        }
+    }
     crate::console::println!(
         "Ouroboros kernel: smp: core {core} up at EL{} (mpidr {mpidr:#x}, affinity {:#x}), parked",
         crate::el2::current_el(),
         madt::affinity(mpidr)
     );
+    // The mark after the line: a core counts as up only once it has
+    // survived its first console write, and `main.rs`'s set_quiet, which
+    // comes after `start` returns, cannot then drop a late up line.
+    CORE_UP[core as usize].store(CORE_UP_PARKED, Ordering::Release);
     // SAFETY: the one write to PARAMS happened before this core started.
     if unsafe { (*PARAMS.get()).fault_core } == core {
         crate::console::println!("Ouroboros kernel: smp: core {core} taking the \\SMPFAULT undefined instruction");
@@ -288,10 +305,21 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     let n = cores.count.min(MAX_CORES);
     // The boot core's own index: the MADT fixes no order on ARM, so it may
     // be any entry. From here its TPIDR_EL1 is that index, its stack still
-    // main.rs's.
-    if let Some(mine) = (0..n).find(|&i| cores.mpidr[i] == me) {
-        BOOT_INDEX.store(mine as u64, Ordering::Relaxed);
-        set_core_index(mine as u64);
+    // main.rs's. A table that does not list this core at all (or lists it
+    // under an affinity its MPIDR does not carry) starts nothing: an entry
+    // started with index 0 would share the boot core's index, its fault
+    // lines and its canary.
+    match (0..n).find(|&i| cores.mpidr[i] == me) {
+        Some(mine) => {
+            BOOT_INDEX.store(mine as u64, Ordering::Relaxed);
+            set_core_index(mine as u64);
+        }
+        None => {
+            crate::console::println!(
+                "Ouroboros kernel: smp: this core (affinity {me:#x}) is not among the MADT's {n} cores; no core started"
+            );
+            return;
+        }
     }
     // `\SMPFAULT`: the first core that will be started takes the fault.
     let fault_core = if fault_first {
@@ -353,10 +381,10 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
         while up_mark.load(Ordering::Acquire) == 0 && crate::timer::now_ticks() < deadline {
             core::hint::spin_loop();
         }
-        if up_mark.load(Ordering::Acquire) == 1 {
-            up += 1;
-        } else {
-            crate::console::println!("Ouroboros kernel: smp: core {i} (affinity {aff:#x}) did not report up within a second");
+        match up_mark.load(Ordering::Acquire) {
+            CORE_UP_PARKED => up += 1,
+            CORE_FAILED => {} // its own line said why
+            _ => crate::console::println!("Ouroboros kernel: smp: core {i} (affinity {aff:#x}) did not report up within a second"),
         }
     }
     crate::console::println!(

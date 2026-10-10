@@ -1149,11 +1149,19 @@ fn check_attributes(planned: &[(u64, u64)]) {
 /// safety requirements otherwise apply identically) - the same
 /// requirement `main.rs`'s single call site already satisfies for every
 /// caller of this function, since none can run before boot completes.
-/// Must be called with interrupts masked throughout - single-core, so
-/// no other code can observe the table set mid-rebuild. Every caller
-/// today is an exception entry (SVC, IRQ or EL0 fault) or runs inside
-/// one, which is what satisfies this; a caller from ordinary EL1 code
-/// with interrupts enabled would not, and must mask them first.
+/// Must be called with interrupts masked throughout, so no other code on
+/// this core can observe the table set mid-rebuild. Every caller today is
+/// an exception entry (SVC, IRQ or EL0 fault) or runs inside one, which is
+/// what satisfies this; a caller from ordinary EL1 code with interrupts
+/// enabled would not, and must mask them first. Since multi-core step 2
+/// the parked secondary cores walk view 0's tables too (`smp.rs`,
+/// `boot_regime`), while this rewrites them in place: that is sound only
+/// because a parked core executes two instructions in the kernel block
+/// and reads nothing else, every entry it could walk is rewritten with an
+/// equal valid value by one 64-bit store, and the kernel block's
+/// attributes never change; a rebuild that zeroed a table first, or
+/// changed a kernel attribute, would need the inner-shareable
+/// invalidation (`tlbi vmalle1is`) and a shootdown, which are step 4's.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");

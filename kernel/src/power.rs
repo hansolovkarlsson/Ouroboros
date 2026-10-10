@@ -101,7 +101,12 @@ pub unsafe fn discover_conduit(rsdp: Option<*const u8>) {
 ///
 /// The `asm!` is not `nomem`: the call hands memory (the parameter block,
 /// the stacks, the tables) to another core, so every store before it must
-/// stay before it.
+/// stay before it. `x1` to `x3` are outputs too and `x4` to `x17` are
+/// clobbered (`clobber_abi("C")`), as SMCCC lets the callee return in or
+/// scratch them: TF-A and QEMU happen to preserve them, and a compiler
+/// keeping `entry` in `x2` across the call would otherwise start the next
+/// core at whatever a different firmware left there. The result is
+/// PSCI's `int32`, read from `w0`.
 ///
 /// # Safety
 /// `entry` must be code that can run with the MMU off on a fresh core
@@ -111,17 +116,18 @@ pub unsafe fn cpu_on(target: u64, entry: u64, context: u64) -> Result<(), i64> {
     let result: u64;
     match CONDUIT.load(Ordering::Relaxed) {
         CONDUIT_HVC => unsafe {
-            asm!("hvc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, in("x1") target, in("x2") entry, in("x3") context, options(nostack));
+            asm!("hvc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, inout("x1") target => _, inout("x2") entry => _, inout("x3") context => _, clobber_abi("C"), options(nostack));
         },
         CONDUIT_SMC => unsafe {
-            asm!("smc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, in("x1") target, in("x2") entry, in("x3") context, options(nostack));
+            asm!("smc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, inout("x1") target => _, inout("x2") entry => _, inout("x3") context => _, clobber_abi("C"), options(nostack));
         },
         _ => return Err(-1),
     }
-    if result == 0 {
+    let code = i64::from(result as u32 as i32);
+    if code == 0 {
         Ok(())
     } else {
-        Err(result as i64)
+        Err(code)
     }
 }
 

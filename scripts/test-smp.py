@@ -3,7 +3,7 @@
 
     python3 scripts/test-smp.py    (or `make test-smp`, which builds the image)
 
-Five boots. In each, before the exit, the boot log says `MADT: N cores (this
+Six boots. In each, before the exit, the boot log says `MADT: N cores (this
 core affinity A, mpidr M)` and one `MADT: core i: mpidr M, enabled` line per
 core (step 1): N must be the `-smp` count, with N distinct MPIDRs, the boot
 core's affinity among them, every core enabled. Then (step 2) the boot core
@@ -22,9 +22,12 @@ QEMU's own trace.
 3. `-smp 4`, `virt,gic-version=3`: the per-core GICv3 path (each core's
    redistributor found by its own MPIDR, the system-register interface on
    a secondary), which Parallels, the owed target, has.
-4. `-smp 1`: one core, no `core up` line, the summary `0 of 0`, the shell
+4. `-smp 4`, `virt,virtualization=on,gic-version=3`: both at once, the
+   one shape that runs the stub's EL2 GIC branch (`icc_sre_el2`,
+   `ich_hcr_el2` for a core that will use the system registers).
+5. `-smp 1`: one core, no `core up` line, the summary `0 of 0`, the shell
    as before.
-5. `-smp 4` with the `\\SMPFAULT` flag file (an ESP directory copy, vvfat):
+6. `-smp 4` with the `\\SMPFAULT` flag file (an ESP directory copy, vvfat):
    the first core started takes an undefined instruction after its up
    line, the fault line must name that core (`EXCEPTION core=N`, read
    from the kernel's own `taking` line), and the boot core's shell must
@@ -32,7 +35,7 @@ QEMU's own trace.
 
 A boot with no `Ouroboros kernel` line is the firmware stalling in its own
 boot, which happens; the rig says INCONCLUSIVE for that boot and does not
-pass. About six minutes. Run it whenever smp.rs, el2.rs, madt.rs's GICC
+pass. About seven minutes. Run it whenever smp.rs, el2.rs, madt.rs's GICC
 parse, the GIC backends' per-core init or the console lock changes.
 """
 import importlib.util
@@ -137,6 +140,7 @@ def main() -> int:
     checks += boot("smp4", 4)
     checks += boot("smp4-el2", 4, machine="virt,virtualization=on")
     checks += boot("smp4-gicv3", 4, machine="virt,gic-version=3")
+    checks += boot("smp4-el2-gicv3", 4, machine="virt,virtualization=on,gic-version=3")
     checks += boot("smp1", 1)
     esp = os.path.join(ROOT, "build", "test-smp-esp")
     shutil.rmtree(esp, ignore_errors=True)
