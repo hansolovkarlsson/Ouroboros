@@ -855,13 +855,16 @@ The small open tails those arcs deliberately left:
   or an `ESC` that announces itself complete) is an ABI question, left until a
   case needs it; Esc then `O` at a prompt is rare.
 
-- **`test-kbd-mode`'s `Ozq` check cannot fail (found 2026-10-09, #253).**
-  Its docstring said it fails with the key parser not fed the boot shell's
-  interrupt byte (E1 of the Ctrl-C plan); with that rule removed it passes,
-  on #253's version and on main's (`zq`) alike, and with E2's interval removed
-  as well (on a variant typing the Esc and Ctrl+\ 20 ms apart). Not yet known why: the Esc may never reach the queue during the
-  boot shell's wait, or be closed before the next key is read. E1 itself is
-  checked on the host. Find out which, then make the check real or remove it.
+- **~~`test-kbd-mode`'s `Ozq` check cannot fail~~ (found 2026-10-09, #253):
+  DONE (2026-10-10, #254).** Why: the shell's next command,
+  `readkey spin 100 keep`, was typed between the interrupt and `Ozq`, and
+  under #253's `keyseq` its `r` ends any open Esc, so `Ozq` arrived whole
+  whatever the queue did (on main the `e` of `echo zq` was masked by E2 the
+  same way). `Ozq` is now the shell's next line, and the check fails with E1
+  and E2 removed together (the shell ran `q`). E1 alone no rig can see: it
+  matters only for a key read within E2's interval of the Esc, and the
+  shell's wake and its `wait: interrupted` line take longer; it is checked on
+  the host.
 
 - **Two tails of `cond`'s escape sequences (found 2026-10-07, the high
   review of #228).** (1) Reverse video is one setting in `cond` shared by
