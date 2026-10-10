@@ -1072,6 +1072,7 @@ make run-usb-multi   # + a USB tablet and a storage stick (the 3-device xHCI rig
 make run-usb-hub     # the keyboard and the stick BEHIND a usb-hub (the Raspberry Pi's layout)
 make test-usb-hub    # the same layout, driven and graded, plus a boot FROM a stick behind the hub, and that boot again with injected Stalls (scripts/test-usb-hub.py)
 make run-gicv3       # force GICv3 instead of QEMU's default GICv2
+make test-smp        # multi-core step 1: the MADT's cores on -smp 4 and -smp 1, the shell working (scripts/test-smp.py)
 ```
 
 On the USB targets you can inject keystrokes through the monitor socket:

@@ -128,7 +128,7 @@ unsafe fn read_reg64(base: usize, offset: usize) -> u64 {
     unsafe { read_volatile((base + offset) as *const u64) }
 }
 
-fn read_mpidr() -> u64 {
+pub(crate) fn read_mpidr() -> u64 {
     let mpidr: u64;
     unsafe {
         asm!("mrs {0}, mpidr_el1", out(reg) mpidr, options(nomem, nostack, preserves_flags));
