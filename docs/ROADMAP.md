@@ -823,11 +823,19 @@ The small open tails those arcs deliberately left:
   was 12 a second until #232's review made the tick read ahead for the
   owner whoever it interrupted.)
 
-- **Escape sends nothing on the USB keyboard (found 2026-10-07, building
-  the navigation keys).** `xhci.rs`'s `keycode_to_ascii` has no arm for
-  Escape (HID 0x29), and it needs a decision first: a bare ESC is also how
-  every sequence starts, and the shell's `keyseq` filter would swallow the
-  key after it. Tab, the other half of this item, is DONE (2026-10-09,
+- **~~Escape sends nothing on the USB keyboard~~ (found 2026-10-07, building
+  the navigation keys): DONE (2026-10-09, #253).** Decided by Hans that day,
+  option 1 of four: Escape (HID 0x29) sends a bare ESC, what a terminal
+  sends, and `xhci.rs` marks the last byte of every key, which the kernel's
+  keyboard queue takes as the key's end (`keyseq::Source::Usb { last }`). So
+  the USB Escape is a whole key at once, where the queue would have held it
+  open for a second and trimmed a letter typed in that second as its rest. A
+  program reading bytes tells it apart by the quiet after it (Edit's 50 ms);
+  the shell's `keyseq` still drops a printable byte typed straight after a
+  bare ESC, as it does on the serial line (option 2, changing that, was not
+  taken). Checked by `make test-nav-keys` (READKEY reads a 27), `make
+  test-kbd-cut`'s check 6 and three host tests in `keyseq`, each failing with
+  its part removed. Tab, the other half of this item, is DONE (2026-10-09,
   #248): HID 0x2b sends 9, so filename completion works from a Parallels or
   Pi keyboard, checked by `make test-nav-keys`.
 
