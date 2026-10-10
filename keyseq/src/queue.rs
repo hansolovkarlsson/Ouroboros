@@ -111,13 +111,21 @@ impl KeyQueue {
     fn expire(&mut self, now: u64) {
         let alone = if self.inside_usb { self.usb_alone } else { self.esc_alone };
         if self.inside && now.saturating_sub(self.fed_at) > alone {
-            self.keys = KeySeq::new();
-            self.inside = false;
-            self.partial = 0;
-            self.dropping = false;
-            if self.len == 0 {
-                self.taken_mid = false;
-            }
+            self.end_key();
+        }
+    }
+
+    /// The key in progress is over, by the quiet after it ([`Self::expire`])
+    /// or by its last USB byte ([`Self::push`]): what arrives next starts a
+    /// key of its own, nothing more of this one is dropped, and with nothing
+    /// queued no reader holds a part of it that a trim could still remove.
+    fn end_key(&mut self) {
+        self.keys = KeySeq::new();
+        self.inside = false;
+        self.partial = 0;
+        self.dropping = false;
+        if self.len == 0 {
+            self.taken_mid = false;
         }
     }
 
@@ -134,10 +142,7 @@ impl KeyQueue {
         let from_usb = matches!(from, Source::Usb { .. });
         self.push_byte(byte, from_usb, now);
         if from == (Source::Usb { last: true }) && self.inside && self.inside_usb {
-            self.keys = KeySeq::new();
-            self.inside = false;
-            self.partial = 0;
-            self.dropping = false;
+            self.end_key();
         }
     }
 

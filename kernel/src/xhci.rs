@@ -2002,9 +2002,9 @@ impl Xhci {
     /// `uptme`), even though the xHCI debug log below showed every
     /// expected report, including the dropped character's own. Fixed by
     /// draining every qualifying keycode from a report into `pending`
-    /// (bounded at 5 - `buf[2..8]` has at most 6 slots, and the first
-    /// match is always returned immediately rather than queued) instead of
-    /// discarding everything past the first.
+    /// (all of them, up to the 6 slots of `buf[2..8]`, each key's last
+    /// byte marked in `pending_last`; this function only pops from there)
+    /// instead of discarding everything past the first.
     fn poll_key(&mut self) -> Option<(u8, bool)> {
         // Drain any keycodes still queued from the last processed report
         // before touching the event ring at all.
