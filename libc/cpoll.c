@@ -11,6 +11,7 @@
  *     cpoll: both 1 key=0 out=4 ms=<n> (fd 1 ready: fd 0 looked at, no wait)
  *     cpoll: sleep 0 ms=<n>            (no fds, timeout 100: a sleep)
  *     cpoll: null EFAULT
+ *     cpoll: net ENOSYS                (open of /net/ip refused: no /net fd exists to poll)
  *     cpoll: timing done
  *
  * `cpoll key` writes `cpoll: waiting` with write(), no newline (so only
@@ -25,6 +26,7 @@
  * `cpoll leave` polls fd 0 for up to 10 s, prints `cpoll: leave <n>` and exits
  * without reading: the key it saw must reach the shell. */
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
@@ -60,6 +62,17 @@ static int timing(void) {
     errno = 0;
     n = poll(NULL, 1, 0);
     printf("cpoll: null %s\r\n", n == -1 ? err_name(errno) : "succeeded");
+    /* poll's answer for a /net file, POLLERR, has no rig: open refuses the
+     * /net binding (ENOSYS, file.c's resolve_target), so no fd reaches that
+     * branch. This line is the tripwire. The day open learns /net it prints
+     * something else, and the POLLERR check is owed (needs the rig's
+     * `mount -n /net`; without it /net is a missing directory, ENOENT). */
+    errno = 0;
+    int nfd = open("/net/ip", O_RDONLY);
+    if (nfd >= 0) {
+        close(nfd);
+    }
+    printf("cpoll: net %s\r\n", nfd < 0 ? err_name(errno) : "opened");
     printf("cpoll: timing done\r\n");
     return 0;
 }

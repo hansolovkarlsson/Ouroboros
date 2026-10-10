@@ -14,7 +14,10 @@ line:
    ends at a tick, later under TCG's late ticks, settled by Hans 2026-10-08); fd 1
    is ready for POLLOUT, a closed fd 9 is POLLNVAL (32), and with fd 1 ready
    fd 0 is answered too, at once, rather than skipped; no fds and timeout 100 sleeps (blocked, SLEEP_UNTIL), not before 100 ms;
-   a null array with one entry is EFAULT.
+   a null array with one entry is EFAULT; and, after `mount -n /net`, open of
+   `/net/ip` is ENOSYS: no /net fd exists, so poll's POLLERR for one has no
+   check, and this line is the tripwire that says so (the day open learns
+   /net it prints `opened`, and the POLLERR check is owed).
 2. **`cpoll key`**: it writes `cpoll: waiting` with no newline, so the text
    shows only if poll flushed fd 1 before its wait; then `x` typed answers
    the timeout -1 wait and the read after it returns 120; `y` typed a second
@@ -51,7 +54,8 @@ def main() -> int:
     seg = {}
     try:
         ok = guest.wait_for("login:", timeout=120)
-        ok = ok and guest.run([("", "root"), ("assword", "root")]) and guest.wait_for(PROMPT)
+        ok = ok and guest.run([("", "root"), ("assword", "root"), ("# ", "mount -n /net")]) \
+            and guest.wait_for(PROMPT)
         if ok:
             start = len(guest.transcript())
             guest.type_line("cpoll timing")
@@ -113,6 +117,8 @@ def main() -> int:
         ("no fds, timeout 100: a sleep, not before 100 ms (and before 300)",
          sleep is not None and sleep.group(1) == "0" and 100 <= int(sleep.group(2)) < 300),
         ("a null array is EFAULT", "cpoll: null EFAULT" in timing),
+        ("a /net file cannot be opened (ENOSYS), so none is polled: POLLERR has no check yet",
+         "cpoll: net ENOSYS" in timing),
         ("fd 1 flushed before the wait (`cpoll: waiting` shown)", "cpoll: waiting" in key),
         ("a key ends the -1 wait, and read returns it", "cpoll: key 120" in key),
         ("a key typed into the 3000 ms wait is read in time", "cpoll: key 121 in time" in key),

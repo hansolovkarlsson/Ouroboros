@@ -1023,8 +1023,12 @@ static int key_by(unsigned long deadline) {
 /* poll.h. fd 0 with POLLIN (or POLLRDNORM) waits for a key; fds 0 to 2, the
  * console, are always ready for POLLOUT (or POLLWRNORM); a file on a
  * filesystem, local or remote, is ready for both, as POSIX has regular
- * files; a /net file or another binding, which nothing here can wait on yet,
- * is POLLERR; a closed fd is POLLNVAL; a negative one is skipped. Every entry
+ * files; any other target is POLLERR, rather than a "ready" whose read would
+ * block. No fd reaches that branch today: open refuses the console and /net
+ * bindings (resolve_target), so every open fd is fsd's or a remote mount's,
+ * and the branch is the default for an open that learns /net, with no rig
+ * until then (cpoll's `net` line is the tripwire); a closed fd is POLLNVAL;
+ * a negative one is skipped. Every entry
  * is answered, fd 0 included when another is already ready (then without
  * waiting). With nothing to wait on, the timeout is a blocked sleep
  * (SLEEP_UNTIL), -1 for good, as POSIX has it. */

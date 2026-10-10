@@ -846,6 +846,19 @@ The small open tails those arcs deliberately left:
   #248): HID 0x2b sends 9, so filename completion works from a Parallels or
   Pi keyboard, checked by `make test-nav-keys`.
 
+- **`poll`'s `POLLERR` for a `/net` file has no check, because no `/net` fd
+  can exist (found 2026-10-10, asked to run the check).** The C library's
+  `open` refuses the `/net` binding at `resolve_target` (ENOSYS), so every
+  open fd is fsd's or a remote mount's, and `poll`'s branch for any other
+  target is unreachable: a check of it cannot fail, and the claim in #240's
+  records that a `/net` file "is `POLLERR`" was true of no observable run.
+  The branch stays, as the default an `open` that learns `/net` would fall
+  into rather than a "ready" whose read would block. What exists instead is
+  a tripwire: `cpoll timing` opens `/net/ip` after `mount -n /net` and
+  `make test-cpoll` requires ENOSYS, so the day `open` learns `/net` the rig
+  fails and the `POLLERR` check (a connection file opened, then polled) is
+  owed with it. Until then, this item is closed by that line, not by a rig.
+
 - **A USB Escape then `O` or `[` is still read as a sequence by every reader
   (found 2026-10-09, #253's second review).** The driver knows the Escape key
   is a whole key and the kernel's queue uses that, but the mark stops there:
