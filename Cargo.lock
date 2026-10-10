@@ -537,6 +537,14 @@ name = "syscall-abi"
 version = "0.1.0"
 
 [[package]]
+name = "syscost"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "tail"
 version = "0.1.0"
 dependencies = [
