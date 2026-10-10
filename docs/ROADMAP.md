@@ -854,10 +854,11 @@ The small open tails those arcs deliberately left:
   records that a `/net` file "is `POLLERR`" was true of no observable run.
   The branch stays, as the default an `open` that learns `/net` would fall
   into rather than a "ready" whose read would block. What exists instead is
-  a tripwire: `cpoll timing` opens `/net/ip` after `mount -n /net` and
-  `make test-cpoll` requires ENOSYS, so the day `open` learns `/net` the rig
-  fails and the `POLLERR` check (a connection file opened, then polled) is
-  owed with it. Until then, this item is closed by that line, not by a rig.
+  a tripwire: `cpoll timing` opens `/net/ip` and `/net/tcp/clone` after
+  `mount -n /net` and `make test-cpoll` requires ENOSYS for both, so the day
+  `open` learns `/net` the rig fails. What stays open here is the `POLLERR`
+  check itself, a connection file opened and then polled, owed on that day
+  and not before; the tripwire is what says when.
 
 - **A USB Escape then `O` or `[` is still read as a sequence by every reader
   (found 2026-10-09, #253's second review).** The driver knows the Escape key

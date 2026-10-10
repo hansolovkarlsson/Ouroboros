@@ -29,8 +29,8 @@
  * would be POLLERR, rather than a "ready" whose read would block, but none
  * exists yet: open refuses the /net binding (ENOSYS), so a /net file (a TCP
  * connection) cannot be polled because it cannot be opened; a descriptor
- * that is not open is
- * POLLNVAL; a negative one is skipped. POLLRDNORM and POLLWRNORM are taken
+ * that is not open is POLLNVAL; a negative one is skipped. POLLRDNORM and
+ * POLLWRNORM are taken
  * as POLLIN and POLLOUT; the band flags are never ready. When any entry is
  * ready, fd 0 is looked at without waiting. With nothing to wait on, the
  * timeout is a sleep, blocked in the kernel (SLEEP_UNTIL), and -1 sleeps for
