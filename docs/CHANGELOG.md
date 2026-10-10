@@ -10,8 +10,8 @@ here actually works today, see [`architecture.md`](architecture.md) and
 ## Unreleased: the storage server under large writes, and the C library for Proem and Edit
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
-version is held for a go-ahead. So far five days' work, 2026-10-05 to
-2026-10-09, #209 to #253: the storage server made safe under large writes and
+version is held for a go-ahead. So far six days' work, 2026-10-05 to
+2026-10-10, #209 to #254: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the

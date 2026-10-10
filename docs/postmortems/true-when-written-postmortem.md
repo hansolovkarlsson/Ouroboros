@@ -7,8 +7,9 @@ stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
 duplicated constant guarded by a comment, a claim of unreachability that
 removed its own test, an authority that was already wrong, a diagnosis written
-before its dump was read, a comment that named its own expiry, and a limit's
-"unreachable" made false by globbing.*
+before its dump was read, a comment that named its own expiry, a limit's
+"unreachable" made false by globbing, and a comment falsified by a later
+commit of its own pull request.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -949,6 +950,22 @@ where to look. **When a fix lands for one limit, read the comments on every
 neighbouring limit that rests on the same premise**: here both rested on "the
 line is 128 bytes", and the change that broke the premise (globbing) touched
 neither comment's function.
+
+## Falsified in the same pull request (2026-10-09)
+
+The comment on the USB Escape key's new arm in `xhci.rs`, written in #253's
+first commit, said the shell's `keyseq` "still drops a printable byte typed
+straight after it". It was true. Two commits later, in the same pull
+request, option 2 changed `keyseq` so that the byte is kept, and that commit
+touched `keyseq/src/lib.rs` and the rigs but not `xhci.rs`. The second high
+review found the comment, and two in `keyseq`'s own queue describing the drop
+path as it was. The shape is this document's, compressed: the claim and the
+edit that falsified it were hours apart and in different files, and here
+they were even in one diff, which is no protection when a reviewer reads the
+commits that changed behaviour and not the comments that described the old
+one. **When a decision changes in the middle of a pull request, grep the
+pull request's own earlier commits for the sentences that stated the old
+decision.**
 
 ## What actually worked
 
