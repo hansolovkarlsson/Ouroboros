@@ -60,7 +60,10 @@ Esc, and the shell's wake and its `wait: interrupted` line take longer, so
 E2 has closed the Esc by then. E1 alone is checked on the host
 (`keyseq::KeyQueue`'s tests), as `test-kbd-cut`'s check 3 says for the kill
 path. The ISO backslash key, 0x32,
-cannot be sent by QEMU, so its mapping is checked only on hardware.
+cannot be sent by QEMU, so its mapping is checked only on hardware (row A7 of
+docs/testing/testing-parallels.md): QEMU's one key code for that position,
+`backslash`, sends 0x31, measured 2026-10-10 with a build in which 0x32 typed
+`#` (sendkey gave 92, the US key's byte), and PS/2 cannot tell the two apart.
 QEMU's own trace must hold no fault line.
 About a minute. Run it whenever `interrupt_key_check`, `KBD_MODE`, xhci.rs's
 Ctrl mapping or the death path's per-task resets change.
