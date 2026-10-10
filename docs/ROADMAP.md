@@ -860,6 +860,22 @@ The small open tails those arcs deliberately left:
   check itself, a connection file opened and then polled, owed on that day
   and not before; the tripwire is what says when.
 
+- **The ISO backslash key (HID 0x32) has no rig and can have none; it is a
+  by-hand check on hardware (settled 2026-10-10, asked to run the check).**
+  `xhci.rs` maps 0x32, the ISO keyboard's key left of Enter, as the US
+  backslash key 0x31 (so Ctrl+\ works there, #235), and leaves 0x64, the key
+  beside left Shift, unmapped. No rig can press 0x32: QEMU's USB keyboard
+  has one key code for both positions, `backslash`, and it sends 0x31,
+  measured by a throwaway build in which 0x32 typed `#` (`sendkey backslash`
+  gave 92 and `shift-backslash` 124, the US key's bytes; keycodemapdb lists
+  both USB codes under that one key code); `prlctl send-key-event` speaks
+  PS/2, where both positions are scancode 0x2b; and the kernel has no host
+  tests. The check is row A7 of `docs/testing/testing-parallels.md`: a
+  physical ISO keyboard, the key left of Enter typing `\` and `|` and ending
+  `readkey raw` under Ctrl, the key beside left Shift typing nothing and not
+  killing under Ctrl. An ANSI keyboard cannot run it. Until a hardware
+  session does, the mapping of 0x32 rests on the HID usage table alone.
+
 - **A USB Escape then `O` or `[` is still read as a sequence by every reader
   (found 2026-10-09, #253's second review).** The driver knows the Escape key
   is a whole key and the kernel's queue uses that, but the mark stops there:
