@@ -35,11 +35,14 @@ Ctrl+C typed during its spin still queued: the shell's wait on it must
 collect its exit (no zombie in `ps`), since that Ctrl+C was a byte when it
 was read and must not interrupt the shell; `echo qk` typed behind the Ctrl+C
 must then run as the shell's next line, which proves the queue held both.
-A second stuck `wait` takes an Esc and then Ctrl+\\; `Ozq`, typed while
-`readkey spin 100 keep` is busy afterwards, must reach the shell whole
-(`unknown command: Ozq`): the key parser saw the interrupt byte end the Esc,
-so the `O` and the `z` are not eaten as an SS3 sequence. An `O`, because
-since 2026-10-09 `keyseq` keeps any other letter after a bare ESC. The order of the waits' checks (an ended child, or a reply already
+A second stuck `wait` takes an Esc and then Ctrl+\\, and `Ozq`, the shell's
+next line, must reach it whole (`unknown command: Ozq`): the interrupt byte
+ended the Esc in the queue's key parser (E1), or the Esc had ended by the
+quiet after it (E2), so the `O` and the `z` are not eaten as an SS3
+sequence. An `O`, because since 2026-10-09 `keyseq` keeps any other letter
+after a bare ESC, and the shell's next line, because any letter typed before
+it ends the Esc the same way (until 2026-10-10 the line was typed after a
+`readkey spin 100 keep`, whose `r` did, so the check could not fail). The order of the waits' checks (an ended child, or a reply already
 there, before an interrupt) has no check here: it needs a key in the gap
 between a program ending and the shell's next poll. Step 3 checks that `readkey
 mode` ran in a slot a raw `readkey` ran in, since otherwise a cooked
@@ -50,12 +53,13 @@ Each check fails with its part of the kernel removed: the raw test in
 (2), the reset in `end_task` (3), Ctrl+\\ as the boot shell's interrupt in `interrupt_key_check`'s owner-0 arm (6),
 the boot shell's interrupt decided as it is read rather than found in the
 queue (the zombie check; queued, it is lost behind a full queue, check 6),
-and 0x64 in the USB map (the `<>` check). The `Ozq` line is printed as a
-note, not a check, because it CANNOT FAIL as written: it passes with the parser not fed the boot shell's interrupt byte,
-and passed so on main's version (`zq`) too, both observed 2026-10-09, though
-this docstring named that rule as its subject. That rule is checked on the
-host (`keyseq::KeyQueue`'s tests); the check stays until it is made real or
-removed (docs/ROADMAP.md). The ISO backslash key, 0x32,
+0x64 in the USB map (the `<>` check), and the boot shell's interrupt byte fed
+to the parser (E1) together with E2's interval (the `Ozq` check). E1 alone
+no rig can see: it matters only for a key read within E2's interval of the
+Esc, and the shell's wake and its `wait: interrupted` line take longer, so
+E2 has closed the Esc by then. E1 alone is checked on the host
+(`keyseq::KeyQueue`'s tests), as `test-kbd-cut`'s check 3 says for the kill
+path. The ISO backslash key, 0x32,
 cannot be sent by QEMU, so its mapping is checked only on hardware.
 QEMU's own trace must hold no fault line.
 About a minute. Run it whenever `interrupt_key_check`, `KBD_MODE`, xhci.rs's
@@ -196,10 +200,10 @@ def main() -> int:
                 ok = guest.wait_for(r"wait: interrupted[\s\S]*" + PROMPT, timeout=20)
                 seg["wait"] = guest.transcript()[start:]
             if ok:
-                # An Esc read ahead into the queue, then Ctrl+\: the key
-                # parser must see the interrupt byte, or it is left inside
-                # the Esc and eats the next bytes queued, here the `Oz` of
-                # `Ozq` typed while `readkey spin 100 keep` is busy.
+                # An Esc read ahead into the queue, then Ctrl+\: the Esc
+                # must be over (E1, or E2 first), or it eats the `Oz` of
+                # `Ozq`. The shell's next line, so no letter before it ends
+                # the Esc instead.
                 guest.type_line(f"wait {recv_slot}")
                 time.sleep(1.5)
                 guest.type_raw(b"\x1b")
@@ -208,14 +212,8 @@ def main() -> int:
                 ok = guest.wait_for(r"wait: interrupted[\s\S]*" + PROMPT, timeout=20)
             if ok:
                 start = len(guest.transcript())
-                guest.type_line("readkey spin 100 keep")
-                ok = guest.wait_for("readkey: spinning")
-                if ok:
-                    guest.type_raw(b"Ozq")
-                    ok = guest.wait_for(r"readkey: kept[\s\S]*" + PROMPT, timeout=30)
-                if ok:
-                    guest.type_raw(b"\n")
-                    ok = guest.wait_for(PROMPT)
+                guest.type_line("Ozq")
+                ok = guest.wait_for(PROMPT)
                 seg["esc"] = guest.transcript()[start:]
             if found is not None:
                 guest.type_line(f"kill {recv_slot}")
@@ -259,6 +257,8 @@ def main() -> int:
          ended("cooked fs", "Ctrl+\\") and "(28)" not in seg.get("cooked fs", "")),
         ("Ctrl+\\ interrupted the boot shell's stuck wait, behind a full queue",
          "wait: interrupted" in seg.get("wait", "")),
+        ("after Esc then Ctrl+\\ at the wait, the shell's next line is whole (`Ozq`)",
+         "unknown command: Ozq" in seg.get("esc", "")),
         ("the boot shell ignored both bytes (`ef`)",
          "ef" in [l.strip() for l in seg.get("shell", "").splitlines()]),
         ("no fault lines", faults == 0),
@@ -267,11 +267,6 @@ def main() -> int:
     for name, good in checks:
         print(f"{'ok  ' if good else 'FAIL'} {name}")
         failed += 0 if good else 1
-    # Not a check: it passes with its rule removed (the docstring), so it is
-    # shown as a note and counted in no verdict.
-    esc_whole = "unknown command: Ozq" in seg.get("esc", "")
-    print(f"note `Ozq` reached the shell whole: {'yes' if esc_whole else 'NO'} "
-          "(cannot fail with its rule removed; not counted, docs/ROADMAP.md)")
     print(f"transcript: {os.path.relpath(TRANSCRIPT, ROOT)}; {drive_qemu.fault_text(faults)}")
     return 1 if failed else 0
 
