@@ -13,8 +13,14 @@
 //! A control byte (below 0x20, or DEL) arriving inside a sequence ends it
 //! and is passed through, as ECMA-48 has a terminal execute it: a sequence
 //! cut short (a byte lost, a bare ESC from a host terminal's Escape key)
-//! then cannot swallow the Enter or Backspace typed after it. A bare ESC
-//! followed by a printable byte still swallows that byte.
+//! then cannot swallow the Enter or Backspace typed after it. Any other byte
+//! after a bare ESC, save `[` and `O`, which start a sequence, is that byte
+//! (since 2026-10-09, decided by Hans with the USB Escape key): the Escape
+//! key is a key a line editor ignores, and the letter typed after it is
+//! kept, not taken for an `ESC x` sequence. The cost is stated: a host
+//! terminal's Alt+x (`ESC x`) types `x`, and an `ESC` sequence of another
+//! shape (`ESC P`, `ESC ]`) leaves its tail as text. Esc then a typed `[`
+//! or `O` is still read as a sequence's start, as on any terminal.
 //!
 //! Pure: no I/O, no syscalls, no heap, so it builds and is tested on the
 //! host (`make test`).
@@ -90,9 +96,10 @@ impl KeySeq {
                     self.state = State::Ss3;
                     Fed::Pending
                 }
+                // The Escape key, then a key of its own (see the module doc).
                 _ => {
                     self.state = State::Ground;
-                    Fed::Sequence
+                    Fed::Byte(b)
                 }
             },
             State::Csi => {
@@ -173,7 +180,15 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_escape_swallows_one_printable_byte() {
-        assert_eq!(run(b"\x1bxy"), (b"y".to_vec(), 1));
+    fn a_bare_escape_keeps_the_byte_after_it() {
+        assert_eq!(run(b"\x1bxy"), (b"xy".to_vec(), 0));
+        assert_eq!(run(b"\x1bq"), (b"q".to_vec(), 0), "Esc then q at `more` quits");
+        assert_eq!(run(b"\x1b\x1bx"), (b"x".to_vec(), 0));
+    }
+
+    #[test]
+    fn a_bare_escape_then_bracket_or_o_still_starts_a_sequence() {
+        assert_eq!(run(b"\x1b[Ax"), (b"x".to_vec(), 1));
+        assert_eq!(run(b"\x1bOQx"), (b"x".to_vec(), 1));
     }
 }

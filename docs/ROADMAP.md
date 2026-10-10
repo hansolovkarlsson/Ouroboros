@@ -830,14 +830,29 @@ The small open tails those arcs deliberately left:
   keyboard queue takes as the key's end (`keyseq::Source::Usb { last }`). So
   the USB Escape is a whole key at once, where the queue would have held it
   open for a second and trimmed a letter typed in that second as its rest. A
-  program reading bytes tells it apart by the quiet after it (Edit's 50 ms);
-  the shell's `keyseq` still drops a printable byte typed straight after a
-  bare ESC, as it does on the serial line (option 2, changing that, was not
-  taken). Checked by `make test-nav-keys` (READKEY reads a 27), `make
-  test-kbd-cut`'s check 6 and three host tests in `keyseq`, each failing with
-  its part removed. Tab, the other half of this item, is DONE (2026-10-09,
+  program reading bytes tells it apart by the quiet after it (Edit's 50 ms).
+  Option 2 was added to the same PR after its review found what option 1
+  alone cost (Esc then `q` paged `more` instead of quitting; Esc then `root`
+  at login gave `oot`): `keyseq` now reads a bare ESC followed by any byte
+  but `[` or `O` as Escape and then that byte, for every reader and the
+  kernel's queue alike. Its stated cost: a host terminal's Alt+x types `x`,
+  and an ESC sequence of another shape leaves its tail as text. Checked by
+  `make test-nav-keys` (READKEY reads a 27, Esc then `q` quits `more`, a
+  letter after Esc reaches the shell), `make test-kbd-cut`'s check 6 and
+  host tests in `keyseq`, each failing with its part removed. The controls
+  that used a letter after Esc (`test-kbd-cut` checks 2, 3 and 6, and their
+  host tests) now use `O`, which still opens a sequence, so they can still
+  fail. Tab, the other half of this item, is DONE (2026-10-09,
   #248): HID 0x2b sends 9, so filename completion works from a Parallels or
   Pi keyboard, checked by `make test-nav-keys`.
+
+- **`test-kbd-mode`'s `Ozq` check cannot fail (found 2026-10-09, #253).**
+  Its docstring said it fails with the key parser not fed the boot shell's
+  interrupt byte (E1 of the Ctrl-C plan); with that rule removed it passes,
+  on #253's version and on main's (`zq`) alike, and with E2's interval removed
+  as well (on a variant typing the Esc and Ctrl+\ 20 ms apart). Not yet known why: the Esc may never reach the queue during the
+  boot shell's wait, or be closed before the next key is read. E1 itself is
+  checked on the host. Find out which, then make the check real or remove it.
 
 - **Two tails of `cond`'s escape sequences (found 2026-10-07, the high
   review of #228).** (1) Reverse video is one setting in `cond` shared by

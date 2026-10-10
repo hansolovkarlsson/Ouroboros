@@ -342,14 +342,16 @@ mod tests {
 
     #[test]
     fn a_bare_escape_ends_after_the_interval() {
-        // E2: a program read a bare ESC and exited; a letter typed later
-        // starts a key of its own and is kept.
+        // E2: a program read a bare ESC and exited; a word typed later
+        // starts a key of its own and is kept. It starts with `O`, which
+        // inside the interval would open an SS3 sequence: any other letter is
+        // kept after a bare ESC whatever the interval.
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b", 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(ESC_ALONE + 1);
-        push_all(&mut q, b"echo", ESC_ALONE + 1);
-        assert_eq!(drain(&mut q), b"echo");
+        push_all(&mut q, b"Oops", ESC_ALONE + 1);
+        assert_eq!(drain(&mut q), b"Oops");
     }
 
     #[test]
@@ -364,13 +366,14 @@ mod tests {
 
     #[test]
     fn nothing_typed_after_an_interrupt_is_eaten() {
-        // E1: ESC queued, then Ctrl+C acted on, then a letter at once,
-        // inside the interval, so only the flush's own rule can save it.
+        // E1: ESC queued, then Ctrl+C acted on, then `Ok` at once, inside
+        // the interval, so only the flush's own rule can save it. An `O`,
+        // because any other letter after a bare ESC is kept by the parser.
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         push_all(&mut q, b"\x1b", 0);
         q.flush(Some(0x03));
-        push_all(&mut q, b"e", 0);
-        assert_eq!(drain(&mut q), b"e");
+        push_all(&mut q, b"Ok", 0);
+        assert_eq!(drain(&mut q), b"Ok");
     }
 
     #[test]
@@ -485,27 +488,28 @@ mod tests {
 
     #[test]
     fn a_usb_escape_is_a_whole_key_at_once() {
-        // A program read the Escape key and exited; a letter typed within
-        // `usb_alone` is a key of its own, not the Escape's rest.
+        // A program read the Escape key and exited; an `O` typed within
+        // `usb_alone` is a key of its own, not the Escape's rest (an SS3
+        // sequence's second byte). Any other letter is kept by the parser.
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         q.push(0x1b, LAST, 0);
         assert!(!q.inside_usb_key(0), "nothing more is read for it");
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(1);
-        q.push(b'e', LAST, 1);
-        assert_eq!(drain(&mut q), b"e");
+        q.push(b'O', LAST, 1);
+        assert_eq!(drain(&mut q), b"O");
     }
 
     #[test]
-    fn a_usb_escape_then_a_letter_are_two_keys() {
+    fn a_usb_escape_then_an_o_are_two_keys() {
         // Both queued before a change of owner: the reader took the Escape,
-        // and the letter behind it starts a key, so the trim keeps it.
+        // and the `O` behind it starts a key, so the trim keeps it.
         let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
         q.push(0x1b, LAST, 0);
-        q.push(b'e', LAST, 0);
+        q.push(b'O', LAST, 0);
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(0);
-        assert_eq!(drain(&mut q), b"e");
+        assert_eq!(drain(&mut q), b"O");
     }
 
     #[test]
@@ -517,7 +521,7 @@ mod tests {
         push_all(&mut q, &letters, 0);
         q.push(0x1b, LAST, 0);
         assert_eq!(drain(&mut q), letters.to_vec(), "no room for the Escape");
-        q.push(b'e', LAST, 0);
-        assert_eq!(drain(&mut q), b"e");
+        q.push(b'O', LAST, 0);
+        assert_eq!(drain(&mut q), b"O");
     }
 }

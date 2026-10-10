@@ -7,7 +7,7 @@ Item 2 of docs/handoffs/closed/2026-10-05-from-edit-editor-console.md: the USB
 keyboard sends the VT100/xterm sequences for Up, Down, Right, Left, Home, End,
 Page Up, Page Down, Delete, F2 and F3 (kernel/src/xhci.rs, keycode_to_bytes),
 which it dropped before, and Tab (keycode_to_ascii, unmapped until
-2026-10-09). Six checks in one boot:
+2026-10-09). Seven checks in one boot:
 
 1. **The bytes.** `/bin/READKEY` prints every byte it reads with its value.
    The eleven keys are pressed through the QEMU monitor's `sendkey`, which
@@ -23,12 +23,18 @@ which it dropped before, and Tab (keycode_to_ascii, unmapped until
    `ro`, `ESC [ D`, `ot`, so login succeeds only if its reader swallows the
    sequence; and `echo c`, `ESC [ A`, `ESC [ 5 ~`, `d` must print `cd`.
 4. **`more` takes a sequence as one key** (`ulib::read_key`): one Down at
-   `--More--` shows one more screen, where byte by byte it showed three.
+   `--More--` shows one more screen, where byte by byte it showed three. It
+   is then left by Escape and `q` on the USB keyboard, which must quit:
+   before 2026-10-09 `keyseq` read `ESC q` as one sequence, and any key
+   pages, so it showed another screen.
 5. **Tab completes on the USB keyboard**: `echo /include/el` typed on the
    serial line, Tab on the USB keyboard, Enter: the shell must print
    `/include/elf.h` (the only name there starting `el`), where without the
    mapping it printed `/include/el`.
-6. **`ulib::read_line` agrees with login**: `useradd navu` with the password
+6. **A letter typed after Escape is kept** (`keyseq` since 2026-10-09):
+   Escape, then `echo k7` and Enter, all on the USB keyboard: the shell must
+   print `k7`, where before it ran `cho k7`.
+7. **`ulib::read_line` agrees with login**: `useradd navu` with the password
    typed as `pa`, `ESC [ D`, `ss`, then a login as navu typing `pass`, which
    succeeds only if both readers drop the sequence. The run boots a copy of
    the image, so the user never reaches `build/esp.img`.
@@ -139,10 +145,16 @@ def main() -> int:
                 ok = guest.wait_for("--More--")
             if ok:
                 time.sleep(1.5)  # time for any further screens to show
-                drive_qemu.sendkeys(MONITOR, ["q"], KEY_DELAY)
+                # Escape and then q: q must still quit.
+                drive_qemu.sendkeys(MONITOR, ["esc", "q"], KEY_DELAY)
                 ok = guest.wait_for("# ")
             if ok:
                 steps_done.append("more")
+        if ok:
+            drive_qemu.sendkeys(MONITOR, ["esc", "e", "c", "h", "o", "spc", "k", "7", "ret"], KEY_DELAY)
+            ok = guest.wait_for("# ")
+            if ok:
+                steps_done.append("esc line")
         if ok:
             # A password set through ulib::read_line with an arrow typed in
             # it, then typed plain at login: the two readers must agree.
@@ -183,13 +195,15 @@ def main() -> int:
     more_part = more_part[:more_part.find("useradd navu")] if "useradd navu" in more_part else more_part
     after_useradd = out[out.find("useradd navu"):] if "useradd navu" in out else ""
     checks = [
-        ("driven to the end", len(steps_done) == 7),
+        ("driven to the end", len(steps_done) == 8),
         ("login took `ro ESC[D ot` as root", "login" in steps_done and "Login incorrect" not in first_login),
         (f"readkey read the eleven sequences, Tab and Escape ({len(want)} bytes)", got == want),
         ("the shell printed `axb` (USB keys in the line)", "axb" in lines),
         ("Tab on the USB keyboard completed `/include/el` to `/include/elf.h`", "/include/elf.h" in lines),
         ("the shell printed `cd` (serial sequences in the line)", "cd" in lines),
         ("one Down at `more` is one screen (two prompts)", more_part.count("--More--") == 2),
+        ("Escape then q quits `more`", "more" in steps_done),
+        ("the shell printed `k7` (a letter after Escape kept)", "k7" in lines),
         ("a password typed with ESC [ D at useradd logs in typed plain",
          "useradd" in steps_done and "Login incorrect" not in after_useradd and "$ " in after_useradd),
         ("no fault lines", faults == 0),

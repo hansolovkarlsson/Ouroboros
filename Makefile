@@ -1915,8 +1915,9 @@ test-cond-vt: image
 # The navigation and function keys on QEMU's USB keyboard
 # (scripts/test-nav-keys.py): the eleven keys, Tab and Escape pressed by
 # monitor sendkey, the bytes /bin/READKEY reads checked against their VT100
-# sequences, a 9 and a 27, then the
-# shell and login taking them as nothing. One boot, about a minute; run it
+# sequences, a 9 and a 27, then the shell and login taking them as nothing,
+# `more` quitting on Esc then q, and the shell keeping a letter typed after
+# Escape. One boot, about a minute; run it
 # whenever xhci.rs's key mapping, the shell's line editor or login's reader
 # changes.
 test-nav-keys: image

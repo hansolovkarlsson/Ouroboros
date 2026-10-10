@@ -283,9 +283,13 @@ ESC, what a terminal sends, and the driver marks the last byte of every key,
 so the kernel's keyboard queue counts the Escape as a whole key at once:
 without that, it held a USB Escape open for a second as the start of a
 sequence, and a letter typed in that second was dropped as its rest when the
-program exited. At the shell, a letter typed straight after Escape is still
-dropped, as on the serial line. `make test-nav-keys` and `make test-kbd-cut`
-check it, and each check fails with its part removed.
+program exited. And every keyboard reader (the shell, login, `passwd`,
+`more`) now keeps the key typed after a bare Escape, from the USB keyboard
+or a host terminal, unless it is `[` or `O`, which start a sequence: before,
+Esc then `root` at login gave `oot`, and Esc then `q` paged `more` instead
+of quitting. A host terminal's Alt+x now types `x`. `make test-nav-keys`
+and `make test-kbd-cut` check it, and each check fails with its part
+removed.
 
 **A rig no longer boots an image built from other sources (#247).** The
 rigs refused a stale image by comparing modification times, and a reverted
