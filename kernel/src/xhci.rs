@@ -1000,8 +1000,8 @@ fn keycode_to_bytes(keycode: u8, shift: bool, ctrl: bool) -> Option<KeyBytes> {
         // starts with the same byte, so the key is told apart by where it
         // ends: `pending_last` marks its one byte as a whole key for the
         // kernel's queue (decided 2026-10-09). A program reading bytes tells
-        // it apart by the quiet after it, as on any terminal; the shell's
-        // `keyseq` still drops a printable byte typed straight after it.
+        // it apart by the quiet after it, as on any terminal; `keyseq` keeps
+        // a byte typed after it, save `[` and `O`, which start a sequence.
         0x29 => b"\x1b",
         _ => {
             let byte = keycode_to_ascii(keycode, shift, ctrl)?;

@@ -154,6 +154,13 @@ impl KeyQueue {
         let abandons = self.inside && byte == crate::ESC;
         let starts = !self.inside || abandons;
         let fed = self.keys.feed(byte);
+        if matches!(fed, Fed::Byte(b) if b >= 0x20 && b != 0x7f) {
+            // A printable byte is a key of its own: in ground, or after a
+            // bare ESC, which it shows was a whole key (the Escape key), so
+            // the ESC is not this byte's front, to be taken back from a full
+            // queue for it (review of #253).
+            self.partial = 0;
+        }
         self.inside = fed == Fed::Pending;
         if starts {
             self.inside_usb = from_usb;
@@ -172,7 +179,8 @@ impl KeyQueue {
                     return;
                 }
                 // A control byte ends a cut sequence and is a key of its own
-                // (keyseq passes it through the same way): kept, if it fits.
+                // (keyseq passes it through the same way), and so does any
+                // byte after a bare ESC but `[` and `O`: kept, if it fits.
                 Fed::Byte(_) => self.dropping = false,
             }
         } else if self.len == QUEUE_LEN {
@@ -191,8 +199,10 @@ impl KeyQueue {
                     return;
                 }
                 Fed::Sequence => return,
-                // A control byte ending the key that did not fit, or an
-                // ordinary byte: kept if taking the key back made room.
+                // A control byte ending the key that did not fit: kept if
+                // taking the key back made room. An ordinary byte took
+                // nothing back (`partial` is 0 for it, even after a bare
+                // ESC), so it is dropped below.
                 Fed::Byte(_) => {}
             }
         }
@@ -510,6 +520,20 @@ mod tests {
         assert_eq!(q.pop(), Some(0x1b));
         q.trim_cut_key(0);
         assert_eq!(drain(&mut q), b"O");
+    }
+
+    #[test]
+    fn a_full_queue_keeps_a_bare_escape_over_the_letter_after_it() {
+        // The ESC is a whole key once a letter follows it: the letter does
+        // not fit and is dropped, as any ordinary byte, and the Escape the
+        // reader may be waiting for (Edit, to cancel a prefix) is kept.
+        let mut q = KeyQueue::new(ESC_ALONE, USB_ALONE);
+        let letters = [b'x'; QUEUE_LEN - 1];
+        push_all(&mut q, &letters, 0);
+        push_all(&mut q, b"\x1bq", 0);
+        let mut want = letters.to_vec();
+        want.push(0x1b);
+        assert_eq!(drain(&mut q), want);
     }
 
     #[test]

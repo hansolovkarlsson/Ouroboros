@@ -50,8 +50,8 @@ Each check fails with its part of the kernel removed: the raw test in
 (2), the reset in `end_task` (3), Ctrl+\\ as the boot shell's interrupt in `interrupt_key_check`'s owner-0 arm (6),
 the boot shell's interrupt decided as it is read rather than found in the
 queue (the zombie check; queued, it is lost behind a full queue, check 6),
-and 0x64 in the USB map (the `<>` check). The `Ozq` check CANNOT FAIL as
-written: it passes with the parser not fed the boot shell's interrupt byte,
+and 0x64 in the USB map (the `<>` check). The `Ozq` line is printed as a
+note, not a check, because it CANNOT FAIL as written: it passes with the parser not fed the boot shell's interrupt byte,
 and passed so on main's version (`zq`) too, both observed 2026-10-09, though
 this docstring named that rule as its subject. That rule is checked on the
 host (`keyseq::KeyQueue`'s tests); the check stays until it is made real or
@@ -259,8 +259,6 @@ def main() -> int:
          ended("cooked fs", "Ctrl+\\") and "(28)" not in seg.get("cooked fs", "")),
         ("Ctrl+\\ interrupted the boot shell's stuck wait, behind a full queue",
          "wait: interrupted" in seg.get("wait", "")),
-        ("after Esc then Ctrl+\\ at the wait, the next key queued is not eaten (`Ozq`)",
-         "unknown command: Ozq" in seg.get("esc", "")),
         ("the boot shell ignored both bytes (`ef`)",
          "ef" in [l.strip() for l in seg.get("shell", "").splitlines()]),
         ("no fault lines", faults == 0),
@@ -269,6 +267,11 @@ def main() -> int:
     for name, good in checks:
         print(f"{'ok  ' if good else 'FAIL'} {name}")
         failed += 0 if good else 1
+    # Not a check: it passes with its rule removed (the docstring), so it is
+    # shown as a note and counted in no verdict.
+    esc_whole = "unknown command: Ozq" in seg.get("esc", "")
+    print(f"note `Ozq` reached the shell whole: {'yes' if esc_whole else 'NO'} "
+          "(cannot fail with its rule removed; not counted, docs/ROADMAP.md)")
     print(f"transcript: {os.path.relpath(TRANSCRIPT, ROOT)}; {drive_qemu.fault_text(faults)}")
     return 1 if failed else 0
 

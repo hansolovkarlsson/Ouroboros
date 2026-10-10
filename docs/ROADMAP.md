@@ -846,6 +846,15 @@ The small open tails those arcs deliberately left:
   #248): HID 0x2b sends 9, so filename completion works from a Parallels or
   Pi keyboard, checked by `make test-nav-keys`.
 
+- **A USB Escape then `O` or `[` is still read as a sequence by every reader
+  (found 2026-10-09, #253's second review).** The driver knows the Escape key
+  is a whole key and the kernel's queue uses that, but the mark stops there:
+  a reader gets bytes, so the shell or login reading Escape and then `Oscar`
+  takes `ESC O s` for an SS3 key and keeps `car`, as a host terminal's would.
+  Carrying key boundaries to readers (a read that returns one key at a time,
+  or an `ESC` that announces itself complete) is an ABI question, left until a
+  case needs it; Esc then `O` at a prompt is rare.
+
 - **`test-kbd-mode`'s `Ozq` check cannot fail (found 2026-10-09, #253).**
   Its docstring said it fails with the key parser not fed the boot shell's
   interrupt byte (E1 of the Ctrl-C plan); with that rule removed it passes,
