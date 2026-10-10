@@ -912,6 +912,17 @@ unsafe fn build_identity_map(
     unsafe { build_tables(memory_map, el0_regions, extra_devices, &stored_nc[..nc_count], true) }
 }
 
+/// The EL1 regime the boot core switched to, kept for the secondary cores,
+/// which share its tables (`smp.rs`; class A of the multi-core plan's
+/// inventory, written once at the switch).
+static BOOT_REGIME: SyncCell<Option<El1Regime>> = SyncCell::new(None);
+
+/// The regime [`switch_to_identity_map`] installed on the boot core.
+pub(crate) fn boot_regime() -> El1Regime {
+    // SAFETY: written once at the switch, before any second core runs.
+    unsafe { *BOOT_REGIME.get() }.expect("mmu::boot_regime before the identity map was installed")
+}
+
 /// The switch half of [`install_identity_map`]: onto the current task's
 /// view, then the one-time cache clean of the non-cacheable ranges and the
 /// walker check of every view, both of which need the new tables live.
@@ -930,17 +941,6 @@ unsafe fn build_identity_map(
 /// [`build_identity_map`] must have returned `planned` on this boot, after
 /// `exit_boot_services`, with IRQs masked and `exceptions::install` done
 /// (at EL2 that write takes effect at the drop).
-/// The EL1 regime the boot core switched to, kept for the secondary cores,
-/// which share its tables (`smp.rs`; class A of the multi-core plan's
-/// inventory, written once at the switch).
-static BOOT_REGIME: SyncCell<Option<El1Regime>> = SyncCell::new(None);
-
-/// The regime [`switch_to_identity_map`] installed on the boot core.
-pub(crate) fn boot_regime() -> El1Regime {
-    // SAFETY: written once at the switch, before any second core runs.
-    unsafe { *BOOT_REGIME.get() }.expect("mmu::boot_regime before the identity map was installed")
-}
-
 unsafe fn switch_to_identity_map(planned: Planned) {
     let view = crate::tasks::current_index();
     // SAFETY: the one write, on the boot core, before any second core.

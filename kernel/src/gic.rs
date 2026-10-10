@@ -71,7 +71,9 @@ pub unsafe fn init_this_core() {
     let info = info();
     match info.version {
         GicVersion::V2 => unsafe { gicv2::init_cpu_interface(info.gicc_base as usize) },
-        GicVersion::V3 => unsafe { gicv3::init_this_core(info.gicr_base as usize, info.gicr_size as usize) },
+        GicVersion::V3 => {
+            let _this_cores_frame = unsafe { gicv3::init_this_core(info.gicr_base as usize, info.gicr_size as usize) };
+        }
     }
 }
 

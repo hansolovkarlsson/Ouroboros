@@ -201,23 +201,26 @@ pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
         // read-back in init_this_core.
         write_reg32(gicd_base, 0x000, GICD_CTLR_INIT);
         while read_reg32(gicd_base, 0x000) & GICD_CTLR_RWP != 0 {}
-        init_this_core(gicr_base, gicr_size);
+        let sgi_base = init_this_core(gicr_base, gicr_size);
+        SGI_BASE.store(sgi_base, Ordering::Relaxed);
     }
 }
 
 /// This core's redistributor (found by its own `MPIDR_EL1`) woken and its
 /// SGIs/PPIs put in Group 1, and its CPU interface through the system
 /// registers. The per-core half of [`init`], which a secondary core runs
-/// for itself; `SGI_BASE` is this core's frame and so per core (class B of
-/// the multi-core plan's inventory), which step 4 makes an array.
+/// for itself. Returns this core's SGI_base frame and does NOT store it:
+/// `SGI_BASE` is the boot core's (only [`init`] writes it), since
+/// `enable_interrupt` on the boot core reads it after the secondaries have
+/// started; a per-core array is step 4's, when a secondary enables
+/// anything of its own.
 ///
 /// # Safety
 /// As [`init`], after the distributor is up.
-pub unsafe fn init_this_core(gicr_base: usize, gicr_size: usize) {
+pub unsafe fn init_this_core(gicr_base: usize, gicr_size: usize) -> usize {
     let rd_base =
         find_own_redistributor(gicr_base, gicr_size).expect("no matching GICv3 redistributor frame found for this CPU's MPIDR_EL1 in the discovered GICR region");
     let sgi_base = rd_base + SGI_BASE_OFFSET;
-    SGI_BASE.store(sgi_base, Ordering::Relaxed);
 
     unsafe {
         // Wake the redistributor before touching anything else in it.
@@ -253,6 +256,7 @@ pub unsafe fn init_this_core(gicr_base: usize, gicr_size: usize) {
         asm!("msr icc_pmr_el1, {0}", in(reg) ICC_PMR_ALLOW_ALL, options(nomem, nostack, preserves_flags));
         asm!("msr icc_igrpen1_el1, {0}", "isb", in(reg) ICC_IGRPEN1_ENABLE, options(nostack, preserves_flags));
     }
+    sgi_base
 }
 
 /// Enables forwarding of `intid`.

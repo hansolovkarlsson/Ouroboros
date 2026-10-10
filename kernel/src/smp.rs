@@ -27,15 +27,17 @@
 //! not armed; the boot core's tick keeps every job it has.
 //!
 //! A fault on a secondary halts that core alone: the vector table is the
-//! same, `rust_exception_handler` names the core (`core=N`), and its halt
-//! loop spins the faulting core, so the boot core's shell goes on. The
-//! `\SMPFAULT` boot flag makes core 1 take an undefined instruction right
+//! same, `rust_exception_handler` names the core (`core=N`, the MADT's
+//! index, which the boot core takes as its own once the table is read) and
+//! checks that core's own stack canary, and its halt loop spins the
+//! faulting core, so the boot core's shell goes on. The `\SMPFAULT` boot
+//! flag makes the first core started take an undefined instruction right
 //! after its up line, which is how `make test-smp` sees that.
 
 use crate::madt::{self, CoreList, MAX_CORES};
 use crate::synccell::SyncCell;
 use core::arch::{asm, global_asm};
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 /// What [`smp_secondary_entry`] reads with the MMU off: the EL1 regime and
 /// the register values the boot core wants every core to share. Field
@@ -56,7 +58,7 @@ pub struct SecondaryParams {
     cpacr: u64,
     spsr: u64,
     /// `\SMPFAULT`: the core index that takes a deliberate fault after its
-    /// up line, 0 for none. Read by Rust only.
+    /// up line, `NO_FAULT_CORE` for none. Read by Rust only.
     fault_core: u64,
 }
 const _: () = assert!(core::mem::offset_of!(SecondaryParams, mair) == 0);
@@ -83,20 +85,48 @@ static PARAMS: SyncCell<SecondaryParams> = SyncCell::new(SecondaryParams {
     cnthctl: 0,
     cpacr: 0,
     spsr: 0,
-    fault_core: 0,
+    fault_core: NO_FAULT_CORE,
 });
+
+/// `fault_core` when no core is to fault: not 0, which is a valid index.
+const NO_FAULT_CORE: u64 = u64::MAX;
+
+/// The boot core's own MADT index, written by [`start`] once the MADT is
+/// read, which is when its `TPIDR_EL1` becomes that index too (class A).
+/// Until then the boot core is core 0 by `set_boot_core_index`.
+static BOOT_INDEX: AtomicU64 = AtomicU64::new(0);
+
+/// The word at the base of each secondary's stack, as `main.rs`'s
+/// `STACK_CANARY` at the boot core's: an overflow overwrites it first.
+const STACK_CANARY: u64 = 0x5141_5141_5141_5141;
 
 /// A secondary core's stack. Smaller than the boot core's 256 KB: a parked
 /// core runs `secondary_main` and a fault report, and step 4 sizes it for
 /// tasks when it comes.
 pub const SECONDARY_STACK_SIZE: usize = 64 * 1024;
 #[repr(C, align(16))]
-struct SecondaryStacks([[u8; SECONDARY_STACK_SIZE]; MAX_CORES - 1]);
-/// One stack per core but the boot core's (class B: per core by nature).
-/// Core `i` (1-based, the MADT's index) takes the top of entry `i - 1`,
-/// which is `base + i * SECONDARY_STACK_SIZE`.
+struct SecondaryStacks([[u8; SECONDARY_STACK_SIZE]; MAX_CORES]);
+/// One stack per MADT index (class B: per core by nature). Core `i` takes
+/// entry `i`, whose top is `base + (i + 1) * SECONDARY_STACK_SIZE`; the
+/// boot core's entry goes unused, since the MADT may list it at any index
+/// (ACPI fixes no order on ARM), and indexing by the table's own index is
+/// what keeps every core's index, stack and up mark in step.
 static STACKS: SyncCell<SecondaryStacks> =
-    SyncCell::new(SecondaryStacks([[0; SECONDARY_STACK_SIZE]; MAX_CORES - 1]));
+    SyncCell::new(SecondaryStacks([[0; SECONDARY_STACK_SIZE]; MAX_CORES]));
+
+/// This core's stack canary: intact or not, and the stack's base, for the
+/// fault line. The boot core's is `main.rs`'s 256 KB stack; a secondary's
+/// is its `STACKS` entry.
+pub(crate) fn this_core_stack_canary() -> (bool, u64) {
+    let core = core_index();
+    if core == BOOT_INDEX.load(Ordering::Relaxed) {
+        return (crate::stack_canary_intact(), crate::stacks().0.0);
+    }
+    let base = STACKS.get() as u64 + core * SECONDARY_STACK_SIZE as u64;
+    // SAFETY: the base word of this core's own stack, written by `start`
+    // before the core ran; volatile since nothing the compiler sees writes it.
+    (unsafe { core::ptr::read_volatile(base as *const u64) } == STACK_CANARY, base)
+}
 
 /// Per core: 0 not started, 1 up and parked (class B). Written by the core
 /// itself, read by the boot core's wait in [`start`].
@@ -111,9 +141,14 @@ pub fn core_index() -> u64 {
     idx
 }
 
-/// Marks this core as core 0 in `TPIDR_EL1`. The boot core, at its start.
+/// Marks this core as core 0 in `TPIDR_EL1`. The boot core, at its start,
+/// before the MADT says which index it really has ([`start`] corrects it).
 pub fn set_boot_core_index() {
     unsafe { asm!("msr tpidr_el1, xzr", options(nomem, nostack, preserves_flags)) };
+}
+
+fn set_core_index(idx: u64) {
+    unsafe { asm!("msr tpidr_el1, {0}", in(reg) idx, options(nomem, nostack, preserves_flags)) };
 }
 
 global_asm!(
@@ -133,7 +168,8 @@ smp_secondary_entry:
     ldp  x13, x14, [x1, #64]
     ldp  x15, x16, [x1, #80]
     ldr  x17, [x1, #96]
-    mul  x8, x19, x7
+    add  x8, x19, #1
+    mul  x8, x8, x7
     add  x8, x6, x8
     msr  tpidr_el1, x19
     mrs  x9, CurrentEL
@@ -201,6 +237,8 @@ smp_secondary_entry:
 3:
     wfe
     b    3b
+    .global smp_secondary_entry_end
+smp_secondary_entry_end:
 "#,
     params = sym PARAMS,
     secondary_main = sym secondary_main,
@@ -208,6 +246,7 @@ smp_secondary_entry:
 
 unsafe extern "C" {
     fn smp_secondary_entry();
+    fn smp_secondary_entry_end();
 }
 
 /// A secondary core's Rust half, on its own stack, at EL1 with the MMU on:
@@ -244,8 +283,22 @@ fn wait_ticks() -> u64 {
 ///
 /// # Safety
 /// Once, on the boot core, at EL1, with the console installed.
-pub unsafe fn start(cores: &CoreList, fault_core: u64) {
+pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     let me = madt::affinity(crate::gicv3::read_mpidr());
+    let n = cores.count.min(MAX_CORES);
+    // The boot core's own index: the MADT fixes no order on ARM, so it may
+    // be any entry. From here its TPIDR_EL1 is that index, its stack still
+    // main.rs's.
+    if let Some(mine) = (0..n).find(|&i| cores.mpidr[i] == me) {
+        BOOT_INDEX.store(mine as u64, Ordering::Relaxed);
+        set_core_index(mine as u64);
+    }
+    // `\SMPFAULT`: the first core that will be started takes the fault.
+    let fault_core = if fault_first {
+        (0..n).find(|&i| cores.mpidr[i] != me && cores.enabled[i]).map_or(NO_FAULT_CORE, |i| i as u64)
+    } else {
+        NO_FAULT_CORE
+    };
     let regime = crate::mmu::boot_regime();
     let params = SecondaryParams {
         mair: regime.mair,
@@ -264,17 +317,27 @@ pub unsafe fn start(cores: &CoreList, fault_core: u64) {
         fault_core,
     };
     // SAFETY: the one write, before any CPU_ON; then cleaned to the point
-    // of coherency, since the stub reads it with the MMU off.
+    // of coherency, since the stub reads it with the MMU off. The stub's
+    // own code too: the firmware's loader cleaned the image to the point
+    // of unification, which on an A72 is the shared L2, and a fresh core
+    // with its MMU off fetches from memory (Linux's EFI stub cleans the
+    // image to PoC for this reason).
     unsafe { *PARAMS.get() = params };
     crate::mmu::clean_to_poc(PARAMS.get() as u64, core::mem::size_of::<SecondaryParams>() as u64, 1, 0);
     let entry = smp_secondary_entry as *const () as u64;
+    let entry_end = smp_secondary_entry_end as *const () as u64;
+    crate::mmu::clean_to_poc(entry, entry_end - entry, 1, 0);
     let mut started = 0usize;
     let mut up = 0usize;
-    for (i, up_mark) in CORE_UP.iter().enumerate().take(cores.count.min(MAX_CORES)) {
+    for (i, up_mark) in CORE_UP.iter().enumerate().take(n) {
         let aff = cores.mpidr[i];
         if aff == me {
             continue;
         }
+        // This core's stack canary, under the stack the stub will take.
+        let base = STACKS.get() as u64 + i as u64 * SECONDARY_STACK_SIZE as u64;
+        // SAFETY: the base word of a stack nothing has used.
+        unsafe { core::ptr::write_volatile(base as *mut u64, STACK_CANARY) };
         if !cores.enabled[i] {
             crate::console::println!("Ouroboros kernel: smp: core {i} (affinity {aff:#x}) is not enabled in the MADT, left off");
             continue;

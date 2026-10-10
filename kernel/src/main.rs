@@ -948,7 +948,7 @@ extern "C" fn kernel_main() -> ! {
         }
         // The secondary cores, started and parked (smp.rs, multi-core step
         // 2): after the distributor is up and before the tick is armed.
-        unsafe { smp::start(&madt::cores(), if smp_fault { 1 } else { 0 }) };
+        unsafe { smp::start(&madt::cores(), smp_fault) };
         timer::arm(timer::TICK_INTERVAL_MS);
         if let Some(intid) = nic_intid {
             console::println!(

@@ -99,6 +99,10 @@ pub unsafe fn discover_conduit(rsdp: Option<*const u8>) {
 /// `hvc` one unusable after the drop from EL2, which `discover_conduit`
 /// leaves as none).
 ///
+/// The `asm!` is not `nomem`: the call hands memory (the parameter block,
+/// the stacks, the tables) to another core, so every store before it must
+/// stay before it.
+///
 /// # Safety
 /// `entry` must be code that can run with the MMU off on a fresh core
 /// (`smp::smp_secondary_entry`), and anything it reads must be clean to
@@ -107,10 +111,10 @@ pub unsafe fn cpu_on(target: u64, entry: u64, context: u64) -> Result<(), i64> {
     let result: u64;
     match CONDUIT.load(Ordering::Relaxed) {
         CONDUIT_HVC => unsafe {
-            asm!("hvc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, in("x1") target, in("x2") entry, in("x3") context, options(nomem, nostack));
+            asm!("hvc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, in("x1") target, in("x2") entry, in("x3") context, options(nostack));
         },
         CONDUIT_SMC => unsafe {
-            asm!("smc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, in("x1") target, in("x2") entry, in("x3") context, options(nomem, nostack));
+            asm!("smc #0", inout("x0") PSCI_CPU_ON_64 as u64 => result, in("x1") target, in("x2") entry, in("x3") context, options(nostack));
         },
         _ => return Err(-1),
     }

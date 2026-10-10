@@ -93,6 +93,7 @@ pub struct Flags {
     pub early_fault: bool,
     /// [`WALK_FAULT`]
     pub walk_fault: bool,
+    /// [`SMP_FAULT`]
     pub smp_fault: bool,
 }
 

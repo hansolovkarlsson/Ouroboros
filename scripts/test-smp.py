@@ -3,7 +3,7 @@
 
     python3 scripts/test-smp.py    (or `make test-smp`, which builds the image)
 
-Four boots. In each, before the exit, the boot log says `MADT: N cores (this
+Five boots. In each, before the exit, the boot log says `MADT: N cores (this
 core affinity A, mpidr M)` and one `MADT: core i: mpidr M, enabled` line per
 core (step 1): N must be the `-smp` count, with N distinct MPIDRs, the boot
 core's affinity among them, every core enabled. Then (step 2) the boot core
@@ -19,16 +19,20 @@ QEMU's own trace.
 2. `-smp 4`, `virt,virtualization=on` (an EL2 handoff, as the Raspberry
    Pi's; each secondary enters at EL2 and drops itself, the log must say
    the boot core `dropped from EL2 to EL1` and each core `up at EL1`).
-3. `-smp 1`: one core, no `core up` line, the summary `0 of 0`, the shell
+3. `-smp 4`, `virt,gic-version=3`: the per-core GICv3 path (each core's
+   redistributor found by its own MPIDR, the system-register interface on
+   a secondary), which Parallels, the owed target, has.
+4. `-smp 1`: one core, no `core up` line, the summary `0 of 0`, the shell
    as before.
-4. `-smp 4` with the `\\SMPFAULT` flag file (an ESP directory copy, vvfat):
-   core 1 takes an undefined instruction after its up line, the fault line
-   must name it (`EXCEPTION core=1`), and the boot core's shell must still
-   answer: a secondary's fault halts that core alone.
+5. `-smp 4` with the `\\SMPFAULT` flag file (an ESP directory copy, vvfat):
+   the first core started takes an undefined instruction after its up
+   line, the fault line must name that core (`EXCEPTION core=N`, read
+   from the kernel's own `taking` line), and the boot core's shell must
+   still answer: a secondary's fault halts that core alone.
 
 A boot with no `Ouroboros kernel` line is the firmware stalling in its own
 boot, which happens; the rig says INCONCLUSIVE for that boot and does not
-pass. About five minutes. Run it whenever smp.rs, el2.rs, madt.rs's GICC
+pass. About six minutes. Run it whenever smp.rs, el2.rs, madt.rs's GICC
 parse, the GIC backends' per-core init or the console lock changes.
 """
 import importlib.util
@@ -112,14 +116,16 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
          summary is not None and summary.groups() == (str(others), str(others), str(smp))),
         (f"{name}: the shell still answers after a {DWELL} s dwell with the other cores parked", dwell_ok),
     ]
-    if machine != "virt":
+    if "virtualization=on" in machine:
         checks.append((f"{name}: the boot core dropped from EL2 to EL1", "dropped from EL2 to EL1" in out))
     if fault:
+        taking = re.search(r"smp: core (\d+) taking the \\SMPFAULT undefined instruction", out)
+        victim = taking.group(1) if taking else "?"
         checks += [
-            (f"{name}: core 1 took the \\SMPFAULT instruction", "smp: core 1 taking the \\SMPFAULT undefined instruction" in out),
-            (f"{name}: the fault line names core 1 (EXCEPTION core=1, an undefined instruction, esr 0x2000000)",
-             re.search(r"EXCEPTION core=1 vector=\d+ esr_el1=0x2000000 ", out) is not None),
-            (f"{name}: no other core's fault line", re.search(r"EXCEPTION core=(?!1 )", out) is None),
+            (f"{name}: a core took the \\SMPFAULT instruction (core {victim})", taking is not None),
+            (f"{name}: the fault line names that core (EXCEPTION core={victim}, an undefined instruction, esr 0x2000000)",
+             taking is not None and re.search(rf"EXCEPTION core={victim} vector=\d+ esr_el1=0x2000000 ", out) is not None),
+            (f"{name}: no other core's fault line", taking is not None and re.search(rf"EXCEPTION core=(?!{victim} )", out) is None),
         ]
     else:
         checks.append((f"{name}: no fault lines", faults == 0 and "EXCEPTION" not in out))
@@ -130,6 +136,7 @@ def main() -> int:
     checks = []
     checks += boot("smp4", 4)
     checks += boot("smp4-el2", 4, machine="virt,virtualization=on")
+    checks += boot("smp4-gicv3", 4, machine="virt,gic-version=3")
     checks += boot("smp1", 1)
     esp = os.path.join(ROOT, "build", "test-smp-esp")
     shutil.rmtree(esp, ignore_errors=True)
