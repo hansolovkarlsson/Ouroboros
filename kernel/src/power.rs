@@ -153,12 +153,21 @@ pub fn power_off() -> ! {
 /// Halt the machine: mask all interrupts and park the core in `wfi` forever,
 /// so nothing (not even the timer tick) can resume it. Never returns.
 pub fn halt() -> ! {
-    // This core halts; the kernel lock, if it is this core's, must not
-    // halt with it (lock.rs): the first run of multi-core step 4(b) had a
-    // secondary fault at EL0 and halt holding it, and the boot core's
-    // shell never came up.
-    crate::lock::release_if_held();
-    crate::console::println!("Ouroboros kernel: system halted");
+    // Whose halt is this (lock.rs)? A core holding the kernel lock stopped
+    // inside an entry with the state behind the lock half-written, and
+    // the boot core's death is the system's: the kernel halts, and every
+    // other core parks at its next entry. A secondary holding nothing (a
+    // fault in its own setup) halts alone, and the rest go on; the first
+    // run of multi-core step 4(b) had one halt holding the lock and the
+    // boot core's shell never came up, which is why the two are told
+    // apart here rather than the lock handed on to run over the wreck.
+    // Forced past a quieted console: a halt is a fault's last word.
+    if crate::lock::held_by_me() || crate::smp::is_boot_core() {
+        crate::lock::halt_kernel();
+        crate::console::println_force!("Ouroboros kernel: system halted");
+    } else {
+        crate::console::println_force!("Ouroboros kernel: core {} halted alone, holding nothing; the rest go on", crate::smp::core_index());
+    }
     unsafe {
         // DAIFSet: mask Debug/SError/IRQ/FIQ so the timer tick can't wake us.
         asm!("msr daifset, #0xf", options(nomem, nostack, preserves_flags));

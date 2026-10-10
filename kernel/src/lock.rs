@@ -19,10 +19,15 @@
 //! exception at EL1 is a diverging fault, which takes no lock and halts).
 //! A core that finds the lock its own has broken that rule, and the kernel
 //! says so and halts rather than deadlock in silence. The diverging fault
-//! reporter does not take it either: it halts this core, and may be
-//! reporting from inside the holder.
+//! reporter does not take it either: it halts, and may be reporting from
+//! inside the holder, in which case the state behind the lock is suspect,
+//! so `power::halt` on a core that holds the lock (or on the boot core,
+//! whose death is the system's) halts the KERNEL: `HALTED` is set, the
+//! lock stays with the dead core, and every other core parks at its next
+//! `acquire` with a line. A secondary that halts holding nothing (a fault
+//! in its own setup, `\SMPFAULT`) halts alone, and the rest go on.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The core index plus one of the holder, 0 when free (class C of the
 /// plan's inventory: the lock itself).
@@ -32,6 +37,12 @@ static KERNEL_LOCK: AtomicU64 = AtomicU64::new(0);
 pub fn acquire() {
     let me = crate::smp::core_index() + 1;
     loop {
+        if HALTED.load(Ordering::Acquire) {
+            crate::console::println_force!("Ouroboros kernel: core {} stopped: the kernel has halted", me - 1);
+            loop {
+                unsafe { core::arch::asm!("wfe", options(nomem, nostack, preserves_flags)) };
+            }
+        }
         match KERNEL_LOCK.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed) {
             Ok(_) => return,
             Err(owner) if owner == me => {
@@ -46,13 +57,21 @@ pub fn acquire() {
     }
 }
 
-/// Releases the lock if this core holds it, for a halt: a core that stops
-/// for good inside an entry (a fault handler's halting arm) must not take
-/// the kernel with it, since the others spin on this lock at their next
-/// entry. `power::halt` calls it first.
-pub fn release_if_held() {
-    let me = crate::smp::core_index() + 1;
-    let _ = KERNEL_LOCK.compare_exchange(me, 0, Ordering::Release, Ordering::Relaxed);
+/// Set once the kernel has halted (`power::halt` on a core that holds the
+/// lock, or on the boot core): every other core stops at its next
+/// `acquire`, since the state behind the lock may be half-written and
+/// nothing may run over it. Never cleared.
+static HALTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this core holds the lock.
+pub fn held_by_me() -> bool {
+    KERNEL_LOCK.load(Ordering::Relaxed) == crate::smp::core_index() + 1
+}
+
+/// Halts the kernel: the lock stays with its holder, and every core that
+/// comes to `acquire` after this parks for good with a line.
+pub fn halt_kernel() {
+    HALTED.store(true, Ordering::Release);
 }
 
 /// Releases the lock this core holds. Releasing a lock another core

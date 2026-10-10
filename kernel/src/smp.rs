@@ -36,7 +36,6 @@
 //! flag makes the first core started take an undefined instruction right
 //! after its up line, which is how `make test-smp` sees that.
 
-use crate::exceptions::Context;
 use crate::madt::{self, CoreList, MAX_CORES};
 use crate::synccell::SyncCell;
 use core::arch::{asm, global_asm};
@@ -103,11 +102,6 @@ static BOOT_INDEX: AtomicU64 = AtomicU64::new(0);
 /// `STACK_CANARY` at the boot core's: an overflow overwrites it first.
 const STACK_CANARY: u64 = 0x5141_5141_5141_5141;
 
-/// Each secondary core's idle loop registers (class B): the saved state
-/// its tick's trampoline restores. Separate from slot 1's `Context`, which
-/// is the boot core's idle and would be overwritten by two cores at once.
-static IDLE_CONTEXTS: [SyncCell<Context>; MAX_CORES] = [const { SyncCell::new(Context::zeroed()) }; MAX_CORES];
-
 /// Ticks taken on each core (class B): a secondary's own count, which the
 /// boot core's `TICKS` does not include (step 3, decision 2).
 static CORE_TICKS: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
@@ -147,7 +141,7 @@ static STACKS: SyncCell<SecondaryStacks> =
 /// is its `STACKS` entry.
 pub(crate) fn this_core_stack_canary() -> (bool, u64) {
     let core = core_index();
-    if core == BOOT_INDEX.load(Ordering::Relaxed) {
+    if is_boot_core() {
         return (crate::stack_canary_intact(), crate::stacks().0.0);
     }
     let base = STACKS.get() as u64 + core * SECONDARY_STACK_SIZE as u64;
@@ -156,11 +150,11 @@ pub(crate) fn this_core_stack_canary() -> (bool, u64) {
     (unsafe { core::ptr::read_volatile(base as *const u64) } == STACK_CANARY, base)
 }
 
-/// Per core: 0 not started, [`CORE_UP_PARKED`] up and parked,
+/// Per core: 0 not started, [`CORE_UP_IDLE`] up and into its idle loop,
 /// [`CORE_FAILED`] parked without a GIC interface (class B). Written by the
 /// core itself, read by the boot core's wait in [`start`].
 static CORE_UP: [AtomicU8; MAX_CORES] = [const { AtomicU8::new(0) }; MAX_CORES];
-const CORE_UP_PARKED: u8 = 1;
+const CORE_UP_IDLE: u8 = 1;
 const CORE_FAILED: u8 = 2;
 
 /// This core's index, from `TPIDR_EL1`: 0 on the boot core (`main.rs`
@@ -306,8 +300,10 @@ extern "C" fn secondary_main(core: u64) -> ! {
     );
     // The mark after the line: a core counts as up only once it has
     // survived its first console write, and `main.rs`'s set_quiet, which
-    // comes after `start` returns, cannot then drop a late up line.
-    CORE_UP[core as usize].store(CORE_UP_PARKED, Ordering::Release);
+    // comes after `start` returns, cannot then drop a late up line (the
+    // `ticking` line, later, is a println and may be quieted: a signal,
+    // not a report).
+    CORE_UP[core as usize].store(CORE_UP_IDLE, Ordering::Release);
     // SAFETY: the one write to PARAMS happened before this core started.
     if unsafe { (*PARAMS.get()).fault_core } == core {
         crate::console::println!("Ouroboros kernel: smp: core {core} taking the \\SMPFAULT undefined instruction");
@@ -317,33 +313,17 @@ extern "C" fn secondary_main(core: u64) -> ! {
     // (slot 1's, which map the loop's page for EL0; TTBR0 is per core),
     // EL0's wfe allowed, the timer PPI enabled at this core's own
     // interface and armed, this core's current slot the idle slot, and the
-    // one entry into a task, exceptions.rs's resume_frame, from a copy of
-    // the idle registers laid out as a frame on this stack. From here the
-    // core alternates EL0 and its tick, every interrupt masked at EL1.
+    // one entry into a task, tasks::enter_frame. From here the core
+    // alternates EL0 and its tick, every interrupt masked at EL1.
     crate::mmu::activate_task(crate::tasks::TaskIndex::IDLE);
     crate::tasks::allow_el0_wfe();
     unsafe { crate::gic::enable_ppi_this_core(crate::timer::INTID, gic) };
     crate::tasks::set_current_idle_here();
-    // SAFETY: this core's own entry, written once before its first eret.
-    unsafe { *IDLE_CONTEXTS[core as usize].get() = crate::tasks::idle_context() };
     crate::timer::arm(crate::timer::TICK_INTERVAL_MS);
-    #[repr(C, align(16))]
-    struct Frame(Context);
-    let frame = Frame(unsafe { *IDLE_CONTEXTS[core as usize].get() });
-    unsafe {
-        asm!(
-            "mov sp, {frame}",
-            "b {resume}",
-            frame = in(reg) &raw const frame as u64,
-            resume = sym resume_frame,
-            options(noreturn),
-        );
-    }
-}
-
-unsafe extern "C" {
-    /// `exceptions.rs`'s restore-and-eret tail: a full `Context` at `sp`.
-    fn resume_frame();
+    // Its registers live in the frame on this stack from here, saved and
+    // restored by the tick's trampoline; slot 1's Context is the boot
+    // core's idle and is not touched.
+    unsafe { crate::tasks::enter_frame(crate::tasks::idle_context()) }
 }
 
 /// How long [`start`] waits for each core's up mark, in timer ticks of
@@ -354,8 +334,9 @@ fn wait_ticks() -> u64 {
 
 /// Starts every core the MADT lists but this one, and waits for each to
 /// report up. Logs one line per core and a summary. On the boot core,
-/// after the identity map, the vectors and `gic::init`; before the tick is
-/// armed (a secondary never arms its own).
+/// after the identity map, the vectors, `gic::init` and `tasks::init`
+/// (the idle page every core runs), before the console goes quiet; each
+/// secondary arms its own timer.
 ///
 /// # Safety
 /// Once, on the boot core, at EL1, with the console installed.
@@ -442,7 +423,7 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
             core::hint::spin_loop();
         }
         match up_mark.load(Ordering::Acquire) {
-            CORE_UP_PARKED => up += 1,
+            CORE_UP_IDLE => up += 1,
             CORE_FAILED => {} // its own line said why
             _ => crate::console::println!("Ouroboros kernel: smp: core {i} (affinity {aff:#x}) did not report up within a second"),
         }

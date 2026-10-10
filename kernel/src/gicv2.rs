@@ -86,14 +86,21 @@ pub unsafe fn init_cpu_interface(gicc_base: usize) {
 /// Must run after [`init`].
 pub unsafe fn enable_interrupt(gicd_base: usize, intid: u32) {
     if intid >= 32 {
-        // Route this SPI to CPU 0 (ITARGETSR is a CPU bitmask, one byte per
-        // intid; 0x01 = CPU 0). Read-modify-write the containing word so the
-        // neighbouring intids' targets are preserved.
+        // Route this SPI to THIS core (ITARGETSR is a CPU bitmask, one byte
+        // per intid). Which bit this core is comes from ITARGETSR0, whose
+        // bytes read back as the reading core's own mask (the GICv2 way to
+        // learn one's interface number); it was 0x01, CPU 0, which is the
+        // boot core only when the firmware started on CPU 0, and a boot on
+        // another core would have sent every device interrupt to a core
+        // that idles outside the scheduler (the high review of 4(b)).
+        // Read-modify-write the containing word so the neighbouring intids'
+        // targets are preserved.
+        let me = unsafe { read_reg(gicd_base, GICD_ITARGETSR) } & 0xff;
         let word = GICD_ITARGETSR + ((intid as usize) & !3);
         let shift = (intid % 4) * 8;
         let mut targets = unsafe { read_reg(gicd_base, word) };
         targets &= !(0xffu32 << shift);
-        targets |= 0x01u32 << shift;
+        targets |= me << shift;
         unsafe { write_reg(gicd_base, word, targets) };
     }
     let reg_offset = GICD_ISENABLER + 4 * ((intid / 32) as usize);

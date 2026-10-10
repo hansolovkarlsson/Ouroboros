@@ -212,8 +212,8 @@ pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
 /// for itself. Returns this core's SGI_base frame and does NOT store it:
 /// `SGI_BASE` is the boot core's (only [`init`] writes it), since
 /// `enable_interrupt` on the boot core reads it after the secondaries have
-/// started; a per-core array is step 4's, when a secondary enables
-/// anything of its own. `Err` names what refused, for a secondary to log
+/// started; a secondary enables its PPIs through the frame this returns
+/// (`gic::enable_ppi_this_core`), never through `SGI_BASE`. `Err` names what refused, for a secondary to log
 /// and park on rather than panic.
 ///
 /// # Safety

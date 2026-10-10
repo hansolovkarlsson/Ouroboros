@@ -30,8 +30,11 @@ QEMU's own trace.
 6. `-smp 4` with the `\\SMPFAULT` flag file (an ESP directory copy, vvfat):
    the first core started takes an undefined instruction after its up
    line, the fault line must name that core (`EXCEPTION core=N`, read
-   from the kernel's own `taking` line), and the boot core's shell must
-   still answer: a secondary's fault halts that core alone.
+   from the kernel's own `taking` line), the kernel must say that core
+   `halted alone, holding nothing` and never `system halted`, and the boot
+   core's shell must still answer: a fault on a core holding no kernel
+   lock halts that core alone (a core inside an entry, or the boot core,
+   halts the kernel, and every other core parks at its next entry).
 
 A boot with no `Ouroboros kernel` line is the firmware stalling in its own
 boot, which happens; the rig says INCONCLUSIVE for that boot and does not
@@ -125,7 +128,7 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
          ticking == expected_ticking),
         (f"{name}: the summary says {others} of {others} started cores up, {smp} in all",
          summary is not None and summary.groups() == (str(others), str(others), str(smp))),
-        (f"{name}: the shell still answers after a {DWELL} s dwell with the other cores parked", dwell_ok),
+        (f"{name}: the shell still answers after a {DWELL} s dwell with the other cores idling and ticking", dwell_ok),
     ]
     if "virtualization=on" in machine:
         checks.append((f"{name}: the boot core dropped from EL2 to EL1", "dropped from EL2 to EL1" in out))
@@ -136,6 +139,8 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
             (f"{name}: the fault line names that core (EXCEPTION core={victim}, an undefined instruction, esr 0x2000000)",
              taking is not None and re.search(rf"EXCEPTION core={victim} vector=\d+ esr_el1=0x2000000 ", out) is not None),
             (f"{name}: no other core's fault line", taking is not None and re.search(rf"EXCEPTION core=(?!{victim} )", out) is None),
+            (f"{name}: that core halted alone, holding nothing, and the kernel did not halt",
+             taking is not None and f"core {victim} halted alone, holding nothing; the rest go on" in out and "system halted" not in out),
         ]
     else:
         checks.append((f"{name}: no fault lines", faults == 0 and "EXCEPTION" not in out))

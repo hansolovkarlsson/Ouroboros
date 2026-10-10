@@ -2748,16 +2748,27 @@ pub unsafe fn start() -> ! {
     // explicitness, so this function's contract doesn't silently depend on
     // that ordering.
     crate::mmu::activate_task(TaskIndex::FIRST);
-    // Through the trampolines' own restore tail (`exceptions.rs`'s
-    // `resume_frame`), from a copy of task 0's Context laid out as a frame
-    // on this stack: the one entry into any task, so task 0 starts with
-    // every register its Context holds (x0-x30 included, which the eret
-    // this replaced never loaded, leaving the kernel's leftovers in them)
-    // and a secondary core's first entry, in step 4, has nothing of its
-    // own to get wrong. Multi-core step 3, decision 3.
+    // Through the one entry into any task (`enter_frame`), so task 0
+    // starts with every register its Context holds (x0-x30 included,
+    // which the eret this replaced never loaded, leaving the kernel's
+    // leftovers in them). Multi-core step 3, decision 3.
+    unsafe { enter_frame(*TASKS[TaskIndex::FIRST.index()].get()) }
+}
+
+/// The one entry into a task from this core: `ctx` laid out as a frame on
+/// this stack, `sp` moved to it, and `exceptions.rs`'s `resume_frame`,
+/// the trampolines' own restore-and-eret tail, so a task entered here and
+/// a task resumed after a tick are restored by the same instructions.
+/// Task 0 at boot and each secondary core's idle loop (`smp.rs`) enter
+/// through it; nothing else spells an eret into a task.
+///
+/// # Safety
+/// `ctx` must be a task's valid initial or saved registers for the view
+/// this core's `TTBR0` points at. Never returns.
+pub(crate) unsafe fn enter_frame(ctx: Context) -> ! {
     #[repr(C, align(16))]
     struct Frame(Context);
-    let frame = Frame(unsafe { *TASKS[TaskIndex::FIRST.index()].get() });
+    let frame = Frame(ctx);
     unsafe {
         asm!(
             "mov sp, {frame}",

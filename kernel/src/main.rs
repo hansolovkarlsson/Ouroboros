@@ -966,6 +966,21 @@ extern "C" fn kernel_main() -> ! {
     mmu::report_deferred_warnings();
     unsafe { tasks::init(&program, fsd.as_ref(), cond.as_ref(), netd.as_ref(), accountd.as_ref()) };
 
+    // The secondary cores, started and into their idle loops (smp.rs,
+    // multi-core steps 2 and 4(b)): only with a GIC (each brings up its
+    // own interface and timer; without one gic::info would panic on a
+    // secondary, where a panic has no path), after tasks::init has copied
+    // the idle loop into its page, which every core runs (started before
+    // it, the secondaries fetched zeros from that page and took an
+    // undefined instruction, the first run of 4(b)), and before the
+    // console goes quiet below, so every line start prints reaches a
+    // framebuffer-only console too.
+    if gic_info.is_some() {
+        unsafe { smp::start(&madt::cores(), smp_fault) };
+    } else {
+        console::println!("Ouroboros kernel: smp: no interrupt controller, the other cores are left off");
+    }
+
     console::println!("Ouroboros kernel: shell ready - type and press Enter");
 
     // Hand the screen over to the console server. On a framebuffer-only
@@ -994,12 +1009,6 @@ extern "C" fn kernel_main() -> ! {
     // From here on the tick is also what drives every further task switch
     // (`tasks::on_tick`).
 
-    // The secondary cores, started and into their idle loops (smp.rs,
-    // multi-core steps 2 and 4(b)): after the distributor is up and after
-    // tasks::init has copied the idle loop into its page, which every core
-    // runs (started before it, the secondaries fetched zeros from that
-    // page and took an undefined instruction, the first run of 4(b)).
-    unsafe { smp::start(&madt::cores(), smp_fault) };
     // SAFETY: called after tasks::init().
     unsafe { tasks::start() }
 }
