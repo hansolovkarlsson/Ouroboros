@@ -562,6 +562,7 @@ make test                   # host unit tests + clippy --all-targets for the pur
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary
 make check-xhci-barriers    # the xHCI driver's two DMA barriers found in the built kernel image (scripts/check-xhci-barriers.py); no QEMU rig can see one missing - ALSO RUN BY `make test` since 2026-10-03
 make check-site             # the published GitHub Pages site vs the documents it abridges - ALSO RUN BY `make test` since 2026-09-05
+make check-statics          # every static in kernel/src against the multi-core plan's inventory (docs/roadmap/roadmap-smp.md, scripts/check-statics.py), each in exactly one class row; fails naming a static in no row, in two, or gone from the tree - ALSO RUN BY `make test` since 2026-10-10 (step 0 of the multi-core arc)
 make clean
 ```
 
@@ -589,7 +590,9 @@ after a range test silently swallowed five verbs its docstring claimed; since
 verb plus the refusals on both sides, which is most of the suite's ~20 s), and
 `check-site` (above), and since 2026-10-03 `check-xhci-barriers` (above),
 which builds the kernel and finds the xHCI driver's two DMA barriers in its
-image, the one check here no QEMU rig could stand in for. The suite exists
+image, the one check here no QEMU rig could stand in for, and since
+2026-10-10 `check-statics` (above), every static in the kernel against the
+multi-core plan's inventory. The suite exists
 because such a crate can otherwise have
 **no build coverage at all**: it is a workspace member but not a
 default-member, so until something depends on it, `cargo build`, `make
