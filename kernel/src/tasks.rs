@@ -162,19 +162,38 @@ mod task_index {
     /// [`current_index`] can only ever have been a `TaskIndex`'s index,
     /// and rebuilding one from it needs no check and no modulo. Lives in
     /// this module so that nothing outside it can store a bare `usize`.
-    static CURRENT: AtomicUsize = AtomicUsize::new(TaskIndex::FIRST.0);
+    /// One per core since multi-core step 4(b) (class B of the plan's
+    /// inventory), indexed by `smp::core_index()`: the boot core's entry
+    /// is the scheduler's current task; a secondary's is
+    /// [`TaskIndex::IDLE`] while it runs only its idle loop.
+    static CURRENT: [AtomicUsize; crate::madt::MAX_CORES] =
+        [const { AtomicUsize::new(TaskIndex::FIRST.0) }; crate::madt::MAX_CORES];
 
-    /// The running task's slot, as a [`TaskIndex`].
+    /// The running task's slot on this core, as a [`TaskIndex`].
     pub(crate) fn current_index() -> TaskIndex {
-        TaskIndex(CURRENT.load(Ordering::Relaxed))
+        TaskIndex(CURRENT[crate::smp::core_index() as usize].load(Ordering::Relaxed))
     }
 
-    /// The one store to `CURRENT`.
+    /// The one store to this core's `CURRENT`.
     pub(super) fn set_current(slot: TaskIndex) {
-        CURRENT.store(slot.0, Ordering::Relaxed);
+        CURRENT[crate::smp::core_index() as usize].store(slot.0, Ordering::Relaxed);
+    }
+
+    /// The boot core's index changed from 0 to the MADT's (`smp::start`):
+    /// its current slot moves with it.
+    pub(crate) fn relocate_current(from: u64, to: u64) {
+        let slot = CURRENT[from as usize].load(Ordering::Relaxed);
+        CURRENT[to as usize].store(slot, Ordering::Relaxed);
+    }
+
+    /// A secondary core, about to run its idle loop: its current slot is
+    /// the idle slot (the loop's code and nothing else; its registers live
+    /// in `smp::IDLE_CONTEXTS`, not in the slot's).
+    pub(crate) fn set_current_idle_here() {
+        set_current(TaskIndex::IDLE);
     }
 }
-pub(crate) use task_index::{current_index, TaskIndex};
+pub(crate) use task_index::{current_index, relocate_current, set_current_idle_here, TaskIndex};
 use task_index::set_current;
 
 /// The send-mask ceiling, checked rather than described. [`caps_for_slot`]
@@ -2559,13 +2578,7 @@ pub unsafe fn init(
     unsafe { core::ptr::copy_nonoverlapping(start, idle_start, len) };
 
     let idle_addr = idle_start as u64;
-    *unsafe { &mut *TASKS[1].get() } = Context {
-        gpr: [0; 31],
-        sp_el0: idle_addr + IDLE_REGION_SIZE as u64,
-        elr_el1: idle_addr,
-        spsr_el1: 0,
-        ..Context::zeroed()
-    };
+    *unsafe { &mut *TASKS[1].get() } = idle_context();
     unsafe { *REGIONS[1].get() = (idle_addr, IDLE_REGION_SIZE as u64) };
     set_name(1, b"idle");
     clean_dcache_range(idle_addr, IDLE_REGION_SIZE as u64);
@@ -2631,17 +2644,7 @@ pub unsafe fn init(
     // EL0's own `wfe`/`wfi` traps to EL1 as a synchronous exception
     // instead of executing. Set once here, globally, for both tasks -
     // not per-task state.
-    unsafe {
-        asm!(
-            "mrs {tmp}, sctlr_el1",
-            "orr {tmp}, {tmp}, {bits}",
-            "msr sctlr_el1, {tmp}",
-            "isb",
-            tmp = out(reg) _,
-            bits = in(reg) (1u64 << 18) | (1u64 << 16),
-            options(nostack),
-        );
-    }
+    allow_el0_wfe();
     // Every slot live at boot gets its generation here: init is the one place
     // a slot becomes live outside `spawn`/`install_task`, and a boot task with
     // no generation has packed identity 0, which `SENDER_TASK` reports as "no
@@ -2703,6 +2706,41 @@ fn clean_dcache_range(addr: u64, len: u64) {
 ///
 /// # Safety
 /// Must be called after [`init`].
+/// The idle loop's initial registers: `el0_idle_template` copied into
+/// `IDLE_REGION` by [`init`], a stack the loop never uses at the region's
+/// top, EL0t with interrupts unmasked. Slot 1's first context, and since
+/// multi-core step 4(b) each secondary core's own (`smp::IDLE_CONTEXTS`):
+/// every core runs the same two instructions from the same page.
+pub(crate) fn idle_context() -> Context {
+    let idle_addr = IDLE_REGION.get() as u64;
+    Context {
+        gpr: [0; 31],
+        sp_el0: idle_addr + IDLE_REGION_SIZE as u64,
+        elr_el1: idle_addr,
+        spsr_el1: 0,
+        ..Context::zeroed()
+    }
+}
+
+/// `SCTLR_EL1.nTWE` and `nTWI` (bits 18 and 16: the "n" means trapping is
+/// DISABLED), so EL0's `wfe` and `wfi` do not trap to EL1: the idle loop
+/// is a `wfe`, and before this was set it faulted on the first real
+/// hardware boot (the module doc). `SCTLR_EL1` is per core, so a secondary
+/// sets it for itself before its first `eret` into EL0.
+pub(crate) fn allow_el0_wfe() {
+    unsafe {
+        asm!(
+            "mrs {tmp}, sctlr_el1",
+            "orr {tmp}, {tmp}, {bits}",
+            "msr sctlr_el1, {tmp}",
+            "isb",
+            tmp = out(reg) _,
+            bits = in(reg) (1u64 << 18) | (1u64 << 16),
+            options(nostack),
+        );
+    }
+}
+
 pub unsafe fn start() -> ! {
     // The boot-time install already left task 0's view active
     // (mmu::install_identity_map's switch half switches to the current

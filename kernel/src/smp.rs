@@ -22,9 +22,11 @@
 //! and `eret`s into EL1 with the MMU running, or, at EL1, writes the
 //! regime and turns the MMU on in place. Only then does it take its stack
 //! and call [`secondary_main`], which brings up this core's GIC interface,
-//! says `core N up at EL1`, and parks in `wfe` with every interrupt masked.
-//! Nothing is scheduled on a secondary yet; that is step 4. Its timer is
-//! not armed; the boot core's tick keeps every job it has.
+//! says `core N up at EL1`, and (step 4(b)) enters its own idle loop at
+//! EL0 through `resume_frame`, with its timer armed: from then on it
+//! alternates the idle loop and its tick, which only counts
+//! (`CORE_TICKS`) and returns. The boot core's tick keeps every job it
+//! has (step 3, decision 2); placing tasks on a secondary is step 4(d).
 //!
 //! A fault on a secondary halts that core alone: the vector table is the
 //! same, `rust_exception_handler` names the core (`core=N`, the MADT's
@@ -34,6 +36,7 @@
 //! flag makes the first core started take an undefined instruction right
 //! after its up line, which is how `make test-smp` sees that.
 
+use crate::exceptions::Context;
 use crate::madt::{self, CoreList, MAX_CORES};
 use crate::synccell::SyncCell;
 use core::arch::{asm, global_asm};
@@ -99,6 +102,31 @@ static BOOT_INDEX: AtomicU64 = AtomicU64::new(0);
 /// The word at the base of each secondary's stack, as `main.rs`'s
 /// `STACK_CANARY` at the boot core's: an overflow overwrites it first.
 const STACK_CANARY: u64 = 0x5141_5141_5141_5141;
+
+/// Each secondary core's idle loop registers (class B): the saved state
+/// its tick's trampoline restores. Separate from slot 1's `Context`, which
+/// is the boot core's idle and would be overwritten by two cores at once.
+static IDLE_CONTEXTS: [SyncCell<Context>; MAX_CORES] = [const { SyncCell::new(Context::zeroed()) }; MAX_CORES];
+
+/// Ticks taken on each core (class B): a secondary's own count, which the
+/// boot core's `TICKS` does not include (step 3, decision 2).
+static CORE_TICKS: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
+
+/// Whether this core is the boot core: the one whose tick does the
+/// scheduler's jobs and whose current task is the scheduler's.
+pub fn is_boot_core() -> bool {
+    core_index() == BOOT_INDEX.load(Ordering::Relaxed)
+}
+
+/// A secondary core's tick (step 4(b)): counted, and said once, the first
+/// time, so a rig can see that the core's timer fires and its IRQ path
+/// round-trips through EL0. The frame goes back unchanged: the idle loop.
+pub fn secondary_tick() {
+    let core = core_index() as usize;
+    if CORE_TICKS[core].fetch_add(1, Ordering::Relaxed) == 0 {
+        crate::console::println!("Ouroboros kernel: smp: core {core} ticking (its first tick, from its idle loop at EL0)");
+    }
+}
 
 /// A secondary core's stack. Smaller than the boot core's 256 KB: a parked
 /// core runs `secondary_main` and a fault report, and step 4 sizes it for
@@ -259,17 +287,20 @@ extern "C" fn secondary_main(core: u64) -> ! {
     // A GIC that will not come up on this core is a line and a parked core
     // without one, not a panic: a panic on a secondary after the exit has
     // no path but the firmware's, which is gone.
-    if let Err(why) = unsafe { crate::gic::init_this_core() } {
-        crate::console::println!(
-            "Ouroboros kernel: smp: core {core} (mpidr {mpidr:#x}) has no GIC interface ({why}), parked without one"
-        );
-        CORE_UP[core as usize].store(CORE_FAILED, Ordering::Release);
-        loop {
-            unsafe { asm!("wfe", options(nomem, nostack, preserves_flags)) };
+    let gic = match unsafe { crate::gic::init_this_core() } {
+        Ok(this) => this,
+        Err(why) => {
+            crate::console::println!(
+                "Ouroboros kernel: smp: core {core} (mpidr {mpidr:#x}) has no GIC interface ({why}), parked without one"
+            );
+            CORE_UP[core as usize].store(CORE_FAILED, Ordering::Release);
+            loop {
+                unsafe { asm!("wfe", options(nomem, nostack, preserves_flags)) };
+            }
         }
-    }
+    };
     crate::console::println!(
-        "Ouroboros kernel: smp: core {core} up at EL{} (mpidr {mpidr:#x}, affinity {:#x}), parked",
+        "Ouroboros kernel: smp: core {core} up at EL{} (mpidr {mpidr:#x}, affinity {:#x}), idling",
         crate::el2::current_el(),
         madt::affinity(mpidr)
     );
@@ -282,9 +313,37 @@ extern "C" fn secondary_main(core: u64) -> ! {
         crate::console::println!("Ouroboros kernel: smp: core {core} taking the \\SMPFAULT undefined instruction");
         unsafe { asm!("udf #0", options(nomem, nostack)) };
     }
-    loop {
-        unsafe { asm!("wfe", options(nomem, nostack, preserves_flags)) };
+    // Into this core's idle loop at EL0 (step 4(b)): the idle view's tables
+    // (slot 1's, which map the loop's page for EL0; TTBR0 is per core),
+    // EL0's wfe allowed, the timer PPI enabled at this core's own
+    // interface and armed, this core's current slot the idle slot, and the
+    // one entry into a task, exceptions.rs's resume_frame, from a copy of
+    // the idle registers laid out as a frame on this stack. From here the
+    // core alternates EL0 and its tick, every interrupt masked at EL1.
+    crate::mmu::activate_task(crate::tasks::TaskIndex::IDLE);
+    crate::tasks::allow_el0_wfe();
+    unsafe { crate::gic::enable_ppi_this_core(crate::timer::INTID, gic) };
+    crate::tasks::set_current_idle_here();
+    // SAFETY: this core's own entry, written once before its first eret.
+    unsafe { *IDLE_CONTEXTS[core as usize].get() = crate::tasks::idle_context() };
+    crate::timer::arm(crate::timer::TICK_INTERVAL_MS);
+    #[repr(C, align(16))]
+    struct Frame(Context);
+    let frame = Frame(unsafe { *IDLE_CONTEXTS[core as usize].get() });
+    unsafe {
+        asm!(
+            "mov sp, {frame}",
+            "b {resume}",
+            frame = in(reg) &raw const frame as u64,
+            resume = sym resume_frame,
+            options(noreturn),
+        );
     }
+}
+
+unsafe extern "C" {
+    /// `exceptions.rs`'s restore-and-eret tail: a full `Context` at `sp`.
+    fn resume_frame();
 }
 
 /// How long [`start`] waits for each core's up mark, in timer ticks of
@@ -312,6 +371,7 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     match (0..n).find(|&i| cores.mpidr[i] == me) {
         Some(mine) => {
             BOOT_INDEX.store(mine as u64, Ordering::Relaxed);
+            crate::tasks::relocate_current(0, mine as u64);
             set_core_index(mine as u64);
         }
         None => {

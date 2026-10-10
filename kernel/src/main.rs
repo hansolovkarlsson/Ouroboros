@@ -947,9 +947,6 @@ extern "C" fn kernel_main() -> ! {
                 exceptions::set_net_intid(intid);
             }
         }
-        // The secondary cores, started and parked (smp.rs, multi-core step
-        // 2): after the distributor is up and before the tick is armed.
-        unsafe { smp::start(&madt::cores(), smp_fault) };
         timer::arm(timer::TICK_INTERVAL_MS);
         if let Some(intid) = nic_intid {
             console::println!(
@@ -997,6 +994,12 @@ extern "C" fn kernel_main() -> ! {
     // From here on the tick is also what drives every further task switch
     // (`tasks::on_tick`).
 
+    // The secondary cores, started and into their idle loops (smp.rs,
+    // multi-core steps 2 and 4(b)): after the distributor is up and after
+    // tasks::init has copied the idle loop into its page, which every core
+    // runs (started before it, the secondaries fetched zeros from that
+    // page and took an undefined instruction, the first run of 4(b)).
+    unsafe { smp::start(&madt::cores(), smp_fault) };
     // SAFETY: called after tasks::init().
     unsafe { tasks::start() }
 }

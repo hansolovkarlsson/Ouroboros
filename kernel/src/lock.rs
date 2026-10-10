@@ -46,6 +46,15 @@ pub fn acquire() {
     }
 }
 
+/// Releases the lock if this core holds it, for a halt: a core that stops
+/// for good inside an entry (a fault handler's halting arm) must not take
+/// the kernel with it, since the others spin on this lock at their next
+/// entry. `power::halt` calls it first.
+pub fn release_if_held() {
+    let me = crate::smp::core_index() + 1;
+    let _ = KERNEL_LOCK.compare_exchange(me, 0, Ordering::Release, Ordering::Relaxed);
+}
+
 /// Releases the lock this core holds. Releasing a lock another core
 /// holds, or a free one, is the same broken rule as re-entry, and halts.
 pub fn release() {

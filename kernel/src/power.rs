@@ -153,6 +153,11 @@ pub fn power_off() -> ! {
 /// Halt the machine: mask all interrupts and park the core in `wfi` forever,
 /// so nothing (not even the timer tick) can resume it. Never returns.
 pub fn halt() -> ! {
+    // This core halts; the kernel lock, if it is this core's, must not
+    // halt with it (lock.rs): the first run of multi-core step 4(b) had a
+    // secondary fault at EL0 and halt holding it, and the boot core's
+    // shell never came up.
+    crate::lock::release_if_held();
     crate::console::println!("Ouroboros kernel: system halted");
     unsafe {
         // DAIFSet: mask Debug/SError/IRQ/FIQ so the timer tick can't wake us.

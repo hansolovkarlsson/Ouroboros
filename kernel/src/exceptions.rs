@@ -590,8 +590,8 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
 /// task is a supervised server (fsd, cond, netd, accountd), the kernel
 /// restarts it from the image kept at boot - see `supervisor::restart`.
 extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
-    // The kernel lock around the whole handler (lock.rs); the halting
-    // arms below keep it, which is right: that core is done.
+    // The kernel lock around the whole handler (lock.rs); a halting arm
+    // below releases it on the way (power::halt), so the other cores go on.
     crate::lock::acquire();
     el0_fault_locked(frame);
     crate::lock::release();
@@ -694,8 +694,16 @@ fn irq_locked(frame: *mut Context) {
         // comment) would constantly interleave with and corrupt whatever
         // the user is typing. TICKS is kept for whenever something wants an
         // uptime/tick-count query.
-        TICKS.fetch_add(1, Ordering::Relaxed);
         timer::arm(timer::TICK_INTERVAL_MS);
+        // The tick's jobs are the boot core's (multi-core step 3, decision
+        // 2): a secondary's tick counts for itself and goes back to its
+        // idle loop, until step 4(d) places tasks on it.
+        if !crate::smp::is_boot_core() {
+            crate::smp::secondary_tick();
+            unsafe { gic::end_of_interrupt(intid) };
+            return;
+        }
+        TICKS.fetch_add(1, Ordering::Relaxed);
         // Unconditional again - see tasks.rs's `el0_idle_template` doc
         // comment for the real, found-and-fixed bug this used to work
         // around: the task switch itself hung the very first time it ran

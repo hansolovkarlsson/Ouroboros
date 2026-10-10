@@ -58,7 +58,8 @@ PROMPT = "# "
 DWELL = 10
 COUNT_RE = re.compile(r"MADT: (\d+) cores(, more than fit listed)? \(this core affinity (0x[0-9a-f]+), mpidr 0x[0-9a-f]+\)")
 CORE_RE = re.compile(r"MADT: core (\d+): mpidr (0x[0-9a-f]+), (enabled|disabled)")
-UP_RE = re.compile(r"smp: core (\d+) up at EL(\d) \(mpidr 0x[0-9a-f]+, affinity 0x[0-9a-f]+\), parked")
+UP_RE = re.compile(r"smp: core (\d+) up at EL(\d) \(mpidr 0x[0-9a-f]+, affinity 0x[0-9a-f]+\), idling")
+TICK_RE = re.compile(r"smp: core (\d+) ticking \(its first tick, from its idle loop at EL0\)")
 SUMMARY_RE = re.compile(r"smp: (\d+) of (\d+) started cores up, (\d+) cores in all")
 
 
@@ -103,6 +104,11 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
     mpidrs = [m for _, m, _ in cores]
     ups = UP_RE.findall(out)
     up_cores = sorted(int(i) for i, _ in ups)
+    ticking = sorted(int(i) for i in TICK_RE.findall(out))
+    taking = re.search(r"smp: core (\d+) taking the \\SMPFAULT undefined instruction", out)
+    # The core that takes the \SMPFAULT fault halts before its idle loop,
+    # so it is the one core expected not to tick.
+    expected_ticking = [i for i in range(1, smp) if not (taking and i == int(taking.group(1)))]
     summary = SUMMARY_RE.search(out)
     others = smp - 1
     checks = [
@@ -113,8 +119,10 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
          len(cores) == smp and len(set(mpidrs)) == smp and [int(i) for i, _, _ in cores] == list(range(smp))),
         (f"{name}: the boot core's affinity is among them", count is not None and count.group(3) in mpidrs),
         (f"{name}: every core enabled", len(cores) == smp and all(e == "enabled" for _, _, e in cores)),
-        (f"{name}: every other core says up at EL1 and parked ({others} of them)" + (f" (saw cores {up_cores})" if up_cores != list(range(1, smp)) else ""),
+        (f"{name}: every other core says up at EL1 and idling ({others} of them)" + (f" (saw cores {up_cores})" if up_cores != list(range(1, smp)) else ""),
          up_cores == list(range(1, smp)) and all(el == "1" for _, el in ups)),
+        (f"{name}: every other core took its first tick from its idle loop at EL0 ({len(expected_ticking)} of them)" + (f" (saw cores {ticking})" if ticking != expected_ticking else ""),
+         ticking == expected_ticking),
         (f"{name}: the summary says {others} of {others} started cores up, {smp} in all",
          summary is not None and summary.groups() == (str(others), str(others), str(smp))),
         (f"{name}: the shell still answers after a {DWELL} s dwell with the other cores parked", dwell_ok),
@@ -122,7 +130,6 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
     if "virtualization=on" in machine:
         checks.append((f"{name}: the boot core dropped from EL2 to EL1", "dropped from EL2 to EL1" in out))
     if fault:
-        taking = re.search(r"smp: core (\d+) taking the \\SMPFAULT undefined instruction", out)
         victim = taking.group(1) if taking else "?"
         checks += [
             (f"{name}: a core took the \\SMPFAULT instruction (core {victim})", taking is not None),

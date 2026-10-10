@@ -1564,7 +1564,7 @@ unsafe fn switch_full(view: TaskIndex, built: &Planned) {
             "isb",                    // MAIR/TCR visible before TTBR0 switch
             "msr ttbr0_el1, {ttbr0}",
             "isb",                    // TTBR0 switch takes effect
-            "tlbi vmalle1",           // drop stale entries from firmware's tables
+            "tlbi vmalle1is",         // drop stale entries, on every core: a rebuild rewrites tables the parked cores walk too (step 4(b))
             "ic ialluis",             // drop stale I-cache lines tagged under the old tables
             "dsb ish",
             "isb",
