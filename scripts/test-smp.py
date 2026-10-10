@@ -70,7 +70,7 @@ UP_RE = re.compile(r"smp: core (\d+) up at EL(\d) \(mpidr 0x[0-9a-f]+, affinity 
 TICK_RE = re.compile(r"smp: core (\d+) ticking \(its first tick, from its idle loop at EL0\)")
 SUMMARY_RE = re.compile(r"smp: (\d+) of (\d+) started cores up, (\d+) cores in all")
 KICK_RE = re.compile(r"smp: core (\d+) answered a kick from core (\d+), once the kernel lock was free")
-KICK_FAIL_RE = re.compile(r"smp: core (\d+)(?: \(the boot core\))? (answered a kick while core \d+ held the kernel lock|cannot be kicked|cannot be sent an SGI|did not answer a kick within a second)")
+KICK_FAIL_RE = re.compile(r"smp: core (\d+)(?: \(the boot core\))? (answered a kick while core \d+ held the kernel lock|cannot be kicked|cannot be sent an SGI|did not answer a kick within a second|answered every kick but was never seen waiting with one)")
 
 
 def boot(name, smp, machine="virt", esp=None, fault=False):
@@ -116,9 +116,13 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
     up_cores = sorted(int(i) for i, _ in ups)
     ticking = sorted(int(i) for i in TICK_RE.findall(out))
     taking = re.search(r"smp: core (\d+) taking the \\SMPFAULT undefined instruction", out)
+    # The boot core's MADT index, from the table, not assumed 0: the kernel
+    # takes whichever index lists its affinity (ACPI fixes no order on ARM).
+    boot_index = next((int(i) for i, m, _ in cores if count and m == count.group(3)), 0)
+    secondaries = [i for i in range(smp) if i != boot_index]
     # The core that takes the \SMPFAULT fault halts before its idle loop,
     # so it is the one core expected not to tick.
-    expected_ticking = [i for i in range(1, smp) if not (taking and i == int(taking.group(1)))]
+    expected_ticking = [i for i in secondaries if not (taking and i == int(taking.group(1)))]
     summary = SUMMARY_RE.search(out)
     kicked = sorted(int(i) for i, _ in KICK_RE.findall(out))
     kick_fails = KICK_FAIL_RE.findall(out)
@@ -135,15 +139,15 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
          len(cores) == smp and len(set(mpidrs)) == smp and [int(i) for i, _, _ in cores] == list(range(smp))),
         (f"{name}: the boot core's affinity is among them", count is not None and count.group(3) in mpidrs),
         (f"{name}: every core enabled", len(cores) == smp and all(e == "enabled" for _, _, e in cores)),
-        (f"{name}: every other core says up at EL1 and idling ({others} of them)" + (f" (saw cores {up_cores})" if up_cores != list(range(1, smp)) else ""),
-         up_cores == list(range(1, smp)) and all(el == "1" for _, el in ups)),
+        (f"{name}: every other core says up at EL1 and idling ({others} of them)" + (f" (saw cores {up_cores})" if up_cores != secondaries else ""),
+         up_cores == secondaries and all(el == "1" for _, el in ups)),
         (f"{name}: every other core took its first tick from its idle loop at EL0 ({len(expected_ticking)} of them)" + (f" (saw cores {ticking})" if ticking != expected_ticking else ""),
          ticking == expected_ticking),
         (f"{name}: the summary says {others} of {others} started cores up, {smp} in all",
          summary is not None and summary.groups() == (str(others), str(others), str(smp))),
         (f"{name}: every other core answered a kick SGI from the boot core once the kernel lock was free ({len(expected_ticking)} of them)"
          + (f" (saw cores {kicked})" if kicked != expected_ticking else ""),
-         kicked == expected_ticking and all(src == "0" for _, src in KICK_RE.findall(out))),
+         kicked == expected_ticking and all(src == str(boot_index) for _, src in KICK_RE.findall(out))),
         (f"{name}: no core answered a kick under the lock, or could not be kicked"
          + (f" (saw: {'; '.join(other_fails)})" if other_fails else ""), not other_fails),
         (f"{name}: the shell still answers after a {DWELL} s dwell with the other cores idling and ticking", dwell_ok),

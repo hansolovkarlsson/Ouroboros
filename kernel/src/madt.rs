@@ -137,6 +137,14 @@ pub fn affinity(mpidr: u64) -> u64 {
 }
 
 /// The cores [`discover`] found; empty before it ran or when it failed.
+/// Core `core`'s affinity as the MADT records it, without copying the
+/// list: `None` past the cores it lists.
+pub fn mpidr(core: usize) -> Option<u64> {
+    // SAFETY: as `cores`.
+    let cores = unsafe { &*CORES.get() };
+    (core < cores.count.min(MAX_CORES)).then(|| cores.mpidr[core])
+}
+
 pub fn cores() -> CoreList {
     // SAFETY: written once by `discover` before the exit and before any
     // second core runs (synccell.rs's argument, and the plan's class A).

@@ -683,22 +683,34 @@ pub fn set_net_intid(intid: u32) {
 /// switch happens. Must return normally (the trampoline restores from
 /// `frame` and `eret`s back) — never halt or diverge from here.
 extern "C" fn rust_irq_handler(frame: *mut Context) {
+    // Acknowledged before the kernel lock: the CPU interface is this
+    // core's own (GICv2's banked GICC, GICv3's ICC_* system registers) and
+    // the GIC's description is written once before any second core runs
+    // (class A), so the read touches nothing another core writes. Done
+    // first so this core can say which interrupt it waits for the lock
+    // with (smp::note_waiting), which is how smp::start's ping sees a kick
+    // reach a core while the lock is held (step 4(c)).
+    let acked = unsafe { gic::acknowledge() };
+    crate::smp::note_waiting(acked.intid());
     // The kernel lock around the whole tick (lock.rs).
     crate::lock::acquire();
-    irq_locked(frame);
+    crate::smp::note_in_kernel();
+    irq_locked(frame, acked);
     crate::lock::release();
 }
 
-fn irq_locked(frame: *mut Context) {
-    let acked = unsafe { gic::acknowledge() };
+fn irq_locked(frame: *mut Context, acked: gic::Acked) {
     let intid = acked.intid();
 
-    // A secondary core (multi-core step 4(b)) takes its own timer and
-    // nothing else: a device interrupt that reached it (a GICv2 SPI routed
-    // by interface number, say) is acknowledged below and dropped, never
-    // acted on, since acting on it (on_net_irq) would switch this core
-    // into a task behind the scheduler's back. Devices are the boot
-    // core's, and so are the tick's jobs (step 3, decision 2).
+    // A secondary core (multi-core step 4(b)) acts on its own timer and on
+    // a kick (step 4(c)) and on nothing else: a device interrupt that
+    // reached it (a GICv2 SPI routed by interface number, say) is
+    // acknowledged and dropped, never acted on, since acting on it
+    // (on_net_irq) would switch this core into a task behind the
+    // scheduler's back. Devices are the boot core's, and so are the tick's
+    // jobs (step 3, decision 2). The kick's branch is tested before any
+    // boot-core-only branch, and a secondary's early return is in the
+    // timer's branch only, so a kick reaches on_kick on every core.
     let boot_core = crate::smp::is_boot_core();
     if intid == timer::INTID {
         // No longer logged every tick (used to print "tick N" here): now

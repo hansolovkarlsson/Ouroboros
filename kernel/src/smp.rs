@@ -195,47 +195,89 @@ pub fn on_kick() {
     }
 }
 
-/// [`start`]'s check of the kick, for one started core: sent with the
-/// kernel lock held, it must not be answered while the lock is (the lock
-/// is held for `held` counter ticks, the answer watched for throughout),
-/// and must be answered within a second once the lock is released. One
-/// line either way, which `make test-smp` reads.
-fn ping(core: usize, held: u64) {
+/// Which interrupt each core has acknowledged and is waiting for the
+/// kernel lock with, [`NOT_WAITING`] when none (class B: the core's own
+/// mark, read by [`ping`]). Set by `exceptions.rs`'s IRQ entry between the
+/// acknowledge and the lock, cleared once the lock is taken.
+static WAITING: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(NOT_WAITING) }; MAX_CORES];
+const NOT_WAITING: u32 = u32::MAX;
+
+/// This core has acknowledged `intid` and is about to wait for the kernel
+/// lock with it.
+pub fn note_waiting(intid: u32) {
+    WAITING[core_index() as usize].store(intid, Ordering::Release);
+}
+
+/// This core holds the kernel lock: it waits with nothing.
+pub fn note_in_kernel() {
+    WAITING[core_index() as usize].store(NOT_WAITING, Ordering::Release);
+}
+
+/// How many kicks [`ping`] sends before it gives up on seeing one arrive
+/// while the lock is held. An attempt is indecisive when the core takes
+/// its tick first and waits for the lock with that instead; the kick is
+/// then taken after the release, and the next attempt tries again.
+const PING_ATTEMPTS: usize = 5;
+
+/// [`start`]'s check of the kick, for one started core. Each attempt sends
+/// the kick with the kernel lock held and keeps holding it until the core
+/// is seen waiting for the lock with an interrupt it has acknowledged
+/// ([`WAITING`]). When that interrupt is the kick, the attempt is
+/// decisive: the lock is held a millisecond more, so a handler that acted
+/// before taking the lock would have answered, and the core must not have
+/// answered; then, the lock released, it must answer within a second.
+/// Decisive by observation, not by a timing assumption: a delivery slower
+/// than any fixed hold would otherwise pass a handler that skipped the
+/// lock (the review of #265). One line, which `make test-smp` reads.
+fn ping(core: usize) {
     let me = core_index();
-    let before = PINGS_ANSWERED[core].load(Ordering::Acquire);
-    crate::lock::acquire();
-    let sent = kick(core, KICK_PING);
-    let mut answered_under_lock = false;
-    if sent.is_ok() {
-        let until = crate::timer::now_ticks() + held;
-        while crate::timer::now_ticks() < until {
-            if PINGS_ANSWERED[core].load(Ordering::Acquire) != before {
-                answered_under_lock = true;
-                break;
-            }
+    for _ in 0..PING_ATTEMPTS {
+        let before = PINGS_ANSWERED[core].load(Ordering::Acquire);
+        crate::lock::acquire();
+        if let Err(why) = kick(core, KICK_PING) {
+            crate::lock::release();
+            crate::console::println!("Ouroboros kernel: smp: core {core} cannot be kicked ({why})");
+            return;
+        }
+        let deadline = crate::timer::now_ticks() + wait_ticks();
+        let mut seen = NOT_WAITING;
+        while seen == NOT_WAITING && crate::timer::now_ticks() < deadline {
+            seen = WAITING[core].load(Ordering::Acquire);
             core::hint::spin_loop();
         }
+        let decisive = seen == KICK_SGI;
+        if decisive {
+            let until = crate::timer::now_ticks() + crate::timer::frequency_hz() / 1000;
+            while crate::timer::now_ticks() < until {
+                core::hint::spin_loop();
+            }
+        }
+        let answered_under_lock = PINGS_ANSWERED[core].load(Ordering::Acquire) != before;
+        crate::lock::release();
+        if answered_under_lock {
+            crate::console::println!(
+                "Ouroboros kernel: smp: core {core} answered a kick while core {me} held the kernel lock: its handler ran outside the lock"
+            );
+            return;
+        }
+        let deadline = crate::timer::now_ticks() + wait_ticks();
+        while PINGS_ANSWERED[core].load(Ordering::Acquire) == before && crate::timer::now_ticks() < deadline {
+            core::hint::spin_loop();
+        }
+        if PINGS_ANSWERED[core].load(Ordering::Acquire) == before {
+            crate::console::println!("Ouroboros kernel: smp: core {core} did not answer a kick within a second");
+            return;
+        }
+        if decisive {
+            crate::console::println!(
+                "Ouroboros kernel: smp: core {core} answered a kick from core {me}, once the kernel lock was free"
+            );
+            return;
+        }
     }
-    crate::lock::release();
-    if let Err(why) = sent {
-        crate::console::println!("Ouroboros kernel: smp: core {core} cannot be kicked ({why})");
-        return;
-    }
-    if answered_under_lock {
-        crate::console::println!(
-            "Ouroboros kernel: smp: core {core} answered a kick while core {me} held the kernel lock: its handler ran outside the lock"
-        );
-        return;
-    }
-    let deadline = crate::timer::now_ticks() + wait_ticks();
-    while PINGS_ANSWERED[core].load(Ordering::Acquire) == before && crate::timer::now_ticks() < deadline {
-        core::hint::spin_loop();
-    }
-    if PINGS_ANSWERED[core].load(Ordering::Acquire) != before {
-        crate::console::println!("Ouroboros kernel: smp: core {core} answered a kick from core {me}, once the kernel lock was free");
-    } else {
-        crate::console::println!("Ouroboros kernel: smp: core {core} did not answer a kick within a second");
-    }
+    crate::console::println!(
+        "Ouroboros kernel: smp: core {core} answered every kick but was never seen waiting with one while the lock was held ({PING_ATTEMPTS} attempts)"
+    );
 }
 
 /// A secondary core's stack. Smaller than the boot core's 256 KB: a parked
@@ -391,7 +433,9 @@ unsafe extern "C" {
 }
 
 /// A secondary core's Rust half, on its own stack, at EL1 with the MMU on:
-/// this core's GIC interface, the up line, then parked for good.
+/// this core's GIC interface, what another core needs to kick it and the
+/// kick enabled (step 4(c)), its timer, the up line, then (step 4(b)) its
+/// own idle loop at EL0, from which it takes its ticks and its kicks.
 extern "C" fn secondary_main(core: u64) -> ! {
     let mpidr = crate::gicv3::read_mpidr();
     // A GIC that will not come up on this core is a line and a parked core
@@ -568,13 +612,14 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
         cores.count
     );
     // Every core that came up must take a kick, and only once the kernel
-    // lock is free (step 4(c)). The lock held 50 ms per core: long enough
-    // for an SGI to arrive under it, which on QEMU takes well under a
-    // millisecond, so a handler that skipped the lock would be seen.
-    let held = crate::timer::frequency_hz() / 20;
+    // lock is free (step 4(c)). On every boot, not behind a flag: the line
+    // is the one check of SGI delivery a hardware boot log has (the Pi's
+    // and Parallels' are read by eye), and it costs the time a kick takes
+    // to arrive, a few milliseconds per core, plus a second for a core
+    // that is up but cannot take one, which is the case it reports.
     for (i, up_mark) in CORE_UP.iter().enumerate().take(n) {
         if up_mark.load(Ordering::Acquire) == CORE_UP_IDLE {
-            ping(i, held);
+            ping(i);
         }
     }
 }

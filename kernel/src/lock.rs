@@ -22,7 +22,7 @@
 //! core waits for it.
 //!
 //! A kick's SGI is taken like every IRQ, under this lock, and its sender
-//! holds this lock (`smp::kick` refuses otherwise) and never waits for the
+//! holds this lock (`smp::kick` halts the kernel otherwise) and never waits for the
 //! answer: a sender that waited holding the lock for a handler that needs
 //! it would deadlock. The plan first ruled the other way, that an SGI
 //! handler takes no lock and leaves a flag for the next tick; that would

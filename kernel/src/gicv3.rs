@@ -326,23 +326,29 @@ const ICC_SGI1R_AFF3_SHIFT: u32 = 48;
 /// `ICC_CTLR_EL1.RSS`: the CPU interface takes a range selector, so an
 /// SGI can reach an Aff0 past 15.
 const ICC_CTLR_RSS: u64 = 1 << 18;
+/// `GICD_TYPER.RSS`: the distributor routes an SGI with a range selector.
+/// Linux requires this one and the CPU interface's before it sets RS.
+const GICD_TYPER: usize = 0x0004;
+const GICD_TYPER_RSS: u32 = 1 << 26;
 
 /// Sends Group 1 SGI `sgi` (0 to 15) to the one core whose affinity is
 /// `mpidr` (the MADT's value, affinity fields only), through
 /// `ICC_SGI1R_EL1`. Prior stores are made visible first (`dsb ishst`) and
 /// the write is synchronized after (`isb`), as Linux's `gic_ipi_send_mask`
-/// does. `Err` for an Aff0 past 15 on an interface without a range
-/// selector, which no SGI can reach.
+/// does. `Err` for an Aff0 past 15 when the CPU interface or the
+/// distributor (`gicd_base`'s) has no range selector, which no SGI can
+/// reach.
 ///
 /// # Safety
 /// After [`init`]; `sgi` below 16.
-pub unsafe fn send_sgi(sgi: u32, mpidr: u64) -> Result<(), &'static str> {
+pub unsafe fn send_sgi(sgi: u32, gicd_base: usize, mpidr: u64) -> Result<(), &'static str> {
     let aff0 = mpidr & 0xff;
     if aff0 > 15 {
         let ctlr: u64;
         unsafe { asm!("mrs {0}, icc_ctlr_el1", out(reg) ctlr, options(nomem, nostack, preserves_flags)) };
-        if ctlr & ICC_CTLR_RSS == 0 {
-            return Err("its Aff0 is past 15 and this GICv3 interface has no range selector");
+        let typer = unsafe { read_reg32(gicd_base, GICD_TYPER) };
+        if ctlr & ICC_CTLR_RSS == 0 || typer & GICD_TYPER_RSS == 0 {
+            return Err("its Aff0 is past 15 and this GICv3 has no range selector for SGIs");
         }
     }
     let value = (1u64 << (aff0 & 0xf))

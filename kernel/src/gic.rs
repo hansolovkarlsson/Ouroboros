@@ -141,15 +141,13 @@ pub unsafe fn enable_interrupt(intid: u32) {
 #[derive(Clone, Copy)]
 pub struct Acked {
     raw: u32,
+    intid: u32,
 }
 
 impl Acked {
     /// The interrupt's ID (1023 when spurious).
     pub fn intid(self) -> u32 {
-        match info().version {
-            GicVersion::V2 => gicv2::intid_of(self.raw),
-            GicVersion::V3 => self.raw,
-        }
+        self.intid
     }
 }
 
@@ -158,11 +156,17 @@ impl Acked {
 /// # Safety
 /// Must run after [`init`], from IRQ-handling context.
 pub unsafe fn acknowledge() -> Acked {
-    let raw = match info().version {
-        GicVersion::V2 => unsafe { gicv2::acknowledge(info().gicc_base as usize) },
-        GicVersion::V3 => unsafe { gicv3::acknowledge() },
-    };
-    Acked { raw }
+    let info = info();
+    match info.version {
+        GicVersion::V2 => {
+            let raw = unsafe { gicv2::acknowledge(info.gicc_base as usize) };
+            Acked { raw, intid: gicv2::intid_of(raw) }
+        }
+        GicVersion::V3 => {
+            let raw = unsafe { gicv3::acknowledge() };
+            Acked { raw, intid: raw }
+        }
+    }
 }
 
 /// Signals that the interrupt `acked` (from [`acknowledge`]) has been fully
@@ -207,12 +211,9 @@ pub unsafe fn send_sgi(sgi: u32, core: usize) -> Result<(), &'static str> {
     let info = info();
     match info.version {
         GicVersion::V2 => unsafe { gicv2::send_sgi(info.gicd_base as usize, sgi, core) },
-        GicVersion::V3 => {
-            let cores = crate::madt::cores();
-            if core >= cores.count.min(crate::madt::MAX_CORES) {
-                return Err("no such core in the MADT");
-            }
-            unsafe { gicv3::send_sgi(sgi, cores.mpidr[core]) }
-        }
+        GicVersion::V3 => match crate::madt::mpidr(core) {
+            Some(mpidr) => unsafe { gicv3::send_sgi(sgi, info.gicd_base as usize, mpidr) },
+            None => Err("no such core in the MADT"),
+        },
     }
 }
