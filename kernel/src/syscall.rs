@@ -275,14 +275,15 @@ pub(crate) fn key_wait_answer(task: usize, until_us: u64) -> Option<u64> {
     }
 }
 
-/// The next byte from a keyboard device, and whether it came from the USB
-/// keyboard: the byte-stream console first, then the USB keyboard's queue,
-/// except inside a USB key, whose rest is taken from the USB keyboard
-/// before the console is looked at again. A report's bytes wait whole in
-/// `xhci`'s `pending`, so a USB key is read whole and no serial byte lands
-/// inside it (the hazard the review of #229 found); the USB Escape key sends
-/// nothing, so a USB key is never left open waiting for more.
-fn keyboard_device_byte() -> Option<(u8, bool)> {
+/// The next byte from a keyboard device, and where it came from: the
+/// byte-stream console first, then the USB keyboard's queue, except inside
+/// a USB key, whose rest is taken from the USB keyboard before the console
+/// is looked at again. A report's bytes wait whole in `xhci`'s `pending`,
+/// so a USB key is read whole and no serial byte lands inside it (the
+/// hazard the review of #229 found); its last byte is marked, so a USB key
+/// is never left open waiting for more, the Escape key's bare `ESC`
+/// included.
+fn keyboard_device_byte() -> Option<(u8, keyseq::Source)> {
     // SAFETY: as in poll_keyboard_byte.
     let now = crate::exceptions::ticks();
     let usb_first = unsafe { (*KBD_QUEUE.get()).inside_usb_key(now) };
@@ -293,21 +294,21 @@ fn keyboard_device_byte() -> Option<(u8, bool)> {
         // comes from the serial line, and a USB byte read now would land
         // inside it, so the USB keyboard waits, at most the bare-ESC
         // interval (the fifth high review of #238).
-        return console::read_byte().map(|byte| (byte, false));
+        return console::read_byte().map(|byte| (byte, keyseq::Source::Serial));
     }
     if usb_first {
-        if let Some(byte) = crate::xhci::poll_key() {
-            return Some((byte, true));
+        if let Some((byte, last)) = crate::xhci::poll_key() {
+            return Some((byte, keyseq::Source::Usb { last }));
         }
     }
     if let Some(byte) = console::read_byte() {
-        return Some((byte, false));
+        return Some((byte, keyseq::Source::Serial));
     }
     if usb_first {
         // Polled just above, and it had nothing.
         return None;
     }
-    crate::xhci::poll_key().map(|byte| (byte, true))
+    crate::xhci::poll_key().map(|(byte, last)| (byte, keyseq::Source::Usb { last }))
 }
 
 /// What [`take_one`] did.
@@ -335,7 +336,7 @@ enum Took {
 /// one of its waits); otherwise it is queued as a byte. The caller has
 /// checked the reader owns the keyboard.
 fn take_one(boot_waits: bool) -> Took {
-    let Some((byte, from_usb)) = keyboard_device_byte() else {
+    let Some((byte, from)) = keyboard_device_byte() else {
         return Took::Nothing;
     };
     match tasks::interrupt_key_check(byte) {
@@ -353,7 +354,7 @@ fn take_one(boot_waits: bool) -> Took {
         tasks::KeyVerdict::BootInterrupt => {}
     }
     // SAFETY: as in poll_keyboard_byte.
-    unsafe { (*KBD_QUEUE.get()).push(byte, from_usb, crate::exceptions::ticks()) };
+    unsafe { (*KBD_QUEUE.get()).push(byte, from, crate::exceptions::ticks()) };
     Took::Byte
 }
 

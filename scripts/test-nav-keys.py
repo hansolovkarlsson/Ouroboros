@@ -11,9 +11,9 @@ which it dropped before, and Tab (keycode_to_ascii, unmapped until
 
 1. **The bytes.** `/bin/READKEY` prints every byte it reads with its value.
    The eleven keys are pressed through the QEMU monitor's `sendkey`, which
-   reaches the guest ONLY as a USB keyboard report, then Tab, then `q`; the
-   values printed must be the eleven sequences and a 9, in order, and nothing
-   else.
+   reaches the guest ONLY as a USB keyboard report, then Tab, Escape and
+   `q`; the values printed must be the eleven sequences, a 9 and a 27, in
+   order, and nothing else.
 2. **The shell's line editor swallows them** (the `keyseq` crate). `echo a`
    typed on the serial line, then Up, Left, `x`, Delete, Home, End and F2 on
    the USB keyboard, then `b` and Enter: the shell must print `axb`. The `x`
@@ -67,6 +67,8 @@ KEYS = [
 IN_LINE = ["up", "left", "x", "delete", "home", "end", "f2"]
 # Tab, read by readkey after the eleven keys, and pressed in the line.
 TAB = ("tab", b"\t")
+# Escape, read by readkey after Tab: a bare ESC (since 2026-10-09).
+ESC = ("esc", b"\x1b")
 COPY = os.path.join(ROOT, "build", "test-nav-keys.img")
 
 
@@ -99,7 +101,7 @@ def main() -> int:
             guest.type_line("readkey")
             ok = guest.wait_for("press keys")
         if ok:
-            drive_qemu.sendkeys(MONITOR, [name for name, _ in KEYS] + [TAB[0], "q"], KEY_DELAY)
+            drive_qemu.sendkeys(MONITOR, [name for name, _ in KEYS] + [TAB[0], ESC[0], "q"], KEY_DELAY)
             # The farewell and the prompt after it in one match: a wait for
             # the farewell alone marks the prompt as seen too, and a second
             # wait for it then never matches.
@@ -173,7 +175,7 @@ def main() -> int:
     session = out[out.find("readkey"):] if "readkey" in out else ""
     readkey_part = session[:session.find("readkey: bye")] if "readkey: bye" in session else ""
     got = [int(v) for v in re.findall(r"key: .  \((\d+)\)", readkey_part)]
-    want = list(b"".join(seq for _, seq in KEYS) + TAB[1])
+    want = list(b"".join(seq for _, seq in KEYS) + TAB[1] + ESC[1])
     lines = [l.strip() for l in out.splitlines()]
     # The first login only: the useradd step logs in again later.
     first_login = out[:out.find("readkey")] if "readkey" in out else out
@@ -183,7 +185,7 @@ def main() -> int:
     checks = [
         ("driven to the end", len(steps_done) == 7),
         ("login took `ro ESC[D ot` as root", "login" in steps_done and "Login incorrect" not in first_login),
-        (f"readkey read the eleven sequences and Tab ({len(want)} bytes)", got == want),
+        (f"readkey read the eleven sequences, Tab and Escape ({len(want)} bytes)", got == want),
         ("the shell printed `axb` (USB keys in the line)", "axb" in lines),
         ("Tab on the USB keyboard completed `/include/el` to `/include/elf.h`", "/include/elf.h" in lines),
         ("the shell printed `cd` (serial sequences in the line)", "cd" in lines),

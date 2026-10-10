@@ -144,10 +144,10 @@
 //! re-arms the ring, without the Reset Endpoint/Set TR Dequeue Pointer
 //! sequence real recovery needs); no auto-repeat (a held key reports once
 //! per press, not repeatedly, by design - see [`poll_key`]);
-//! unmapped keys (Escape, the function keys other than F2 and F3,
-//! ...) are silently ignored, while the arrows, Home, End, Page Up/Down,
-//! Delete, F2 and F3 send their VT100 sequences (`keycode_to_bytes`,
-//! since 2026-10-07); only the *first* interrupt IN endpoint found in the
+//! unmapped keys (the function keys other than F2 and F3, ...) are
+//! silently ignored, while the arrows, Home, End, Page Up/Down, Delete,
+//! F2 and F3 send their VT100 sequences (`keycode_to_bytes`, since
+//! 2026-10-07), and Escape a bare `ESC` (since 2026-10-09); only the *first* interrupt IN endpoint found in the
 //! configuration descriptor is ever configured, so a composite
 //! keyboard+something-else device with more than one would only get its
 //! first endpoint driven.
@@ -996,6 +996,13 @@ fn keycode_to_bytes(keycode: u8, shift: bool, ctrl: bool) -> Option<KeyBytes> {
         0x4c => b"\x1b[3~", // Delete (forward)
         0x3b => b"\x1bOQ",  // F2
         0x3c => b"\x1bOR",  // F3
+        // Escape: a bare ESC, what a terminal sends. Every sequence above
+        // starts with the same byte, so the key is told apart by where it
+        // ends: `pending_last` marks its one byte as a whole key for the
+        // kernel's queue (decided 2026-10-09). A program reading bytes tells
+        // it apart by the quiet after it, as on any terminal; the shell's
+        // `keyseq` still drops a printable byte typed straight after it.
+        0x29 => b"\x1b",
         _ => {
             let byte = keycode_to_ascii(keycode, shift, ctrl)?;
             return Some(KeyBytes { bytes: [byte, 0, 0, 0], len: 1 });
@@ -1008,8 +1015,8 @@ fn keycode_to_bytes(keycode: u8, shift: bool, ctrl: bool) -> Option<KeyBytes> {
 
 /// USB HID keycode -> ASCII, boot-protocol Usage IDs 0x04-0x38 (letters,
 /// digits, and the punctuation/whitespace keys this shell's line editor
-/// cares about). `None` for anything unmapped (Escape, the modifiers
-/// themselves, ...; the navigation and function keys are
+/// cares about). `None` for anything unmapped (the modifiers
+/// themselves, ...; Escape and the navigation and function keys are
 /// [`keycode_to_bytes`]'s) - a real, documented gap, not a bug; see
 /// module doc comment. A held Ctrl maps letters to the classic C0
 /// control bytes (Ctrl+A = 0x01 ... Ctrl+Z = 0x1a) - added for the
@@ -1286,6 +1293,10 @@ struct KeyboardState {
     /// Bytes, not keys: a navigation key is a sequence of up to
     /// `KEY_BYTES_MAX`, so the queue holds six of the longest.
     pending: [u8; 6 * KEY_BYTES_MAX],
+    /// Per byte of `pending`: it is the last of its key. The kernel's
+    /// keyboard queue ends a USB key there (`keyseq::Source::Usb`), which is
+    /// what makes the Escape key, a bare `ESC`, a complete key at once.
+    pending_last: [bool; 6 * KEY_BYTES_MAX],
     pending_len: usize,
 }
 
@@ -1994,7 +2005,7 @@ impl Xhci {
     /// (bounded at 5 - `buf[2..8]` has at most 6 slots, and the first
     /// match is always returned immediately rather than queued) instead of
     /// discarding everything past the first.
-    fn poll_key(&mut self) -> Option<u8> {
+    fn poll_key(&mut self) -> Option<(u8, bool)> {
         // Drain any keycodes still queued from the last processed report
         // before touching the event ring at all.
         if let Some(k) = self.pop_pending_key() {
@@ -2072,16 +2083,19 @@ impl Xhci {
         self.wait_transfer_event(slot_id, &[trb_addr]).map(|_| ())
     }
 
-    /// Pops the oldest queued keycode, if any.
-    fn pop_pending_key(&mut self) -> Option<u8> {
+    /// Pops the oldest queued byte, if any, and whether it is the last of
+    /// its key.
+    fn pop_pending_key(&mut self) -> Option<(u8, bool)> {
         let kb = self.keyboard.as_mut()?;
         if kb.pending_len == 0 {
             return None;
         }
-        let ascii = kb.pending[0];
+        let byte = kb.pending[0];
+        let last = kb.pending_last[0];
         kb.pending.copy_within(1..kb.pending_len, 0);
+        kb.pending_last.copy_within(1..kb.pending_len, 0);
         kb.pending_len -= 1;
-        Some(ascii)
+        Some((byte, last))
     }
 
     /// The keyboard-report half of the old `poll_key`, factored out so
@@ -2157,11 +2171,16 @@ impl Xhci {
             // whole or not at all, so the queue never holds half of one;
             // the kernel's keyboard queue (`keyseq::KeyQueue`) relies on
             // that, reading a USB key's rest from here before the serial
-            // line, and holding a USB key open far longer than a bare
-            // Escape (a second: only a keyboard gone mid-report reaches it).
+            // line, ending the key at the byte `pending_last` marks, and
+            // otherwise holding a USB key open far longer than a serial
+            // bare Escape (a second: only a keyboard gone mid-report
+            // reaches it).
             if kb.pending_len + key.len <= kb.pending.len() {
-                kb.pending[kb.pending_len..kb.pending_len + key.len].copy_from_slice(&key.bytes[..key.len]);
-                kb.pending_len += key.len;
+                let end = kb.pending_len + key.len;
+                kb.pending[kb.pending_len..end].copy_from_slice(&key.bytes[..key.len]);
+                kb.pending_last[kb.pending_len..end].fill(false);
+                kb.pending_last[end - 1] = true;
+                kb.pending_len = end;
             }
         }
     }
@@ -3418,6 +3437,7 @@ unsafe fn activate_keyboard(xhci: &mut Xhci, idx: usize, kb: KeyboardEndpoint) -
         last_report: [0; 8],
         had_error: false,
         pending: [0; 6 * KEY_BYTES_MAX],
+        pending_last: [false; 6 * KEY_BYTES_MAX],
         pending_len: 0,
     });
     console::println!(
@@ -3625,8 +3645,8 @@ unsafe fn poll_until(mut cond: impl FnMut() -> bool) -> bool {
 /// new is pressed this poll. Called from `syscall.rs`'s `TRY_READ_CHAR`
 /// dispatch arm as a fallback when the byte-stream console has nothing
 /// waiting - see that module for why no shell/ABI changes were needed to
-/// wire this in.
-pub fn poll_key() -> Option<u8> {
+/// wire this in. The flag is true on the last byte of a key.
+pub fn poll_key() -> Option<(u8, bool)> {
     unsafe { (*XHCI.get()).as_mut() }.and_then(Xhci::poll_key)
 }
 

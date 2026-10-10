@@ -28,7 +28,8 @@ a machine whose public key the other does not list is refused.
   as escape sequences (`ESC [ A` and the like), and the line editor and
   login's prompts drop each one whole rather than inserting its tail as
   text. There is no cursor movement within the line and no history. A
-  bare Escape typed on a host terminal swallows the key after it.
+  bare Escape, from a host terminal or the USB keyboard, swallows the
+  printable key typed after it.
 - **Tokenization: whitespace-split, no quoting.** `echo "a b"` sees the
   literal words `"a` and `b"`, not one quoted argument — there is no
   quote-stripping. Every command except `echo`/`write` only ever looks

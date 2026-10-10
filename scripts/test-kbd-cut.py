@@ -23,6 +23,12 @@ case the shell must run a line typed next, whole:
    prints `k4`, not `badecho k4`.
 5. **TCSADRAIN keeps them.** `ctermios drain`, `echo k5` typed during its
    spin, then Enter: `k5`.
+6. **A USB Escape is a whole key at once.** `readkey one` reads the Escape
+   key on the USB keyboard and exits; `e`, pressed on the USB keyboard 0.3 s
+   after it, well inside the second a USB key may stay open, must reach the
+   shell: `cho k6` typed next on the serial line prints `k6`. Without the
+   driver marking the key's last byte, the `e` was trimmed as the Escape's
+   rest and the shell ran `cho k6`.
 
 Each fails with its part of the kernel removed, except E1's rule alone in
 check 3: the 0.3 s before the Ctrl+C is past E2's interval, so E2 already
@@ -122,6 +128,16 @@ def main() -> int:
                 guest.type_raw(b"echo k5")
                 ok = guest.wait_for(r"ctermios: drained[\s\S]*" + PROMPT, timeout=30)
             ok = ok and then_line("drain", "")
+        # 6. A USB Escape is a whole key at once.
+        if ok:
+            guest.type_line("readkey one")
+            ok = guest.wait_for(r"readkey: one\?")
+            if ok:
+                drive_qemu.sendkeys(MONITOR, ["esc", "e"], KEY_DELAY)
+                ok = guest.wait_for(r"readkey: one 27[\s\S]*" + PROMPT)
+            if ok:
+                time.sleep(0.5)
+                ok = then_line("usbesc", "cho k6")
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -140,6 +156,7 @@ def main() -> int:
         ("TCSAFLUSH discards keys typed ahead (`k4`, no `bad`)",
          printed("flush", "k4") and "bad" not in seg.get("flush", "")),
         ("TCSADRAIN keeps them (`k5`)", printed("drain", "k5")),
+        ("a letter typed after a USB Escape is kept (`k6`)", printed("usbesc", "k6")),
         ("no fault lines", faults == 0),
     ]
     failed = 0
