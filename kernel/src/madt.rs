@@ -31,6 +31,7 @@ use core::mem::size_of;
 use core::ptr;
 
 use crate::acpi;
+use crate::synccell::SyncCell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GicVersion {
@@ -88,6 +89,59 @@ pub enum DiscoveryError {
 const TYPE_GICC: u8 = 11;
 const TYPE_GICD: u8 = 12;
 const TYPE_GICR: u8 = 14;
+
+/// Offset of `arm_mpidr` within a GICC entry (`acpi_madt_generic_interrupt`
+/// in Linux's `actbl2.h`: `gicr_base_address` at 60, then `arm_mpidr` at
+/// 68), and of `flags` (12; bit 0 is Enabled). Read by bounds-checked raw
+/// offset like the other GICC fields, since the entry has grown across
+/// ACPI revisions and an older one must not be read past its length.
+const GICC_MPIDR_OFFSET: usize = 68;
+const GICC_FLAGS_OFFSET: usize = 12;
+const GICC_FLAG_ENABLED: u32 = 1;
+
+/// How many cores [`CoreList`] holds. The Pi 4 has four, QEMU's `virt` as
+/// many as `-smp` says, Parallels as many as the VM is given; a table with
+/// more sets `truncated` and the log says so, rather than reading past the
+/// array or guessing.
+pub const MAX_CORES: usize = 16;
+
+/// Every core the MADT describes, one GICC entry each, in table order:
+/// the input to multi-core step 2 (`docs/roadmap/roadmap-smp.md`), where
+/// each `mpidr` but the boot core's is the target of a PSCI `CPU_ON`.
+/// Written once by [`discover`], before the exit (class A of the plan's
+/// inventory), and read after.
+#[derive(Clone, Copy)]
+pub struct CoreList {
+    pub count: usize,
+    pub mpidr: [u64; MAX_CORES],
+    pub enabled: [bool; MAX_CORES],
+    /// The table listed more than `MAX_CORES`; `count` is what fits.
+    pub truncated: bool,
+}
+
+impl CoreList {
+    const fn empty() -> Self {
+        CoreList { count: 0, mpidr: [0; MAX_CORES], enabled: [false; MAX_CORES], truncated: false }
+    }
+}
+
+static CORES: SyncCell<CoreList> = SyncCell::new(CoreList::empty());
+
+/// The affinity fields of an `MPIDR_EL1` value (Aff3 in bits 39:32, Aff2
+/// to Aff0 in 23:0), which is all a GICC entry's `arm_mpidr` records: the
+/// register itself also carries bit 31 (always set) and the MT and U bits,
+/// so QEMU's boot core reads `0x8000_0000` where the table says `0x0`.
+/// Compare cores by this, never by the raw register.
+pub fn affinity(mpidr: u64) -> u64 {
+    mpidr & 0xff_00ff_ffff
+}
+
+/// The cores [`discover`] found; empty before it ran or when it failed.
+pub fn cores() -> CoreList {
+    // SAFETY: written once by `discover` before the exit and before any
+    // second core runs (synccell.rs's argument, and the plan's class A).
+    unsafe { *CORES.get() }
+}
 
 /// Offset of `gicr_base_address` within `MadtGicc` — read directly via a
 /// bounds-checked raw offset rather than the full `MadtGicc` struct,
@@ -172,6 +226,7 @@ pub unsafe fn discover(rsdp: Option<*const u8>) -> Result<GicInfo, DiscoveryErro
     let mut gicc_base: u64 = 0; // first Type 0x0B entry's own MMIO base (v2)
     let mut gicc_gicr_base: u64 = 0; // first Type 0x0B entry's gicr_base_address, if any (v3 fallback)
     let mut gicr: Option<(u64, u64)> = None; // (base_address, length) from a Type 0x0E entry
+    let mut cores = CoreList::empty();
 
     while offset + size_of::<SubtableHeader>() <= table_len {
         let entry_ptr = unsafe { table_addr.add(offset) };
@@ -198,6 +253,20 @@ pub unsafe fn discover(rsdp: Option<*const u8>) -> Result<GicInfo, DiscoveryErro
                     let p = unsafe { entry_ptr.add(GICC_GICR_BASE_OFFSET) }.cast::<u64>();
                     gicc_gicr_base = unsafe { ptr::read_unaligned(p) };
                 }
+                // One GICC entry per core: its MPIDR is what CPU_ON will
+                // name, its Enabled flag whether the firmware offers it.
+                if entry_len >= GICC_MPIDR_OFFSET + 8 {
+                    if cores.count < MAX_CORES {
+                        let m = unsafe { entry_ptr.add(GICC_MPIDR_OFFSET) }.cast::<u64>();
+                        let f = unsafe { entry_ptr.add(GICC_FLAGS_OFFSET) }.cast::<u32>();
+                        cores.mpidr[cores.count] = unsafe { ptr::read_unaligned(m) };
+                        cores.enabled[cores.count] =
+                            unsafe { ptr::read_unaligned(f) } & GICC_FLAG_ENABLED != 0;
+                        cores.count += 1;
+                    } else {
+                        cores.truncated = true;
+                    }
+                }
             }
             TYPE_GICR if gicr.is_none() && entry_len >= size_of::<MadtGicr>() => {
                 let entry = unsafe { ptr::read_unaligned(entry_ptr.cast::<MadtGicr>()) };
@@ -208,6 +277,9 @@ pub unsafe fn discover(rsdp: Option<*const u8>) -> Result<GicInfo, DiscoveryErro
 
         offset += entry_len;
     }
+
+    // SAFETY: the one write, before the exit, on the boot core (see `cores`).
+    unsafe { *CORES.get() = cores };
 
     let (gicd_base, version_byte) = gicd.ok_or(DiscoveryError::NoGicd)?;
 

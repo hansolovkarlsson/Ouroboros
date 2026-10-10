@@ -372,6 +372,29 @@ extern "C" fn kernel_main() -> ! {
             None
         }
     };
+    // The cores the MADT describes, one GICC entry each (multi-core step 1,
+    // docs/roadmap/roadmap-smp.md): the count and this core's MPIDR on one
+    // line, then one line per core, so a rig can count them and step 2 can
+    // match each `core N up` against its MPIDR. Logged here, before the
+    // exit, for the same reason as the GIC line above.
+    {
+        let cores = madt::cores();
+        log::info!(
+            "Ouroboros kernel: MADT: {} cores{} (this core affinity {:#x}, mpidr {:#x})",
+            cores.count,
+            if cores.truncated { ", more than fit listed" } else { "" },
+            madt::affinity(gicv3::read_mpidr()),
+            gicv3::read_mpidr()
+        );
+        for i in 0..cores.count {
+            log::info!(
+                "Ouroboros kernel: MADT: core {}: mpidr {:#x}, {}",
+                i,
+                cores.mpidr[i],
+                if cores.enabled[i] { "enabled" } else { "disabled" }
+            );
+        }
+    }
 
     // Read the PSCI conduit (hvc/smc) from ACPI's FADT now, in the same
     // before-exit_boot_services window as the MADT parse, so the `POWER`
