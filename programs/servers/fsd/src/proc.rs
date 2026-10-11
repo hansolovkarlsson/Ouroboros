@@ -24,9 +24,10 @@
 //! `core` 2 to 5 as the task moves, so a reader that sizes first and then
 //! reads a moment later can read short. Read to the short read, as `cat` does.
 //!
-//! Read-only: every write/mutate method returns [`Error::ReadOnly`]. Only per-slot
-//! *state* is exposed - there is no cross-task argv/name accessor in the kernel
-//! yet (`GET_ARG*` returns the *caller's* own), so `/<n>` has just `state`.
+//! Read-only: every write/mutate method returns [`Error::ReadOnly`]. A slot
+//! exposes its scheduler state and the core executing it; a `name` file could
+//! join them, since the kernel's `TASK_NAME` answers for any slot (the shell's
+//! `ps` reads it), and nobody has asked for one.
 //! `/cpus` is the first top-level entry with a name rather than a slot number:
 //! the boot core and every secondary that came up and takes tasks, which until
 //! it existed a user could read only off the boot log or `coreprobe`'s report.
@@ -76,7 +77,7 @@ impl Fs {
                 // slot (0.. until the kernel reports no such slot). Includes
                 // unused slots - their `state` file just reads "unused", the
                 // same as `ps` shows.
-                let mut cpus = [0u8; CPUS_MAX];
+                let mut cpus = [0u8; DECIMAL_LINE_MAX];
                 f("cpus", false, cpus_bytes(&mut cpus) as u32);
                 let mut i = 0u64;
                 loop {
@@ -97,7 +98,7 @@ impl Fs {
             Node::Task(n) => {
                 // A slot's directory holds `state` and `core`.
                 f("state", false, state_bytes(n).len() as u32);
-                let mut core = [0u8; CPUS_MAX];
+                let mut core = [0u8; DECIMAL_LINE_MAX];
                 f("core", false, core_bytes(n, &mut core) as u32);
                 Ok(())
             }
@@ -114,12 +115,12 @@ impl Fs {
         match parse(path) {
             Node::State(n) => Ok(copy_out(state_bytes(n), offset, buf)),
             Node::Core(n) => {
-                let mut core = [0u8; CPUS_MAX];
+                let mut core = [0u8; DECIMAL_LINE_MAX];
                 let len = core_bytes(n, &mut core);
                 Ok(copy_out(&core[..len], offset, buf))
             }
             Node::Cpus => {
-                let mut cpus = [0u8; CPUS_MAX];
+                let mut cpus = [0u8; DECIMAL_LINE_MAX];
                 let n = cpus_bytes(&mut cpus);
                 Ok(copy_out(&cpus[..n], offset, buf))
             }
@@ -136,11 +137,11 @@ impl Fs {
             Node::Root | Node::Task(_) => (0u64, true),
             Node::State(n) => (state_bytes(n).len() as u64, false),
             Node::Core(n) => {
-                let mut core = [0u8; CPUS_MAX];
+                let mut core = [0u8; DECIMAL_LINE_MAX];
                 (core_bytes(n, &mut core) as u64, false)
             }
             Node::Cpus => {
-                let mut cpus = [0u8; CPUS_MAX];
+                let mut cpus = [0u8; DECIMAL_LINE_MAX];
                 (cpus_bytes(&mut cpus) as u64, false)
             }
             Node::UnderCpus => return Err(Error::NotADirectory),
@@ -189,20 +190,21 @@ fn state_bytes(n: u64) -> &'static [u8] {
     }
 }
 
-/// The most `/cpus` holds: twenty decimal digits and a newline.
-const CPUS_MAX: usize = 21;
+/// The most a decimal line holds, `/cpus` and `/<n>/core` both: twenty
+/// digits and a newline. Every buffer those two files are formatted into.
+const DECIMAL_LINE_MAX: usize = 21;
 
 /// The bytes of `/cpus`: the cores that take tasks, from the kernel's
 /// `CORE_INFO_UP` (the boot core and every secondary that came up), as one
 /// decimal line. Asked on every read, so it is what the kernel says now.
-fn cpus_bytes(buf: &mut [u8; CPUS_MAX]) -> usize {
+fn cpus_bytes(buf: &mut [u8; DECIMAL_LINE_MAX]) -> usize {
     decimal_line(crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_UP, 0, 0, 0), buf)
 }
 
 /// `v` as a decimal line, `"4\n"`, into `buf`; the length written. The one
 /// spelling of a synthetic file's number (`/cpus`, `/<n>/core`).
-fn decimal_line(v: u64, buf: &mut [u8; CPUS_MAX]) -> usize {
-    let n = u64_decimal(v, &mut buf[..CPUS_MAX - 1]);
+fn decimal_line(v: u64, buf: &mut [u8; DECIMAL_LINE_MAX]) -> usize {
+    let n = u64_decimal(v, &mut buf[..DECIMAL_LINE_MAX - 1]);
     buf[n] = b'\n';
     n + 1
 }
@@ -211,16 +213,15 @@ fn decimal_line(v: u64, buf: &mut [u8; CPUS_MAX]) -> usize {
 /// this instant, from the kernel's `CORE_INFO_TASK_CORE`, or `none` when no
 /// core is (runnable but waiting its turn, blocked, empty, or the idle slot).
 /// `fsd` itself is on a core while it answers, so its own slot reads a core.
-fn core_bytes(n: u64, buf: &mut [u8; CPUS_MAX]) -> usize {
-    let core = crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, n, 0, 0);
-    // A core index is small; NO_CORE and BAD_OP (a kernel without the op)
-    // are both at the top, so one bound tells a core from either, the same
-    // test the shell's `ps` makes.
-    if core >= syscall_abi::CORE_INFO_NO_CORE {
-        buf[..5].copy_from_slice(b"none\n");
-        return 5;
+fn core_bytes(n: u64, buf: &mut [u8; DECIMAL_LINE_MAX]) -> usize {
+    // `core_of` is the one spelling of the test, shared with the shell's `ps`.
+    match syscall_abi::core_of(crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, n, 0, 0)) {
+        Some(core) => decimal_line(core, buf),
+        None => {
+            buf[..5].copy_from_slice(b"none\n");
+            5
+        }
     }
-    decimal_line(core, buf)
 }
 
 /// Copy `src[offset..]` into `buf`, returning the byte count (0 at/past the end).

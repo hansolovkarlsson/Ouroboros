@@ -120,7 +120,7 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
             guest.type_line("help")
             dwell_ok = guest.wait_for(r"builtins:[\s\S]*" + PROMPT, timeout=20)
         if dwell_ok and not esp:
-            probe = run_probes(guest)
+            probe = run_probes(guest, smp)
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -196,7 +196,7 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
     return checks
 
 
-def run_probes(guest):
+def run_probes(guest, smp):
     """Step 4(d): /bin/COREPROBE alone, as a pair, and held then ended by
     Ctrl+C, each transcript cut out for its own checks."""
     got = {}
@@ -229,21 +229,26 @@ def run_probes(guest):
     # answers the same by file, and `kill` ends it.
     guest.type_line("exec /bin/coreprobe hold")
     # The prompt comes back before the probe's line (exec returns at once),
-    # so wait for the line alone, then for ps's last slot and its prompt.
-    bg = guest.wait_for(r"holding on core \d+", timeout=30)
-    # `ps` twice if the first catches the probe blocked in its own console
-    # call (its "holding" line is one): the slot count is discovered from
-    # the listing, as ps itself discovers it, not restated here.
+    # so wait for the line alone, after this exec's echo: the foreground
+    # hold printed the same line, and a wait that never advanced past it
+    # would take it for this one.
+    bg = guest.wait_for(r"exec /bin/coreprobe hold[\s\S]*holding on core \d+", timeout=30)
+    # `ps` up to twice, each judged on its own listing: the first may catch
+    # the probe blocked in its own console call (its "holding" line is one)
+    # or runnable but not yet picked up by an idle core; on one core the
+    # shell has the core, so `runnable` is the answer there. The slot count
+    # is discovered from the listing, as ps itself discovers it.
     slot = None
+    expected = "running" if smp > 1 else "runnable"
     for _ in range(2):
+        before = len(guest.transcript())
         guest.type_line("ps")
         bg = guest.wait_for(r"\bps\r?\n[\s\S]*?" + PROMPT, timeout=30) and bg
-        ps_out = guest.transcript()
         found = re.search(r"task (\d+): (running on core \d+|runnable|blocked \(waiting\))\s+(?:/bin/)?coreprobe",
-                          ps_out[len(got["hold_out"]):], re.I)
+                          guest.transcript()[before:], re.I)
         if found:
             slot = found.group(1)
-            if not found.group(2).startswith("blocked"):
+            if found.group(2).startswith(expected):
                 break
     got["bg_slot"] = slot
     if slot is None:

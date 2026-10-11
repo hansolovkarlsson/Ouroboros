@@ -151,6 +151,18 @@ pub const CORE_INFO_TASK_CORE: u64 = 3;
 /// [`CORE_INFO_TASK_CORE`]'s answer when no core is executing the task.
 /// Below [`CORE_INFO_BAD_OP`]; a core index is small, so neither can be one.
 pub const CORE_INFO_NO_CORE: u64 = u64::MAX - 1;
+
+/// A [`CORE_INFO_TASK_CORE`] answer as a core index, or `None` for
+/// [`CORE_INFO_NO_CORE`] and for [`CORE_INFO_BAD_OP`] (a kernel without the
+/// op). The one spelling of the test, so `ps` and `fsd`'s `/proc/<n>/core`
+/// cannot disagree on the same answer (the high review of #271).
+pub const fn core_of(answer: u64) -> Option<u64> {
+    if answer < CORE_INFO_NO_CORE {
+        Some(answer)
+    } else {
+        None
+    }
+}
 /// [`CORE_INFO`]'s answer to an op it does not know.
 pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
 

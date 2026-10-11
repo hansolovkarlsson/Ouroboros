@@ -3546,14 +3546,11 @@ fn cmd_ps(out: &mut Output) {
             // itself one such task while it runs `ps`. Only a task on a
             // core has a core; a runnable one waiting its turn has none.
             let core = if state == TASK_STATE_RUNNABLE {
-                syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, i, 0, 0)
+                syscall_abi::core_of(syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, i, 0, 0))
             } else {
-                syscall_abi::CORE_INFO_NO_CORE
+                None
             };
-            // A core index is small; NO_CORE and BAD_OP (a kernel without the
-            // op) are both at the top, so one bound tells a core from either,
-            // the same test fsd's /proc/<n>/core makes.
-            if core < syscall_abi::CORE_INFO_NO_CORE {
+            if let Some(core) = core {
                 out.put_str(": running on core ");
                 out.put_u64_decimal(core);
             } else {
