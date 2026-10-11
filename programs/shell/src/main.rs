@@ -2914,13 +2914,15 @@ fn print_str(s: &str) {
 }
 
 /// After a program this shell waited on was killed: normal video again
-/// (`CSI 0 m`), before anything else is printed. A program killed between
-/// `ESC [ 7 m` and `ESC [ 0 m` (an editor drawing its status line) leaves the
-/// console drawing inverted, and only the shell knows the program is gone
+/// (`CSI 0 m`) and the cursor shown (`CSI ? 25 h`), before anything else is
+/// printed. A program killed between `ESC [ 7 m` and `ESC [ 0 m` (an editor
+/// drawing its status line) leaves the console drawing inverted, and one
+/// killed between `ESC [ ? 25 l` and `ESC [ ? 25 h` (the same editor, mid
+/// redraw) leaves it with no cursor; only the shell knows the program is gone
 /// (step 4 of `docs/roadmap/roadmap-ctrl-c.md`; the kernel does not know what
 /// the program wrote). Right on a serial terminal too.
 fn reset_after_kill() {
-    con_write(b"\x1b[0m");
+    con_write(b"\x1b[0m\x1b[?25h");
 }
 
 /// Append `bytes` to `buf[..*n]`, bounded. The shell's own copy: it does not

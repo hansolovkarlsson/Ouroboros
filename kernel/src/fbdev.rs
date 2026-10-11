@@ -4,7 +4,7 @@
 //! decisions, ANSI parsing) lives in `cond` now; this is only the pixel
 //! plumbing it drives through the gated `FB_*` syscalls (`syscall.rs`,
 //! accepted from `CON_TASK` alone): plot a run of glyph bitmaps, scroll
-//! the screen up, clear it.
+//! the screen up, clear it, invert one cell (the server's cursor).
 //!
 //! `cond` looks each character up in its *own* copy of `font.rs` and
 //! sends the 8-byte glyph bitmaps here - the font (the thing that was
@@ -13,8 +13,8 @@
 //!
 //! The kernel's own `fbconsole` (the emergency/boot console) writes the
 //! *same* framebuffer independently, for boot messages and fault
-//! reports. Single-core with no preemption inside a syscall, so the two
-//! never run concurrently; on a framebuffer-only platform they do share
+//! reports. One core is in the kernel at a time (`lock.rs`) and `cond`
+//! stays on the boot core, so the two never run concurrently; on a framebuffer-only platform they do share
 //! the screen (kernel during boot/faults, `cond` in steady state) - see
 //! `CLAUDE.md`'s "Driver isolation, part 3".
 
@@ -165,6 +165,36 @@ pub fn scroll(n: usize) {
         core::ptr::write_bytes(fb.base.add(total_bytes - shift_bytes), 0, shift_bytes);
     }
     publish(fb, 0, total_bytes, 1);
+}
+
+/// Inverts the pixels of cell `(col, row)`: white to black and black to
+/// white, every channel. The console server's cursor is this: drawn by
+/// inverting the cell the cursor is on, taken off by inverting it again,
+/// so the server keeps no copy of what the cell holds and the screen stays
+/// the one truth. A cell past the last column or row is skipped.
+pub fn invert_cell(col: usize, row: usize) {
+    let Some(fb) = (unsafe { (*FB.0.get()).as_ref() }) else {
+        return;
+    };
+    if col >= fb.cols || row >= fb.rows {
+        return;
+    }
+    let x0 = col * GLYPH_W;
+    let y0 = row * GLYPH_H;
+    for dy in 0..GLYPH_H {
+        for dx in 0..GLYPH_W {
+            let off = ((y0 + dy) * fb.stride + x0 + dx) * BYTES_PER_PIXEL;
+            // The three colour channels, as put_pixel writes them.
+            for channel in 0..3 {
+                unsafe {
+                    let p = fb.base.add(off + channel);
+                    p.write_volatile(!p.read_volatile());
+                }
+            }
+        }
+    }
+    let off = (y0 * fb.stride + x0) * BYTES_PER_PIXEL;
+    publish(fb, off, GLYPH_W * BYTES_PER_PIXEL, GLYPH_H);
 }
 
 /// Blank the entire framebuffer.

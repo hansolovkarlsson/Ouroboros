@@ -5,7 +5,8 @@
 
 Item 1 of docs/handoffs/closed/2026-10-05-from-edit-editor-console.md: cond's
 framebuffer backend must act on `CSI row;col H`, `CSI K`, `CSI J`, `CSI 7 m` and
-`CSI 0 m`, and draw nothing for `CSI ? 25 l/h`. QEMU gets a framebuffer from
+`CSI 0 m`, and act on `CSI ? 25 l/h` (since 2026-10-11 cond draws a cursor, the
+cell inverted, and those two hide and show it). QEMU gets a framebuffer from
 `-device ramfb`, and then cond renders the shell's output there and nowhere
 else, so the serial line shows only the kernel's own boot log. This rig reads
 the screen instead: a QMP `screendump` of the guest's display, cut into 8x8
@@ -25,6 +26,13 @@ FB_* primitives change.
 After the model's check, `vtprobe hold` writes `CSI 7 m` and `held` and
 waits for a key; Ctrl+C kills it, and the shell's next prompt must be drawn in
 normal video (its reset after a kill, step 4 of docs/roadmap/roadmap-ctrl-c.md).
+Then the cursor: after `clear` the prompt's row must carry it, the cell after
+`# ` inverted (a blank cell inverted is a block); `vtprobe hide` writes
+`CSI ? 25 l` and `hidden` and waits, and its row must carry no inverted cell;
+Ctrl+C kills it, and the shell's next prompt must carry the cursor again (its
+reset after a kill shows it). The first fails with FB_INVERT a no-op in the
+kernel, the second with cond ignoring `CSI ? 25 l`, the third with the shell's
+reset not writing `CSI ? 25 h`.
 
 `--keep DIR` leaves the final screendump (PPM) in DIR for a look by eye.
 """
@@ -201,6 +209,9 @@ def main() -> int:
     )
     screen = None
     held_screen = None
+    cursor_screen = None
+    hidden_screen = None
+    back_screen = None
     driven = False
     try:
         qmp = Qmp(QMP)
@@ -274,6 +285,27 @@ def main() -> int:
                                         held_screen = rows
                                         break
                                     time.sleep(0.5)
+                    # The cursor: on the prompt after a clear; gone while
+                    # `vtprobe hide` holds it hidden; back on the prompt the
+                    # shell draws after Ctrl+C kills it.
+                    if held_screen is not None:
+                        guest.type_line("clear")
+                        cursor_screen = wait_screen(r"^#$")
+                        if cursor_screen:
+                            guest.type_line("vtprobe hide")
+                            hidden_screen = wait_screen(r"^hidden")
+                            if hidden_screen:
+                                guest.proc.stdin.write(b"\x03")
+                                guest.proc.stdin.flush()
+                                deadline = time.time() + 30
+                                while time.time() < deadline:
+                                    rows = snap()
+                                    lines = text(rows)
+                                    at = next((i for i, l in enumerate(lines) if l.startswith("hidden")), None)
+                                    if at is not None and "#" in lines[at + 1:]:
+                                        back_screen = rows
+                                        break
+                                    time.sleep(0.5)
         faults = guest.aborts()
     finally:
         guest.stop()
@@ -306,11 +338,38 @@ def main() -> int:
         prompt_normal = prompt_at > at and held_screen[prompt_at][0] == ("#", False)
         print(f"     |{lines[at]}")
         print(f"     |{lines[prompt_at]}  (prompt reversed: {held_screen[prompt_at][0][1]})")
+    def cursor_on_prompt(rows):
+        """The last prompt row's cell after `# ` is a blank cell inverted, and
+        it is the row's only inverted cell."""
+        if not rows:
+            return False
+        lines = text(rows)
+        prompt_at = max((i for i, l in enumerate(lines) if l == "#"), default=None)
+        if prompt_at is None:
+            return False
+        row = rows[prompt_at]
+        return row[2] == (BLANK, True) and sum(1 for _, rev in row if rev) == 1
+
+    def no_cursor_on_hidden(rows):
+        """The row `vtprobe hide` wrote `hidden` on has no inverted cell."""
+        if not rows:
+            return False
+        lines = text(rows)
+        at = next((i for i, l in enumerate(lines) if l.startswith("hidden")), None)
+        return at is not None and not any(rev for _, rev in rows[at])
+
+    cursor_drawn = cursor_on_prompt(cursor_screen)
+    cursor_hidden = no_cursor_on_hidden(hidden_screen)
+    cursor_back = cursor_on_prompt(back_screen) and (
+        back_screen is not None and no_cursor_on_hidden(back_screen))
     checks = [
-        ("driven to the end", driven and held_screen is not None),
+        ("driven to the end", driven and back_screen is not None),
         (f"rows 1-{CHECKED_ROWS} and the bottom-right cell as modelled", driven and not bad),
         ("vtprobe hold drew `held` reversed", held_reversed),
         ("after Ctrl+C killed it, the shell's prompt is in normal video", prompt_normal),
+        ("the cursor is drawn after the prompt (the cell inverted, the row's only one)", cursor_drawn),
+        ("vtprobe hide (CSI ? 25 l) takes the cursor off its row", cursor_hidden),
+        ("after Ctrl+C killed it, the shell's prompt has the cursor again", cursor_back),
         ("no fault lines", faults == 0),
     ]
     for line in bad[:40]:

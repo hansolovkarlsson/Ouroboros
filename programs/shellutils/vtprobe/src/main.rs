@@ -37,6 +37,11 @@
 //! waits for a key, so Ctrl+C kills it with reverse video still on. The
 //! shell must reset it (`CSI 0 m`) before its prompt; without that, cond
 //! draws the prompt and everything after it inverted.
+//!
+//! `vtprobe hide` is the same for the cursor: it writes `CSI ? 25 l` and
+//! `hidden`, then waits for a key, so Ctrl+C kills it with the cursor hidden.
+//! The shell must show it again (`CSI ? 25 h`) before its prompt; without
+//! that, the console has no cursor until a program shows it.
 
 #![no_std]
 #![no_main]
@@ -46,6 +51,12 @@
 pub extern "C" fn _start() -> ! {
     let target = ulib::stdout_target();
     let mut first = [0u8; 8];
+    if ulib::arg(1, &mut first).is_some_and(|n| &first[..n] == b"hide") {
+        ulib::write_out(target, b"\x1b[?25lhidden");
+        ulib::read_char();
+        ulib::write_out(target, b"\x1b[?25h\r\n");
+        ulib::exit(0);
+    }
     if ulib::arg(1, &mut first).is_some_and(|n| &first[..n] == b"hold") {
         ulib::write_out(target, b"\x1b[7mheld");
         ulib::read_char();
@@ -103,7 +114,8 @@ pub extern "C" fn _start() -> ! {
     // 4. Reverse video on and off, each way of turning it off.
     at(6, 5);
     out(b"\x1b[7mREV\x1b[0mnor\x1b[7mx\x1b[my\x1b[7mz\x1b[27mw");
-    // 5. Cursor hide and show draw nothing.
+    // 5. Cursor hide and show draw nothing mid-write (the cursor itself
+    //    is drawn only when a write ends, and the shell's prompt has it).
     at(7, 3);
     out(b"\x1b[?25l\x1b[?25hok");
     // 6. Omitted parameters, and sequences that are parsed and ignored.

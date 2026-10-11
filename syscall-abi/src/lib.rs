@@ -569,6 +569,16 @@ pub const FB_SCROLL: u64 = 36;
 /// Used by the server's startup and its `clear`/ANSI-`2J` handling.
 pub const FB_CLEAR: u64 = 37;
 
+/// `(col, row)` -> `0`, or a reserved-band error. Inverts the pixels of
+/// one framebuffer character cell, white to black and black to white.
+/// **Gated to [`CON_TASK`]**. The server's cursor (since 2026-10-11): it
+/// draws the cursor by inverting the cell it is on when a write ends, and
+/// takes it off by inverting the same cell again before the next write,
+/// so it needs no copy of what the cell holds. A cell past the last
+/// column or row is skipped. Numbered after [`CORE_INFO`], the last
+/// syscall before it, rather than beside its siblings.
+pub const FB_INVERT: u64 = 76;
+
 /// `()` -> the calling task's **stdout target** (the task index its
 /// output should be sent to, set by whoever [`SPAWN`]ed it; [`CON_TASK`]
 /// by default, and for boot-loaded tasks). A program routes its output

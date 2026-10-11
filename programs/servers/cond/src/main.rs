@@ -22,7 +22,10 @@
 //!   scroll decisions, ANSI parsing) moved out of the kernel's
 //!   `fbconsole`. Each glyph is looked up in this program's own `font`
 //!   and blitted via `FB_BLIT`; the kernel keeps only the dumb pixel
-//!   primitives (`FB_BLIT`/`FB_SCROLL`/`FB_CLEAR`, `kernel/src/fbdev.rs`).
+//!   primitives (`FB_BLIT`/`FB_SCROLL`/`FB_CLEAR`/`FB_INVERT`,
+//!   `kernel/src/fbdev.rs`). The cursor is a steady block: the cell it is
+//!   on, inverted by `FB_INVERT` when a write ends and inverted back before
+//!   the next write draws, hidden and shown by `CSI ? 25 l/h`.
 
 #![no_std]
 #![no_main]
@@ -112,6 +115,8 @@ fn detect_backend() -> Backend {
             row: 0,
             wrap_pending: false,
             reverse: false,
+            cursor_visible: true,
+            cursor_at: None,
             ansi: Ansi::Ground,
             params: [0; MAX_PARAMS],
             nparams: 0,
@@ -126,9 +131,11 @@ fn write_text(backend: &mut Backend, bytes: &[u8]) {
     match backend {
         Backend::ByteStream => con_write_raw(bytes),
         Backend::Framebuffer(fb) => {
+            fb.cursor_off();
             for &c in bytes {
                 fb.put_char(c);
             }
+            fb.cursor_on();
         }
     }
 }
@@ -140,8 +147,9 @@ fn write_text(backend: &mut Backend, bytes: &[u8]) {
 /// The escape sequences it acts on are the set a full-screen program needs
 /// (DevTools's Edit asked for them, `docs/handoffs/2026-10-05-from-edit-
 /// editor-console.md`, item 1): `CSI row;col H`, `CSI Ps K`, `CSI Ps J`,
-/// `CSI Ps m` for reverse video (7 on, 0 and 27 off), and the private
-/// `CSI ? ... h/l` forms, which are parsed and drawn as nothing. Every other
+/// `CSI Ps m` for reverse video (7 on, 0 and 27 off), and `CSI ? 25 h/l`,
+/// which shows and hides the cursor; every other private `CSI ? ... h/l`
+/// form is parsed and drawn as nothing. Every other
 /// sequence is consumed and dropped, so none of it prints: any CSI to its
 /// final byte, `ESC` with intermediates (`ESC ( B`) to its final byte, and
 /// the string sequences (OSC `ESC ]`, and DCS, SOS, PM, APC) to BEL or
@@ -159,6 +167,14 @@ struct Fb {
     /// SGR 7: glyphs are drawn with their bits inverted. Erasing ignores
     /// it and always blanks to the background.
     reverse: bool,
+    /// DECTCEM, `CSI ? 25 h/l`: whether the cursor is drawn when a write
+    /// ends. A full-screen program hides it while it redraws.
+    cursor_visible: bool,
+    /// The cell the cursor is drawn on right now (inverted by
+    /// `FB_INVERT`), or `None` between `cursor_off` and `cursor_on`. Kept
+    /// apart from `col`/`row`, which move while a write is drawn; the
+    /// cursor comes off the cell it was put on, wherever they are now.
+    cursor_at: Option<(usize, usize)>,
     ansi: Ansi,
     /// The CSI sequence being parsed: its numeric parameters, how many
     /// were started (`;` starts the next), and whether it had a private
@@ -286,7 +302,9 @@ impl Fb {
                 }
                 b'<'..=b'?' => self.private = true,
                 0x40..=0x7e => {
-                    if !self.private {
+                    if self.private {
+                        self.private_csi(c);
+                    } else {
                         self.csi(c);
                     }
                     self.ansi = Ansi::Ground;
@@ -361,6 +379,44 @@ impl Fb {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Acts on a private CSI sequence's final byte (`CSI ? ... h/l`). Only
+    /// mode 25 (DECTCEM) does anything: `h` shows the cursor and `l` hides
+    /// it, from the end of this write on. Nothing is drawn here: the cursor
+    /// is off the screen for the whole of a write and `cursor_on` reads
+    /// `cursor_visible` when the write ends.
+    fn private_csi(&mut self, final_byte: u8) {
+        for i in 0..self.nparams.min(MAX_PARAMS) {
+            if self.params[i] == 25 {
+                match final_byte {
+                    b'h' => self.cursor_visible = true,
+                    b'l' => self.cursor_visible = false,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Takes the cursor off the screen before a write draws anything: the
+    /// cell it was on is inverted again, which gives it its pixels back.
+    /// Every drawing path (glyphs, erasing, scrolling, clearing) runs
+    /// between this and `cursor_on`, so none of them ever draws over the
+    /// cursor or moves it.
+    fn cursor_off(&mut self) {
+        if let Some((col, row)) = self.cursor_at.take() {
+            syscall4(syscall_abi::FB_INVERT, col as u64, row as u64, 0, 0);
+        }
+    }
+
+    /// Draws the cursor where the write left it, as that cell inverted,
+    /// unless `CSI ? 25 l` hid it. With a wrap pending the cursor is on
+    /// the last column's glyph, as a VT100 shows it.
+    fn cursor_on(&mut self) {
+        if self.cursor_visible && self.cursor_at.is_none() {
+            syscall4(syscall_abi::FB_INVERT, self.col as u64, self.row as u64, 0, 0);
+            self.cursor_at = Some((self.col, self.row));
         }
     }
 

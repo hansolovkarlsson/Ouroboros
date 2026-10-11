@@ -1070,6 +1070,14 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             crate::fbdev::clear();
             0
         }
+        syscall_abi::FB_INVERT => {
+            // The console server's cursor: one cell's pixels inverted.
+            if !con_access_allowed() {
+                return syscall_abi::FS_ERROR;
+            }
+            crate::fbdev::invert_cell(arg0 as usize, arg1 as usize);
+            0
+        }
         syscall_abi::GET_TICKS => exceptions::ticks(),
         // Microseconds since boot: see timer::monotonic_us.
         syscall_abi::MONOTONIC_US => crate::timer::monotonic_us(),
