@@ -772,7 +772,9 @@ not yet checked on this tree are marked (predicted).
       built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
       and `make test-spawn-owner` (`roadmap-smp.md`, step 4(d)).
       **Two small follow-ups asked by Hans on 2026-10-11, after #268:**
-      - [ ] **`/proc/cpus`: how many cores are active.** Today the count is
+      - [x] **`/proc/cpus`: how many cores are active.** Built 2026-10-11,
+            `make test-proc-cpus`: one line from `CORE_INFO_UP`, `fsd`'s first
+            named `/proc` entry. As planned: today the count is
             in the boot log (`MADT: N cores`, one `smp: core i up` line per
             secondary, a summary) and in `coreprobe`'s report (`N cores
             up`, a two-second probe built for the rig). Nothing a user types
@@ -784,7 +786,8 @@ not yet checked on this tree are marked (predicted).
             `/<n>/state` today, so this is its first top-level entry with a
             name rather than a slot number; `fsd` runs on the boot core and
             asks the kernel, so no new syscall. Done when `cat /proc/cpus`
-            prints `4` under `SMP=4` and `1` on one core, in a rig.
+            prints `4` under `SMP=4` and `1` on one core, in a rig. (Done:
+            the rig boots `-smp 1` and `-smp 4` and reads 1 and 4.)
       - [ ] **`ps` names the core a running task is on.** With programs
             placed on the secondaries (step 4(d)), `ps`'s `runnable` hides
             a real third state: the task is executing on core N right now.

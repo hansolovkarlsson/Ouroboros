@@ -337,6 +337,15 @@ image whose stamp is not the tree's (`scripts/srcid.py`).
 meant to persist, as Linux does, so it cannot clear a pending change or
 restart a reset by writing a bit back as read.
 
+**`/proc/cpus`: how many cores take tasks, as a file (2026-10-11).** The
+count was in the boot log and in `coreprobe`'s two-second report and nowhere
+a user could read it plainly. `fsd`'s synthetic `/proc` gains its first named
+top-level entry: `cat /proc/cpus` after `mount -p /proc` prints one line, the
+boot core and every secondary that came up, from the kernel's `CORE_INFO_UP`,
+asked on every read. Nothing lives under it. Checked by `make test-proc-cpus`,
+two boots, `-smp 1` and `-smp 4`, reading 1 and 4. Asked by Hans after #268;
+its companion, `ps` naming a running task's core, stays on the roadmap.
+
 **The kernel's spawn staging has one owner at a time (#268, 2026-10-11).** A
 spawn is fed through four staging buffers over many syscalls (one 512-byte
 chunk each, with a round trip to `fsd` between them), and the buffers

@@ -415,7 +415,8 @@ mount (no bind needed — `netd`'s export serves `/proc` too):
 
 ```
 $ mount -p /proc                    # your own process table
-$ ls /proc                          # 0/ 1/ 2/ ... one dir per task slot
+$ ls /proc                          # cpus 0/ 1/ 2/ ... the cores file, one dir per task slot
+$ cat /proc/cpus                    # how many cores take tasks (4 on a four-core machine)
 $ cat /proc/2/state                 # runnable | blocked | zombie | unused
 $ ls /mnt/a/proc                    # MACHINE A's task slots
 $ cat /mnt/a/proc/2/state           # A's filesystem-server state
