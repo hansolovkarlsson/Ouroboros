@@ -4949,6 +4949,15 @@ impl Drop for AsUser {
     }
 }
 
+
+/// Give up a staging netd claimed and will not spawn: a `SPAWN` with a total
+/// of `0`, refused as empty, which releases the kernel's staging (one owner
+/// at a time since 2026-10-11, the shell's `abandon_staging` is the other
+/// copy). Without it a failed `cpu` run would hold the staging until netd's
+/// next spawn, and the shell's every command would be refused meanwhile.
+fn abandon_staging() {
+    syscall4(syscall_abi::SPAWN, 0, syscall_abi::CON_TASK, 0, 0);
+}
 fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
     const ARGV_CAP: usize = syscall_abi::ARGV_MAX as usize;
     let mut blob = [0u8; ARGV_CAP]; // [argc:u32][ (len:u32, bytes) ... ]
@@ -5006,6 +5015,9 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
         // not read the binary cannot run it.
         let n = read_file_chunk(As::FirstParty, &path[..plen], 0, offset, &mut chunk);
         if n >= syscall_abi::FS_ERR_MIN {
+            if offset > 0 {
+                abandon_staging();
+            }
             return None; // no such program, or a read error
         }
         if n == 0 {
@@ -5021,7 +5033,14 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
         heartbeat();
         let n = (n as usize).min(chunk.len());
         if syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n as u64, 0) != 0 {
-            return None; // staged past the kernel's buffer
+            // Staged past the kernel's buffer (the chunks before are ours
+            // to give up), or, for the first chunk, the staging is another
+            // task's mid-spawn (SPAWN_ERR_STAGING_BUSY: nothing of ours
+            // went in). Either way this run does not happen.
+            if offset > 0 {
+                abandon_staging();
+            }
+            return None;
         }
         offset += n as u64;
         if n < chunk.len() {
@@ -5033,8 +5052,10 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
     }
     // Stage argv, then spawn with stdout -> NET_TASK (us) and no cwd.
     if syscall4(syscall_abi::ARGS_STAGE, blob.as_ptr() as u64, w as u64, 0, 0) != 0 {
+        abandon_staging();
         return None;
     }
+    // SPAWN releases the staging whatever it answers.
     let slot = syscall4(syscall_abi::SPAWN, offset, syscall_abi::NET_TASK, w as u64, 0);
     if slot >= syscall_abi::FS_ERR_MIN {
         return None;

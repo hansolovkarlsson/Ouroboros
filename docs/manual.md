@@ -561,7 +561,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 6 | `get_ticks` | none | Preemption tick count since boot |
 | 7–14 | *(gap)* | | *Deliberate gaps: the old `fs_*` syscalls: the filesystem lives in userland now (the fsd server); their contracts survive as the `FSOP_*` request protocol below* |
 | 15 | `read_char` | none | Blocking read: the task is suspended until a byte arrives and it owns the keyboard |
-| 16 | `spawn` | staged total len | Start a program image previously fed in via `spawn_stage` as a new task alongside the caller; returns the new task's slot index |
+| 16 | `spawn` | staged total len | Start a program image previously fed in via `spawn_stage` as a new task alongside the caller; returns the new task's slot index. Only the task that staged may spawn, and the staging is released whatever the answer (a total of 0 is how a stager gives up: refused as empty, released) |
 | 17 | `exit` | code | Destroy the calling task; status kept (masked to 0–255) until `wait`ed. Slots 0–5 (the shell, idle, and the four servers) refused (`EXIT_DENIED`) |
 | 18 | `task_state` | index | `UNUSED`/`RUNNABLE`/`BLOCKED`/`ZOMBIE`, or `TASK_STATE_INVALID` past the last slot |
 | 19 | `kill` | index | Destroy another task (reaps immediately). The permanent slots (below the first spawnable one) refused with `TASK_ERR_PROTECTED`, the caller's own slot with `TASK_ERR_SELF` |
@@ -575,7 +575,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 27 | `block_read` | LBA, buf ptr | Read one 512-byte sector (fsd only) |
 | 28 | `block_write` | LBA, buf ptr | Write one 512-byte sector (fsd only) |
 | 29 | `msg_call` | dest, req ptr/len, reply ptr | Synchronous request/response: send + block for a reply *from `dest` specifically*; sub-tick round trips via direct delivery. Reply buffer is a fixed `MSG_MAX_LEN` (768) bytes. The server answers with `msg_reply` (73) to the call `sender_call` (74) names, so a late answer to a call cut short by Ctrl+C goes nowhere |
-| 30 | `spawn_stage` | offset, chunk ptr/len | Feed one chunk of a program image into the kernel's staging buffer (`SPAWN_STAGING_SIZE`) for `spawn` |
+| 30 | `spawn_stage` | offset, chunk ptr/len | Feed one chunk of a program image into the kernel's staging buffer (`SPAWN_STAGING_SIZE`) for `spawn`. The first staging call claims the staging for the caller; another task's staging call answers `SPAWN_ERR_STAGING_BUSY` until the owner spawns or ends (since 2026-10-11) |
 
 **File operations** are `FSOP_*` requests to the filesystem server
 (task 2), sent via `msg_call`: a 56-byte message (op + six LE u64

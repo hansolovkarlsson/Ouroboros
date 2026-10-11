@@ -166,6 +166,22 @@ pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
 /// [`GET_ARGC`]/[`GET_ARG`]. The **cwd length** (arg3) attaches the working
 /// directory staged via [`CWD_STAGE`] (`0` = none); the child reads it via
 /// [`GET_CWD`].
+///
+/// **The staging has one owner at a time (since 2026-10-11).** The first
+/// staging call ([`SPAWN_STAGE`], [`ARGS_STAGE`], [`CWD_STAGE`] or
+/// [`ENV_STAGE`]) a task makes claims the staging for that task, and every
+/// staging call and `SPAWN` from another task is refused with
+/// [`SPAWN_ERR_STAGING_BUSY`] until the owner's `SPAWN` (whatever its
+/// outcome) or the owner's end releases it. Before this, the buffers
+/// belonged to no task, so two tasks spawning at once (a shell and `netd`'s
+/// `cpu`, or two cores) interleaved their chunks and one started the other's
+/// image. A `SPAWN` by a task that staged nothing is [`SPAWN_ERROR`]. **A
+/// `SPAWN` with a total of `0` is how a stager gives a staging up** that it
+/// cannot finish (a read that failed mid-file, a file over the bound): it is
+/// refused as [`SPAWN_ERR_TOO_LARGE`], as an empty total always was, and
+/// the staging is released. A stager that abandons without it holds the
+/// staging until its own next `SPAWN` or its end, and every other spawner
+/// is refused meanwhile.
 pub const SPAWN: u64 = 16;
 
 /// `(exit code)` -> **does not return** on success: the calling task is
@@ -413,7 +429,10 @@ pub const ACCT_TASK: u64 = 5;
 /// kernel's fixed spawn staging buffer ([`SPAWN_STAGING_SIZE`]) at `offset` - the feed
 /// half of the two-step spawn (see [`SPAWN`]'s contract-change note).
 /// Chunks are bounded by the same 512-byte per-syscall buffer cap as
-/// everything else; offsets past the staging buffer are refused.
+/// everything else; offsets past the staging buffer are refused. The first
+/// staging call claims the staging for the caller; another task's call is
+/// [`SPAWN_ERR_STAGING_BUSY`] until the owner spawns or ends (see
+/// [`SPAWN`]).
 pub const SPAWN_STAGE: u64 = 30;
 
 /// `(grantee task, buf ptr, buf len, dir)` -> `0` on success, or
@@ -682,7 +701,9 @@ pub const MONOTONIC_US: u64 = 46;
 /// little-endian, read with unaligned loads. Bounded by [`ARGV_MAX`]. The
 /// child reads it back via [`GET_ARGC`]/[`GET_ARG`]. Delivered kernel-side
 /// (stored per-task, fetched by the child) exactly like [`STDOUT_TARGET`],
-/// so a spawned program's start-up register/stack state is unchanged.
+/// so a spawned program's start-up register/stack state is unchanged. A
+/// staging call: it claims the staging for the caller, or is
+/// [`SPAWN_ERR_STAGING_BUSY`] while another task holds it (see [`SPAWN`]).
 pub const ARGS_STAGE: u64 = 47;
 
 /// `()` -> the number of arguments (argv entries) the current task was
@@ -713,7 +734,9 @@ pub const ARGV_MAX: u64 = 512;
 /// [`SPAWN`] (its arg3 is the cwd length; `0` = none), so a spawned command
 /// inherits the shell's cwd and can resolve relative paths / default to the
 /// current directory. Delivered kernel-side and fetched via [`GET_CWD`],
-/// exactly like argv and the stdout target. Bounded by [`CWD_MAX`].
+/// exactly like argv and the stdout target. Bounded by [`CWD_MAX`]. A
+/// staging call: it claims the staging for the caller, or is
+/// [`SPAWN_ERR_STAGING_BUSY`] while another task holds it (see [`SPAWN`]).
 pub const CWD_STAGE: u64 = 50;
 
 /// `(out pointer, out capacity)` -> the length of the current task's working
@@ -804,6 +827,10 @@ pub const YIELD: u64 = 57;
 /// `NAME=VALUE` string. The child reads it via [`GET_ENVC`]/[`GET_ENV`] (and
 /// `ulib::getenv`). Bounded by [`ENV_MAX`]; delivered kernel-side (stored
 /// per-task) exactly like argv, so start-up register/stack state is unchanged.
+/// A staging call: it claims the staging for the caller, or is
+/// [`SPAWN_ERR_STAGING_BUSY`] while another task holds it (see [`SPAWN`]);
+/// the latch is cleared with the owner's release, so a stager that ends
+/// leaves no environment for the next one.
 pub const ENV_STAGE: u64 = 58;
 
 /// `()` -> the number of environment variables the current task inherited (`0`
@@ -1902,8 +1929,16 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// steps down by one, so the band has no holes. `MAX-43` is
 /// [`REPLY_STALE`] (2026-10-09), the same kind again: [`MSG_REPLY`]'s
 /// answer to the server, with `sys.h`'s mirror and `FS_ERR_CLIENT`
-/// stepping down with it.
-pub const FS_ERR_MIN: u64 = u64::MAX - 44;
+/// stepping down with it. `MAX-44` is [`SPAWN_ERR_STAGING_BUSY`]
+/// (2026-10-11), the same kind once more: a staging call's answer to its
+/// own caller, never a 9P reply (`cpu` turns it into a text line), with
+/// the same two steps in `sys.h`.
+pub const FS_ERR_MIN: u64 = u64::MAX - 45;
+/// The kernel's spawn staging is held by another task, mid-spawn: its first
+/// staging call claimed it and its [`SPAWN`] or end has not released it
+/// yet. Try again later; nothing of the caller's was staged. A staging call
+/// by the owner itself is never refused with this.
+pub const SPAWN_ERR_STAGING_BUSY: u64 = u64::MAX - 44;
 /// [`MSG_REPLY`]: the call is over (cut short, or its caller dead), so the
 /// reply went nowhere. A server that made something for the caller (a fid)
 /// should undo it: nobody will learn of it.

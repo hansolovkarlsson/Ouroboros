@@ -585,10 +585,88 @@ const ENV_STAGING_SIZE: usize = syscall_abi::ENV_MAX as usize;
 static ENV_STAGING: SyncCell<[u8; ENV_STAGING_SIZE]> = SyncCell::new([0; ENV_STAGING_SIZE]);
 /// Length of the env blob staged for the *next* `SPAWN` (`0` = none). Set by
 /// `ENV_STAGE`, consumed and reset to `0` by the next `SPAWN` - a single-slot
-/// latch, safe because the shell always stages immediately before spawning and
-/// the kernel is single-core / non-reentrant across the SVC boundary.
+/// latch. Part of the staging [`SPAWN_STAGER`] owns: cleared with every
+/// release, so a stager that ends leaves no environment for the next one.
 static PENDING_ENV_LEN: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+
+/// The owner of the spawn staging ([`SPAWN_STAGING`], [`ARGS_STAGING`],
+/// [`CWD_STAGING`], [`ENV_STAGING`] and [`PENDING_ENV_LEN`]): the packed
+/// task identity (`tasks::task_id_of`) of the task whose staging is in
+/// progress, or `0` for none (`0` names slot 0 and no generation, so it is
+/// no live identity). The buffers are filled over many syscalls, one chunk
+/// each, and until 2026-10-11 belonged to no task, so two tasks spawning
+/// at once interleaved their chunks and one started the other's image; a
+/// stager blocked in `fsd` between chunks made that possible on one core,
+/// and a second core made it likelier (found building multi-core step
+/// 4(d)). The first staging call a task makes claims the staging
+/// ([`claim_staging`]); every staging call and `SPAWN` from another task is
+/// `SPAWN_ERR_STAGING_BUSY` until the owner's `SPAWN`, whatever its outcome,
+/// or the owner's end ([`release_staging_of`], from `tasks::end_task`)
+/// releases it. An owner that is no longer a live task is no owner, by
+/// `tasks::live_occupant`: so a teardown that missed the release heals at
+/// the next claim rather than holding every spawn for the rest of the boot.
+/// Read and written under the kernel lock, like every per-task table.
+static SPAWN_STAGER: AtomicU64 = AtomicU64::new(0);
+
+/// Claim the staging for the calling task: `Ok` when it is free, held by a
+/// task that is gone, or already the caller's; `Err(SPAWN_ERR_STAGING_BUSY)`
+/// while another live task holds it. Every staging arm calls this first,
+/// before it copies a byte, so a refused call stages nothing.
+fn claim_staging() -> Result<(), u64> {
+    let Some(me) = tasks::task_id_of(tasks::current_task()) else {
+        // The running task always has an identity; refuse rather than hand
+        // the staging to "nobody" if that ever stops being true.
+        return Err(SPAWN_ERROR);
+    };
+    let held = SPAWN_STAGER.load(Ordering::Relaxed);
+    if held == me {
+        return Ok(());
+    }
+    if held != 0 && tasks::live_occupant(held).is_some() {
+        return Err(syscall_abi::SPAWN_ERR_STAGING_BUSY);
+    }
+    // Free, or a dead owner's: a new owner starts with a clean latch.
+    release_staging();
+    SPAWN_STAGER.store(me, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Whether the calling task may `SPAWN` what is staged: `Ok` when it is the
+/// owner; `Err(SPAWN_ERR_STAGING_BUSY)` while another live task holds the
+/// staging; `Err(SPAWN_ERROR)` when nobody does (the caller staged nothing,
+/// so there is no program of its own to start).
+fn spawn_owner_check() -> Result<(), u64> {
+    let held = SPAWN_STAGER.load(Ordering::Relaxed);
+    if held != 0 && tasks::task_id_of(tasks::current_task()) == Some(held) {
+        return Ok(());
+    }
+    if held != 0 && tasks::live_occupant(held).is_some() {
+        return Err(syscall_abi::SPAWN_ERR_STAGING_BUSY);
+    }
+    release_staging();
+    Err(SPAWN_ERROR)
+}
+
+/// The staging is nobody's: the owner mark and the env latch cleared. The
+/// buffers' bytes are left as they are; a new owner overwrites what it
+/// uses and `SPAWN` reads only the length its owner staged.
+fn release_staging() {
+    SPAWN_STAGER.store(0, Ordering::Relaxed);
+    PENDING_ENV_LEN.store(0, Ordering::Relaxed);
+}
+
+/// Release the staging if task `slot` holds it: the owner's end, called by
+/// `tasks::end_task` for every exit, kill and doom, so a stager that dies
+/// mid-spawn does not hold the staging until a claim notices it is gone.
+/// Compared by slot, since the teardown may have reset the identity by the
+/// time it runs.
+pub(crate) fn release_staging_of(slot: usize) {
+    let held = SPAWN_STAGER.load(Ordering::Relaxed);
+    if held != 0 && syscall_abi::task_id_slot(held) as usize == slot {
+        release_staging();
+    }
+}
 
 /// Upper bound for a namespace blob (matches the per-task store), used to bound
 /// the `NS_SET` copy. A task's namespace is set directly by `NS_SET` and a
@@ -952,12 +1030,26 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
         syscall_abi::GET_TICKS => exceptions::ticks(),
         // Microseconds since boot: see timer::monotonic_us.
         syscall_abi::MONOTONIC_US => crate::timer::monotonic_us(),
-        syscall_abi::SPAWN => spawn_staged(arg0, arg1, arg2, arg3),
+        syscall_abi::SPAWN => {
+            // Only the staging's owner may start what is staged, and the
+            // staging is released whatever the outcome: a success, a
+            // refusal, and the total of 0 a stager gives up with (refused as
+            // SPAWN_ERR_TOO_LARGE by spawn_staged, as it always was).
+            if let Err(code) = spawn_owner_check() {
+                return code;
+            }
+            let result = spawn_staged(arg0, arg1, arg2, arg3);
+            release_staging();
+            result
+        }
         syscall_abi::CWD_STAGE => {
             // arg0 = cwd pointer, arg1 = length. Copies the working-directory
             // string into the staging buffer for the next SPAWN (arg3).
             if !valid_stage_range(arg0, arg1, CWD_STAGING_SIZE) {
                 return SPAWN_ERROR;
+            }
+            if let Err(code) = claim_staging() {
+                return code;
             }
             let len = arg1 as usize;
             let staging = unsafe { &mut *CWD_STAGING.get() };
@@ -1005,6 +1097,9 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             if !valid_stage_range(arg0, arg1, ARGS_STAGING_SIZE) {
                 return SPAWN_ERROR;
             }
+            if let Err(code) = claim_staging() {
+                return code;
+            }
             let len = arg1 as usize;
             let staging = unsafe { &mut *ARGS_STAGING.get() };
             // SAFETY: range sanity-checked above, same trust model as every
@@ -1029,6 +1124,9 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // (SPAWN's four args are full, so unlike argv there's no length arg).
             if !valid_stage_range(arg0, arg1, ENV_STAGING_SIZE) {
                 return SPAWN_ERROR;
+            }
+            if let Err(code) = claim_staging() {
+                return code;
             }
             let len = arg1 as usize;
             let staging = unsafe { &mut *ENV_STAGING.get() };
@@ -1281,6 +1379,11 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             let Some(end) = offset.checked_add(len) else { return SPAWN_ERROR };
             if end > staging.len() {
                 return SPAWN_ERROR;
+            }
+            // The first chunk claims the staging for this task; another
+            // task's chunk is refused until the owner spawns or ends.
+            if let Err(code) = claim_staging() {
+                return code;
             }
             // SAFETY: bounds sanity-checked above, same trust model as
             // every other userland pointer argument.

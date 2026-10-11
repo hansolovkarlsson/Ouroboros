@@ -10,8 +10,8 @@ here actually works today, see [`architecture.md`](architecture.md) and
 ## Unreleased: the storage server under large writes, and the C library for Proem and Edit
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
-version is held for a go-ahead. So far six days' work, 2026-10-05 to
-2026-10-10, #209 to #266: the storage server made safe under large writes and
+version is held for a go-ahead. So far seven days' work, 2026-10-05 to
+2026-10-11, #209 onward: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the
@@ -20,8 +20,9 @@ cursor addressing, the navigation keys, the screen size, Ctrl-C as a key and
 `poll`), with a task's FP/SIMD registers saved across the kernel and keys
 typed while a program is busy kept, ending in DevTools's editor running here
 as `/bin/edit`. Then, on 2026-10-10, the multi-core arc on QEMU, from the
-plan to programs running on every core (#258 to #266). The days' records
-are in `docs/work-journal/`, one file a day.
+plan to programs running on every core (#258 to #266), and on 2026-10-11
+the owner the spawn staging had owed since the arc's last step. The days'
+records are in `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
 `cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
@@ -335,6 +336,31 @@ image whose stamp is not the tree's (`scripts/srcid.py`).
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or
 restart a reset by writing a bit back as read.
+
+**The kernel's spawn staging has one owner at a time (2026-10-11).** A
+spawn is fed through four staging buffers over many syscalls (one 512-byte
+chunk each, with a round trip to `fsd` between them), and the buffers
+belonged to no task: two tasks spawning at once interleaved their chunks
+and one started the other's image. One core could do it, since a stager is
+blocked between chunks; the multi-core arc's last step found it and left it
+owed. Now the first staging call a task makes claims the staging
+(`syscall::SPAWN_STAGER`, the stager's task identity), every other task's
+staging call and `SPAWN` answer `SPAWN_ERR_STAGING_BUSY` meanwhile (the
+error band's floor `FS_ERR_MIN` stepped down to `MAX-45`, with `sys.h`'s
+mirror), and the owner's `SPAWN`, whatever its outcome, or its end
+releases it: an exit, a kill, a doom on another core, all through
+`end_task`. An owner that is no longer a live task is no owner, so a missed
+release heals at the next claim instead of holding every spawn for the
+rest of the boot. A stager that cannot finish (a read that failed mid-file,
+a file over the bound) gives the staging up with a `SPAWN` of total 0,
+refused as empty as it always was; the shell and `netd`'s `cpu` do so on
+every failure after the first chunk. The shell names the refusal
+(`another task is mid-spawn and holds the kernel's spawn staging`). Checked
+by `make test-spawn-owner` with `/bin/STAGEPROBE`, a probe that claims the
+staging as a spawner does and holds it: the shell's command refused and
+printing nothing while a program holds it, a second stager's code, and the
+release by exit, by `kill` and by abandon with the holder still alive; every
+check fails with the claim answering Ok to everyone.
 
 ## v0.22.0: the Raspberry Pi 4 runs a full session, and per-user keys below the wire (2026-10-04)
 

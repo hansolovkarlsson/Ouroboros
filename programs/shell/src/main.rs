@@ -1963,6 +1963,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         // above (they print numbers).
         SHELL_ERR_EMPTY_PROGRAM => "program file is empty",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
+        syscall_abi::SPAWN_ERR_STAGING_BUSY => "another task is mid-spawn and holds the kernel's spawn staging (try again)",
         syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
         // Names the whole protected set: a message listing a stale subset is how
         // a reader concludes a newly added server is fair game.
@@ -2652,6 +2653,16 @@ fn stage_argv(argv: &[&str]) -> Result<u64, ()> {
     Ok(off as u64)
 }
 
+/// Give up a staging this shell claimed and will not spawn: a `SPAWN` with a
+/// total of `0`, refused as empty as it always was, which releases the
+/// kernel's staging (one owner at a time since 2026-10-11). Called on every
+/// failure after the first chunk went in. Without it the shell would hold
+/// the staging until its own next spawn, and every other spawner (`netd`'s
+/// `cpu`, a child shell, a program that spawns) would be refused meanwhile.
+fn abandon_staging() {
+    syscall4(syscall_abi::SPAWN, 0, syscall_abi::CON_TASK, 0, 0);
+}
+
 fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, stdout_target: u64) -> Result<u64, u64> {
     let mut path_buf = [0u8; PATH_SIZE];
     let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), path, &mut path_buf) else {
@@ -2667,14 +2678,25 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
     loop {
         let n = fs_read_at(path, offset, &mut chunk);
         if n >= FS_ERR_MIN {
+            if offset > 0 {
+                abandon_staging();
+            }
             return Err(n);
         }
         if n == 0 {
             break;
         }
-        if syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n, 0) != 0 {
+        let staged = syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n, 0);
+        if staged == syscall_abi::SPAWN_ERR_STAGING_BUSY {
+            // Another task is mid-spawn and holds the staging; nothing of
+            // ours went in, so there is nothing to give up.
+            return Err(staged);
+        }
+        if staged != 0 {
             // Only reachable by staging past the kernel's staging buffer
-            // - the same refusal SPAWN itself gives for that.
+            // - the same refusal SPAWN itself gives for that. The chunks
+            // before this one are ours to give up.
+            abandon_staging();
             return Err(syscall_abi::SPAWN_ERR_TOO_LARGE);
         }
         offset += n;
@@ -2696,13 +2718,17 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
     // the child reads it via GET_ARGC/GET_ARG). argv[0] is the program name.
     let argv_len = match stage_argv(argv) {
         Ok(n) => n,
-        Err(()) => return Err(0),
+        Err(()) => {
+            abandon_staging();
+            return Err(0);
+        }
     };
     // Stage the cwd (arg3 = its length; the child reads it via GET_CWD), so a
     // spawned command inherits this shell's working directory and can resolve
     // relative paths / default to it.
     let cwd_stage_len = if cwd_len > 0 {
         if syscall4(syscall_abi::CWD_STAGE, cwd.as_ptr() as u64, cwd_len as u64, 0, 0) != 0 {
+            abandon_staging();
             return Err(0);
         }
         cwd_len as u64
