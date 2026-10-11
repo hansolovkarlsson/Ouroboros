@@ -346,8 +346,8 @@ second argument, answers the core or `CORE_INFO_NO_CORE`; `ps` prints
 `running on core N` for such a task (the shell itself, running `ps`, is
 one) and keeps `runnable` for one waiting its turn; `/proc/<n>/core` answers
 the same by file, `none` when no core is. Only a task on a core has a core:
-placement is at dispatch, not a pin. Checked in `make test-smp` on every
-boot: a `coreprobe hold` in the background shows in `ps` as running on a
+placement is at dispatch, not a pin. Checked in `make test-smp` on its five
+probe boots (the fault boot runs no programs): a `coreprobe hold` in the background shows in `ps` as running on a
 secondary (runnable on one core, where the shell has it), `/proc/<n>/core`
 reads the same, and `kill` ends it. The second follow-up from #269.
 

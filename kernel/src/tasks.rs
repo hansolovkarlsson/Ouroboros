@@ -2532,14 +2532,14 @@ pub(crate) fn core_info(op: u64, arg: u64) -> u64 {
             .filter(|&c| current_on(c).is_spawnable())
             .fold(0u64, |mask, c| mask | (1 << c)),
         syscall_abi::CORE_INFO_UP => crate::smp::up_cores().count() as u64,
-        // A core that halted alone (`smp::mark_down_here`) keeps its CURRENT
-        // entry, so a task stranded on it would read as running there for
-        // the rest of the boot; only a core that is up counts here (the high
-        // review of #271). The kill path's view of the same entry is the
-        // open item "a core halting while it runs a program".
+        // The one predicate every reader of "is this task on a core" uses,
+        // `running_core`: the kill, the placement and this op agree. A core
+        // that halted alone (`smp::mark_down_here`) keeps its CURRENT entry,
+        // so a task stranded on it reads as running there, to `ps` as to
+        // `kill`: the roadmap item "a task stranded on a core that halted"
+        // (docs/ROADMAP.md, the multi-core section) owns that, for all three.
         syscall_abi::CORE_INFO_TASK_CORE => TaskIndex::new(arg as usize)
             .and_then(running_core)
-            .filter(|&c| crate::smp::up_cores().any(|up| up == c))
             .map_or(syscall_abi::CORE_INFO_NO_CORE, |c| c as u64),
         _ => syscall_abi::CORE_INFO_BAD_OP,
     }

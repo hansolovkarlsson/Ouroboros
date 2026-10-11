@@ -259,8 +259,8 @@ def run_probes(guest, smp):
         return got
     guest.type_line("mount -p /proc")
     guest.wait_for(PROMPT, timeout=30)
-    # Twice: the file is one instant's, and a tick on the probe's core can
-    # hand that core to the `cat` itself until an idle core takes the probe.
+    # Twice, and both must agree: the file is one instant's, and a check
+    # that passes on either read would pass on a stale core as well.
     for _ in range(2):
         guest.type_line(f"cat /proc/{slot}/core")
         guest.wait_for(PROMPT, timeout=30)
@@ -343,8 +343,8 @@ def probe_checks(name, smp, boot_index, probe):
         checks.append((f"{name}: `ps` shows the held program running on a secondary"
                        + (f" (saw `{ps_line[0]}`)" if ps_line else ""),
                        probe.get("bg", False) and ps_line is not None and ps_line[1] in secondaries))
-        checks.append((f"{name}: `/proc/{slot}/core` names a secondary in one of two reads (read {core_reads})",
-                       any(r in secondaries for r in core_reads)))
+        checks.append((f"{name}: `/proc/{slot}/core` names a secondary in both reads (read {core_reads})",
+                       len(core_reads) == 2 and all(r in secondaries for r in core_reads)))
     else:
         checks.append((f"{name}: `ps` shows the held program runnable, not on a core (the shell has the one core)"
                        + (f" (saw `{ps_line[0]}`)" if ps_line else ""),

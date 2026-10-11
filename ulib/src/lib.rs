@@ -332,10 +332,20 @@ pub fn get_ticks() -> u64 {
     syscall(syscall_abi::GET_TICKS, 0)
 }
 
-/// What the kernel knows of the cores (`CORE_INFO`): `op` is one of
-/// `syscall_abi::CORE_INFO_*`.
+/// What the kernel knows of the cores (`CORE_INFO`) for the ops that take
+/// no second argument: `CORE_INFO_THIS`, `CORE_INFO_BUSY`, `CORE_INFO_UP`.
+/// `CORE_INFO_TASK_CORE` takes a slot: that is [`task_core`], since this
+/// wrapper's second argument is always 0 and would answer for slot 0.
 pub fn core_info(op: u64) -> u64 {
     syscall(syscall_abi::CORE_INFO, op)
+}
+
+/// The core executing task `slot` at this instant, or `None` when no core
+/// is (`CORE_INFO_TASK_CORE`, judged by `syscall_abi::core_of`, the one
+/// spelling the shell's `ps` and `fsd`'s `/proc/<n>/core` use too; those two
+/// do not link `ulib`, so they call the syscall themselves).
+pub fn task_core(slot: u64) -> Option<u64> {
+    syscall_abi::core_of(syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, slot, 0, 0))
 }
 
 /// Voluntarily give up the rest of this task's time slice (`YIELD`), letting

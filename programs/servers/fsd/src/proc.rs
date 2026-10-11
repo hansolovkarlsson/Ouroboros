@@ -53,9 +53,10 @@ enum Node {
     Core(u64),
     /// `/cpus` - how many cores take tasks.
     Cpus,
-    /// `/cpus/...` - a path beneath the file: not a directory, as a path under
-    /// a file answers on the disk arms (the high review of #270).
-    UnderCpus,
+    /// A path beneath one of the files (`/cpus/x`, `/<n>/state/x`,
+    /// `/<n>/core/x`): not a directory, as a path under a file answers on the
+    /// disk arms (the high reviews of #270 and #271).
+    UnderFile,
     /// A path that resolves to nothing here.
     NotFound,
 }
@@ -77,7 +78,7 @@ impl Fs {
                 // slot (0.. until the kernel reports no such slot). Includes
                 // unused slots - their `state` file just reads "unused", the
                 // same as `ps` shows.
-                let mut cpus = [0u8; DECIMAL_LINE_MAX];
+                let mut cpus = [0u8; LINE_MAX];
                 f("cpus", false, cpus_bytes(&mut cpus) as u32);
                 let mut i = 0u64;
                 loop {
@@ -97,12 +98,12 @@ impl Fs {
             }
             Node::Task(n) => {
                 // A slot's directory holds `state` and `core`.
-                f("state", false, state_bytes(n).len() as u32);
-                let mut core = [0u8; DECIMAL_LINE_MAX];
-                f("core", false, core_bytes(n, &mut core) as u32);
+                let mut line = [0u8; LINE_MAX];
+                f("state", false, file_bytes(&Node::State(n), &mut line) as u32);
+                f("core", false, file_bytes(&Node::Core(n), &mut line) as u32);
                 Ok(())
             }
-            Node::State(_) | Node::Core(_) | Node::Cpus | Node::UnderCpus => Err(Error::NotADirectory),
+            Node::State(_) | Node::Core(_) | Node::Cpus | Node::UnderFile => Err(Error::NotADirectory),
             Node::NotFound => Err(Error::NotFound),
         }
     }
@@ -113,20 +114,14 @@ impl Fs {
 
     pub fn read_at(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
         match parse(path) {
-            Node::State(n) => Ok(copy_out(state_bytes(n), offset, buf)),
-            Node::Core(n) => {
-                let mut core = [0u8; DECIMAL_LINE_MAX];
-                let len = core_bytes(n, &mut core);
-                Ok(copy_out(&core[..len], offset, buf))
-            }
-            Node::Cpus => {
-                let mut cpus = [0u8; DECIMAL_LINE_MAX];
-                let n = cpus_bytes(&mut cpus);
-                Ok(copy_out(&cpus[..n], offset, buf))
-            }
             Node::Root | Node::Task(_) => Err(Error::NotAFile),
-            Node::UnderCpus => Err(Error::NotADirectory),
+            Node::UnderFile => Err(Error::NotADirectory),
             Node::NotFound => Err(Error::NotFound),
+            file => {
+                let mut line = [0u8; LINE_MAX];
+                let len = file_bytes(&file, &mut line);
+                Ok(copy_out(&line[..len], offset, buf))
+            }
         }
     }
 
@@ -135,17 +130,12 @@ impl Fs {
     pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
         let (size, is_dir) = match parse(path) {
             Node::Root | Node::Task(_) => (0u64, true),
-            Node::State(n) => (state_bytes(n).len() as u64, false),
-            Node::Core(n) => {
-                let mut core = [0u8; DECIMAL_LINE_MAX];
-                (core_bytes(n, &mut core) as u64, false)
-            }
-            Node::Cpus => {
-                let mut cpus = [0u8; DECIMAL_LINE_MAX];
-                (cpus_bytes(&mut cpus) as u64, false)
-            }
-            Node::UnderCpus => return Err(Error::NotADirectory),
+            Node::UnderFile => return Err(Error::NotADirectory),
             Node::NotFound => return Err(Error::NotFound),
+            file => {
+                let mut line = [0u8; LINE_MAX];
+                (file_bytes(&file, &mut line) as u64, false)
+            }
         };
         Ok(crate::vfs::Stat {
             size,
@@ -179,8 +169,26 @@ impl Fs {
     }
 }
 
-/// The state string for slot `n`, from the `TASK_STATE` syscall. A slot past the
-/// scheduler's count reads "unused" (harmless; the listing never offers one).
+/// The bytes of one of the files, formatted into `buf` at the instant of
+/// the read: the one place a file's content is made, so a listing's size,
+/// a `stat` and a read cannot disagree on how it is spelled, and the next
+/// file (`name` is a candidate) is one arm here and nowhere else.
+fn file_bytes(node: &Node, buf: &mut [u8; LINE_MAX]) -> usize {
+    match node {
+        Node::State(n) => {
+            let bytes = state_bytes(*n);
+            buf[..bytes.len()].copy_from_slice(bytes);
+            bytes.len()
+        }
+        Node::Core(n) => core_bytes(*n, buf),
+        Node::Cpus => cpus_bytes(buf),
+        // Not files; the callers' matches keep them out.
+        Node::Root | Node::Task(_) | Node::UnderFile | Node::NotFound => 0,
+    }
+}
+
+/// The state string for slot `n`, from the `TASK_STATE` syscall. `parse`
+/// refuses a slot past the scheduler's count, so this never sees one.
 fn state_bytes(n: u64) -> &'static [u8] {
     match crate::syscall4(syscall_abi::TASK_STATE, n, 0, 0, 0) {
         syscall_abi::TASK_STATE_RUNNABLE => b"runnable\n",
@@ -190,21 +198,22 @@ fn state_bytes(n: u64) -> &'static [u8] {
     }
 }
 
-/// The most a decimal line holds, `/cpus` and `/<n>/core` both: twenty
-/// digits and a newline. Every buffer those two files are formatted into.
-const DECIMAL_LINE_MAX: usize = 21;
+/// The most any file here holds: twenty digits and a newline for the
+/// decimal lines (`/cpus`, `/<n>/core`), more than `state`'s longest word.
+/// The one buffer size every file is formatted into.
+const LINE_MAX: usize = 21;
 
 /// The bytes of `/cpus`: the cores that take tasks, from the kernel's
 /// `CORE_INFO_UP` (the boot core and every secondary that came up), as one
 /// decimal line. Asked on every read, so it is what the kernel says now.
-fn cpus_bytes(buf: &mut [u8; DECIMAL_LINE_MAX]) -> usize {
+fn cpus_bytes(buf: &mut [u8; LINE_MAX]) -> usize {
     decimal_line(crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_UP, 0, 0, 0), buf)
 }
 
 /// `v` as a decimal line, `"4\n"`, into `buf`; the length written. The one
 /// spelling of a synthetic file's number (`/cpus`, `/<n>/core`).
-fn decimal_line(v: u64, buf: &mut [u8; DECIMAL_LINE_MAX]) -> usize {
-    let n = u64_decimal(v, &mut buf[..DECIMAL_LINE_MAX - 1]);
+fn decimal_line(v: u64, buf: &mut [u8; LINE_MAX]) -> usize {
+    let n = u64_decimal(v, &mut buf[..LINE_MAX - 1]);
     buf[n] = b'\n';
     n + 1
 }
@@ -213,7 +222,7 @@ fn decimal_line(v: u64, buf: &mut [u8; DECIMAL_LINE_MAX]) -> usize {
 /// this instant, from the kernel's `CORE_INFO_TASK_CORE`, or `none` when no
 /// core is (runnable but waiting its turn, blocked, empty, or the idle slot).
 /// `fsd` itself is on a core while it answers, so its own slot reads a core.
-fn core_bytes(n: u64, buf: &mut [u8; DECIMAL_LINE_MAX]) -> usize {
+fn core_bytes(n: u64, buf: &mut [u8; LINE_MAX]) -> usize {
     // `core_of` is the one spelling of the test, shared with the shell's `ps`.
     match syscall_abi::core_of(crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, n, 0, 0)) {
         Some(core) => decimal_line(core, buf),
@@ -236,8 +245,9 @@ fn copy_out(src: &[u8], offset: u64, buf: &mut [u8]) -> u32 {
 }
 
 /// Parse a `/proc`-relative path (byte scanning; relocation-safe). Accepts `/`,
-/// `/cpus`, `/<digits>`, `/<digits>/state` and `/<digits>/core`; `/cpus/...` is
-/// [`Node::UnderCpus`] and anything else [`Node::NotFound`].
+/// `/cpus`, `/<digits>`, `/<digits>/state` and `/<digits>/core` for a slot the
+/// scheduler has; a path below any of the files is [`Node::UnderFile`] and
+/// anything else [`Node::NotFound`].
 fn parse(path: &str) -> Node {
     let b = path.as_bytes();
     let mut i = 0;
@@ -254,7 +264,7 @@ fn parse(path: &str) -> Node {
         return Node::Cpus;
     }
     if b[i..].starts_with(b"cpus/") {
-        return Node::UnderCpus;
+        return Node::UnderFile;
     }
     // First component: the slot number (all digits).
     let start = i;
@@ -270,6 +280,13 @@ fn parse(path: &str) -> Node {
     if i == start {
         return Node::NotFound; // empty component (e.g. "//")
     }
+    // A slot the scheduler does not have is not here either: the root
+    // listing never offers it, and before 2026-10-11 `/99/state` read
+    // "unused" and `/99/core` would have read "none", a plausible file for
+    // a slot that does not exist (the third high review of #271).
+    if crate::syscall4(syscall_abi::TASK_STATE, n, 0, 0, 0) == syscall_abi::TASK_STATE_INVALID {
+        return Node::NotFound;
+    }
     if i >= b.len() {
         return Node::Task(n); // "/<n>"
     }
@@ -280,6 +297,8 @@ fn parse(path: &str) -> Node {
         Node::State(n)
     } else if rest == b"core" {
         Node::Core(n)
+    } else if rest.starts_with(b"state/") || rest.starts_with(b"core/") {
+        Node::UnderFile
     } else {
         Node::NotFound
     }
