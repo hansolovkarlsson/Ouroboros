@@ -55,7 +55,8 @@ This document is the one to update first when direction changes.
 > #266).** Programs run on the secondaries and the shell and servers on the
 > boot core, under one kernel lock that has not needed splitting. Owed
 > before the arc closes: the Pi 4 and Parallels boots of every step since
-> 2, and an owner for the spawn staging buffers (item 4 below).
+> 2. The spawn staging buffers have their owner since 2026-10-11 (item 4
+> below, `make test-spawn-owner`).
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as
@@ -764,10 +765,12 @@ not yet checked on this tree are marked (predicted).
       work: locking or per-core ownership wherever `SyncCell` stands today,
       and a scheduler that places tasks on cores. A plan document before any
       code, the way `roadmap-el1-drop.md` was. QEMU `-smp 4` is the loop; the
-      Pi 4 (four A72s) and Parallels follow. **Owed from step 4(d):** an owner for the
-      spawn staging buffers, which two spawners interleave (one core could
-      already, two make it likelier; `roadmap-smp.md`, step 4(d)'s
-      finding), and the Pi 4 and Parallels boots of every step since 2.
+      Pi 4 (four A72s) and Parallels follow. **Owed from step 4(d):** the
+      Pi 4 and Parallels boots of every step since 2. The other debt from
+      4(d), an owner for the spawn staging buffers that two spawners
+      interleaved (one core could already, two made it likelier), was
+      built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
+      and `make test-spawn-owner` (`roadmap-smp.md`, step 4(d)).
 - [ ] **5. SSH, to reach a Pi remotely.** **Needs networking on the Pi
       first**, which it has none of: the Pi 4's on-board Ethernet is GENET,
       not virtio (see the Pi test plan note above), so either a GENET driver

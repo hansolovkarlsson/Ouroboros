@@ -4865,7 +4865,9 @@ fn handle_cpu_run(c: &mut TcpConn, msg: &[u8], auth: &Auth, who: Proxy) {
         c.prefix_len = n;
         return;
     };
-    match cpu_spawn(cmdline).map(|slot| (slot, syscall(syscall_abi::TASK_IDENTITY, slot as u64))) {
+    let spawned = cpu_spawn(cmdline);
+    let busy = spawned == Err(CpuSpawnError::StagingBusy);
+    match spawned.ok().map(|slot| (slot, syscall(syscall_abi::TASK_IDENTITY, slot as u64))) {
         Some((_, id)) if id != syscall_abi::GET_ID_ERR => {
             // Capture: hold the response until the child's output completes.
             c.cpu_child = id;
@@ -4876,7 +4878,11 @@ fn handle_cpu_run(c: &mut TcpConn, msg: &[u8], auth: &Auth, who: Proxy) {
             // first instruction, or a foreign WAIT reaped it between the two
             // syscalls). Stream an error line and FIN (cpu_child stays NONE, so
             // pump_send sends c.prefix immediately).
-            let msg: &[u8] = b"cpu: cannot run command (no such /bin program?)\r\n";
+            let msg: &[u8] = if busy {
+                b"cpu: this machine is mid-spawn (its spawn staging is held by another task); try again\r\n"
+            } else {
+                b"cpu: cannot run command (no such /bin program?)\r\n"
+            };
             let n = msg.len().min(c.prefix.len());
             c.prefix[..n].copy_from_slice(&msg[..n]);
             c.prefix_len = n;
@@ -4949,7 +4955,24 @@ impl Drop for AsUser {
     }
 }
 
-fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
+
+/// Give up a staging netd claimed and will not spawn: a `SPAWN` with a total
+/// of `0`, refused as empty, which releases the kernel's staging (one owner
+/// at a time since 2026-10-11, the shell's `abandon_staging` is the other
+/// copy). Without it a failed `cpu` run would hold the staging until netd's
+/// next spawn, and the shell's every command would be refused meanwhile.
+fn abandon_staging() {
+    syscall4(syscall_abi::SPAWN, 0, syscall_abi::CON_TASK, 0, 0);
+}
+/// `cpu_spawn`'s refusal, for the line the remote user reads: the staging
+/// held by another task mid-spawn (try again) is told from everything else.
+#[derive(PartialEq)]
+enum CpuSpawnError {
+    StagingBusy,
+    Other,
+}
+
+fn cpu_spawn(cmdline: &[u8]) -> Result<u8, CpuSpawnError> {
     const ARGV_CAP: usize = syscall_abi::ARGV_MAX as usize;
     let mut blob = [0u8; ARGV_CAP]; // [argc:u32][ (len:u32, bytes) ... ]
     let mut w = 4usize;
@@ -4972,7 +4995,7 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
         }
         let tok = &cmdline[start..i];
         if w + 4 + tok.len() > blob.len() {
-            return None;
+            return Err(CpuSpawnError::Other);
         }
         blob[w..w + 4].copy_from_slice(&(tok.len() as u32).to_le_bytes());
         w += 4;
@@ -4981,7 +5004,7 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
         if argc == 0 {
             const P: &[u8] = b"/bin/";
             if P.len() + tok.len() > path.len() {
-                return None;
+                return Err(CpuSpawnError::Other);
             }
             path[..P.len()].copy_from_slice(P);
             path[P.len()..P.len() + tok.len()].copy_from_slice(tok);
@@ -4990,7 +5013,7 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
         argc += 1;
     }
     if argc == 0 {
-        return None;
+        return Err(CpuSpawnError::Other);
     }
     blob[0..4].copy_from_slice(&argc.to_le_bytes());
 
@@ -5006,7 +5029,10 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
         // not read the binary cannot run it.
         let n = read_file_chunk(As::FirstParty, &path[..plen], 0, offset, &mut chunk);
         if n >= syscall_abi::FS_ERR_MIN {
-            return None; // no such program, or a read error
+            if offset > 0 {
+                abandon_staging();
+            }
+            return Err(CpuSpawnError::Other); // no such program, or a read error
         }
         if n == 0 {
             break;
@@ -5020,8 +5046,18 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
         // real wedge in fsd is still caught.
         heartbeat();
         let n = (n as usize).min(chunk.len());
-        if syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n as u64, 0) != 0 {
-            return None; // staged past the kernel's buffer
+        let staged = syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n as u64, 0);
+        if staged == syscall_abi::SPAWN_ERR_STAGING_BUSY {
+            // Another task's staging is mid-spawn; nothing of ours went in.
+            return Err(CpuSpawnError::StagingBusy);
+        }
+        if staged != 0 {
+            // Staged past the kernel's buffer: the chunks before are ours
+            // to give up.
+            if offset > 0 {
+                abandon_staging();
+            }
+            return Err(CpuSpawnError::Other);
         }
         offset += n as u64;
         if n < chunk.len() {
@@ -5029,21 +5065,23 @@ fn cpu_spawn(cmdline: &[u8]) -> Option<u8> {
         }
     }
     if offset == 0 {
-        return None; // empty file
+        return Err(CpuSpawnError::Other); // empty file
     }
     // Stage argv, then spawn with stdout -> NET_TASK (us) and no cwd.
     if syscall4(syscall_abi::ARGS_STAGE, blob.as_ptr() as u64, w as u64, 0, 0) != 0 {
-        return None;
+        abandon_staging();
+        return Err(CpuSpawnError::Other);
     }
+    // SPAWN releases the staging whatever it answers.
     let slot = syscall4(syscall_abi::SPAWN, offset, syscall_abi::NET_TASK, w as u64, 0);
     if slot >= syscall_abi::FS_ERR_MIN {
-        return None;
+        return Err(CpuSpawnError::Other);
     }
     // No DELEGATE here: since 2026-09-06 the kernel grants a child its spawner
     // at spawn, so the child may pipe its output back to us by construction.
     // The explicit grant (and the TO_NET self-bit that existed only to permit
     // it) were no-ops after that and are gone.
-    Some(slot as u8)
+    Ok(slot as u8)
 }
 
 /// `netd`'s **export namespace** (cluster Phase 3 — the namespace-aware export):

@@ -2383,7 +2383,8 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 /// also takes the task's [`PREVIOUS_OWNERS`] entry, the one table whose
 /// clear is its reader, and re-points the entries naming the task, which
 /// asks [`task_id_of`] and so must run while the state is still live),
-/// and fail anyone blocked mid-call to it. Then the slot: its state
+/// fail anyone blocked mid-call to it, and give up the spawn staging if it
+/// was mid-spawn (`syscall::release_staging_of`). Then the slot: its state
 /// becomes `final_state` (`Unused` for a kill, `Zombie` for an exit whose
 /// status a `WAIT` still has to collect), its region record is forgotten,
 /// and every other per-task table is reset. The order matters because the
@@ -2400,6 +2401,7 @@ fn end_task(i: TaskIndex, final_state: TaskState) {
     free_runtime_region(base, size);
     revert_input_owner_if(i);
     fail_calls_to(i);
+    crate::syscall::release_staging_of(i);
     CURRENT_CALLS[i].store(0, Ordering::Relaxed);
 
     unsafe { *STATES[i].get() = final_state };
