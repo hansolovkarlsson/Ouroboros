@@ -14,13 +14,20 @@
 //! ```text
 //!   /              ->  cpus 0/ 1/ 2/ ... the cores file, then one dir per scheduler slot
 //!   /cpus          ->  "4\n"             how many cores take tasks (CORE_INFO_UP; since 2026-10-11)
-//!   /<n>           ->  state             the slot's files
+//!   /<n>           ->  state core        the slot's files
 //!   /<n>/state     ->  "runnable\n" | "blocked\n" | "zombie\n" | "unused\n"
+//!   /<n>/core      ->  "1\n" | "none\n"   the core executing the task now (CORE_INFO_TASK_CORE; since 2026-10-11)
 //! ```
 //!
-//! Read-only: every write/mutate method returns [`Error::ReadOnly`]. Only per-slot
-//! *state* is exposed - there is no cross-task argv/name accessor in the kernel
-//! yet (`GET_ARG*` returns the *caller's* own), so `/<n>` has just `state`.
+//! Every file here is generated at the instant it is read, and its size in a
+//! listing or a `stat` is that instant's too: `state` is 8 or 9 bytes and
+//! `core` 2 to 5 as the task moves, so a reader that sizes first and then
+//! reads a moment later can read short. Read to the short read, as `cat` does.
+//!
+//! Read-only: every write/mutate method returns [`Error::ReadOnly`]. A slot
+//! exposes its scheduler state and the core executing it; a `name` file could
+//! join them, since the kernel's `TASK_NAME` answers for any slot (the shell's
+//! `ps` reads it), and nobody has asked for one.
 //! `/cpus` is the first top-level entry with a name rather than a slot number:
 //! the boot core and every secondary that came up and takes tasks, which until
 //! it existed a user could read only off the boot log or `coreprobe`'s report.
@@ -42,11 +49,14 @@ enum Node {
     Task(u64),
     /// `/<n>/state` - the slot's state file.
     State(u64),
+    /// `/<n>/core` - the core executing the slot's task now, or `none`.
+    Core(u64),
     /// `/cpus` - how many cores take tasks.
     Cpus,
-    /// `/cpus/...` - a path beneath the file: not a directory, as a path under
-    /// a file answers on the disk arms (the high review of #270).
-    UnderCpus,
+    /// A path beneath one of the files (`/cpus/x`, `/<n>/state/x`,
+    /// `/<n>/core/x`): not a directory, as a path under a file answers on the
+    /// disk arms (the high reviews of #270 and #271).
+    UnderFile,
     /// A path that resolves to nothing here.
     NotFound,
 }
@@ -68,7 +78,7 @@ impl Fs {
                 // slot (0.. until the kernel reports no such slot). Includes
                 // unused slots - their `state` file just reads "unused", the
                 // same as `ps` shows.
-                let mut cpus = [0u8; CPUS_MAX];
+                let mut cpus = [0u8; LINE_MAX];
                 f("cpus", false, cpus_bytes(&mut cpus) as u32);
                 let mut i = 0u64;
                 loop {
@@ -87,11 +97,13 @@ impl Fs {
                 Ok(())
             }
             Node::Task(n) => {
-                // A slot's directory holds just `state`.
-                f("state", false, state_bytes(n).len() as u32);
+                // A slot's directory holds `state` and `core`.
+                let mut line = [0u8; LINE_MAX];
+                f("state", false, file_bytes(&Node::State(n), &mut line) as u32);
+                f("core", false, file_bytes(&Node::Core(n), &mut line) as u32);
                 Ok(())
             }
-            Node::State(_) | Node::Cpus | Node::UnderCpus => Err(Error::NotADirectory),
+            Node::State(_) | Node::Core(_) | Node::Cpus | Node::UnderFile => Err(Error::NotADirectory),
             Node::NotFound => Err(Error::NotFound),
         }
     }
@@ -102,15 +114,14 @@ impl Fs {
 
     pub fn read_at(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
         match parse(path) {
-            Node::State(n) => Ok(copy_out(state_bytes(n), offset, buf)),
-            Node::Cpus => {
-                let mut cpus = [0u8; CPUS_MAX];
-                let n = cpus_bytes(&mut cpus);
-                Ok(copy_out(&cpus[..n], offset, buf))
-            }
             Node::Root | Node::Task(_) => Err(Error::NotAFile),
-            Node::UnderCpus => Err(Error::NotADirectory),
+            Node::UnderFile => Err(Error::NotADirectory),
             Node::NotFound => Err(Error::NotFound),
+            file => {
+                let mut line = [0u8; LINE_MAX];
+                let len = file_bytes(&file, &mut line);
+                Ok(copy_out(&line[..len], offset, buf))
+            }
         }
     }
 
@@ -119,13 +130,12 @@ impl Fs {
     pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
         let (size, is_dir) = match parse(path) {
             Node::Root | Node::Task(_) => (0u64, true),
-            Node::State(n) => (state_bytes(n).len() as u64, false),
-            Node::Cpus => {
-                let mut cpus = [0u8; CPUS_MAX];
-                (cpus_bytes(&mut cpus) as u64, false)
-            }
-            Node::UnderCpus => return Err(Error::NotADirectory),
+            Node::UnderFile => return Err(Error::NotADirectory),
             Node::NotFound => return Err(Error::NotFound),
+            file => {
+                let mut line = [0u8; LINE_MAX];
+                (file_bytes(&file, &mut line) as u64, false)
+            }
         };
         Ok(crate::vfs::Stat {
             size,
@@ -159,8 +169,26 @@ impl Fs {
     }
 }
 
-/// The state string for slot `n`, from the `TASK_STATE` syscall. A slot past the
-/// scheduler's count reads "unused" (harmless; the listing never offers one).
+/// The bytes of one of the files, formatted into `buf` at the instant of
+/// the read: the one place a file's content is made, so a listing's size,
+/// a `stat` and a read cannot disagree on how it is spelled, and the next
+/// file (`name` is a candidate) is one arm here and nowhere else.
+fn file_bytes(node: &Node, buf: &mut [u8; LINE_MAX]) -> usize {
+    match node {
+        Node::State(n) => {
+            let bytes = state_bytes(*n);
+            buf[..bytes.len()].copy_from_slice(bytes);
+            bytes.len()
+        }
+        Node::Core(n) => core_bytes(*n, buf),
+        Node::Cpus => cpus_bytes(buf),
+        // Not files; the callers' matches keep them out.
+        Node::Root | Node::Task(_) | Node::UnderFile | Node::NotFound => 0,
+    }
+}
+
+/// The state string for slot `n`, from the `TASK_STATE` syscall. `parse`
+/// refuses a slot past the scheduler's count, so this never sees one.
 fn state_bytes(n: u64) -> &'static [u8] {
     match crate::syscall4(syscall_abi::TASK_STATE, n, 0, 0, 0) {
         syscall_abi::TASK_STATE_RUNNABLE => b"runnable\n",
@@ -170,17 +198,39 @@ fn state_bytes(n: u64) -> &'static [u8] {
     }
 }
 
-/// The most `/cpus` holds: twenty decimal digits and a newline.
-const CPUS_MAX: usize = 21;
+/// The most any file here holds: twenty digits and a newline for the
+/// decimal lines (`/cpus`, `/<n>/core`), more than `state`'s longest word.
+/// The one buffer size every file is formatted into.
+const LINE_MAX: usize = 21;
 
 /// The bytes of `/cpus`: the cores that take tasks, from the kernel's
 /// `CORE_INFO_UP` (the boot core and every secondary that came up), as one
 /// decimal line. Asked on every read, so it is what the kernel says now.
-fn cpus_bytes(buf: &mut [u8; CPUS_MAX]) -> usize {
-    let up = crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_UP, 0, 0, 0);
-    let n = u64_decimal(up, &mut buf[..CPUS_MAX - 1]);
+fn cpus_bytes(buf: &mut [u8; LINE_MAX]) -> usize {
+    decimal_line(crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_UP, 0, 0, 0), buf)
+}
+
+/// `v` as a decimal line, `"4\n"`, into `buf`; the length written. The one
+/// spelling of a synthetic file's number (`/cpus`, `/<n>/core`).
+fn decimal_line(v: u64, buf: &mut [u8; LINE_MAX]) -> usize {
+    let n = u64_decimal(v, &mut buf[..LINE_MAX - 1]);
     buf[n] = b'\n';
     n + 1
+}
+
+/// The bytes of `/<n>/core`: the index of the core executing slot `n` at
+/// this instant, from the kernel's `CORE_INFO_TASK_CORE`, or `none` when no
+/// core is (runnable but waiting its turn, blocked, empty, or the idle slot).
+/// `fsd` itself is on a core while it answers, so its own slot reads a core.
+fn core_bytes(n: u64, buf: &mut [u8; LINE_MAX]) -> usize {
+    // `core_of` is the one spelling of the test, shared with the shell's `ps`.
+    match syscall_abi::core_of(crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, n, 0, 0)) {
+        Some(core) => decimal_line(core, buf),
+        None => {
+            buf[..5].copy_from_slice(b"none\n");
+            5
+        }
+    }
 }
 
 /// Copy `src[offset..]` into `buf`, returning the byte count (0 at/past the end).
@@ -195,8 +245,9 @@ fn copy_out(src: &[u8], offset: u64, buf: &mut [u8]) -> u32 {
 }
 
 /// Parse a `/proc`-relative path (byte scanning; relocation-safe). Accepts `/`,
-/// `/cpus`, `/<digits>`, and `/<digits>/state`; `/cpus/...` is
-/// [`Node::UnderCpus`] and anything else [`Node::NotFound`].
+/// `/cpus`, `/<digits>`, `/<digits>/state` and `/<digits>/core` for a slot the
+/// scheduler has; a path below any of the files is [`Node::UnderFile`] and
+/// anything else [`Node::NotFound`].
 fn parse(path: &str) -> Node {
     let b = path.as_bytes();
     let mut i = 0;
@@ -213,7 +264,7 @@ fn parse(path: &str) -> Node {
         return Node::Cpus;
     }
     if b[i..].starts_with(b"cpus/") {
-        return Node::UnderCpus;
+        return Node::UnderFile;
     }
     // First component: the slot number (all digits).
     let start = i;
@@ -229,6 +280,13 @@ fn parse(path: &str) -> Node {
     if i == start {
         return Node::NotFound; // empty component (e.g. "//")
     }
+    // A slot the scheduler does not have is not here either: the root
+    // listing never offers it, and before 2026-10-11 `/99/state` read
+    // "unused" and `/99/core` would have read "none", a plausible file for
+    // a slot that does not exist (the third high review of #271).
+    if crate::syscall4(syscall_abi::TASK_STATE, n, 0, 0, 0) == syscall_abi::TASK_STATE_INVALID {
+        return Node::NotFound;
+    }
     if i >= b.len() {
         return Node::Task(n); // "/<n>"
     }
@@ -237,6 +295,10 @@ fn parse(path: &str) -> Node {
     let rest = &b[i..];
     if rest == b"state" {
         Node::State(n)
+    } else if rest == b"core" {
+        Node::Core(n)
+    } else if rest.starts_with(b"state/") || rest.starts_with(b"core/") {
+        Node::UnderFile
     } else {
         Node::NotFound
     }

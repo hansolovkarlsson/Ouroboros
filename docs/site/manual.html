@@ -251,6 +251,7 @@ $ cp /BIN/LS /mnt/a/ls.copy         # stream a local file onto A (chunked)</code
 <div class="panel"><pre><code>$ mount -p /proc                    # your own process table
 $ cat /proc/cpus                    # how many cores take tasks
 $ cat /proc/2/state                 # runnable | blocked | zombie | unused
+$ cat /proc/6/core                  # the core executing task 6 right now, or none
 $ ls /mnt/a/proc                    # MACHINE A's task slots
 $ cat /mnt/a/proc/2/state           # A's filesystem-server state
 

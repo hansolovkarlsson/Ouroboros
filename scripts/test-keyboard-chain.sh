@@ -70,14 +70,14 @@ grade() { # name, transcript, marker, expected-regex...
 # 1. The nested shell keeps the keyboard across the commands it runs.
 boot '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
   '# @@cd /EFI' '# @@echo hi' '# @@pwd' '# @@ps' '# @@'
-grade "nested shell keeps the keyboard" "$out" "pwd" '^/EFI$' '^task 6: runnable' '^task 0: blocked'
+grade "nested shell keeps the keyboard" "$out" "pwd" '^/EFI$' '^task 6: running on core' '^task 0: blocked'
 
 # 2. Three deep, the middle link killed from below: the keyboard skips it.
 boot '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
   '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' \
   '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 8' '@@root' 'assword@@root' \
   '# @@kill 7' "# @@$CTRLC" '# @@pwd' '# @@ps' '# @@'
-grade "dead link spliced out" "$out" "kill 7" '^/EFI$' '^task 6: runnable' '^task 0: blocked'
+grade "dead link spliced out" "$out" "kill 7" '^/EFI$' '^task 6: running on core' '^task 0: blocked'
 
 # 3. fg back to a task in the chain pops it: the boot shell gets it back last.
 boot '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
@@ -91,18 +91,19 @@ boot '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
   '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' \
   '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 8' '@@root' 'assword@@root' \
   '# @@fg 7' '# @@kill 8' "# @@$CTRLC" '# @@pwd' '# @@ps' '# @@'
-grade "pop then kill, the live shell answers" "$out" "kill 8" '^/EFI$' '^task 6: runnable' '^task 0: blocked'
+grade "pop then kill, the live shell answers" "$out" "kill 8" '^/EFI$' '^task 6: running on core' '^task 0: blocked'
 
 # 5. Ctrl+C at a handed-over session's OWN prompt DETACHES to the parent
 #    without killing it (2026-09-21): task 6 was handed the keyboard by `fg`
 #    (the boot shell did `exec`, not a foreground run, so it is at its prompt,
 #    not in a WAIT on 6), so Ctrl+C reverts the keyboard to the boot shell and
 #    LEAVES 6 alive. `ps` at the boot shell then shows 6 still there (blocked,
-#    not owning the keyboard) and task 0 runnable. Negative control on the
+#    not owning the keyboard) and task 0 on a core, since it runs `ps` (the
+#    shell on the core prints `running on core N`, 2026-10-11). Negative control on the
 #    pre-change kernel: Ctrl+C killed 6, so `ps` showed `task 6: unused`.
 boot '# @@exec /EFI/ORBS/SH.BIN' 'login:@@fg 6' '@@root' 'assword@@root' \
   '# @@cd /EFI' "# @@$CTRLC" '# @@ps' '# @@'
-grade "ctrl-c detaches a handed-over shell, it survives" "$out" "ps" '^task 6: blocked' '^task 0: runnable'
+grade "ctrl-c detaches a handed-over shell, it survives" "$out" "ps" '^task 6: blocked' '^task 0: running on core'
 
 # 6. Ctrl+C at a FOREGROUND command still terminates it (the other side of the
 #    distinction): the boot shell ran `/EFI/ORBS/SH.BIN` as a foreground
@@ -111,6 +112,6 @@ grade "ctrl-c detaches a handed-over shell, it survives" "$out" "ps" '^task 6: b
 #    above had wrongly caught this case, 6 would still be alive here.
 boot '# @@/EFI/ORBS/SH.BIN' 'login:@@root' 'assword@@root' '# @@cd /EFI' \
   "# @@$CTRLC" '# @@ps' '# @@'
-grade "ctrl-c terminates a foreground shell" "$out" "ps" '^task 6: unused' '^task 0: runnable'
+grade "ctrl-c terminates a foreground shell" "$out" "ps" '^task 6: unused' '^task 0: running on core'
 
 exit $fail

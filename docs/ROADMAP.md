@@ -771,6 +771,25 @@ not yet checked on this tree are marked (predicted).
       interleaved (one core could already, two made it likelier), was
       built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
       and `make test-spawn-owner` (`roadmap-smp.md`, step 4(d)).
+      - [ ] **A task stranded on a core that halted.** A secondary that
+            takes a kernel fault halts alone (`smp::mark_down_here`, "core N
+            halted alone, holding nothing; the rest go on") and its `CURRENT`
+            entry keeps the task it was running. Every reader of
+            `tasks::running_core` then believes the task is on that core:
+            `ps` and `/proc/<n>/core` say `running on core N`, the placement
+            never picks it, and `kill` marks it doomed and kicks a core with
+            every interrupt masked, printing "which ends it" for a kill that
+            is lost (the third high review of #271 saw the two halves and
+            asked for one predicate, which they now share; this item is what
+            the predicate does not yet know). The task cannot resume: its
+            registers died with the core. The fix is for the halting core to
+            hand its task to the boot core's tick, which ends it under the
+            lock with a line naming the core, and parks the entry at the idle
+            slot, so `ps`, `kill` and the picker all see an ended task. No rig
+            can raise the fault at EL0 today (`\SMPFAULT` faults a core before
+            it runs any task), so the check is the boot log's line on a
+            by-hand fault. The same item as the standup's "a core halting
+            while it runs a program", written down here for the first time.
       **Two small follow-ups asked by Hans on 2026-10-11, after #268:**
       - [x] **`/proc/cpus`: how many cores are active.** Built 2026-10-11,
             `make test-proc-cpus`: one line from `CORE_INFO_UP`, `fsd`'s first
@@ -788,7 +807,21 @@ not yet checked on this tree are marked (predicted).
             asks the kernel, so no new syscall. Done when `cat /proc/cpus`
             prints `4` under `SMP=4` and `1` on one core, in a rig. (Done:
             the rig boots `-smp 1` and `-smp 4` and reads 1 and 4.)
-      - [ ] **`ps` names the core a running task is on.** With programs
+      - [x] **`ps` names the core a running task is on.** Built 2026-10-11:
+            `CORE_INFO_TASK_CORE`, `ps`'s `running on core N`, and
+            `/proc/<n>/core`, checked in `test-smp.py` on its five probe
+            boots (the `\SMPFAULT` boot runs no programs). One
+            adjustment to the "done when" below: the rig requires the core
+            `ps` names to be a secondary, not the one the probe's own line
+            named, because a program moves between secondaries whenever it
+            blocks and its "holding" line is itself a call to the console
+            server (`test-smp.py` already notes this for the kill). The high
+            review of #271 asked for the core, or a `running` state, to come
+            from `TASK_STATE` itself, so `ps` and a remote `/proc` reader get
+            one atomic answer instead of two files at two instants; that is a
+            change to `TASK_STATE`'s answers, which every rig reading
+            `runnable` depends on, so it is left as a follow-up if the two
+            instants ever mislead someone. As planned: with programs
             placed on the secondaries (step 4(d)), `ps`'s `runnable` hides
             a real third state: the task is executing on core N right now.
             The kernel knows it (`tasks::running_core`, the per-core

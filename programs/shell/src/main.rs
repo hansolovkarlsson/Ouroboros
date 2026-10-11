@@ -3513,11 +3513,12 @@ fn task_name(i: u64, buf: &mut [u8]) -> usize {
 /// is discovered without it leaking into the ABI as a constant). Each
 /// line carries the task's name (`argv[0]`, via [`task_name`]) after its
 /// state - the servers and init are named by the kernel, spawned commands
-/// by the argv they were launched with. The caller can't tell "running
-/// right now" from "runnable, waiting its turn" - it is, by definition,
-/// the one running at the moment it asks - so both print as "runnable".
-/// Real output, so it goes through the sink (redirectable like any other
-/// command's).
+/// by the argv they were launched with. A runnable task a core is
+/// executing at that instant prints as `running on core N` (since
+/// 2026-10-11, `CORE_INFO_TASK_CORE`; this shell is one such task while it
+/// runs `ps`), and one waiting its turn as `runnable`: with programs placed
+/// on the secondaries the two are different things. Real output, so it
+/// goes through the sink (redirectable like any other command's).
 fn cmd_ps(out: &mut Output) {
     let mut i = 0u64;
     loop {
@@ -3539,12 +3540,27 @@ fn cmd_ps(out: &mut Output) {
             }
             out.put_str(") - `wait` to collect");
         } else {
-            out.put_str(match state {
-                TASK_STATE_UNUSED => ": unused",
-                TASK_STATE_RUNNABLE => ": runnable",
-                TASK_STATE_BLOCKED => ": blocked (waiting)",
-                _ => ": ?",
-            });
+            // A runnable task on a core right now is a third state, not a
+            // kind of runnable: with programs placed on the secondaries
+            // (multi-core step 4(d)) `runnable` alone hid it. This shell is
+            // itself one such task while it runs `ps`. Only a task on a
+            // core has a core; a runnable one waiting its turn has none.
+            let core = if state == TASK_STATE_RUNNABLE {
+                syscall_abi::core_of(syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, i, 0, 0))
+            } else {
+                None
+            };
+            if let Some(core) = core {
+                out.put_str(": running on core ");
+                out.put_u64_decimal(core);
+            } else {
+                out.put_str(match state {
+                    TASK_STATE_UNUSED => ": unused",
+                    TASK_STATE_RUNNABLE => ": runnable",
+                    TASK_STATE_BLOCKED => ": blocked (waiting)",
+                    _ => ": ?",
+                });
+            }
         }
         // Append the name, when the slot has one (unused slots don't).
         let mut name = [0u8; syscall_abi::TASK_NAME_MAX as usize];

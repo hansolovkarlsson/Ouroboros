@@ -1781,7 +1781,7 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             tasks::deliver_reply(tasks::current_task(), dest, data);
             0
         }
-        syscall_abi::CORE_INFO => tasks::core_info(arg0),
+        syscall_abi::CORE_INFO => tasks::core_info(arg0, arg1),
         syscall_abi::SENDER_CALL => {
             // No arguments: the call the message this task last received
             // opened, captured with SENDER_ID's credential, for MSG_REPLY and

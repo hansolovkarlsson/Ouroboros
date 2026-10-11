@@ -418,6 +418,7 @@ $ mount -p /proc                    # your own process table
 $ ls /proc                          # cpus 0/ 1/ 2/ ... the cores file, one dir per task slot
 $ cat /proc/cpus                    # how many cores take tasks (4 on a four-core machine)
 $ cat /proc/2/state                 # runnable | blocked | zombie | unused
+$ cat /proc/6/core                  # the core executing task 6 right now, or none
 $ ls /mnt/a/proc                    # MACHINE A's task slots
 $ cat /mnt/a/proc/2/state           # A's filesystem-server state
 ```
