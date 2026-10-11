@@ -771,6 +771,38 @@ not yet checked on this tree are marked (predicted).
       interleaved (one core could already, two made it likelier), was
       built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
       and `make test-spawn-owner` (`roadmap-smp.md`, step 4(d)).
+      **Two small follow-ups asked by Hans on 2026-10-11, after #268:**
+      - [ ] **`/proc/cpus`: how many cores are active.** Today the count is
+            in the boot log (`MADT: N cores`, one `smp: core i up` line per
+            secondary, a summary) and in `coreprobe`'s report (`N cores
+            up`, a two-second probe built for the rig). Nothing a user types
+            answers it plainly. `cat /proc/cpus` is the Unix-shaped spelling:
+            one line, the cores up, from `CORE_INFO_UP` (the boot core and
+            every secondary that takes tasks), and the bitmask of the cores
+            running a program at that instant from `CORE_INFO_BUSY` if it
+            earns a second line. `fsd`'s `/proc` serves only `/<n>` and
+            `/<n>/state` today, so this is its first top-level entry with a
+            name rather than a slot number; `fsd` runs on the boot core and
+            asks the kernel, so no new syscall. Done when `cat /proc/cpus`
+            prints `4` under `SMP=4` and `1` on one core, in a rig.
+      - [ ] **`ps` names the core a running task is on.** With programs
+            placed on the secondaries (step 4(d)), `ps`'s `runnable` hides
+            a real third state: the task is executing on core N right now.
+            The kernel knows it (`tasks::running_core`, the per-core
+            `CURRENT`), and nothing exposes it. A fourth `CORE_INFO` op,
+            `CORE_INFO_TASK_CORE` with the slot as the second argument,
+            answering the core index or a "not on a core" sentinel; `ps`
+            prints `running on core N` for such a task and `runnable` for
+            one waiting its turn, so the two stop sharing a word; and
+            `/proc/<n>/core` beside `/proc/<n>/state` for the same answer
+            by file. Only a task on a core has a core: placement is at
+            dispatch, not a pin, so a runnable task has none to report, and
+            a blocked one is on no core. Done when `coreprobe hold | ps`
+            is not the check (a pipeline's `ps` runs after the probe
+            starts, but on which core is the probe's to say): `exec
+            /bin/coreprobe hold` then `ps` must show that slot `running on
+            core N` with N the core the probe's own `holding on core N`
+            line named, under `SMP=4`, in `test-smp.py`.
 - [ ] **5. SSH, to reach a Pi remotely.** **Needs networking on the Pi
       first**, which it has none of: the Pi 4's on-board Ethernet is GENET,
       not virtio (see the Pi test plan note above), so either a GENET driver
