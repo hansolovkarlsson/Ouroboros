@@ -87,7 +87,7 @@ CALLS_RE = re.compile(r"coreprobe: \d+ calls to fsd from core (\d+), (\d+) us ea
 CALL_BOUND_US = 5000
 SUMMARY_RE = re.compile(r"smp: (\d+) of (\d+) started cores up, (\d+) cores in all")
 KICK_RE = re.compile(r"smp: core (\d+) answered a kick from core (\d+), once the kernel lock was free")
-KICK_FAIL_RE = re.compile(r"smp: core (\d+)(?: \(the boot core\))? (answered a kick while core \d+ held the kernel lock|cannot be kicked|cannot be sent an SGI|did not answer a kick within a second|answered every kick but was never seen waiting with one)")
+KICK_FAIL_RE = re.compile(r"smp: core (\d+)(?: \(the boot core\))? (answered a kick while core \d+ held the kernel lock|cannot be kicked|cannot be sent an SGI|did not answer a kick within a second|answered every kick but was never seen waiting with one|is down \(it halted after coming up\), not kicked)")
 
 
 def boot(name, smp, machine="virt", esp=None, fault=False):
@@ -148,7 +148,11 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
     kick_fails = KICK_FAIL_RE.findall(out)
     # The \SMPFAULT victim halted with every interrupt masked: the one core
     # expected not to answer, and to be named for it.
-    victim_silent = [(i, why) for i, why in kick_fails if taking and i == taking.group(1) and why.startswith("did not answer")]
+    # Either it halted before the boot core's ping reached it, and marked
+    # itself down (step 4(d)), or after, and did not answer: a race, and
+    # both lines say the same thing.
+    victim_silent = [(i, why) for i, why in kick_fails if taking and i == taking.group(1)
+                     and (why.startswith("did not answer") or why.startswith("is down"))]
     other_fails = [f"core {i} {why}" for i, why in kick_fails if (i, why) not in victim_silent]
     others = smp - 1
     checks = [
@@ -183,7 +187,7 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
             (f"{name}: the fault line names that core (EXCEPTION core={victim}, an undefined instruction, esr 0x2000000)",
              taking is not None and re.search(rf"EXCEPTION core={victim} vector=\d+ esr_el1=0x2000000 ", out) is not None),
             (f"{name}: no other core's fault line", taking is not None and re.search(rf"EXCEPTION core=(?!{victim} )", out) is None),
-            (f"{name}: the halted core did not answer its kick, and said so", len(victim_silent) == 1),
+            (f"{name}: the halted core was not answered for: it did not answer its kick, or was down before it, and the boot core said so", len(victim_silent) == 1),
             (f"{name}: that core halted alone, holding nothing, and the kernel did not halt",
              taking is not None and f"core {victim} halted alone, holding nothing; the rest go on" in out and "system halted" not in out),
         ]
@@ -202,6 +206,10 @@ def run_probes(guest):
     guest.type_line("coreprobe | coreprobe -")
     got["pair"] = guest.wait_for(r"rounds[\s\S]*rounds[\s\S]*" + PROMPT, timeout=60)
     got["pair_out"] = guest.transcript()
+    many = " | ".join(["coreprobe"] + ["coreprobe -"] * 3)
+    guest.type_line(many)
+    got["four"] = guest.wait_for(r"(?:rounds[\s\S]*){4}" + PROMPT, timeout=90)
+    got["four_out"] = guest.transcript()
     guest.type_line("coreprobe calls")
     got["calls"] = guest.wait_for(r"failed[\s\S]*" + PROMPT, timeout=120)
     got["calls_out"] = guest.transcript()
@@ -224,7 +232,10 @@ def probe_checks(name, smp, boot_index, probe):
         return [(f"{name}: the core probes ran (the shell never answered after the dwell)", False)]
     alone_out = probe["alone_out"]
     pair_out = probe["pair_out"][len(alone_out):]
-    calls_out = probe["calls_out"][len(probe["pair_out"]):]
+    four_out = probe["four_out"][len(probe["pair_out"]):]
+    calls_out = probe["calls_out"][len(probe["four_out"]):]
+    four = PROBE_RE.findall(four_out)
+    most = max((int(r[1]) for r in four), default=0)
     hold_out = probe["hold_out"][len(probe["calls_out"]):]
     calls = CALLS_RE.search(calls_out)
     alone = PROBE_RE.findall(alone_out)
@@ -243,6 +254,9 @@ def probe_checks(name, smp, boot_index, probe):
         (f"{name}: `coreprobe | coreprobe -` ran " + ("on secondaries, two programs at once" if many else "on the one core, one at a time")
          + (f" (saw {pair})" if len(pair) != 2 else ""),
          probe["pair"] and len(pair) == 2 and placed(pair) and all(r[1] == ("2" if many else "1") for r in pair)),
+        (f"{name}: four probes in one pipeline ran only on " + ("the secondaries, as many at once as there are of them" if many else "the one core, one at a time")
+         + (f" (saw {four})" if len(four) != 4 or not placed(four) or most != len(secondaries) else ""),
+         probe["four"] and len(four) == 4 and placed(four) and most == len(secondaries)),
         (f"{name}: `coreprobe calls` reached fsd from " + ("a secondary" if many else "the one core")
          + f" in under {CALL_BOUND_US} us a round trip" + (f" (core {calls.group(1)}, {calls.group(2)} us, {calls.group(3)} failed)" if calls else ""),
          probe["calls"] and calls is not None and calls.group(1) in secondaries

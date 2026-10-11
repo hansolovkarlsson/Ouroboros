@@ -635,6 +635,9 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     crate::mmu::clean_to_poc(entry, entry_end - entry, 1, 0);
     let mut started = 0usize;
     let mut up = 0usize;
+    // Which cores the summary counts as up, for the ping's line on a core
+    // that halts after it (step 4(d): a core halting alone marks itself down).
+    let mut started_up = [false; MAX_CORES];
     for (i, up_mark) in CORE_UP.iter().enumerate().take(n) {
         let aff = cores.mpidr[i];
         if aff == me {
@@ -660,7 +663,10 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
             core::hint::spin_loop();
         }
         match up_mark.load(Ordering::Acquire) {
-            CORE_UP_IDLE => up += 1,
+            CORE_UP_IDLE => {
+                up += 1;
+                started_up[i] = true;
+            }
             CORE_FAILED => {} // its own line said why
             _ => crate::console::println!("Ouroboros kernel: smp: core {i} (affinity {aff:#x}) did not report up within a second"),
         }
@@ -676,8 +682,14 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     // to arrive, a few milliseconds per core, plus a second for a core
     // that is up but cannot take one, which is the case it reports.
     for (i, up_mark) in CORE_UP.iter().enumerate().take(n) {
-        if up_mark.load(Ordering::Acquire) == CORE_UP_IDLE {
-            ping(i);
+        match up_mark.load(Ordering::Acquire) {
+            CORE_UP_IDLE => ping(i),
+            // Came up, then halted alone (mark_down_here) before its ping:
+            // said, since a core the summary counted is otherwise silent.
+            CORE_FAILED if started_up[i] => {
+                crate::console::println!("Ouroboros kernel: smp: core {i} is down (it halted after coming up), not kicked");
+            }
+            _ => {}
         }
     }
 }
