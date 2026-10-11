@@ -2449,9 +2449,19 @@ pub(crate) fn kill_task(i: TaskIndex) -> Ended {
     // core cannot switch away from it first, since a switch needs the
     // lock this core holds.
     if let Some(core) = running_core(i) {
-        if let Some(id) = task_id_of(i.index()) {
-            DOOMED[i.index()].store(id, Ordering::Relaxed);
-        }
+        // A task some core runs is never Unused (its core switches away
+        // under the lock before the slot is freed), so it has an identity.
+        // If that ever breaks, the kill would be lost while its line says
+        // otherwise: say so and halt instead (the low review of #266).
+        let Some(id) = task_id_of(i.index()) else {
+            crate::console::println_force!(
+                "Ouroboros kernel: task {} runs on core {core} with no identity (an Unused slot); halting rather than lose its kill",
+                i.index()
+            );
+            crate::lock::halt_kernel();
+            crate::power::halt();
+        };
+        DOOMED[i.index()].store(id, Ordering::Relaxed);
         crate::smp::kick_kill(core);
         return Ended::OnCore(core);
     }
