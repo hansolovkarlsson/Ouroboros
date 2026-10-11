@@ -249,6 +249,10 @@ def probe_checks(name, smp, boot_index, probe):
         return all(set(r[0].split()) <= secondaries for r in reports)
     ended = re.search(r"Ctrl\+C - foreground task (\d+) terminated", hold_out)
     remote = re.search(r"task (\d+) ended on core (\d+), as another core asked", hold_out)
+    # The core the kill was sent to: not necessarily the one the probe
+    # started on, since a program moves between secondaries whenever it
+    # blocks (its own "holding" line is a call to the console server).
+    sent = re.search(r"task (\d+) is running on core (\d+), which ends it", hold_out)
     many = smp > 1
     checks = [
         (f"{name}: coreprobe alone ran on " + ("a secondary core" if many else "the one core") + f", one program at once, {smp} cores up"
@@ -269,10 +273,11 @@ def probe_checks(name, smp, boot_index, probe):
         (f"{name}: Ctrl+C ended it and the shell answered after", probe["hold"] and ended is not None),
     ]
     if many:
-        checks.append((f"{name}: it was ended on the core it ran on, as the boot core asked"
+        checks.append((f"{name}: it was ended on the secondary it ran on, the one the boot core's kill named"
                        + (f" (core {remote.group(2)})" if remote else ""),
-                       remote is not None and held is not None and ended is not None
-                       and remote.groups() == (ended.group(1), held.group(1))))
+                       remote is not None and sent is not None and ended is not None
+                       and remote.groups() == sent.groups() and remote.group(1) == ended.group(1)
+                       and remote.group(2) in secondaries))
     else:
         checks.append((f"{name}: one core, so no kill was sent to another", remote is None))
     return checks
