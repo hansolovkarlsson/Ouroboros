@@ -292,7 +292,7 @@ Its core cannot have switched away first, since a switch needs the lock.*
       retried, up to five. `make test-smp` requires each
       secondary's answer on all six boots, no line saying a core answered
       under the lock or could not be kicked, and on the `\SMPFAULT` boot the
-      halted core's silence. (d) **built 2026-10-10: programs on the
+      halted core's silence. (d) **done 2026-10-10 on QEMU: programs on the
       secondaries.** One predicate, `tasks::may_run_here`, decides every
       pick: the task is runnable, no other core runs it, and it is in this
       core's part of the partition. The slots below `FIRST_SPAWNABLE` (the
@@ -318,9 +318,19 @@ Its core cannot have switched away first, since a switch needs the lock.*
       The rebuild check the plan said was owed: `mmu::rebuild_with_el0_regions`
       compares the regions with the last build's (`mmu::BUILT_REGIONS`) and
       halts if a changed view is one some core runs. `CORE_INFO` (75) and
-      `/bin/COREPROBE` show where a program runs; `make test-smp` runs the
-      probe alone, as a pair and held then ended by Ctrl+C on every image
-      boot shape, and `SMP=N` boots any rig on N cores (`drive-qemu.py`).
+      `/bin/COREPROBE` show where a program runs. `make test-smp`, on every
+      image boot shape: the probe alone on a secondary; two in a pipeline,
+      two programs at once; four in a pipeline on four cores, only on the
+      three secondaries and three at once (two probes could not see the
+      partition, since the kick sends a new program to an idle secondary
+      before the boot core's round reaches it); a hundred round trips to
+      `fsd` from a secondary under 5 ms each (350-600 us with the idle-core
+      kick, about 46 ms without); and `coreprobe hold` ended by Ctrl+C on
+      its own core. Each was seen to fail with its part of the kernel
+      removed: the kill done in place (the rebuild check halts), the
+      partition, the kick, the doom check in the IRQ entry. `SMP=N` boots
+      any rig on N cores (`drive-qemu.py`), and ten keyboard, kill, call
+      and FP rigs passed on one core and on four.
       The plan's "two spinning programs both progressing in `ps`" became the
       probe's own report, since `ps` would show both progressing on one core
       too; two programs running at once is a bit each in `CORE_INFO`'s mask
