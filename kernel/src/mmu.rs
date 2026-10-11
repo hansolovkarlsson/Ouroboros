@@ -375,6 +375,11 @@ static STORED_MEMORY_MAP: StoredMapCell = StoredMapCell(UnsafeCell::new(None));
 static STORED_EXTRA_DEVICES: SyncCell<([(u64, u64); MAX_EXTRA_DEVICES], usize)> =
     SyncCell::new(([(0, 0); MAX_EXTRA_DEVICES], 0));
 static STORED_UNCACHED: SyncCell<([(u64, u64); MAX_UNCACHED], usize)> = SyncCell::new(([(0, 0); MAX_UNCACHED], 0));
+/// The EL0 regions the tables were last built for, one per view (class C:
+/// written by every build, under the kernel lock after boot). What
+/// [`rebuild_with_el0_regions`] compares against to find the views a
+/// rebuild changes, which no core may be running (multi-core step 4(d)).
+static BUILT_REGIONS: SyncCell<[(u64, u64); MAX_EL0_REGIONS]> = SyncCell::new([(0, 0); MAX_EL0_REGIONS]);
 
 // One L0 entry (`L1_TABLE` above, always L0 index 0) covers the first
 // 512GB of VA space (512 entries * 1GB each) - enough for every RAM
@@ -906,6 +911,7 @@ unsafe fn build_identity_map(
     stored_nc[..nc_count].copy_from_slice(&uncached[..nc_count]);
     unsafe { *STORED_UNCACHED.get() = (stored_nc, nc_count) };
     unsafe { *STORED_MEMORY_MAP.0.get() = Some(memory_map) };
+    unsafe { *BUILT_REGIONS.get() = el0_regions };
     // Re-borrow from the stash rather than the original parameter (now
     // moved) - the rest of this function is unchanged either way.
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }.unwrap();
@@ -1157,20 +1163,43 @@ fn check_attributes(planned: &[(u64, u64)]) {
 /// 4(b) the secondary cores run their idle loop at EL0 from view 1's
 /// idle page and take their ticks through the vectors, their stacks and
 /// the GIC, all under view 1's tables (`smp.rs`), while this rewrites
-/// those tables in place on the boot core. That is sound today for two
-/// reasons, neither of which a check enforces yet: `build_tables` stores
-/// every entry of an existing view with one 64-bit store and never
-/// clears an entry before refilling it, so a secondary's walk sees the
-/// old value or the new, both valid, and the entries a secondary can
-/// touch (the kernel block, the idle region, the device blocks) are
-/// rewritten with EQUAL values, since only the respawned slot's region
-/// changes. `switch_full` ends with `tlbi vmalle1is`, so every core's
-/// stale entries go. A rebuild that cleared first, moved the idle region
-/// or changed a kernel attribute would break a running secondary with no
-/// warning; a double-buffered view, or a check that the rewrite is
-/// equal-or-valid, is owed with step 4(d), where secondaries run tasks of
-/// their own.
+/// those tables in place on whichever core rebuilds; since step 4(d) the
+/// secondaries also run programs under their own views. That is sound for
+/// three reasons. The views a rebuild changes, the slots whose region
+/// differs from the last build's, are views no core runs: CHECKED at the
+/// top of this function (`BUILT_REGIONS` against `tasks::running_core`),
+/// which halts otherwise, and kept true by `tasks::kill_task`, which ends
+/// a task running on another core there. Every other view is rewritten
+/// with EQUAL entries, and `build_tables` stores each with one 64-bit
+/// store and never clears one before refilling it, so a walk on another
+/// core sees the old value or the new, both valid: NOT checked, and a
+/// rebuild that cleared first, moved the idle region or changed a kernel
+/// attribute would break a running core with no warning. And
+/// `switch_full` ends with `tlbi vmalle1is`, so every core's stale
+/// entries go.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
+    // The views this rebuild changes are the slots whose region differs
+    // from the last build's, and the in-place rewrite is sound only if no
+    // core runs one of them (multi-core step 4(d)): every other view is
+    // rewritten with equal entries, which a walk on another core reads as
+    // the old value or the new. A task ended on another core is ended
+    // there for this reason (tasks::kill_task); this is the check that
+    // says so if a path ever tears one down from here.
+    // SAFETY: under the kernel lock, as the rest of this function.
+    let built = unsafe { &mut *BUILT_REGIONS.get() };
+    for slot in crate::tasks::TaskIndex::all() {
+        let i = slot.index();
+        if built[i] != el0_regions[i] {
+            if let Some(core) = crate::tasks::running_core(slot) {
+                crate::console::println_force!(
+                    "Ouroboros kernel: a rebuild changes task {i}'s view while core {core} runs it; halting rather than rewrite tables under it"
+                );
+                crate::lock::halt_kernel();
+                crate::power::halt();
+            }
+        }
+    }
+    *built = el0_regions;
     let memory_map = unsafe { (*STORED_MEMORY_MAP.0.get()).as_ref() }
         .expect("install_identity_map must run before rebuild_with_el0_regions");
     let (extra_devices, count) = unsafe { *STORED_EXTRA_DEVICES.get() };

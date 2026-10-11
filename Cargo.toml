@@ -21,7 +21,7 @@ members = [
     "programs/textutils/rev", "programs/textutils/uniq", "programs/textutils/sort",
     "programs/netutils/ping", "programs/netutils/resolve", "programs/netutils/fetch",
     "programs/netutils/dial", "programs/netutils/serve",
-    "programs/shellutils/echo", "programs/shellutils/uptime", "programs/shellutils/syscost", "programs/shellutils/clear",
+    "programs/shellutils/echo", "programs/shellutils/uptime", "programs/shellutils/syscost", "programs/shellutils/coreprobe", "programs/shellutils/clear",
     "programs/shellutils/args", "programs/shellutils/pwd", "programs/shellutils/readkey",
     "programs/shellutils/send", "programs/shellutils/recv", "programs/shellutils/selftest", "programs/shellutils/bootid",
     "programs/shellutils/man", "programs/shellutils/printenv", "programs/shellutils/rdprobe", "programs/shellutils/fpprobe", "programs/shellutils/vtprobe", "programs/shellutils/id",

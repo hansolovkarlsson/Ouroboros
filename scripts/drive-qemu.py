@@ -87,6 +87,14 @@ class Guest:
         self.intlog = intlog or os.path.join(
             os.path.dirname(os.path.abspath(image)), "qemu-int.log"
         )
+        # `SMP=N` in the environment (`make test-kbd-mode SMP=4`) boots every
+        # rig on N cores unless the rig names its own -smp: the keyboard,
+        # kill and call rigs are the checks that would see a race between
+        # cores (multi-core step 4(d), docs/roadmap/roadmap-smp.md).
+        smp = os.environ.get("SMP")
+        if smp and "-smp" not in extra_args:
+            extra_args = [*extra_args, "-smp", smp]
+            self.report(f"booting with -smp {smp} (SMP={smp})")
         cmd = [
             "qemu-system-aarch64", "-machine", machine, "-cpu", "cortex-a72",
             "-m", "512M", "-bios", ovmf,

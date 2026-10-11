@@ -162,11 +162,17 @@ pub fn halt() -> ! {
     // boot core's shell never came up, which is why the two are told
     // apart here rather than the lock handed on to run over the wreck.
     // Forced past a quieted console: a halt is a fault's last word.
-    if crate::lock::is_halted() || crate::lock::held_by_me() || crate::smp::is_boot_core() {
+    // A core running a program halts the kernel too (multi-core step 4(d),
+    // the high review of #266): the program's registers are on this core's
+    // stack, so no other core can resume it or end it, and a kill of it
+    // would wait on this core for good.
+    let runs_a_program = crate::tasks::current_index() != crate::tasks::TaskIndex::IDLE;
+    if crate::lock::is_halted() || crate::lock::held_by_me() || crate::smp::is_boot_core() || runs_a_program {
         crate::lock::halt_kernel();
         crate::console::println_force!("Ouroboros kernel: system halted");
     } else {
         crate::console::println_force!("Ouroboros kernel: core {} halted alone, holding nothing; the rest go on", crate::smp::core_index());
+        crate::smp::mark_down_here();
     }
     unsafe {
         // DAIFSet: mask Debug/SError/IRQ/FIQ so the timer tick can't wake us.

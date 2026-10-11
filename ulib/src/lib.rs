@@ -332,6 +332,12 @@ pub fn get_ticks() -> u64 {
     syscall(syscall_abi::GET_TICKS, 0)
 }
 
+/// What the kernel knows of the cores (`CORE_INFO`): `op` is one of
+/// `syscall_abi::CORE_INFO_*`.
+pub fn core_info(op: u64) -> u64 {
+    syscall(syscall_abi::CORE_INFO, op)
+}
+
 /// Voluntarily give up the rest of this task's time slice (`YIELD`), letting
 /// another runnable task run before this one is resumed. Used to hand the CPU
 /// to a pipe consumer when its mailbox is momentarily full, rather than

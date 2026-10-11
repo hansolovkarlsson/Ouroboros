@@ -114,6 +114,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coreprobe"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "cp"
 version = "0.1.0"
 dependencies = [

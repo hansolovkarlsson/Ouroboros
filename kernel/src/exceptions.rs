@@ -597,7 +597,14 @@ extern "C" fn rust_el0_fault_handler(frame: *mut Context) {
     // below halts the kernel with it held (power::halt), every core
     // stopping at its next entry.
     crate::lock::acquire();
-    el0_fault_locked(frame);
+    // A task another core asked to end is ended as asked, and its fault
+    // with it: the fault's teardown must not then run for the task that
+    // replaced it (step 4(d)).
+    // SAFETY: `frame` is this fault's live trap frame.
+    if !unsafe { tasks::end_if_doomed(frame) } {
+        el0_fault_locked(frame);
+    }
+    tasks::kick_idle_cores();
     crate::lock::release();
 }
 
@@ -695,7 +702,12 @@ extern "C" fn rust_irq_handler(frame: *mut Context) {
     // The kernel lock around the whole tick (lock.rs).
     crate::lock::acquire();
     crate::smp::note_in_kernel();
+    // A task another core asked to end, ended here first (step 4(d)); the
+    // interrupt is then handled for whichever task replaced it.
+    // SAFETY: `frame` is this IRQ's live trap frame.
+    unsafe { tasks::end_if_doomed(frame) };
     irq_locked(frame, acked);
+    tasks::kick_idle_cores();
     crate::lock::release();
 }
 
@@ -723,6 +735,8 @@ fn irq_locked(frame: *mut Context, acked: gic::Acked) {
         timer::arm(timer::TICK_INTERVAL_MS);
         if !boot_core {
             crate::smp::secondary_tick();
+            // Its own round-robin, among the programs it may run (step 4(d)).
+            unsafe { tasks::on_secondary_tick(frame) };
             unsafe { gic::end_of_interrupt(acked) };
             return;
         }
@@ -746,7 +760,8 @@ fn irq_locked(frame: *mut Context, acked: gic::Acked) {
         // Another core kicked this one (step 4(c)), on any core: under the
         // kernel lock, like every entry, so the kick's work runs only once
         // its sender has released the lock (smp::kick).
-        crate::smp::on_kick();
+        // SAFETY: `frame` is this IRQ's live trap frame.
+        unsafe { crate::smp::on_kick(frame) };
     } else if boot_core && intid == NET_INTID.load(Ordering::Relaxed) {
         // A NIC receive frame arrived (TX completions are suppressed at the
         // device, so this INTID always means receive - see virtio_net.rs).

@@ -758,7 +758,10 @@ not yet checked on this tree are marked (predicted).
       work: locking or per-core ownership wherever `SyncCell` stands today,
       and a scheduler that places tasks on cores. A plan document before any
       code, the way `roadmap-el1-drop.md` was. QEMU `-smp 4` is the loop; the
-      Pi 4 (four A72s) and Parallels follow.
+      Pi 4 (four A72s) and Parallels follow. **Owed from step 4(d):** an owner for the
+      spawn staging buffers, which two spawners interleave (one core could
+      already, two make it likelier; `roadmap-smp.md`, step 4(d)'s
+      finding), and the Pi 4 and Parallels boots of every step since 2.
 - [ ] **5. SSH, to reach a Pi remotely.** **Needs networking on the Pi
       first**, which it has none of: the Pi 4's on-board Ethernet is GENET,
       not virtio (see the Pi test plan note above), so either a GENET driver
