@@ -179,7 +179,7 @@ Its core cannot have switched away first, since a switch needs the lock.*
       fault line. Step 2 extends the same rig. Control: with the MPIDR
       collection removed the count reads 0 and the rig is red.
 - [x] **Step 2. The cores started and parked. Built 2026-10-10 on QEMU;
-      the Pi 4 and Parallels boots are still owed.** `kernel/src/smp.rs`:
+      on the Pi 4 2026-10-11; the Parallels boot is still owed.** `kernel/src/smp.rs`:
       `CPU_ON` per core through `power::cpu_on`, the entry stub
       `smp_secondary_entry` (no stack until the MMU is on; at EL2 the
       hypervisor controls and EL1's regime as `el2::drop_to_el1` writes
@@ -213,8 +213,9 @@ Its core cannot have switched away first, since a switch needs the lock.*
       owned by core so a takeover leaves one owner, and the EL2-with-GICv3
       boot added. Control: with `CPU_ON` not called the rig is red on the
       up lines and the summary.
-      Pi 4 over serial and Parallels: by eye from the boot log, not yet
-      done.
+      Pi 4 over serial: done 2026-10-11, by eye from the boot log
+      (`testing-pi4.md` section 6: `MADT: 4 cores`, three up lines, the
+      summary, the ticks and the kicks, no fault). Parallels: not yet done.
 - [x] **Step 3. The three decisions. Done 2026-10-10.** (1) FP/SIMD
       stays eager, on a measurement: `make measure-syscost`
       (`/bin/SYSCOST`, 200,000 `GET_TICKS` calls, three runs, the median)
@@ -232,8 +233,9 @@ Its core cannot have switched away first, since a switch needs the lock.*
       Context laid out as a frame, so x0-x30 are loaded too and no eret
       into a task exists outside the trampolines; `make test-fpsimd`,
       `make test-kbd-mode` and `make test-smp` green.
-- [x] **Step 4. Tasks on cores. Done on QEMU 2026-10-10; the Pi 4 and
-      Parallels boots are owed, as for step 2.** In order, each its own PR: (a) **done
+- [x] **Step 4. Tasks on cores. Done on QEMU 2026-10-10, on the Pi 4
+      2026-10-11 (`testing-pi4.md` section 6, through `ps` and `/proc/cpus`);
+      the Parallels boot is owed, as for step 2.** In order, each its own PR: (a) **done
       2026-10-10: the kernel lock**, `kernel/src/lock.rs`, taken at the
       start of every resumable entry's Rust half (a syscall, the tick, an
       EL0 fault) and released before the trampoline's `eret`, owned by

@@ -1440,6 +1440,40 @@ wrong password). On the board with it (`build 0af55b5c3b81 debug`, stick and
 card re-staged): four boots, `root` typed at once each time, logged in every
 time, no line, the boot counter 1 to 4. Not reproduced; the line stays armed.
 
+**2026-10-11: the multi-core arc on the board (#258 to #271).** Card and
+stick staged from `main` at `de8576e` (the closeout of the day the arc
+gained `/proc/cpus` and `ps`'s core), the card's `/etc` re-staged, the
+stick's kept. One boot over serial, the fifth in the capture (the four
+before it are build `551d773ffb22`, from before the arc). Everything the
+arc owed from the Pi, in the order the log printed it:
+
+```
+MADT: 4 cores (this core affinity 0x0, mpidr 0x80000000)
+MADT: core 0: mpidr 0x0, enabled                      (and cores 1 to 3, mpidr 0x1 to 0x3)
+running at EL2 after the exit
+dropped from EL2 to EL1, on our own tables and vectors (GIC system registers: not implemented)
+MADT: GIC V2, GICD @ 0xff841000, GICC/GICR @ 0xff842000 (size 0x0)
+smp: core 1 up at EL1 (mpidr 0x80000001, affinity 0x1), idling          (and cores 2, 3)
+smp: 3 of 3 started cores up, 4 cores in all
+smp: core 1 ticking (its first tick, from its idle loop at EL0)          (and cores 2, 3)
+smp: core 1 answered a kick from core 0, once the kernel lock was free   (and cores 2, 3)
+```
+
+Then as `root` on the stick: `coreprobe | coreprobe -` ran on cores 2 and 1
+(`up to 2 programs running at once, 4 cores up`, 1385 and 1461 rounds);
+`exec /bin/coreprobe hold` said `holding on core 3` and `ps`, twice, showed
+it `running on core 1`, the move between secondaries after its holding line
+that `test-smp.py` documents; `mount -p /proc` then `cat /proc/cpus` printed
+`4`; `kill 6` printed `killed (running on core 1, which ends it)` and core 1
+answered `ended on core 1, as another core asked`; the next `ps` had the
+slot unused; `shutdown` powered the board off. No `EXCEPTION`, no `SError`,
+no `halted` anywhere in the capture. The MADT lists the cores' affinities
+(0x0 to 0x3) and each core reports its `MPIDR_EL1` with bit 31 set
+(`0x8000000N`); that bit is the register's fixed one, not a mismatch.
+**What this boot does not measure:** the kernel lock's cost and the FP/SIMD
+save on the A72 (`make measure-syscost` has no serial form), which step 3's
+decision and the lock split wait on. Parallels is still owed.
+
 ---
 
 ## 7. Risks, ranked
