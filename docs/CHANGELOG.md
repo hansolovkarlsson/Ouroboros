@@ -345,17 +345,19 @@ console server kept a cell position and drew nothing there, on Parallels,
 on QEMU's `ramfb` and on the Pi 4's monitor, where Hans saw the serial
 terminal's cursor blink and the screen's absent. A steady block now, one
 cell inverted, which the kernel owns: one new primitive gated to the
-console server, `FB_CURSOR` (76), names the cell, and every blit over it,
-scroll, clear and the kernel's own fault report lift it and put it back, so
+console server, `FB_CURSOR` (76), names the cell; a blit over it draws
+that glyph inverted, and every scroll, clear and the kernel's own fault
+report lift it and put it back, so
 `cond` keeps no copy of the screen and nothing is left inverted that is not
-the cursor. `CSI ? 25 l` and `h` hide and show it (an editor hides it
+the cursor. It dies with the server, so one the supervisor restarts
+starts with none. `CSI ? 25 l` and `h` hide and show it (an editor hides it
 while redrawing), and the shell's reset after a kill shows it again with
 the normal video, so a program killed mid-redraw leaves a cursor. A program
 that exits with the cursor hidden leaves it hidden, as on Unix, and `clear`
 is the way back: it shows the cursor and restores normal video before it
 clears. It does
 not blink: that would need the server to wake on a timer, and it waits on
-its clients alone. `make test-cond-vt` gains three checks, each failing with
+its clients alone. `make test-cond-vt` gains five checks, each failing with
 its part removed: the cursor on the prompt (a blank cell inverted, the
 row's only one), gone while `vtprobe hide` holds it hidden, back after
 Ctrl+C kills that probe; and `clear` bringing the cursor and normal video

@@ -216,13 +216,21 @@ pub fn print(args: fmt::Arguments) {
 /// Like [`print`], but ignores [`set_quiet`] - for fault reports, which
 /// must reach a console even after the kernel has otherwise gone quiet.
 pub fn print_force(args: fmt::Arguments) {
+    with_console(|console| {
+        let _ = fmt::Write::write_fmt(console, args);
+    });
+}
+
+/// Every write to the installed console goes through here: the lock taken
+/// (or found held by this core), the console server's cursor lifted when
+/// this console draws on its screen, the write, the cursor back, the lock
+/// released if it was taken here. The one place the sequence is spelled,
+/// so a writer cannot drop a step of it. Nothing happens without a console.
+fn with_console(write: impl FnOnce(&mut Console)) {
     let held = lock();
-    // The console server's cursor comes off for the whole write and goes
-    // back after, under this lock, so a line drawn or scrolled over it
-    // leaves nothing inverted that is not the cursor.
     let lifted = lift_cursor_if_drawing();
     if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
-        let _ = fmt::Write::write_fmt(console, args);
+        write(console);
     }
     crate::fbdev::restore_cursor(lifted);
     unlock(held);
@@ -256,15 +264,11 @@ pub fn putc(byte: u8) {
 /// so another core's line cannot land inside `cond`'s escape sequence and
 /// a batch costs two atomic operations rather than two per byte.
 pub fn write_bytes(bytes: &[u8]) {
-    let held = lock();
-    let lifted = lift_cursor_if_drawing();
-    if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
+    with_console(|console| {
         for &b in bytes {
             console.write_byte(b);
         }
-    }
-    crate::fbdev::restore_cursor(lifted);
-    unlock(held);
+    });
 }
 
 /// Non-blocking read of one byte from the global console. `None` if there

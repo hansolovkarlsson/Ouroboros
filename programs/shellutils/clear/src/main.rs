@@ -14,7 +14,8 @@
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
     let target = ulib::stdout_target();
-    ulib::write_out(target, b"\x1b[0m\x1b[?25h\x1b[2J\x1b[H");
+    ulib::write_out(target, syscall_abi::CON_RESET);
+    ulib::write_out(target, b"\x1b[2J\x1b[H");
     ulib::end_of_stream(target);
     ulib::exit(0);
 }

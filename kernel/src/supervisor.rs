@@ -256,8 +256,10 @@ pub fn restart(slot: usize) {
         );
         return;
     }
-    // Fresh server, fresh liveness (heartbeat + ping).
+    // Fresh server, fresh liveness (heartbeat + ping), and no cursor left
+    // from the old one (a wedged server is replaced without end_task).
     e.reset_liveness();
+    crate::fbdev::server_ended(slot as u64);
     let image_len = e.image_len;
     let (header, phdrs, region_size) = match loader::elf_region_size(&e.image[..image_len]) {
         Ok(result) => result,

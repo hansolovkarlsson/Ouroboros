@@ -573,8 +573,9 @@ pub const FB_CLEAR: u64 = 37;
 /// cursor on one framebuffer character cell, drawn as that cell inverted,
 /// or nowhere when the cell is past the screen ([`FB_CURSOR_NONE`] is the
 /// spelling for that). **Gated to [`CON_TASK`]**. The kernel owns the one
-/// inverted cell (since 2026-10-11): a blit over it, a scroll, a clear and
-/// the kernel's own fault report all lift it first and put it back after,
+/// inverted cell (since 2026-10-11): a blit over it draws that glyph
+/// inverted, and a scroll, a clear and the kernel's own fault report lift
+/// it first and put it back after,
 /// so the server names the cell when its write ends and keeps no copy of
 /// the screen, and nothing is ever left inverted that is not the cursor.
 /// Numbered after [`CORE_INFO`], the last syscall before it, rather than
@@ -583,6 +584,14 @@ pub const FB_CURSOR: u64 = 76;
 /// [`FB_CURSOR`]'s column for "no cursor": any cell past the screen means
 /// the same, and this one is past every screen.
 pub const FB_CURSOR_NONE: u64 = u64::MAX;
+
+/// The console put back the way a program should leave it: normal video
+/// (`CSI 0 m`) and the cursor shown (`CSI ? 25 h`). Written by the shell
+/// after a program it waited on was killed, and by `/bin/clear` before it
+/// clears, the way back from a program that exited with either changed.
+/// Spelled once here, since the shell does not link `ulib`: the next
+/// attribute a program can leave behind goes in this one place.
+pub const CON_RESET: &[u8] = b"\x1b[0m\x1b[?25h";
 
 /// `()` -> the calling task's **stdout target** (the task index its
 /// output should be sent to, set by whoever [`SPAWN`]ed it; [`CON_TASK`]

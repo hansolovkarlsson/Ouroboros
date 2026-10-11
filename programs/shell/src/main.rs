@@ -2922,7 +2922,7 @@ fn print_str(s: &str) {
 /// (step 4 of `docs/roadmap/roadmap-ctrl-c.md`; the kernel does not know what
 /// the program wrote). Right on a serial terminal too.
 fn reset_after_kill() {
-    con_write(b"\x1b[0m\x1b[?25h");
+    con_write(syscall_abi::CON_RESET);
 }
 
 /// Append `bytes` to `buf[..*n]`, bounded. The shell's own copy: it does not

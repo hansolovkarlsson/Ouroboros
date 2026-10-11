@@ -15,8 +15,9 @@
 //!
 //! The kernel's own `fbconsole` (the emergency/boot console) writes the
 //! *same* framebuffer independently, for boot messages and fault
-//! reports. One core is in the kernel at a time (`lock.rs`) and `cond`
-//! stays on the boot core, so the two never run concurrently; on a framebuffer-only platform they do share
+//! reports. The console lock serialises the two (`FbCell`'s SAFETY note
+//! below: the `FB_*` arms take it, the kernel's prints hold it; the kernel
+//! lock does not cover a halting core's fault report); on a framebuffer-only platform they do share
 //! the screen (kernel during boot/faults, `cond` in steady state) - see
 //! `CLAUDE.md`'s "Driver isolation, part 3".
 
@@ -37,10 +38,11 @@ struct FbDev {
     cols: usize,
     rows: usize,
     /// The console server's cursor: the one cell drawn inverted, set by
-    /// `FB_CURSOR`. This side owns it, so a blit over it, a scroll, a clear
-    /// and the kernel's own prints all lift it first and put it back after
-    /// (`lift_cursor`, `restore_cursor`), and nothing is left inverted that
-    /// is not the cursor.
+    /// `FB_CURSOR`. This side owns it, so a blit over it draws that glyph
+    /// inverted, a scroll, a clear and the kernel's own prints lift it first
+    /// and put it back after (`lift_cursor`, `restore_cursor`), and nothing
+    /// is left inverted that is not the cursor. It dies with the server
+    /// (`server_ended`), so a restarted server starts with none.
     cursor: Option<(usize, usize)>,
 }
 
@@ -127,10 +129,14 @@ fn put_pixel(fb: &FbDev, x: usize, y: usize, white: bool) {
     }
 }
 
-fn draw_one(fb: &FbDev, glyph: &[u8], col: usize, row: usize) {
+/// Draws one glyph at a cell, its bits inverted when the cursor is on
+/// that cell, so the cursor shows on the new glyph with no second pass.
+fn draw_one(fb: &FbDev, glyph: &[u8], col: usize, row: usize, inverted: bool) {
     let x0 = col * GLYPH_W;
     let y0 = row * GLYPH_H;
+    let flip = if inverted { 0xff } else { 0 };
     for (dy, bits) in glyph.iter().enumerate().take(GLYPH_H) {
+        let bits = bits ^ flip;
         for dx in 0..GLYPH_W {
             put_pixel(fb, x0 + dx, y0 + dy, (bits >> dx) & 1 != 0);
         }
@@ -141,15 +147,13 @@ fn draw_one(fb: &FbDev, glyph: &[u8], col: usize, row: usize) {
 /// `(col..col+count, row)`. `glyphs` must be at least `count * GLYPH_BYTES`
 /// long (the syscall arm validates the caller's buffer). Cells past the
 /// last column, or a row past the last, are skipped rather than wrapping -
-/// wrap/scroll decisions belong to `cond`. A run over the cursor's cell
-/// lifts the cursor first and puts it back after, so the cursor sits on
-/// the new glyph.
+/// wrap/scroll decisions belong to `cond`. The glyph that lands on the
+/// cursor's cell is drawn inverted, so the cursor sits on it at the cost
+/// of the one publish the run pays anyway.
 pub fn blit_glyphs(glyphs: &[u8], count: usize, col: usize, row: usize) {
     let held = crate::console::lock();
     if let Some(fb) = unsafe { (*FB.0.get()).as_ref() } {
         if row < fb.rows {
-            let over_cursor = fb.cursor.is_some_and(|(c, r)| r == row && c >= col && c < col.saturating_add(count));
-            let lifted = if over_cursor { lift_cursor() } else { None };
             let mut drawn = 0usize;
             for i in 0..count {
                 let c = col + i;
@@ -160,13 +164,12 @@ pub fn blit_glyphs(glyphs: &[u8], count: usize, col: usize, row: usize) {
                 if start + GLYPH_BYTES > glyphs.len() {
                     break;
                 }
-                draw_one(fb, &glyphs[start..start + GLYPH_BYTES], c, row);
+                draw_one(fb, &glyphs[start..start + GLYPH_BYTES], c, row, fb.cursor == Some((c, row)));
                 drawn += 1;
             }
             // The run of cells is contiguous within each of its pixel rows.
             let off = (row * GLYPH_H * fb.stride + col * GLYPH_W) * BYTES_PER_PIXEL;
             publish(fb, off, drawn * GLYPH_W * BYTES_PER_PIXEL, GLYPH_H);
-            restore_cursor(lifted);
         }
     }
     crate::console::unlock(held);
@@ -246,6 +249,15 @@ pub fn set_cursor(col: u64, row: u64) {
         }
     }
     crate::console::unlock(held);
+}
+
+/// The console server's life ended (`tasks::end_task`, or the supervisor
+/// restarting a wedged one): its cursor goes with it, so the next life
+/// starts with none and no client has to know about the last one.
+pub fn server_ended(slot: u64) {
+    if slot == syscall_abi::CON_TASK {
+        set_cursor(syscall_abi::FB_CURSOR_NONE, 0);
+    }
 }
 
 /// Takes the cursor off the screen while something else draws: the cell

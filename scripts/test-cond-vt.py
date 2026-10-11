@@ -254,6 +254,15 @@ def main() -> int:
             rx = re.compile(pattern)
             return wait_until(lambda lines: any(rx.search(l) for l in lines), repr(pattern), timeout)
 
+        def wait_after(word, timeout=30):
+            """The screen once the shell's prompt is below the row a probe
+            wrote `word` at the start of: the probe has ended, killed or
+            exited, and the shell has drawn what it draws after."""
+            def fits(lines):
+                at = next((i for i, l in enumerate(lines) if l.startswith(word)), None)
+                return at is not None and "#" in lines[at + 1:]
+            return wait_until(fits, f"a prompt below {word!r}", timeout)
+
         def wait_cleared(timeout=90):
             """A screen `clear` has just produced: the prompt and nothing else.
             A bare `#` anywhere would also match the prompt that was on screen
@@ -295,19 +304,10 @@ def main() -> int:
                         guest.type_line("clear")
                         if wait_cleared():
                             guest.type_line("vtprobe hold")
-                            if wait_screen(r"held"):
+                            if wait_screen(r"^held"):
                                 guest.proc.stdin.write(b"\x03")
                                 guest.proc.stdin.flush()
-                                deadline = time.time() + 30
-                                while time.time() < deadline:
-                                    rows = snap()
-                                    lines = text(rows)
-                                    at = next((i for i, l in enumerate(lines) if "held" in l), None)
-                                    if at is not None and "#" in lines[at + 1:]:
-                                        time.sleep(drive_qemu.SETTLE)
-                                        held_screen = snap()
-                                        break
-                                    time.sleep(0.5)
+                                held_screen = wait_after("held")
                     # The cursor: on the prompt after a clear; gone while
                     # `vtprobe hide` holds it hidden; back on the prompt the
                     # shell draws after Ctrl+C kills it.
@@ -320,31 +320,13 @@ def main() -> int:
                             if hidden_screen:
                                 guest.proc.stdin.write(b"\x03")
                                 guest.proc.stdin.flush()
-                                deadline = time.time() + 30
-                                while time.time() < deadline:
-                                    rows = snap()
-                                    lines = text(rows)
-                                    at = next((i for i, l in enumerate(lines) if l.startswith("hidden")), None)
-                                    if at is not None and "#" in lines[at + 1:]:
-                                        time.sleep(drive_qemu.SETTLE)
-                                        back_screen = snap()
-                                        break
-                                    time.sleep(0.5)
+                                back_screen = wait_after("hidden")
                                 # A program that exits with the cursor hidden
                                 # and video reversed leaves both; `clear` is
                                 # the way back.
                                 if back_screen is not None:
                                     guest.type_line("vtprobe leave")
-                                    deadline = time.time() + 30
-                                    while time.time() < deadline:
-                                        rows = snap()
-                                        lines = text(rows)
-                                        at = next((i for i, l in enumerate(lines) if l.startswith("left")), None)
-                                        if at is not None and "#" in lines[at + 1:]:
-                                            time.sleep(drive_qemu.SETTLE)
-                                            left_screen = snap()
-                                            break
-                                        time.sleep(0.5)
+                                    left_screen = wait_after("left")
                                     if left_screen is not None:
                                         guest.type_line("clear")
                                         clear_screen = wait_cleared()
@@ -380,17 +362,19 @@ def main() -> int:
         prompt_normal = prompt_at > at and held_screen[prompt_at][0] == ("#", False)
         print(f"     |{lines[at]}")
         print(f"     |{lines[prompt_at]}  (prompt reversed: {held_screen[prompt_at][0][1]})")
+    def last_prompt_row(rows):
+        """The cells of the lowest row that reads as a bare prompt, or None."""
+        if not rows:
+            return None
+        lines = text(rows)
+        prompt_at = max((i for i, l in enumerate(lines) if l == "#"), default=None)
+        return None if prompt_at is None else rows[prompt_at]
+
     def cursor_on_prompt(rows):
         """The last prompt row's cell after `# ` is a blank cell inverted, and
         it is the row's only inverted cell."""
-        if not rows:
-            return False
-        lines = text(rows)
-        prompt_at = max((i for i, l in enumerate(lines) if l == "#"), default=None)
-        if prompt_at is None:
-            return False
-        row = rows[prompt_at]
-        return row[2] == (BLANK, True) and sum(1 for _, rev in row if rev) == 1
+        row = last_prompt_row(rows)
+        return row is not None and row[2] == (BLANK, True) and sum(1 for _, rev in row if rev) == 1
 
     def no_cursor_on_hidden(rows):
         """The row `vtprobe hide` wrote `hidden` on has no inverted cell."""
@@ -403,14 +387,8 @@ def main() -> int:
     def prompt_left_changed(rows):
         """The last prompt row after `vtprobe leave`: `# ` drawn reversed and no
         cursor block after it."""
-        if not rows:
-            return False
-        lines = text(rows)
-        prompt_at = max((i for i, l in enumerate(lines) if l == "#"), default=None)
-        if prompt_at is None:
-            return False
-        row = rows[prompt_at]
-        return row[0] == ("#", True) and row[2] == (BLANK, False)
+        row = last_prompt_row(rows)
+        return row is not None and row[0] == ("#", True) and row[2] == (BLANK, False)
 
     cursor_drawn = cursor_on_prompt(cursor_screen)
     cursor_hidden = no_cursor_on_hidden(hidden_screen)
