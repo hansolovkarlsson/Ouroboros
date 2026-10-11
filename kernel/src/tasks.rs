@@ -2565,11 +2565,31 @@ pub unsafe fn reschedule_if_idle(frame: *mut Context) {
 /// secondary per spawned program; this core is never kicked, since its own
 /// entry is choosing its next task already.
 pub(crate) fn kick_idle_cores() {
+    // One pass over the cores first: which tasks run, and whether any other
+    // core is idle at all. It runs at the end of every entry on every core,
+    // so the common case, no idle core to wake, costs one load per core
+    // and nothing more (the high review of #266 measured the first form,
+    // a running_core scan per task, at about 3 us a syscall under TCG on
+    // four cores).
+    let me = crate::smp::core_index() as usize;
+    let mut running = [false; NUM_TASKS];
+    let mut another_idle = false;
+    for core in crate::smp::up_cores() {
+        let t = current_on(core);
+        if t == TaskIndex::IDLE {
+            another_idle |= core != me;
+        } else {
+            running[t.index()] = true;
+        }
+    }
+    if !another_idle {
+        return;
+    }
     // The runnable tasks no core runs: the work an idle core could take.
     let mut waiting = [false; NUM_TASKS];
     let mut any = false;
     for t in TaskIndex::all() {
-        if t != TaskIndex::IDLE && is_runnable(t) && running_core(t).is_none() {
+        if t != TaskIndex::IDLE && !running[t.index()] && is_runnable(t) {
             waiting[t.index()] = true;
             any = true;
         }
@@ -2577,7 +2597,6 @@ pub(crate) fn kick_idle_cores() {
     if !any {
         return;
     }
-    let me = crate::smp::core_index() as usize;
     for core in crate::smp::up_cores() {
         if core == me || current_on(core) != TaskIndex::IDLE {
             continue;
