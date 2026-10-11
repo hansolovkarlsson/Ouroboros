@@ -23,7 +23,7 @@ as `/bin/edit`. Then, on 2026-10-10, the multi-core arc on QEMU, from the
 plan to programs running on every core (#258 to #266), and on 2026-10-11
 the owner the spawn staging had owed since the arc's last step, then the
 cores made readable from a shell, `/proc/cpus` and `ps` naming the core a
-running task is on; the Pi 4 booted the whole arc the same day, every line
+running task is on, and a cursor on the framebuffer console; the Pi 4 booted the whole arc the same day, every line
 it owed (`testing/testing-pi4.md` section 6), with Parallels still owed. The days'
 records are in `docs/work-journal/`, one file a day.
 
@@ -339,6 +339,22 @@ image whose stamp is not the tree's (`scripts/srcid.py`).
 **PORTSC is a register type of its own (#209).** Its write keeps only the bits
 meant to persist, as Linux does, so it cannot clear a pending change or
 restart a reset by writing a bit back as read.
+
+**The framebuffer console has a cursor (2026-10-11).** It never had one: the
+console server kept a cell position and drew nothing there, on Parallels,
+on QEMU's `ramfb` and on the Pi 4's monitor, where Hans saw the serial
+terminal's cursor blink and the screen's absent. A steady block now: one
+new primitive gated to the console server, `FB_INVERT` (76), inverts a
+cell's pixels, and `cond` inverts the cursor's cell when a write ends and
+inverts it back before the next write draws, so the screen stays the one
+copy of itself. `CSI ? 25 l` and `h` hide and show it (an editor hides it
+while redrawing), and the shell's reset after a kill shows it again with
+the normal video, so a program killed mid-redraw leaves a cursor. It does
+not blink: that would need the server to wake on a timer, and it waits on
+its clients alone. `make test-cond-vt` gains three checks, each failing with
+its part removed: the cursor on the prompt (a blank cell inverted, the
+row's only one), gone while `vtprobe hide` holds it hidden, back after
+Ctrl+C kills that probe.
 
 **`ps` names the core a running task is on (#271, 2026-10-11).** With programs
 placed on the secondaries since multi-core step 4(d), `ps`'s `runnable` hid

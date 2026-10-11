@@ -2612,6 +2612,11 @@ of writing them down now rather than from scratch later.
 > **Part built 2026-10-07 (#228), the subset DevTools's editor asked for:**
 > cursor positioning, line and screen erase, SGR 7 reverse video, a late
 > wrap at the last column, and every other escape consumed without drawing.
+> **A cursor since 2026-10-11:** a steady block, the cell inverted by one
+> gated primitive (`FB_INVERT`), hidden and shown by `CSI ? 25 l/h`; the
+> framebuffer console had drawn none, which the Pi 4's monitor made plain.
+> It does not blink, since `cond` waits on its clients alone and a blink
+> needs a timed wait; worth it only if someone misses it.
 > Still to do from the list below: colour, bold and underline, save and
 > restore cursor, scroll regions, and a return channel.
 

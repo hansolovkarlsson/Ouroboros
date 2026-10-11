@@ -338,8 +338,11 @@ one of two backends at startup from `con_info`:
   scroll decisions, a small ANSI parser) moved out of the kernel's
   `fbconsole` into `cond`. Each glyph is looked up in the server's own
   font and drawn via the gated `fb_blit`; the kernel keeps only *dumb*
-  pixel primitives (`fb_blit`/`fb_scroll`/`fb_clear`, `fbdev.rs`) — the
-  framebuffer analogue of the `block_*` device access. This was chosen
+  pixel primitives (`fb_blit`/`fb_scroll`/`fb_clear`/`fb_invert`, `fbdev.rs`), the
+  framebuffer analogue of the `block_*` device access. The cursor (since
+  2026-10-11) is the cell it is on inverted by `fb_invert` when a write
+  ends, and inverted back before the next write draws; `CSI ? 25 l/h`
+  hide and show it. This was chosen
   over mapping the framebuffer into the server's EL0 view, which would
   have needed a per-view device-mapping the MMU doesn't have (and which
   the reverted per-task ASIDs already showed is silicon-only trouble).
@@ -615,6 +618,7 @@ something the kernel alone can say.
 | 35 | `fb_blit` | glyphs ptr, count, col, row | `0` or an error | Plots `count` 8-byte glyph bitmaps (from the server's own font, in its own region) at framebuffer cells `(col..col+count, row)`. **Gated to task 3**. The dumb blit half of the framebuffer backend — the server owns the font/cursor/wrap/scroll/ANSI, this just puts pixels on screen (`fbdev.rs`) |
 | 36 | `fb_scroll` | count | `0` | Scrolls the framebuffer up `count` character rows (a `ptr::copy` memmove), blanking the exposed bottom. **Gated to task 3** |
 | 37 | `fb_clear` | none | `0` | Blanks the whole framebuffer. **Gated to task 3**. Used by the server's startup and its `clear`/ANSI-`2J` handling |
+| 76 | `fb_invert` | col, row | `0` or an error | Inverts the pixels of one character cell, white to black and black to white. **Gated to task 3**. The server's cursor (2026-10-11): the cell under it inverted when a write ends, inverted back before the next write draws, so the server keeps no copy of the screen. A cell past the last column or row is skipped. Numbered after `core_info`, not beside its siblings (`fbdev.rs`) |
 | 38 | `stdout_target` | none | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable — program-to-program pipes and `exec … > file` |
 | 39 | `self` | none | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
 | 40 | `heap_info` | field (`0`=heap base, `1`=heap size, `2`=stack base, `3`=stack size, `4`=the largest image a program may load, `HEAP_INFO_IMAGE_MAX`) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 1 MiB **raw heap area** (the loader's `HEAP_PAGES`, 256KB until 2026-10-05), between its code and its stack guard page and zeroed at load, which it reads/writes via a `&mut [u8]`: space far larger than the stack (whose extent fields `2`/`3` report, so a program never restates the loader's page count), for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap: `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |

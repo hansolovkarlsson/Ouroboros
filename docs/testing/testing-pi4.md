@@ -1474,6 +1474,15 @@ no `halted` anywhere in the capture. The MADT lists the cores' affinities
 save on the A72 (`make measure-syscost` has no serial form), which step 3's
 decision and the lock split wait on. Parallels is still owed.
 
+**The same boot, by eye: no cursor on the monitor.** Hans saw the serial
+terminal's cursor blink and the HDMI screen's absent. The framebuffer
+console had never drawn one, on any platform: `cond` kept a cell position
+and nothing marked it. Built the same day: a steady block cursor, the cell
+inverted by a new gated primitive (`FB_INVERT`), hidden and shown by
+`CSI ? 25 l/h`, checked on QEMU's `ramfb` by `make test-cond-vt`. On the
+board it is a check by eye on the next boot: a block after the prompt,
+moving as you type, and `clear` leaving one at the top left.
+
 ---
 
 ## 7. Risks, ranked
