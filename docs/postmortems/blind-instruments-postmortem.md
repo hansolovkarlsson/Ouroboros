@@ -7,8 +7,8 @@ that found another instrument of the same kind added a dated section after
 "What shipped": test rigs, mutation harnesses, gate hints, firmware dumps read
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
-on 2026-10-10 the controls a keyboard change blinded. The spine below has held
-for all of them.*
+on 2026-10-10 the controls a keyboard change blinded and then the multi-core
+rigs. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -1645,3 +1645,71 @@ removed. Both found by the second high review. The line was folded into the
 `--More--` count, and the docstring now says which check sees what. A
 dependent line reads as independent coverage, and a count of passes is only
 as honest as the independence of what it counts.
+
+## Seven more, from the multi-core rigs (2026-10-10)
+
+Steps 4(c) and 4(d) of the multi-core arc (#265, #266) built the SGI between
+cores and the placement of programs on them, and `make test-smp` grew a check
+for each. Seven of its instruments, or the measurements beside them, could
+not see what they were for until something broke them.
+
+**A failure pattern that missed a wording.** The first green run of 4(c)
+printed `core 0 (the boot core) cannot be sent an SGI` on the `-smp 1` boot,
+and the rig passed: its pattern for a core that cannot be kicked was
+`smp: core N cannot ...`, and the boot core's line put `(the boot core)`
+between the two. The line itself was noise (a uniprocessor GICv2 reads
+`ITARGETSR` as zero), but a real failure in that wording would have passed
+the same way. **A pattern written for the lines one has seen is blind to the
+line one has not**; read the transcript of a green run for anything shaped
+like a failure the pattern does not take.
+
+**A check that trusted a timing.** The kick's boot check held the kernel
+lock for 50 ms after the SGI and required no answer meanwhile, to show the
+kicked core's handler waits for the lock. It assumed the SGI arrives inside
+the 50 ms; a slower delivery would have passed a handler that skipped the
+lock, the defect the check existed for. Found by the high review. The check
+now acknowledges the interrupt before the lock and records which one each
+core waits with, and holds the lock until it sees the kick itself waiting,
+retrying when a tick got there first. **Decisive by observation, not by a
+fixed window**: a hold long enough on one host is short on the next.
+
+**A control masked by another mechanism.** With the partition removed, so
+the boot core could take programs, the placement checks stayed green: with
+two probes and three idle secondaries, the idle-core kick sent each new
+program to a secondary before the boot core's round reached it. The
+partition was real and the rig could not see it. Four probes in one pipeline
+on four cores, more work than secondaries, separate the two: three at once
+with the partition, four without. **When two mechanisms produce the same
+outcome, a control for one needs the case where the other cannot.**
+
+**A regex the shell's echo satisfied.** "The shell answered after the
+kill" waited for `after-the-kill` and the prompt, and the shell echoes the
+typed `echo after-the-kill` before running it, so the check passed whether
+`echo` ran or not. Found by the high review; it now takes the output on a
+line of its own. The same shape as the 2026-09-06 shells that printed the
+same prompt: **an input the rig types is in the transcript too.**
+
+**A check red for a correct kernel.** The kill check compared the core that
+ended `coreprobe hold` with the core the probe said it started on. A program
+moves between secondaries whenever it blocks, and the probe's own "holding"
+line is a call to the console server, so on one boot it started on core 3
+and was ended, correctly, on core 1. It now compares with the core the kill
+line names. This file's 2026-09-20 rule: **a check that can turn red for a
+cause outside its subject is as broken as one that cannot.**
+
+**A notice that was not where it was looked for.** `SMP=4` adds a line,
+`booting with -smp 4`, to the driver's stderr; two of the ten rigs run under
+it are shell scripts that capture the driver's output into a variable, so
+their logs lacked it and read as "not applied". Their own transcripts said
+`MADT: 4 cores` on every boot. The run was right; the notice was not where
+the summary looked. **Confirm a setting from the guest's own account of
+itself, not from the harness's account of what it passed.**
+
+**A measurement of the artifact that does not ship.** The idle-core kick
+looked like 8 to 10 us a syscall under TCG on four cores, measured in
+alternating rounds, enough to want a per-wake-site flag the review had
+suggested. The rigs boot a debug kernel, unoptimized; on a release kernel
+the difference was not measurable (13.2 to 13.8 us with the kick, 13.3 to
+18.7 us without). The flag would have added a rule to every place a task
+becomes runnable, for a cost a real build does not have. The 2026-10-03 rule
+again: **check the artifact that ships.**

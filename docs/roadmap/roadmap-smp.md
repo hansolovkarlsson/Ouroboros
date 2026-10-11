@@ -3,7 +3,10 @@
 **The arc for the week of 2026-10-12, set by Hans on 2026-10-10**, while
 DevTools's C compiler is being finished and Ouroboros has a clear week. The
 roadmap's Pi direction 4 asked for a plan document before any code, the way
-`roadmap-el1-drop.md` was, and this is it. Nothing in it is built.
+`roadmap-el1-drop.md` was, and this is it. *Written before any of it was
+built; every step was then built on QEMU the same day (#258 to #266), and
+the steps below say what each became, with the corrections to this plan's
+first design marked where they stand.*
 
 Today one core runs everything. The firmware hands the kernel off on one
 core, the others are never started, and one argument makes every mutable
@@ -229,7 +232,8 @@ Its core cannot have switched away first, since a switch needs the lock.*
       Context laid out as a frame, so x0-x30 are loaded too and no eret
       into a task exists outside the trampolines; `make test-fpsimd`,
       `make test-kbd-mode` and `make test-smp` green.
-- [ ] **Step 4. Tasks on cores.** In order, each its own PR: (a) **done
+- [x] **Step 4. Tasks on cores. Done on QEMU 2026-10-10; the Pi 4 and
+      Parallels boots are owed, as for step 2.** In order, each its own PR: (a) **done
       2026-10-10: the kernel lock**, `kernel/src/lock.rs`, taken at the
       start of every resumable entry's Rust half (a syscall, the tick, an
       EL0 fault) and released before the trampoline's `eret`, owned by
