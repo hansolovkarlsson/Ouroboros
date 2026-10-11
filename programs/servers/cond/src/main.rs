@@ -25,7 +25,7 @@
 //!   primitives (`FB_BLIT`/`FB_SCROLL`/`FB_CLEAR`/`FB_INVERT`,
 //!   `kernel/src/fbdev.rs`). The cursor is a steady block: the cell it is
 //!   on, inverted by `FB_INVERT` when a write ends and inverted back before
-//!   the next write draws, hidden and shown by `CSI ? 25 l/h`.
+//!   anything draws, hidden and shown by `CSI ? 25 l/h`.
 
 #![no_std]
 #![no_main]
@@ -131,11 +131,10 @@ fn write_text(backend: &mut Backend, bytes: &[u8]) {
     match backend {
         Backend::ByteStream => con_write_raw(bytes),
         Backend::Framebuffer(fb) => {
-            fb.cursor_off();
             for &c in bytes {
                 fb.put_char(c);
             }
-            fb.cursor_on();
+            fb.cursor_settle();
         }
     }
 }
@@ -171,9 +170,10 @@ struct Fb {
     /// ends. A full-screen program hides it while it redraws.
     cursor_visible: bool,
     /// The cell the cursor is drawn on right now (inverted by
-    /// `FB_INVERT`), or `None` between `cursor_off` and `cursor_on`. Kept
-    /// apart from `col`/`row`, which move while a write is drawn; the
-    /// cursor comes off the cell it was put on, wherever they are now.
+    /// `FB_INVERT`), or `None` from the first drawing call of a write to
+    /// `cursor_settle` at its end. Kept apart from `col`/`row`, which move
+    /// while a write is drawn; the cursor comes off the cell it was put on,
+    /// wherever they are now.
     cursor_at: Option<(usize, usize)>,
     ansi: Ansi,
     /// The CSI sequence being parsed: its numeric parameters, how many
@@ -241,6 +241,7 @@ impl Fb {
                                 *bits = !*bits;
                             }
                         }
+                        self.cursor_off();
                         syscall4(
                             syscall_abi::FB_BLIT,
                             cell.as_ptr() as u64,
@@ -359,6 +360,7 @@ impl Fb {
                         self.blank(0, self.row, self.col + 1);
                     }
                     2 => {
+                        self.cursor_off();
                         syscall4(syscall_abi::FB_CLEAR, 0, 0, 0, 0);
                     }
                     // 3 erases the scrollback (xterm), and there is none.
@@ -399,29 +401,38 @@ impl Fb {
         }
     }
 
-    /// Takes the cursor off the screen before a write draws anything: the
-    /// cell it was on is inverted again, which gives it its pixels back.
-    /// Every drawing path (glyphs, erasing, scrolling, clearing) runs
-    /// between this and `cursor_on`, so none of them ever draws over the
-    /// cursor or moves it.
+    /// Takes the cursor off the screen: the cell it was on is inverted
+    /// again, which gives it its pixels back. Every drawing path (glyphs,
+    /// erasing, scrolling, clearing) calls this first, so none of them ever
+    /// draws over the cursor; a write that draws nothing never pays for it.
     fn cursor_off(&mut self) {
         if let Some((col, row)) = self.cursor_at.take() {
             syscall4(syscall_abi::FB_INVERT, col as u64, row as u64, 0, 0);
         }
     }
 
-    /// Draws the cursor where the write left it, as that cell inverted,
-    /// unless `CSI ? 25 l` hid it. With a wrap pending the cursor is on
+    /// Settles the cursor when a write ends: on the cell the write left it
+    /// on, as that cell inverted, unless `CSI ? 25 l` hid it. A write that
+    /// drew nothing and left the cursor where it was costs nothing here (a
+    /// mode change, an empty write); one that moved it costs the old cell
+    /// back and the new one inverted. With a wrap pending the cursor is on
     /// the last column's glyph, as a VT100 shows it.
-    fn cursor_on(&mut self) {
-        if self.cursor_visible && self.cursor_at.is_none() {
-            syscall4(syscall_abi::FB_INVERT, self.col as u64, self.row as u64, 0, 0);
-            self.cursor_at = Some((self.col, self.row));
+    fn cursor_settle(&mut self) {
+        if !self.cursor_visible {
+            self.cursor_off();
+            return;
         }
+        if self.cursor_at == Some((self.col, self.row)) {
+            return;
+        }
+        self.cursor_off();
+        syscall4(syscall_abi::FB_INVERT, self.col as u64, self.row as u64, 0, 0);
+        self.cursor_at = Some((self.col, self.row));
     }
 
     /// Blanks `n` cells of `row` from `col`, clipped to the line.
-    fn blank(&self, col: usize, row: usize, n: usize) {
+    fn blank(&mut self, col: usize, row: usize, n: usize) {
+        self.cursor_off();
         let mut col = col;
         let mut left = n.min(self.cols.saturating_sub(col));
         while left > 0 {
@@ -438,6 +449,7 @@ impl Fb {
             self.row += 1;
         } else {
             // Already on the last row: scroll up one and stay put.
+            self.cursor_off();
             syscall4(syscall_abi::FB_SCROLL, 1, 0, 0, 0);
         }
     }

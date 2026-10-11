@@ -2616,7 +2616,9 @@ of writing them down now rather than from scratch later.
 > gated primitive (`FB_INVERT`), hidden and shown by `CSI ? 25 l/h`; the
 > framebuffer console had drawn none, which the Pi 4's monitor made plain.
 > It does not blink, since `cond` waits on its clients alone and a blink
-> needs a timed wait; worth it only if someone misses it.
+> needs a timed wait; worth it only if someone misses it. A program that
+> exits with the cursor hidden leaves it hidden, as on Unix (the shell
+> restores it after a kill, which only it can see); `clear` is the way back.
 > Still to do from the list below: colour, bold and underline, save and
 > restore cursor, scroll regions, and a return channel.
 

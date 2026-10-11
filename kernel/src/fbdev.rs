@@ -34,15 +34,22 @@ struct FbDev {
     stride: usize,
     cols: usize,
     rows: usize,
+    /// The cell `invert_cell` last inverted and has not inverted back:
+    /// the console server's cursor, as this side knows it. The kernel's
+    /// own prints lift it while they draw (`lift_cursor`).
+    cursor: Option<(usize, usize)>,
 }
 
 struct FbCell(UnsafeCell<Option<FbDev>>);
-// SAFETY: the `synccell` module's argument (one core, interrupts masked
-// for the whole of every EL1 context), which `SyncCell` would state for
-// us except that `FbDev` holds the framebuffer's raw `*mut u8` and is not
-// `Send`, so the bound refuses it and this wrapper argues its own case:
-// set once at boot before any task runs, then only read/written from
-// within the FB_* syscall arms (IRQs masked, never reentrant).
+// SAFETY: one core is in the kernel at a time (`lock.rs`, taken at every
+// resumable entry's Rust half), and the FB_* syscall arms, the only
+// writers of this record, run under it; the console's `lift_cursor` and
+// `restore_cursor` read the record and write pixels only, under the
+// console lock. `SyncCell` would state the argument for us, except that
+// `FbDev` holds the framebuffer's raw `*mut u8` and is not `Send`, so the
+// bound refuses it and this wrapper argues its own case: set once at boot
+// before any task runs. (Before 2026-10-11 this comment made the
+// single-core argument, which the multi-core arc ended.)
 unsafe impl Sync for FbCell {}
 static FB: FbCell = FbCell(UnsafeCell::new(None));
 
@@ -63,6 +70,7 @@ pub unsafe fn install(info: &Info) {
             stride: info.stride,
             cols: info.width / GLYPH_W,
             rows: info.height / GLYPH_H,
+            cursor: None,
         });
     }
 }
@@ -171,14 +179,45 @@ pub fn scroll(n: usize) {
 /// white, every channel. The console server's cursor is this: drawn by
 /// inverting the cell the cursor is on, taken off by inverting it again,
 /// so the server keeps no copy of what the cell holds and the screen stays
-/// the one truth. A cell past the last column or row is skipped.
+/// the one truth. The cell is recorded as the cursor until the same cell is
+/// inverted again. A cell past the last column or row is skipped.
 pub fn invert_cell(col: usize, row: usize) {
-    let Some(fb) = (unsafe { (*FB.0.get()).as_ref() }) else {
+    let Some(fb) = (unsafe { (*FB.0.get()).as_mut() }) else {
         return;
     };
     if col >= fb.cols || row >= fb.rows {
         return;
     }
+    invert_pixels(fb, col, row);
+    fb.cursor = if fb.cursor == Some((col, row)) { None } else { Some((col, row)) };
+}
+
+/// Takes the console server's cursor off the screen while the kernel's own
+/// console draws (a fault report, forced past `CONSOLE_QUIET`): the cell
+/// gets its pixels back and the record stands. `restore_cursor` puts it
+/// back. Without this the kernel's lines, and the scroll they can cause,
+/// would redraw the cell under an inversion the server still believes in,
+/// and the server's next write would invert a glyph that was never the
+/// cursor. The cursor is then over whatever the kernel left in that cell,
+/// which is the server's to redraw, and nothing is left inverted for good.
+pub fn lift_cursor() -> Option<(usize, usize)> {
+    let fb = unsafe { (*FB.0.get()).as_ref() }?;
+    let (col, row) = fb.cursor?;
+    invert_pixels(fb, col, row);
+    fb.cursor
+}
+
+/// Puts back what `lift_cursor` took off.
+pub fn restore_cursor(lifted: Option<(usize, usize)>) {
+    let Some(fb) = (unsafe { (*FB.0.get()).as_ref() }) else {
+        return;
+    };
+    if let Some((col, row)) = lifted {
+        invert_pixels(fb, col, row);
+    }
+}
+
+fn invert_pixels(fb: &FbDev, col: usize, row: usize) {
     let x0 = col * GLYPH_W;
     let y0 = row * GLYPH_H;
     for dy in 0..GLYPH_H {

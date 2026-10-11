@@ -37,7 +37,15 @@ impl fmt::Write for Console {
             Console::Pl011(uart) => uart.write_str(s),
             Console::Uart16550(uart) => uart.write_str(s),
             Console::Virtio(dev) => write_str_virtio(dev, s),
-            Console::Framebuffer(fb) => fb.write_str(s),
+            Console::Framebuffer(fb) => {
+                // The console server's cursor is an inverted cell; it comes
+                // off while the kernel draws and goes back after, so the
+                // server's inversion stays consistent (fbdev::lift_cursor).
+                let lifted = crate::fbdev::lift_cursor();
+                let result = fb.write_str(s);
+                crate::fbdev::restore_cursor(lifted);
+                result
+            }
         }
     }
 }
@@ -93,7 +101,11 @@ impl Console {
             Console::Virtio(dev) => {
                 let _ = unsafe { dev.write(&[byte]) };
             }
-            Console::Framebuffer(fb) => fb.put_char(byte),
+            Console::Framebuffer(fb) => {
+                let lifted = crate::fbdev::lift_cursor();
+                fb.put_char(byte);
+                crate::fbdev::restore_cursor(lifted);
+            }
         }
     }
 

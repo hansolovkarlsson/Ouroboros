@@ -233,8 +233,11 @@ def main() -> int:
             while time.time() < deadline:
                 rows = snap()
                 if any(rx.search(line) for line in text(rows)):
+                    # The frame that matched can be mid-write: the shell sends
+                    # its prompt as two one-byte messages and cond settles the
+                    # cursor after each, so grade a fresh frame after the settle.
                     time.sleep(drive_qemu.SETTLE)
-                    return rows
+                    return snap()
                 time.sleep(0.5)
             guest.report(f"!!! TIMEOUT waiting on the screen for {pattern!r}")
             return None
@@ -261,7 +264,8 @@ def main() -> int:
                             lines = text(rows)
                             if (not any(command in line for line in lines)
                                     and "#" in lines[CHECKED_ROWS:]):
-                                screen = rows
+                                time.sleep(drive_qemu.SETTLE)
+                                screen = snap()
                                 driven = True
                                 break
                             time.sleep(0.5)
@@ -282,7 +286,8 @@ def main() -> int:
                                     lines = text(rows)
                                     at = next((i for i, l in enumerate(lines) if "held" in l), None)
                                     if at is not None and "#" in lines[at + 1:]:
-                                        held_screen = rows
+                                        time.sleep(drive_qemu.SETTLE)
+                                        held_screen = snap()
                                         break
                                     time.sleep(0.5)
                     # The cursor: on the prompt after a clear; gone while
@@ -303,7 +308,8 @@ def main() -> int:
                                     lines = text(rows)
                                     at = next((i for i, l in enumerate(lines) if l.startswith("hidden")), None)
                                     if at is not None and "#" in lines[at + 1:]:
-                                        back_screen = rows
+                                        time.sleep(drive_qemu.SETTLE)
+                                        back_screen = snap()
                                         break
                                     time.sleep(0.5)
         faults = guest.aborts()

@@ -51,17 +51,20 @@
 pub extern "C" fn _start() -> ! {
     let target = ulib::stdout_target();
     let mut first = [0u8; 8];
-    if ulib::arg(1, &mut first).is_some_and(|n| &first[..n] == b"hide") {
-        ulib::write_out(target, b"\x1b[?25lhidden");
-        ulib::read_char();
-        ulib::write_out(target, b"\x1b[?25h\r\n");
-        ulib::exit(0);
-    }
-    if ulib::arg(1, &mut first).is_some_and(|n| &first[..n] == b"hold") {
-        ulib::write_out(target, b"\x1b[7mheld");
-        ulib::read_char();
-        ulib::write_out(target, b"\x1b[0m\r\n");
-        ulib::exit(0);
+    let mode = ulib::arg(1, &mut first).map(|n| &first[..n]);
+    // The two hold probes: write the prefix, wait for a key (so Ctrl+C
+    // kills the probe in that state), then the suffix.
+    let holds: [(&[u8], &[u8], &[u8]); 2] = [
+        (b"hold", b"\x1b[7mheld", b"\x1b[0m\r\n"),
+        (b"hide", b"\x1b[?25lhidden", b"\x1b[?25h\r\n"),
+    ];
+    for (name, prefix, suffix) in holds {
+        if mode == Some(name) {
+            ulib::write_out(target, prefix);
+            ulib::read_char();
+            ulib::write_out(target, suffix);
+            ulib::exit(0);
+        }
     }
     let (Some(cols), Some(rows)) = (number_arg(1), number_arg(2)) else {
         ulib::write_out(target, b"usage: vtprobe COLS ROWS\r\n");

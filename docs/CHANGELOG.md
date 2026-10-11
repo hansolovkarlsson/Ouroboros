@@ -349,7 +349,12 @@ cell's pixels, and `cond` inverts the cursor's cell when a write ends and
 inverts it back before the next write draws, so the screen stays the one
 copy of itself. `CSI ? 25 l` and `h` hide and show it (an editor hides it
 while redrawing), and the shell's reset after a kill shows it again with
-the normal video, so a program killed mid-redraw leaves a cursor. It does
+the normal video, so a program killed mid-redraw leaves a cursor. A program
+that exits with the cursor hidden leaves it hidden, as on Unix, and `clear`
+is the way back: it shows the cursor and restores normal video before it
+clears. The kernel's own fault report, which draws on the same screen, lifts
+the cursor while it prints and puts it back, so nothing stays inverted for
+good. It does
 not blink: that would need the server to wake on a timer, and it waits on
 its clients alone. `make test-cond-vt` gains three checks, each failing with
 its part removed: the cursor on the prompt (a blank cell inverted, the
