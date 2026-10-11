@@ -3513,11 +3513,12 @@ fn task_name(i: u64, buf: &mut [u8]) -> usize {
 /// is discovered without it leaking into the ABI as a constant). Each
 /// line carries the task's name (`argv[0]`, via [`task_name`]) after its
 /// state - the servers and init are named by the kernel, spawned commands
-/// by the argv they were launched with. The caller can't tell "running
-/// right now" from "runnable, waiting its turn" - it is, by definition,
-/// the one running at the moment it asks - so both print as "runnable".
-/// Real output, so it goes through the sink (redirectable like any other
-/// command's).
+/// by the argv they were launched with. A runnable task a core is
+/// executing at that instant prints as `running on core N` (since
+/// 2026-10-11, `CORE_INFO_TASK_CORE`; this shell is one such task while it
+/// runs `ps`), and one waiting its turn as `runnable`: with programs placed
+/// on the secondaries the two are different things. Real output, so it
+/// goes through the sink (redirectable like any other command's).
 fn cmd_ps(out: &mut Output) {
     let mut i = 0u64;
     loop {
@@ -3549,7 +3550,10 @@ fn cmd_ps(out: &mut Output) {
             } else {
                 syscall_abi::CORE_INFO_NO_CORE
             };
-            if core != syscall_abi::CORE_INFO_NO_CORE {
+            // A core index is small; NO_CORE and BAD_OP (a kernel without the
+            // op) are both at the top, so one bound tells a core from either,
+            // the same test fsd's /proc/<n>/core makes.
+            if core < syscall_abi::CORE_INFO_NO_CORE {
                 out.put_str(": running on core ");
                 out.put_u64_decimal(core);
             } else {

@@ -795,8 +795,13 @@ not yet checked on this tree are marked (predicted).
             `ps` names to be a secondary, not the one the probe's own line
             named, because a program moves between secondaries whenever it
             blocks and its "holding" line is itself a call to the console
-            server (`test-smp.py` already notes this for the kill). As
-            planned: with programs
+            server (`test-smp.py` already notes this for the kill). The high
+            review of #271 asked for the core, or a `running` state, to come
+            from `TASK_STATE` itself, so `ps` and a remote `/proc` reader get
+            one atomic answer instead of two files at two instants; that is a
+            change to `TASK_STATE`'s answers, which every rig reading
+            `runnable` depends on, so it is left as a follow-up if the two
+            instants ever mislead someone. As planned: with programs
             placed on the secondaries (step 4(d)), `ps`'s `runnable` hides
             a real third state: the task is executing on core N right now.
             The kernel knows it (`tasks::running_core`, the per-core

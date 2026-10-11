@@ -19,6 +19,11 @@
 //!   /<n>/core      ->  "1\n" | "none\n"   the core executing the task now (CORE_INFO_TASK_CORE; since 2026-10-11)
 //! ```
 //!
+//! Every file here is generated at the instant it is read, and its size in a
+//! listing or a `stat` is that instant's too: `state` is 8 or 9 bytes and
+//! `core` 2 to 5 as the task moves, so a reader that sizes first and then
+//! reads a moment later can read short. Read to the short read, as `cat` does.
+//!
 //! Read-only: every write/mutate method returns [`Error::ReadOnly`]. Only per-slot
 //! *state* is exposed - there is no cross-task argv/name accessor in the kernel
 //! yet (`GET_ARG*` returns the *caller's* own), so `/<n>` has just `state`.
@@ -191,8 +196,13 @@ const CPUS_MAX: usize = 21;
 /// `CORE_INFO_UP` (the boot core and every secondary that came up), as one
 /// decimal line. Asked on every read, so it is what the kernel says now.
 fn cpus_bytes(buf: &mut [u8; CPUS_MAX]) -> usize {
-    let up = crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_UP, 0, 0, 0);
-    let n = u64_decimal(up, &mut buf[..CPUS_MAX - 1]);
+    decimal_line(crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_UP, 0, 0, 0), buf)
+}
+
+/// `v` as a decimal line, `"4\n"`, into `buf`; the length written. The one
+/// spelling of a synthetic file's number (`/cpus`, `/<n>/core`).
+fn decimal_line(v: u64, buf: &mut [u8; CPUS_MAX]) -> usize {
+    let n = u64_decimal(v, &mut buf[..CPUS_MAX - 1]);
     buf[n] = b'\n';
     n + 1
 }
@@ -203,13 +213,14 @@ fn cpus_bytes(buf: &mut [u8; CPUS_MAX]) -> usize {
 /// `fsd` itself is on a core while it answers, so its own slot reads a core.
 fn core_bytes(n: u64, buf: &mut [u8; CPUS_MAX]) -> usize {
     let core = crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, n, 0, 0);
-    if core == syscall_abi::CORE_INFO_NO_CORE || core == syscall_abi::CORE_INFO_BAD_OP {
+    // A core index is small; NO_CORE and BAD_OP (a kernel without the op)
+    // are both at the top, so one bound tells a core from either, the same
+    // test the shell's `ps` makes.
+    if core >= syscall_abi::CORE_INFO_NO_CORE {
         buf[..5].copy_from_slice(b"none\n");
         return 5;
     }
-    let len = u64_decimal(core, &mut buf[..CPUS_MAX - 1]);
-    buf[len] = b'\n';
-    len + 1
+    decimal_line(core, buf)
 }
 
 /// Copy `src[offset..]` into `buf`, returning the byte count (0 at/past the end).
