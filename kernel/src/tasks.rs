@@ -166,8 +166,16 @@ mod task_index {
     /// inventory), indexed by `smp::core_index()`: the boot core's entry
     /// is the scheduler's current task; a secondary's is
     /// [`TaskIndex::IDLE`] while it runs only its idle loop.
-    static CURRENT: [AtomicUsize; crate::madt::MAX_CORES] =
-        [const { AtomicUsize::new(TaskIndex::FIRST.0) }; crate::madt::MAX_CORES];
+    /// Every entry but the boot core's starts at the idle slot (step 4(d)),
+    /// so a core that was never started never seems to run a task: the
+    /// boot core's is entry 0 until `smp::start` moves it to its MADT index
+    /// ([`relocate_current`]), and a secondary sets its own to idle before
+    /// its first entry into EL0.
+    static CURRENT: [AtomicUsize; crate::madt::MAX_CORES] = {
+        let mut cur = [const { AtomicUsize::new(TaskIndex::IDLE.0) }; crate::madt::MAX_CORES];
+        cur[0] = AtomicUsize::new(TaskIndex::FIRST.0);
+        cur
+    };
 
     /// The running task's slot on this core, as a [`TaskIndex`].
     pub(crate) fn current_index() -> TaskIndex {
@@ -182,8 +190,32 @@ mod task_index {
     /// The boot core's index changed from 0 to the MADT's (`smp::start`):
     /// its current slot moves with it.
     pub(crate) fn relocate_current(from: u64, to: u64) {
+        if from == to {
+            return;
+        }
         let slot = CURRENT[from as usize].load(Ordering::Relaxed);
         CURRENT[to as usize].store(slot, Ordering::Relaxed);
+        // Entry `from` is now a secondary's, which starts idle: left as it
+        // was, it would name the boot core's task as running there too.
+        CURRENT[from as usize].store(TaskIndex::IDLE.0, Ordering::Relaxed);
+    }
+
+    /// The task core `core` is running (the idle slot for a core that runs
+    /// none, or was never started). Read under the kernel lock, so it is
+    /// the task that core will resume at its next `eret`.
+    pub(crate) fn current_on(core: usize) -> TaskIndex {
+        TaskIndex(CURRENT[core].load(Ordering::Relaxed))
+    }
+
+    /// The core running `slot`, if one is: never for the idle slot, which
+    /// every idle core runs at once and is no one task (step 4(d)). The one
+    /// spelling of "running elsewhere", which the scheduler's pick, a kill
+    /// and a table rebuild all ask.
+    pub(crate) fn running_core(slot: TaskIndex) -> Option<usize> {
+        if slot == TaskIndex::IDLE {
+            return None;
+        }
+        CURRENT.iter().position(|c| c.load(Ordering::Relaxed) == slot.0)
     }
 
     /// A secondary core, about to run its idle loop: its current slot is
@@ -193,7 +225,7 @@ mod task_index {
         set_current(TaskIndex::IDLE);
     }
 }
-pub(crate) use task_index::{current_index, relocate_current, set_current_idle_here, TaskIndex};
+pub(crate) use task_index::{current_index, current_on, relocate_current, running_core, set_current_idle_here, TaskIndex};
 use task_index::set_current;
 
 /// The send-mask ceiling, checked rather than described. [`caps_for_slot`]
@@ -612,10 +644,16 @@ const PENDING_KILL_BY_QUIT: u64 = 1 << 63;
 /// [`on_tick`] has not carried out yet: such a task reads no more keys, so
 /// nothing typed after the interrupt goes to the program it ends (the
 /// fourth high review of #238: the tick's wake-check ran before the kill
-/// and handed the doomed program the next key).
+/// and handed the doomed program the next key). Also a task another core
+/// is about to end ([`DOOMED`], multi-core step 4(d)): the Ctrl+C has been
+/// carried out as far as this core can, and until that core ends it, the
+/// task neither reads keys nor has a second Ctrl+C judged as its own (the
+/// high review of #266); the keys wait for the owner after it.
 pub(crate) fn kill_pending_for(slot: usize) -> bool {
     let marked = PENDING_KILL.load(Ordering::Relaxed) & !PENDING_KILL_BY_QUIT;
-    marked != 0 && task_id_of(slot) == Some(marked)
+    let doomed = DOOMED.get(slot).map_or(0, |d| d.load(Ordering::Relaxed));
+    let id = task_id_of(slot);
+    (marked != 0 && id == Some(marked)) || (doomed != 0 && id == Some(doomed))
 }
 
 /// Ctrl+C (ETX): ends or detaches a cooked keyboard owner, and is an ordinary
@@ -2074,13 +2112,66 @@ static STATES: [SyncCell<TaskState>; NUM_TASKS] = [
 /// [`next_or_halt`], which reports and halts on it rather than resume a
 /// task whose state says it must not run.
 fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
-    scan_from(from, is_runnable)
+    if crate::smp::is_boot_core() {
+        scan_from(from, may_run_here)
+    } else {
+        // A secondary runs real work before its idle loop: the idle slot is
+        // its fallback, not a turn in the round (step 4(d)). The boot core
+        // keeps its round as it was, idle included.
+        scan_from(from, |c| c != TaskIndex::IDLE && may_run_here(c))
+            .or_else(|| may_run_here(TaskIndex::IDLE).then_some(TaskIndex::IDLE))
+    }
 }
 
-/// Whether `t` is `Runnable` right now: the one predicate both scans
-/// ask, so they cannot disagree about what "runnable" means.
+/// Whether `t` is `Runnable` right now.
 fn is_runnable(t: TaskIndex) -> bool {
     matches!(unsafe { *STATES[t.index()].get() }, TaskState::Runnable)
+}
+
+/// Whether THIS core may switch to `t` (multi-core step 4(d)): the one
+/// predicate every pick asks, so no scan can disagree about it. `t` must
+/// be runnable and not running on another core ([`running_core`]; the idle
+/// slot is every idle core's at once). Placement is partitioned: the boot
+/// core runs the slots below [`FIRST_SPAWNABLE`] (the boot shell, idle and
+/// the servers, pinned there, which the plan's decision 2 and the devices'
+/// interrupts assume), and a spawned program runs on a secondary, falling
+/// back to the boot core only when no secondary is up
+/// (`smp::secondaries_up`). Deterministic on purpose: with secondaries up,
+/// every program runs on one, so `make test-smp` can require it.
+fn may_run_here(t: TaskIndex) -> bool {
+    may_run_on(crate::smp::core_index() as usize, t)
+}
+
+/// [`may_run_here`] asked for any core `core`: the one statement of the
+/// placement rule, which the pick on a core and the kick that wakes an idle
+/// one ([`kick_idle_cores`]) both ask, so they cannot disagree (the high
+/// review of #266 found a copy of it in the kick).
+fn may_run_on(core: usize, t: TaskIndex) -> bool {
+    if !is_runnable(t) {
+        return false;
+    }
+    if t == TaskIndex::IDLE {
+        return true;
+    }
+    if running_core(t).is_some_and(|c| c != core) {
+        return false;
+    }
+    if crate::smp::is_boot(core) {
+        !t.is_spawnable() || !crate::smp::secondaries_up()
+    } else {
+        t.is_spawnable()
+    }
+}
+
+/// Saves the interrupted task's registers into its slot before a switch
+/// away from it. Not the idle slot's: every idle core runs the same loop
+/// from its first instruction, so the idle loop's registers are never
+/// worth keeping, and with several cores idle at once one slot could not
+/// keep them anyway ([`switch_to`] loads a fresh [`idle_context`]).
+fn save_frame(current: TaskIndex, frame: &Context) {
+    if current != TaskIndex::IDLE {
+        unsafe { *TASKS[current.index()].get() = *frame };
+    }
 }
 
 /// The one scan behind [`next_runnable`] and [`next_runnable_skip_idle`]:
@@ -2128,7 +2219,7 @@ fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
     // (Runnable, not idle) is always found and stays put. `None` is
     // reached only if `from` IS the idle task or is not Runnable, and
     // then the plain scan (with its halt on nothing) is the right answer.
-    scan_from(from, |c| c != TaskIndex::IDLE && is_runnable(c)).unwrap_or_else(|| next_or_halt(from))
+    scan_from(from, |c| c != TaskIndex::IDLE && may_run_here(c)).unwrap_or_else(|| next_or_halt(from))
 }
 
 /// Voluntarily give up the CPU (the `YIELD` syscall): save the current task -
@@ -2157,7 +2248,7 @@ pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
     }
     // YIELD's own return value, seen by `current` when it is resumed later.
     frame.gpr[0] = 0;
-    unsafe { *TASKS[current.index()].get() = *frame };
+    save_frame(current, frame);
     // STATES[current.index()] stays Runnable - a yield doesn't block.
     switch_to(frame, next);
     frame.gpr[0]
@@ -2172,7 +2263,7 @@ pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
 /// why the save is not in here. One place, so the three steps cannot be
 /// reordered or one of them forgotten at a new site.
 fn switch_to(frame: &mut Context, next: TaskIndex) {
-    *frame = unsafe { *TASKS[next.index()].get() };
+    *frame = if next == TaskIndex::IDLE { idle_context() } else { unsafe { *TASKS[next.index()].get() } };
     set_current(next);
     crate::mmu::activate_task(next);
 }
@@ -2234,11 +2325,10 @@ pub(crate) unsafe fn block_current_and_switch_to(
 ) -> u64 {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    unsafe { *TASKS[current.index()].get() = *frame };
+    save_frame(current, frame);
     unsafe { *STATES[current.index()].get() = TaskState::Blocked(reason) };
     let next = match prefer {
-        Some(p)
-            if p != current && unsafe { *STATES[p.index()].get() } == TaskState::Runnable =>
+        Some(p) if p != current && may_run_here(p) =>
         {
             p
         }
@@ -2305,6 +2395,7 @@ pub(crate) unsafe fn exit_current_and_switch(frame: *mut Context, status: u64) -
 /// still take a `usize` (the ledger's stated scope for the newtype).
 fn end_task(i: TaskIndex, final_state: TaskState) {
     let i = i.index();
+    DOOMED[i].store(0, Ordering::Relaxed);
     let (base, size) = task_region(i);
     free_runtime_region(base, size);
     revert_input_owner_if(i);
@@ -2343,7 +2434,7 @@ fn end_task(i: TaskIndex, final_state: TaskState) {
 /// simply discarded. The whole teardown ([`end_task`]) runs here; the caller
 /// does the mmu rebuild after, same as the `EXIT` arm does - see
 /// `syscall.rs`.
-pub(crate) fn kill_task(i: TaskIndex) {
+pub(crate) fn kill_task(i: TaskIndex) -> Ended {
     if i == current_index() {
         crate::console::println_force!(
             "Ouroboros kernel: kill_task on the running task {} - a kernel bug; halting rather than freeing the region the eret returns into",
@@ -2351,7 +2442,182 @@ pub(crate) fn kill_task(i: TaskIndex) {
         );
         crate::power::halt();
     }
+    // Running on another core (multi-core step 4(d)): its registers are
+    // live there and its region is what that core executes, so it is not
+    // torn down from here. It is marked, and its core kicked; that core
+    // ends it at its next entry, under the lock ([`end_if_doomed`]). Its
+    // core cannot switch away from it first, since a switch needs the
+    // lock this core holds.
+    if let Some(core) = running_core(i) {
+        // A task some core runs is never Unused (its core switches away
+        // under the lock before the slot is freed), so it has an identity.
+        // If that ever breaks, the kill would be lost while its line says
+        // otherwise: say so and halt instead (the low review of #266).
+        let Some(id) = task_id_of(i.index()) else {
+            crate::console::println_force!(
+                "Ouroboros kernel: task {} runs on core {core} with no identity (an Unused slot); halting rather than lose its kill",
+                i.index()
+            );
+            crate::lock::halt_kernel();
+            crate::power::halt();
+        };
+        DOOMED[i.index()].store(id, Ordering::Relaxed);
+        crate::smp::kick_kill(core);
+        return Ended::OnCore(core);
+    }
     end_task(i, TaskState::Unused);
+    Ended::Now
+}
+
+/// What [`kill_task`] did.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// Torn down here, now.
+    Now,
+    /// Running on this core, which was kicked to end it at its next entry.
+    OnCore(usize),
+}
+
+/// Tasks another core has asked to end while they ran on this one, by
+/// packed identity ([`task_id_of`]), 0 for none (class C, under the kernel
+/// lock: set by [`kill_task`], taken by [`end_if_doomed`], cleared by
+/// [`end_task`]). An identity rather than a flag, so a mark can never end
+/// a later occupant of the slot.
+static DOOMED: [AtomicU64; NUM_TASKS] = [const { AtomicU64::new(0) }; NUM_TASKS];
+
+/// At every resumable entry on every core, under the kernel lock and before
+/// anything else (multi-core step 4(d)): if another core asked to end this
+/// core's current task ([`kill_task`]), end it here, where its registers
+/// are, and switch away, rebuilding the tables after. `true` when it did,
+/// and `frame` then holds the next task: a syscall must not be dispatched
+/// for the ended one.
+///
+/// # Safety
+/// `frame` is the live trap frame of the entry being handled.
+pub(crate) unsafe fn end_if_doomed(frame: *mut Context) -> bool {
+    let current = current_index();
+    let marked = DOOMED[current.index()].load(Ordering::Relaxed);
+    if marked == 0 {
+        return false;
+    }
+    if current == TaskIndex::IDLE || task_id_of(current.index()) != Some(marked) {
+        // A mark for an occupant this slot no longer holds.
+        DOOMED[current.index()].store(0, Ordering::Relaxed);
+        return false;
+    }
+    crate::console::println!(
+        "Ouroboros kernel: task {} ended on core {}, as another core asked",
+        current.index(),
+        crate::smp::core_index()
+    );
+    unsafe { kill_current_and_switch(frame) };
+    // SAFETY: under the kernel lock, IRQs masked; the ended task is not
+    // current on any core now (rebuild_with_el0_regions checks it).
+    unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
+    true
+}
+
+/// `CORE_INFO`'s answers (multi-core step 4(d)): this core's index, the
+/// cores running a spawned program, or how many cores take tasks. Under
+/// the kernel lock, so the busy mask is one instant's.
+pub(crate) fn core_info(op: u64) -> u64 {
+    match op {
+        syscall_abi::CORE_INFO_THIS => crate::smp::core_index(),
+        syscall_abi::CORE_INFO_BUSY => crate::smp::up_cores()
+            .filter(|&c| current_on(c).is_spawnable())
+            .fold(0u64, |mask, c| mask | (1 << c)),
+        syscall_abi::CORE_INFO_UP => crate::smp::up_cores().count() as u64,
+        _ => syscall_abi::CORE_INFO_BAD_OP,
+    }
+}
+
+/// A secondary core's tick (multi-core step 4(d)): round-robin among the
+/// tasks this core may run ([`may_run_here`]), and nothing else. The boot
+/// core's tick ([`on_tick`]) keeps every other job: the wake-check for
+/// every blocked task wherever it last ran, the keyboard, the kill mark
+/// and the supervisor (step 3, decision 2), since a blocked task runs on
+/// no core and its wake is one decision in one place.
+///
+/// # Safety
+/// `frame` is the live IRQ trap frame, as [`on_tick`]'s.
+pub unsafe fn on_secondary_tick(frame: *mut Context) {
+    let frame = unsafe { &mut *frame };
+    let current = current_index();
+    let next = next_or_halt(current);
+    if next != current {
+        save_frame(current, frame);
+        switch_to(frame, next);
+    }
+}
+
+/// A kick asking this core to look for work (`smp::KICK_RESCHED`): an idle
+/// core switches to a task it may run, if there is one; a busy core goes
+/// on, and takes up waiting work at its tick.
+///
+/// # Safety
+/// `frame` is the live IRQ trap frame.
+pub unsafe fn reschedule_if_idle(frame: *mut Context) {
+    let frame = unsafe { &mut *frame };
+    if current_index() != TaskIndex::IDLE {
+        return;
+    }
+    let next = next_or_halt(TaskIndex::IDLE);
+    if next != TaskIndex::IDLE {
+        switch_to(frame, next);
+    }
+}
+
+/// At the end of every resumable entry, under the kernel lock (multi-core
+/// step 4(d)): kicks an idle core for each runnable task no core runs that
+/// it may take, so work made runnable on one core (a reply, a message, a
+/// spawn, a wake at the boot core's tick) starts within a kick, not at the
+/// other core's next tick, 20 ms on. The boot core for a pinned task, a
+/// secondary per spawned program; this core is never kicked, since its own
+/// entry is choosing its next task already.
+pub(crate) fn kick_idle_cores() {
+    // One pass over the cores first: which tasks run, and whether any other
+    // core is idle at all. It runs at the end of every entry on every core,
+    // so the common case, no idle core to wake, costs one load per core
+    // and nothing more (the high review of #266 measured the first form,
+    // a running_core scan per task, at about 3 us a syscall under TCG on
+    // four cores).
+    let me = crate::smp::core_index() as usize;
+    let mut running = [false; NUM_TASKS];
+    let mut another_idle = false;
+    for core in crate::smp::up_cores() {
+        let t = current_on(core);
+        if t == TaskIndex::IDLE {
+            another_idle |= core != me;
+        } else {
+            running[t.index()] = true;
+        }
+    }
+    if !another_idle {
+        return;
+    }
+    // The runnable tasks no core runs: the work an idle core could take.
+    let mut waiting = [false; NUM_TASKS];
+    let mut any = false;
+    for t in TaskIndex::all() {
+        if t != TaskIndex::IDLE && !running[t.index()] && is_runnable(t) {
+            waiting[t.index()] = true;
+            any = true;
+        }
+    }
+    if !any {
+        return;
+    }
+    for core in crate::smp::up_cores() {
+        if core == me || current_on(core) != TaskIndex::IDLE {
+            continue;
+        }
+        // One task for each idle core kicked, so two cores are not sent
+        // after the same one.
+        if let Some(t) = TaskIndex::all().find(|t| waiting[t.index()] && may_run_on(core, *t)) {
+            waiting[t.index()] = false;
+            crate::smp::kick_resched(core);
+        }
+    }
 }
 
 /// The EL0-fault teardown's context switch: destroys the *currently
@@ -2906,7 +3172,11 @@ pub unsafe fn on_tick(frame: *mut Context) {
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
             return;
         }
-        kill_task(victim_slot);
+        // A victim running on a secondary is ended there (kill_task), at
+        // that core's next entry: the kick's, or at the latest its tick's.
+        if let Ended::OnCore(core) = kill_task(victim_slot) {
+            crate::console::println!("Ouroboros kernel: task {} is running on core {core}, which ends it", victim_slot.index());
+        }
         unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
     }
 
@@ -3002,7 +3272,17 @@ pub unsafe fn on_tick(frame: *mut Context) {
             }
             // Not the current task: tear it down in place, leave `current`
             // running, and fall through to the ordinary round-robin.
-            kill_task(server);
+            // A server is pinned to the boot core (may_run_here), so one that
+            // is not this tick's current runs nowhere and ends here; a server
+            // found running elsewhere is the pin broken, and restarting it
+            // into a slot that is still occupied would run two copies.
+            if kill_task(server) != Ended::Now {
+                crate::console::println_force!(
+                    "Ouroboros kernel: server slot {slot} found running on another core; servers are pinned to the boot core"
+                );
+                crate::lock::halt_kernel();
+                crate::power::halt();
+            }
             crate::supervisor::restart(slot);
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
         }
@@ -3014,7 +3294,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
         // and reloading the same context.
         return;
     }
-    unsafe { *TASKS[current.index()].get() = *frame };
+    save_frame(current, frame);
     switch_to(frame, next);
 }
 
@@ -3052,7 +3332,7 @@ pub unsafe fn on_net_irq(frame: *mut Context) {
             unsafe { (*TASKS[i].get()).gpr[0] = 0 };
             unsafe { *STATES[i].get() = TaskState::Runnable };
             if slot != current {
-                unsafe { *TASKS[current.index()].get() = *frame };
+                save_frame(current, frame);
                 switch_to(frame, slot);
             }
             // Only one task ever blocks on NetInput (the network server).

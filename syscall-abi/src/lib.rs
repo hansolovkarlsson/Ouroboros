@@ -122,6 +122,25 @@ pub const MSG_REPLY: u64 = 73;
 /// `[`TASK_ID_SLOT_BITS`]`) | slot`, the call number unique within a boot.
 pub const SENDER_CALL: u64 = 74;
 
+/// `(op)` -> what the kernel knows of the cores (multi-core step 4(d)), for a
+/// program that must see where it runs (`coreprobe`, `make test-smp`):
+/// [`CORE_INFO_THIS`] the index of the core running the caller (the MADT's),
+/// [`CORE_INFO_BUSY`] a bitmask of the cores running a spawned program at
+/// this instant, the caller's own included (not the boot shell, a server or
+/// the idle loop, so two bits mean two programs ran at once), and
+/// [`CORE_INFO_UP`] how many cores take tasks (the boot core and every
+/// secondary that came up). [`CORE_INFO_BAD_OP`] for any other `op`. A read
+/// of the scheduler's own state, under its lock; not gated.
+pub const CORE_INFO: u64 = 75;
+/// [`CORE_INFO`]: this core's index.
+pub const CORE_INFO_THIS: u64 = 0;
+/// [`CORE_INFO`]: the cores running a spawned program, one bit each.
+pub const CORE_INFO_BUSY: u64 = 1;
+/// [`CORE_INFO`]: how many cores take tasks.
+pub const CORE_INFO_UP: u64 = 2;
+/// [`CORE_INFO`]'s answer to an op it does not know.
+pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
+
 /// `(total staged length, stdout target, argv blob length)` -> **the new
 /// task's slot index** on success (needed to wait on, send to, or kill what
 /// was just started - the shell's pipeline flow does all three), [`SPAWN_ERROR`]
@@ -200,7 +219,12 @@ pub const TASK_STATE_INVALID: u64 = u64::MAX;
 /// same teardown as a voluntary [`EXIT`] (slot freed, mapping removed,
 /// RAM reclaimed in the LIFO case), minus the context switch: the killed
 /// task isn't the one running. If the killed task held the keyboard (see
-/// [`FG`]), ownership reverts as on any death of the owner.
+/// [`FG`]), ownership reverts as on any death of the owner. A task running
+/// on another core at the time (multi-core) is ended by that core, at its
+/// next entry into the kernel, which the kill brings about at once with an
+/// interrupt and at the latest with that core's next tick: `0` then says
+/// the task is ending, and a [`TASK_STATE`] or [`spawn`](SPAWN) in that
+/// moment may still find the slot occupied. [`WAIT`] is how to know it ended.
 pub const KILL: u64 = 19;
 
 /// `(task index, foreground)` -> `0` on success, [`TASK_ERR_PROTECTED`]

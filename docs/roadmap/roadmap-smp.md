@@ -45,8 +45,8 @@ later cannot be left out of the argument silently.
 | class | what is in it | what multi-core does to it |
 | --- | --- | --- |
 | **A. Boot-only.** Written before the exit, or before the second core starts, read after. | `bootid::IDENTITY`; `madt::CORES`, the cores the MADT lists, written by `discover` before the exit; `mmu::BOOT_REGIME`, the EL1 regime the boot core switched to, `smp::PARAMS`, what a secondary reads with its MMU off, and `smp::BOOT_INDEX`, the boot core's own MADT index, all written once before any `CPU_ON`; the early fault reporter's cells, dead once `exceptions::install` runs: `earlyfault::CONSOLE`, `earlyfault::FRAMEBUFFER`, `earlyfault::STACKS`, `earlyfault::RAM`, `earlyfault::RAM_TRUNCATED`, `earlyfault::TEST_FAULT`, `earlyfault::READING`, `earlyfault::PLANT_WALK_FAULT`, `earlyfault::IMAGE_RANGE`, `earlyfault::IMAGE_TABLE`, `earlyfault::ENTERED`; `power::CONDUIT`; `gic::INFO`; `gicv3::GICD_BASE`; `exceptions::NET_INTID`; `mmu::STORED_MEMORY_MAP`, `mmu::STORED_EXTRA_DEVICES`, `mmu::STORED_UNCACHED`; `main::ENTRY_SP`; the boot flags `usb_msd::STALLS_REQUESTED` and `usb_msd::INJECT_STALLS`; `font::FONT8X8_PRINTABLE`, which is immutable | Nothing. The argument becomes "written before `CPU_ON`", and `CPU_ON` is the happens-before edge: a barrier before the call, and the secondaries read what the boot core wrote. |
-| **B. Per-core by nature.** One per core, or held in a system register. | `main::KERNEL_STACK` and `smp::STACKS`, one per secondary; `smp::CORE_UP`, each core's own mark; `smp::CORE_TICKS`, each core's tick count (step 4(b)); `smp::KICKS`, the reasons each core was kicked for, `smp::PINGS_ANSWERED`, each core's answers to `smp::start`'s check, and `smp::WAITING`, the interrupt each core has acknowledged and waits for the kernel lock with (step 4(c)); `gicv2::CPU_MASKS`, each core's GICv2 interface mask, which only the core itself can read and any sender of an SGI to it needs; `gicv3::SGI_BASE` (this core's redistributor frame, found by `MPIDR_EL1`, so it is wrong on any other core today); the timer, which is system registers; `tasks::CURRENT`; `exceptions::TICKS`; the exception frame on each core's stack; the staging buffers a syscall copies through, `syscall::SPAWN_STAGING`, `syscall::ARGS_STAGING`, `syscall::CWD_STAGING`, `syscall::ENV_STAGING` and `syscall::PENDING_ENV_LEN`, per core rather than locked, since a spawn on two cores at once would otherwise be serialized by a 2 MB copy | Arrays indexed by core, with the core's index in `TPIDR_EL1` so the index is one instruction away in every trampoline. The stack array is the first thing the secondary entry stub needs. |
-| **C. Scheduler-owned.** The per-slot tables, indexed by task, touched by the task itself and by others (a sender to its mailbox, a parent at spawn, the supervisor, a kill). | `tasks::TASKS`, `tasks::REGIONS`, `tasks::STATES`, `tasks::MAILBOXES`, `tasks::GRANTS`, `tasks::ARGVS`, `tasks::ENVS`, `tasks::CWDS`, `tasks::NAMESPACES`, `tasks::SENDER_CREDS`, `tasks::IDS`, `tasks::SAVED_IDS`, `tasks::GROUPS`, `tasks::GROUP_COUNTS`, `tasks::PARENTS`, `tasks::DELEGATED_SEND`, `tasks::STDOUT_TARGET`, `tasks::CURRENT_CALLS`, `tasks::NEXT_CALL`, `tasks::GENERATIONS`, `tasks::NEXT_GENERATION`, `tasks::NEXT_RUNTIME_REGION_TOP`, `tasks::IDLE_REGION`; `supervisor::REGISTRY`; `lock::KERNEL_LOCK`, the lock itself, and `lock::HALTED`, set when a holder dies (step 4(a), 4(b)); the translation tables and their notes, `mmu::L0_TABLES`, `mmu::L1_TABLES`, `mmu::EXTRA_L1_TABLES`, `mmu::EL0_L2_TABLES`, `mmu::EL0_L3_TABLES`, `mmu::NC_L2_TABLES`, `mmu::NC_L3_TABLES`, `mmu::NC_NOTES`, `mmu::DEFERRED_REFUSAL`; `syscall::TASK_REPORTS` | One scheduler lock first: a spinlock taken at every kernel entry that touches a table, released before the `eret`, held only with IRQs masked (which at EL1 they always are). Per-slot locks later, if the measurement in step 4 says the one lock costs. |
+| **B. Per-core by nature.** One per core, or held in a system register. | `main::KERNEL_STACK` and `smp::STACKS`, one per secondary; `smp::CORE_UP`, each core's own mark; `smp::CORE_TICKS`, each core's tick count (step 4(b)); `smp::SECONDARIES_UP`, the secondaries up as one word, each core's own bit (step 4(d)); `smp::KICKS`, the reasons each core was kicked for, `smp::PINGS_ANSWERED`, each core's answers to `smp::start`'s check, and `smp::WAITING`, the interrupt each core has acknowledged and waits for the kernel lock with (step 4(c)); `gicv2::CPU_MASKS`, each core's GICv2 interface mask, which only the core itself can read and any sender of an SGI to it needs; `gicv3::SGI_BASE` (this core's redistributor frame, found by `MPIDR_EL1`, so it is wrong on any other core today); the timer, which is system registers; `tasks::CURRENT`; `exceptions::TICKS`; the exception frame on each core's stack; the staging buffers a syscall copies through, `syscall::SPAWN_STAGING`, `syscall::ARGS_STAGING`, `syscall::CWD_STAGING`, `syscall::ENV_STAGING` and `syscall::PENDING_ENV_LEN`, per core rather than locked, since a spawn on two cores at once would otherwise be serialized by a 2 MB copy (corrected in step 4(d): an array per core does not make them sound, since a stager can move between cores between its chunks; what they need is an owner, and they stay single until it is built) | Arrays indexed by core, with the core's index in `TPIDR_EL1` so the index is one instruction away in every trampoline. The stack array is the first thing the secondary entry stub needs. |
+| **C. Scheduler-owned.** The per-slot tables, indexed by task, touched by the task itself and by others (a sender to its mailbox, a parent at spawn, the supervisor, a kill). | `tasks::TASKS`, `tasks::REGIONS`, `tasks::STATES`, `tasks::MAILBOXES`, `tasks::GRANTS`, `tasks::ARGVS`, `tasks::ENVS`, `tasks::CWDS`, `tasks::NAMESPACES`, `tasks::SENDER_CREDS`, `tasks::IDS`, `tasks::SAVED_IDS`, `tasks::GROUPS`, `tasks::GROUP_COUNTS`, `tasks::PARENTS`, `tasks::DELEGATED_SEND`, `tasks::STDOUT_TARGET`, `tasks::CURRENT_CALLS`, `tasks::NEXT_CALL`, `tasks::GENERATIONS`, `tasks::NEXT_GENERATION`, `tasks::NEXT_RUNTIME_REGION_TOP`, `tasks::IDLE_REGION`; `tasks::DOOMED`, the tasks another core asked to end while they ran on this one (step 4(d)); `supervisor::REGISTRY`; `lock::KERNEL_LOCK`, the lock itself, and `lock::HALTED`, set when a holder dies (step 4(a), 4(b)); the translation tables and their notes, `mmu::L0_TABLES`, `mmu::L1_TABLES`, `mmu::EXTRA_L1_TABLES`, `mmu::EL0_L2_TABLES`, `mmu::EL0_L3_TABLES`, `mmu::NC_L2_TABLES`, `mmu::NC_L3_TABLES`, `mmu::NC_NOTES`, `mmu::DEFERRED_REFUSAL`, `mmu::BUILT_REGIONS`, the regions the views were last built for, which a rebuild compares against (step 4(d)); `syscall::TASK_REPORTS` | One scheduler lock first: a spinlock taken at every kernel entry that touches a table, released before the `eret`, held only with IRQs masked (which at EL1 they always are). Per-slot locks later, if the measurement in step 4 says the one lock costs. |
 | **D. Device-owned.** A device's handle and its DMA memory. | `syscall::BLOCK`, `syscall::NET`, `syscall::RNG`; the xHCI controller, `xhci::XHCI`, and its DMA memory, `xhci::DMA_POOL`, `xhci::USB_CBW_BUF`, `xhci::USB_CSW_BUF`, `xhci::USB_DATA_BUF`, `xhci::DCBAA`, `xhci::SCRATCHPAD_ARRAY`, `xhci::SCRATCHPAD_PAGES`, `xhci::COMMAND_RING`, `xhci::EP0_RINGS`, `xhci::INT_RING`, `xhci::BULK_IN_RING`, `xhci::BULK_OUT_RING`, `xhci::EVENT_RING`, `xhci::ERST`, `xhci::INPUT_CONTEXT`, `xhci::OUTPUT_DEVICE_CONTEXTS`, `xhci::CTRL_BUF`, `xhci::INT_BUF`; the USB storage counters `usb_msd::NEXT_TAG` and `usb_msd::RECOVERY_LOG_COUNT`; the virtio rings and buffers, `virtio_blk::DESC_TABLE`, `virtio_blk::AVAIL_RING`, `virtio_blk::USED_RING`, `virtio_blk::REQ_HEADER`, `virtio_blk::REQ_STATUS`, `virtio_net::RX_DESC`, `virtio_net::RX_AVAIL`, `virtio_net::RX_USED`, `virtio_net::TX_DESC`, `virtio_net::TX_AVAIL`, `virtio_net::TX_USED`, `virtio_net::RX_BUFS`, `virtio_net::TX_BUF`, `virtio_rng::DESC_TABLE`, `virtio_rng::AVAIL_RING`, `virtio_rng::USED_RING`, `virtio_rng::RNG_BUF`, `virtio_console::DESC_TABLE`, `virtio_console::AVAIL_RING`, `virtio_console::USED_RING` | A lock per device. Each has one user today (`BLOCK_*` is `fsd`'s alone, `NET_*` `netd`'s), which would allow pinning instead, but the xHCI controller is already shared between the tick's keyboard poll and `fsd`'s storage requests, so a per-device lock is the choice that is correct for all four without a placement rule. The DMA barriers `check-xhci-barriers` finds stay as they are; the uncached region is in the shared tables, so every core maps it alike. |
 | **E. Console and keyboard.** Written from every core's fault handler, from `cond`'s syscalls and from the tick. | `console::CONSOLE`, `console::CONSOLE_QUIET` and `console::CONSOLE_LOCK`, the lock itself; `fbdev::FB`; `syscall::KBD_QUEUE`; `tasks::INPUT_OWNER`, `tasks::PREVIOUS_OWNERS`, `tasks::FOREGROUND_COMMAND`, `tasks::PENDING_KILL`, `tasks::KBD_RAW` | A console lock of its own, which a fault handler takes with a timeout so a core that faults while another holds it still reports (the fault line then says the console was busy). The keyboard state goes under the scheduler lock: it is scheduler state (who is foreground, who dies), and the tick that reads ahead for the owner runs on one core (the next section). |
 
@@ -136,7 +136,14 @@ comparison), and restores it. A task made runnable by a message from
 another core is picked up at that core's next tick or by an SGI sent to an
 idle core, whichever the measurement favours. Servers start pinned to the
 boot core, with their device locks making the pin a performance choice and
-not a correctness one. Kills and keyboard owner changes become an SGI to the
+not a correctness one. *As built in step 4(d): no `Running(core)` state;
+"running on another core" is the per-core `CURRENT` read through
+`tasks::running_core`, one spelling for the pick, the kill and the table
+rebuild. An idle core is kicked, not left for its tick: a program calling
+`fsd` from a secondary would otherwise wait up to 20 ms for each answer.
+Placement is partitioned rather than round-robin over every core: the boot
+shell joins the servers on the boot core, and programs run on the
+secondaries, so placement is deterministic and a rig can require it.* Kills and keyboard owner changes become an SGI to the
 core that runs the target, so the per-task resets in `end_task` run where
 the task's registers are. *Corrected in step 4(c): a keyboard owner change
 needs nothing on the target's core (`INPUT_OWNER` is state under the
@@ -285,15 +292,61 @@ Its core cannot have switched away first, since a switch needs the lock.*
       retried, up to five. `make test-smp` requires each
       secondary's answer on all six boots, no line saying a core answered
       under the lock or could not be kicked, and on the `\SMPFAULT` boot the
-      halted core's silence. (d) placement, round-robin across cores
-      with servers pinned, and the remote kill (the Design section's
-      correction): the kick's second reason. The rig grows with each: two spinning programs
-      both progressing in `ps`, `fpprobe | fpprobe -` with the two probes on
-      two cores (the FP state of each core's task kept apart), and the whole
-      existing suite run with an `SMP=4` knob on `drive-qemu.py`'s `Guest`,
-      because the keyboard, kill and call rigs are the checks that would
-      see a race. QEMU's multi-threaded TCG runs each virtual core on a host
-      thread, so a race here is a real race, not a modelled one.
+      halted core's silence. (d) **done 2026-10-10 on QEMU: programs on the
+      secondaries.** One predicate, `tasks::may_run_here`, decides every
+      pick: the task is runnable, no other core runs it, and it is in this
+      core's part of the partition. The slots below `FIRST_SPAWNABLE` (the
+      boot shell, idle and the servers) run on the boot core, and a spawned
+      program runs on a secondary, falling back to the boot core only when
+      no secondary is up (`smp::secondaries_up`; a core that halts alone
+      marks itself down). A secondary's tick (`tasks::on_secondary_tick`)
+      round-robins its programs and does nothing else; the boot core's tick
+      keeps the wake-check for every blocked task, the keyboard, the kill
+      mark and the supervisor, as decision 2 said. A secondary takes real
+      work before its idle loop. The idle loop's registers are never saved
+      (`tasks::save_frame`): every idle core runs it from its first
+      instruction, and one slot could not hold several cores' copies. At
+      the end of every entry `tasks::kick_idle_cores` kicks an idle core for
+      each runnable task no core runs that it may take (`smp::KICK_RESCHED`),
+      so a reply to a program on a secondary, or a call from one to `fsd`,
+      starts within a kick and not at the other core's tick. The remote
+      kill: `tasks::kill_task` on a task running on another core marks it
+      (`tasks::DOOMED`, by identity) and kicks that core (`smp::KICK_KILL`),
+      which ends it at the start of its next entry, under the lock
+      (`tasks::end_if_doomed`), before a syscall is dispatched for it; the
+      supervisor's kill of a server is pinned to be local and halts if not.
+      The rebuild check the plan said was owed: `mmu::rebuild_with_el0_regions`
+      compares the regions with the last build's (`mmu::BUILT_REGIONS`) and
+      halts if a changed view is one some core runs. `CORE_INFO` (75) and
+      `/bin/COREPROBE` show where a program runs. `make test-smp`, on every
+      image boot shape: the probe alone on a secondary; two in a pipeline,
+      two programs at once; four in a pipeline on four cores, only on the
+      three secondaries and three at once (two probes could not see the
+      partition, since the kick sends a new program to an idle secondary
+      before the boot core's round reaches it); a hundred round trips to
+      `fsd` from a secondary under 5 ms each (350-600 us with the idle-core
+      kick, about 46 ms without); and `coreprobe hold` ended by Ctrl+C on
+      its own core. Each was seen to fail with its part of the kernel
+      removed: the kill done in place (the rebuild check halts), the
+      partition, the kick, the doom check in the IRQ entry. `SMP=N` boots
+      any rig on N cores (`drive-qemu.py`), and ten keyboard, kill, call
+      and FP rigs passed on one core and on four.
+      The plan's "two spinning programs both progressing in `ps`" became the
+      probe's own report, since `ps` would show both progressing on one core
+      too; two programs running at once is a bit each in `CORE_INFO`'s mask
+      at one instant.
+
+      **Found while building, not fixed here:** the spawn staging buffers
+      (`syscall::SPAWN_STAGING`, `ARGS_STAGING`, `CWD_STAGING`,
+      `ENV_STAGING`, `PENDING_ENV_LEN`) are filled over several syscalls and
+      belong to no task, so two tasks spawning at once interleave their
+      chunks and one spawns the other's image. This was already possible on
+      one core, since a stager can be preempted between chunks, and two
+      cores make it likelier. The inventory's remedy for them, an array per
+      core, does not fix it: the stager can move between cores between its
+      chunks, and the kernel lock already serializes every copy. The fix is
+      an owner for the staging, refused to a second stager until the first
+      spawns or dies. A roadmap item of its own.
 
 ## Size
 
