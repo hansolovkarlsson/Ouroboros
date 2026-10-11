@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
 version is held for a go-ahead. So far six days' work, 2026-10-05 to
-2026-10-10, #209 to #254: the storage server made safe under large writes and
+2026-10-10, #209 to #266: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the
@@ -19,7 +19,9 @@ console and keyboard made fit for a full-screen editor (all of Edit's request:
 cursor addressing, the navigation keys, the screen size, Ctrl-C as a key and
 `poll`), with a task's FP/SIMD registers saved across the kernel and keys
 typed while a program is busy kept, ending in DevTools's editor running here
-as `/bin/edit`. The days' records are in `docs/work-journal/`, one file a day.
+as `/bin/edit`. Then, on 2026-10-10, the multi-core arc on QEMU, from the
+plan to programs running on every core (#258 to #266). The days' records
+are in `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
 `cp` of a 758 KB file used to stop near 170 KB with `server slot 2 wedged`
@@ -292,6 +294,34 @@ Esc then `root` at login gave `oot`, and Esc then `q` paged `more` instead
 of quitting. A host terminal's Alt+x now types `x`. `make test-nav-keys`
 and `make test-kbd-cut` check it, and each check fails with its part
 removed.
+
+**Every core starts, and each runs its own idle loop and tick (#258 to
+#264).** The kernel used to run on the one core the firmware handed it and
+never start the others. It now finds every core in the ACPI MADT, starts
+each through PSCI `CPU_ON`, brings it to EL1 on the kernel's own tables (the
+Raspberry Pi hands each core over at EL2, and each drops itself as the boot
+core does), and gives it its own stack, GIC interface, timer and idle loop.
+The boot log says `MADT: N cores`, then `smp: core N up at EL1` and `core N
+ticking` for each. One kernel lock keeps one core at a time inside the
+kernel, taken at every entry and released before the return, so the
+single-core reasoning every kernel static relied on became "the holder of
+the lock"; `make check-statics`, in `make test`, holds every static to a
+class in the plan's inventory (`docs/roadmap/roadmap-smp.md`). A fault on a
+core says which (`EXCEPTION core=N`), and a core that faults in its own
+setup halts alone while the rest go on. `make test-smp` boots `-smp 4` on
+EL1 and EL2 handoffs and both GIC versions, and `-smp 1`.
+
+**Programs run on every core (#265, #266).** Any core can now interrupt
+another into the kernel with an SGI, on GICv2 and GICv3. Placement is split:
+the shell, the idle loop and the servers stay on the boot core, and every
+program a shell starts runs on another core, so two programs run at once.
+An idle core is woken as soon as there is work for it, which keeps a call
+to `fsd` from another core at well under a millisecond. Ctrl+C or `kill`
+on a program running on another core is carried out by that core, at once.
+`CORE_INFO` (syscall 75) says which core a program is on and how many run
+programs; `/bin/COREPROBE` reports it. `SMP=4` boots any QEMU rig on four
+cores, and ten keyboard, kill, call and FP rigs pass on one core and on
+four. Not yet seen on the Pi 4 or Parallels, which are owed.
 
 **A rig no longer boots an image built from other sources (#247).** The
 rigs refused a stale image by comparing modification times, and a reverted

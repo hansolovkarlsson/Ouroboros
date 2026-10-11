@@ -50,7 +50,12 @@ This document is the one to update first when direction changes.
 > that are cheaper on one core, FP/SIMD eager or lazy, the tick's jobs, task
 > 0's entry through the trampolines (3); then tasks on cores behind one
 > scheduler lock and per-device locks, measured (4). The week covers 0 to 3
-> and the start of 4; the arc ends when 4 does.
+> and the start of 4; the arc ends when 4 does. **Where it stands
+> (2026-10-10): every step is done on QEMU, 0 to 4(d), in one day (#258 to
+> #266).** Programs run on the secondaries and the shell and servers on the
+> boot core, under one kernel lock that has not needed splitting. Owed
+> before the arc closes: the Pi 4 and Parallels boots of every step since
+> 2, and an owner for the spawn staging buffers (item 4 below).
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as
@@ -747,7 +752,8 @@ not yet checked on this tree are marked (predicted).
       400 (item 6).
 - [ ] **4. Multi-core, on QEMU first. Planned 2026-10-10,
       [`roadmap-smp.md`](roadmap/roadmap-smp.md), the arc for the week of
-      2026-10-12.** Today one core runs everything and
+      2026-10-12. Built on QEMU the same day, steps 0 to 4(d) (#258 to
+      #266); the hardware boots and the item below are what is left.** Today one core runs everything and
       the others are never started; the single-core argument is load-bearing
       (`synccell.rs` states it once for every mutable static, and the kernel
       never runs at EL1 with IRQs unmasked). What it needs: the secondary
