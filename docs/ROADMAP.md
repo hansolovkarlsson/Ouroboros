@@ -56,7 +56,10 @@ This document is the one to update first when direction changes.
 > boot core, under one kernel lock that has not needed splitting. Owed
 > before the arc closes: the Pi 4 and Parallels boots of every step since
 > 2. The spawn staging buffers have their owner since 2026-10-11 (item 4
-> below, `make test-spawn-owner`).
+> below, `make test-spawn-owner`), and the same day gave the cores a reading
+> from a shell, `/proc/cpus` and `ps` naming a running task's core (#270,
+> #271), and wrote down the task stranded on a core that halted alone, item
+> 4's open sub-item.
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as

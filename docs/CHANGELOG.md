@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
 version is held for a go-ahead. So far seven days' work, 2026-10-05 to
-2026-10-11, #209 to #268: the storage server made safe under large writes and
+2026-10-11, #209 to #271: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the
@@ -21,7 +21,9 @@ cursor addressing, the navigation keys, the screen size, Ctrl-C as a key and
 typed while a program is busy kept, ending in DevTools's editor running here
 as `/bin/edit`. Then, on 2026-10-10, the multi-core arc on QEMU, from the
 plan to programs running on every core (#258 to #266), and on 2026-10-11
-the owner the spawn staging had owed since the arc's last step. The days'
+the owner the spawn staging had owed since the arc's last step, then the
+cores made readable from a shell, `/proc/cpus` and `ps` naming the core a
+running task is on. The days'
 records are in `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
@@ -337,7 +339,7 @@ image whose stamp is not the tree's (`scripts/srcid.py`).
 meant to persist, as Linux does, so it cannot clear a pending change or
 restart a reset by writing a bit back as read.
 
-**`ps` names the core a running task is on (2026-10-11).** With programs
+**`ps` names the core a running task is on (#271, 2026-10-11).** With programs
 placed on the secondaries since multi-core step 4(d), `ps`'s `runnable` hid
 a real third state: the task is executing on core N right now. The kernel
 knew (the per-core `CURRENT`, `tasks::running_core`) and nothing exposed it.
@@ -351,14 +353,15 @@ probe boots (the fault boot runs no programs): a `coreprobe hold` in the backgro
 secondary (runnable on one core, where the shell has it), `/proc/<n>/core`
 reads the same, and `kill` ends it. The second follow-up from #269.
 
-**`/proc/cpus`: how many cores take tasks, as a file (2026-10-11).** The
+**`/proc/cpus`: how many cores take tasks, as a file (#270, 2026-10-11).** The
 count was in the boot log and in `coreprobe`'s two-second report and nowhere
 a user could read it plainly. `fsd`'s synthetic `/proc` gains its first named
 top-level entry: `cat /proc/cpus` after `mount -p /proc` prints one line, the
 boot core and every secondary that came up, from the kernel's `CORE_INFO_UP`,
 asked on every read. Nothing lives under it. Checked by `make test-proc-cpus`,
 two boots, `-smp 1` and `-smp 4`, reading 1 and 4. Asked by Hans after #268;
-its companion, `ps` naming a running task's core, stays on the roadmap.
+its companion, `ps` naming a running task's core, went in the same day
+(#271, the entry above).
 
 **The kernel's spawn staging has one owner at a time (#268, 2026-10-11).** A
 spawn is fed through four staging buffers over many syscalls (one 512-byte

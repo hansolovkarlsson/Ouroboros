@@ -1,15 +1,16 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-10-09. Five PRs, no new subsystem, and four defects that were all
+through 2026-10-11. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
 duplicated constant guarded by a comment, a claim of unreachability that
 removed its own test, an authority that was already wrong, a diagnosis written
 before its dump was read, a comment that named its own expiry, a limit's
-"unreachable" made false by globbing, and a comment falsified by a later
-commit of its own pull request.*
+"unreachable" made false by globbing, a comment falsified by a later
+commit of its own pull request, and a rig outside the suite reading a line
+the suite's own change rewrote.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -966,6 +967,31 @@ commits that changed behaviour and not the comments that described the old
 one. **When a decision changes in the middle of a pull request, grep the
 pull request's own earlier commits for the sentences that stated the old
 decision.**
+
+## A rig the suite does not run (2026-10-11)
+
+`scripts/test-keyboard-chain.sh` graded its six nested-shell recipes on
+`ps`'s lines, among them `^task 6: runnable` for the shell underneath. That
+was true from the day it was written until #271's first commit made `ps`
+print `running on core N` for a task on a core, which on four cores the
+inner shell always is. The rig takes minutes and is outside `make test`, so
+nothing ran it; the suite stayed green; the second high review found the
+patterns by reading the rig, and the rerun showed four of the six recipes
+red. The shape of every section above, one layer out: the claim was not a
+comment but a check, and a check nobody runs is a claim with a shebang.
+**Before changing what a command prints, grep the rigs for the lines they
+read from it**, and run each one found whether or not the suite does;
+`grep -rn 'task [0-9]*: ' scripts/` would have named this one.
+
+Two smaller ones from the same pull request, both false on arrival. A
+comment in `tasks.rs` pointed the reader at a roadmap item, "a task stranded
+on a core that halted", that did not exist until the third review asked
+where it was; it exists now. And the remote kill's line, "task N is running
+on core C, which ends it", is a claim about every case, and the stranded
+task is the case where it is false: the core that would end it has halted
+with every interrupt masked. The line stands, since the roadmap item is what
+makes it true in every case, and it is the same claim-as-conclusion that
+the 09-20 section named.
 
 ## What actually worked
 
