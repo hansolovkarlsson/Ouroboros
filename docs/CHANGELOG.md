@@ -359,8 +359,8 @@ every failure after the first chunk. The shell names the refusal
 by `make test-spawn-owner` with `/bin/STAGEPROBE`, a probe that claims the
 staging as a spawner does and holds it: the shell's command refused and
 printing nothing while a program holds it, a second stager's code, and the
-release by exit, by `kill` and by abandon with the holder still alive; the
-refusal checks fail with the claim answering Ok to everyone, and with `SPAWN`
+release by exit, by `kill` and by abandon with the holder still alive, and a
+`SPAWN` of a total past what the owner staged refused; the refusal checks fail with the claim answering Ok to everyone, and with `SPAWN`
 not releasing the boot shell keeps the staging and no holder can claim.
 
 ## v0.22.0: the Raspberry Pi 4 runs a full session, and per-user keys below the wire (2026-10-04)

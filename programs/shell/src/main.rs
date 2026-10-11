@@ -1899,6 +1899,11 @@ fn print_no_fs() {
 /// A small value, below every kernel code (all `>= FS_ERR_MIN`) and above
 /// `0`, the existing "failed" sentinel, so it collides with nothing.
 const SHELL_ERR_EMPTY_PROGRAM: u64 = 1;
+/// The shell's other spawn refusal: the kernel refused the argv or cwd
+/// staging (`ARGS_STAGE`/`CWD_STAGE` answered an error). It used to be
+/// `Err(0)`, which every caller prints as "path too long" (the high review
+/// of #268).
+const SHELL_ERR_STAGE_REFUSED: u64 = 2;
 
 /// Prints `"<cmd>: <one specific reason>"` for a kernel `FS_ERR_*` code -
 /// the payoff of splitting the old single collapsed `FS_ERROR` sentinel:
@@ -1962,6 +1967,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         // SPAWN_ERR_TOO_LARGE and SPAWN_ERR_IMAGE_TOO_LARGE are handled
         // above (they print numbers).
         SHELL_ERR_EMPTY_PROGRAM => "program file is empty",
+        SHELL_ERR_STAGE_REFUSED => "the kernel refused the argument or working-directory staging",
         syscall_abi::SPAWN_ERR_NO_FREE_SLOT => "no free task slot",
         syscall_abi::SPAWN_ERR_STAGING_BUSY => "another task is mid-spawn and holds the kernel's spawn staging (try again)",
         syscall_abi::TASK_ERR_NO_SUCH_TASK => "no such task (see ps)",
@@ -2720,7 +2726,7 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
         Ok(n) => n,
         Err(()) => {
             abandon_staging();
-            return Err(0);
+            return Err(SHELL_ERR_STAGE_REFUSED);
         }
     };
     // Stage the cwd (arg3 = its length; the child reads it via GET_CWD), so a
@@ -2729,7 +2735,7 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
     let cwd_stage_len = if cwd_len > 0 {
         if syscall4(syscall_abi::CWD_STAGE, cwd.as_ptr() as u64, cwd_len as u64, 0, 0) != 0 {
             abandon_staging();
-            return Err(0);
+            return Err(SHELL_ERR_STAGE_REFUSED);
         }
         cwd_len as u64
     } else {

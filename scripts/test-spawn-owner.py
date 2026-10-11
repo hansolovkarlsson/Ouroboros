@@ -17,6 +17,9 @@ it.
 without spawning; `stageprobe check <ms>` waits, then tries to claim until it
 is refused and then until it succeeds. One boot, in this order:
 
+0. `stageprobe over`: one chunk staged, then a `SPAWN` of a total of 4096
+   must answer `SPAWN_ERROR` (the kernel hands a child no more than its
+   owner staged, so the previous stager's bytes are never parsed).
 1. `exec /bin/stageprobe check 6000`, then `exec /bin/stageprobe hold 12000` (both in
    the background). While the holder holds, `echo refused-one` must be
    refused by the shell with the code's message and print nothing; the
@@ -51,6 +54,7 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-spawn-owner.txt")
 PROMPT = "# "
 BUSY = (1 << 64) - 1 - 44      # syscall_abi::SPAWN_ERR_STAGING_BUSY
 TOO_LARGE = (1 << 64) - 1 - 12  # syscall_abi::SPAWN_ERR_TOO_LARGE, a SPAWN of total 0
+SPAWN_ERROR = (1 << 64) - 1     # syscall_abi::SPAWN_ERROR, a total past what the owner staged
 REFUSAL = r"echo: another task is mid-spawn and holds the kernel's spawn staging \(try again\)"
 
 
@@ -65,6 +69,10 @@ def drive(guest):
     got = {}
     if not guest.run([("login:", "root"), ("assword", "root"), (PROMPT, "")]):
         return None
+    # 0. a child gets no more than its owner staged: a SPAWN of a total past
+    # the one chunk is SPAWN_ERROR, not the previous stager's image parsed.
+    guest.type_line("/bin/stageprobe over")
+    got["over"] = guest.wait_for(rf"spawn of a total past the staged chunk answered code {SPAWN_ERROR}[\s\S]*" + PROMPT, timeout=30)
     # 1. the checker first (it waits six seconds before it tries), then the holder.
     guest.type_line("exec /bin/stageprobe check 6000")
     got["checker"] = guest.wait_for(r"stageprobe \d+: checking after ms 6000", timeout=30)
@@ -80,7 +88,8 @@ def drive(guest):
     # the checker's refusal line is already in the transcript: read at the end.
     got["claimed"] = guest.wait_for(rf"stageprobe {checker}: claimed after refusals \d+", timeout=60)
     claimed_out = guest.transcript()
-    got["holder1_exit"] = claimed_out.find(f"stageprobe {holder1}: exiting") < claimed_out.find(f"stageprobe {checker}: claimed")
+    exit1 = claimed_out.find(f"stageprobe {holder1}: exiting")
+    got["holder1_exit"] = exit1 >= 0 and exit1 < claimed_out.find(f"stageprobe {checker}: claimed")
     guest.type_line("echo ok-one")
     got["ok_one"] = guest.wait_for(r"\nok-one\r?\n[\s\S]*" + PROMPT, timeout=30)
     # 2. the release by a kill.
@@ -115,6 +124,7 @@ def checks(got, out, faults):
     ok3 = three.find("\nok-three")
     exit3 = three.find(f"stageprobe {holder3}: exiting")
     return [
+        ("a SPAWN of a total past what the owner staged is SPAWN_ERROR", bool(got["over"])),
         ("the checker and the first holder started", bool(got["checker"] and got["holder1"]) and None not in (checker, holder1)),
         ("echo refused while a program held the staging (the message)", bool(re.search(REFUSAL, one))),
         ("echo printed nothing while refused", "\nrefused-one" not in one),

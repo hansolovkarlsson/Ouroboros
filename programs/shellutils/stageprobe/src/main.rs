@@ -11,6 +11,11 @@
 //!                                 with a SPAWN of total 0, then linger ten
 //!                                 times as long before exiting (the release
 //!                                 is the abandon, with the task still alive)
+//! stageprobe over                 claim one 16-byte chunk, then SPAWN a total
+//!                                 of 4096 with argv and cwd lengths of 512 and
+//!                                 128: the kernel must answer SPAWN_ERROR (a
+//!                                 total past what this owner staged), never
+//!                                 read the previous stager's bytes as a program
 //! stageprobe check <ms>           wait <ms>, then try to claim every 20 ms:
 //!                                 report the first refusal and the claim that
 //!                                 follows it, give the claim up, exit 0; exit
@@ -31,7 +36,7 @@ const GIVE_UP_US: u64 = 40_000_000;
 static CHUNK: [u8; 16] = *b"stageprobe-chunk";
 
 fn usage(target: u64) -> ! {
-    ulib::write_out(target, b"usage: stageprobe hold <ms> [abandon] | check <ms>\r\n");
+    ulib::write_out(target, b"usage: stageprobe hold <ms> [abandon] | check <ms> | over\r\n");
     ulib::end_of_stream(target);
     ulib::exit(2);
 }
@@ -75,8 +80,21 @@ pub extern "C" fn _start() -> ! {
     let mode = match &word[..len.min(word.len())] {
         b"hold" => 0,
         b"check" => 1,
+        b"over" => 2,
         _ => usage(target),
     };
+    if mode == 2 {
+        let r = claim();
+        if r != 0 {
+            say(target, me, b"could not claim the staging, code ", Some(r));
+            ulib::end_of_stream(target);
+            ulib::exit(1);
+        }
+        let r = ulib::syscall4(syscall_abi::SPAWN, 4096, syscall_abi::CON_TASK, 512, 128);
+        say(target, me, b"spawn of a total past the staged chunk answered code ", Some(r));
+        ulib::end_of_stream(target);
+        ulib::exit(if r == syscall_abi::SPAWN_ERROR { 0 } else { 5 });
+    }
     let mut num = [0u8; 16];
     let Some(len) = ulib::arg(2, &mut num) else { usage(target) };
     let Some(ms) = core::str::from_utf8(&num[..len.min(num.len())]).ok().and_then(ulib::parse_u64) else {

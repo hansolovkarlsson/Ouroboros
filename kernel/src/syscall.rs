@@ -589,6 +589,16 @@ static ENV_STAGING: SyncCell<[u8; ENV_STAGING_SIZE]> = SyncCell::new([0; ENV_STA
 /// release, so a stager that ends leaves no environment for the next one.
 static PENDING_ENV_LEN: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+/// How much of each buffer the OWNER staged, so a `SPAWN` can hand its
+/// child only that: the end of the highest `SPAWN_STAGE` chunk, the
+/// `ARGS_STAGE` length and the `CWD_STAGE` length. `SPAWN`'s own lengths
+/// are the caller's word and were the only bound until 2026-10-11: a new
+/// owner that staged one chunk and asked for a 512-byte argv got the
+/// previous stager's argv bytes (the high review of #268). Cleared with
+/// every release, like the env latch.
+static STAGED_IMAGE_END: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static STAGED_ARGV_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static STAGED_CWD_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 /// The owner of the spawn staging ([`SPAWN_STAGING`], [`ARGS_STAGING`],
 /// [`CWD_STAGING`], [`ENV_STAGING`] and [`PENDING_ENV_LEN`]): the packed
@@ -609,27 +619,50 @@ static PENDING_ENV_LEN: core::sync::atomic::AtomicUsize =
 /// Read and written under the kernel lock, like every per-task table.
 static SPAWN_STAGER: AtomicU64 = AtomicU64::new(0);
 
-/// Claim the staging for the calling task: `Ok` when it is free, held by a
-/// task that is gone, or already the caller's; `Err(SPAWN_ERR_STAGING_BUSY)`
-/// while another live task holds it. Every staging arm calls this first,
-/// before it copies a byte, so a refused call stages nothing.
-fn claim_staging() -> Result<(), u64> {
-    let Some(me) = tasks::task_id_of(tasks::current_task()) else {
-        // The running task always has an identity; refuse rather than hand
-        // the staging to "nobody" if that ever stops being true.
-        return Err(SPAWN_ERROR);
-    };
+/// The staging as the calling task finds it: the one reading of
+/// [`SPAWN_STAGER`] that [`claim_staging`] and [`spawn_owner_check`] both
+/// act on, so the liveness rule (a dead owner is no owner) is written once.
+enum Staging {
+    /// The caller holds it.
+    Mine,
+    /// Another live task holds it.
+    Held,
+    /// Nobody does: never claimed, released, or claimed by a task since
+    /// gone. The mark and latches are cleared on the way, so the next owner
+    /// starts clean.
+    Free,
+}
+
+fn staging_state() -> Staging {
     let held = SPAWN_STAGER.load(Ordering::Relaxed);
-    if held == me {
-        return Ok(());
+    if held != 0 && tasks::task_id_of(tasks::current_task()) == Some(held) {
+        return Staging::Mine;
     }
     if held != 0 && tasks::live_occupant(held).is_some() {
-        return Err(syscall_abi::SPAWN_ERR_STAGING_BUSY);
+        return Staging::Held;
     }
-    // Free, or a dead owner's: a new owner starts with a clean latch.
     release_staging();
-    SPAWN_STAGER.store(me, Ordering::Relaxed);
-    Ok(())
+    Staging::Free
+}
+
+/// Claim the staging for the calling task: `Ok` when it is free or already
+/// the caller's; `Err(SPAWN_ERR_STAGING_BUSY)` while another live task holds
+/// it. Every staging arm calls this first, before it copies a byte, so a
+/// refused call stages nothing.
+fn claim_staging() -> Result<(), u64> {
+    match staging_state() {
+        Staging::Mine => Ok(()),
+        Staging::Held => Err(syscall_abi::SPAWN_ERR_STAGING_BUSY),
+        Staging::Free => {
+            let Some(me) = tasks::task_id_of(tasks::current_task()) else {
+                // The running task always has an identity; refuse rather
+                // than hand the staging to "nobody" if that ever changes.
+                return Err(SPAWN_ERROR);
+            };
+            SPAWN_STAGER.store(me, Ordering::Relaxed);
+            Ok(())
+        }
+    }
 }
 
 /// Whether the calling task may `SPAWN` what is staged: `Ok` when it is the
@@ -637,23 +670,24 @@ fn claim_staging() -> Result<(), u64> {
 /// staging; `Err(SPAWN_ERROR)` when nobody does (the caller staged nothing,
 /// so there is no program of its own to start).
 fn spawn_owner_check() -> Result<(), u64> {
-    let held = SPAWN_STAGER.load(Ordering::Relaxed);
-    if held != 0 && tasks::task_id_of(tasks::current_task()) == Some(held) {
-        return Ok(());
+    match staging_state() {
+        Staging::Mine => Ok(()),
+        Staging::Held => Err(syscall_abi::SPAWN_ERR_STAGING_BUSY),
+        Staging::Free => Err(SPAWN_ERROR),
     }
-    if held != 0 && tasks::live_occupant(held).is_some() {
-        return Err(syscall_abi::SPAWN_ERR_STAGING_BUSY);
-    }
-    release_staging();
-    Err(SPAWN_ERROR)
 }
 
-/// The staging is nobody's: the owner mark and the env latch cleared. The
-/// buffers' bytes are left as they are; a new owner overwrites what it
-/// uses and `SPAWN` reads only the length its owner staged.
+/// The staging is nobody's: the owner mark and every latch cleared. The
+/// buffers' bytes are left as they are, which is safe only because `SPAWN`
+/// hands a child no more than the latches say its owner staged
+/// ([`STAGED_IMAGE_END`], [`STAGED_ARGV_LEN`], [`STAGED_CWD_LEN`],
+/// [`PENDING_ENV_LEN`]); the bytes beyond are the previous stager's.
 fn release_staging() {
     SPAWN_STAGER.store(0, Ordering::Relaxed);
     PENDING_ENV_LEN.store(0, Ordering::Relaxed);
+    STAGED_IMAGE_END.store(0, Ordering::Relaxed);
+    STAGED_ARGV_LEN.store(0, Ordering::Relaxed);
+    STAGED_CWD_LEN.store(0, Ordering::Relaxed);
 }
 
 /// Release the staging if task `slot` holds it: the owner's end, called by
@@ -737,6 +771,9 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
     // an early failure) clears it - a failed spawn must not leak its staged env
     // onto the next one.
     let staged_env_len = pending_env_len();
+    let staged_image_end = STAGED_IMAGE_END.load(Ordering::Relaxed);
+    let staged_argv_len = STAGED_ARGV_LEN.load(Ordering::Relaxed);
+    let staged_cwd_len = STAGED_CWD_LEN.load(Ordering::Relaxed);
     let staging = unsafe { &mut *SPAWN_STAGING.get() };
     let size = total_len as usize;
     // A program bigger than the staging buffer can't have been staged
@@ -745,6 +782,11 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
     // path-reading implementation's own refusal.
     if size == 0 || size > staging.len() {
         return syscall_abi::SPAWN_ERR_TOO_LARGE;
+    }
+    // A total past what this owner staged would start the previous
+    // stager's bytes: a bad argument, not a program.
+    if size > staged_image_end {
+        return SPAWN_ERROR;
     }
     let program = &staging[..size];
 
@@ -777,15 +819,16 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
             tasks::set_stdout_target(slot, stdout_target);
             // Attach the argv blob staged via ARGS_STAGE (arg2 = its length;
             // 0 = no args). The child reads it via GET_ARGC/GET_ARG. Bounded
-            // by the staging buffer itself.
-            let argv_len = (argv_len as usize).min(ARGS_STAGING_SIZE);
+            // by what this owner staged, so a length past it cannot hand
+            // the child the previous stager's bytes.
+            let argv_len = (argv_len as usize).min(staged_argv_len);
             if argv_len > 0 {
                 let staged = unsafe { &*ARGS_STAGING.get() };
                 tasks::set_argv(slot, &staged[..argv_len]);
             }
             // Attach the working directory staged via CWD_STAGE (arg3 = its
             // length; 0 = none). The child reads it via GET_CWD.
-            let cwd_len = (cwd_len as usize).min(CWD_STAGING_SIZE);
+            let cwd_len = (cwd_len as usize).min(staged_cwd_len);
             if cwd_len > 0 {
                 let staged = unsafe { &*CWD_STAGING.get() };
                 tasks::set_cwd(slot, &staged[..cwd_len]);
@@ -1057,6 +1100,7 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // other userland pointer argument.
             let path = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
             staging[..len].copy_from_slice(path);
+            STAGED_CWD_LEN.store(len, Ordering::Relaxed);
             0
         }
         syscall_abi::GET_CWD => {
@@ -1106,6 +1150,7 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // other userland pointer argument.
             let blob = unsafe { core::slice::from_raw_parts(arg0 as *const u8, len) };
             staging[..len].copy_from_slice(blob);
+            STAGED_ARGV_LEN.store(len, Ordering::Relaxed);
             0
         }
         syscall_abi::GET_ARGC => argv_count(tasks::argv_blob(tasks::current_task())),
@@ -1389,6 +1434,7 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // every other userland pointer argument.
             let chunk = unsafe { core::slice::from_raw_parts(arg1 as *const u8, len) };
             staging[offset..end].copy_from_slice(chunk);
+            STAGED_IMAGE_END.fetch_max(end, Ordering::Relaxed);
             0
         }
         syscall_abi::EXIT => {

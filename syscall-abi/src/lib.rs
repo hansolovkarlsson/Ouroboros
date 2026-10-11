@@ -181,7 +181,11 @@ pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
 /// refused as [`SPAWN_ERR_TOO_LARGE`], as an empty total always was, and
 /// the staging is released. A stager that abandons without it holds the
 /// staging until its own next `SPAWN` or its end, and every other spawner
-/// is refused meanwhile.
+/// is refused meanwhile. A child gets no more than its owner staged: the
+/// argv and cwd lengths are capped to the `ARGS_STAGE`/`CWD_STAGE` lengths
+/// the owner gave, and a total past the end of its highest `SPAWN_STAGE`
+/// chunk is [`SPAWN_ERROR`], so the previous stager's bytes never reach a
+/// new owner's child.
 pub const SPAWN: u64 = 16;
 
 /// `(exit code)` -> **does not return** on success: the calling task is
