@@ -22,10 +22,11 @@
 //!   scroll decisions, ANSI parsing) moved out of the kernel's
 //!   `fbconsole`. Each glyph is looked up in this program's own `font`
 //!   and blitted via `FB_BLIT`; the kernel keeps only the dumb pixel
-//!   primitives (`FB_BLIT`/`FB_SCROLL`/`FB_CLEAR`/`FB_INVERT`,
-//!   `kernel/src/fbdev.rs`). The cursor is a steady block: the cell it is
-//!   on, inverted by `FB_INVERT` when a write ends and inverted back before
-//!   anything draws, hidden and shown by `CSI ? 25 l/h`.
+//!   primitives (`FB_BLIT`/`FB_SCROLL`/`FB_CLEAR`/`FB_CURSOR`,
+//!   `kernel/src/fbdev.rs`). The cursor is a steady block, the cell it is
+//!   on inverted: this side names the cell with `FB_CURSOR` when a write
+//!   ends and the kernel keeps it drawn through everything else that draws,
+//!   its own fault report included. `CSI ? 25 l/h` hide and show it.
 
 #![no_std]
 #![no_main]
@@ -169,11 +170,9 @@ struct Fb {
     /// DECTCEM, `CSI ? 25 h/l`: whether the cursor is drawn when a write
     /// ends. A full-screen program hides it while it redraws.
     cursor_visible: bool,
-    /// The cell the cursor is drawn on right now (inverted by
-    /// `FB_INVERT`), or `None` from the first drawing call of a write to
-    /// `cursor_settle` at its end. Kept apart from `col`/`row`, which move
-    /// while a write is drawn; the cursor comes off the cell it was put on,
-    /// wherever they are now.
+    /// The cell the kernel was last told the cursor is on (`FB_CURSOR`),
+    /// or `None` for hidden; `cursor_settle` tells it again only when this
+    /// differs from where the write left the cursor.
     cursor_at: Option<(usize, usize)>,
     ansi: Ansi,
     /// The CSI sequence being parsed: its numeric parameters, how many
@@ -241,7 +240,6 @@ impl Fb {
                                 *bits = !*bits;
                             }
                         }
-                        self.cursor_off();
                         syscall4(
                             syscall_abi::FB_BLIT,
                             cell.as_ptr() as u64,
@@ -360,7 +358,6 @@ impl Fb {
                         self.blank(0, self.row, self.col + 1);
                     }
                     2 => {
-                        self.cursor_off();
                         syscall4(syscall_abi::FB_CLEAR, 0, 0, 0, 0);
                     }
                     // 3 erases the scrollback (xterm), and there is none.
@@ -386,9 +383,8 @@ impl Fb {
 
     /// Acts on a private CSI sequence's final byte (`CSI ? ... h/l`). Only
     /// mode 25 (DECTCEM) does anything: `h` shows the cursor and `l` hides
-    /// it, from the end of this write on. Nothing is drawn here: the cursor
-    /// is off the screen for the whole of a write and `cursor_on` reads
-    /// `cursor_visible` when the write ends.
+    /// it, from the end of this write on. Nothing is drawn here:
+    /// `cursor_settle` reads `cursor_visible` when the write ends.
     fn private_csi(&mut self, final_byte: u8) {
         for i in 0..self.nparams.min(MAX_PARAMS) {
             if self.params[i] == 25 {
@@ -401,38 +397,24 @@ impl Fb {
         }
     }
 
-    /// Takes the cursor off the screen: the cell it was on is inverted
-    /// again, which gives it its pixels back. Every drawing path (glyphs,
-    /// erasing, scrolling, clearing) calls this first, so none of them ever
-    /// draws over the cursor; a write that draws nothing never pays for it.
-    fn cursor_off(&mut self) {
-        if let Some((col, row)) = self.cursor_at.take() {
-            syscall4(syscall_abi::FB_INVERT, col as u64, row as u64, 0, 0);
-        }
-    }
-
-    /// Settles the cursor when a write ends: on the cell the write left it
-    /// on, as that cell inverted, unless `CSI ? 25 l` hid it. A write that
-    /// drew nothing and left the cursor where it was costs nothing here (a
-    /// mode change, an empty write); one that moved it costs the old cell
-    /// back and the new one inverted. With a wrap pending the cursor is on
-    /// the last column's glyph, as a VT100 shows it.
+    /// Settles the cursor when a write ends: the kernel is told the cell the
+    /// write left it on, or no cell if `CSI ? 25 l` hid it, and only when
+    /// that differs from what it was last told. The kernel draws the cursor
+    /// as that cell inverted and keeps it so through every blit, scroll and
+    /// clear, so nothing here has to step around it. With a wrap pending the
+    /// cursor is on the last column's glyph, as a VT100 shows it.
     fn cursor_settle(&mut self) {
-        if !self.cursor_visible {
-            self.cursor_off();
+        let wanted = if self.cursor_visible { Some((self.col, self.row)) } else { None };
+        if wanted == self.cursor_at {
             return;
         }
-        if self.cursor_at == Some((self.col, self.row)) {
-            return;
-        }
-        self.cursor_off();
-        syscall4(syscall_abi::FB_INVERT, self.col as u64, self.row as u64, 0, 0);
-        self.cursor_at = Some((self.col, self.row));
+        let (col, row) = wanted.map_or((syscall_abi::FB_CURSOR_NONE, 0), |(c, r)| (c as u64, r as u64));
+        syscall4(syscall_abi::FB_CURSOR, col, row, 0, 0);
+        self.cursor_at = wanted;
     }
 
     /// Blanks `n` cells of `row` from `col`, clipped to the line.
-    fn blank(&mut self, col: usize, row: usize, n: usize) {
-        self.cursor_off();
+    fn blank(&self, col: usize, row: usize, n: usize) {
         let mut col = col;
         let mut left = n.min(self.cols.saturating_sub(col));
         while left > 0 {
@@ -449,7 +431,6 @@ impl Fb {
             self.row += 1;
         } else {
             // Already on the last row: scroll up one and stay put.
-            self.cursor_off();
             syscall4(syscall_abi::FB_SCROLL, 1, 0, 0, 0);
         }
     }

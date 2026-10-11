@@ -37,15 +37,7 @@ impl fmt::Write for Console {
             Console::Pl011(uart) => uart.write_str(s),
             Console::Uart16550(uart) => uart.write_str(s),
             Console::Virtio(dev) => write_str_virtio(dev, s),
-            Console::Framebuffer(fb) => {
-                // The console server's cursor is an inverted cell; it comes
-                // off while the kernel draws and goes back after, so the
-                // server's inversion stays consistent (fbdev::lift_cursor).
-                let lifted = crate::fbdev::lift_cursor();
-                let result = fb.write_str(s);
-                crate::fbdev::restore_cursor(lifted);
-                result
-            }
+            Console::Framebuffer(fb) => fb.write_str(s),
         }
     }
 }
@@ -101,11 +93,7 @@ impl Console {
             Console::Virtio(dev) => {
                 let _ = unsafe { dev.write(&[byte]) };
             }
-            Console::Framebuffer(fb) => {
-                let lifted = crate::fbdev::lift_cursor();
-                fb.put_char(byte);
-                crate::fbdev::restore_cursor(lifted);
-            }
+            Console::Framebuffer(fb) => fb.put_char(byte),
         }
     }
 
@@ -139,7 +127,7 @@ static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
 static CONSOLE_LOCK: AtomicU64 = AtomicU64::new(0);
 const LOCK_SPINS: u32 = 50_000_000;
 
-fn lock() {
+pub(crate) fn lock() {
     let me = crate::smp::core_index() + 1;
     for _ in 0..LOCK_SPINS {
         match CONSOLE_LOCK.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed) {
@@ -151,7 +139,7 @@ fn lock() {
     CONSOLE_LOCK.swap(me, Ordering::Acquire);
 }
 
-fn unlock() {
+pub(crate) fn unlock() {
     let me = crate::smp::core_index() + 1;
     let _ = CONSOLE_LOCK.compare_exchange(me, 0, Ordering::Release, Ordering::Relaxed);
 }
@@ -205,9 +193,15 @@ pub fn print(args: fmt::Arguments) {
 /// must reach a console even after the kernel has otherwise gone quiet.
 pub fn print_force(args: fmt::Arguments) {
     lock();
+    // The console server's cursor (an inverted framebuffer cell) comes off
+    // for the whole write and goes back after, under this lock, so a line
+    // drawn or scrolled over it leaves nothing inverted that is not the
+    // cursor (fbdev::lift_cursor). Nothing to do on a byte-stream console.
+    let lifted = crate::fbdev::lift_cursor();
     if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
         let _ = fmt::Write::write_fmt(console, args);
     }
+    crate::fbdev::restore_cursor(lifted);
     unlock();
 }
 
@@ -240,11 +234,13 @@ pub fn putc(byte: u8) {
 /// a batch costs two atomic operations rather than two per byte.
 pub fn write_bytes(bytes: &[u8]) {
     lock();
+    let lifted = crate::fbdev::lift_cursor();
     if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
         for &b in bytes {
             console.write_byte(b);
         }
     }
+    crate::fbdev::restore_cursor(lifted);
     unlock();
 }
 

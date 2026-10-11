@@ -1478,7 +1478,7 @@ decision and the lock split wait on. Parallels is still owed.
 terminal's cursor blink and the HDMI screen's absent. The framebuffer
 console had never drawn one, on any platform: `cond` kept a cell position
 and nothing marked it. Built the same day: a steady block cursor, the cell
-inverted by a new gated primitive (`FB_INVERT`), hidden and shown by
+inverted, placed by a new gated primitive (`FB_CURSOR`), hidden and shown by
 `CSI ? 25 l/h`, checked on QEMU's `ramfb` by `make test-cond-vt`. On the
 board it is a check by eye on the next boot: a block after the prompt,
 moving as you type, and `clear` leaving one at the top left.

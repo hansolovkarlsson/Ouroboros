@@ -42,6 +42,12 @@
 //! `hidden`, then waits for a key, so Ctrl+C kills it with the cursor hidden.
 //! The shell must show it again (`CSI ? 25 h`) before its prompt; without
 //! that, the console has no cursor until a program shows it.
+//!
+//! `vtprobe leave` writes `CSI ? 25 l`, `CSI 7 m` and `left`, and exits with
+//! both left changed: a program that ends that way leaves the console with
+//! no cursor and in reverse video, as on Unix, and `/bin/clear` is the way
+//! back (it shows the cursor and restores normal video first). The rig
+//! checks the prompt after it has no cursor, and the one after `clear` has.
 
 #![no_std]
 #![no_main]
@@ -52,6 +58,11 @@ pub extern "C" fn _start() -> ! {
     let target = ulib::stdout_target();
     let mut first = [0u8; 8];
     let mode = ulib::arg(1, &mut first).map(|n| &first[..n]);
+    if mode == Some(&b"leave"[..]) {
+        ulib::write_out(target, b"\x1b[?25l\x1b[7mleft\r\n");
+        ulib::end_of_stream(target);
+        ulib::exit(0);
+    }
     // The two hold probes: write the prefix, wait for a key (so Ctrl+C
     // kills the probe in that state), then the suffix.
     let holds: [(&[u8], &[u8], &[u8]); 2] = [

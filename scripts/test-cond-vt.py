@@ -30,9 +30,12 @@ Then the cursor: after `clear` the prompt's row must carry it, the cell after
 `# ` inverted (a blank cell inverted is a block); `vtprobe hide` writes
 `CSI ? 25 l` and `hidden` and waits, and its row must carry no inverted cell;
 Ctrl+C kills it, and the shell's next prompt must carry the cursor again (its
-reset after a kill shows it). The first fails with FB_INVERT a no-op in the
+reset after a kill shows it). The first fails with FB_CURSOR a no-op in the
 kernel, the second with cond ignoring `CSI ? 25 l`, the third with the shell's
-reset not writing `CSI ? 25 h`.
+reset not writing `CSI ? 25 h`. Last, `vtprobe leave` exits with the cursor
+hidden and video reversed, which the prompt after it keeps (as on Unix), and
+`clear` must bring both back: the prompt after it carries the cursor and is
+normal; fails with clear's `CSI 0 m` `CSI ? 25 h` prefix removed.
 
 `--keep DIR` leaves the final screendump (PPM) in DIR for a look by eye.
 """
@@ -212,6 +215,8 @@ def main() -> int:
     cursor_screen = None
     hidden_screen = None
     back_screen = None
+    left_screen = None
+    clear_screen = None
     driven = False
     try:
         qmp = Qmp(QMP)
@@ -312,6 +317,24 @@ def main() -> int:
                                         back_screen = snap()
                                         break
                                     time.sleep(0.5)
+                                # A program that exits with the cursor hidden
+                                # and video reversed leaves both; `clear` is
+                                # the way back.
+                                if back_screen is not None:
+                                    guest.type_line("vtprobe leave")
+                                    deadline = time.time() + 30
+                                    while time.time() < deadline:
+                                        rows = snap()
+                                        lines = text(rows)
+                                        at = next((i for i, l in enumerate(lines) if l.startswith("left")), None)
+                                        if at is not None and "#" in lines[at + 1:]:
+                                            time.sleep(drive_qemu.SETTLE)
+                                            left_screen = snap()
+                                            break
+                                        time.sleep(0.5)
+                                    if left_screen is not None:
+                                        guest.type_line("clear")
+                                        clear_screen = wait_screen(r"^#$")
         faults = guest.aborts()
     finally:
         guest.stop()
@@ -364,18 +387,34 @@ def main() -> int:
         at = next((i for i, l in enumerate(lines) if l.startswith("hidden")), None)
         return at is not None and not any(rev for _, rev in rows[at])
 
+    def prompt_left_changed(rows):
+        """The last prompt row after `vtprobe leave`: `# ` drawn reversed and no
+        cursor block after it."""
+        if not rows:
+            return False
+        lines = text(rows)
+        prompt_at = max((i for i, l in enumerate(lines) if l == "#"), default=None)
+        if prompt_at is None:
+            return False
+        row = rows[prompt_at]
+        return row[0] == ("#", True) and row[2] == (BLANK, False)
+
     cursor_drawn = cursor_on_prompt(cursor_screen)
     cursor_hidden = no_cursor_on_hidden(hidden_screen)
     cursor_back = cursor_on_prompt(back_screen) and (
         back_screen is not None and no_cursor_on_hidden(back_screen))
+    left_kept = prompt_left_changed(left_screen)
+    clear_restores = cursor_on_prompt(clear_screen) and clear_screen[0][0] == ("#", False)
     checks = [
-        ("driven to the end", driven and back_screen is not None),
+        ("driven to the end", driven and clear_screen is not None),
         (f"rows 1-{CHECKED_ROWS} and the bottom-right cell as modelled", driven and not bad),
         ("vtprobe hold drew `held` reversed", held_reversed),
         ("after Ctrl+C killed it, the shell's prompt is in normal video", prompt_normal),
         ("the cursor is drawn after the prompt (the cell inverted, the row's only one)", cursor_drawn),
         ("vtprobe hide (CSI ? 25 l) takes the cursor off its row", cursor_hidden),
         ("after Ctrl+C killed it, the shell's prompt has the cursor again", cursor_back),
+        ("a program that exits with the cursor hidden and video reversed leaves both (as on Unix)", left_kept),
+        ("clear shows the cursor and restores normal video before it clears", clear_restores),
         ("no fault lines", faults == 0),
     ]
     for line in bad[:40]:

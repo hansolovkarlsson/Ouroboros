@@ -569,15 +569,20 @@ pub const FB_SCROLL: u64 = 36;
 /// Used by the server's startup and its `clear`/ANSI-`2J` handling.
 pub const FB_CLEAR: u64 = 37;
 
-/// `(col, row)` -> `0`, or a reserved-band error. Inverts the pixels of
-/// one framebuffer character cell, white to black and black to white.
-/// **Gated to [`CON_TASK`]**. The server's cursor (since 2026-10-11): it
-/// draws the cursor by inverting the cell it is on when a write ends, and
-/// takes it off by inverting the same cell again before the next write,
-/// so it needs no copy of what the cell holds. A cell past the last
-/// column or row is skipped. Numbered after [`CORE_INFO`], the last
-/// syscall before it, rather than beside its siblings.
-pub const FB_INVERT: u64 = 76;
+/// `(col, row)` -> `0`, or a reserved-band error. Puts the console's
+/// cursor on one framebuffer character cell, drawn as that cell inverted,
+/// or nowhere when the cell is past the screen ([`FB_CURSOR_NONE`] is the
+/// spelling for that). **Gated to [`CON_TASK`]**. The kernel owns the one
+/// inverted cell (since 2026-10-11): a blit over it, a scroll, a clear and
+/// the kernel's own fault report all lift it first and put it back after,
+/// so the server names the cell when its write ends and keeps no copy of
+/// the screen, and nothing is ever left inverted that is not the cursor.
+/// Numbered after [`CORE_INFO`], the last syscall before it, rather than
+/// beside its siblings.
+pub const FB_CURSOR: u64 = 76;
+/// [`FB_CURSOR`]'s column for "no cursor": any cell past the screen means
+/// the same, and this one is past every screen.
+pub const FB_CURSOR_NONE: u64 = u64::MAX;
 
 /// `()` -> the calling task's **stdout target** (the task index its
 /// output should be sent to, set by whoever [`SPAWN`]ed it; [`CON_TASK`]
