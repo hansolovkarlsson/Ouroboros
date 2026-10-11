@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
 version is held for a go-ahead. So far seven days' work, 2026-10-05 to
-2026-10-11, #209 onward: the storage server made safe under large writes and
+2026-10-11, #209 to #268: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the
@@ -337,7 +337,7 @@ image whose stamp is not the tree's (`scripts/srcid.py`).
 meant to persist, as Linux does, so it cannot clear a pending change or
 restart a reset by writing a bit back as read.
 
-**The kernel's spawn staging has one owner at a time (2026-10-11).** A
+**The kernel's spawn staging has one owner at a time (#268, 2026-10-11).** A
 spawn is fed through four staging buffers over many syscalls (one 512-byte
 chunk each, with a round trip to `fsd` between them), and the buffers
 belonged to no task: two tasks spawning at once interleaved their chunks

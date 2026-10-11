@@ -352,7 +352,7 @@ Its core cannot have switched away first, since a switch needs the lock.*
       an owner for the staging, refused to a second stager until the first
       spawns or dies. A roadmap item of its own.
 
-      **Built 2026-10-11.** `syscall::SPAWN_STAGER` holds the stager's
+      **Built 2026-10-11 (#268).** `syscall::SPAWN_STAGER` holds the stager's
       task identity: the first staging call claims it, every other task's
       staging call and `SPAWN` answer `SPAWN_ERR_STAGING_BUSY` (the floor's
       old value, `FS_ERR_MIN` stepped down to `MAX-45` with `sys.h`'s

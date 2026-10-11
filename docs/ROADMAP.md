@@ -769,7 +769,7 @@ not yet checked on this tree are marked (predicted).
       Pi 4 and Parallels boots of every step since 2. The other debt from
       4(d), an owner for the spawn staging buffers that two spawners
       interleaved (one core could already, two made it likelier), was
-      built on 2026-10-11: `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
+      built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
       and `make test-spawn-owner` (`roadmap-smp.md`, step 4(d)).
 - [ ] **5. SSH, to reach a Pi remotely.** **Needs networking on the Pi
       first**, which it has none of: the Pi 4's on-board Ethernet is GENET,
