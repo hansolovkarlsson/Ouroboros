@@ -122,15 +122,22 @@ pub const MSG_REPLY: u64 = 73;
 /// `[`TASK_ID_SLOT_BITS`]`) | slot`, the call number unique within a boot.
 pub const SENDER_CALL: u64 = 74;
 
-/// `(op)` -> what the kernel knows of the cores (multi-core step 4(d)), for a
-/// program that must see where it runs (`coreprobe`, `make test-smp`):
-/// [`CORE_INFO_THIS`] the index of the core running the caller (the MADT's),
-/// [`CORE_INFO_BUSY`] a bitmask of the cores running a spawned program at
-/// this instant, the caller's own included (not the boot shell, a server or
-/// the idle loop, so two bits mean two programs ran at once), and
-/// [`CORE_INFO_UP`] how many cores take tasks (the boot core and every
-/// secondary that came up). [`CORE_INFO_BAD_OP`] for any other `op`. A read
-/// of the scheduler's own state, under its lock; not gated.
+/// `(op, slot)` -> what the kernel knows of the cores (multi-core step 4(d)),
+/// for a program that must see where it runs (`coreprobe`, `make test-smp`)
+/// and for `ps` and `/proc`: [`CORE_INFO_THIS`] the index of the core
+/// running the caller (the MADT's), [`CORE_INFO_BUSY`] a bitmask of the
+/// cores running a spawned program at this instant, the caller's own
+/// included (not the boot shell, a server or the idle loop, so two bits mean
+/// two programs ran at once), [`CORE_INFO_UP`] how many cores take tasks
+/// (the boot core and every secondary that came up), and
+/// [`CORE_INFO_TASK_CORE`] the core that is executing task `slot` (the
+/// second argument) at this instant, or [`CORE_INFO_NO_CORE`] when no core
+/// is: the slot is runnable but waiting its turn, blocked, empty, out of
+/// range, or the idle slot (every idle core runs it, so it has no one core).
+/// [`CORE_INFO_BAD_OP`] for any other `op`. A read of the scheduler's own
+/// state, under its lock; not gated. Only a task on a core has a core:
+/// placement is at dispatch, not a pin, so the answer is this instant's and
+/// a program moves between secondaries whenever it blocks.
 pub const CORE_INFO: u64 = 75;
 /// [`CORE_INFO`]: this core's index.
 pub const CORE_INFO_THIS: u64 = 0;
@@ -138,6 +145,12 @@ pub const CORE_INFO_THIS: u64 = 0;
 pub const CORE_INFO_BUSY: u64 = 1;
 /// [`CORE_INFO`]: how many cores take tasks.
 pub const CORE_INFO_UP: u64 = 2;
+/// [`CORE_INFO`]: the core executing the task in the second argument, or
+/// [`CORE_INFO_NO_CORE`] (since 2026-10-11, for `ps` and `/proc/<n>/core`).
+pub const CORE_INFO_TASK_CORE: u64 = 3;
+/// [`CORE_INFO_TASK_CORE`]'s answer when no core is executing the task.
+/// Below [`CORE_INFO_BAD_OP`]; a core index is small, so neither can be one.
+pub const CORE_INFO_NO_CORE: u64 = u64::MAX - 1;
 /// [`CORE_INFO`]'s answer to an op it does not know.
 pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
 

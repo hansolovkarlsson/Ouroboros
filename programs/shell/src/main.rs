@@ -3539,12 +3539,27 @@ fn cmd_ps(out: &mut Output) {
             }
             out.put_str(") - `wait` to collect");
         } else {
-            out.put_str(match state {
-                TASK_STATE_UNUSED => ": unused",
-                TASK_STATE_RUNNABLE => ": runnable",
-                TASK_STATE_BLOCKED => ": blocked (waiting)",
-                _ => ": ?",
-            });
+            // A runnable task on a core right now is a third state, not a
+            // kind of runnable: with programs placed on the secondaries
+            // (multi-core step 4(d)) `runnable` alone hid it. This shell is
+            // itself one such task while it runs `ps`. Only a task on a
+            // core has a core; a runnable one waiting its turn has none.
+            let core = if state == TASK_STATE_RUNNABLE {
+                syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, i, 0, 0)
+            } else {
+                syscall_abi::CORE_INFO_NO_CORE
+            };
+            if core != syscall_abi::CORE_INFO_NO_CORE {
+                out.put_str(": running on core ");
+                out.put_u64_decimal(core);
+            } else {
+                out.put_str(match state {
+                    TASK_STATE_UNUSED => ": unused",
+                    TASK_STATE_RUNNABLE => ": runnable",
+                    TASK_STATE_BLOCKED => ": blocked (waiting)",
+                    _ => ": ?",
+                });
+            }
         }
         // Append the name, when the slot has one (unused slots don't).
         let mut name = [0u8; syscall_abi::TASK_NAME_MAX as usize];

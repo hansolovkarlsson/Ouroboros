@@ -14,8 +14,9 @@
 //! ```text
 //!   /              ->  cpus 0/ 1/ 2/ ... the cores file, then one dir per scheduler slot
 //!   /cpus          ->  "4\n"             how many cores take tasks (CORE_INFO_UP; since 2026-10-11)
-//!   /<n>           ->  state             the slot's files
+//!   /<n>           ->  state core        the slot's files
 //!   /<n>/state     ->  "runnable\n" | "blocked\n" | "zombie\n" | "unused\n"
+//!   /<n>/core      ->  "1\n" | "none\n"   the core executing the task now (CORE_INFO_TASK_CORE; since 2026-10-11)
 //! ```
 //!
 //! Read-only: every write/mutate method returns [`Error::ReadOnly`]. Only per-slot
@@ -42,6 +43,8 @@ enum Node {
     Task(u64),
     /// `/<n>/state` - the slot's state file.
     State(u64),
+    /// `/<n>/core` - the core executing the slot's task now, or `none`.
+    Core(u64),
     /// `/cpus` - how many cores take tasks.
     Cpus,
     /// `/cpus/...` - a path beneath the file: not a directory, as a path under
@@ -87,11 +90,13 @@ impl Fs {
                 Ok(())
             }
             Node::Task(n) => {
-                // A slot's directory holds just `state`.
+                // A slot's directory holds `state` and `core`.
                 f("state", false, state_bytes(n).len() as u32);
+                let mut core = [0u8; CPUS_MAX];
+                f("core", false, core_bytes(n, &mut core) as u32);
                 Ok(())
             }
-            Node::State(_) | Node::Cpus | Node::UnderCpus => Err(Error::NotADirectory),
+            Node::State(_) | Node::Core(_) | Node::Cpus | Node::UnderCpus => Err(Error::NotADirectory),
             Node::NotFound => Err(Error::NotFound),
         }
     }
@@ -103,6 +108,11 @@ impl Fs {
     pub fn read_at(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
         match parse(path) {
             Node::State(n) => Ok(copy_out(state_bytes(n), offset, buf)),
+            Node::Core(n) => {
+                let mut core = [0u8; CPUS_MAX];
+                let len = core_bytes(n, &mut core);
+                Ok(copy_out(&core[..len], offset, buf))
+            }
             Node::Cpus => {
                 let mut cpus = [0u8; CPUS_MAX];
                 let n = cpus_bytes(&mut cpus);
@@ -120,6 +130,10 @@ impl Fs {
         let (size, is_dir) = match parse(path) {
             Node::Root | Node::Task(_) => (0u64, true),
             Node::State(n) => (state_bytes(n).len() as u64, false),
+            Node::Core(n) => {
+                let mut core = [0u8; CPUS_MAX];
+                (core_bytes(n, &mut core) as u64, false)
+            }
             Node::Cpus => {
                 let mut cpus = [0u8; CPUS_MAX];
                 (cpus_bytes(&mut cpus) as u64, false)
@@ -183,6 +197,21 @@ fn cpus_bytes(buf: &mut [u8; CPUS_MAX]) -> usize {
     n + 1
 }
 
+/// The bytes of `/<n>/core`: the index of the core executing slot `n` at
+/// this instant, from the kernel's `CORE_INFO_TASK_CORE`, or `none` when no
+/// core is (runnable but waiting its turn, blocked, empty, or the idle slot).
+/// `fsd` itself is on a core while it answers, so its own slot reads a core.
+fn core_bytes(n: u64, buf: &mut [u8; CPUS_MAX]) -> usize {
+    let core = crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, n, 0, 0);
+    if core == syscall_abi::CORE_INFO_NO_CORE || core == syscall_abi::CORE_INFO_BAD_OP {
+        buf[..5].copy_from_slice(b"none\n");
+        return 5;
+    }
+    let len = u64_decimal(core, &mut buf[..CPUS_MAX - 1]);
+    buf[len] = b'\n';
+    len + 1
+}
+
 /// Copy `src[offset..]` into `buf`, returning the byte count (0 at/past the end).
 fn copy_out(src: &[u8], offset: u64, buf: &mut [u8]) -> u32 {
     let off = offset as usize;
@@ -195,7 +224,7 @@ fn copy_out(src: &[u8], offset: u64, buf: &mut [u8]) -> u32 {
 }
 
 /// Parse a `/proc`-relative path (byte scanning; relocation-safe). Accepts `/`,
-/// `/cpus`, `/<digits>`, and `/<digits>/state`; `/cpus/...` is
+/// `/cpus`, `/<digits>`, `/<digits>/state` and `/<digits>/core`; `/cpus/...` is
 /// [`Node::UnderCpus`] and anything else [`Node::NotFound`].
 fn parse(path: &str) -> Node {
     let b = path.as_bytes();
@@ -237,6 +266,8 @@ fn parse(path: &str) -> Node {
     let rest = &b[i..];
     if rest == b"state" {
         Node::State(n)
+    } else if rest == b"core" {
+        Node::Core(n)
     } else {
         Node::NotFound
     }

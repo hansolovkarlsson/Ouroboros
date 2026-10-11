@@ -337,6 +337,20 @@ image whose stamp is not the tree's (`scripts/srcid.py`).
 meant to persist, as Linux does, so it cannot clear a pending change or
 restart a reset by writing a bit back as read.
 
+**`ps` names the core a running task is on (2026-10-11).** With programs
+placed on the secondaries since multi-core step 4(d), `ps`'s `runnable` hid
+a real third state: the task is executing on core N right now. The kernel
+knew (the per-core `CURRENT`, `tasks::running_core`) and nothing exposed it.
+A fourth `CORE_INFO` operation, `CORE_INFO_TASK_CORE` with the slot as its
+second argument, answers the core or `CORE_INFO_NO_CORE`; `ps` prints
+`running on core N` for such a task (the shell itself, running `ps`, is
+one) and keeps `runnable` for one waiting its turn; `/proc/<n>/core` answers
+the same by file, `none` when no core is. Only a task on a core has a core:
+placement is at dispatch, not a pin. Checked in `make test-smp` on every
+boot: a `coreprobe hold` in the background shows in `ps` as running on a
+secondary (runnable on one core, where the shell has it), `/proc/<n>/core`
+reads the same, and `kill` ends it. The second follow-up from #269.
+
 **`/proc/cpus`: how many cores take tasks, as a file (2026-10-11).** The
 count was in the boot log and in `coreprobe`'s two-second report and nowhere
 a user could read it plainly. `fsd`'s synthetic `/proc` gains its first named

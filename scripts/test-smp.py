@@ -224,6 +224,29 @@ def run_probes(guest):
     # (the high review of #266).
     got["hold"] = held and guest.wait_for(r"\nafter-the-kill\r?\n[\s\S]*" + PROMPT, timeout=30)
     got["hold_out"] = guest.transcript()
+    # A program held in the background, so the shell can ask where it is:
+    # `ps` names the core a running task is on (2026-10-11), `/proc/<n>/core`
+    # answers the same by file, and `kill` ends it.
+    guest.type_line("exec /bin/coreprobe hold")
+    # The prompt comes back before the probe's line (exec returns at once),
+    # so wait for the line alone, then for ps's last slot and its prompt.
+    bg = guest.wait_for(r"holding on core \d+", timeout=30)
+    guest.type_line("ps")
+    # The typed `ps` follows the prompt on its line, so key on the last slot.
+    bg = guest.wait_for(r"task 10: [^\n]*\n[\s\S]*?" + PROMPT, timeout=30) and bg
+    ps_out = guest.transcript()
+    slot = re.search(r"task (\d+): (?:running on core \d+|runnable)\s+(?:/bin/)?coreprobe", ps_out[len(got["hold_out"]):], re.I)
+    slot = slot.group(1) if slot else "99"
+    guest.type_line("mount -p /proc")
+    guest.wait_for(PROMPT, timeout=30)
+    guest.type_line(f"cat /proc/{slot}/core")
+    guest.wait_for(PROMPT, timeout=30)
+    guest.type_line(f"kill {slot}")
+    guest.wait_for(PROMPT, timeout=30)
+    guest.type_line("echo after-the-bg-kill")
+    got["bg"] = bg and guest.wait_for(r"\nafter-the-bg-kill\r?\n[\s\S]*" + PROMPT, timeout=30)
+    got["bg_slot"] = slot
+    got["bg_out"] = guest.transcript()
     return got
 
 
@@ -280,6 +303,30 @@ def probe_checks(name, smp, boot_index, probe):
                        and remote.group(2) in secondaries))
     else:
         checks.append((f"{name}: one core, so no kill was sent to another", remote is None))
+    # The background hold: `ps` and `/proc/<n>/core` on a program that is
+    # running right now (on a secondary) or waiting its turn (one core, where
+    # the shell running `ps` is the one on the core).
+    bg_out = probe.get("bg_out", "")[len(probe["hold_out"]):]
+    slot = probe.get("bg_slot", "99")
+    ps_line = re.search(rf"task {slot}: (running on core (\d+)|runnable)", bg_out)
+    shell_line = re.search(rf"task 0: running on core (\d+)", bg_out)
+    core_file = re.search(rf"cat /proc/{slot}/core\r?\n([^\r\n]+)", bg_out)
+    if many:
+        checks.append((f"{name}: `ps` shows the held program running on a secondary"
+                       + (f" (saw `{ps_line.group(1)}`)" if ps_line else ""),
+                       probe.get("bg", False) and ps_line is not None and ps_line.group(2) in secondaries))
+        checks.append((f"{name}: `/proc/{slot}/core` names a secondary" + (f" (read `{core_file.group(1)}`)" if core_file else ""),
+                       core_file is not None and core_file.group(1) in secondaries))
+    else:
+        checks.append((f"{name}: `ps` shows the held program runnable, not on a core (the shell has the one core)"
+                       + (f" (saw `{ps_line.group(1)}`)" if ps_line else ""),
+                       probe.get("bg", False) and ps_line is not None and ps_line.group(1) == "runnable"))
+        checks.append((f"{name}: `/proc/{slot}/core` reads none" + (f" (read `{core_file.group(1)}`)" if core_file else ""),
+                       core_file is not None and core_file.group(1) == "none"))
+    checks.append((f"{name}: `ps` shows the shell itself running on the boot core, core {boot_index}"
+                   + (f" (saw core {shell_line.group(1)})" if shell_line else ""),
+                   shell_line is not None and shell_line.group(1) == str(boot_index)))
+    checks.append((f"{name}: `kill {slot}` ended the held program and the shell answered after", probe.get("bg", False)))
     return checks
 
 

@@ -2520,15 +2520,21 @@ pub(crate) unsafe fn end_if_doomed(frame: *mut Context) -> bool {
 }
 
 /// `CORE_INFO`'s answers (multi-core step 4(d)): this core's index, the
-/// cores running a spawned program, or how many cores take tasks. Under
-/// the kernel lock, so the busy mask is one instant's.
-pub(crate) fn core_info(op: u64) -> u64 {
+/// cores running a spawned program, how many cores take tasks, or the core
+/// executing task `arg` (2026-10-11, for `ps` and `/proc/<n>/core`: the
+/// per-core `CURRENT`, through [`running_core`], which answers `None` for
+/// the idle slot since every idle core runs it). Under the kernel lock, so
+/// the busy mask and a task's core are one instant's.
+pub(crate) fn core_info(op: u64, arg: u64) -> u64 {
     match op {
         syscall_abi::CORE_INFO_THIS => crate::smp::core_index(),
         syscall_abi::CORE_INFO_BUSY => crate::smp::up_cores()
             .filter(|&c| current_on(c).is_spawnable())
             .fold(0u64, |mask, c| mask | (1 << c)),
         syscall_abi::CORE_INFO_UP => crate::smp::up_cores().count() as u64,
+        syscall_abi::CORE_INFO_TASK_CORE => TaskIndex::new(arg as usize)
+            .and_then(running_core)
+            .map_or(syscall_abi::CORE_INFO_NO_CORE, |c| c as u64),
         _ => syscall_abi::CORE_INFO_BAD_OP,
     }
 }

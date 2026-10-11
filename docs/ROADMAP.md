@@ -788,7 +788,15 @@ not yet checked on this tree are marked (predicted).
             asks the kernel, so no new syscall. Done when `cat /proc/cpus`
             prints `4` under `SMP=4` and `1` on one core, in a rig. (Done:
             the rig boots `-smp 1` and `-smp 4` and reads 1 and 4.)
-      - [ ] **`ps` names the core a running task is on.** With programs
+      - [x] **`ps` names the core a running task is on.** Built 2026-10-11:
+            `CORE_INFO_TASK_CORE`, `ps`'s `running on core N`, and
+            `/proc/<n>/core`, checked in `test-smp.py` on every boot. One
+            adjustment to the "done when" below: the rig requires the core
+            `ps` names to be a secondary, not the one the probe's own line
+            named, because a program moves between secondaries whenever it
+            blocks and its "holding" line is itself a call to the console
+            server (`test-smp.py` already notes this for the kill). As
+            planned: with programs
             placed on the secondaries (step 4(d)), `ps`'s `runnable` hides
             a real third state: the task is executing on core N right now.
             The kernel knows it (`tasks::running_core`, the per-core
