@@ -28,9 +28,10 @@ is refused and then until it succeeds. One boot, in this order:
    holder still alive for fifteen seconds more, `echo ok-three` must run
    before the holder's exiting line (the release by a SPAWN of total 0).
 
-Every check fails on the tree with `claim_staging` answering Ok to everyone
-(the state before this change), and check 3 fails with `SPAWN` not
-releasing. QEMU's own trace must hold no fault line. About two minutes.
+The four refusal checks fail on the tree with `claim_staging` answering Ok
+to everyone (the state before this change); with `SPAWN` not releasing, the
+boot shell keeps the staging from its first spawn and no holder can even
+claim it, so eight fail (checked 2026-10-11). QEMU's own trace must hold no fault line. About two minutes.
 Run it whenever claim_staging, release_staging_of, end_task or the shell's
 and netd's staging flows change.
 """

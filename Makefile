@@ -1934,7 +1934,9 @@ test-fpsimd: image
 # /bin/STAGEPROBE): a program holding the staging mid-spawn makes the shell's
 # next command refuse with the code's message and a second stager's
 # SPAWN_STAGE answer SPAWN_ERR_STAGING_BUSY; the holder's exit, its kill and
-# its abandon (a SPAWN of total 0) each release it. One boot, about two
+# its abandon (a SPAWN of total 0) each release it. The refusal checks fail
+# with the claim answering Ok to everyone; with SPAWN not releasing, the
+# boot shell keeps the staging and no holder can claim. One boot, about two
 # minutes. Run it whenever claim_staging, release_staging_of, end_task or
 # the shell's and netd's staging flows change. `SMP=4` runs it on four cores.
 test-spawn-owner: image
