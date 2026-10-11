@@ -219,7 +219,10 @@ def run_probes(guest):
     guest.type_raw(b"\x03")
     held = held and guest.wait_for(r"terminated[\s\S]*" + PROMPT, timeout=30)
     guest.type_line("echo after-the-kill")
-    got["hold"] = held and guest.wait_for(r"after-the-kill\s+[\s\S]*" + PROMPT, timeout=30)
+    # The output on a line of its own: the shell's echo of the typed line
+    # also holds the word, after `echo `, so a bare match proves nothing
+    # (the high review of #266).
+    got["hold"] = held and guest.wait_for(r"\nafter-the-kill\r?\n[\s\S]*" + PROMPT, timeout=30)
     got["hold_out"] = guest.transcript()
     return got
 

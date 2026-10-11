@@ -144,19 +144,14 @@ fn spin(mut sink: u64) -> u64 {
     sink
 }
 
-/// Copies piped input (`MSG_RECV`, EOF the empty message) to `target`,
-/// as `fpprobe -` does.
+/// Copies piped input to `target` until its end, as `fpprobe -` does.
 fn forward_stdin(target: u64) {
     let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     loop {
-        let packed = ulib::syscall4(syscall_abi::MSG_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
-        if packed >= syscall_abi::FS_ERR_MIN {
+        let n = ulib::pipe_recv(&mut buf);
+        if n == 0 {
             break;
         }
-        let len = ((packed & 0xffff_ffff) as usize).min(buf.len());
-        if len == 0 {
-            break;
-        }
-        ulib::write_out(target, &buf[..len]);
+        ulib::write_out(target, &buf[..n]);
     }
 }

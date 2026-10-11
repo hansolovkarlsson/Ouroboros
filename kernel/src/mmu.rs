@@ -1163,19 +1163,20 @@ fn check_attributes(planned: &[(u64, u64)]) {
 /// 4(b) the secondary cores run their idle loop at EL0 from view 1's
 /// idle page and take their ticks through the vectors, their stacks and
 /// the GIC, all under view 1's tables (`smp.rs`), while this rewrites
-/// those tables in place on the boot core. That is sound today for two
-/// reasons, neither of which a check enforces yet: `build_tables` stores
-/// every entry of an existing view with one 64-bit store and never
-/// clears an entry before refilling it, so a secondary's walk sees the
-/// old value or the new, both valid, and the entries a secondary can
-/// touch (the kernel block, the idle region, the device blocks) are
-/// rewritten with EQUAL values, since only the respawned slot's region
-/// changes. `switch_full` ends with `tlbi vmalle1is`, so every core's
-/// stale entries go. A rebuild that cleared first, moved the idle region
-/// or changed a kernel attribute would break a running secondary with no
-/// warning; a double-buffered view, or a check that the rewrite is
-/// equal-or-valid, is owed with step 4(d), where secondaries run tasks of
-/// their own.
+/// those tables in place on whichever core rebuilds; since step 4(d) the
+/// secondaries also run programs under their own views. That is sound for
+/// three reasons. The views a rebuild changes, the slots whose region
+/// differs from the last build's, are views no core runs: CHECKED at the
+/// top of this function (`BUILT_REGIONS` against `tasks::running_core`),
+/// which halts otherwise, and kept true by `tasks::kill_task`, which ends
+/// a task running on another core there. Every other view is rewritten
+/// with EQUAL entries, and `build_tables` stores each with one 64-bit
+/// store and never clears one before refilling it, so a walk on another
+/// core sees the old value or the new, both valid: NOT checked, and a
+/// rebuild that cleared first, moved the idle region or changed a kernel
+/// attribute would break a running core with no warning. And
+/// `switch_full` ends with `tlbi vmalle1is`, so every core's stale
+/// entries go.
 pub(crate) unsafe fn rebuild_with_el0_regions(el0_regions: [(u64, u64); MAX_EL0_REGIONS]) {
     // The views this rebuild changes are the slots whose region differs
     // from the last build's, and the in-place rewrite is sound only if no

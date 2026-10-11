@@ -219,7 +219,12 @@ pub const TASK_STATE_INVALID: u64 = u64::MAX;
 /// same teardown as a voluntary [`EXIT`] (slot freed, mapping removed,
 /// RAM reclaimed in the LIFO case), minus the context switch: the killed
 /// task isn't the one running. If the killed task held the keyboard (see
-/// [`FG`]), ownership reverts as on any death of the owner.
+/// [`FG`]), ownership reverts as on any death of the owner. A task running
+/// on another core at the time (multi-core) is ended by that core, at its
+/// next entry into the kernel, which the kill brings about at once with an
+/// interrupt and at the latest with that core's next tick: `0` then says
+/// the task is ending, and a [`TASK_STATE`] or [`spawn`](SPAWN) in that
+/// moment may still find the slot occupied. [`WAIT`] is how to know it ended.
 pub const KILL: u64 = 19;
 
 /// `(task index, foreground)` -> `0` on success, [`TASK_ERR_PROTECTED`]

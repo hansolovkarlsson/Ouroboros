@@ -644,10 +644,16 @@ const PENDING_KILL_BY_QUIT: u64 = 1 << 63;
 /// [`on_tick`] has not carried out yet: such a task reads no more keys, so
 /// nothing typed after the interrupt goes to the program it ends (the
 /// fourth high review of #238: the tick's wake-check ran before the kill
-/// and handed the doomed program the next key).
+/// and handed the doomed program the next key). Also a task another core
+/// is about to end ([`DOOMED`], multi-core step 4(d)): the Ctrl+C has been
+/// carried out as far as this core can, and until that core ends it, the
+/// task neither reads keys nor has a second Ctrl+C judged as its own (the
+/// high review of #266); the keys wait for the owner after it.
 pub(crate) fn kill_pending_for(slot: usize) -> bool {
     let marked = PENDING_KILL.load(Ordering::Relaxed) & !PENDING_KILL_BY_QUIT;
-    marked != 0 && task_id_of(slot) == Some(marked)
+    let doomed = DOOMED.get(slot).map_or(0, |d| d.load(Ordering::Relaxed));
+    let id = task_id_of(slot);
+    (marked != 0 && id == Some(marked)) || (doomed != 0 && id == Some(doomed))
 }
 
 /// Ctrl+C (ETX): ends or detaches a cooked keyboard owner, and is an ordinary
@@ -2133,17 +2139,24 @@ fn is_runnable(t: TaskIndex) -> bool {
 /// (`smp::secondaries_up`). Deterministic on purpose: with secondaries up,
 /// every program runs on one, so `make test-smp` can require it.
 fn may_run_here(t: TaskIndex) -> bool {
+    may_run_on(crate::smp::core_index() as usize, t)
+}
+
+/// [`may_run_here`] asked for any core `core`: the one statement of the
+/// placement rule, which the pick on a core and the kick that wakes an idle
+/// one ([`kick_idle_cores`]) both ask, so they cannot disagree (the high
+/// review of #266 found a copy of it in the kick).
+fn may_run_on(core: usize, t: TaskIndex) -> bool {
     if !is_runnable(t) {
         return false;
     }
     if t == TaskIndex::IDLE {
         return true;
     }
-    let me = crate::smp::core_index() as usize;
-    if running_core(t).is_some_and(|c| c != me) {
+    if running_core(t).is_some_and(|c| c != core) {
         return false;
     }
-    if crate::smp::is_boot_core() {
+    if crate::smp::is_boot(core) {
         !t.is_spawnable() || !crate::smp::secondaries_up()
     } else {
         t.is_spawnable()
@@ -2552,36 +2565,27 @@ pub unsafe fn reschedule_if_idle(frame: *mut Context) {
 /// secondary per spawned program; this core is never kicked, since its own
 /// entry is choosing its next task already.
 pub(crate) fn kick_idle_cores() {
-    let mut pinned = false;
-    let mut programs = 0usize;
+    // The runnable tasks no core runs: the work an idle core could take.
+    let mut waiting = [false; NUM_TASKS];
+    let mut any = false;
     for t in TaskIndex::all() {
-        if t == TaskIndex::IDLE || !is_runnable(t) || running_core(t).is_some() {
-            continue;
-        }
-        if t.is_spawnable() {
-            programs += 1;
-        } else {
-            pinned = true;
+        if t != TaskIndex::IDLE && is_runnable(t) && running_core(t).is_none() {
+            waiting[t.index()] = true;
+            any = true;
         }
     }
-    if !pinned && programs == 0 {
+    if !any {
         return;
     }
     let me = crate::smp::core_index() as usize;
-    let secondaries = crate::smp::secondaries_up();
     for core in crate::smp::up_cores() {
         if core == me || current_on(core) != TaskIndex::IDLE {
             continue;
         }
-        let wanted = if crate::smp::is_boot(core) {
-            pinned || (!secondaries && programs > 0)
-        } else if programs > 0 {
-            programs -= 1;
-            true
-        } else {
-            false
-        };
-        if wanted {
+        // One task for each idle core kicked, so two cores are not sent
+        // after the same one.
+        if let Some(t) = TaskIndex::all().find(|t| waiting[t.index()] && may_run_on(core, *t)) {
+            waiting[t.index()] = false;
             crate::smp::kick_resched(core);
         }
     }
@@ -3139,8 +3143,11 @@ pub unsafe fn on_tick(frame: *mut Context) {
             unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
             return;
         }
-        // A victim running on a secondary is ended there (kill_task).
-        let _ = kill_task(victim_slot);
+        // A victim running on a secondary is ended there (kill_task), at
+        // that core's next entry: the kick's, or at the latest its tick's.
+        if let Ended::OnCore(core) = kill_task(victim_slot) {
+            crate::console::println!("Ouroboros kernel: task {} is running on core {core}, which ends it", victim_slot.index());
+        }
         unsafe { crate::mmu::rebuild_with_el0_regions(el0_regions()) };
     }
 

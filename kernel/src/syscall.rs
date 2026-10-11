@@ -1406,8 +1406,10 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
                 tasks::Ended::Now => console::println!("Ouroboros kernel: task {i} killed"),
                 tasks::Ended::OnCore(core) => console::println!("Ouroboros kernel: task {i} killed (running on core {core}, which ends it)"),
             }
-            // SAFETY: same masked-IRQ single-core contract as
-            // spawn_program's and EXIT's rebuilds.
+            // SAFETY: under the kernel lock with IRQs masked, as
+            // spawn_program's and EXIT's rebuilds. A kill left to another
+            // core changes no region here, so this rebuild changes no view
+            // (the check at the top of the rebuild would halt otherwise).
             unsafe { mmu::rebuild_with_el0_regions(tasks::el0_regions()) };
             0
         }
