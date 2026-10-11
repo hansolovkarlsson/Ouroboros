@@ -249,6 +249,7 @@ $ cp /BIN/LS /mnt/a/ls.copy         # stream a local file onto A (chunked)</code
 <p><code class="inline">/proc</code>, <code class="inline">/dev/cons</code> and <code class="inline">/net</code> are synthetic filesystems — the task table as files, the console as a <em>writable</em> file, and the machine's IPv4/MAC as read-only files. Because <code class="inline">netd</code>'s export serves them too, reading another machine's is just a longer path:</p>
 
 <div class="panel"><pre><code>$ mount -p /proc                    # your own process table
+$ cat /proc/cpus                    # how many cores take tasks
 $ cat /proc/2/state                 # runnable | blocked | zombie | unused
 $ ls /mnt/a/proc                    # MACHINE A's task slots
 $ cat /mnt/a/proc/2/state           # A's filesystem-server state

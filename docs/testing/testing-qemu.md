@@ -1073,6 +1073,7 @@ make run-usb-hub     # the keyboard and the stick BEHIND a usb-hub (the Raspberr
 make test-usb-hub    # the same layout, driven and graded, plus a boot FROM a stick behind the hub, and that boot again with injected Stalls (scripts/test-usb-hub.py)
 make run-gicv3       # force GICv3 instead of QEMU's default GICv2
 make test-smp        # multi-core steps 1 and 2: the MADT's cores, the other cores started by PSCI into their own idle loops and ticks, each answering a kick SGI once the kernel lock is free (step 4(c)), /bin/COREPROBE placed on the secondaries and a program there ended by Ctrl+C on its own core (step 4(d)), on -smp 4 (EL1 and EL2 handoffs), -smp 1, and with \SMPFAULT (scripts/test-smp.py)
+make test-proc-cpus   # /proc/cpus prints the cores that take tasks, on -smp 1 and -smp 4 (scripts/test-proc-cpus.py)
 make test-spawn-owner # the owner of the kernel's spawn staging: a program holding it mid-spawn, the shell refused meanwhile, a second stager's code, the release by exit, kill and abandon (scripts/test-spawn-owner.py, /bin/STAGEPROBE)
 SMP=4 make test-kbd-mode   # any rig that boots through drive-qemu.py's Guest, on 4 cores (or N) unless the rig names its own -smp: multi-core step 4(d)'s way to run the keyboard, kill and call rigs where a race between cores could show
 ```

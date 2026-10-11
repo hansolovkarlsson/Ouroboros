@@ -3742,7 +3742,8 @@ fn cmd_mount_con(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Out
 /// as files, cluster Phase 3) at `<path>` in this shell's namespace. `fsd`
 /// auto-mounts `/proc` at the reserved `NS_PROC_TREE` at boot, so this is just a
 /// namespace bind (like `mount <n> <path>` for a disk tree). Then `ls <path>`
-/// lists one dir per task slot and `cat <path>/<n>/state` reads its scheduler
+/// lists `cpus` (how many cores take tasks, since 2026-10-11) and one dir per
+/// task slot, and `cat <path>/<n>/state` reads a slot's scheduler
 /// state. A remote machine's `/proc` needs no bind here - read it at
 /// `<remote-mount>/proc` (netd's export routes it). Usually `mount -p /proc`.
 fn cmd_mount_proc(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Output) {
