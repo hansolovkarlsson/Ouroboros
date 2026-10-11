@@ -41,7 +41,8 @@ reserved mount-table index** (`MAX_MOUNTS` grows by one; the new top slot,
 tree 0. The tree layout it serves:
 
 ```
-/               ->  0/  1/  2/ ...        (one dir per scheduler slot)
+/               ->  cpus 0/  1/  2/ ...   (the cores file, then one dir per scheduler slot)
+/cpus           ->  "4\n"                 (how many cores take tasks; added 2026-10-11)
 /<n>            ->  state                 (the slot's files)
 /<n>/state      ->  "runnable\n" | "blocked\n" | "zombie\n" | "unused\n"
 ```

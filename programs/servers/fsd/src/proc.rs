@@ -44,6 +44,9 @@ enum Node {
     State(u64),
     /// `/cpus` - how many cores take tasks.
     Cpus,
+    /// `/cpus/...` - a path beneath the file: not a directory, as a path under
+    /// a file answers on the disk arms (the high review of #270).
+    UnderCpus,
     /// A path that resolves to nothing here.
     NotFound,
 }
@@ -88,7 +91,7 @@ impl Fs {
                 f("state", false, state_bytes(n).len() as u32);
                 Ok(())
             }
-            Node::State(_) | Node::Cpus => Err(Error::NotADirectory),
+            Node::State(_) | Node::Cpus | Node::UnderCpus => Err(Error::NotADirectory),
             Node::NotFound => Err(Error::NotFound),
         }
     }
@@ -106,6 +109,7 @@ impl Fs {
                 Ok(copy_out(&cpus[..n], offset, buf))
             }
             Node::Root | Node::Task(_) => Err(Error::NotAFile),
+            Node::UnderCpus => Err(Error::NotADirectory),
             Node::NotFound => Err(Error::NotFound),
         }
     }
@@ -120,6 +124,7 @@ impl Fs {
                 let mut cpus = [0u8; CPUS_MAX];
                 (cpus_bytes(&mut cpus) as u64, false)
             }
+            Node::UnderCpus => return Err(Error::NotADirectory),
             Node::NotFound => return Err(Error::NotFound),
         };
         Ok(crate::vfs::Stat {
@@ -190,8 +195,8 @@ fn copy_out(src: &[u8], offset: u64, buf: &mut [u8]) -> u32 {
 }
 
 /// Parse a `/proc`-relative path (byte scanning; relocation-safe). Accepts `/`,
-/// `/cpus`, `/<digits>`, and `/<digits>/state`; anything else is
-/// [`Node::NotFound`].
+/// `/cpus`, `/<digits>`, and `/<digits>/state`; `/cpus/...` is
+/// [`Node::UnderCpus`] and anything else [`Node::NotFound`].
 fn parse(path: &str) -> Node {
     let b = path.as_bytes();
     let mut i = 0;
@@ -202,9 +207,13 @@ fn parse(path: &str) -> Node {
     if i >= b.len() {
         return Node::Root;
     }
-    // The one named entry, a file: nothing lives under it.
+    // The one named entry, a file: nothing lives under it, and a path that
+    // goes on below it is "not a directory", as under a file on a disk.
     if &b[i..] == b"cpus" {
         return Node::Cpus;
+    }
+    if b[i..].starts_with(b"cpus/") {
+        return Node::UnderCpus;
     }
     // First component: the slot number (all digits).
     let start = i;
