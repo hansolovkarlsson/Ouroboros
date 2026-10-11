@@ -227,16 +227,25 @@ pub(crate) fn kick_kill(core: usize) {
     let _ = kick(core, KICK_KILL);
 }
 
+/// The secondaries up and taking work, one bit per MADT index (class B:
+/// each core sets its own bit as it comes up and clears it if it halts
+/// alone). [`CORE_UP`] says the same per core, for [`start`]'s wait and its
+/// lines; this is the one word placement reads at every pick and at the
+/// end of every entry (`tasks::kick_idle_cores`), where reading sixteen
+/// marks cost about 8 us a syscall under TCG on four cores (the high
+/// review of #266, measured by `make measure-syscost` with and without).
+static SECONDARIES_UP: AtomicU32 = AtomicU32::new(0);
+
 /// Whether any secondary core is up and taking work: placement's question
-/// (`tasks::may_run_here`), since with none a program runs on the boot core.
+/// (`tasks::may_run_on`), since with none a program runs on the boot core.
 pub(crate) fn secondaries_up() -> bool {
-    CORE_UP.iter().any(|m| m.load(Ordering::Acquire) == CORE_UP_IDLE)
+    SECONDARIES_UP.load(Ordering::Relaxed) != 0
 }
 
 /// The cores that run tasks: the boot core and every secondary up.
 pub(crate) fn up_cores() -> impl Iterator<Item = usize> {
-    let boot = BOOT_INDEX.load(Ordering::Relaxed) as usize;
-    (0..MAX_CORES).filter(move |&c| c == boot || CORE_UP[c].load(Ordering::Acquire) == CORE_UP_IDLE)
+    let mask = SECONDARIES_UP.load(Ordering::Relaxed) | (1 << BOOT_INDEX.load(Ordering::Relaxed));
+    (0..MAX_CORES).filter(move |&c| mask & (1 << c) != 0)
 }
 
 /// Whether `core` is the boot core.
@@ -249,6 +258,7 @@ pub(crate) fn is_boot(core: usize) -> bool {
 pub(crate) fn mark_down_here() {
     let core = core_index() as usize;
     if core < MAX_CORES && !is_boot_core() {
+        SECONDARIES_UP.fetch_and(!(1 << core), Ordering::Relaxed);
         CORE_UP[core].store(CORE_FAILED, Ordering::Release);
     }
 }
@@ -540,6 +550,7 @@ extern "C" fn secondary_main(core: u64) -> ! {
     // for a state the core has reached (`main.rs`'s set_quiet comes after
     // `start` returns and cannot drop a late up line; the `ticking` line,
     // later, is a println and may be quieted: a signal, not a report).
+    SECONDARIES_UP.fetch_or(1 << core, Ordering::Relaxed);
     CORE_UP[core as usize].store(CORE_UP_IDLE, Ordering::Release);
     // SAFETY: the one write to PARAMS happened before this core started.
     if unsafe { (*PARAMS.get()).fault_core } == core {
