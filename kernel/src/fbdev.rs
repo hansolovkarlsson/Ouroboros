@@ -52,7 +52,13 @@ struct FbCell(UnsafeCell<Option<FbDev>>);
 // order the fault handler takes them in), and the console's own prints
 // hold it for their whole write, where `lift_cursor` and `restore_cursor`
 // run. A halting secondary's fault report and the boot core's FB_* arm
-// are serialised by it, not by the kernel lock. `SyncCell` would state the argument for us, except that
+// are serialised by it, not by the kernel lock. The lock is bounded: a
+// holder that does not finish in `LOCK_SPINS` is taken over, so that a
+// fault report never deadlocks, and in that one case a reader can see the
+// record mid-write. The price is bounded too: `invert_pixels` refuses a
+// cell past the screen, so the worst outcome is one wrong cell inverted.
+// The geometry fields are written once at `install` and read unlocked.
+// `SyncCell` would state the argument for us, except that
 // `FbDev` holds the framebuffer's raw `*mut u8` and is not `Send`, so the
 // bound refuses it and this wrapper argues its own case: set once at boot
 // before any task runs. (Before 2026-10-11 this comment made the
@@ -139,10 +145,10 @@ fn draw_one(fb: &FbDev, glyph: &[u8], col: usize, row: usize) {
 /// lifts the cursor first and puts it back after, so the cursor sits on
 /// the new glyph.
 pub fn blit_glyphs(glyphs: &[u8], count: usize, col: usize, row: usize) {
-    crate::console::lock();
+    let held = crate::console::lock();
     if let Some(fb) = unsafe { (*FB.0.get()).as_ref() } {
         if row < fb.rows {
-            let over_cursor = fb.cursor.is_some_and(|(c, r)| r == row && c >= col && c < col + count);
+            let over_cursor = fb.cursor.is_some_and(|(c, r)| r == row && c >= col && c < col.saturating_add(count));
             let lifted = if over_cursor { lift_cursor() } else { None };
             let mut drawn = 0usize;
             for i in 0..count {
@@ -163,7 +169,7 @@ pub fn blit_glyphs(glyphs: &[u8], count: usize, col: usize, row: usize) {
             restore_cursor(lifted);
         }
     }
-    crate::console::unlock();
+    crate::console::unlock(held);
 }
 
 /// Scroll the screen up by `n` text rows (memmove within the framebuffer,
@@ -172,7 +178,7 @@ pub fn blit_glyphs(glyphs: &[u8], count: usize, col: usize, row: usize) {
 /// stays on its screen cell: the server scrolls because its cursor is on
 /// the last row, and that is where it still is.
 pub fn scroll(n: usize) {
-    crate::console::lock();
+    let held = crate::console::lock();
     if let Some(fb) = unsafe { (*FB.0.get()).as_ref() } {
         if n > 0 {
             let lifted = lift_cursor();
@@ -192,7 +198,7 @@ pub fn scroll(n: usize) {
             restore_cursor(lifted);
         }
     }
-    crate::console::unlock();
+    crate::console::unlock(held);
 }
 
 /// Blank the entire framebuffer. The cursor, if there is one, is drawn
@@ -200,13 +206,13 @@ pub fn scroll(n: usize) {
 /// where it was, and a server restarted by the supervisor clears first and
 /// then places its own cursor with `FB_CURSOR`, which moves this one.
 pub fn clear() {
-    crate::console::lock();
+    let held = crate::console::lock();
     if let Some(fb) = unsafe { (*FB.0.get()).as_ref() } {
         let lifted = lift_cursor();
         clear_pixels(fb);
         restore_cursor(lifted);
     }
-    crate::console::unlock();
+    crate::console::unlock(held);
 }
 
 fn clear_pixels(fb: &FbDev) {
@@ -223,7 +229,7 @@ fn clear_pixels(fb: &FbDev) {
 /// the record follows. The one writer of the record. The same cell again
 /// costs nothing.
 pub fn set_cursor(col: u64, row: u64) {
-    crate::console::lock();
+    let held = crate::console::lock();
     if let Some(fb) = unsafe { (*FB.0.get()).as_mut() } {
         let wanted = usize::try_from(col)
             .ok()
@@ -239,7 +245,7 @@ pub fn set_cursor(col: u64, row: u64) {
             }
         }
     }
-    crate::console::unlock();
+    crate::console::unlock(held);
 }
 
 /// Takes the cursor off the screen while something else draws: the cell
@@ -267,8 +273,13 @@ pub fn restore_cursor(lifted: Option<(usize, usize)>) {
 }
 
 /// Inverts the pixels of one cell, white to black and black to white: one
-/// 32-bit XOR of the three colour channels per pixel.
+/// 32-bit XOR of the three colour channels per pixel. A cell past the
+/// screen is skipped here too, so a torn record (see `FbCell`'s SAFETY
+/// note) can cost a cell and never a write outside the framebuffer.
 fn invert_pixels(fb: &FbDev, col: usize, row: usize) {
+    if col >= fb.cols || row >= fb.rows {
+        return;
+    }
     let x0 = col * GLYPH_W;
     let y0 = row * GLYPH_H;
     for dy in 0..GLYPH_H {

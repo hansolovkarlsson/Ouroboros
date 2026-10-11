@@ -127,21 +127,45 @@ static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
 static CONSOLE_LOCK: AtomicU64 = AtomicU64::new(0);
 const LOCK_SPINS: u32 = 50_000_000;
 
-pub(crate) fn lock() {
+/// Takes the console lock and says whether this call took it: `false` when
+/// this core already held it (a fault report inside a print, or a print
+/// inside an `FB_*` primitive), and the matching `unlock(false)` then leaves
+/// it held for the outer holder. The pair is how a nested use cannot drop
+/// the lock from under the code that took it.
+#[must_use]
+pub(crate) fn lock() -> bool {
     let me = crate::smp::core_index() + 1;
     for _ in 0..LOCK_SPINS {
         match CONSOLE_LOCK.compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed) {
-            Ok(_) => return,
-            Err(owner) if owner == me => return,
+            Ok(_) => return true,
+            Err(owner) if owner == me => return false,
             Err(_) => core::hint::spin_loop(),
         }
     }
     CONSOLE_LOCK.swap(me, Ordering::Acquire);
+    true
 }
 
-pub(crate) fn unlock() {
+/// Releases the console lock if `acquired` says this core's `lock` took it.
+pub(crate) fn unlock(acquired: bool) {
+    if !acquired {
+        return;
+    }
     let me = crate::smp::core_index() + 1;
     let _ = CONSOLE_LOCK.compare_exchange(me, 0, Ordering::Release, Ordering::Relaxed);
+}
+
+/// Lifts the console server's cursor (an inverted framebuffer cell) while
+/// the kernel's own console draws, when that console is the framebuffer:
+/// only then does a kernel line land on the server's screen. On a
+/// byte-stream console (QEMU's UART, the Pi's PL011, with `cond` on the
+/// framebuffer beside it) the cursor stays where it is and nothing is paid.
+/// Console lock held by the caller.
+fn lift_cursor_if_drawing() -> Option<(usize, usize)> {
+    match unsafe { (*CONSOLE.get()).as_ref() } {
+        Some(Console::Framebuffer(_)) => crate::fbdev::lift_cursor(),
+        _ => None,
+    }
 }
 
 /// When set, ordinary [`print`]/[`println`] output is suppressed - the
@@ -192,17 +216,16 @@ pub fn print(args: fmt::Arguments) {
 /// Like [`print`], but ignores [`set_quiet`] - for fault reports, which
 /// must reach a console even after the kernel has otherwise gone quiet.
 pub fn print_force(args: fmt::Arguments) {
-    lock();
-    // The console server's cursor (an inverted framebuffer cell) comes off
-    // for the whole write and goes back after, under this lock, so a line
-    // drawn or scrolled over it leaves nothing inverted that is not the
-    // cursor (fbdev::lift_cursor). Nothing to do on a byte-stream console.
-    let lifted = crate::fbdev::lift_cursor();
+    let held = lock();
+    // The console server's cursor comes off for the whole write and goes
+    // back after, under this lock, so a line drawn or scrolled over it
+    // leaves nothing inverted that is not the cursor.
+    let lifted = lift_cursor_if_drawing();
     if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
         let _ = fmt::Write::write_fmt(console, args);
     }
     crate::fbdev::restore_cursor(lifted);
-    unlock();
+    unlock(held);
 }
 
 macro_rules! println {
@@ -233,15 +256,15 @@ pub fn putc(byte: u8) {
 /// so another core's line cannot land inside `cond`'s escape sequence and
 /// a batch costs two atomic operations rather than two per byte.
 pub fn write_bytes(bytes: &[u8]) {
-    lock();
-    let lifted = crate::fbdev::lift_cursor();
+    let held = lock();
+    let lifted = lift_cursor_if_drawing();
     if let Some(console) = unsafe { (*CONSOLE.get()).as_mut() } {
         for &b in bytes {
             console.write_byte(b);
         }
     }
     crate::fbdev::restore_cursor(lifted);
-    unlock();
+    unlock(held);
 }
 
 /// Non-blocking read of one byte from the global console. `None` if there

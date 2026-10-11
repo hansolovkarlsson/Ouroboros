@@ -109,6 +109,10 @@ fn detect_backend() -> Backend {
         let cols = syscall4(syscall_abi::CON_INFO, syscall_abi::CON_INFO_COLS, 0, 0, 0) as usize;
         let rows = syscall4(syscall_abi::CON_INFO, syscall_abi::CON_INFO_ROWS, 0, 0, 0) as usize;
         syscall4(syscall_abi::FB_CLEAR, 0, 0, 0, 0);
+        // The kernel may still hold the cursor of this server's last life (the
+        // supervisor restarts it); say there is none, so `cursor_at: None`
+        // below is true of the kernel too and the first settle starts clean.
+        syscall4(syscall_abi::FB_CURSOR, syscall_abi::FB_CURSOR_NONE, 0, 0, 0);
         Backend::Framebuffer(Fb {
             cols: cols.max(1),
             rows: rows.max(1),

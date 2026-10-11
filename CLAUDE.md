@@ -699,7 +699,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/framebuffer.rs GOP discovery: resolution/stride/format + framebuffer base - the console that works on Parallels
   src/font.rs        embedded 8x8 bitmap font, printable ASCII only (cond keeps its own copy)
   src/fbconsole.rs   framebuffer text console - the kernel's EMERGENCY/boot console only; steady state is cond
-  src/fbdev.rs       dumb framebuffer primitives for cond (FB_BLIT/FB_SCROLL/FB_CLEAR), gated to CON_TASK
+  src/fbdev.rs       dumb framebuffer primitives for cond (FB_BLIT/FB_SCROLL/FB_CLEAR, and FB_CURSOR: the one inverted cell, kernel-owned), gated to CON_TASK
   src/smp.rs         the secondary cores (multi-core step 2): PSCI CPU_ON per MADT core, the no-stack entry stub that drops each
                      core to EL1 (or turns its MMU on in place) on the boot core's tables, a 64 KB stack per core, TPIDR_EL1 the
                      core index, this core's GIC interface, `core N up`, then (step 4(b)) its own idle loop at EL0 with its own

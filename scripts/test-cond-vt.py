@@ -232,20 +232,33 @@ def main() -> int:
                 time.sleep(0.1)
             raise SystemExit("test-cond-vt: screendump wrote nothing")
 
-        def wait_screen(pattern, timeout=90):
-            rx = re.compile(pattern)
+        def wait_until(fits, what, timeout=90):
+            """The first screen that `fits`, read again a settle later: the frame
+            that matched can be mid-write (the shell sends its prompt as two
+            one-byte messages and cond settles the cursor after each), so the
+            graded frame is the fresh one when it still fits. When it no longer
+            fits the state was transient (a command's echo that the program
+            then cleared), and the frame that matched is the answer."""
             deadline = time.time() + timeout
             while time.time() < deadline:
-                rows = snap()
-                if any(rx.search(line) for line in text(rows)):
-                    # The frame that matched can be mid-write: the shell sends
-                    # its prompt as two one-byte messages and cond settles the
-                    # cursor after each, so grade a fresh frame after the settle.
+                first = snap()
+                if fits(text(first)):
                     time.sleep(drive_qemu.SETTLE)
-                    return snap()
+                    settled = snap()
+                    return settled if fits(text(settled)) else first
                 time.sleep(0.5)
-            guest.report(f"!!! TIMEOUT waiting on the screen for {pattern!r}")
+            guest.report(f"!!! TIMEOUT waiting on the screen for {what}")
             return None
+
+        def wait_screen(pattern, timeout=90):
+            rx = re.compile(pattern)
+            return wait_until(lambda lines: any(rx.search(l) for l in lines), repr(pattern), timeout)
+
+        def wait_cleared(timeout=90):
+            """A screen `clear` has just produced: the prompt and nothing else.
+            A bare `#` anywhere would also match the prompt that was on screen
+            before `clear` ran."""
+            return wait_until(lambda lines: [l for l in lines if l] == ["#"], "a cleared screen", timeout)
 
         if (guest.wait_for("shell ready", timeout=120)
                 and wait_screen(r"^login:")):
@@ -280,7 +293,7 @@ def main() -> int:
                     # draw its next prompt in normal video.
                     if driven:
                         guest.type_line("clear")
-                        if wait_screen(r"^#$"):
+                        if wait_cleared():
                             guest.type_line("vtprobe hold")
                             if wait_screen(r"held"):
                                 guest.proc.stdin.write(b"\x03")
@@ -300,7 +313,7 @@ def main() -> int:
                     # shell draws after Ctrl+C kills it.
                     if held_screen is not None:
                         guest.type_line("clear")
-                        cursor_screen = wait_screen(r"^#$")
+                        cursor_screen = wait_cleared()
                         if cursor_screen:
                             guest.type_line("vtprobe hide")
                             hidden_screen = wait_screen(r"^hidden")
@@ -334,7 +347,7 @@ def main() -> int:
                                         time.sleep(0.5)
                                     if left_screen is not None:
                                         guest.type_line("clear")
-                                        clear_screen = wait_screen(r"^#$")
+                                        clear_screen = wait_cleared()
         faults = guest.aborts()
     finally:
         guest.stop()
