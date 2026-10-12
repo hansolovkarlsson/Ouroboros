@@ -278,6 +278,17 @@ def run_probes(guest, smp):
     # on the image the other rigs boot (`touch` was, the second review).
     guest.type_line("mkdir | wc")
     got["eos"] = guest.wait_for(r"\n0 0 0\r?\n[\s\S]*" + PROMPT, timeout=30)
+    # A consumer gone before its producer is spawned (`grep` refuses its
+    # pattern and exits at once, on its own core): SPAWN refuses the
+    # producer (TASK_ERR_NO_SUCH_TASK) and the shell tears the pipeline down
+    # saying nothing past grep's own complaint and exit code, then answers
+    # (the third review of #279: a producer run toward a dead consumer took
+    # the keyboard's foreground with it).
+    before = len(guest.transcript())
+    guest.type_line("coreprobe | grep (")
+    guest.type_line("echo after-dead-consumer")
+    got["dead"] = guest.wait_for(r"\nafter-dead-consumer\r?\n[\s\S]*" + PROMPT, timeout=60)
+    got["dead_out"] = guest.transcript()[before:]
     return got
 
 
@@ -366,6 +377,10 @@ def probe_checks(name, smp, boot_index, probe):
     checks.append((f"{name}: `kill {slot}` ended the held program and the shell answered after", probe.get("bg", False)))
     checks.append((f"{name}: `mkdir | wc` printed `0 0 0` and the shell answered (end-of-stream from a producer's exit)",
                    probe.get("eos", False)))
+    dead_out = probe.get("dead_out", "")
+    checks.append((f"{name}: `coreprobe | grep (` with grep gone first: grep's complaint, no other pipe error, and the shell answered",
+                   probe.get("dead", False) and "bad pattern" in dead_out
+                   and re.search(r"pipe: (?!grep exited)", dead_out) is None))
     return checks
 
 

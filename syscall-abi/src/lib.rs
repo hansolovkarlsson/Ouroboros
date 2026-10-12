@@ -189,11 +189,13 @@ pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
 /// to the console) is unaffected. **SPAWN grants the child the right to
 /// send to its stdout target** (since 2026-10-12), under [`DELEGATE`]'s own
 /// rule (the caller holds a send right to the target), in the same step, so
-/// a pipeline stage never runs before it may write to its consumer. A live
-/// target the caller may not grant is refused [`MSG_ERR_DENIED`] before
-/// anything is allocated; a target that is not a live task (a consumer that
-/// already exited, or the console with no console server) is no refusal,
-/// and the child's writes there fail at once, as to a closed pipe. The
+/// a pipeline stage never runs before it may write to its consumer. Checked
+/// before anything is allocated: [`CON_TASK`] is always accepted (every task
+/// reaches it, and with no console server a program's console writes fall
+/// back to `PUTC`); any other target that is not a live task is refused
+/// [`TASK_ERR_NO_SUCH_TASK`] (a pipeline's consumer that already exited,
+/// which the shell tears down), and one the caller may not grant
+/// [`MSG_ERR_DENIED`]. The
 /// **argv blob length** (arg2) attaches the argument vector previously
 /// staged via [`ARGS_STAGE`] (`0` = no args); the child reads it via
 /// [`GET_ARGC`]/[`GET_ARG`]. The **cwd length** (arg3) attaches the working

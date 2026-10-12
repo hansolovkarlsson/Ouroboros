@@ -789,24 +789,30 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
         return SPAWN_ERROR;
     }
     // The stdout target, checked before anything is allocated so a refusal
-    // unwinds nothing. A live task the child could not be granted (neither
-    // the spawner, which `spawn` grants every child, nor a task the spawner
-    // may grant a right to: `may_grant`, DELEGATE's own rule) is refused
-    // MSG_ERR_DENIED, rather than spawned with a stdout whose every write
-    // would be dropped with no word to anyone (the review of #279). A target
-    // that is not a live task is no refusal: the program runs and its writes
-    // there fail at once (TASK_ERR_NO_SUCH_TASK), as a Unix writer to a
-    // closed pipe does. That is a pipeline whose consumer already exited
-    // (a bad pattern to `grep`, say), which must not decide by timing whether
-    // the producer runs at all, and a boot with no console server, where a
-    // program's console writes fall back to PUTC (the second review of #279).
-    let stdout_task = usize::try_from(stdout_target).ok().and_then(tasks::live_index);
+    // unwinds nothing. The console is always accepted: every task reaches it
+    // statically, and on a boot with no console server a program's console
+    // writes fall back to PUTC (the second review of #279 found it refused).
+    // Any other target must be a live task, else TASK_ERR_NO_SUCH_TASK: a
+    // pipeline whose consumer already exited (a bad pattern to `grep`, say),
+    // which the shell tears down as it did when its DELEGATE found the stage
+    // gone, and which keeps a child from being handed its own slot as its
+    // stdout (the third review of #279: a dead slot is the lowest free one).
+    // And one the child can be granted: the spawner, which `spawn` grants
+    // every child, or a task the spawner may grant a right to (`may_grant`,
+    // DELEGATE's own rule), else MSG_ERR_DENIED, rather than a stdout whose
+    // every write would be dropped with no word (the review of #279).
     let spawner = tasks::current_task();
-    if let Some(t) = stdout_task {
+    let stdout_task = if stdout_target == syscall_abi::CON_TASK {
+        None
+    } else {
+        let Some(t) = usize::try_from(stdout_target).ok().and_then(tasks::live_index) else {
+            return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+        };
         if t.index() != spawner && !tasks::may_grant(spawner, t.index()) {
             return syscall_abi::MSG_ERR_DENIED;
         }
-    }
+        Some(t)
+    };
     let program = &staging[..size];
 
     let (header, phdrs, region_size) = match loader::elf_region_size(program) {

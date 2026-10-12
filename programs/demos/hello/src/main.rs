@@ -82,14 +82,15 @@ fn write_out(target: u64, bytes: &[u8]) {
     }
 }
 
-/// Send `bytes` as raw `MSG_MAX_LEN`-chunked messages to `target`. Two
-/// transient is retried for a bounded time: a full mailbox (`MSG_ERR_FULL`
-/// - the reading task drains it between our sends). A denied send is final:
-/// `SPAWN` grants a program the right to its stdout target before it runs,
-/// or refuses the spawn (since 2026-10-12; a pipeline's link was delegated
-/// after the spawn before that, and was retried here). If the mailbox stays
-/// full for ~3s, or any other error comes back, or the target dies, we give
-/// up rather than hang.
+/// Send `bytes` as raw `MSG_MAX_LEN`-chunked messages to `target`. One
+/// transient is retried for a bounded time, yielding between tries: a full
+/// mailbox (`MSG_ERR_FULL` - the reading task drains it between our sends).
+/// A denied send is not waited out: `SPAWN` grants a program the right to
+/// its stdout target before it runs, or refuses the spawn (since 2026-10-12;
+/// a pipeline's link was delegated after the spawn before that, and was
+/// retried here), and a grant lost when the target's slot is reused does not
+/// come back. If the mailbox stays full for ~3s, or any other error comes
+/// back, or the target dies, we give up rather than hang.
 fn pipe_out(target: u64, bytes: &[u8]) {
     let mut off = 0;
     while off < bytes.len() {

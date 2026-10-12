@@ -612,9 +612,7 @@ pub fn pipe_out(target: u64, bytes: &[u8]) {
             if !transient || get_ticks() > deadline {
                 return;
             }
-            if r == syscall_abi::MSG_ERR_FULL {
-                yield_now(); // let the consumer drain (or exit) before retrying
-            }
+            yield_now(); // let the consumer drain (or exit) before retrying
         }
         off += n;
     }
@@ -662,9 +660,7 @@ pub fn end_of_stream(target: u64) {
         if r == 0 || !transient || get_ticks() > deadline {
             break;
         }
-        if r == syscall_abi::MSG_ERR_FULL {
-            yield_now(); // as in pipe_out: let the consumer drain before retrying
-        }
+        yield_now(); // as in pipe_out: let the consumer drain before retrying
     }
 }
 
