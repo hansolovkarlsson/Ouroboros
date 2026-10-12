@@ -1483,6 +1483,11 @@ inverted, placed by a new gated primitive (`FB_CURSOR`), hidden and shown by
 board it is a check by eye on the next boot: a block after the prompt,
 moving as you type, and `clear` leaving one at the top left.
 
+**Seen 2026-10-11, the same evening (#274 merged, `main` at `e241710`):**
+Hans re-staged card and stick and booted; the monitor shows a solid block
+cursor, as expected. The console had drawn none since it moved to `cond`,
+so this is the first cursor the board's screen has had.
+
 ---
 
 ## 7. Risks, ranked
