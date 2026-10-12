@@ -49,6 +49,11 @@ appear.
    halts the kernel, and every other core parks at its next entry). The
    halted core must not answer its kick, and the boot core must say so.
 
+In every boot that runs the probes, no supervised server may be restarted
+(the supervisor's `server slot N wedged` or `restarted` line): with one
+core and a program spinning beside the shell, the tick's scan from the
+running task once never reached `fsd` (2026-10-12; `tasks::ROUND`).
+
 A boot with no `Ouroboros kernel` line is the firmware stalling in its own
 boot, which happens; the rig says INCONCLUSIVE for that boot and does not
 pass. About seven minutes. Run it whenever smp.rs, el2.rs, madt.rs's GICC
@@ -292,6 +297,7 @@ def run_probes(guest, smp):
     guest.type_line("echo after-dead-consumer")
     got["dead"] = guest.wait_for(r"\nafter-dead-consumer\r?\n[\s\S]*" + PROMPT, timeout=60)
     got["dead_out"] = guest.transcript()[before:]
+    got["end_out"] = guest.transcript()
     return got
 
 
@@ -384,6 +390,13 @@ def probe_checks(name, smp, boot_index, probe):
     checks.append((f"{name}: `coreprobe | grep (` with grep gone first: grep's complaint, no other pipe error, and the shell answered",
                    probe.get("dead", False) and "bad pattern" in dead_out
                    and re.search(r"pipe: (?!grep exited)", dead_out) is None))
+    # Over the whole boot (the transcript at the probes' end): no server restarted. A spinning program on the
+    # boot core once starved `fsd` until the supervisor restarted it as
+    # wedged, twice, while every other check here passed or failed on the
+    # timing (2026-10-12, the tick's round, `tasks::ROUND`).
+    restarts = re.findall(r"server slot \d+ (?:wedged|restarted)[^\r\n]*", probe.get("end_out", ""))
+    checks.append((f"{name}: no server was restarted in the whole boot"
+                   + (f" (saw {restarts[0]!r})" if restarts else ""), not restarts))
     return checks
 
 

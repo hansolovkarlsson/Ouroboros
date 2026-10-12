@@ -224,8 +224,32 @@ mod task_index {
     pub(crate) fn set_current_idle_here() {
         set_current(TaskIndex::IDLE);
     }
+
+    /// Where each core's tick last left its round: the slot its last tick
+    /// picked (class B of the plan's inventory, one per core). The tick
+    /// scans on from here, not from the task running now, because a task
+    /// can be running now without the tick having picked it: a block, a
+    /// call or a yield switches straight to another task, and a scan from
+    /// wherever those leave off can pass the same slot every time. Seen
+    /// 2026-10-12 on one core, a program spinning beside a shell taking a
+    /// key a tick: the tick went from the program to the shell, the shell
+    /// switched to `cond` to echo, `cond` blocked and its scan found the
+    /// program again, and `fsd`, runnable two slots behind, never came
+    /// round until the supervisor restarted it as wedged. Typed like
+    /// [`CURRENT`], so only a `TaskIndex` is ever stored.
+    static ROUND: [AtomicUsize; crate::madt::MAX_CORES] = [const { AtomicUsize::new(0) }; crate::madt::MAX_CORES];
+
+    /// Where this core's tick round stands ([`ROUND`]).
+    pub(crate) fn round_here() -> TaskIndex {
+        TaskIndex(ROUND[crate::smp::core_index() as usize].load(Ordering::Relaxed))
+    }
+
+    /// This core's tick picked `slot`: its round goes on from there.
+    pub(crate) fn set_round_here(slot: TaskIndex) {
+        ROUND[crate::smp::core_index() as usize].store(slot.0, Ordering::Relaxed);
+    }
 }
-pub(crate) use task_index::{current_index, current_on, relocate_current, running_core, set_current_idle_here, TaskIndex};
+pub(crate) use task_index::{current_index, current_on, relocate_current, round_here, running_core, set_current_idle_here, set_round_here, TaskIndex};
 use task_index::set_current;
 
 /// The send-mask ceiling, checked rather than described. [`caps_for_slot`]
@@ -2197,6 +2221,19 @@ fn scan_from(from: TaskIndex, wanted: impl Fn(TaskIndex) -> bool) -> Option<Task
     None
 }
 
+/// The tick's pick, on any core: the next task after this core's round
+/// position ([`round_here`]), not after the task running now, which a
+/// direct switch may have chosen; the round then moves to the pick. Every
+/// task this core may run comes round within one pass of ticks, however
+/// the switches between ticks fall. Only the ticks call this: a block, a
+/// call, a yield and a kick still choose from where they stand, and move
+/// nothing.
+fn next_at_tick() -> TaskIndex {
+    let next = next_or_halt(round_here());
+    set_round_here(next);
+    next
+}
+
 /// [`next_runnable`], for a caller that has no safe "stay put": the
 /// scan includes `from` itself as its last candidate, so `None` means
 /// nothing at all is runnable, which cannot happen while the idle task
@@ -2571,7 +2608,7 @@ pub(crate) fn core_info(op: u64, arg: u64) -> u64 {
 pub unsafe fn on_secondary_tick(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    let next = next_or_halt(current);
+    let next = next_at_tick();
     if next != current {
         save_frame(current, frame);
         switch_to(frame, next);
@@ -3316,7 +3353,7 @@ pub unsafe fn on_tick(frame: *mut Context) {
         }
     }
 
-    let next = next_or_halt(current);
+    let next = next_at_tick();
     if next == current {
         // Nothing else runnable - stay put rather than pointlessly saving
         // and reloading the same context.
