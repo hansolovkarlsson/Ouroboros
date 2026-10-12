@@ -108,6 +108,15 @@ const NO_FAULT_CORE: u64 = u64::MAX;
 /// Until then the boot core is core 0 by `set_boot_core_index`.
 static BOOT_INDEX: AtomicU64 = AtomicU64::new(0);
 
+/// The boot core's MPIDR affinity, written once at the top of [`start`],
+/// before its index moves (class A; `u64::MAX` until then, when
+/// [`is_boot_core`] is still true on it). [`halt_alone_here`] reads it
+/// because the index cannot be trusted in [`start`]'s own window: between
+/// `BOOT_INDEX` and `TPIDR_EL1` taking the MADT index, the boot core's two
+/// differ and `is_boot_core` says no (the review of #278). An affinity is
+/// the hardware's, and no store order blurs it.
+static BOOT_AFFINITY: AtomicU64 = AtomicU64::new(u64::MAX);
+
 /// The word at the base of each secondary's stack, as `main.rs`'s
 /// `STACK_CANARY` at the boot core's: an overflow overwrites it first.
 const STACK_CANARY: u64 = 0x5141_5141_5141_5141;
@@ -253,14 +262,35 @@ pub(crate) fn is_boot(core: usize) -> bool {
     core as u64 == BOOT_INDEX.load(Ordering::Relaxed)
 }
 
-/// This core halts alone (`power::halt`, holding nothing): it takes no
-/// more work, so placement stops counting it and no kick waits on it.
-pub(crate) fn mark_down_here() {
+/// Whether this core halts alone (`power::halt`, holding nothing), and if
+/// so it is marked down and says so: it takes no more work, so placement
+/// stops counting it and no kick waits on it. Only a secondary running the
+/// idle slot may; the boot core's halt is the system's (by index, and by
+/// affinity for [`start`]'s window, [`BOOT_AFFINITY`]), and a core running
+/// a program holds that program's registers on its own stack, so no other
+/// core could resume or end it (the high review of #266). The decision,
+/// the mark and the `halted alone` line are all here, so `power::halt` has
+/// no way to halt a core alone but this function: a dead core that came up
+/// is marked down only here, with its `CURRENT` the idle slot, which
+/// `tasks::running_core` reads as no task, so a task can never read as
+/// running on a halted core. (A core whose GIC interface would not come up
+/// is marked failed in `secondary_main` and parks there, before it ever
+/// ran a task or counted as up.) `false` marks and prints nothing, and the
+/// caller halts the kernel.
+pub(crate) fn halt_alone_here() -> bool {
     let core = core_index() as usize;
-    if core < MAX_CORES && !is_boot_core() {
-        SECONDARIES_UP.fetch_and(!(1 << core), Ordering::Relaxed);
-        CORE_UP[core].store(CORE_FAILED, Ordering::Release);
+    let boot_by_affinity = madt::affinity(crate::gicv3::read_mpidr()) == BOOT_AFFINITY.load(Ordering::Relaxed);
+    if core >= MAX_CORES
+        || is_boot_core()
+        || boot_by_affinity
+        || crate::tasks::current_index() != crate::tasks::TaskIndex::IDLE
+    {
+        return false;
     }
+    SECONDARIES_UP.fetch_and(!(1 << core), Ordering::Relaxed);
+    CORE_UP[core].store(CORE_FAILED, Ordering::Release);
+    crate::console::println_force!("Ouroboros kernel: core {core} halted alone, holding nothing; the rest go on");
+    true
 }
 
 /// Which interrupt each core has acknowledged and is waiting for the
@@ -581,6 +611,7 @@ fn wait_ticks() -> u64 {
 /// Once, on the boot core, at EL1, with the console installed.
 pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     let me = madt::affinity(crate::gicv3::read_mpidr());
+    BOOT_AFFINITY.store(me, Ordering::Relaxed);
     let n = cores.count.min(MAX_CORES);
     // The boot core's own index: the MADT fixes no order on ARM, so it may
     // be any entry. From here its TPIDR_EL1 is that index, its stack still
@@ -695,7 +726,7 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     for (i, up_mark) in CORE_UP.iter().enumerate().take(n) {
         match up_mark.load(Ordering::Acquire) {
             CORE_UP_IDLE => ping(i),
-            // Came up, then halted alone (mark_down_here) before its ping:
+            // Came up, then halted alone (halt_alone_here) before its ping:
             // said, since a core the summary counted is otherwise silent.
             CORE_FAILED if started_up[i] => {
                 crate::console::println!("Ouroboros kernel: smp: core {i} is down (it halted after coming up), not kicked");

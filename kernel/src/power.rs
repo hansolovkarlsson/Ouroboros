@@ -156,8 +156,9 @@ pub fn halt() -> ! {
     // Whose halt is this (lock.rs)? A core holding the kernel lock stopped
     // inside an entry with the state behind the lock half-written, and
     // the boot core's death is the system's: the kernel halts, and every
-    // other core parks at its next entry. A secondary holding nothing (a
-    // fault in its own setup) halts alone, and the rest go on; the first
+    // other core parks at its next entry. A secondary holding nothing and
+    // running no program (a fault in its own setup, or in its idle loop)
+    // halts alone, and the rest go on; the first
     // run of multi-core step 4(b) had one halt holding the lock and the
     // boot core's shell never came up, which is why the two are told
     // apart here rather than the lock handed on to run over the wreck.
@@ -165,14 +166,15 @@ pub fn halt() -> ! {
     // A core running a program halts the kernel too (multi-core step 4(d),
     // the high review of #266): the program's registers are on this core's
     // stack, so no other core can resume it or end it, and a kill of it
-    // would wait on this core for good.
-    let runs_a_program = crate::tasks::current_index() != crate::tasks::TaskIndex::IDLE;
-    if crate::lock::is_halted() || crate::lock::held_by_me() || crate::smp::is_boot_core() || runs_a_program {
+    // would wait on this core for good. `smp::halt_alone_here` decides
+    // that and the boot core's case, and marks the core down and says so
+    // only when it halts alone; there is no other way to halt alone here.
+    // It is asked only once the lock questions are answered, so a core
+    // already halting the kernel is never marked.
+    let alone = !crate::lock::is_halted() && !crate::lock::held_by_me() && crate::smp::halt_alone_here();
+    if !alone {
         crate::lock::halt_kernel();
         crate::console::println_force!("Ouroboros kernel: system halted");
-    } else {
-        crate::console::println_force!("Ouroboros kernel: core {} halted alone, holding nothing; the rest go on", crate::smp::core_index());
-        crate::smp::mark_down_here();
     }
     unsafe {
         // DAIFSet: mask Debug/SError/IRQ/FIQ so the timer tick can't wake us.

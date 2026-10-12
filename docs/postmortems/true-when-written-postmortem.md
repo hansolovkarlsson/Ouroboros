@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-10-11. Five PRs, no new subsystem, and four defects that were all
+through 2026-10-12. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -9,8 +9,9 @@ duplicated constant guarded by a comment, a claim of unreachability that
 removed its own test, an authority that was already wrong, a diagnosis written
 before its dump was read, a comment that named its own expiry, a limit's
 "unreachable" made false by globbing, a comment falsified by a later
-commit of its own pull request, and a rig outside the suite reading a line
-the suite's own change rewrote.*
+commit of its own pull request, a rig outside the suite reading a line
+the suite's own change rewrote, and a defect written down without reading
+the code that would have produced it.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -1007,6 +1008,35 @@ primitives was spelled in four index lines; two gained the new one and two
 did not, until the third review counted. The same day's rule holds for all
 three: the edit that falsifies a claim is in another place, and a review
 that reads only the diff never sees the claim.
+
+## A defect written down without reading its cause (2026-10-12)
+
+The 10-11 section above ends with the roadmap item for the stranded task
+making the kill's line true "in every case". The next morning, sizing that
+item's fix meant reading the halt it was about, and `power::halt` already
+halted the whole kernel when the faulting core ran a program
+(`runs_a_program`, from the review of #266 a day before the item was
+written): a core halts alone only on the idle slot, so no task is ever
+stranded, and the kill's line was true in every case all along. The item was
+the false claim, made by a review that read the readers of `CURRENT` and not
+the one function that decides what a halting core leaves in it. A claim
+written to keep another claim honest is a claim too, and it needs the same
+check: **before writing down a defect, read the code that would have to
+produce it**, not only the code that would show it.
+
+The correction then repeated the document's oldest shape within the hour.
+The pull request closing the item (#278) rewrote the comment in `tasks.rs`
+to say a halted core's `CURRENT` "is always the idle slot", a claim only a
+test in `power.rs` made true, in another file, and the same pull request
+proposed, as a roadmap item, the very change to `power::halt` that would
+falsify it. Its review read both. The rule moved into the one function that
+marks a core down, `smp::halt_alone_here`, which refuses a core running a
+program, so the comment now describes what that function enforces. The
+review also found the closure's "every halt on a secondary goes through
+`power::halt`" false (a core without a GIC interface parks in its own loop):
+the verdict held, since such a core never ran a task, but an "every" offered
+as evidence is a claim of its own, the kind the paragraph above it said to
+read the code for.
 
 ## What actually worked
 

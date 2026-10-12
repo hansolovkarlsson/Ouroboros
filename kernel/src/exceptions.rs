@@ -571,9 +571,10 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
             "Ouroboros kernel:   this core's kernel stack's canary is OVERWRITTEN: the stack overflowed below {stack_base:#x}"
         );
     }
-    // Whose halt: a core inside an entry (holding the kernel lock) or the
-    // boot core halts the kernel, a secondary holding nothing halts alone
-    // (power::halt, lock.rs). main.rs's silent halt was the old end here,
+    // Whose halt: a core inside an entry (holding the kernel lock), the
+    // boot core, or a core running a program halts the kernel; a secondary
+    // holding nothing and running the idle slot halts alone (power::halt,
+    // smp::halt_alone_here, lock.rs). main.rs's silent halt was the old end here,
     // and said nothing about either.
     crate::power::halt()
 }
