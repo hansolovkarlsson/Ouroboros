@@ -788,34 +788,59 @@ not yet checked on this tree are marked (predicted).
       built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
       and `make test-spawn-owner` (`roadmap-smp.md`, step 4(d)).
       - [x] **A task stranded on a core that halted. Closed 2026-10-12:
-            the state cannot be reached, and could not when this item was
-            written.** The item said a secondary that takes a kernel fault
-            halts alone (`smp::mark_down_here`) with its `CURRENT` entry
-            still naming the task it ran, so `ps`, `/proc/<n>/core`, the
-            placement and `kill` would all take the task for running on a
-            dead core. But `power::halt` halts alone only when the core holds
-            no lock, is not the boot core, and runs the idle slot: a core
-            whose current slot is a program halts the whole kernel
-            (`runs_a_program`, added by the review of #266, c9cbf6a,
-            2026-10-10, a day before this item was written by the third
-            review of #271). Every halt on a secondary goes through
-            `power::halt` (the diverging exception handler, an EL0 fault in
-            the idle slot, a fault in the core's own setup), and a
-            secondary's `CURRENT` starts at the idle slot, which
-            `running_core` answers `None` for. So the dead core never holds a
-            task, and the remote kill's "which ends it" holds in every case.
-            The comment in `tasks.rs` that pointed here says so now. No rig
-            can show it (nothing faults a secondary at EL1 while it runs a
-            program); the evidence is the reading above.
-            **What the item's sketch would still buy, as a `new` item:** a
-            kernel fault on a secondary that runs a program stops the whole
-            system today, which is safe and blunt. Letting that core halt
-            alone, its program ended from the boot core's tick with a line
-            naming the core and its entry parked at the idle slot, would keep
-            the rest running. About half a day, plus a fault to test it with
-            (a `\SMPFAULT` variant faulting in the kernel while a program is
-            current on a secondary). Resilience, not a defect; not part of
-            the multi-core arc.
+            the state could not be reached when this item was written, and
+            since #278 it cannot be spelled.** The item said a secondary that
+            takes a kernel fault halts alone with its `CURRENT` entry still
+            naming the task it ran, so `ps`, `/proc/<n>/core`, the placement
+            and `kill` would all take the task for running on a dead core.
+            But `power::halt` already halted the whole kernel when the core
+            ran a program (`runs_a_program`, added by the review of #266,
+            c9cbf6a, 2026-10-10, a day before this item was written by the
+            third review of #271), and a core is marked down only on
+            `power::halt`'s halt-alone path. A secondary that parks without
+            it (no GIC interface in `secondary_main`, or the entry stub's
+            `3:` loop) has never run a task, so its `CURRENT` is the idle
+            slot it started with, and it was never marked up. The rule was
+            a test in `power.rs` and a comment in `tasks.rs`; #278 moved it
+            into the one function that marks a core down,
+            `smp::halt_alone_here`, which refuses the boot core and a core
+            running a program (the caller then halts the kernel), so no edit
+            to `power::halt` can strand a task without editing that
+            function. No rig can show it (nothing faults a secondary at EL1
+            while it runs a program); the evidence is the reading above.
+      - [ ] **new** **A secondary's kernel fault under a program stops only
+            that core.** What the item above sketched, as resilience rather
+            than a defect: today such a fault halts the whole system, which
+            is safe and blunt. The core would halt alone, its program ended
+            from the boot core's tick with a line naming the core and its
+            entry parked at the idle slot, so the rest keeps running; that
+            means changing `smp::halt_alone_here`'s refusal, which is where
+            the rule lives now. About half a day, plus a fault to test it
+            with (a `\SMPFAULT` variant faulting in the kernel while a
+            program is current on a secondary). Not part of the multi-core
+            arc.
+      - [ ] **`fsd` restarted as wedged while a program spins on one core.**
+            Seen 2026-10-12 in `make test-smp`'s `-smp 1` boot: with `exec
+            /bin/coreprobe hold` spinning in the background, the supervisor
+            printed `server slot 2 wedged - no progress (runnable) -
+            restarting` twice (attempts 1 and 2 of 3). Two runs on #278's
+            branch scored 131 ok, the two failures `ps` showing the program
+            `runnable` (its line cut by the restart's) and the shell's answer
+            after `kill 6`; one run on `main` at `f61138f`, without #278, had
+            the same two restarts in its transcript (`build/test-smp-smp1.txt`)
+            but answered after the kill, and its check lines were not kept,
+            so its score is unknown. On 2026-10-11
+            the same rig was 133 of 133 with these checks, so either it was
+            always intermittent or something merged since brought it; of
+            #272 to #276 only #274 (the cursor: `cond`, `fbdev.rs`, the
+            console lock around every `FB_*` arm) changed code, so it is the
+            first suspect, and a run of the rig at `0d38602` (#271's merge)
+            is the first bisection. With one core, `fsd` is runnable and should get its slices
+            in round robin beside the spinning program; "no progress" says it
+            did not, or that the wedge detector's idea of progress does not
+            hold with a spinner beside it. A restart of `fsd` on a running
+            system is not harmless (three per boot), so this blocks closing
+            the arc until it is explained.
       - [ ] **Keys lost on Parallels with the stick passed through.** Seen
             2026-10-12 driving the multi-core boot by `prlctl send-key-event`
             (`testing/testing-parallels.md`, "Multi-core"): with the stick on

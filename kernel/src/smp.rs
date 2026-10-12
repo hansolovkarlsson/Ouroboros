@@ -253,14 +253,24 @@ pub(crate) fn is_boot(core: usize) -> bool {
     core as u64 == BOOT_INDEX.load(Ordering::Relaxed)
 }
 
-/// This core halts alone (`power::halt`, holding nothing): it takes no
-/// more work, so placement stops counting it and no kick waits on it.
-pub(crate) fn mark_down_here() {
+/// Whether this core may halt alone (`power::halt`, holding nothing), and
+/// if so it is marked down: it takes no more work, so placement stops
+/// counting it and no kick waits on it. Only a secondary running the idle
+/// slot may; the boot core's halt is the system's, and a core running a
+/// program holds that program's registers on its own stack, so no other
+/// core could resume or end it (the high review of #266). Answering here,
+/// where the core is marked down, is what keeps a dead core's `CURRENT`
+/// always the idle slot, which `tasks::running_core` reads as no task: a
+/// task can never read as running on a halted core. `false` marks nothing,
+/// and the caller halts the kernel.
+pub(crate) fn halt_alone_here() -> bool {
     let core = core_index() as usize;
-    if core < MAX_CORES && !is_boot_core() {
-        SECONDARIES_UP.fetch_and(!(1 << core), Ordering::Relaxed);
-        CORE_UP[core].store(CORE_FAILED, Ordering::Release);
+    if core >= MAX_CORES || is_boot_core() || crate::tasks::current_index() != crate::tasks::TaskIndex::IDLE {
+        return false;
     }
+    SECONDARIES_UP.fetch_and(!(1 << core), Ordering::Relaxed);
+    CORE_UP[core].store(CORE_FAILED, Ordering::Release);
+    true
 }
 
 /// Which interrupt each core has acknowledged and is waiting for the
@@ -695,7 +705,7 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     for (i, up_mark) in CORE_UP.iter().enumerate().take(n) {
         match up_mark.load(Ordering::Acquire) {
             CORE_UP_IDLE => ping(i),
-            // Came up, then halted alone (mark_down_here) before its ping:
+            // Came up, then halted alone (halt_alone_here) before its ping:
             // said, since a core the summary counted is otherwise silent.
             CORE_FAILED if started_up[i] => {
                 crate::console::println!("Ouroboros kernel: smp: core {i} is down (it halted after coming up), not kicked");
