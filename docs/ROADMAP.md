@@ -921,6 +921,20 @@ The small open tails those arcs deliberately left:
   was 12 a second until #232's review made the tick read ahead for the
   owner whoever it interrupted.)
 
+- **End-of-stream only from a program that exits (found 2026-10-12, the
+  second review of #279).** A pipeline's consumer learns its producer is done
+  from an empty message, which `ulib::exit` and libc's `_exit` send for a
+  program that did not. A producer that dies any other way (an EL0 fault the
+  kernel ends it for, a `kill` from another shell, a raw `EXIT` such as
+  `pong`'s) sends none, and its consumer waits in `MSG_RECV`, and the shell on
+  the consumer, until a Ctrl+C. The shell's old `DELEGATE` teardown covered
+  only a producer gone before the link was authorized. The whole fix is in
+  the kernel's teardown (`tasks::end_task`), once, but it has to know that
+  the program did not send one already and that the target slot still holds
+  the task the program was spawned toward, or a stray empty message reaches a
+  later occupant (the shell's own mailbox, for a redirect). Not yet seen
+  outside a Ctrl+C.
+
 - **The network right is still delegated after the spawn (found 2026-10-12,
   making `SPAWN` grant the stdout target).** The shell's `spawn_path` spawns
   a program and then `DELEGATE`s it `TO_NET` (`programs/shell/src/main.rs`).

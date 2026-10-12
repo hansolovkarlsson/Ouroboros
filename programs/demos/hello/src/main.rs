@@ -59,6 +59,8 @@ fn main() -> ! {
             if r == 0 || !transient || get_ticks() > deadline {
                 break;
             }
+            // Let the consumer drain, as ulib::end_of_stream does.
+            syscall4(syscall_abi::YIELD, 0, 0, 0, 0);
         }
     }
     task_exit(0);
@@ -103,6 +105,8 @@ fn pipe_out(target: u64, bytes: &[u8]) {
             if !transient || get_ticks() > deadline {
                 return;
             }
+            // Let the consumer drain, as ulib::pipe_out does.
+            syscall4(syscall_abi::YIELD, 0, 0, 0, 0);
         }
         off += n;
     }

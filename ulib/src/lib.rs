@@ -590,11 +590,13 @@ pub fn con_write(bytes: &[u8]) {
 /// consumer runs (draining, or exiting early like `head`, after which the next
 /// send fails fast with `TASK_ERR_NO_SUCH_TASK` and this returns). Without the
 /// yield the producer would spin re-sending until the next tick preempted it -
-/// up to a full second on hardware. A `MSG_ERR_DENIED` is final: `SPAWN`
-/// grants a program the right to its stdout target before it runs, or
-/// refuses the spawn (since 2026-10-12), so a refusal here does not pass.
-/// (It was retried for the window before the shell's `DELEGATE` landed,
-/// which is what dropped a pipeline stage's line after 150 ticks.)
+/// up to a full second on hardware. A `MSG_ERR_DENIED` is not waited out:
+/// `SPAWN` grants a program the right to its stdout target before it runs,
+/// or refuses the spawn (since 2026-10-12), so there is no window for it to
+/// close. A grant can still be lost, when the target's slot is reaped and
+/// reused while this program runs on, and then no wait brings it back. (It
+/// was retried for the window before the shell's `DELEGATE` landed, which
+/// is what dropped a pipeline stage's line after 150 ticks.)
 pub fn pipe_out(target: u64, bytes: &[u8]) {
     let mut off = 0;
     while off < bytes.len() {
@@ -1799,8 +1801,10 @@ pub fn fs_error_msg(code: u64) -> &'static [u8] {
 /// Reaching netd needs the `TO_NET` send-capability, which a spawnable slot does
 /// *not* hold statically - the shell delegates it (`DELEGATE`) to a command it
 /// spawns. A tick can let this program run in the window before that delegation
-/// lands, so a transient `MSG_ERR_DENIED` is retried briefly (the same bounded
-/// wait `pipe_out` uses), rather than surfaced as a failure.
+/// lands, so a transient `MSG_ERR_DENIED` is retried briefly (150 ticks),
+/// rather than surfaced as a failure. `pipe_out` no longer retries it since
+/// 2026-10-12: `SPAWN` grants the stdout link before a program runs, so that
+/// window is gone, and this one is still open (ROADMAP.md's follow-up).
 pub fn net_call(req: &[u8], reply: &mut [u8]) -> u64 {
     net_msg_call(req, reply)
 }

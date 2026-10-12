@@ -189,9 +189,11 @@ pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
 /// to the console) is unaffected. **SPAWN grants the child the right to
 /// send to its stdout target** (since 2026-10-12), under [`DELEGATE`]'s own
 /// rule (the caller holds a send right to the target), in the same step, so
-/// a pipeline stage never runs before it may write to its consumer; a
-/// target the caller could not delegate gets no grant, and the child's
-/// sends to it are refused as before. The
+/// a pipeline stage never runs before it may write to its consumer. A live
+/// target the caller may not grant is refused [`MSG_ERR_DENIED`] before
+/// anything is allocated; a target that is not a live task (a consumer that
+/// already exited, or the console with no console server) is no refusal,
+/// and the child's writes there fail at once, as to a closed pipe. The
 /// **argv blob length** (arg2) attaches the argument vector previously
 /// staged via [`ARGS_STAGE`] (`0` = no args); the child reads it via
 /// [`GET_ARGC`]/[`GET_ARG`]. The **cwd length** (arg3) attaches the working
@@ -672,9 +674,9 @@ pub const HEAP_INFO_IMAGE_MAX: u64 = 4;
 /// before either slot's liveness is looked at. The two answers are kept apart
 /// because a task that exited before its link is authorized is the ordinary
 /// case, and a caller must tell it from a genuine denial without a second
-/// syscall. [`SPAWN`] answers the same two for its stdout target, under the
-/// same rule, and that is where the shell meets them: a pipeline's links are
-/// granted by `SPAWN` since 2026-10-12, not by this call.
+/// syscall. [`SPAWN`] refuses the same denial for its stdout target, under
+/// the same rule, and that is where the shell meets it: a pipeline's links
+/// are granted by `SPAWN` since 2026-10-12, not by this call.
 /// Runtime capability delegation: grant `grantee` (a task slot) the right to
 /// initiate IPC sends to `target` (a task slot) - a dynamic addition to
 /// `grantee`'s static send-mask. One rule: `grantee` must be the caller's
