@@ -57,7 +57,8 @@ This document is the one to update first when direction changes.
 > hardware targets have booted it: the Pi 4 every step on 2026-10-11
 > (`testing/testing-pi4.md` section 6), Parallels steps 2 to 4(d) on
 > 2026-10-12 from the shell (`testing/testing-parallels.md`, "Multi-core";
-> its boot lines cannot be read there, item 4's second open sub-item). The spawn staging buffers have their owner since 2026-10-11 (item 4
+> its boot lines cannot be read there, a follow-up under "Remaining
+> follow-ups"). The spawn staging buffers have their owner since 2026-10-11 (item 4
 > below, `make test-spawn-owner`), and the same day gave the cores a reading
 > from a shell, `/proc/cpus` and `ps` naming a running task's core (#270,
 > #271), and wrote down a task stranded on a core that halted alone, which
@@ -768,7 +769,9 @@ not yet checked on this tree are marked (predicted).
 - [ ] **4. Multi-core, on QEMU first. Planned 2026-10-10,
       [`roadmap-smp.md`](roadmap/roadmap-smp.md), the arc for the week of
       2026-10-12. Built on QEMU the same day, steps 0 to 4(d) (#258 to
-      #266); the hardware boots and the item below are what is left.** Today one core runs everything and
+      #266); the hardware boots are in (the Pi 4 2026-10-11, Parallels
+      2026-10-12), and what is left is the open sub-item below, the `fsd`
+      wedge, whose fix is #280.** Today one core runs everything and
       the others are never started; the single-core argument is load-bearing
       (`synccell.rs` states it once for every mutable static, and the kernel
       never runs at EL1 with IRQs unmasked). What it needs: the secondary
@@ -801,76 +804,33 @@ not yet checked on this tree are marked (predicted).
             it (no GIC interface in `secondary_main`, or the entry stub's
             `3:` loop) has never run a task, so its `CURRENT` is the idle
             slot it started with, and it was never marked up. The rule was
-            a test in `power.rs` and a comment in `tasks.rs`; #278 moved it
-            into the one function that marks a core down,
-            `smp::halt_alone_here`, which refuses the boot core and a core
-            running a program (the caller then halts the kernel), so no edit
-            to `power::halt` can strand a task without editing that
-            function. No rig can show it (nothing faults a secondary at EL1
+            a test in `power.rs` and a comment in `tasks.rs`; #278 moved the
+            decision, the mark and the `halted alone` line into one function,
+            `smp::halt_alone_here`, which refuses the boot core (by index,
+            and by MPIDR affinity for `smp::start`'s window, when the two
+            indexes differ) and a core running a program, so `power::halt`
+            has no way left to halt a core alone without it and halts the
+            kernel otherwise. No rig can show it (nothing faults a secondary at EL1
             while it runs a program); the evidence is the reading above.
-      - [ ] **new** **A secondary's kernel fault under a program stops only
-            that core.** What the item above sketched, as resilience rather
-            than a defect: today such a fault halts the whole system, which
-            is safe and blunt. The core would halt alone, its program ended
-            from the boot core's tick with a line naming the core and its
-            entry parked at the idle slot, so the rest keeps running; that
-            means changing `smp::halt_alone_here`'s refusal, which is where
-            the rule lives now. About half a day, plus a fault to test it
-            with (a `\SMPFAULT` variant faulting in the kernel while a
-            program is current on a secondary). Not part of the multi-core
-            arc.
-      - [ ] **`fsd` restarted as wedged while a program spins on one core.**
-            Seen 2026-10-12 in `make test-smp`'s `-smp 1` boot: with `exec
-            /bin/coreprobe hold` spinning in the background, the supervisor
-            printed `server slot 2 wedged - no progress (runnable) -
-            restarting` twice (attempts 1 and 2 of 3). Two runs on #278's
-            branch scored 131 ok, the two failures `ps` showing the program
-            `runnable` (its line cut by the restart's) and the shell's answer
-            after `kill 6`; one run on `main` at `f61138f`, without #278, had
-            the same two restarts in its transcript (`build/test-smp-smp1.txt`)
-            but answered after the kill, and its check lines were not kept,
-            so its score is unknown. On 2026-10-11
-            the same rig was 133 of 133 with these checks, so either it was
-            always intermittent or something merged since brought it; of
-            #272 to #276 only #274 (the cursor: `cond`, `fbdev.rs`, the
-            console lock around every `FB_*` arm) changed code, so it is the
-            first suspect, and a run of the rig at `0d38602` (#271's merge)
-            is the first bisection. With one core, `fsd` is runnable and should get its slices
-            in round robin beside the spinning program; "no progress" says it
-            did not, or that the wedge detector's idea of progress does not
-            hold with a spinner beside it. A restart of `fsd` on a running
-            system is not harmless (three per boot), so this blocks closing
-            the arc until it is explained.
-      - [ ] **Keys lost on Parallels with the stick passed through.** Seen
-            2026-10-12 driving the multi-core boot by `prlctl send-key-event`
-            (`testing/testing-parallels.md`, "Multi-core"): with the stick on
-            the xHCI beside the keyboard, about half the lines lost a key
-            (`coeprobe`, `ove the lazy dog`, an Enter, so login read
-            `rootroot`), on four vCPUs and on one alike, and a slower key
-            delay (0.3 s, 0.6 s) did not help. Without the stick, two boots
-            the same morning typed every key at 0.12 s. So it is the
-            keyboard and the stick on one controller, not multi-core: a third
-            mode beside the two the contention fix closed in v0.4
-            (`CHANGELOG.md`, "xHCI keyboard ↔ USB-storage contention fixed"),
-            where the keyboard is addressed and the stick works but reports
-            go missing. Not yet bisected: whether a physical keyboard loses
-            keys too (check A5 by hand), and whether a change brought it:
-            the v0.4 fix was confirmed with typing and a stick together, and
-            the xHCI work for the Pi since (#191 to #200, the controller's
-            setup order among it) is where to look first. The check is a line
-            typed with the stick attached, read back whole, ten times.
-      - [ ] **The kernel's boot lines cannot be read on Parallels.** The
-            kernel's framebuffer console prints them and `cond` clears the
-            screen about two seconds after power-on; `prlctl capture` takes
-            about a second a frame, and the VM's serial file stays empty
-            (Parallels' firmware does not write its console there). So
-            `MADT: 4 cores`, `core N up` and the summary were not seen on
-            2026-10-12; the count came from `coreprobe` instead. The
-            usb-storage postmortem's lesson applies ("replay the data on the
-            other side of the transition"), but re-printing through the
-            kernel's console is not enough here, since `cond` clears that
-            too: the lines have to reach `cond`'s screen, or a file such as
-            a `/proc` entry holding the kernel's boot log.
+      - [ ] **`fsd` restarted as wedged while a program spins on one core.
+            Cause found 2026-10-12; the fix is #280, on #279.** Seen in
+            `make test-smp`'s `-smp 1` boot: with `exec /bin/coreprobe hold`
+            spinning in the background, the supervisor printed `server slot
+            2 wedged - no progress (runnable) - restarting` twice, and two
+            checks failed in two runs on #278's branch (131 ok). Not a
+            regression: a run at `0d38602`, before #274, scored 133 with the
+            same two restarts in its transcript, so the rig had passed or
+            failed on timing. A ring of the last 32 switches showed the
+            cause: every pick scanned on from the task running, and with the
+            rig typing a key a tick the boot core went round 6 -> 0 -> 3 -> 6
+            (the tick from the program to the shell, the shell's echo a
+            direct switch to `cond`, `cond`'s block scanning on to the
+            program), so `fsd` at slot 2 never came round. #280 gives each
+            core's tick a round of its own (`tasks::ROUND`) and makes
+            `make test-smp` fail on any server restart; it needs #279 below
+            it (`SPAWN` granting a child its stdout target), since the fairer
+            tick otherwise exposes a pipeline stage writing before the
+            shell's `DELEGATE` and losing its line. Closes when #280 lands.
       **Two small follow-ups asked by Hans on 2026-10-11, after #268:**
       - [x] **`/proc/cpus`: how many cores are active.** Built 2026-10-11,
             `make test-proc-cpus`: one line from `CORE_INFO_UP`, `fsd`'s first
@@ -987,6 +947,50 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 ## Remaining follow-ups from completed arcs (small, unsequenced)
 
 The small open tails those arcs deliberately left:
+
+- **A secondary's kernel fault under a program stops only that core
+  (new, 2026-10-12).** What item 4's closed sub-item, "a task stranded on
+  a core that halted", sketched, as resilience rather than a defect: today such a fault halts the whole system, which
+  is safe and blunt. The core would halt alone, its program ended
+  from the boot core's tick with a line naming the core and its
+  entry parked at the idle slot, so the rest keeps running; that
+  means changing `smp::halt_alone_here`'s refusal, which is where
+  the rule lives now. About half a day, plus a fault to test it
+  with (a `\SMPFAULT` variant faulting in the kernel while a
+  program is current on a secondary). Not part of the multi-core
+  arc.
+
+- **Keys lost on Parallels with the stick passed through.** Seen
+  2026-10-12 driving the multi-core boot by `prlctl send-key-event`
+  (`testing/testing-parallels.md`, "Multi-core"): with the stick on
+  the xHCI beside the keyboard, about half the lines lost a key
+  (`coeprobe`, `ove the lazy dog`, an Enter, so login read
+  `rootroot`), on four vCPUs and on one alike, and a slower key
+  delay (0.3 s, 0.6 s) did not help. Without the stick, two boots
+  the same morning typed every key at 0.12 s. So it is the
+  keyboard and the stick on one controller, not multi-core: a third
+  mode beside the two the contention fix closed in v0.4
+  (`CHANGELOG.md`, "xHCI keyboard ↔ USB-storage contention fixed"),
+  where the keyboard is addressed and the stick works but reports
+  go missing. Not yet bisected: whether a physical keyboard loses
+  keys too (check A5 by hand), and whether a change brought it:
+  the v0.4 fix was confirmed with typing and a stick together, and
+  the xHCI work for the Pi since (#191 to #200, the controller's
+  setup order among it) is where to look first. The check is a line
+  typed with the stick attached, read back whole, ten times.
+
+- **The kernel's boot lines cannot be read on Parallels.** The
+  kernel's framebuffer console prints them and `cond` clears the
+  screen about two seconds after power-on; `prlctl capture` takes
+  about a second a frame, and the VM's serial file stays empty
+  (Parallels' firmware does not write its console there). So
+  `MADT: 4 cores`, `core N up` and the summary were not seen on
+  2026-10-12; the count came from `coreprobe` instead. The
+  usb-storage postmortem's lesson applies ("replay the data on the
+  other side of the transition"), but re-printing through the
+  kernel's console is not enough here, since `cond` clears that
+  too: the lines have to reach `cond`'s screen, or a file such as
+  a `/proc` entry holding the kernel's boot log.
 
 - **A busy program keeps up with about 25 keys a second (found 2026-10-07,
   building the keyboard queue).** The xHCI driver keeps one interrupt

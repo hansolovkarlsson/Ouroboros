@@ -32,10 +32,12 @@
 //! reporter does not take it either: it halts, and may be reporting from
 //! inside the holder, in which case the state behind the lock is suspect,
 //! so `power::halt` on a core that holds the lock (or on the boot core,
-//! whose death is the system's) halts the KERNEL: `HALTED` is set, the
-//! lock stays with the dead core, and every other core parks at its next
-//! `acquire` with a line. A secondary that halts holding nothing (a fault
-//! in its own setup, `\SMPFAULT`) halts alone, and the rest go on.
+//! whose death is the system's, or on a core running a program, whose
+//! registers die with it) halts the KERNEL: `HALTED` is set, the lock
+//! stays with the dead core, and every other core parks at its next
+//! `acquire` with a line. A secondary that halts holding nothing and
+//! running the idle slot (a fault in its own setup, `\SMPFAULT`) halts
+//! alone, and the rest go on (`smp::halt_alone_here` decides).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

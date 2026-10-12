@@ -2537,8 +2537,10 @@ pub(crate) fn core_info(op: u64, arg: u64) -> u64 {
         // `running_core`: the kill, the placement and this op agree. A core
         // that halted alone keeps its CURRENT entry, and that entry is
         // always the idle slot, which `running_core` answers `None` for:
-        // `smp::halt_alone_here`, the one place a core is marked down,
-        // refuses a core running a program (`power::halt` then halts the
+        // `smp::halt_alone_here`, the one place a core that came up is
+        // marked down (a core whose GIC would not come up is marked failed
+        // in `secondary_main`, before it ever ran a task), refuses a core
+        // running a program (`power::halt` then halts the
         // whole kernel), so no task is ever left reading as running on a
         // dead core.
         syscall_abi::CORE_INFO_TASK_CORE => TaskIndex::new(arg as usize)

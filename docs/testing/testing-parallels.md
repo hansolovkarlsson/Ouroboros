@@ -211,13 +211,13 @@ from the Parallels logo straight to `cond`'s screen. The serial port's file
 (`parallels/com.output.txt`) stayed empty. `4 cores up` stands in for them:
 it is `smp::up_cores()`, marked by each secondary after its `up` line is
 printed. The kernel's own kill lines (the remote kill's "ends it") are not on
-this screen either. `ROADMAP.md` item 4 has the sub-item.
+this screen either. `ROADMAP.md` has it under "Remaining follow-ups".
 
 **Keys were lost with the stick attached.** About half the typed lines lost a
 key (`coeprobe`, `ove the lazy dog`, an Enter lost so login read `rootroot`),
 at four vCPUs and at one, at a key delay of 0.12 s, 0.3 s and 0.6 s alike;
 two boots the same morning without the stick lost none at 0.12 s. Retyping
-got every check above through. `ROADMAP.md` item 4 has the sub-item; until it
+got every check above through. `ROADMAP.md` has it under "Remaining follow-ups"; until it
 is fixed, read every typed line back off the screenshot before trusting its
 output.
 
