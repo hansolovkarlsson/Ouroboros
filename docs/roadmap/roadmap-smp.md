@@ -179,7 +179,7 @@ Its core cannot have switched away first, since a switch needs the lock.*
       fault line. Step 2 extends the same rig. Control: with the MPIDR
       collection removed the count reads 0 and the rig is red.
 - [x] **Step 2. The cores started and parked. Built 2026-10-10 on QEMU;
-      on the Pi 4 2026-10-11; the Parallels boot is still owed.** `kernel/src/smp.rs`:
+      on the Pi 4 2026-10-11, on Parallels 2026-10-12.** `kernel/src/smp.rs`:
       `CPU_ON` per core through `power::cpu_on`, the entry stub
       `smp_secondary_entry` (no stack until the MMU is on; at EL2 the
       hypervisor controls and EL1's regime as `el2::drop_to_el1` writes
@@ -215,7 +215,14 @@ Its core cannot have switched away first, since a switch needs the lock.*
       up lines and the summary.
       Pi 4 over serial: done 2026-10-11, by eye from the boot log
       (`testing-pi4.md` section 6: `MADT: 4 cores`, three up lines, the
-      summary, the ticks and the kicks, no fault). Parallels: not yet done.
+      summary, the ticks and the kicks, no fault). Parallels: 2026-10-12,
+      but not from the boot log, which `cond` clears before any capture can
+      read it (`testing-parallels.md`, "Multi-core"); the count of cores up
+      is read instead through `coreprobe` (`4 cores up` with four vCPUs),
+      which is `CORE_INFO_UP`, `smp::up_cores()`: the secondaries marked up
+      and the boot core (not the summary line's own counter, but set at
+      the same point in `smp.rs`, after the core's `up` line is printed,
+      so three secondaries counted means three up lines written).
 - [x] **Step 3. The three decisions. Done 2026-10-10.** (1) FP/SIMD
       stays eager, on a measurement: `make measure-syscost`
       (`/bin/SYSCOST`, 200,000 `GET_TICKS` calls, three runs, the median)
@@ -234,8 +241,9 @@ Its core cannot have switched away first, since a switch needs the lock.*
       into a task exists outside the trampolines; `make test-fpsimd`,
       `make test-kbd-mode` and `make test-smp` green.
 - [x] **Step 4. Tasks on cores. Done on QEMU 2026-10-10, on the Pi 4
-      2026-10-11 (`testing-pi4.md` section 6, through `ps` and `/proc/cpus`);
-      the Parallels boot is owed, as for step 2.** In order, each its own PR: (a) **done
+      2026-10-11 (`testing-pi4.md` section 6, through `ps` and `/proc/cpus`),
+      on Parallels 2026-10-12 (`testing-parallels.md`, "Multi-core", the
+      same checks from the shell).** In order, each its own PR: (a) **done
       2026-10-10: the kernel lock**, `kernel/src/lock.rs`, taken at the
       start of every resumable entry's Rust half (a syscall, the tick, an
       EL0 fault) and released before the trampoline's `eret`, owned by
