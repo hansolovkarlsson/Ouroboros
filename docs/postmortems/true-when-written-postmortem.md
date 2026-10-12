@@ -993,6 +993,21 @@ with every interrupt masked. The line stands, since the roadmap item is what
 makes it true in every case, and it is the same claim-as-conclusion that
 the 09-20 section named.
 
+The evening's cursor pull request (#274, four reviews) added three more,
+each a species this document already has. A doc comment in `cond` said
+`cursor_on` reads the visibility flag, and `cursor_on` had become
+`cursor_settle` in the same commit: falsified in the same pull request,
+the 10-09 shape, by a rename this time. `fbdev.rs`'s module doc said the
+kernel's framebuffer console and the server's primitives "never run
+concurrently" because one core is in the kernel at a time, while the SAFETY
+note thirty lines below it said a halting core's fault report takes no
+kernel lock; the module doc was the copy and the SAFETY note the original,
+and the fourth review read both. And the list of gated framebuffer
+primitives was spelled in four index lines; two gained the new one and two
+did not, until the third review counted. The same day's rule holds for all
+three: the edit that falsifies a claim is in another place, and a review
+that reads only the diff never sees the claim.
+
 ## What actually worked
 
 Three things, none of them "be more careful".
