@@ -1229,12 +1229,7 @@ fn run_head_pipeline(
                 // reaps, silent for exit 0 and reporting anything else
                 // (`kill_and_reap` would throw that code away). The shell's
                 // DELEGATE answered this until SPAWN granted the link.
-                for j in i + 1..prog_stages.len() {
-                    if syscall(syscall_abi::KILL, slots[j]) != 0 {
-                        let cmd = prog_stages[j].split_whitespace().next().unwrap_or("stage");
-                        wait_pipe_stage(cmd, slots[j]);
-                    }
-                }
+                end_pipeline(&prog_stages[i + 1..], &slots[i + 1..prog_stages.len()]);
                 return;
             }
             Err(code) => {
@@ -1312,7 +1307,23 @@ fn run_head_pipeline(
         // keyboard (an interactive last stage, e.g. `ls -l | more`) and reap
         // every stage in order.
         PipeSink::Console => {
-            syscall4(syscall_abi::FG, slots[last], 1, 0, 0); // foreground command
+            // The keyboard goes to the last stage, which must still be there:
+            // a last stage gone already (a bad `grep` pattern further down
+            // than the stage SPAWN checked, or one that failed just after)
+            // would leave the keyboard with the shell, and Ctrl+C could not
+            // end a producer still running (the fourth review of #279). So a
+            // refused FG ends the pipeline as SPAWN's refusal does: live
+            // stages killed, the rest reaped with their exit codes. A
+            // pipeline that already finished (`mkdir | wc`) comes out the
+            // same as it would below: every stage reaped, codes reported.
+            let fg = syscall4(syscall_abi::FG, slots[last], 1, 0, 0);
+            if fg != 0 {
+                if fg != syscall_abi::TASK_ERR_NO_SUCH_TASK {
+                    print_fs_error("pipe: could not hand the keyboard to the last stage", fg);
+                }
+                end_pipeline(prog_stages, &slots[..prog_stages.len()]);
+                return;
+            }
             for i in 0..prog_stages.len() {
                 let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
                 wait_pipe_stage(cmd, slots[i]);
@@ -1393,6 +1404,20 @@ fn drain_program_output(slot: u64) {
         }
     }
     let _ = syscall(syscall_abi::WAIT, slot);
+}
+
+/// Ends a pipeline the shell will not run to completion: each stage still
+/// live is killed (`KILL` frees it), and each that already exited is reaped
+/// by [`wait_pipe_stage`], silent for exit 0 and reporting anything else, so
+/// a stage that failed on its own still says how. `stages` and `slots` are
+/// the same stages, in the same order.
+fn end_pipeline(stages: &[&str], slots: &[u64]) {
+    for (stage, &slot) in stages.iter().zip(slots) {
+        if syscall(syscall_abi::KILL, slot) != 0 {
+            let cmd = stage.split_whitespace().next().unwrap_or("stage");
+            wait_pipe_stage(cmd, slot);
+        }
+    }
 }
 
 /// Kill a spawned task **and collect its slot** - what every "abandon this

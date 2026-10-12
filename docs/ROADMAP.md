@@ -921,6 +921,31 @@ The small open tails those arcs deliberately left:
   was 12 a second until #232's review made the tick read ahead for the
   owner whoever it interrupted.)
 
+- **A pipeline's lifetime is managed by snapshots (found 2026-10-12, the
+  fourth review of #279; all but the first true on `main` before it).**
+  The shell decides a pipeline's fate from moments: `SPAWN` checks a
+  producer's own consumer when it is spawned, and the shell checks the last
+  stage when it hands it the keyboard (`FG`), and either ends the pipeline
+  if its stage is gone. A stage that dies after those moments leaves the
+  rest running: a producer whose consumer exited later keeps going with its
+  writes failing (a holding one keeps its core), and when the keyboard's
+  owner dies the keyboard reverts to the shell, whose Ctrl+C then interrupts
+  only its own wait ("see ps"), not the stages. The teardown itself kills
+  stored slot numbers, which a crashed stage's reused slot could make a
+  stranger's, and can race a later stage's output (`0 0 0`, a kill line); a
+  refused pipeline with `> out` leaves `out` untouched, where a Unix shell
+  truncates it first. And the shell writes a stage's exit report in pieces
+  (`pipe: `, then the rest), so a later stage still writing can land between
+  them (`pipe: 0 0 0`, seen in `make test-smp`'s `-smp 1` boot). The whole fix is Unix's: Ctrl+C at a pipeline ends
+  every stage (the pipeline as one job, killed by identity, not by slot),
+  and a producer whose consumer is gone ends on its next write (a broken
+  pipe), so no moment's check has to be right. `make test-smp`'s
+  `coreprobe | grep (` check cannot force which stage runs first, so it may
+  pass by the path where `coreprobe` runs, and its `coreprobe hold | cat |
+  grep (` check passes through `cat`'s `SPAWN` refusal; the shell's refused
+  `FG` to a last stage that died after that check covers a window no rig can
+  force (with it disabled the check still passed, on 4 cores and on 1).
+
 - **End-of-stream only from a program that exits (found 2026-10-12, the
   second review of #279).** A pipeline's consumer learns its producer is done
   from an empty message, which `ulib::exit` and libc's `_exit` send for a
