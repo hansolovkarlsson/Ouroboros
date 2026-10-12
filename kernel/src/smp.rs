@@ -108,13 +108,12 @@ const NO_FAULT_CORE: u64 = u64::MAX;
 /// Until then the boot core is core 0 by `set_boot_core_index`.
 static BOOT_INDEX: AtomicU64 = AtomicU64::new(0);
 
-/// The boot core's MPIDR affinity, written once at the top of [`start`],
-/// before its index moves (class A; `u64::MAX` until then, when
-/// [`is_boot_core`] is still true on it). [`halt_alone_here`] reads it
-/// because the index cannot be trusted in [`start`]'s own window: between
-/// `BOOT_INDEX` and `TPIDR_EL1` taking the MADT index, the boot core's two
-/// differ and `is_boot_core` says no (the review of #278). An affinity is
-/// the hardware's, and no store order blurs it.
+/// The boot core's MPIDR affinity, written once by [`set_boot_core_index`],
+/// the kernel's first act (class A). [`is_boot_core`] compares it, not the
+/// index: in [`start`]'s own window, between `BOOT_INDEX` and `TPIDR_EL1`
+/// taking the MADT index, the boot core's two indexes differ, and an index
+/// comparison said no there (the reviews of #278). An affinity is the
+/// hardware's, and no store order blurs it.
 static BOOT_AFFINITY: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// The word at the base of each secondary's stack, as `main.rs`'s
@@ -126,9 +125,15 @@ const STACK_CANARY: u64 = 0x5141_5141_5141_5141;
 static CORE_TICKS: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
 
 /// Whether this core is the boot core: the one whose tick does the
-/// scheduler's jobs and whose current task is the scheduler's.
+/// scheduler's jobs and whose current task is the scheduler's. By MPIDR
+/// affinity ([`BOOT_AFFINITY`]), so it holds through [`start`]'s window
+/// too, when the boot core's `TPIDR_EL1` and `BOOT_INDEX` disagree. Before
+/// [`set_boot_core_index`] records it, only the boot core runs, so the
+/// answer is yes. At EL1 under an EL2 the kernel set up, `MPIDR_EL1` reads
+/// `VMPIDR_EL2`, which `el2.rs` and the secondary stub set to the real one.
 pub fn is_boot_core() -> bool {
-    core_index() == BOOT_INDEX.load(Ordering::Relaxed)
+    let boot = BOOT_AFFINITY.load(Ordering::Relaxed);
+    boot == u64::MAX || madt::affinity(crate::gicv3::read_mpidr()) == boot
 }
 
 /// A secondary core's tick (step 4(b)): counted, and said once, the first
@@ -265,8 +270,8 @@ pub(crate) fn is_boot(core: usize) -> bool {
 /// Whether this core halts alone (`power::halt`, holding nothing), and if
 /// so it is marked down and says so: it takes no more work, so placement
 /// stops counting it and no kick waits on it. Only a secondary running the
-/// idle slot may; the boot core's halt is the system's (by index, and by
-/// affinity for [`start`]'s window, [`BOOT_AFFINITY`]), and a core running
+/// idle slot may; the boot core's halt is the system's ([`is_boot_core`],
+/// by affinity, so also in [`start`]'s window), and a core running
 /// a program holds that program's registers on its own stack, so no other
 /// core could resume or end it (the high review of #266). The decision,
 /// the mark and the `halted alone` line are all here, so `power::halt` has
@@ -279,17 +284,14 @@ pub(crate) fn is_boot(core: usize) -> bool {
 /// caller halts the kernel.
 pub(crate) fn halt_alone_here() -> bool {
     let core = core_index() as usize;
-    let boot_by_affinity = madt::affinity(crate::gicv3::read_mpidr()) == BOOT_AFFINITY.load(Ordering::Relaxed);
-    if core >= MAX_CORES
-        || is_boot_core()
-        || boot_by_affinity
-        || crate::tasks::current_index() != crate::tasks::TaskIndex::IDLE
-    {
+    if core >= MAX_CORES || is_boot_core() || crate::tasks::current_index() != crate::tasks::TaskIndex::IDLE {
         return false;
     }
+    // The line before the mark: `start` reads CORE_FAILED as "its own line
+    // said why" and goes on to its summary, so the line has to be out first.
+    crate::console::println_force!("Ouroboros kernel: core {core} halted alone, holding nothing; the rest go on");
     SECONDARIES_UP.fetch_and(!(1 << core), Ordering::Relaxed);
     CORE_UP[core].store(CORE_FAILED, Ordering::Release);
-    crate::console::println_force!("Ouroboros kernel: core {core} halted alone, holding nothing; the rest go on");
     true
 }
 
@@ -424,8 +426,11 @@ pub fn core_index() -> u64 {
 
 /// Marks this core as core 0 in `TPIDR_EL1`. The boot core, at its start,
 /// before the MADT says which index it really has ([`start`] corrects it).
+/// Also records its affinity ([`BOOT_AFFINITY`]), which never changes and
+/// is what [`is_boot_core`] asks.
 pub fn set_boot_core_index() {
     unsafe { asm!("msr tpidr_el1, xzr", options(nomem, nostack, preserves_flags)) };
+    BOOT_AFFINITY.store(madt::affinity(crate::gicv3::read_mpidr()), Ordering::Relaxed);
 }
 
 fn set_core_index(idx: u64) {
@@ -611,7 +616,6 @@ fn wait_ticks() -> u64 {
 /// Once, on the boot core, at EL1, with the console installed.
 pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     let me = madt::affinity(crate::gicv3::read_mpidr());
-    BOOT_AFFINITY.store(me, Ordering::Relaxed);
     let n = cores.count.min(MAX_CORES);
     // The boot core's own index: the MADT fixes no order on ARM, so it may
     // be any entry. From here its TPIDR_EL1 is that index, its stack still

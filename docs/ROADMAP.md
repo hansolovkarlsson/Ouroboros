@@ -806,9 +806,10 @@ not yet checked on this tree are marked (predicted).
             slot it started with, and it was never marked up. The rule was
             a test in `power.rs` and a comment in `tasks.rs`; #278 moved the
             decision, the mark and the `halted alone` line into one function,
-            `smp::halt_alone_here`, which refuses the boot core (by index,
-            and by MPIDR affinity for `smp::start`'s window, when the two
-            indexes differ) and a core running a program, so `power::halt`
+            `smp::halt_alone_here`, which refuses the boot core
+            (`smp::is_boot_core`, by MPIDR affinity since the review of
+            db0288a, so also in `smp::start`'s window, when the boot core's
+            two indexes differ) and a core running a program, so `power::halt`
             has no way left to halt a core alone without it and halts the
             kernel otherwise. No rig can show it (nothing faults a secondary at EL1
             while it runs a program); the evidence is the reading above.
