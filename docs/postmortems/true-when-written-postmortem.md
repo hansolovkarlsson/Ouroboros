@@ -993,6 +993,18 @@ with every interrupt masked. The line stands, since the roadmap item is what
 makes it true in every case, and it is the same claim-as-conclusion that
 the 09-20 section named.
 
+The next morning (2026-10-12) turned that around. Sizing the roadmap item's
+fix meant reading the halt it was about, and `power::halt` already halted
+the whole kernel when the faulting core ran a program (`runs_a_program`,
+from the review of #266 a day before the item was written): a core halts
+alone only on the idle slot, so no task is ever stranded and the kill's line
+was true in every case all along. The item was the false claim, made by a
+review that read the readers of `CURRENT` and not the one function that
+decides what a halting core leaves in it. A claim written to keep another
+claim honest is a claim too, and it needs the same check: **before writing
+down a defect, read the code that would have to produce it**, not only the
+code that would show it.
+
 The evening's cursor pull request (#274, four reviews) added three more,
 each a species this document already has. A doc comment in `cond` said
 `cursor_on` reads the visibility flag, and `cursor_on` had become

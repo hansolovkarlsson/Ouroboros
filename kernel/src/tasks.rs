@@ -2536,9 +2536,10 @@ pub(crate) fn core_info(op: u64, arg: u64) -> u64 {
         // The one predicate every reader of "is this task on a core" uses,
         // `running_core`: the kill, the placement and this op agree. A core
         // that halted alone (`smp::mark_down_here`) keeps its CURRENT entry,
-        // so a task stranded on it reads as running there, to `ps` as to
-        // `kill`: the roadmap item "a task stranded on a core that halted"
-        // (docs/ROADMAP.md, the multi-core section) owns that, for all three.
+        // and that entry is always the idle slot, which `running_core`
+        // answers `None` for: `power::halt` halts the whole kernel instead
+        // when the core runs a program (`runs_a_program`), so no task is
+        // ever left reading as running on a dead core.
         syscall_abi::CORE_INFO_TASK_CORE => TaskIndex::new(arg as usize)
             .and_then(running_core)
             .map_or(syscall_abi::CORE_INFO_NO_CORE, |c| c as u64),

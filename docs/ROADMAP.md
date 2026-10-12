@@ -60,8 +60,8 @@ This document is the one to update first when direction changes.
 > its boot lines cannot be read there, item 4's second open sub-item). The spawn staging buffers have their owner since 2026-10-11 (item 4
 > below, `make test-spawn-owner`), and the same day gave the cores a reading
 > from a shell, `/proc/cpus` and `ps` naming a running task's core (#270,
-> #271), and wrote down the task stranded on a core that halted alone, item
-> 4's open sub-item.
+> #271), and wrote down a task stranded on a core that halted alone, which
+> on 2026-10-12 turned out to be unreachable (item 4's closed sub-item).
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as
@@ -787,25 +787,35 @@ not yet checked on this tree are marked (predicted).
       interleaved (one core could already, two made it likelier), was
       built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
       and `make test-spawn-owner` (`roadmap-smp.md`, step 4(d)).
-      - [ ] **A task stranded on a core that halted.** A secondary that
-            takes a kernel fault halts alone (`smp::mark_down_here`, "core N
-            halted alone, holding nothing; the rest go on") and its `CURRENT`
-            entry keeps the task it was running. Every reader of
-            `tasks::running_core` then believes the task is on that core:
-            `ps` and `/proc/<n>/core` say `running on core N`, the placement
-            never picks it, and `kill` marks it doomed and kicks a core with
-            every interrupt masked, printing "which ends it" for a kill that
-            is lost (the third high review of #271 saw the two halves and
-            asked for one predicate, which they now share; this item is what
-            the predicate does not yet know). The task cannot resume: its
-            registers died with the core. The fix is for the halting core to
-            hand its task to the boot core's tick, which ends it under the
-            lock with a line naming the core, and parks the entry at the idle
-            slot, so `ps`, `kill` and the picker all see an ended task. No rig
-            can raise the fault at EL0 today (`\SMPFAULT` faults a core before
-            it runs any task), so the check is the boot log's line on a
-            by-hand fault. The same item as the standup's "a core halting
-            while it runs a program", written down here for the first time.
+      - [x] **A task stranded on a core that halted. Closed 2026-10-12:
+            the state cannot be reached, and could not when this item was
+            written.** The item said a secondary that takes a kernel fault
+            halts alone (`smp::mark_down_here`) with its `CURRENT` entry
+            still naming the task it ran, so `ps`, `/proc/<n>/core`, the
+            placement and `kill` would all take the task for running on a
+            dead core. But `power::halt` halts alone only when the core holds
+            no lock, is not the boot core, and runs the idle slot: a core
+            whose current slot is a program halts the whole kernel
+            (`runs_a_program`, added by the review of #266, c9cbf6a,
+            2026-10-10, a day before this item was written by the third
+            review of #271). Every halt on a secondary goes through
+            `power::halt` (the diverging exception handler, an EL0 fault in
+            the idle slot, a fault in the core's own setup), and a
+            secondary's `CURRENT` starts at the idle slot, which
+            `running_core` answers `None` for. So the dead core never holds a
+            task, and the remote kill's "which ends it" holds in every case.
+            The comment in `tasks.rs` that pointed here says so now. No rig
+            can show it (nothing faults a secondary at EL1 while it runs a
+            program); the evidence is the reading above.
+            **What the item's sketch would still buy, as a `new` item:** a
+            kernel fault on a secondary that runs a program stops the whole
+            system today, which is safe and blunt. Letting that core halt
+            alone, its program ended from the boot core's tick with a line
+            naming the core and its entry parked at the idle slot, would keep
+            the rest running. About half a day, plus a fault to test it with
+            (a `\SMPFAULT` variant faulting in the kernel while a program is
+            current on a secondary). Resilience, not a defect; not part of
+            the multi-core arc.
       - [ ] **Keys lost on Parallels with the stick passed through.** Seen
             2026-10-12 driving the multi-core boot by `prlctl send-key-event`
             (`testing/testing-parallels.md`, "Multi-core"): with the stick on
