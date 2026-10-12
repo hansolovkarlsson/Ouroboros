@@ -2402,6 +2402,7 @@ fn end_task(i: TaskIndex, final_state: TaskState) {
     revert_input_owner_if(i);
     fail_calls_to(i);
     crate::syscall::release_staging_of(i);
+    crate::fbdev::server_ended(i as u64);
     CURRENT_CALLS[i].store(0, Ordering::Relaxed);
 
     unsafe { *STATES[i].get() = final_state };

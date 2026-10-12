@@ -5,7 +5,8 @@
 
 Item 1 of docs/handoffs/closed/2026-10-05-from-edit-editor-console.md: cond's
 framebuffer backend must act on `CSI row;col H`, `CSI K`, `CSI J`, `CSI 7 m` and
-`CSI 0 m`, and draw nothing for `CSI ? 25 l/h`. QEMU gets a framebuffer from
+`CSI 0 m`, and act on `CSI ? 25 l/h` (since 2026-10-11 cond draws a cursor, the
+cell inverted, and those two hide and show it). QEMU gets a framebuffer from
 `-device ramfb`, and then cond renders the shell's output there and nowhere
 else, so the serial line shows only the kernel's own boot log. This rig reads
 the screen instead: a QMP `screendump` of the guest's display, cut into 8x8
@@ -25,6 +26,16 @@ FB_* primitives change.
 After the model's check, `vtprobe hold` writes `CSI 7 m` and `held` and
 waits for a key; Ctrl+C kills it, and the shell's next prompt must be drawn in
 normal video (its reset after a kill, step 4 of docs/roadmap/roadmap-ctrl-c.md).
+Then the cursor: after `clear` the prompt's row must carry it, the cell after
+`# ` inverted (a blank cell inverted is a block); `vtprobe hide` writes
+`CSI ? 25 l` and `hidden` and waits, and its row must carry no inverted cell;
+Ctrl+C kills it, and the shell's next prompt must carry the cursor again (its
+reset after a kill shows it). The first fails with FB_CURSOR a no-op in the
+kernel, the second with cond ignoring `CSI ? 25 l`, the third with the shell's
+reset not writing `CSI ? 25 h`. Last, `vtprobe leave` exits with the cursor
+hidden and video reversed, which the prompt after it keeps (as on Unix), and
+`clear` must bring both back: the prompt after it carries the cursor and is
+normal; fails with clear's `CSI 0 m` `CSI ? 25 h` prefix removed.
 
 `--keep DIR` leaves the final screendump (PPM) in DIR for a look by eye.
 """
@@ -201,6 +212,11 @@ def main() -> int:
     )
     screen = None
     held_screen = None
+    cursor_screen = None
+    hidden_screen = None
+    back_screen = None
+    left_screen = None
+    clear_screen = None
     driven = False
     try:
         qmp = Qmp(QMP)
@@ -216,17 +232,42 @@ def main() -> int:
                 time.sleep(0.1)
             raise SystemExit("test-cond-vt: screendump wrote nothing")
 
-        def wait_screen(pattern, timeout=90):
-            rx = re.compile(pattern)
+        def wait_until(fits, what, timeout=90):
+            """The first screen that `fits`, read again a settle later: the frame
+            that matched can be mid-write (the shell sends its prompt as two
+            one-byte messages and cond settles the cursor after each), so the
+            graded frame is the fresh one when it still fits. When it no longer
+            fits the state was transient (a command's echo that the program
+            then cleared), and the frame that matched is the answer."""
             deadline = time.time() + timeout
             while time.time() < deadline:
-                rows = snap()
-                if any(rx.search(line) for line in text(rows)):
+                first = snap()
+                if fits(text(first)):
                     time.sleep(drive_qemu.SETTLE)
-                    return rows
+                    settled = snap()
+                    return settled if fits(text(settled)) else first
                 time.sleep(0.5)
-            guest.report(f"!!! TIMEOUT waiting on the screen for {pattern!r}")
+            guest.report(f"!!! TIMEOUT waiting on the screen for {what}")
             return None
+
+        def wait_screen(pattern, timeout=90):
+            rx = re.compile(pattern)
+            return wait_until(lambda lines: any(rx.search(l) for l in lines), repr(pattern), timeout)
+
+        def wait_after(word, timeout=30):
+            """The screen once the shell's prompt is below the row a probe
+            wrote `word` at the start of: the probe has ended, killed or
+            exited, and the shell has drawn what it draws after."""
+            def fits(lines):
+                at = next((i for i, l in enumerate(lines) if l.startswith(word)), None)
+                return at is not None and "#" in lines[at + 1:]
+            return wait_until(fits, f"a prompt below {word!r}", timeout)
+
+        def wait_cleared(timeout=90):
+            """A screen `clear` has just produced: the prompt and nothing else.
+            A bare `#` anywhere would also match the prompt that was on screen
+            before `clear` ran."""
+            return wait_until(lambda lines: [l for l in lines if l] == ["#"], "a cleared screen", timeout)
 
         if (guest.wait_for("shell ready", timeout=120)
                 and wait_screen(r"^login:")):
@@ -250,7 +291,8 @@ def main() -> int:
                             lines = text(rows)
                             if (not any(command in line for line in lines)
                                     and "#" in lines[CHECKED_ROWS:]):
-                                screen = rows
+                                time.sleep(drive_qemu.SETTLE)
+                                screen = snap()
                                 driven = True
                                 break
                             time.sleep(0.5)
@@ -260,20 +302,34 @@ def main() -> int:
                     # draw its next prompt in normal video.
                     if driven:
                         guest.type_line("clear")
-                        if wait_screen(r"^#$"):
+                        if wait_cleared():
                             guest.type_line("vtprobe hold")
-                            if wait_screen(r"held"):
+                            if wait_screen(r"^held"):
                                 guest.proc.stdin.write(b"\x03")
                                 guest.proc.stdin.flush()
-                                deadline = time.time() + 30
-                                while time.time() < deadline:
-                                    rows = snap()
-                                    lines = text(rows)
-                                    at = next((i for i, l in enumerate(lines) if "held" in l), None)
-                                    if at is not None and "#" in lines[at + 1:]:
-                                        held_screen = rows
-                                        break
-                                    time.sleep(0.5)
+                                held_screen = wait_after("held")
+                    # The cursor: on the prompt after a clear; gone while
+                    # `vtprobe hide` holds it hidden; back on the prompt the
+                    # shell draws after Ctrl+C kills it.
+                    if held_screen is not None:
+                        guest.type_line("clear")
+                        cursor_screen = wait_cleared()
+                        if cursor_screen:
+                            guest.type_line("vtprobe hide")
+                            hidden_screen = wait_screen(r"^hidden")
+                            if hidden_screen:
+                                guest.proc.stdin.write(b"\x03")
+                                guest.proc.stdin.flush()
+                                back_screen = wait_after("hidden")
+                                # A program that exits with the cursor hidden
+                                # and video reversed leaves both; `clear` is
+                                # the way back.
+                                if back_screen is not None:
+                                    guest.type_line("vtprobe leave")
+                                    left_screen = wait_after("left")
+                                    if left_screen is not None:
+                                        guest.type_line("clear")
+                                        clear_screen = wait_cleared()
         faults = guest.aborts()
     finally:
         guest.stop()
@@ -306,11 +362,50 @@ def main() -> int:
         prompt_normal = prompt_at > at and held_screen[prompt_at][0] == ("#", False)
         print(f"     |{lines[at]}")
         print(f"     |{lines[prompt_at]}  (prompt reversed: {held_screen[prompt_at][0][1]})")
+    def last_prompt_row(rows):
+        """The cells of the lowest row that reads as a bare prompt, or None."""
+        if not rows:
+            return None
+        lines = text(rows)
+        prompt_at = max((i for i, l in enumerate(lines) if l == "#"), default=None)
+        return None if prompt_at is None else rows[prompt_at]
+
+    def cursor_on_prompt(rows):
+        """The last prompt row's cell after `# ` is a blank cell inverted, and
+        it is the row's only inverted cell."""
+        row = last_prompt_row(rows)
+        return row is not None and row[2] == (BLANK, True) and sum(1 for _, rev in row if rev) == 1
+
+    def no_cursor_on_hidden(rows):
+        """The row `vtprobe hide` wrote `hidden` on has no inverted cell."""
+        if not rows:
+            return False
+        lines = text(rows)
+        at = next((i for i, l in enumerate(lines) if l.startswith("hidden")), None)
+        return at is not None and not any(rev for _, rev in rows[at])
+
+    def prompt_left_changed(rows):
+        """The last prompt row after `vtprobe leave`: `# ` drawn reversed and no
+        cursor block after it."""
+        row = last_prompt_row(rows)
+        return row is not None and row[0] == ("#", True) and row[2] == (BLANK, False)
+
+    cursor_drawn = cursor_on_prompt(cursor_screen)
+    cursor_hidden = no_cursor_on_hidden(hidden_screen)
+    cursor_back = cursor_on_prompt(back_screen) and (
+        back_screen is not None and no_cursor_on_hidden(back_screen))
+    left_kept = prompt_left_changed(left_screen)
+    clear_restores = cursor_on_prompt(clear_screen) and clear_screen[0][0] == ("#", False)
     checks = [
-        ("driven to the end", driven and held_screen is not None),
+        ("driven to the end", driven and clear_screen is not None),
         (f"rows 1-{CHECKED_ROWS} and the bottom-right cell as modelled", driven and not bad),
         ("vtprobe hold drew `held` reversed", held_reversed),
         ("after Ctrl+C killed it, the shell's prompt is in normal video", prompt_normal),
+        ("the cursor is drawn after the prompt (the cell inverted, the row's only one)", cursor_drawn),
+        ("vtprobe hide (CSI ? 25 l) takes the cursor off its row", cursor_hidden),
+        ("after Ctrl+C killed it, the shell's prompt has the cursor again", cursor_back),
+        ("a program that exits with the cursor hidden and video reversed leaves both (as on Unix)", left_kept),
+        ("clear shows the cursor and restores normal video before it clears", clear_restores),
         ("no fault lines", faults == 0),
     ]
     for line in bad[:40]:

@@ -54,8 +54,8 @@ This document is the one to update first when direction changes.
 > (2026-10-10): every step is done on QEMU, 0 to 4(d), in one day (#258 to
 > #266).** Programs run on the secondaries and the shell and servers on the
 > boot core, under one kernel lock that has not needed splitting. Owed
-> before the arc closes: the Pi 4 and Parallels boots of every step since
-> 2. The spawn staging buffers have their owner since 2026-10-11 (item 4
+> before the arc closes: the Parallels boot of every step since 2; the Pi 4
+> booted them all on 2026-10-11 (`testing/testing-pi4.md` section 6). The spawn staging buffers have their owner since 2026-10-11 (item 4
 > below, `make test-spawn-owner`), and the same day gave the cores a reading
 > from a shell, `/proc/cpus` and `ps` naming a running task's core (#270,
 > #271), and wrote down the task stranded on a core that halted alone, item
@@ -769,7 +769,8 @@ not yet checked on this tree are marked (predicted).
       and a scheduler that places tasks on cores. A plan document before any
       code, the way `roadmap-el1-drop.md` was. QEMU `-smp 4` is the loop; the
       Pi 4 (four A72s) and Parallels follow. **Owed from step 4(d):** the
-      Pi 4 and Parallels boots of every step since 2. The other debt from
+      Parallels boot of every step since 2; the Pi 4's is in (2026-10-11,
+      `testing/testing-pi4.md` section 6). The other debt from
       4(d), an owner for the spawn staging buffers that two spawners
       interleaved (one core could already, two made it likelier), was
       built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
@@ -2611,6 +2612,13 @@ of writing them down now rather than from scratch later.
 > **Part built 2026-10-07 (#228), the subset DevTools's editor asked for:**
 > cursor positioning, line and screen erase, SGR 7 reverse video, a late
 > wrap at the last column, and every other escape consumed without drawing.
+> **A cursor since 2026-10-11:** a steady block, the cell inverted by one
+> gated primitive (`FB_CURSOR`, the kernel owning the one inverted cell), hidden and shown by `CSI ? 25 l/h`; the
+> framebuffer console had drawn none, which the Pi 4's monitor made plain.
+> It does not blink, since `cond` waits on its clients alone and a blink
+> needs a timed wait; worth it only if someone misses it. A program that
+> exits with the cursor hidden leaves it hidden, as on Unix (the shell
+> restores it after a kill, which only it can see); `clear` is the way back.
 > Still to do from the list below: colour, bold and underline, save and
 > restore cursor, scroll regions, and a return channel.
 

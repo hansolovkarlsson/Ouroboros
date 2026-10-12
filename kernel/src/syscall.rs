@@ -1070,6 +1070,15 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             crate::fbdev::clear();
             0
         }
+        syscall_abi::FB_CURSOR => {
+            // The console server's cursor: the one cell drawn inverted, or
+            // none (a cell past the screen, FB_CURSOR_NONE).
+            if !con_access_allowed() {
+                return syscall_abi::FS_ERROR;
+            }
+            crate::fbdev::set_cursor(arg0, arg1);
+            0
+        }
         syscall_abi::GET_TICKS => exceptions::ticks(),
         // Microseconds since boot: see timer::monotonic_us.
         syscall_abi::MONOTONIC_US => crate::timer::monotonic_us(),
