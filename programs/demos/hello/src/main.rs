@@ -55,7 +55,7 @@ fn main() -> ! {
         let deadline = get_ticks() + 150;
         loop {
             let r = syscall4(syscall_abi::MSG_SEND, target, dummy.as_ptr() as u64, 0, 0);
-            let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+            let transient = r == syscall_abi::MSG_ERR_FULL;
             if r == 0 || !transient || get_ticks() > deadline {
                 break;
             }
@@ -81,13 +81,13 @@ fn write_out(target: u64, bytes: &[u8]) {
 }
 
 /// Send `bytes` as raw `MSG_MAX_LEN`-chunked messages to `target`. Two
-/// transients are retried for a bounded time: a full mailbox
-/// (`MSG_ERR_FULL` - the reading task drains it between our sends), and a
-/// denied send (`MSG_ERR_DENIED` - when we're a pipe producer streaming
-/// straight to a sibling consumer, the shell delegates us that send
-/// capability moments after spawning us, and a tick can let us run first;
-/// see the shell's `cmd_pipeline_prog`). If either persists for ~3s, or any
-/// other error comes back, or the target dies, we give up rather than hang.
+/// transient is retried for a bounded time: a full mailbox (`MSG_ERR_FULL`
+/// - the reading task drains it between our sends). A denied send is final:
+/// `SPAWN` grants a program the right to its stdout target before it runs,
+/// or refuses the spawn (since 2026-10-12; a pipeline's link was delegated
+/// after the spawn before that, and was retried here). If the mailbox stays
+/// full for ~3s, or any other error comes back, or the target dies, we give
+/// up rather than hang.
 fn pipe_out(target: u64, bytes: &[u8]) {
     let mut off = 0;
     while off < bytes.len() {
@@ -99,7 +99,7 @@ fn pipe_out(target: u64, bytes: &[u8]) {
             if r == 0 {
                 break;
             }
-            let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+            let transient = r == syscall_abi::MSG_ERR_FULL;
             if !transient || get_ticks() > deadline {
                 return;
             }

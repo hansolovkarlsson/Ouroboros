@@ -269,6 +269,13 @@ def run_probes(guest, smp):
     guest.type_line("echo after-the-bg-kill")
     got["bg"] = bg and guest.wait_for(r"\nafter-the-bg-kill\r?\n[\s\S]*" + PROMPT, timeout=30)
     got["bg_out"] = guest.transcript()
+    # A producer that sends no end-of-stream of its own (`touch` only calls
+    # exit) must still end its consumer: `ulib::exit` sends it, so `wc`
+    # prints its count of nothing and the shell answers. Without that the
+    # shell waits on `wc` for good, since `SPAWN` grants the link and the
+    # shell no longer finds a producer gone (the review of #279).
+    guest.type_line("touch zzeos | wc")
+    got["eos"] = guest.wait_for(r"\n0 0 0\r?\n[\s\S]*" + PROMPT, timeout=30)
     return got
 
 
@@ -355,6 +362,8 @@ def probe_checks(name, smp, boot_index, probe):
                    + (f" (saw core {shell_line.group(1)})" if shell_line else ""),
                    shell_line is not None and shell_line.group(1) == str(boot_index)))
     checks.append((f"{name}: `kill {slot}` ended the held program and the shell answered after", probe.get("bg", False)))
+    checks.append((f"{name}: `touch zzeos | wc` printed `0 0 0` and the shell answered (end-of-stream from a producer's exit)",
+                   probe.get("eos", False)))
     return checks
 
 

@@ -1764,7 +1764,16 @@ fn holds_send_right(src: usize, dest: usize) -> bool {
 /// right already in hand outlives the parent that gave it, like every other
 /// grant; only the authority to grant anything NEW dies with the parent.
 pub(crate) fn may_delegate(delegator: usize, grantee: usize, target: usize) -> bool {
-    is_child_of(grantee, delegator) && holds_send_right(delegator, target)
+    is_child_of(grantee, delegator) && may_grant(delegator, target)
+}
+
+/// The target half of [`may_delegate`]: whether `delegator` may hand any
+/// child of its own a send right to `target`, which is whether it holds one
+/// itself. `SPAWN` asks this alone before it creates the child its stdout
+/// grant is for (the child half is true by construction), so the two
+/// grants are one rule (the review of #279).
+pub(crate) fn may_grant(delegator: usize, target: usize) -> bool {
+    holds_send_right(delegator, target)
 }
 
 /// `DELEGATE`'s core: grant `grantee` the runtime capability to send to

@@ -788,6 +788,22 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
     if size > staged_image_end {
         return SPAWN_ERROR;
     }
+    // The stdout target, checked before anything is allocated so a refusal
+    // unwinds nothing. It must be a live task (a pipeline's consumer that
+    // already exited, a bad pattern to `grep` say, answers NO_SUCH_TASK, as
+    // DELEGATE did, and the shell takes that as the ordinary case), and one
+    // the child will be able to reach: the spawner itself, which `spawn`
+    // grants every child, or a task the spawner may grant a right to
+    // (`may_grant`, DELEGATE's own rule), else MSG_ERR_DENIED. Refused here
+    // rather than spawned with a stdout it cannot write: that child's every
+    // write was dropped with no word to anyone (the review of #279).
+    let Some(stdout_task) = usize::try_from(stdout_target).ok().and_then(tasks::live_index) else {
+        return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+    };
+    let spawner = tasks::current_task();
+    if stdout_task.index() != spawner && !tasks::may_grant(spawner, stdout_task.index()) {
+        return syscall_abi::MSG_ERR_DENIED;
+    }
     let program = &staging[..size];
 
     let (header, phdrs, region_size) = match loader::elf_region_size(program) {
@@ -817,21 +833,18 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
             // Record where this program's output should go (the console by
             // default; the shell for a pipe/redirect). See STDOUT_TARGET.
             tasks::set_stdout_target(slot, stdout_target);
-            // And the right to send there, granted in the same step, under
-            // DELEGATE's own rule (`may_delegate`: the child is the caller's,
-            // and the caller holds a send right to the target), so a program
-            // never runs without the right to reach its stdout. It used to be
-            // a DELEGATE the shell made after spawning every stage of a
-            // pipeline, and a stage that wrote before it was refused, which
-            // `ulib::pipe_out` retries for 150 ticks and then drops: one core
-            // and four spinning stages made the shell slow enough to lose a
-            // line every time (2026-10-12). Nothing is granted for a target
-            // the caller could not delegate, and the child's sends to it are
-            // refused, as before.
-            if let Some(target) = usize::try_from(stdout_target).ok().and_then(tasks::live_index) {
-                if tasks::may_delegate(tasks::current_task(), slot, target.index()) {
-                    tasks::set_delegate(slot, target.index());
-                }
+            // And the right to send there, in the same step and under the
+            // check above, so a program never runs without the right to reach
+            // its stdout. It used to be a DELEGATE the shell made after
+            // spawning every stage of a pipeline, and a stage that wrote
+            // before it was refused, which `ulib::pipe_out` retried for 150
+            // ticks and then dropped: one core and four spinning stages made
+            // the shell slow enough to lose a line every time (2026-10-12).
+            // Granted only where the child does not already reach the target
+            // (the console statically, its spawner from `spawn`), so the
+            // grant is there for a pipeline's sibling link alone.
+            if !tasks::may_send(slot, stdout_task.index()) {
+                tasks::set_delegate(slot, stdout_task.index());
             }
             // Attach the argv blob staged via ARGS_STAGE (arg2 = its length;
             // 0 = no args). The child reads it via GET_ARGC/GET_ARG. Bounded
@@ -2030,9 +2043,11 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             //
             // A slot that is not live answers TASK_ERR_NO_SUCH_TASK, as KILL,
             // FG, WAIT, MSG_SEND and MSG_CALL already do - NOT the policy
-            // refusal. The distinction is the shell's: a pipeline stage that
-            // already exited (its own error, already printed) is the ordinary
-            // reason a link cannot be authorized, and a real denial is not.
+            // refusal. The distinction is the caller's: a task that already
+            // exited (a pipeline stage's own error, already printed) is the
+            // ordinary reason a link cannot be authorized, and a real denial
+            // is not. SPAWN gives the same two answers for its stdout target,
+            // which is where the shell meets them since 2026-10-12.
             // It used to fold both into MSG_ERR_DENIED, and the shell then
             // re-derived the reason from TASK_STATE after the fact - two more
             // syscalls, and a guess: a policy refusal on a stage that died in

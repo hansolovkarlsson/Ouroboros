@@ -1218,12 +1218,32 @@ fn run_head_pipeline(
                 slots[i] = slot;
                 next_target = slot;
             }
+            Err(code) if code == syscall_abi::TASK_ERR_NO_SUCH_TASK => {
+                // SPAWN found this stage's consumer already gone: the
+                // ordinary case of a stage that rejected its own arguments
+                // (a bad `grep` pattern, an unknown flag), printed its reason
+                // and exited. It has told the user what went wrong, so say
+                // nothing more; tear down, and let a stage that ended on its
+                // own say how. `KILL` frees a live stage and refuses one that
+                // already exited, which `wait_pipe_stage` reaps, silent for
+                // exit 0 and reporting anything else (`kill_and_reap` would
+                // throw that code away). This was the shell's DELEGATE
+                // answering NO_SUCH_TASK until SPAWN granted the link.
+                for j in i + 1..prog_stages.len() {
+                    if syscall(syscall_abi::KILL, slots[j]) != 0 {
+                        let cmd = prog_stages[j].split_whitespace().next().unwrap_or("stage");
+                        wait_pipe_stage(cmd, slots[j]);
+                    }
+                }
+                return;
+            }
             Err(code) => {
                 for s in &slots[i + 1..prog_stages.len()] {
                     kill_and_reap(*s);
                 }
                 let cmd = prog_stages[i].split_whitespace().next().unwrap_or("");
                 match code {
+                    syscall_abi::MSG_ERR_DENIED => print_fs_error("pipe: could not authorize the stream", code),
                     0 => {
                         print_str("pipe: ");
                         print_str(cmd);
@@ -1239,9 +1259,12 @@ fn run_head_pipeline(
 
     // Each producer->consumer link was authorized by its SPAWN: the kernel
     // grants a child the right to send to the stdout target it is spawned
-    // with, so no stage runs before it may write (a DELEGATE here, after
-    // every stage was spawned, lost a stage's first lines when spawning the
-    // rest took longer than `ulib::pipe_out` retries a refusal).
+    // with, or refuses the spawn (handled above), so no stage runs before it
+    // may write (a DELEGATE here, after every stage was spawned, lost a
+    // stage's first lines when spawning the rest took longer than
+    // `ulib::pipe_out` retried a refusal). A stage that exits early sends
+    // its end-of-stream from `ulib::exit`, so its consumer is not left
+    // waiting.
 
     // A builtin head: capture its output and stream it to the first program
     // stage (the shell is the byte path only for this one hop). A program head

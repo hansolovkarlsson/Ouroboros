@@ -58,7 +58,7 @@ fn main() -> ! {
         let deadline = get_ticks() + 150;
         loop {
             let r = syscall4(syscall_abi::MSG_SEND, target, dummy.as_ptr() as u64, 0, 0);
-            let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+            let transient = r == syscall_abi::MSG_ERR_FULL;
             if r == 0 || !transient || get_ticks() > deadline {
                 break;
             }
@@ -116,7 +116,7 @@ fn pipe_out(target: u64, bytes: &[u8]) {
             if r == 0 {
                 break;
             }
-            let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+            let transient = r == syscall_abi::MSG_ERR_FULL;
             if !transient || get_ticks() > deadline {
                 return;
             }
