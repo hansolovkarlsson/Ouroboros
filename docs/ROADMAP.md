@@ -53,9 +53,11 @@ This document is the one to update first when direction changes.
 > and the start of 4; the arc ends when 4 does. **Where it stands
 > (2026-10-10): every step is done on QEMU, 0 to 4(d), in one day (#258 to
 > #266).** Programs run on the secondaries and the shell and servers on the
-> boot core, under one kernel lock that has not needed splitting. Owed
-> before the arc closes: the Parallels boot of every step since 2; the Pi 4
-> booted them all on 2026-10-11 (`testing/testing-pi4.md` section 6). The spawn staging buffers have their owner since 2026-10-11 (item 4
+> boot core, under one kernel lock that has not needed splitting. Both
+> hardware targets have booted it: the Pi 4 every step on 2026-10-11
+> (`testing/testing-pi4.md` section 6), Parallels steps 2 to 4(d) on
+> 2026-10-12 from the shell (`testing/testing-parallels.md`, "Multi-core";
+> its boot lines cannot be read there, item 4's second open sub-item). The spawn staging buffers have their owner since 2026-10-11 (item 4
 > below, `make test-spawn-owner`), and the same day gave the cores a reading
 > from a shell, `/proc/cpus` and `ps` naming a running task's core (#270,
 > #271), and wrote down the task stranded on a core that halted alone, item
@@ -754,6 +756,15 @@ not yet checked on this tree are marked (predicted).
       place), so this needs its own mode, say `make bootstick`, and a rule
       for which of card and stick wins when both are present. Also the Pi
       400 (item 6).
+      **Set by Hans on 2026-10-12 as the direction after multi-core:** one
+      disk carrying both the boot partition (FAT32) and a root partition
+      (exFAT or ext2), on a stick, a card or a virtual disk, merging this
+      item with item 1. On Parallels a virtual disk cannot be that disk (the
+      kernel can read no storage there but a passed-through stick, see the
+      usb-storage postmortem's first finding), so its first experiment is
+      whether Parallels' firmware boots from the passed-through stick, which
+      would make the `.hdd` unnecessary. A plan document comes first, as for
+      every arc; not yet written.
 - [ ] **4. Multi-core, on QEMU first. Planned 2026-10-10,
       [`roadmap-smp.md`](roadmap/roadmap-smp.md), the arc for the week of
       2026-10-12. Built on QEMU the same day, steps 0 to 4(d) (#258 to
@@ -768,9 +779,10 @@ not yet checked on this tree are marked (predicted).
       work: locking or per-core ownership wherever `SyncCell` stands today,
       and a scheduler that places tasks on cores. A plan document before any
       code, the way `roadmap-el1-drop.md` was. QEMU `-smp 4` is the loop; the
-      Pi 4 (four A72s) and Parallels follow. **Owed from step 4(d):** the
-      Parallels boot of every step since 2; the Pi 4's is in (2026-10-11,
-      `testing/testing-pi4.md` section 6). The other debt from
+      Pi 4 (four A72s) and Parallels follow. **The hardware boots are in:**
+      the Pi 4's on 2026-10-11 (`testing/testing-pi4.md` section 6), and
+      Parallels' on 2026-10-12, read from the shell because its boot lines
+      cannot be (`testing/testing-parallels.md`, "Multi-core"). The other debt from
       4(d), an owner for the spawn staging buffers that two spawners
       interleaved (one core could already, two made it likelier), was
       built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
@@ -794,6 +806,36 @@ not yet checked on this tree are marked (predicted).
             it runs any task), so the check is the boot log's line on a
             by-hand fault. The same item as the standup's "a core halting
             while it runs a program", written down here for the first time.
+      - [ ] **Keys lost on Parallels with the stick passed through.** Seen
+            2026-10-12 driving the multi-core boot by `prlctl send-key-event`
+            (`testing/testing-parallels.md`, "Multi-core"): with the stick on
+            the xHCI beside the keyboard, about half the lines lost a key
+            (`coeprobe`, `ove the lazy dog`, an Enter, so login read
+            `rootroot`), on four vCPUs and on one alike, and a slower key
+            delay (0.3 s, 0.6 s) did not help. Without the stick, two boots
+            the same morning typed every key at 0.12 s. So it is the
+            keyboard and the stick on one controller, not multi-core: a third
+            mode beside the two the contention fix closed in v0.4
+            (`CHANGELOG.md`, "xHCI keyboard ↔ USB-storage contention fixed"),
+            where the keyboard is addressed and the stick works but reports
+            go missing. Not yet bisected: whether a physical keyboard loses
+            keys too (check A5 by hand), and whether a change brought it:
+            the v0.4 fix was confirmed with typing and a stick together, and
+            the xHCI work for the Pi since (#191 to #200, the controller's
+            setup order among it) is where to look first. The check is a line
+            typed with the stick attached, read back whole, ten times.
+      - [ ] **The kernel's boot lines cannot be read on Parallels.** The
+            kernel's framebuffer console prints them and `cond` clears the
+            screen about two seconds after power-on; `prlctl capture` takes
+            about a second a frame, and the VM's serial file stays empty
+            (Parallels' firmware does not write its console there). So
+            `MADT: 4 cores`, `core N up` and the summary were not seen on
+            2026-10-12; the count came from `coreprobe` instead. The
+            usb-storage postmortem's lesson applies ("replay the data on the
+            other side of the transition"), but re-printing through the
+            kernel's console is not enough here, since `cond` clears that
+            too: the lines have to reach `cond`'s screen, or a file such as
+            a `/proc` entry holding the kernel's boot log.
       **Two small follow-ups asked by Hans on 2026-10-11, after #268:**
       - [x] **`/proc/cpus`: how many cores are active.** Built 2026-10-11,
             `make test-proc-cpus`: one line from `CORE_INFO_UP`, `fsd`'s first

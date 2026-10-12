@@ -24,7 +24,8 @@ plan to programs running on every core (#258 to #266), and on 2026-10-11
 the owner the spawn staging had owed since the arc's last step, then the
 cores made readable from a shell, `/proc/cpus` and `ps` naming the core a
 running task is on, and a cursor on the framebuffer console; the Pi 4 booted the whole arc the same day, every line
-it owed (`testing/testing-pi4.md` section 6), with Parallels still owed. The days'
+it owed (`testing/testing-pi4.md` section 6), and Parallels on 2026-10-12
+from its shell (`testing/testing-parallels.md`, "Multi-core"). The days'
 records are in `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**

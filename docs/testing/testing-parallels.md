@@ -173,6 +173,54 @@ socket-link setup, the auth cross-check via `scripts/np9p_client.py`, and the
 dial-out foreign-observer test. That remains the cluster's validation path until
 step 1 exists.
 
+## Multi-core (2026-10-12)
+
+The multi-core arc ([`roadmap-smp.md`](../roadmap/roadmap-smp.md)) booted on
+Parallels on 2026-10-12, from `main` at `f61138f` (the build said `+dirty`
+only for an untracked `screenlog.1`). The VM's vCPU count is a VM setting:
+`prlctl set Ouroboros --cpus 4` (it had been 2). `/bin` is on the stick, so
+the stick was staged by `make stick STICK=/Volumes/STICK` (the Pi's exFAT
+stick, its `/etc` kept) and assigned to the VM with `prlsrvctl usb set
+<device id> Ouroboros`, which connects it whenever the VM runs (`prlsrvctl
+usb list` gives the id; `prlsrvctl usb del` undoes it). Every check was typed
+by `prlctl send-key-event` and read from `prlctl capture` screenshots.
+
+What the shell showed, at four vCPUs:
+
+| Check | Seen |
+| --- | --- |
+| `coreprobe` | `ran on core 1, up to 1 programs running at once, 4 cores up` |
+| `coreprobe \| coreprobe -` | `ran on core 3` and `ran on core 1`, each `up to 2 programs running at once, 4 cores up` |
+| `coreprobe calls` | `100 calls to fsd from core 1, 20 us each, 0 failed` |
+| `coreprobe hold`, then Ctrl+C | `holding on core 1`; Ctrl+C ended it and the prompt came back |
+| `exec /bin/coreprobe hold`, `ps` | `task 6: running on core 1  /bin/coreprobe`, the shell `running on core 0` |
+| `cat /proc/cpus` | `4` |
+| `cat /proc/6/core` | `1` |
+| `kill 6`, `ps` | slot 6 `unused` |
+
+At one vCPU, the same stick: `coreprobe` ran `on core 0`, `1 cores up`. No
+fault line in any boot. Four probes in one pipeline was not seen: the line
+lost a key every time it was typed (below), so that check stays with
+`make test-smp`.
+
+**What could not be seen: the kernel's boot lines.** `MADT: 4 cores`, the
+`core N up` lines, the summary, the ticks and the kicks are printed on the
+kernel's framebuffer console, and `cond` clears the screen about two seconds
+after power-on; a `prlctl capture` takes about a second, and the frames went
+from the Parallels logo straight to `cond`'s screen. The serial port's file
+(`parallels/com.output.txt`) stayed empty. `4 cores up` stands in for them:
+it is `smp::up_cores()`, marked by each secondary after its `up` line is
+printed. The kernel's own kill lines (the remote kill's "ends it") are not on
+this screen either. `ROADMAP.md` item 4 has the sub-item.
+
+**Keys were lost with the stick attached.** About half the typed lines lost a
+key (`coeprobe`, `ove the lazy dog`, an Enter lost so login read `rootroot`),
+at four vCPUs and at one, at a key delay of 0.12 s, 0.3 s and 0.6 s alike;
+two boots the same morning without the stick lost none at 0.12 s. Retyping
+got every check above through. `ROADMAP.md` item 4 has the sub-item; until it
+is fixed, read every typed line back off the screenshot before trusting its
+output.
+
 ## Recommended sequence
 
 1. **Run Part A now.** It's fast (`make test-parallels` for A3, a hand pass for
