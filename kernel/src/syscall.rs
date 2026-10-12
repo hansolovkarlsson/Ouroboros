@@ -817,6 +817,22 @@ fn spawn_staged(total_len: u64, stdout_target: u64, argv_len: u64, cwd_len: u64)
             // Record where this program's output should go (the console by
             // default; the shell for a pipe/redirect). See STDOUT_TARGET.
             tasks::set_stdout_target(slot, stdout_target);
+            // And the right to send there, granted in the same step, under
+            // DELEGATE's own rule (`may_delegate`: the child is the caller's,
+            // and the caller holds a send right to the target), so a program
+            // never runs without the right to reach its stdout. It used to be
+            // a DELEGATE the shell made after spawning every stage of a
+            // pipeline, and a stage that wrote before it was refused, which
+            // `ulib::pipe_out` retries for 150 ticks and then drops: one core
+            // and four spinning stages made the shell slow enough to lose a
+            // line every time (2026-10-12). Nothing is granted for a target
+            // the caller could not delegate, and the child's sends to it are
+            // refused, as before.
+            if let Some(target) = usize::try_from(stdout_target).ok().and_then(tasks::live_index) {
+                if tasks::may_delegate(tasks::current_task(), slot, target.index()) {
+                    tasks::set_delegate(slot, target.index());
+                }
+            }
             // Attach the argv blob staged via ARGS_STAGE (arg2 = its length;
             // 0 = no args). The child reads it via GET_ARGC/GET_ARG. Bounded
             // by what this owner staged, so a length past it cannot hand

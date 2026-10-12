@@ -788,6 +788,12 @@ death — both a dying task's delegated-out capabilities and any delegation aime
 wherever a slot becomes live, so that safety does not rest on every teardown
 path remembering.
 
+Since 2026-10-12 `spawn` grants a child the right to send to its stdout
+target in the same step, under the same rule, so a pipeline's
+producer-to-consumer links need no `delegate` call: when the shell delegated
+them after spawning every stage, a stage that wrote first was refused, and
+`ulib::pipe_out` drops a message refused for 150 ticks.
+
 It was **one** slot until 2026-09-06, which was a bug rather than a scope cut:
 a pipeline stage needs its downstream consumer *and* `TO_NET` to read a remote
 mount, and with one slot the second grant silently revoked the first. A set is

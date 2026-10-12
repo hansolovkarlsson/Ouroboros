@@ -921,6 +921,19 @@ The small open tails those arcs deliberately left:
   was 12 a second until #232's review made the tick read ahead for the
   owner whoever it interrupted.)
 
+- **The network right is still delegated after the spawn (found 2026-10-12,
+  making `SPAWN` grant the stdout target).** The shell's `spawn_path` spawns
+  a program and then `DELEGATE`s it `TO_NET` (`programs/shell/src/main.rs`).
+  On more than one core the child can run on a secondary before that call,
+  and a first `netd` request made in the gap is refused (`MSG_ERR_DENIED`).
+  (`netd`'s `cpu` child needs no grant: a child is granted its spawner at
+  spawn, since 2026-09-06.) The stdout target was the
+  same race, and lost pipeline lines on one core (`SPAWN`'s doc in
+  `syscall-abi`); the `TO_NET` grant has no argument left in `SPAWN`, so its
+  fix wants a way to name it at spawn (a staged grant set, beside the staged
+  argv and environment), not another `DELEGATE` moved earlier. Not yet seen
+  failing; (predicted) a `ping` or `fetch` started on a secondary.
+
 - **~~Escape sends nothing on the USB keyboard~~ (found 2026-10-07, building
   the navigation keys): DONE (2026-10-09, #253).** Decided by Hans that day,
   option 1 of four: Escape (HID 0x29) sends a bare ESC, what a terminal
