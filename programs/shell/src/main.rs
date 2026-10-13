@@ -4303,7 +4303,7 @@ fn cmd_format(arg: &str) {
         0 => print_line("formatted - run `mount -a`, then `ls`"),
         MOUNT_ALREADY => print_line("format: a filesystem is mounted - run `unmount` first"),
         MOUNT_NO_DEVICE => print_line("format: no disk device"),
-        FS_ERR_NOT_FOUND => print_line("format: no MBR partition to format (not a GPT disk) - run `partition` first"),
+        FS_ERR_NOT_FOUND => print_line("format: no MBR partition to format - run `partition` first (a GPT disk is not formatted here)"),
         _ => print_line("format: the partition is too small, or an I/O error occurred"),
     }
 }

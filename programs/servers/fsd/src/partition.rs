@@ -44,12 +44,10 @@ const MAX_GPT_ARR_SECTORS: usize = 128;
 /// partition *type* - a partition that isn't a mountable filesystem just fails
 /// the mount and the next is tried.
 pub fn discover(disk: &mut Disk, out: &mut [u64; MAX_PARTITIONS]) -> Result<usize, DiskError> {
-    let mut lba1 = [0u8; SECTOR_SIZE];
-    disk.read_sector(1, &mut lba1)?;
     let mut mbr = [0u8; SECTOR_SIZE];
     disk.read_sector(0, &mut mbr)?;
 
-    if &lba1[0..8] == b"EFI PART" || mbr_has_protective(&mbr) {
+    if is_gpt(disk)? {
         // Primary GPT header at LBA 1; on failure, the backup at the last LBA.
         if let Some(n) = try_gpt(disk, 1, out)? {
             return Ok(n);
@@ -84,6 +82,18 @@ pub fn discover(disk: &mut Disk, out: &mut [u64; MAX_PARTITIONS]) -> Result<usiz
         }
     }
     Ok(n)
+}
+
+/// Whether [`discover`] reads the disk as GPT: "EFI PART" at LBA 1, or a
+/// protective 0xEE entry in the MBR. The one test, so `format`, which writes
+/// MBR partitions only, refuses exactly the disks `mount` reads as GPT (the
+/// medium review of #288).
+pub fn is_gpt(disk: &mut Disk) -> Result<bool, DiskError> {
+    let mut lba1 = [0u8; SECTOR_SIZE];
+    disk.read_sector(1, &mut lba1)?;
+    let mut mbr = [0u8; SECTOR_SIZE];
+    disk.read_sector(0, &mut mbr)?;
+    Ok(&lba1[0..8] == b"EFI PART" || mbr_has_protective(&mbr))
 }
 
 /// Whether the LBA-0 MBR is a GPT *protective* MBR: a valid `0x55AA` boot

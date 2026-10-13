@@ -135,8 +135,11 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             let mut line = [0u8; 160];
             let mut len = 0;
             for part in [fallback, "fsd: ", mounted.name(), " mounted, disk commands available\r\n"] {
-                line[len..len + part.len()].copy_from_slice(part.as_bytes());
-                len += part.len();
+                // Bounded, so a longer name or message is cut, never a panic
+                // in the storage server (the third review of #288).
+                let take = part.len().min(line.len() - len);
+                line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
+                len += take;
             }
             con_write(&line[..len]);
             mounts[0] = Some(mounted);
@@ -191,6 +194,7 @@ fn erase_disk(sectors: u64) -> u64 {
         sectors
     };
     let count = want.min(capacity);
+    disk::Disk.table_rewritten();
     let zero = [0u8; 512];
     let mut lba = 0u64;
     while lba < count {
@@ -219,6 +223,7 @@ fn partition_disk(type_byte: u8) -> u64 {
     // MBR partitioning is a 32-bit LBA scheme; a partition past 2 TiB
     // can't be expressed here (that's what GPT, a later step, is for).
     let part_sectors = (capacity - start).min(u32::MAX as u64) as u32;
+    disk::Disk.table_rewritten();
     let ptype = if type_byte == 0 { 0x0C } else { type_byte };
 
     let mut mbr = [0u8; 512];
@@ -256,46 +261,42 @@ fn partition_disk(type_byte: u8) -> u64 {
 /// the pairing for [`partition_disk`]'s writer. GPT disks aren't handled here
 /// yet (a later step); [`FSOP_FORMAT`] targets the MBR partition table.
 fn find_partition() -> Option<(u32, u32)> {
-    let mut mbr = [0u8; 512];
-    if disk::Disk.read_sector(0, &mut mbr).is_err() {
+    // A GPT disk, by the test `mount` reads it with: this formatter writes
+    // MBR partitions only, and on a GPT disk it would lay the filesystem from
+    // LBA 1 over the GPT and every partition in it, the ESP included (the
+    // medium review of #288). Refused.
+    if partition::is_gpt(&mut disk::Disk).ok()? {
         return None;
     }
-    if mbr[510] != 0x55 || mbr[511] != 0xAA {
-        return None;
-    }
-    // The MBR's partitions. A protective 0xEE entry is a GPT disk, which this
-    // formatter cannot address: it would lay the filesystem from LBA 1 over
-    // the GPT itself and every partition in it, the ESP included (the medium
-    // review of #288; `partition` writes MBR only). Refused.
+    // The partitions `mount` sees, from the one parser it uses, so `format`
+    // never picks an entry `mount` would not list (one starting at LBA 0,
+    // the MBR itself); each one's size from its MBR entry.
     let mut parts = [0u64; partition::MAX_PARTITIONS];
-    let mut sizes = [0u32; partition::MAX_PARTITIONS];
-    let mut count = 0;
-    for i in 0..4 {
-        let e = 0x1BE + i * 16;
-        let ptype = mbr[e + 4];
-        let start = u32::from_le_bytes([mbr[e + 8], mbr[e + 9], mbr[e + 10], mbr[e + 11]]);
-        let size = u32::from_le_bytes([mbr[e + 12], mbr[e + 13], mbr[e + 14], mbr[e + 15]]);
-        if ptype == 0xEE {
-            return None;
-        }
-        if ptype != 0 && size != 0 && count < parts.len() {
-            parts[count] = u64::from(start);
-            sizes[count] = size;
-            count += 1;
-        }
-    }
-    // The root by `vfs::mount`'s own rule, so `format` writes over what `/`
-    // showed: the first partition beside the boot one that holds a
-    // filesystem, else (a partition just made, holding none) the first beside
-    // it, the boot partition only when the disk has no other. On one disk
-    // carrying the ESP and a root, `format` had written over the ESP (the high
-    // review of #288), and a partition before the root holding no filesystem
-    // would have been formatted in the root's place (the medium review).
-    let (order, n, _) = vfs::root_order(&parts, count, disk::Disk.boot_partition_start());
-    let size_of = |lba: u64| parts[..count].iter().position(|&p| p == lba).map(|i| sizes[i]);
-    let probing = order[..n].iter().find(|&&lba| u32::try_from(lba).ok().and_then(vfs::Filesystem::probe).is_some());
-    let target = probing.or(order[..n].first())?;
-    Some((u32::try_from(*target).ok()?, size_of(*target)?))
+    let count = partition::discover(&mut disk::Disk, &mut parts).ok()?;
+    let mut mbr = [0u8; 512];
+    disk::Disk.read_sector(0, &mut mbr).ok()?;
+    let size_of = |lba: u64| {
+        (0..4).map(|i| 0x1BE + i * 16).find_map(|e| {
+            let start = u32::from_le_bytes([mbr[e + 8], mbr[e + 9], mbr[e + 10], mbr[e + 11]]);
+            let size = u32::from_le_bytes([mbr[e + 12], mbr[e + 13], mbr[e + 14], mbr[e + 15]]);
+            (u64::from(start) == lba && size != 0).then_some(size)
+        })
+    };
+    // The root by `vfs::mount`'s rule, so `format` writes over what `/`
+    // showed: among the partitions beside the one the system booted from,
+    // the first holding a filesystem, else the first of them (one just made);
+    // the boot partition only when the disk has no other. Never the boot
+    // partition while another is there, even when that other holds no
+    // filesystem: a damaged root beside the ESP is formatted, not the ESP
+    // (the third review of #288 found the probe reaching it).
+    let boot = disk::Disk.boot_partition_start();
+    let (order, n, _) = vfs::root_order(&parts, count, boot);
+    // root_order puts every partition beside the boot one first.
+    let others = order[..n].iter().filter(|&&lba| Some(lba) != boot).count();
+    let candidates = if others > 0 { &order[..others] } else { &order[..n] };
+    let probing = candidates.iter().find(|&&lba| u32::try_from(lba).ok().and_then(vfs::Filesystem::probe).is_some());
+    let target = *probing.or(candidates.first())?;
+    Some((u32::try_from(target).ok()?, size_of(target)?))
 }
 
 /// Lay a fresh filesystem of type `fstype` into the disk's root partition

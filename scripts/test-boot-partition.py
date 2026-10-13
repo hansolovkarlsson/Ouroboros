@@ -47,8 +47,9 @@ tree, not the ESP's. Every boot checks the filesystem `fsd` mounted as `/`.
 
 and three on copies this script makes, each disk with a signature of its own
 (the reviews of #288): disk-format formats a copy of disk.img's root and
-finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock
-and `fsd` must say it fell back to the ESP; gpt-format runs `format` on a
+finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock,
+`fsd` must say it fell back to the ESP, and `format` must then take the
+damaged root, never the ESP; gpt-format runs `format` on a
 copy of espgpt.img, which must be refused.
 
 The ext2 and exFAT boots are the ones that can tell a kernel naming its boot
@@ -210,6 +211,12 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
     steps = [("login:", "")]
     if reads_root:
         steps = [("login:", "root"), ("assword", "root"), ("# ", "ls /"), ("# ", "echo after-ls"), ("# ", "")]
+    if label == "disk-badroot":
+        # Then format the damaged root: the format must take it, not the ESP
+        # beside it, which is the only partition there that still probes (the
+        # third review of #288 found the probe reaching the ESP).
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "format ext2"),
+                 ("# ", "mount -a"), ("# ", "mount 0 /esp"), ("# ", "cd /esp/EFI"), ("# ", "cd /"), ("# ", "")]
     if label == "gpt-format":
         steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "format ext2"),
                  ("# ", "mount -a"), ("# ", "cd /EFI"), ("# ", "cd /"), ("# ", "")]
@@ -228,7 +235,10 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         guest.stop()
     with open(TRANSCRIPT.format(label), "w") as fh:
         fh.write(out)
-    if bus == "usb" and usb_hub.firmware_stalled(out, faults):
+    # Any boot with a stick attached, not only one booted from it: the
+    # firmware probes every USB disk, and its known stall in UsbBootExecCmd hit
+    # virtio-beside once (2026-10-13), graded as failed checks then.
+    if stick and usb_hub.firmware_stalled(out, faults):
         return None, "QEMU's firmware stalled in its own USB boot"
     got = LINE.search(out)
     got = got.group(1).strip() if got else "no line"
@@ -261,13 +271,21 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         after = out.split("format ext2", 1)[1] if "format ext2" in out else ""
         found = re.search(r"cd /EFI\r?\n([\s\S]*?)# ", out)
         checks += [
-            (f"{label}: `format` refuses a GPT disk", "not a GPT disk" in after),
+            (f"{label}: `format` refuses a GPT disk", "a GPT disk is not formatted here" in after),
             (f"{label}: the disk mounts after, its ESP whole (`cd /EFI` silent)",
              "FAT32 mounted" in after and found is not None and found.group(1).strip() == ""),
         ]
     elif label == "disk-badroot":
-        checks.append((f"{label}: fsd says it fell back to the boot partition",
-                       "no partition beside the boot partition mounted" in out))
+        before, _, after = out.partition("format ext2")
+        found = re.search(r"cd /esp/EFI\r?\n([\s\S]*?)# ", after)
+        checks += [
+            (f"{label}: fsd says it fell back to the boot partition",
+             "no partition beside the boot partition mounted" in before),
+            (f"{label}: `format ext2` takes the damaged root, and `mount -a` mounts it",
+             "ext2 mounted" in after and "no partition beside" not in after),
+            (f"{label}: the ESP is whole after the format (`cd /esp/EFI` silent)",
+             found is not None and found.group(1).strip() == ""),
+        ]
     elif one_disk:
         # The root's tree, not the ESP's: the ESP has EFI at its top, the ext2
         # root has none (step 4's check; it fails with fsd taking partition 1).

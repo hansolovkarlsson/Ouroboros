@@ -278,6 +278,28 @@ blocks other than 512 bytes cannot skip the wrong partition: its LBAs would
 not match the disk's table, the disk would not be the boot disk, and `fsd`
 would be told 0.
 
+A third review of #288 found the last fix's own regression: with the root
+beside the ESP damaged, the probe reached the ESP, the only partition there
+that still validated, and `format` would have written over it. `format`
+now looks only beside the boot partition while another is there (rig:
+`disk-badroot` formats its damaged root and finds the ESP whole). It also
+takes its partitions from `partition::discover` and refuses what
+`partition::is_gpt` calls GPT, the tests `mount` uses, so it cannot pick an
+entry `mount` would not list. And after `erase` or `partition` rewrites
+the table, `fsd` stops using the boot partition's start for the rest of
+the boot, since it could name a new partition.
+
+Open, Hans's to decide, from the reviews of #288 (the series stopped there,
+the rest being design rather than defect):
+- **Fail closed when the root does not mount?** Today a damaged root beside
+  the ESP leaves the ESP as `/`, with a line saying so: FAT32 enforces no
+  modes, so its `/etc/shadow` and cluster key are readable by any user, and
+  accounts changed on the root are replaced by the ESP's older copies.
+  `espext2.img` does the same on `main`. Refusing to mount, or mounting
+  the ESP read-only, would fail closed.
+- **A boot stick's read failing at boot** is taken as "not the boot disk",
+  and `fsd` then mounts its first partition, the ESP on a one-disk stick.
+
 Open for step 5, from that review: the root is the first partition beside
 the boot partition that mounts, which is right for two partitions and a
 guess for more (an exFAT data partition before the root would be `/`).
