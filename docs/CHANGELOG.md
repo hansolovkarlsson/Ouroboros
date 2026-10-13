@@ -7,6 +7,18 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Unreleased
+
+**Not yet released.** Changes since v0.23.0, drafted as they land.
+
+**The kernel names the partition it booted from (2026-10-13).** Step 1 of
+`docs/roadmap/roadmap-one-disk.md`. Before the exit, `bootdisk.rs` reads the
+`HardDrive` node of the image's own device path and logs `boot partition: N
+of MBR|GPT at LBA s, b blocks`, with the MBR disk signature or the GPT
+partition GUID. Nothing acts on it yet. Step 3 will take that disk as the
+block device. `make test-boot-partition` boots five layouts, a USB stick
+among them, and compares each line with the image's own table.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

@@ -6,7 +6,8 @@ merges with item 1). One disk carries both the boot partition (FAT32, the
 ESP) and a root partition (ext2 or exFAT). It may be a stick, a card or a
 virtual disk, and the system needs nothing else to boot and run.
 
-**Status 2026-10-13: planned, nothing built.** Grounded in the code at
+**Status 2026-10-13: step 1 built** (`kernel/src/bootdisk.rs`, `make
+test-boot-partition`); the rest planned. Grounded in the code at
 `ebdebc1` (v0.23.0). Four decisions are Hans's to make before step 4, listed
 under "Decisions" below. Claims not yet checked on this tree are marked
 (predicted).
@@ -124,16 +125,28 @@ Both answers go into `testing-parallels.md` and `testing-pi4.md`. Only these
 two boots can show it. QEMU already boots from a stick
 (`test-usb-hub.py --usb-boot`).
 
-**1. The kernel names its boot partition.** Read the `HardDrive` node
-before the exit and log it as `boot partition: N at LBA s, size n, disk
-<signature>`. Keep it in a static, class A in the multi-core inventory
+**1. The kernel names its boot partition. Built 2026-10-13.** On QEMU the
+path ends `HD(1,MBR,0x00000000,0x1,0x1FFFF)/\EFI\BOOT\BOOTAA64.EFI` from
+virtio and runs through `USB(0x0,0x0)` from a stick, so the `HardDrive` node
+is there in both. `make test-boot-partition` compares five boots with the
+host's reading of each table, and fails both with the kernel naming
+partition 1 and with the host reader taking the first partition. The
+review of #285 added a null device path (an image loaded from memory), a
+signature of a type the specification does not list, and a nested
+partition, each logged rather than taken as something else. The step as
+built: read the `HardDrive` node before the exit and log it as `boot
+partition: N of MBR|GPT at LBA s, b blocks`, then `disk signature none` or
+`0x...`, or `partition GUID ...`. Keep it in a static, class A in the
+multi-core inventory
 (written once before the exit, read-only afterwards), and give it a row in
 `roadmap-smp.md` so `check-statics` passes. Check on QEMU: `run-image`
 names partition 1, and `run-image-ext2` names partition 2 at the ESP's
 start.
 - Mutation: log the first partition instead. The ext2 check goes red.
-- If a firmware gives no `HardDrive` node (a vvfat ESP may not, predicted),
-  log so, and every later step falls back to today's behaviour.
+- If a firmware gives no `HardDrive` node, log so, and every later step
+  falls back to today's behaviour. A vvfat ESP (`make run`) was predicted to
+  have none and has one: `HD(1,MBR,0xBE1AFDFA,0x3F,0xFBFC1)`, read
+  2026-10-13, the one boot so far with a nonzero MBR signature.
 
 **2. Images get a disk signature.** `mkext2.py`, `mkexfat.py` and the new
 image (step 4) write a nonzero signature at byte 440. The value comes from

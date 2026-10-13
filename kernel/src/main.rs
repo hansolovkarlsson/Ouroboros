@@ -5,6 +5,7 @@ extern crate alloc;
 
 mod acpi;
 mod block;
+mod bootdisk;
 mod bootflags;
 mod bootid;
 mod console;
@@ -211,6 +212,10 @@ extern "C" fn kernel_main() -> ! {
         })
         .unwrap_or((0, 0));
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}", image_range.0, image_range.1);
+    // Which partition of which disk this image came from (bootdisk.rs, step 1
+    // of docs/roadmap/roadmap-one-disk.md): only the firmware knows, so it is
+    // read here, from the image's own device path, and kept for after the exit.
+    bootdisk::discover();
 
     // Must happen before exit_boot_services: the devicetree/ACPI pointers
     // live in the UEFI configuration table, and PCI enumeration needs boot
