@@ -332,3 +332,15 @@ fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
 fn crc32_finish(crc: u32) -> u32 {
     crc ^ 0xFFFF_FFFF
 }
+
+/// The boot partition's start LBA when the disk read through `read` holds it,
+/// else 0: what `BLOCK_BOOT_START` answers for a device about to be
+/// installed. For `MOUNT`'s rescan, which installs a stick whatever it is,
+/// so a boot stick taken there after a failed boot-time init still tells
+/// `fsd` (the high review of #288).
+pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> u64 {
+    match (is_boot_disk(read, capacity), get()) {
+        (Some(true), Some(boot)) => boot.start_lba,
+        _ => 0,
+    }
+}

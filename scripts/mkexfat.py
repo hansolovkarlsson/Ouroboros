@@ -18,74 +18,26 @@ from the FAT32 one). One block device, no slot-ordering ambiguity.
 
 Inputs (build them first): esp.img (`make image`) for the FAT32 payload, and
 exfatpart.img (the `exfatpart.img` Makefile recipe) for the raw exFAT
-filesystem. Run from the repo root.
+filesystem. Run from the repo root. The disk is assembled and signed by
+scripts/mbrdisk.py. Since one-disk step 4 fsd tries the boot partition last,
+so this order is no longer needed; it is kept so the image tests what it
+always did, and build/disk.img (scripts/mkdisk.py) is the ESP-first layout.
 """
-import struct, os, sys
+import os
+import sys
 
-import disksig
+import mbrdisk
 
-ESP, EXF, DST, SECT = "build/esp.img", "build/exfatpart.img", "build/espexfat.img", 512
+ESP, EXF, DST = "build/esp.img", "build/exfatpart.img", "build/espexfat.img"
 
 for f in (ESP, EXF):
     if not os.path.exists(f):
         sys.exit(f"{f} not found - run `make image` and the exfatpart.img recipe first")
 
-# The FAT32 filesystem payload out of esp.img's own MBR (tracks `make image`).
-esp = open(ESP, "rb").read()
-fat_start = fat_size = None
-for i in range(4):
-    e = 0x1be + i * 16
-    if esp[e + 4] != 0:
-        fat_start = struct.unpack("<I", esp[e + 8:e + 12])[0]
-        fat_size = struct.unpack("<I", esp[e + 12:e + 16])[0]
-        break
-if fat_start is None:
-    sys.exit(f"no MBR partition found in {ESP}")
-fat = esp[fat_start * SECT:(fat_start + fat_size) * SECT]
-
-# The exFAT filesystem is the whole raw image (VBR at sector 0). Its internal
-# FatOffset/ClusterHeapOffset are partition-relative, which is exactly what
-# fsd/src/exfat.rs adds partition_lba to - so it drops into a partition as-is.
-exf = open(EXF, "rb").read()
-if exf[3:11] != b"EXFAT   ":
-    sys.exit(f"{EXF} is not an exFAT filesystem (no 'EXFAT   ' signature)")
-exf_sectors = (len(exf) + SECT - 1) // SECT
-
-
-def align_up(lba, to=2048):  # 1 MiB alignment
-    return (lba + to - 1) // to * to
-
-
-P1_START = 2048                                  # exFAT
-P1_END = P1_START + exf_sectors - 1              # inclusive
-P2_START = align_up(P1_END + 1)                  # FAT32 ESP
-P2_END = P2_START + fat_size - 1
-disk_sectors = align_up(P2_END + 1)
-disk = bytearray(disk_sectors * SECT)
-
-
-def mbr_entry(buf, idx, ptype, start, size, boot=0x00):
-    e = 0x1be + idx * 16
-    buf[e] = boot
-    buf[e + 1:e + 4] = bytes([0xff, 0xff, 0xff])   # CHS start (LBA-only reader)
-    buf[e + 4] = ptype
-    buf[e + 5:e + 8] = bytes([0xff, 0xff, 0xff])   # CHS end
-    buf[e + 8:e + 12] = struct.pack("<I", start)
-    buf[e + 12:e + 16] = struct.pack("<I", size)
-
-
-mbr_entry(disk, 0, 0x07, P1_START, exf_sectors)          # exFAT / NTFS / HPFS
-mbr_entry(disk, 1, 0x0b, P2_START, fat_size, boot=0x80)  # FAT32 (bootable ESP)
-disk[510], disk[511] = 0x55, 0xAA
-
-disk[P1_START * SECT:P1_START * SECT + len(exf)] = exf
-disk[P2_START * SECT:P2_START * SECT + len(fat)] = fat
-
-with open(DST, "wb") as f:
-    f.write(disk)
-# The MBR disk signature, here rather than as a separate Makefile step, so this
-# script cannot write an unsigned disk (scripts/disksig.py, one-disk step 2).
-print(f"disksig: {DST}: {disksig.set_signature(DST):#010x}")
-print(f"wrote {DST}: {disk_sectors} sectors "
-      f"(exFAT @ LBA {P1_START}, {exf_sectors} sectors; "
-      f"FAT32 ESP @ LBA {P2_START}, {fat_size} sectors)")
+layout = mbrdisk.assemble(DST, [
+    (0x07, mbrdisk.exfat_payload(EXF), False),  # exFAT / NTFS / HPFS, first so fsd took it before step 4
+    (0x0B, mbrdisk.esp_payload(ESP), True),     # FAT32, the bootable ESP
+])
+(exf_start, exf_sectors), (esp_start, esp_sectors) = layout
+print(f"wrote {DST}: exFAT @ LBA {exf_start}, {exf_sectors} sectors; "
+      f"FAT32 ESP @ LBA {esp_start}, {esp_sectors} sectors")

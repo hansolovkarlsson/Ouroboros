@@ -57,6 +57,7 @@ read stops it before anything runs. About four minutes. Run it whenever
 bootdisk.rs, main.rs's choice of block device, or how an image lays out its
 partitions, changes.
 """
+import hashlib
 import importlib.util
 import os
 import re
@@ -131,23 +132,52 @@ def expected(image):
 # the code that started it).
 BOOTS = [
     # label, boot image, its bus, another disk on virtio, another on USB,
-    # and the filesystem fsd must mount as `/`
-    ("esp", "esp.img", "virtio", None, None, "FAT32"),
-    ("gpt", "espgpt.img", "virtio", None, None, "FAT32"),
-    ("ext2", "espext2.img", "virtio", None, None, "ext2"),
-    ("exfat", "espexfat.img", "virtio", None, None, "exFAT"),
-    ("usb-boot", "esp.img", "usb", None, None, "FAT32"),
-    ("usb-boot-beside", "esp.img", "usb", "usbstick.img", None, "FAT32"),
-    ("virtio-beside", "esp.img", "virtio", None, "usbstick.img", "FAT32"),
-    ("fallback", "esp.img", "nvme", "usbstick.img", "espext2.img", "FAT32"),
+    # the filesystem fsd must mount as `/`, and whether the image is one disk
+    # with the ESP first and a root beside it (step 4: `ls /` must show the
+    # root's tree; a column, not the file's name, the high review of #288)
+    ("esp", "esp.img", "virtio", None, None, "FAT32", False),
+    ("gpt", "espgpt.img", "virtio", None, None, "FAT32", False),
+    ("ext2", "espext2.img", "virtio", None, None, "ext2", False),
+    ("exfat", "espexfat.img", "virtio", None, None, "exFAT", False),
+    ("usb-boot", "esp.img", "usb", None, None, "FAT32", False),
+    ("usb-boot-beside", "esp.img", "usb", "usbstick.img", None, "FAT32", False),
+    ("virtio-beside", "esp.img", "virtio", None, "usbstick.img", "FAT32", False),
+    ("fallback", "esp.img", "nvme", "usbstick.img", "espext2.img", "FAT32", False),
     # One disk, the ESP first and the ext2 root second (step 4): fsd must pass
     # over the boot partition and mount the root, on virtio and from a stick.
-    ("disk", "disk.img", "virtio", None, None, "ext2"),
-    ("disk-usb", "disk.img", "usb", None, None, "ext2"),
+    ("disk", "disk.img", "virtio", None, None, "ext2", True),
+    ("disk-usb", "disk.img", "usb", None, None, "ext2", True),
+    # Copies of disk.img made by this script, each given a signature of its
+    # own so no two disks here share one (the review of #288): one whose root's
+    # superblock is zeroed, where fsd must say it fell back to the ESP rather
+    # than run on it without a word; one that `format ext2` must reformat
+    # the root of, not the ESP, the boot partition (the review found
+    # find_partition took partition 1).
+    ("disk-badroot", "disk-badroot.img", "virtio", None, None, "FAT32", False),
+    ("disk-format", "disk-format.img", "virtio", None, None, "ext2", False),
 ]
 
 
-def boot(label, image, bus, want, on_virtio, on_usb, root):
+def make_copies():
+    """disk-badroot.img and disk-format.img from disk.img, signed again."""
+    source = os.path.join(BUILD, "disk.img")
+    with open(source, "rb") as fh:
+        disk = bytearray(fh.read())
+    root_start = struct.unpack_from("<I", disk, 446 + 16 + 8)[0]
+    bad = bytearray(disk)
+    superblock = root_start * 512 + 1024
+    bad[superblock:superblock + 1024] = bytes(1024)
+    for name, data in (("disk-badroot.img", bad), ("disk-format.img", disk)):
+        # A signature of the copy's own, from its name: disk-format.img is
+        # byte for byte disk.img, so signing it from its bytes gives disk.img's
+        # signature back, which the check below refuses.
+        own = int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little") or 1
+        struct.pack_into("<I", data, 440, own)
+        with open(os.path.join(BUILD, name), "wb") as fh:
+            fh.write(data)
+
+
+def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
     name = f"test-boot-partition[{label}]: "
     stick = image if bus == "usb" else on_usb
     extra = list(usb_hub.layout(True, stick)) if stick else []
@@ -163,11 +193,17 @@ def boot(label, image, bus, want, on_virtio, on_usb, root):
     guest = drive_qemu.Guest(virtio or image, extra_args=extra, virtio_disk=bool(virtio),
                              stamp_from=image, label=name)
     beside = bool(on_virtio or on_usb)
-    one_disk = os.path.basename(image) == "disk.img"
     reads_root = (beside and bus != "nvme") or one_disk
     steps = [("login:", "")]
     if reads_root:
         steps = [("login:", "root"), ("assword", "root"), ("# ", "ls /"), ("# ", "echo after-ls"), ("# ", "")]
+    if label == "disk-format":
+        # Format the root, then look with builtins, since the new root has no
+        # /bin: `cd /bin` must fail on the empty ext2, and `cd /esp/EFI` must
+        # succeed on partition index 0, the ESP, which the format left alone.
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "format ext2"),
+                 ("# ", "mount -a"), ("# ", "cd /bin"), ("# ", "mount 0 /esp"),
+                 ("# ", "cd /esp/EFI"), ("# ", "cd /"), ("# ", "")]
     try:
         reached = guest.run(steps)
         out = guest.transcript()
@@ -189,11 +225,23 @@ def boot(label, image, bus, want, on_virtio, on_usb, root):
         (f"{label}: no fault lines", faults == 0),
         (f"{label}: fsd mounts {root} as /", f"{root} mounted" in out),
     ]
-    if one_disk:
+    listing = re.search(r"ls /\r?\n([\s\S]*?)echo after-ls", out)
+    listing = listing.group(1) if listing else ""
+    if label == "disk-format":
+        def answer(command):
+            found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", out)
+            return found.group(1).strip() if found else None
+        bin_answer, efi_answer = answer("cd /bin"), answer("cd /esp/EFI")
+        checks += [
+            (f"{label}: `format ext2` reformatted the root (`cd /bin` refused)", bool(bin_answer)),
+            (f"{label}: the ESP, partition 0, still holds EFI (`cd /esp/EFI` silent)", efi_answer == ""),
+        ]
+    elif label == "disk-badroot":
+        checks.append((f"{label}: fsd says it fell back to the boot partition",
+                       "no partition beside the boot partition mounted" in out))
+    elif one_disk:
         # The root's tree, not the ESP's: the ESP has EFI at its top, the ext2
         # root has none (step 4's check; it fails with fsd taking partition 1).
-        listing = re.search(r"ls /\r?\n([\s\S]*?)echo after-ls", out)
-        listing = listing.group(1) if listing else ""
         checks.append((f"{label}: `ls /` shows the root's tree, not the ESP's",
                        "bin/" in listing and not re.search(r"\bEFI\b", listing)))
     if not beside:
@@ -218,21 +266,20 @@ def boot(label, image, bus, want, on_virtio, on_usb, root):
             ]
         else:
             checks.append((f"{label}: virtio-blk installed, the stick not", virtio_installed and not usb_installed))
-        listing = re.search(r"ls /\r?\n([\s\S]*?)echo after-ls", out)
-        listing = listing.group(1) if listing else ""
         checks.append((f"{label}: `ls /` shows the ESP's tree",
                        bool(re.search(r"\bEFI\b", listing)) and "USBTEST" not in listing))
     return checks, got
 
 
 def main():
+    make_copies()
     planned = [(label, os.path.join(BUILD, image), bus,
-                os.path.join(BUILD, v) if v else None, os.path.join(BUILD, u) if u else None, root)
-               for label, image, bus, v, u, root in BOOTS]
+                os.path.join(BUILD, v) if v else None, os.path.join(BUILD, u) if u else None, root, one)
+               for label, image, bus, v, u, root, one in BOOTS]
     # Every expectation first: an image this script cannot read stops the run
     # before any boot, not halfway through (the review of #285).
     try:
-        wants = [expected(image) for _, image, _, _, _, _ in planned]
+        wants = [expected(image) for _, image, _, _, _, _, _ in planned]
         disks = {d for row in planned for d in (row[1], row[3], row[4]) if d}
         mbr = {image for image in disks if not disksig.is_gpt(image)}
         sigs = {image: disksig.read_signature(image) for image in mbr}
@@ -252,8 +299,8 @@ def main():
     if shared:
         raise SystemExit(f"images sharing a disk signature: {shared}")
     failed = inconclusive = 0
-    for (label, image, bus, on_virtio, on_usb, root), want in zip(planned, wants):
-        checks, got = boot(label, image, bus, want, on_virtio, on_usb, root)
+    for (label, image, bus, on_virtio, on_usb, root, one_disk), want in zip(planned, wants):
+        checks, got = boot(label, image, bus, want, on_virtio, on_usb, root, one_disk)
         print(f"     {label}: table says {want}")
         print(f"     {label}: kernel says {got}")
         if checks is None:

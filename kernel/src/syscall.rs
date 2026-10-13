@@ -68,8 +68,10 @@ static BLOCK: SyncCell<Option<crate::block::BlockDevice>> = SyncCell::new(None);
 /// answers. Written with `BLOCK`, always, by [`install_block_device`].
 static BLOCK_BOOT_START: SyncCell<u64> = SyncCell::new(0);
 
-/// Installs the block device the `BLOCK_*` syscalls serve. First
-/// installed wins, same as the filesystem itself. `boot_start` is the boot
+/// Installs the block device the `BLOCK_*` syscalls serve, over any one
+/// already there: the boot path installs once, and `MOUNT`'s replace path
+/// overwrites on purpose, so `fsd` must ask `BLOCK_BOOT_START` again after
+/// every mount and never cache it. `boot_start` is the boot
 /// partition's start LBA when `device` was matched as the boot disk
 /// (`bootdisk::is_boot_disk`), else 0: a required argument, so no install
 /// can leave the last device's answer behind (one-disk step 4).
@@ -1698,10 +1700,17 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
                 return syscall_abi::MOUNT_NO_DEVICE;
             }
             match crate::usb_msd::Device::init() {
-                Ok(device) => {
-                    // Not asked whether it is the boot disk: a stick passed
-                    // through late, so `fsd` keeps its first-partition rule.
-                    install_block_device(crate::block::BlockDevice::UsbMsd(device), 0);
+                Ok(mut device) => {
+                    // Installed whatever it is, but asked whether it is the
+                    // boot disk, so a boot stick taken here (after its
+                    // boot-time init failed) still has `fsd` mount the root
+                    // beside its ESP. A stick passed through late on Parallels
+                    // is not the boot disk and answers 0.
+                    let capacity = device.capacity_sectors();
+                    // SAFETY: initialised, not yet installed.
+                    let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
+                    let boot_start = crate::bootdisk::boot_start(&mut read, capacity);
+                    install_block_device(crate::block::BlockDevice::UsbMsd(device), boot_start);
                     console::println!("Ouroboros kernel: usb-msd block device installed");
                     0
                 }

@@ -119,11 +119,24 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
         return syscall_abi::NO_FS;
     }
     match vfs::Filesystem::mount(disk::Disk) {
-        Ok(mounted) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
-        Ok(mounted) => {
-            print("fsd: ");
-            print(mounted.name());
-            print(" mounted, disk commands available\r\n");
+        Ok((mounted, _)) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
+        Ok((mounted, fell_back)) => {
+            if fell_back {
+                // The disk has a partition beside the boot one, the root on
+                // one disk (one-disk step 4), and it did not mount: say so
+                // rather than run on the ESP's tree without a word.
+                print("fsd: no partition beside the boot partition mounted - the boot partition is `/`\r\n");
+            }
+            // One write, so no other task's line lands inside it: three
+            // pieces let accountd's ready line split "fsd: FAT32 mounted" on a
+            // boot `make test-boot-partition` read (the review of #288).
+            let mut line = [0u8; 64];
+            let mut len = 0;
+            for part in ["fsd: ", mounted.name(), " mounted, disk commands available\r\n"] {
+                line[len..len + part.len()].copy_from_slice(part.as_bytes());
+                len += part.len();
+            }
+            con_write(&line[..len]);
             mounts[0] = Some(mounted);
             0
         }
@@ -248,20 +261,31 @@ fn find_partition() -> Option<(u32, u32)> {
     if mbr[510] != 0x55 || mbr[511] != 0xAA {
         return None;
     }
+    // The root by the rule `vfs::mount` uses: the partition the system booted
+    // from only when the disk has no other. On one disk carrying the ESP and a
+    // root, `format` had written over the ESP, partition 1, and left the root
+    // that `/` shows untouched (the high review of #288).
+    let boot = disk::Disk.boot_partition_start();
+    let mut first = None;
     for i in 0..4 {
         let e = 0x1BE + i * 16;
         let ptype = mbr[e + 4];
         let start = u32::from_le_bytes([mbr[e + 8], mbr[e + 9], mbr[e + 10], mbr[e + 11]]);
         let size = u32::from_le_bytes([mbr[e + 12], mbr[e + 13], mbr[e + 14], mbr[e + 15]]);
-        if ptype != 0 && size != 0 {
+        if ptype == 0 || size == 0 {
+            continue;
+        }
+        if Some(u64::from(start)) != boot {
             return Some((start, size));
         }
+        first.get_or_insert((start, size));
     }
-    None
+    first
 }
 
-/// Lay a fresh filesystem of type `fstype` into the disk's first MBR
-/// partition (mkfs). FAT32, exFAT, and ext2 are all supported (milestone 3);
+/// Lay a fresh filesystem of type `fstype` into the disk's root partition
+/// (mkfs): the first MBR partition, or on one disk carrying the ESP the first
+/// that is not the boot partition ([`find_partition`]). FAT32, exFAT, and ext2 are all supported (milestone 3);
 /// any other `fstype` returns [`FS_ERROR`]. Returns `0`, [`MOUNT_NO_DEVICE`],
 /// [`FS_ERR_NOT_FOUND`] (no partition - run `partition` first),
 /// [`FS_ERR_DISK_FULL`] (partition too small), or [`FS_ERR_IO`].

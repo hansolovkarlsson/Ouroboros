@@ -247,7 +247,29 @@ filesystem `fsd` mounted: ext2 for `disk.img` and `espext2.img`, FAT32 for
 partition, and both `disk.img` boots mounted the ESP; the kernel installing
 the stick with no start, and the USB boot did. The ESP still carries the
 whole tree, `/bin` and `/etc` included, as every image's does; what the ESP
-needs once a root sits beside it is step 5's question. Planned as:
+needs once a root sits beside it is step 5's question.
+
+The high review of #288 found two ways the rule was not applied
+everywhere. `format` took the first MBR partition, which on `disk.img` is
+the ESP: it wrote over the boot partition and left the root `/` showed
+untouched. It now takes the root by `mount`'s rule (rig: `disk-format`
+formats a copy and finds `/` empty and the ESP whole; mutation: the old
+rule, and it failed). And `MOUNT`'s rescan installed every stick with no
+start, so the `mount -a` retry after a failed boot-time init mounted the
+ESP; the rescan now asks the stick too (`bootdisk::boot_start`). That case
+needs a stick whose init fails at boot, which no rig sets up. A root that
+does not mount now says so (`fsd: no partition beside the boot partition
+mounted`; rig: `disk-badroot`, a copy with its superblock zeroed; mutation:
+the line removed, and it failed). `fsd`'s mount line is now one write: in
+three it was split by `accountd`'s, which the rig's new check on what
+mounted caught. The three image scripts share `scripts/mbrdisk.py`, and
+write the same bytes as before.
+
+Open for step 5, from that review: the root is the first partition beside
+the boot partition that mounts, which is right for two partitions and a
+guess for more (an exFAT data partition before the root would be `/`).
+Naming the root, by MBR type 0x83 or a GPT root type GUID, would hold for
+any layout. Planned as:
 - `fsd` asks the kernel for the boot partition: a new syscall, or a field of
   an existing one. That is settled at the step, and the number goes in
   `syscall-abi`.

@@ -1506,9 +1506,6 @@ $(EXT2_PART): esp
 image-ext2: image $(EXT2_PART)
 	python3 scripts/mkext2.py
 
-# Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
-# then fsd mounts the ext2 partition (partition 1) read-only - so `ls`/`cat`/
-# pipelines read from ext2 (their /bin binaries live there too).
 # One disk for boot and root (one-disk step 4, docs/roadmap/roadmap-one-disk.md):
 # build/disk.img, MBR, the FAT32 ESP as partition 1 and the ext2 root as
 # partition 2 (scripts/mkdisk.py), the conventional order espext2.img could
@@ -1531,6 +1528,9 @@ run-disk: disk
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
+# Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
+# then fsd mounts the ext2 partition (partition 1) read-only - so `ls`/`cat`/
+# pipelines read from ext2 (their /bin binaries live there too).
 run-image-ext2: image-ext2
 	qemu-system-aarch64 \
 		-machine virt \
