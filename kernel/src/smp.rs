@@ -49,7 +49,7 @@
 use crate::madt::{self, CoreList, MAX_CORES};
 use crate::synccell::SyncCell;
 use core::arch::{asm, global_asm};
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 /// What [`smp_secondary_entry`] reads with the MMU off: the EL1 regime and
 /// the register values the boot core wants every core to share. Field
@@ -108,13 +108,16 @@ const NO_FAULT_CORE: u64 = u64::MAX;
 /// Until then the boot core is core 0 by `set_boot_core_index`.
 static BOOT_INDEX: AtomicU64 = AtomicU64::new(0);
 
-/// The boot core's MPIDR affinity, written once by [`set_boot_core_index`],
-/// the kernel's first act (class A). [`is_boot_core`] compares it, not the
-/// index: in [`start`]'s own window, between `BOOT_INDEX` and `TPIDR_EL1`
-/// taking the MADT index, the boot core's two indexes differ, and an index
-/// comparison said no there (the reviews of #278). An affinity is the
-/// hardware's, and no store order blurs it.
-static BOOT_AFFINITY: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Whether [`start`] has begun starting secondaries (class A: set once, by
+/// the boot core, just before its first `CPU_ON`). Until then the boot core
+/// is the only core running, so it is the one asking [`is_boot_core`],
+/// whatever its two indexes say: in [`start`]'s window, between
+/// `BOOT_INDEX` and `TPIDR_EL1` taking the MADT index, they differ, and an
+/// index comparison said no there (the reviews of #278). No hardware
+/// register is read for it: the MPIDR affinity that stood here instead
+/// rested, on an EL2 handoff, on `el2.rs` copying MPIDR into `VMPIDR_EL2`,
+/// which no rig could catch being lost (the review of #281).
+static SECONDARIES_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// The word at the base of each secondary's stack, as `main.rs`'s
 /// `STACK_CANARY` at the boot core's: an overflow overwrites it first.
@@ -125,15 +128,13 @@ const STACK_CANARY: u64 = 0x5141_5141_5141_5141;
 static CORE_TICKS: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
 
 /// Whether this core is the boot core: the one whose tick does the
-/// scheduler's jobs and whose current task is the scheduler's. By MPIDR
-/// affinity ([`BOOT_AFFINITY`]), so it holds through [`start`]'s window
-/// too, when the boot core's `TPIDR_EL1` and `BOOT_INDEX` disagree. Before
-/// [`set_boot_core_index`] records it, only the boot core runs, so the
-/// answer is yes. At EL1 under an EL2 the kernel set up, `MPIDR_EL1` reads
-/// `VMPIDR_EL2`, which `el2.rs` and the secondary stub set to the real one.
+/// scheduler's jobs and whose current task is the scheduler's. Yes for any
+/// core before the first secondary is started ([`SECONDARIES_STARTED`]),
+/// since only the boot core runs then, which covers [`start`]'s window when
+/// its two indexes disagree; after that, [`is_boot`] of this core's index,
+/// the one rule, both indexes long settled.
 pub fn is_boot_core() -> bool {
-    let boot = BOOT_AFFINITY.load(Ordering::Relaxed);
-    boot == u64::MAX || madt::affinity(crate::gicv3::read_mpidr()) == boot
+    !SECONDARIES_STARTED.load(Ordering::Acquire) || is_boot(core_index() as usize)
 }
 
 /// A secondary core's tick (step 4(b)): counted, and said once, the first
@@ -287,10 +288,12 @@ pub(crate) fn halt_alone_here() -> bool {
     if core >= MAX_CORES || is_boot_core() || crate::tasks::current_index() != crate::tasks::TaskIndex::IDLE {
         return false;
     }
-    // The line before the mark: `start` reads CORE_FAILED as "its own line
-    // said why" and goes on to its summary, so the line has to be out first.
-    crate::console::println_force!("Ouroboros kernel: core {core} halted alone, holding nothing; the rest go on");
+    // Down first, so placement and the kicks stop counting this core while
+    // its line is written (a UART line takes milliseconds); then the line;
+    // then CORE_FAILED, which `start` reads as "its own line said why", so
+    // the line is out before it (the reviews of db0288a and #281).
     SECONDARIES_UP.fetch_and(!(1 << core), Ordering::Relaxed);
+    crate::console::println_force!("Ouroboros kernel: core {core} halted alone, holding nothing; the rest go on");
     CORE_UP[core].store(CORE_FAILED, Ordering::Release);
     true
 }
@@ -426,11 +429,8 @@ pub fn core_index() -> u64 {
 
 /// Marks this core as core 0 in `TPIDR_EL1`. The boot core, at its start,
 /// before the MADT says which index it really has ([`start`] corrects it).
-/// Also records its affinity ([`BOOT_AFFINITY`]), which never changes and
-/// is what [`is_boot_core`] asks.
 pub fn set_boot_core_index() {
     unsafe { asm!("msr tpidr_el1, xzr", options(nomem, nostack, preserves_flags)) };
-    BOOT_AFFINITY.store(madt::affinity(crate::gicv3::read_mpidr()), Ordering::Relaxed);
 }
 
 fn set_core_index(idx: u64) {
@@ -684,6 +684,10 @@ pub unsafe fn start(cores: &CoreList, fault_first: bool) {
     // Which cores the summary counts as up, for the ping's line on a core
     // that halts after it (step 4(d): a core halting alone marks itself down).
     let mut started_up = [false; MAX_CORES];
+    // From the first CPU_ON a second core may be running, so is_boot_core
+    // stops answering yes by default and asks the index, settled above.
+    // Release before the call, as every boot-only write is (class A).
+    SECONDARIES_STARTED.store(true, Ordering::Release);
     for (i, up_mark) in CORE_UP.iter().enumerate().take(n) {
         let aff = cores.mpidr[i];
         if aff == me {
