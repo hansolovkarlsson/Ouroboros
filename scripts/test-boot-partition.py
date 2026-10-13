@@ -8,7 +8,9 @@ the `HardDrive` node of its own image's device path (kernel/src/bootdisk.rs)
 and logs `boot partition: N of MBR|GPT at LBA s, b blocks, ...`. Each boot
 here compares that line with the partition this script finds by reading the
 image's partition table on the host: the one FAT partition on an MBR disk
-(type 0x0b or 0x0c), or the one entry of a GPT disk with its unique GUID.
+(type 0x0b, 0x0c or 0xef), or the one entry of a GPT disk with its unique
+GUID. An MBR image must also carry its own nonzero disk signature (one-disk
+step 2, scripts/disksig.py), or the run stops before any boot.
 
 Five boots, each to the login prompt:
   esp       build/esp.img on virtio-blk: partition 1, the whole disk
@@ -41,6 +43,9 @@ ROOT = os.path.dirname(HERE)
 _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
 drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
+sys.path.insert(0, HERE)
+import disksig  # noqa: E402
+
 _spec = importlib.util.spec_from_file_location("test_usb_hub", os.path.join(HERE, "test-usb-hub.py"))
 usb_hub = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(usb_hub)
@@ -75,6 +80,11 @@ def expected(image):
         first, last = struct.unpack_from("<QQ", entry, 32)
         guid = uuid.UUID(bytes_le=entry[16:32])
         return f"{number} of GPT at LBA {first}, {last - first + 1} blocks, partition GUID {guid}"
+    # Every MBR image carries its own nonzero signature since one-disk step 2
+    # (scripts/disksig.py): an unsigned one stops the run here, before any boot.
+    why = disksig.check_signature(image)
+    if why:
+        raise SystemExit(f"{image}: {why}")
     signature = struct.unpack_from("<I", mbr, 440)[0]
     fats = []
     for i in range(4):

@@ -1304,6 +1304,9 @@ image: esp
 	find "$$MP" -name '._*' -delete; \
 	hdiutil detach "$$MP" >/dev/null; \
 	rmdir "$$MP"
+	# The MBR disk signature, from the image's own bytes (scripts/disksig.py,
+	# one-disk step 2): hdiutil leaves it zero. Last, after every change.
+	python3 scripts/disksig.py set $(ESP_DIR).img
 
 # build/esp.img again with the MSDSTALL boot flag file at its root, for
 # `test-usb-hub.py --stall` (see bootflags.rs): the same attach, change,
@@ -1317,6 +1320,7 @@ image-stall: image
 	hdiutil detach "$$MP" >/dev/null || hdiutil detach -force "$$MP" >/dev/null || { echo "image-stall: $$MP is still mounted"; exit 1; }; \
 	rmdir "$$MP"; \
 	test $$ok = 1 || { echo "image-stall: could not stage MSDSTALL"; exit 1; }
+	python3 scripts/disksig.py set $(STALL_IMG)
 
 # Boots the real build/esp.img (genuine FAT32) instead of `run`'s vvfat
 # passthrough - needed for anything that reads the filesystem at runtime
@@ -1412,6 +1416,7 @@ $(EXFAT_PART): esp
 # (FAT32 probe fails on the exFAT partition, exFAT probe succeeds).
 image-exfat: image $(EXFAT_PART)
 	python3 scripts/mkexfat.py
+	python3 scripts/disksig.py set $(EXFAT_IMG)
 
 # Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
 # then fsd mounts the exFAT partition (partition 1) - so `ls`/`cat`/pipelines
@@ -1498,6 +1503,7 @@ $(EXT2_PART): esp
 # the ext2 partition, ext2 succeeds).
 image-ext2: image $(EXT2_PART)
 	python3 scripts/mkext2.py
+	python3 scripts/disksig.py set $(EXT2_IMG)
 
 # Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
 # then fsd mounts the ext2 partition (partition 1) read-only - so `ls`/`cat`/
@@ -2225,6 +2231,11 @@ test:
 	@# transcripts here, where it runs in a second.
 	@echo "== test-usb-hub's INCONCLUSIVE classifier"
 	@python3 scripts/test-usb-hub.py --self-test || exit 1
+	@# The disk signature every image recipe writes (one-disk step 2): its
+	@# rules on synthetic images, so the check that an image carries its own
+	@# signature is seen failing on an unsigned one and on one changed after.
+	@echo "== disk signatures (scripts/disksig.py)"
+	@python3 scripts/disksig.py --self-test || exit 1
 	@echo "== xHCI barriers in the kernel image"
 	@$(MAKE) --no-print-directory check-xhci-barriers || exit 1
 	@# The multi-core plan (docs/roadmap/roadmap-smp.md) names every static in
