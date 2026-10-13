@@ -106,16 +106,14 @@ const PING_INTERVAL: u32 = 64;
 
 /// How long (in ticks) an injected ping may go unacked before the server is
 /// declared wedged. Far above a healthy ack's round trip (a woken server
-/// acks within a tick or two when it gets a turn), so a genuine
-/// `Blocked`-deadlock is caught while a healthy idle server never trips.
-/// A turn can wait a full round of the tick (`tasks::ROUND`): on one core
-/// with every slot runnable, the round passes each of them before it comes
-/// back to the server the ping just woke. So the bound is twice the slot
-/// count, checked below; it was 8, under one round of 11 slots (the review
-/// of #280). About half a second at the 20 ms tick, well inside
-/// [`PING_INTERVAL`].
-const PING_TIMEOUT: u32 = 2 * crate::tasks::NUM_TASKS as u32;
-const _: () = assert!(PING_TIMEOUT as usize >= 2 * crate::tasks::NUM_TASKS && PING_TIMEOUT < PING_INTERVAL);
+/// acks within a tick or two), so a genuine `Blocked`-deadlock is caught
+/// while a healthy idle server never trips. The tick's round
+/// (`tasks::ROUND`) does not bear on it: the ping wakes a server idle in
+/// its receive at once, and `poll_ping` ends the wait the moment it sees
+/// the server not blocked, however long the server then waits for a turn
+/// (the second review of #280, which found a raise to 22 justified by the
+/// opposite).
+const PING_TIMEOUT: u32 = 8;
 
 /// [`poll_ping`]'s verdict for one supervised server this tick.
 pub enum PingAction {

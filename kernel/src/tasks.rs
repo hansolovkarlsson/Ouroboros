@@ -2139,8 +2139,12 @@ static STATES: [SyncCell<TaskState>; NUM_TASKS] = [
 ];
 
 /// Scans forward from `from` (exclusive), wrapping, for the next
-/// `Runnable` task; the scan's last candidate is `from` itself, so a
-/// still-runnable `from` is returned when nothing else is. `None` means
+/// `Runnable` task this core may run, real work first: the idle slot is the
+/// fallback, not a turn in the round, on every core (a secondary since step
+/// 4(d), the boot core since the second review of #280, where idle at slot
+/// 1 took every block's turn from slot 0 and every pass of the tick's
+/// round). The scan's last candidate is `from` itself, so a still-runnable
+/// `from` is returned when no other real work is. `None` means
 /// nothing at all is runnable, which is unreachable today (task 1, the
 /// idle task, never blocks - see this module's doc comment for why it
 /// can't safely use `wfe` either, so it has to stay a real,
@@ -2148,15 +2152,8 @@ static STATES: [SyncCell<TaskState>; NUM_TASKS] = [
 /// [`next_or_halt`], which reports and halts on it rather than resume a
 /// task whose state says it must not run.
 fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
-    if crate::smp::is_boot_core() {
-        scan_from(from, may_run_here)
-    } else {
-        // A secondary runs real work before its idle loop: the idle slot is
-        // its fallback, not a turn in the round (step 4(d)). The boot core
-        // keeps its round as it was, idle included.
-        scan_from(from, |c| c != TaskIndex::IDLE && may_run_here(c))
-            .or_else(|| may_run_here(TaskIndex::IDLE).then_some(TaskIndex::IDLE))
-    }
+    scan_from(from, |c| c != TaskIndex::IDLE && may_run_here(c))
+        .or_else(|| may_run_here(TaskIndex::IDLE).then_some(TaskIndex::IDLE))
 }
 
 /// Whether `t` is `Runnable` right now.
@@ -2224,20 +2221,19 @@ fn scan_from(from: TaskIndex, wanted: impl Fn(TaskIndex) -> bool) -> Option<Task
     None
 }
 
-/// The tick's pick, on any core: the next task after this core's round
-/// position ([`round_here`]), not after the task running now (`current`),
+/// The tick's pick, on any core: [`next_runnable`] from this core's round
+/// position ([`round_here`]), not from the task running now (`current`),
 /// which a direct switch may have chosen; the round then moves to the pick.
-/// Every task this core may run comes round within one pass of ticks,
-/// however the switches between ticks fall. Real work first, the idle slot
-/// only when there is none (on the boot core too, where the idle slot was a
-/// turn in the round: it cost every other task a tick per pass, the review
-/// of #280). Only the ticks call this: a block, a call, a yield and a kick
-/// still choose from where they stand, and move nothing. Nothing runnable at
-/// all halts through [`next_or_halt`], named after the task that was running.
+/// So every task this core may run is PICKED once per pass of ticks, however
+/// the switches between ticks fall. Picked is not run: a direct switch
+/// between ticks (a block, a call, a network interrupt's switch to `netd`)
+/// can still take a picked task's turn, and the round reaches it again only
+/// a pass later; what the round ends is a scan that could never reach a
+/// slot at all. Only the ticks call this: a block, a call, a yield and a
+/// kick still choose from where they stand, and move nothing. Nothing
+/// runnable at all halts, named after the task that was running.
 fn next_at_tick(current: TaskIndex) -> TaskIndex {
-    let next = scan_from(round_here(), |c| c != TaskIndex::IDLE && may_run_here(c))
-        .or_else(|| may_run_here(TaskIndex::IDLE).then_some(TaskIndex::IDLE))
-        .unwrap_or_else(|| next_or_halt(current));
+    let next = next_runnable(round_here()).unwrap_or_else(|| nothing_runnable(current));
     set_round_here(next);
     next
 }
@@ -2250,16 +2246,17 @@ fn next_at_tick(current: TaskIndex) -> TaskIndex {
 /// (Blocked, or torn down). One place, so its callers cannot disagree
 /// about what the fallback means.
 fn next_or_halt(from: TaskIndex) -> TaskIndex {
-    match next_runnable(from) {
-        Some(next) => next,
-        None => {
-            crate::console::println_force!(
-                "Ouroboros kernel: nothing runnable after task {} (the idle task should never block) - halting",
-                from.index()
-            );
-            crate::power::halt();
-        }
-    }
+    next_runnable(from).unwrap_or_else(|| nothing_runnable(from))
+}
+
+/// The halt when nothing at all is runnable, named after the task that was
+/// running ([`next_or_halt`], [`next_at_tick`]).
+fn nothing_runnable(after: TaskIndex) -> ! {
+    crate::console::println_force!(
+        "Ouroboros kernel: nothing runnable after task {} (the idle task should never block) - halting",
+        after.index()
+    );
+    crate::power::halt();
 }
 
 /// Like [`next_runnable`], but skips the idle task. A *voluntary* yield

@@ -49,10 +49,13 @@ appear.
    halts the kernel, and every other core parks at its next entry). The
    halted core must not answer its kick, and the boot core must say so.
 
-In every boot that runs the probes, no supervised server may be restarted
-(the supervisor's `server slot N wedged` or `restarted` line): with one
-core and a program spinning beside the shell, the tick's scan from the
-running task once never reached `fsd` (2026-10-12; `tasks::ROUND`).
+In every boot, no supervised server may be starved: no `server slot N
+wedged - no progress (runnable)` line, the supervisor's verdict on a server
+that stayed runnable and never ran. With one core and a program spinning
+beside the shell, the tick's scan from the running task once never reached
+`fsd`, which was restarted that way twice a boot (2026-10-12;
+`tasks::ROUND`). A server's other faults (a ping timeout, a crash) are not
+starvation and have their own rigs.
 
 A boot with no `Ouroboros kernel` line is the firmware stalling in its own
 boot, which happens; the rig says INCONCLUSIVE for that boot and does not
@@ -202,11 +205,11 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
     # on the boot core once starved `fsd` until the supervisor restarted it
     # as wedged, twice a boot, while every other check passed or failed on
     # the timing (2026-10-12, the tick's round, `tasks::ROUND`). What
-    # starvation produces is a server runnable and never run (`no progress
-    # (runnable)`, any slot) or `fsd` restarted at all; another server's own
-    # ping timeout is a different fault and has its own rigs.
-    starved = re.findall(r"server slot \d+ wedged - no progress \(runnable\)[^\r\n]*|server slot 2 (?:wedged|restarted)[^\r\n]*", out)
-    checks.append((f"{name}: no server starved (no runnable wedge, no fsd restart) in the whole boot"
+    # starvation produces is the supervisor's runnable wedge, on whichever
+    # slot it hit (no slot number here: `tasks.rs` owns the map); a ping
+    # timeout or a crash is a different fault and has its own rigs.
+    starved = re.findall(r"server slot \d+ wedged - no progress \(runnable\)[^\r\n]*", out)
+    checks.append((f"{name}: no server starved (no runnable wedge) in the whole boot"
                    + (f" (saw {starved[0]!r})" if starved else ""), not starved))
     return checks
 
