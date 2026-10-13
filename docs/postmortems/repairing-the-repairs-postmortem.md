@@ -510,3 +510,51 @@ The first review suggested counting abandoned calls and dropping the next
 reply. It assumed a server answers a caller's requests in order, and netd's
 parked requests do not; checked against the code before it was offered on,
 it was set aside.
+
+## Three branches, thirteen rounds, and the question that ended them (2026-10-12)
+
+*Added from the end of the multi-core arc: #278 (the stranded task found
+unreachable), #279 (`SPAWN` grants a child its stdout target) and #280 (a
+round of its own for each core's tick), with #281 the follow-up to a review
+of #278's last commit. Code, each round answered with rigs and, where a
+check was new, a mutation control.*
+
+| branch | rounds | findings by round | the repair a later round found wanting |
+| --- | --- | --- | --- |
+| #278 + #281 | 4 | 5, 8, 6, 7 | the boot core's identity: by index, then by index and affinity in one caller, then affinity for every caller (which rested on `VMPIDR_EL2` no rig could check), then "yes until the first `CPU_ON`", one rule and no register |
+| #279 | 5 | 10, 10, 6, 7, 8 | a dead stdout target: refused, then accepted (a producer took the keyboard's foreground to a dead stage), then refused again, then a guard on `FG` (which killed `cp` mid-copy when `echo` had finished), then the guard taken out |
+| #280 | 4 | 8, 7, 6, 8 | `PING_TIMEOUT`: 8, raised to 22, back to 8, raised to 22, back to 8, each move argued from one case |
+
+**The spine held on all three, and the 10-08 lesson came back word for
+word on #280.** The ping timeout went round between two opposite arguments,
+the idle server the ping wakes at once and the server mid-call that it does
+not, and each round found the other side. It ended when the constant was
+seen not to be the branch's to change at all: the round did not create the
+exposure, so the timeout went back to `main`'s value and into a follow-up
+whose answer is a measurement.
+
+**The lesson this section adds: ask of every finding whether it is true on
+`main`.** #279's middle rounds were not about #279. After its first repair,
+almost every finding was about how the shell decides a pipeline's fate (from
+a moment's check), which the `DELEGATE` loop the branch removed had decided
+the same way; each guard added to that model drew the next finding,
+including one that was worse than what it guarded against. The series
+converged the moment the findings were sorted by that one question: what
+the branch made worse was fixed (end-of-stream at exit, the console exempt,
+a dead consumer refused as `main` refused it), and the rest, true before the
+branch, went into one roadmap entry, "A pipeline's lifetime is managed by
+snapshots", whose fix is a design (the pipeline as one job) rather than a
+fifth guard. A review reads the code around a change, and old behaviour
+around a change reads as the change's; only the comparison with the base
+tells them apart, and it is the reviewer's question as much as the author's.
+
+**And one this file has said before, twice in one day: a check written into
+a repair can be one that cannot fail.** #279's rig check for a dead last
+stage was mutated, and passed with the guard it was written for disabled,
+on four cores and on one, because the case reached a different refusal
+first; it was kept anyway, with a comment saying so, and the next review
+asked why a check that cannot fail was there. #280's static assert on the
+ping timeout restated the line above it and was not mutated at all. The
+habit already in this file, mutate the new check before trusting it, was
+half kept: the mutation that shows a check cannot fail is an instruction to
+delete the check or find the case that reaches it, not to annotate it.

@@ -10,8 +10,8 @@ here actually works today, see [`architecture.md`](architecture.md) and
 ## Unreleased: the storage server under large writes, and the C library for Proem and Edit
 
 **Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
-version is held for a go-ahead. So far seven days' work, 2026-10-05 to
-2026-10-11, #209 to #275: the storage server made safe under large writes and
+version is held for a go-ahead. So far eight days' work, 2026-10-05 to
+2026-10-12, #209 to #281: the storage server made safe under large writes and
 double mounts; the C library made able to host Proem (now cpp) and Edit, the
 whole C-hosting plan among it, ending in DevTools's preprocessor running here,
 with the C headers on the disk and FAT32 names that keep their case; and the
@@ -25,7 +25,9 @@ the owner the spawn staging had owed since the arc's last step, then the
 cores made readable from a shell, `/proc/cpus` and `ps` naming the core a
 running task is on, and a cursor on the framebuffer console; the Pi 4 booted the whole arc the same day, every line
 it owed (`testing/testing-pi4.md` section 6), and Parallels on 2026-10-12
-from its shell (`testing/testing-parallels.md`, "Multi-core"). The days'
+from its shell (`testing/testing-parallels.md`, "Multi-core"), the day the
+arc closed with a fair round for every core's tick and a pipeline's links
+granted by `SPAWN` itself. The days'
 records are in `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
@@ -413,6 +415,36 @@ printing nothing while a program holds it, a second stager's code, and the
 release by exit, by `kill` and by abandon with the holder still alive, and a
 `SPAWN` of a total past what the owner staged refused; the refusal checks fail with the claim answering Ok to everyone, and with `SPAWN`
 not releasing the boot shell keeps the staging and no holder can claim.
+
+**A spinning program no longer starves `fsd` (#280, 2026-10-12).** With one
+core, a program spinning in the background and a shell taking keys, the
+supervisor restarted `fsd` as wedged, twice a boot: every pick scanned on
+from the task just running, and the shell's echo to `cond` left each scan
+past `fsd`'s slot. Each core's tick now keeps a round of its own
+(`tasks::ROUND`), which only the tick advances, so every task a core may
+run is picked once a pass; and every scan takes real work before the idle
+slot, on the boot core as on the others. `make test-smp` now fails a boot
+in which any server is restarted or lost, or any program faults.
+
+**A pipeline stage never runs before it may write (#279, 2026-10-12).**
+`SPAWN` grants a child the right to send to its stdout target in the same
+step, where the shell used to `DELEGATE` each link after spawning every
+stage: a stage that wrote first was refused, and its line dropped after 150
+ticks, which on one core with four busy stages happened every time. A
+target the spawner may not grant is refused (`pipe: could not authorize the
+stream`), and a consumer already gone is refused and torn down as before; a
+refused send to stdout is no longer retried. A program that ends without
+sending end-of-stream, nineteen of them (`touch`, `mkdir`, ...), now sends
+it from `ulib::exit`, as the C library's `_exit` already did, so `touch f |
+wc` no longer leaves `wc` waiting. A boot with no console server can spawn
+programs again.
+
+**A secondary core's halt is decided in one place (#278, #281,
+2026-10-12).** A core halts alone only when it is a secondary running no
+program (`smp::halt_alone_here`), so no task can read as running on a dead
+core; the boot core is recognised as itself through `smp::start`, before
+the first `CPU_ON`, without depending on any register an EL2 handoff sets
+up. Nothing visible changes; it is the rule made one function.
 
 ## v0.22.0: the Raspberry Pi 4 runs a full session, and per-user keys below the wire (2026-10-04)
 

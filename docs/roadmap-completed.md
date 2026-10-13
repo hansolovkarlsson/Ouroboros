@@ -20,6 +20,152 @@ a **DONE** marker or ~~strikethrough~~ is finished.
 
 ---
 
+## Multi-core ✅ DONE (2026-10-12)
+
+Planned on 2026-10-10 in [`roadmap/roadmap-smp.md`](roadmap/roadmap-smp.md)
+and built on QEMU the same day, steps 0 to 4(d) (#258 to #266); the spawn
+staging's owner (#268), `/proc/cpus` and `ps` naming a task's core (#270,
+#271) on 2026-10-11, when the Pi 4 booted every step
+([`testing/testing-pi4.md`](testing/testing-pi4.md) section 6); and on
+2026-10-12 the Parallels boot
+([`testing/testing-parallels.md`](testing/testing-parallels.md),
+"Multi-core") and the arc's last three defects (#278 to #281). Each change
+is summarized in [`CHANGELOG.md`](CHANGELOG.md), and the days are in
+`work-journal/2026-10-10.md` to `2026-10-12.md`.
+
+**What it came to.** The single-core argument the kernel had rested on
+(`synccell.rs`, one statement for every mutable static) became an
+inventory, every static in one of five classes and `make check-statics`
+holding it there, and one kernel lock taken at every resumable entry. It
+has not needed splitting: a syscall cost 24.9 µs before it and 27.8 µs with
+it under TCG, and the split waits for a measurement on hardware. What the
+hardware boots found was not in the cores' bring-up but in the scheduler
+and the pipeline beside it: on one core a spinning program and a typing
+shell made every pick skip `fsd` until the supervisor restarted it (a
+round per core's tick, `tasks::ROUND`, #280), and a pipeline stage that
+wrote before the shell's `DELEGATE` lost its line, now impossible because
+`SPAWN` grants the link (#279). The item below is moved verbatim from
+`ROADMAP.md`.
+
+- [x] **4. Multi-core, on QEMU first. Planned 2026-10-10,
+      [`roadmap-smp.md`](roadmap/roadmap-smp.md), the arc for the week of
+      2026-10-12. Built on QEMU the same day, steps 0 to 4(d) (#258 to
+      #266); the hardware boots are in (the Pi 4 2026-10-11, Parallels
+      2026-10-12), and its sub-items below are closed (the `fsd` wedge by
+      #280); what is left is closing the arc itself, its move to
+      `roadmap-completed.md` and the release.** Today one core runs everything and
+      the others are never started; the single-core argument is load-bearing
+      (`synccell.rs` states it once for every mutable static, and the kernel
+      never runs at EL1 with IRQs unmasked). What it needs: the secondary
+      cores started through PSCI `CPU_ON` (the conduit is already found,
+      `power.rs`), a stack and an exception level setup per core (the EL2
+      drop too, on the Pi), the GIC's per-core interface and the timer per
+      core, the cores found from the MADT's GICC entries, and then the real
+      work: locking or per-core ownership wherever `SyncCell` stands today,
+      and a scheduler that places tasks on cores. A plan document before any
+      code, the way `roadmap-el1-drop.md` was. QEMU `-smp 4` is the loop; the
+      Pi 4 (four A72s) and Parallels follow. **The hardware boots are in:**
+      the Pi 4's on 2026-10-11 (`testing/testing-pi4.md` section 6), and
+      Parallels' on 2026-10-12, read from the shell because its boot lines
+      cannot be (`testing/testing-parallels.md`, "Multi-core"). The other debt from
+      4(d), an owner for the spawn staging buffers that two spawners
+      interleaved (one core could already, two made it likelier), was
+      built on 2026-10-11 (#268): `syscall::SPAWN_STAGER`, `SPAWN_ERR_STAGING_BUSY`
+      and `make test-spawn-owner` (`roadmap-smp.md`, step 4(d)).
+      - [x] **A task stranded on a core that halted. Closed 2026-10-12:
+            the state could not be reached when this item was written, and
+            since #278 it cannot be spelled.** The item said a secondary that
+            takes a kernel fault halts alone with its `CURRENT` entry still
+            naming the task it ran, so `ps`, `/proc/<n>/core`, the placement
+            and `kill` would all take the task for running on a dead core.
+            But `power::halt` already halted the whole kernel when the core
+            ran a program (`runs_a_program`, added by the review of #266,
+            c9cbf6a, 2026-10-10, a day before this item was written by the
+            third review of #271), and a core is marked down only on
+            `power::halt`'s halt-alone path. A secondary that parks without
+            it (no GIC interface in `secondary_main`, or the entry stub's
+            `3:` loop) has never run a task, so its `CURRENT` is the idle
+            slot it started with, and it was never marked up. The rule was
+            a test in `power.rs` and a comment in `tasks.rs`; #278 moved the
+            decision, the mark and the `halted alone` line into one function,
+            `smp::halt_alone_here`, which refuses the boot core
+            (`smp::is_boot_core`, which answers yes until the first secondary
+            is started, so also in `smp::start`'s window, when the boot
+            core's two indexes differ; #281) and a core running a program, so `power::halt`
+            has no way left to halt a core alone without it and halts the
+            kernel otherwise. No rig can show it (nothing faults a secondary at EL1
+            while it runs a program); the evidence is the reading above.
+      - [x] **`fsd` restarted as wedged while a program spins on one core.
+            Cause found 2026-10-12; fixed by #280, on #279, both merged the
+            same day.** Seen in
+            `make test-smp`'s `-smp 1` boot: with `exec /bin/coreprobe hold`
+            spinning in the background, the supervisor printed `server slot
+            2 wedged - no progress (runnable) - restarting` twice, and two
+            checks failed in two runs on #278's branch (131 ok). Not a
+            regression: a run at `0d38602`, before #274, scored 133 with the
+            same two restarts in its transcript, so the rig had passed or
+            failed on timing. A ring of the last 32 switches showed the
+            cause: every pick scanned on from the task running, and with the
+            rig typing a key a tick the boot core went round 6 -> 0 -> 3 -> 6
+            (the tick from the program to the shell, the shell's echo a
+            direct switch to `cond`, `cond`'s block scanning on to the
+            program), so `fsd` at slot 2 never came round. #280 gives each
+            core's tick a round of its own (`tasks::ROUND`) and makes
+            `make test-smp` fail on any server restart; it needs #279 below
+            it (`SPAWN` granting a child its stdout target), since the fairer
+            tick otherwise exposes a pipeline stage writing before the
+            shell's `DELEGATE` and losing its line. `make test-smp` has run
+            149 of 149 since, with no server restarted in any boot.
+      **Two small follow-ups asked by Hans on 2026-10-11, after #268:**
+      - [x] **`/proc/cpus`: how many cores are active.** Built 2026-10-11,
+            `make test-proc-cpus`: one line from `CORE_INFO_UP`, `fsd`'s first
+            named `/proc` entry. As planned: today the count is
+            in the boot log (`MADT: N cores`, one `smp: core i up` line per
+            secondary, a summary) and in `coreprobe`'s report (`N cores
+            up`, a two-second probe built for the rig). Nothing a user types
+            answers it plainly. `cat /proc/cpus` is the Unix-shaped spelling:
+            one line, the cores up, from `CORE_INFO_UP` (the boot core and
+            every secondary that takes tasks), and the bitmask of the cores
+            running a program at that instant from `CORE_INFO_BUSY` if it
+            earns a second line. `fsd`'s `/proc` serves only `/<n>` and
+            `/<n>/state` today, so this is its first top-level entry with a
+            name rather than a slot number; `fsd` runs on the boot core and
+            asks the kernel, so no new syscall. Done when `cat /proc/cpus`
+            prints `4` under `SMP=4` and `1` on one core, in a rig. (Done:
+            the rig boots `-smp 1` and `-smp 4` and reads 1 and 4.)
+      - [x] **`ps` names the core a running task is on.** Built 2026-10-11:
+            `CORE_INFO_TASK_CORE`, `ps`'s `running on core N`, and
+            `/proc/<n>/core`, checked in `test-smp.py` on its five probe
+            boots (the `\SMPFAULT` boot runs no programs). One
+            adjustment to the "done when" below: the rig requires the core
+            `ps` names to be a secondary, not the one the probe's own line
+            named, because a program moves between secondaries whenever it
+            blocks and its "holding" line is itself a call to the console
+            server (`test-smp.py` already notes this for the kill). The high
+            review of #271 asked for the core, or a `running` state, to come
+            from `TASK_STATE` itself, so `ps` and a remote `/proc` reader get
+            one atomic answer instead of two files at two instants; that is a
+            change to `TASK_STATE`'s answers, which every rig reading
+            `runnable` depends on, so it is left as a follow-up if the two
+            instants ever mislead someone. As planned: with programs
+            placed on the secondaries (step 4(d)), `ps`'s `runnable` hides
+            a real third state: the task is executing on core N right now.
+            The kernel knows it (`tasks::running_core`, the per-core
+            `CURRENT`), and nothing exposes it. A fourth `CORE_INFO` op,
+            `CORE_INFO_TASK_CORE` with the slot as the second argument,
+            answering the core index or a "not on a core" sentinel; `ps`
+            prints `running on core N` for such a task and `runnable` for
+            one waiting its turn, so the two stop sharing a word; and
+            `/proc/<n>/core` beside `/proc/<n>/state` for the same answer
+            by file. Only a task on a core has a core: placement is at
+            dispatch, not a pin, so a runnable task has none to report, and
+            a blocked one is on no core. Done when `coreprobe hold | ps`
+            is not the check (a pipeline's `ps` runs after the probe
+            starts, but on which core is the probe's to say): `exec
+            /bin/coreprobe hold` then `ps` must show that slot `running on
+            core N` with N the core the probe's own `holding on core N`
+            line named, under `SMP=4`, in `test-smp.py`.
+
 ## The Raspberry Pi 4 bring-up ✅ DONE (2026-10-04, v0.22.0)
 
 From desk work on 2026-09-27, with no board, to a full session on a Pi 4 on
