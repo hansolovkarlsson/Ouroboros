@@ -2141,16 +2141,18 @@ static STATES: [SyncCell<TaskState>; NUM_TASKS] = [
 /// Scans forward from `from` (exclusive), wrapping, for the next
 /// `Runnable` task this core may run, real work first: the idle slot is the
 /// fallback, not a turn in the round, on every core (a secondary since step
-/// 4(d), the boot core since the second review of #280, where idle at slot
-/// 1 took every block's turn from slot 0 and every pass of the tick's
-/// round). The scan's last candidate is `from` itself, so a still-runnable
+/// 4(d); the boot core's tick since the review of #280, and every other
+/// boot-core switch, a block, an exit, a kill, a yield, since its second
+/// review, where idle at slot 1 took the turn of every block from slot 0).
+/// The scan's last candidate is `from` itself, so a still-runnable
 /// `from` is returned when no other real work is. `None` means
 /// nothing at all is runnable, which is unreachable today (task 1, the
 /// idle task, never blocks - see this module's doc comment for why it
 /// can't safely use `wfe` either, so it has to stay a real,
-/// always-runnable busy-spin); every caller goes through
-/// [`next_or_halt`], which reports and halts on it rather than resume a
-/// task whose state says it must not run.
+/// always-runnable busy-spin); every caller goes through [`next_or_halt`]
+/// or the tick's [`next_at_tick`], which report and halt on it through
+/// [`nothing_runnable`] rather than resume a task whose state says it must
+/// not run.
 fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
     scan_from(from, |c| c != TaskIndex::IDLE && may_run_here(c))
         .or_else(|| may_run_here(TaskIndex::IDLE).then_some(TaskIndex::IDLE))
@@ -2207,7 +2209,7 @@ fn save_frame(current: TaskIndex, frame: &Context) {
     }
 }
 
-/// The one scan behind [`next_runnable`] and [`next_runnable_skip_idle`]:
+/// The one scan behind [`next_runnable`]:
 /// forward from `from` (exclusive), wrapping, `from` itself the last
 /// candidate, for the first slot `wanted` accepts.
 fn scan_from(from: TaskIndex, wanted: impl Fn(TaskIndex) -> bool) -> Option<TaskIndex> {
@@ -2241,10 +2243,11 @@ fn next_at_tick(current: TaskIndex) -> TaskIndex {
 /// [`next_runnable`], for a caller that has no safe "stay put": the
 /// scan includes `from` itself as its last candidate, so `None` means
 /// nothing at all is runnable, which cannot happen while the idle task
-/// never blocks. If it ever does, every switch path halts here with a
-/// report rather than resuming a task whose state says it must not run
-/// (Blocked, or torn down). One place, so its callers cannot disagree
-/// about what the fallback means.
+/// never blocks. If it ever does, every switch path but the tick's halts
+/// here, and the tick's ([`next_at_tick`]) through the same
+/// [`nothing_runnable`], with a report rather than resuming a task whose
+/// state says it must not run (Blocked, or torn down). One halt, so no two
+/// callers can disagree about what the fallback means.
 fn next_or_halt(from: TaskIndex) -> TaskIndex {
     next_runnable(from).unwrap_or_else(|| nothing_runnable(from))
 }
@@ -2259,23 +2262,11 @@ fn nothing_runnable(after: TaskIndex) -> ! {
     crate::power::halt();
 }
 
-/// Like [`next_runnable`], but skips the idle task. A *voluntary* yield
-/// ([`yield_current_and_switch`]) wants to hand the CPU to real work;
-/// parking on idle would just wait for the next tick, which is exactly
-/// the stall the yield exists to avoid. The yielding task is itself
-/// `Runnable` and the scan's last candidate, so when nothing else is
-/// runnable it stays put; idle is never chosen for a yield.
-fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
-    // The scan's last candidate is `from` itself, so a real yielder
-    // (Runnable, not idle) is always found and stays put. `None` is
-    // reached only if `from` IS the idle task or is not Runnable, and
-    // then the plain scan (with its halt on nothing) is the right answer.
-    scan_from(from, |c| c != TaskIndex::IDLE && may_run_here(c)).unwrap_or_else(|| next_or_halt(from))
-}
-
 /// Voluntarily give up the CPU (the `YIELD` syscall): save the current task -
 /// which stays `Runnable`, this is a yield, not a block - and switch to another
-/// runnable task, preferring real work over idle ([`next_runnable_skip_idle`]).
+/// runnable task, preferring real work over idle ([`next_or_halt`], whose
+/// scan takes idle only when no real work is, and the yielder itself is the
+/// scan's last candidate, so with nothing else runnable it stays put).
 /// Returns `0` to the yielding task when it resumes.
 ///
 /// The reason this exists: a pipe producer whose consumer's mailbox is full
@@ -2293,7 +2284,7 @@ fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
 pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    let next = next_runnable_skip_idle(current);
+    let next = next_or_halt(current);
     if next == current {
         return frame.gpr[0]; // nothing else to run - just carry on
     }
@@ -2357,9 +2348,10 @@ pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitR
 
 /// Like [`block_current_and_switch`], but switches straight to `prefer`
 /// when it's given and currently runnable, instead of round-robining to
-/// the next runnable task (which, with an always-runnable idle task, is
-/// usually idle, so a plain `MSG_CALL` reply would otherwise wait a full
-/// tick). `MSG_CALL` uses this to switch directly to the server it just
+/// the next runnable task (which need not be the server just called: any
+/// real work further round comes first, so a plain `MSG_CALL` reply could
+/// wait behind it; until the second review of #280 the next task from the
+/// boot shell was always idle, which made that a full tick). `MSG_CALL` uses this to switch directly to the server it just
 /// delivered a request to: that server runs, replies (direct-delivered
 /// back, waking this caller), and blocks again, all before the next tick,
 /// the sub-tick synchronous round trip the ABI's `MSG_CALL` doc

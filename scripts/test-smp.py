@@ -49,13 +49,13 @@ appear.
    halts the kernel, and every other core parks at its next entry). The
    halted core must not answer its kick, and the boot core must say so.
 
-In every boot, no supervised server may be starved: no `server slot N
-wedged - no progress (runnable)` line, the supervisor's verdict on a server
-that stayed runnable and never ran. With one core and a program spinning
-beside the shell, the tick's scan from the running task once never reached
-`fsd`, which was restarted that way twice a boot (2026-10-12;
-`tasks::ROUND`). A server's other faults (a ping timeout, a crash) are not
-starvation and have their own rigs.
+In every boot, no supervised server may be restarted: no `server slot N
+wedged` or `restarted` line, whatever the slot or the reason. With one core
+and a program spinning beside the shell, the tick's scan from the running
+task once never reached `fsd`, which was restarted as wedged twice a boot
+(2026-10-12; `tasks::ROUND`), and a server mid-call to a starved peer would
+show as a ping timeout instead. These boots are the only ones that run the
+multi-core shapes, so no other rig would see a restart here.
 
 A boot with no `Ouroboros kernel` line is the firmware stalling in its own
 boot, which happens; the rig says INCONCLUSIVE for that boot and does not
@@ -201,15 +201,16 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
         ]
     else:
         checks.append((f"{name}: no fault lines", faults == 0 and "EXCEPTION" not in out))
-    # Over the whole boot, every boot: no server starved. A spinning program
-    # on the boot core once starved `fsd` until the supervisor restarted it
-    # as wedged, twice a boot, while every other check passed or failed on
-    # the timing (2026-10-12, the tick's round, `tasks::ROUND`). What
-    # starvation produces is the supervisor's runnable wedge, on whichever
-    # slot it hit (no slot number here: `tasks.rs` owns the map); a ping
-    # timeout or a crash is a different fault and has its own rigs.
-    starved = re.findall(r"server slot \d+ wedged - no progress \(runnable\)[^\r\n]*", out)
-    checks.append((f"{name}: no server starved (no runnable wedge) in the whole boot"
+    # Over the whole boot, every boot: no server restarted, on any slot (no
+    # slot number here: `tasks.rs` owns the map) and for any reason. A
+    # spinning program on the boot core once starved `fsd` until the
+    # supervisor restarted it as wedged, twice a boot, while every other
+    # check passed or failed on the timing (2026-10-12, `tasks::ROUND`);
+    # starvation can also show as a ping timeout (a server mid-call to a
+    # starved peer), and a crash under the kernel lock as a restart, and no
+    # other rig boots these shapes.
+    starved = re.findall(r"server slot \d+ (?:wedged|restarted)[^\r\n]*", out)
+    checks.append((f"{name}: no server restarted in the whole boot"
                    + (f" (saw {starved[0]!r})" if starved else ""), not starved))
     return checks
 

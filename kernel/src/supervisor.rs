@@ -105,15 +105,20 @@ const WEDGE_TICKS: u32 = 128;
 const PING_INTERVAL: u32 = 64;
 
 /// How long (in ticks) an injected ping may go unacked before the server is
-/// declared wedged. Far above a healthy ack's round trip (a woken server
-/// acks within a tick or two), so a genuine `Blocked`-deadlock is caught
-/// while a healthy idle server never trips. The tick's round
-/// (`tasks::ROUND`) does not bear on it: the ping wakes a server idle in
-/// its receive at once, and `poll_ping` ends the wait the moment it sees
-/// the server not blocked, however long the server then waits for a turn
-/// (the second review of #280, which found a raise to 22 justified by the
-/// opposite).
-const PING_TIMEOUT: u32 = 8;
+/// declared wedged. Far above a healthy ack's round trip, so a genuine
+/// `Blocked`-deadlock is caught while a healthy server never trips. A
+/// server idle in its receive is woken by the ping at once, and `poll_ping`
+/// ends the wait the moment it is not blocked, so for it the bound does not
+/// matter. It matters for the case the ping exists for: a server blocked
+/// mid-call to a peer, which the ping does not wake, and whose call ends
+/// only when the peer gets turns enough to answer. On one busy core the
+/// tick's round (`tasks::ROUND`) spaces a task's turns up to a pass of
+/// every slot apart, so two such turns need two passes: twice the slot
+/// count, about half a second at the 20 ms tick. It was 8, under one pass
+/// (the reviews of #280, the second of which argued it back to 8 from the
+/// idle-receive case alone, and the third found the mid-call case).
+const PING_TIMEOUT: u32 = 2 * crate::tasks::NUM_TASKS as u32;
+const _: () = assert!(PING_TIMEOUT < PING_INTERVAL, "a ping must time out before the next one is due");
 
 /// [`poll_ping`]'s verdict for one supervised server this tick.
 pub enum PingAction {
