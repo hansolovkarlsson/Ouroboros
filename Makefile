@@ -2232,8 +2232,8 @@ test:
 	@echo "== test-usb-hub's INCONCLUSIVE classifier"
 	@python3 scripts/test-usb-hub.py --self-test || exit 1
 	@# The disk signature every image recipe writes (one-disk step 2): its
-	@# rules on synthetic images, so the check that an image carries its own
-	@# signature is seen failing on an unsigned one and on one changed after.
+	@# rules on synthetic images, so the check that an image carries one is
+	@# seen failing on an unsigned image, and the 0 rule and GPT refusal hold.
 	@echo "== disk signatures (scripts/disksig.py)"
 	@python3 scripts/disksig.py --self-test || exit 1
 	@echo "== xHCI barriers in the kernel image"

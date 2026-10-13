@@ -9,8 +9,9 @@ and logs `boot partition: N of MBR|GPT at LBA s, b blocks, ...`. Each boot
 here compares that line with the partition this script finds by reading the
 image's partition table on the host: the one FAT partition on an MBR disk
 (type 0x0b, 0x0c or 0xef), or the one entry of a GPT disk with its unique
-GUID. An MBR image must also carry its own nonzero disk signature (one-disk
-step 2, scripts/disksig.py), or the run stops before any boot.
+GUID. The MBR images must also carry nonzero disk signatures, each
+different from the others' (one-disk step 2, scripts/disksig.py), or the
+run stops before any boot: that is what step 3 will tell disks apart by.
 
 Five boots, each to the login prompt:
   esp       build/esp.img on virtio-blk: partition 1, the whole disk
@@ -80,7 +81,7 @@ def expected(image):
         first, last = struct.unpack_from("<QQ", entry, 32)
         guid = uuid.UUID(bytes_le=entry[16:32])
         return f"{number} of GPT at LBA {first}, {last - first + 1} blocks, partition GUID {guid}"
-    # Every MBR image carries its own nonzero signature since one-disk step 2
+    # Every MBR image carries a nonzero signature since one-disk step 2
     # (scripts/disksig.py): an unsigned one stops the run here, before any boot.
     why = disksig.check_signature(image)
     if why:
@@ -137,6 +138,16 @@ def main():
     # before any boot, not halfway through (the review of #285).
     planned = [(label, os.path.join(BUILD, image), usb) for label, image, usb in boots]
     wants = [expected(image) for _, image, _ in planned]
+    # The MBR images booted must not share a signature: step 3 picks the block
+    # device by it (the review of #286 moved this check from "the image's own
+    # hash", which every boot's counter write broke, to the property itself).
+    mbr = {image for _, image, _ in planned if not disksig.is_gpt(image)}
+    by_sig = {}
+    for image in sorted(mbr):
+        by_sig.setdefault(disksig.read_signature(image), []).append(os.path.basename(image))
+    shared = [names for names in by_sig.values() if len(names) > 1]
+    if shared:
+        raise SystemExit(f"images sharing a disk signature: {shared}")
     failed = inconclusive = 0
     for (label, image, usb), want in zip(planned, wants):
         checks, want, got = boot(label, image, usb, want)

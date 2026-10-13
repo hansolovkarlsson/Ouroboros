@@ -49,8 +49,7 @@ ESP_TYPE = bytes([0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
 # From the payload's own bytes, not random: the kernel names its boot partition
 # by this GUID (bootdisk.rs), so the same esp.img gives the same GUIDs, and a
 # different one different GUIDs (scripts/disksig.py, one-disk step 2).
-disk_guid = disksig.guid_for(SRC, "gpt disk")
-part_guid = disksig.guid_for(SRC, "gpt partition")
+disk_guid, part_guid = disksig.guids_for_bytes(img, ["gpt disk", "gpt partition"])
 
 # Partition entry array (128 * 128), one used entry.
 entry = bytearray(128)

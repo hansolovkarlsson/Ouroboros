@@ -25,7 +25,8 @@ zero, so the firmware named every image's disk alike; `scripts/disksig.py`
 now writes one from the image's own bytes as each recipe's last step, and
 `mkgpt.py`'s GUIDs come from `esp.img`'s bytes instead of being random. The
 kernel's `boot partition:` line reports each one, and `make
-test-boot-partition` refuses an unsigned image before booting it.
+test-boot-partition` refuses, before booting, an unsigned image or two
+images sharing a signature.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

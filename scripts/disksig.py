@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""The MBR disk signature of a built image, from the image's own bytes.
+r"""The MBR disk signature of a built image, from the image's own bytes.
 
     python3 scripts/disksig.py set IMAGE...     write each image's signature
-    python3 scripts/disksig.py check IMAGE...   each must carry its own, nonzero
+    python3 scripts/disksig.py check IMAGE...   each MBR image must carry one, nonzero
     python3 scripts/disksig.py guid IMAGE LABEL print a GUID from IMAGE's bytes
     python3 scripts/disksig.py --self-test      (run by `make test`)
 
@@ -14,16 +14,20 @@ zero, so the node named all of them alike, and step 3, which picks the block
 device by the node, could tell two of them apart only by where the boot
 partition starts.
 
-The signature is the first four bytes of SHA-256 over the whole image with
-those four bytes counted as zero, so it is the image's own: the same bytes
-give the same signature, and two images that differ in any byte (the node-a
-and node-b pair, the stall image and the image it was copied from) get
-different ones, with no counter or randomness to keep. hdiutil's FAT32 is not
-byte-for-byte reproducible, so two builds of one tree differ too; nothing
-relies on them matching. A hash of 0 becomes 1, since 0 means "none" to the
-kernel. `check` recomputes it, so an image changed after it was signed (a
-recipe that forgot to sign again after editing a copy) is caught, not just an
-unsigned one.
+The signature is the first four bytes of SHA-256 over the whole image as
+built, with those four bytes counted as zero, so two images built different
+(the node-a and node-b pair, the stall image and the image it was copied
+from, which its recipe signs again) get different ones, with no counter or
+randomness to keep. hdiutil's FAT32 is not byte-for-byte reproducible, so two
+builds of one tree differ too; nothing relies on them matching. A hash of 0
+becomes 1, since 0 means "none" to the kernel.
+
+It is the disk's name, not a checksum of it. Every boot writes the image (the
+boot counter's `\EFI\ORBS\BOOTID.TXT`, and whatever a rig makes), so `check`
+asks only that an MBR image carries a nonzero signature; one that tracked the
+bytes refused every image that had been booted once (the review of #286). And
+a copy of an image carries its source's signature, as a disk copied with `dd`
+does: a rig that attaches a copy beside its source signs the copy again.
 
 A GPT disk takes no MBR signature (its protective MBR's is unused, by the
 UEFI specification): its node carries the partition's GUID instead, which
@@ -41,24 +45,32 @@ SIG_LEN = 4
 CHUNK = 1 << 20
 
 
-def content_hash(path, label=b""):
-    """SHA-256 of the image with the signature bytes counted as zero, then
-    `label`, read in chunks so a large image is never held whole."""
+def _hash_image(chunks):
+    """SHA-256 state over an image given as chunks, the signature bytes in
+    the first chunk counted as zero."""
     h = hashlib.sha256()
+    for i, chunk in enumerate(chunks):
+        if i == 0 and len(chunk) >= SIG_OFFSET + SIG_LEN:
+            chunk = bytearray(chunk)
+            chunk[SIG_OFFSET:SIG_OFFSET + SIG_LEN] = bytes(SIG_LEN)
+        h.update(chunk)
+    return h
+
+
+def content_hash(path):
+    """The hash state of the image at `path`, read in chunks so a large image
+    is never held whole."""
     with open(path, "rb") as fh:
-        first = bytearray(fh.read(CHUNK))
-        if len(first) >= SIG_OFFSET + SIG_LEN:
-            first[SIG_OFFSET:SIG_OFFSET + SIG_LEN] = bytes(SIG_LEN)
-        h.update(first)
-        for chunk in iter(lambda: fh.read(CHUNK), b""):
-            h.update(chunk)
-    h.update(label)
-    return h.digest()
+        return _hash_image(iter(lambda: fh.read(CHUNK), b""))
+
+
+def signature_from_digest(digest):
+    """The first four bytes, little-endian; 0 means none, so it becomes 1."""
+    return struct.unpack("<I", digest[:SIG_LEN])[0] or 1
 
 
 def signature_for(path):
-    sig = struct.unpack("<I", content_hash(path)[:SIG_LEN])[0]
-    return sig or 1
+    return signature_from_digest(content_hash(path).digest())
 
 
 def read_signature(path):
@@ -87,28 +99,41 @@ def set_signature(path):
 
 
 def check_signature(path):
-    """None when `path` carries its own nonzero signature, else why not."""
-    have = read_signature(path)
-    if have == 0:
+    """None when `path` is a GPT disk or an MBR disk with a nonzero
+    signature, else why not."""
+    if is_gpt(path):
+        return None
+    if read_signature(path) == 0:
         return "no disk signature (bytes 440-443 are zero)"
-    want = signature_for(path)
-    if have != want:
-        return f"signature {have:#010x} is not its own ({want:#010x}): the image changed after it was signed"
     return None
 
 
-def guid_for(path, label):
-    """A GUID from `path`'s bytes and `label`, in the on-disk (mixed-endian)
-    byte order, shaped as an RFC 4122 version 4 GUID."""
-    raw = bytearray(content_hash(path, label.encode())[:16])
+def guid_from_state(state, label):
+    """A GUID from an image's hash state and `label`, in the on-disk
+    (mixed-endian) byte order, shaped as an RFC 4122 version 4 GUID."""
+    h = state.copy()
+    h.update(label.encode())
+    raw = bytearray(h.digest()[:16])
     raw[6] = (raw[6] & 0x0F) | 0x40
     raw[8] = (raw[8] & 0x3F) | 0x80
     return uuid.UUID(bytes=bytes(raw)).bytes_le
 
 
+def guid_for(path, label):
+    return guid_from_state(content_hash(path), label)
+
+
+def guids_for_bytes(data, labels):
+    """One GUID per label from an image already in memory, hashed once
+    (mkgpt.py holds esp.img whole)."""
+    state = _hash_image([data])
+    return [guid_from_state(state, label) for label in labels]
+
+
 def self_test():
-    """Each rule on a synthetic MBR image, so the check can fail: unsigned,
-    signed, changed after signing, and two different images."""
+    """Each rule on synthetic images, so each check can fail: unsigned and
+    signed, booted after signing, two different images, the 0 rule, GPT, and
+    the GUID's shape."""
     results = []
     with tempfile.TemporaryDirectory() as tmp:
         def image(name, fill):
@@ -128,10 +153,26 @@ def self_test():
         results.append(("two images get different signatures", set_signature(b) != sig_a))
         with open(a, "r+b") as fh:
             fh.seek(2048)
-            fh.write(b"changed")
-        results.append(("an image changed after signing fails", check_signature(a) is not None))
+            fh.write(b"booted")
+        results.append(("an image written after signing still passes", check_signature(a) is None))
+        results.append(("a hash of 0 gives signature 1", signature_from_digest(bytes(32)) == 1))
+        gpt = image("gpt.img", b"")
+        with open(gpt, "r+b") as fh:
+            fh.seek(512)
+            fh.write(b"EFI PART")
+        try:
+            set_signature(gpt)
+            refused = False
+        except ValueError:
+            refused = True
+        results.append(("set refuses a GPT disk", refused))
+        results.append(("check passes a GPT disk", check_signature(gpt) is None))
+        guid = uuid.UUID(bytes_le=guid_for(b, "disk"))
+        results.append(("a GUID is version 4, RFC 4122 variant", guid.version == 4 and guid.variant == uuid.RFC_4122))
         results.append(("the GUIDs of one image differ by label", guid_for(b, "disk") != guid_for(b, "partition")))
-        results.append(("a GUID is stable", guid_for(b, "disk") == guid_for(b, "disk")))
+        with open(b, "rb") as fh:
+            whole = fh.read()
+        results.append(("in memory and from disk give one GUID", guids_for_bytes(whole, ["disk"])[0] == guid_for(b, "disk")))
     failed = 0
     for name, ok in results:
         print(f"{'ok  ' if ok else 'FAIL'} disksig: {name}")
@@ -140,6 +181,14 @@ def self_test():
 
 
 def main(argv):
+    try:
+        return run(argv)
+    except (OSError, ValueError) as e:
+        print(f"disksig: {e}", file=sys.stderr)
+        return 1
+
+
+def run(argv):
     if argv == ["--self-test"]:
         return self_test()
     if len(argv) >= 2 and argv[0] == "set":
@@ -150,7 +199,8 @@ def main(argv):
         failed = 0
         for path in argv[1:]:
             why = check_signature(path)
-            print(f"{'ok  ' if why is None else 'FAIL'} disksig: {path}: {why or 'its own signature'}")
+            ok = why or ("a GPT disk, named by its partition GUID" if is_gpt(path) else "signed")
+            print(f"{'ok  ' if why is None else 'FAIL'} disksig: {path}: {ok}")
             failed += 0 if why is None else 1
         return 1 if failed else 0
     if len(argv) == 3 and argv[0] == "guid":
