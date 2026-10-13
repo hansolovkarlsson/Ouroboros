@@ -46,6 +46,15 @@ LBA when the installed disk is the boot disk, else 0, and `fsd` tries that
 partition last. Booted on virtio and as a USB stick by `make
 test-boot-partition`, which now checks the filesystem every boot mounts.
 
+**C11's comparison macros reach a compiler with the builtins (2026-10-13).**
+DevTools asked (its note, now in `docs/handoffs/closed/`): picolibc's
+`<math.h>` wrote `isgreater` and the other five as builtins only for a
+compiler that says it is GNU, and otherwise as GNU statement expressions,
+which DevTools's `cc` does not have. The condition now also takes the
+builtins when `__has_builtin` says so; clang's output is unchanged. The
+change is a patch, `libc/picolibc-patches/`, which `build-picolibc.sh`
+applies to every regenerated prebuilt tree.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
