@@ -11,15 +11,25 @@ image's partition table on the host: the one FAT partition on an MBR disk
 (type 0x0b, 0x0c or 0xef), or the one entry of a GPT disk with its unique
 GUID. The MBR images must also carry nonzero disk signatures, each
 different from the others' (one-disk step 2, scripts/disksig.py), or the
-run stops before any boot: that is what step 3 will tell disks apart by.
+run stops before any boot: that is what step 3 tells disks apart by.
 
-Five boots, each to the login prompt:
+Five boots to the login prompt:
   esp       build/esp.img on virtio-blk: partition 1, the whole disk
   gpt       build/espgpt.img: partition 1 of a GPT, named by its GUID
   ext2      build/espext2.img: the ESP is partition 2, after the root
   exfat     build/espexfat.img: the same with an exFAT root
   usb-boot  build/esp.img as a USB stick on QEMU's xHCI, no virtio disk:
             the path through a USB node, the case the Pi and Parallels boot
+
+and two with a second, unrelated disk beside the boot disk (build/usbstick.img,
+signed, holding USBTEST.TXT), for step 3, the block device chosen by the boot
+partition (`main.rs`'s `install_boot_disk`):
+  usb-boot-beside  esp.img on USB, usbstick.img on virtio: before step 3
+                   virtio was always taken; now the kernel must hold it back
+                   and install the stick, and `ls /` after login must show
+                   the ESP's tree, not USBTEST.TXT
+  virtio-beside    esp.img on virtio, usbstick.img on USB: virtio is the boot
+                   disk and is installed, the stick is never asked
 
 The ext2 and exFAT boots are the ones that can tell a kernel naming its boot
 partition from one naming the first partition. The stick's QEMU arguments
@@ -29,8 +39,9 @@ own USB boot (no kernel line, a clean fault trace, UsbBootExecCmd last) is
 INCONCLUSIVE, not a failed check and not a pass, and exits 100 as there;
 anything else that keeps the kernel from printing fails. Every image's
 expected line is read before the first boot, so an image this script cannot
-read stops it before anything runs. About two minutes. Run it whenever
-bootdisk.rs, or how an image lays out its partitions, changes.
+read stops it before anything runs. About three minutes. Run it whenever
+bootdisk.rs, main.rs's choice of block device, or how an image lays out its
+partitions, changes.
 """
 import importlib.util
 import os
@@ -100,15 +111,27 @@ def expected(image):
     return f"{number} of MBR at LBA {start}, {blocks} blocks, disk signature {sig}"
 
 
-def boot(label, image, usb, want):
-    guest = drive_qemu.Guest(
-        image,
-        extra_args=usb_hub.layout(True, image) if usb else (),
-        virtio_disk=not usb,
-        label=f"test-boot-partition[{label}]: ",
-    )
+def boot(label, image, usb, want, beside=None):
+    if beside and usb:
+        # The unrelated disk on virtio; Guest attaches its `image` there, and
+        # the stale-image guard reads the boot image's stamp.
+        guest = drive_qemu.Guest(beside, extra_args=usb_hub.layout(True, image),
+                                 stamp_from=image, label=f"test-boot-partition[{label}]: ")
+    elif beside:
+        guest = drive_qemu.Guest(image, extra_args=usb_hub.layout(True, beside),
+                                 label=f"test-boot-partition[{label}]: ")
+    else:
+        guest = drive_qemu.Guest(
+            image,
+            extra_args=usb_hub.layout(True, image) if usb else (),
+            virtio_disk=not usb,
+            label=f"test-boot-partition[{label}]: ",
+        )
+    steps = [("login:", "")]
+    if beside:
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "ls /"), ("# ", "echo after-ls"), ("# ", "")]
     try:
-        reached = guest.run([("login:", "")])
+        reached = guest.run(steps)
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -119,11 +142,29 @@ def boot(label, image, usb, want):
         return None, want, "QEMU's firmware stalled in its own USB boot"
     got = LINE.search(out)
     got = got.group(1).strip() if got else "no line"
-    return [
-        (f"{label}: reached the login prompt", reached),
+    checks = [
+        (f"{label}: reached the {'end' if beside else 'login prompt'}", reached),
         (f"{label}: the kernel names the partition the table holds", got == want),
         (f"{label}: no fault lines", faults == 0),
-    ], want, got
+    ]
+    if beside:
+        listing = re.search(r"ls /\r?\n([\s\S]*?)echo after-ls", out)
+        listing = listing.group(1) if listing else ""
+        usb_installed = "usb-msd block device installed" in out
+        virtio_installed = "block device installed for the filesystem server" in out
+        if usb:
+            checks += [
+                (f"{label}: virtio-blk held back as not the boot disk", "virtio-blk is not the boot disk" in out),
+                (f"{label}: the boot stick installed, virtio not", usb_installed and not virtio_installed),
+            ]
+        else:
+            checks += [
+                (f"{label}: virtio-blk installed, the stick not", virtio_installed and not usb_installed),
+            ]
+        checks += [
+            (f"{label}: `ls /` shows the ESP's tree", bool(re.search(r"\bEFI\b", listing)) and "USBTEST" not in listing),
+        ]
+    return checks, want, got
 
 
 def main():
@@ -133,14 +174,20 @@ def main():
         ("ext2", "espext2.img", False),
         ("exfat", "espexfat.img", False),
         ("usb-boot", "esp.img", True),
+        ("usb-boot-beside", "esp.img", True, "usbstick.img"),
+        ("virtio-beside", "esp.img", False, "usbstick.img"),
     ]
     # Every expectation first: an image this script cannot read stops the run
     # before any boot, not halfway through (the review of #285).
-    planned = [(label, os.path.join(BUILD, image), usb) for label, image, usb in boots]
+    planned = [(b[0], os.path.join(BUILD, b[1]), b[2], os.path.join(BUILD, b[3]) if len(b) > 3 else None) for b in boots]
     try:
-        wants = [expected(image) for _, image, _ in planned]
-        mbr = {image for _, image, _ in planned if not disksig.is_gpt(image)}
+        wants = [expected(image) for _, image, _, _ in planned]
+        disks = {image for _, image, _, _ in planned} | {beside for _, _, _, beside in planned if beside}
+        mbr = {image for image in disks if not disksig.is_gpt(image)}
         sigs = {image: disksig.read_signature(image) for image in mbr}
+        unsigned = [os.path.basename(image) for image in sorted(mbr) if sigs[image] == 0]
+        if unsigned:
+            raise SystemExit(f"test-boot-partition: unsigned images: {unsigned} (scripts/disksig.py set; `make` rebuilds its own)")
     except (OSError, ValueError) as e:
         raise SystemExit(f"test-boot-partition: {e}")
     # The MBR images booted must not share a signature: step 3 picks the block
@@ -153,8 +200,8 @@ def main():
     if shared:
         raise SystemExit(f"images sharing a disk signature: {shared}")
     failed = inconclusive = 0
-    for (label, image, usb), want in zip(planned, wants):
-        checks, want, got = boot(label, image, usb, want)
+    for (label, image, usb, beside), want in zip(planned, wants):
+        checks, want, got = boot(label, image, usb, want, beside)
         print(f"     {label}: table says {want}")
         print(f"     {label}: kernel says {got}")
         if checks is None:

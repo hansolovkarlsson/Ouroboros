@@ -155,7 +155,12 @@ pub(crate) fn net_ack_interrupt() {
 /// cell. Returns whether a device is installed after the attempt. The
 /// *filesystem* half of mounting lives in the server now
 /// (`FSOP_MOUNT`), not here - the kernel only handles the device.
-pub fn try_install_usb_block_device() -> bool {
+///
+/// `accept` is asked once the stick is initialised, before it is installed:
+/// the boot-time step's question, whether it is the boot disk
+/// (`main.rs::install_boot_disk`, one-disk step 3). A stick refused is
+/// logged and left uninstalled, and the answer is `false`.
+pub fn try_install_usb_block_device(accept: impl FnOnce(&mut crate::usb_msd::Device) -> bool) -> bool {
     if block_device_installed() {
         return true;
     }
@@ -163,7 +168,11 @@ pub fn try_install_usb_block_device() -> bool {
         return false;
     }
     match crate::usb_msd::Device::init() {
-        Ok(device) => {
+        Ok(mut device) => {
+            if !accept(&mut device) {
+                console::println!("Ouroboros kernel: usb-msd is not the boot disk - not installed");
+                return false;
+            }
             install_block_device(crate::block::BlockDevice::UsbMsd(device));
             console::println!("Ouroboros kernel: usb-msd block device installed");
             true
