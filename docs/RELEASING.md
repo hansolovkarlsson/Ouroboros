@@ -61,6 +61,7 @@ is `0.5.0`.
 | `0.20.0` | 2026-09-22 | the fid verbs reach the export (C `open()`/`read()`/`write()` on a remote file), the keyboard follows a chain, the remote mount goes asynchronous; error floor to `MAX-43` |
 | `0.21.0` | 2026-09-26 | held sessions keyed (X25519 + HMAC-SHA-512, `AUTHNP04`, offered not required: no flag day), the kernel boot identity (`BOOT_ID`), a park never signs |
 | `0.22.0` | 2026-10-04 | the Raspberry Pi 4 runs a full session (own stack, EL2 to EL1 drop, xHCI on non-coherent PCIe, hubs, `make sdcard`/`make stick`); per-user keys steps 0 to 4 below the wire; root squash; version-2 shadow lines |
+| `0.23.0` | 2026-10-13 | multi-core (programs on every core, one kernel lock, booted on QEMU, the Pi 4 and Parallels); the C-hosting arc (DevTools's `cpp` and `edit` run here); the console and keyboard for a full-screen editor; FP/SIMD saved across the kernel |
 
 ## Four things that have bitten, and how to avoid them
 

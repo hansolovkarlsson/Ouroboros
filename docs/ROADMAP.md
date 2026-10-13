@@ -20,12 +20,12 @@ This document is the one to update first when direction changes.
 
 ## What's next (the current frontier)
 
-> **Released 2026-10-04: v0.22.0, the Raspberry Pi 4 runs a full session**
-> (#176 to #207, recorded in [`CHANGELOG.md`](CHANGELOG.md) and
-> [`roadmap-completed.md`](roadmap-completed.md); the board's record is
-> `testing/testing-pi4.md` section 6). The Pi's open directions are under "The
-> Raspberry Pi, after the first full session" below; per-user keys steps 0 to
-> 4 went out in the same release, with step 5 next (item 1).
+> **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
+> and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
+> and [`roadmap-completed.md`](roadmap-completed.md)). The next direction, set
+> by Hans on 2026-10-12, is one disk for boot and root. The Pi's open
+> directions are under "The Raspberry Pi, after the first full session"
+> below, and per-user keys step 5 is item 1.
 
 > **Done 2026-09-26: session-scoped authentication**
 > ([`roadmap-session-auth.md`](roadmap/roadmap-session-auth.md), moved to
@@ -47,8 +47,7 @@ This document is the one to update first when direction changes.
 > shell and servers on the boot core, under one kernel lock that has not
 > needed splitting; each core's tick keeps a round of its own, so a direct
 > switch cannot starve a slot; `SPAWN` grants a child its stdout target, so
-> no pipeline stage runs before it may write. **Owed:** cutting the
-> unreleased range (#209 to #281) as v0.23.0, held for Hans's go-ahead.
+> no pipeline stage runs before it may write. Released in v0.23.0.
 
 The microkernel arc is largely built — the FAT32 **filesystem** (`fsd`),
 the **console** (`cond`), and the **network** server (`netd`) all run as

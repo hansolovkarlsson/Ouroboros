@@ -7,27 +7,27 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## Unreleased: the storage server under large writes, and the C library for Proem and Edit
+## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
-**Not yet released.** Changes since v0.22.0, drafted as they land; cutting a
-version is held for a go-ahead. So far eight days' work, 2026-10-05 to
-2026-10-12, #209 to #281: the storage server made safe under large writes and
-double mounts; the C library made able to host Proem (now cpp) and Edit, the
-whole C-hosting plan among it, ending in DevTools's preprocessor running here,
-with the C headers on the disk and FAT32 names that keep their case; and the
-console and keyboard made fit for a full-screen editor (all of Edit's request:
-cursor addressing, the navigation keys, the screen size, Ctrl-C as a key and
+Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
+to #281: the storage server made safe under large writes and double mounts;
+the C library made able to host Proem (now cpp) and Edit, the whole C-hosting
+plan among it, ending in DevTools's preprocessor running here, with the C
+headers on the disk and FAT32 names that keep their case; and the console and
+keyboard made fit for a full-screen editor (all of Edit's request: cursor
+addressing, the navigation keys, the screen size, Ctrl-C as a key and
 `poll`), with a task's FP/SIMD registers saved across the kernel and keys
 typed while a program is busy kept, ending in DevTools's editor running here
 as `/bin/edit`. Then, on 2026-10-10, the multi-core arc on QEMU, from the
 plan to programs running on every core (#258 to #266), and on 2026-10-11
 the owner the spawn staging had owed since the arc's last step, then the
 cores made readable from a shell, `/proc/cpus` and `ps` naming the core a
-running task is on, and a cursor on the framebuffer console; the Pi 4 booted the whole arc the same day, every line
-it owed (`testing/testing-pi4.md` section 6), and Parallels on 2026-10-12
-from its shell (`testing/testing-parallels.md`, "Multi-core"), the day the
-arc closed with a fair round for every core's tick and a pipeline's links
-granted by `SPAWN` itself. The days'
+running task is on, and a cursor on the framebuffer console; the Pi 4 booted
+the whole arc the same day, every line it owed (`testing/testing-pi4.md`
+section 6), and Parallels on 2026-10-12 from its shell
+(`testing/testing-parallels.md`, "Multi-core"), the day the arc closed with a
+fair round for every core's tick and a pipeline's links granted by `SPAWN`
+itself. **No wire flag day**: nothing in `ninep-abi` changed. The days'
 records are in `docs/work-journal/`, one file a day.
 
 **A large file no longer gets `fsd` restarted part way through (#211, #212).**
@@ -328,7 +328,7 @@ on a program running on another core is carried out by that core, at once.
 `CORE_INFO` (syscall 75) says which core a program is on and how many run
 programs; `/bin/COREPROBE` reports it. `SMP=4` boots any QEMU rig on four
 cores, and ten keyboard, kill, call and FP rigs pass on one core and on
-four. Not yet seen on the Pi 4 or Parallels, which are owed.
+four. Booted since on the Pi 4 (2026-10-11) and on Parallels (2026-10-12).
 
 **A rig no longer boots an image built from other sources (#247).** The
 rigs refused a stale image by comparing modification times, and a reverted
