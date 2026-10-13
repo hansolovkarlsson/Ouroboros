@@ -6,10 +6,13 @@ merges with item 1). One disk carries both the boot partition (FAT32, the
 ESP) and a root partition (ext2 or exFAT). It may be a stick, a card or a
 virtual disk, and the system needs nothing else to boot and run.
 
-**Status 2026-10-13: steps 1 to 4 built** (`kernel/src/bootdisk.rs`,
+**Status 2026-10-13: steps 1 to 4 built, D1, D2, D5 and D6 settled, D3 and
+D4 deferred** (`kernel/src/bootdisk.rs`,
 `scripts/disksig.py`, `make test-boot-partition`); the rest planned. Grounded in the code at
-`ebdebc1` (v0.23.0). Four decisions are Hans's, D1 settled (ext2), listed
-under "Decisions" below. Claims not yet checked on this tree are marked
+`ebdebc1` (v0.23.0). Six decisions are Hans's, listed under "Decisions"
+below: D1 ext2, D2 the image written, D5 the ESP read-only when the root
+does not mount, D6 a failed read retried once and named; D3 and D4
+deferred. Claims not yet checked on this tree are marked
 (predicted).
 
 ## Why
@@ -289,16 +292,11 @@ entry `mount` would not list. And after `erase` or `partition` rewrites
 the table, `fsd` stops using the boot partition's start for the rest of
 the boot, since it could name a new partition.
 
-Open, Hans's to decide, from the reviews of #288 (the series stopped there,
-the rest being design rather than defect):
-- **Fail closed when the root does not mount?** Today a damaged root beside
-  the ESP leaves the ESP as `/`, with a line saying so: FAT32 enforces no
-  modes, so its `/etc/shadow` and cluster key are readable by any user, and
-  accounts changed on the root are replaced by the ESP's older copies.
-  `espext2.img` does the same on `main`. Refusing to mount, or mounting
-  the ESP read-only, would fail closed.
-- **A boot stick's read failing at boot** is taken as "not the boot disk",
-  and `fsd` then mounts its first partition, the ESP on a one-disk stick.
+Two questions from the reviews of #288 (the series stopped there, the rest
+being design rather than defect) went to Hans and are settled as D5 and D6
+under "Decisions": a root that does not mount leaves the ESP mounted
+read-only, and a boot stick's failed read is retried once and then logged
+as a failed read. Both are step 4b.
 
 Open for step 5, from that review: the root is the first partition beside
 the boot partition that mounts, which is right for two partitions and a
@@ -318,7 +316,13 @@ any layout. Planned as:
 - Mutation: today's first-partition rule. `run-disk` mounts the FAT32 and
   the rig fails.
 
-**5. Staging a physical disk** (decision D2). `make bootstick` puts the
+**4b. Failing closed, D5 and D6.** `fsd` mounts the boot partition
+read-only when it falls back to it beside a root that did not mount; the
+kernel retries a failed boot-disk read once and names a failed read in its
+line. The rig's `disk-badroot` boot then checks that a write to `/` is
+refused.
+
+**5. Staging a physical disk** (decision D2, settled: the image written). `make bootstick` puts the
 combined layout on a stick, for the Pi with pftf on partition 1. `make
 stick` and `make sdcard` stay until the two-disk layouts are retired.
 
@@ -360,11 +364,30 @@ there.
   **Recommended: (a) with an `/etc` carry-over.** It is a destructive write
   to a raw device, so it is guarded like `make sdcard` is: the marker file,
   and the device named, never guessed.
+  **Settled by Hans on 2026-10-13: (a), the image written, `/etc` carried
+  over from the old root.**
 - **D3. Whether the ESP is mounted at `/boot`** (step 6), or reached only
   by `mount 0 <path>` as today.
 - **D4. Whether a release ships the combined disk** in place of today's
   one-partition image. That would change the downloadable artifacts and
   `RELEASING.md`.
+
+  **D3 and D4 deferred by Hans on 2026-10-13:** releases stay on today's
+  one-partition image until step 0 shows Parallels and the Pi boot from a
+  stick, and `/boot` is left out of this arc.
+- **D5. A root that does not mount** (from the reviews of #288). **Settled
+  by Hans on 2026-10-13: mount the ESP read-only.** When the disk has a
+  partition beside the boot one and none of them mounts, `fsd` mounts the
+  boot partition as `/` read-only, with the line it prints now: the system
+  comes up to be looked at and repaired, nothing is written to the ESP, and
+  accounts cannot be changed there. FAT32 still enforces no modes, so its
+  `/etc/shadow` stays readable while it is `/`. Built as step 4b.
+- **D6. A boot stick's read failing at boot** (from the reviews of #288).
+  **Settled by Hans on 2026-10-13: retry once, then log.** The boot-disk
+  check is retried once when a read fails; if it fails again, the stick is
+  installed as not the boot disk and the line says the read failed, not
+  that it did not match, so a one-disk stick's wrong root is visible.
+  Built as step 4b.
 
 ## Risks
 
