@@ -46,6 +46,14 @@ LBA when the installed disk is the boot disk, else 0, and `fsd` tries that
 partition last. Booted on virtio and as a USB stick by `make
 test-boot-partition`, which now checks the filesystem every boot mounts.
 
+**A root that does not mount leaves the ESP read-only (2026-10-13).** Step
+4b of the one-disk plan, Hans's decisions D5 and D6. When the root beside
+the ESP does not mount, `fsd` still mounts the ESP as `/` so the system
+can be looked at and repaired, but read-only: every change is refused as
+a read-only filesystem, root's included, until `unmount`. And a boot
+disk's partition table that fails to read is asked again once, then logged
+as a failed read rather than taken silently for another disk.
+
 **C11's comparison macros reach a compiler with the builtins (2026-10-13).**
 DevTools asked (its note, now in `docs/handoffs/closed/`): picolibc's
 `<math.h>` wrote `isgreater` and the other five as builtins only for a

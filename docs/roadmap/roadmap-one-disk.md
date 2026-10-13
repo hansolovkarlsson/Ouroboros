@@ -6,7 +6,7 @@ merges with item 1). One disk carries both the boot partition (FAT32, the
 ESP) and a root partition (ext2 or exFAT). It may be a stick, a card or a
 virtual disk, and the system needs nothing else to boot and run.
 
-**Status 2026-10-13: steps 1 to 4 built, D1, D2, D5 and D6 settled, D3 and
+**Status 2026-10-13: steps 1 to 4 and 4b built, D1, D2, D5 and D6 settled, D3 and
 D4 deferred** (`kernel/src/bootdisk.rs`,
 `scripts/disksig.py`, `make test-boot-partition`); the rest planned. Grounded in the code at
 `ebdebc1` (v0.23.0). Six decisions are Hans's, listed under "Decisions"
@@ -316,11 +316,24 @@ any layout. Planned as:
 - Mutation: today's first-partition rule. `run-disk` mounts the FAT32 and
   the rig fails.
 
-**4b. Failing closed, D5 and D6.** `fsd` mounts the boot partition
-read-only when it falls back to it beside a root that did not mount; the
-kernel retries a failed boot-disk read once and names a failed read in its
-line. The rig's `disk-badroot` boot then checks that a write to `/` is
-refused.
+**4b. Failing closed, D5 and D6. Built 2026-10-13.** D5: when `fsd` falls
+back to the boot partition beside a root that did not mount, tree 0 is
+read-only (`ROOT_READ_ONLY`): `handle_ninep` refuses every verb that
+changes the disk with `FS_ERR_READ_ONLY` before `check_access`, so root is
+refused too, and an `NP_OPEN` for writing, creating or truncating is
+refused, which leaves no fid that could write. Any other mount of tree 0,
+and `unmount`, clear it, so `unmount; format ext2; mount -a` still repairs
+the root. The line now ends "read-only". Rig: `disk-badroot` has root's
+`touch /rotest` refused as a read-only filesystem; mutation: the refusal
+removed, and that check failed. D6: `bootdisk::is_boot_disk_retrying`
+asks again once when a read failed on the way, and after a second failure
+says the read failed, "though it may be" the boot disk; virtio, the boot
+stick and `MOUNT`'s rescan all go through it. That needs a disk whose
+reads fail at boot, which no QEMU rig sets up. Planned as: `fsd` mounts
+the boot partition read-only when it falls back to it beside a root that
+did not mount; the kernel retries a failed boot-disk read once and names a
+failed read in its line. The rig's `disk-badroot` boot then checks that a
+write to `/` is refused.
 
 **5. Staging a physical disk** (decision D2, settled: the image written). `make bootstick` puts the
 combined layout on a stick, for the Pi with pftf on partition 1. `make

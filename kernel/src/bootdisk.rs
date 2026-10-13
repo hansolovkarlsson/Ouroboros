@@ -338,8 +338,40 @@ fn crc32_finish(crc: u32) -> u32 {
 /// installed. For `MOUNT`'s rescan, which installs a stick whatever it is,
 /// so a boot stick taken there after a failed boot-time init still tells
 /// `fsd` (the high review of #288).
-pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> u64 {
-    start_if(is_boot_disk(read, capacity))
+pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64, name: &str) -> u64 {
+    start_if(is_boot_disk_retrying(read, capacity, name))
+}
+
+/// [`is_boot_disk`], asked again once when a read failed on the way, and
+/// logged when it fails again (decision D6, docs/roadmap/roadmap-one-disk.md):
+/// a read that failed is no answer that the disk does not match, and on a
+/// one-disk stick taking it for one would mount the ESP as `/`. After the
+/// second failure the disk is taken as not the boot disk, as before, but the
+/// line says the read failed. `name` names the disk in the line.
+pub(crate) fn is_boot_disk_retrying(
+    read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool,
+    capacity: u64,
+    name: &str,
+) -> Option<bool> {
+    for attempt in 0..2 {
+        let mut failed = false;
+        let mut counted = |lba: u64, buf: &mut [u8; 512]| {
+            let ok = read(lba, buf);
+            failed |= !ok;
+            ok
+        };
+        let answer = is_boot_disk(&mut counted, capacity);
+        if answer != Some(false) || !failed {
+            return answer;
+        }
+        if attempt == 0 {
+            crate::console::println!("Ouroboros kernel: {name}: a read of its partition table failed - asking again");
+        }
+    }
+    crate::console::println!(
+        "Ouroboros kernel: {name}: reading its partition table failed twice - taken as not the boot disk, though it may be"
+    );
+    Some(false)
 }
 
 /// The boot partition's start LBA when [`is_boot_disk`] answered yes, else

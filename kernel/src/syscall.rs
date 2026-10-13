@@ -1709,7 +1709,7 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
                     let capacity = device.capacity_sectors();
                     // SAFETY: initialised, not yet installed.
                     let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
-                    let boot_start = crate::bootdisk::boot_start(&mut read, capacity);
+                    let boot_start = crate::bootdisk::boot_start(&mut read, capacity, "usb-msd");
                     install_block_device(crate::block::BlockDevice::UsbMsd(device), boot_start);
                     console::println!("Ouroboros kernel: usb-msd block device installed");
                     0

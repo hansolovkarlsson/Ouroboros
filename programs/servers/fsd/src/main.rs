@@ -39,6 +39,7 @@ mod proc;
 mod vfs;
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::panic::PanicInfo;
 
 #[no_mangle]
@@ -111,6 +112,37 @@ fn main() -> ! {
 ///
 /// [`MOUNT_ALREADY`]: syscall_abi::MOUNT_ALREADY
 /// [`NO_FS`]: syscall_abi::NO_FS
+/// Whether tree 0 is the boot partition mounted read-only because the root
+/// beside it did not mount (decision D5, docs/roadmap/roadmap-one-disk.md):
+/// the system comes up to be looked at and repaired, and nothing is written
+/// to the ESP, by root either. Set by [`try_mount`] when it falls back,
+/// cleared by every other mount of tree 0 and by `FSOP_UNMOUNT`. fsd is one
+/// task, so an atomic is only the spelling of a mutable static.
+static ROOT_READ_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Whether `verb` (with its params `p`) changes what is on the disk: the
+/// verbs [`handle_ninep`] refuses on a read-only tree. An `NP_OPEN` changes
+/// it when it opens for writing, creating or truncating; a fid opened that
+/// way is then the only one that can write (`NP_PWRITE`), so refusing the
+/// open covers the writes through it.
+fn mutates(verb: u64, p: &[u64; 4]) -> bool {
+    match verb {
+        ninep_abi::NP_WRITE
+        | ninep_abi::NP_WRITE_FILE
+        | ninep_abi::NP_WRITE_AT
+        | ninep_abi::NP_TOUCH
+        | ninep_abi::NP_MKDIR
+        | ninep_abi::NP_RM
+        | ninep_abi::NP_RMDIR
+        | ninep_abi::NP_MV
+        | ninep_abi::NP_CHMOD
+        | ninep_abi::NP_CHOWN
+        | ninep_abi::NP_PWRITE => true,
+        ninep_abi::NP_OPEN => p[0] & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_CREATE | ninep_abi::OPEN_TRUNC) != 0,
+        _ => false,
+    }
+}
+
 fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     if mounts[0].is_some() {
         return syscall_abi::MOUNT_ALREADY;
@@ -127,8 +159,10 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             // the disk has a partition beside the boot one, the root on one
             // disk (one-disk step 4), and it did not mount, the line says so
             // first rather than run on the ESP's tree without a word.
+            // D5: the fallback is read-only, so nothing is written to the ESP.
+            ROOT_READ_ONLY.store(fell_back, Ordering::Relaxed);
             let fallback = if fell_back {
-                "fsd: no partition beside the boot partition mounted - the boot partition is `/`\r\n"
+                "fsd: no partition beside the boot partition mounted - the boot partition is `/`, read-only\r\n"
             } else {
                 ""
             };
@@ -541,6 +575,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         // is marked dead, not freed (see `Fid::dead`): it holds a tree number
         // and a path, and the slot may later hold another partition.
         let mut any = false;
+        ROOT_READ_ONLY.store(false, Ordering::Relaxed);
         for m in mounts.iter_mut() {
             if m.as_ref().is_some_and(|fs| fs.is_disk()) {
                 *m = None;
@@ -623,6 +658,11 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     let Some(fs) = mounts[tree].as_mut() else {
         return status_reply(reply, syscall_abi::NO_FS);
     };
+    // A read-only tree (D5's fallback) refuses every change, root's included,
+    // so this comes before `check_access`, whose first rule lets root through.
+    if tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed) && mutates(verb, &p) {
+        return status_reply(reply, syscall_abi::FS_ERR_READ_ONLY);
+    }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
     // uid/gid against the target's owner+mode before running the op. ext2-only
     // (others return mode:None, which `check_access` treats as unrestricted);

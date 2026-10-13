@@ -1171,7 +1171,7 @@ fn init_storage() -> Option<virtio_blk::Device> {
     // SAFETY: the device is initialised, and nothing else holds it yet.
     let capacity = device.capacity_sectors();
     let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
-    let matched = bootdisk::is_boot_disk(&mut read, capacity);
+    let matched = bootdisk::is_boot_disk_retrying(&mut read, capacity, "virtio-blk");
     if matched == Some(false) {
         console::println!("Ouroboros kernel: virtio-blk is not the boot disk - held, installed only if no other disk is");
         return Some(device);
@@ -1199,7 +1199,7 @@ fn install_boot_disk(held: Option<virtio_blk::Device>) {
         let capacity = usb.capacity_sectors();
         // SAFETY: the stick is initialised and not yet installed.
         let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { usb.read_sector(lba, buf) }.is_ok();
-        let matched = bootdisk::is_boot_disk(&mut read, capacity);
+        let matched = bootdisk::is_boot_disk_retrying(&mut read, capacity, "usb-msd");
         // With no virtio disk held back the stick goes in whatever it is (the
         // Pi and Parallels boot from a disk the kernel cannot drive and run
         // from the stick); asked all the same, so `fsd` learns whether it holds
