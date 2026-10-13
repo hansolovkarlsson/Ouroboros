@@ -144,22 +144,17 @@ pub(crate) fn net_ack_interrupt() {
     }
 }
 
-/// Activates the USB mass-storage device (if any) and installs it as
-/// the block device the filesystem server operates on - shared by the
-/// boot-time attempt (`main.rs`, covers QEMU where the device is
-/// present at scan time) and the `MOUNT` syscall (covers real
-/// Parallels, where a passed-through stick attaches a few seconds
-/// after boot - see the enumeration diagnostics; the syscall arm has
-/// its own replace-capable variant inline). First-installed wins: a
-/// no-op if a device (virtio or a previous USB one) is already in the
-/// cell. Returns whether a device is installed after the attempt. The
-/// *filesystem* half of mounting lives in the server now
-/// (`FSOP_MOUNT`), not here - the kernel only handles the device.
+/// Activates the USB mass-storage device (if any) and installs it as the
+/// block device the filesystem server operates on, at boot only
+/// (`main.rs::install_boot_disk`). The `MOUNT` syscall's rescan, for a stick
+/// passed through after boot on Parallels, has its own replace-capable copy
+/// inline and asks no question. A no-op if a device is already in the cell.
+/// The *filesystem* half of mounting lives in the server (`FSOP_MOUNT`); the
+/// kernel only handles the device.
 ///
 /// `accept` is asked once the stick is initialised, before it is installed:
-/// the boot-time step's question, whether it is the boot disk
-/// (`main.rs::install_boot_disk`, one-disk step 3). A stick refused is
-/// left uninstalled, and the caller says why.
+/// whether it is the boot disk (one-disk step 3). The answer says what
+/// happened, so the caller can say why nothing was installed.
 pub fn try_install_usb_block_device(accept: impl FnOnce(&mut crate::usb_msd::Device) -> bool) -> UsbInstall {
     if block_device_installed() {
         return UsbInstall::Installed;

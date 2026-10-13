@@ -153,10 +153,6 @@ pub(crate) fn discover() {
             "Ouroboros kernel: boot partition: {} of {table} at LBA {}, {} blocks, no signature",
             found.number, found.start_lba, found.size_blocks
         ),
-        DiskSignature::Mbr(0) => log::info!(
-            "Ouroboros kernel: boot partition: {} of {table} at LBA {}, {} blocks, disk signature none",
-            found.number, found.start_lba, found.size_blocks
-        ),
         DiskSignature::Mbr(sig) => log::info!(
             "Ouroboros kernel: boot partition: {} of {table} at LBA {}, {} blocks, disk signature {sig:#010x}",
             found.number, found.start_lba, found.size_blocks
@@ -187,8 +183,9 @@ pub(crate) fn discover() {
 /// its sector 0. On MBR: entry `number` with the same start and size, and,
 /// when the node carries a signature, the disk's bytes 440-443 equal to it,
 /// 0 included. On GPT: the primary header at LBA 1, or the backup at the
-/// last sector when the primary is not there (as `fsd`'s partition.rs
-/// reads it), then entry `number` with the same start, size and unique GUID.
+/// last sector when the primary does not validate, each with both CRCs
+/// checked as `fsd`'s partition.rs checks them, then entry `number` with the
+/// same start, size and unique GUID.
 /// A node with no signature, or one of a type the specification does not
 /// list, is matched on the table alone. Every value read from the disk is
 /// bounded with checked arithmetic: a disk only being asked must never halt
@@ -211,7 +208,7 @@ fn mbr_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> 
     if !read(0, &mut sector) || sector[510] != 0x55 || sector[511] != 0xaa {
         return false;
     }
-    let disk_sig = le(&sector[440..444]) as u32;
+    let disk_sig = u32::from_le_bytes([sector[440], sector[441], sector[442], sector[443]]);
     match boot.signature {
         DiskSignature::Mbr(sig) if sig != disk_sig => return false,
         DiskSignature::Gpt(_) => return false,
@@ -227,34 +224,111 @@ fn mbr_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> 
 }
 
 fn gpt_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> bool {
+    // The primary header, else the backup at the last sector, each taken only
+    // if it validates as fsd's partition.rs validates it (both CRCs): a stale
+    // "EFI PART" left by an earlier table, or a corrupt primary the firmware
+    // itself skipped, must not decide (the medium review of #287).
+    if let Some(found) = gpt_entry(boot, read, 1, capacity) {
+        return found;
+    }
+    match capacity.checked_sub(1) {
+        Some(last) if last > 1 => gpt_entry(boot, read, last, capacity).unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// The largest entry array read, as fsd's `MAX_GPT_ARR_SECTORS`: 128 entries
+/// of 128 bytes is 32 sectors, and anything past 64 KiB is refused.
+const MAX_GPT_ARRAY_SECTORS: u64 = 128;
+
+/// Whether the GPT whose header is at `header_lba` holds the boot partition,
+/// or `None` when that header or its entry array does not validate.
+fn gpt_entry(
+    boot: &BootPartition,
+    read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool,
+    header_lba: u64,
+    capacity: u64,
+) -> Option<bool> {
+    let mut header = [0u8; 512];
+    if !read(header_lba, &mut header) || &header[0..8] != b"EFI PART" {
+        return None;
+    }
+    let header_size = le(&header[12..16]) as usize;
+    if !(92..=512).contains(&header_size) {
+        return None;
+    }
+    let stored = le(&header[16..20]) as u32;
+    let mut zeroed = header;
+    zeroed[16..20].fill(0);
+    if crc32_finish(crc32_update(CRC_INIT, &zeroed[..header_size])) != stored {
+        return None;
+    }
+    let array_lba = le(&header[72..80]);
+    let count = le(&header[80..84]);
+    let entry_size = le(&header[84..88]);
+    let stored_array = le(&header[88..92]) as u32;
+    if !(128..=512).contains(&entry_size) || 512 % entry_size != 0 {
+        return None;
+    }
+    let array_bytes = count.checked_mul(entry_size).filter(|b| *b > 0 && *b <= MAX_GPT_ARRAY_SECTORS * 512)?;
+    let array_end = array_lba.checked_add(array_bytes.div_ceil(512))?;
+    if array_end > capacity {
+        return None;
+    }
+    // One pass: the CRC over exactly `array_bytes`, and the boot entry kept
+    // when its sector goes by. It counts only if the CRC holds.
+    let wanted = u64::from(boot.number).checked_sub(1).map(|i| i * entry_size);
+    let mut entry = None;
+    let mut crc = CRC_INIT;
     let mut sector = [0u8; 512];
-    let header_at = |lba: u64, sector: &mut [u8; 512], read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool| {
-        read(lba, sector) && &sector[0..8] == b"EFI PART"
-    };
-    if !header_at(1, &mut sector, read) {
-        let Some(last) = capacity.checked_sub(1) else { return false };
-        if last <= 1 || !header_at(last, &mut sector, read) {
-            return false;
+    let mut done = 0u64;
+    let mut lba = array_lba;
+    while done < array_bytes {
+        if !read(lba, &mut sector) {
+            return None;
         }
+        let take = (array_bytes - done).min(512) as usize;
+        crc = crc32_update(crc, &sector[..take]);
+        if let Some(offset) = wanted.filter(|o| (done..done + take as u64).contains(o)) {
+            let at = (offset - done) as usize;
+            let mut unique = [0u8; 16];
+            unique.copy_from_slice(&sector[at + 16..at + 32]);
+            entry = Some((unique, le(&sector[at + 32..at + 40]), le(&sector[at + 40..at + 48])));
+        }
+        done += take as u64;
+        lba += 1;
     }
-    let array_lba = le(&sector[72..80]);
-    let count = le(&sector[80..84]);
-    let entry_size = le(&sector[84..88]);
-    if boot.number == 0 || u64::from(boot.number) > count || !(128..=512).contains(&entry_size) || 512 % entry_size != 0 {
-        return false;
+    if crc32_finish(crc) != stored_array {
+        return None;
     }
-    let offset = (u64::from(boot.number) - 1) * entry_size;
-    let Some(lba) = array_lba.checked_add(offset / 512) else { return false };
-    if lba >= capacity || !read(lba, &mut sector) {
-        return false;
-    }
-    let at = (offset % 512) as usize;
-    let first = le(&sector[at + 32..at + 40]);
-    let last = le(&sector[at + 40..at + 48]);
+    let Some((unique, first, last)) = entry else { return Some(false) };
     let guid_ok = match boot.signature {
-        DiskSignature::Gpt(guid) => guid[..] == sector[at + 16..at + 32],
+        DiskSignature::Gpt(guid) => guid == unique,
         DiskSignature::Mbr(_) => false,
         DiskSignature::None | DiskSignature::Unknown(_) => true,
     };
-    guid_ok && first == boot.start_lba && last.checked_add(1) == first.checked_add(boot.size_blocks)
+    // Both ends must be computed: two overflows are not a match (the medium
+    // review of #287 found `None == None` taken as one).
+    let ends = matches!((last.checked_add(1), first.checked_add(boot.size_blocks)), (Some(a), Some(b)) if a == b);
+    Some(guid_ok && first == boot.start_lba && ends)
+}
+
+/// CRC-32 (IEEE, reflected `0xEDB88320`), the one GPT and `zlib.crc32` use,
+/// table-free and bitwise as fsd's partition.rs has it: run at most over one
+/// header and a 64 KiB entry array at boot.
+const CRC_INIT: u32 = 0xFFFF_FFFF;
+
+fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    crc
+}
+
+fn crc32_finish(crc: u32) -> u32 {
+    crc ^ 0xFFFF_FFFF
 }

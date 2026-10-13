@@ -210,9 +210,20 @@ dropped, and it failed), and every boot alone on its bus now checks that
 its own disk was installed directly (mutation: the GPT match refusing, and
 the GPT boot failed). Left as found: the choice spread over `init_storage`
 and `install_boot_disk` rather than one chooser, and sector 0 read twice.
-A stick whose init fails, or that attaches late, is not reached afterwards
-when a virtio fallback was installed: `mount -a` replaces the device only
-when `fsd` mounted nothing.
+The medium review of #287 changed three more. A GPT header counts only if
+its CRC and its entry array's CRC hold, as in `fsd`, so a stale "EFI PART"
+or a corrupt primary falls to the backup (mutation: the header CRC test
+inverted, and the gpt boot failed). Two overflows are no longer a match.
+And a stick whose init failed leaves the device empty rather than mounting
+the fallback, so `mount -a`, which replaces the device only when `fsd`
+mounted nothing, can still reach it; a stick that attaches after the boot
+scan is still not reached when a virtio fallback was installed. The fallback
+boot now pins the firmware to its NVMe disk with `bootindex=0`: once the
+rig's arguments were reordered, the firmware booted the stick beside it,
+which carries an ESP of its own. Declined: two unsigned disks of the same
+layout both match an unsigned boot partition, since signature 0 names
+nothing; every image is signed since step 2. Deferred to `ROADMAP.md`: the
+matcher in a pure crate with host tests, shared with `fsd`'s partition.rs.
 
 Not covered, as before step 3: only the first virtio-blk slot is probed,
 and the xHCI drives only the first storage device it finds, so two sticks

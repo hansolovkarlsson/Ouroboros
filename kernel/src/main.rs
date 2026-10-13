@@ -1204,14 +1204,20 @@ fn install_boot_disk(held: Option<virtio_blk::Device>) {
     let Some(device) = held else { return };
     // The held virtio disk is not the boot disk; it goes in only as the
     // fallback, the order from before step 3, and the line says why no other
-    // disk did. A stick that failed or is not attached yet may still have
-    // been the boot disk, and nothing later reaches it: `mount -a` replaces the
-    // device only when `fsd` mounted nothing, and it mounts the fallback.
+    // disk did. Not when the stick's init failed: that stick may be the boot
+    // disk, and a fallback mounted now would keep it out for the whole boot,
+    // since `mount -a` replaces the device only when `fsd` mounted nothing.
+    // Left empty, `mount -a` retries the stick (the medium review of #287).
     let why = match outcome {
         syscall::UsbInstall::Installed => return,
         syscall::UsbInstall::Refused => "the USB stick is not the boot disk either",
-        syscall::UsbInstall::Failed => "the USB stick's init failed, so whether it is the boot disk is unknown",
         syscall::UsbInstall::Absent => "no USB stick is attached",
+        syscall::UsbInstall::Failed => {
+            console::println!(
+                "Ouroboros kernel: virtio-blk is not the boot disk and the USB stick's init failed - no disk installed, `mount -a` retries the stick"
+            );
+            return;
+        }
     };
     syscall::install_block_device(block::BlockDevice::Virtio(device));
     console::println!("Ouroboros kernel: virtio-blk installed as the fallback: {why}");
