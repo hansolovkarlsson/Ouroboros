@@ -770,8 +770,9 @@ not yet checked on this tree are marked (predicted).
       [`roadmap-smp.md`](roadmap/roadmap-smp.md), the arc for the week of
       2026-10-12. Built on QEMU the same day, steps 0 to 4(d) (#258 to
       #266); the hardware boots are in (the Pi 4 2026-10-11, Parallels
-      2026-10-12), and what is left is the open sub-item below, the `fsd`
-      wedge, whose fix is #280.** Today one core runs everything and
+      2026-10-12), and its sub-items below are closed (the `fsd` wedge by
+      #280); what is left is closing the arc itself, its move to
+      `roadmap-completed.md` and the release.** Today one core runs everything and
       the others are never started; the single-core argument is load-bearing
       (`synccell.rs` states it once for every mutable static, and the kernel
       never runs at EL1 with IRQs unmasked). What it needs: the secondary
@@ -806,14 +807,16 @@ not yet checked on this tree are marked (predicted).
             slot it started with, and it was never marked up. The rule was
             a test in `power.rs` and a comment in `tasks.rs`; #278 moved the
             decision, the mark and the `halted alone` line into one function,
-            `smp::halt_alone_here`, which refuses the boot core (by index,
-            and by MPIDR affinity for `smp::start`'s window, when the two
-            indexes differ) and a core running a program, so `power::halt`
+            `smp::halt_alone_here`, which refuses the boot core
+            (`smp::is_boot_core`, which answers yes until the first secondary
+            is started, so also in `smp::start`'s window, when the boot
+            core's two indexes differ; #281) and a core running a program, so `power::halt`
             has no way left to halt a core alone without it and halts the
             kernel otherwise. No rig can show it (nothing faults a secondary at EL1
             while it runs a program); the evidence is the reading above.
-      - [ ] **`fsd` restarted as wedged while a program spins on one core.
-            Cause found 2026-10-12; the fix is #280, on #279.** Seen in
+      - [x] **`fsd` restarted as wedged while a program spins on one core.
+            Cause found 2026-10-12; fixed by #280, on #279, both merged the
+            same day.** Seen in
             `make test-smp`'s `-smp 1` boot: with `exec /bin/coreprobe hold`
             spinning in the background, the supervisor printed `server slot
             2 wedged - no progress (runnable) - restarting` twice, and two
@@ -830,7 +833,8 @@ not yet checked on this tree are marked (predicted).
             `make test-smp` fail on any server restart; it needs #279 below
             it (`SPAWN` granting a child its stdout target), since the fairer
             tick otherwise exposes a pipeline stage writing before the
-            shell's `DELEGATE` and losing its line. Closes when #280 lands.
+            shell's `DELEGATE` and losing its line. `make test-smp` has run
+            149 of 149 since, with no server restarted in any boot.
       **Two small follow-ups asked by Hans on 2026-10-11, after #268:**
       - [x] **`/proc/cpus`: how many cores are active.** Built 2026-10-11,
             `make test-proc-cpus`: one line from `CORE_INFO_UP`, `fsd`'s first
