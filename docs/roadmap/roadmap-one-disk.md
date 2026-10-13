@@ -130,10 +130,14 @@ path ends `HD(1,MBR,0x00000000,0x1,0x1FFFF)/\EFI\BOOT\BOOTAA64.EFI` from
 virtio and runs through `USB(0x0,0x0)` from a stick, so the `HardDrive` node
 is there in both. `make test-boot-partition` compares five boots with the
 host's reading of each table, and fails both with the kernel naming
-partition 1 and with the host reader taking the first partition. Planned
-as: Read the `HardDrive` node
-before the exit and log it as `boot partition: N at LBA s, size n, disk
-<signature>`. Keep it in a static, class A in the multi-core inventory
+partition 1 and with the host reader taking the first partition. The
+review of #285 added a null device path (an image loaded from memory), a
+signature of a type the specification does not list, and a nested
+partition, each logged rather than taken as something else. The step as
+built: read the `HardDrive` node before the exit and log it as `boot
+partition: N of MBR|GPT at LBA s, b blocks`, then `disk signature none` or
+`0x...`, or `partition GUID ...`. Keep it in a static, class A in the
+multi-core inventory
 (written once before the exit, read-only afterwards), and give it a row in
 `roadmap-smp.md` so `check-statics` passes. Check on QEMU: `run-image`
 names partition 1, and `run-image-ext2` names partition 2 at the ESP's

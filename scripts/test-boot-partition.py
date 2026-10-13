@@ -19,10 +19,15 @@ Five boots, each to the login prompt:
             the path through a USB node, the case the Pi and Parallels boot
 
 The ext2 and exFAT boots are the ones that can tell a kernel naming its boot
-partition from one naming the first partition. A usb-boot where QEMU's own
-firmware stalls and never starts the kernel is INCONCLUSIVE, as in
-test-usb-hub.py: not a failed check, and not a pass. About two minutes. Run
-it whenever bootdisk.rs, or how an image lays out its partitions, changes.
+partition from one naming the first partition. The stick's QEMU arguments
+and the stall rule are test-usb-hub.py's own (`layout`, `firmware_stalled`),
+imported rather than copied: a usb-boot where QEMU's firmware stalls in its
+own USB boot (no kernel line, a clean fault trace, UsbBootExecCmd last) is
+INCONCLUSIVE, not a failed check and not a pass, and exits 100 as there;
+anything else that keeps the kernel from printing fails. Every image's
+expected line is read before the first boot, so an image this script cannot
+read stops it before anything runs. About two minutes. Run it whenever
+bootdisk.rs, or how an image lays out its partitions, changes.
 """
 import importlib.util
 import os
@@ -36,12 +41,16 @@ ROOT = os.path.dirname(HERE)
 _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
 drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
+_spec = importlib.util.spec_from_file_location("test_usb_hub", os.path.join(HERE, "test-usb-hub.py"))
+usb_hub = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(usb_hub)
 
 BUILD = os.path.join(ROOT, "build")
 TRANSCRIPT = os.path.join(BUILD, "test-boot-partition-{}.txt")
-FAT_TYPES = (0x0B, 0x0C)
+# FAT32 (CHS and LBA) and the EFI System type: the partition the firmware
+# boots on an MBR disk.
+ESP_TYPES = (0x0B, 0x0C, 0xEF)
 LINE = re.compile(r"boot partition: (.*)")
-KERNEL_ALIVE = "UEFI stage alive"
 
 
 def expected(image):
@@ -70,31 +79,20 @@ def expected(image):
     fats = []
     for i in range(4):
         entry = mbr[446 + 16 * i:462 + 16 * i]
-        if entry[4] in FAT_TYPES:
+        if entry[4] in ESP_TYPES:
             start, blocks = struct.unpack_from("<II", entry, 8)
             fats.append((i + 1, start, blocks))
     if len(fats) != 1:
-        raise SystemExit(f"{image}: expected one FAT partition, found {len(fats)}")
+        raise SystemExit(f"{image}: expected one ESP partition (type 0x0b, 0x0c or 0xef), found {len(fats)}")
     number, start, blocks = fats[0]
     sig = "none" if signature == 0 else f"{signature:#010x}"
     return f"{number} of MBR at LBA {start}, {blocks} blocks, disk signature {sig}"
 
 
-def usb_stick(image):
-    """QEMU arguments for `image` as a USB stick on an xHCI root port. A
-    snapshot, so the boot never writes the image behind it."""
-    return [
-        "-device", "qemu-xhci,id=xhci0",
-        "-drive", f"file={image},format=raw,if=none,id=usbstick,snapshot=on",
-        "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
-    ]
-
-
-def boot(label, image, usb):
-    want = expected(image)
+def boot(label, image, usb, want):
     guest = drive_qemu.Guest(
         image,
-        extra_args=usb_stick(image) if usb else (),
+        extra_args=usb_hub.layout(True, image) if usb else (),
         virtio_disk=not usb,
         label=f"test-boot-partition[{label}]: ",
     )
@@ -106,8 +104,8 @@ def boot(label, image, usb):
         guest.stop()
     with open(TRANSCRIPT.format(label), "w") as fh:
         fh.write(out)
-    if usb and KERNEL_ALIVE not in out:
-        return None, want, "the firmware never started the kernel"
+    if usb and usb_hub.firmware_stalled(out, faults):
+        return None, want, "QEMU's firmware stalled in its own USB boot"
     got = LINE.search(out)
     got = got.group(1).strip() if got else "no line"
     return [
@@ -125,22 +123,26 @@ def main():
         ("exfat", "espexfat.img", False),
         ("usb-boot", "esp.img", True),
     ]
+    # Every expectation first: an image this script cannot read stops the run
+    # before any boot, not halfway through (the review of #285).
+    planned = [(label, os.path.join(BUILD, image), usb) for label, image, usb in boots]
+    wants = [expected(image) for _, image, _ in planned]
     failed = inconclusive = 0
-    for label, name, usb in boots:
-        checks, want, got = boot(label, os.path.join(BUILD, name), usb)
+    for (label, image, usb), want in zip(planned, wants):
+        checks, want, got = boot(label, image, usb, want)
         print(f"     {label}: table says {want}")
         print(f"     {label}: kernel says {got}")
         if checks is None:
             print(f"INCONCLUSIVE {label}: {got}")
             inconclusive += 1
             continue
-        for name, ok in checks:
-            print(f"{'ok  ' if ok else 'FAIL'} {name}")
+        for check, ok in checks:
+            print(f"{'ok  ' if ok else 'FAIL'} {check}")
             failed += 0 if ok else 1
     print(f"transcripts: {os.path.relpath(TRANSCRIPT.format('<boot>'), ROOT)}")
     if failed:
         return 1
-    return 2 if inconclusive else 0
+    return usb_hub.INCONCLUSIVE if inconclusive else 0
 
 
 if __name__ == "__main__":

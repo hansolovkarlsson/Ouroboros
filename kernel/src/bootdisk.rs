@@ -40,6 +40,10 @@ pub(crate) enum DiskSignature {
     Mbr(u32),
     /// The GPT partition's unique GUID, as its 16 bytes on disk.
     Gpt([u8; 16]),
+    /// A signature type the UEFI specification does not list (3 and up),
+    /// kept apart from `None` so that a signature that was there is never
+    /// logged or matched as if it were absent (the review of #285).
+    Unknown(u8),
 }
 
 /// The partition the kernel image was loaded from.
@@ -70,22 +74,39 @@ pub(crate) fn get() -> Option<BootPartition> {
 /// Read the image's device path, log it, and keep its `HardDrive` node. Must
 /// run before `exit_boot_services`.
 pub(crate) fn discover() {
-    let path = match boot::open_protocol_exclusive::<LoadedImageDevicePath>(boot::image_handle()) {
-        Ok(path) => path,
+    let protocol = match boot::open_protocol_exclusive::<LoadedImageDevicePath>(boot::image_handle()) {
+        Ok(protocol) => protocol,
         Err(e) => {
             log::info!("Ouroboros kernel: boot partition: unknown, the image has no device path ({:?})", e.status());
             return;
         }
+    };
+    // An image loaded from a memory buffer (a chainloader, a network boot)
+    // has the protocol installed with a NULL interface, and ScopedProtocol's
+    // Deref unwraps it: `get` is the only access that cannot panic (the
+    // review of #285).
+    let Some(path) = protocol.get() else {
+        log::info!("Ouroboros kernel: boot partition: unknown, the image's device path is null (loaded from memory)");
+        return;
     };
     match path.to_string16(DisplayOnly(false), AllowShortcuts(false)) {
         Ok(text) => log::info!("Ouroboros kernel: booted from {text}"),
         Err(_) => log::info!("Ouroboros kernel: booted from a path the firmware cannot print"),
     }
 
-    let node = path.node_iter().find_map(|node| match node.as_enum() {
+    // The FIRST HardDrive node, on purpose. Where a partition holds a table of
+    // its own, edk2's path nests them, HD(outer)/HD(inner), and the image came
+    // from the innermost; but what step 3 matches is the disk's own table,
+    // which holds the outermost. A nesting is logged so it is seen.
+    let mut nodes = path.node_iter().filter_map(|node| match node.as_enum() {
         Ok(DevicePathNodeEnum::MediaHardDrive(hd)) => Some(hd),
         _ => None,
     });
+    let node = nodes.next();
+    let nested = nodes.count();
+    if nested > 0 {
+        log::info!("Ouroboros kernel: boot partition: {nested} more partition(s) nested inside it, keeping the disk's own (the first)");
+    }
     let Some(hd) = node else {
         log::info!("Ouroboros kernel: boot partition: unknown, the path names no partition");
         return;
@@ -93,6 +114,7 @@ pub(crate) fn discover() {
     let signature = match hd.partition_signature() {
         PartitionSignature::Mbr(bytes) if u32::from_le_bytes(bytes) != 0 => DiskSignature::Mbr(u32::from_le_bytes(bytes)),
         PartitionSignature::Guid(guid) => DiskSignature::Gpt(guid.to_bytes()),
+        PartitionSignature::Unknown { signature_type, .. } => DiskSignature::Unknown(signature_type),
         _ => DiskSignature::None,
     };
     let found = BootPartition {
@@ -118,6 +140,10 @@ pub(crate) fn discover() {
         DiskSignature::Gpt(guid) => log::info!(
             "Ouroboros kernel: boot partition: {} of {table} at LBA {}, {} blocks, partition GUID {}",
             found.number, found.start_lba, found.size_blocks, uefi::Guid::from_bytes(guid)
+        ),
+        DiskSignature::Unknown(kind) => log::info!(
+            "Ouroboros kernel: boot partition: {} of {table} at LBA {}, {} blocks, signature of unknown type {kind}",
+            found.number, found.start_lba, found.size_blocks
         ),
     }
 
