@@ -19,6 +19,15 @@ partition GUID. Nothing acts on it yet. Step 3 will take that disk as the
 block device. `make test-boot-partition` boots five layouts, a USB stick
 among them, and compares each line with the image's own table.
 
+**Every image carries a disk signature of its own (2026-10-13).** Step 2 of
+the same plan. hdiutil and `mkext2.py`/`mkexfat.py` left the MBR signature
+zero, so the firmware named every image's disk alike; `scripts/disksig.py`
+now writes one from the image's own bytes as each recipe's last step, and
+`mkgpt.py`'s GUIDs come from `esp.img`'s bytes instead of being random. The
+kernel's `boot partition:` line reports each one, and `make
+test-boot-partition` refuses, before booting, an unsigned image or two
+images sharing a signature.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

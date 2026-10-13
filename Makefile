@@ -1215,6 +1215,9 @@ $(USBSTICK_IMG):
 	printf 'hello from the USB stick\n' > $(BUILD_DIR)/usbstick-src/USBTEST.TXT
 	hdiutil create -size 64m -fs FAT32 -volname USBSTICK -srcfolder $(BUILD_DIR)/usbstick-src -format UDTO -ov $(BUILD_DIR)/usbstick.cdr
 	mv $(BUILD_DIR)/usbstick.cdr $(USBSTICK_IMG)
+	# Signed: it is attached beside the boot disk (run-usb-multi, run-usb-hub,
+	# test-usb-hub), the case one-disk step 3 tells apart by signature.
+	python3 scripts/disksig.py set $(USBSTICK_IMG)
 	rm -rf $(BUILD_DIR)/usbstick-src
 
 run-usb-multi: esp $(USBSTICK_IMG)
@@ -1304,6 +1307,9 @@ image: esp
 	find "$$MP" -name '._*' -delete; \
 	hdiutil detach "$$MP" >/dev/null; \
 	rmdir "$$MP"
+	# The MBR disk signature, from the image's own bytes (scripts/disksig.py,
+	# one-disk step 2): hdiutil leaves it zero. Last, after every change.
+	python3 scripts/disksig.py set $(ESP_DIR).img
 
 # build/esp.img again with the MSDSTALL boot flag file at its root, for
 # `test-usb-hub.py --stall` (see bootflags.rs): the same attach, change,
@@ -1317,6 +1323,7 @@ image-stall: image
 	hdiutil detach "$$MP" >/dev/null || hdiutil detach -force "$$MP" >/dev/null || { echo "image-stall: $$MP is still mounted"; exit 1; }; \
 	rmdir "$$MP"; \
 	test $$ok = 1 || { echo "image-stall: could not stage MSDSTALL"; exit 1; }
+	python3 scripts/disksig.py set $(STALL_IMG)
 
 # Boots the real build/esp.img (genuine FAT32) instead of `run`'s vvfat
 # passthrough - needed for anything that reads the filesystem at runtime
@@ -2225,6 +2232,11 @@ test:
 	@# transcripts here, where it runs in a second.
 	@echo "== test-usb-hub's INCONCLUSIVE classifier"
 	@python3 scripts/test-usb-hub.py --self-test || exit 1
+	@# The disk signature every image recipe writes (one-disk step 2): its
+	@# rules on synthetic images, so the check that an image carries one is
+	@# seen failing on an unsigned image, and the 0 rule and GPT refusal hold.
+	@echo "== disk signatures (scripts/disksig.py)"
+	@python3 scripts/disksig.py --self-test || exit 1
 	@echo "== xHCI barriers in the kernel image"
 	@$(MAKE) --no-print-directory check-xhci-barriers || exit 1
 	@# The multi-core plan (docs/roadmap/roadmap-smp.md) names every static in

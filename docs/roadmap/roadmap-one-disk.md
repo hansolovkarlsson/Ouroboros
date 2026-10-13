@@ -6,8 +6,8 @@ merges with item 1). One disk carries both the boot partition (FAT32, the
 ESP) and a root partition (ext2 or exFAT). It may be a stick, a card or a
 virtual disk, and the system needs nothing else to boot and run.
 
-**Status 2026-10-13: step 1 built** (`kernel/src/bootdisk.rs`, `make
-test-boot-partition`); the rest planned. Grounded in the code at
+**Status 2026-10-13: steps 1 and 2 built** (`kernel/src/bootdisk.rs`,
+`scripts/disksig.py`, `make test-boot-partition`); the rest planned. Grounded in the code at
 `ebdebc1` (v0.23.0). Four decisions are Hans's to make before step 4, listed
 under "Decisions" below. Claims not yet checked on this tree are marked
 (predicted).
@@ -148,11 +148,33 @@ start.
   have none and has one: `HD(1,MBR,0xBE1AFDFA,0x3F,0xFBFC1)`, read
   2026-10-13, the one boot so far with a nonzero MBR signature.
 
-**2. Images get a disk signature.** `mkext2.py`, `mkexfat.py` and the new
-image (step 4) write a nonzero signature at byte 440. The value comes from
-the image's own contents, so the same tree gives the same image. hdiutil's
-`esp.img` is patched after it is made. `make test` checks it on the host:
-every image the Makefile builds has a nonzero signature.
+**2. Images get a disk signature. Built 2026-10-13.** `scripts/disksig.py
+set` writes each MBR image's signature at byte 440 as its recipe's last step
+(`image`, `image-stall`, `image-ext2`, `image-exfat`, and so the 2vm pairs
+built through them; step 4's image will do the same): the first four bytes
+of SHA-256 over the image with those bytes counted as zero, 1 if that is 0.
+`mkgpt.py`'s disk and partition GUIDs come from `esp.img`'s bytes the same
+way, where they were random. The kernel reports what was written, on every
+boot of `test-boot-partition`. Before any boot the rig refuses an MBR image
+with no signature (it stopped there with `make image` left unsigned) and two
+MBR images sharing one (it stopped there with `espext2.img` given
+`esp.img`'s). `make test` runs `disksig.py --self-test`, eleven rules on
+synthetic images.
+
+The signature is the disk's name, not a checksum. The first version also
+required it to equal the hash of the image's current bytes, and the review of
+#286 found every boot breaks that: the boot counter's file is rewritten on
+each one, so an image booted once was refused. The rule that step 3 needs is
+the one kept: nonzero, and different between disks. A copy of an image
+carries its source's signature, as a disk copied with `dd` does, so a rig
+that attaches a copy beside its source must sign the copy again (step 3's).
+
+Planned as "the same tree gives the same image", which does not hold:
+hdiutil's FAT32 differs byte for byte between two builds of one tree. What
+holds is per image: two images built different get different signatures
+(the node-a and node-b pair, a stall image and its source). Planned too as
+`make test` checking every image the Makefile builds; it does not build
+them, so the rig checks the images it boots instead.
 
 **3. The block device is the boot disk.** The rule above, applied in
 `init_storage` and in `try_install_usb_block_device`. Check: a new rig

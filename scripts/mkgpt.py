@@ -12,7 +12,9 @@ then discovers the partition through the GPT path instead of the MBR path.
 Reads the FAT32 partition offset/size from esp.img's own MBR, so it tracks
 whatever `make image` produced. Run from the repo root after `make image`.
 """
-import struct, zlib, os, uuid, sys
+import struct, zlib, os, sys
+
+import disksig
 
 SRC, DST, SECT = "build/esp.img", "build/espgpt.img", 512
 
@@ -44,8 +46,12 @@ disk = bytearray(disk_sectors * SECT)
 # EFI System Partition type GUID (mixed-endian on-disk byte order).
 ESP_TYPE = bytes([0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
                   0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b])
-disk_guid = uuid.uuid4().bytes
-part_guid = uuid.uuid4().bytes
+# From esp.img's disk signature, its name (scripts/disksig.py, one-disk step
+# 2), not random and not its bytes: the kernel names its boot partition by the
+# partition GUID (bootdisk.rs), and booting esp.img rewrites a file in it, so a
+# GUID from the bytes would change with every boot. `make image` signs it.
+disk_guid = disksig.guid_for(SRC, "gpt disk")
+part_guid = disksig.guid_for(SRC, "gpt partition")
 
 # Partition entry array (128 * 128), one used entry.
 entry = bytearray(128)

@@ -8,7 +8,10 @@ the `HardDrive` node of its own image's device path (kernel/src/bootdisk.rs)
 and logs `boot partition: N of MBR|GPT at LBA s, b blocks, ...`. Each boot
 here compares that line with the partition this script finds by reading the
 image's partition table on the host: the one FAT partition on an MBR disk
-(type 0x0b or 0x0c), or the one entry of a GPT disk with its unique GUID.
+(type 0x0b, 0x0c or 0xef), or the one entry of a GPT disk with its unique
+GUID. The MBR images must also carry nonzero disk signatures, each
+different from the others' (one-disk step 2, scripts/disksig.py), or the
+run stops before any boot: that is what step 3 will tell disks apart by.
 
 Five boots, each to the login prompt:
   esp       build/esp.img on virtio-blk: partition 1, the whole disk
@@ -41,6 +44,9 @@ ROOT = os.path.dirname(HERE)
 _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
 drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
+sys.path.insert(0, HERE)
+import disksig  # noqa: E402
+
 _spec = importlib.util.spec_from_file_location("test_usb_hub", os.path.join(HERE, "test-usb-hub.py"))
 usb_hub = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(usb_hub)
@@ -75,6 +81,11 @@ def expected(image):
         first, last = struct.unpack_from("<QQ", entry, 32)
         guid = uuid.UUID(bytes_le=entry[16:32])
         return f"{number} of GPT at LBA {first}, {last - first + 1} blocks, partition GUID {guid}"
+    # Every MBR image carries a nonzero signature since one-disk step 2
+    # (scripts/disksig.py): an unsigned one stops the run here, before any boot.
+    why = disksig.check_signature(image)
+    if why:
+        raise SystemExit(f"{image}: {why}")
     signature = struct.unpack_from("<I", mbr, 440)[0]
     fats = []
     for i in range(4):
@@ -126,7 +137,21 @@ def main():
     # Every expectation first: an image this script cannot read stops the run
     # before any boot, not halfway through (the review of #285).
     planned = [(label, os.path.join(BUILD, image), usb) for label, image, usb in boots]
-    wants = [expected(image) for _, image, _ in planned]
+    try:
+        wants = [expected(image) for _, image, _ in planned]
+        mbr = {image for _, image, _ in planned if not disksig.is_gpt(image)}
+        sigs = {image: disksig.read_signature(image) for image in mbr}
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"test-boot-partition: {e}")
+    # The MBR images booted must not share a signature: step 3 picks the block
+    # device by it (the review of #286 moved this check from "the image's own
+    # hash", which every boot's counter write broke, to the property itself).
+    by_sig = {}
+    for image in sorted(mbr):
+        by_sig.setdefault(sigs[image], []).append(os.path.basename(image))
+    shared = [names for names in by_sig.values() if len(names) > 1]
+    if shared:
+        raise SystemExit(f"images sharing a disk signature: {shared}")
     failed = inconclusive = 0
     for (label, image, usb), want in zip(planned, wants):
         checks, want, got = boot(label, image, usb, want)
