@@ -1961,8 +1961,13 @@ test-proc-cpus: image
 # five boots, the FAT32, GPT, ext2 and exFAT images on virtio and esp.img as a
 # USB stick, each line compared with the image's own partition table read on
 # the host; the ext2 and exFAT boots, whose ESP is partition 2, are the ones a
-# kernel naming the first partition fails. About two minutes.
-test-boot-partition: image image-gpt image-ext2 image-exfat
+# kernel naming the first partition fails. Since step 3, two more boots with
+# usbstick.img beside the boot disk on the other bus (the boot disk must be the
+# one installed, and `ls /` after login must show the ESP's tree), and one
+# booted from NVMe, which the kernel cannot drive, where neither disk it can is
+# the boot disk and virtio goes in as the fallback with its reason; every boot
+# alone on its bus must install its own disk directly. About three minutes.
+test-boot-partition: image image-gpt image-ext2 image-exfat $(USBSTICK_IMG)
 	python3 scripts/test-boot-partition.py
 
 # cond's escape sequences on a framebuffer, read off the pixels

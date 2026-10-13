@@ -144,35 +144,53 @@ pub(crate) fn net_ack_interrupt() {
     }
 }
 
-/// Activates the USB mass-storage device (if any) and installs it as
-/// the block device the filesystem server operates on - shared by the
-/// boot-time attempt (`main.rs`, covers QEMU where the device is
-/// present at scan time) and the `MOUNT` syscall (covers real
-/// Parallels, where a passed-through stick attaches a few seconds
-/// after boot - see the enumeration diagnostics; the syscall arm has
-/// its own replace-capable variant inline). First-installed wins: a
-/// no-op if a device (virtio or a previous USB one) is already in the
-/// cell. Returns whether a device is installed after the attempt. The
-/// *filesystem* half of mounting lives in the server now
-/// (`FSOP_MOUNT`), not here - the kernel only handles the device.
-pub fn try_install_usb_block_device() -> bool {
+/// Activates the USB mass-storage device (if any) and installs it as the
+/// block device the filesystem server operates on, at boot only
+/// (`main.rs::install_boot_disk`). The `MOUNT` syscall's rescan, for a stick
+/// passed through after boot on Parallels, has its own replace-capable copy
+/// inline and asks no question. A no-op if a device is already in the cell.
+/// The *filesystem* half of mounting lives in the server (`FSOP_MOUNT`); the
+/// kernel only handles the device.
+///
+/// `accept` is asked once the stick is initialised, before it is installed:
+/// whether it is the boot disk (one-disk step 3). The answer says what
+/// happened, so the caller can say why nothing was installed.
+pub fn try_install_usb_block_device(accept: impl FnOnce(&mut crate::usb_msd::Device) -> bool) -> UsbInstall {
     if block_device_installed() {
-        return true;
+        return UsbInstall::Installed;
     }
     if !crate::xhci::storage_present() {
-        return false;
+        return UsbInstall::Absent;
     }
     match crate::usb_msd::Device::init() {
-        Ok(device) => {
+        Ok(mut device) => {
+            if !accept(&mut device) {
+                return UsbInstall::Refused;
+            }
             install_block_device(crate::block::BlockDevice::UsbMsd(device));
             console::println!("Ouroboros kernel: usb-msd block device installed");
-            true
+            UsbInstall::Installed
         }
         Err(e) => {
             console::println!("Ouroboros kernel: usb-msd init failed ({e})");
-            false
+            UsbInstall::Failed
         }
     }
+}
+
+/// What [`try_install_usb_block_device`] did, so its caller can say why a
+/// stick was not installed (the review of #287: one "not the boot disk" line
+/// had stood for all three).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum UsbInstall {
+    /// A block device is installed: this stick, or one already there.
+    Installed,
+    /// The xHCI scan found no storage device.
+    Absent,
+    /// A stick was there and its initialisation failed.
+    Failed,
+    /// A stick was initialised and `accept` refused it.
+    Refused,
 }
 
 /// Whether the calling task may use the `BLOCK_*` syscalls: whoever holds

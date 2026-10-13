@@ -6,7 +6,7 @@ merges with item 1). One disk carries both the boot partition (FAT32, the
 ESP) and a root partition (ext2 or exFAT). It may be a stick, a card or a
 virtual disk, and the system needs nothing else to boot and run.
 
-**Status 2026-10-13: steps 1 and 2 built** (`kernel/src/bootdisk.rs`,
+**Status 2026-10-13: steps 1 to 3 built** (`kernel/src/bootdisk.rs`,
 `scripts/disksig.py`, `make test-boot-partition`); the rest planned. Grounded in the code at
 `ebdebc1` (v0.23.0). Four decisions are Hans's to make before step 4, listed
 under "Decisions" below. Claims not yet checked on this tree are marked
@@ -176,14 +176,58 @@ holds is per image: two images built different get different signatures
 `make test` checking every image the Makefile builds; it does not build
 them, so the rig checks the images it boots instead.
 
-**3. The block device is the boot disk.** The rule above, applied in
-`init_storage` and in `try_install_usb_block_device`. Check: a new rig
-boots QEMU from a USB stick holding the combined image, with an unrelated
-virtio-blk disk also attached. Today virtio wins, and the rig must see the
-stick taken.
-- Mutation: virtio first again. The rig fails.
-- `mount -a`'s rescan keeps its fallback, so a stick passed through late
-  on Parallels is still taken.
+**3. The block device is the boot disk. Built 2026-10-13.**
+`bootdisk::is_boot_disk` reads a disk's own table through a read-sector
+function and answers whether it holds the boot partition: on MBR, entry
+`number` with the same start and size and the disk signature the firmware
+read; on GPT, entry `number` with the same start, size and unique GUID.
+`init_storage` installs the virtio disk only when it matches, or when the
+boot partition is unknown, and otherwise holds it back; `install_boot_disk`
+then installs the USB stick if it matches, or the held virtio disk as the
+fallback, logged. With the boot partition unknown the order is the old one.
+`make test-boot-partition` gained two boots with `usbstick.img` beside the
+boot disk. With the boot stick on USB and `usbstick.img` on virtio, virtio
+is held back, the stick installed, and `ls /` shows the ESP's tree. With
+the roles swapped, virtio is installed as before. Mutation: `is_boot_disk`
+answering unknown, the old order, and the first boot failed four checks,
+login among them, since `usbstick.img` has no `/etc`. A vvfat ESP still
+installs its virtio disk (its sector 0 carries the signature the firmware
+reported). Planned as:
+- the rule applied in `init_storage` and in `try_install_usb_block_device`,
+  with a rig booting from a stick beside an unrelated virtio disk: built so.
+- `mount -a`'s rescan keeps its fallback, so a stick passed through late on
+  Parallels is still taken: unchanged, and it does not ask.
+
+The review of #287 changed four things. A disk is read by the table the
+firmware named, so a hybrid MBR is read as the GPT it booted, and a GPT
+whose primary header is gone is read from its backup, as `fsd` does. Every
+value read from a disk is bounded with checked arithmetic, since a header
+built to overflow had panicked a debug kernel. A node with no signature
+matches on the table alone. And the fallback's line says why no other disk
+went in: the stick refused, failed, or absent. A rig boot from NVMe, which
+the kernel cannot drive, reaches that fallback (mutation: the fallback
+dropped, and it failed), and every boot alone on its bus now checks that
+its own disk was installed directly (mutation: the GPT match refusing, and
+the GPT boot failed). Left as found: the choice spread over `init_storage`
+and `install_boot_disk` rather than one chooser, and sector 0 read twice.
+The medium review of #287 changed three more. A GPT header counts only if
+its CRC and its entry array's CRC hold, as in `fsd`, so a stale "EFI PART"
+or a corrupt primary falls to the backup (mutation: the header CRC test
+inverted, and the gpt boot failed). Two overflows are no longer a match.
+And a stick whose init failed leaves the device empty rather than mounting
+the fallback, so `mount -a`, which replaces the device only when `fsd`
+mounted nothing, can still reach it; a stick that attaches after the boot
+scan is still not reached when a virtio fallback was installed. The fallback
+boot now pins the firmware to its NVMe disk with `bootindex=0`: once the
+rig's arguments were reordered, the firmware booted the stick beside it,
+which carries an ESP of its own. Declined: two unsigned disks of the same
+layout both match an unsigned boot partition, since signature 0 names
+nothing; every image is signed since step 2. Deferred to `ROADMAP.md`: the
+matcher in a pure crate with host tests, shared with `fsd`'s partition.rs.
+
+Not covered, as before step 3: only the first virtio-blk slot is probed,
+and the xHCI drives only the first storage device it finds, so two sticks
+are still "first found" whichever was booted.
 
 **4. `fsd` takes the root by the rule, and a combined image exists.**
 - `fsd` asks the kernel for the boot partition: a new syscall, or a field of

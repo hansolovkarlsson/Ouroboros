@@ -28,6 +28,15 @@ kernel's `boot partition:` line reports each one, and `make
 test-boot-partition` refuses, before booting, an unsigned image or two
 images sharing a signature.
 
+**The block device is the disk the system booted from (2026-10-13).** Step 3.
+The kernel used to take the first disk it found, virtio before USB, so a
+machine booted from a USB stick with a virtio disk attached ran on the
+virtio disk. Now each candidate's own partition table is matched against
+the boot partition the firmware named (`bootdisk::is_boot_disk`), and a
+disk that is not it is installed only as the fallback, with a line saying
+so. `make test-boot-partition` boots from a stick beside an unrelated
+virtio disk and reads the ESP's tree with `ls /`.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

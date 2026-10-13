@@ -833,6 +833,15 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **The boot-disk matcher in a pure crate, with host tests** (from the
+  medium review of #287, 2026-10-13). `bootdisk::is_boot_disk` parses
+  MBR and GPT (both CRCs, the backup header, checked arithmetic) inside
+  the kernel, where only QEMU boots reach it, and `fsd`'s partition.rs
+  parses the same tables a second time. A crate taking a read-sector
+  closure, tested by `make test` like `accounts` and `ninep-abi`, could
+  serve both and reach the cases no rig sets up: a hybrid MBR, a corrupt
+  primary, a header built to overflow. See `roadmap-one-disk.md` step 3.
+
 - **Splitting the kernel lock (from the multi-core arc, step 4(a)).** One
   lock is taken at every resumable entry, and nothing has needed more: under
   TCG a syscall cost 24,934 ns before it and 27,786 ns with it

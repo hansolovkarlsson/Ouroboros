@@ -847,8 +847,8 @@ extern "C" fn kernel_main() -> ! {
     // virtio transports, and Parallels' own PCI inventory
     // (`pci::log_all_devices`) shows no virtio-blk device there at all
     // regardless of whether the scan itself would be safe.
-    if virtio_mmio_probe_safe {
-        init_storage();
+    let held_virtio = if virtio_mmio_probe_safe {
+        let held = init_storage();
         // Network stack, Stage 1 (docs/ROADMAP.md): the virtio-net driver +
         // a raw-frame ARP round-trip proof. Same gate as storage - the
         // virtio-mmio scan crashes real Parallels hardware, and Parallels
@@ -861,18 +861,22 @@ extern "C" fn kernel_main() -> ! {
         // run started with `-device virtio-rng-device` has one, and userland is
         // built to degrade loudly without it.
         init_entropy();
+        held
     } else {
         console::println!("Ouroboros kernel: skipping virtio-blk (unconfirmed-safe virtio-mmio scan on this platform) - disk commands won't work this boot");
-    }
+        None
+    };
 
     // Second disk path: USB mass storage over the xHCI driver, if the
-    // multi-device scan activated one and nothing else mounted
-    // (first-mounted-wins - virtio stays the QEMU dev loop's primary).
+    // multi-device scan activated one, and the choice between it and a virtio
+    // disk init_storage held back as not the boot disk (one-disk step 3,
+    // install_boot_disk: the boot disk wins, the held virtio disk is the
+    // fallback; with no boot partition known, virtio first as before).
     // On real Parallels hardware the passed-through stick usually
     // attaches a few seconds *after* this point (confirmed by the
     // enumeration diagnostics), so this boot-time attempt mostly serves
     // QEMU; the shell's `mount` command covers the late-attach case.
-    syscall::try_install_usb_block_device();
+    install_boot_disk(held_virtio);
 
     // GIC/timer setup - gated on `gic_info` being `Some` (real MADT
     // discovery, `madt.rs`), not the console-discovery heuristic this used to share
@@ -1131,31 +1135,45 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
 /// skipped there rather than "not fatal if it fails" the way every other
 /// failure mode here is - a crash isn't a failure this function could
 /// recover from and report.
-fn init_storage() {
+///
+/// Since one-disk step 3 (docs/roadmap/roadmap-one-disk.md) it installs the
+/// disk only when it is the one the system booted from, or when that is
+/// unknown (`bootdisk::is_boot_disk`). Any other virtio disk is handed back,
+/// held for [`install_boot_disk`], which installs it only if no USB stick
+/// is the boot disk either.
+fn init_storage() -> Option<virtio_blk::Device> {
     let mut device = match unsafe { virtio_blk::Device::discover() } {
         Ok(device) => device,
         Err(e) => {
             console::println!("Ouroboros kernel: virtio-blk discovery failed ({e})");
-            return;
+            return None;
         }
     };
     if let Err(e) = unsafe { device.init() } {
         console::println!("Ouroboros kernel: virtio-blk init failed ({e})");
-        return;
+        return None;
     }
     console::println!("Ouroboros kernel: virtio-blk ready, capacity {} sectors", device.capacity_sectors());
 
     let mut sector = [0u8; 512];
     if let Err(e) = unsafe { device.read_sector(0, &mut sector) } {
         console::println!("Ouroboros kernel: virtio-blk read failed ({e})");
-        return;
+        return None;
     }
     let signature = (sector[511] as u16) << 8 | sector[510] as u16;
     if signature != 0xaa55 {
         console::println!(
             "Ouroboros kernel: virtio-blk sector 0 has no MBR signature ({signature:#06x}) - not attempting a FAT32 mount"
         );
-        return;
+        return None;
+    }
+
+    // SAFETY: the device is initialised, and nothing else holds it yet.
+    let capacity = device.capacity_sectors();
+    let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
+    if bootdisk::is_boot_disk(&mut read, capacity) == Some(false) {
+        console::println!("Ouroboros kernel: virtio-blk is not the boot disk - held, installed only if no other disk is");
+        return Some(device);
     }
 
     // Custody goes to the BLOCK cell for the filesystem server to
@@ -1164,6 +1182,45 @@ fn init_storage() {
     // auto-mount takes it from here.
     syscall::install_block_device(block::BlockDevice::Virtio(device));
     console::println!("Ouroboros kernel: block device installed for the filesystem server");
+    None
+}
+
+/// The boot-time USB step, after [`init_storage`]: the USB stick is installed
+/// when it is the boot disk, and otherwise only if no virtio disk was held
+/// back, which goes in instead as the fallback. With the boot partition
+/// unknown both answer `None` and the order is the one before step 3:
+/// virtio, then USB. The `MOUNT` syscall's later rescan, which replaces the
+/// device with a stick attached late, is unchanged.
+fn install_boot_disk(held: Option<virtio_blk::Device>) {
+    let outcome = syscall::try_install_usb_block_device(|usb| match held {
+        None => true,
+        Some(_) => {
+            let capacity = usb.capacity_sectors();
+            // SAFETY: the stick is initialised and not yet installed.
+            let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { usb.read_sector(lba, buf) }.is_ok();
+            bootdisk::is_boot_disk(&mut read, capacity) == Some(true)
+        }
+    });
+    let Some(device) = held else { return };
+    // The held virtio disk is not the boot disk; it goes in only as the
+    // fallback, the order from before step 3, and the line says why no other
+    // disk did. Not when the stick's init failed: that stick may be the boot
+    // disk, and a fallback mounted now would keep it out for the whole boot,
+    // since `mount -a` replaces the device only when `fsd` mounted nothing.
+    // Left empty, `mount -a` retries the stick (the medium review of #287).
+    let why = match outcome {
+        syscall::UsbInstall::Installed => return,
+        syscall::UsbInstall::Refused => "the USB stick is not the boot disk either",
+        syscall::UsbInstall::Absent => "no USB stick is attached",
+        syscall::UsbInstall::Failed => {
+            console::println!(
+                "Ouroboros kernel: virtio-blk is not the boot disk and the USB stick's init failed - no disk installed, `mount -a` retries the stick"
+            );
+            return;
+        }
+    };
+    syscall::install_block_device(block::BlockDevice::Virtio(device));
+    console::println!("Ouroboros kernel: virtio-blk installed as the fallback: {why}");
 }
 
 /// Brings up the virtio-net driver and hands it to the `NET` cell for the
