@@ -1037,6 +1037,20 @@ The small open tails those arcs deliberately left:
   drop exit codes, the redirect overflow's own loop). The fix is one design,
   not more guards: the pipeline as a job, ended as a whole by identity.
 
+- **The ping timeout for a server mid-call to a busy peer (found 2026-10-12,
+  the reviews of #280).** `supervisor::PING_TIMEOUT` (8 ticks) bounds how
+  long a pinged server may stay blocked. A server idle in its receive is
+  woken by the ping at once and never comes near it; a server blocked
+  mid-call to a peer is not woken, and acks only once the peer has answered,
+  which on one busy core takes the peer's turns (a pass of the tick's round
+  apart, `tasks::ROUND`) and its own work and queue. #280 raised it to 22 and
+  back twice under review, each time on a partial argument, and left it at
+  `main`'s 8: the round did not create this exposure (the scan from the
+  running task spaced turns too), so it wants its own look. What would
+  settle it is a measurement, a one-core boot with every slot busy and a
+  server mid-call, rather than another bound argued from one case. Not yet
+  seen as a false restart.
+
 - **End-of-stream only from a program that exits (found 2026-10-12, the
   second review of #279).** A pipeline's consumer learns its producer is done
   from an empty message, which `ulib::exit` and libc's `_exit` send for a

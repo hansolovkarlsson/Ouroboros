@@ -49,6 +49,15 @@ appear.
    halts the kernel, and every other core parks at its next entry). The
    halted core must not answer its kick, and the boot core must say so.
 
+In every boot, no supervised server may be restarted or lost: no `server
+slot N wedged` or `restarted` line, no refused restart (`not restarting`),
+and no `EL0 FAULT` line, whatever the slot or the reason. With one core
+and a program spinning beside the shell, the tick's scan from the running
+task once never reached `fsd`, which was restarted as wedged twice a boot
+(2026-10-12; `tasks::ROUND`), and a server mid-call to a starved peer would
+show as a ping timeout instead. These boots are the only ones that run the
+multi-core shapes, so no other rig would see a restart here.
+
 A boot with no `Ouroboros kernel` line is the firmware stalling in its own
 boot, which happens; the rig says INCONCLUSIVE for that boot and does not
 pass. About seven minutes. Run it whenever smp.rs, el2.rs, madt.rs's GICC
@@ -193,6 +202,20 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
         ]
     else:
         checks.append((f"{name}: no fault lines", faults == 0 and "EXCEPTION" not in out))
+    # Over the whole boot, every boot: no server restarted, on any slot (no
+    # slot number here: `tasks.rs` owns the map) and for any reason. A
+    # spinning program on the boot core once starved `fsd` until the
+    # supervisor restarted it as wedged, twice a boot, while every other
+    # check passed or failed on the timing (2026-10-12, `tasks::ROUND`);
+    # starvation can also show as a ping timeout (a server mid-call to a
+    # starved peer), and a crash under the kernel lock as a restart, and no
+    # other rig boots these shapes.
+    # A refused restart ("no kept image ... - not restarting") and the crash
+    # line that precedes any of it (`EL0 FAULT task=N`) are counted too: the
+    # boot's fault check looks for `EXCEPTION` only (the review of 42fd6db).
+    starved = re.findall(r"server slot \d+ (?:wedged|restarted)[^\r\n]*|[^\r\n]*- not restarting|EL0 FAULT task=[^\r\n]*", out)
+    checks.append((f"{name}: no server restarted or lost, and no EL0 fault, in the whole boot"
+                   + (f" (saw {starved[0]!r})" if starved else ""), not starved))
     return checks
 
 

@@ -224,9 +224,36 @@ mod task_index {
     pub(crate) fn set_current_idle_here() {
         set_current(TaskIndex::IDLE);
     }
+
+    /// Where each core's tick last left its round: the slot its last tick
+    /// picked (class B of the plan's inventory, one per core). The tick
+    /// scans on from here, not from the task running now, because a task
+    /// can be running now without the tick having picked it: a block, a
+    /// call or a yield switches straight to another task, and a scan from
+    /// wherever those leave off can pass the same slot every time. Seen
+    /// 2026-10-12 on one core, a program spinning beside a shell taking a
+    /// key a tick: the tick went from the program to the shell, the shell
+    /// switched to `cond` to echo, `cond` blocked and its scan found the
+    /// program again, and `fsd`, runnable two slots behind, never came
+    /// round until the supervisor restarted it as wedged. Typed like
+    /// [`CURRENT`], so only a `TaskIndex` is ever stored.
+    static ROUND: [AtomicUsize; crate::madt::MAX_CORES] = [const { AtomicUsize::new(0) }; crate::madt::MAX_CORES];
+
+    /// Where this core's tick round stands ([`ROUND`]). For the ticks alone,
+    /// like [`set_current`]'s store: `pub(super)`, imported privately.
+    pub(super) fn round_here() -> TaskIndex {
+        TaskIndex(ROUND[crate::smp::core_index() as usize].load(Ordering::Relaxed))
+    }
+
+    /// This core's tick picked `slot`: its round goes on from there. Only a
+    /// tick may move it; a block, a call or a yield that did would bring
+    /// back the starvation the round exists to end.
+    pub(super) fn set_round_here(slot: TaskIndex) {
+        ROUND[crate::smp::core_index() as usize].store(slot.0, Ordering::Relaxed);
+    }
 }
 pub(crate) use task_index::{current_index, current_on, relocate_current, running_core, set_current_idle_here, TaskIndex};
-use task_index::set_current;
+use task_index::{round_here, set_current, set_round_here};
 
 /// The send-mask ceiling, checked rather than described. [`caps_for_slot`]
 /// packs the per-slot send-mask into the low `NUM_TASKS` bits of a `u32` whose
@@ -2112,24 +2139,23 @@ static STATES: [SyncCell<TaskState>; NUM_TASKS] = [
 ];
 
 /// Scans forward from `from` (exclusive), wrapping, for the next
-/// `Runnable` task; the scan's last candidate is `from` itself, so a
-/// still-runnable `from` is returned when nothing else is. `None` means
+/// `Runnable` task this core may run, real work first: the idle slot is the
+/// fallback, not a turn in the round, on every core (a secondary since step
+/// 4(d); the boot core's tick since the review of #280, and every other
+/// boot-core switch, a block, an exit, a kill, a yield, since its second
+/// review, where idle at slot 1 took the turn of every block from slot 0).
+/// The scan's last candidate is `from` itself, so a still-runnable
+/// `from` is returned when no other real work is. `None` means
 /// nothing at all is runnable, which is unreachable today (task 1, the
 /// idle task, never blocks - see this module's doc comment for why it
 /// can't safely use `wfe` either, so it has to stay a real,
-/// always-runnable busy-spin); every caller goes through
-/// [`next_or_halt`], which reports and halts on it rather than resume a
-/// task whose state says it must not run.
+/// always-runnable busy-spin); every caller goes through [`next_or_halt`]
+/// or the tick's [`next_at_tick`], which report and halt on it through
+/// [`nothing_runnable`] rather than resume a task whose state says it must
+/// not run.
 fn next_runnable(from: TaskIndex) -> Option<TaskIndex> {
-    if crate::smp::is_boot_core() {
-        scan_from(from, may_run_here)
-    } else {
-        // A secondary runs real work before its idle loop: the idle slot is
-        // its fallback, not a turn in the round (step 4(d)). The boot core
-        // keeps its round as it was, idle included.
-        scan_from(from, |c| c != TaskIndex::IDLE && may_run_here(c))
-            .or_else(|| may_run_here(TaskIndex::IDLE).then_some(TaskIndex::IDLE))
-    }
+    scan_from(from, |c| c != TaskIndex::IDLE && may_run_here(c))
+        .or_else(|| may_run_here(TaskIndex::IDLE).then_some(TaskIndex::IDLE))
 }
 
 /// Whether `t` is `Runnable` right now.
@@ -2183,7 +2209,7 @@ fn save_frame(current: TaskIndex, frame: &Context) {
     }
 }
 
-/// The one scan behind [`next_runnable`] and [`next_runnable_skip_idle`]:
+/// The one scan behind [`next_runnable`]:
 /// forward from `from` (exclusive), wrapping, `from` itself the last
 /// candidate, for the first slot `wanted` accepts.
 fn scan_from(from: TaskIndex, wanted: impl Fn(TaskIndex) -> bool) -> Option<TaskIndex> {
@@ -2197,53 +2223,60 @@ fn scan_from(from: TaskIndex, wanted: impl Fn(TaskIndex) -> bool) -> Option<Task
     None
 }
 
+/// The tick's pick, on any core: [`next_runnable`] from this core's round
+/// position ([`round_here`]), not from the task running now (`current`),
+/// which a direct switch may have chosen; the round then moves to the pick.
+/// So every task this core may run is PICKED once per pass of ticks, however
+/// the switches between ticks fall. Picked is not run: a direct switch
+/// between ticks (a block, a call, a network interrupt's switch to `netd`)
+/// can still take a picked task's turn, and the round reaches it again only
+/// a pass later; what the round ends is a scan that could never reach a
+/// slot at all. Only the ticks call this: a block, a call, a yield and a
+/// kick still choose from where they stand, and move nothing. Nothing
+/// runnable at all halts, named after the task that was running.
+fn next_at_tick(current: TaskIndex) -> TaskIndex {
+    let next = next_runnable(round_here()).unwrap_or_else(|| nothing_runnable(current));
+    set_round_here(next);
+    next
+}
+
 /// [`next_runnable`], for a caller that has no safe "stay put": the
 /// scan includes `from` itself as its last candidate, so `None` means
 /// nothing at all is runnable, which cannot happen while the idle task
-/// never blocks. If it ever does, every switch path halts here with a
-/// report rather than resuming a task whose state says it must not run
-/// (Blocked, or torn down). One place, so its callers cannot disagree
-/// about what the fallback means.
+/// never blocks. If it ever does, every switch path but the tick's halts
+/// here, and the tick's ([`next_at_tick`]) through the same
+/// [`nothing_runnable`], with a report rather than resuming a task whose
+/// state says it must not run (Blocked, or torn down). One halt, so no two
+/// callers can disagree about what the fallback means.
 fn next_or_halt(from: TaskIndex) -> TaskIndex {
-    match next_runnable(from) {
-        Some(next) => next,
-        None => {
-            crate::console::println_force!(
-                "Ouroboros kernel: nothing runnable after task {} (the idle task should never block) - halting",
-                from.index()
-            );
-            crate::power::halt();
-        }
-    }
+    next_runnable(from).unwrap_or_else(|| nothing_runnable(from))
 }
 
-/// Like [`next_runnable`], but skips the idle task. A *voluntary* yield
-/// ([`yield_current_and_switch`]) wants to hand the CPU to real work;
-/// parking on idle would just wait for the next tick, which is exactly
-/// the stall the yield exists to avoid. The yielding task is itself
-/// `Runnable` and the scan's last candidate, so when nothing else is
-/// runnable it stays put; idle is never chosen for a yield.
-fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
-    // The scan's last candidate is `from` itself, so a real yielder
-    // (Runnable, not idle) is always found and stays put. `None` is
-    // reached only if `from` IS the idle task or is not Runnable, and
-    // then the plain scan (with its halt on nothing) is the right answer.
-    scan_from(from, |c| c != TaskIndex::IDLE && may_run_here(c)).unwrap_or_else(|| next_or_halt(from))
+/// The halt when nothing at all is runnable, named after the task that was
+/// running ([`next_or_halt`], [`next_at_tick`]).
+fn nothing_runnable(after: TaskIndex) -> ! {
+    crate::console::println_force!(
+        "Ouroboros kernel: nothing runnable after task {} (the idle task should never block) - halting",
+        after.index()
+    );
+    crate::power::halt();
 }
 
 /// Voluntarily give up the CPU (the `YIELD` syscall): save the current task -
 /// which stays `Runnable`, this is a yield, not a block - and switch to another
-/// runnable task, preferring real work over idle ([`next_runnable_skip_idle`]).
+/// runnable task, preferring real work over idle ([`next_or_halt`], whose
+/// scan takes idle only when no real work is, and the yielder itself is the
+/// scan's last candidate, so with nothing else runnable it stays put).
 /// Returns `0` to the yielding task when it resumes.
 ///
 /// The reason this exists: a pipe producer whose consumer's mailbox is full
 /// (`MSG_ERR_FULL`) otherwise busy-spins re-sending until the next tick lets
-/// the consumer run - at a 1-second tick, a real stall on hardware, and a waste
+/// the consumer run - up to a 20 ms tick, a real stall on hardware, and a waste
 /// of a CPU that could be running the consumer. Yielding hands the CPU straight
 /// to the consumer, which drains (or exits early, like `head`, at which point
 /// the producer's next send fails fast and it stops). Same trap-frame /
-/// return-value contract as [`block_current_and_switch`] (see `next_runnable`'s
-/// doc comment for why the return is `frame.gpr[0]`).
+/// return-value contract as [`block_current_and_switch`] (see its doc comment
+/// for why the return is `frame.gpr[0]`).
 ///
 /// # Safety
 /// `frame` must be the live trap frame of the syscall currently being
@@ -2251,7 +2284,7 @@ fn next_runnable_skip_idle(from: TaskIndex) -> TaskIndex {
 pub(crate) unsafe fn yield_current_and_switch(frame: *mut Context) -> u64 {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    let next = next_runnable_skip_idle(current);
+    let next = next_or_halt(current);
     if next == current {
         return frame.gpr[0]; // nothing else to run - just carry on
     }
@@ -2315,15 +2348,16 @@ pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitR
 
 /// Like [`block_current_and_switch`], but switches straight to `prefer`
 /// when it's given and currently runnable, instead of round-robining to
-/// the next runnable task (which, with an always-runnable idle task, is
-/// usually idle, so a plain `MSG_CALL` reply would otherwise wait a full
-/// tick). `MSG_CALL` uses this to switch directly to the server it just
-/// delivered a request to: that server runs, replies (direct-delivered
-/// back, waking this caller), and blocks again, all before the next tick,
-/// the sub-tick synchronous round trip the ABI's `MSG_CALL` doc
-/// describes. Safe regardless of what `prefer` actually does: if it never
-/// replies, this caller stays blocked exactly as it would have, woken by
-/// the eventual reply or Ctrl+C.
+/// the next runnable task (which need not be the server just called: any
+/// real work further round comes first, so a plain `MSG_CALL` reply could
+/// wait behind it; until the second review of #280 the next task from the
+/// boot shell was always idle, which made that a full tick). `MSG_CALL` uses
+/// this to switch directly to the server it just delivered a request to: that
+/// server runs, replies (direct-delivered back, waking this caller), and
+/// blocks again, all before the next tick, the sub-tick synchronous round
+/// trip the ABI's `MSG_CALL` doc describes. Safe regardless of what `prefer`
+/// actually does: if it never replies, this caller stays blocked exactly as
+/// it would have, woken by the eventual reply or Ctrl+C.
 ///
 /// # Safety
 /// Same contract as [`block_current_and_switch`].
@@ -2571,7 +2605,7 @@ pub(crate) fn core_info(op: u64, arg: u64) -> u64 {
 pub unsafe fn on_secondary_tick(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    let next = next_or_halt(current);
+    let next = next_at_tick(current);
     if next != current {
         save_frame(current, frame);
         switch_to(frame, next);
@@ -3316,10 +3350,11 @@ pub unsafe fn on_tick(frame: *mut Context) {
         }
     }
 
-    let next = next_or_halt(current);
+    let next = next_at_tick(current);
     if next == current {
-        // Nothing else runnable - stay put rather than pointlessly saving
-        // and reloading the same context.
+        // The round's pick is the task already running (the only one
+        // runnable, or its turn again): stay put rather than pointlessly
+        // saving and reloading the same context.
         return;
     }
     save_frame(current, frame);
