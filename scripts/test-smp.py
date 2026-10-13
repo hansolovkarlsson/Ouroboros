@@ -198,6 +198,16 @@ def boot(name, smp, machine="virt", esp=None, fault=False):
         ]
     else:
         checks.append((f"{name}: no fault lines", faults == 0 and "EXCEPTION" not in out))
+    # Over the whole boot, every boot: no server starved. A spinning program
+    # on the boot core once starved `fsd` until the supervisor restarted it
+    # as wedged, twice a boot, while every other check passed or failed on
+    # the timing (2026-10-12, the tick's round, `tasks::ROUND`). What
+    # starvation produces is a server runnable and never run (`no progress
+    # (runnable)`, any slot) or `fsd` restarted at all; another server's own
+    # ping timeout is a different fault and has its own rigs.
+    starved = re.findall(r"server slot \d+ wedged - no progress \(runnable\)[^\r\n]*|server slot 2 (?:wedged|restarted)[^\r\n]*", out)
+    checks.append((f"{name}: no server starved (no runnable wedge, no fsd restart) in the whole boot"
+                   + (f" (saw {starved[0]!r})" if starved else ""), not starved))
     return checks
 
 
@@ -297,7 +307,6 @@ def run_probes(guest, smp):
     guest.type_line("echo after-dead-consumer")
     got["dead"] = guest.wait_for(r"\nafter-dead-consumer\r?\n[\s\S]*" + PROMPT, timeout=60)
     got["dead_out"] = guest.transcript()[before:]
-    got["end_out"] = guest.transcript()
     return got
 
 
@@ -390,13 +399,6 @@ def probe_checks(name, smp, boot_index, probe):
     checks.append((f"{name}: `coreprobe | grep (` with grep gone first: grep's complaint, no other pipe error, and the shell answered",
                    probe.get("dead", False) and "bad pattern" in dead_out
                    and re.search(r"pipe: (?!grep exited)", dead_out) is None))
-    # Over the whole boot (the transcript at the probes' end): no server restarted. A spinning program on the
-    # boot core once starved `fsd` until the supervisor restarted it as
-    # wedged, twice, while every other check here passed or failed on the
-    # timing (2026-10-12, the tick's round, `tasks::ROUND`).
-    restarts = re.findall(r"server slot \d+ (?:wedged|restarted)[^\r\n]*", probe.get("end_out", ""))
-    checks.append((f"{name}: no server was restarted in the whole boot"
-                   + (f" (saw {restarts[0]!r})" if restarts else ""), not restarts))
     return checks
 
 

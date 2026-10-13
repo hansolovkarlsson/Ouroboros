@@ -239,18 +239,21 @@ mod task_index {
     /// [`CURRENT`], so only a `TaskIndex` is ever stored.
     static ROUND: [AtomicUsize; crate::madt::MAX_CORES] = [const { AtomicUsize::new(0) }; crate::madt::MAX_CORES];
 
-    /// Where this core's tick round stands ([`ROUND`]).
-    pub(crate) fn round_here() -> TaskIndex {
+    /// Where this core's tick round stands ([`ROUND`]). For the ticks alone,
+    /// like [`set_current`]'s store: `pub(super)`, imported privately.
+    pub(super) fn round_here() -> TaskIndex {
         TaskIndex(ROUND[crate::smp::core_index() as usize].load(Ordering::Relaxed))
     }
 
-    /// This core's tick picked `slot`: its round goes on from there.
-    pub(crate) fn set_round_here(slot: TaskIndex) {
+    /// This core's tick picked `slot`: its round goes on from there. Only a
+    /// tick may move it; a block, a call or a yield that did would bring
+    /// back the starvation the round exists to end.
+    pub(super) fn set_round_here(slot: TaskIndex) {
         ROUND[crate::smp::core_index() as usize].store(slot.0, Ordering::Relaxed);
     }
 }
-pub(crate) use task_index::{current_index, current_on, relocate_current, round_here, running_core, set_current_idle_here, set_round_here, TaskIndex};
-use task_index::set_current;
+pub(crate) use task_index::{current_index, current_on, relocate_current, running_core, set_current_idle_here, TaskIndex};
+use task_index::{round_here, set_current, set_round_here};
 
 /// The send-mask ceiling, checked rather than described. [`caps_for_slot`]
 /// packs the per-slot send-mask into the low `NUM_TASKS` bits of a `u32` whose
@@ -2222,14 +2225,19 @@ fn scan_from(from: TaskIndex, wanted: impl Fn(TaskIndex) -> bool) -> Option<Task
 }
 
 /// The tick's pick, on any core: the next task after this core's round
-/// position ([`round_here`]), not after the task running now, which a
-/// direct switch may have chosen; the round then moves to the pick. Every
-/// task this core may run comes round within one pass of ticks, however
-/// the switches between ticks fall. Only the ticks call this: a block, a
-/// call, a yield and a kick still choose from where they stand, and move
-/// nothing.
-fn next_at_tick() -> TaskIndex {
-    let next = next_or_halt(round_here());
+/// position ([`round_here`]), not after the task running now (`current`),
+/// which a direct switch may have chosen; the round then moves to the pick.
+/// Every task this core may run comes round within one pass of ticks,
+/// however the switches between ticks fall. Real work first, the idle slot
+/// only when there is none (on the boot core too, where the idle slot was a
+/// turn in the round: it cost every other task a tick per pass, the review
+/// of #280). Only the ticks call this: a block, a call, a yield and a kick
+/// still choose from where they stand, and move nothing. Nothing runnable at
+/// all halts through [`next_or_halt`], named after the task that was running.
+fn next_at_tick(current: TaskIndex) -> TaskIndex {
+    let next = scan_from(round_here(), |c| c != TaskIndex::IDLE && may_run_here(c))
+        .or_else(|| may_run_here(TaskIndex::IDLE).then_some(TaskIndex::IDLE))
+        .unwrap_or_else(|| next_or_halt(current));
     set_round_here(next);
     next
 }
@@ -2608,7 +2616,7 @@ pub(crate) fn core_info(op: u64, arg: u64) -> u64 {
 pub unsafe fn on_secondary_tick(frame: *mut Context) {
     let frame = unsafe { &mut *frame };
     let current = current_index();
-    let next = next_at_tick();
+    let next = next_at_tick(current);
     if next != current {
         save_frame(current, frame);
         switch_to(frame, next);
@@ -3353,10 +3361,11 @@ pub unsafe fn on_tick(frame: *mut Context) {
         }
     }
 
-    let next = next_at_tick();
+    let next = next_at_tick(current);
     if next == current {
-        // Nothing else runnable - stay put rather than pointlessly saving
-        // and reloading the same context.
+        // The round's pick is the task already running (the only one
+        // runnable, or its turn again): stay put rather than pointlessly
+        // saving and reloading the same context.
         return;
     }
     save_frame(current, frame);
