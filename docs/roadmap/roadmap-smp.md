@@ -6,7 +6,10 @@ roadmap's Pi direction 4 asked for a plan document before any code, the way
 `roadmap-el1-drop.md` was, and this is it. *Written before any of it was
 built; every step was then built on QEMU the same day (#258 to #266), and
 the steps below say what each became, with the corrections to this plan's
-first design marked where they stand.*
+first design marked where they stand. The arc closed on 2026-10-12, after
+both hardware boots and three last defects (#278 to #281); its record is
+[`roadmap-completed.md`](../roadmap-completed.md), and its open tails are
+`ROADMAP.md`'s follow-ups.*
 
 Today one core runs everything. The firmware hands the kernel off on one
 core, the others are never started, and one argument makes every mutable
