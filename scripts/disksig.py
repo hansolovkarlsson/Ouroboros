@@ -3,7 +3,7 @@ r"""The MBR disk signature of a built image, from the image's own bytes.
 
     python3 scripts/disksig.py set IMAGE...     write each image's signature
     python3 scripts/disksig.py check IMAGE...   each MBR image must carry one, nonzero
-    python3 scripts/disksig.py guid IMAGE LABEL print a GUID from IMAGE's bytes
+    python3 scripts/disksig.py guid IMAGE LABEL print a GUID from IMAGE's signature
     python3 scripts/disksig.py --self-test      (run by `make test`)
 
 Step 2 of docs/roadmap/roadmap-one-disk.md. The kernel names the partition it
@@ -30,8 +30,11 @@ a copy of an image carries its source's signature, as a disk copied with `dd`
 does: a rig that attaches a copy beside its source signs the copy again.
 
 A GPT disk takes no MBR signature (its protective MBR's is unused, by the
-UEFI specification): its node carries the partition's GUID instead, which
-`guid` derives from the payload in the same way, for scripts/mkgpt.py.
+UEFI specification): its node carries the partition's GUID instead. `guid`
+derives one from a signed MBR image's signature and a label, for
+scripts/mkgpt.py, which wraps esp.img: from the name, not the bytes, so
+booting esp.img does not change the GPT built from it (the medium review of
+#286 found the first version took the bytes, the same error as the check).
 """
 import hashlib
 import os
@@ -108,26 +111,18 @@ def check_signature(path):
     return None
 
 
-def guid_from_state(state, label):
-    """A GUID from an image's hash state and `label`, in the on-disk
-    (mixed-endian) byte order, shaped as an RFC 4122 version 4 GUID."""
-    h = state.copy()
-    h.update(label.encode())
+def guid_for(path, label):
+    """A GUID from the signature of the MBR image at `path` and `label`, in
+    the on-disk (mixed-endian) byte order, shaped as an RFC 4122 version 4
+    GUID. An unsigned image has no name to derive one from."""
+    sig = read_signature(path)
+    if sig == 0:
+        raise ValueError(f"{path}: no disk signature to derive a GUID from (run `disksig.py set` first)")
+    h = hashlib.sha256(b"ouroboros disk " + struct.pack("<I", sig) + b" " + label.encode())
     raw = bytearray(h.digest()[:16])
     raw[6] = (raw[6] & 0x0F) | 0x40
     raw[8] = (raw[8] & 0x3F) | 0x80
     return uuid.UUID(bytes=bytes(raw)).bytes_le
-
-
-def guid_for(path, label):
-    return guid_from_state(content_hash(path), label)
-
-
-def guids_for_bytes(data, labels):
-    """One GUID per label from an image already in memory, hashed once
-    (mkgpt.py holds esp.img whole)."""
-    state = _hash_image([data])
-    return [guid_from_state(state, label) for label in labels]
 
 
 def self_test():
@@ -170,9 +165,29 @@ def self_test():
         guid = uuid.UUID(bytes_le=guid_for(b, "disk"))
         results.append(("a GUID is version 4, RFC 4122 variant", guid.version == 4 and guid.variant == uuid.RFC_4122))
         results.append(("the GUIDs of one image differ by label", guid_for(b, "disk") != guid_for(b, "partition")))
-        with open(b, "rb") as fh:
-            whole = fh.read()
-        results.append(("in memory and from disk give one GUID", guids_for_bytes(whole, ["disk"])[0] == guid_for(b, "disk")))
+        before = guid_for(b, "disk")
+        with open(b, "r+b") as fh:
+            fh.seek(2048)
+            fh.write(b"booted")
+        results.append(("a GUID survives a write to the image", guid_for(b, "disk") == before))
+        unsigned = image("u.img", b"unsigned")
+        try:
+            guid_for(unsigned, "disk")
+            no_guid = False
+        except ValueError:
+            no_guid = True
+        results.append(("an unsigned image gives no GUID", no_guid))
+        blank = os.path.join(tmp, "blank.img")
+        with open(blank, "wb") as fh:
+            fh.write(bytes(4096))
+        refusals = []
+        for call in (set_signature, check_signature):
+            try:
+                call(blank)
+                refusals.append(False)
+            except ValueError:
+                refusals.append(True)
+        results.append(("set and check refuse a disk with no MBR", all(refusals)))
     failed = 0
     for name, ok in results:
         print(f"{'ok  ' if ok else 'FAIL'} disksig: {name}")

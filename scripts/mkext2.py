@@ -12,6 +12,8 @@ Run from the repo root.
 """
 import struct, os, sys
 
+import disksig
+
 ESP, EXT2, DST, SECT = "build/esp.img", "build/ext2part.img", "build/espext2.img", 512
 
 for f in (ESP, EXT2):
@@ -71,6 +73,9 @@ disk[P2_START * SECT:P2_START * SECT + len(fat)] = fat
 
 with open(DST, "wb") as f:
     f.write(disk)
+# The MBR disk signature, here rather than as a separate Makefile step, so this
+# script cannot write an unsigned disk (scripts/disksig.py, one-disk step 2).
+print(f"disksig: {DST}: {disksig.set_signature(DST):#010x}")
 print(f"wrote {DST}: {disk_sectors} sectors "
       f"(ext2 @ LBA {P1_START}, {ext2_sectors} sectors; "
       f"FAT32 ESP @ LBA {P2_START}, {fat_size} sectors)")

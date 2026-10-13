@@ -137,14 +137,18 @@ def main():
     # Every expectation first: an image this script cannot read stops the run
     # before any boot, not halfway through (the review of #285).
     planned = [(label, os.path.join(BUILD, image), usb) for label, image, usb in boots]
-    wants = [expected(image) for _, image, _ in planned]
+    try:
+        wants = [expected(image) for _, image, _ in planned]
+        mbr = {image for _, image, _ in planned if not disksig.is_gpt(image)}
+        sigs = {image: disksig.read_signature(image) for image in mbr}
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"test-boot-partition: {e}")
     # The MBR images booted must not share a signature: step 3 picks the block
     # device by it (the review of #286 moved this check from "the image's own
     # hash", which every boot's counter write broke, to the property itself).
-    mbr = {image for _, image, _ in planned if not disksig.is_gpt(image)}
     by_sig = {}
     for image in sorted(mbr):
-        by_sig.setdefault(disksig.read_signature(image), []).append(os.path.basename(image))
+        by_sig.setdefault(sigs[image], []).append(os.path.basename(image))
     shared = [names for names in by_sig.values() if len(names) > 1]
     if shared:
         raise SystemExit(f"images sharing a disk signature: {shared}")

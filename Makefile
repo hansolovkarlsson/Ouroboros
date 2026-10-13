@@ -1215,6 +1215,9 @@ $(USBSTICK_IMG):
 	printf 'hello from the USB stick\n' > $(BUILD_DIR)/usbstick-src/USBTEST.TXT
 	hdiutil create -size 64m -fs FAT32 -volname USBSTICK -srcfolder $(BUILD_DIR)/usbstick-src -format UDTO -ov $(BUILD_DIR)/usbstick.cdr
 	mv $(BUILD_DIR)/usbstick.cdr $(USBSTICK_IMG)
+	# Signed: it is attached beside the boot disk (run-usb-multi, run-usb-hub,
+	# test-usb-hub), the case one-disk step 3 tells apart by signature.
+	python3 scripts/disksig.py set $(USBSTICK_IMG)
 	rm -rf $(BUILD_DIR)/usbstick-src
 
 run-usb-multi: esp $(USBSTICK_IMG)
@@ -1416,7 +1419,6 @@ $(EXFAT_PART): esp
 # (FAT32 probe fails on the exFAT partition, exFAT probe succeeds).
 image-exfat: image $(EXFAT_PART)
 	python3 scripts/mkexfat.py
-	python3 scripts/disksig.py set $(EXFAT_IMG)
 
 # Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
 # then fsd mounts the exFAT partition (partition 1) - so `ls`/`cat`/pipelines
@@ -1503,7 +1505,6 @@ $(EXT2_PART): esp
 # the ext2 partition, ext2 succeeds).
 image-ext2: image $(EXT2_PART)
 	python3 scripts/mkext2.py
-	python3 scripts/disksig.py set $(EXT2_IMG)
 
 # Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
 # then fsd mounts the ext2 partition (partition 1) read-only - so `ls`/`cat`/
