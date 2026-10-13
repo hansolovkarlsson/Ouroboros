@@ -403,7 +403,8 @@ int __issignalingl(long double d);
   #endif
 #endif
 
-#if __GNUC_PREREQ (2, 97) && !(defined(__riscv) && defined(__clang__))
+#if (__GNUC_PREREQ (2, 97) && !(defined(__riscv) && defined(__clang__))) \
+    || __has_builtin(__builtin_isgreater)
 #define isgreater(__x,__y)	(__builtin_isgreater (__x, __y))
 #define isgreaterequal(__x,__y)	(__builtin_isgreaterequal (__x, __y))
 #define isless(__x,__y)		(__builtin_isless (__x, __y))
