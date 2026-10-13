@@ -21,7 +21,7 @@ Five boots to the login prompt:
   usb-boot  build/esp.img as a USB stick on QEMU's xHCI, no virtio disk:
             the path through a USB node, the case the Pi and Parallels boot
 
-and two with a second, unrelated disk beside the boot disk (build/usbstick.img,
+and three with a second, unrelated disk beside the boot disk (build/usbstick.img,
 signed, holding USBTEST.TXT), for step 3, the block device chosen by the boot
 partition (`main.rs`'s `install_boot_disk`):
   usb-boot-beside  esp.img on USB, usbstick.img on virtio: before step 3
@@ -30,6 +30,11 @@ partition (`main.rs`'s `install_boot_disk`):
                    the ESP's tree, not USBTEST.TXT
   virtio-beside    esp.img on virtio, usbstick.img on USB: virtio is the boot
                    disk and is installed, the stick is never asked
+  fallback         esp.img on NVMe, which the firmware boots and the kernel
+                   cannot drive, usbstick.img on virtio and espext2.img on
+                   USB: neither is the boot disk, so virtio is held, the stick
+                   refused, and virtio installed as the fallback with that
+                   reason (the review of #287 found no boot reached it)
 
 The ext2 and exFAT boots are the ones that can tell a kernel naming its boot
 partition from one naming the first partition. The stick's QEMU arguments
@@ -112,7 +117,12 @@ def expected(image):
 
 
 def boot(label, image, usb, want, beside=None):
-    if beside and usb:
+    if label == "fallback":
+        nvme = ["-drive", f"file={image},format=raw,if=none,id=nvboot,snapshot=on",
+                "-device", "nvme,serial=boot,drive=nvboot"]
+        guest = drive_qemu.Guest(beside, extra_args=nvme + usb_hub.layout(True, os.path.join(BUILD, "espext2.img")),
+                                 stamp_from=image, label=f"test-boot-partition[{label}]: ")
+    elif beside and usb:
         # The unrelated disk on virtio; Guest attaches its `image` there, and
         # the stale-image guard reads the boot image's stamp.
         guest = drive_qemu.Guest(beside, extra_args=usb_hub.layout(True, image),
@@ -128,7 +138,7 @@ def boot(label, image, usb, want, beside=None):
             label=f"test-boot-partition[{label}]: ",
         )
     steps = [("login:", "")]
-    if beside:
+    if beside and label != "fallback":
         steps = [("login:", "root"), ("assword", "root"), ("# ", "ls /"), ("# ", "echo after-ls"), ("# ", "")]
     try:
         reached = guest.run(steps)
@@ -143,11 +153,25 @@ def boot(label, image, usb, want, beside=None):
     got = LINE.search(out)
     got = got.group(1).strip() if got else "no line"
     checks = [
-        (f"{label}: reached the {'end' if beside else 'login prompt'}", reached),
+        (f"{label}: reached the {'end' if beside and label != 'fallback' else 'login prompt'}", reached),
         (f"{label}: the kernel names the partition the table holds", got == want),
         (f"{label}: no fault lines", faults == 0),
     ]
-    if beside:
+    if not beside:
+        # Alone on its bus, the boot disk must match itself and be installed
+        # directly: a matcher refusing its own boot disk would still reach the
+        # login prompt, through the fallback (the review of #287).
+        direct = "usb-msd block device installed" if usb else "block device installed for the filesystem server"
+        checks.append((f"{label}: the boot disk installed as itself, not as a fallback",
+                       direct in out and "is not the boot disk" not in out and "as the fallback" not in out))
+    if label == "fallback":
+        checks += [
+            (f"{label}: virtio-blk held back as not the boot disk", "virtio-blk is not the boot disk" in out),
+            (f"{label}: the stick refused, virtio installed as the fallback, with the reason",
+             "virtio-blk installed as the fallback: the USB stick is not the boot disk either" in out
+             and "usb-msd block device installed" not in out),
+        ]
+    elif beside:
         listing = re.search(r"ls /\r?\n([\s\S]*?)echo after-ls", out)
         listing = listing.group(1) if listing else ""
         usb_installed = "usb-msd block device installed" in out
@@ -176,6 +200,7 @@ def main():
         ("usb-boot", "esp.img", True),
         ("usb-boot-beside", "esp.img", True, "usbstick.img"),
         ("virtio-beside", "esp.img", False, "usbstick.img"),
+        ("fallback", "esp.img", False, "usbstick.img"),
     ]
     # Every expectation first: an image this script cannot read stops the run
     # before any boot, not halfway through (the review of #285).

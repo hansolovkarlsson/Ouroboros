@@ -198,6 +198,22 @@ reported). Planned as:
 - `mount -a`'s rescan keeps its fallback, so a stick passed through late on
   Parallels is still taken: unchanged, and it does not ask.
 
+The review of #287 changed four things. A disk is read by the table the
+firmware named, so a hybrid MBR is read as the GPT it booted, and a GPT
+whose primary header is gone is read from its backup, as `fsd` does. Every
+value read from a disk is bounded with checked arithmetic, since a header
+built to overflow had panicked a debug kernel. A node with no signature
+matches on the table alone. And the fallback's line says why no other disk
+went in: the stick refused, failed, or absent. A rig boot from NVMe, which
+the kernel cannot drive, reaches that fallback (mutation: the fallback
+dropped, and it failed), and every boot alone on its bus now checks that
+its own disk was installed directly (mutation: the GPT match refusing, and
+the GPT boot failed). Left as found: the choice spread over `init_storage`
+and `install_boot_disk` rather than one chooser, and sector 0 read twice.
+A stick whose init fails, or that attaches late, is not reached afterwards
+when a virtio fallback was installed: `mount -a` replaces the device only
+when `fsd` mounted nothing.
+
 Not covered, as before step 3: only the first virtio-blk slot is probed,
 and the xHCI drives only the first storage device it finds, so two sticks
 are still "first found" whichever was booted.

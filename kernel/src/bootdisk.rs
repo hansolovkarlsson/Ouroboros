@@ -2,10 +2,9 @@
 //! this image from, read from the image's own device path before
 //! `ExitBootServices`. Step 1 of `docs/roadmap/roadmap-one-disk.md`.
 //!
-//! Nothing after the exit knows which disk the system booted from: the block
-//! device is whichever disk is found first (`syscall.rs`'s `BLOCK`, virtio
-//! before USB), and `fsd` mounts the first partition that validates. The
-//! firmware does know. The `LoadedImageDevicePath` protocol on the image
+//! Until one-disk step 3 nothing after the exit knew which disk the system
+//! booted from: the block device was whichever disk was found first
+//! (`syscall.rs`'s `BLOCK`, virtio before USB). The firmware does know. The `LoadedImageDevicePath` protocol on the image
 //! handle is the path `LoadImage` was given, and on a disk it runs through a
 //! `HardDrive` media node: the partition's number (from 1), its start LBA and
 //! size in blocks, and the disk's MBR signature or the partition's GPT GUID.
@@ -34,10 +33,12 @@ use uefi::proto::device_path::{DevicePathNodeEnum, LoadedImageDevicePath};
 /// The disk's identity as the firmware's `HardDrive` node states it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiskSignature {
-    /// No signature: the node's signature type 0, or an MBR signature of 0,
-    /// which every image this project built until 2026-10-13 had.
+    /// The node carries no signature (its signature type 0), so a disk is
+    /// matched on its table alone (the review of #287: it had also stood for
+    /// an MBR signature of 0, which made "no signature" a claim of 0).
     None,
-    /// The MBR's 32-bit disk signature, bytes 440 to 443 of sector 0.
+    /// The MBR's 32-bit disk signature, bytes 440 to 443 of sector 0, 0
+    /// included: every image this project built until 2026-10-13 had 0.
     Mbr(u32),
     /// The GPT partition's unique GUID, as its 16 bytes on disk.
     Gpt([u8; 16]),
@@ -47,9 +48,23 @@ pub(crate) enum DiskSignature {
     Unknown(u8),
 }
 
+/// The partition table the firmware says the boot partition is in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Table {
+    Mbr,
+    Gpt,
+    /// A format the specification does not list: matched against nothing.
+    Unknown,
+}
+
 /// The partition the kernel image was loaded from.
 #[derive(Clone, Copy)]
 pub(crate) struct BootPartition {
+    /// The table the firmware read it from. A disk is read by this table,
+    /// not by guessing from its sector 0, so a hybrid MBR (an 0xEE entry
+    /// beside real ones) is read as the GPT the firmware booted (the review
+    /// of #287).
+    pub(crate) table: Table,
     /// From 1, in the partition table's own order.
     pub(crate) number: u32,
     /// First block, in the disk's logical blocks.
@@ -111,24 +126,34 @@ pub(crate) fn discover() {
         return;
     };
     let signature = match hd.partition_signature() {
-        PartitionSignature::Mbr(bytes) if u32::from_le_bytes(bytes) != 0 => DiskSignature::Mbr(u32::from_le_bytes(bytes)),
+        PartitionSignature::Mbr(bytes) => DiskSignature::Mbr(u32::from_le_bytes(bytes)),
         PartitionSignature::Guid(guid) => DiskSignature::Gpt(guid.to_bytes()),
         PartitionSignature::Unknown { signature_type, .. } => DiskSignature::Unknown(signature_type),
         _ => DiskSignature::None,
     };
+    let table = match hd.partition_format() {
+        PartitionFormat::MBR => Table::Mbr,
+        PartitionFormat::GPT => Table::Gpt,
+        _ => Table::Unknown,
+    };
     let found = BootPartition {
+        table,
         number: hd.partition_number(),
         start_lba: hd.partition_start(),
         size_blocks: hd.partition_size(),
         signature,
     };
-    let table = match hd.partition_format() {
-        PartitionFormat::MBR => "MBR",
-        PartitionFormat::GPT => "GPT",
-        _ => "an unknown table",
+    let table = match table {
+        Table::Mbr => "MBR",
+        Table::Gpt => "GPT",
+        Table::Unknown => "an unknown table",
     };
     match signature {
         DiskSignature::None => log::info!(
+            "Ouroboros kernel: boot partition: {} of {table} at LBA {}, {} blocks, no signature",
+            found.number, found.start_lba, found.size_blocks
+        ),
+        DiskSignature::Mbr(0) => log::info!(
             "Ouroboros kernel: boot partition: {} of {table} at LBA {}, {} blocks, disk signature none",
             found.number, found.start_lba, found.size_blocks
         ),
@@ -153,63 +178,83 @@ pub(crate) fn discover() {
 }
 
 /// Whether a disk is the one the boot partition is on, read through `read`
-/// (one 512-byte sector by LBA, `false` on a failed read). `None` when the
-/// boot partition is unknown, so the caller keeps today's order. Step 3 of
-/// docs/roadmap/roadmap-one-disk.md.
+/// (one 512-byte sector by LBA, `false` on a failed read) on a disk of
+/// `capacity` sectors. `None` when the boot partition is unknown, or in a
+/// table of a format the specification does not list, so the caller keeps
+/// the order from before step 3 (docs/roadmap/roadmap-one-disk.md).
 ///
-/// The disk's own table must hold the boot partition: on MBR, entry
-/// `number` with the same start and size, and the disk's signature (bytes
-/// 440-443) equal to the one the firmware read there, 0 included, since the
-/// node's field is that same word; on GPT, entry `number` with the same
-/// start, size and unique GUID. A signature of a type the specification does
-/// not list is matched on the table alone.
-pub(crate) fn is_boot_disk(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool) -> Option<bool> {
+/// The disk is read by the table the firmware named, not by guessing from
+/// its sector 0. On MBR: entry `number` with the same start and size, and,
+/// when the node carries a signature, the disk's bytes 440-443 equal to it,
+/// 0 included. On GPT: the primary header at LBA 1, or the backup at the
+/// last sector when the primary is not there (as `fsd`'s partition.rs
+/// reads it), then entry `number` with the same start, size and unique GUID.
+/// A node with no signature, or one of a type the specification does not
+/// list, is matched on the table alone. Every value read from the disk is
+/// bounded with checked arithmetic: a disk only being asked must never halt
+/// the boot (the review of #287 found a header that overflowed the sum).
+pub(crate) fn is_boot_disk(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> Option<bool> {
     let boot = get()?;
+    match boot.table {
+        Table::Unknown => None,
+        Table::Mbr => Some(mbr_holds(&boot, read)),
+        Table::Gpt => Some(gpt_holds(&boot, read, capacity)),
+    }
+}
+
+fn le(bytes: &[u8]) -> u64 {
+    bytes.iter().rev().fold(0u64, |v, b| v << 8 | u64::from(*b))
+}
+
+fn mbr_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool) -> bool {
     let mut sector = [0u8; 512];
     if !read(0, &mut sector) || sector[510] != 0x55 || sector[511] != 0xaa {
-        return Some(false);
+        return false;
     }
-    let gpt = sector[446 + 4] == 0xee;
-    if !gpt {
-        let disk_sig = u32::from_le_bytes([sector[440], sector[441], sector[442], sector[443]]);
-        match boot.signature {
-            DiskSignature::Mbr(sig) if sig != disk_sig => return Some(false),
-            DiskSignature::None if disk_sig != 0 => return Some(false),
-            DiskSignature::Gpt(_) => return Some(false),
-            _ => {}
+    let disk_sig = le(&sector[440..444]) as u32;
+    match boot.signature {
+        DiskSignature::Mbr(sig) if sig != disk_sig => return false,
+        DiskSignature::Gpt(_) => return false,
+        _ => {}
+    }
+    if !(1..=4).contains(&boot.number) {
+        return false;
+    }
+    let entry = 446 + 16 * (boot.number as usize - 1);
+    sector[entry + 4] != 0
+        && le(&sector[entry + 8..entry + 12]) == boot.start_lba
+        && le(&sector[entry + 12..entry + 16]) == boot.size_blocks
+}
+
+fn gpt_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> bool {
+    let mut sector = [0u8; 512];
+    let header_at = |lba: u64, sector: &mut [u8; 512], read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool| {
+        read(lba, sector) && &sector[0..8] == b"EFI PART"
+    };
+    if !header_at(1, &mut sector, read) {
+        let Some(last) = capacity.checked_sub(1) else { return false };
+        if last <= 1 || !header_at(last, &mut sector, read) {
+            return false;
         }
-        if !(1..=4).contains(&boot.number) {
-            return Some(false);
-        }
-        let entry = 446 + 16 * (boot.number as usize - 1);
-        let start = u32::from_le_bytes([sector[entry + 8], sector[entry + 9], sector[entry + 10], sector[entry + 11]]);
-        let size = u32::from_le_bytes([sector[entry + 12], sector[entry + 13], sector[entry + 14], sector[entry + 15]]);
-        return Some(sector[entry + 4] != 0 && u64::from(start) == boot.start_lba && u64::from(size) == boot.size_blocks);
     }
-    // GPT: the primary header at LBA 1, then the boot entry in the array.
-    if !read(1, &mut sector) || &sector[0..8] != b"EFI PART" {
-        return Some(false);
-    }
-    let field = |s: &[u8; 512], at: usize, len: usize| s[at..at + len].iter().rev().fold(0u64, |v, b| v << 8 | u64::from(*b));
-    let array_lba = field(&sector, 72, 8);
-    let count = field(&sector, 80, 4);
-    let entry_size = field(&sector, 84, 4);
+    let array_lba = le(&sector[72..80]);
+    let count = le(&sector[80..84]);
+    let entry_size = le(&sector[84..88]);
     if boot.number == 0 || u64::from(boot.number) > count || !(128..=512).contains(&entry_size) || 512 % entry_size != 0 {
-        return Some(false);
+        return false;
     }
     let offset = (u64::from(boot.number) - 1) * entry_size;
-    if !read(array_lba + offset / 512, &mut sector) {
-        return Some(false);
+    let Some(lba) = array_lba.checked_add(offset / 512) else { return false };
+    if lba >= capacity || !read(lba, &mut sector) {
+        return false;
     }
     let at = (offset % 512) as usize;
-    let first = field(&sector, at + 32, 8);
-    let last = field(&sector, at + 40, 8);
-    let mut unique = [0u8; 16];
-    unique.copy_from_slice(&sector[at + 16..at + 32]);
+    let first = le(&sector[at + 32..at + 40]);
+    let last = le(&sector[at + 40..at + 48]);
     let guid_ok = match boot.signature {
-        DiskSignature::Gpt(guid) => guid == unique,
-        DiskSignature::Unknown(_) => true,
-        _ => false,
+        DiskSignature::Gpt(guid) => guid[..] == sector[at + 16..at + 32],
+        DiskSignature::Mbr(_) => false,
+        DiskSignature::None | DiskSignature::Unknown(_) => true,
     };
-    Some(guid_ok && first == boot.start_lba && last + 1 == first + boot.size_blocks)
+    guid_ok && first == boot.start_lba && last.checked_add(1) == first.checked_add(boot.size_blocks)
 }

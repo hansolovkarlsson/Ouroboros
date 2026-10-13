@@ -159,29 +159,43 @@ pub(crate) fn net_ack_interrupt() {
 /// `accept` is asked once the stick is initialised, before it is installed:
 /// the boot-time step's question, whether it is the boot disk
 /// (`main.rs::install_boot_disk`, one-disk step 3). A stick refused is
-/// logged and left uninstalled, and the answer is `false`.
-pub fn try_install_usb_block_device(accept: impl FnOnce(&mut crate::usb_msd::Device) -> bool) -> bool {
+/// left uninstalled, and the caller says why.
+pub fn try_install_usb_block_device(accept: impl FnOnce(&mut crate::usb_msd::Device) -> bool) -> UsbInstall {
     if block_device_installed() {
-        return true;
+        return UsbInstall::Installed;
     }
     if !crate::xhci::storage_present() {
-        return false;
+        return UsbInstall::Absent;
     }
     match crate::usb_msd::Device::init() {
         Ok(mut device) => {
             if !accept(&mut device) {
-                console::println!("Ouroboros kernel: usb-msd is not the boot disk - not installed");
-                return false;
+                return UsbInstall::Refused;
             }
             install_block_device(crate::block::BlockDevice::UsbMsd(device));
             console::println!("Ouroboros kernel: usb-msd block device installed");
-            true
+            UsbInstall::Installed
         }
         Err(e) => {
             console::println!("Ouroboros kernel: usb-msd init failed ({e})");
-            false
+            UsbInstall::Failed
         }
     }
+}
+
+/// What [`try_install_usb_block_device`] did, so its caller can say why a
+/// stick was not installed (the review of #287: one "not the boot disk" line
+/// had stood for all three).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum UsbInstall {
+    /// A block device is installed: this stick, or one already there.
+    Installed,
+    /// The xHCI scan found no storage device.
+    Absent,
+    /// A stick was there and its initialisation failed.
+    Failed,
+    /// A stick was initialised and `accept` refused it.
+    Refused,
 }
 
 /// Whether the calling task may use the `BLOCK_*` syscalls: whoever holds
