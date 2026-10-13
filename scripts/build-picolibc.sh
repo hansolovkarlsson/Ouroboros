@@ -53,5 +53,14 @@ mkdir -p "$PREBUILT/lib"
 cp "$INSTALL/lib/libc.a" "$PREBUILT/lib/libc.a"
 "$STRIP" --strip-debug "$PREBUILT/lib/libc.a"
 cp -R "$INSTALL/include" "$PREBUILT/include"
+# This project's changes to picolibc's headers, one patch each in
+# libc/picolibc-patches/, applied to every regenerated tree; a patch that no
+# longer applies stops the script rather than drop the change silently. The
+# first: C11's comparison macros as builtins for a compiler that has them
+# (DevTools's cc, docs/handoffs/closed/2026-10-13-from-devtools-picolibc-comparison-builtins.md).
+for p in "$ROOT"/libc/picolibc-patches/*.patch; do
+    [ -e "$p" ] || continue
+    patch -s -p1 -d "$PREBUILT" < "$p" || { echo "build-picolibc: $p no longer applies"; exit 1; }
+done
 echo "$VERSION" > "$PREBUILT/VERSION"
 echo "picolibc-prebuilt regenerated ($VERSION), $(du -sh "$PREBUILT" | cut -f1)"
