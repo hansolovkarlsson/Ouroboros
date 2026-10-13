@@ -404,6 +404,16 @@ pub const MSG_CALL: u64 = 29;
 /// [`BLOCK_READ`] for who may call this (only [`FSD_TASK`]).
 pub const BLOCK_INFO: u64 = 26;
 
+/// `()` -> the start LBA of the partition the system booted from, on the
+/// installed block device, or `0` when that is unknown: the firmware named
+/// no partition, or the device installed is not the disk it is on (a
+/// fallback, or a stick taken by `MOUNT`'s rescan). `0` is never a partition
+/// start, sector 0 holding the table. [`BLOCK_ERR_NO_DEVICE`] with no device,
+/// [`BLOCK_ERR_DENIED`] for any caller but [`FSD_TASK`], as [`BLOCK_INFO`].
+/// For `fsd` to mount as `/` the partition beside the ESP rather than the
+/// ESP (one-disk step 4, docs/roadmap/roadmap-one-disk.md).
+pub const BLOCK_BOOT_START: u64 = 77;
+
 /// `(lba, buf ptr)` -> `0` on success, or a `BLOCK_ERR_*` code. Reads
 /// exactly one [`BLOCK_SECTOR_SIZE`]-byte sector into `buf` (the length
 /// is implied, not passed). **Gated to [`FSD_TASK`]**: any other caller

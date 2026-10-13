@@ -88,14 +88,24 @@ impl Filesystem {
 
     /// Discover the disk's partitions (MBR or GPT - see `partition::discover`)
     /// and mount the first one that holds a filesystem we recognize. Each
-    /// partition is probed as FAT32 ([`fat32::Fs::mount_at`]) then exFAT
-    /// ([`exfat::Fs::mount_at`]), taking the first that validates; a future
-    /// format (ext2, ...) adds another probe here and its own arm. Returns
-    /// [`Error::NoFat32Partition`] if no partition mounts as any known format.
+    /// partition is probed as FAT32 ([`fat32::Fs::mount_at`]), exFAT
+    /// ([`exfat::Fs::mount_at`]) and ext2 ([`ext2::Fs::mount_at`]), taking
+    /// the first that validates. Returns [`Error::NoFat32Partition`] if no
+    /// partition mounts as any known format.
+    ///
+    /// The partition the system booted from, when the kernel knows it is on
+    /// this disk ([`Disk::boot_partition_start`]), is passed over while any
+    /// other partition mounts: on one disk carrying the ESP and a root beside
+    /// it, the root is `/`, whatever their order. A disk whose only
+    /// filesystem is the boot partition mounts it as before (one-disk step 4,
+    /// docs/roadmap/roadmap-one-disk.md).
     pub fn mount(mut disk: Disk) -> Result<Self, Error> {
         let mut parts = [0u64; partition::MAX_PARTITIONS];
         let count = partition::discover(&mut disk, &mut parts)?;
-        for &lba in &parts[..count] {
+        let boot = disk.boot_partition_start();
+        let others = parts[..count].iter().filter(|&&lba| Some(lba) != boot);
+        let last = parts[..count].iter().filter(|&&lba| Some(lba) == boot);
+        for &lba in others.chain(last) {
             // The layout arithmetic is 32-bit (partitions past 2 TB aren't a
             // concern here); a start LBA that doesn't fit just isn't tried.
             let Ok(lba32) = u32::try_from(lba) else {

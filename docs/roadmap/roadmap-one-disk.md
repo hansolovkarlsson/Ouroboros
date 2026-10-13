@@ -6,9 +6,9 @@ merges with item 1). One disk carries both the boot partition (FAT32, the
 ESP) and a root partition (ext2 or exFAT). It may be a stick, a card or a
 virtual disk, and the system needs nothing else to boot and run.
 
-**Status 2026-10-13: steps 1 to 3 built** (`kernel/src/bootdisk.rs`,
+**Status 2026-10-13: steps 1 to 4 built** (`kernel/src/bootdisk.rs`,
 `scripts/disksig.py`, `make test-boot-partition`); the rest planned. Grounded in the code at
-`ebdebc1` (v0.23.0). Four decisions are Hans's to make before step 4, listed
+`ebdebc1` (v0.23.0). Four decisions are Hans's, D1 settled (ext2), listed
 under "Decisions" below. Claims not yet checked on this tree are marked
 (predicted).
 
@@ -229,7 +229,25 @@ Not covered, as before step 3: only the first virtio-blk slot is probed,
 and the xHCI drives only the first storage device it finds, so two sticks
 are still "first found" whichever was booted.
 
-**4. `fsd` takes the root by the rule, and a combined image exists.**
+**4. `fsd` takes the root by the rule, and a combined image exists. Built
+2026-10-13**, with D1 settled as ext2. A new system call,
+`BLOCK_BOOT_START` (77), gated to `fsd` like the other `BLOCK_*` calls,
+answers the boot partition's start LBA on the installed device, or 0 when
+that device is not known to be the boot disk. The kernel keeps it beside the
+device and every install must pass it (`install_block_device`'s second
+argument), so the fallback and `MOUNT`'s late stick answer 0. The USB stick
+is now always asked whether it is the boot disk, even when it is installed
+regardless, so a stick booted from tells `fsd` so. `vfs::mount` tries the
+boot partition last. `scripts/mkdisk.py` (`make disk`, `make run-disk`)
+builds `build/disk.img`: the FAT32 ESP as partition 1 (type 0x0c,
+bootable), the ext2 root as partition 2, signed. `make test-boot-partition`
+boots it on virtio and as a USB stick, and every boot now checks the
+filesystem `fsd` mounted: ext2 for `disk.img` and `espext2.img`, FAT32 for
+`esp.img`, exFAT for `espexfat.img`. Mutations: `fsd` ignoring the boot
+partition, and both `disk.img` boots mounted the ESP; the kernel installing
+the stick with no start, and the USB boot did. The ESP still carries the
+whole tree, `/bin` and `/etc` included, as every image's does; what the ESP
+needs once a root sits beside it is step 5's question. Planned as:
 - `fsd` asks the kernel for the boot partition: a new syscall, or a field of
   an existing one. That is settled at the step, and the number goes in
   `syscall-abi`.
@@ -274,6 +292,7 @@ there.
   re-staged from the Mac needs `sudo`. exFAT is writable by Finder and by
   `sdcard.sh` as today, but it warns that accounts are not secure.
   **Recommended: ext2**, staged by writing a built image (D2).
+  **Settled by Hans on 2026-10-13: ext2.**
 - **D2. How a physical stick is staged.**
   - (a) Write the whole `disk.img` to the device: simple and exact, but it
     replaces accounts made on the device. `KEEP_ETC` would then have to

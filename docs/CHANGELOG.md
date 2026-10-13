@@ -37,6 +37,15 @@ disk that is not it is installed only as the fallback, with a line saying
 so. `make test-boot-partition` boots from a stick beside an unrelated
 virtio disk and reads the ESP's tree with `ls /`.
 
+**One disk carries the ESP and the root (2026-10-13).** Step 4. `make
+disk` builds `build/disk.img`, the FAT32 ESP as partition 1 and an ext2
+root as partition 2 (D1, settled by Hans: ext2, where `fsd` enforces
+permissions). `fsd` mounts the root and not the ESP because the kernel now
+tells it which partition it booted from: `BLOCK_BOOT_START` (77), the start
+LBA when the installed disk is the boot disk, else 0, and `fsd` tries that
+partition last. Booted on virtio and as a USB stick by `make
+test-boot-partition`, which now checks the filesystem every boot mounts.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

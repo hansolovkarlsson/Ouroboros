@@ -37,6 +37,19 @@ impl Disk {
         }
     }
 
+    /// The start LBA of the partition the system booted from, when the kernel
+    /// matched this device as the disk it is on, else `None`: the firmware
+    /// named no partition, or the device is a fallback or a stick taken late
+    /// (`BLOCK_BOOT_START`, one-disk step 4). A kernel without the call
+    /// answers an error, which is `None` too.
+    pub fn boot_partition_start(&self) -> Option<u64> {
+        match syscall4(syscall_abi::BLOCK_BOOT_START, 0, 0, 0, 0) {
+            0 => None,
+            code if code >= syscall_abi::FS_ERR_MIN => None,
+            start => Some(start),
+        }
+    }
+
     pub fn read_sector(&mut self, sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), DiskError> {
         match syscall4(syscall_abi::BLOCK_READ, sector, buf.as_mut_ptr() as u64, 0, 0) {
             0 => Ok(()),
