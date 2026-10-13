@@ -292,20 +292,6 @@ def run_probes(guest, smp):
     guest.type_line("echo after-dead-consumer")
     got["dead"] = guest.wait_for(r"\nafter-dead-consumer\r?\n[\s\S]*" + PROMPT, timeout=60)
     got["dead_out"] = guest.transcript()[before:]
-    # The last stage gone, two stages past a producer that holds a core: the
-    # shell must end the pipeline, not wait on the holding producer with the
-    # keyboard still its own, where Ctrl+C cannot reach it (the fourth review
-    # of #279). In practice `grep` is gone before `cat` is spawned, so this
-    # passes through `cat`'s SPAWN refusal; the shell's other guard, a refused
-    # FG to a last stage that died after that check, covers a window no rig
-    # can force (with that guard disabled this still passes, on 4 cores and
-    # on 1). If the shell does wait, Ctrl+\\ gets it back for the next steps.
-    guest.type_line("coreprobe hold | cat | grep (")
-    guest.type_line("echo after-dead-last-stage")
-    got["dead_last"] = guest.wait_for(r"\nafter-dead-last-stage\r?\n[\s\S]*" + PROMPT, timeout=60)
-    if not got["dead_last"]:
-        guest.type_raw(b"\x1c")
-        guest.wait_for(PROMPT, timeout=30)
     return got
 
 
@@ -398,8 +384,6 @@ def probe_checks(name, smp, boot_index, probe):
     checks.append((f"{name}: `coreprobe | grep (` with grep gone first: grep's complaint, no other pipe error, and the shell answered",
                    probe.get("dead", False) and "bad pattern" in dead_out
                    and re.search(r"pipe: (?!grep exited)", dead_out) is None))
-    checks.append((f"{name}: `coreprobe hold | cat | grep (`: the last stage gone, the shell ended the pipeline and answered with no Ctrl+C",
-                   probe.get("dead_last", False)))
     return checks
 
 

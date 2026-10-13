@@ -922,11 +922,12 @@ The small open tails those arcs deliberately left:
   owner whoever it interrupted.)
 
 - **A pipeline's lifetime is managed by snapshots (found 2026-10-12, the
-  fourth review of #279; all but the first true on `main` before it).**
-  The shell decides a pipeline's fate from moments: `SPAWN` checks a
-  producer's own consumer when it is spawned, and the shell checks the last
-  stage when it hands it the keyboard (`FG`), and either ends the pipeline
-  if its stage is gone. A stage that dies after those moments leaves the
+  fourth and fifth reviews of #279; true on `main` before it but for one
+  narrowing, the first sentence's).**
+  The shell decides a pipeline's fate from a moment: `SPAWN` checks a
+  producer's own consumer when it is spawned (`main`'s `DELEGATE` loop
+  checked every link once, after every spawn), and the pipeline is ended if
+  it is gone. A stage that dies after that moment leaves the
   rest running: a producer whose consumer exited later keeps going with its
   writes failing (a holding one keeps its core), and when the keyboard's
   owner dies the keyboard reverts to the shell, whose Ctrl+C then interrupts
@@ -941,10 +942,19 @@ The small open tails those arcs deliberately left:
   and a producer whose consumer is gone ends on its next write (a broken
   pipe), so no moment's check has to be right. `make test-smp`'s
   `coreprobe | grep (` check cannot force which stage runs first, so it may
-  pass by the path where `coreprobe` runs, and its `coreprobe hold | cat |
-  grep (` check passes through `cat`'s `SPAWN` refusal; the shell's refused
-  `FG` to a last stage that died after that check covers a window no rig can
-  force (with it disabled the check still passed, on 4 cores and on 1).
+  pass by the path where `coreprobe` runs. The fifth review of #279 added
+  what a moment's check cannot tell apart: a consumer that exited 0 without
+  reading (`cp a b | echo hi`, `mkdir d | uptime`) looks the same as one
+  that refused its arguments, so its producers are ended or never run,
+  silently (true on `main` through the `DELEGATE` loop); a guard on a refused
+  `FG` was built and taken out again for that reason, since it killed `cp`
+  mid-copy when `echo` had already finished, and `FG` is also refused when
+  the shell no longer owns the keyboard. `KILL` of a stage on another core
+  answers before that core has ended it, so the shell can be back at its
+  prompt with the stage still alive for a moment. And the shell spells
+  "end this pipeline" three ways (`end_pipeline`, `kill_and_reap` loops that
+  drop exit codes, the redirect overflow's own loop). The fix is one design,
+  not more guards: the pipeline as a job, ended as a whole by identity.
 
 - **End-of-stream only from a program that exits (found 2026-10-12, the
   second review of #279).** A pipeline's consumer learns its producer is done

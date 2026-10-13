@@ -1220,15 +1220,15 @@ fn run_head_pipeline(
             }
             Err(code) if code == syscall_abi::TASK_ERR_NO_SUCH_TASK && i + 1 < prog_stages.len() => {
                 // SPAWN found this stage's consumer, a later stage, already
-                // gone: the ordinary case of a stage that rejected its own
-                // arguments (a bad `grep` pattern, an unknown flag), printed
-                // its reason and exited. It has told the user what went
-                // wrong, so say nothing more; tear down, and let a stage that
-                // ended on its own say how. `KILL` frees a live stage and
-                // refuses one that already exited, which `wait_pipe_stage`
-                // reaps, silent for exit 0 and reporting anything else
-                // (`kill_and_reap` would throw that code away). The shell's
-                // DELEGATE answered this until SPAWN granted the link.
+                // gone: usually a stage that rejected its own arguments (a
+                // bad `grep` pattern, an unknown flag), printed its reason
+                // and exited, so say nothing more; tear down, and let a stage
+                // that ended on its own say how (`end_pipeline`). The shell's
+                // DELEGATE answered this until SPAWN granted the link, with
+                // the same limit: a consumer that exited 0 without reading
+                // (`cp a b | echo hi`) also ends its producers, which then
+                // never run, silently (ROADMAP.md's follow-up on a
+                // pipeline's lifetime).
                 end_pipeline(&prog_stages[i + 1..], &slots[i + 1..prog_stages.len()]);
                 return;
             }
@@ -1307,23 +1307,7 @@ fn run_head_pipeline(
         // keyboard (an interactive last stage, e.g. `ls -l | more`) and reap
         // every stage in order.
         PipeSink::Console => {
-            // The keyboard goes to the last stage, which must still be there:
-            // a last stage gone already (a bad `grep` pattern further down
-            // than the stage SPAWN checked, or one that failed just after)
-            // would leave the keyboard with the shell, and Ctrl+C could not
-            // end a producer still running (the fourth review of #279). So a
-            // refused FG ends the pipeline as SPAWN's refusal does: live
-            // stages killed, the rest reaped with their exit codes. A
-            // pipeline that already finished (`mkdir | wc`) comes out the
-            // same as it would below: every stage reaped, codes reported.
-            let fg = syscall4(syscall_abi::FG, slots[last], 1, 0, 0);
-            if fg != 0 {
-                if fg != syscall_abi::TASK_ERR_NO_SUCH_TASK {
-                    print_fs_error("pipe: could not hand the keyboard to the last stage", fg);
-                }
-                end_pipeline(prog_stages, &slots[..prog_stages.len()]);
-                return;
-            }
+            syscall4(syscall_abi::FG, slots[last], 1, 0, 0); // foreground command
             for i in 0..prog_stages.len() {
                 let cmd = prog_stages[i].split_whitespace().next().unwrap_or("stage");
                 wait_pipe_stage(cmd, slots[i]);
@@ -1407,10 +1391,13 @@ fn drain_program_output(slot: u64) {
 }
 
 /// Ends a pipeline the shell will not run to completion: each stage still
-/// live is killed (`KILL` frees it), and each that already exited is reaped
-/// by [`wait_pipe_stage`], silent for exit 0 and reporting anything else, so
-/// a stage that failed on its own still says how. `stages` and `slots` are
-/// the same stages, in the same order.
+/// live is killed (`KILL` ends it, at once on this core or, on another, at
+/// that core's next entry into the kernel), and each that already exited is
+/// reaped by [`wait_pipe_stage`], silent for exit 0 and reporting anything
+/// else, so a stage that failed on its own still says how. `stages` and
+/// `slots` are the same stages, in the same order. Its limits (a stored slot
+/// is killed by number; a consumer that exited 0 without reading ends its
+/// producers too) are ROADMAP.md's follow-up on a pipeline's lifetime.
 fn end_pipeline(stages: &[&str], slots: &[u64]) {
     for (stage, &slot) in stages.iter().zip(slots) {
         if syscall(syscall_abi::KILL, slot) != 0 {
