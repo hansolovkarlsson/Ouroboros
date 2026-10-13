@@ -319,7 +319,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers check-statics test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-spawn-owner test-proc-cpus test-boot-partition test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers check-statics test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-spawn-owner test-proc-cpus test-boot-partition test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -1506,6 +1506,28 @@ $(EXT2_PART): esp
 image-ext2: image $(EXT2_PART)
 	python3 scripts/mkext2.py
 
+# One disk for boot and root (one-disk step 4, docs/roadmap/roadmap-one-disk.md):
+# build/disk.img, MBR, the FAT32 ESP as partition 1 and the ext2 root as
+# partition 2 (scripts/mkdisk.py), the conventional order espext2.img could
+# not use while fsd mounted the first partition it found. The kernel names the
+# partition it booted from and fsd mounts the other as `/`.
+DISK_IMG := $(BUILD_DIR)/disk.img
+
+disk: image $(EXT2_PART)
+	python3 scripts/mkdisk.py
+
+run-disk: disk
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(DISK_IMG),format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
 # Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
 # then fsd mounts the ext2 partition (partition 1) read-only - so `ls`/`cat`/
 # pipelines read from ext2 (their /bin binaries live there too).
@@ -1966,8 +1988,12 @@ test-proc-cpus: image
 # one installed, and `ls /` after login must show the ESP's tree), and one
 # booted from NVMe, which the kernel cannot drive, where neither disk it can is
 # the boot disk and virtio goes in as the fallback with its reason; every boot
-# alone on its bus must install its own disk directly. About three minutes.
-test-boot-partition: image image-gpt image-ext2 image-exfat $(USBSTICK_IMG)
+# alone on its bus must install its own disk directly. Since step 4, disk.img
+# (the ESP first, the ext2 root second) on virtio and as a USB stick, where
+# fsd must mount the root, and every boot checks what fsd mounted; and copies
+# of disk.img and espgpt.img for `format` taking the root, never the ESP or a
+# GPT disk, and for a root that fails to mount being said. About five minutes.
+test-boot-partition: image image-gpt image-ext2 image-exfat disk $(USBSTICK_IMG)
 	python3 scripts/test-boot-partition.py
 
 # cond's escape sequences on a framebuffer, read off the pixels

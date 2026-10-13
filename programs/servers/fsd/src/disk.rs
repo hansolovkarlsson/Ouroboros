@@ -5,6 +5,7 @@
 //! this task's slot (`syscall_abi::FSD_TASK`) - see `syscall.rs`'s
 //! `block_access_allowed`.
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::syscall4;
 
 /// One sector, matching `syscall_abi::BLOCK_SECTOR_SIZE` (duplicated
@@ -24,6 +25,11 @@ pub enum DiskError {
 /// Zero-sized handle - all real state (the device, its rings/buffers)
 /// lives in the kernel. Exists as a struct so `fat32::Fs` can hold and
 /// call it exactly the way it held the old `BlockDevice`.
+/// Whether this server has rewritten the partition table this boot
+/// ([`Disk::table_rewritten`]). fsd is one task, so an atomic is only the
+/// spelling of a mutable static, not a concurrency claim.
+static TABLE_REWRITTEN: AtomicBool = AtomicBool::new(false);
+
 pub struct Disk;
 
 impl Disk {
@@ -34,6 +40,32 @@ impl Disk {
         match syscall4(syscall_abi::BLOCK_INFO, 0, 0, 0, 0) {
             code if code >= syscall_abi::FS_ERR_MIN => Err(DiskError::NoDevice),
             capacity => Ok(capacity),
+        }
+    }
+
+    /// Mark the partition table as rewritten by this server (`erase`,
+    /// `partition`), before the first sector is written: the kernel's
+    /// boot partition start was read from the table at boot, and after a
+    /// rewrite it could name a new, unrelated partition, which would then be
+    /// passed over (the medium review of #288). From then on this boot,
+    /// [`boot_partition_start`](Self::boot_partition_start) answers `None`.
+    pub fn table_rewritten(&self) {
+        TABLE_REWRITTEN.store(true, Ordering::Relaxed);
+    }
+
+    /// The start LBA of the partition the system booted from, when the kernel
+    /// matched this device as the disk it is on, else `None`: the firmware
+    /// named no partition, or the device is a fallback or a stick taken late
+    /// (`BLOCK_BOOT_START`, one-disk step 4). A kernel without the call
+    /// answers an error, which is `None` too.
+    pub fn boot_partition_start(&self) -> Option<u64> {
+        if TABLE_REWRITTEN.load(Ordering::Relaxed) {
+            return None;
+        }
+        match syscall4(syscall_abi::BLOCK_BOOT_START, 0, 0, 0, 0) {
+            0 => None,
+            code if code >= syscall_abi::FS_ERR_MIN => None,
+            start => Some(start),
         }
     }
 

@@ -1171,16 +1171,18 @@ fn init_storage() -> Option<virtio_blk::Device> {
     // SAFETY: the device is initialised, and nothing else holds it yet.
     let capacity = device.capacity_sectors();
     let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
-    if bootdisk::is_boot_disk(&mut read, capacity) == Some(false) {
+    let matched = bootdisk::is_boot_disk(&mut read, capacity);
+    if matched == Some(false) {
         console::println!("Ouroboros kernel: virtio-blk is not the boot disk - held, installed only if no other disk is");
         return Some(device);
     }
+    let boot_start = bootdisk::start_if(matched);
 
     // Custody goes to the BLOCK cell for the filesystem server to
     // reach via the BLOCK_* syscalls - the kernel no longer mounts
     // (or contains) any filesystem itself; the server's own boot-time
     // auto-mount takes it from here.
-    syscall::install_block_device(block::BlockDevice::Virtio(device));
+    syscall::install_block_device(block::BlockDevice::Virtio(device), boot_start);
     console::println!("Ouroboros kernel: block device installed for the filesystem server");
     None
 }
@@ -1190,15 +1192,21 @@ fn init_storage() -> Option<virtio_blk::Device> {
 /// back, which goes in instead as the fallback. With the boot partition
 /// unknown both answer `None` and the order is the one before step 3:
 /// virtio, then USB. The `MOUNT` syscall's later rescan, which replaces the
-/// device with a stick attached late, is unchanged.
+/// device with a stick attached late, installs whatever stick it finds but
+/// asks it the same question, so `BLOCK_BOOT_START` answers for it too.
 fn install_boot_disk(held: Option<virtio_blk::Device>) {
-    let outcome = syscall::try_install_usb_block_device(|usb| match held {
-        None => true,
-        Some(_) => {
-            let capacity = usb.capacity_sectors();
-            // SAFETY: the stick is initialised and not yet installed.
-            let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { usb.read_sector(lba, buf) }.is_ok();
-            bootdisk::is_boot_disk(&mut read, capacity) == Some(true)
+    let outcome = syscall::try_install_usb_block_device(|usb| {
+        let capacity = usb.capacity_sectors();
+        // SAFETY: the stick is initialised and not yet installed.
+        let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { usb.read_sector(lba, buf) }.is_ok();
+        let matched = bootdisk::is_boot_disk(&mut read, capacity);
+        // With no virtio disk held back the stick goes in whatever it is (the
+        // Pi and Parallels boot from a disk the kernel cannot drive and run
+        // from the stick); asked all the same, so `fsd` learns whether it holds
+        // the boot partition.
+        match (held.is_some(), matched) {
+            (true, Some(true)) | (false, _) => Some(bootdisk::start_if(matched)),
+            (true, _) => None,
         }
     });
     let Some(device) = held else { return };
@@ -1219,7 +1227,7 @@ fn install_boot_disk(held: Option<virtio_blk::Device>) {
             return;
         }
     };
-    syscall::install_block_device(block::BlockDevice::Virtio(device));
+    syscall::install_block_device(block::BlockDevice::Virtio(device), 0);
     console::println!("Ouroboros kernel: virtio-blk installed as the fallback: {why}");
 }
 

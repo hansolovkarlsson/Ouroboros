@@ -87,35 +87,60 @@ impl Filesystem {
     }
 
     /// Discover the disk's partitions (MBR or GPT - see `partition::discover`)
-    /// and mount the first one that holds a filesystem we recognize. Each
-    /// partition is probed as FAT32 ([`fat32::Fs::mount_at`]) then exFAT
-    /// ([`exfat::Fs::mount_at`]), taking the first that validates; a future
-    /// format (ext2, ...) adds another probe here and its own arm. Returns
-    /// [`Error::NoFat32Partition`] if no partition mounts as any known format.
-    pub fn mount(mut disk: Disk) -> Result<Self, Error> {
+    /// and mount one that holds a filesystem we recognize: each is probed as
+    /// FAT32 ([`fat32::Fs::mount_at`]), exFAT ([`exfat::Fs::mount_at`]) and
+    /// ext2 ([`ext2::Fs::mount_at`]), in table order, except as below.
+    /// Returns [`Error::NoFat32Partition`] if no partition mounts as any
+    /// known format. The `bool` is whether the boot partition was mounted
+    /// although the disk has others, every one of which failed to mount:
+    /// the caller says so, since a root that did not probe then leaves the
+    /// ESP as `/` (the high review of #288).
+    ///
+    /// The partition the system booted from, when the kernel knows it is on
+    /// this disk ([`Disk::boot_partition_start`]), is passed over while any
+    /// other partition mounts: on one disk carrying the ESP and a root beside
+    /// it, the root is `/`, whatever their order. A disk whose only
+    /// filesystem is the boot partition mounts it as before (one-disk step 4,
+    /// docs/roadmap/roadmap-one-disk.md).
+    pub fn mount(mut disk: Disk) -> Result<(Self, bool), Error> {
         let mut parts = [0u64; partition::MAX_PARTITIONS];
         let count = partition::discover(&mut disk, &mut parts)?;
-        for &lba in &parts[..count] {
+        let boot = disk.boot_partition_start();
+        let (order, count, has_others) = root_order(&parts, count, boot);
+        for &lba in &order[..count] {
             // The layout arithmetic is 32-bit (partitions past 2 TB aren't a
             // concern here); a start LBA that doesn't fit just isn't tried.
             let Ok(lba32) = u32::try_from(lba) else {
                 continue;
             };
-            if let Ok(fs) = fat32::Fs::mount_at(Disk, lba32) {
-                return Ok(Filesystem::Fat32(fs));
-            }
-            if let Ok(fs) = exfat::Fs::mount_at(Disk, lba32) {
-                return Ok(Filesystem::ExFat(fs));
-            }
-            if let Ok(fs) = ext2::Fs::mount_at(Disk, lba32) {
-                return Ok(Filesystem::Ext2(fs));
+            let fell_back = has_others && Some(lba) == boot;
+            if let Some(fs) = Self::probe(lba32) {
+                return Ok((fs, fell_back));
             }
         }
         Err(Error::NoFat32Partition)
     }
 
-    /// Mount the disk's `index`-th partition (same MBR/GPT discovery order as
-    /// [`mount`](Self::mount), which mounts the first that validates). Probes
+    /// The filesystem at `lba`, as FAT32, exFAT or ext2, the first that
+    /// validates; `None` when none does. What [`mount`](Self::mount) tries
+    /// at each partition, and what `format` asks to find the root by the
+    /// same rule.
+    pub fn probe(lba: u32) -> Option<Self> {
+        if let Ok(fs) = fat32::Fs::mount_at(Disk, lba) {
+            return Some(Filesystem::Fat32(fs));
+        }
+        if let Ok(fs) = exfat::Fs::mount_at(Disk, lba) {
+            return Some(Filesystem::ExFat(fs));
+        }
+        if let Ok(fs) = ext2::Fs::mount_at(Disk, lba) {
+            return Some(Filesystem::Ext2(fs));
+        }
+        None
+    }
+
+    /// Mount the disk's `index`-th partition, counted in the MBR/GPT
+    /// discovery order (the table's, not [`mount`](Self::mount)'s, which tries
+    /// the boot partition last: on `disk.img` tree 0 is index 1). Probes
     /// FAT32-then-exFAT-then-ext2 at that one partition. The multi-mount entry
     /// point (cluster Phase 0): a client mounts a *specific* partition into a
     /// tree rather than taking whatever validates first. Returns
@@ -301,4 +326,32 @@ impl Filesystem {
             _ => Err(Error::Unsupported),
         }
     }
+}
+
+/// `parts[..count]` in the order a root is looked for: every partition but
+/// the one the system booted from, in table order, then that one. With how
+/// many, and whether any other partition is there at all. One list, so
+/// [`Filesystem::mount`] and `format` cannot order it differently (the
+/// medium review of #288).
+pub fn root_order(
+    parts: &[u64; partition::MAX_PARTITIONS],
+    count: usize,
+    boot: Option<u64>,
+) -> ([u64; partition::MAX_PARTITIONS], usize, bool) {
+    let mut order = [0u64; partition::MAX_PARTITIONS];
+    let mut n = 0;
+    for &lba in &parts[..count] {
+        if Some(lba) != boot {
+            order[n] = lba;
+            n += 1;
+        }
+    }
+    let has_others = n > 0;
+    for &lba in &parts[..count] {
+        if Some(lba) == boot {
+            order[n] = lba;
+            n += 1;
+        }
+    }
+    (order, n, has_others)
 }
