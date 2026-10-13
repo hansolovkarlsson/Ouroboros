@@ -749,8 +749,13 @@ not yet checked on this tree are marked (predicted).
       kernel can read no storage there but a passed-through stick, see the
       usb-storage postmortem's first finding), so its first experiment is
       whether Parallels' firmware boots from the passed-through stick, which
-      would make the `.hdd` unnecessary. A plan document comes first, as for
-      every arc; not yet written.
+      would make the `.hdd` unnecessary. **The plan is
+      [`roadmap-one-disk.md`](roadmap/roadmap-one-disk.md)** (2026-10-13):
+      the kernel names its boot partition from the firmware's device path,
+      takes that disk as its block device, and `fsd` mounts as `/` the
+      partition beside the ESP, so the ESP comes first. It found the
+      Parallels question answered once already, in 2026-08 ("Mode B"), so
+      its step 0 re-confirms it. Four decisions are Hans's before step 4.
 - [x] **4. Multi-core. DONE 2026-10-12, moved to
       [`roadmap-completed.md`](roadmap-completed.md)** with its sub-items;
       the plan is [`roadmap-smp.md`](roadmap/roadmap-smp.md). Its open tails
