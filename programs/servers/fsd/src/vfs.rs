@@ -106,27 +106,36 @@ impl Filesystem {
         let mut parts = [0u64; partition::MAX_PARTITIONS];
         let count = partition::discover(&mut disk, &mut parts)?;
         let boot = disk.boot_partition_start();
-        let others = parts[..count].iter().filter(|&&lba| Some(lba) != boot);
-        let last = parts[..count].iter().filter(|&&lba| Some(lba) == boot);
-        let has_others = parts[..count].iter().any(|&lba| Some(lba) != boot);
-        for &lba in others.chain(last) {
-            let fell_back = has_others && Some(lba) == boot;
+        let (order, count, has_others) = root_order(&parts, count, boot);
+        for &lba in &order[..count] {
             // The layout arithmetic is 32-bit (partitions past 2 TB aren't a
             // concern here); a start LBA that doesn't fit just isn't tried.
             let Ok(lba32) = u32::try_from(lba) else {
                 continue;
             };
-            if let Ok(fs) = fat32::Fs::mount_at(Disk, lba32) {
-                return Ok((Filesystem::Fat32(fs), fell_back));
-            }
-            if let Ok(fs) = exfat::Fs::mount_at(Disk, lba32) {
-                return Ok((Filesystem::ExFat(fs), fell_back));
-            }
-            if let Ok(fs) = ext2::Fs::mount_at(Disk, lba32) {
-                return Ok((Filesystem::Ext2(fs), fell_back));
+            let fell_back = has_others && Some(lba) == boot;
+            if let Some(fs) = Self::probe(lba32) {
+                return Ok((fs, fell_back));
             }
         }
         Err(Error::NoFat32Partition)
+    }
+
+    /// The filesystem at `lba`, as FAT32, exFAT or ext2, the first that
+    /// validates; `None` when none does. What [`mount`](Self::mount) tries
+    /// at each partition, and what `format` asks to find the root by the
+    /// same rule.
+    pub fn probe(lba: u32) -> Option<Self> {
+        if let Ok(fs) = fat32::Fs::mount_at(Disk, lba) {
+            return Some(Filesystem::Fat32(fs));
+        }
+        if let Ok(fs) = exfat::Fs::mount_at(Disk, lba) {
+            return Some(Filesystem::ExFat(fs));
+        }
+        if let Ok(fs) = ext2::Fs::mount_at(Disk, lba) {
+            return Some(Filesystem::Ext2(fs));
+        }
+        None
     }
 
     /// Mount the disk's `index`-th partition, counted in the MBR/GPT
@@ -317,4 +326,32 @@ impl Filesystem {
             _ => Err(Error::Unsupported),
         }
     }
+}
+
+/// `parts[..count]` in the order a root is looked for: every partition but
+/// the one the system booted from, in table order, then that one. With how
+/// many, and whether any other partition is there at all. One list, so
+/// [`Filesystem::mount`] and `format` cannot order it differently (the
+/// medium review of #288).
+pub fn root_order(
+    parts: &[u64; partition::MAX_PARTITIONS],
+    count: usize,
+    boot: Option<u64>,
+) -> ([u64; partition::MAX_PARTITIONS], usize, bool) {
+    let mut order = [0u64; partition::MAX_PARTITIONS];
+    let mut n = 0;
+    for &lba in &parts[..count] {
+        if Some(lba) != boot {
+            order[n] = lba;
+            n += 1;
+        }
+    }
+    let has_others = n > 0;
+    for &lba in &parts[..count] {
+        if Some(lba) == boot {
+            order[n] = lba;
+            n += 1;
+        }
+    }
+    (order, n, has_others)
 }

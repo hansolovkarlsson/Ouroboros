@@ -265,6 +265,19 @@ three it was split by `accountd`'s, which the rig's new check on what
 mounted caught. The three image scripts share `scripts/mbrdisk.py`, and
 write the same bytes as before.
 
+The medium review of #288 tightened `format` again. It reads the root by
+`mount`'s own order and probe (`vfs::root_order`, `Filesystem::probe`), so
+a partition before the root holding no filesystem is not formatted in its
+place, and it refuses a GPT disk, over which it would have laid a
+filesystem from LBA 1, true on `main` too (rig: `gpt-format`; mutation: the
+refusal dropped, and it failed). The fallback warning and the mount line
+are one write. Kept: with the boot partition unknown, `format` formats
+partition 1, which is then what `/` shows. On the one-disk layout that is
+the ESP, and only naming the root by type closes it. A firmware counting in
+blocks other than 512 bytes cannot skip the wrong partition: its LBAs would
+not match the disk's table, the disk would not be the boot disk, and `fsd`
+would be told 0.
+
 Open for step 5, from that review: the root is the first partition beside
 the boot partition that mounts, which is right for two partitions and a
 guess for more (an exFAT data partition before the root would be `/`).

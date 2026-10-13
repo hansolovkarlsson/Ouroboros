@@ -45,6 +45,12 @@ tells it which partition it booted from (BLOCK_BOOT_START):
 In both, `fsd` must mount ext2, and `ls /` after login must show the root's
 tree, not the ESP's. Every boot checks the filesystem `fsd` mounted as `/`.
 
+and three on copies this script makes, each disk with a signature of its own
+(the reviews of #288): disk-format formats a copy of disk.img's root and
+finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock
+and `fsd` must say it fell back to the ESP; gpt-format runs `format` on a
+copy of espgpt.img, which must be refused.
+
 The ext2 and exFAT boots are the ones that can tell a kernel naming its boot
 partition from one naming the first partition. The stick's QEMU arguments
 and the stall rule are test-usb-hub.py's own (`layout`, `firmware_stalled`),
@@ -53,7 +59,7 @@ own USB boot (no kernel line, a clean fault trace, UsbBootExecCmd last) is
 INCONCLUSIVE, not a failed check and not a pass, and exits 100 as there;
 anything else that keeps the kernel from printing fails. Every image's
 expected line is read before the first boot, so an image this script cannot
-read stops it before anything runs. About four minutes. Run it whenever
+read stops it before anything runs. About five minutes. Run it whenever
 bootdisk.rs, main.rs's choice of block device, or how an image lays out its
 partitions, changes.
 """
@@ -155,6 +161,9 @@ BOOTS = [
     # find_partition took partition 1).
     ("disk-badroot", "disk-badroot.img", "virtio", None, None, "FAT32", False),
     ("disk-format", "disk-format.img", "virtio", None, None, "ext2", False),
+    # A copy of espgpt.img: `format` must refuse a GPT disk, which it would
+    # have laid a filesystem over from LBA 1 (the medium review of #288).
+    ("gpt-format", "gpt-format.img", "virtio", None, None, "FAT32", False),
 ]
 
 
@@ -175,6 +184,10 @@ def make_copies():
         struct.pack_into("<I", data, 440, own)
         with open(os.path.join(BUILD, name), "wb") as fh:
             fh.write(data)
+    # A GPT disk is named by its partition GUID, not the MBR signature, so
+    # its copy needs none of its own: it is never attached beside espgpt.img.
+    with open(os.path.join(BUILD, "espgpt.img"), "rb") as src, open(os.path.join(BUILD, "gpt-format.img"), "wb") as dst:
+        dst.write(src.read())
 
 
 def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
@@ -197,6 +210,9 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
     steps = [("login:", "")]
     if reads_root:
         steps = [("login:", "root"), ("assword", "root"), ("# ", "ls /"), ("# ", "echo after-ls"), ("# ", "")]
+    if label == "gpt-format":
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "format ext2"),
+                 ("# ", "mount -a"), ("# ", "cd /EFI"), ("# ", "cd /"), ("# ", "")]
     if label == "disk-format":
         # Format the root, then look with builtins, since the new root has no
         # /bin: `cd /bin` must fail on the empty ext2, and `cd /esp/EFI` must
@@ -232,9 +248,22 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", out)
             return found.group(1).strip() if found else None
         bin_answer, efi_answer = answer("cd /bin"), answer("cd /esp/EFI")
+        # The remount after the format, not the boot's: the line `mount -a`
+        # itself prints (the medium review of #288 found the boot's line
+        # alone satisfied the check).
+        remount = out.split("format ext2", 1)[1] if "format ext2" in out else ""
         checks += [
+            (f"{label}: `mount -a` after the format mounts ext2", "ext2 mounted" in remount),
             (f"{label}: `format ext2` reformatted the root (`cd /bin` refused)", bool(bin_answer)),
             (f"{label}: the ESP, partition 0, still holds EFI (`cd /esp/EFI` silent)", efi_answer == ""),
+        ]
+    elif label == "gpt-format":
+        after = out.split("format ext2", 1)[1] if "format ext2" in out else ""
+        found = re.search(r"cd /EFI\r?\n([\s\S]*?)# ", out)
+        checks += [
+            (f"{label}: `format` refuses a GPT disk", "not a GPT disk" in after),
+            (f"{label}: the disk mounts after, its ESP whole (`cd /EFI` silent)",
+             "FAT32 mounted" in after and found is not None and found.group(1).strip() == ""),
         ]
     elif label == "disk-badroot":
         checks.append((f"{label}: fsd says it fell back to the boot partition",

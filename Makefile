@@ -1990,8 +1990,9 @@ test-proc-cpus: image
 # the boot disk and virtio goes in as the fallback with its reason; every boot
 # alone on its bus must install its own disk directly. Since step 4, disk.img
 # (the ESP first, the ext2 root second) on virtio and as a USB stick, where
-# fsd must mount the root, and every boot checks what fsd mounted. About four
-# minutes.
+# fsd must mount the root, and every boot checks what fsd mounted; and copies
+# of disk.img and espgpt.img for `format` taking the root, never the ESP or a
+# GPT disk, and for a root that fails to mount being said. About five minutes.
 test-boot-partition: image image-gpt image-ext2 image-exfat disk $(USBSTICK_IMG)
 	python3 scripts/test-boot-partition.py
 

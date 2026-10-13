@@ -1176,7 +1176,7 @@ fn init_storage() -> Option<virtio_blk::Device> {
         console::println!("Ouroboros kernel: virtio-blk is not the boot disk - held, installed only if no other disk is");
         return Some(device);
     }
-    let boot_start = boot_start_if(matched);
+    let boot_start = bootdisk::start_if(matched);
 
     // Custody goes to the BLOCK cell for the filesystem server to
     // reach via the BLOCK_* syscalls - the kernel no longer mounts
@@ -1187,21 +1187,13 @@ fn init_storage() -> Option<virtio_blk::Device> {
     None
 }
 
-/// The boot partition's start LBA when a disk was matched as the boot disk,
-/// else 0: what `BLOCK_BOOT_START` answers `fsd` (one-disk step 4).
-fn boot_start_if(matched: Option<bool>) -> u64 {
-    match (matched, bootdisk::get()) {
-        (Some(true), Some(boot)) => boot.start_lba,
-        _ => 0,
-    }
-}
-
 /// The boot-time USB step, after [`init_storage`]: the USB stick is installed
 /// when it is the boot disk, and otherwise only if no virtio disk was held
 /// back, which goes in instead as the fallback. With the boot partition
 /// unknown both answer `None` and the order is the one before step 3:
 /// virtio, then USB. The `MOUNT` syscall's later rescan, which replaces the
-/// device with a stick attached late, is unchanged.
+/// device with a stick attached late, installs whatever stick it finds but
+/// asks it the same question, so `BLOCK_BOOT_START` answers for it too.
 fn install_boot_disk(held: Option<virtio_blk::Device>) {
     let outcome = syscall::try_install_usb_block_device(|usb| {
         let capacity = usb.capacity_sectors();
@@ -1213,7 +1205,7 @@ fn install_boot_disk(held: Option<virtio_blk::Device>) {
         // from the stick); asked all the same, so `fsd` learns whether it holds
         // the boot partition.
         match (held.is_some(), matched) {
-            (true, Some(true)) | (false, _) => Some(boot_start_if(matched)),
+            (true, Some(true)) | (false, _) => Some(bootdisk::start_if(matched)),
             (true, _) => None,
         }
     });
