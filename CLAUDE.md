@@ -673,7 +673,8 @@ docs/                every document is annotated in full in `docs/README.md` - r
                      roadmap-async-rmount.md, roadmap-session-auth.md, roadmap-user-keys.md, roadmap-el1-drop.md
                      (the Pi hands off at EL2; the kernel assumes EL1), roadmap-c-hosting.md (a C program as a Unix command)
                      roadmap-ctrl-c.md (Ctrl-C as a key for a raw program, with Ctrl+\ as the way out)
-                     and roadmap-smp.md (multi-core: the end of the single-core argument, the arc from 2026-10-12)
+                     roadmap-smp.md (multi-core: the end of the single-core argument, the arc from 2026-10-12)
+                     and roadmap-one-disk.md (one disk for boot and root: the ESP first, the root beside it, the arc after multi-core)
   work-journal/      chronological dev-log, one file per day plus an index README - a lighter companion to CHANGELOG.md
   testing/           testing-qemu.md (every `make run-*` target, the test images, the 9P host peers, the two-node
                      cluster rig), testing-parallels.md and testing-pi4.md (the real-hardware guides, sharing one
