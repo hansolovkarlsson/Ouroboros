@@ -1156,8 +1156,11 @@ fn init_storage() -> Option<virtio_blk::Device> {
     console::println!("Ouroboros kernel: virtio-blk ready, capacity {} sectors", device.capacity_sectors());
 
     let mut sector = [0u8; 512];
-    if let Err(e) = unsafe { device.read_sector(0, &mut sector) } {
-        console::println!("Ouroboros kernel: virtio-blk read failed ({e})");
+    // Read twice before giving up, as the boot-disk check is (D6): the first
+    // read a disk sees is the likeliest to fail once (the review of #291).
+    let first = unsafe { device.read_sector(0, &mut sector) };
+    if let Err(e) = first.or_else(|_| unsafe { device.read_sector(0, &mut sector) }) {
+        console::println!("Ouroboros kernel: virtio-blk read failed twice ({e})");
         return None;
     }
     let signature = (sector[511] as u16) << 8 | sector[510] as u16;

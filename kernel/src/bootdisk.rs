@@ -342,22 +342,29 @@ pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capa
     start_if(is_boot_disk_retrying(read, capacity, name))
 }
 
-/// [`is_boot_disk`], asked again once when a read failed on the way, and
-/// logged when it fails again (decision D6, docs/roadmap/roadmap-one-disk.md):
-/// a read that failed is no answer that the disk does not match, and on a
-/// one-disk stick taking it for one would mount the ESP as `/`. After the
-/// second failure the disk is taken as not the boot disk, as before, but the
-/// line says the read failed. `name` names the disk in the line.
+/// [`is_boot_disk`], asked again once when a read failed on the way
+/// (decision D6, docs/roadmap/roadmap-one-disk.md). A read that failed is no
+/// answer that the disk does not match: the firmware booted from a disk it
+/// could read, and on a one-disk stick taking it for another disk mounts the
+/// ESP as `/`. So when the reads fail a second time, the disk is taken as the
+/// boot disk, nothing read having said otherwise, and the line says so; `fsd`
+/// is then told the firmware's start, which on any other disk would only pass
+/// over one partition at that LBA (the review of #291 found the first form,
+/// "not the boot disk", installing a held virtio disk over a boot stick and
+/// leaving the ESP writable as `/`). A failed read of the last sector, the
+/// GPT backup header's, does not count: it is only the alternative path, and
+/// some sticks report a sector too many. `name` names the disk in the line.
 pub(crate) fn is_boot_disk_retrying(
     read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool,
     capacity: u64,
     name: &str,
 ) -> Option<bool> {
+    let last = capacity.checked_sub(1);
     for attempt in 0..2 {
         let mut failed = false;
         let mut counted = |lba: u64, buf: &mut [u8; 512]| {
             let ok = read(lba, buf);
-            failed |= !ok;
+            failed |= !ok && Some(lba) != last;
             ok
         };
         let answer = is_boot_disk(&mut counted, capacity);
@@ -369,9 +376,9 @@ pub(crate) fn is_boot_disk_retrying(
         }
     }
     crate::console::println!(
-        "Ouroboros kernel: {name}: reading its partition table failed twice - taken as not the boot disk, though it may be"
+        "Ouroboros kernel: {name}: reading its partition table failed twice - taken as the boot disk, nothing read having said otherwise"
     );
-    Some(false)
+    Some(true)
 }
 
 /// The boot partition's start LBA when [`is_boot_disk`] answered yes, else

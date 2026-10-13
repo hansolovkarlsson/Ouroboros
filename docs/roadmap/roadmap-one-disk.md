@@ -329,11 +329,24 @@ removed, and that check failed. D6: `bootdisk::is_boot_disk_retrying`
 asks again once when a read failed on the way, and after a second failure
 says the read failed, "though it may be" the boot disk; virtio, the boot
 stick and `MOUNT`'s rescan all go through it. That needs a disk whose
-reads fail at boot, which no QEMU rig sets up. Planned as: `fsd` mounts
-the boot partition read-only when it falls back to it beside a root that
-did not mount; the kernel retries a failed boot-disk read once and names a
-failed read in its line. The rig's `disk-badroot` boot then checks that a
-write to `/` is refused.
+reads fail at boot, which no QEMU rig sets up.
+
+The review of #291 changed D6's answer and tightened D5. A disk whose
+table still cannot be read after the second try is taken as the boot disk,
+not for another: the firmware booted a disk it could read, and the first
+form ("not the boot disk") left a one-disk virtio boot's ESP writable as
+`/` and put a held virtio disk over a boot stick. `fsd` is told the
+firmware's start, which on any other disk only passes over one partition
+at that LBA. A failed read of the last sector, the GPT backup header's, is
+not counted, and `init_storage`'s first read of sector 0 is tried twice.
+`mutates()` is default-deny: it lists the verbs that only read, so a verb
+added later is refused on a read-only tree until it is listed as reading
+(no verb today is unlisted, so no rig can show that). The fid path checks
+the read-only tree too, and the open-for-write mask is one function,
+`ninep_abi::open_writes`, where `fsd` had three copies. Kept: the flag is a
+static for tree 0 rather than a property of the mount, and `FSOP_MOUNT_INFO`
+does not report it; only tree 0 can be the fallback, and the two places
+that can change it clear or set it.
 
 **5. Staging a physical disk** (decision D2, settled: the image written). `make bootstick` puts the
 combined layout on a stick, for the Pi with pftf on partition 1. `make

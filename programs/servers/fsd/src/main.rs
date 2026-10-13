@@ -103,6 +103,36 @@ fn main() -> ! {
     }
 }
 
+/// Whether tree 0 is the boot partition mounted read-only because the root
+/// beside it did not mount (decision D5, docs/roadmap/roadmap-one-disk.md):
+/// the system comes up to be looked at and repaired, and nothing is written
+/// to the ESP, by root either. Set by [`try_mount`] when it falls back,
+/// cleared by every other mount of tree 0 and by `FSOP_UNMOUNT`. fsd is one
+/// task, so an atomic is only the spelling of a mutable static.
+static ROOT_READ_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// Whether `verb` (with its params `p`) may change what is on the disk: the
+/// verbs [`handle_ninep`] and the fid path refuse on a read-only tree.
+/// DEFAULT-DENY: the verbs that only read are listed, and every other verb,
+/// one added later included, counts as a change, so a new verb cannot reach a
+/// read-only tree unrefused for want of an arm here (the review of #291, the
+/// unspellable-postmortem's rule). An `NP_OPEN` changes the disk when it opens
+/// for writing, creating or truncating ([`ninep_abi::open_writes`]).
+fn mutates(verb: u64, p: &[u64; 4]) -> bool {
+    match verb {
+        ninep_abi::NP_READDIR
+        | ninep_abi::NP_READ_FILE
+        | ninep_abi::NP_READ
+        | ninep_abi::NP_READ_AT
+        | ninep_abi::NP_STAT
+        | ninep_abi::NP_PREAD
+        | ninep_abi::NP_FSTAT
+        | ninep_abi::NP_CLUNK => false,
+        ninep_abi::NP_OPEN => ninep_abi::open_writes(p[0]),
+        _ => true,
+    }
+}
+
 /// Attempts the auto-mount into tree 0 if the kernel has a device
 /// installed. Quiet when there's simply no device (the ordinary
 /// Parallels-before-`mount` case); logs the outcome whenever a device is
@@ -112,37 +142,6 @@ fn main() -> ! {
 ///
 /// [`MOUNT_ALREADY`]: syscall_abi::MOUNT_ALREADY
 /// [`NO_FS`]: syscall_abi::NO_FS
-/// Whether tree 0 is the boot partition mounted read-only because the root
-/// beside it did not mount (decision D5, docs/roadmap/roadmap-one-disk.md):
-/// the system comes up to be looked at and repaired, and nothing is written
-/// to the ESP, by root either. Set by [`try_mount`] when it falls back,
-/// cleared by every other mount of tree 0 and by `FSOP_UNMOUNT`. fsd is one
-/// task, so an atomic is only the spelling of a mutable static.
-static ROOT_READ_ONLY: AtomicBool = AtomicBool::new(false);
-
-/// Whether `verb` (with its params `p`) changes what is on the disk: the
-/// verbs [`handle_ninep`] refuses on a read-only tree. An `NP_OPEN` changes
-/// it when it opens for writing, creating or truncating; a fid opened that
-/// way is then the only one that can write (`NP_PWRITE`), so refusing the
-/// open covers the writes through it.
-fn mutates(verb: u64, p: &[u64; 4]) -> bool {
-    match verb {
-        ninep_abi::NP_WRITE
-        | ninep_abi::NP_WRITE_FILE
-        | ninep_abi::NP_WRITE_AT
-        | ninep_abi::NP_TOUCH
-        | ninep_abi::NP_MKDIR
-        | ninep_abi::NP_RM
-        | ninep_abi::NP_RMDIR
-        | ninep_abi::NP_MV
-        | ninep_abi::NP_CHMOD
-        | ninep_abi::NP_CHOWN
-        | ninep_abi::NP_PWRITE => true,
-        ninep_abi::NP_OPEN => p[0] & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_CREATE | ninep_abi::OPEN_TRUNC) != 0,
-        _ => false,
-    }
-}
-
 fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     if mounts[0].is_some() {
         return syscall_abi::MOUNT_ALREADY;
@@ -1094,15 +1093,20 @@ fn handle_fid_op(
     let flags = fids[idx].flags;
     let allowed = match verb {
         ninep_abi::NP_PREAD => flags & ninep_abi::OPEN_READ != 0,
-        ninep_abi::NP_PWRITE => {
-            flags & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_CREATE | ninep_abi::OPEN_TRUNC) != 0
-        }
+        ninep_abi::NP_PWRITE => ninep_abi::open_writes(flags),
         _ => true, // NP_FSTAT: metadata, like NP_STAT
     };
     if !allowed {
         return status_reply(reply, syscall_abi::FS_ERR_PERM);
     }
     let tree = fids[idx].tree;
+    // The read-only tree's gate for the fid path too, so the refusal of a
+    // write-open is not the only thing between a fid and the ESP: today a
+    // write fid cannot outlive the unmount before the fallback, but nothing
+    // here should depend on that staying true (the review of #291).
+    if tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed) && mutates(verb, p) {
+        return status_reply(reply, syscall_abi::FS_ERR_READ_ONLY);
+    }
     let Some(path) = fids[idx].path_str() else {
         return status_reply(reply, syscall_abi::FS_ERROR);
     };
@@ -1558,9 +1562,7 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
                 // the file, so leaving it out of this mask let
                 // `open(path, O_RDONLY | O_TRUNC)` destroy a root-owned file
                 // with only read permission.
-                let wants_write = flags
-                    & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_CREATE | ninep_abi::OPEN_TRUNC)
-                    != 0;
+                let wants_write = ninep_abi::open_writes(flags);
                 let wants_read = flags & ninep_abi::OPEN_READ != 0;
                 // DEFAULT-DENY on a flag word that asks for nothing recognisable:
                 // `flags == 0` satisfied neither branch and fell through to
