@@ -58,10 +58,12 @@ fn main() -> ! {
         let deadline = get_ticks() + 150;
         loop {
             let r = syscall4(syscall_abi::MSG_SEND, target, dummy.as_ptr() as u64, 0, 0);
-            let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+            let transient = r == syscall_abi::MSG_ERR_FULL;
             if r == 0 || !transient || get_ticks() > deadline {
                 break;
             }
+            // Let the consumer drain, as ulib::end_of_stream does.
+            syscall4(syscall_abi::YIELD, 0, 0, 0, 0);
         }
     }
     task_exit(0);
@@ -116,10 +118,12 @@ fn pipe_out(target: u64, bytes: &[u8]) {
             if r == 0 {
                 break;
             }
-            let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+            let transient = r == syscall_abi::MSG_ERR_FULL;
             if !transient || get_ticks() > deadline {
                 return;
             }
+            // Let the consumer drain, as ulib::pipe_out does.
+            syscall4(syscall_abi::YIELD, 0, 0, 0, 0);
         }
         off += n;
     }

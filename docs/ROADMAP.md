@@ -1002,6 +1002,68 @@ The small open tails those arcs deliberately left:
   was 12 a second until #232's review made the tick read ahead for the
   owner whoever it interrupted.)
 
+- **A pipeline's lifetime is managed by snapshots (found 2026-10-12, the
+  fourth and fifth reviews of #279; true on `main` before it but for one
+  narrowing, the first sentence's).**
+  The shell decides a pipeline's fate from a moment: `SPAWN` checks a
+  producer's own consumer when it is spawned (`main`'s `DELEGATE` loop
+  checked every link once, after every spawn), and the pipeline is ended if
+  it is gone. A stage that dies after that moment leaves the
+  rest running: a producer whose consumer exited later keeps going with its
+  writes failing (a holding one keeps its core), and when the keyboard's
+  owner dies the keyboard reverts to the shell, whose Ctrl+C then interrupts
+  only its own wait ("see ps"), not the stages. The teardown itself kills
+  stored slot numbers, which a crashed stage's reused slot could make a
+  stranger's, and can race a later stage's output (`0 0 0`, a kill line); a
+  refused pipeline with `> out` leaves `out` untouched, where a Unix shell
+  truncates it first. And the shell writes a stage's exit report in pieces
+  (`pipe: `, then the rest), so a later stage still writing can land between
+  them (`pipe: 0 0 0`, seen in `make test-smp`'s `-smp 1` boot). The whole fix is Unix's: Ctrl+C at a pipeline ends
+  every stage (the pipeline as one job, killed by identity, not by slot),
+  and a producer whose consumer is gone ends on its next write (a broken
+  pipe), so no moment's check has to be right. `make test-smp`'s
+  `coreprobe | grep (` check cannot force which stage runs first, so it may
+  pass by the path where `coreprobe` runs. The fifth review of #279 added
+  what a moment's check cannot tell apart: a consumer that exited 0 without
+  reading (`cp a b | echo hi`, `mkdir d | uptime`) looks the same as one
+  that refused its arguments, so its producers are ended or never run,
+  silently (true on `main` through the `DELEGATE` loop); a guard on a refused
+  `FG` was built and taken out again for that reason, since it killed `cp`
+  mid-copy when `echo` had already finished, and `FG` is also refused when
+  the shell no longer owns the keyboard. `KILL` of a stage on another core
+  answers before that core has ended it, so the shell can be back at its
+  prompt with the stage still alive for a moment. And the shell spells
+  "end this pipeline" three ways (`end_pipeline`, `kill_and_reap` loops that
+  drop exit codes, the redirect overflow's own loop). The fix is one design,
+  not more guards: the pipeline as a job, ended as a whole by identity.
+
+- **End-of-stream only from a program that exits (found 2026-10-12, the
+  second review of #279).** A pipeline's consumer learns its producer is done
+  from an empty message, which `ulib::exit` and libc's `_exit` send for a
+  program that did not. A producer that dies any other way (an EL0 fault the
+  kernel ends it for, a `kill` from another shell, a raw `EXIT` such as
+  `pong`'s) sends none, and its consumer waits in `MSG_RECV`, and the shell on
+  the consumer, until a Ctrl+C. The shell's old `DELEGATE` teardown covered
+  only a producer gone before the link was authorized. The whole fix is in
+  the kernel's teardown (`tasks::end_task`), once, but it has to know that
+  the program did not send one already and that the target slot still holds
+  the task the program was spawned toward, or a stray empty message reaches a
+  later occupant (the shell's own mailbox, for a redirect). Not yet seen
+  outside a Ctrl+C.
+
+- **The network right is still delegated after the spawn (found 2026-10-12,
+  making `SPAWN` grant the stdout target).** The shell's `spawn_path` spawns
+  a program and then `DELEGATE`s it `TO_NET` (`programs/shell/src/main.rs`).
+  On more than one core the child can run on a secondary before that call,
+  and a first `netd` request made in the gap is refused (`MSG_ERR_DENIED`).
+  (`netd`'s `cpu` child needs no grant: a child is granted its spawner at
+  spawn, since 2026-09-06.) The stdout target was the
+  same race, and lost pipeline lines on one core (`SPAWN`'s doc in
+  `syscall-abi`); the `TO_NET` grant has no argument left in `SPAWN`, so its
+  fix wants a way to name it at spawn (a staged grant set, beside the staged
+  argv and environment), not another `DELEGATE` moved earlier. Not yet seen
+  failing; (predicted) a `ping` or `fetch` started on a secondary.
+
 - **~~Escape sends nothing on the USB keyboard~~ (found 2026-10-07, building
   the navigation keys): DONE (2026-10-09, #253).** Decided by Hans that day,
   option 1 of four: Escape (HID 0x29) sends a bare ESC, what a terminal

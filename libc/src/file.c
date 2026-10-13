@@ -849,8 +849,10 @@ static void console_write(const unsigned char *buf, size_t n) {
 }
 
 /* Send bytes to a pipe consumer via MSG_SEND. Yields on a full mailbox (rather
- * than dropping bytes) and retries a not-yet-delegated send - the same bounded
- * retry as ulib::pipe_out. */
+ * than dropping bytes) - the same bounded retry as ulib::pipe_out. A denied
+ * send is not waited out: SPAWN grants a program its stdout target before it
+ * runs, or refuses the spawn (since 2026-10-12), and a grant lost when the
+ * target's slot is reused does not come back. */
 static void pipe_write(long target, const unsigned char *buf, size_t n) {
     size_t off = 0;
     while (off < n) {
@@ -865,13 +867,11 @@ static void pipe_write(long target, const unsigned char *buf, size_t n) {
                 break;
             }
             unsigned long u = (unsigned long)r;
-            int transient = (u == MSG_ERR_FULL || u == MSG_ERR_DENIED);
+            int transient = (u == MSG_ERR_FULL);
             if (!transient || __os_syscall1(SYS_GET_TICKS, 0) > deadline) {
                 return;
             }
-            if (u == MSG_ERR_FULL) {
-                __os_syscall1(SYS_YIELD, 0);
-            }
+            __os_syscall1(SYS_YIELD, 0);
         }
         off += chunk;
     }

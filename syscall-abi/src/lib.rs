@@ -184,8 +184,18 @@ pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
 /// should go to - normally [`CON_TASK`] (the console), but a shell
 /// orchestrating a program-to-program pipe or an `exec … > file`
 /// redirect sets it to itself so it can relay/capture the program's
-/// output. The program reads it back via [`STDOUT_TARGET`]; a program
-/// that ignores it (outputs straight to the console) is unaffected. The
+/// output, or a pipeline's producer to its consumer. The program reads it
+/// back via [`STDOUT_TARGET`]; a program that ignores it (outputs straight
+/// to the console) is unaffected. **SPAWN grants the child the right to
+/// send to its stdout target** (since 2026-10-12), under [`DELEGATE`]'s own
+/// rule (the caller holds a send right to the target), in the same step, so
+/// a pipeline stage never runs before it may write to its consumer. Checked
+/// before anything is allocated: [`CON_TASK`] is always accepted (every task
+/// reaches it, and with no console server a program's console writes fall
+/// back to `PUTC`); any other target that is not a live task is refused
+/// [`TASK_ERR_NO_SUCH_TASK`] (a pipeline's consumer that already exited,
+/// which the shell tears down), and one the caller may not grant
+/// [`MSG_ERR_DENIED`]. The
 /// **argv blob length** (arg2) attaches the argument vector previously
 /// staged via [`ARGS_STAGE`] (`0` = no args); the child reads it via
 /// [`GET_ARGC`]/[`GET_ARG`]. The **cwd length** (arg3) attaches the working
@@ -664,9 +674,11 @@ pub const HEAP_INFO_IMAGE_MAX: u64 = 4;
 /// a target the caller neither spawned nor holds a send right to. Checked in
 /// that order - a protected grantee is refused
 /// before either slot's liveness is looked at. The two answers are kept apart
-/// because a pipeline's producer or consumer exiting before its link is
-/// authorized is the ordinary case, and the shell must tell it from a genuine
-/// denial without a second syscall.
+/// because a task that exited before its link is authorized is the ordinary
+/// case, and a caller must tell it from a genuine denial without a second
+/// syscall. [`SPAWN`] refuses the same denial for its stdout target, under
+/// the same rule, and that is where the shell meets it: a pipeline's links
+/// are granted by `SPAWN` since 2026-10-12, not by this call.
 /// Runtime capability delegation: grant `grantee` (a task slot) the right to
 /// initiate IPC sends to `target` (a task slot) - a dynamic addition to
 /// `grantee`'s static send-mask. One rule: `grantee` must be the caller's
@@ -675,10 +687,10 @@ pub const HEAP_INFO_IMAGE_MAX: u64 = 4;
 /// the caller itself holds a send right to, statically or by delegation (its
 /// own children always are, since a spawner and its child are granted each
 /// other at spawn). Rights flow one step down and nowhere else: the boot shell
-/// wires a pipeline's producer to its consumer (relay-free
-/// `programA | programB`) and hands each command its network right, and a
-/// nested shell does the same for its own commands with the right it was
-/// handed. `SPAWN` is ungated, so any task may spawn a child and pass it what
+/// hands each command its network right with this call (a pipeline's
+/// producer-to-consumer link, relay-free `programA | programB`, is
+/// [`SPAWN`]'s own grant since 2026-10-12, under this rule), and a nested
+/// shell does the same for its own commands with the right it was handed. `SPAWN` is ungated, so any task may spawn a child and pass it what
 /// it holds; that grants nothing the task could not have relayed itself, and
 /// no task can ever reach one it could not reach before. A parent and its
 /// child are granted each other at spawn, so capture, redirection and
@@ -689,7 +701,8 @@ pub const HEAP_INFO_IMAGE_MAX: u64 = 4;
 /// supervised server, therefore survives that server's restart: nothing but
 /// the same server ever comes back there, and the grants that reach it are
 /// only ever made once (the shell's `TO_NET` at spawn, `netd`'s to its own
-/// remote-exec child). No explicit revoke is needed for either flow. Enforced at the `MSG_SEND`/`MSG_CALL` boundary (the kernel's
+/// remote-exec child). A child's right to its stdout target needs no call:
+/// [`SPAWN`] grants it under this same rule. No explicit revoke is needed for either flow. Enforced at the `MSG_SEND`/`MSG_CALL` boundary (the kernel's
 /// `may_send`).
 ///
 /// **Grants ACCUMULATE.** A task's delegations are a set, so a second call

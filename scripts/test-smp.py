@@ -269,6 +269,29 @@ def run_probes(guest, smp):
     guest.type_line("echo after-the-bg-kill")
     got["bg"] = bg and guest.wait_for(r"\nafter-the-bg-kill\r?\n[\s\S]*" + PROMPT, timeout=30)
     got["bg_out"] = guest.transcript()
+    # A producer that sends no end-of-stream of its own must still end its
+    # consumer: `ulib::exit` sends it, so `wc` prints its count of nothing
+    # and the shell answers. Without that the shell waits on `wc` for good,
+    # since `SPAWN` grants the link and the shell no longer finds a producer
+    # gone (the review of #279). `mkdir` with no argument complains on the
+    # console, not its stdout, and exits: no end-of-stream, and nothing made
+    # on the image the other rigs boot (`touch` was, the second review).
+    guest.type_line("mkdir | wc")
+    # `0 0 0` anywhere, not at a line's start: the shell reports mkdir's exit
+    # code in pieces (`pipe: `, then the rest), and wc's line can land between
+    # them, as it did once on -smp 1.
+    got["eos"] = guest.wait_for(r"0 0 0\r?\n[\s\S]*" + PROMPT, timeout=30)
+    # A consumer gone before its producer is spawned (`grep` refuses its
+    # pattern and exits at once, on its own core): SPAWN refuses the
+    # producer (TASK_ERR_NO_SUCH_TASK) and the shell tears the pipeline down
+    # saying nothing past grep's own complaint and exit code, then answers
+    # (the third review of #279: a producer run toward a dead consumer took
+    # the keyboard's foreground with it).
+    before = len(guest.transcript())
+    guest.type_line("coreprobe | grep (")
+    guest.type_line("echo after-dead-consumer")
+    got["dead"] = guest.wait_for(r"\nafter-dead-consumer\r?\n[\s\S]*" + PROMPT, timeout=60)
+    got["dead_out"] = guest.transcript()[before:]
     return got
 
 
@@ -355,6 +378,12 @@ def probe_checks(name, smp, boot_index, probe):
                    + (f" (saw core {shell_line.group(1)})" if shell_line else ""),
                    shell_line is not None and shell_line.group(1) == str(boot_index)))
     checks.append((f"{name}: `kill {slot}` ended the held program and the shell answered after", probe.get("bg", False)))
+    checks.append((f"{name}: `mkdir | wc` printed `0 0 0` and the shell answered (end-of-stream from a producer's exit)",
+                   probe.get("eos", False)))
+    dead_out = probe.get("dead_out", "")
+    checks.append((f"{name}: `coreprobe | grep (` with grep gone first: grep's complaint, no other pipe error, and the shell answered",
+                   probe.get("dead", False) and "bad pattern" in dead_out
+                   and re.search(r"pipe: (?!grep exited)", dead_out) is None))
     return checks
 
 

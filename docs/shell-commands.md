@@ -243,10 +243,12 @@ ps | upper                               ->  the process list, uppercased
   byte path (except for the one hop out of a builtin first stage). The shell
   spawns the stages, aims each one's stdout at the next (the last at the
   console, or — with a trailing `> file`/`>> file` — at the shell, which
-  captures it and writes it to the file), and hands each producer a runtime
-  capability to reach its
-  consumer (`DELEGATE`); that sibling-to-sibling send is otherwise forbidden
-  by the IPC send-mask, and the shell alone can grant it. Each stage holds its
+  captures it and writes it to the file), and each producer gets a runtime
+  capability to reach its consumer, granted by the kernel's `SPAWN` itself
+  since 2026-10-12 (a `DELEGATE` before that, made after every stage was
+  spawned, so a fast stage could lose its first lines); that
+  sibling-to-sibling send is otherwise forbidden by the IPC send-mask, and
+  only the stages' spawner can grant it. Each stage holds its
   consumer *and* the `TO_NET` every spawned command gets, so the delegation set
   is a per-task bitmask rather than a single target — it was one slot until
   2026-09-06, and a piped read of a remote mount could not work until it was

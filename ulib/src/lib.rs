@@ -583,15 +583,20 @@ pub fn con_write(bytes: &[u8]) {
 
 /// Send `bytes` as raw `MSG_MAX_LEN`-chunked messages to `target` (the shell,
 /// when we're a pipe producer / capture source), with the same bounded retry
-/// on a full mailbox or a not-yet-delegated send as `hello`/`args`.
+/// on a full mailbox as `hello`/`args`.
 ///
 /// On a **full mailbox** (`MSG_ERR_FULL`) the producer can make no progress
 /// until the consumer drains, so it **yields** rather than busy-spinning: the
 /// consumer runs (draining, or exiting early like `head`, after which the next
 /// send fails fast with `TASK_ERR_NO_SUCH_TASK` and this returns). Without the
 /// yield the producer would spin re-sending until the next tick preempted it -
-/// up to a full second on hardware. A `MSG_ERR_DENIED` (the brief
-/// delegation-not-yet-applied window) just retries, no yield.
+/// up to a full second on hardware. A `MSG_ERR_DENIED` is not waited out:
+/// `SPAWN` grants a program the right to its stdout target before it runs,
+/// or refuses the spawn (since 2026-10-12), so there is no window for it to
+/// close. A grant can still be lost, when the target's slot is reaped and
+/// reused while this program runs on, and then no wait brings it back. (It
+/// was retried for the window before the shell's `DELEGATE` landed, which
+/// is what dropped a pipeline stage's line after 150 ticks.)
 pub fn pipe_out(target: u64, bytes: &[u8]) {
     let mut off = 0;
     while off < bytes.len() {
@@ -603,13 +608,11 @@ pub fn pipe_out(target: u64, bytes: &[u8]) {
             if r == 0 {
                 break;
             }
-            let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+            let transient = r == syscall_abi::MSG_ERR_FULL;
             if !transient || get_ticks() > deadline {
                 return;
             }
-            if r == syscall_abi::MSG_ERR_FULL {
-                yield_now(); // let the consumer drain (or exit) before retrying
-            }
+            yield_now(); // let the consumer drain (or exit) before retrying
         }
         off += n;
     }
@@ -633,10 +636,19 @@ pub fn pipe_recv(buf: &mut [u8]) -> usize {
     ((packed & 0xffff_ffff) as usize).min(buf.len())
 }
 
+/// Whether this program has signalled end-of-stream ([`end_of_stream`]),
+/// so [`exit`] sends one only for a program that did not.
+static ENDED_STREAM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// If our output is piped/captured (target isn't the console), signal
 /// end-of-stream with an empty message so the reading task knows we're done.
-/// A no-op when writing straight to the console.
+/// A no-op when writing straight to the console. Sent once: [`exit`] sends
+/// it for a program that never called this, so a stage that ends without
+/// it (`touch f | wc`) cannot leave its consumer waiting for good.
 pub fn end_of_stream(target: u64) {
+    if ENDED_STREAM.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     if target == syscall_abi::CON_TASK {
         return;
     }
@@ -644,13 +656,11 @@ pub fn end_of_stream(target: u64) {
     let deadline = get_ticks() + 150;
     loop {
         let r = syscall4(syscall_abi::MSG_SEND, target, dummy.as_ptr() as u64, 0, 0);
-        let transient = r == syscall_abi::MSG_ERR_FULL || r == syscall_abi::MSG_ERR_DENIED;
+        let transient = r == syscall_abi::MSG_ERR_FULL;
         if r == 0 || !transient || get_ticks() > deadline {
             break;
         }
-        if r == syscall_abi::MSG_ERR_FULL {
-            yield_now(); // as in pipe_out: let the consumer drain before retrying
-        }
+        yield_now(); // as in pipe_out: let the consumer drain before retrying
     }
 }
 
@@ -684,6 +694,13 @@ pub fn emit_dec(buf: &mut [u8], n: &mut usize, v: u64) {
 /// End this task with `code` (never returns). A program that's somehow
 /// unkillable (task 0/1) just parks quietly instead.
 pub fn exit(code: u64) -> ! {
+    // End-of-stream for a piped program that did not send it, as the C
+    // library's `_exit` does (`libc/src/os.c`): nineteen programs ended
+    // without one, and their consumer waited for it until a Ctrl+C. The
+    // shell used to tear such a pipeline down when its DELEGATE found the
+    // producer gone, which only covered a producer gone by then; `SPAWN`
+    // grants the link now and that check is gone (the review of #279).
+    end_of_stream(stdout_target());
     syscall(syscall_abi::EXIT, code);
     loop {
         core::hint::spin_loop();
@@ -1780,8 +1797,10 @@ pub fn fs_error_msg(code: u64) -> &'static [u8] {
 /// Reaching netd needs the `TO_NET` send-capability, which a spawnable slot does
 /// *not* hold statically - the shell delegates it (`DELEGATE`) to a command it
 /// spawns. A tick can let this program run in the window before that delegation
-/// lands, so a transient `MSG_ERR_DENIED` is retried briefly (the same bounded
-/// wait `pipe_out` uses), rather than surfaced as a failure.
+/// lands, so a transient `MSG_ERR_DENIED` is retried briefly (150 ticks),
+/// rather than surfaced as a failure. `pipe_out` no longer retries it since
+/// 2026-10-12: `SPAWN` grants the stdout link before a program runs, so that
+/// window is gone, and this one is still open (ROADMAP.md's follow-up).
 pub fn net_call(req: &[u8], reply: &mut [u8]) -> u64 {
     net_msg_call(req, reply)
 }

@@ -1143,10 +1143,10 @@ fn cmd_pipeline(
 /// splits it (the drained upstream, then the builtin-headed remainder).
 ///
 /// Program stages are spawned right-to-left so each producer has a live
-/// consumer to point its stdout at; each adjacent producer->consumer link is
-/// authorized with one `DELEGATE` (a spawnable slot's static mask reaches the
-/// console and the shell, but not a sibling). The shell waits on (and reaps)
-/// every program stage.
+/// consumer to point its stdout at; `SPAWN` itself grants each producer the
+/// right to send to that consumer (a spawnable slot's static mask reaches the
+/// console and the shell, but not a sibling), so no stage ever runs without
+/// it. The shell waits on (and reaps) every program stage.
 fn run_head_pipeline(
     stages: &[&str],
     cwd: &mut [u8; CWD_SIZE],
@@ -1210,12 +1210,27 @@ fn run_head_pipeline(
     for i in (0..prog_stages.len()).rev() {
         match spawn_stage(prog_stages[i], cwd, *cwd_len, env, next_target) {
             Ok(slot) => {
-                // `spawn_path` has already delegated `TO_NET`; this stage's
-                // producer->consumer grant is added below. Both survive only
-                // because `tasks.rs::DELEGATED_SEND` is a SET - as one slot,
-                // whichever grant landed second silently revoked the first.
+                // `spawn_path` has already delegated `TO_NET`, and SPAWN
+                // granted this stage's producer->consumer link. Both survive
+                // only because `tasks.rs::DELEGATED_SEND` is a SET - as one
+                // slot, whichever grant landed second silently revoked the
+                // first.
                 slots[i] = slot;
                 next_target = slot;
+            }
+            Err(code) if code == syscall_abi::TASK_ERR_NO_SUCH_TASK && i + 1 < prog_stages.len() => {
+                // SPAWN found this stage's consumer, a later stage, already
+                // gone: usually a stage that rejected its own arguments (a
+                // bad `grep` pattern, an unknown flag), printed its reason
+                // and exited, so say nothing more; tear down, and let a stage
+                // that ended on its own say how (`end_pipeline`). The shell's
+                // DELEGATE answered this until SPAWN granted the link, with
+                // the same limit: a consumer that exited 0 without reading
+                // (`cp a b | echo hi`) also ends its producers, which then
+                // never run, silently (ROADMAP.md's follow-up on a
+                // pipeline's lifetime).
+                end_pipeline(&prog_stages[i + 1..], &slots[i + 1..prog_stages.len()]);
+                return;
             }
             Err(code) => {
                 for s in &slots[i + 1..prog_stages.len()] {
@@ -1223,6 +1238,7 @@ fn run_head_pipeline(
                 }
                 let cmd = prog_stages[i].split_whitespace().next().unwrap_or("");
                 match code {
+                    syscall_abi::MSG_ERR_DENIED => print_fs_error("pipe: could not authorize the stream", code),
                     0 => {
                         print_str("pipe: ");
                         print_str(cmd);
@@ -1236,40 +1252,14 @@ fn run_head_pipeline(
         }
     }
 
-    // Authorize each adjacent producer->consumer link.
-    for i in 0..prog_stages.len() - 1 {
-        let r = syscall4(syscall_abi::DELEGATE, slots[i], slots[i + 1], 0, 0);
-        if r != 0 {
-            // A stage that has ALREADY exited is the ordinary case, not a
-            // capability failure: a stage that rejects its own arguments (a bad
-            // `grep` pattern, an unknown flag) prints its reason and exits
-            // before the shell gets here. It has already told the user what
-            // went wrong, so adding "could not authorize the stream" on top
-            // only obscures it. Anything else is a real failure and still says
-            // so. Either end of the link may be the one that died, and the
-            // kernel says which case this is - it answers NO_SUCH_TASK for a
-            // dead slot and DENIED for a refusal - so the reason is read from
-            // the answer, not re-derived from a later TASK_STATE.
-            let died = r == syscall_abi::TASK_ERR_NO_SUCH_TASK;
-            // Tear down, and let a stage that ended on its own say how. `KILL`
-            // frees a live stage outright and refuses one that already exited;
-            // that one is reaped by `wait_pipe_stage`, silent for exit 0 and
-            // reporting anything else. The "already told the user" premise
-            // above is false for a program that exits with no output (`touch
-            // f | wc`): its exit code is the only thing there is to show, and
-            // `kill_and_reap` would throw it away.
-            for j in 0..prog_stages.len() {
-                if syscall(syscall_abi::KILL, slots[j]) != 0 {
-                    let cmd = prog_stages[j].split_whitespace().next().unwrap_or("stage");
-                    wait_pipe_stage(cmd, slots[j]);
-                }
-            }
-            if !died {
-                print_fs_error("pipe: could not authorize the stream", r);
-            }
-            return;
-        }
-    }
+    // Each producer->consumer link was authorized by its SPAWN: the kernel
+    // grants a child the right to send to the stdout target it is spawned
+    // with, or refuses the spawn (handled above: a consumer already gone, or
+    // a link it may not grant), so no stage runs before it may write (a
+    // DELEGATE here, after every stage was spawned, lost a stage's first
+    // lines when spawning the rest took longer than `ulib::pipe_out` retried
+    // a refusal). A stage that exits early sends its end-of-stream from
+    // `ulib::exit`, so its consumer is not left waiting.
 
     // A builtin head: capture its output and stream it to the first program
     // stage (the shell is the byte path only for this one hop). A program head
@@ -1398,6 +1388,23 @@ fn drain_program_output(slot: u64) {
         }
     }
     let _ = syscall(syscall_abi::WAIT, slot);
+}
+
+/// Ends a pipeline the shell will not run to completion: each stage still
+/// live is killed (`KILL` ends it, at once on this core or, on another, at
+/// that core's next entry into the kernel), and each that already exited is
+/// reaped by [`wait_pipe_stage`], silent for exit 0 and reporting anything
+/// else, so a stage that failed on its own still says how. `stages` and
+/// `slots` are the same stages, in the same order. Its limits (a stored slot
+/// is killed by number; a consumer that exited 0 without reading ends its
+/// producers too) are ROADMAP.md's follow-up on a pipeline's lifetime.
+fn end_pipeline(stages: &[&str], slots: &[u64]) {
+    for (stage, &slot) in stages.iter().zip(slots) {
+        if syscall(syscall_abi::KILL, slot) != 0 {
+            let cmd = stage.split_whitespace().next().unwrap_or("stage");
+            wait_pipe_stage(cmd, slot);
+        }
+    }
 }
 
 /// Kill a spawned task **and collect its slot** - what every "abandon this
