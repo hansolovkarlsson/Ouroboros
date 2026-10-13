@@ -2271,12 +2271,12 @@ fn nothing_runnable(after: TaskIndex) -> ! {
 ///
 /// The reason this exists: a pipe producer whose consumer's mailbox is full
 /// (`MSG_ERR_FULL`) otherwise busy-spins re-sending until the next tick lets
-/// the consumer run - at a 1-second tick, a real stall on hardware, and a waste
+/// the consumer run - up to a 20 ms tick, a real stall on hardware, and a waste
 /// of a CPU that could be running the consumer. Yielding hands the CPU straight
 /// to the consumer, which drains (or exits early, like `head`, at which point
 /// the producer's next send fails fast and it stops). Same trap-frame /
-/// return-value contract as [`block_current_and_switch`] (see `next_runnable`'s
-/// doc comment for why the return is `frame.gpr[0]`).
+/// return-value contract as [`block_current_and_switch`] (see its doc comment
+/// for why the return is `frame.gpr[0]`).
 ///
 /// # Safety
 /// `frame` must be the live trap frame of the syscall currently being
@@ -2351,13 +2351,13 @@ pub(crate) unsafe fn block_current_and_switch(frame: *mut Context, reason: WaitR
 /// the next runnable task (which need not be the server just called: any
 /// real work further round comes first, so a plain `MSG_CALL` reply could
 /// wait behind it; until the second review of #280 the next task from the
-/// boot shell was always idle, which made that a full tick). `MSG_CALL` uses this to switch directly to the server it just
-/// delivered a request to: that server runs, replies (direct-delivered
-/// back, waking this caller), and blocks again, all before the next tick,
-/// the sub-tick synchronous round trip the ABI's `MSG_CALL` doc
-/// describes. Safe regardless of what `prefer` actually does: if it never
-/// replies, this caller stays blocked exactly as it would have, woken by
-/// the eventual reply or Ctrl+C.
+/// boot shell was always idle, which made that a full tick). `MSG_CALL` uses
+/// this to switch directly to the server it just delivered a request to: that
+/// server runs, replies (direct-delivered back, waking this caller), and
+/// blocks again, all before the next tick, the sub-tick synchronous round
+/// trip the ABI's `MSG_CALL` doc describes. Safe regardless of what `prefer`
+/// actually does: if it never replies, this caller stays blocked exactly as
+/// it would have, woken by the eventual reply or Ctrl+C.
 ///
 /// # Safety
 /// Same contract as [`block_current_and_switch`].
