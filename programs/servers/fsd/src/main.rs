@@ -327,10 +327,8 @@ fn find_partition() -> Option<(u32, u32)> {
     let mut mbr = [0u8; 512];
     disk::Disk.read_sector(0, &mut mbr).ok()?;
     let size_of = |lba: u64| {
-        (0..4).map(|i| 0x1BE + i * 16).find_map(|e| {
-            let start = u32::from_le_bytes([mbr[e + 8], mbr[e + 9], mbr[e + 10], mbr[e + 11]]);
-            let size = u32::from_le_bytes([mbr[e + 12], mbr[e + 13], mbr[e + 14], mbr[e + 15]]);
-            (u64::from(start) == lba && size != 0).then_some(size)
+        (0..4).map(|i| parttable::mbr_entry(&mbr, i)).find_map(|e| {
+            (u64::from(e.start) == lba && e.sectors != 0).then_some(e.sectors)
         })
     };
     // The root by `vfs::mount`'s rule, so `format` writes over what `/`

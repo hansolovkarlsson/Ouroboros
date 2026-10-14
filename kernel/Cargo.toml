@@ -10,6 +10,7 @@ syscall-abi = { path = "../syscall-abi" }
 # The key-sequence filter userland's readers use: the kernel uses it to keep
 # a key whole in the keyboard queue and across a change of owner.
 keyseq = { path = "../keyseq" }
+parttable = { path = "../parttable" }
 uefi = { version = "0.39", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
 # The version `uefi` 0.39 itself depends on (one crate in the lock file, not
 # two): for the raw `EFI_LOADED_IMAGE_PROTOCOL` layout earlyfault.rs reads
