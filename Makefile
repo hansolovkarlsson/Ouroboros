@@ -314,6 +314,37 @@ endif
 endif
 endif
 
+# The linker for /bin/edit and /bin/cpp (the accepted note
+# docs/handoffs/closed/2026-10-14-from-devtools-link-with-ld.md): CLINK=lld, the
+# default, is ld.lld with programs/linker.ld like every other C program here;
+# CLINK=devtools is DevTools's ld, built here from LD_DIR (a sibling checkout,
+# only read, as cpp's and Edit's sources are). Only the link changes: the same
+# objects, the same strip after. DevTools's ld reads no linker script:
+# --target=ouroboros is programs/linker.ld's layout and LDFLAGS_RUSTSHIM's
+# flags held in its own code, so A CHANGE TO EITHER OWES DEVTOOLS A NOTICE
+# (a note in its docs/handoffs/), or the two linkers part without a word.
+# The choice is recorded in CLINK_CHOICE, rewritten only when it changes, so
+# switching linkers relinks both programs rather than staging the last ones.
+# LD_DIR must not contain spaces.
+CLINK        ?= lld
+LD_DIR       ?= ../DevTools/ld
+HOST_CC      ?= cc
+DEVTOOLS_LD  := $(BUILD_DIR)/host/ld
+CLINK_CHOICE := $(BUILD_DIR)/clink.choice
+ifeq ($(CLINK),lld)
+CLINK_CMD    := "$(LD_LLD)" $(LDFLAGS_RUSTSHIM)
+CLINK_DEPS   :=
+else ifeq ($(CLINK),devtools)
+ifeq ($(wildcard $(LD_DIR)/driver/ld.c),)
+$(error CLINK=devtools: no ld sources at $(LD_DIR) (set LD_DIR))
+endif
+CLINK_CMD    := "$(DEVTOOLS_LD)" --target=ouroboros --gc-sections
+CLINK_DEPS   := $(DEVTOOLS_LD)
+else
+$(error CLINK=$(CLINK): must be lld or devtools)
+endif
+_ := $(shell mkdir -p $(BUILD_DIR) && (echo $(CLINK) | cmp -s - $(CLINK_CHOICE) || echo $(CLINK) > $(CLINK_CHOICE)))
+
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
@@ -762,8 +793,8 @@ $(BUILD_DIR)/cpp/%.o: $(CPP_DIR)/lib/%.c Makefile
 $(BUILD_DIR)/cpp/cpp.o: $(CPP_DIR)/driver/cpp.c Makefile
 	@mkdir -p $(BUILD_DIR)/cpp
 	$(CC) $(CPP_CFLAGS) -c $< -o $@
-$(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld
-	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(CPP_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
+$(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld $(CLINK_CHOICE) $(CLINK_DEPS)
+	$(CLINK_CMD) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(CPP_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpp.elf $(CPP_BIN)
 -include $(wildcard $(BUILD_DIR)/cpp/*.d)
 
@@ -776,10 +807,16 @@ EDIT_CFLAGS := $(CFLAGS_OS) $(PICO_INC) -I$(EDIT_DIR)/src -MMD -MP
 $(BUILD_DIR)/edit/%.o: $(EDIT_DIR)/src/%.c Makefile
 	@mkdir -p $(BUILD_DIR)/edit
 	$(CC) $(EDIT_CFLAGS) -c $< -o $@
-$(EDIT_BIN): $(EDIT_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld
-	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/edit.elf $(PICO_PORT) $(EDIT_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
+$(EDIT_BIN): $(EDIT_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld $(CLINK_CHOICE) $(CLINK_DEPS)
+	$(CLINK_CMD) -o $(BUILD_DIR)/edit.elf $(PICO_PORT) $(EDIT_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/edit.elf $(EDIT_BIN)
 -include $(wildcard $(BUILD_DIR)/edit/*.d)
+
+# DevTools's ld for CLINK=devtools (above), built the way its own Makefile
+# builds it, for the host.
+$(DEVTOOLS_LD): $(wildcard $(LD_DIR)/lib/*.c $(LD_DIR)/lib/*.h) $(LD_DIR)/driver/ld.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -std=c11 -O2 -I$(LD_DIR)/lib $(wildcard $(LD_DIR)/lib/*.c) $(LD_DIR)/driver/ld.c -o $@
 
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
