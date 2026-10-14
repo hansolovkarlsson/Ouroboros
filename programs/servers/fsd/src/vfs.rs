@@ -101,9 +101,10 @@ impl Filesystem {
     /// other partition mounts: on one disk carrying the ESP and a root beside
     /// it, the root is `/`, whatever their order. A disk whose only
     /// filesystem is the boot partition mounts it as before (one-disk step 4,
-    /// docs/roadmap/roadmap-one-disk.md).
+    /// docs/roadmap/roadmap-one-disk.md). A partition typed as a root is
+    /// tried before, and in place of, any untyped one ([`root_order`]).
     pub fn mount(mut disk: Disk) -> Result<(Self, bool), Error> {
-        let mut parts = [0u64; partition::MAX_PARTITIONS];
+        let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
         let count = partition::discover(&mut disk, &mut parts)?;
         let boot = disk.boot_partition_start();
         let (order, count, has_others) = root_order(&parts, count, boot);
@@ -147,12 +148,12 @@ impl Filesystem {
     /// [`Error::NoFat32Partition`] if `index` is out of range or the partition
     /// mounts as no known format.
     pub fn mount_partition(mut disk: Disk, index: usize) -> Result<Self, Error> {
-        let mut parts = [0u64; partition::MAX_PARTITIONS];
+        let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
         let count = partition::discover(&mut disk, &mut parts)?;
         if index >= count {
             return Err(Error::NoFat32Partition);
         }
-        let Ok(lba32) = u32::try_from(parts[index]) else {
+        let Ok(lba32) = u32::try_from(parts[index].start) else {
             return Err(Error::NoFat32Partition);
         };
         if let Ok(fs) = fat32::Fs::mount_at(Disk, lba32) {
@@ -328,28 +329,44 @@ impl Filesystem {
     }
 }
 
-/// `parts[..count]` in the order a root is looked for: every partition but
-/// the one the system booted from, in table order, then that one. With how
-/// many, and whether any other partition is there at all. One list, so
-/// [`Filesystem::mount`] and `format` cannot order it differently (the
-/// medium review of #288).
+/// `parts[..count]`'s start LBAs in the order a root is looked for, with how
+/// many, and whether any candidate other than the boot partition is there
+/// at all. One list, so [`Filesystem::mount`] and `format` cannot order it
+/// differently (the medium review of #288).
+///
+/// The partitions whose type marks them as a root ([`partition::Partition::
+/// root`]: MBR 0x83, GPT's AArch64 root GUID) come first, in table order,
+/// and when there is one, the untyped partitions beside the boot one are not
+/// candidates at all: on a disk with an exFAT data partition before the
+/// root, the root is `/`, and a root that does not mount leaves the boot
+/// partition read-only (decision D5) rather than a data partition as `/`.
+/// With no typed root, every partition but the boot one, in table order, as
+/// before the root was named by type: `espexfat.img`'s exFAT root has a type
+/// (0x07) that a data partition shares. The boot partition comes last; when
+/// the kernel does not know it (`boot` is `None`), the untyped partitions
+/// follow the typed ones in table order, as every partition did then.
 pub fn root_order(
-    parts: &[u64; partition::MAX_PARTITIONS],
+    parts: &[partition::Partition; partition::MAX_PARTITIONS],
     count: usize,
     boot: Option<u64>,
 ) -> ([u64; partition::MAX_PARTITIONS], usize, bool) {
     let mut order = [0u64; partition::MAX_PARTITIONS];
     let mut n = 0;
-    for &lba in &parts[..count] {
-        if Some(lba) != boot {
-            order[n] = lba;
+    let beside = |p: &&partition::Partition| Some(p.start) != boot;
+    for p in parts[..count].iter().filter(beside).filter(|p| p.root) {
+        order[n] = p.start;
+        n += 1;
+    }
+    if n == 0 || boot.is_none() {
+        for p in parts[..count].iter().filter(beside).filter(|p| !p.root) {
+            order[n] = p.start;
             n += 1;
         }
     }
     let has_others = n > 0;
-    for &lba in &parts[..count] {
-        if Some(lba) == boot {
-            order[n] = lba;
+    for p in &parts[..count] {
+        if Some(p.start) == boot {
+            order[n] = p.start;
             n += 1;
         }
     }

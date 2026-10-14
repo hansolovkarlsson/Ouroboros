@@ -303,7 +303,26 @@ Open for step 5, from that review: the root is the first partition beside
 the boot partition that mounts, which is right for two partitions and a
 guess for more (an exFAT data partition before the root would be `/`).
 Naming the root, by MBR type 0x83 or a GPT root type GUID, would hold for
-any layout. Planned as:
+any layout. **Built 2026-10-14:** `partition::discover` records each
+partition's type, and `vfs::root_order` puts the partitions typed as a root
+first: MBR 0x83, or on GPT the Discoverable Partitions Specification's
+AArch64 root GUID only, since the generic "Linux filesystem data" GUID
+marks a data partition as much as a root. With a typed root on the disk,
+the untyped partitions beside the boot one are not candidates at all, so
+a typed root that does not mount leaves the ESP read-only (D5) rather than
+a data partition as `/`; with none, the old rule stands, which
+`espexfat.img` needs (its exFAT root's type, 0x07, is a data partition's
+too). `format` takes the same order, so it formats a typed root even when
+the root no longer probes, and with the boot partition unknown it now
+formats the typed root, not partition 1, which closes the case kept open
+above. `make test-boot-partition` gained `disk-data.img`, the ESP, an exFAT
+data partition and the ext2 root: the root mounts, `format` takes it and
+leaves the data partition whole, and with the root's superblock zeroed the
+ESP comes up read-only. Mutations: the type ignored (all three failed), and
+the untyped partitions kept as candidates beside a typed root (the damaged
+root's boot failed).
+
+The plan for step 4, as it was written:
 - `fsd` asks the kernel for the boot partition: a new syscall, or a field of
   an existing one. That is settled at the step, and the number goes in
   `syscall-abi`.

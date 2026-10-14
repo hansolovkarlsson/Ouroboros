@@ -311,7 +311,7 @@ fn find_partition() -> Option<(u32, u32)> {
     // The partitions `mount` sees, from the one parser it uses, so `format`
     // never picks an entry `mount` would not list (one starting at LBA 0,
     // the MBR itself); each one's size from its MBR entry.
-    let mut parts = [0u64; partition::MAX_PARTITIONS];
+    let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
     let count = partition::discover(&mut disk::Disk, &mut parts).ok()?;
     let mut mbr = [0u8; 512];
     disk::Disk.read_sector(0, &mut mbr).ok()?;
@@ -323,8 +323,10 @@ fn find_partition() -> Option<(u32, u32)> {
         })
     };
     // The root by `vfs::mount`'s rule, so `format` writes over what `/`
-    // showed: among the partitions beside the one the system booted from,
-    // the first holding a filesystem, else the first of them (one just made);
+    // showed: among the candidates beside the one the system booted from
+    // (a partition typed as a root, else every other one), the first holding
+    // a filesystem, else the first of them (one just made, or a typed root
+    // too damaged to probe);
     // the boot partition only when the disk has no other. Never the boot
     // partition while another is there, even when that other holds no
     // filesystem: a damaged root beside the ESP is formatted, not the ESP

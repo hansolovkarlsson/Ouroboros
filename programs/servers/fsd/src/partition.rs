@@ -20,6 +20,36 @@
 
 use crate::disk::{Disk, DiskError, SECTOR_SIZE};
 
+/// One partition as [`discover`] finds it: where it starts, and whether its
+/// table entry's type marks it as a root filesystem ([`is_root_type`]). The
+/// type is what lets `fsd` name the root on a disk with more than one
+/// partition beside the boot one, rather than taking the first that mounts
+/// (`docs/roadmap/roadmap-one-disk.md`, the root by type).
+#[derive(Clone, Copy, Default)]
+pub struct Partition {
+    pub start: u64,
+    pub root: bool,
+}
+
+/// The MBR type of a Linux filesystem, which every MBR root of ours carries
+/// (`scripts/mbrdisk.py`'s `EXT2_TYPE`). MBR has no type for a root as such;
+/// this is the nearest it has.
+pub const MBR_LINUX: u8 = 0x83;
+
+/// The Discoverable Partitions Specification's "Root Partition (64-bit
+/// ARM/AArch64)", `b921b045-1df0-41c3-af44-4c6f280d3fae`, in the on-disk
+/// byte order (the first three fields little-endian). Only this GUID marks a
+/// GPT root: the generic "Linux filesystem data" GUID marks any Linux
+/// partition, a data one as much as a root, so it would be the guess again.
+pub const GPT_ROOT_AARCH64: [u8; 16] = [
+    0x45, 0xb0, 0x21, 0xb9, 0xf0, 0x1d, 0xc3, 0x41, 0xaf, 0x44, 0x4c, 0x6f, 0x28, 0x0d, 0x3f, 0xae,
+];
+
+/// Whether an MBR type byte marks a root filesystem.
+pub fn is_root_type(mbr_type: u8) -> bool {
+    mbr_type == MBR_LINUX
+}
+
 /// Most partitions `fsd` collects from one disk. A GPT can declare 128 entries,
 /// but the overwhelming majority are empty; a handful of real partitions is all
 /// we ever mount from.
@@ -34,16 +64,16 @@ pub const MAX_PARTITIONS: usize = 16;
 /// the old fixed entry cap had.
 const MAX_GPT_ARR_SECTORS: usize = 128;
 
-/// Enumerate the disk's partition start LBAs into `out`, returning the count.
+/// Enumerate the disk's partitions into `out`, returning the count.
 /// Detects GPT by the "EFI PART" signature at LBA 1 *or* a protective (type
 /// 0xEE) entry in the LBA-0 MBR (so a GPT whose primary header signature is
 /// itself damaged is still recognized and recovered from the backup);
 /// otherwise reads the classic MBR partition table. Unused/empty entries and
-/// the GPT protective MBR entry are skipped. The caller (`vfs::mount`) tries
-/// mounting a filesystem at each, so this deliberately doesn't filter by
-/// partition *type* - a partition that isn't a mountable filesystem just fails
-/// the mount and the next is tried.
-pub fn discover(disk: &mut Disk, out: &mut [u64; MAX_PARTITIONS]) -> Result<usize, DiskError> {
+/// the GPT protective MBR entry are skipped. Nothing is filtered by type: a
+/// partition that holds no mountable filesystem just fails the mount. The
+/// type is recorded instead ([`Partition::root`]), for `vfs::root_order` to
+/// put a typed root first.
+pub fn discover(disk: &mut Disk, out: &mut [Partition; MAX_PARTITIONS]) -> Result<usize, DiskError> {
     let mut mbr = [0u8; SECTOR_SIZE];
     disk.read_sector(0, &mut mbr)?;
 
@@ -77,7 +107,7 @@ pub fn discover(disk: &mut Disk, out: &mut [u64; MAX_PARTITIONS]) -> Result<usiz
             continue;
         }
         if n < out.len() {
-            out[n] = lba;
+            out[n] = Partition { start: lba, root: is_root_type(ptype) };
             n += 1;
         }
     }
@@ -122,7 +152,7 @@ fn mbr_has_protective(mbr: &[u8; SECTOR_SIZE]) -> bool {
 fn try_gpt(
     disk: &mut Disk,
     header_lba: u64,
-    out: &mut [u64; MAX_PARTITIONS],
+    out: &mut [Partition; MAX_PARTITIONS],
 ) -> Result<Option<usize>, DiskError> {
     let mut hdr = [0u8; SECTOR_SIZE];
     if disk.read_sector(header_lba, &mut hdr).is_err() {
@@ -186,7 +216,7 @@ fn try_gpt(
             }
             let start = u64::from_le_bytes(buf[base + 32..base + 40].try_into().unwrap_or([0; 8]));
             if start != 0 && n < out.len() {
-                out[n] = start;
+                out[n] = Partition { start, root: buf[base..base + 16] == GPT_ROOT_AARCH64 };
                 n += 1;
             }
         }

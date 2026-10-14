@@ -45,6 +45,14 @@ tells it which partition it booted from (BLOCK_BOOT_START):
 In both, `fsd` must mount ext2, and `ls /` after login must show the root's
 tree, not the ESP's. Every boot checks the filesystem `fsd` mounted as `/`.
 
+and three of build/disk-data.img, which this script builds: the ESP, an
+exFAT data partition (MBR type 0x07), the ext2 root (0x83). `fsd` must take
+the root by its type, not the data partition that comes first:
+  disk-data          mounts the ext2 root
+  disk-data-format   `format ext2` reformats the root, the data partition whole
+  disk-data-badroot  its root's superblock zeroed: the ESP read-only (D5),
+                     never the data partition as `/`
+
 and three on copies this script makes, each disk with a signature of its own
 (the reviews of #288): disk-format formats a copy of disk.img's root and
 finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock,
@@ -65,7 +73,9 @@ read stops it before anything runs. About five minutes. Run it whenever
 bootdisk.rs, main.rs's choice of block device, or how an image lays out its
 partitions, changes.
 """
+import contextlib
 import hashlib
+import io
 import importlib.util
 import os
 import re
@@ -80,6 +90,7 @@ drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
 sys.path.insert(0, HERE)
 import disksig  # noqa: E402
+import mbrdisk  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("test_usb_hub", os.path.join(HERE, "test-usb-hub.py"))
 usb_hub = importlib.util.module_from_spec(_spec)
@@ -166,7 +177,28 @@ BOOTS = [
     # A copy of espgpt.img: `format` must refuse a GPT disk, which it would
     # have laid a filesystem over from LBA 1 (the medium review of #288).
     ("gpt-format", "gpt-format.img", "virtio", None, None, "FAT32", False),
+    # The root by type: the ESP, then an exFAT data partition (type 0x07),
+    # then the ext2 root (0x83). Before the type was read, the data
+    # partition, the first beside the ESP that mounted, was `/`. The root
+    # must be; `format` must take the root and leave the data partition; and
+    # with the root's superblock zeroed, fsd must fall back to the ESP
+    # read-only (D5), not take the data partition as `/`.
+    ("disk-data", "disk-data.img", "virtio", None, None, "ext2", True),
+    ("disk-data-format", "disk-data-format.img", "virtio", None, None, "ext2", False),
+    ("disk-data-badroot", "disk-data-badroot.img", "virtio", None, None, "FAT32", False),
 ]
+
+
+def mbrdisk_image(path, parts):
+    """The bytes of an MBR disk of `parts`, assembled at `path`."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        mbrdisk.assemble(path, parts)
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def bootdisk_entries(disk):
+    return mbrdisk.entries(bytes(disk[:512]))
 
 
 def make_copies():
@@ -186,6 +218,20 @@ def make_copies():
         struct.pack_into("<I", data, 440, own)
         with open(os.path.join(BUILD, name), "wb") as fh:
             fh.write(data)
+    # Three partitions, the root by type (each signed by name, as above).
+    data = bytearray(mbrdisk_image(os.path.join(BUILD, "disk-data.img"), [
+        (mbrdisk.ESP_TYPE, mbrdisk.esp_payload(os.path.join(BUILD, "esp.img")), True),
+        (0x07, mbrdisk.exfat_payload(os.path.join(BUILD, "exfatpart.img")), False),
+        (mbrdisk.EXT2_TYPE, mbrdisk.ext2_payload(os.path.join(BUILD, "ext2part.img")), False)]))
+    root_start = bootdisk_entries(data)[2][2]
+    bad = bytearray(data)
+    bad[root_start * 512 + 1024:root_start * 512 + 2048] = bytes(1024)
+    for name, image in (("disk-data.img", data), ("disk-data-format.img", bytearray(data)),
+                        ("disk-data-badroot.img", bad)):
+        own = int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little") or 1
+        struct.pack_into("<I", image, 440, own)
+        with open(os.path.join(BUILD, name), "wb") as fh:
+            fh.write(image)
     # A GPT disk is named by its partition GUID, not the MBR signature, so
     # its copy needs none of its own: it is never attached beside espgpt.img.
     with open(os.path.join(BUILD, "espgpt.img"), "rb") as src, open(os.path.join(BUILD, "gpt-format.img"), "wb") as dst:
@@ -224,6 +270,14 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
     if label == "gpt-format":
         steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "format ext2"),
                  ("# ", "mount -a"), ("# ", "cd /EFI"), ("# ", "cd /"), ("# ", "")]
+    if label == "disk-data-format":
+        # Format the root, then: `/` is the empty ext2 (`cd /bin` refused),
+        # and the exFAT data partition, table index 1, still holds its tree.
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "format ext2"),
+                 ("# ", "mount -a"), ("# ", "cd /bin"), ("# ", "mount 1 /data"),
+                 ("# ", "cd /data/bin"), ("# ", "cd /"), ("# ", "")]
+    if label == "disk-data-badroot":
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "touch /rotest"), ("# ", "")]
     if label == "disk-format":
         # Format the root, then look with builtins, since the new root has no
         # /bin: `cd /bin` must fail on the empty ext2, and `cd /esp/EFI` must
@@ -270,6 +324,24 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             (f"{label}: `mount -a` after the format mounts ext2", "ext2 mounted" in remount),
             (f"{label}: `format ext2` reformatted the root (`cd /bin` refused)", bool(bin_answer)),
             (f"{label}: the ESP, partition 0, still holds EFI (`cd /esp/EFI` silent)", efi_answer == ""),
+        ]
+    elif label == "disk-data-format":
+        def answer(command):
+            found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", out)
+            return found.group(1).strip() if found else None
+        remount = out.split("format ext2", 1)[1] if "format ext2" in out else ""
+        checks += [
+            (f"{label}: `mount -a` after the format mounts ext2", "ext2 mounted" in remount),
+            (f"{label}: `format ext2` reformatted the typed root (`cd /bin` refused)", bool(answer("cd /bin"))),
+            (f"{label}: the exFAT data partition before it is whole (`cd /data/bin` silent)",
+             answer("cd /data/bin") == ""),
+        ]
+    elif label == "disk-data-badroot":
+        checks += [
+            (f"{label}: fsd fell back to the boot partition, read-only, not to the data partition",
+             "the boot partition is `/`, read-only" in out and "exFAT mounted" not in out),
+            (f"{label}: root's `touch /rotest` is refused as read-only",
+             bool(re.search(r"touch /rotest\r?\n[^#]*read-only", out))),
         ]
     elif label == "gpt-format":
         after = out.split("format ext2", 1)[1] if "format ext2" in out else ""
