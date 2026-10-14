@@ -12,7 +12,10 @@ reached.
 
 On the host, before any boot, every refusal must leave its disk's bytes as
 they were: a FAT volume holding someone's file, a Pi card, a one-disk layout
-whose ext2 root lacks /etc/srcid, a disk too small, a partition's node. Then
+whose ext2 root lacks /etc/srcid, a disk too small, a partition's node.
+Then the Pi's stick (step 5b), on the host but for one boot: the pinned
+firmware on a fresh one, its settings and config.txt carried by a re-stage,
+FIRMWARE=1 resetting the settings and keeping config.txt, PI=0 dropping it. Then
 a fresh file is written, and must hold build/esp.img's ESP and
 build/ext2part.img's root as they are, and a signature of its own.
 
@@ -62,8 +65,11 @@ PASSWORD = "annpass1"
 HOME_TEXT = "carried-home"
 
 
-def bootstick_run(target, carry=True):
-    env = dict(os.environ, CARRY="1" if carry else "0")
+def bootstick_run(target, carry=True, **extra):
+    env = dict(os.environ, CARRY="1" if carry else "0", **extra)
+    for name in ("PI", "FIRMWARE"):
+        if name not in extra:
+            env.pop(name, None)
     out = subprocess.run([sys.executable, os.path.join(HERE, "bootstick.py"), target],
                          capture_output=True, text=True, env=env)
     return out.returncode, out.stdout + out.stderr
@@ -172,8 +178,8 @@ def refusals():
     return checks
 
 
-def boot(label, steps):
-    guest = drive_qemu.Guest(STICK, label=NAME + f"[{label}] ")
+def boot(label, steps, image=STICK):
+    guest = drive_qemu.Guest(image, label=NAME + f"[{label}] ")
     try:
         reached = guest.run(steps)
         out = guest.transcript()
@@ -195,10 +201,86 @@ def srcid_of_build():
                           capture_output=True, text=True).stdout
 
 
+class Esp:
+    """Partition 1 of a written image, mounted for the length of a `with`."""
+
+    def __init__(self, path, write=False):
+        self.path, self.write = path, write
+
+    def __enter__(self):
+        self.mount = os.path.join(WORK, "esp-mount")
+        os.makedirs(self.mount, exist_ok=True)
+        subprocess.run(["hdiutil", "attach", "-nobrowse", *([] if self.write else ["-readonly"]),
+                        "-mountpoint", self.mount, self.path], capture_output=True, check=True)
+        return self
+
+    def read(self, name):
+        path = os.path.join(self.mount, name)
+        return open(path, "rb").read() if os.path.isfile(path) else None
+
+    def append(self, name, data):
+        with open(os.path.join(self.mount, name), "r+b") as fh:
+            fh.seek(-len(data), os.SEEK_END)
+            fh.write(data)
+
+    def __exit__(self, *exc):
+        subprocess.run(["hdiutil", "detach", self.mount], capture_output=True)
+
+
+def pi_stick():
+    """Step 5b, the Pi's stick: the firmware at the root of partition 1 on a
+    fresh disk, carried whole on a re-stage, reinstalled by FIRMWARE=1 with
+    config.txt kept, dropped by PI=0. QEMU cannot run the Pi's firmware, so
+    what the Pi's boot ROM would read is checked on the host, and one boot
+    shows the ESP and root still boot with the firmware beside them."""
+    checks = []
+    zip_path, _ = bootstick.pftf_zip()
+    shipped = {n: subprocess.run(["unzip", "-p", zip_path, n], capture_output=True).stdout
+               for n in ("RPI_EFI.fd", "config.txt", "start4.elf", "overlays/upstream-pi4.dtbo")}
+    pi = blank("pi", 128 << 20)
+    code, out = bootstick_run(pi, PI="1")
+    with Esp(pi) as esp:
+        names = os.listdir(esp.mount)
+        checks.append(("pi: a fresh stick gets the pinned firmware, file for file",
+                       code == 0 and all(esp.read(n) == data for n, data in shipped.items())))
+        checks.append(("pi: beside the ESP's tree, without the readme or macOS's sidecars",
+                       esp.read("EFI/BOOT/BOOTAA64.EFI") is not None and "Readme.md" not in names
+                       and not any(n.startswith("._") for n in names)))
+    ok, out_boot, faults = boot("pi", [("login:", "root"), ("assword", "root"), ("# ", "shutdown")], image=pi)
+    checks.append(("pi: it boots on QEMU to a root shell, the ext2 root mounted, no faults",
+                   ok and "ext2 mounted" in out_boot and faults == 0))
+    settings, overlay = b"SETTINGS", b"# set by hand\n"
+    with Esp(pi, write=True) as esp:
+        esp.append("RPI_EFI.fd", settings)
+        with open(os.path.join(esp.mount, "config.txt"), "ab") as fh:
+            fh.write(overlay)
+    code, out = bootstick_run(pi)
+    with Esp(pi) as esp:
+        fd, config = esp.read("RPI_EFI.fd"), esp.read("config.txt")
+    checks.append(("pi: a re-stage keeps it a Pi stick and carries RPI_EFI.fd and config.txt",
+                   code == 0 and "a Pi stick" in out and fd and fd.endswith(settings)
+                   and config and config.endswith(overlay)))
+    code, out = bootstick_run(pi, FIRMWARE="1")
+    with Esp(pi) as esp:
+        fd, config = esp.read("RPI_EFI.fd"), esp.read("config.txt")
+    checks.append(("pi: FIRMWARE=1 puts the pinned RPI_EFI.fd back and keeps config.txt",
+                   code == 0 and fd == shipped["RPI_EFI.fd"] and config and config.endswith(overlay)))
+    code, out = bootstick_run(pi, PI="0")
+    with Esp(pi) as esp:
+        gone = esp.read("RPI_EFI.fd") is None and esp.read("start4.elf") is None
+    checks.append(("pi: PI=0 drops the firmware, and says so", code == 0 and gone and "dropped" in out))
+    before = digest(pi)
+    code, out = bootstick_run(pi, FIRMWARE="1")
+    checks.append(("pi: FIRMWARE=1 on a stick that is not a Pi's is refused, untouched",
+                   code == 1 and "not a Pi stick" in out and digest(pi) == before))
+    return checks
+
+
 def main():
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(WORK)
     checks = refusals()
+    checks += pi_stick()
 
     checks += sources()
 

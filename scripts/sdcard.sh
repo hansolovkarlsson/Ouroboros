@@ -60,10 +60,9 @@
 # Anything else on the card (the firmware's files, a user's own) is untouched.
 set -eu
 
-# The pinned firmware release. Bump both together; the SHA-256 is the one
-# GitHub reports for the release asset (`gh release view --repo pftf/RPi4`).
-FW_VERSION=v1.53
-FW_SHA256=ca9973e2a7a546b3df871cfb7382e656829114b6dfa424f40dc67cc90a217d88
+# The pinned firmware release, in scripts/pftf.env, which scripts/bootstick.py
+# reads too, so the card and a one-disk Pi stick get the same one.
+. "$(dirname "$0")/pftf.env"
 FW_ZIP="RPi4_UEFI_Firmware_${FW_VERSION}.zip"
 FW_URL="https://github.com/pftf/RPi4/releases/download/${FW_VERSION}/${FW_ZIP}"
 
