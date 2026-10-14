@@ -207,9 +207,14 @@ class Esp:
     def __init__(self, path, write=False):
         self.path, self.write = path, write
 
+    count = 0
+
     def __enter__(self):
-        self.mount = os.path.join(WORK, "esp-mount")
-        os.makedirs(self.mount, exist_ok=True)
+        # A mountpoint of its own each time, so a volume that would not
+        # detach is never mounted over (the review of #294).
+        Esp.count += 1
+        self.mount = os.path.join(WORK, f"esp-mount-{Esp.count}")
+        os.makedirs(self.mount)
         subprocess.run(["hdiutil", "attach", "-nobrowse", *([] if self.write else ["-readonly"]),
                         "-mountpoint", self.mount, self.path], capture_output=True, check=True)
         return self
@@ -224,7 +229,9 @@ class Esp:
             fh.write(data)
 
     def __exit__(self, *exc):
-        subprocess.run(["hdiutil", "detach", self.mount], capture_output=True)
+        # Checked: bootstick then writes the image's raw node, which must not
+        # happen under a FAT mounted read-write (bootstick.detach's rule).
+        bootstick.detach(self.mount)
 
 
 def pi_stick():
@@ -234,14 +241,17 @@ def pi_stick():
     what the Pi's boot ROM would read is checked on the host, and one boot
     shows the ESP and root still boot with the firmware beside them."""
     checks = []
-    zip_path, _ = bootstick.pftf_zip()
-    shipped = {n: subprocess.run(["unzip", "-p", zip_path, n], capture_output=True).stdout
-               for n in ("RPI_EFI.fd", "config.txt", "start4.elf", "overlays/upstream-pi4.dtbo")}
+    zip_path, _, _ = bootstick.pftf_zip()
+    # Every file the release ships, the readme aside: the Pi's boot ROM needs
+    # files no QEMU boot can show missing (the review of #294).
+    members = [n for n in subprocess.run(["unzip", "-Z1", zip_path], capture_output=True, text=True).stdout.split()
+               if not n.endswith("/") and n != "Readme.md"]
+    shipped = {n: subprocess.run(["unzip", "-p", zip_path, n], capture_output=True).stdout for n in members}
     pi = blank("pi", 128 << 20)
     code, out = bootstick_run(pi, PI="1")
     with Esp(pi) as esp:
         names = os.listdir(esp.mount)
-        checks.append(("pi: a fresh stick gets the pinned firmware, file for file",
+        checks.append((f"pi: a fresh stick gets the pinned firmware, all {len(shipped)} files, byte for byte",
                        code == 0 and all(esp.read(n) == data for n, data in shipped.items())))
         checks.append(("pi: beside the ESP's tree, without the readme or macOS's sidecars",
                        esp.read("EFI/BOOT/BOOTAA64.EFI") is not None and "Readme.md" not in names
@@ -254,12 +264,20 @@ def pi_stick():
         esp.append("RPI_EFI.fd", settings)
         with open(os.path.join(esp.mount, "config.txt"), "ab") as fh:
             fh.write(overlay)
+        # A boot flag set to bisect a hang, and a directory left by hand: not
+        # the firmware's, so neither may outlive the re-stage.
+        open(os.path.join(esp.mount, "NOXHCI"), "w").close()
+        os.makedirs(os.path.join(esp.mount, "OLDSTUFF"))
     code, out = bootstick_run(pi)
     with Esp(pi) as esp:
         fd, config = esp.read("RPI_EFI.fd"), esp.read("config.txt")
+        names = os.listdir(esp.mount)
     checks.append(("pi: a re-stage keeps it a Pi stick and carries RPI_EFI.fd and config.txt",
                    code == 0 and "a Pi stick" in out and fd and fd.endswith(settings)
                    and config and config.endswith(overlay)))
+    checks.append(("pi: a boot flag and a stray directory at the root are not carried, and are named",
+                   code == 0 and "NOXHCI" not in names and "OLDSTUFF" not in names
+                   and "not carried from its root: NOXHCI, OLDSTUFF" in out))
     code, out = bootstick_run(pi, FIRMWARE="1")
     with Esp(pi) as esp:
         fd, config = esp.read("RPI_EFI.fd"), esp.read("config.txt")
@@ -273,6 +291,23 @@ def pi_stick():
     code, out = bootstick_run(pi, FIRMWARE="1")
     checks.append(("pi: FIRMWARE=1 on a stick that is not a Pi's is refused, untouched",
                    code == 1 and "not a Pi stick" in out and digest(pi) == before))
+    code, out = bootstick_run(pi, PI="true")
+    checks.append(("an option that is not 1 or 0 (PI=true) is refused, untouched",
+                   code == 1 and "give PI=1 or PI=0" in out and digest(pi) == before))
+    # An ESP that will not mount: its firmware cannot be told, so the default
+    # refuses, and PI=0 re-stages it, which is how a damaged ESP is repaired.
+    esp_start = bootstick.parse_mbr(open(pi, "rb").read(512))[0][2]
+    with open(pi, "r+b") as fh:
+        fh.seek(esp_start * 512)
+        fh.write(bytes(512))
+    before = digest(pi)
+    code, out = bootstick_run(pi)
+    checks.append(("an ESP that will not mount is refused by default, untouched",
+                   code == 1 and "does not mount" in out and digest(pi) == before))
+    code, out = bootstick_run(pi, PI="0")
+    with Esp(pi) as esp:
+        repaired = esp.read("EFI/BOOT/BOOTAA64.EFI") is not None
+    checks.append(("PI=0 re-stages a disk whose ESP will not mount, and the ESP mounts after", code == 0 and repaired))
     return checks
 
 

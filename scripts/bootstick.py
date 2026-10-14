@@ -88,6 +88,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -102,7 +103,6 @@ ESP_IMG = os.path.join(ROOT, "build", "esp.img")
 KEPT_IMG = os.path.join(ROOT, "build", "bootstick-written.img")
 ESP_TREE = os.path.join(ROOT, "build", "esp")
 CACHE = os.path.join(ROOT, "build", "cache")
-PFTF_ENV = os.path.join(HERE, "pftf.env")
 # What marks a Pi's boot partition: the pftf firmware, which also holds its
 # settings and every UEFI variable (no NVRAM on the Pi; scripts/sdcard.sh).
 FIRMWARE_MARK = "RPI_EFI.fd"
@@ -407,6 +407,32 @@ def check_target(disk, need):
         raise Refused(f"{disk.dev} holds {disk.size} bytes; the image needs {need}")
 
 
+def mounted_read_only(ident):
+    """Where macOS has `ident` mounted, mounting it read-only if it is not;
+    None when it will not mount."""
+    mount = diskutil("info", ident).get("MountPoint")
+    if mount:
+        return mount
+    try:
+        diskutil("mount", "readOnly", ident)
+    except Refused:
+        return None
+    return diskutil("info", ident).get("MountPoint")
+
+
+def detach(mount):
+    """Detach the image mounted at `mount`, or refuse: a volume still
+    attached may hold FAT writes its backing file does not have yet, and a
+    copy read from that file would put a half-written tree on the disk (the
+    review of #294). A busy volume (Spotlight, fseventsd) is asked again."""
+    for _ in range(10):
+        out = subprocess.run(["hdiutil", "detach", mount], capture_output=True, text=True)
+        if out.returncode == 0:
+            return
+        time.sleep(1)
+    raise Refused(f"{mount} would not detach ({out.stderr.strip()}); nothing was written to the disk")
+
+
 def system_disks():
     """The whole disks the Mac's system volume lives on: on APFS the
     container diskutil names for `/` is synthesized, so the physical stores
@@ -488,12 +514,9 @@ def classify(disk, debugfs, tmp):
         return "empty", None, None
     kinds = []
     for ident, mount in found:
+        mount = mount or mounted_read_only(ident)
         if not mount:
-            try:
-                diskutil("mount", "readOnly", ident)
-            except Refused:
-                raise Refused(f"{disk.dev}: {ident} does not mount, so what it holds cannot be told; refusing")
-            mount = diskutil("info", ident).get("MountPoint")
+            raise Refused(f"{disk.dev}: {ident} does not mount, so what it holds cannot be told; refusing")
         names = os.listdir(mount)
         kind = volume_kind(names)
         if kind is None and os.path.isfile(os.path.join(mount, "EFI", "ORBS", "INIT.CFG")):
@@ -650,44 +673,39 @@ def build_root(debugfs, e2fsck, kind, source, tmp):
 
 
 def pftf_zip():
-    """The pinned pftf release's zip (scripts/pftf.env), fetched into
-    build/cache once and checked against its SHA-256 on every use, as
-    scripts/sdcard.sh does. Returns its path and version."""
-    pin = {}
-    for line in open(PFTF_ENV):
-        line = line.strip()
-        if line and not line.startswith("#"):
-            name, _, value = line.partition("=")
-            pin[name] = value
-    version, want = pin["FW_VERSION"], pin["FW_SHA256"]
-    name = f"RPi4_UEFI_Firmware_{version}.zip"
-    path = os.path.join(CACHE, name)
-    if not os.path.isfile(path):
-        url = f"https://github.com/pftf/RPi4/releases/download/{version}/{name}"
-        say(f"fetching {url}")
-        os.makedirs(CACHE, exist_ok=True)
-        subprocess.run(["curl", "-fsSL", "-o", path + ".part", url], check=True)
-        os.replace(path + ".part", path)
-    got = hashlib.sha256(open(path, "rb").read()).hexdigest()
-    if got != want:
-        raise Refused(f"{path} has SHA-256 {got}, expected {want}; delete it and retry, or check the release")
-    return path, version
+    """The pinned pftf release's zip, from scripts/pftf.sh, the one fetch and
+    check make sdcard uses too. Returns its path, its version, and the names
+    of the firmware's own files: the zip's top-level entries, the readme
+    left out, as sdcard.sh leaves it."""
+    out = subprocess.run([os.path.join(HERE, "pftf.sh")], capture_output=True, text=True,
+                         env=dict(os.environ, CACHE_DIR=CACHE))
+    if out.returncode != 0:
+        raise Refused(f"the Pi's firmware could not be had: {out.stderr.strip()}")
+    path = out.stdout.strip()
+    version = re.search(r"_(v[^_/]+)\.zip$", path)
+    listing = subprocess.run(["unzip", "-Z1", path], capture_output=True, text=True, check=True).stdout
+    names = {line.split("/")[0] for line in listing.splitlines() if line.strip()} - {"Readme.md"}
+    return path, version.group(1) if version else "?", names
 
 
-def old_firmware(disk, kind):
+def old_firmware(disk, kind, pi_opt, reinstall):
     """The mount point of the old disk's ESP when it holds the Pi's firmware
-    (a one-disk Pi stick), else None. Mounted read-only if macOS has not."""
+    (a one-disk Pi stick), else None. Mounted read-only if macOS has not.
+    An ESP that will not mount cannot say, and its firmware's settings
+    cannot be carried, so it is refused unless the answer does not matter:
+    PI=0 writes no firmware, and PI=1 FIRMWARE=1 writes the release's. A
+    damaged ESP is what a re-stage is for (the review of #294)."""
     if kind != "one-disk":
         return None
     ident = disk.dev[len("/dev/"):] + "s1"
-    mount = diskutil("info", ident).get("MountPoint")
+    mount = mounted_read_only(ident)
     if not mount:
-        try:
-            diskutil("mount", "readOnly", ident)
-        except Refused:
-            raise Refused(f"{disk.dev}: its ESP ({ident}) does not mount, so whether it holds the Pi's firmware "
-                          f"cannot be told; refusing")
-        mount = diskutil("info", ident).get("MountPoint")
+        if pi_opt == "0" or (pi_opt == "1" and reinstall):
+            say(f"its ESP ({ident}) does not mount; whatever firmware it held is not carried")
+            return None
+        raise Refused(f"{disk.dev}: its ESP ({ident}) does not mount, so whether it holds the Pi's firmware, "
+                      f"and the firmware's settings, cannot be read. PI=0 writes it with no firmware; "
+                      f"PI=1 FIRMWARE=1 with the pinned release, its settings reset")
     return mount if os.path.isfile(os.path.join(mount, FIRMWARE_MARK)) else None
 
 
@@ -698,8 +716,13 @@ def pi_esp(tmp, old_fw, reinstall):
     and it is the firmware itself, so it is carried whole, as make sdcard
     installs it once); otherwise the pinned release, keeping the old disk's
     config.txt, where the UART overlay is set by hand. What is the firmware's
-    on the old disk is everything at its root that build/esp does not own.
+    on the old disk is what has a name of the release's own files, matched
+    without case as FAT does, and config.txt: never Ouroboros's boot flags
+    (\\NOXHCI and the rest, set for one boot to bisect a hang) or anything
+    else left at its root (the review of #294).
     Returns the copy's path and what went on it."""
+    zip_path, version, firmware_names = pftf_zip()
+    wanted = {n.lower() for n in firmware_names} | {"config.txt"}
     copy = os.path.join(tmp, "esp-pi.img")
     shutil.copyfile(ESP_IMG, copy)
     mount = os.path.join(tmp, "esp-pi")
@@ -708,15 +731,17 @@ def pi_esp(tmp, old_fw, reinstall):
     if out.returncode != 0:
         raise Refused(f"hdiutil could not attach a copy of {ESP_IMG}: {out.stderr.strip()}")
     try:
-        owned = set(os.listdir(ESP_TREE))
         if old_fw and not reinstall:
+            left = []
             for name in sorted(os.listdir(old_fw)):
-                if name in owned or LITTER.match(name):
-                    continue
-                subprocess.run(["cp", "-R", "-X", os.path.join(old_fw, name), mount], check=True)
+                if name.lower() in wanted:
+                    subprocess.run(["cp", "-R", "-X", os.path.join(old_fw, name), mount], check=True)
+                elif not LITTER.match(name) and name not in os.listdir(ESP_TREE):
+                    left.append(name)
             note = "the old disk's, RPI_EFI.fd and its settings with it"
+            if left:
+                note += f"; not carried from its root: {', '.join(left)}"
         else:
-            zip_path, version = pftf_zip()
             # Names exactly as shipped: the pftf readme says renaming them
             # breaks boot. The readme itself is not wanted (sdcard.sh).
             subprocess.run(["unzip", "-o", "-q", zip_path, "-x", "Readme.md", "-d", mount], check=True)
@@ -728,9 +753,12 @@ def pi_esp(tmp, old_fw, reinstall):
         for name in (".fseventsd", ".Trashes", ".Spotlight-V100"):
             shutil.rmtree(os.path.join(mount, name), ignore_errors=True)
     except subprocess.CalledProcessError as e:
+        subprocess.run(["hdiutil", "detach", "-force", mount], capture_output=True)
         raise Refused(f"putting the Pi's firmware on the ESP failed ({e.cmd[0]}): is the ESP full?")
-    finally:
-        subprocess.run(["hdiutil", "detach", mount], capture_output=True)
+    except BaseException:
+        subprocess.run(["hdiutil", "detach", "-force", mount], capture_output=True)
+        raise
+    detach(mount)
     return copy, note
 
 
@@ -758,7 +786,16 @@ def write(target):
     for f in (ESP_IMG, ROOT_IMG):
         if not os.path.isfile(f):
             raise Refused(f"{f} not found - run `make disk` (make bootstick builds it)")
-    carry = os.environ.get("CARRY", "1") != "0"
+    # Each option is 1, 0 or unset; anything else is refused before the disk
+    # is touched, since PI=true on a fresh stick would quietly write one the
+    # Pi cannot boot (the review of #294).
+    opts = {}
+    for name in ("CARRY", "PI", "FIRMWARE", "EJECT"):
+        opts[name] = os.environ.get(name, "")
+        if opts[name] not in ("", "0", "1"):
+            raise Refused(f"{name}={opts[name]!r}: give {name}=1 or {name}=0")
+    carry = opts["CARRY"] != "0"
+    reinstall = opts["FIRMWARE"] == "1"
     attached = None
     if not target.startswith("/dev/"):
         if not os.path.isfile(target):
@@ -776,13 +813,12 @@ def write(target):
         check_target(disk, 0)
         with tempfile.TemporaryDirectory() as tmp:
             kind, source, old_record = classify(disk, debugfs, tmp)
-            old_fw = old_firmware(disk, kind)
+            old_fw = old_firmware(disk, kind, opts["PI"], reinstall)
             say(f"{disk.dev} is {'empty' if kind == 'empty' else 'ours (' + kind + ')'}"
                 f"{', a Pi stick' if old_fw else ''}")
             # A Pi stick stays one unless PI=0 says otherwise: dropping its
             # firmware loses the firmware's settings with it.
-            pi = {"1": True, "0": False}.get(os.environ.get("PI", ""), bool(old_fw))
-            reinstall = os.environ.get("FIRMWARE") == "1"
+            pi = {"1": True, "0": False}.get(opts["PI"], bool(old_fw))
             if reinstall and not pi:
                 raise Refused("FIRMWARE=1 reinstalls the Pi's firmware, and this is not a Pi stick (PI=1 makes one)")
             if old_fw and not pi:
@@ -857,7 +893,7 @@ def write(target):
         if attached:
             subprocess.run(["hdiutil", "detach", attached], capture_output=True)
     if not attached:
-        if os.environ.get("EJECT") == "1":
+        if opts["EJECT"] == "1":
             diskutil("eject", target)
         else:
             say(f"not ejected; run diskutil eject {target} (or pass EJECT=1)")

@@ -1829,12 +1829,21 @@ stick:
 #   make bootstick BOOTSTICK=/dev/disk4            # find N with diskutil list
 #   make bootstick BOOTSTICK=/dev/disk4 CARRY=0    # the image's /etc and /Users
 #   make bootstick BOOTSTICK=/dev/disk4 EJECT=1
+#   make bootstick BOOTSTICK=/dev/disk4 PI=1       # the Pi 4's stick, pftf on partition 1 (step 5b);
+#                                                  # a Pi stick stays one, PI=0 drops the firmware
+#   make bootstick BOOTSTICK=/dev/disk4 FIRMWARE=1 # a Pi stick's firmware reinstalled, settings
+#                                                  # reset, config.txt kept
 #   make bootstick BOOTSTICK=build/stick.img       # a file: mkfile -n 128m build/stick.img
+# Each option is taken from the command line only, never from the shell's
+# environment: a FIRMWARE=1 left exported from a `make sdcard` session would
+# otherwise reset a Pi stick's firmware settings on its next re-stage.
+BOOTSTICK_OPT = $(if $(filter command line,$(origin $(1))),$($(1)))
 bootstick:
 	@test -n "$(BOOTSTICK)" || { \
 		echo "bootstick: name the whole disk, e.g. make bootstick BOOTSTICK=/dev/disk4 (diskutil list shows N)"; exit 1; }
 	$(MAKE) image $(EXT2_PART)
-	CARRY="$(CARRY)" EJECT="$(EJECT)" python3 scripts/bootstick.py "$(BOOTSTICK)"
+	CARRY="$(call BOOTSTICK_OPT,CARRY)" EJECT="$(call BOOTSTICK_OPT,EJECT)" PI="$(call BOOTSTICK_OPT,PI)" \
+		FIRMWARE="$(call BOOTSTICK_OPT,FIRMWARE)" python3 scripts/bootstick.py "$(BOOTSTICK)"
 
 # Boot a file written by `make bootstick` on virtio, as run-disk boots disk.img.
 run-bootstick:
@@ -2033,11 +2042,13 @@ test-boot-partition: image image-gpt image-ext2 image-exfat disk $(USBSTICK_IMG)
 	python3 scripts/test-boot-partition.py
 
 # `make bootstick` against disk image files (scripts/test-bootstick.py): the
-# guard's refusals leave their disks untouched, a fresh file holds the ESP
-# and root as built, then three boots: a user added, the file re-staged and
-# the user logging in with the counter gone on, and CARRY=0 as the control
-# that refuses the user. About two and a half minutes - run it whenever
-# bootstick.py, mbrdisk.py, disksig.py or the root's recipe changes.
+# guard's refusals leave their disks untouched; the other disks it takes as
+# ours; the Pi's stick (PI=1, FIRMWARE=1, PI=0, its firmware's files only
+# carried, an ESP that will not mount); a fresh file holds the ESP and root
+# as built; then four boots: the Pi stick, a user added, the file re-staged
+# and the user logging in with the counter gone on, and CARRY=0 as the
+# control that refuses the user. About three minutes - run it whenever
+# bootstick.py, pftf.sh, mbrdisk.py, disksig.py or the root's recipe changes.
 test-bootstick: disk
 	python3 scripts/test-bootstick.py
 
