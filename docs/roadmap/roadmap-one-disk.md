@@ -6,7 +6,7 @@ merges with item 1). One disk carries both the boot partition (FAT32, the
 ESP) and a root partition (ext2 or exFAT). It may be a stick, a card or a
 virtual disk, and the system needs nothing else to boot and run.
 
-**Status 2026-10-14: steps 1 to 4b and 5a built, D1, D2, D5 and D6 settled, D3 and
+**Status 2026-10-14: steps 1 to 5b built, D1, D2, D5 and D6 settled, D3 and
 D4 deferred** (`kernel/src/bootdisk.rs`,
 `scripts/disksig.py`, `make test-boot-partition`, `scripts/bootstick.py`,
 `make test-bootstick`); the rest planned. Grounded in the code at
@@ -445,9 +445,30 @@ included, as every image's does. Its `/etc` is what D5's read-only
 fallback shows, with the image's dev accounts. Not carried: hard links
 (each name gets its own copy) and timestamps.
 
-**5b. The Pi's stick: open.** pftf on partition 1, and its `RPI_EFI.fd`
-carried over like the counter, since the firmware's settings and every
-UEFI variable live in that file (`sdcard.sh`'s header), then on the stick.
+**5b. The Pi's stick. Built 2026-10-14** (`PI=1`). The same disk with the
+pftf firmware at the root of partition 1, where the Pi's boot ROM reads it,
+beside the ESP tree: the pinned release on a fresh stick, put into a copy
+of `esp.img` through `hdiutil` (the 64 MiB ESP holds the tree's 5 MB and
+the firmware's 7 MB). The pin moved to `scripts/pftf.env`, which
+`sdcard.sh` sources and `bootstick.py` reads, so a card and a stick cannot
+get different releases. On a re-stage the stick's own firmware files are
+carried whole, everything at the old ESP's root that `build/esp` does not
+own, `RPI_EFI.fd` among them: it is the firmware and the store of its
+settings and every UEFI variable, so this is `make sdcard`'s "installed
+once". A Pi stick stays one by default; `PI=0` drops the firmware and says
+so; `FIRMWARE=1` reinstalls the release, resetting the settings and keeping
+the old `config.txt` (the UART overlay is set there by hand), and is
+refused on a stick that is not a Pi's. A card as the target is still
+refused, now saying why: the kernel cannot read it once it runs.
+
+`make test-bootstick`, 39 checks, gained seven: the pinned files on a fresh
+stick, file for file, without the readme or macOS's sidecars; a boot on
+QEMU with the firmware beside the ESP; a changed `RPI_EFI.fd` and
+`config.txt` carried by a re-stage; `FIRMWARE=1`; `PI=0`; the refusal.
+QEMU cannot run pftf, so whether the Pi boots the stick is step 8.
+Mutations, each failing the rig: the old firmware never carried,
+`config.txt` not kept by `FIRMWARE=1`, a Pi stick not staying one, and
+the refusal removed.
 
 **6. The boot partition at a path** (decision D3). Optional for the arc:
 mount the ESP at `/boot` for every task, so a new kernel can be put on the
