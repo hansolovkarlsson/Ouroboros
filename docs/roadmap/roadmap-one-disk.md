@@ -6,9 +6,10 @@ merges with item 1). One disk carries both the boot partition (FAT32, the
 ESP) and a root partition (ext2 or exFAT). It may be a stick, a card or a
 virtual disk, and the system needs nothing else to boot and run.
 
-**Status 2026-10-13: steps 1 to 4 and 4b built, D1, D2, D5 and D6 settled, D3 and
+**Status 2026-10-14: steps 1 to 4b and 5a built, D1, D2, D5 and D6 settled, D3 and
 D4 deferred** (`kernel/src/bootdisk.rs`,
-`scripts/disksig.py`, `make test-boot-partition`); the rest planned. Grounded in the code at
+`scripts/disksig.py`, `make test-boot-partition`, `scripts/bootstick.py`,
+`make test-bootstick`); the rest planned. Grounded in the code at
 `ebdebc1` (v0.23.0). Six decisions are Hans's, listed under "Decisions"
 below: D1 ext2, D2 the image written, D5 the ESP read-only when the root
 does not mount, D6 a failed read retried once and named; D3 and D4
@@ -364,6 +365,55 @@ that can change it clear or set it.
 **5. Staging a physical disk** (decision D2, settled: the image written). `make bootstick` puts the
 combined layout on a stick, for the Pi with pftf on partition 1. `make
 stick` and `make sdcard` stay until the two-disk layouts are retired.
+
+**5a. Built 2026-10-14, for QEMU and Parallels** (`scripts/bootstick.py`,
+`make bootstick BOOTSTICK=/dev/diskN`, `make test-bootstick`). It writes
+`disk.img`'s layout to a whole disk, built from `esp.img` and
+`ext2part.img` with the old disk's state laid over it: `/etc` file by file
+(a file a newer tree introduced is added), `/Users` home by home (a home
+the old disk has replaces the image's whole, so a file deleted on the
+stick stays deleted; `make stick` keeps homes the same way), each with its
+mode, owner and links. Hans added `/Users` to D2 on 2026-10-14, and kept
+the root at the image's 24 MiB (growing it is a `ROADMAP.md` follow-up).
+The disk keeps its signature across a re-stage, since it is the same disk,
+and a disk that had none of ours gets a random one, never the image's: two
+sticks written from one build must differ (step 2's rule). The boot
+counter's file is carried too, the larger of the old and the new, since
+rolling it back would let a machine whose variable store does not persist
+hand out a counter twice (`bootid.rs`). `CARRY=0` resets `/etc` and
+`/Users` only.
+
+The guard: a whole disk's node, not internal fixed media, not the Mac's
+own, large enough, and empty or ours. Ours is a disk this wrote (an ext2
+partition 2 holding `/etc/srcid`), a `make stick` stick, or a written
+`esp.img`; from the last two, which record no modes, files take the
+image's mode for the same path and the owner of the home they are in. A
+Pi card is refused. A file in place of a device is attached with `hdiutil`
+and written through the same `/dev/diskN` path, which is how the rig
+reaches the device code without `sudo`; a device the user cannot open goes
+through `sudo dd`, which no rig reaches. The write is read back and
+compared, and the disk's last MiB zeroed so an old backup GPT cannot be
+found behind the new MBR.
+
+`make test-bootstick`, 27 checks: four refusals each leave their disk's
+bytes unchanged, a fresh file holds the ESP and root as built, then three
+boots. A user is added on the first; after a re-stage she logs in, reads
+her file, and the counter goes on; after `CARRY=0` she is refused and the
+counter still goes on. Mutations, each failing the rig: the root's carry
+dropped, the counter's carry dropped, a new signature on every write, and
+the guard taking any volume as empty. They run with `OUROBOROS_STALE_OK=1`:
+`bootstick.py` is in the tree's source hash but not in the image, so a
+mutated writer looks to the stale-image guard like a stale image, when the
+image booted is the one built from the clean tree.
+
+Left open: the ESP still carries the whole tree, `/bin` and `/etc`
+included, as every image's does. Its `/etc` is what D5's read-only
+fallback shows, with the image's dev accounts. Not carried: hard links
+(each name gets its own copy) and timestamps.
+
+**5b. The Pi's stick: open.** pftf on partition 1, and its `RPI_EFI.fd`
+carried over like the counter, since the firmware's settings and every
+UEFI variable live in that file (`sdcard.sh`'s header), then on the stick.
 
 **6. The boot partition at a path** (decision D3). Optional for the arc:
 mount the ESP at `/boot` for every task, so a new kernel can be put on the

@@ -761,8 +761,14 @@ not yet checked on this tree are marked (predicted).
       ext2 root beside it) mounting its root, a root that does not mount
       leaving the ESP read-only. Decisions D1 (ext2), D2 (the image
       written), D5 and D6 settled by Hans, D3 and D4 deferred (#290).
+      **Step 5a built 2026-10-14:** `make bootstick` writes that layout to
+      a whole disk, the old disk's `/etc`, `/Users`, boot counter and
+      signature carried over (`make test-bootstick`).
       **Open:** step 0 on Parallels and the Pi 4 (Hans at the hardware),
-      step 5 (`make bootstick`), and steps 6 to 8.
+      step 5b (the Pi's stick, pftf on partition 1), and steps 6 to 8.
+      Follow-up: the root on a stick is the image's 24 MiB; growing it to
+      fill the device needs `fsd`'s ext2 run at that size first (Hans,
+      2026-10-14: its own item, not step 5's).
 - [x] **4. Multi-core. DONE 2026-10-12, moved to
       [`roadmap-completed.md`](roadmap-completed.md)** with its sub-items;
       the plan is [`roadmap-smp.md`](roadmap/roadmap-smp.md). Its open tails

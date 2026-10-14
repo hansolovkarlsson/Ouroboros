@@ -55,6 +55,15 @@ disk's partition table that fails to read is asked again once, then taken
 as not the boot disk with a line saying the read failed, where it had been
 taken for another disk without a word.
 
+**`make bootstick` writes the one disk to a stick (2026-10-14).** Step 5a
+of the one-disk plan. It writes `disk.img`'s layout to a whole disk and
+carries the old disk's `/etc` and `/Users` over, with modes and owners, so
+accounts and homes made on the stick survive a re-stage; the disk keeps
+its signature and its boot counter. It refuses anything not empty and not
+ours, and a Pi card. A disk image file can stand in for the stick, which
+is how `make test-bootstick` checks it: a user added on one boot logs in
+after a re-stage, and is refused after `CARRY=0`.
+
 **C11's comparison macros reach a compiler with the builtins (2026-10-13).**
 DevTools asked (its note, now in `docs/handoffs/closed/`): picolibc's
 `<math.h>` wrote `isgreater` and the other five as builtins only for a
