@@ -569,7 +569,7 @@ make test-cpp                # the C-hosting arc's finish line (scripts/test-cpp
 make test-unmount            # `unmount` with a partition mount and a held file, on a copy of the ext2 image (scripts/test-unmount.py, /bin/CFIDHOLD): both trees cleared, the held fid answering NO_FS and never handed to the next opener, the shell's own partition binding dropped, `erase` allowed after; about a minute and a half - run it whenever FSOP_UNMOUNT, the fid table or the shell's mount code changes
 make test-crename            # unlink, rename and fstat in the C port (scripts/test-crename.py, /bin/CRENAME, /bin/CFSTAT): two boots, FAT32 and ext2 (a partition at /mnt/f for EXDEV), the checks Proem's and Edit's handoff notes name; about two minutes - run it whenever libc's unlink/rename/fstat, its headers, or fsd's NP_RM/NP_MV/NP_FSTAT changes
 make test-keyboard-chain     # rebuilds the image, then four driven QEMU boots through the nested-shell keyboard-chain recipes (scripts/test-keyboard-chain.sh); minutes, so not in `make test` - run it whenever tasks.rs's keyboard ownership changes
-make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi, keyseq) + the cross-language wire-constant check + check-site + test-usb-hub's INCONCLUSIVE classifier on fixed transcripts (`--self-test`) + the disk signature rules (`disksig.py --self-test`, one-disk step 2) + check-xhci-barriers (so it also builds the kernel)
+make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi, keyseq, parttable) + the cross-language wire-constant check + check-site + test-usb-hub's INCONCLUSIVE classifier on fixed transcripts (`--self-test`) + the disk signature rules (`disksig.py --self-test`, one-disk step 2) + check-xhci-barriers (so it also builds the kernel)
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary
 make check-xhci-barriers    # the xHCI driver's two DMA barriers found in the built kernel image (scripts/check-xhci-barriers.py); no QEMU rig can see one missing - ALSO RUN BY `make test` since 2026-10-03
 make check-site             # the published GitHub Pages site vs the documents it abridges - ALSO RUN BY `make test` since 2026-09-05
@@ -590,7 +590,7 @@ pre-alpha code that mostly proves it boots, and most of it can only run on
 the target. The **pure crates are the exception and now have one**:
 `make test` runs the host unit tests for every crate with no I/O, no
 syscalls and no target dependency (`accounts`, `regex`, `ed25519`,
-`clusterkeys`, `ninep-abi`, `keyseq`: 152 tests as of 2026-09-23, and the number is
+`clusterkeys`, `ninep-abi`, `keyseq`, `parttable`: 226 tests as of 2026-10-14, and the number is
 checked by running it, not by incrementing), clippy over those crates' test
 targets too, the cross-language wire-constant check
 (`scripts/check-wire-constants.py`: Rust against the two C headers and the
@@ -748,7 +748,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
                      test-early-fault.py
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
   src/bootdisk.rs    the boot partition: the HardDrive node of the image's own device path, read before the exit (one-disk step 1),
-                     and is_boot_disk, which makes the disk booted from the block device (step 3)
+                     and is_boot_disk, which makes the disk booted from the block device (step 3); the matcher itself is parttable's
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
   src/xhci.rs        from-scratch xHCI: rings, multi-device port scan, HID interrupt endpoint, storage endpoint reset
 
@@ -795,6 +795,9 @@ ed25519/             hand-rolled Ed25519: SHA-512, field, curve, scalar, sign/ve
 clusterkeys/         the /etc/cluster/{id,id.pub,authorized} file format. No trust-on-first-use
 accounts/            /etc/{passwd,shadow,group} parsing/formatting, SHA-256 hashing, salts, lookups, rewrites
 regex/               a small POSIX-ERE engine behind grep. An explicit backtracking stack, not host recursion
+parttable/           partition tables, read: the MBR and GPT parsing (both CRCs, the backup header, checked bounds), the partition list
+                     with root types, and the boot-disk matcher, through a read-sector closure; the ONE copy, which the kernel's
+                     bootdisk.rs and fsd's partition.rs both call, host-tested in make test
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses
                      (the shell's line editor, login, ulib::read_line and read_key), so two readers never disagree on what was typed;
                      the kernel uses it too, to keep keys whole in its keyboard queue
@@ -811,8 +814,8 @@ scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py
                      FOREIGN OBSERVER for both directions of the export)
 ```
 
-Sixty-eight-crate workspace (`cargo metadata`'s count, 2026-10-07). `kernel` and the shared libs (`ulib`,
-`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `keyseq`, `nsresolve`) sit at the repo root; **every userland
+Seventy-two-crate workspace (`cargo metadata`'s count, 2026-10-14). `kernel` and the shared libs (`ulib`,
+`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `keyseq`, `parttable`, `nsresolve`) sit at the repo root; **every userland
 program lives under `programs/`, grouped by role** (`programs/shell`,
 `programs/servers/{fsd,cond,netd,accountd}`, `programs/demos/{hello,pong}`,
 `programs/fileutils/*`, `programs/textutils/*`, `programs/netutils/*`,

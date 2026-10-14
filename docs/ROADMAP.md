@@ -847,8 +847,10 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
-- **The boot-disk matcher in a pure crate, with host tests** (from the
-  medium review of #287, 2026-10-13). `bootdisk::is_boot_disk` parses
+- **The boot-disk matcher in a pure crate, with host tests. DONE
+  2026-10-14:** `parttable`, which the kernel's `bootdisk.rs` and `fsd`'s
+  partition.rs both call, its host tests in `make test`. As planned
+  (from the medium review of #287, 2026-10-13): `bootdisk::is_boot_disk` parses
   MBR and GPT (both CRCs, the backup header, checked arithmetic) inside
   the kernel, where only QEMU boots reach it, and `fsd`'s partition.rs
   parses the same tables a second time. A crate taking a read-sector

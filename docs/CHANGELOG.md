@@ -55,6 +55,17 @@ disk's partition table that fails to read is asked again once, then taken
 as not the boot disk with a line saying the read failed, where it had been
 taken for another disk without a word.
 
+**One copy of the partition-table parsing, tested on the host
+(2026-10-14).** The kernel's boot-disk matcher and `fsd`'s partition reader
+each parsed MBR and GPT (both CRCs, the backup header, the bounds) with
+code only QEMU boots reached. Both now call the pure `parttable` crate,
+whose host tests in `make test` reach what no boot sets up: a hybrid MBR,
+a corrupt primary GPT, headers built to overflow, a read failing on one
+copy and not the other. Behaviour is unchanged but for one bound `fsd`
+lacked: a GPT entry array reaching past the disk is not trusted. `format`
+now takes a partition's size from the same parse that chose it, rather
+than reading the table a second time.
+
 **The root is named by its partition type (2026-10-14).** On a disk with
 more than one partition beside the ESP, `fsd` took the first that mounted
 as `/`, so an exFAT data partition before the root became the root. It now

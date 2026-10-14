@@ -1163,8 +1163,8 @@ fn init_storage() -> Option<virtio_blk::Device> {
         console::println!("Ouroboros kernel: virtio-blk read failed twice ({e})");
         return None;
     }
-    let signature = (sector[511] as u16) << 8 | sector[510] as u16;
-    if signature != 0xaa55 {
+    if !parttable::has_boot_signature(&sector) {
+        let signature = (sector[511] as u16) << 8 | sector[510] as u16;
         console::println!(
             "Ouroboros kernel: virtio-blk sector 0 has no MBR signature ({signature:#06x}) - not attempting a FAT32 mount"
         );
