@@ -341,7 +341,12 @@ rounds, so D6 is as Hans wrote it: the disk is taken as not the boot disk,
 and the line says the read failed. The matcher answers yes, no or
 unreadable (`bootdisk::Boot`), and a GPT copy that validates decides even
 when the other copy could not be read, so a readable backup's no is a no.
-The question of what an unreadable disk should be went back to Hans.
+The question of what an unreadable disk should be went back to Hans, with
+its costs set out (leave it out unless nothing else is there; take it as the
+boot disk), and **he kept D6 as built on 2026-10-13**: an unreadable disk is
+not the boot disk, accepting that a one-disk stick failing its read mounts
+its ESP as `/` read-write, and that a dead stick goes in over a working
+virtio disk. Not to be re-litigated in a review.
 A failed read of the backup header beside a primary that was read
 and did not validate is not an unreadable disk, and `init_storage`'s first
 read of sector 0 is tried twice (a disk that fails it twice is still dropped,
@@ -421,7 +426,9 @@ there.
   check is retried once when a read fails; if it fails again, the stick is
   installed as not the boot disk and the line says the read failed, not
   that it did not match, so a one-disk stick's wrong root is visible.
-  Built as step 4b.
+  Built as step 4b. **Confirmed by Hans on 2026-10-13**, after the reviews
+  of #291, with its costs: a one-disk stick failing its read mounts its ESP
+  as `/` read-write, and a dead stick goes in over a working virtio disk.
 
 ## Risks
 
