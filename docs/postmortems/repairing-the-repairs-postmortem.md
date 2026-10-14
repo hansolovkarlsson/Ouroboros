@@ -558,3 +558,51 @@ ping timeout restated the line above it and was not mutated at all. The
 habit already in this file, mutate the new check before trusting it, was
 half kept: the mutation that shows a check cannot fail is an instruction to
 delete the check or find the case that reaches it, not to annotate it.
+
+## Five branches, twelve rounds, and a decision changed in a round (2026-10-13)
+
+*Added from the one-disk arc's first day: #285 (the boot partition named),
+#286 (every image signed), #287 (the disk booted from installed), #288 (the
+root beside the ESP) and #291 (D5 and D6, a root that does not mount and a
+boot disk's failed read). Code, each round answered with rigs and, for each
+new check, a mutation control.*
+
+| branch | rounds | findings by round | the repair a later round found wanting |
+| --- | --- | --- | --- |
+| #285 | 2 | 9, 0 | none; the second round was one read of the diff |
+| #286 | 2 | 9, 7 | the signature checked as the hash of the image's bytes, which every boot changes; then the GPT GUIDs derived from the same bytes |
+| #287 | 3 | 9, 10, 0 | the fallback's log line, which stood for three reasons |
+| #288 | 3 | 10, 10, 10 | `format`: partition 1 (the ESP), then `mount`'s order with the boot partition in it, which reached the ESP when the root was damaged |
+| #291 | 2 | 10, 8 | D6, reversed in the first round and put back in the second |
+
+**The spine held: the later rounds found the earlier rounds' repairs.**
+#288's third round found the second round's `format` rule, built to take
+the root by `mount`'s order, still able to reach the ESP; #286's second
+round found the first round's own error made again in a second file. The
+10-12 question settled #288: sorted by whether each finding was the
+branch's or `main`'s, the third round's own regression was fixed and the
+rest went to Hans as two questions.
+
+**The lesson this section adds: a review round is not where the user's
+decision is changed.** D6 was Hans's, written into the plan an hour
+before: a disk whose table cannot be read twice is taken as not the boot
+disk, and the line says so. The first review of #291 argued the opposite,
+that such a disk should be taken as the boot disk, with a real failure
+behind it (a one-disk stick mounting its ESP writable). I made the change.
+The second review found what the change cost, as the opposite side of any
+trade will: an unrelated disk with one bad sector winning over the real
+boot stick, a dead stick going in over a working disk. Each round was right
+about the side it looked at, and the code could only take one side, so the
+rounds would have gone on swinging it. D6 went back as written and the
+trade went to Hans with three answers and their costs; he kept D6. When a
+finding argues against a decision someone else made, the answer is a
+question to them, not a commit: the round has found a cost, not a defect,
+and choosing which cost to pay is the decision itself.
+
+**And one smaller: when a finding names a mistake of reasoning, look for
+the mistake, not the instance.** #286's first round found the disk
+signature checked as a hash of the image's current bytes, an identity
+treated as a checksum. The fix corrected the check and left `mkgpt.py`
+deriving its GUIDs the same way, which the next round found. A finding
+about a line is fixed at the line; a finding about a way of thinking is
+fixed by searching the branch for that thought.

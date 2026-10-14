@@ -755,7 +755,14 @@ not yet checked on this tree are marked (predicted).
       takes that disk as its block device, and `fsd` mounts as `/` the
       partition beside the ESP, so the ESP comes first. It found the
       Parallels question answered once already, in 2026-08 ("Mode B"), so
-      its step 0 re-confirms it. Four decisions are Hans's before step 4.
+      its step 0 re-confirms it. **Steps 1 to 4b built the same day on QEMU
+      (#285 to #288, #291):** the boot partition named and its disk
+      installed, every image signed, `build/disk.img` (the ESP first, an
+      ext2 root beside it) mounting its root, a root that does not mount
+      leaving the ESP read-only. Decisions D1 (ext2), D2 (the image
+      written), D5 and D6 settled by Hans, D3 and D4 deferred (#290).
+      **Open:** step 0 on Parallels and the Pi 4 (Hans at the hardware),
+      step 5 (`make bootstick`), and steps 6 to 8.
 - [x] **4. Multi-core. DONE 2026-10-12, moved to
       [`roadmap-completed.md`](roadmap-completed.md)** with its sub-items;
       the plan is [`roadmap-smp.md`](roadmap/roadmap-smp.md). Its open tails
