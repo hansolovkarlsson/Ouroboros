@@ -449,11 +449,11 @@ fallback shows, with the image's dev accounts. Not carried: hard links
 pftf firmware at the root of partition 1, where the Pi's boot ROM reads it,
 beside the ESP tree: the pinned release on a fresh stick, put into a copy
 of `esp.img` through `hdiutil` (the 64 MiB ESP holds the tree's 5 MB and
-the firmware's 7 MB). The pin moved to `scripts/pftf.env`, which
-`sdcard.sh` sources and `bootstick.py` reads, so a card and a stick cannot
-get different releases. On a re-stage the stick's own firmware files are
-carried whole, everything at the old ESP's root that `build/esp` does not
-own, `RPI_EFI.fd` among them: it is the firmware and the store of its
+the firmware's 7 MB). The pin moved to `scripts/pftf.env`, fetched and
+checked by `scripts/pftf.sh` for both `sdcard.sh` and `bootstick.py`, so a
+card and a stick cannot get different releases. On a re-stage the stick's own firmware files are
+carried whole, the release's own files and `config.txt` (after the review,
+below), `RPI_EFI.fd` among them: it is the firmware and the store of its
 settings and every UEFI variable, so this is `make sdcard`'s "installed
 once". A Pi stick stays one by default; `PI=0` drops the firmware and says
 so; `FIRMWARE=1` reinstalls the release, resetting the settings and keeping
@@ -469,6 +469,35 @@ QEMU cannot run pftf, so whether the Pi boots the stick is step 8.
 Mutations, each failing the rig: the old firmware never carried,
 `config.txt` not kept by `FIRMWARE=1`, a Pi stick not staying one, and
 the refusal removed.
+
+The high review of #294 found ten things, all taken:
+- What was carried as firmware was everything at the old ESP's root that
+  `build/esp` did not own, so a boot flag set to bisect a hang (`\NOXHCI`)
+  stayed on every later kernel, and stray entries came back. Only the
+  release's own names (the zip's top level, matched without case) and
+  `config.txt` are carried now, and what was left behind is named.
+- A failed `hdiutil detach` was ignored, and the copy then read from its
+  backing file could miss FAT writes. A detach is retried and then refused
+  (`bootstick.detach`), in the rig too, whose mounts each get their own
+  mountpoint.
+- An ESP that would not mount made a one-disk stick impossible to
+  re-stage, `PI=0` included. It is now refused only when its firmware
+  could matter: `PI=0` writes the disk without firmware, and `PI=1
+  FIRMWARE=1` with the release's.
+- A failed download said the ESP might be full. The fetch is
+  `scripts/pftf.sh` now, the one fetch and check `sdcard.sh` and
+  `bootstick.py` both run, with its own error.
+- `PI=true` fell back to the default; every option is now 1, 0 or unset.
+- The rig compared four of the release's files; it compares all fifteen.
+- The `make` target took `PI` and `FIRMWARE` from the shell's environment
+  too, so a `FIRMWARE=1` left exported would reset a Pi stick's settings.
+  It passes each option from the command line only, and its usage lists
+  them. CLAUDE.md's and the Makefile's rig descriptions are current.
+
+The rig is at 43 checks: a flag and a directory not carried, an
+unmountable ESP refused and then repaired by `PI=0`, and `PI=true`
+refused. Each new check failed with its fix reverted, as did installing
+one file short. No rig reaches a busy volume's detach.
 
 **6. The boot partition at a path** (decision D3). Optional for the arc:
 mount the ESP at `/boot` for every task, so a new kernel can be put on the

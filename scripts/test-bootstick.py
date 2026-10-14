@@ -305,8 +305,11 @@ def pi_stick():
     checks.append(("an ESP that will not mount is refused by default, untouched",
                    code == 1 and "does not mount" in out and digest(pi) == before))
     code, out = bootstick_run(pi, PI="0")
-    with Esp(pi) as esp:
-        repaired = esp.read("EFI/BOOT/BOOTAA64.EFI") is not None
+    try:
+        with Esp(pi) as esp:
+            repaired = esp.read("EFI/BOOT/BOOTAA64.EFI") is not None
+    except subprocess.CalledProcessError:
+        repaired = False  # still unmountable: graded here, not a crash
     checks.append(("PI=0 re-stages a disk whose ESP will not mount, and the ESP mounts after", code == 0 and repaired))
     return checks
 

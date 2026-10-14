@@ -316,8 +316,8 @@ reports, so that one was tripped through a `diskutil` shim that reports it.
 `make sdcard` checks that `SDCARD` names a directory before it builds anything.
 
 **The firmware is pinned, checksummed and installed once.** The release
-(pftf v1.53) and its SHA-256 are in `scripts/pftf.env`, which `make bootstick`
-reads too (below); the zip is
+(pftf v1.53) and its SHA-256 are in `scripts/pftf.env`, and `scripts/pftf.sh`
+fetches and checks it for `make sdcard` and `make bootstick` (below) alike; the zip is
 cached in `build/cache/` and checked on every use. It is unzipped onto a card
 only when the card has no `RPI_EFI.fd`, because this firmware has no NVRAM: the
 §5 settings and every UEFI variable, the boot counter's included, are stored
@@ -424,7 +424,11 @@ It writes the whole disk, so the guard is `scripts/bootstick.py`'s: a whole
 disk's node, external or removable, not the Mac's, and empty or ours. On a
 re-stage the stick keeps its accounts and homes (`/etc`, `/Users`), its disk
 signature, its boot counter and **its firmware files whole**, `RPI_EFI.fd`
-with them, so the §5 settings survive as they do on a card. `FIRMWARE=1`
+with them, so the §5 settings survive as they do on a card. Only the
+firmware's own files and `config.txt` are carried: a boot flag such as
+`NOXHCI` left at the root is not, and the run names what it left behind.
+If the stick's ESP no longer mounts, the run refuses; `PI=1 FIRMWARE=1`
+rewrites it with the release's firmware, settings reset. `FIRMWARE=1`
 reinstalls the pinned release (settings reset, `config.txt` kept); `PI=0`
 drops the firmware. A card is refused as a target: the kernel cannot read
 it once it runs.
