@@ -59,9 +59,11 @@ taken for another disk without a word.
 more than one partition beside the ESP, `fsd` took the first that mounted
 as `/`, so an exFAT data partition before the root became the root. It now
 takes a partition typed as a root first (MBR 0x83, or GPT's AArch64 root
-GUID), and when the disk has one, a data partition is never `/`: a typed
-root that does not mount leaves the ESP read-only. A disk with no typed
-root mounts as before. `format` follows the same rule.
+GUID), and when the disk has one, no other partition is ever a writable
+`/`: a typed root that does not mount leaves the ESP, or another partition
+when the boot partition is not known, read-only. A disk with no typed root
+mounts as before. `format` follows the same rule, and formats only the
+root's candidates.
 
 **The Pi's one disk (2026-10-14).** Step 5b. `make bootstick PI=1` puts
 the Pi 4's UEFI firmware at the root of the stick's first partition, where

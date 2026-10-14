@@ -91,10 +91,11 @@ impl Filesystem {
     /// FAT32 ([`fat32::Fs::mount_at`]), exFAT ([`exfat::Fs::mount_at`]) and
     /// ext2 ([`ext2::Fs::mount_at`]), in table order, except as below.
     /// Returns [`Error::NoFat32Partition`] if no partition mounts as any
-    /// known format. The `bool` is whether the boot partition was mounted
-    /// although the disk has others, every one of which failed to mount:
-    /// the caller says so, since a root that did not probe then leaves the
-    /// ESP as `/` (the high review of #288).
+    /// known format. The [`Fallback`] is set when what mounted is not the
+    /// root's candidate, every one of which failed to mount: the caller says
+    /// so and mounts it read-only, since a root that did not probe then
+    /// leaves the ESP or another partition as `/` (the high review of #288,
+    /// the review of #295).
     ///
     /// The partition the system booted from, when the kernel knows it is on
     /// this disk ([`Disk::boot_partition_start`]), is passed over while any
@@ -103,20 +104,23 @@ impl Filesystem {
     /// filesystem is the boot partition mounts it as before (one-disk step 4,
     /// docs/roadmap/roadmap-one-disk.md). A partition typed as a root is
     /// tried before, and in place of, any untyped one ([`root_order`]).
-    pub fn mount(mut disk: Disk) -> Result<(Self, bool), Error> {
+    pub fn mount(mut disk: Disk) -> Result<(Self, Option<Fallback>), Error> {
         let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
         let count = partition::discover(&mut disk, &mut parts)?;
         let boot = disk.boot_partition_start();
-        let (order, count, has_others) = root_order(&parts, count, boot);
-        for &lba in &order[..count] {
+        let roots = root_order(&parts, count, boot);
+        for (i, &lba) in roots.order[..roots.len].iter().enumerate() {
             // The layout arithmetic is 32-bit (partitions past 2 TB aren't a
             // concern here); a start LBA that doesn't fit just isn't tried.
             let Ok(lba32) = u32::try_from(lba) else {
                 continue;
             };
-            let fell_back = has_others && Some(lba) == boot;
             if let Some(fs) = Self::probe(lba32) {
-                return Ok((fs, fell_back));
+                let fallback = roots.is_fallback(i).then_some(Fallback {
+                    typed_root: roots.typed,
+                    boot_partition: Some(lba) == boot,
+                });
+                return Ok((fs, fallback));
             }
         }
         Err(Error::NoFat32Partition)
@@ -329,27 +333,68 @@ impl Filesystem {
     }
 }
 
-/// `parts[..count]`'s start LBAs in the order a root is looked for, with how
-/// many, and whether any candidate other than the boot partition is there
-/// at all. One list, so [`Filesystem::mount`] and `format` cannot order it
-/// differently (the medium review of #288).
+/// What [`Filesystem::mount`] fell back to when the root did not mount: for
+/// the line that says so, which names the rule the root was looked for by.
+pub struct Fallback {
+    /// The root was a partition typed as one.
+    pub typed_root: bool,
+    /// What mounted instead is the partition the system booted from (else
+    /// one of the untyped partitions, the boot partition not being known).
+    pub boot_partition: bool,
+}
+
+/// Where a root is looked for on one disk ([`root_order`]): the start LBAs
+/// in order, how many there are, and how many of the first of them are the
+/// root's candidates. A partition past the candidates is a fallback, mounted
+/// read-only (decision D5) so that the system comes up to be repaired with
+/// nothing written to it, and never a partition `format` takes.
+pub struct RootOrder {
+    pub order: [u64; partition::MAX_PARTITIONS],
+    pub len: usize,
+    pub candidates: usize,
+    /// Whether the candidates are partitions typed as a root.
+    pub typed: bool,
+}
+
+impl RootOrder {
+    /// The partitions `format` may lay a root on: the candidates, or every
+    /// partition when there are none (a disk whose only partition is the
+    /// boot one, or a table that names no root and no boot partition).
+    pub fn format_targets(&self) -> &[u64] {
+        if self.candidates > 0 { &self.order[..self.candidates] } else { &self.order[..self.len] }
+    }
+
+    /// Whether mounting the `i`-th partition of the order means the root
+    /// did not mount.
+    pub fn is_fallback(&self, i: usize) -> bool {
+        self.candidates > 0 && i >= self.candidates
+    }
+}
+
+/// `parts[..count]` in the order a root is looked for. One list, so
+/// [`Filesystem::mount`] and `format` cannot order it differently (the
+/// medium review of #288).
 ///
 /// The partitions whose type marks them as a root ([`partition::Partition::
-/// root`]: MBR 0x83, GPT's AArch64 root GUID) come first, in table order,
-/// and when there is one, the untyped partitions beside the boot one are not
-/// candidates at all: on a disk with an exFAT data partition before the
-/// root, the root is `/`, and a root that does not mount leaves the boot
-/// partition read-only (decision D5) rather than a data partition as `/`.
-/// With no typed root, every partition but the boot one, in table order, as
-/// before the root was named by type: `espexfat.img`'s exFAT root has a type
-/// (0x07) that a data partition shares. The boot partition comes last; when
-/// the kernel does not know it (`boot` is `None`), the untyped partitions
-/// follow the typed ones in table order, as every partition did then.
+/// root`]: MBR 0x83, GPT's AArch64 root GUID) are the candidates, in table
+/// order, when the disk has one: on a disk with an exFAT data partition
+/// before the root, the root is `/`. Every other partition is then only a
+/// fallback, read-only: the boot partition when the kernel names it, else
+/// the untyped partitions in table order, since which of them is the ESP is
+/// not known. So a typed root that does not mount never leaves a data
+/// partition or the ESP as a writable `/`, and `format` takes the typed root,
+/// whether the boot partition is known or not (the review of #295).
+///
+/// With no typed root, every partition but the boot one is a candidate, in
+/// table order, as before the root was named by type (`espexfat.img`'s exFAT
+/// root has a type, 0x07, that a data partition shares), and the boot
+/// partition is the fallback. With no typed root and no boot partition named,
+/// every partition is a candidate, as every one was then.
 pub fn root_order(
     parts: &[partition::Partition; partition::MAX_PARTITIONS],
     count: usize,
     boot: Option<u64>,
-) -> ([u64; partition::MAX_PARTITIONS], usize, bool) {
+) -> RootOrder {
     let mut order = [0u64; partition::MAX_PARTITIONS];
     let mut n = 0;
     let beside = |p: &&partition::Partition| Some(p.start) != boot;
@@ -357,18 +402,25 @@ pub fn root_order(
         order[n] = p.start;
         n += 1;
     }
-    if n == 0 || boot.is_none() {
+    let typed = n > 0;
+    if !typed || boot.is_none() {
         for p in parts[..count].iter().filter(beside).filter(|p| !p.root) {
             order[n] = p.start;
             n += 1;
         }
     }
-    let has_others = n > 0;
+    let candidates = if typed {
+        parts[..count].iter().filter(beside).filter(|p| p.root).count()
+    } else if boot.is_some() {
+        n
+    } else {
+        0
+    };
     for p in &parts[..count] {
         if Some(p.start) == boot {
             order[n] = p.start;
             n += 1;
         }
     }
-    (order, n, has_others)
+    RootOrder { order, len: n, candidates, typed }
 }

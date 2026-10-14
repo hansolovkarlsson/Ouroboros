@@ -45,14 +45,6 @@ tells it which partition it booted from (BLOCK_BOOT_START):
 In both, `fsd` must mount ext2, and `ls /` after login must show the root's
 tree, not the ESP's. Every boot checks the filesystem `fsd` mounted as `/`.
 
-and three of build/disk-data.img, which this script builds: the ESP, an
-exFAT data partition (MBR type 0x07), the ext2 root (0x83). `fsd` must take
-the root by its type, not the data partition that comes first:
-  disk-data          mounts the ext2 root
-  disk-data-format   `format ext2` reformats the root, the data partition whole
-  disk-data-badroot  its root's superblock zeroed: the ESP read-only (D5),
-                     never the data partition as `/`
-
 and three on copies this script makes, each disk with a signature of its own
 (the reviews of #288): disk-format formats a copy of disk.img's root and
 finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock,
@@ -60,6 +52,19 @@ finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock,
 there (decision D5), and `format` must then take the damaged root, never
 the ESP; gpt-format runs `format` on a
 copy of espgpt.img, which must be refused.
+
+and four of build/disk-data.img, which this script builds: the ESP, an
+exFAT data partition (MBR type 0x07), the ext2 root (0x83). `fsd` must take
+the root by its type, not the data partition that comes first:
+  disk-data          mounts the ext2 root
+  disk-data-format   `format ext2` reformats the root, the data partition whole
+  disk-data-badroot  its root's superblock zeroed: the ESP read-only (D5),
+                     never the data partition as `/`, and `format` takes the
+                     damaged root, the data partition and the ESP left whole
+  disk-data-unknown  the same, the boot partition unknown to fsd (esp.img
+                     booted from NVMe, this disk the fallback on virtio): an
+                     untyped partition comes up read-only, and `format` still
+                     takes the typed root
 
 The ext2 and exFAT boots are the ones that can tell a kernel naming its boot
 partition from one naming the first partition. The stick's QEMU arguments
@@ -69,7 +74,7 @@ own USB boot (no kernel line, a clean fault trace, UsbBootExecCmd last) is
 INCONCLUSIVE, not a failed check and not a pass, and exits 100 as there;
 anything else that keeps the kernel from printing fails. Every image's
 expected line is read before the first boot, so an image this script cannot
-read stops it before anything runs. About five minutes. Run it whenever
+read stops it before anything runs. About seven minutes. Run it whenever
 bootdisk.rs, main.rs's choice of block device, or how an image lays out its
 partitions, changes.
 """
@@ -186,6 +191,13 @@ BOOTS = [
     ("disk-data", "disk-data.img", "virtio", None, None, "ext2", True),
     ("disk-data-format", "disk-data-format.img", "virtio", None, None, "ext2", False),
     ("disk-data-badroot", "disk-data-badroot.img", "virtio", None, None, "FAT32", False),
+    # The same damaged disk with the boot partition unknown to fsd: the
+    # firmware boots esp.img from NVMe, which the kernel cannot drive, so the
+    # virtio disk goes in as the fallback and BLOCK_BOOT_START answers 0. An
+    # untyped partition may come up, read-only; `format` must still take the
+    # typed root, not the ESP or the data partition that probe (the review of
+    # #295 found both written over).
+    ("disk-data-unknown", "esp.img", "nvme", "disk-data-unknown.img", None, "FAT32", False),
 ]
 
 
@@ -227,7 +239,7 @@ def make_copies():
     bad = bytearray(data)
     bad[root_start * 512 + 1024:root_start * 512 + 2048] = bytes(1024)
     for name, image in (("disk-data.img", data), ("disk-data-format.img", bytearray(data)),
-                        ("disk-data-badroot.img", bad)):
+                        ("disk-data-badroot.img", bad), ("disk-data-unknown.img", bytearray(bad))):
         own = int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little") or 1
         struct.pack_into("<I", image, 440, own)
         with open(os.path.join(BUILD, name), "wb") as fh:
@@ -276,8 +288,13 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "format ext2"),
                  ("# ", "mount -a"), ("# ", "cd /bin"), ("# ", "mount 1 /data"),
                  ("# ", "cd /data/bin"), ("# ", "cd /"), ("# ", "")]
-    if label == "disk-data-badroot":
-        steps = [("login:", "root"), ("assword", "root"), ("# ", "touch /rotest"), ("# ", "")]
+    if label in ("disk-data-badroot", "disk-data-unknown"):
+        # The fallback is read-only; then `format` must take the damaged
+        # typed root, table index 2, and leave the exFAT data partition,
+        # index 1, and the ESP, index 0, whole.
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "touch /rotest"), ("# ", "unmount"),
+                 ("# ", "format ext2"), ("# ", "mount -a"), ("# ", "mount 1 /data"), ("# ", "cd /data/bin"),
+                 ("# ", "mount 0 /esp"), ("# ", "cd /esp/EFI"), ("# ", "cd /"), ("# ", "")]
     if label == "disk-format":
         # Format the root, then look with builtins, since the new root has no
         # /bin: `cd /bin` must fail on the empty ext2, and `cd /esp/EFI` must
@@ -336,12 +353,27 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             (f"{label}: the exFAT data partition before it is whole (`cd /data/bin` silent)",
              answer("cd /data/bin") == ""),
         ]
-    elif label == "disk-data-badroot":
+    elif label in ("disk-data-badroot", "disk-data-unknown"):
+        before, _, after = out.partition("format ext2")
+
+        def answer(command):
+            found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", after)
+            return found.group(1).strip() if found else None
+        if label == "disk-data-badroot":
+            checks.append((f"{label}: fsd fell back to the boot partition, read-only, naming the typed root",
+                           "the partition typed as the root did not mount - the boot partition is `/`, read-only"
+                           in before and "exFAT mounted" not in before))
+        else:
+            checks.append((f"{label}: with the boot partition unknown, an untyped partition comes up read-only",
+                           "the partition typed as the root did not mount - an untyped partition is `/`, read-only"
+                           in before))
         checks += [
-            (f"{label}: fsd fell back to the boot partition, read-only, not to the data partition",
-             "the boot partition is `/`, read-only" in out and "exFAT mounted" not in out),
             (f"{label}: root's `touch /rotest` is refused as read-only",
-             bool(re.search(r"touch /rotest\r?\n[^#]*read-only", out))),
+             bool(re.search(r"touch /rotest\r?\n[^#]*read-only", before))),
+            (f"{label}: `format ext2` takes the typed root, and `mount -a` mounts it",
+             "ext2 mounted" in after),
+            (f"{label}: the exFAT data partition is whole (`cd /data/bin` silent)", answer("cd /data/bin") == ""),
+            (f"{label}: the ESP is whole (`cd /esp/EFI` silent)", answer("cd /esp/EFI") == ""),
         ]
     elif label == "gpt-format":
         after = out.split("format ext2", 1)[1] if "format ext2" in out else ""
@@ -379,8 +411,9 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
     elif bus == "nvme":
         checks += [
             (f"{label}: virtio-blk held back as not the boot disk", held),
-            (f"{label}: the stick refused, virtio installed as the fallback, with the reason",
-             "virtio-blk installed as the fallback: the USB stick is not the boot disk either" in out
+            (f"{label}: {'the stick refused, ' if on_usb else ''}virtio installed as the fallback, with the reason",
+             ("virtio-blk installed as the fallback: the USB stick is not the boot disk either" if on_usb
+              else "virtio-blk installed as the fallback: no USB stick is attached") in out
              and not usb_installed),
         ]
     else:
