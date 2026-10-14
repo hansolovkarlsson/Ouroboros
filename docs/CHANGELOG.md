@@ -55,6 +55,14 @@ disk's partition table that fails to read is asked again once, then taken
 as not the boot disk with a line saying the read failed, where it had been
 taken for another disk without a word.
 
+**The Pi's one disk (2026-10-14).** Step 5b. `make bootstick PI=1` puts
+the Pi 4's UEFI firmware at the root of the stick's first partition, where
+the Pi's boot ROM reads it, so one stick can stand in for card and stick.
+A re-stage carries the stick's firmware files whole, its settings with
+them; `FIRMWARE=1` reinstalls the pinned release and keeps `config.txt`.
+The pinned release now lives in `scripts/pftf.env`, shared with `make
+sdcard`. Checked on image files; the Pi itself is step 8.
+
 **`make bootstick` writes the one disk to a stick (2026-10-14).** Step 5a
 of the one-disk plan. It writes `disk.img`'s layout to a whole disk and
 carries the old disk's `/etc` and `/Users` over, with modes and owners, so

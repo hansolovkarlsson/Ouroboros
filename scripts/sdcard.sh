@@ -60,12 +60,10 @@
 # Anything else on the card (the firmware's files, a user's own) is untouched.
 set -eu
 
-# The pinned firmware release. Bump both together; the SHA-256 is the one
-# GitHub reports for the release asset (`gh release view --repo pftf/RPi4`).
-FW_VERSION=v1.53
-FW_SHA256=ca9973e2a7a546b3df871cfb7382e656829114b6dfa424f40dc67cc90a217d88
-FW_ZIP="RPi4_UEFI_Firmware_${FW_VERSION}.zip"
-FW_URL="https://github.com/pftf/RPi4/releases/download/${FW_VERSION}/${FW_ZIP}"
+# The pinned firmware release, in scripts/pftf.env; scripts/pftf.sh fetches
+# and checks it, for this script and scripts/bootstick.py alike, so a card
+# and a one-disk Pi stick get the same one.
+. "$(dirname "$0")/pftf.env"
 
 ESP_DIR="${ESP_DIR:-build/esp}"
 CACHE_DIR="${CACHE_DIR:-build/cache}"
@@ -144,20 +142,13 @@ elif [ ! -e "$CARD/RPI_EFI.fd" ] || [ "$FIRMWARE" = 1 ]; then
     if [ -e "$CARD/RPI_EFI.fd" ]; then
         echo "sdcard: FIRMWARE=1: reinstalling; this resets the firmware's settings and UEFI variables"
     fi
-    mkdir -p "$CACHE_DIR"
-    if [ ! -f "$CACHE_DIR/$FW_ZIP" ]; then
-        echo "sdcard: fetching $FW_URL"
-        curl -fsSL -o "$CACHE_DIR/$FW_ZIP.part" "$FW_URL"
-        mv "$CACHE_DIR/$FW_ZIP.part" "$CACHE_DIR/$FW_ZIP"
-    fi
-    GOT=$(shasum -a 256 "$CACHE_DIR/$FW_ZIP" | cut -d ' ' -f 1)
-    [ "$GOT" = "$FW_SHA256" ] || die "$CACHE_DIR/$FW_ZIP has SHA-256 $GOT, expected $FW_SHA256; delete it and retry, or check the release"
+    FW_ZIP_PATH=$(CACHE_DIR="$CACHE_DIR" "$(dirname "$0")/pftf.sh") || die "the firmware could not be fetched or checked (above)"
     # Names exactly as shipped: the pftf readme says renaming them breaks boot.
     if [ -e "$CARD/config.txt" ]; then
-        unzip -o -q "$CACHE_DIR/$FW_ZIP" -x config.txt -d "$CARD"
+        unzip -o -q "$FW_ZIP_PATH" -x config.txt -d "$CARD"
         echo "sdcard: config.txt kept (edit or delete it by hand to take the shipped one)"
     else
-        unzip -o -q "$CACHE_DIR/$FW_ZIP" -d "$CARD"
+        unzip -o -q "$FW_ZIP_PATH" -d "$CARD"
     fi
     rm -f "$CARD/Readme.md"
     FW_NOTE="installed pftf $FW_VERSION"
