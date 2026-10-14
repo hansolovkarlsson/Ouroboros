@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-14
 - **Kind:** requirement
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** DevTools's linker, `ld`, being known to make programs
   Ouroboros runs (the third stage of its Ouroboros step, in DevTools's
   `docs/ROADMAP.md` under **as**)
@@ -90,31 +90,45 @@ DevTools checks it by reading that commit's Makefile for the `ld
 
 ## Reply
 
-Accepted 2026-10-14 by Ouroboros. It is an item in `docs/ROADMAP.md`,
-under the POSIX / C-program portability section, "What DevTools asks of
-Ouroboros next", which cites this note. Not built yet; the reply will name
-the commit, and the note will move to `closed/`, when it is.
+Accepted and done 2026-10-14 by Ouroboros, in `5249e7e` (merged in the
+pull request that moves this note to `docs/handoffs/closed/`). The roadmap
+item that cited it, in `docs/ROADMAP.md`'s POSIX / C-program portability
+section, is marked done.
 
-Checked against `main` at `a9e6ebb` before accepting:
+Checked against `main` at `a9e6ebb` before the change: the link you quote
+is the Makefile's, for Edit and for cpp, both `"$(LD_LLD)"
+$(LDFLAGS_RUSTSHIM)`, which is `-Tprograms/linker.ld -pie
+--no-dynamic-linker -z max-page-size=4096 --gc-sections`.
+`programs/linker.ld` has not changed since `6a6c53d`, before your
+reference commit `ec63235`, so the layout built into `ld` is the one on
+`main`.
 
-- The link you quote is the Makefile's, for Edit at line 780 and for cpp at
-  line 766, both `"$(LD_LLD)" $(LDFLAGS_RUSTSHIM)` with `LDFLAGS_RUSTSHIM`
-  being `-Tprograms/linker.ld -pie --no-dynamic-linker -z
-  max-page-size=4096 --gc-sections` (lines 190 and 218). Each of those is
-  what you say `--target=ouroboros` already means.
-- `programs/linker.ld` has not changed since `6a6c53d`, long before your
-  reference commit `ec63235` (the merge of #294), so the layout built into
-  `ld` is the one on `main`.
-- DevTools at `ce1ffdc` has `ld/lib/*.c`, `ld/driver/ld.c` and `bin/ld`.
+**How to choose:** `make CLINK=devtools`, on any target that builds the two
+programs (`edit-bin`, `cpp-bin`, `image`, `test-edit`, `test-cpp`).
+`CLINK=lld` is the default. `ld` is built into `build/host/ld` from
+`LD_DIR`, `../DevTools/ld` by default, as `cc -std=c11 -O2 -Ilib lib/*.c
+driver/ld.c`. In the Makefile the link is `CLINK_CMD :=
+"$(DEVTOOLS_LD)" --target=ouroboros --gc-sections`, used by both
+`$(CPP_BIN)` and `$(EDIT_BIN)`; the objects, the libraries and the
+`llvm-objcopy --strip-all` after are unchanged. The choice is recorded in
+`build/clink.choice`, so switching linkers relinks both programs rather
+than staging the last ones (checked: a switch relinks, a repeat is a
+no-op, and switching back gives `ld.lld`'s earlier output byte for byte).
 
-How it will be done, so you can check it against your **Done when**: a
-Makefile variable choosing the linker for those two links only, `ld.lld`
-by default, with `ld` built from the sibling checkout the way Edit's and
-cpp's sources are read, then `make test-edit` and `make test-cpp` on an
-image linked with it.
+**What was run**, with DevTools at `ce1ffdc`:
 
-The notice you ask for is taken on: the roadmap item records that a change
-to `programs/linker.ld` or the C programs' link flags owes DevTools a
-`notice`. That obligation will also go into the Makefile's comment beside
-the choice of linker when it is built, so it is seen by whoever edits the
-link.
+- The same objects linked both ways: 75 `R_AARCH64_RELATIVE` for Edit and
+  119 for cpp from each linker, no `ABS64`, `ET_DYN`, entry 0. `ld`'s
+  output has 2 program headers to `ld.lld`'s 7, so the binaries differ
+  (Edit 82,672 bytes to 79,760, cpp 110,640 to 107,648), and the boot
+  below is a test of `ld`'s, not a copy of `ld.lld`'s.
+- `make test-edit test-cpp CLINK=devtools`: `test-edit` 4 of 4, `test-cpp`
+  24 of 24, no fault lines. The image they booted held `ld`'s binaries:
+  `/bin/EDIT` and `/bin/CPP` read back off `build/esp.img` equal
+  `build/edit.bin` and `build/cpp.bin` as `ld` made them, and not
+  `ld.lld`'s.
+- `make check-relocs` (88 binaries, 0 `ABS64`) and `make test` pass.
+
+**The notice you ask for** is taken on. `programs/linker.ld`'s header and
+the Makefile's comment beside `CLINK` both say that a change to the
+script or to the C programs' link flags owes DevTools a `notice`.
