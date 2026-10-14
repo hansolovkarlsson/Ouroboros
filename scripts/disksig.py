@@ -94,7 +94,18 @@ def set_signature(path):
     if is_gpt(path):
         raise ValueError(f"{path}: a GPT disk takes no MBR signature (scripts/mkgpt.py sets its GUIDs)")
     read_signature(path)
-    sig = signature_for(path)
+    return put_signature(path, signature_for(path))
+
+
+def put_signature(path, sig):
+    """Write `sig` as the signature of the MBR image at `path`: for a disk
+    whose name is not its bytes' hash, a stick that keeps the one it had
+    (scripts/bootstick.py)."""
+    if is_gpt(path):
+        raise ValueError(f"{path}: a GPT disk takes no MBR signature")
+    read_signature(path)
+    if not 0 < sig < 1 << 32:
+        raise ValueError(f"{path}: signature {sig:#x} is not a nonzero 32-bit value")
     with open(path, "r+b") as fh:
         fh.seek(SIG_OFFSET)
         fh.write(struct.pack("<I", sig))

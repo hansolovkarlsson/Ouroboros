@@ -319,7 +319,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick release test check-relocs check-xhci-barriers check-statics test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-spawn-owner test-proc-cpus test-boot-partition test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-spawn-owner test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -1814,6 +1814,42 @@ stick:
 		echo "stick: STICK='$(STICK)' is not a mounted stick, e.g. make stick STICK=/Volumes/STICK"; exit 1; }
 	$(MAKE) sdcard SDCARD="$(STICK)" STICK_MODE=1
 
+# One disk on a stick (one-disk step 5, docs/roadmap/roadmap-one-disk.md):
+# writes build/disk.img's layout, the ESP as partition 1 and the ext2 root as
+# partition 2, to a WHOLE disk, carrying the old disk's /etc, /Users, boot
+# counter and signature over (decision D2, the image written; /Users added by
+# Hans on 2026-10-14). It replaces the whole disk, so scripts/bootstick.py
+# guards it: a whole disk's node, external or removable, not the Mac's own,
+# and empty or ours (a disk it wrote, a `make stick` stick, or a written
+# esp.img); a Pi card is refused. BOOTSTICK may name a disk image file
+# instead, which it attaches with hdiutil and writes the same way, so it can
+# be tried on QEMU first (`make run-bootstick`). A device this user cannot
+# open is read and written through sudo dd.
+#
+#   make bootstick BOOTSTICK=/dev/disk4            # find N with diskutil list
+#   make bootstick BOOTSTICK=/dev/disk4 CARRY=0    # the image's /etc and /Users
+#   make bootstick BOOTSTICK=/dev/disk4 EJECT=1
+#   make bootstick BOOTSTICK=build/stick.img       # a file: mkfile -n 128m build/stick.img
+bootstick:
+	@test -n "$(BOOTSTICK)" || { \
+		echo "bootstick: name the whole disk, e.g. make bootstick BOOTSTICK=/dev/disk4 (diskutil list shows N)"; exit 1; }
+	$(MAKE) image $(EXT2_PART)
+	CARRY="$(CARRY)" EJECT="$(EJECT)" python3 scripts/bootstick.py "$(BOOTSTICK)"
+
+# Boot a file written by `make bootstick` on virtio, as run-disk boots disk.img.
+run-bootstick:
+	@test -f "$(BOOTSTICK)" || { echo "run-bootstick: BOOTSTICK='$(BOOTSTICK)' is not a file make bootstick wrote"; exit 1; }
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=$(BOOTSTICK),format=raw,if=none,id=hd0 \
+		-device virtio-blk-device,drive=hd0 \
+		-device virtio-rng-device \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
 # Cut a release: build the release-profile disk images and package the
 # downloadable artifacts (esp.img.zip + esp.hdd.zip + SHA256SUMS) under
 # build/release/. Local and repeatable. The outward-facing publish step
@@ -1995,6 +2031,15 @@ test-proc-cpus: image
 # GPT disk, and for a root that fails to mount being said. About five minutes.
 test-boot-partition: image image-gpt image-ext2 image-exfat disk $(USBSTICK_IMG)
 	python3 scripts/test-boot-partition.py
+
+# `make bootstick` against disk image files (scripts/test-bootstick.py): the
+# guard's refusals leave their disks untouched, a fresh file holds the ESP
+# and root as built, then three boots: a user added, the file re-staged and
+# the user logging in with the counter gone on, and CARRY=0 as the control
+# that refuses the user. About two and a half minutes - run it whenever
+# bootstick.py, mbrdisk.py, disksig.py or the root's recipe changes.
+test-bootstick: disk
+	python3 scripts/test-bootstick.py
 
 # cond's escape sequences on a framebuffer, read off the pixels
 # (scripts/test-cond-vt.py): QEMU with -device ramfb, the screen taken by QMP
@@ -2268,6 +2313,7 @@ test:
 	@# seen failing on an unsigned image, and the 0 rule and GPT refusal hold.
 	@echo "== disk signatures (scripts/disksig.py)"
 	@python3 scripts/disksig.py --self-test || exit 1
+	@python3 scripts/bootstick.py --self-test || exit 1
 	@echo "== xHCI barriers in the kernel image"
 	@$(MAKE) --no-print-directory check-xhci-barriers || exit 1
 	@# The multi-core plan (docs/roadmap/roadmap-smp.md) names every static in
