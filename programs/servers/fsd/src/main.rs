@@ -111,6 +111,13 @@ fn main() -> ! {
 /// task, so an atomic is only the spelling of a mutable static.
 static ROOT_READ_ONLY: AtomicBool = AtomicBool::new(false);
 
+/// Whether `verb` on `tree` is refused because that tree is read-only: the
+/// one spelling of the gate, for `handle_ninep` and the fid path alike (the
+/// second high review of #291 found the predicate written out twice).
+fn refused_read_only(tree: usize, verb: u64, p: &[u64; 4]) -> bool {
+    tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed) && mutates(verb, p)
+}
+
 /// Whether `verb` (with its params `p`) may change what is on the disk: the
 /// verbs [`handle_ninep`] and the fid path refuse on a read-only tree.
 /// DEFAULT-DENY: the verbs that only read are listed, and every other verb,
@@ -659,7 +666,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     };
     // A read-only tree (D5's fallback) refuses every change, root's included,
     // so this comes before `check_access`, whose first rule lets root through.
-    if tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed) && mutates(verb, &p) {
+    if refused_read_only(tree, verb, &p) {
         return status_reply(reply, syscall_abi::FS_ERR_READ_ONLY);
     }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
@@ -1104,7 +1111,7 @@ fn handle_fid_op(
     // write-open is not the only thing between a fid and the ESP: today a
     // write fid cannot outlive the unmount before the fallback, but nothing
     // here should depend on that staying true (the review of #291).
-    if tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed) && mutates(verb, p) {
+    if refused_read_only(tree, verb, p) {
         return status_reply(reply, syscall_abi::FS_ERR_READ_ONLY);
     }
     let Some(path) = fids[idx].path_str() else {

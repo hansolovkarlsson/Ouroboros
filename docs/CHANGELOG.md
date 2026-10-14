@@ -51,8 +51,9 @@ test-boot-partition`, which now checks the filesystem every boot mounts.
 the ESP does not mount, `fsd` still mounts the ESP as `/` so the system
 can be looked at and repaired, but read-only: every change is refused as
 a read-only filesystem, root's included, until `unmount`. And a boot
-disk's partition table that fails to read is asked again once, then logged
-as a failed read rather than taken silently for another disk.
+disk's partition table that fails to read is asked again once, then taken
+as not the boot disk with a line saying the read failed, where it had been
+taken for another disk without a word.
 
 **C11's comparison macros reach a compiler with the builtins (2026-10-13).**
 DevTools asked (its note, now in `docs/handoffs/closed/`): picolibc's

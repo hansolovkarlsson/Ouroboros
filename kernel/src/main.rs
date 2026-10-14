@@ -1175,7 +1175,8 @@ fn init_storage() -> Option<virtio_blk::Device> {
     let capacity = device.capacity_sectors();
     let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
     let matched = bootdisk::is_boot_disk_retrying(&mut read, capacity, "virtio-blk");
-    if matched == Some(false) {
+    // Not the boot disk, or unreadable twice (D6: taken as not the boot disk).
+    if matches!(matched, Some(bootdisk::Boot::No | bootdisk::Boot::Unreadable)) {
         console::println!("Ouroboros kernel: virtio-blk is not the boot disk - held, installed only if no other disk is");
         return Some(device);
     }
@@ -1207,9 +1208,12 @@ fn install_boot_disk(held: Option<virtio_blk::Device>) {
         // Pi and Parallels boot from a disk the kernel cannot drive and run
         // from the stick); asked all the same, so `fsd` learns whether it holds
         // the boot partition.
+        // D6: a stick unreadable twice is installed as not the boot disk,
+        // over a held virtio disk too, and the line above has said the read
+        // failed. Only a stick that was read and does not match is refused.
         match (held.is_some(), matched) {
-            (true, Some(true)) | (false, _) => Some(bootdisk::start_if(matched)),
-            (true, _) => None,
+            (true, Some(bootdisk::Boot::No)) => None,
+            _ => Some(bootdisk::start_if(matched)),
         }
     });
     let Some(device) = held else { return };
