@@ -13,6 +13,8 @@ import sys
 import disksig
 
 SECT = 512
+ESP_TYPE = 0x0C   # FAT32 LBA
+EXT2_TYPE = 0x83  # Linux
 
 
 def esp_payload(esp_path):
@@ -80,3 +82,27 @@ def assemble(dst, parts):
         f.write(disk)
     print(f"disksig: {dst}: {disksig.set_signature(dst):#010x}")
     return layout
+
+
+def one_disk(esp, root):
+    """The one-disk layout (one-disk step 4), the one statement of it that
+    scripts/mkdisk.py and scripts/bootstick.py both write: the FAT32 ESP as
+    partition 1, bootable, the ext2 root as partition 2."""
+    return [(ESP_TYPE, esp, True), (EXT2_TYPE, root, False)]
+
+
+def entries(sector0):
+    """[(number, type, start, sectors)] of an MBR's used entries, or None
+    when sector 0 is no MBR or is a GPT's protective one."""
+    if len(sector0) < SECT or sector0[510:512] != b"\x55\xaa":
+        return None
+    parts = []
+    for i in range(4):
+        e = 0x1BE + i * 16
+        ptype = sector0[e + 4]
+        start, sectors = struct.unpack_from("<II", sector0, e + 8)
+        if ptype == 0xEE:
+            return None
+        if ptype and sectors:
+            parts.append((i + 1, ptype, start, sectors))
+    return parts

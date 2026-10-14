@@ -40,7 +40,6 @@ import importlib.util
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 
@@ -100,12 +99,58 @@ def blank(name, size):
     return path
 
 
+def ext2(path, request, write=False):
+    """debugfs's stdout for one request on the root of the one-disk image at `path`."""
+    start = bootstick.parse_mbr(open(path, "rb").read(512))[1][2]
+    args = [bootstick.tool("debugfs")] + (["-w"] if write else []) + ["-R", request, f"{path}?offset={start * 512}"]
+    return subprocess.run(args, capture_output=True, text=True).stdout
+
+
+def counter_record(path):
+    """The boot counter record in partition 1 of the image at `path`."""
+    start = bootstick.parse_mbr(open(path, "rb").read(512))[0][2] * 512
+    with open(path, "rb") as fh:
+        def read(o, n):
+            fh.seek(start + o)
+            return fh.read(n)
+        return bootstick.esp_counter(read)
+
+
+def sources():
+    """The other disks bootstick takes as ours, and what each must carry
+    (the review of #293): a `make stick` FAT volume's homes owned by the
+    passwd entry whose home they are, in this project's passwd format; a
+    written esp.img's boot counter; and a dd copy of disk.img, whose
+    signature every such copy shares, given one of its own."""
+    checks = []
+    passwd = open(os.path.join(BUILD, "esp", "etc", "passwd")).read() + "ann:1002:1002:/Users/ann\n"
+    fat = fat_volume("make-stick", {".ouroboros-stick": "", "etc/passwd": passwd, "Users/ann/n.txt": "hi\n"})
+    code, out = bootstick_run(fat)
+    listing = ext2(fat, "ls -p /Users/ann") if code == 0 else ""
+    checks.append(("a `make stick` stick: written, ann's home and file owned by 1002",
+                   code == 0 and "/040755/1002/1002/./" in listing and "/100644/1002/1002/n.txt/" in listing))
+    esp_stick = fat_volume("esp-stick", {"EFI/ORBS/INIT.CFG": "\\EFI\\ORBS\\SH.BIN\n",
+                                         "EFI/ORBS/BOOTID.TXT": "00000000000000000042\n"})
+    code, out = bootstick_run(esp_stick)
+    checks.append(("a written esp.img: its boot counter carried",
+                   code == 0 and counter_record(esp_stick) == b"00000000000000000042\n"))
+    copy = os.path.join(WORK, "dd-copy.img")
+    shutil.copyfile(os.path.join(BUILD, "disk.img"), copy)
+    with open(copy, "ab") as fh:
+        fh.truncate(128 << 20)
+    code, out = bootstick_run(copy)
+    image_sig = disksig.read_signature(os.path.join(BUILD, "disk.img"))
+    checks.append(("a dd copy of disk.img: taken as ours, given a signature of its own",
+                   code == 0 and "ours (one-disk)" in out and disksig.read_signature(copy) not in (0, image_sig)))
+    return checks
+
+
 def refusals():
     """Each target bootstick must refuse, and the bytes it must not touch."""
     checks = []
     foreign_root = os.path.join(WORK, "foreign-root.img")
     shutil.copyfile(os.path.join(BUILD, "disk.img"), foreign_root)
-    root_start = struct.unpack_from("<I", open(foreign_root, "rb").read(512), 446 + 16 + 8)[0]
+    root_start = bootstick.parse_mbr(open(foreign_root, "rb").read(512))[1][2]
     debugfs = bootstick.tool("debugfs")
     subprocess.run([debugfs, "-w", "-R", "rm /etc/srcid", f"{foreign_root}?offset={root_start * 512}"],
                    capture_output=True, check=True)
@@ -145,13 +190,9 @@ def counter(out):
     return int(found[-1]) if found else None
 
 
-def root_bytes(path):
-    with open(path, "rb") as fh:
-        sector = fh.read(512)
-    _, _, start, sectors = bootstick.parse_mbr(sector)[1]
-    with open(path, "rb") as fh:
-        fh.seek(start * 512)
-        return fh.read(sectors * 512)
+def srcid_of_build():
+    return subprocess.run([bootstick.tool("debugfs"), "-R", "cat /etc/srcid", os.path.join(BUILD, "ext2part.img")],
+                          capture_output=True, text=True).stdout
 
 
 def main():
@@ -159,7 +200,14 @@ def main():
     os.makedirs(WORK)
     checks = refusals()
 
-    blank("stick", 128 << 20)
+    checks += sources()
+
+    # Not a whole number of MiB, with a backup GPT header at its last LBA:
+    # the zeroing must reach the very end (the review of #293).
+    blank("stick", (128 << 20) + 3 * 512)
+    with open(STICK, "r+b") as fh:
+        fh.seek(-512, os.SEEK_END)
+        fh.write(b"EFI PART")
     code, out = bootstick_run(STICK)
     print(out, end="")
     with open(STICK, "rb") as fh:
@@ -174,8 +222,11 @@ def main():
         ("a fresh file is written", code == 0),
         ("partition 1 is the ESP, partition 2 the ext2 root", bootstick.is_one_disk(parts) is not None),
         ("the ESP is esp.img's as built", written_esp == esp),
-        ("the root is ext2part.img's as built", parts and root_bytes(STICK)[:os.path.getsize(os.path.join(BUILD, "ext2part.img"))]
-         == open(os.path.join(BUILD, "ext2part.img"), "rb").read()),
+        ("the root's /etc/passwd and /etc/srcid are the image's, /etc/disksig the signature",
+         code == 0 and ext2(STICK, "cat /etc/passwd") == open(os.path.join(BUILD, "esp", "etc", "passwd")).read()
+         and ext2(STICK, "cat /etc/srcid") == srcid_of_build()
+         and ext2(STICK, "cat /etc/disksig").strip() == f"{disksig.read_signature(STICK):08x}"),
+        ("the last LBA's old GPT header is gone", open(STICK, "rb").read()[-512:] == bytes(512)),
         ("the disk has a signature, not disk.img's", sig != 0 and sig != disksig.read_signature(os.path.join(BUILD, "disk.img"))),
     ]
 
@@ -193,9 +244,18 @@ def main():
         ("first: no fault lines", first_faults == 0),
     ]
 
+    # The old root's build stamp as an earlier build's: it must not carry, or
+    # the restaged boot meets two stamps and the stale-image guard refuses it.
+    stamp = os.path.join(WORK, "old-srcid")
+    with open(stamp, "w") as fh:
+        fh.write("an earlier build\n")
+    ext2(STICK, "rm /etc/srcid", write=True)
+    ext2(STICK, f"write {stamp} /etc/srcid", write=True)
     code, out = bootstick_run(STICK)
     print(out, end="")
     checks += [
+        ("re-staged: the build stamp is the new image's, not the old root's",
+         ext2(STICK, "cat /etc/srcid") == srcid_of_build()),
         ("re-staged: written, the old disk taken as ours", code == 0 and "ours (one-disk)" in out),
         ("re-staged: the signature kept", disksig.read_signature(STICK) == sig),
     ]

@@ -1833,7 +1833,7 @@ stick:
 bootstick:
 	@test -n "$(BOOTSTICK)" || { \
 		echo "bootstick: name the whole disk, e.g. make bootstick BOOTSTICK=/dev/disk4 (diskutil list shows N)"; exit 1; }
-	$(MAKE) disk
+	$(MAKE) image $(EXT2_PART)
 	CARRY="$(CARRY)" EJECT="$(EJECT)" python3 scripts/bootstick.py "$(BOOTSTICK)"
 
 # Boot a file written by `make bootstick` on virtio, as run-disk boots disk.img.

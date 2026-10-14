@@ -30,10 +30,7 @@ for f in (ESP, ROOT):
     if not os.path.exists(f):
         sys.exit(f"{f} not found - run `make image` and the ext2part.img recipe first")
 
-layout = mbrdisk.assemble(DST, [
-    (0x0C, mbrdisk.esp_payload(ESP), True),     # FAT32 LBA, the bootable ESP
-    (0x83, mbrdisk.ext2_payload(ROOT), False),  # Linux, the ext2 root
-])
+layout = mbrdisk.assemble(DST, mbrdisk.one_disk(mbrdisk.esp_payload(ESP), mbrdisk.ext2_payload(ROOT)))
 (esp_start, esp_sectors), (root_start, root_sectors) = layout
 print(f"wrote {DST}: FAT32 ESP @ LBA {esp_start}, {esp_sectors} sectors; "
       f"ext2 root @ LBA {root_start}, {root_sectors} sectors")

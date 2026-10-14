@@ -79,10 +79,17 @@ ME = "bootstick"
 SECT = 512
 MIB = 1 << 20
 ESP_IMG = os.path.join(ROOT, "build", "esp.img")
+KEPT_IMG = os.path.join(ROOT, "build", "bootstick-written.img")
 ROOT_IMG = os.path.join(ROOT, "build", "ext2part.img")
 ESP_TYPES = (0x0B, 0x0C, 0xEF)
-EXT2_TYPE = 0x83
+EXT2_TYPE = mbrdisk.EXT2_TYPE
 CARRIED = ("etc", "Users")
+# Under /etc but the build's or this script's, never the old disk's: the
+# build stamp (scripts/srcid.py; an old one beside a new ESP's is two stamps,
+# which the stale-image guard refuses), and the signature this script gave
+# the disk, which is how a re-stage knows the signature is one it chose.
+NEVER_CARRIED = ("etc/srcid", "etc/disksig")
+SIG_FILE = "etc/disksig"
 # What macOS leaves on a fresh FAT volume, the same set scripts/sdcard.sh
 # does not count as contents.
 LITTER = re.compile(r"^(\._.*|\.DS_Store|\.Spotlight-V100|\.fseventsd|\.Trashes|\.TemporaryItems|"
@@ -109,21 +116,7 @@ def tool(name):
 
 # --- Pure rules: no device, no tool. `--self-test` covers each. -------------
 
-def parse_mbr(sector0):
-    """[(number, type, start, sectors)] of an MBR's used entries, or None
-    when sector 0 is no MBR or is a GPT's protective one."""
-    if len(sector0) < SECT or sector0[510:512] != b"\x55\xaa":
-        return None
-    parts = []
-    for i in range(4):
-        e = 0x1BE + i * 16
-        ptype = sector0[e + 4]
-        start, sectors = struct.unpack_from("<II", sector0, e + 8)
-        if ptype == 0xEE:
-            return None
-        if ptype and sectors:
-            parts.append((i + 1, ptype, start, sectors))
-    return parts
+parse_mbr = mbrdisk.entries
 
 
 def is_one_disk(parts):
@@ -152,17 +145,19 @@ def volume_kind(names):
 
 
 def homes_from_passwd(text):
-    """{home directory name under /Users: (uid, gid)} from a passwd file."""
+    """{home directory name under /Users: (uid, gid)} from a passwd file in
+    this project's format, `name:uid:gid:home` (accounts/src/lib.rs,
+    parse_account; scripts/mkpasswd.py), not Unix's seven fields."""
     homes = {}
     for line in text.splitlines():
         fields = line.split(":")
-        if len(fields) < 6:
+        if len(fields) < 4:
             continue
         try:
-            uid, gid = int(fields[2]), int(fields[3])
+            uid, gid = int(fields[1]), int(fields[2])
         except ValueError:
             continue
-        home = fields[5].rstrip("/")
+        home = fields[3].rstrip("/")
         if home.startswith("/Users/") and "/" not in home[len("/Users/"):]:
             homes[home[len("/Users/"):]] = (uid, gid)
     return homes
@@ -324,7 +319,11 @@ class Disk:
         self._sudo_read = None
 
     def read(self, offset, length):
-        assert offset % SECT == 0
+        """`length` bytes at any `offset`: the raw node takes whole sectors,
+        so the read is widened to them and cut back."""
+        lead = offset % SECT
+        if lead:
+            return self.read(offset - lead, length + lead)[lead:]
         padded = (length + SECT - 1) // SECT * SECT
         if self._sudo_read is not True:
             try:
@@ -361,8 +360,8 @@ class Disk:
             return
         except PermissionError:
             say(f"{self.raw} is not writable as you; writing through sudo dd")
-        assert offset % MIB == 0
-        out = subprocess.run(["sudo", "dd", f"if={path}", f"of={self.raw}", "bs=1m", f"oseek={offset // MIB}",
+        bs = MIB if offset % MIB == 0 else SECT
+        out = subprocess.run(["sudo", "dd", f"if={path}", f"of={self.raw}", f"bs={bs}", f"oseek={offset // bs}",
                               "conv=sync"], capture_output=True)
         if out.returncode != 0:
             raise Refused(f"sudo dd could not write {self.raw}: {out.stderr.decode().strip()}")
@@ -374,13 +373,25 @@ def check_target(disk, need):
         raise Refused(f"{disk.dev} is a partition; name the whole disk (/dev/diskN)")
     if info.get("Internal") and not info.get("RemovableMedia"):
         raise Refused(f"{disk.dev} is internal, fixed media; refusing")
-    boot = diskutil("info", "/")
-    if disk.dev in (f"/dev/{boot.get('ParentWholeDisk')}", f"/dev/{boot.get('DeviceIdentifier')}"):
+    if disk.dev in system_disks():
         raise Refused(f"{disk.dev} holds the Mac's own system volume; refusing")
     if info.get("Writable") is False:
         raise Refused(f"{disk.dev} is read-only (a locked card or stick?)")
     if disk.size < need:
         raise Refused(f"{disk.dev} holds {disk.size} bytes; the image needs {need}")
+
+
+def system_disks():
+    """The whole disks the Mac's system volume lives on: on APFS the
+    container diskutil names for `/` is synthesized, so the physical stores
+    behind it are looked up too (the review of #293)."""
+    boot = diskutil("info", "/")
+    disks = {f"/dev/{boot.get('ParentWholeDisk')}", f"/dev/{boot.get('DeviceIdentifier')}"}
+    for store in boot.get("APFSPhysicalStores") or []:
+        ident = store.get("APFSPhysicalStore")
+        if ident:
+            disks.add(f"/dev/{diskutil('info', ident).get('ParentWholeDisk')}")
+    return disks
 
 
 def volumes(disk):
@@ -398,25 +409,52 @@ def volumes(disk):
     return entries
 
 
-def ext2_root_is_ours(debugfs, image):
-    out = subprocess.run([debugfs, "-R", "stat /etc/srcid", image], capture_output=True, text=True)
-    return out.returncode == 0 and "Inode:" in out.stdout
+def debugfs_read(debugfs, spec, request):
+    """debugfs's answer to one read-only request on `spec`, through sudo
+    when the device cannot be opened as this user."""
+    out = subprocess.run([debugfs, "-R", request, spec], capture_output=True, text=True)
+    if "Permission denied" in out.stderr:
+        out = subprocess.run(["sudo", debugfs, "-R", request, spec], capture_output=True, text=True)
+    return out
+
+
+def ext2_root_is_ours(debugfs, spec):
+    """Whether the ext2 filesystem at `spec` (an image, or a device with
+    `?offset=`) holds /etc/srcid, read in place: a Linux stick's 30 GB root
+    is refused without being copied first (the review of #293)."""
+    out = debugfs_read(debugfs, spec, "stat /etc/srcid")
+    return "Inode:" in out.stdout
+
+
+def ext2_text(debugfs, image, path):
+    out = subprocess.run([debugfs, "-R", f"cat {quote('/' + path)}", image], capture_output=True, text=True)
+    return out.stdout if "File not found" not in out.stderr else None
+
+
+def esp_counter(read):
+    """The boot counter record in the FAT32 ESP `read(offset, length)`
+    reads, or None."""
+    try:
+        at = fat32_find(read, BOOTID_PATH)
+    except (struct.error, IndexError):
+        return None
+    return read(at[0], 21) if at and at[1] == 21 else None
 
 
 def classify(disk, debugfs, tmp):
-    """('one-disk', root image, old ESP bytes), ('fat', mount point, None),
-    or ('empty', None, None); refuses anything else."""
+    """('one-disk', root image, old counter record), ('fat', mount point,
+    old counter record), or ('empty', None, None); refuses anything else."""
     sector0 = disk.read(0, SECT)
     parts = parse_mbr(sector0)
     layout = is_one_disk(parts)
     if layout:
         esp, root = layout
+        if not ext2_root_is_ours(debugfs, f"{disk.dev}?offset={root[2] * SECT}"):
+            raise Refused(f"{disk.dev} has an ext2 partition 2 without /etc/srcid: not a disk this wrote; refusing")
         root_img = os.path.join(tmp, "old-root.img")
         with open(root_img, "wb") as fh:
             fh.write(disk.read(root[2] * SECT, root[3] * SECT))
-        if not ext2_root_is_ours(debugfs, root_img):
-            raise Refused(f"{disk.dev} has an ext2 partition 2 without /etc/srcid: not a disk this wrote; refusing")
-        return "one-disk", root_img, disk.read(esp[2] * SECT, esp[3] * SECT)
+        return "one-disk", root_img, esp_counter(lambda o, n: disk.read(esp[2] * SECT + o, n))
     found = volumes(disk)
     if not found:
         if any(disk.read(0, MIB)):
@@ -444,7 +482,9 @@ def classify(disk, debugfs, tmp):
     if len(ours) > 1:
         raise Refused(f"{disk.dev} holds more than one volume of ours ({', '.join(ours)}); refusing to choose")
     if ours:
-        return "fat", ours[0], None
+        counter = os.path.join(ours[0], *BOOTID_PATH)
+        record = open(counter, "rb").read() if os.path.isfile(counter) else None
+        return "fat", ours[0], record
     return "empty", None, None
 
 
@@ -461,9 +501,12 @@ def ext2_tree(debugfs, image, top):
         out = subprocess.run([debugfs, "-R", f"ls -p {quote('/' + rel)}", image], capture_output=True, text=True)
         lines = [ln for ln in out.stdout.splitlines() if ln.startswith("/")]
         if not lines:
-            if rel == top:
+            # Absent only when debugfs says so: any other failure to list a
+            # tree would carry nothing and reset the stick's accounts without
+            # a word (the review of #293).
+            if rel == top and "File not found by ext2_lookup" in out.stderr:
                 return {}
-            raise Refused(f"cannot list /{rel} in {image}: {out.stderr.strip()}")
+            raise Refused(f"cannot list /{rel} in {image}: {out.stderr.strip() or 'no entries'}")
         for line in lines:
             fields = line.split("/")
             if len(fields) < 7:
@@ -548,6 +591,8 @@ def build_root(debugfs, e2fsck, kind, source, tmp):
         homes = homes_from_passwd(open(passwd, errors="replace").read()) if os.path.isfile(passwd) else {}
         for top in CARRIED:
             old.update(fat_tree(source, top, new, homes))
+    old = {p: e for p, e in old.items()
+           if not any(p == n or p.startswith(n + "/") for n in NEVER_CARRIED)}
     if not old:
         return new_root, 0
     script = os.path.join(tmp, "carry.cmds")
@@ -577,17 +622,15 @@ def build_root(debugfs, e2fsck, kind, source, tmp):
     return new_root, sum(1 for e in old.values() if e["kind"] != "d")
 
 
-def esp_with_bootid(old_esp):
+def esp_with_bootid(kind, old_record):
     """build/esp.img's ESP, its boot counter raised to the old disk's when
     that is larger. The record is fixed width and written in place."""
     esp = bytearray(mbrdisk.esp_payload(ESP_IMG))
     new_at = fat32_find(lambda o, n: bytes(esp[o:o + n]), BOOTID_PATH)
     if not new_at:
         raise Refused(f"{ESP_IMG} has no {'/'.join(BOOTID_PATH)}")
-    if old_esp is None:
+    if kind == "empty":
         return bytes(esp), None
-    old_at = fat32_find(lambda o, n: bytes(old_esp[o:o + n]), BOOTID_PATH)
-    old_record = bytes(old_esp[old_at[0]:old_at[0] + 21]) if old_at and old_at[1] == 21 else None
     old_value = bootid_value(old_record)
     if old_value is None:
         say("the old disk's boot counter could not be read; the new disk starts from the image's")
@@ -620,34 +663,59 @@ def write(target):
         disk = Disk(attached or target)
         check_target(disk, 0)
         with tempfile.TemporaryDirectory() as tmp:
-            kind, source, old_esp = classify(disk, debugfs, tmp)
+            kind, source, old_record = classify(disk, debugfs, tmp)
             say(f"{disk.dev} is {'empty' if kind == 'empty' else 'ours (' + kind + ')'}")
+            # The old signature is kept only when this script gave it, which
+            # the root's /etc/disksig says: a stick that is a dd copy of
+            # disk.img carries the image's, which every such copy shares, so
+            # it gets a new one (the review of #293).
             old_sig = None
             if kind == "one-disk":
-                old_sig = struct.unpack_from("<I", disk.read(0, SECT), disksig.SIG_OFFSET)[0] or None
+                on_disk = struct.unpack_from("<I", disk.read(0, SECT), disksig.SIG_OFFSET)[0]
+                if on_disk and (ext2_text(debugfs, source, SIG_FILE) or "").strip() == f"{on_disk:08x}":
+                    old_sig = on_disk
+            sig = old_sig or (int.from_bytes(os.urandom(4), "little") or 1)
+            root_kind = kind
             if not carry and kind != "empty":
                 # Only the root's state: the counter and the disk's name are
                 # never rolled back (the module doc says why).
                 say("CARRY=0: /etc and /Users not carried; accounts and homes made on this disk are reset")
-                kind, source = "empty", None
-            root, carried = build_root(debugfs, e2fsck, kind, source, tmp)
-            esp, counter = esp_with_bootid(old_esp)
-            image = os.path.join(tmp, "disk.img")
+                root_kind, source = "empty", None
+            root, carried = build_root(debugfs, e2fsck, root_kind, source, tmp)
+            sig_file = os.path.join(tmp, "disksig")
+            with open(sig_file, "w") as fh:
+                fh.write(f"{sig:08x}\n")
+            out = subprocess.run([debugfs, "-w", "-R", f"write {quote(sig_file)} /{SIG_FILE}", root],
+                                 capture_output=True, text=True)
+            if "Allocated inode" not in out.stdout + out.stderr:
+                raise Refused(f"could not write /{SIG_FILE} into the new root: {out.stderr.strip()}")
+            esp, counter = esp_with_bootid(kind, old_record)
+            # Kept outside the temporary directory until the disk reads back
+            # whole: once the write starts it is the only copy of the old
+            # disk's /etc and /Users (the review of #293).
+            image = KEPT_IMG
             # assemble signs from the bytes and says so; the signature is
             # replaced below, so its line would name one the disk never gets.
             with contextlib.redirect_stdout(io.StringIO()):
-                mbrdisk.assemble(image, [(0x0C, esp, True), (EXT2_TYPE, mbrdisk.ext2_payload(root), False)])
-            sig = old_sig or (int.from_bytes(os.urandom(4), "little") or 1)
+                mbrdisk.assemble(image, mbrdisk.one_disk(esp, mbrdisk.ext2_payload(root)))
             disksig.put_signature(image, sig)
             size = os.path.getsize(image)
             check_target(disk, size)
             diskutil("unmountDisk", disk.dev)
             say(f"writing {size // MIB} MiB to {disk.dev}")
-            disk.write_file(image)
-            want = hashlib.sha256(open(image, "rb").read()).hexdigest()
-            if hashlib.sha256(disk.read(0, size)).hexdigest() != want:
-                raise Refused(f"{disk.dev} does not read back what was written; do not boot it")
-            tail = (disk.size // MIB - 1) * MIB
+            try:
+                disk.write_file(image)
+                want = hashlib.sha256(open(image, "rb").read()).hexdigest()
+                same = hashlib.sha256(disk.read(0, size)).hexdigest() == want
+            except (Refused, OSError) as e:
+                raise Refused(f"writing {disk.dev} failed: {e}. The disk as it should be, the old disk's "
+                              f"/etc and /Users in it, is {image}; write it with dd once the disk works")
+            if not same:
+                raise Refused(f"{disk.dev} does not read back what was written; do not boot it. The disk "
+                              f"as it should be, the old disk's /etc and /Users in it, is {image}")
+            # The last MiB up to the very end, where a backup GPT's header is
+            # (the last LBA), whatever the disk's size is a multiple of.
+            tail = disk.size - MIB
             if tail >= size:
                 zeros = os.path.join(tmp, "zeros")
                 with open(zeros, "wb") as fh:
@@ -659,6 +727,7 @@ def write(target):
                 else "carried nothing: /etc and /Users are the image's")
             if counter is not None:
                 say(f"boot counter carried: {counter}")
+        os.remove(KEPT_IMG)
     finally:
         if attached:
             subprocess.run(["hdiutil", "detach", attached], capture_output=True)
@@ -693,7 +762,7 @@ def self_test():
     results.append(("macOS's litter is empty", volume_kind([".fseventsd", "._x", ".Spotlight-V100"]) == "empty"))
     results.append(("a stick is ours", volume_kind([".ouroboros-stick", "bin"]) == "ours"))
     results.append(("anything else is not", volume_kind(["photos"]) is None))
-    homes = homes_from_passwd("root:x:0:0:root:/:/bin/sh\nann:x:1002:1002::/Users/ann:/bin/sh\nbad:x:z:1::/Users/bad:\n")
+    homes = homes_from_passwd("root:0:0:/\nann:1002:1002:/Users/ann:00ab:11cd\nbad:z:1:/Users/bad\n")
     results.append(("homes come from passwd", homes == {"ann": (1002, 1002)}))
     new = {"etc/shadow": {"kind": "f", "mode": 0o100600, "uid": 501, "gid": 20}}
     results.append(("a FAT file takes the image's mode", fat_metadata("etc/shadow", "f", new, homes) == (0o100600, 0, 0)))
