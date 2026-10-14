@@ -395,7 +395,7 @@ through `sudo dd`, which no rig reaches. The write is read back and
 compared, and the disk's last MiB zeroed so an old backup GPT cannot be
 found behind the new MBR.
 
-`make test-bootstick`, 27 checks: four refusals each leave their disk's
+`make test-bootstick`, 27 checks as first built: four refusals each leave their disk's
 bytes unchanged, a fresh file holds the ESP and root as built, then three
 boots. A user is added on the first; after a re-stage she logs in, reads
 her file, and the counter goes on; after `CARRY=0` she is refused and the
@@ -405,6 +405,40 @@ the guard taking any volume as empty. They run with `OUROBOROS_STALE_OK=1`:
 `bootstick.py` is in the tree's source hash but not in the image, so a
 mutated writer looks to the stale-image guard like a stale image, when the
 image booted is the one built from the clean tree.
+
+The high review of #293 found ten things, all taken:
+- A `make stick` stick's homes went to root, since the passwd reader took
+  Unix's seven fields and this project's are `name:uid:gid:home` (its own
+  self-test fed it the wrong format).
+- The old root's `/etc/srcid` was carried, so a stick re-staged from a newer
+  build held two build stamps and the stale-image guard refused it. It and
+  `/etc/disksig` are never carried.
+- A Linux stick (FAT then ext4) had its whole root copied before it was
+  refused. `/etc/srcid` is now looked for in place, on the device.
+- A written `esp.img`'s boot counter was not carried; it is now, from the
+  volume.
+- The zeroed tail ended short of the last LBA on a disk that is not a whole
+  number of MiB. It now runs to the end.
+- On APFS the Mac's own disk was named by its synthesized container, never
+  its physical store. The stores are looked up too.
+- After a failed write, the only copy of the old `/etc` and `/Users` was
+  deleted with the temporary directory. The disk as written is kept at
+  `build/bootstick-written.img` until it reads back, and the error names it.
+- A tree that failed to list was taken as absent and carried nothing; only
+  debugfs's "not found" now means absent.
+- A dd copy of `disk.img` kept the image's signature, which every such copy
+  shares. The signature is kept only when `/etc/disksig` in the root says
+  this script gave it.
+- The layout, the MBR reader and the build's dependency were copies. The
+  layout is `mbrdisk.one_disk` and the reader `mbrdisk.entries`, both used by
+  `mkdisk.py` and `bootstick.py`, and `make bootstick` builds only the two
+  payloads. `LITTER` stays a copy of `sdcard.sh`'s list, which is shell.
+
+The rig grew to 32 checks: a `make stick` stick's home owned by its user, a
+written `esp.img`'s counter carried, a dd copy given a signature of its
+own, an odd-sized disk's old backup GPT header zeroed, and an old build
+stamp left behind on a re-stage. Each failed with its fix reverted. No rig
+reaches the APFS lookup, the kept image or the listing failure.
 
 Left open: the ESP still carries the whole tree, `/bin` and `/etc`
 included, as every image's does. Its `/etc` is what D5's read-only

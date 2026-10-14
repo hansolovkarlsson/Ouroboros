@@ -23,22 +23,28 @@ Carried over from the old disk, when it is ours:
   /etc and /Users  from the old root: each file's bytes, mode, owner and
                    group, and symbolic links. Laid over the new root, the old
                    disk's entry winning where both have one; an entry only the
-                   new image has (a file a newer tree introduced) stays.
+                   new image has (a file a newer tree introduced) stays. A
+                   home the old disk has replaces the image's whole. Never
+                   /etc/srcid, the build's stamp, or /etc/disksig, below.
   the disk signature  the old disk's, since it is the same disk (the
-                   signature is a disk's name, scripts/disksig.py). A disk
-                   that had none of ours gets a random one, never the
-                   image's: two sticks written from one build must differ.
+                   signature is a disk's name, scripts/disksig.py), when the
+                   root's /etc/disksig says this script gave it. Any other
+                   disk gets a random one, never the image's: two sticks
+                   written from one build, or copied from disk.img with dd,
+                   must differ.
   the boot counter  \\EFI\\ORBS\\BOOTID.TXT, the larger of the old and the
                    new: rolling the file back would let a boot hand out a
                    counter it handed out before, on a machine whose variable
-                   store does not keep it (kernel/src/bootid.rs).
+                   store does not keep it (kernel/src/bootid.rs). From a
+                   written esp.img too, read off its volume.
 
 The old disk's root is ext2 for a disk this script wrote, so it is read with
 e2fsprogs' debugfs, never mounted. A stick staged by `make stick` (FAT32 or
 exFAT, `.ouroboros-stick` at its root) or a written esp.img (`EFI/ORBS/
 INIT.CFG`) has no modes or owners: its files take the new image's mode for
 the same path, else 0644 and 0755, and a home directory and everything under
-it takes the owner whose home it is in the carried /etc/passwd, else root.
+it takes the owner whose home it is in the carried /etc/passwd (this
+project's `name:uid:gid:home`), else root.
 
 The guard, since this replaces a whole disk. The target must be a whole disk
 (`/dev/diskN`, not a partition), external or removable, not the disk the Mac
@@ -53,9 +59,13 @@ the next part of step 5. Anything this cannot read is refused rather than
 guessed at. A device it cannot open is read and written through `sudo dd`;
 an attached image file belongs to the user and needs no sudo.
 
-After the write the bytes are read back and compared, and the disk's last
-MiB is zeroed, so a backup GPT left by a stick's old table cannot be found
-behind the new MBR.
+The old root is checked for /etc/srcid in place, on the device, before any
+of it is copied. The disk as it will be written is built at
+build/bootstick-written.img and kept until the disk reads it back, since
+once the write starts it is the only copy of the old /etc and /Users. After
+the write the bytes are read back and compared, and the disk's last MiB, up
+to its last LBA, is zeroed, so a backup GPT left by a stick's old table
+cannot be found behind the new MBR.
 """
 import contextlib
 import hashlib
