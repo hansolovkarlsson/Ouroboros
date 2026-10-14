@@ -303,7 +303,57 @@ Open for step 5, from that review: the root is the first partition beside
 the boot partition that mounts, which is right for two partitions and a
 guess for more (an exFAT data partition before the root would be `/`).
 Naming the root, by MBR type 0x83 or a GPT root type GUID, would hold for
-any layout. Planned as:
+any layout. **Built 2026-10-14:** `partition::discover` records each
+partition's type, and `vfs::root_order` puts the partitions typed as a root
+first: MBR 0x83, or on GPT the Discoverable Partitions Specification's
+AArch64 root GUID only, since the generic "Linux filesystem data" GUID
+marks a data partition as much as a root. With a typed root on the disk,
+the untyped partitions beside the boot one are not candidates at all, so
+a typed root that does not mount leaves the ESP read-only (D5) rather than
+a data partition as `/`; with none, the old rule stands, which
+`espexfat.img` needs (its exFAT root's type, 0x07, is a data partition's
+too). `format` takes the same order, so it formats a typed root even when
+the root no longer probes, and with the boot partition unknown it now
+formats the typed root, not partition 1, which closes the case kept open
+above. `make test-boot-partition` gained `disk-data.img`, the ESP, an exFAT
+data partition and the ext2 root: the root mounts, `format` takes it and
+leaves the data partition whole, and with the root's superblock zeroed the
+ESP comes up read-only. Mutations: the type ignored (all three failed), and
+the untyped partitions kept as candidates beside a typed root (the damaged
+root's boot failed).
+
+The high review of #295 found the rule held only while the kernel named
+the boot partition. With it unknown (a fallback disk, a stick taken late,
+or after `partition` or `erase`), the untyped partitions followed a
+damaged typed root as candidates: the ESP or a data partition came up as
+`/` read-write with no line, and `format` wrote over the first that
+probed, the hazard the third review of #288 closed. `root_order` now
+returns a `RootOrder` saying how many of its entries are the root's
+candidates; anything mounted past them is a fallback, read-only and named,
+whether the boot partition is known or not, and `format` formats only the
+candidates (`format_targets`). The fallback line names the rule the root
+was looked for by, since "no partition beside the boot partition mounted"
+was false once untyped ones are not tried. `disk-data-badroot` now runs
+`format` too, and `disk-data-unknown` boots `esp.img` from NVMe with the
+damaged disk as virtio's fallback, so `fsd` is told no boot partition: an
+untyped partition comes up read-only, and `format` takes the typed root,
+the data partition and the ESP whole. 115 checks. Mutations: the fallback
+dropped when the boot partition is unknown, and `format` choosing among
+every partition, each failing.
+
+**Settled by Hans on 2026-10-14: 0x83 stays a root type, its cost
+accepted.** MBR has no type for a root, and 0x83 is the generic
+Linux type, which a data partition carries too, the reason GPT's generic
+Linux GUID was left out. On a disk with an exFAT root (0x07) and an ext4
+partition typed 0x83 that `fsd` cannot mount, the 0x83 partition is now
+the only candidate: the ESP comes up read-only instead of the exFAT root,
+and `format` would take the ext4 partition. Every root this project writes
+is 0x83 ext2 (D1), so the case needs a disk made elsewhere. Counting 0x83
+only when it mounts was the alternative, and would have given a damaged
+ext2 root's protection back to the guess. Not to be re-litigated in a
+review.
+
+The plan for step 4, as it was written:
 - `fsd` asks the kernel for the boot partition: a new syscall, or a field of
   an existing one. That is settled at the step, and the number goes in
   `syscall-abi`.

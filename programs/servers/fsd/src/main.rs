@@ -158,7 +158,7 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     }
     match vfs::Filesystem::mount(disk::Disk) {
         Ok((mounted, _)) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
-        Ok((mounted, fell_back)) => {
+        Ok((mounted, fallback)) => {
             // One write, so no other task's line lands inside it: three
             // pieces let accountd's ready line split "fsd: FAT32 mounted" on a
             // boot `make test-boot-partition` read (the review of #288). When
@@ -166,11 +166,22 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             // disk (one-disk step 4), and it did not mount, the line says so
             // first rather than run on the ESP's tree without a word.
             // D5: the fallback is read-only, so nothing is written to the ESP.
-            ROOT_READ_ONLY.store(fell_back, Ordering::Relaxed);
-            let fallback = if fell_back {
-                "fsd: no partition beside the boot partition mounted - the boot partition is `/`, read-only\r\n"
-            } else {
-                ""
+            ROOT_READ_ONLY.store(fallback.is_some(), Ordering::Relaxed);
+            // Which rule the root was looked for by, and what came up instead:
+            // with a typed root, the untyped partitions beside it were never
+            // tried, so "none beside the boot partition mounted" would send
+            // whoever reads it after the wrong partition (the review of #295).
+            let fallback = match fallback {
+                None => "",
+                Some(vfs::Fallback { typed_root: true, boot_partition: true }) => {
+                    "fsd: the partition typed as the root did not mount - the boot partition is `/`, read-only\r\n"
+                }
+                Some(vfs::Fallback { typed_root: true, boot_partition: false }) => {
+                    "fsd: the partition typed as the root did not mount - an untyped partition is `/`, read-only\r\n"
+                }
+                Some(vfs::Fallback { typed_root: false, .. }) => {
+                    "fsd: no partition beside the boot partition mounted - the boot partition is `/`, read-only\r\n"
+                }
             };
             let mut line = [0u8; 160];
             let mut len = 0;
@@ -311,7 +322,7 @@ fn find_partition() -> Option<(u32, u32)> {
     // The partitions `mount` sees, from the one parser it uses, so `format`
     // never picks an entry `mount` would not list (one starting at LBA 0,
     // the MBR itself); each one's size from its MBR entry.
-    let mut parts = [0u64; partition::MAX_PARTITIONS];
+    let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
     let count = partition::discover(&mut disk::Disk, &mut parts).ok()?;
     let mut mbr = [0u8; 512];
     disk::Disk.read_sector(0, &mut mbr).ok()?;
@@ -323,17 +334,19 @@ fn find_partition() -> Option<(u32, u32)> {
         })
     };
     // The root by `vfs::mount`'s rule, so `format` writes over what `/`
-    // showed: among the partitions beside the one the system booted from,
-    // the first holding a filesystem, else the first of them (one just made);
-    // the boot partition only when the disk has no other. Never the boot
-    // partition while another is there, even when that other holds no
+    // showed: among the candidates beside the one the system booted from
+    // (a partition typed as a root, else every other one), the first holding
+    // a filesystem, else the first of them (one just made, or a typed root
+    // too damaged to probe);
+    // the boot partition only when the disk has no other. Never a fallback
+    // while a candidate is there, even when the candidate holds no
     // filesystem: a damaged root beside the ESP is formatted, not the ESP
-    // (the third review of #288 found the probe reaching it).
+    // (the third review of #288 found the probe reaching it), and a damaged
+    // typed root is formatted, not a data partition or an ESP beside it,
+    // whether or not the boot partition is known (the review of #295).
     let boot = disk::Disk.boot_partition_start();
-    let (order, n, _) = vfs::root_order(&parts, count, boot);
-    // root_order puts every partition beside the boot one first.
-    let others = order[..n].iter().filter(|&&lba| Some(lba) != boot).count();
-    let candidates = if others > 0 { &order[..others] } else { &order[..n] };
+    let roots = vfs::root_order(&parts, count, boot);
+    let candidates = roots.format_targets();
     let probing = candidates.iter().find(|&&lba| u32::try_from(lba).ok().and_then(vfs::Filesystem::probe).is_some());
     let target = *probing.or(candidates.first())?;
     Some((u32::try_from(target).ok()?, size_of(target)?))
