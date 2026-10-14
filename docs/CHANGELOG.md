@@ -62,7 +62,9 @@ code only QEMU boots reached. Both now call the pure `parttable` crate,
 whose host tests in `make test` reach what no boot sets up: a hybrid MBR,
 a corrupt primary GPT, headers built to overflow, a read failing on one
 copy and not the other. Behaviour is unchanged but for one bound `fsd`
-lacked: a GPT entry array reaching past the disk is not trusted.
+lacked: a GPT entry array reaching past the disk is not trusted. `format`
+now takes a partition's size from the same parse that chose it, rather
+than reading the table a second time.
 
 **The root is named by its partition type (2026-10-14).** On a disk with
 more than one partition beside the ESP, `fsd` took the first that mounted

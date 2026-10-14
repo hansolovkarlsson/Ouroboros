@@ -75,14 +75,19 @@ pub struct MbrEntry {
     pub sectors: u32,
 }
 
-/// The MBR's entry `index` (0 to 3) in `sector`.
-pub fn mbr_entry(sector: &[u8; SECTOR], index: usize) -> MbrEntry {
-    let e = 0x1BE + 16 * (index & 3);
-    MbrEntry {
+/// The MBR's entry `index` (0 to 3) in `sector`, `None` past the fourth:
+/// a partition number out of range is no entry, never another one (the
+/// review of #296; it had been masked to 0 to 3).
+pub fn mbr_entry(sector: &[u8; SECTOR], index: usize) -> Option<MbrEntry> {
+    if index > 3 {
+        return None;
+    }
+    let e = 0x1BE + 16 * index;
+    Some(MbrEntry {
         kind: sector[e + 4],
         start: u32::from_le_bytes([sector[e + 8], sector[e + 9], sector[e + 10], sector[e + 11]]),
         sectors: u32::from_le_bytes([sector[e + 12], sector[e + 13], sector[e + 14], sector[e + 15]]),
-    }
+    })
 }
 
 /// Whether `sector` ends in the `0x55 0xAA` boot signature.
@@ -101,7 +106,7 @@ pub const PROTECTIVE: u8 = 0xEE;
 /// Whether `sector` is a GPT's protective MBR: the boot signature and an
 /// entry of type 0xEE, also in a hybrid MBR that has real entries beside it.
 pub fn is_protective(sector: &[u8; SECTOR]) -> bool {
-    has_boot_signature(sector) && (0..4).any(|i| mbr_entry(sector, i).kind == PROTECTIVE)
+    has_boot_signature(sector) && (0..4).filter_map(|i| mbr_entry(sector, i)).any(|e| e.kind == PROTECTIVE)
 }
 
 /// Whether the disk is read as GPT: "EFI PART" at LBA 1, or a protective
@@ -110,12 +115,18 @@ pub fn is_protective(sector: &[u8; SECTOR]) -> bool {
 /// `format`, which writes MBR partitions only, refuses exactly the disks
 /// [`discover`] reads as GPT (the medium review of #288).
 pub fn is_gpt(read: &mut ReadSector) -> Option<bool> {
+    gpt_and_mbr(read).map(|(gpt, _)| gpt)
+}
+
+/// [`is_gpt`]'s answer with the sector 0 it read, so [`discover`] reads it
+/// once (the review of #296).
+fn gpt_and_mbr(read: &mut ReadSector) -> Option<(bool, [u8; SECTOR])> {
     let mut lba1 = [0u8; SECTOR];
     let mut lba0 = [0u8; SECTOR];
     if !read(1, &mut lba1) || !read(0, &mut lba0) {
         return None;
     }
-    Some(&lba1[0..8] == b"EFI PART" || is_protective(&lba0))
+    Some((&lba1[0..8] == b"EFI PART" || is_protective(&lba0), lba0))
 }
 
 // --- GPT --------------------------------------------------------------------
@@ -220,13 +231,15 @@ pub fn read_gpt(
 
 // --- Partitions, for a root -------------------------------------------------
 
-/// One partition as [`discover`] finds it: where it starts, and whether its
-/// type marks it as a root filesystem. The type is what lets `fsd` name the
+/// One partition as [`discover`] finds it: where it starts, how many sectors
+/// it holds, and whether its type marks it as a root filesystem. The size is
+/// here so `fsd`'s `format` reads no table of its own (the review of #296). The type is what lets `fsd` name the
 /// root on a disk with more than one partition beside the boot one, rather
 /// than take the first that mounts (`docs/roadmap/roadmap-one-disk.md`).
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Partition {
     pub start: u64,
+    pub sectors: u64,
     pub root: bool,
 }
 
@@ -263,7 +276,8 @@ pub struct Unreadable;
 /// read failing is that copy invalid, so a bad primary never hides a good
 /// backup; only sector 0 or 1 unread is [`Unreadable`].
 pub fn discover(read: &mut ReadSector, capacity: Option<u64>, out: &mut [Partition]) -> Result<usize, Unreadable> {
-    if is_gpt(read).ok_or(Unreadable)? {
+    let (gpt, mbr) = gpt_and_mbr(read).ok_or(Unreadable)?;
+    if gpt {
         let copies = [Some(GPT_PRIMARY), capacity.and_then(gpt_backup)];
         for header in copies.into_iter().flatten() {
             let mut n = 0;
@@ -272,8 +286,11 @@ pub fn discover(read: &mut ReadSector, capacity: Option<u64>, out: &mut [Partiti
                     return;
                 }
                 let start = le(&bytes[32..40]);
+                // An entry whose end is before its start, or past u64, has
+                // no size: 0, which `format` would refuse as too small.
+                let sectors = le(&bytes[40..48]).checked_sub(start).and_then(|d| d.checked_add(1)).unwrap_or(0);
                 if start != 0 && n < out.len() {
-                    out[n] = Partition { start, root: bytes[..16] == GPT_ROOT_AARCH64 };
+                    out[n] = Partition { start, sectors, root: bytes[..16] == GPT_ROOT_AARCH64 };
                     n += 1;
                 }
             });
@@ -285,18 +302,13 @@ pub fn discover(read: &mut ReadSector, capacity: Option<u64>, out: &mut [Partiti
         // trusted.
         return Ok(0);
     }
-    let mut mbr = [0u8; SECTOR];
-    if !read(0, &mut mbr) {
-        return Err(Unreadable);
-    }
     let mut n = 0;
-    for i in 0..4 {
-        let e = mbr_entry(&mbr, i);
+    for e in (0..4).filter_map(|i| mbr_entry(&mbr, i)) {
         if e.kind == 0 || e.kind == PROTECTIVE || e.start == 0 {
             continue;
         }
         if n < out.len() {
-            out[n] = Partition { start: u64::from(e.start), root: is_root_type(e.kind) };
+            out[n] = Partition { start: u64::from(e.start), sectors: u64::from(e.sectors), root: is_root_type(e.kind) };
             n += 1;
         }
     }
@@ -409,7 +421,7 @@ pub fn is_boot_disk(boot: &BootPartition, read: &mut ReadSector, capacity: u64) 
 }
 
 fn mbr_holds(boot: &BootPartition, sector: &[u8; SECTOR]) -> bool {
-    if !has_boot_signature(sector) || !(1..=4).contains(&boot.number) {
+    if !has_boot_signature(sector) {
         return false;
     }
     match boot.signature {
@@ -417,7 +429,9 @@ fn mbr_holds(boot: &BootPartition, sector: &[u8; SECTOR]) -> bool {
         DiskSignature::Gpt(_) => return false,
         _ => {}
     }
-    let e = mbr_entry(sector, boot.number as usize - 1);
+    let Some(e) = (boot.number as usize).checked_sub(1).and_then(|i| mbr_entry(sector, i)) else {
+        return false;
+    };
     e.kind != 0 && u64::from(e.start) == boot.start_lba && u64::from(e.sectors) == boot.size_blocks
 }
 

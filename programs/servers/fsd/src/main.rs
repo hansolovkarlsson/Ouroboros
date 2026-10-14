@@ -306,11 +306,11 @@ fn partition_disk(type_byte: u8) -> u64 {
     0
 }
 
-/// The disk's first MBR partition (start LBA, sector count), or `None` if
-/// the disk has no valid MBR (bad boot signature) or no non-empty partition
-/// entry. Reads LBA 0's four 16-byte entries at the classic 0x1BE offset -
-/// the pairing for [`partition_disk`]'s writer. GPT disks aren't handled here
-/// yet (a later step); [`FSOP_FORMAT`] targets the MBR partition table.
+/// The partition `format` lays a root on (start LBA, sector count): the
+/// root by `vfs::mount`'s own order ([`vfs::root_order`]), from the one
+/// partition parser ([`partition::discover`]), with the size the table
+/// gives it. `None` on a GPT disk, which this MBR-only formatter refuses,
+/// when the disk has no partition, or when the size does not fit 32 bits.
 fn find_partition() -> Option<(u32, u32)> {
     // A GPT disk, by the test `mount` reads it with: this formatter writes
     // MBR partitions only, and on a GPT disk it would lay the filesystem from
@@ -321,15 +321,13 @@ fn find_partition() -> Option<(u32, u32)> {
     }
     // The partitions `mount` sees, from the one parser it uses, so `format`
     // never picks an entry `mount` would not list (one starting at LBA 0,
-    // the MBR itself); each one's size from its MBR entry.
+    // the MBR itself), each with its size.
     let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
     let count = partition::discover(&mut disk::Disk, &mut parts).ok()?;
-    let mut mbr = [0u8; 512];
-    disk::Disk.read_sector(0, &mut mbr).ok()?;
+    // The size from the same parse that chose the partition, not a second
+    // read of the table (the review of #296).
     let size_of = |lba: u64| {
-        (0..4).map(|i| parttable::mbr_entry(&mbr, i)).find_map(|e| {
-            (u64::from(e.start) == lba && e.sectors != 0).then_some(e.sectors)
-        })
+        parts[..count].iter().find(|p| p.start == lba && p.sectors != 0).and_then(|p| u32::try_from(p.sectors).ok())
     };
     // The root by `vfs::mount`'s rule, so `format` writes over what `/`
     // showed: among the candidates beside the one the system booted from

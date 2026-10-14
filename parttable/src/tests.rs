@@ -289,9 +289,9 @@ fn discover_lists_mbr_entries_with_their_root_type() {
     let mut out = [Partition::default(); 8];
     assert_eq!(discover(&mut m.reader(), Some(DISK), &mut out), Ok(3));
     assert_eq!(&out[..3], &[
-        Partition { start: 2048, root: false },
-        Partition { start: 4000, root: false },
-        Partition { start: 5000, root: true },
+        Partition { start: 2048, sectors: 100, root: false },
+        Partition { start: 4000, sectors: 10, root: false },
+        Partition { start: 5000, sectors: 10, root: true },
     ]);
     // An entry at LBA 0 is the MBR itself, never a partition.
     let mut m = Mem::new();
@@ -312,9 +312,9 @@ fn discover_lists_gpt_entries_with_the_aarch64_root_guid_only() {
     let mut out = [Partition::default(); 8];
     assert_eq!(discover(&mut m.reader(), Some(DISK), &mut out), Ok(3));
     assert_eq!(&out[..3], &[
-        Partition { start: 34, root: false },
-        Partition { start: 400, root: false },
-        Partition { start: 600, root: true },
+        Partition { start: 34, sectors: 100, root: false },
+        Partition { start: 400, sectors: 101, root: false },
+        Partition { start: 600, sectors: 101, root: true },
     ]);
 }
 
@@ -336,6 +336,44 @@ fn discover_takes_the_backup_and_trusts_no_corrupt_table() {
     let mut m = Mem::gpt_disk(&parts);
     m.fail.push(0);
     assert_eq!(discover(&mut m.reader(), Some(DISK), &mut out), Err(Unreadable));
+}
+
+#[test]
+fn discover_trusts_only_a_copy_that_validated() {
+    // The primary's array unread: that copy said nothing, and the backup is
+    // read, not the entries the primary handed over before its read failed
+    // (the review of #296: every other corrupt-primary case was Invalid).
+    let parts: Vec<_> = (0..6u64).map(|i| (ESP_GUID, UNIQUE, 100 + i * 10, 105 + i * 10)).collect();
+    let mut out = [Partition::default(); 8];
+    let mut m = Mem::gpt_disk(&parts);
+    m.fail.push(2);
+    assert_eq!(discover(&mut m.reader(), Some(DISK), &mut out), Ok(6));
+    // Its second array sector unread, after the first handed four entries
+    // over: still the backup's six.
+    let mut m = Mem::gpt_disk(&parts);
+    m.fail.push(3);
+    out = [Partition::default(); 8];
+    assert_eq!(discover(&mut m.reader(), Some(DISK), &mut out), Ok(6));
+    assert_eq!(out[5].start, 150);
+    // Both arrays unread: no partitions.
+    m.fail.push(DISK - 32);
+    assert_eq!(discover(&mut m.reader(), Some(DISK), &mut out), Ok(0));
+}
+
+#[test]
+fn an_entry_index_past_four_is_no_entry() {
+    let mut m = Mem::new();
+    m.mbr(&[(0x0C, 2048, 1000)], 0);
+    assert_eq!(mbr_entry(&m.sectors[0], 4), None);
+    assert_eq!(mbr_entry(&m.sectors[0], 0).map(|e| e.start), Some(2048));
+}
+
+#[test]
+fn a_gpt_entry_ending_before_it_starts_has_no_size() {
+    let m = Mem::gpt_disk(&[(ESP_GUID, UNIQUE, 500, 400)]);
+    let mut out = [Partition::default(); 2];
+    assert_eq!(discover(&mut m.reader(), Some(DISK), &mut out), Ok(1));
+    assert_eq!(out[0].sectors, 0);
 }
 
 #[test]
