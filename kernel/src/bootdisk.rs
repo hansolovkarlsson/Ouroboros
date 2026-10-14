@@ -190,7 +190,12 @@ pub(crate) fn discover() {
 /// list, is matched on the table alone. Every value read from the disk is
 /// bounded with checked arithmetic: a disk only being asked must never halt
 /// the boot (the review of #287 found a header that overflowed the sum).
-pub(crate) fn is_boot_disk(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> Option<bool> {
+///
+/// [`Boot::Unreadable`] when the answer needed a read that failed: a table
+/// that validated says yes or no even if another copy could not be read (the
+/// second high review of #291 found a counted failure overruling a backup
+/// GPT that had said no).
+pub(crate) fn is_boot_disk(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> Option<Boot> {
     let boot = get()?;
     match boot.table {
         Table::Unknown => None,
@@ -199,13 +204,37 @@ pub(crate) fn is_boot_disk(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, ca
     }
 }
 
+/// What a disk's table says of the boot partition.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Boot {
+    /// The disk's own table holds it.
+    Yes,
+    /// The table was read and does not hold it.
+    No,
+    /// A read the answer needed failed, so the table said nothing.
+    Unreadable,
+}
+
+impl From<bool> for Boot {
+    fn from(holds: bool) -> Self {
+        if holds { Boot::Yes } else { Boot::No }
+    }
+}
+
 fn le(bytes: &[u8]) -> u64 {
     bytes.iter().rev().fold(0u64, |v, b| v << 8 | u64::from(*b))
 }
 
-fn mbr_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool) -> bool {
+fn mbr_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool) -> Boot {
     let mut sector = [0u8; 512];
-    if !read(0, &mut sector) || sector[510] != 0x55 || sector[511] != 0xaa {
+    if !read(0, &mut sector) {
+        return Boot::Unreadable;
+    }
+    Boot::from(mbr_entry_holds(boot, &sector))
+}
+
+fn mbr_entry_holds(boot: &BootPartition, sector: &[u8; 512]) -> bool {
+    if sector[510] != 0x55 || sector[511] != 0xaa {
         return false;
     }
     let disk_sig = u32::from_le_bytes([sector[440], sector[441], sector[442], sector[443]]);
@@ -223,57 +252,83 @@ fn mbr_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> 
         && le(&sector[entry + 12..entry + 16]) == boot.size_blocks
 }
 
-fn gpt_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> bool {
+fn gpt_holds(boot: &BootPartition, read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> Boot {
     // The primary header, else the backup at the last sector, each taken only
     // if it validates as fsd's partition.rs validates it (both CRCs): a stale
     // "EFI PART" left by an earlier table, or a corrupt primary the firmware
-    // itself skipped, must not decide (the medium review of #287).
-    if let Some(found) = gpt_entry(boot, read, 1, capacity) {
-        return found;
+    // itself skipped, must not decide (the medium review of #287). A copy
+    // that validates decides; the disk is unreadable only when the primary
+    // could not be read and the backup did not answer either. A backup that
+    // could not be read beside a primary that was read and did not validate
+    // is a No: the backup is only the alternative path, and some sticks
+    // report a sector too many.
+    let primary = gpt_entry(boot, read, 1, capacity);
+    if let GptCopy::Valid(holds) = primary {
+        return Boot::from(holds);
     }
-    match capacity.checked_sub(1) {
-        Some(last) if last > 1 => gpt_entry(boot, read, last, capacity).unwrap_or(false),
-        _ => false,
+    let backup = match capacity.checked_sub(1) {
+        Some(last) if last > 1 => gpt_entry(boot, read, last, capacity),
+        _ => GptCopy::Invalid,
+    };
+    match (primary, backup) {
+        (_, GptCopy::Valid(holds)) => Boot::from(holds),
+        (GptCopy::Unreadable, _) => Boot::Unreadable,
+        _ => Boot::No,
     }
+}
+
+/// One GPT copy, read: it validated and does or does not hold the boot
+/// partition, it did not validate, or a read it needed failed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GptCopy {
+    Valid(bool),
+    Invalid,
+    Unreadable,
 }
 
 /// The largest entry array read, as fsd's `MAX_GPT_ARR_SECTORS`: 128 entries
 /// of 128 bytes is 32 sectors, and anything past 64 KiB is refused.
 const MAX_GPT_ARRAY_SECTORS: u64 = 128;
 
-/// Whether the GPT whose header is at `header_lba` holds the boot partition,
-/// or `None` when that header or its entry array does not validate.
+/// The GPT copy whose header is at `header_lba`, read and validated.
 fn gpt_entry(
     boot: &BootPartition,
     read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool,
     header_lba: u64,
     capacity: u64,
-) -> Option<bool> {
+) -> GptCopy {
     let mut header = [0u8; 512];
-    if !read(header_lba, &mut header) || &header[0..8] != b"EFI PART" {
-        return None;
+    if !read(header_lba, &mut header) {
+        return GptCopy::Unreadable;
+    }
+    if &header[0..8] != b"EFI PART" {
+        return GptCopy::Invalid;
     }
     let header_size = le(&header[12..16]) as usize;
     if !(92..=512).contains(&header_size) {
-        return None;
+        return GptCopy::Invalid;
     }
     let stored = le(&header[16..20]) as u32;
     let mut zeroed = header;
     zeroed[16..20].fill(0);
     if crc32_finish(crc32_update(CRC_INIT, &zeroed[..header_size])) != stored {
-        return None;
+        return GptCopy::Invalid;
     }
     let array_lba = le(&header[72..80]);
     let count = le(&header[80..84]);
     let entry_size = le(&header[84..88]);
     let stored_array = le(&header[88..92]) as u32;
     if !(128..=512).contains(&entry_size) || 512 % entry_size != 0 {
-        return None;
+        return GptCopy::Invalid;
     }
-    let array_bytes = count.checked_mul(entry_size).filter(|b| *b > 0 && *b <= MAX_GPT_ARRAY_SECTORS * 512)?;
-    let array_end = array_lba.checked_add(array_bytes.div_ceil(512))?;
+    let Some(array_bytes) = count.checked_mul(entry_size).filter(|b| *b > 0 && *b <= MAX_GPT_ARRAY_SECTORS * 512) else {
+        return GptCopy::Invalid;
+    };
+    let Some(array_end) = array_lba.checked_add(array_bytes.div_ceil(512)) else {
+        return GptCopy::Invalid;
+    };
     if array_end > capacity {
-        return None;
+        return GptCopy::Invalid;
     }
     // One pass: the CRC over exactly `array_bytes`, and the boot entry kept
     // when its sector goes by. It counts only if the CRC holds.
@@ -285,7 +340,7 @@ fn gpt_entry(
     let mut lba = array_lba;
     while done < array_bytes {
         if !read(lba, &mut sector) {
-            return None;
+            return GptCopy::Unreadable;
         }
         let take = (array_bytes - done).min(512) as usize;
         crc = crc32_update(crc, &sector[..take]);
@@ -299,9 +354,9 @@ fn gpt_entry(
         lba += 1;
     }
     if crc32_finish(crc) != stored_array {
-        return None;
+        return GptCopy::Invalid;
     }
-    let Some((unique, first, last)) = entry else { return Some(false) };
+    let Some((unique, first, last)) = entry else { return GptCopy::Valid(false) };
     let guid_ok = match boot.signature {
         DiskSignature::Gpt(guid) => guid == unique,
         DiskSignature::Mbr(_) => false,
@@ -310,7 +365,7 @@ fn gpt_entry(
     // Both ends must be computed: two overflows are not a match (the medium
     // review of #287 found `None == None` taken as one).
     let ends = matches!((last.checked_add(1), first.checked_add(boot.size_blocks)), (Some(a), Some(b)) if a == b);
-    Some(guid_ok && first == boot.start_lba && ends)
+    GptCopy::Valid(guid_ok && first == boot.start_lba && ends)
 }
 
 /// CRC-32 (IEEE, reflected `0xEDB88320`), the one GPT and `zlib.crc32` use,
@@ -338,8 +393,35 @@ fn crc32_finish(crc: u32) -> u32 {
 /// installed. For `MOUNT`'s rescan, which installs a stick whatever it is,
 /// so a boot stick taken there after a failed boot-time init still tells
 /// `fsd` (the high review of #288).
-pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> u64 {
-    start_if(is_boot_disk(read, capacity))
+pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64, name: &str) -> u64 {
+    start_if(is_boot_disk_retrying(read, capacity, name))
+}
+
+/// [`is_boot_disk`], asked again once when it answered
+/// [`Boot::Unreadable`], and logged when it does so again: decision D6
+/// (Hans, 2026-10-13, docs/roadmap/roadmap-one-disk.md), "retry once, then
+/// log". The caller then treats the disk as not the boot disk, and the line
+/// has said the read failed rather than that the table did not match. (The
+/// first review of #291 had it taken as the boot disk instead, which the
+/// second review found putting a dead or unrelated disk first; that went
+/// back to Hans as a question rather than be decided again in a review.)
+pub(crate) fn is_boot_disk_retrying(
+    read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool,
+    capacity: u64,
+    name: &str,
+) -> Option<Boot> {
+    let answer = is_boot_disk(read, capacity);
+    if answer != Some(Boot::Unreadable) {
+        return answer;
+    }
+    crate::console::println!("Ouroboros kernel: {name}: a read of its partition table failed - asking again");
+    let answer = is_boot_disk(read, capacity);
+    if answer == Some(Boot::Unreadable) {
+        crate::console::println!(
+            "Ouroboros kernel: {name}: reading its partition table failed twice - taken as not the boot disk, though it may be"
+        );
+    }
+    answer
 }
 
 /// The boot partition's start LBA when [`is_boot_disk`] answered yes, else
@@ -347,9 +429,9 @@ pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capa
 /// the rescan alike (the medium review of #288 found two copies). A firmware
 /// counting in blocks other than 512 bytes cannot be answered wrongly here:
 /// its LBAs would not match the disk's table, and the disk is no boot disk.
-pub(crate) fn start_if(matched: Option<bool>) -> u64 {
+pub(crate) fn start_if(matched: Option<Boot>) -> u64 {
     match (matched, get()) {
-        (Some(true), Some(boot)) => boot.start_lba,
+        (Some(Boot::Yes), Some(boot)) => boot.start_lba,
         _ => 0,
     }
 }

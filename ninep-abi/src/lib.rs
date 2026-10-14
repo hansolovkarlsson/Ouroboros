@@ -168,6 +168,15 @@ pub const OPEN_CREATE: u64 = 4;
 /// [`NP_OPEN`] flag: truncate the file to empty on open.
 pub const OPEN_TRUNC: u64 = 8;
 
+/// Whether an [`NP_OPEN`] with `flags` changes the file, and so needs write
+/// access: writing, creating or truncating ([`OPEN_TRUNC`] destroys the
+/// contents). The one spelling of the mask, for `fsd`'s permission check, its
+/// fid write check and its read-only refusal, which had three copies (the
+/// review of #291; OPEN_TRUNC was once missing from one of them).
+pub const fn open_writes(flags: u64) -> bool {
+    flags & (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC) != 0
+}
+
 /// How many fids `fsd` holds open at once, across every client: every local C
 /// program and, since step 5 of `docs/roadmap/roadmap-fid-verbs.md`
 /// (2026-09-12), every export session, since a remote fid is an `fsd` fid
@@ -970,6 +979,16 @@ mod tests {
     //! --target aarch64-apple-darwin`). No I/O, no syscalls - the cheapest
     //! foreign observer this project has.
     use super::*;
+
+    #[test]
+    fn open_writes_is_every_flag_that_changes_the_file() {
+        assert!(!open_writes(OPEN_READ));
+        assert!(!open_writes(0));
+        for flag in [OPEN_WRITE, OPEN_CREATE, OPEN_TRUNC] {
+            assert!(open_writes(flag));
+            assert!(open_writes(flag | OPEN_READ));
+        }
+    }
 
     #[test]
     fn proxy_id_round_trips() {

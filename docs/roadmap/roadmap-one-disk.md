@@ -6,7 +6,7 @@ merges with item 1). One disk carries both the boot partition (FAT32, the
 ESP) and a root partition (ext2 or exFAT). It may be a stick, a card or a
 virtual disk, and the system needs nothing else to boot and run.
 
-**Status 2026-10-13: steps 1 to 4 built, D1, D2, D5 and D6 settled, D3 and
+**Status 2026-10-13: steps 1 to 4 and 4b built, D1, D2, D5 and D6 settled, D3 and
 D4 deferred** (`kernel/src/bootdisk.rs`,
 `scripts/disksig.py`, `make test-boot-partition`); the rest planned. Grounded in the code at
 `ebdebc1` (v0.23.0). Six decisions are Hans's, listed under "Decisions"
@@ -316,11 +316,50 @@ any layout. Planned as:
 - Mutation: today's first-partition rule. `run-disk` mounts the FAT32 and
   the rig fails.
 
-**4b. Failing closed, D5 and D6.** `fsd` mounts the boot partition
-read-only when it falls back to it beside a root that did not mount; the
-kernel retries a failed boot-disk read once and names a failed read in its
-line. The rig's `disk-badroot` boot then checks that a write to `/` is
-refused.
+**4b. Failing closed, D5 and D6. Built 2026-10-13.** D5: when `fsd` falls
+back to the boot partition beside a root that did not mount, tree 0 is
+read-only (`ROOT_READ_ONLY`): `handle_ninep` refuses every verb that
+changes the disk with `FS_ERR_READ_ONLY` before `check_access`, so root is
+refused too, and an `NP_OPEN` for writing, creating or truncating is
+refused, which leaves no fid that could write. Any other mount of tree 0,
+and `unmount`, clear it, so `unmount; format ext2; mount -a` still repairs
+the root. The line now ends "read-only". Rig: `disk-badroot` has root's
+`touch /rotest` refused as a read-only filesystem; mutation: the refusal
+removed, and that check failed. D6: `bootdisk::is_boot_disk_retrying`
+asks again once when a read failed on the way, and after a second failure
+says the read failed, "though it may be" the boot disk; virtio, the boot
+stick and `MOUNT`'s rescan all go through it. That needs a disk whose
+reads fail at boot, which no QEMU rig sets up.
+
+The review of #291 tightened D5 and changed D6's answer, and the second
+review of #291 changed it back. The first review argued that a disk whose
+table could not be read twice should be taken as the boot disk; the code
+did that, and the second review found it putting an unrelated disk with an
+unreadable sector, or a dead stick, in place of the real boot disk or a
+working one. That is a design question, and it was being decided in review
+rounds, so D6 is as Hans wrote it: the disk is taken as not the boot disk,
+and the line says the read failed. The matcher answers yes, no or
+unreadable (`bootdisk::Boot`), and a GPT copy that validates decides even
+when the other copy could not be read, so a readable backup's no is a no.
+The question of what an unreadable disk should be went back to Hans, with
+its costs set out (leave it out unless nothing else is there; take it as the
+boot disk), and **he kept D6 as built on 2026-10-13**: an unreadable disk is
+not the boot disk, accepting that a one-disk stick failing its read mounts
+its ESP as `/` read-write, and that a dead stick goes in over a working
+virtio disk. Not to be re-litigated in a review.
+A failed read of the backup header beside a primary that was read
+and did not validate is not an unreadable disk, and `init_storage`'s first
+read of sector 0 is tried twice (a disk that fails it twice is still dropped,
+as on `main`).
+`mutates()` is default-deny: it lists the verbs that only read, so a verb
+added later is refused on a read-only tree until it is listed as reading
+(no verb today is unlisted, so no rig can show that). The fid path checks
+the read-only tree too, through one gate (`refused_read_only`), and the
+open-for-write mask is one function, `ninep_abi::open_writes`, where `fsd`
+had three copies. Kept: the flag is a
+static for tree 0 rather than a property of the mount, and `FSOP_MOUNT_INFO`
+does not report it; only tree 0 can be the fallback, and the two places
+that can change it clear or set it.
 
 **5. Staging a physical disk** (decision D2, settled: the image written). `make bootstick` puts the
 combined layout on a stick, for the Pi with pftf on partition 1. `make
@@ -387,7 +426,9 @@ there.
   check is retried once when a read fails; if it fails again, the stick is
   installed as not the boot disk and the line says the read failed, not
   that it did not match, so a one-disk stick's wrong root is visible.
-  Built as step 4b.
+  Built as step 4b. **Confirmed by Hans on 2026-10-13**, after the reviews
+  of #291, with its costs: a one-disk stick failing its read mounts its ESP
+  as `/` read-write, and a dead stick goes in over a working virtio disk.
 
 ## Risks
 
