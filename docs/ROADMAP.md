@@ -2581,6 +2581,18 @@ be reviewed after the fact from the saved screenshots.
 >       remote mount. Until then Proem reads the zero pair as "no
 >       identity" and rereads headers. Proem's fstat note asked for it
 >       first; the fallback met its **Done when**.
+>
+> **What DevTools asks of Ouroboros next, accepted 2026-10-14.**
+>
+> - [ ] **new** **Link `/bin/edit` and `/bin/cpp` with DevTools's `ld`,
+>       and boot them.** A choice of linker for those two links only
+>       (`ld --target=ouroboros --gc-sections` on the same inputs, `ld.lld`
+>       staying the default), `ld` built from the sibling checkout as Edit
+>       and cpp are, then `make test-edit` and `make test-cpp` on an image
+>       linked that way. The reply names the commit. From then on, a change
+>       to `programs/linker.ld` or the C programs' link flags owes DevTools
+>       a `notice`, since `ld` holds that layout in its code. Note:
+>       [`handoffs/2026-10-14-from-devtools-link-with-ld.md`](handoffs/2026-10-14-from-devtools-link-with-ld.md).
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

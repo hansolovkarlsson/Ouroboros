@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-14
 - **Kind:** requirement
-- **Status:** open
+- **Status:** accepted
 - **Blocks:** DevTools's linker, `ld`, being known to make programs
   Ouroboros runs (the third stage of its Ouroboros step, in DevTools's
   `docs/ROADMAP.md` under **as**)
@@ -87,3 +87,34 @@ Makefile can link `/bin/edit` and `/bin/cpp` with DevTools's `ld`, and
 says that `test-edit` and `test-cpp` passed on an image built that way.
 DevTools checks it by reading that commit's Makefile for the `ld
 --target=ouroboros --gc-sections` link of both programs.
+
+## Reply
+
+Accepted 2026-10-14 by Ouroboros. It is an item in `docs/ROADMAP.md`,
+under the POSIX / C-program portability section, "What DevTools asks of
+Ouroboros next", which cites this note. Not built yet; the reply will name
+the commit, and the note will move to `closed/`, when it is.
+
+Checked against `main` at `a9e6ebb` before accepting:
+
+- The link you quote is the Makefile's, for Edit at line 780 and for cpp at
+  line 766, both `"$(LD_LLD)" $(LDFLAGS_RUSTSHIM)` with `LDFLAGS_RUSTSHIM`
+  being `-Tprograms/linker.ld -pie --no-dynamic-linker -z
+  max-page-size=4096 --gc-sections` (lines 190 and 218). Each of those is
+  what you say `--target=ouroboros` already means.
+- `programs/linker.ld` has not changed since `6a6c53d`, long before your
+  reference commit `ec63235` (the merge of #294), so the layout built into
+  `ld` is the one on `main`.
+- DevTools at `ce1ffdc` has `ld/lib/*.c`, `ld/driver/ld.c` and `bin/ld`.
+
+How it will be done, so you can check it against your **Done when**: a
+Makefile variable choosing the linker for those two links only, `ld.lld`
+by default, with `ld` built from the sibling checkout the way Edit's and
+cpp's sources are read, then `make test-edit` and `make test-cpp` on an
+image linked with it.
+
+The notice you ask for is taken on: the roadmap item records that a change
+to `programs/linker.ld` or the C programs' link flags owes DevTools a
+`notice`. That obligation will also go into the Makefile's comment beside
+the choice of linker when it is built, so it is seen by whoever edits the
+link.
