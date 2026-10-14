@@ -606,3 +606,44 @@ treated as a checksum. The fix corrected the check and left `mkgpt.py`
 deriving its GUIDs the same way, which the next round found. A finding
 about a line is fixed at the line; a finding about a way of thinking is
 fixed by searching the branch for that thought.
+
+## Four branches, one round each, and the question asked first (2026-10-14)
+
+*Added from the one-disk arc's second day: #293 (`make bootstick`), #294
+(the Pi's stick), #295 (the root by its type) and #296 (`parttable`, one
+copy of the partition tables). Each round answered with rigs and, for each
+new check, a mutation control.*
+
+| branch | rounds | findings | taken | to Hans |
+| --- | --- | --- | --- | --- |
+| #293 | 1 | 10 | 10 | 0 |
+| #294 | 1 | 10 | 10 | 0 |
+| #295 | 1 | 8 | 7 | 1 (MBR 0x83 as a root type) |
+| #296 | 1 | 9 | 9 | 0 |
+
+**The spine was not tested today, and that is the honest reading of the
+table.** No branch had a second round: Hans merged each after its fixes,
+their rigs and their mutations. The spine says the repairs carry the same
+defect rate as the code; today's 36 repairs were checked by rigs and
+mutation and by nothing that reads them, so whatever they carry is still
+in `main`. A later round on the one-disk code should be scoped to the four
+review commits (`97a7239`; `81c4c98` and `532843a`; `7587e03`; `76dbeb7`), as 09-01's
+fourth round was.
+
+**Yesterday's lesson, applied: one question instead of two rounds.** The
+review of #295 found that 0x83 is the generic Linux type, so a disk made
+elsewhere with an ext4 data partition typed 0x83 would hand that partition
+the root. That is a cost, not a defect: counting 0x83 only when it mounts
+would remove it and give a damaged ext2 root's protection back to the
+guess. On 10-13 a round's finding against D6 was committed and the next
+round swung it back. Today the trade went to Hans as three answers with
+their costs before any change, he kept 0x83, and it went into the plan as
+settled. It took one message.
+
+**And the findings that were not the reviewer's to find.** Three of
+today's 37 were blind spots in my own checks rather than in the code's
+logic: a self-test written in the same wrong passwd format as the code, a
+check claiming "file for file" over four of fifteen files, and a rig that
+tested only the case with the boot partition known. They are written up
+where instruments are, in
+[`blind-instruments-postmortem.md`](blind-instruments-postmortem.md).

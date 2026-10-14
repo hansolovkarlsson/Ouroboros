@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-10. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-14. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -1713,3 +1713,65 @@ the difference was not measurable (13.2 to 13.8 us with the kick, 13.3 to
 18.7 us without). The flag would have added a rule to every place a task
 becomes runnable, for a cost a real build does not have. The 2026-10-03 rule
 again: **check the artifact that ships.**
+
+## Five more, from the one-disk stick (2026-10-14)
+
+`make bootstick` (#293, #294), the root by its type (#295) and `parttable`
+(#296) each came with a rig or host tests and a mutation for every check.
+Five of those instruments could not see what they were for until a review
+or a run showed it.
+
+**A self-test written from the code's own mistake.** `homes_from_passwd`
+read Unix's seven-field passwd (uid in the third field, home in the sixth);
+this project's is `name:uid:gid:home`. Its self-test fed it
+`ann:x:1002:1002::/Users/ann:/bin/sh`, the format I believed in, so the
+code and its test agreed and every home carried from a `make stick` stick
+would have gone to root. Found by the high review, which read
+`accounts::parse_account`. **A test whose input comes from the same belief
+as the code checks the code against itself.** The input now comes from the
+format's own source (`mkpasswd.py`'s output in the rig, the real field
+order in the self-test).
+
+**A check that said "file for file" over four files.** The Pi stick's
+firmware check compared `RPI_EFI.fd`, `config.txt`, `start4.elf` and one
+overlay against the pinned zip, which ships fifteen. A filter that dropped
+`fixup4.dat` or a device tree would have passed, and the Pi will not boot
+without them; QEMU cannot run pftf to show it. It now compares every file
+in `unzip -Z1` but the readme, and a mutation installing one file short
+fails it. **A check's name is a claim; count what it compares.**
+
+**A rig built for the case I pictured.** #295's three new boots all ran
+with the kernel naming the boot partition, the case the rule was designed
+around. The review found the rule broken exactly when the boot partition is
+unknown: the ESP or a data partition came up as a writable `/`. The rig
+could not have failed for that, because no boot it made reached the case.
+The fourth boot reaches it by booting `esp.img` from NVMe, which the kernel
+cannot drive, so the disk under test goes in as virtio's fallback and
+`BLOCK_BOOT_START` answers 0. **Before trusting a rig for a rule, list the
+inputs the rule branches on and check each has a boot.**
+
+**A mutation caught as a crash.** Mutating #294's fix so an unmountable
+ESP was always refused made the rig exit 1 with a traceback and no check
+lines: its own mount of the still-broken ESP raised. The mutation was
+caught, by accident; the rig graded nothing. The check now takes a failed
+mount as "not repaired". **A crash is not a failed check: a rig must grade
+the condition it exists to test, including when that condition breaks the
+rig's own tools.**
+
+**Exit codes that looked like mutations caught.** The first mutation pass
+on #293 printed `rc=2` for all four mutants, which reads as four caught.
+None was graded: the stale-image guard refused every boot, because the
+mutated writer is in the source hash. On #295 one mutant was refused the
+same way because I edited `CLAUDE.md` while its image built. Both were the
+guard working. Read without the check lines, though, each looked like a
+mutant caught. **A nonzero exit says a run stopped, not that a check
+failed: read the FAIL lines.** The writer's mutations now run with
+`OUROBOROS_STALE_OK=1`, the reason stated in the rig, since the image they
+boot contains none of the writer.
+
+**And one that worked:** `parttable`'s nineteen host tests passed on their
+first run, which this file has learned to distrust, so six mutations went
+in before anything else (no backup, unread taken as no, no header CRC, no
+capacity bound, the signature ignored, any type a root) and each failed
+them. The review still found a case none reached, a GPT copy unread partway
+through its array, and wrote the mutation for it.
