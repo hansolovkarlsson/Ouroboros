@@ -341,13 +341,17 @@ the data partition and the ESP whole. 115 checks. Mutations: the fallback
 dropped when the boot partition is unknown, and `format` choosing among
 every partition, each failing.
 
-**Open, for Hans:** MBR has no type for a root, and 0x83 is the generic
+**Settled by Hans on 2026-10-14: 0x83 stays a root type, its cost
+accepted.** MBR has no type for a root, and 0x83 is the generic
 Linux type, which a data partition carries too, the reason GPT's generic
 Linux GUID was left out. On a disk with an exFAT root (0x07) and an ext4
 partition typed 0x83 that `fsd` cannot mount, the 0x83 partition is now
 the only candidate: the ESP comes up read-only instead of the exFAT root,
 and `format` would take the ext4 partition. Every root this project writes
-is 0x83 ext2 (D1), so the case needs a disk made elsewhere.
+is 0x83 ext2 (D1), so the case needs a disk made elsewhere. Counting 0x83
+only when it mounts was the alternative, and would have given a damaged
+ext2 root's protection back to the guess. Not to be re-litigated in a
+review.
 
 The plan for step 4, as it was written:
 - `fsd` asks the kernel for the boot partition: a new syscall, or a field of
