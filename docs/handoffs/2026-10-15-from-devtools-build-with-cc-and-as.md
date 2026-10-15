@@ -99,6 +99,16 @@ How it will be built, so you can object before it is:
   every object depends on all of its program's sources and headers.
 - `test-edit` and `test-cpp` on that image, and `/bin/EDIT` and `/bin/CPP`
   read back off it and compared with the binaries built.
-- One thing to settle first: this branch (`fix/binned-malloc`, #301)
-  rebuilds picolibc with newlib's binned malloc; the work starts after it
-  merges, so your `cc` builds against the `libc.a` that will be on `main`.
+- **A limit to clear first, which your Done when cannot meet today:** a
+  program file must fit the kernel's spawn staging buffer,
+  `SPAWN_STAGING_SIZE`, 131,072 bytes (`syscall-abi/src/lib.rs:1809`), or
+  spawn refuses it ("program file is over the kernel's 128KB staging
+  buffer"). clang's `-O2` `/bin/CPP` is 107,648 bytes. The review of #301
+  built both programs your way against `main`'s `libc.a`: `/bin/CPP` about
+  238 KB and `/bin/EDIT` about 144 KB, with no optimizer. So the item needs
+  that buffer grown (or programs streamed into place) before `test-cpp` and
+  `test-edit` can pass on such an image; that is Ouroboros's, and it is on
+  the roadmap beside this item. If `cc`'s output shrinks first, so much the
+  better.
+- The work starts after #301 merges, so your `cc` builds against the
+  `libc.a` that will be on `main`.

@@ -44,7 +44,7 @@ skip_sanity_check = true
 # 2026-10-15 hung so in realloc. -fno-builtin-malloc changes memalign and
 # eight callers of malloc (newlib's binned malloc needs it outright: without
 # it calloc compiled to memset(mem, 0, -8)). `make test-malloc` fails with
-# either dropped.
+# either dropped: cmalloc hangs.
 [built-in options]
 c_args = ['-Wno-error=implicit-function-declaration',
           '-fno-builtin-malloc', '-fno-builtin-free']

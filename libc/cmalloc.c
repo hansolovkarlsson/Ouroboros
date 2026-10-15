@@ -9,14 +9,13 @@
  * whole length when it is handed out; a realloc'd block must keep that byte
  * over the part it kept, a calloc'd one must read 0 in every byte before it
  * is written, and a memalign'd one must be aligned. At the end every live
- * block must still hold its byte throughout: two blocks that overlap, or a
- * chunk whose size went wrong, show there. The calloc check is there because
+ * block must still hold its byte throughout, which two live blocks handed
+ * out over the same memory could not. The calloc check is there because
  * newlib's calloc faulted while picolibc was built without
- * -fno-builtin-malloc, and the memalign one because nano-malloc's memalign
- * drops its size store without the same flag (libc/picolibc-cross.txt).
- * Without -fno-builtin-free nano-malloc's realloc frees a remainder with no
- * size and a later call loops for good: then cmalloc never ends, which is
- * how scripts/test-malloc.py sees it.
+ * -fno-builtin-malloc, and memalign because nano-malloc's drops its size
+ * store without the same flag (libc/picolibc-cross.txt). Without either flag
+ * nano-malloc frees a chunk with no size and a later call loops for good:
+ * then cmalloc never ends, which is how scripts/test-malloc.py sees it.
  *
  * The timing. One untimed pass first, so the first count carries no start-up
  * cost; then malloc, calloc, realloc and free alone are timed, no memalign

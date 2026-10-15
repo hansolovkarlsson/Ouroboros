@@ -13,7 +13,12 @@ libc/picolibc-cross.txt gives picolibc's malloc: without -fno-builtin-free
 nano-malloc's realloc frees a remainder with no size and a later call loops
 for good, so cmalloc never returns to the prompt (the libc.a shipped until
 2026-10-15 did so at its 215th operation); without -fno-builtin-malloc
-nano-malloc's memalign drops its size store, which the byte check sees.
+nano-malloc's memalign drops its size store, and cmalloc hangs the same way.
+Controls run 2026-10-15, each failing: that libc.a; one built with only
+-fno-builtin-free; a calloc leaving one byte set (the calloc check); a block
+written 48 bytes past its end (a hang, nano looping on the broken headers
+before the byte check is reached). A calloc that clears too little cannot be
+seen under nano, whose malloc zeroes every block itself.
 
 Then it times malloc, calloc, realloc and free at the same counts, after an
 untimed pass, the fastest of three, and prints the largest count's cost over

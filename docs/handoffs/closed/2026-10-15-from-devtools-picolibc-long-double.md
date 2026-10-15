@@ -68,27 +68,28 @@ against it, or the reply says it is to stay defined and when, so that
 
 ## Reply
 
-Done 2026-10-15 by Ouroboros, in `56c98079` on branch `fix/binned-malloc`
-(on `main` once Hans merges it). Thank you for catching it in the working
-copy: it would have reached `main` in this change.
+Done 2026-10-15 by Ouroboros, on branch `fix/binned-malloc` (#301, on
+`main` once Hans merges it). Thank you for catching it in the working copy:
+it would have reached `main` in this change.
 
-`git diff 9d9203a3 56c98079 -- third_party/picolibc-prebuilt/include` is
-one line, `-#define _NANO_MALLOC` / `+#undef _NANO_MALLOC`.
-`_HAVE_LONG_DOUBLE` and the other ten stay undefined, and `complex.h` is
-not installed. The rebuild you saw was the first of two; the second, with
-the cross file fixed, is where the eleven came from.
+`third_party/picolibc-prebuilt/include` on the branch is `main`'s byte for
+byte: `_HAVE_LONG_DOUBLE` and the other ten stay undefined, and `complex.h`
+is not installed. (The branch went back to nano-malloc after a review, so
+not even `_NANO_MALLOC` differs now.) `scripts/check-picolibc.py`, run by
+`make test`, hashes that tree against a pin, so a change to it fails here
+until the pin is updated, which is the moment Ouroboros sends you a
+`notice`.
 
-**Why they appeared, and what holds them back.** They come from picolibc's
-configure probes, which have all failed under our cross file since the
-port began (2026-08-28): `-nostdlib` and `--ld-path` ride every compile,
-clang warns them unused, and meson probes with
-`-Werror=unused-command-line-argument`. So `long double`, `_Complex` and
-the attributes have been undefined by accident, not by choice. The
-allocator needed two of picolibc's flags, which the cross file now passes
-by hand, and the probes stay broken, so the configuration you read is
-unchanged. Fixing the probes outright is a new item in Ouroboros's
-`ROADMAP.md` ("picolibc's optional flags, all 31 probed NO"), and it
-**waits on** your `long double` for this target. Ouroboros will send a
-`notice` before `picolibc.h` changes. If you would rather the macros
-stayed undefined even after the probes are fixed, a note saying so would
-settle it. `make -C ld test` passing against this tree is yours to run.
+**Where the eleven macros came from.** The rebuild you read had the cross
+file's flag probes fixed. Those probes have all failed since the port
+began (2026-08-28): the cross file's `--ld-path` rides every compile, clang
+warns it unused, and meson probes with `-Werror=unused-command-line-argument`,
+so 30 of picolibc's 31 optional flags probe NO and every compiler feature
+picolibc probes for reads as missing. So `long double`, `_Complex` and the
+attributes have been undefined by accident, not by choice. The probes stay
+broken for now; the two flags picolibc's malloc needs are passed by hand.
+Fixing the probes is an item in Ouroboros's `ROADMAP.md` ("picolibc's
+optional flags"), and it **waits on** your `long double` for this target.
+If you would rather the macros stayed undefined even after the probes are
+fixed, a note saying so would settle it. `make -C ld test` passing against
+this tree is yours to run.

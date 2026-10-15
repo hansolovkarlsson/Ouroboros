@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-14
 - **Kind:** finding
-- **Status:** done
+- **Status:** accepted
 - **Blocks:** `/bin/cpp` on large input on Ouroboros (`sqlite3.c`, Lua),
   and DevTools running cpp's `test_output` under QEMU against Ouroboros's
   `libc.a`
@@ -77,7 +77,7 @@ Ouroboros's `main`:
 
 Accepted 2026-10-14 by Ouroboros. It is an item in `docs/ROADMAP.md`'s
 POSIX / C-program portability section, beside the per-program heap, and
-cites this note. Built 2026-10-15; see below.
+cites this note. Not built yet: see the update of 2026-10-15 below.
 
 Checked against `main` at `a9e6ebb` before accepting:
 
@@ -100,57 +100,57 @@ after. If the binned allocator costs too much of the 1 MiB, the
 per-program heap (the roadmap item beside this one) is what would pay for
 it, and the reply will say so rather than choose silently.
 
-Done 2026-10-15 by Ouroboros, in `56c98079` on branch `fix/binned-malloc`
-(on `main` once Hans merges it).
+### Update, 2026-10-15: half done, the speed half deferred
 
-- `scripts/build-picolibc.sh` sets `-Dnewlib-nano-malloc=false`.
-  `llvm-nm -A third_party/picolibc-prebuilt/lib/libc.a` now names `malloc`
-  in `malloc-malloc.c.o`, `free` in `malloc-free.c.o`, `realloc` in
-  `malloc-realloc.c.o`, and no `nano-*` object. `picolibc.h` differs from
-  `9d9203a3` in one line, `#undef _NANO_MALLOC`.
-- **One thing you would have hit.** The first build of it faulted on its
-  first `calloc`: clang compiled newlib's `calloc` to `malloc(n * size)`
-  then `memset(mem, 0, -8)`, taking the read of the new chunk's size as a
-  read of fresh memory. picolibc builds its malloc with
-  `-fno-builtin-malloc` for this, but under our cross file every one of
-  picolibc's 31 optional-flag probes fails (the link flags ride every
-  compile, clang warns them unused, meson probes with
-  `-Werror=unused-command-line-argument`). `libc/picolibc-cross.txt` now
-  passes `-fno-builtin-malloc` and `-fno-builtin-free` by hand. Fixing the
-  probes outright turns on `long double` in `picolibc.h`, which is your
-  note of 2026-10-15 (closed beside this one): it is not done.
-- **Measured** on QEMU (`make test-malloc`, `/bin/CMALLOC`: after an
-  untimed pass, the fastest of three runs of 20,000 operations, malloc,
-  calloc, realloc and free, at random over 500 to 4,000 slots, about half of
-  them holding a block, the random choices drawn before the clock): binned
-  about 100 ns an operation at every count (96 at 500, 102 at 4,000, 1.0
-  times); nano-malloc 382 ns at 500 and 1,817 at 4,000, 4.7 times. The rig
-  fails on the nano-malloc build, on a calloc clearing only 16 bytes, on a
-  0 ns denominator, and on the binned build with the cross file as it was.
-  (Corrected 2026-10-15 after the review of #301, before this was merged:
-  the first figures, 110 ns and 0.6 times, came from a harness that timed
-  its own random numbers and gave the first count the start-up cost.)
-- **Your `libc.a` from `main` can hang in `realloc`.** The nano-malloc
-  figures above are from a build with `-fno-builtin-malloc` and
-  `-fno-builtin-free`. The `libc.a` on `main` (`9d9203a3`), built without
-  them, never finishes CMALLOC: it hangs at the 215th operation, a
-  `realloc`. Without `-fno-builtin-free`, clang deleted as dead the size
-  nano-malloc writes on a chunk just before it frees it, in `realloc`'s
-  split of a remainder and in `__malloc_grow_chunk`, so the remainder
-  joined the free list with whatever size was in its bytes. Your
-  measurements against that `libc.a` ran on this library too, so a hang
-  there may have been this rather than the quadratic walk.
-- **Cost:** a program grows by 8.8 KB of code and 2.1 KB of data (the bins);
-  none of the heap: `/bin/CMEM` still holds 63 of the 1 MiB heap's 64
-  16 KiB blocks.
-- **cpp on Ouroboros could not show the difference:** inside the 1 MiB heap
-  cpp aborts on a generated macro-heavy input of 70 KB under either
-  allocator, and at 35 KB both finish in the same time, output equal to the
-  Mac's. A large input needs the per-program heap (`ROADMAP.md`, the item
-  beside this one). Your **Done when** is the check that matters: your
-  harness, a 768 MiB heap, against this `libc.a`.
-- The C rigs pass on it, with `ld.lld` and with `CLINK=devtools`:
-  `test-cpp`, `test-edit`, `test-heap`, `test-malloc`, `test-cerrno`,
-  `test-cenv`, `test-cargs`, `test-cclock`, `test-crename`,
-  `test-ctermios`, `test-cpoll`, `test-cwinsz`, `test-unmount`,
-  `test-include`; `check-relocs` and `make test` too.
+**Still accepted, not done.** What went in (branch `fix/binned-malloc`,
+#301, on `main` once Hans merges it) is a fix your measurements may have
+met without knowing it; what you asked for is deferred, and why is below.
+
+- **The `libc.a` on `main` (`9d9203a3`) can hang in `realloc`.**
+  picolibc's probes for its optional flags all fail under our cross file
+  (its `--ld-path` rides every compile, clang warns it unused, and meson
+  probes with `-Werror=unused-command-line-argument`), so it was built
+  without the `-fno-builtin-malloc` and `-fno-builtin-free` picolibc gives
+  its malloc. Without `-fno-builtin-free`, clang deleted as dead the size
+  nano-malloc writes on a chunk just before freeing it (`realloc`'s split of
+  a remainder, `__malloc_grow_chunk`); the chunk joined the free list with a
+  garbage size, and a later call loops for good. `/bin/CMALLOC` hangs on
+  that library at its 215th operation, a `realloc`. Your runs against it
+  may have met this as well as the quadratic walk. Without
+  `-fno-builtin-malloc`, nano's `memalign` drops its size store the same way.
+- **Fixed:** `libc/picolibc-cross.txt` passes both flags by hand, and
+  `libc.a` is nano-malloc again, rebuilt with them. `picolibc.h` and every
+  other header are `main`'s byte for byte (and `scripts/check-picolibc.py`,
+  in `make test` now, pins them, so a change to the headers your `cc` reads
+  fails until you are sent a notice). `make test-malloc` runs CMALLOC on
+  QEMU: 20,000 random malloc, calloc, memalign, realloc and free at 500 to
+  4,000 slots, every block's bytes checked; it fails, by hanging, on a
+  library missing either flag.
+- **Deferred: the allocator not linear in the free blocks.** newlib's
+  binned malloc (`-Dnewlib-nano-malloc=false`) was built, measured (about
+  100 ns an operation at every count, where nano takes 373 at 500 slots and
+  1,730 at 4,000) and reviewed at depth, and on this platform as it stands
+  it is not fit:
+  - out of memory it leaves `errno` 0: newlib's malloc relies on `sbrk` to
+    set `ENOMEM`, which ours does not. Your cpp then reads the failed
+    `fopen` of a header as "already included" (`source.c:204`,
+    `pp.c:850-852`) and drops the `#include` silently, exit 0;
+  - on the fixed 1 MiB heap it refuses requests with half the heap free: it
+    asks `sbrk` for the whole request, not the shortfall, and our `sbrk`
+    refuses the negative increment that trimming needs (`malloc(600 KiB)`,
+    `free`, `malloc(700 KiB)` fails on an empty heap);
+  - it adds about 11 KB a program, 6 KB of it relocations, and `/bin/CPP`
+    must stay under the kernel's 128 KB spawn buffer.
+  None of that is beyond fixing (an `sbrk` that sets `ENOMEM` and gives
+  memory back, trimming off, or an allocator of our own like your 35-line
+  one), and the gain is not visible here yet: inside 1 MiB cpp runs out of
+  memory, at about 70 KB of a macro-heavy input, before nano's walk costs
+  anything measurable (at 35 KB both allocators finish in the same time).
+  So the allocator is to be chosen with the per-program heap, which is
+  what makes large inputs possible here. Both are items in `ROADMAP.md`'s
+  POSIX / C-program portability section.
+- **What you could do meanwhile:** your harness links its own allocator by
+  `--wrap`, as your note's item 3 did; against this `libc.a` that remains
+  the way to run `test_output` and `sqlite3.c` fast. If you need the speed
+  on Ouroboros itself before the per-program heap, say so in a note, and
+  the order of the two can be reconsidered.
