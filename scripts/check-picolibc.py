@@ -1,87 +1,83 @@
 #!/usr/bin/env python3
-"""The committed picolibc, pinned: its headers and its allocator.
+"""The committed C library, pinned: libc.a and the headers DevTools's cc reads.
 
     python3 scripts/check-picolibc.py      (or `make check-picolibc`; also run by `make test`)
 
-Two things about third_party/picolibc-prebuilt that only a QEMU boot or
-another project would otherwise notice:
+Three hashes, each against a pin:
 
-- The include tree is what DevTools's cc compiles against, read straight from
-  this working copy (its cc/Makefile's CC_OUROBOROS_SYSTEM_DIR). On 2026-10-15
-  a regeneration with the cross file's flag probes fixed defined eleven
-  _HAVE_ macros in picolibc.h and installed complex.h; nothing here failed,
-  and DevTools found it when its cc refused <math.h>
+- third_party/picolibc-prebuilt/lib/libc.a, the whole archive. It rebuilds
+  byte for byte from scripts/build-picolibc.sh, libc/picolibc-cross.txt and
+  the compiler named in picolibc-prebuilt/COMPILER, so any change to it is a
+  regeneration. The archive shipped until 2026-10-15 hung in realloc (built
+  without -fno-builtin-free) and passed every check in make test; which
+  objects defined malloc was the same in it as in the fixed one, so only the
+  bytes tell them apart. A changed archive owes make test-malloc and the C
+  rigs before LIB_PIN moves.
+- third_party/picolibc-prebuilt/include and libc/pico/include, which
+  DevTools's cc compiles against straight from this working copy (its
+  cc/Makefile, ld/tests/pie/check.sh, cc/tests/elf/tools.sh). On 2026-10-15 a
+  regeneration defined eleven _HAVE_ macros in picolibc.h and nothing here
+  failed; DevTools found it
   (docs/handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md).
-  This hashes every file under include/, path and bytes, and fails when the
-  hash is not HEADERS_PIN. Updating the pin is the moment to send DevTools a
-  `notice` in its docs/handoffs/.
-- The allocator libc.a carries: malloc, free and realloc from nano-malloc's
-  objects (scripts/build-picolibc.sh says why). A regeneration that drops or
-  adds -Dnewlib-nano-malloc changes them, and make test-malloc, the check that
-  sees what the allocator does, is a minute-long boot outside make test.
+  A changed header tree owes DevTools a `notice` in its docs/handoffs/
+  before its pin moves.
+
+A tree is the files git would track there (`git ls-files --cached --others
+--exclude-standard`), path and bytes: a new header counts before it is
+committed, and an ignored file (Finder's .DS_Store) does not.
 """
 import hashlib
 import os
 import subprocess
 import sys
 
-HEADERS_PIN = "7a8283488e020fc3c6e773865d9e433d5d9d573294aa60e32d5b352b132f3f9d"
-ALLOCATOR = {"malloc": "nano-malloc.c.o", "free": "nano-free.c.o", "realloc": "nano-realloc.c.o"}
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PREBUILT = os.path.join(ROOT, "third_party", "picolibc-prebuilt")
+LIB = "third_party/picolibc-prebuilt/lib/libc.a"
+LIB_PIN = "1701241b01337927bd9ec8de8d9d2fb78115c1550ce768cf987063c89764b9c0"
+TREES = {
+    "third_party/picolibc-prebuilt/include": "658ce8126e53a6350942164411060d5c66cd2dae134c61808747dc0524e19486",
+    "libc/pico/include": "19440640c0ac66d24f2a71018ff315fbe670b3b349063f2013a9252b5eb0c5a6",
+}
 
 
-def headers_hash():
-    include = os.path.join(PREBUILT, "include")
+def file_hash(rel):
+    with open(os.path.join(ROOT, rel), "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def tree_hash(rel):
+    names = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", rel],
+                           cwd=ROOT, capture_output=True, check=True).stdout.split(b"\0")
     h = hashlib.sha256()
-    for dirpath, dirnames, filenames in os.walk(include):
-        dirnames.sort()
-        for name in sorted(filenames):
-            path = os.path.join(dirpath, name)
-            h.update(os.path.relpath(path, include).encode() + b"\0")
-            with open(path, "rb") as f:
-                h.update(f.read() + b"\0")
+    for name in sorted(n for n in names if n):
+        path = os.path.join(ROOT, os.fsdecode(name))
+        if not os.path.isfile(path):
+            continue  # deleted in the working copy: absent from the tree
+        h.update(name + b"\0")
+        with open(path, "rb") as f:
+            h.update(f.read() + b"\0")
     return h.hexdigest()
-
-
-def llvm_nm():
-    sysroot = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True, check=True).stdout.strip()
-    host = next(l.split()[1] for l in subprocess.run(["rustc", "-vV"], capture_output=True, text=True,
-                                                       check=True).stdout.splitlines() if l.startswith("host:"))
-    return os.path.join(sysroot, "lib", "rustlib", host, "bin", "llvm-nm")
-
-
-def defining_objects():
-    out = subprocess.run([llvm_nm(), "-A", "--defined-only", os.path.join(PREBUILT, "lib", "libc.a")],
-                         capture_output=True, text=True, check=True).stdout
-    found = {}
-    for line in out.splitlines():
-        parts = line.split()
-        # libc.a:member.o: 0000000000000000 T name
-        if len(parts) == 4 and parts[2] == "T" and parts[3] in ALLOCATOR:
-            found[parts[3]] = parts[0].rstrip(":").split(":")[-1]
-    return found
 
 
 def main():
     failed = 0
-    got = headers_hash()
-    if got == HEADERS_PIN:
-        print("check-picolibc: the include tree DevTools's cc reads is as pinned")
+    got = file_hash(LIB)
+    if got == LIB_PIN:
+        print(f"check-picolibc: {LIB} is as pinned")
     else:
-        print(f"check-picolibc: FAIL the include tree changed: sha256 {got}, pinned {HEADERS_PIN}.\n"
-              "  DevTools's cc compiles against these headers from this working copy: send it a notice\n"
-              "  (its docs/handoffs/) before updating HEADERS_PIN in scripts/check-picolibc.py.")
+        print(f"check-picolibc: FAIL {LIB} changed: sha256 {got}, pinned {LIB_PIN}.\n"
+              "  A regeneration: run make test-malloc and the C rigs on it before updating LIB_PIN\n"
+              "  in scripts/check-picolibc.py.")
         failed += 1
-    found = defining_objects()
-    for name, member in ALLOCATOR.items():
-        if found.get(name) == member:
-            continue
-        print(f"check-picolibc: FAIL {name} is defined in {found.get(name, 'nothing')}, not {member}:\n"
-              "  libc.a's allocator is not the one scripts/build-picolibc.sh documents")
-        failed += 1
-    if not failed:
-        print("check-picolibc: libc.a's malloc, free and realloc are nano-malloc's")
+    for rel, pin in TREES.items():
+        got = tree_hash(rel)
+        if got == pin:
+            print(f"check-picolibc: {rel}, which DevTools's cc reads, is as pinned")
+        else:
+            print(f"check-picolibc: FAIL {rel} changed: sha256 {got}, pinned {pin}.\n"
+                  "  DevTools's cc compiles against it from this working copy: send it a notice\n"
+                  "  (its docs/handoffs/) before updating the pin in scripts/check-picolibc.py.")
+            failed += 1
     return 1 if failed else 0
 
 

@@ -73,7 +73,10 @@ for p in "$ROOT"/libc/picolibc-patches/*.patch; do
     patch -s -p1 -d "$PREBUILT" < "$p" || { echo "build-picolibc: $p no longer applies"; exit 1; }
 done
 echo "$VERSION" > "$PREBUILT/VERSION"
-# The compiler that built it: a new Apple clang alone changes objects (2100.1.1
-# to 2100.3.34 changed four of libm's), so the tree says which one it was.
-clang --version | head -1 > "$PREBUILT/COMPILER"
+# The compiler that built it, as meson ran it (the cross file's `c`, resolved
+# by meson, not whatever clang is first on PATH): a new Apple clang alone
+# changes objects (2100.1.1 to 2100.3.34 changed six of them), so the tree says
+# which one it was.
+python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["host"]["c"]["full_version"])' \
+    "$BUILD/meson-info/intro-compilers.json" > "$PREBUILT/COMPILER"
 echo "picolibc-prebuilt regenerated ($VERSION), $(du -sh "$PREBUILT" | cut -f1)"

@@ -5,17 +5,20 @@
  * malloc, or one time in eight by calloc, or one time in eight by memalign
  * at 16, 32 or 64 bytes. About half the slots hold a block at any time.
  *
- * The check, untimed. Every block gets its slot's own byte written over its
- * whole length when it is handed out; a realloc'd block must keep that byte
- * over the part it kept, a calloc'd one must read 0 in every byte before it
- * is written, and a memalign'd one must be aligned. At the end every live
- * block must still hold its byte throughout, which two live blocks handed
- * out over the same memory could not. The calloc check is there because
- * newlib's calloc faulted while picolibc was built without
- * -fno-builtin-malloc, and memalign because nano-malloc's drops its size
- * store without the same flag (libc/picolibc-cross.txt). Without either flag
- * nano-malloc frees a chunk with no size and a later call loops for good:
- * then cmalloc never ends, which is how scripts/test-malloc.py sees it.
+ * The check, untimed. Every block gets a pattern written over its whole
+ * length when it is handed out, a byte of its slot and offset that is never
+ * 0 (the byte nano-malloc fills with); a block is read back whole before it
+ * is freed, the part a realloc kept is read back after it, and every block
+ * still live at the end is read back whole. A block handed out over memory
+ * another live block holds shows as the other's bytes changed when either
+ * is read. The calloc and memalign checks hold an allocator to its contract:
+ * under nano-malloc neither can fail (its malloc zeroes every block, and its
+ * memalign's arithmetic aligns even on a broken heap), but another allocator
+ * meets them. What does fail under nano is the hang: without
+ * -fno-builtin-free (libc/picolibc-cross.txt) its realloc frees a remainder
+ * with no size, without -fno-builtin-malloc its memalign drops its size
+ * store, and a later call loops for good. Then cmalloc never ends, which is
+ * how scripts/test-malloc.py sees it.
  *
  * The timing. One untimed pass first, so the first count carries no start-up
  * cost; then malloc, calloc, realloc and free alone are timed, no memalign
@@ -66,8 +69,17 @@ static unsigned char size(void) {
     return (unsigned char)(16 + next() % 113);
 }
 
-static unsigned char mark(long slot) {
-    return (unsigned char)(slot * 7 + 1);
+/* Never 0, and varying along the block, so a block moved or overlapped by
+ * a few bytes does not read as itself. */
+static unsigned char mark(long slot, long k) {
+    return (unsigned char)(1 + (slot * 131 + k * 7) % 255);
+}
+
+/* The block in `slot` read back over its first `n` bytes. */
+static void verify(long slot, long n) {
+    for (long k = 0; blocks[slot] != NULL && k < n; k++) {
+        pattern_bad += blocks[slot][k] != mark(slot, k);
+    }
 }
 
 static long now_us(void) {
@@ -99,11 +111,13 @@ static void take(long slot, unsigned char *p, unsigned char n, int kind, unsigne
     for (long k = 0; kind == OP_CALLOC && k < n; k++) {
         calloc_bad += p[k] != 0;
     }
-    for (long k = 0; kind == OP_REALLOC && k < kept; k++) {
-        pattern_bad += p[k] != mark(slot);
+    if (kind == OP_REALLOC) {
+        verify(slot, kept);
     }
     misaligned += kind == OP_MEMALIGN && ((uintptr_t)p & (align - 1u)) != 0;
-    memset(p, mark(slot), n);
+    for (long k = 0; k < n; k++) {
+        p[k] = mark(slot, k);
+    }
 }
 
 static void check(long slots) {
@@ -111,6 +125,7 @@ static void check(long slots) {
         take(i, malloc(16), 16, OP_MALLOC, 0, 0);
     }
     for (long i = 0; i < slots; i += 2) {
+        verify(i, sizes[i]);
         free(blocks[i]);
         blocks[i] = NULL;
     }
@@ -132,14 +147,13 @@ static void check(long slots) {
                 take(i, p, o->size, OP_REALLOC, 0, kept);
             }
         } else {
+            verify(i, sizes[i]);
             free(blocks[i]);
             blocks[i] = NULL;
         }
     }
     for (long i = 0; i < slots; i++) {
-        for (long k = 0; blocks[i] != NULL && k < sizes[i]; k++) {
-            pattern_bad += blocks[i][k] != mark(i);
-        }
+        verify(i, sizes[i]);
         free(blocks[i]);
         blocks[i] = NULL;
     }
@@ -196,10 +210,10 @@ int main(void) {
     for (int s = 0; s < NCOUNTS; s++) {
         check(SLOT_COUNTS[s]);
     }
+    long checked_failed = failed;
     printf("cmalloc: checked %d ops at each of %d counts: %ld failed, %ld calloc bytes not 0, "
            "%ld memalign misaligned, %ld bytes not their block's\n",
            OPS, NCOUNTS, failed, calloc_bad, misaligned, pattern_bad);
-    int ok = failed == 0 && calloc_bad == 0 && misaligned == 0 && pattern_bad == 0;
 
     long ns[NCOUNTS], live = 0, skip;
     measure(SLOT_COUNTS[0], &skip); /* untimed: the start-up costs */
@@ -216,6 +230,9 @@ int main(void) {
         printf("cmalloc: %ld slots, %ld live at the end, %d ops, fastest of %d: %ld ns each\n",
                SLOT_COUNTS[s], live, OPS, REPEATS, ns[s]);
     }
+    long timed_failed = failed - checked_failed;
+    int ok = failed == 0 && calloc_bad == 0 && misaligned == 0 && pattern_bad == 0;
+    printf("cmalloc: timed: %ld failed\n", timed_failed);
     if (ns[0] > 0) {
         long ratio10 = ns[NCOUNTS - 1] * 10 / ns[0];
         printf("cmalloc: %ld slots cost %ld.%ld times %ld slots (measured, not graded): %s\n",
