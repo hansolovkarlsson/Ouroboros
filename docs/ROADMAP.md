@@ -2586,13 +2586,15 @@ be reviewed after the fact from the saved screenshots.
 > item, `ld` linking Edit and cpp, is done and moved to
 > [`roadmap-completed.md`](roadmap-completed.md) on 2026-10-15. The
 > allocator item came from DevTools too and moved here from Proem's block
-> that day, and the review of #301 split three more from it:
+> that day; the flag probes were found building it, the cc-and-as item is
+> DevTools's request of the same day, and the review of #301 found the spawn
+> buffer limit that blocks it:
 >
 > - [ ] **fix** **An allocator that is not linear in the free blocks**, chosen
 >       with the per-program heap above. picolibc's nano-malloc keeps one
 >       address-ordered free list, so `malloc`, `free` and `realloc` each walk
->       it: `make test-malloc` measures 373 ns an operation at 500 slots and
->       1,730 at 4,000 (DevTools measured cpp's large test at 208 s against
+>       it: `make test-malloc` measures about 360 ns an operation at 500 slots
+>       and 1,740 at 4,000 (DevTools measured cpp's large test at 208 s against
 >       1 s for a size-class allocator, on its own heap). newlib's binned
 >       malloc (`-Dnewlib-nano-malloc=false`) was built on 2026-10-15 (about
 >       100 ns at every count) and deferred by the max review of #301: out
@@ -2654,8 +2656,16 @@ be reviewed after the fact from the saved screenshots.
 >       `long double`. DevTools's `cc` refuses `long double` here, binary128
 >       in software, which is on DevTools's roadmap. **Waits on** that:
 >       [`handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md`](handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md).
->       When it moves: the cross file, `check-picolibc`'s pin, the C rigs,
->       and a notice to DevTools before the headers change.
+>       **It need not wait** (the max review of #301 showed): move
+>       `--ld-path` to `c_link_args`, and add a second header patch in
+>       `libc/picolibc-patches/` that undefines the eleven macros, and drop
+>       `complex.h` (Apple `patch` leaves it empty: `rm`, or `patch -E`); the
+>       include tree then hashes to `check-picolibc`'s pin unchanged, and
+>       `libc.a` gains `-frounding-math`, `-fno-builtin` and the rest. Its
+>       cost: the archive grows about 600 KB (programs shrink), every object
+>       changes, so the C rigs and `test-malloc` run on it and `LIB_PIN`
+>       moves. Its own PR. When DevTools's `long double` lands, the macros
+>       patch goes, with a notice.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
@@ -4192,6 +4202,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   "more" in the reply) is a wire change: fsd, `netd`'s export, both host
   peers and `ulib`. cpp is not affected: it opens headers by path. Found
   2026-10-06 staging the C headers (step 6 of the C-hosting plan).
+  `/bin` is close too: since `/bin/CMALLOC` its 80 names take 499 bytes as
+  `name\n` (the review of #301 measured 506 of the reply on FAT32), so a
+  program or two more staged there drops a name from `ls /bin` and tab
+  completion.
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970

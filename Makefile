@@ -705,9 +705,10 @@ cmem-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cmem.elf $(PICO_PORT) $(BUILD_DIR)/pico/cmem.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cmem.elf $(CMEM_BIN)
 
-# What one malloc, free or realloc costs at four numbers of slots, and the
-# largest count's cost over the smallest's: the measure of an allocator that
-# walks its free blocks (DevTools's nano-malloc note). Runs as /bin/CMALLOC.
+# picolibc's malloc checked (every block's bytes, calloc, memalign) and then
+# timed at four numbers of slots, the largest count's cost over the smallest's
+# reported: the measure of an allocator that walks its free blocks (DevTools's
+# nano-malloc note). Runs as /bin/CMALLOC.
 cmalloc-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/cmalloc.c -o $(BUILD_DIR)/pico/cmalloc.o
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cmalloc.elf $(PICO_PORT) $(BUILD_DIR)/pico/cmalloc.o $(PICO_LIBC) $(NSRESOLVE_A)
@@ -2070,12 +2071,12 @@ test-held-keys: image
 test-heap: image
 	python3 scripts/test-heap.py
 
-# malloc's cost as the slots grow (scripts/test-malloc.py, /bin/CMALLOC): one
-# operation at 4000 slots (about half holding a block) must cost under twice
-# one at 500, which an allocator walking its free list does not (DevTools's
-# nano-malloc note), and every calloc'd byte must read 0. One boot, about a
-# minute; run it whenever picolibc is rebuilt or its malloc options or cross
-# file change.
+# picolibc's malloc on a booted image (scripts/test-malloc.py, /bin/CMALLOC):
+# random operations with every block's bytes read back, graded, and a return
+# to the prompt, which a library missing either flag the cross file gives its
+# malloc never makes (it hangs in a realloc); the cost an operation at 500 to
+# 4000 slots reported, not graded. One boot, about a minute; run it whenever
+# picolibc is rebuilt or its malloc options or cross file change.
 test-malloc: image
 	python3 scripts/test-malloc.py
 
@@ -2371,10 +2372,9 @@ CHECK_LINK_LAYOUT := python3 scripts/check-link-layout.py '$(LDFLAGS_RUSTSHIM)'
 check-link-layout:
 	@$(CHECK_LINK_LAYOUT)
 
-# The committed picolibc (scripts/check-picolibc.py): its include tree, which
-# DevTools's cc reads from this working copy, against a pin, and libc.a's
-# malloc, free and realloc from nano-malloc's objects. Also run by `make test`
-# since 2026-10-15.
+# The committed C library (scripts/check-picolibc.py): libc.a hashed whole, and
+# the two header trees DevTools's cc reads from this working copy, each against
+# a pin. Also run by `make test` since 2026-10-15.
 check-picolibc:
 	@python3 scripts/check-picolibc.py
 
@@ -2442,9 +2442,9 @@ test:
 	@# is read only by whoever happens to open the file.
 	@echo "== the link layout DevTools's ld copies"
 	@$(CHECK_LINK_LAYOUT) || exit 1
-	@# The headers DevTools's cc reads from this working copy, and the
-	@# allocator libc.a carries: a regeneration changed both on 2026-10-15
-	@# with every check here green.
+	@# libc.a and the headers DevTools's cc reads from this working copy: a
+	@# regeneration changed the headers on 2026-10-15, and the libc.a that hung
+	@# in realloc shipped for seven weeks, with every check here green.
 	@echo "== the committed picolibc"
 	@python3 scripts/check-picolibc.py || exit 1
 	@echo "== all pure-crate host tests passed, and clippy clean including tests"

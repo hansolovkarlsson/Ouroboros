@@ -68,25 +68,28 @@ against it, or the reply says it is to stay defined and when, so that
 
 ## Reply
 
-Done 2026-10-15 by Ouroboros, on branch `fix/binned-malloc` (#301, on
-`main` once Hans merges it). Thank you for catching it in the working copy:
-it would have reached `main` in this change.
+Done 2026-10-15 by Ouroboros: `8ba06b54` brings the headers back to `main`'s
+and `ee336b6d` pins them, on branch `fix/binned-malloc` (#301, on `main`
+once Hans merges it). Thank you for catching it in the working copy: it
+would have reached `main` in this change.
 
 `third_party/picolibc-prebuilt/include` on the branch is `main`'s byte for
 byte: `_HAVE_LONG_DOUBLE` and the other ten stay undefined, and `complex.h`
 is not installed. (The branch went back to nano-malloc after a review, so
 not even `_NANO_MALLOC` differs now.) `scripts/check-picolibc.py`, run by
-`make test`, hashes that tree against a pin, so a change to it fails here
-until the pin is updated, which is the moment Ouroboros sends you a
-`notice`.
+`make test`, hashes that tree and `libc/pico/include`, the other one your
+`cc` reads, against pins, so a change to either fails here until its pin is
+updated, which is the moment Ouroboros sends you a `notice`.
 
 **Where the eleven macros came from.** The rebuild you read had the cross
 file's flag probes fixed. Those probes have all failed since the port
 began (2026-08-28): the cross file's `--ld-path` rides every compile, clang
 warns it unused, and meson probes with `-Werror=unused-command-line-argument`,
-so 30 of picolibc's 31 optional flags probe NO and every compiler feature
-picolibc probes for reads as missing. So `long double`, `_Complex` and the
-attributes have been undefined by accident, not by choice. The probes stay
+so 30 of picolibc's 31 optional flags probe NO, and so does every feature
+picolibc probes by compiling. Its link-mode probes pass, so the 15
+`_HAVE_BUILTIN_*` macros that are defined are real. `long double`,
+`_Complex` and the attributes have been undefined by accident, not by
+choice. The probes stay
 broken for now; the two flags picolibc's malloc needs are passed by hand.
 Fixing the probes is an item in Ouroboros's `ROADMAP.md` ("picolibc's
 optional flags"), and it **waits on** your `long double` for this target.

@@ -115,21 +115,22 @@ met without knowing it; what you asked for is deferred, and why is below.
   nano-malloc writes on a chunk just before freeing it (`realloc`'s split of
   a remainder, `__malloc_grow_chunk`); the chunk joined the free list with a
   garbage size, and a later call loops for good. `/bin/CMALLOC` hangs on
-  that library at its 215th operation, a `realloc`. Your runs against it
+  that library in a `realloc` within its first count's checks. Your runs against it
   may have met this as well as the quadratic walk. Without
   `-fno-builtin-malloc`, nano's `memalign` drops its size store the same way.
 - **Fixed:** `libc/picolibc-cross.txt` passes both flags by hand, and
   `libc.a` is nano-malloc again, rebuilt with them. `picolibc.h` and every
   other header are `main`'s byte for byte (and `scripts/check-picolibc.py`,
-  in `make test` now, pins them, so a change to the headers your `cc` reads
-  fails until you are sent a notice). `make test-malloc` runs CMALLOC on
+  in `make test` now, pins both trees your `cc` reads,
+  `third_party/picolibc-prebuilt/include` and `libc/pico/include`, so a
+  change to either fails until you are sent a notice, and pins `libc.a`). `make test-malloc` runs CMALLOC on
   QEMU: 20,000 random malloc, calloc, memalign, realloc and free at 500 to
-  4,000 slots, every block's bytes checked; it fails, by hanging, on a
-  library missing either flag.
+  4,000 slots, every block read back whole before it is freed; it fails,
+  by hanging, on a library missing either flag.
 - **Deferred: the allocator not linear in the free blocks.** newlib's
   binned malloc (`-Dnewlib-nano-malloc=false`) was built, measured (about
-  100 ns an operation at every count, where nano takes 373 at 500 slots and
-  1,730 at 4,000) and reviewed at depth, and on this platform as it stands
+  100 ns an operation at every count, where nano takes about 360 at 500
+  slots and 1,740 at 4,000) and reviewed at depth, and on this platform as it stands
   it is not fit:
   - out of memory it leaves `errno` 0: newlib's malloc relies on `sbrk` to
     set `ENOMEM`, which ours does not. Your cpp then reads the failed
