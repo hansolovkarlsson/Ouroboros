@@ -32,10 +32,10 @@ skip_sanity_check = true
 # without them clang took newlib's calloc reading the new chunk's size as a
 # read of fresh memory and called memset(mem, 0, -8), the first calloc
 # faulting (2026-10-15, `make test-malloc` checks it). Moving the link flags
-# to c_link_args fixes every probe but also turns on long double, _Complex
-# and four attributes in picolibc.h, and DevTools's cc refuses long double
-# here (docs/handoffs/2026-10-15-from-devtools-picolibc-long-double.md), so
-# that fix waits on ROADMAP.md's item for it.
+# to c_link_args fixes every probe but also defines eleven _HAVE_ macros in
+# picolibc.h, long double among them, and DevTools's cc refuses long double
+# here (docs/handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md),
+# so that fix waits on ROADMAP.md's item for it.
 [built-in options]
 c_args = ['-Wno-error=implicit-function-declaration',
           '-fno-builtin-malloc', '-fno-builtin-free']

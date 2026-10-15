@@ -2576,7 +2576,7 @@ be reviewed after the fact from the saved screenshots.
 >       where nano-malloc took 4.6 microseconds at 1000 and 9.9 at 4000
 >       (`make test-malloc`, `/bin/CMALLOC`; `CHANGELOG.md`). About 11 KB a
 >       program and none of the heap. Note:
->       [`handoffs/2026-10-14-from-devtools-nano-malloc.md`](handoffs/2026-10-14-from-devtools-nano-malloc.md).
+>       [`handoffs/closed/2026-10-14-from-devtools-nano-malloc.md`](handoffs/closed/2026-10-14-from-devtools-nano-malloc.md).
 > - [ ] **fix** **picolibc's optional flags, all 31 probed NO.** Found
 >       2026-10-15 building the binned malloc: `libc/picolibc-cross.txt`
 >       puts `-nostdlib` and `--ld-path` on the compiler line, clang warns
@@ -2593,7 +2593,7 @@ be reviewed after the fact from the saved screenshots.
 >       rest) once a program uses `long double`. DevTools's `cc` refuses
 >       `long double` here, binary128 in software, which is on DevTools's
 >       roadmap. **Waits on** that:
->       [`handoffs/2026-10-15-from-devtools-picolibc-long-double.md`](handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md).
+>       [`handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md`](handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md).
 >       When it moves, the item is the cross file, the C rigs, and a notice
 >       to DevTools before `picolibc.h` changes.
 > - [ ] **new** **A real file identity in `fstat` (`st_dev`, `st_ino`).**

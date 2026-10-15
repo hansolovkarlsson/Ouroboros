@@ -8,7 +8,7 @@ and 4000 live blocks, with about as many free blocks scattered between them,
 and prints the ratio of the largest set's cost per operation to the
 smallest's. picolibc's nano-malloc keeps its free blocks on one
 address-ordered list and walks it on every call, so its cost grows with the
-set (DevTools's note, docs/handoffs/2026-10-14-from-devtools-nano-malloc.md);
+set (DevTools's note, docs/handoffs/closed/2026-10-14-from-devtools-nano-malloc.md);
 newlib's binned malloc does not. One allocation in eight is a calloc of a
 reused block, whose bytes must all read 0: newlib's calloc faulted on its
 first call while picolibc was built without -fno-builtin-malloc

@@ -16,7 +16,7 @@
 #                            one address-ordered free list made every malloc,
 #                            free and realloc linear in the free blocks (cpp
 #                            quadratic on large input; DevTools's note,
-#                            docs/handoffs/2026-10-14-from-devtools-nano-malloc.md).
+#                            docs/handoffs/closed/2026-10-14-from-devtools-nano-malloc.md).
 #                            `make test-malloc` is the check.
 #   -Dthread-local-storage=false, -Dpicocrt=false (we use our own crt0),
 #   -Dsemihost=false, -Dmultilib=false, -Dtests=false, -Dspecsdir=none.

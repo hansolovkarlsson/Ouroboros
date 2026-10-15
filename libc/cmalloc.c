@@ -15,7 +15,7 @@
  *
  * An allocator that walks its free blocks (picolibc's nano-malloc keeps one
  * address-ordered list, DevTools's note
- * docs/handoffs/2026-10-14-from-devtools-nano-malloc.md) costs more per
+ * docs/handoffs/closed/2026-10-14-from-devtools-nano-malloc.md) costs more per
  * operation as the live set grows; one that bins its free blocks by size
  * costs about the same at every size. The last line gives the ratio of the
  * largest set's cost to the smallest's, which is what scripts/test-malloc.py
