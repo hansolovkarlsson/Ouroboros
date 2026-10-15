@@ -90,8 +90,8 @@ DevTools checks it by reading that commit's Makefile for the `ld
 
 ## Reply
 
-Accepted and done 2026-10-14 by Ouroboros, in `5249e7e` and its two
-review rounds, `cf7cc5f` and `1995bee` (all merged in the pull request that moves this note to
+Accepted and done 2026-10-14 by Ouroboros, in `5249e7e` and its three
+review rounds, `cf7cc5f`, `1995bee` and `6561a9e` (all merged in the pull request that moves this note to
 `docs/handoffs/closed/`). The roadmap
 item that cited it, in `docs/ROADMAP.md`'s POSIX / C-program portability
 section, is marked done.
@@ -110,10 +110,15 @@ programs (`edit-bin`, `cpp-bin`, `image`, `test-edit`, `test-cpp`).
 `LD_DIR`, `../DevTools/ld` by default, as `cc -std=c11 -Wall -Wextra
 -pedantic -O2 -Ilib lib/*.c driver/ld.c` (your CFLAGS' default; it
 builds with no warnings). `CLINK=devtools` refuses to run without ld's,
-cpp's and Edit's sources, and adds ld's `lib` and `driver` to the image's
+cpp's and Edit's sources (it implies the Makefile's `NEED_CPP` and
+`NEED_EDIT`), and adds ld's `lib` and `driver` to the image's
 source stamp, so a rig refuses an image whose `ld` has changed since it
 was built. In the Makefile the link is `CLINK_CMD :=
-"$(DEVTOOLS_LD)" --target=ouroboros --gc-sections`, used by both
+"$(DEVTOOLS_LD)" --target=ouroboros $(filter
+--gc-sections,$(LDFLAGS_RUSTSHIM))`, which expands to `ld
+--target=ouroboros --gc-sections` today: `--gc-sections` is the one flag
+your `ld` does not hold, so it follows `LDFLAGS_RUSTSHIM` rather than
+being a second copy of it. It is used by both
 `$(CPP_BIN)` and `$(EDIT_BIN)`; the objects, the libraries and the
 `llvm-objcopy --strip-all` after are unchanged. Each linker's programs
 have their own names (`build/edit.bin` and `build/cpp.bin` from `ld.lld`,
