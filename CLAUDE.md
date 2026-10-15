@@ -569,11 +569,12 @@ make test-cpp                # the C-hosting arc's finish line (scripts/test-cpp
 make test-unmount            # `unmount` with a partition mount and a held file, on a copy of the ext2 image (scripts/test-unmount.py, /bin/CFIDHOLD): both trees cleared, the held fid answering NO_FS and never handed to the next opener, the shell's own partition binding dropped, `erase` allowed after; about a minute and a half - run it whenever FSOP_UNMOUNT, the fid table or the shell's mount code changes
 make test-crename            # unlink, rename and fstat in the C port (scripts/test-crename.py, /bin/CRENAME, /bin/CFSTAT): two boots, FAT32 and ext2 (a partition at /mnt/f for EXDEV), the checks Proem's and Edit's handoff notes name; about two minutes - run it whenever libc's unlink/rename/fstat, its headers, or fsd's NP_RM/NP_MV/NP_FSTAT changes
 make test-keyboard-chain     # rebuilds the image, then four driven QEMU boots through the nested-shell keyboard-chain recipes (scripts/test-keyboard-chain.sh); minutes, so not in `make test` - run it whenever tasks.rs's keyboard ownership changes
-make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi, keyseq, parttable) + the cross-language wire-constant check + check-site + test-usb-hub's INCONCLUSIVE classifier on fixed transcripts (`--self-test`) + the disk signature rules (`disksig.py --self-test`, one-disk step 2) + check-xhci-barriers (so it also builds the kernel)
+make test                   # host unit tests + clippy --all-targets for the pure crates (accounts, regex, ed25519, clusterkeys, ninep-abi, keyseq, parttable) + the cross-language wire-constant check + check-site + test-usb-hub's INCONCLUSIVE classifier on fixed transcripts (`--self-test`) + the disk signature rules (`disksig.py --self-test`, one-disk step 2) + check-xhci-barriers (so it also builds the kernel) + check-link-layout
 make check-relocs           # the PIE contract: no R_AARCH64_ABS64 in any userland binary
 make check-xhci-barriers    # the xHCI driver's two DMA barriers found in the built kernel image (scripts/check-xhci-barriers.py); no QEMU rig can see one missing - ALSO RUN BY `make test` since 2026-10-03
 make check-site             # the published GitHub Pages site vs the documents it abridges - ALSO RUN BY `make test` since 2026-09-05
 make check-statics          # every static in kernel/src against the multi-core plan's inventory (docs/roadmap/roadmap-smp.md, scripts/check-statics.py), each in exactly one class row; fails naming a static in no row, in two, or gone from the tree - ALSO RUN BY `make test` since 2026-10-10 (step 0 of the multi-core arc)
+make check-link-layout      # programs/linker.ld (comments aside) and LDFLAGS_RUSTSHIM against the pin of the copy DevTools's ld holds as --target=ouroboros (scripts/check-link-layout.py); fails until the pin is updated, which is when DevTools is sent a notice - ALSO RUN BY `make test` since 2026-10-14. `make CLINK=devtools` links /bin/edit and /bin/cpp with that ld (built from LD_DIR, ../DevTools/ld), ld.lld the default
 make clean
 ```
 
@@ -604,7 +605,9 @@ which builds the kernel and finds the xHCI driver's two DMA barriers in its
 image, the one check here no QEMU rig could stand in for, and since
 2026-10-10 `check-statics` (above), every static in the kernel against the
 multi-core plan's inventory, and since 2026-10-13 `disksig.py --self-test`,
-the disk signature every image recipe writes (one-disk step 2). The suite exists
+the disk signature every image recipe writes (one-disk step 2). Since
+2026-10-14 also `check-link-layout` (above), the layout DevTools's `ld`
+copies. The suite exists
 because such a crate can otherwise have
 **no build coverage at all**: it is a workspace member but not a
 default-member, so until something depends on it, `cargo build`, `make

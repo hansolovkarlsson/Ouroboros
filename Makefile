@@ -322,35 +322,50 @@ endif
 # objects, the same strip after. DevTools's ld reads no linker script:
 # --target=ouroboros is programs/linker.ld's layout and LDFLAGS_RUSTSHIM's
 # flags held in its own code, so A CHANGE TO EITHER OWES DEVTOOLS A NOTICE
-# (a note in its docs/handoffs/), or the two linkers part without a word.
+# (a note in its docs/handoffs/), or the two linkers part without a word;
+# check-link-layout (in `make test`) pins that layout, so a change to either
+# fails the suite until the pin is updated and the notice sent.
 # The choice is recorded in CLINK_CHOICE, rewritten only when it changes, so
 # switching linkers relinks both programs rather than staging the last ones.
+# CLINK=devtools needs ld's, cpp's and Edit's sources: an image asked to carry
+# ld-linked programs and carrying none would be graded as if it did. Neither
+# check stops `make clean`, and a dry run (-n) records nothing.
 # LD_DIR must not contain spaces.
 CLINK        ?= lld
 LD_DIR       ?= ../DevTools/ld
 HOST_CC      ?= cc
 DEVTOOLS_LD  := $(BUILD_DIR)/host/ld
 CLINK_CHOICE := $(BUILD_DIR)/clink.choice
+CLINK_GOALS  := $(filter-out clean,$(or $(MAKECMDGOALS),all))
 ifeq ($(CLINK),lld)
 CLINK_CMD    := "$(LD_LLD)" $(LDFLAGS_RUSTSHIM)
 CLINK_DEPS   :=
 else ifeq ($(CLINK),devtools)
+CLINK_CMD    := "$(DEVTOOLS_LD)" --target=ouroboros --gc-sections
+CLINK_DEPS   := $(DEVTOOLS_LD)
+ifneq ($(CLINK_GOALS),)
 ifeq ($(wildcard $(LD_DIR)/driver/ld.c),)
 $(error CLINK=devtools: no ld sources at $(LD_DIR) (set LD_DIR))
 endif
-CLINK_CMD    := "$(DEVTOOLS_LD)" --target=ouroboros --gc-sections
-CLINK_DEPS   := $(DEVTOOLS_LD)
-else
+ifeq ($(and $(HAVE_CPP),$(HAVE_EDIT)),)
+$(error CLINK=devtools: needs cpp's sources at $(CPP_DIR) and Edit's at $(EDIT_DIR), the two programs it links)
+endif
+endif
+else ifneq ($(CLINK_GOALS),)
 $(error CLINK=$(CLINK): must be lld or devtools)
 endif
-_ := $(shell mkdir -p $(BUILD_DIR) && (echo $(CLINK) | cmp -s - $(CLINK_CHOICE) || echo $(CLINK) > $(CLINK_CHOICE)))
+ifneq ($(CLINK_GOALS),)
+ifeq ($(findstring n,$(firstword -$(MAKEFLAGS))),)
+CLINK_RECORD := $(shell mkdir -p $(BUILD_DIR) && (echo $(CLINK) | cmp -s - $(CLINK_CHOICE) || echo $(CLINK) > $(CLINK_CHOICE)))
+endif
+endif
 
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-spawn-owner test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-spawn-owner test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -812,11 +827,11 @@ $(EDIT_BIN): $(EDIT_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/link
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/edit.elf $(EDIT_BIN)
 -include $(wildcard $(BUILD_DIR)/edit/*.d)
 
-# DevTools's ld for CLINK=devtools (above), built the way its own Makefile
-# builds it, for the host.
-$(DEVTOOLS_LD): $(wildcard $(LD_DIR)/lib/*.c $(LD_DIR)/lib/*.h) $(LD_DIR)/driver/ld.c
+# DevTools's ld for CLINK=devtools (above), for the host, with the flags its
+# own Makefile's CFLAGS default to (it goes through a libld.a; this does not).
+$(DEVTOOLS_LD): $(wildcard $(LD_DIR)/lib/*.c $(LD_DIR)/lib/*.h) $(LD_DIR)/driver/ld.c Makefile
 	@mkdir -p $(dir $@)
-	$(HOST_CC) -std=c11 -O2 -I$(LD_DIR)/lib $(wildcard $(LD_DIR)/lib/*.c) $(LD_DIR)/driver/ld.c -o $@
+	$(HOST_CC) -std=c11 -Wall -Wextra -pedantic -O2 -I$(LD_DIR)/lib $(wildcard $(LD_DIR)/lib/*.c) $(LD_DIR)/driver/ld.c -o $@
 
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
@@ -918,8 +933,9 @@ serve-bin:
 # (make takes prerequisites in order without -j, and this Makefile is run
 # without it). SRCID_DIRS are the directories another project's programs are
 # compiled from: exactly those, so that project's tests and docs are not part
-# of what an image here was built from.
-SRCID_DIRS := $(if $(HAVE_CPP),$(CPP_DIR)/lib $(CPP_DIR)/driver) $(if $(HAVE_EDIT),$(EDIT_DIR)/src)
+# of what an image here was built from. Under CLINK=devtools ld's sources are
+# among them, since ld then decides the bytes of /bin/EDIT and /bin/CPP.
+SRCID_DIRS := $(if $(HAVE_CPP),$(CPP_DIR)/lib $(CPP_DIR)/driver) $(if $(HAVE_EDIT),$(EDIT_DIR)/src) $(if $(filter devtools,$(CLINK)),$(LD_DIR)/lib $(LD_DIR)/driver)
 srcid-begin:
 	@mkdir -p $(BUILD_DIR)
 	python3 scripts/srcid.py begin $(BUILD_DIR)/srcid.begin $(SRCID_DIRS)
@@ -2311,6 +2327,13 @@ check-xhci-barriers: build
 check-statics:
 	@python3 scripts/check-statics.py
 
+# programs/linker.ld and LDFLAGS_RUSTSHIM against the pin of the copy DevTools's
+# ld holds in its code (CLINK above, scripts/check-link-layout.py): fails on a
+# change to either until the pin is updated and DevTools sent a notice. Also
+# run by `make test` since 2026-10-14.
+check-link-layout:
+	@python3 scripts/check-link-layout.py '$(LDFLAGS_RUSTSHIM)'
+
 check-site:
 	@python3 scripts/check-site-freshness.py
 
@@ -2370,6 +2393,11 @@ test:
 	@# compiler, test or review of that file sees. Step 0 of the arc.
 	@echo "== kernel statics vs the multi-core inventory"
 	@python3 scripts/check-statics.py || exit 1
+	@# DevTools's ld holds programs/linker.ld's layout and the C link flags
+	@# in its own code, so they are a copy, and a comment asking for a notice
+	@# is read only by whoever happens to open the file.
+	@echo "== the link layout DevTools's ld copies"
+	@python3 scripts/check-link-layout.py '$(LDFLAGS_RUSTSHIM)' || exit 1
 	@echo "== all pure-crate host tests passed, and clippy clean including tests"
 
 clean:
