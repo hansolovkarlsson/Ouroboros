@@ -705,8 +705,8 @@ cmem-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cmem.elf $(PICO_PORT) $(BUILD_DIR)/pico/cmem.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cmem.elf $(CMEM_BIN)
 
-# What one malloc, free or realloc costs at four sizes of the live set, and
-# the largest's cost over the smallest's: the measure of an allocator that
+# What one malloc, free or realloc costs at four numbers of slots, and the
+# largest count's cost over the smallest's: the measure of an allocator that
 # walks its free blocks (DevTools's nano-malloc note). Runs as /bin/CMALLOC.
 cmalloc-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/cmalloc.c -o $(BUILD_DIR)/pico/cmalloc.o
@@ -2070,11 +2070,12 @@ test-held-keys: image
 test-heap: image
 	python3 scripts/test-heap.py
 
-# malloc's cost as the live set grows (scripts/test-malloc.py, /bin/CMALLOC):
-# one operation at 4000 live blocks must cost under twice one at 500, which an
-# allocator walking its free list does not (DevTools's nano-malloc note). One
-# boot, about a minute; run it whenever picolibc is rebuilt or its malloc
-# options change.
+# malloc's cost as the slots grow (scripts/test-malloc.py, /bin/CMALLOC): one
+# operation at 4000 slots (about half holding a block) must cost under twice
+# one at 500, which an allocator walking its free list does not (DevTools's
+# nano-malloc note), and every calloc'd byte must read 0. One boot, about a
+# minute; run it whenever picolibc is rebuilt or its malloc options or cross
+# file change.
 test-malloc: image
 	python3 scripts/test-malloc.py
 

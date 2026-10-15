@@ -2214,3 +2214,37 @@ note on the block, verbatim:
 >       cuts a call short too, and `pwd` stays `/`. Controls: the call number
 >       not compared (`cd` took SUB's "exists"), a call's wait not
 >       interruptible; both fail it.*
+
+## What DevTools asked of Ouroboros: the linker and the allocator, DONE (2026-10-14 to 2026-10-15)
+
+Moved from [`ROADMAP.md`](ROADMAP.md)'s libc section on 2026-10-15, after the
+binned malloc (#301). The linker item was the first of the block "What
+DevTools asks of Ouroboros next"; the allocator item sat with Proem's
+follow-ups, where its triage put it. One item split from the allocator, the
+rest of picolibc's flag probes, stays on the roadmap, waiting on DevTools's
+`long double`.
+
+> - [x] **DONE 2026-10-14** **Link `/bin/edit` and `/bin/cpp` with DevTools's `ld`,
+>       and boot them.** Built the same day: `make CLINK=devtools`;
+>       `test-edit` and `test-cpp` pass on that image (`CHANGELOG.md`). A choice of linker for those two links only
+>       (`ld --target=ouroboros --gc-sections` on the same inputs, `ld.lld`
+>       staying the default), `ld` built from the sibling checkout as Edit
+>       and cpp are, then `make test-edit` and `make test-cpp` on an image
+>       linked that way. The reply names the commit. From then on, a change
+>       to `programs/linker.ld` or the C programs' link flags owes DevTools
+>       a `notice`, since `ld` holds that layout in its code. Note:
+>       [`handoffs/closed/2026-10-14-from-devtools-link-with-ld.md`](handoffs/closed/2026-10-14-from-devtools-link-with-ld.md).
+> - [x] **DONE 2026-10-15** **An allocator that is not linear in the free blocks.**
+>       picolibc is built with `-Dnewlib-nano-malloc=false`, newlib's binned
+>       malloc: about 100 ns an operation at 500 to 4,000 slots on QEMU
+>       (about half of them holding a block), where nano-malloc took 382 ns
+>       at 500 and 1,817 at 4,000 (`make test-malloc`, `/bin/CMALLOC`; nano
+>       built with `-fno-builtin-malloc` and `-free`, since without them it
+>       hangs). About 11 KB
+>       a program and none of the heap. Building it found that picolibc's
+>       optional flags had all probed NO since the port began; the two its
+>       malloc needs are passed by hand, and without them `main`'s
+>       nano-malloc could hang in `realloc` (`CHANGELOG.md`). The rest of
+>       the probes stay on the roadmap. Notes:
+>       [`handoffs/closed/2026-10-14-from-devtools-nano-malloc.md`](handoffs/closed/2026-10-14-from-devtools-nano-malloc.md),
+>       [`handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md`](handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md).

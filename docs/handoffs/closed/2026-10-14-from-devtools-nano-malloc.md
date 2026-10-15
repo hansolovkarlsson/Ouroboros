@@ -119,12 +119,27 @@ Done 2026-10-15 by Ouroboros, in `56c98079` on branch `fix/binned-malloc`
   passes `-fno-builtin-malloc` and `-fno-builtin-free` by hand. Fixing the
   probes outright turns on `long double` in `picolibc.h`, which is your
   note of 2026-10-15 (closed beside this one): it is not done.
-- **Measured** on QEMU (`make test-malloc`, `/bin/CMALLOC`: 20,000
-  malloc/free/realloc/calloc at random over N live blocks with as many free
-  ones between them): nano-malloc 4.6 microseconds an operation at 1,000
-  live and 9.9 at 4,000, 6.4 times its cost at 500; binned about 110 ns at
-  every size, 0.6 times. The rig fails on the nano-malloc build and on the
-  binned build with the cross file as it was.
+- **Measured** on QEMU (`make test-malloc`, `/bin/CMALLOC`: after an
+  untimed pass, the fastest of three runs of 20,000 operations, malloc,
+  calloc, realloc and free, at random over 500 to 4,000 slots, about half of
+  them holding a block, the random choices drawn before the clock): binned
+  about 100 ns an operation at every count (96 at 500, 102 at 4,000, 1.0
+  times); nano-malloc 382 ns at 500 and 1,817 at 4,000, 4.7 times. The rig
+  fails on the nano-malloc build, on a calloc clearing only 16 bytes, on a
+  0 ns denominator, and on the binned build with the cross file as it was.
+  (Corrected 2026-10-15 after the review of #301, before this was merged:
+  the first figures, 110 ns and 0.6 times, came from a harness that timed
+  its own random numbers and gave the first count the start-up cost.)
+- **Your `libc.a` from `main` can hang in `realloc`.** The nano-malloc
+  figures above are from a build with `-fno-builtin-malloc` and
+  `-fno-builtin-free`. The `libc.a` on `main` (`9d9203a3`), built without
+  them, never finishes CMALLOC: it hangs at the 215th operation, a
+  `realloc`. Without `-fno-builtin-free`, clang deleted as dead the size
+  nano-malloc writes on a chunk just before it frees it, in `realloc`'s
+  split of a remainder and in `__malloc_grow_chunk`, so the remainder
+  joined the free list with whatever size was in its bytes. Your
+  measurements against that `libc.a` ran on this library too, so a hang
+  there may have been this rather than the quadratic walk.
 - **Cost:** a program grows by 8.8 KB of code and 2.1 KB of data (the bins);
   none of the heap: `/bin/CMEM` still holds 63 of the 1 MiB heap's 64
   16 KiB blocks.

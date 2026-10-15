@@ -551,10 +551,12 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
 - **That costs every optional flag probe** (found 2026-10-15): `--ld-path` and
   `-nostdlib` ride each compile, clang warns them unused, and meson probes
   with `-Werror=unused-command-line-argument`, so all 31 of picolibc's
-  optional flags probe NO and the library is built without them. The one that
-  broke something is `-fno-builtin-malloc`: without it clang compiled newlib's
-  calloc to `memset(mem, 0, -8)`. The cross file passes it and
-  `-fno-builtin-free` in `c_args` by hand. Fixing the probes outright also
+  optional flags probe NO and the library is built without them. The two that
+  broke something are `-fno-builtin-malloc` and `-fno-builtin-free`: without
+  them clang compiled newlib's calloc to `memset(mem, 0, -8)`, and deleted as
+  dead the size nano-malloc writes on a chunk just before freeing it, so the
+  nano-malloc shipped until 2026-10-15 could hang in `realloc`. The cross
+  file passes both in `c_args` by hand. Fixing the probes outright also
   turns on `long double` in `picolibc.h`, which DevTools's `cc` refuses here,
   so that waits on `ROADMAP.md`'s item.
 
