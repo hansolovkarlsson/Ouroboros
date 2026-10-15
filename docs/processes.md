@@ -536,13 +536,27 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   `libc/picolibc-cross.txt`, strip, copy). Build options: `-fPIC`,
   `-Dposix-console=true`, `-Dnewlib-global-errno=true` (one global `errno`, no
   TLS — we have no threads), `-Dthread-local-storage=false`, `-Dpicocrt=false`
-  (our `crt0`), `-Dsemihost=false`, `-Dmultilib=false`, `-Dtests=false`.
+  (our `crt0`), `-Dsemihost=false`, `-Dmultilib=false`, `-Dtests=false`,
+  and since 2026-10-15 `-Dnewlib-nano-malloc=false`: newlib's binned malloc,
+  whose cost does not grow with the free blocks the way nano-malloc's single
+  list did (DevTools's note, `make test-malloc`). It costs a program about
+  11 KB (8.8 KB of code, 2.1 KB of bins) and nothing of the heap: CMEM still
+  holds 63 of its 64 16 KiB blocks.
 - **One friction point when regenerating:** modern clang makes
   implicit-function-declaration a hard error, which trips a couple of picolibc
   1.8.9 tinystdio files — the cross-file demotes it
   (`-Wno-error=implicit-function-declaration`). And Apple clang defaults to the
   Mach-O linker, which rejects meson's GNU-linker probe, so the cross-file's `c`
   binary carries `--ld-path=…/gcc-ld/ld.lld` to force LLD.
+- **That costs every optional flag probe** (found 2026-10-15): `--ld-path` and
+  `-nostdlib` ride each compile, clang warns them unused, and meson probes
+  with `-Werror=unused-command-line-argument`, so all 31 of picolibc's
+  optional flags probe NO and the library is built without them. The one that
+  broke something is `-fno-builtin-malloc`: without it clang compiled newlib's
+  calloc to `memset(mem, 0, -8)`. The cross file passes it and
+  `-fno-builtin-free` in `c_args` by hand. Fixing the probes outright also
+  turns on `long double` in `picolibc.h`, which DevTools's `cc` refuses here,
+  so that waits on `ROADMAP.md`'s item.
 
 **Closed 2026-08-29** (this was the arc's one open follow-up): picolibc's
 `posix-console` stdout is *unbuffered* — one `write(1,&c,1)` per char, so console

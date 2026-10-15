@@ -12,6 +12,12 @@
 #                            write()/read() stubs in libc/src/file.c (our porting
 #                            layer). picolibc's stdio bottoms out at those.
 #   -Dnewlib-global-errno -> a single global errno (no TLS; we have no threads).
+#   -Dnewlib-nano-malloc=false -> newlib's binned malloc, not nano-malloc, whose
+#                            one address-ordered free list made every malloc,
+#                            free and realloc linear in the free blocks (cpp
+#                            quadratic on large input; DevTools's note,
+#                            docs/handoffs/2026-10-14-from-devtools-nano-malloc.md).
+#                            `make test-malloc` is the check.
 #   -Dthread-local-storage=false, -Dpicocrt=false (we use our own crt0),
 #   -Dsemihost=false, -Dmultilib=false, -Dtests=false, -Dspecsdir=none.
 # See docs/processes.md "Writing a program in C" and the libc-arc postmortem.
@@ -43,6 +49,7 @@ rm -rf "$BUILD" "$INSTALL"
 ( cd "$SRC" && meson setup "$BUILD" --cross-file "$CROSS" \
     -Dmultilib=false -Dpicocrt=false -Dsemihost=false -Dtests=false \
     -Dthread-local-storage=false -Dnewlib-global-errno=true -Dspecsdir=none \
+    -Dnewlib-nano-malloc=false \
     -Dposix-console=true -Dprefix="$INSTALL" )
 ninja -C "$BUILD"
 ninja -C "$BUILD" install

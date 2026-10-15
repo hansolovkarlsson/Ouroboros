@@ -23,5 +23,19 @@ skip_sanity_check = true
 
 # picolibc 1.8.9's tinystdio has a few implicit-function-declaration sites
 # (e.g. fcvtl.c -> fcvtl_r) that modern clang treats as a hard error; demote it.
+#
+# -fno-builtin-malloc and -fno-builtin-free are given here, for every file,
+# because picolibc's own probe for them fails under this file: -nostdlib and
+# --ld-path above ride every compile, clang warns them unused, and meson
+# probes each optional flag with -Werror=unused-command-line-argument, so all
+# 31 of picolibc's optional flags probe NO. Its malloc needs these two:
+# without them clang took newlib's calloc reading the new chunk's size as a
+# read of fresh memory and called memset(mem, 0, -8), the first calloc
+# faulting (2026-10-15, `make test-malloc` checks it). Moving the link flags
+# to c_link_args fixes every probe but also turns on long double, _Complex
+# and four attributes in picolibc.h, and DevTools's cc refuses long double
+# here (docs/handoffs/2026-10-15-from-devtools-picolibc-long-double.md), so
+# that fix waits on ROADMAP.md's item for it.
 [built-in options]
-c_args = ['-Wno-error=implicit-function-declaration']
+c_args = ['-Wno-error=implicit-function-declaration',
+          '-fno-builtin-malloc', '-fno-builtin-free']

@@ -125,6 +125,20 @@ test-cpp` pass on that image. A change to the linker script or the C link
 flags now owes DevTools a notice, and `make test` fails until it is sent:
 `scripts/check-link-layout.py` pins the layout `ld` copies.
 
+**A C program's malloc no longer slows as its heap fills (2026-10-15).**
+DevTools asked (its note, now in `docs/handoffs/closed/`): picolibc's
+nano-malloc walked one free list on every `malloc`, `free` and `realloc`,
+so cpp on a large input was quadratic. picolibc is built with newlib's
+binned malloc now. `make test-malloc` runs `/bin/CMALLOC`: one operation at
+4,000 live blocks costs 0.6 times one at 500, where nano-malloc's cost 6.4
+times (4.6 microseconds at 1,000, 9.9 at 4,000, against about 110 ns at
+every size). The first build of it faulted on its first `calloc`: picolibc's
+probe for `-fno-builtin-malloc` had failed, like all 31 of its optional
+flags, since the port began (the cross file's link flags ride each compile),
+and clang compiled `calloc` to `memset(mem, 0, -8)`. The cross file passes
+the two flags by hand; the probes themselves wait on DevTools's `long
+double`, since fixing them turns it on in `picolibc.h` (`ROADMAP.md`).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

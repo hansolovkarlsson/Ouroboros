@@ -192,7 +192,7 @@
 
 #undef _NANO_FORMATTED_IO
 
-#define _NANO_MALLOC
+#undef _NANO_MALLOC
 
 #undef _NANO_MALLOC_CLEAR_FREED
 

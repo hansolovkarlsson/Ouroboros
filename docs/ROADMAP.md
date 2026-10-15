@@ -2570,16 +2570,32 @@ be reviewed after the fact from the saved screenshots.
 >       `mmu.rs`/`tasks.rs` mapping a region of more than one slot. Split
 >       from the 1 MiB heap item (#210, now in `roadmap-completed.md`), which
 >       met the handoff's **Done when**.
-> - [ ] **fix** **An allocator that is not linear in the free blocks.**
->       picolibc's nano-malloc keeps one address-ordered free list, so
->       `malloc`, `free` and `realloc` each walk it and a program holding
->       many blocks is quadratic: DevTools measured cpp's large test at
->       208 s where a size-class allocator took 1 s, and `sqlite3.c`
->       unfinished after 34 minutes against 5 s. Candidate:
->       `-Dnewlib-nano-malloc=false` in `scripts/build-picolibc.sh`, newlib's
->       binned malloc, its size and overhead weighed against the 1 MiB heap
->       (the item above pays if it does not fit). Note:
+> - [x] **DONE 2026-10-15** **An allocator that is not linear in the free blocks.**
+>       picolibc is built with `-Dnewlib-nano-malloc=false`, newlib's binned
+>       malloc: about 110 ns an operation at 500 to 4000 live blocks on QEMU,
+>       where nano-malloc took 4.6 microseconds at 1000 and 9.9 at 4000
+>       (`make test-malloc`, `/bin/CMALLOC`; `CHANGELOG.md`). About 11 KB a
+>       program and none of the heap. Note:
 >       [`handoffs/2026-10-14-from-devtools-nano-malloc.md`](handoffs/2026-10-14-from-devtools-nano-malloc.md).
+> - [ ] **fix** **picolibc's optional flags, all 31 probed NO.** Found
+>       2026-10-15 building the binned malloc: `libc/picolibc-cross.txt`
+>       puts `-nostdlib` and `--ld-path` on the compiler line, clang warns
+>       them unused on every compile, and meson probes with
+>       `-Werror=unused-command-line-argument`, so picolibc has been built
+>       since 2026-08-28 without `-fno-builtin`, `-ffunction-sections`,
+>       `-frounding-math`, `-fno-common`, `-fno-stack-protector` and the rest.
+>       `-fno-builtin-malloc` and `-free` are passed by hand now (their
+>       absence made calloc fault). Moving the link flags to `c_link_args`
+>       fixes every probe (tried: four NO remain, each GCC-only or a link
+>       probe `-nostdlib` cannot pass) but also defines `_HAVE_LONG_DOUBLE`,
+>       `_HAVE_COMPLEX` and nine others in `picolibc.h`, installs
+>       `complex.h`, and needs the quad-float helpers (`__addtf3` and the
+>       rest) once a program uses `long double`. DevTools's `cc` refuses
+>       `long double` here, binary128 in software, which is on DevTools's
+>       roadmap. **Waits on** that:
+>       [`handoffs/2026-10-15-from-devtools-picolibc-long-double.md`](handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md).
+>       When it moves, the item is the cross file, the C rigs, and a notice
+>       to DevTools before `picolibc.h` changes.
 > - [ ] **new** **A real file identity in `fstat` (`st_dev`, `st_ino`).**
 >       The second half of the `fstat` fallback (#216, now in
 >       `roadmap-completed.md`): the `NP_FSTAT` record carries
