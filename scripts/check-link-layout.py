@@ -9,8 +9,9 @@ LDFLAGS_RUSTSHIM) written into its code, as of the note
 docs/handoffs/closed/2026-10-14-from-devtools-link-with-ld.md. So the two are
 a second copy, and a copy drifts without a word: `ld.lld` follows an edit to
 the script, `make CLINK=devtools` keeps linking the old layout, and every
-check here stays green. This hashes the script with its comments and spacing
-taken out, so a comment-only edit passes, together with the flags, and fails
+check here stays green. This hashes the script with its comments taken out
+and each run of spacing collapsed to one space, so a comment-only edit passes
+(spacing added between tokens does not), together with the flags, and fails
 when the hash is not PIN. Updating PIN is the moment to send DevTools a
 `notice` in its docs/handoffs/.
 """

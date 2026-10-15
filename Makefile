@@ -265,6 +265,10 @@ CCLOCK_BIN   := $(BUILD_DIR)/cclock.bin
 CWINSZ_BIN   := $(BUILD_DIR)/cwinsz.bin
 CTERMIOS_BIN := $(BUILD_DIR)/ctermios.bin
 CPOLL_BIN    := $(BUILD_DIR)/cpoll.bin
+# The linker for /bin/cpp and /bin/edit, ld.lld or DevTools's ld (CLINK, see
+# its block below). Its default is set here, before CPP_BIN and EDIT_BIN, whose
+# names depend on it.
+CLINK        ?= lld
 # DevTools's C preprocessor, built here for Ouroboros (step 8 of the C-hosting
 # plan): its sources are read from CPP_DIR, a sibling checkout by default.
 # CPP_DIR must not contain spaces: its files are make prerequisites.
@@ -279,9 +283,9 @@ CPP_OBJS     := $(if $(HAVE_CPP),$(patsubst $(CPP_DIR)/lib/%.c,$(BUILD_DIR)/cpp/
 # switch it off: one switch rather than a guard in each (the reviews of
 # #226). Not named CPP: make predefines that as the C preprocessor command,
 # so `CPP ?=` never took and `CPP=required` would reach every tool that runs
-# $CPP. `make clean` is never stopped by it.
+# $CPP. `make clean` is never stopped by it. CLINK=devtools implies it too.
 NEED_CPP     ?= optional
-ifneq ($(filter cpp-bin test-cpp,$(MAKECMDGOALS)),)
+ifneq ($(filter cpp-bin test-cpp,$(MAKECMDGOALS))$(filter devtools,$(CLINK)),)
 override NEED_CPP := required
 endif
 ifeq ($(NEED_CPP),required)
@@ -297,13 +301,14 @@ endif
 # are read from EDIT_DIR, a sibling checkout by default, every src/*.c but the
 # Mac's platform file (platform_ouroboros.c is the one for here). NEED_EDIT
 # is NEED_CPP's twin: optional by default, required for edit-bin and
-# test-edit, so a release can insist. EDIT_DIR must not contain spaces.
+# test-edit, so a release can insist; CLINK=devtools implies it too. EDIT_DIR
+# must not contain spaces.
 EDIT_DIR     ?= ../DevTools/edit
 EDIT_BIN     := $(BUILD_DIR)/edit$(if $(filter devtools,$(CLINK)),-ld).bin
 HAVE_EDIT    := $(wildcard $(EDIT_DIR)/src/platform_ouroboros.c)
 EDIT_OBJS    := $(if $(HAVE_EDIT),$(patsubst $(EDIT_DIR)/src/%.c,$(BUILD_DIR)/edit/%.o,$(filter-out %/platform_posix.c,$(wildcard $(EDIT_DIR)/src/*.c))))
 NEED_EDIT    ?= optional
-ifneq ($(filter edit-bin test-edit,$(MAKECMDGOALS)),)
+ifneq ($(filter edit-bin test-edit,$(MAKECMDGOALS))$(filter devtools,$(CLINK)),)
 override NEED_EDIT := required
 endif
 ifeq ($(NEED_EDIT),required)
@@ -320,8 +325,9 @@ endif
 # CLINK=devtools is DevTools's ld, built here from LD_DIR (a sibling checkout,
 # only read, as cpp's and Edit's sources are). Only the link changes: the same
 # objects, the same strip after. DevTools's ld reads no linker script:
-# --target=ouroboros is programs/linker.ld's layout and LDFLAGS_RUSTSHIM's
-# flags held in its own code, so A CHANGE TO EITHER OWES DEVTOOLS A NOTICE
+# --target=ouroboros is programs/linker.ld's layout and LDFLAGS_OS's flags
+# held in its own code, and --gc-sections is passed only while LDFLAGS_RUSTSHIM
+# has it, so A CHANGE TO EITHER OWES DEVTOOLS A NOTICE
 # (a note in its docs/handoffs/), or the two linkers part without a word;
 # check-link-layout (in `make test`) pins that layout, so a change to either
 # fails the suite until the pin is updated and the notice sent.
@@ -331,30 +337,26 @@ endif
 # names a file of its own rather than relying on timestamps: make here
 # compares whole seconds, and a switch made within the second of the last link
 # would otherwise stage the other linker's programs.
-# CLINK=devtools needs ld's, cpp's and Edit's sources: an image asked to carry
-# ld-linked programs and carrying none would be graded as if it did. Neither
-# check stops `make clean`.
-# LD_DIR must not contain spaces.
-CLINK        ?= lld
+# CLINK=devtools needs ld's sources, and cpp's and Edit's (NEED_CPP and
+# NEED_EDIT above): an image asked to carry ld-linked programs and carrying
+# none would be graded as if it did. Neither check stops `make clean`.
+# CLINK's default is set above CPP_BIN. LD_DIR must not contain spaces.
 LD_DIR       ?= ../DevTools/ld
 HOST_CC      ?= cc
-LD_SRCS      := $(wildcard $(LD_DIR)/lib/*.c) $(LD_DIR)/driver/ld.c
-LD_CMD       := $(HOST_CC) -std=c11 -Wall -Wextra -pedantic -O2 -I$(LD_DIR)/lib
-LD_ID        := $(shell echo '$(LD_CMD) $(LD_SRCS)' | shasum -a 256 | cut -c1-12)
-DEVTOOLS_LD  := $(BUILD_DIR)/host/ld-$(LD_ID)
 CLINK_GOALS  := $(filter-out clean,$(or $(MAKECMDGOALS),all))
 ifeq ($(CLINK),lld)
 CLINK_CMD    := "$(LD_LLD)" $(LDFLAGS_RUSTSHIM)
 CLINK_DEPS   :=
 else ifeq ($(CLINK),devtools)
-CLINK_CMD    := "$(DEVTOOLS_LD)" --target=ouroboros --gc-sections
+LD_SRCS      := $(wildcard $(LD_DIR)/lib/*.c) $(LD_DIR)/driver/ld.c
+LD_CMD       := $(HOST_CC) -std=c11 -Wall -Wextra -pedantic -O2 -I$(LD_DIR)/lib
+LD_ID        := $(shell echo '$(LD_CMD) $(LD_SRCS)' | shasum -a 256 | cut -c1-12)
+DEVTOOLS_LD  := $(BUILD_DIR)/host/ld-$(LD_ID)
+CLINK_CMD    := "$(DEVTOOLS_LD)" --target=ouroboros $(filter --gc-sections,$(LDFLAGS_RUSTSHIM))
 CLINK_DEPS   := $(DEVTOOLS_LD)
 ifneq ($(CLINK_GOALS),)
 ifeq ($(wildcard $(LD_DIR)/driver/ld.c),)
 $(error CLINK=devtools: no ld sources at $(LD_DIR) (set LD_DIR))
-endif
-ifeq ($(and $(HAVE_CPP),$(HAVE_EDIT)),)
-$(error CLINK=devtools: needs cpp's sources at $(CPP_DIR) and Edit's at $(EDIT_DIR), the two programs it links)
 endif
 endif
 else ifneq ($(CLINK_GOALS),)
@@ -832,9 +834,11 @@ $(EDIT_BIN): $(EDIT_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/link
 # suggested, with the flags its own Makefile's CFLAGS default to (it goes
 # through a libld.a; this does not). A copy of DevTools's recipe, unpinned:
 # running its own build would be running another project's build.
+ifeq ($(CLINK),devtools)
 $(DEVTOOLS_LD): $(LD_SRCS) $(wildcard $(LD_DIR)/lib/*.h $(LD_DIR)/driver/*.h)
 	@mkdir -p $(dir $@)
 	$(LD_CMD) $(LD_SRCS) -o $@
+endif
 
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
@@ -2198,6 +2202,9 @@ measure-syscost: image
 # EDIT_DIR): `edit hello.txt` opens, ^Q Q repeats a delete on poll's timeout,
 # Left through the escape timeout moves the cursor, ^K D saves, cat shows
 # `hXi`. One boot on a copy of the image, about a minute; needs Edit's sources.
+# With CLINK=devtools too whenever kernel/src/loader.rs, programs/linker.ld
+# or the C link flags change: DevTools's ld then links /bin/edit, and nothing
+# routine boots that path.
 test-edit: image
 	python3 scripts/test-edit.py
 
@@ -2250,7 +2257,9 @@ test-include: image image-ext2 image-exfat
 # cpp built for the Mac, with signed and with unsigned char, and clang for this
 # target compiles them. One boot, about a minute and a half;
 # needs DevTools's cpp at CPP_DIR. Run it whenever the C runtime, the header
-# stage or cpp-bin changes.
+# stage or cpp-bin changes; with CLINK=devtools too (DevTools's ld links it,
+# and nothing routine boots that path) whenever kernel/src/loader.rs,
+# programs/linker.ld or the C link flags change, as test-edit.
 # Without cpp's sources there is nothing to test: test-cpp sets
 # NEED_CPP=required (above), which stops before the image is built, not after.
 test-cpp: image
@@ -2334,8 +2343,9 @@ check-statics:
 # ld holds in its code (CLINK above, scripts/check-link-layout.py): fails on a
 # change to either until the pin is updated and DevTools sent a notice. Also
 # run by `make test` since 2026-10-14.
+CHECK_LINK_LAYOUT := python3 scripts/check-link-layout.py '$(LDFLAGS_RUSTSHIM)'
 check-link-layout:
-	@python3 scripts/check-link-layout.py '$(LDFLAGS_RUSTSHIM)'
+	@$(CHECK_LINK_LAYOUT)
 
 check-site:
 	@python3 scripts/check-site-freshness.py
@@ -2400,7 +2410,7 @@ test:
 	@# in its own code, so they are a copy, and a comment asking for a notice
 	@# is read only by whoever happens to open the file.
 	@echo "== the link layout DevTools's ld copies"
-	@$(MAKE) --no-print-directory check-link-layout || exit 1
+	@$(CHECK_LINK_LAYOUT) || exit 1
 	@echo "== all pure-crate host tests passed, and clippy clean including tests"
 
 clean:
