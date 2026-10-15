@@ -2570,6 +2570,16 @@ be reviewed after the fact from the saved screenshots.
 >       `mmu.rs`/`tasks.rs` mapping a region of more than one slot. Split
 >       from the 1 MiB heap item (#210, now in `roadmap-completed.md`), which
 >       met the handoff's **Done when**.
+> - [ ] **fix** **An allocator that is not linear in the free blocks.**
+>       picolibc's nano-malloc keeps one address-ordered free list, so
+>       `malloc`, `free` and `realloc` each walk it and a program holding
+>       many blocks is quadratic: DevTools measured cpp's large test at
+>       208 s where a size-class allocator took 1 s, and `sqlite3.c`
+>       unfinished after 34 minutes against 5 s. Candidate:
+>       `-Dnewlib-nano-malloc=false` in `scripts/build-picolibc.sh`, newlib's
+>       binned malloc, its size and overhead weighed against the 1 MiB heap
+>       (the item above pays if it does not fit). Note:
+>       [`handoffs/2026-10-14-from-devtools-nano-malloc.md`](handoffs/2026-10-14-from-devtools-nano-malloc.md).
 > - [ ] **new** **A real file identity in `fstat` (`st_dev`, `st_ino`).**
 >       The second half of the `fstat` fallback (#216, now in
 >       `roadmap-completed.md`): the `NP_FSTAT` record carries
