@@ -93,6 +93,18 @@ ours, and a Pi card. A disk image file can stand in for the stick, which
 is how `make test-bootstick` checks it: a user added on one boot logs in
 after a re-stage, and is refused after `CARRY=0`.
 
+**`make bootstick` keeps a failed write's only copy (2026-10-14).** When a
+write fails, the disk as it should have been is left in
+`build/bootstick-written.img`, the one copy of the old disk's `/etc` and
+`/Users`; the next run now refuses until that file is moved away, where it
+used to rebuild it from the half-written disk. An option set in the shell's
+environment (`PI=1 make bootstick ...`) is refused by name rather than
+silently dropped, a disk only a few sectors larger than the image has its
+last sector cleared too, and a boot counter record with a byte after it is
+no longer written into the ESP. A Pi stick now carries a manifest of its
+firmware's files (`\EFI\ORBS\PFTF.TXT`), and a re-stage carries by it: no
+download, and a file only an older release shipped is kept.
+
 **C11's comparison macros reach a compiler with the builtins (2026-10-13).**
 DevTools asked (its note, now in `docs/handoffs/closed/`): picolibc's
 `<math.h>` wrote `isgreater` and the other five as builtins only for a

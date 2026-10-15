@@ -509,7 +509,14 @@ once". A Pi stick stays one by default; `PI=0` drops the firmware and says
 so; `FIRMWARE=1` reinstalls the release, resetting the settings and keeping
 the old `config.txt` (the UART overlay is set there by hand), and is
 refused on a stick that is not a Pi's. A card as the target is still
-refused, now saying why: the kernel cannot read it once it runs.
+refused, now saying why: the kernel cannot read it once it runs. **Since
+the second review of the repairs (2026-10-14), which files are the stick's
+firmware is what its manifest says:** `\EFI\ORBS\PFTF.TXT`, written with the
+firmware's names whenever bootstick puts firmware on a stick, so a re-stage
+needs no fetch and carries what an older release shipped too; a stick from
+before the manifest falls back to the pinned release's names and is given
+one (Hans's choice, over keeping the zip's names or carrying everything
+that is not ours).
 
 `make test-bootstick`, 39 checks, gained seven: the pinned files on a fresh
 stick, file for file, without the readme or macOS's sidecars; a boot on

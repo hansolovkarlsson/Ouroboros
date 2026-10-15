@@ -1896,11 +1896,16 @@ stick:
 #   make bootstick BOOTSTICK=build/stick.img       # a file: mkfile -n 128m build/stick.img
 # Each option is taken from the command line only, never from the shell's
 # environment: a FIRMWARE=1 left exported from a `make sdcard` session would
-# otherwise reset a Pi stick's firmware settings on its next re-stage.
+# otherwise reset a Pi stick's firmware settings on its next re-stage. One in
+# the environment is refused, not dropped: dropped, `PI=1 make bootstick`
+# wrote a stick with no firmware without a word (the second review of #294).
 BOOTSTICK_OPT = $(if $(filter command line,$(origin $(1))),$($(1)))
+BOOTSTICK_ENV = $(strip $(foreach v,CARRY EJECT PI FIRMWARE,$(if $(filter environment%,$(origin $(v))),$(v))))
 bootstick:
 	@test -n "$(BOOTSTICK)" || { \
 		echo "bootstick: name the whole disk, e.g. make bootstick BOOTSTICK=/dev/disk4 (diskutil list shows N)"; exit 1; }
+	@test -z "$(BOOTSTICK_ENV)" || { \
+		echo "bootstick: $(BOOTSTICK_ENV) set in the environment; give it on make's command line (make bootstick ... PI=1), or unset it"; exit 1; }
 	$(MAKE) image $(EXT2_PART)
 	CARRY="$(call BOOTSTICK_OPT,CARRY)" EJECT="$(call BOOTSTICK_OPT,EJECT)" PI="$(call BOOTSTICK_OPT,PI)" \
 		FIRMWARE="$(call BOOTSTICK_OPT,FIRMWARE)" python3 scripts/bootstick.py "$(BOOTSTICK)"
