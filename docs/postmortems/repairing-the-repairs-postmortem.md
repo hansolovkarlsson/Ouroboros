@@ -647,3 +647,48 @@ check claiming "file for file" over four of fifteen files, and a rig that
 tested only the case with the boot partition known. They are written up
 where instruments are, in
 [`blind-instruments-postmortem.md`](blind-instruments-postmortem.md).
+
+## One branch, three rounds, and the spine tested after all (2026-10-14, evening)
+
+*Added the same evening, from DevTools's note: `make CLINK=devtools`, which
+links `/bin/edit` and `/bin/cpp` with DevTools's `ld`
+(`handoff/triage-devtools-ld`, unpushed at the day's end). The second and
+third rounds were Hans's, run on the repairs of the round before.*
+
+| round | on | findings | taken | declined |
+| --- | --- | --- | --- | --- |
+| 1 | the change (`5249e7e`) | 8 | 6 | 2 |
+| 2 | round 1's repair (`cf7cc5f`) | 6 | 5 | 1 |
+| 3 | round 2's repair (`1995bee`) | 8 | 6 | 2 |
+
+**The morning's section said the spine went untested; the evening tested
+it on one branch, and it held.** Round 1 found the change's real gap: the
+image's source stamp did not cover `ld`, so a rig would grade an image
+linked by a changed `ld` as current. Its repair recorded the linker choice
+in a file made at parse time. Round 2 found three defects in that repair
+and none in the original change: nothing could remake the record, so `make
+clean image` stopped on it; every goal rewrote it, so an unrelated target
+relinked both programs; and `ld` was not rebuilt for a deleted source. The
+repair was smaller than the change and carried more defects than it.
+
+**A declined finding was the one that mattered.** Round 1 also said a
+linker switch made within the second of the last link would leave the
+record no newer than the binaries. I declined it in the commit message:
+APFS keeps sub-second times. That was a belief about the filesystem, not a
+measurement of the tool, and the tool is GNU Make 3.81, which compares
+whole seconds; a backdated `touch` showed it while I was fixing round 2's
+findings. The first fix for it, deleting the dependents when a record
+changed, failed too, because make stats a target before remaking its
+prerequisites. The cure was to remove the timestamp from the question:
+each linker's outputs and each `ld` build have names of their own.
+**A reason for declining is a claim like any other, and this one had a
+one-line test nobody ran.**
+
+**Round 3 found no correctness defect.** Its eight were fragilities (the
+per-linker names right only for a `CLINK` given on the command line,
+`--gc-sections` a second copy of a flag) and costs (a hash and a recursive
+make on every run). That is the shape 09-01's fourth round had: when a
+round finds only what would break later, the branch is near its floor.
+Of the two it declined, one is the note's own recipe for building `ld`,
+which could only be cured by running DevTools's build, which the handoff
+rule forbids.

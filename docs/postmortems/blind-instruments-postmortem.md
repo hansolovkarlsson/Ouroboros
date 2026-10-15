@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -1775,3 +1775,31 @@ in before anything else (no backup, unread taken as no, no header CRC, no
 capacity bound, the signature ignored, any type a root) and each failed
 them. The review still found a case none reached, a GPT copy unread partway
 through its array, and wrote the mutation for it.
+
+## Two more, from the linker choice (2026-10-14, evening)
+
+Fixing the second review round of `make CLINK=devtools` (DevTools's `ld`
+for `/bin/edit` and `/bin/cpp`), a test of whether `ld` is rebuilt when a
+source is deleted printed "ld kept". Two of my own instruments then sent
+the diagnosis the wrong way before the third found the cause.
+
+**A grep that matched the flag, not the file.** To see whether the record
+of `ld`'s inputs still named the deleted `extra.c`, I ran `grep -c extra`
+on it and got 1. The record was right: the match was `-Wextra`, in the
+compiler flags it also holds. I began reasoning about a record that was
+not rewritten. **A count says something matched, not what: print the
+match.**
+
+**A rig whose arguments arrived as one.** The next run put its make
+variables in one shell variable, `B="BUILD_DIR=... CLINK=devtools
+LD_DIR=..."`, and passed `$B`. zsh does not split words, so make got one
+argument, took it as a target, and stopped; every line of my harness
+printed "ld kept", now even for the source added. The trap was a known
+one, and the harness read make's output only for one pattern, so a make that ran nothing
+looked like a make that rebuilt nothing. **A harness must tell "did not
+run" from "ran and found nothing"; this one printed the same word for
+both.** The arguments are now written out, and the third run, with `ld`
+backdated by `touch -A -10`, rebuilt it: the cause was make's whole-second
+timestamps (the evening's section of
+[`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md)).
+
