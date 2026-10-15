@@ -21,21 +21,30 @@ endian = 'little'
 [properties]
 skip_sanity_check = true
 
-# picolibc 1.8.9's tinystdio has a few implicit-function-declaration sites
-# (e.g. fcvtl.c -> fcvtl_r) that modern clang treats as a hard error; demote it.
+# Two defects of this file, found 2026-10-15, explain the options below.
 #
-# -fno-builtin-malloc and -fno-builtin-free are given here, for every file,
-# because picolibc's own probe for them fails under this file: -nostdlib and
-# --ld-path above ride every compile, clang warns them unused, and meson
-# probes each optional flag with -Werror=unused-command-line-argument, so all
-# 31 of picolibc's optional flags probe NO. Its malloc needs these two:
-# without them clang took newlib's calloc reading the new chunk's size as a
-# read of fresh memory and called memset(mem, 0, -8), the first calloc
-# faulting (2026-10-15, `make test-malloc` checks it). Moving the link flags
-# to c_link_args fixes every probe but also defines eleven _HAVE_ macros in
-# picolibc.h, long double among them, and DevTools's cc refuses long double
-# here (docs/handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md),
-# so that fix waits on ROADMAP.md's item for it.
+# --ld-path above rides every compile, clang warns it unused there, and meson
+# probes each optional flag with -Werror=unused-command-line-argument, so 30
+# of picolibc's 31 optional flags probe NO (only -Wno-unused-command-line-
+# argument says YES) and the library is built without them. That also leaves
+# _HAVE_LONG_DOUBLE undefined in picolibc.h, which hides the prototypes of
+# four long double functions (fcvtl_r, ecvtl_r, frexpl, __math_with_errnol)
+# from the files that call them: that, not picolibc itself, is why the
+# implicit-function-declaration error has to be demoted. Fixing the probes
+# (--ld-path into c_link_args, tried) defines eleven _HAVE_ macros, long
+# double among them, and DevTools's cc refuses long double here
+# (docs/handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md), so
+# that waits on ROADMAP.md's item for it.
+#
+# Until then the two flags picolibc gives its malloc are given here, for every
+# file. Without -fno-builtin-free clang deletes, as dead, the size nano-malloc
+# writes on a chunk just before freeing it (realloc's split of a remainder,
+# __malloc_grow_chunk, memalign), so the chunk joins the free list with a
+# garbage size and a later call can loop for good: the libc.a shipped until
+# 2026-10-15 hung so in realloc. -fno-builtin-malloc changes memalign and
+# eight callers of malloc (newlib's binned malloc needs it outright: without
+# it calloc compiled to memset(mem, 0, -8)). `make test-malloc` fails with
+# either dropped.
 [built-in options]
 c_args = ['-Wno-error=implicit-function-declaration',
           '-fno-builtin-malloc', '-fno-builtin-free']

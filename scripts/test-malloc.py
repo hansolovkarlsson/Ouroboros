@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
-"""malloc's cost as the live set grows: `/bin/CMALLOC` on a booted image.
+"""picolibc's malloc on a booted image: `/bin/CMALLOC`, checked, then timed.
 
     python3 scripts/test-malloc.py      (or `make test-malloc`, which builds the image)
 
-`cmalloc` (libc/cmalloc.c) times malloc, free and realloc at 500, 1000, 2000
-and 4000 slots, about half of them holding a block at any time and the rest
-free blocks scattered between them, after one untimed pass, the fastest of
-three runs at each count, and prints the ratio of the largest count's cost
-per operation to the smallest's. picolibc's nano-malloc keeps its free blocks
-on one address-ordered list and walks it on every call, so its cost grows
-with the count (DevTools's note,
-docs/handoffs/closed/2026-10-14-from-devtools-nano-malloc.md); newlib's binned
-malloc does not. One fill in eight is a calloc, and every byte of each
-calloc'd block still in its slot at the end must read 0, its chunk dirtied
-whole before: newlib's calloc faulted on its first call while picolibc was
-built without -fno-builtin-malloc (libc/picolibc-cross.txt). The rig fails
-when the ratio reaches MAX_RATIO, which the nano-malloc build does; when a
-calloc faults or leaves a byte set, which the binned build with the old
-cross file does, and a calloc clearing only 16 bytes does; and when the
-smallest count's cost rounds to 0 ns, which gives no ratio.
+`cmalloc` (libc/cmalloc.c) first runs 20,000 random operations at each of
+500, 1000, 2000 and 4000 slots, untimed: malloc, calloc, memalign, realloc
+and free, every block written whole with its slot's byte. Every calloc'd
+block must read 0 when it comes back, every memalign'd one must be aligned,
+a realloc'd one must keep its bytes, and every block still live at the end
+must hold its own byte throughout. The checks are for the two flags
+libc/picolibc-cross.txt gives picolibc's malloc: without -fno-builtin-free
+nano-malloc's realloc frees a remainder with no size and a later call loops
+for good, so cmalloc never returns to the prompt (the libc.a shipped until
+2026-10-15 did so at its 215th operation); without -fno-builtin-malloc
+nano-malloc's memalign drops its size store, which the byte check sees.
 
-Each check must hold, and QEMU's own trace must hold no fault line. One boot,
-about a minute. Run it whenever picolibc is rebuilt or its malloc options
-change.
+Then it times malloc, calloc, realloc and free at the same counts, after an
+untimed pass, the fastest of three, and prints the largest count's cost over
+the smallest's. That ratio is reported, not graded: nano-malloc's walk of its
+free list costs about 4.6 times at 4000 slots what it does at 500, which is
+DevTools's note (docs/handoffs/2026-10-14-from-devtools-nano-malloc.md),
+deferred to the per-program heap.
+
+Checks: driven to the prompt after cmalloc (a hang fails here, after the
+step timeout), its check line clean, the first exit line after the command
+cmalloc's own with code 0, and no fault line in QEMU's trace. One boot,
+about a minute. Run it whenever picolibc is rebuilt or its malloc options or
+the cross file change.
 """
 import importlib.util
 import os
@@ -37,16 +41,18 @@ _spec.loader.exec_module(drive_qemu)
 
 IMAGE = os.path.join(ROOT, "build", "esp.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-malloc.txt")
-# Eight times the slots: an allocator linear in its free blocks costs several
-# times more per operation, one that bins them about the same.
-MAX_RATIO = 2.0
-SUMMARY = re.compile(r"^cmalloc: (\d+) slots cost (?:(\d+)\.(\d) times (\d+) slots|unmeasured.*?), (\d+) failed, (\d+) calloc bytes not 0", re.M)
+CHECKED = re.compile(r"^cmalloc: checked \d+ ops at each of \d+ counts: (\d+) failed, (\d+) calloc bytes not 0, "
+                     r"(\d+) memalign misaligned, (\d+) bytes not their block's", re.M)
+# The first line that ends a task after the command: cmalloc's own end.
+ENDED = re.compile(r"task \d+ (exited \(code (\d+)\)|killed[^\r\n]*)")
 
 
 def main() -> int:
     guest = drive_qemu.Guest(IMAGE, label="test-malloc: ")
     try:
-        steps = [("login:", "root"), ("assword", "root"), ("# ", "cmalloc"), ("not 0[\\s\\S]*# ", "")]
+        # The prompt after the command, not a word of the summary: a cmalloc
+        # that dies is graded as soon as the shell is back.
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "cmalloc"), ("# ", "")]
         driven = guest.run(steps)
         out = guest.transcript()
         faults = guest.aborts()
@@ -61,16 +67,16 @@ def main() -> int:
     # not cmalloc's.
     typed = out.find("# cmalloc")
     after = out[typed:] if typed >= 0 else ""
-    m = SUMMARY.search(after)
-    ratio = float(f"{m.group(2)}.{m.group(3)}") if m and m.group(2) else None
+    m = CHECKED.search(after)
+    ended = ENDED.search(after)
     checks = [
-        ("driven to the end", driven),
-        ("the summary line", m is not None),
-        ("no allocation failed", m is not None and m.group(5) == "0"),
-        ("every calloc'd byte 0", m is not None and m.group(6) == "0"),
-        ("the smallest count's cost measured (not 0 ns)", ratio is not None),
-        (f"the largest count costs under {MAX_RATIO} times the smallest", ratio is not None and ratio < MAX_RATIO),
-        ("cmalloc exited 0", re.search(r"task \d+ exited \(code 0\)", after) is not None),
+        ("driven back to the prompt (a hang fails here)", driven),
+        ("the check line", m is not None),
+        ("no allocation failed", m is not None and m.group(1) == "0"),
+        ("every calloc'd byte 0", m is not None and m.group(2) == "0"),
+        ("every memalign'd block aligned", m is not None and m.group(3) == "0"),
+        ("every live block holds its own bytes", m is not None and m.group(4) == "0"),
+        ("cmalloc's own end is exit code 0", ended is not None and ended.group(2) == "0"),
         ("no fault lines", faults == 0),
     ]
     failed = 0

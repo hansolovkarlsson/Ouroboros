@@ -12,12 +12,16 @@
 #                            write()/read() stubs in libc/src/file.c (our porting
 #                            layer). picolibc's stdio bottoms out at those.
 #   -Dnewlib-global-errno -> a single global errno (no TLS; we have no threads).
-#   -Dnewlib-nano-malloc=false -> newlib's binned malloc, not nano-malloc, whose
-#                            one address-ordered free list made every malloc,
-#                            free and realloc linear in the free blocks (cpp
-#                            quadratic on large input; DevTools's note,
-#                            docs/handoffs/closed/2026-10-14-from-devtools-nano-malloc.md).
-#                            `make test-malloc` is the check.
+#   malloc is picolibc's default, nano-malloc: one address-ordered free list,
+#                            so each call is linear in the free blocks
+#                            (DevTools's note,
+#                            docs/handoffs/2026-10-14-from-devtools-nano-malloc.md).
+#                            newlib's binned malloc (-Dnewlib-nano-malloc=false)
+#                            was built and reviewed on 2026-10-15 and deferred:
+#                            on the fixed 1 MiB heap it refuses requests with half
+#                            the heap free and leaves errno 0 when out of memory
+#                            (ROADMAP.md). `make test-malloc` checks whichever it
+#                            is: realloc must not hang, calloc must zero.
 #   -Dthread-local-storage=false, -Dpicocrt=false (we use our own crt0),
 #   -Dsemihost=false, -Dmultilib=false, -Dtests=false, -Dspecsdir=none.
 # See docs/processes.md "Writing a program in C" and the libc-arc postmortem.
@@ -49,7 +53,6 @@ rm -rf "$BUILD" "$INSTALL"
 ( cd "$SRC" && meson setup "$BUILD" --cross-file "$CROSS" \
     -Dmultilib=false -Dpicocrt=false -Dsemihost=false -Dtests=false \
     -Dthread-local-storage=false -Dnewlib-global-errno=true -Dspecsdir=none \
-    -Dnewlib-nano-malloc=false \
     -Dposix-console=true -Dprefix="$INSTALL" )
 ninja -C "$BUILD"
 ninja -C "$BUILD" install
@@ -70,4 +73,7 @@ for p in "$ROOT"/libc/picolibc-patches/*.patch; do
     patch -s -p1 -d "$PREBUILT" < "$p" || { echo "build-picolibc: $p no longer applies"; exit 1; }
 done
 echo "$VERSION" > "$PREBUILT/VERSION"
+# The compiler that built it: a new Apple clang alone changes objects (2100.1.1
+# to 2100.3.34 changed four of libm's), so the tree says which one it was.
+clang --version | head -1 > "$PREBUILT/COMPILER"
 echo "picolibc-prebuilt regenerated ($VERSION), $(du -sh "$PREBUILT" | cut -f1)"
