@@ -20,6 +20,13 @@
  * ASSERTs that rejected them are gone (see the note where they were). C
  * programs in particular need this - a C global or file-scope array is
  * .data/.bss - see docs/processes.md's "Writing a program in C".
+ *
+ * A SECOND COPY OF THIS LAYOUT LIVES IN DEVTOOLS'S `ld`, as its
+ * `--target=ouroboros`, which reads no script (the Makefile's CLINK, and
+ * docs/handoffs/closed/2026-10-14-from-devtools-link-with-ld.md). A change here, or
+ * to the C programs' link flags, owes DevTools a `notice` in its
+ * docs/handoffs/, or the two linkers part without a word; `make test` fails
+ * until scripts/check-link-layout.py's pin is updated.
  */
 
 ENTRY(_start)

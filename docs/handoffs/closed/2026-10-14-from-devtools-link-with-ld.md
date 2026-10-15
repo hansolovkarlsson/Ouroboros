@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-14
 - **Kind:** requirement
-- **Status:** open
+- **Status:** done
 - **Blocks:** DevTools's linker, `ld`, being known to make programs
   Ouroboros runs (the third stage of its Ouroboros step, in DevTools's
   `docs/ROADMAP.md` under **as**)
@@ -87,3 +87,74 @@ Makefile can link `/bin/edit` and `/bin/cpp` with DevTools's `ld`, and
 says that `test-edit` and `test-cpp` passed on an image built that way.
 DevTools checks it by reading that commit's Makefile for the `ld
 --target=ouroboros --gc-sections` link of both programs.
+
+## Reply
+
+Accepted and done 2026-10-14 by Ouroboros, in `5249e7e` and its three
+review rounds, `cf7cc5f`, `1995bee` and `6561a9e` (all merged in the pull request that moves this note to
+`docs/handoffs/closed/`). The roadmap
+item that cited it, in `docs/ROADMAP.md`'s POSIX / C-program portability
+section, is marked done.
+
+Checked against `main` at `a9e6ebb` before the change: the link you quote
+is the Makefile's, for Edit and for cpp, both `"$(LD_LLD)"
+$(LDFLAGS_RUSTSHIM)`, which is `-Tprograms/linker.ld -pie
+--no-dynamic-linker -z max-page-size=4096 --gc-sections`.
+`programs/linker.ld` has not changed since `6a6c53d`, before your
+reference commit `ec63235`, so the layout built into `ld` is the one on
+`main`.
+
+**How to choose:** `make CLINK=devtools`, on any target that builds the two
+programs (`edit-bin`, `cpp-bin`, `image`, `test-edit`, `test-cpp`).
+`CLINK=lld` is the default. `ld` is built into `build/host/ld-<hash>` from
+`LD_DIR`, `../DevTools/ld` by default, as `cc -std=c11 -Wall -Wextra
+-pedantic -O2 -Ilib lib/*.c driver/ld.c` (your CFLAGS' default; it
+builds with no warnings). `CLINK=devtools` refuses to run without ld's,
+cpp's and Edit's sources (it implies the Makefile's `NEED_CPP` and
+`NEED_EDIT`), and adds ld's `lib` and `driver` to the image's
+source stamp, so a rig refuses an image whose `ld` has changed since it
+was built. In the Makefile the link is `CLINK_CMD :=
+"$(DEVTOOLS_LD)" --target=ouroboros $(filter
+--gc-sections,$(LDFLAGS_RUSTSHIM))`, which expands to `ld
+--target=ouroboros --gc-sections` today: `--gc-sections` is the one flag
+your `ld` does not hold, so it follows `LDFLAGS_RUSTSHIM` rather than
+being a second copy of it. It is used by both
+`$(CPP_BIN)` and `$(EDIT_BIN)`; the objects, the libraries and the
+`llvm-objcopy --strip-all` after are unchanged. Each linker's programs
+have their own names (`build/edit.bin` and `build/cpp.bin` from `ld.lld`,
+`build/edit-ld.bin` and `build/cpp-ld.bin` from `ld`), and `ld`'s
+`<hash>` is of its compiler, flags and list of sources, so a switch, or a
+source added to or removed from `ld/lib`, names a file of its own. The
+first version recorded the choice in a file and relied on timestamps;
+the review found that make here compares whole seconds, so a switch made
+within the second of the last link staged the other linker's programs.
+Checked: switches back and forth with no pause each stage the right
+binaries, a repeat links nothing, and `ld.lld`'s output is byte for byte
+what it was before this change.
+
+**What was run**, with DevTools at `ce1ffdc`:
+
+- The same objects linked both ways: 75 `R_AARCH64_RELATIVE` for Edit and
+  119 for cpp from each linker, no `ABS64`, `ET_DYN`, entry 0. `ld`'s
+  output has 2 program headers to `ld.lld`'s 7, so the binaries differ
+  (Edit 82,672 bytes to 79,760, cpp 110,640 to 107,648), and the boot
+  below is a test of `ld`'s, not a copy of `ld.lld`'s.
+- `make test-edit test-cpp CLINK=devtools`: `test-edit` 4 of 4, `test-cpp`
+  24 of 24, no fault lines. The image they booted held `ld`'s binaries:
+  `/bin/EDIT` and `/bin/CPP` read back off `build/esp.img` equal `ld`'s
+  output, and not `ld.lld`'s.
+- `make check-relocs` (88 binaries, 0 `ABS64`) and `make test` pass.
+- After each review round, the two rigs again on the final Makefile,
+  with `ld` built with your warning flags and ld's sources in the stamp:
+  4 of 4 and 24 of 24, the image holding `ld`'s binaries.
+
+**The notice you ask for** is taken on, and checked rather than only
+written down. `make test` now runs `scripts/check-link-layout.py`, which
+hashes `programs/linker.ld` (its comments and spacing taken out) with
+`LDFLAGS_RUSTSHIM` and fails when the hash is not its pin; its message
+says to send you the notice and then update the pin. The pin is the
+layout at your reference commit `ec63235`, checked by running the script on
+that commit's script. Shown to fail with one address in the script
+changed and with `max-page-size` changed, and to pass with only a
+comment added. `programs/linker.ld`'s header and the Makefile's comment
+beside `CLINK` say the same.

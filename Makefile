@@ -265,11 +265,15 @@ CCLOCK_BIN   := $(BUILD_DIR)/cclock.bin
 CWINSZ_BIN   := $(BUILD_DIR)/cwinsz.bin
 CTERMIOS_BIN := $(BUILD_DIR)/ctermios.bin
 CPOLL_BIN    := $(BUILD_DIR)/cpoll.bin
+# The linker for /bin/cpp and /bin/edit, ld.lld or DevTools's ld (CLINK, see
+# its block below). Its default is set here, before CPP_BIN and EDIT_BIN, whose
+# names depend on it.
+CLINK        ?= lld
 # DevTools's C preprocessor, built here for Ouroboros (step 8 of the C-hosting
 # plan): its sources are read from CPP_DIR, a sibling checkout by default.
 # CPP_DIR must not contain spaces: its files are make prerequisites.
 CPP_DIR      ?= ../DevTools/cpp
-CPP_BIN      := $(BUILD_DIR)/cpp.bin
+CPP_BIN      := $(BUILD_DIR)/cpp$(if $(filter devtools,$(CLINK)),-ld).bin
 HAVE_CPP     := $(wildcard $(CPP_DIR)/driver/cpp.c)
 CPP_OBJS     := $(if $(HAVE_CPP),$(patsubst $(CPP_DIR)/lib/%.c,$(BUILD_DIR)/cpp/%.o,$(wildcard $(CPP_DIR)/lib/*.c)) $(BUILD_DIR)/cpp/cpp.o)
 # Whether an image without /bin/cpp is acceptable: `optional` (the default,
@@ -279,9 +283,9 @@ CPP_OBJS     := $(if $(HAVE_CPP),$(patsubst $(CPP_DIR)/lib/%.c,$(BUILD_DIR)/cpp/
 # switch it off: one switch rather than a guard in each (the reviews of
 # #226). Not named CPP: make predefines that as the C preprocessor command,
 # so `CPP ?=` never took and `CPP=required` would reach every tool that runs
-# $CPP. `make clean` is never stopped by it.
+# $CPP. `make clean` is never stopped by it. CLINK=devtools implies it too.
 NEED_CPP     ?= optional
-ifneq ($(filter cpp-bin test-cpp,$(MAKECMDGOALS)),)
+ifneq ($(filter cpp-bin test-cpp,$(MAKECMDGOALS))$(filter devtools,$(CLINK)),)
 override NEED_CPP := required
 endif
 ifeq ($(NEED_CPP),required)
@@ -297,13 +301,14 @@ endif
 # are read from EDIT_DIR, a sibling checkout by default, every src/*.c but the
 # Mac's platform file (platform_ouroboros.c is the one for here). NEED_EDIT
 # is NEED_CPP's twin: optional by default, required for edit-bin and
-# test-edit, so a release can insist. EDIT_DIR must not contain spaces.
+# test-edit, so a release can insist; CLINK=devtools implies it too. EDIT_DIR
+# must not contain spaces.
 EDIT_DIR     ?= ../DevTools/edit
-EDIT_BIN     := $(BUILD_DIR)/edit.bin
+EDIT_BIN     := $(BUILD_DIR)/edit$(if $(filter devtools,$(CLINK)),-ld).bin
 HAVE_EDIT    := $(wildcard $(EDIT_DIR)/src/platform_ouroboros.c)
 EDIT_OBJS    := $(if $(HAVE_EDIT),$(patsubst $(EDIT_DIR)/src/%.c,$(BUILD_DIR)/edit/%.o,$(filter-out %/platform_posix.c,$(wildcard $(EDIT_DIR)/src/*.c))))
 NEED_EDIT    ?= optional
-ifneq ($(filter edit-bin test-edit,$(MAKECMDGOALS)),)
+ifneq ($(filter edit-bin test-edit,$(MAKECMDGOALS))$(filter devtools,$(CLINK)),)
 override NEED_EDIT := required
 endif
 ifeq ($(NEED_EDIT),required)
@@ -314,12 +319,56 @@ endif
 endif
 endif
 
+# The linker for /bin/edit and /bin/cpp (the accepted note
+# docs/handoffs/closed/2026-10-14-from-devtools-link-with-ld.md): CLINK=lld, the
+# default, is ld.lld with programs/linker.ld like every other C program here;
+# CLINK=devtools is DevTools's ld, built here from LD_DIR (a sibling checkout,
+# only read, as cpp's and Edit's sources are). Only the link changes: the same
+# objects, the same strip after. DevTools's ld reads no linker script:
+# --target=ouroboros is programs/linker.ld's layout and LDFLAGS_OS's flags
+# held in its own code, and --gc-sections is passed only while LDFLAGS_RUSTSHIM
+# has it, so A CHANGE TO EITHER OWES DEVTOOLS A NOTICE
+# (a note in its docs/handoffs/), or the two linkers part without a word;
+# check-link-layout (in `make test`) pins that layout, so a change to either
+# fails the suite until the pin is updated and the notice sent.
+# Each linker's programs have their own names (CPP_BIN and EDIT_BIN, -ld under
+# CLINK=devtools), and ld its own from a hash of its compiler, flags and list
+# of sources (LD_ID), so a switch, or a source added or removed in LD_DIR,
+# names a file of its own rather than relying on timestamps: make here
+# compares whole seconds, and a switch made within the second of the last link
+# would otherwise stage the other linker's programs.
+# CLINK=devtools needs ld's sources, and cpp's and Edit's (NEED_CPP and
+# NEED_EDIT above): an image asked to carry ld-linked programs and carrying
+# none would be graded as if it did. Neither check stops `make clean`.
+# CLINK's default is set above CPP_BIN. LD_DIR must not contain spaces.
+LD_DIR       ?= ../DevTools/ld
+HOST_CC      ?= cc
+CLINK_GOALS  := $(filter-out clean,$(or $(MAKECMDGOALS),all))
+ifeq ($(CLINK),lld)
+CLINK_CMD    := "$(LD_LLD)" $(LDFLAGS_RUSTSHIM)
+CLINK_DEPS   :=
+else ifeq ($(CLINK),devtools)
+LD_SRCS      := $(wildcard $(LD_DIR)/lib/*.c) $(LD_DIR)/driver/ld.c
+LD_CMD       := $(HOST_CC) -std=c11 -Wall -Wextra -pedantic -O2 -I$(LD_DIR)/lib
+LD_ID        := $(shell echo '$(LD_CMD) $(LD_SRCS)' | shasum -a 256 | cut -c1-12)
+DEVTOOLS_LD  := $(BUILD_DIR)/host/ld-$(LD_ID)
+CLINK_CMD    := "$(DEVTOOLS_LD)" --target=ouroboros $(filter --gc-sections,$(LDFLAGS_RUSTSHIM))
+CLINK_DEPS   := $(DEVTOOLS_LD)
+ifneq ($(CLINK_GOALS),)
+ifeq ($(wildcard $(LD_DIR)/driver/ld.c),)
+$(error CLINK=devtools: no ld sources at $(LD_DIR) (set LD_DIR))
+endif
+endif
+else ifneq ($(CLINK_GOALS),)
+$(error CLINK=$(CLINK): must be lld or devtools)
+endif
+
 CARGO_FLAGS :=
 ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-spawn-owner test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-fpsimd test-spawn-owner test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-edit test-cargs test-cerrno test-cenv test-cclock test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -762,9 +811,9 @@ $(BUILD_DIR)/cpp/%.o: $(CPP_DIR)/lib/%.c Makefile
 $(BUILD_DIR)/cpp/cpp.o: $(CPP_DIR)/driver/cpp.c Makefile
 	@mkdir -p $(BUILD_DIR)/cpp
 	$(CC) $(CPP_CFLAGS) -c $< -o $@
-$(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld
-	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(CPP_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
-	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpp.elf $(CPP_BIN)
+$(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld $(CLINK_DEPS)
+	$(CLINK_CMD) -o $(CPP_BIN:.bin=.elf) $(PICO_PORT) $(CPP_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(CPP_BIN:.bin=.elf) $(CPP_BIN)
 -include $(wildcard $(BUILD_DIR)/cpp/*.d)
 
 # /bin/edit, DevTools's editor (the note
@@ -776,10 +825,20 @@ EDIT_CFLAGS := $(CFLAGS_OS) $(PICO_INC) -I$(EDIT_DIR)/src -MMD -MP
 $(BUILD_DIR)/edit/%.o: $(EDIT_DIR)/src/%.c Makefile
 	@mkdir -p $(BUILD_DIR)/edit
 	$(CC) $(EDIT_CFLAGS) -c $< -o $@
-$(EDIT_BIN): $(EDIT_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld
-	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/edit.elf $(PICO_PORT) $(EDIT_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
-	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/edit.elf $(EDIT_BIN)
+$(EDIT_BIN): $(EDIT_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld $(CLINK_DEPS)
+	$(CLINK_CMD) -o $(EDIT_BIN:.bin=.elf) $(PICO_PORT) $(EDIT_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(EDIT_BIN:.bin=.elf) $(EDIT_BIN)
 -include $(wildcard $(BUILD_DIR)/edit/*.d)
+
+# DevTools's ld for CLINK=devtools (above), for the host, as its note
+# suggested, with the flags its own Makefile's CFLAGS default to (it goes
+# through a libld.a; this does not). A copy of DevTools's recipe, unpinned:
+# running its own build would be running another project's build.
+ifeq ($(CLINK),devtools)
+$(DEVTOOLS_LD): $(LD_SRCS) $(wildcard $(LD_DIR)/lib/*.h $(LD_DIR)/driver/*.h)
+	@mkdir -p $(dir $@)
+	$(LD_CMD) $(LD_SRCS) -o $@
+endif
 
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
@@ -881,8 +940,9 @@ serve-bin:
 # (make takes prerequisites in order without -j, and this Makefile is run
 # without it). SRCID_DIRS are the directories another project's programs are
 # compiled from: exactly those, so that project's tests and docs are not part
-# of what an image here was built from.
-SRCID_DIRS := $(if $(HAVE_CPP),$(CPP_DIR)/lib $(CPP_DIR)/driver) $(if $(HAVE_EDIT),$(EDIT_DIR)/src)
+# of what an image here was built from. Under CLINK=devtools ld's sources are
+# among them, since ld then decides the bytes of /bin/EDIT and /bin/CPP.
+SRCID_DIRS := $(if $(HAVE_CPP),$(CPP_DIR)/lib $(CPP_DIR)/driver) $(if $(HAVE_EDIT),$(EDIT_DIR)/src) $(if $(filter devtools,$(CLINK)),$(LD_DIR)/lib $(LD_DIR)/driver)
 srcid-begin:
 	@mkdir -p $(BUILD_DIR)
 	python3 scripts/srcid.py begin $(BUILD_DIR)/srcid.begin $(SRCID_DIRS)
@@ -2142,6 +2202,9 @@ measure-syscost: image
 # EDIT_DIR): `edit hello.txt` opens, ^Q Q repeats a delete on poll's timeout,
 # Left through the escape timeout moves the cursor, ^K D saves, cat shows
 # `hXi`. One boot on a copy of the image, about a minute; needs Edit's sources.
+# With CLINK=devtools too whenever kernel/src/loader.rs, programs/linker.ld
+# or the C link flags change: DevTools's ld then links /bin/edit, and nothing
+# routine boots that path.
 test-edit: image
 	python3 scripts/test-edit.py
 
@@ -2194,7 +2257,9 @@ test-include: image image-ext2 image-exfat
 # cpp built for the Mac, with signed and with unsigned char, and clang for this
 # target compiles them. One boot, about a minute and a half;
 # needs DevTools's cpp at CPP_DIR. Run it whenever the C runtime, the header
-# stage or cpp-bin changes.
+# stage or cpp-bin changes; with CLINK=devtools too (DevTools's ld links it,
+# and nothing routine boots that path) whenever kernel/src/loader.rs,
+# programs/linker.ld or the C link flags change, as test-edit.
 # Without cpp's sources there is nothing to test: test-cpp sets
 # NEED_CPP=required (above), which stops before the image is built, not after.
 test-cpp: image
@@ -2274,6 +2339,14 @@ check-xhci-barriers: build
 check-statics:
 	@python3 scripts/check-statics.py
 
+# programs/linker.ld and LDFLAGS_RUSTSHIM against the pin of the copy DevTools's
+# ld holds in its code (CLINK above, scripts/check-link-layout.py): fails on a
+# change to either until the pin is updated and DevTools sent a notice. Also
+# run by `make test` since 2026-10-14.
+CHECK_LINK_LAYOUT := python3 scripts/check-link-layout.py '$(LDFLAGS_RUSTSHIM)'
+check-link-layout:
+	@$(CHECK_LINK_LAYOUT)
+
 check-site:
 	@python3 scripts/check-site-freshness.py
 
@@ -2333,6 +2406,11 @@ test:
 	@# compiler, test or review of that file sees. Step 0 of the arc.
 	@echo "== kernel statics vs the multi-core inventory"
 	@python3 scripts/check-statics.py || exit 1
+	@# DevTools's ld holds programs/linker.ld's layout and the C link flags
+	@# in its own code, so they are a copy, and a comment asking for a notice
+	@# is read only by whoever happens to open the file.
+	@echo "== the link layout DevTools's ld copies"
+	@$(CHECK_LINK_LAYOUT) || exit 1
 	@echo "== all pure-crate host tests passed, and clippy clean including tests"
 
 clean:
