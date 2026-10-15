@@ -90,8 +90,8 @@ DevTools checks it by reading that commit's Makefile for the `ld
 
 ## Reply
 
-Accepted and done 2026-10-14 by Ouroboros, in `5249e7e` and its review,
-`cf7cc5f` (both merged in the pull request that moves this note to
+Accepted and done 2026-10-14 by Ouroboros, in `5249e7e` and its two
+review rounds, `cf7cc5f` and `1995bee` (all merged in the pull request that moves this note to
 `docs/handoffs/closed/`). The roadmap
 item that cited it, in `docs/ROADMAP.md`'s POSIX / C-program portability
 section, is marked done.
@@ -106,7 +106,7 @@ reference commit `ec63235`, so the layout built into `ld` is the one on
 
 **How to choose:** `make CLINK=devtools`, on any target that builds the two
 programs (`edit-bin`, `cpp-bin`, `image`, `test-edit`, `test-cpp`).
-`CLINK=lld` is the default. `ld` is built into `build/host/ld` from
+`CLINK=lld` is the default. `ld` is built into `build/host/ld-<hash>` from
 `LD_DIR`, `../DevTools/ld` by default, as `cc -std=c11 -Wall -Wextra
 -pedantic -O2 -Ilib lib/*.c driver/ld.c` (your CFLAGS' default; it
 builds with no warnings). `CLINK=devtools` refuses to run without ld's,
@@ -115,10 +115,17 @@ source stamp, so a rig refuses an image whose `ld` has changed since it
 was built. In the Makefile the link is `CLINK_CMD :=
 "$(DEVTOOLS_LD)" --target=ouroboros --gc-sections`, used by both
 `$(CPP_BIN)` and `$(EDIT_BIN)`; the objects, the libraries and the
-`llvm-objcopy --strip-all` after are unchanged. The choice is recorded in
-`build/clink.choice`, so switching linkers relinks both programs rather
-than staging the last ones (checked: a switch relinks, a repeat is a
-no-op, and switching back gives `ld.lld`'s earlier output byte for byte).
+`llvm-objcopy --strip-all` after are unchanged. Each linker's programs
+have their own names (`build/edit.bin` and `build/cpp.bin` from `ld.lld`,
+`build/edit-ld.bin` and `build/cpp-ld.bin` from `ld`), and `ld`'s
+`<hash>` is of its compiler, flags and list of sources, so a switch, or a
+source added to or removed from `ld/lib`, names a file of its own. The
+first version recorded the choice in a file and relied on timestamps;
+the review found that make here compares whole seconds, so a switch made
+within the second of the last link staged the other linker's programs.
+Checked: switches back and forth with no pause each stage the right
+binaries, a repeat links nothing, and `ld.lld`'s output is byte for byte
+what it was before this change.
 
 **What was run**, with DevTools at `ce1ffdc`:
 
@@ -129,12 +136,12 @@ no-op, and switching back gives `ld.lld`'s earlier output byte for byte).
   below is a test of `ld`'s, not a copy of `ld.lld`'s.
 - `make test-edit test-cpp CLINK=devtools`: `test-edit` 4 of 4, `test-cpp`
   24 of 24, no fault lines. The image they booted held `ld`'s binaries:
-  `/bin/EDIT` and `/bin/CPP` read back off `build/esp.img` equal
-  `build/edit.bin` and `build/cpp.bin` as `ld` made them, and not
-  `ld.lld`'s.
+  `/bin/EDIT` and `/bin/CPP` read back off `build/esp.img` equal `ld`'s
+  output, and not `ld.lld`'s.
 - `make check-relocs` (88 binaries, 0 `ABS64`) and `make test` pass.
-- After the review, the two rigs again with `ld` built with your warning
-  flags and ld's sources in the stamp: 4 of 4 and 24 of 24.
+- After each review round, the two rigs again on the final Makefile,
+  with `ld` built with your warning flags and ld's sources in the stamp:
+  4 of 4 and 24 of 24, the image holding `ld`'s binaries.
 
 **The notice you ask for** is taken on, and checked rather than only
 written down. `make test` now runs `scripts/check-link-layout.py`, which
