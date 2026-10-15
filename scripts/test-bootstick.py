@@ -262,7 +262,7 @@ def pi_stick():
     what the Pi's boot ROM would read is checked on the host, and one boot
     shows the ESP and root still boot with the firmware beside them."""
     checks = []
-    zip_path, _, _ = bootstick.pftf_zip()
+    zip_path, _, release_names = bootstick.pftf_zip()
     # Every file the release ships, the readme aside: the Pi's boot ROM needs
     # files no QEMU boot can show missing (the review of #294).
     members = [n for n in subprocess.run(["unzip", "-Z1", zip_path], capture_output=True, text=True).stdout.split()
@@ -274,6 +274,8 @@ def pi_stick():
         names = os.listdir(esp.mount)
         checks.append((f"pi: a fresh stick gets the pinned firmware, all {len(shipped)} files, byte for byte",
                        code == 0 and all(esp.read(n) == data for n, data in shipped.items())))
+        manifest = bootstick.read_manifest(esp.mount)
+        checks.append(("pi: its manifest names exactly the release's files", manifest == set(release_names)))
         checks.append(("pi: beside the ESP's tree, without the readme or macOS's sidecars",
                        esp.read("EFI/BOOT/BOOTAA64.EFI") is not None and "Readme.md" not in names
                        and not any(n.startswith("._") for n in names)))
@@ -289,16 +291,38 @@ def pi_stick():
         # the firmware's, so neither may outlive the re-stage.
         open(os.path.join(esp.mount, "NOXHCI"), "w").close()
         os.makedirs(os.path.join(esp.mount, "OLDSTUFF"))
+        # A file only the stick's own release shipped, named by its manifest
+        # and by no current release: the re-stage must carry it, by the
+        # manifest, with no fetch (Hans, 2026-10-14).
+        open(os.path.join(esp.mount, "OLDPIN.BIN"), "w").close()
+        with open(os.path.join(esp.mount, *bootstick.MANIFEST), "a") as fh:
+            fh.write("OLDPIN.BIN\n")
     code, out = bootstick_run(pi)
     with Esp(pi) as esp:
         fd, config = esp.read("RPI_EFI.fd"), esp.read("config.txt")
         names = os.listdir(esp.mount)
+        manifest = bootstick.read_manifest(esp.mount) or set()
+    checks.append(("pi: a re-stage carries a file only its manifest names, by the manifest, and lists it again",
+                   code == 0 and "OLDPIN.BIN" in names and "by its manifest" in out and "OLDPIN.BIN" in manifest))
     checks.append(("pi: a re-stage keeps it a Pi stick and carries RPI_EFI.fd and config.txt",
                    code == 0 and "a Pi stick" in out and fd and fd.endswith(settings)
                    and config and config.endswith(overlay)))
     checks.append(("pi: a boot flag and a stray directory at the root are not carried, and are named",
                    code == 0 and "NOXHCI" not in names and "OLDSTUFF" not in names
                    and "not carried from its root: NOXHCI, OLDSTUFF" in out))
+    # A stick from before the manifest: the pinned release's names, and a
+    # manifest written for the next time.
+    with Esp(pi, write=True) as esp:
+        listed = os.path.join(esp.mount, *bootstick.MANIFEST)
+        if os.path.exists(listed):  # absent is for the checks to grade, not a crash
+            os.remove(listed)
+    code, out = bootstick_run(pi)
+    with Esp(pi) as esp:
+        fd = esp.read("RPI_EFI.fd")
+        manifest = bootstick.read_manifest(esp.mount)
+    checks.append(("pi: with no manifest, the release's names carry it, and a manifest is written",
+                   code == 0 and "no manifest" in out and fd and fd.endswith(settings)
+                   and manifest is not None and "RPI_EFI.fd" in manifest))
     code, out = bootstick_run(pi, FIRMWARE="1")
     with Esp(pi) as esp:
         fd, config = esp.read("RPI_EFI.fd"), esp.read("config.txt")

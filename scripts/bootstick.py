@@ -106,6 +106,11 @@ CACHE = os.path.join(ROOT, "build", "cache")
 # What marks a Pi's boot partition: the pftf firmware, which also holds its
 # settings and every UEFI variable (no NVRAM on the Pi; scripts/sdcard.sh).
 FIRMWARE_MARK = "RPI_EFI.fd"
+# The names of the firmware's files on a Pi stick, one a line, written beside
+# the ESP's own tree whenever the firmware is put there: a re-stage carries by
+# them, with no fetch and whatever release the stick was made with (Hans,
+# 2026-10-14, from the second review of #294).
+MANIFEST = ("EFI", "ORBS", "PFTF.TXT")
 ROOT_IMG = os.path.join(ROOT, "build", "ext2part.img")
 ESP_TYPES = (0x0B, 0x0C, 0xEF)
 EXT2_TYPE = mbrdisk.EXT2_TYPE
@@ -720,6 +725,17 @@ def old_firmware(disk, kind, pi_opt, reinstall):
     return mount if os.path.isfile(os.path.join(mount, FIRMWARE_MARK)) else None
 
 
+def read_manifest(mount):
+    """The firmware's names from a Pi stick's manifest, or None when it has
+    none (a stick from before it): '#' lines and blank ones aside."""
+    path = os.path.join(mount, *MANIFEST)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        names = {ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")}
+    return names or None
+
+
 def pi_esp(tmp, old_fw, reinstall):
     """A copy of build/esp.img with the Pi's firmware at its root: the old
     disk's own firmware files, RPI_EFI.fd with them, when it had them and
@@ -727,12 +743,18 @@ def pi_esp(tmp, old_fw, reinstall):
     and it is the firmware itself, so it is carried whole, as make sdcard
     installs it once); otherwise the pinned release, keeping the old disk's
     config.txt, where the UART overlay is set by hand. What is the firmware's
-    on the old disk is what has a name of the release's own files, matched
-    without case as FAT does, and config.txt: never Ouroboros's boot flags
+    on the old disk is what its manifest (MANIFEST) names, or for a stick
+    from before the manifest what has a name of the pinned release's own
+    files, matched without case as FAT does, and config.txt: never Ouroboros's boot flags
     (\\NOXHCI and the rest, set for one boot to bisect a hang) or anything
     else left at its root (the review of #294).
     Returns the copy's path and what went on it."""
-    zip_path, version, firmware_names = pftf_zip()
+    carrying = bool(old_fw) and not reinstall
+    listed = read_manifest(old_fw) if carrying else None
+    if listed is None:
+        zip_path, version, firmware_names = pftf_zip()
+    else:
+        firmware_names = listed
     wanted = {n.lower() for n in firmware_names} | {"config.txt"}
     copy = os.path.join(tmp, "esp-pi.img")
     shutil.copyfile(ESP_IMG, copy)
@@ -742,24 +764,33 @@ def pi_esp(tmp, old_fw, reinstall):
     if out.returncode != 0:
         raise Refused(f"hdiutil could not attach a copy of {ESP_IMG}: {out.stderr.strip()}")
     try:
-        if old_fw and not reinstall:
-            left = []
+        if carrying:
+            left, carried = [], []
             for name in sorted(os.listdir(old_fw)):
                 if name.lower() in wanted:
                     subprocess.run(["cp", "-R", "-X", os.path.join(old_fw, name), mount], check=True)
+                    if name.lower() != "config.txt":
+                        carried.append(name)
                 elif not LITTER.match(name) and name not in os.listdir(ESP_TREE):
                     left.append(name)
-            note = "the old disk's, RPI_EFI.fd and its settings with it"
+            installed = carried
+            note = "the old disk's, RPI_EFI.fd and its settings with it, " + \
+                ("by its manifest" if listed is not None else "by the pinned release's names (no manifest)")
             if left:
                 note += f"; not carried from its root: {', '.join(left)}"
         else:
             # Names exactly as shipped: the pftf readme says renaming them
             # breaks boot. The readme itself is not wanted (sdcard.sh).
             subprocess.run(["unzip", "-o", "-q", zip_path, "-x", "Readme.md", "-d", mount], check=True)
+            installed = sorted(firmware_names)
             note = f"pftf {version}" + (" (FIRMWARE=1: the old settings reset)" if old_fw else "")
             if old_fw and os.path.isfile(os.path.join(old_fw, "config.txt")):
                 subprocess.run(["cp", "-X", os.path.join(old_fw, "config.txt"), mount], check=True)
                 note += ", the old config.txt kept"
+        # What is on the stick now, so its next re-stage carries exactly that.
+        with open(os.path.join(mount, *MANIFEST), "w") as fh:
+            fh.write("# the Pi's firmware on this stick, written by make bootstick\n")
+            fh.writelines(f"{n}\n" for n in installed)
         subprocess.run(["find", mount, "-name", "._*", "-delete"], check=True)
         for name in (".fseventsd", ".Trashes", ".Spotlight-V100"):
             shutil.rmtree(os.path.join(mount, name), ignore_errors=True)
