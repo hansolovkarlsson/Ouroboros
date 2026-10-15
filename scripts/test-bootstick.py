@@ -170,11 +170,32 @@ def refusals():
     for what, path, reason in cases:
         before = digest(path)
         code, out = bootstick_run(path)
-        checks.append((f"refused, untouched: {what}", code == 1 and reason in out and digest(path) == before))
+        # No kept image either: a refusal before the write leaves the disk as
+        # it was, so an image left would read as a failed write's next run.
+        checks.append((f"refused, untouched, no image kept: {what}", code == 1 and reason in out
+                       and digest(path) == before and not os.path.exists(bootstick.KEPT_IMG)))
         if not checks[-1][1]:
             print(out)
     code, out = bootstick_run("/dev/disk0s1")
     checks.append(("refused: a partition's node", code == 1 and "not a whole disk" in out))
+    # A kept image left by a write that did not finish is the only copy of
+    # that disk's /etc and /Users: the next run must not rebuild it in place
+    # (the second review of #293). main() stops before this if a real one is
+    # there, so the one made here is the rig's own.
+    with open(bootstick.KEPT_IMG, "wb") as fh:
+        fh.write(b"the only copy")
+    target = blank("after-failure", 128 << 20)
+    before = digest(target)
+    code, out = bootstick_run(target)
+    # Gone is a failure to grade, not a crash: a run that went ahead deletes
+    # the image when its write succeeds.
+    kept = open(bootstick.KEPT_IMG, "rb").read() if os.path.exists(bootstick.KEPT_IMG) else None
+    if kept is not None:
+        os.remove(bootstick.KEPT_IMG)
+    checks.append(("refused, untouched, the kept image too: a kept image left from a failed write",
+                   code == 1 and "did not finish" in out and digest(target) == before and kept == b"the only copy"))
+    if not checks[-1][1]:
+        print(out)
     return checks
 
 
@@ -315,6 +336,9 @@ def pi_stick():
 
 
 def main():
+    if os.path.exists(bootstick.KEPT_IMG):
+        sys.exit(f"{NAME}{bootstick.KEPT_IMG} exists: a real write left it, the only copy of a disk's /etc and "
+                 f"/Users; move it away before running this rig, which makes and deletes its own")
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(WORK)
     checks = refusals()
@@ -349,6 +373,21 @@ def main():
         ("the last LBA's old GPT header is gone", open(STICK, "rb").read()[-512:] == bytes(512)),
         ("the disk has a signature, not disk.img's", sig != 0 and sig != disksig.read_signature(os.path.join(BUILD, "disk.img"))),
     ]
+
+    # A disk that ends inside the MiB after the image: the zeroing of the last
+    # MiB used to be skipped whole then, leaving the backup GPT header at its
+    # last LBA (the second review of #293).
+    image_size = (parts[1][2] + parts[1][3]) * 512 if len(parts) > 1 else 0
+    tight = blank("tight", image_size + 3 * 512)
+    with open(tight, "r+b") as fh:
+        fh.seek(-512, os.SEEK_END)
+        fh.write(b"EFI PART")
+    code, out = bootstick_run(tight)
+    checks.append(("a disk 3 sectors larger than the image: written, its last LBA's old GPT header gone",
+                   image_size > 0 and code == 0 and open(tight, "rb").read()[-512:] == bytes(512)))
+    if not checks[-1][1]:
+        print(out)
+    os.remove(tight)
 
     first_ok, first, first_faults = boot("first", [
         ("login:", "root"), ("assword", "root"), ("# ", "bootid"), ("# ", "useradd ann"),

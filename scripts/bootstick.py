@@ -121,7 +121,7 @@ SIG_FILE = "etc/disksig"
 LITTER = re.compile(r"^(\._.*|\.DS_Store|\.Spotlight-V100|\.fseventsd|\.Trashes|\.TemporaryItems|"
                     r"\.VolumeIcon\.icns|\.metadata_never_index|\.apdisk|System Volume Information)$")
 BOOTID_PATH = ("EFI", "ORBS", "BOOTID.TXT")
-BOOTID_RECORD = re.compile(rb"^\d{20}\n$")
+BOOTID_RECORD = re.compile(rb"\d{20}\n")
 
 
 class Refused(Exception):
@@ -319,7 +319,10 @@ def fat32_find(read, path):
 
 def bootid_value(record):
     """The counter in a boot counter record, or None if it is not one."""
-    return int(record[:20]) if record and BOOTID_RECORD.match(record) else None
+    # fullmatch: `$` matches before a final newline too, so a 22-byte record
+    # passed and was written into the 21-byte slot, shifting the ESP after
+    # it (the second review of #293).
+    return int(record[:20]) if record and BOOTID_RECORD.fullmatch(record) else None
 
 
 # --- The disk. ---------------------------------------------------------------
@@ -386,7 +389,9 @@ class Disk:
             return
         except PermissionError:
             say(f"{self.raw} is not writable as you; writing through sudo dd")
-        bs = MIB if offset % MIB == 0 else SECT
+        # The block must divide the length as well as the offset: conv=sync
+        # pads the last block, past the end of a disk for a short tail.
+        bs = MIB if offset % MIB == 0 and os.path.getsize(path) % MIB == 0 else SECT
         out = subprocess.run(["sudo", "dd", f"if={path}", f"of={self.raw}", f"bs={bs}", f"oseek={offset // bs}",
                               "conv=sync"], capture_output=True)
         if out.returncode != 0:
@@ -488,7 +493,10 @@ def esp_counter(read):
     reads, or None."""
     try:
         at = fat32_find(read, BOOTID_PATH)
-    except (struct.error, IndexError):
+    except (struct.error, IndexError, Refused):
+        # Refused: a damaged BPB can send a read past the disk's end, which a
+        # device read through sudo dd refuses; the counter is then unread,
+        # not the re-stage (the second review of #294).
         return None
     return read(at[0], 21) if at and at[1] == 21 else None
 
@@ -683,7 +691,10 @@ def pftf_zip():
         raise Refused(f"the Pi's firmware could not be had: {out.stderr.strip()}")
     path = out.stdout.strip()
     version = re.search(r"_(v[^_/]+)\.zip$", path)
-    listing = subprocess.run(["unzip", "-Z1", path], capture_output=True, text=True, check=True).stdout
+    listing = subprocess.run(["unzip", "-Z1", path], capture_output=True, text=True)
+    if listing.returncode != 0:
+        raise Refused(f"the Pi's firmware zip {path} cannot be listed: {listing.stderr.strip()}")
+    listing = listing.stdout
     names = {line.split("/")[0] for line in listing.splitlines() if line.strip()} - {"Readme.md"}
     return path, version.group(1) if version else "?", names
 
@@ -785,7 +796,7 @@ def write(target):
     debugfs, e2fsck = tool("debugfs"), tool("e2fsck")
     for f in (ESP_IMG, ROOT_IMG):
         if not os.path.isfile(f):
-            raise Refused(f"{f} not found - run `make disk` (make bootstick builds it)")
+            raise Refused(f"{f} not found - run `make image build/ext2part.img` (make bootstick builds both)")
     # Each option is 1, 0 or unset; anything else is refused before the disk
     # is touched, since PI=true on a fresh stick would quietly write one the
     # Pi cannot boot (the review of #294).
@@ -796,6 +807,12 @@ def write(target):
             raise Refused(f"{name}={opts[name]!r}: give {name}=1 or {name}=0")
     carry = opts["CARRY"] != "0"
     reinstall = opts["FIRMWARE"] == "1"
+    # A kept image is the only copy of a disk whose write failed; the next run
+    # would rebuild it in place, from a half-written disk that may still look
+    # like ours (the second review of #293).
+    if os.path.exists(KEPT_IMG):
+        raise Refused(f"{KEPT_IMG} is left from a write that did not finish: it is the only copy of that "
+                      f"disk's /etc and /Users. Write it with dd once the disk works, or move it away")
     attached = None
     if not target.startswith("/dev/"):
         if not os.path.isfile(target):
@@ -852,15 +869,22 @@ def write(target):
             # Kept outside the temporary directory until the disk reads back
             # whole: once the write starts it is the only copy of the old
             # disk's /etc and /Users (the review of #293).
+            # Until the write starts the disk is untouched, so a refusal before
+            # it removes the image: left, it would read as a failed write's.
             image = KEPT_IMG
-            # assemble signs from the bytes and says so; the signature is
-            # replaced below, so its line would name one the disk never gets.
-            with contextlib.redirect_stdout(io.StringIO()):
-                mbrdisk.assemble(image, mbrdisk.one_disk(esp, mbrdisk.ext2_payload(root)))
-            disksig.put_signature(image, sig)
-            size = os.path.getsize(image)
-            check_target(disk, size)
-            diskutil("unmountDisk", disk.dev)
+            try:
+                # assemble signs from the bytes and says so; the signature is
+                # replaced below, so its line would name one the disk never gets.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    mbrdisk.assemble(image, mbrdisk.one_disk(esp, mbrdisk.ext2_payload(root)))
+                disksig.put_signature(image, sig)
+                size = os.path.getsize(image)
+                check_target(disk, size)
+                diskutil("unmountDisk", disk.dev)
+            except BaseException:
+                if os.path.exists(image):
+                    os.remove(image)
+                raise
             say(f"writing {size // MIB} MiB to {disk.dev}")
             try:
                 disk.write_file(image)
@@ -873,12 +897,14 @@ def write(target):
                 raise Refused(f"{disk.dev} does not read back what was written; do not boot it. The disk "
                               f"as it should be, the old disk's /etc and /Users in it, is {image}")
             # The last MiB up to the very end, where a backup GPT's header is
-            # (the last LBA), whatever the disk's size is a multiple of.
-            tail = disk.size - MIB
-            if tail >= size:
+            # (the last LBA), whatever the disk's size is a multiple of; only
+            # what lies past the image when the image ends inside that MiB
+            # (the second review of #293).
+            tail = max(size, disk.size - MIB)
+            if tail < disk.size:
                 zeros = os.path.join(tmp, "zeros")
                 with open(zeros, "wb") as fh:
-                    fh.write(bytes(MIB))
+                    fh.write(bytes(disk.size - tail))
                 disk.write_file(zeros, tail)
             say(f"wrote and read back {disk.dev}: ESP partition 1, ext2 root partition 2, "
                 f"disk signature {sig:#010x}{' (kept)' if old_sig else ' (new)'}")
@@ -970,6 +996,8 @@ def self_test():
         results.append(("a quote in a name is refused", True))
     results.append(("a counter record reads", bootid_value(b"00000000000000000042\n") == 42))
     results.append(("anything else is no counter", bootid_value(b"42\n") is None and bootid_value(None) is None))
+    results.append(("a record with a byte after it is no counter",
+                    bootid_value(b"00000000000000000042\n\n") is None))
 
     # A FAT32 volume of one cluster per directory: the boot counter found by
     # its path, and a path that is not there not found.
