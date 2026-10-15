@@ -269,7 +269,7 @@ CPOLL_BIN    := $(BUILD_DIR)/cpoll.bin
 # plan): its sources are read from CPP_DIR, a sibling checkout by default.
 # CPP_DIR must not contain spaces: its files are make prerequisites.
 CPP_DIR      ?= ../DevTools/cpp
-CPP_BIN      := $(BUILD_DIR)/cpp.bin
+CPP_BIN      := $(BUILD_DIR)/cpp$(if $(filter devtools,$(CLINK)),-ld).bin
 HAVE_CPP     := $(wildcard $(CPP_DIR)/driver/cpp.c)
 CPP_OBJS     := $(if $(HAVE_CPP),$(patsubst $(CPP_DIR)/lib/%.c,$(BUILD_DIR)/cpp/%.o,$(wildcard $(CPP_DIR)/lib/*.c)) $(BUILD_DIR)/cpp/cpp.o)
 # Whether an image without /bin/cpp is acceptable: `optional` (the default,
@@ -299,7 +299,7 @@ endif
 # is NEED_CPP's twin: optional by default, required for edit-bin and
 # test-edit, so a release can insist. EDIT_DIR must not contain spaces.
 EDIT_DIR     ?= ../DevTools/edit
-EDIT_BIN     := $(BUILD_DIR)/edit.bin
+EDIT_BIN     := $(BUILD_DIR)/edit$(if $(filter devtools,$(CLINK)),-ld).bin
 HAVE_EDIT    := $(wildcard $(EDIT_DIR)/src/platform_ouroboros.c)
 EDIT_OBJS    := $(if $(HAVE_EDIT),$(patsubst $(EDIT_DIR)/src/%.c,$(BUILD_DIR)/edit/%.o,$(filter-out %/platform_posix.c,$(wildcard $(EDIT_DIR)/src/*.c))))
 NEED_EDIT    ?= optional
@@ -325,17 +325,23 @@ endif
 # (a note in its docs/handoffs/), or the two linkers part without a word;
 # check-link-layout (in `make test`) pins that layout, so a change to either
 # fails the suite until the pin is updated and the notice sent.
-# The choice is recorded in CLINK_CHOICE, rewritten only when it changes, so
-# switching linkers relinks both programs rather than staging the last ones.
+# Each linker's programs have their own names (CPP_BIN and EDIT_BIN, -ld under
+# CLINK=devtools), and ld its own from a hash of its compiler, flags and list
+# of sources (LD_ID), so a switch, or a source added or removed in LD_DIR,
+# names a file of its own rather than relying on timestamps: make here
+# compares whole seconds, and a switch made within the second of the last link
+# would otherwise stage the other linker's programs.
 # CLINK=devtools needs ld's, cpp's and Edit's sources: an image asked to carry
 # ld-linked programs and carrying none would be graded as if it did. Neither
-# check stops `make clean`, and a dry run (-n) records nothing.
+# check stops `make clean`.
 # LD_DIR must not contain spaces.
 CLINK        ?= lld
 LD_DIR       ?= ../DevTools/ld
 HOST_CC      ?= cc
-DEVTOOLS_LD  := $(BUILD_DIR)/host/ld
-CLINK_CHOICE := $(BUILD_DIR)/clink.choice
+LD_SRCS      := $(wildcard $(LD_DIR)/lib/*.c) $(LD_DIR)/driver/ld.c
+LD_CMD       := $(HOST_CC) -std=c11 -Wall -Wextra -pedantic -O2 -I$(LD_DIR)/lib
+LD_ID        := $(shell echo '$(LD_CMD) $(LD_SRCS)' | shasum -a 256 | cut -c1-12)
+DEVTOOLS_LD  := $(BUILD_DIR)/host/ld-$(LD_ID)
 CLINK_GOALS  := $(filter-out clean,$(or $(MAKECMDGOALS),all))
 ifeq ($(CLINK),lld)
 CLINK_CMD    := "$(LD_LLD)" $(LDFLAGS_RUSTSHIM)
@@ -353,11 +359,6 @@ endif
 endif
 else ifneq ($(CLINK_GOALS),)
 $(error CLINK=$(CLINK): must be lld or devtools)
-endif
-ifneq ($(CLINK_GOALS),)
-ifeq ($(findstring n,$(firstword -$(MAKEFLAGS))),)
-CLINK_RECORD := $(shell mkdir -p $(BUILD_DIR) && (echo $(CLINK) | cmp -s - $(CLINK_CHOICE) || echo $(CLINK) > $(CLINK_CHOICE)))
-endif
 endif
 
 CARGO_FLAGS :=
@@ -808,9 +809,9 @@ $(BUILD_DIR)/cpp/%.o: $(CPP_DIR)/lib/%.c Makefile
 $(BUILD_DIR)/cpp/cpp.o: $(CPP_DIR)/driver/cpp.c Makefile
 	@mkdir -p $(BUILD_DIR)/cpp
 	$(CC) $(CPP_CFLAGS) -c $< -o $@
-$(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld $(CLINK_CHOICE) $(CLINK_DEPS)
-	$(CLINK_CMD) -o $(BUILD_DIR)/cpp.elf $(PICO_PORT) $(CPP_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
-	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cpp.elf $(CPP_BIN)
+$(CPP_BIN): $(CPP_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld $(CLINK_DEPS)
+	$(CLINK_CMD) -o $(CPP_BIN:.bin=.elf) $(PICO_PORT) $(CPP_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(CPP_BIN:.bin=.elf) $(CPP_BIN)
 -include $(wildcard $(BUILD_DIR)/cpp/*.d)
 
 # /bin/edit, DevTools's editor (the note
@@ -822,16 +823,18 @@ EDIT_CFLAGS := $(CFLAGS_OS) $(PICO_INC) -I$(EDIT_DIR)/src -MMD -MP
 $(BUILD_DIR)/edit/%.o: $(EDIT_DIR)/src/%.c Makefile
 	@mkdir -p $(BUILD_DIR)/edit
 	$(CC) $(EDIT_CFLAGS) -c $< -o $@
-$(EDIT_BIN): $(EDIT_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld $(CLINK_CHOICE) $(CLINK_DEPS)
-	$(CLINK_CMD) -o $(BUILD_DIR)/edit.elf $(PICO_PORT) $(EDIT_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
-	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/edit.elf $(EDIT_BIN)
+$(EDIT_BIN): $(EDIT_OBJS) $(PICO_PORT) $(NSRESOLVE_A) $(PICO_LIBC) programs/linker.ld $(CLINK_DEPS)
+	$(CLINK_CMD) -o $(EDIT_BIN:.bin=.elf) $(PICO_PORT) $(EDIT_OBJS) $(PICO_LIBC) $(NSRESOLVE_A)
+	"$(OBJCOPY)" --strip-all $(EDIT_BIN:.bin=.elf) $(EDIT_BIN)
 -include $(wildcard $(BUILD_DIR)/edit/*.d)
 
-# DevTools's ld for CLINK=devtools (above), for the host, with the flags its
-# own Makefile's CFLAGS default to (it goes through a libld.a; this does not).
-$(DEVTOOLS_LD): $(wildcard $(LD_DIR)/lib/*.c $(LD_DIR)/lib/*.h) $(LD_DIR)/driver/ld.c Makefile
+# DevTools's ld for CLINK=devtools (above), for the host, as its note
+# suggested, with the flags its own Makefile's CFLAGS default to (it goes
+# through a libld.a; this does not). A copy of DevTools's recipe, unpinned:
+# running its own build would be running another project's build.
+$(DEVTOOLS_LD): $(LD_SRCS) $(wildcard $(LD_DIR)/lib/*.h $(LD_DIR)/driver/*.h)
 	@mkdir -p $(dir $@)
-	$(HOST_CC) -std=c11 -Wall -Wextra -pedantic -O2 -I$(LD_DIR)/lib $(wildcard $(LD_DIR)/lib/*.c) $(LD_DIR)/driver/ld.c -o $@
+	$(LD_CMD) $(LD_SRCS) -o $@
 
 write-bin:
 	cargo build -p write --target $(USER_TARGET) --release
@@ -2397,7 +2400,7 @@ test:
 	@# in its own code, so they are a copy, and a comment asking for a notice
 	@# is read only by whoever happens to open the file.
 	@echo "== the link layout DevTools's ld copies"
-	@python3 scripts/check-link-layout.py '$(LDFLAGS_RUSTSHIM)' || exit 1
+	@$(MAKE) --no-print-directory check-link-layout || exit 1
 	@echo "== all pure-crate host tests passed, and clippy clean including tests"
 
 clean:
