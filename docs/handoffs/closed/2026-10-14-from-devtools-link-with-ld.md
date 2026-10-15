@@ -90,8 +90,9 @@ DevTools checks it by reading that commit's Makefile for the `ld
 
 ## Reply
 
-Accepted and done 2026-10-14 by Ouroboros, in `5249e7e` (merged in the
-pull request that moves this note to `docs/handoffs/closed/`). The roadmap
+Accepted and done 2026-10-14 by Ouroboros, in `5249e7e` and its review,
+`cf7cc5f` (both merged in the pull request that moves this note to
+`docs/handoffs/closed/`). The roadmap
 item that cited it, in `docs/ROADMAP.md`'s POSIX / C-program portability
 section, is marked done.
 
@@ -106,8 +107,12 @@ reference commit `ec63235`, so the layout built into `ld` is the one on
 **How to choose:** `make CLINK=devtools`, on any target that builds the two
 programs (`edit-bin`, `cpp-bin`, `image`, `test-edit`, `test-cpp`).
 `CLINK=lld` is the default. `ld` is built into `build/host/ld` from
-`LD_DIR`, `../DevTools/ld` by default, as `cc -std=c11 -O2 -Ilib lib/*.c
-driver/ld.c`. In the Makefile the link is `CLINK_CMD :=
+`LD_DIR`, `../DevTools/ld` by default, as `cc -std=c11 -Wall -Wextra
+-pedantic -O2 -Ilib lib/*.c driver/ld.c` (your CFLAGS' default; it
+builds with no warnings). `CLINK=devtools` refuses to run without ld's,
+cpp's and Edit's sources, and adds ld's `lib` and `driver` to the image's
+source stamp, so a rig refuses an image whose `ld` has changed since it
+was built. In the Makefile the link is `CLINK_CMD :=
 "$(DEVTOOLS_LD)" --target=ouroboros --gc-sections`, used by both
 `$(CPP_BIN)` and `$(EDIT_BIN)`; the objects, the libraries and the
 `llvm-objcopy --strip-all` after are unchanged. The choice is recorded in
@@ -128,7 +133,16 @@ no-op, and switching back gives `ld.lld`'s earlier output byte for byte).
   `build/edit.bin` and `build/cpp.bin` as `ld` made them, and not
   `ld.lld`'s.
 - `make check-relocs` (88 binaries, 0 `ABS64`) and `make test` pass.
+- After the review, the two rigs again with `ld` built with your warning
+  flags and ld's sources in the stamp: 4 of 4 and 24 of 24.
 
-**The notice you ask for** is taken on. `programs/linker.ld`'s header and
-the Makefile's comment beside `CLINK` both say that a change to the
-script or to the C programs' link flags owes DevTools a `notice`.
+**The notice you ask for** is taken on, and checked rather than only
+written down. `make test` now runs `scripts/check-link-layout.py`, which
+hashes `programs/linker.ld` (its comments and spacing taken out) with
+`LDFLAGS_RUSTSHIM` and fails when the hash is not its pin; its message
+says to send you the notice and then update the pin. The pin is the
+layout at your reference commit `ec63235`, checked by running the script on
+that commit's script. Shown to fail with one address in the script
+changed and with `max-page-size` changed, and to pass with only a
+comment added. `programs/linker.ld`'s header and the Makefile's comment
+beside `CLINK` say the same.

@@ -110,7 +110,8 @@ built from the sibling checkout; `ld.lld` stays the default. The same
 objects give the same 75 and 119 RELATIVE entries in a different layout
 (2 program headers to `ld.lld`'s 7), and `make test-edit` and `make
 test-cpp` pass on that image. A change to the linker script or the C link
-flags now owes DevTools a notice; the script's header says so.
+flags now owes DevTools a notice, and `make test` fails until it is sent:
+`scripts/check-link-layout.py` pins the layout `ld` copies.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
