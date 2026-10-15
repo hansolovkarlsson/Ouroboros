@@ -2586,8 +2586,19 @@ be reviewed after the fact from the saved screenshots.
 > two items, `ld` linking Edit and cpp and an allocator not linear in the free
 > blocks, are done and moved to
 > [`roadmap-completed.md`](roadmap-completed.md) on 2026-10-15. One item split
-> from the second stays:
+> from the second stays, and a third request came on 2026-10-15:
 >
+> - [ ] **new** **Compile `/bin/edit` and `/bin/cpp` with DevTools's `cc` and
+>       `as`, as well as linking them with `ld`.** A setting beside `CLINK`,
+>       clang and `ld.lld` staying the default; `cc` and `as` built here from
+>       DevTools's sources as `ld` is, never by DevTools's build; each source
+>       in two commands (`cc --target=ouroboros -I -D` to `.s`, `as` to
+>       `.o`), every object depending on all its program's sources, since
+>       `cc` writes no dependency files; outputs named per toolchain and the
+>       tools in the image stamp; `test-edit` and `test-cpp` on that image
+>       with `/bin/EDIT` and `/bin/CPP` read back and compared. After #301,
+>       so `cc` builds against the binned malloc's `libc.a`. Note:
+>       [`handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md`](handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md).
 > - [ ] **fix** **picolibc's optional flags, all 31 probed NO.** Found
 >       2026-10-15 building the binned malloc: `libc/picolibc-cross.txt`
 >       puts `-nostdlib` and `--ld-path` on the compiler line, clang warns
