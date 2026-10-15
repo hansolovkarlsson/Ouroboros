@@ -692,3 +692,34 @@ round finds only what would break later, the branch is near its floor.
 Of the two it declined, one is the note's own recipe for building `ld`,
 which could only be cured by running DevTools's build, which the handoff
 rule forbids.
+
+## The round the morning owed (2026-10-14, late)
+
+*The second round on the one-disk arc's repairs, scoped to the five repair
+commits of #293 to #296, as 09-01's fourth round was scoped to its fixes.
+The fixes are #300.*
+
+| on | findings | taken | to Hans | declined | already handled |
+| --- | --- | --- | --- | --- | --- |
+| `97a7239`, `81c4c98`, `532843a`, `7587e03`, `76dbeb7` | 10 | 5, and part of a sixth | 2, answered by one choice | 2 | 1 |
+
+**The repairs carried defects, as the spine says, and the worst was a
+repair's own.** The review of #293 had added a kept image, the only copy of
+the old disk's `/etc` and `/Users` after a failed write; nothing stopped
+the next run from rebuilding it out of the half-written disk. That defect
+did not exist before the repair that introduced the copy. **And the repair
+of it had one too, which the rig rather than a reviewer found:** the new
+refusal treated an image left by an earlier refusal, made before any write,
+as a failed write's. Two rounds of the same shape in one evening (this and
+the linker's above) suggest the rule this file keeps arriving at: a repair
+that adds state (a kept file, a recorded choice) adds the question of who
+cleans it up, and that question is where its defects are.
+
+**Two findings were costs, and went to Hans as one question.** Both came
+from #294's settled rule that a Pi stick carries only the firmware's own
+files: telling those files by the pinned zip's names needs the network
+after a clean and forgets an older release's files after a pin bump.
+Carrying everything not ours would cure both by undoing the rule; a
+manifest written on the stick cures both and keeps it. He chose the
+manifest in one answer, as 0x83 was settled in one this morning.
+

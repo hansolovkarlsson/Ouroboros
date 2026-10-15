@@ -1803,3 +1803,18 @@ backdated by `touch -A -10`, rebuilt it: the cause was make's whole-second
 timestamps (the evening's section of
 [`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md)).
 
+**And three more the same night, from the mutation controls of #300.** The
+mutation that removed the kept-image refusal let bootstick go ahead, write
+the stick and, its write having succeeded, delete the kept image; the rig's
+next line opened that image and crashed. The mutation that wrote no
+firmware manifest crashed the rig the same way, on a step that removed the
+manifest before testing the fallback. Each was "caught" only by the
+traceback, the exact failure this file recorded from #294 this morning, and
+each was a step that assumed the step before it had worked. Both now grade
+an absent file as a failed check, and both mutations fail their own
+checks. The third was my mutation harness: it read the rig's last line of
+output as its summary, and on a run that printed nothing it crashed instead
+of saying so. **Every step after the one a mutation breaks is running on a
+state nobody designed for; it has to grade that state, not assume it
+away.**
+
