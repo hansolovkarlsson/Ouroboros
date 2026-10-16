@@ -170,7 +170,13 @@ growing, and DevTools's `cc` and `as` make it about 238 KB.
 least the image bound, so a program is refused for its image first. The
 buffer is RAM only; the kernel file is unchanged. `make test-spawn-size`
 spawns `/bin/ARGS` padded to 200 KiB and to the bound, and checks the
-refusal one byte over.
+refusal one byte over. And `SPAWN_STAGE` takes chunks in order: the
+kernel bounded a spawn by the end of the highest chunk its owner staged,
+so one chunk near the end made the previous stager's bytes below it count
+as the new owner's, and a program could be started, or read as data, by a
+task that may not read its file (the review of this change; the hole was
+as old as the staging's owner, 2026-10-11). `make test-spawn-owner`
+stages one such chunk over the shell's copy of `/bin/STAGEPROBE`.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

@@ -17,13 +17,17 @@ kernel is:
   bound in KB, and prints no argv;
 - then `/bin/args p4` runs, so the refused spawn left the staging free.
 
-Each run's wall time is reported, not graded: a file is staged in 512-byte
-chunks, one fsd read each. No fault line in QEMU's trace. The control: with
-the constant at 131072 (and the kernel's assert that it covers the image
-bound taken out so it builds), the bound check and `past128` fail, while
-`atmax` and `overmax` pass at the old bound, as they should. One boot, about a
-minute. Run it whenever SPAWN_STAGING_SIZE, SPAWN_STAGE or a spawner's
-staging loop (the shell's spawn_path, netd's cpu) changes.
+The shell prints that message for any `SPAWN_STAGE` refusal, so what ties
+`overmax`'s refusal to the bound is `atmax`, one byte shorter, running. Each
+run's wall time is reported, not graded: a file is staged in 512-byte
+chunks, one fsd read each, and the staging is held for all of it. No fault
+line in QEMU's trace. The control: with the constant at 131072 (and the
+kernel's assert that it covers the image bound taken out so it builds),
+`past128` fails, while `atmax` and `overmax` pass at the old bound and the
+message names 128KB, so the sizes follow the constant. One boot, about a
+minute. Run it whenever SPAWN_STAGING_SIZE, SPAWN_STAGE or the shell's
+spawn_path changes. It drives only the shell's loop: netd's `cpu` stages
+the same way and no rig spawns a large file through it.
 """
 import importlib.util
 import os
@@ -104,10 +108,13 @@ def main() -> int:
     try:
         driven = guest.run([("login:", "root"), ("assword", "root"), ("# ", "")])
         for name, line in runs:
+            if not driven:
+                break
             start = time.monotonic()
             # Each run's end is the shell's next prompt after its own echo.
-            driven = driven and guest.run([("", line), (re.escape(line) + r"\r?\n(?:.*\r?\n)*?# ", "")])
-            took[name] = time.monotonic() - start
+            driven = guest.run([("", line), (re.escape(line) + r"\r?\n(?:.*\r?\n)*?# ", "")])
+            if driven:
+                took[name] = time.monotonic() - start
         out = guest.transcript()
     finally:
         guest.stop()
@@ -124,7 +131,6 @@ def main() -> int:
     over = block("/spawn/overmax p3")
     checks = [
         ("driven to the end", driven),
-        (f"SPAWN_STAGING_SIZE ({size}) holds past128's {files['past128']} bytes", size >= files["past128"]),
         (f"past128 ({files['past128']} bytes, past the old {OLD_BOUND}) ran", "argv[1] = p1" in block("/spawn/past128 p1")),
         (f"atmax ({files['atmax']} bytes, the bound) ran", "argv[1] = p2" in block("/spawn/atmax p2")),
         (f"overmax ({files['overmax']} bytes) refused: {refusal!r}", refusal in over),

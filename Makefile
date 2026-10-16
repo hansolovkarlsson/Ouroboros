@@ -2106,7 +2106,8 @@ test-spawn-owner: image
 # of before 2026-10-16), to exactly SPAWN_STAGING_SIZE, and one byte more;
 # the first two run, the third is refused with the shell's message, and a
 # spawn after it runs. One boot, about a minute; run it whenever
-# SPAWN_STAGING_SIZE, SPAWN_STAGE or a spawner's staging loop changes.
+# SPAWN_STAGING_SIZE, SPAWN_STAGE or the shell's spawn_path changes (netd's
+# cpu loop has no rig at this size).
 test-spawn-size: image
 	python3 scripts/test-spawn-size.py
 

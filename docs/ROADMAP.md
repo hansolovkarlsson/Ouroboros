@@ -2635,6 +2635,21 @@ be reviewed after the fact from the saved screenshots.
 >       review of #301's measurement); the spawn buffer that blocked it is
 >       1 MiB since 2026-10-16 (`roadmap-completed.md`). Note:
 >       [`handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md`](handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md).
+> - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
+>       the high review of #303: a file is staged 512 bytes a call, each a
+>       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused
+>       `SPAWN_ERR_STAGING_BUSY` meanwhile, with no retry: a command typed
+>       at the boot shell while `netd`'s `cpu` stages, or the reverse,
+>       fails at once with the "staging held" message. `make
+>       test-spawn-size` measured 1.3 s for 200 KiB and 2.1 s for 1 MiB on
+>       QEMU, against 1.1 s for the 13 KB `/bin/args` (so about a second a
+>       MiB is the staging itself, the rest the command's own turn); USB
+>       mass storage on the Pi will be slower. `SPAWN` then parses and
+>       copies the file under the kernel lock. Options: a bulk
+>       `SPAWN_STAGE` (a grant, as `BLOCK_*` uses), a retry in the shell's
+>       and `netd`'s loops on `BUSY`, or the file read into the child's
+>       region with no global staging. Not urgent while no program near the
+>       bound exists; the cc-and-as item makes `/bin/CPP` about 238 KB.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
