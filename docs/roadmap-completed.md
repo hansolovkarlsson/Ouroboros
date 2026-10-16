@@ -2379,3 +2379,23 @@ own text follows as it stood when it was open.
 >       seven, keep `<complex.h>` removed, and send DevTools a notice
 >       before `check-picolibc`'s header pin moves. Its own PR. Note:
 >       [`handoffs/closed/2026-10-16-from-devtools-probed-macros.md`](handoffs/closed/2026-10-16-from-devtools-probed-macros.md).
+
+## A directory listing longer than one reply, DONE (2026-10-16)
+
+Moved from [`ROADMAP.md`](ROADMAP.md)'s open gaps on 2026-10-16. Built: `NP_READDIR` takes a start index in `a2` and answers a page, whole entries in walk order until the next would not fit, an empty page at the end (`ninep-abi`'s doc is the rule, `readdir_next` the next start). fsd, netd's export and its `/net` listings, the host 9P server, `ulib`'s `fs_list_dir` (`ls`, `tree`, `useradd`) and the shell's glob and tab completion all page; a pager stops on a later page equal to the first, which is what a server from before paging answers. `make test-include` requires every `/include` listing whole and a glob past the first page; `np9p_server.py --self-test` pages `/` through a 10-byte window. The gap as it was recorded:
+
+- **A directory listing is cut at one reply, with no sign of it.**
+  `NP_READDIR` has no offset: fsd writes `name\n` per entry into the reply
+  window, skips any name that no longer fits and goes on walking, so a
+  shorter name further on can still get in; `ls` asks for 512 bytes. So `ls
+  /include` shows about 60 of its 72 names and `ls /include/clang` 30 of 31,
+  and what is left out can be anywhere in the walk: the listing has holes,
+  it is not a prefix, which a paged design must not assume. Tab completion,
+  globs and `tree` read the same way. A paged verb (an offset in the request,
+  "more" in the reply) is a wire change: fsd, `netd`'s export, both host
+  peers and `ulib`. cpp is not affected: it opens headers by path. Found
+  2026-10-06 staging the C headers (step 6 of the C-hosting plan).
+  `/bin` is close too: since `/bin/CMALLOC` its 80 names take 499 bytes as
+  `name\n` (the review of #301 measured 506 of the reply on FAT32), so a
+  program or two more staged there drops a name from `ls /bin` and tab
+  completion.
