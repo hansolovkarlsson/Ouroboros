@@ -6830,11 +6830,15 @@ fn list_dir(who: As, path: &[u8], tree: u64, start: u64, out: &mut [u8]) -> u64 
 /// newline-separated `entries` (dirs suffixed `/`) into `out`, returning its
 /// length. Each entry is a link resolved against `dir_path` so a browser can
 /// navigate into subdirectories and open files. No `Content-Length` (the body
-/// is generated; `Connection: close` delimits it); truncated if it exceeds
-/// `out`.
-/// `more`: the directory goes on past `entries` (the first page); the index
-/// then says so in its last line rather than end as if whole.
-fn build_listing(dir_path: &[u8], entries: &[u8], more: bool, out: &mut [u8]) -> usize {
+/// is generated; `Connection: close` delimits it).
+/// `more`: the directory goes on past `entries` (the first page). An entry is
+/// written only whole and with room left for the note and the closing tags,
+/// so a directory longer than `out` holds ends in a note too, and the page is
+/// never cut mid-tag: until 2026-10-16 it was cut at `out`'s end, `</html>`
+/// and all, with no word (the review of #306, read off a booted index).
+fn build_listing(dir_path: &[u8], entries: &[u8], mut more: bool, out: &mut [u8]) -> usize {
+    const NOTE: &[u8] = b"<li>(more entries than this index shows)</li>";
+    const END: &[u8] = b"</ul></body></html>";
     // The directory path without a trailing slash (except root itself), for
     // joining hrefs cleanly.
     let base: &[u8] = if dir_path.len() > 1 && *dir_path.last().unwrap() == b'/' {
@@ -6843,6 +6847,7 @@ fn build_listing(dir_path: &[u8], entries: &[u8], more: bool, out: &mut [u8]) ->
         dir_path
     };
 
+    let cap = out.len();
     let mut w = 0usize;
     let mut put = |bytes: &[u8], w: &mut usize| {
         let n = bytes.len().min(out.len().saturating_sub(*w));
@@ -6866,6 +6871,13 @@ fn build_listing(dir_path: &[u8], entries: &[u8], more: bool, out: &mut [u8]) ->
         if name == b"." {
             continue; // skip the self-link; keep ".." for parent navigation
         }
+        let base_len = if base != b"/" { base.len() } else { 0 };
+        let item = b"<li><a href=\"".len() + base_len + 1 + name.len() + usize::from(is_dir)
+            + b"\">".len() + line.len() + b"</a></li>".len();
+        if w + item + NOTE.len() + END.len() > cap {
+            more = true;
+            break;
+        }
         put(b"<li><a href=\"", &mut w);
         // href = base + "/" + name  (base is "/" for root -> avoid "//")
         if base != b"/" {
@@ -6882,9 +6894,9 @@ fn build_listing(dir_path: &[u8], entries: &[u8], more: bool, out: &mut [u8]) ->
     }
 
     if more {
-        put(b"<li>(more entries than this index shows)</li>", &mut w);
+        put(NOTE, &mut w);
     }
-    put(b"</ul></body></html>", &mut w);
+    put(END, &mut w);
     w
 }
 
