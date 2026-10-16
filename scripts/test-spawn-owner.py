@@ -20,6 +20,11 @@ is refused and then until it succeeds. One boot, in this order:
 0. `stageprobe over`: one chunk staged, then a `SPAWN` of a total of 4096
    must answer `SPAWN_ERROR` (the kernel hands a child no more than its
    owner staged, so the previous stager's bytes are never parsed).
+   `stageprobe sparse <size of /bin/STAGEPROBE>`: one chunk ending there
+   with nothing staged below it, where the shell's copy of stageprobe still
+   lies; the chunk and the SPAWN must each answer `SPAWN_ERROR`, and that
+   copy must not start (it would print its usage line). With `SPAWN_STAGE`
+   taking a chunk anywhere, as until 2026-10-16, all three fail.
 1. `exec /bin/stageprobe check 6000`, then `exec /bin/stageprobe hold 12000` (both in
    the background). While the holder holds, `echo refused-one` must be
    refused by the shell with the code's message and print nothing; the
@@ -51,6 +56,9 @@ _spec.loader.exec_module(drive_qemu)
 
 IMAGE = os.path.join(ROOT, "build", "esp.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-spawn-owner.txt")
+# The program file the shell stages for step 0b, whose bytes its sparse
+# chunk would otherwise sit on top of.
+STAGEPROBE = os.path.join(ROOT, "build", "esp", "bin", "STAGEPROBE")
 PROMPT = "# "
 BUSY = (1 << 64) - 1 - 44      # syscall_abi::SPAWN_ERR_STAGING_BUSY
 TOO_LARGE = (1 << 64) - 1 - 12  # syscall_abi::SPAWN_ERR_TOO_LARGE, a SPAWN of total 0
@@ -73,6 +81,13 @@ def drive(guest):
     # the one chunk is SPAWN_ERROR, not the previous stager's image parsed.
     guest.type_line("/bin/stageprobe over")
     got["over"] = guest.wait_for(rf"spawn of a total past the staged chunk answered code {SPAWN_ERROR}[\s\S]*" + PROMPT, timeout=30)
+    # 0b. in order: a chunk with nothing staged below it is refused, so the
+    # shell's copy of stageprobe left in the buffer below it is never
+    # started (it would print its usage line).
+    start = len(guest.transcript())
+    guest.type_line(f"/bin/stageprobe sparse {os.path.getsize(STAGEPROBE)}")
+    guest.wait_for(r"spawn of the sparse total answered code \d+[\s\S]*" + PROMPT, timeout=30)
+    got["sparse_out"] = guest.transcript()[start:]
     # 1. the checker first (it waits six seconds before it tries), then the holder.
     guest.type_line("exec /bin/stageprobe check 6000")
     got["checker"] = guest.wait_for(r"stageprobe \d+: checking after ms 6000", timeout=30)
@@ -125,6 +140,11 @@ def checks(got, out, faults):
     exit3 = three.find(f"stageprobe {holder3}: exiting")
     return [
         ("a SPAWN of a total past what the owner staged is SPAWN_ERROR", bool(got["over"])),
+        ("a chunk with nothing staged below it is SPAWN_ERROR",
+         f"a chunk with nothing staged below it answered code {SPAWN_ERROR}" in got["sparse_out"]),
+        ("the spawn of the sparse total is SPAWN_ERROR",
+         f"spawn of the sparse total answered code {SPAWN_ERROR}" in got["sparse_out"]),
+        ("the previous stager's program was not started (no usage line)", "usage: stageprobe" not in got["sparse_out"]),
         ("the checker and the first holder started", bool(got["checker"] and got["holder1"]) and None not in (checker, holder1)),
         ("echo refused while a program held the staging (the message)", bool(re.search(REFUSAL, one))),
         ("echo printed nothing while refused", "\nrefused-one" not in one),

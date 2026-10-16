@@ -16,6 +16,15 @@
 //!                                 128: the kernel must answer SPAWN_ERROR (a
 //!                                 total past what this owner staged), never
 //!                                 read the previous stager's bytes as a program
+//! stageprobe sparse <total>      one 16-byte chunk ending at <total>, with
+//!                                 nothing staged below it, then a SPAWN of
+//!                                 <total>: the kernel must refuse the chunk
+//!                                 and the SPAWN with SPAWN_ERROR. Given the
+//!                                 size of /bin/STAGEPROBE, the buffer below
+//!                                 the chunk holds the shell's copy of this
+//!                                 program, so a kernel that took the chunk
+//!                                 starts that copy, which prints its usage
+//!                                 (the high review of #303)
 //! stageprobe check <ms>           wait <ms>, then try to claim every 20 ms:
 //!                                 report the first refusal and the claim that
 //!                                 follows it, give the claim up, exit 0; exit
@@ -36,7 +45,7 @@ const GIVE_UP_US: u64 = 40_000_000;
 static CHUNK: [u8; 16] = *b"stageprobe-chunk";
 
 fn usage(target: u64) -> ! {
-    ulib::write_out(target, b"usage: stageprobe hold <ms> [abandon] | check <ms> | over\r\n");
+    ulib::write_out(target, b"usage: stageprobe hold <ms> [abandon] | check <ms> | over | sparse <total>\r\n");
     ulib::end_of_stream(target);
     ulib::exit(2);
 }
@@ -81,6 +90,7 @@ pub extern "C" fn _start() -> ! {
         b"hold" => 0,
         b"check" => 1,
         b"over" => 2,
+        b"sparse" => 3,
         _ => usage(target),
     };
     if mode == 2 {
@@ -100,6 +110,19 @@ pub extern "C" fn _start() -> ! {
     let Some(ms) = core::str::from_utf8(&num[..len.min(num.len())]).ok().and_then(ulib::parse_u64) else {
         usage(target)
     };
+    if mode == 3 {
+        let total = ms;
+        if total < CHUNK.len() as u64 {
+            usage(target);
+        }
+        let offset = total - CHUNK.len() as u64;
+        let r = ulib::syscall4(syscall_abi::SPAWN_STAGE, offset, CHUNK.as_ptr() as u64, CHUNK.len() as u64, 0);
+        say(target, me, b"a chunk with nothing staged below it answered code ", Some(r));
+        let s = ulib::syscall4(syscall_abi::SPAWN, total, syscall_abi::CON_TASK, 0, 0);
+        say(target, me, b"spawn of the sparse total answered code ", Some(s));
+        ulib::end_of_stream(target);
+        ulib::exit(if r == syscall_abi::SPAWN_ERROR && s == syscall_abi::SPAWN_ERROR { 0 } else { 5 });
+    }
     let mut abandon_it = false;
     if let Some(len) = ulib::arg(3, &mut word) {
         if &word[..len.min(word.len())] != b"abandon" {

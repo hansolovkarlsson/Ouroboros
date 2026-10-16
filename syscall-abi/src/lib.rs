@@ -478,7 +478,10 @@ pub const ACCT_TASK: u64 = 5;
 /// kernel's fixed spawn staging buffer ([`SPAWN_STAGING_SIZE`]) at `offset` - the feed
 /// half of the two-step spawn (see [`SPAWN`]'s contract-change note).
 /// Chunks are bounded by the same 512-byte per-syscall buffer cap as
-/// everything else; offsets past the staging buffer are refused. The first
+/// everything else; offsets past the staging buffer are refused, and so,
+/// since 2026-10-16, is a chunk that does not start where the caller's last
+/// one ended (the first at 0): the staged program is a prefix its owner
+/// wrote whole, never a previous stager's bytes with a chunk on top. The first
 /// staging call claims the staging for the caller; another task's call is
 /// [`SPAWN_ERR_STAGING_BUSY`] until the owner spawns or ends (see
 /// [`SPAWN`]).
