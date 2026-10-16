@@ -2301,7 +2301,7 @@ follows as it stood when it was open, its 131,072 the bound of then.
 >       PE file is unchanged. `make test-spawn-size` runs `/bin/ARGS` padded
 >       past the old bound and to the new one, refuses it one byte over, and
 >       spawns after the refusal; with the old constant it fails. A 1 MiB
->       file stages in about 2 s on QEMU (`CHANGELOG.md`). The high review
+>       file stages in about 0.7 s on QEMU (`CHANGELOG.md`). The high review
 >       of #303 found the latch it rests on was a high-water mark: one
 >       chunk near the end made the previous stager's bytes below it count
 >       as staged, so a new owner could spawn a binary it may not read.

@@ -482,8 +482,9 @@ pub const ACCT_TASK: u64 = 5;
 /// since 2026-10-16, is a chunk that starts neither at 0 nor where the
 /// caller's last one ended, without claiming the staging: the staged
 /// program is a prefix its owner wrote whole, never a previous stager's
-/// bytes with a chunk on top. A chunk at 0 starts the program over (the
-/// argv, cwd and env staged stand). The first
+/// bytes with a chunk on top. A chunk at 0 starts the spawn over: the argv,
+/// cwd and env staged before it are dropped, so stage the program first.
+/// The first
 /// staging call claims the staging for the caller; another task's call is
 /// [`SPAWN_ERR_STAGING_BUSY`] until the owner spawns or ends (see
 /// [`SPAWN`]).

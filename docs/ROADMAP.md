@@ -2641,15 +2641,18 @@ be reviewed after the fact from the saved screenshots.
 >       `SPAWN_ERR_STAGING_BUSY` meanwhile, with no retry: a command typed
 >       at the boot shell while `netd`'s `cpu` stages, or the reverse,
 >       fails at once with the "staging held" message. `make
->       test-spawn-size` measured 1.3 s for 200 KiB and 2.1 s for 1 MiB on
->       QEMU, against 1.1 s for the 13 KB `/bin/args` (so about a second a
->       MiB is the staging itself, the rest the command's own turn); USB
->       mass storage on the Pi will be slower. `SPAWN` then parses and
->       copies the file under the kernel lock. Options: a bulk
+>       test-spawn-size` measured, from the Enter to the next prompt, 0.9 s
+>       for 200 KiB and 1.5 s for 1 MiB on QEMU, against 0.8 s for the 13 KB
+>       `/bin/args` (so about 0.7 s a MiB is the staging itself); USB mass
+>       storage on the Pi will be slower. `netd`'s `cpu` stages in its own
+>       loop, so for that long `netd` serves nothing else: TCP, ARP and the
+>       9P export all wait (its heartbeat keeps the supervisor away, not the
+>       stall; the third review). `SPAWN` then parses and copies the file
+>       under the kernel lock. Options: a bulk
 >       `SPAWN_STAGE` (a grant, as `BLOCK_*` uses), a retry in the shell's
 >       and `netd`'s loops on `BUSY`, or the file read into the child's
 >       region with no global staging. A file over the bound is found out
->       only after the whole buffer is staged (2.2 s for 1 MiB plus a byte),
+>       only after the whole buffer is staged (1.5 s for 1 MiB plus a byte),
 >       where a size read first would refuse it holding nothing (the
 >       second review). Not urgent while no program near the
 >       bound exists; the cc-and-as item makes `/bin/CPP` about 238 KB.

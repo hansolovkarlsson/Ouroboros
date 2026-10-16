@@ -24,10 +24,12 @@ is refused and then until it succeeds. One boot, in this order:
    with nothing staged below it, where the shell's copy of stageprobe still
    lies, run in the background; the chunk and the SPAWN must each answer
    `SPAWN_ERROR`, that copy must not start (it would print its usage line),
-   and `echo ok-sparse`, typed in the three seconds between, must run (a
+   and `echo ok-sparse`, typed in the eight seconds between, must run (a
    refused chunk claims nothing). With `SPAWN_STAGE` taking a chunk
-   anywhere, as until 2026-10-16, the first three fail; with the order
-   checked after the claim, the echo is refused.
+   anywhere, as until 2026-10-16, all four fail; with the order checked
+   after the claim, the echo is refused. Either control also fails a check
+   or two in the steps after it, which the held claim or the started copy
+   disturbs.
 1. `exec /bin/stageprobe check 6000`, then `exec /bin/stageprobe hold 12000` (both in
    the background). While the holder holds, `echo refused-one` must be
    refused by the shell with the code's message and print nothing; the
@@ -93,7 +95,7 @@ def drive(guest):
     guest.type_line(f"exec /bin/stageprobe sparse {os.path.getsize(STAGEPROBE)}")
     guest.wait_for(r"a chunk with nothing staged below it answered code \d+", timeout=30)
     guest.type_line("echo ok-sparse")
-    guest.wait_for(r"spawn of the sparse total answered code \d+", timeout=30)
+    guest.wait_for(r"spawn of the sparse total answered code \d+", timeout=40)
     guest.wait_for(PROMPT, timeout=10)
     got["sparse_out"] = guest.transcript()[start:]
     # 1. the checker first (it waits six seconds before it tries), then the holder.

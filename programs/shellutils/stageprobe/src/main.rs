@@ -17,7 +17,7 @@
 //!                                 total past what this owner staged), never
 //!                                 read the previous stager's bytes as a program
 //! stageprobe sparse <total>      one 16-byte chunk ending at <total>, with
-//!                                 nothing staged below it, three seconds'
+//!                                 nothing staged below it, eight seconds'
 //!                                 wait (the refusal must have claimed
 //!                                 nothing, so another task spawns
 //!                                 meanwhile), then a SPAWN of <total>: the
@@ -116,12 +116,19 @@ pub extern "C" fn _start() -> ! {
     if mode == 3 {
         let total = ms;
         if total < CHUNK.len() as u64 {
-            usage(target);
+            // Not usage(): the rig reads a usage line as the previous
+            // stager's program started, and this is the probe's own
+            // argument at fault.
+            say(target, me, b"sparse total under the chunk's size: ", Some(total));
+            ulib::end_of_stream(target);
+            ulib::exit(2);
         }
         let offset = total - CHUNK.len() as u64;
         let r = ulib::syscall4(syscall_abi::SPAWN_STAGE, offset, CHUNK.as_ptr() as u64, CHUNK.len() as u64, 0);
         say(target, me, b"a chunk with nothing staged below it answered code ", Some(r));
-        sleep_ms(3000);
+        // Long enough for the rig's `echo` to stage and spawn whole before
+        // this SPAWN, on four cores under TCG too (the third review).
+        sleep_ms(8000);
         let s = ulib::syscall4(syscall_abi::SPAWN, total, syscall_abi::CON_TASK, 0, 0);
         say(target, me, b"spawn of the sparse total answered code ", Some(s));
         ulib::end_of_stream(target);

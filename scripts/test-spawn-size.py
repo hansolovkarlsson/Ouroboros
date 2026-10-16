@@ -110,9 +110,11 @@ def main() -> int:
         for name, line in runs:
             if not driven:
                 break
+            # Timed from the line's Enter, so the paced typing is not in it;
+            # each run's end is the shell's next prompt after its own echo.
+            guest.type_line(line)
             start = time.monotonic()
-            # Each run's end is the shell's next prompt after its own echo.
-            driven = guest.run([("", line), (re.escape(line) + r"\r?\n(?:.*\r?\n)*?# ", "")])
+            driven = guest.wait_for(re.escape(line) + r"\r?\n(?:.*\r?\n)*?# ")
             if driven:
                 took[name] = time.monotonic() - start
         out = guest.transcript()

@@ -603,8 +603,8 @@ const SPAWN_STAGING_SIZE: usize = syscall_abi::SPAWN_STAGING_SIZE;
 /// `.bss` makes the file smaller, never larger). So a buffer of at least
 /// [`loader::image_max`] refuses only a file carrying more than its slack
 /// (about 60 KiB at 1 MiB) outside its image. At 128 KiB the file bound
-/// bound first, at about an eighth of the image room (`/bin/CPP` at
-/// 107,648 bytes, 2026-10-16).
+/// was the one that refused first, at about an eighth of the image room
+/// (`/bin/CPP` at 107,648 bytes, 2026-10-16).
 const _: () = assert!(
     SPAWN_STAGING_SIZE as u64 >= loader::image_max(),
     "the spawn staging buffer is smaller than the image a program may occupy"
@@ -698,7 +698,14 @@ fn staging_state() -> Staging {
 /// it. Every staging arm calls this first, before it copies a byte, so a
 /// refused call stages nothing.
 fn claim_staging() -> Result<(), u64> {
-    match staging_state() {
+    claim_from(staging_state())
+}
+
+/// [`claim_staging`] from a state the caller already read, so a staging arm
+/// that must act on the state before claiming (`SPAWN_STAGE`'s order check)
+/// reads it once.
+fn claim_from(state: Staging) -> Result<(), u64> {
+    match state {
         Staging::Mine => Ok(()),
         Staging::Held => Err(syscall_abi::SPAWN_ERR_STAGING_BUSY),
         Staging::Free => {
@@ -1531,11 +1538,9 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // new owner wrote over them (the high review of #303). Checked
             // before the claim, so a refused chunk claims nothing (the
             // second review); a non-owner's expected offset is 0, since a
-            // free staging's latches are cleared on its claim. A chunk at 0
-            // starts the image over (an owner's retry, or one whose claim
-            // leaked), resetting this latch only: the argv, cwd and env it
-            // staged stand.
-            let expected = match staging_state() {
+            // free staging's latches are cleared on its claim.
+            let state = staging_state();
+            let expected = match state {
                 Staging::Mine => STAGED_IMAGE_END.load(Ordering::Relaxed),
                 Staging::Held => return syscall_abi::SPAWN_ERR_STAGING_BUSY,
                 Staging::Free => 0,
@@ -1545,8 +1550,19 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             }
             // The first chunk claims the staging for this task; another
             // task's chunk is refused until the owner spawns or ends.
-            if let Err(code) = claim_staging() {
+            if let Err(code) = claim_from(state) {
                 return code;
+            }
+            // A chunk at 0 starts the spawn over (an owner's retry, or one
+            // whose claim leaked): every latch is cleared, so nothing the
+            // abandoned attempt staged (its argv, cwd or env) reaches the
+            // child of this one (the third review). The shell and netd stage
+            // the program before the rest, so a spawn in progress loses
+            // nothing.
+            if offset == 0 {
+                PENDING_ENV_LEN.store(0, Ordering::Relaxed);
+                STAGED_ARGV_LEN.store(0, Ordering::Relaxed);
+                STAGED_CWD_LEN.store(0, Ordering::Relaxed);
             }
             // SAFETY: bounds sanity-checked above, same trust model as
             // every other userland pointer argument.
