@@ -544,27 +544,28 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   meson ran in `third_party/picolibc-prebuilt/COMPILER`; `libc.a` rebuilds
   byte for byte from it, and `make test` pins `libc.a` and the two header
   trees DevTools's `cc` reads (`scripts/check-picolibc.py`).
-- **One friction point when regenerating:** modern clang makes
-  implicit-function-declaration a hard error, which trips a couple of picolibc
-  1.8.9 tinystdio files — the cross-file demotes it
-  (`-Wno-error=implicit-function-declaration`). And Apple clang defaults to the
-  Mach-O linker, which rejects meson's GNU-linker probe, so the cross-file's `c`
-  binary carries `--ld-path=…/gcc-ld/ld.lld` to force LLD.
-- **That costs every optional flag probe** (found 2026-10-15): `--ld-path`
-  rides each compile, clang warns it unused, and meson probes with
+- **One friction point when regenerating:** Apple clang defaults to the
+  Mach-O linker, which rejects meson's GNU-linker probe, so the cross file
+  gives `--ld-path=…/gcc-ld/ld.lld` to force LLD, in `c_link_args`.
+- **Not on the `c` line, where it cost every optional flag probe** (found
+  2026-10-15, fixed 2026-10-16): there `--ld-path` rode each compile, clang
+  warned it unused, and meson probes with
   `-Werror=unused-command-line-argument`, so 30 of picolibc's 31 optional
-  flags probe NO and the library is built without them. It also leaves
-  `_HAVE_LONG_DOUBLE` undefined, which hides four long double prototypes
-  from their callers: that is what the implicit-declaration demotion above
-  is really for. The two known to have broken something are
-  `-fno-builtin-malloc` and `-fno-builtin-free`: without them clang deleted
-  as dead the size nano-malloc writes on a chunk just before freeing it, so
-  the library shipped until 2026-10-15 could hang in `realloc`. The cross
-  file passes both by hand. Others are still missing, and one is known to
-  matter: without `-frounding-math`, `round()` and `fdim()` raise spurious
-  overflow and inexact exceptions (`round(1e308)` sets both). Fixing the probes outright also turns on `long double` in
-  `picolibc.h`, which DevTools's `cc` refuses here, so that waits on
-  `ROADMAP.md`'s item.
+  flags probed NO and the library was built without them. Two broke
+  something: without `-fno-builtin-malloc` and `-fno-builtin-free` clang
+  deleted as dead the size nano-malloc writes on a chunk just before
+  freeing it, so the library shipped until 2026-10-15 could hang in
+  `realloc`; and without `-frounding-math` clang computed both arms of a
+  choice, so `round(1e308)` and `fdim(-1e308, 1e308)` raised overflow and
+  inexact (`make test-cfenv`). Four still probe NO, each GCC-only or a link
+  probe `-nostdlib` cannot pass.
+- **The probes define eleven `_HAVE_` macros** in `picolibc.h`,
+  `_HAVE_LONG_DOUBLE` and `_HAVE_COMPLEX` among them, and install
+  `complex.h`. DevTools's `cc` refuses `long double` here, so
+  `libc/picolibc-patches/0002` undefines the eleven and removes `complex.h`
+  in the installed tree: a program sees the headers it saw before, the
+  library is built with them, and the quad-float helpers (`__addtf3` and
+  the rest) its long double members need are linked by nothing yet.
 
 **Closed 2026-08-29** (this was the arc's one open follow-up): picolibc's
 `posix-console` stdout is *unbuffered* — one `write(1,&c,1)` per char, so console

@@ -2231,3 +2231,51 @@ stays there with the allocator and the items split from it.
 >       to `programs/linker.ld` or the C programs' link flags owes DevTools
 >       a `notice`, since `ld` holds that layout in its code. Note:
 >       [`handoffs/closed/2026-10-14-from-devtools-link-with-ld.md`](handoffs/closed/2026-10-14-from-devtools-link-with-ld.md).
+
+## picolibc's optional flags, DONE (2026-10-16)
+
+Moved verbatim from [`ROADMAP.md`](ROADMAP.md)'s libc section on 2026-10-16,
+from the block "What DevTools asks of Ouroboros next", which stays there
+with the allocator, the spawn buffer and DevTools's cc-and-as item.
+
+> - [x] **DONE 2026-10-16** **picolibc's optional flags, 30 of 31 probed NO.**
+>       Built as the last paragraph says: `--ld-path` in `c_link_args`, 27 of
+>       31 probing YES, `libc/picolibc-patches/0002` undefining the eleven
+>       macros and removing `complex.h` (`patch -E`), the include tree the
+>       pinned one byte for byte, the two hand-passed malloc flags and the
+>       implicit-declaration demotion dropped (picolibc passes the first to
+>       its 13 malloc files; the second has nothing left to demote).
+>       `-fno-builtin` goes to the 33 files picolibc marks, not every file.
+>       `make test-cfenv` (`/bin/CPICO fenv`) checks the exceptions and
+>       fails on the old library; every C rig passed with both linkers
+>       before `LIB_PIN` moved (`CHANGELOG.md`). Found
+>       2026-10-15: `libc/picolibc-cross.txt` puts `--ld-path` on the
+>       compiler line, clang warns it unused on every compile, and meson
+>       probes with `-Werror=unused-command-line-argument`, so picolibc has
+>       been built since 2026-08-28 without `-fno-builtin`,
+>       `-ffunction-sections`, `-frounding-math`, `-fno-common`,
+>       `-fno-stack-protector` and the rest. `-fno-builtin-malloc` and
+>       `-free` are passed by hand now: without them nano-malloc's `realloc`
+>       and `memalign` dropped size stores and `main`'s library could hang.
+>       Without `-frounding-math`, `round()` and `fdim()` raise spurious
+>       overflow and inexact exceptions (`round(1e308)` sets both; the review
+>       of #301). Moving `--ld-path` to `c_link_args` fixes every probe
+>       (tried: four NO remain, each GCC-only or a link probe `-nostdlib`
+>       cannot pass) but also defines `_HAVE_LONG_DOUBLE`, `_HAVE_COMPLEX`
+>       and nine others in `picolibc.h`, installs `complex.h`, ends the
+>       implicit declarations the cross file now demotes (four long double
+>       functions whose prototypes those macros hide), and needs the
+>       quad-float helpers (`__addtf3` and the rest) once a program uses
+>       `long double`. DevTools's `cc` refuses `long double` here, binary128
+>       in software, which is on DevTools's roadmap. **Waits on** that:
+>       [`handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md`](handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md).
+>       **It need not wait** (the max review of #301 showed): move
+>       `--ld-path` to `c_link_args`, and add a second header patch in
+>       `libc/picolibc-patches/` that undefines the eleven macros, and drop
+>       `complex.h` (Apple `patch` leaves it empty: `rm`, or `patch -E`); the
+>       include tree then hashes to `check-picolibc`'s pin unchanged, and
+>       `libc.a` gains `-frounding-math`, `-fno-builtin` and the rest. Its
+>       cost: the archive grows about 600 KB (programs shrink), every object
+>       changes, so the C rigs and `test-malloc` run on it and `LIB_PIN`
+>       moves. Its own PR. When DevTools's `long double` lands, the macros
+>       patch goes, with a notice.
