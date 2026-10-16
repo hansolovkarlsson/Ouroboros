@@ -125,6 +125,28 @@ test-cpp` pass on that image. A change to the linker script or the C link
 flags now owes DevTools a notice, and `make test` fails until it is sent:
 `scripts/check-link-layout.py` pins the layout `ld` copies.
 
+**A C program no longer hangs in `realloc` (2026-10-15).** 30 of picolibc's 31
+probes for its optional flags have failed since the port began: the cross
+file's `--ld-path` rides every compile, clang warns it unused, and meson
+probes with `-Werror=unused-command-line-argument`. So `libc.a` was built
+without the `-fno-builtin-malloc` and `-fno-builtin-free` picolibc gives
+its malloc, and clang deleted as dead the size nano-malloc writes on a
+chunk just before freeing it: a `realloc` that left a remainder freed it
+with whatever size was in its bytes, and a later call could loop for good
+(`memalign` likewise). The cross file passes both flags by hand and
+`libc.a` is rebuilt with them; every header is unchanged. `make
+test-malloc` runs `/bin/CMALLOC`, 20,000 random malloc, calloc, memalign,
+realloc and free at 500 to 4,000 slots, every block read back whole before
+it is freed, and hangs in a realloc on a library missing either flag. It
+also reports what DevTools's nano-malloc note is about, not graded: an
+operation costs about 360 ns at 500 slots and 1,740 at 4,000.
+newlib's binned malloc was built for that note and deferred after a
+review: on the fixed 1 MiB heap it left `errno` 0 when out of memory and
+refused requests with half the heap free (`ROADMAP.md`). `make test` now
+also runs `scripts/check-picolibc.py`: `libc.a`, which rebuilds byte for
+byte, and the two header trees DevTools's `cc` reads from this tree, each
+against a pin.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

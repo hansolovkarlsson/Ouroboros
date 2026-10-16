@@ -12,6 +12,16 @@
 #                            write()/read() stubs in libc/src/file.c (our porting
 #                            layer). picolibc's stdio bottoms out at those.
 #   -Dnewlib-global-errno -> a single global errno (no TLS; we have no threads).
+#   malloc is picolibc's default, nano-malloc: one address-ordered free list,
+#                            so each call is linear in the free blocks
+#                            (DevTools's note,
+#                            docs/handoffs/2026-10-14-from-devtools-nano-malloc.md).
+#                            newlib's binned malloc (-Dnewlib-nano-malloc=false)
+#                            was built and reviewed on 2026-10-15 and deferred:
+#                            on the fixed 1 MiB heap it refuses requests with half
+#                            the heap free and leaves errno 0 when out of memory
+#                            (ROADMAP.md). `make test-malloc` checks whichever it
+#                            is: realloc must not hang, calloc must zero.
 #   -Dthread-local-storage=false, -Dpicocrt=false (we use our own crt0),
 #   -Dsemihost=false, -Dmultilib=false, -Dtests=false, -Dspecsdir=none.
 # See docs/processes.md "Writing a program in C" and the libc-arc postmortem.
@@ -63,4 +73,10 @@ for p in "$ROOT"/libc/picolibc-patches/*.patch; do
     patch -s -p1 -d "$PREBUILT" < "$p" || { echo "build-picolibc: $p no longer applies"; exit 1; }
 done
 echo "$VERSION" > "$PREBUILT/VERSION"
+# The compiler that built it, as meson ran it (the cross file's `c`, resolved
+# by meson, not whatever clang is first on PATH): a new Apple clang alone
+# changes objects (2100.1.1 to 2100.3.34 changed six of them), so the tree says
+# which one it was.
+python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["host"]["c"]["full_version"])' \
+    "$BUILD/meson-info/intro-compilers.json" > "$PREBUILT/COMPILER"
 echo "picolibc-prebuilt regenerated ($VERSION), $(du -sh "$PREBUILT" | cut -f1)"

@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-14. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-15. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -1817,4 +1817,63 @@ output as its summary, and on a run that printed nothing it crashed instead
 of saying so. **Every step after the one a mutation breaks is running on a
 state nobody designed for; it has to grade that state, not assume it
 away.**
+
+## Six more, from the C library (2026-10-15)
+
+DevTools's nano-malloc note (#301) went through three reviews in a day, and
+the defect it ended up fixing had lived in `main` for seven weeks behind an
+observer that said NO to everything.
+
+**A build system's probes, all answering NO.** picolibc's meson build asks
+the compiler, flag by flag, whether it takes each optional flag, and leaves
+out what it refuses. Our cross file put `--ld-path` on the compiler line;
+clang warned it unused on every compile; meson probes with
+`-Werror=unused-command-line-argument`; so 30 of 31 probes failed, and the
+library was built without `-fno-builtin-malloc`, `-fno-builtin-free`,
+`-frounding-math` and the rest. The one YES was
+`-Wno-unused-command-line-argument`, which picolibc then adds to every
+compile, silencing the one warning that would have shown it. It surfaced
+only when newlib's binned malloc, built for the note, faulted on its first
+`calloc` (`memset(mem, 0, -8)`), and the hunt for why led to the meson log.
+Without `-fno-builtin-free` the nano-malloc `main` shipped had been deleting
+a chunk's size store before `free` all along, and could hang in `realloc`.
+**A probe that answers is not a probe that works: read what it was asked
+and what it said, at least once.**
+
+**A ratio whose denominator carried the start-up.** The first `make
+test-malloc` timed the 500-slot count first, so it absorbed the program's
+first touches, and the grade, the largest count's cost under twice the
+smallest's, passed at 0.6. I wrote "about 110 ns at every size" beside
+"0.6 times" in four records without seeing they could not both be true. A
+high review did. **A ratio has two ends; grade what each one measured.**
+
+**A control run before the code it controlled existed.** The nano-malloc
+control, 6.4 times and failing as it should, ran against a CMALLOC that did
+not yet call `calloc`. When the review's rework added it, the same library
+never printed a line: the hang above. The control had proved the timing
+could fail, and nothing about the program as it then stood.
+**Re-run every control after the change that adds what it controls.**
+
+**A pass on the binary from before.** Restoring the binned `libc.a` with
+`cp -R` gave it the time of the copy, a minute older than an `edit.elf`
+linked against nano-malloc for a control, so make did not relink, and
+`test-edit` passed: on the wrong allocator. I caught it only because a pass
+there made no sense, and the two timestamps showed why. **A pass is evidence about the binary that ran; check
+it is the one meant.**
+
+**A guard that could not see what it guarded.** `check-picolibc`, written in
+the same PR to keep the defect out of `make test`, checked which archive
+members define `malloc`, `free` and `realloc`. `main`'s hanging library
+defines them in the same members. The second max review ran the check on it
+and it passed. It now hashes `libc.a` whole, which rebuilds byte for byte,
+and fails on `main`'s. **Mutate a new check with the defect it was written
+for, before anything else.**
+
+**A control that the allocator made blind.** "A calloc that clears only 16
+bytes must fail the calloc check" passed: nano-malloc's own `malloc` zeroes
+every block, so a calloc built on it returns zeros whatever it clears. The
+control was replaced with a calloc that leaves a byte set, and the docs now
+say the calloc and memalign counters cannot fail under nano at all. **A
+mutation tests the check only where the system under it can show the
+fault.**
 

@@ -2214,3 +2214,20 @@ note on the block, verbatim:
 >       cuts a call short too, and `pwd` stays `/`. Controls: the call number
 >       not compared (`cd` took SUB's "exists"), a call's wait not
 >       interruptible; both fail it.*
+
+## What DevTools asked of Ouroboros first: the linker, DONE (2026-10-14)
+
+Moved verbatim from [`ROADMAP.md`](ROADMAP.md)'s libc section on 2026-10-15,
+the first item of the block "What DevTools asks of Ouroboros next", which
+stays there with the allocator and the items split from it.
+
+> - [x] **DONE 2026-10-14** **Link `/bin/edit` and `/bin/cpp` with DevTools's `ld`,
+>       and boot them.** Built the same day: `make CLINK=devtools`;
+>       `test-edit` and `test-cpp` pass on that image (`CHANGELOG.md`). A choice of linker for those two links only
+>       (`ld --target=ouroboros --gc-sections` on the same inputs, `ld.lld`
+>       staying the default), `ld` built from the sibling checkout as Edit
+>       and cpp are, then `make test-edit` and `make test-cpp` on an image
+>       linked that way. The reply names the commit. From then on, a change
+>       to `programs/linker.ld` or the C programs' link flags owes DevTools
+>       a `notice`, since `ld` holds that layout in its code. Note:
+>       [`handoffs/closed/2026-10-14-from-devtools-link-with-ld.md`](handoffs/closed/2026-10-14-from-devtools-link-with-ld.md).

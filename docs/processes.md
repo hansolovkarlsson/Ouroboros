@@ -537,12 +537,34 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   `-Dposix-console=true`, `-Dnewlib-global-errno=true` (one global `errno`, no
   TLS — we have no threads), `-Dthread-local-storage=false`, `-Dpicocrt=false`
   (our `crt0`), `-Dsemihost=false`, `-Dmultilib=false`, `-Dtests=false`.
+  malloc is picolibc's default, nano-malloc, which walks one free list on
+  every call (about 360 ns an operation at 500 slots, 1,740 at 4,000, `make
+  test-malloc`); newlib's binned malloc was tried on 2026-10-15 and deferred
+  to the per-program heap (`ROADMAP.md`). The build records the compiler
+  meson ran in `third_party/picolibc-prebuilt/COMPILER`; `libc.a` rebuilds
+  byte for byte from it, and `make test` pins `libc.a` and the two header
+  trees DevTools's `cc` reads (`scripts/check-picolibc.py`).
 - **One friction point when regenerating:** modern clang makes
   implicit-function-declaration a hard error, which trips a couple of picolibc
   1.8.9 tinystdio files — the cross-file demotes it
   (`-Wno-error=implicit-function-declaration`). And Apple clang defaults to the
   Mach-O linker, which rejects meson's GNU-linker probe, so the cross-file's `c`
   binary carries `--ld-path=…/gcc-ld/ld.lld` to force LLD.
+- **That costs every optional flag probe** (found 2026-10-15): `--ld-path`
+  rides each compile, clang warns it unused, and meson probes with
+  `-Werror=unused-command-line-argument`, so 30 of picolibc's 31 optional
+  flags probe NO and the library is built without them. It also leaves
+  `_HAVE_LONG_DOUBLE` undefined, which hides four long double prototypes
+  from their callers: that is what the implicit-declaration demotion above
+  is really for. The two known to have broken something are
+  `-fno-builtin-malloc` and `-fno-builtin-free`: without them clang deleted
+  as dead the size nano-malloc writes on a chunk just before freeing it, so
+  the library shipped until 2026-10-15 could hang in `realloc`. The cross
+  file passes both by hand. Others are still missing, and one is known to
+  matter: without `-frounding-math`, `round()` and `fdim()` raise spurious
+  overflow and inexact exceptions (`round(1e308)` sets both). Fixing the probes outright also turns on `long double` in
+  `picolibc.h`, which DevTools's `cc` refuses here, so that waits on
+  `ROADMAP.md`'s item.
 
 **Closed 2026-08-29** (this was the arc's one open follow-up): picolibc's
 `posix-console` stdout is *unbuffered* — one `write(1,&c,1)` per char, so console

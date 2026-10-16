@@ -77,8 +77,7 @@ Ouroboros's `main`:
 
 Accepted 2026-10-14 by Ouroboros. It is an item in `docs/ROADMAP.md`'s
 POSIX / C-program portability section, beside the per-program heap, and
-cites this note. Not built yet: the reply will name the commit, and the
-note will move to `closed/`, when it is.
+cites this note. Not built yet: see the update of 2026-10-15 below.
 
 Checked against `main` at `a9e6ebb` before accepting:
 
@@ -100,3 +99,59 @@ what `CMEM` can hold, run the C rigs (`test-heap`, `test-cpp`,
 after. If the binned allocator costs too much of the 1 MiB, the
 per-program heap (the roadmap item beside this one) is what would pay for
 it, and the reply will say so rather than choose silently.
+
+### Update, 2026-10-15: half done, the speed half deferred
+
+**Still accepted, not done.** What went in (branch `fix/binned-malloc`,
+#301, on `main` once Hans merges it) is a fix your measurements may have
+met without knowing it; what you asked for is deferred, and why is below.
+
+- **The `libc.a` on `main` (`9d9203a3`) can hang in `realloc`.**
+  picolibc's probes for its optional flags all fail under our cross file
+  (its `--ld-path` rides every compile, clang warns it unused, and meson
+  probes with `-Werror=unused-command-line-argument`), so it was built
+  without the `-fno-builtin-malloc` and `-fno-builtin-free` picolibc gives
+  its malloc. Without `-fno-builtin-free`, clang deleted as dead the size
+  nano-malloc writes on a chunk just before freeing it (`realloc`'s split of
+  a remainder, `__malloc_grow_chunk`); the chunk joined the free list with a
+  garbage size, and a later call loops for good. `/bin/CMALLOC` hangs on
+  that library in a `realloc` within its first count's checks. Your runs against it
+  may have met this as well as the quadratic walk. Without
+  `-fno-builtin-malloc`, nano's `memalign` drops its size store the same way.
+- **Fixed:** `libc/picolibc-cross.txt` passes both flags by hand, and
+  `libc.a` is nano-malloc again, rebuilt with them. `picolibc.h` and every
+  other header are `main`'s byte for byte (and `scripts/check-picolibc.py`,
+  in `make test` now, pins both trees your `cc` reads,
+  `third_party/picolibc-prebuilt/include` and `libc/pico/include`, so a
+  change to either fails until you are sent a notice, and pins `libc.a`). `make test-malloc` runs CMALLOC on
+  QEMU: 20,000 random malloc, calloc, memalign, realloc and free at 500 to
+  4,000 slots, every block read back whole before it is freed; it fails,
+  by hanging, on a library missing either flag.
+- **Deferred: the allocator not linear in the free blocks.** newlib's
+  binned malloc (`-Dnewlib-nano-malloc=false`) was built, measured (about
+  100 ns an operation at every count, where nano takes about 360 at 500
+  slots and 1,740 at 4,000) and reviewed at depth, and on this platform as it stands
+  it is not fit:
+  - out of memory it leaves `errno` 0: newlib's malloc relies on `sbrk` to
+    set `ENOMEM`, which ours does not. Your cpp then reads the failed
+    `fopen` of a header as "already included" (`source.c:204`,
+    `pp.c:850-852`) and drops the `#include` silently, exit 0;
+  - on the fixed 1 MiB heap it refuses requests with half the heap free: it
+    asks `sbrk` for the whole request, not the shortfall, and our `sbrk`
+    refuses the negative increment that trimming needs (`malloc(600 KiB)`,
+    `free`, `malloc(700 KiB)` fails on an empty heap);
+  - it adds about 11 KB a program, 6 KB of it relocations, and `/bin/CPP`
+    must stay under the kernel's 128 KB spawn buffer.
+  None of that is beyond fixing (an `sbrk` that sets `ENOMEM` and gives
+  memory back, trimming off, or an allocator of our own like your 35-line
+  one), and the gain is not visible here yet: inside 1 MiB cpp runs out of
+  memory, at about 70 KB of a macro-heavy input, before nano's walk costs
+  anything measurable (at 35 KB both allocators finish in the same time).
+  So the allocator is to be chosen with the per-program heap, which is
+  what makes large inputs possible here. Both are items in `ROADMAP.md`'s
+  POSIX / C-program portability section.
+- **What you could do meanwhile:** your harness links its own allocator by
+  `--wrap`, as your note's item 3 did; against this `libc.a` that remains
+  the way to run `test_output` and `sqlite3.c` fast. If you need the speed
+  on Ouroboros itself before the per-program heap, say so in a note, and
+  the order of the two can be reconsidered.

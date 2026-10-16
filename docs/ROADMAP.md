@@ -2570,16 +2570,6 @@ be reviewed after the fact from the saved screenshots.
 >       `mmu.rs`/`tasks.rs` mapping a region of more than one slot. Split
 >       from the 1 MiB heap item (#210, now in `roadmap-completed.md`), which
 >       met the handoff's **Done when**.
-> - [ ] **fix** **An allocator that is not linear in the free blocks.**
->       picolibc's nano-malloc keeps one address-ordered free list, so
->       `malloc`, `free` and `realloc` each walk it and a program holding
->       many blocks is quadratic: DevTools measured cpp's large test at
->       208 s where a size-class allocator took 1 s, and `sqlite3.c`
->       unfinished after 34 minutes against 5 s. Candidate:
->       `-Dnewlib-nano-malloc=false` in `scripts/build-picolibc.sh`, newlib's
->       binned malloc, its size and overhead weighed against the 1 MiB heap
->       (the item above pays if it does not fit). Note:
->       [`handoffs/2026-10-14-from-devtools-nano-malloc.md`](handoffs/2026-10-14-from-devtools-nano-malloc.md).
 > - [ ] **new** **A real file identity in `fstat` (`st_dev`, `st_ino`).**
 >       The second half of the `fstat` fallback (#216, now in
 >       `roadmap-completed.md`): the `NP_FSTAT` record carries
@@ -2592,18 +2582,90 @@ be reviewed after the fact from the saved screenshots.
 >       identity" and rereads headers. Proem's fstat note asked for it
 >       first; the fallback met its **Done when**.
 >
-> **What DevTools asks of Ouroboros next, accepted 2026-10-14.**
+> **What DevTools asks of Ouroboros next, accepted 2026-10-14.** The first
+> item, `ld` linking Edit and cpp, is done and moved to
+> [`roadmap-completed.md`](roadmap-completed.md) on 2026-10-15. The
+> allocator item came from DevTools too and moved here from Proem's block
+> that day; the flag probes were found building it, the cc-and-as item is
+> DevTools's request of the same day, and the review of #301 found the spawn
+> buffer limit that blocks it:
 >
-> - [x] **DONE 2026-10-14** **Link `/bin/edit` and `/bin/cpp` with DevTools's `ld`,
->       and boot them.** Built the same day: `make CLINK=devtools`;
->       `test-edit` and `test-cpp` pass on that image (`CHANGELOG.md`). A choice of linker for those two links only
->       (`ld --target=ouroboros --gc-sections` on the same inputs, `ld.lld`
->       staying the default), `ld` built from the sibling checkout as Edit
->       and cpp are, then `make test-edit` and `make test-cpp` on an image
->       linked that way. The reply names the commit. From then on, a change
->       to `programs/linker.ld` or the C programs' link flags owes DevTools
->       a `notice`, since `ld` holds that layout in its code. Note:
->       [`handoffs/closed/2026-10-14-from-devtools-link-with-ld.md`](handoffs/closed/2026-10-14-from-devtools-link-with-ld.md).
+> - [ ] **fix** **An allocator that is not linear in the free blocks**, chosen
+>       with the per-program heap above. picolibc's nano-malloc keeps one
+>       address-ordered free list, so `malloc`, `free` and `realloc` each walk
+>       it: `make test-malloc` measures about 360 ns an operation at 500 slots
+>       and 1,740 at 4,000 (DevTools measured cpp's large test at 208 s against
+>       1 s for a size-class allocator, on its own heap). newlib's binned
+>       malloc (`-Dnewlib-nano-malloc=false`) was built on 2026-10-15 (about
+>       100 ns at every count) and deferred by the max review of #301: out
+>       of memory it leaves `errno` 0 (the port's `sbrk` never sets `ENOMEM`,
+>       which newlib relies on, and cpp then drops an `#include` silently);
+>       it refuses requests with half the 1 MiB heap free (it asks `sbrk` for
+>       the whole request, and `sbrk` refuses the negative increment trimming
+>       needs: `malloc(600K)`, `free`, `malloc(700K)` fails); its `memalign`
+>       accepts a non-power-of-two alignment; `malloc` no longer zeroes and
+>       `realloc(p, 0)` no longer frees; `getpagesize` leaves `libc.a`; and
+>       it adds about 11 KB a program, 6 KB of it relocations, against the
+>       128 KB spawn buffer. The choice is that, with an `sbrk` that sets
+>       `ENOMEM` and gives memory back and trimming off, or an allocator of
+>       our own over `sbrk` (DevTools's 35-line size-class one was its
+>       measure); either way `test-malloc`'s timing becomes graded again,
+>       with a band, not a ceiling. Inside 1 MiB the gain does not show:
+>       cpp runs out of memory at about 70 KB of input before nano's walk
+>       costs anything (at 35 KB both finish in the same time). Note:
+>       [`handoffs/2026-10-14-from-devtools-nano-malloc.md`](handoffs/2026-10-14-from-devtools-nano-malloc.md).
+> - [ ] **new** **Compile `/bin/edit` and `/bin/cpp` with DevTools's `cc` and
+>       `as`, as well as linking them with `ld`.** A setting beside `CLINK`,
+>       clang and `ld.lld` staying the default; `cc` and `as` built here from
+>       DevTools's sources as `ld` is, never by DevTools's build; each source
+>       in two commands (`cc --target=ouroboros -I -D` to `.s`, `as` to
+>       `.o`), every object depending on all its program's sources, since
+>       `cc` writes no dependency files; outputs named per toolchain and the
+>       tools in the image stamp; `test-edit` and `test-cpp` on that image
+>       with `/bin/EDIT` and `/bin/CPP` read back and compared. **Blocked by**
+>       the item below: built that way `/bin/CPP` is about 238 KB and
+>       `/bin/EDIT` about 144 KB (the review of #301's measurement), over the
+>       spawn buffer. Note:
+>       [`handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md`](handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md).
+> - [ ] **new** **A program file larger than the 128 KB spawn buffer.**
+>       `SPAWN_STAGING_SIZE` (131,072, `syscall-abi`) bounds every program
+>       file: spawn refuses a larger one. clang's `/bin/CPP` is 107,648
+>       bytes, about 23 KB under it, and cpp is built unpinned from
+>       `../DevTools/cpp`, so its own growth closes that. A larger buffer, or
+>       a program streamed into its region rather than staged whole, is the
+>       choice; the staging owner (`claim_staging`) and `make
+>       test-spawn-owner` are what it touches.
+> - [ ] **fix** **picolibc's optional flags, 30 of 31 probed NO.** Found
+>       2026-10-15: `libc/picolibc-cross.txt` puts `--ld-path` on the
+>       compiler line, clang warns it unused on every compile, and meson
+>       probes with `-Werror=unused-command-line-argument`, so picolibc has
+>       been built since 2026-08-28 without `-fno-builtin`,
+>       `-ffunction-sections`, `-frounding-math`, `-fno-common`,
+>       `-fno-stack-protector` and the rest. `-fno-builtin-malloc` and
+>       `-free` are passed by hand now: without them nano-malloc's `realloc`
+>       and `memalign` dropped size stores and `main`'s library could hang.
+>       Without `-frounding-math`, `round()` and `fdim()` raise spurious
+>       overflow and inexact exceptions (`round(1e308)` sets both; the review
+>       of #301). Moving `--ld-path` to `c_link_args` fixes every probe
+>       (tried: four NO remain, each GCC-only or a link probe `-nostdlib`
+>       cannot pass) but also defines `_HAVE_LONG_DOUBLE`, `_HAVE_COMPLEX`
+>       and nine others in `picolibc.h`, installs `complex.h`, ends the
+>       implicit declarations the cross file now demotes (four long double
+>       functions whose prototypes those macros hide), and needs the
+>       quad-float helpers (`__addtf3` and the rest) once a program uses
+>       `long double`. DevTools's `cc` refuses `long double` here, binary128
+>       in software, which is on DevTools's roadmap. **Waits on** that:
+>       [`handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md`](handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md).
+>       **It need not wait** (the max review of #301 showed): move
+>       `--ld-path` to `c_link_args`, and add a second header patch in
+>       `libc/picolibc-patches/` that undefines the eleven macros, and drop
+>       `complex.h` (Apple `patch` leaves it empty: `rm`, or `patch -E`); the
+>       include tree then hashes to `check-picolibc`'s pin unchanged, and
+>       `libc.a` gains `-frounding-math`, `-fno-builtin` and the rest. Its
+>       cost: the archive grows about 600 KB (programs shrink), every object
+>       changes, so the C rigs and `test-malloc` run on it and `LIB_PIN`
+>       moves. Its own PR. When DevTools's `long double` lands, the macros
+>       patch goes, with a notice.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
@@ -4140,6 +4202,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   "more" in the reply) is a wire change: fsd, `netd`'s export, both host
   peers and `ulib`. cpp is not affected: it opens headers by path. Found
   2026-10-06 staging the C headers (step 6 of the C-hosting plan).
+  `/bin` is close too: since `/bin/CMALLOC` its 80 names take 499 bytes as
+  `name\n` (the review of #301 measured 506 of the reply on FAT32), so a
+  program or two more staged there drops a name from `ls /bin` and tab
+  completion.
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970
