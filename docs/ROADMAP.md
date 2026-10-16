@@ -2588,8 +2588,9 @@ be reviewed after the fact from the saved screenshots.
 > allocator item came from DevTools too and moved here from Proem's block
 > that day; the flag probes were found building it, the cc-and-as item is
 > DevTools's request of the same day, and the review of #301 found the spawn
-> buffer limit that blocks it. The flag probes are done and moved to
-> [`roadmap-completed.md`](roadmap-completed.md) on 2026-10-16:
+> buffer limit that blocked it. The flag probes and the spawn buffer are
+> done and moved to [`roadmap-completed.md`](roadmap-completed.md) on
+> 2026-10-16:
 >
 > - [ ] **fix** **An allocator that is not linear in the free blocks**, chosen
 >       with the per-program heap above. picolibc's nano-malloc keeps one
@@ -2606,8 +2607,8 @@ be reviewed after the fact from the saved screenshots.
 >       needs: `malloc(600K)`, `free`, `malloc(700K)` fails); its `memalign`
 >       accepts a non-power-of-two alignment; `malloc` no longer zeroes and
 >       `realloc(p, 0)` no longer frees; `getpagesize` leaves `libc.a`; and
->       it adds about 11 KB a program, 6 KB of it relocations, against the
->       128 KB spawn buffer. The choice is that, with an `sbrk` that sets
+>       it adds about 11 KB a program, 6 KB of it relocations, against what
+>       was then a 128 KB spawn buffer (1 MiB since 2026-10-16). The choice is that, with an `sbrk` that sets
 >       `ENOMEM` and gives memory back and trimming off, or an allocator of
 >       our own over `sbrk` (DevTools's 35-line size-class one was its
 >       measure). An allocator of our own replaces the whole family, not
@@ -2629,19 +2630,32 @@ be reviewed after the fact from the saved screenshots.
 >       `.o`), every object depending on all its program's sources, since
 >       `cc` writes no dependency files; outputs named per toolchain and the
 >       tools in the image stamp; `test-edit` and `test-cpp` on that image
->       with `/bin/EDIT` and `/bin/CPP` read back and compared. **Blocked by**
->       the item below: built that way `/bin/CPP` is about 238 KB and
->       `/bin/EDIT` about 144 KB (the review of #301's measurement), over the
->       spawn buffer. Note:
+>       with `/bin/EDIT` and `/bin/CPP` read back and compared. Built that
+>       way `/bin/CPP` is about 238 KB and `/bin/EDIT` about 144 KB (the
+>       review of #301's measurement); the spawn buffer that blocked it is
+>       1 MiB since 2026-10-16 (`roadmap-completed.md`). Note:
 >       [`handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md`](handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md).
-> - [ ] **new** **A program file larger than the 128 KB spawn buffer.**
->       `SPAWN_STAGING_SIZE` (131,072, `syscall-abi`) bounds every program
->       file: spawn refuses a larger one. clang's `/bin/CPP` is 107,648
->       bytes, about 23 KB under it, and cpp is built unpinned from
->       `../DevTools/cpp`, so its own growth closes that. A larger buffer, or
->       a program streamed into its region rather than staged whole, is the
->       choice; the staging owner (`claim_staging`) and `make
->       test-spawn-owner` are what it touches.
+> - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
+>       the high review of #303: a file is staged 512 bytes a call, each a
+>       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused
+>       `SPAWN_ERR_STAGING_BUSY` meanwhile, with no retry: a command typed
+>       at the boot shell while `netd`'s `cpu` stages, or the reverse,
+>       fails at once with the "staging held" message. `make
+>       test-spawn-size` measured, from the Enter to the next prompt, 0.9 s
+>       for 200 KiB and 1.5 s for 1 MiB on QEMU, against 0.8 s for the 13 KB
+>       `/bin/args` (so about 0.7 s a MiB is the staging itself); USB mass
+>       storage on the Pi will be slower. `netd`'s `cpu` stages in its own
+>       loop, so for that long `netd` serves nothing else: TCP, ARP and the
+>       9P export all wait (its heartbeat keeps the supervisor away, not the
+>       stall; the third review). `SPAWN` then parses and copies the file
+>       under the kernel lock. Options: a bulk
+>       `SPAWN_STAGE` (a grant, as `BLOCK_*` uses), a retry in the shell's
+>       and `netd`'s loops on `BUSY`, or the file read into the child's
+>       region with no global staging. A file over the bound is found out
+>       only after the whole buffer is staged (1.5 s for 1 MiB plus a byte),
+>       where a size read first would refuse it holding nothing (the
+>       second review). Not urgent while no program near the
+>       bound exists; the cc-and-as item makes `/bin/CPP` about 238 KB.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not

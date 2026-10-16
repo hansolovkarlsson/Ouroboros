@@ -246,7 +246,7 @@ const _: () = assert!(
 /// the tail. Reported to userland as `HEAP_INFO_IMAGE_MAX`, so the number
 /// the shell prints when `spawn` refuses an image is the one
 /// `elf_region_size` enforces, with no literal anywhere to keep in step.
-pub(crate) fn image_max() -> u64 {
+pub(crate) const fn image_max() -> u64 {
     (SLOT_PAGES - TAIL_PAGES) * PAGE_SIZE as u64
 }
 

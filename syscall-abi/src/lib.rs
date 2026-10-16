@@ -218,9 +218,9 @@ pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
 /// staging until its own next `SPAWN` or its end, and every other spawner
 /// is refused meanwhile. A child gets no more than its owner staged: the
 /// argv and cwd lengths are capped to the `ARGS_STAGE`/`CWD_STAGE` lengths
-/// the owner gave, and a total past the end of its highest `SPAWN_STAGE`
-/// chunk is [`SPAWN_ERROR`], so the previous stager's bytes never reach a
-/// new owner's child.
+/// the owner gave, and a total past the end of the program it staged (its
+/// chunks in order from 0, see [`SPAWN_STAGE`]) is [`SPAWN_ERROR`], so the
+/// previous stager's bytes never reach a new owner's child.
 pub const SPAWN: u64 = 16;
 
 /// `(exit code)` -> **does not return** on success: the calling task is
@@ -478,7 +478,13 @@ pub const ACCT_TASK: u64 = 5;
 /// kernel's fixed spawn staging buffer ([`SPAWN_STAGING_SIZE`]) at `offset` - the feed
 /// half of the two-step spawn (see [`SPAWN`]'s contract-change note).
 /// Chunks are bounded by the same 512-byte per-syscall buffer cap as
-/// everything else; offsets past the staging buffer are refused. The first
+/// everything else; offsets past the staging buffer are refused, and so,
+/// since 2026-10-16, is a chunk that starts neither at 0 nor where the
+/// caller's last one ended, without claiming the staging: the staged
+/// program is a prefix its owner wrote whole, never a previous stager's
+/// bytes with a chunk on top. A chunk at 0 starts the spawn over: the argv,
+/// cwd and env staged before it are dropped, so stage the program first.
+/// The first
 /// staging call claims the staging for the caller; another task's call is
 /// [`SPAWN_ERR_STAGING_BUSY`] until the owner spawns or ends (see
 /// [`SPAWN`]).
@@ -1806,7 +1812,13 @@ pub const FS_ERR_AUTH: u64 = u64::MAX - 30;
 /// sizes its buffer from this constant. (The other spawn bound, the most
 /// a loaded IMAGE may occupy, is the running kernel's to report, not a
 /// literal: [`HEAP_INFO_IMAGE_MAX`].)
-pub const SPAWN_STAGING_SIZE: usize = 131072;
+///
+/// 1 MiB since 2026-10-16, 128 KiB before: `/bin/CPP` was 107,648 bytes
+/// and grows with DevTools's tree, and built by DevTools's `cc` and `as`
+/// it is about 238 KB. The kernel asserts at build time that this is at
+/// least the image bound, so a program is refused for its image, not its
+/// file, unless its file carries more than about 60 KiB past its image.
+pub const SPAWN_STAGING_SIZE: usize = 1024 * 1024;
 
 /// The file was read, but isn't a loadable program (bad ELF header,
 /// unsupported relocation, malformed program headers, ...).

@@ -162,6 +162,22 @@ header patch undefines them: every header is unchanged byte for byte.
 Every C rig passed with `ld.lld` and `CLINK=devtools` before `LIB_PIN`
 moved.
 
+**A program file may be 1 MiB (2026-10-16).** Spawn stages the whole file
+in the kernel before it parses it, and the buffer was 128 KiB, an eighth of
+the 964 KiB a loaded image may occupy: `/bin/CPP` was 107,648 bytes and
+growing, and DevTools's `cc` and `as` make it about 238 KB.
+`SPAWN_STAGING_SIZE` is 1 MiB, and the kernel's build asserts it holds at
+least the image bound, so a program is refused for its image first. The
+buffer is RAM only; the kernel file is unchanged. `make test-spawn-size`
+spawns `/bin/ARGS` padded to 200 KiB and to the bound, and checks the
+refusal one byte over. And `SPAWN_STAGE` takes chunks in order: the
+kernel bounded a spawn by the end of the highest chunk its owner staged,
+so one chunk near the end made the previous stager's bytes below it count
+as the new owner's, and a program could be started, or read as data, by a
+task that may not read its file (the review of this change; the hole was
+as old as the staging's owner, 2026-10-11). `make test-spawn-owner`
+stages one such chunk over the shell's copy of `/bin/STAGEPROBE`.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

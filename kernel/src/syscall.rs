@@ -588,14 +588,27 @@ fn copy_out(ptr: u64, cap: u64, entry: &[u8]) -> Option<u64> {
     Some(entry.len() as u64)
 }
 
-/// Sized generously for a real userland program - the default shell is
-/// currently ~45KB. A fixed EL1 static, not a heap allocation: `alloc` is
-/// unavailable this deep into boot (see `loader.rs`'s own reasoning for
-/// why it's fine on the *boot-services* side but not here), and this
-/// matches this project's established "fixed static buffer, no heap"
-/// pattern for every other runtime buffer (`fat32.rs`'s callers,
-/// `shell/src/main.rs`'s own read buffers).
+/// The whole program file, staged before `SPAWN` parses it, sized by the
+/// ABI's constant (1 MiB since 2026-10-16). A fixed EL1 static, not a heap
+/// allocation: `alloc` is unavailable this deep into boot (see `loader.rs`'s
+/// own reasoning for why it's fine on the *boot-services* side but not
+/// here), and this matches this project's established "fixed static buffer,
+/// no heap" pattern for every other runtime buffer. Zeroed, so it is RAM
+/// only: the PE image's `.data` carries no bytes for it.
 const SPAWN_STAGING_SIZE: usize = syscall_abi::SPAWN_STAGING_SIZE;
+
+/// The file bound must not refuse what the image bound accepts: a
+/// program's file is at most about its loaded image, since its segments sit
+/// in the file at their image offsets and the rest is headers (a large
+/// `.bss` makes the file smaller, never larger). So a buffer of at least
+/// [`loader::image_max`] refuses only a file carrying more than its slack
+/// (about 60 KiB at 1 MiB) outside its image. At 128 KiB the file bound
+/// was the one that refused first, at about an eighth of the image room
+/// (`/bin/CPP` at 107,648 bytes, 2026-10-16).
+const _: () = assert!(
+    SPAWN_STAGING_SIZE as u64 >= loader::image_max(),
+    "the spawn staging buffer is smaller than the image a program may occupy"
+);
 
 static SPAWN_STAGING: SyncCell<[u8; SPAWN_STAGING_SIZE]> = SyncCell::new([0; SPAWN_STAGING_SIZE]);
 
@@ -623,7 +636,9 @@ static ENV_STAGING: SyncCell<[u8; ENV_STAGING_SIZE]> = SyncCell::new([0; ENV_STA
 static PENDING_ENV_LEN: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 /// How much of each buffer the OWNER staged, so a `SPAWN` can hand its
-/// child only that: the end of the highest `SPAWN_STAGE` chunk, the
+/// child only that: the end of the owner's last `SPAWN_STAGE` chunk (each
+/// starting where the one before ended, so every byte below it is the
+/// owner's), the
 /// `ARGS_STAGE` length and the `CWD_STAGE` length. `SPAWN`'s own lengths
 /// are the caller's word and were the only bound until 2026-10-11: a new
 /// owner that staged one chunk and asked for a 512-byte argv got the
@@ -683,7 +698,14 @@ fn staging_state() -> Staging {
 /// it. Every staging arm calls this first, before it copies a byte, so a
 /// refused call stages nothing.
 fn claim_staging() -> Result<(), u64> {
-    match staging_state() {
+    claim_from(staging_state())
+}
+
+/// [`claim_staging`] from a state the caller already read, so a staging arm
+/// that must act on the state before claiming (`SPAWN_STAGE`'s order check)
+/// reads it once.
+fn claim_from(state: Staging) -> Result<(), u64> {
+    match state {
         Staging::Mine => Ok(()),
         Staging::Held => Err(syscall_abi::SPAWN_ERR_STAGING_BUSY),
         Staging::Free => {
@@ -1507,16 +1529,46 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             if end > staging.len() {
                 return SPAWN_ERROR;
             }
+            // In order: a chunk starts at 0 or where this owner's last one
+            // ended, so STAGED_IMAGE_END is a prefix the owner wrote whole.
+            // It was a high-water mark until 2026-10-16, and one chunk near
+            // the end made every byte below it count as staged: the previous
+            // stager's program, a binary the new owner may not read, could
+            // be spawned, or its bytes taken as data by an ELF header the
+            // new owner wrote over them (the high review of #303). Checked
+            // before the claim, so a refused chunk claims nothing (the
+            // second review); a non-owner's expected offset is 0, since a
+            // free staging's latches are cleared on its claim.
+            let state = staging_state();
+            let expected = match state {
+                Staging::Mine => STAGED_IMAGE_END.load(Ordering::Relaxed),
+                Staging::Held => return syscall_abi::SPAWN_ERR_STAGING_BUSY,
+                Staging::Free => 0,
+            };
+            if offset != 0 && offset != expected {
+                return SPAWN_ERROR;
+            }
             // The first chunk claims the staging for this task; another
             // task's chunk is refused until the owner spawns or ends.
-            if let Err(code) = claim_staging() {
+            if let Err(code) = claim_from(state) {
                 return code;
+            }
+            // A chunk at 0 starts the spawn over (an owner's retry, or one
+            // whose claim leaked): every latch is cleared, so nothing the
+            // abandoned attempt staged (its argv, cwd or env) reaches the
+            // child of this one (the third review). The shell and netd stage
+            // the program before the rest, so a spawn in progress loses
+            // nothing.
+            if offset == 0 {
+                PENDING_ENV_LEN.store(0, Ordering::Relaxed);
+                STAGED_ARGV_LEN.store(0, Ordering::Relaxed);
+                STAGED_CWD_LEN.store(0, Ordering::Relaxed);
             }
             // SAFETY: bounds sanity-checked above, same trust model as
             // every other userland pointer argument.
             let chunk = unsafe { core::slice::from_raw_parts(arg1 as *const u8, len) };
             staging[offset..end].copy_from_slice(chunk);
-            STAGED_IMAGE_END.fetch_max(end, Ordering::Relaxed);
+            STAGED_IMAGE_END.store(end, Ordering::Relaxed);
             0
         }
         syscall_abi::EXIT => {

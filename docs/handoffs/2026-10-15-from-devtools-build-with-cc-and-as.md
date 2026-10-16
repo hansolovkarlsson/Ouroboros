@@ -112,3 +112,9 @@ How it will be built, so you can object before it is:
   better.
 - The work starts after #301 merges, so your `cc` builds against the
   `libc.a` that will be on `main`.
+
+**Update 2026-10-16:** the limit above is cleared. `SPAWN_STAGING_SIZE` is
+1 MiB (`syscall-abi/src/lib.rs`), at least the 964 KiB a loaded image may
+occupy, so `/bin/CPP` at about 238 KB and `/bin/EDIT` at about 144 KB fit.
+`make test-spawn-size` checks the bound. The item itself is next on the
+roadmap; the status stays `accepted` until it is done.

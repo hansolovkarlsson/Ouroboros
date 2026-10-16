@@ -20,6 +20,16 @@ is refused and then until it succeeds. One boot, in this order:
 0. `stageprobe over`: one chunk staged, then a `SPAWN` of a total of 4096
    must answer `SPAWN_ERROR` (the kernel hands a child no more than its
    owner staged, so the previous stager's bytes are never parsed).
+   `stageprobe sparse <size of /bin/STAGEPROBE>`: one chunk ending there
+   with nothing staged below it, where the shell's copy of stageprobe still
+   lies, run in the background; the chunk and the SPAWN must each answer
+   `SPAWN_ERROR`, that copy must not start (it would print its usage line),
+   and `echo ok-sparse`, typed in the eight seconds between, must run (a
+   refused chunk claims nothing). With `SPAWN_STAGE` taking a chunk
+   anywhere, as until 2026-10-16, all four fail; with the order checked
+   after the claim, the echo is refused. Either control also fails a check
+   or two in the steps after it, which the held claim or the started copy
+   disturbs.
 1. `exec /bin/stageprobe check 6000`, then `exec /bin/stageprobe hold 12000` (both in
    the background). While the holder holds, `echo refused-one` must be
    refused by the shell with the code's message and print nothing; the
@@ -51,6 +61,9 @@ _spec.loader.exec_module(drive_qemu)
 
 IMAGE = os.path.join(ROOT, "build", "esp.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-spawn-owner.txt")
+# The program file the shell stages for step 0b, whose bytes its sparse
+# chunk would otherwise sit on top of.
+STAGEPROBE = os.path.join(ROOT, "build", "esp", "bin", "STAGEPROBE")
 PROMPT = "# "
 BUSY = (1 << 64) - 1 - 44      # syscall_abi::SPAWN_ERR_STAGING_BUSY
 TOO_LARGE = (1 << 64) - 1 - 12  # syscall_abi::SPAWN_ERR_TOO_LARGE, a SPAWN of total 0
@@ -73,6 +86,18 @@ def drive(guest):
     # the one chunk is SPAWN_ERROR, not the previous stager's image parsed.
     guest.type_line("/bin/stageprobe over")
     got["over"] = guest.wait_for(rf"spawn of a total past the staged chunk answered code {SPAWN_ERROR}[\s\S]*" + PROMPT, timeout=30)
+    # 0b. in order: a chunk with nothing staged below it is refused, so the
+    # shell's copy of stageprobe left in the buffer below it is never
+    # started (it would print its usage line).
+    # In the background, and while it waits after its refused chunk, `echo
+    # ok-sparse` must run: a refused chunk claims nothing.
+    start = len(guest.transcript())
+    guest.type_line(f"exec /bin/stageprobe sparse {os.path.getsize(STAGEPROBE)}")
+    guest.wait_for(r"a chunk with nothing staged below it answered code \d+", timeout=30)
+    guest.type_line("echo ok-sparse")
+    guest.wait_for(r"spawn of the sparse total answered code \d+", timeout=40)
+    guest.wait_for(PROMPT, timeout=10)
+    got["sparse_out"] = guest.transcript()[start:]
     # 1. the checker first (it waits six seconds before it tries), then the holder.
     guest.type_line("exec /bin/stageprobe check 6000")
     got["checker"] = guest.wait_for(r"stageprobe \d+: checking after ms 6000", timeout=30)
@@ -125,6 +150,17 @@ def checks(got, out, faults):
     exit3 = three.find(f"stageprobe {holder3}: exiting")
     return [
         ("a SPAWN of a total past what the owner staged is SPAWN_ERROR", bool(got["over"])),
+        ("a chunk with nothing staged below it is SPAWN_ERROR",
+         f"a chunk with nothing staged below it answered code {SPAWN_ERROR}" in got["sparse_out"]),
+        ("the spawn of the sparse total is SPAWN_ERROR",
+         f"spawn of the sparse total answered code {SPAWN_ERROR}" in got["sparse_out"]),
+        ("a refused chunk claims nothing: echo ran while the probe waited",
+         0 <= got["sparse_out"].find("\nok-sparse") < got["sparse_out"].find("spawn of the sparse total answered")),
+        # The whole run's transcript, not step 0b's slice: a copy the kernel
+        # started runs on its own, on another core with SMP, and may print
+        # after the slice is taken (the second review of #303). No other
+        # step prints the usage.
+        ("the previous stager's program was not started (no usage line in the run)", "usage: stageprobe" not in out),
         ("the checker and the first holder started", bool(got["checker"] and got["holder1"]) and None not in (checker, holder1)),
         ("echo refused while a program held the staging (the message)", bool(re.search(REFUSAL, one))),
         ("echo printed nothing while refused", "\nrefused-one" not in one),
