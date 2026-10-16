@@ -12,17 +12,39 @@ prebuilt tree, where the next regeneration would drop it.
   has no statement expressions or `__typeof__`, and has the six builtins.
   Asked by DevTools on 2026-10-13
   (`docs/handoffs/closed/2026-10-13-from-devtools-picolibc-comparison-builtins.md`).
-- `0002-undefine-probed-macros.patch`: `<picolibc.h>` leaves undefined the
-  eleven `_HAVE_` macros that picolibc's probes define once they work:
-  `_HAVE_ALIAS_ATTRIBUTE`, `_HAVE_ALLOC_SIZE`, `_HAVE_ATTRIBUTE_ALWAYS_INLINE`,
-  `_HAVE_ATTRIBUTE_GNU_INLINE`, `_HAVE_BITFIELDS_IN_PACKED_STRUCTS`,
-  `_HAVE_BUILTIN_COMPLEX`, `_HAVE_COMPLEX`, `_HAVE_FORMAT_ATTRIBUTE`,
-  `_HAVE_LONG_DOUBLE`, `_HAVE_NO_BUILTIN_ATTRIBUTE` and
-  `_HAVE_WEAK_ATTRIBUTE`. `scripts/build-picolibc.sh` removes `<complex.h>`
-  beside it (a deletion hunk would hold the whole file). So programs see the headers they saw before the
-  probes were fixed on 2026-10-16 while the library is built with them.
-  DevTools's `cc` refuses `long double` here
-  (`docs/handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md`);
-  when it takes binary128, this patch goes, with a notice to DevTools, and
-  programs that use `long double` need the quad-float helpers (`__addtf3`
-  and the rest), which nothing here links yet.
+
+The next three keep `<picolibc.h>` from defining a macro DevTools's `cc`
+cannot yet take. picolibc's probes define eleven `_HAVE_` macros since they
+work (2026-10-16); four of them make `cc` refuse a header, and each patch
+goes on its own condition, a `notice` from DevTools, never all at once (its
+finding, `docs/handoffs/closed/2026-10-16-from-devtools-probed-macros.md`). A patch
+removed is a header change, so it owes `check-picolibc`'s pin, and DevTools
+a reply naming the commit.
+
+- `0002-undefine-long-double.patch`: `_HAVE_LONG_DOUBLE`, which makes `cc`
+  refuse `math.h`, `stdlib.h`, `wchar.h`, `fastmath.h` and
+  `sys/iconvnls.h` ("long double is not supported yet on this target").
+  Goes when DevTools sends a notice that `cc` takes `long double` for
+  Ouroboros
+  (`docs/handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md`).
+  Programs that use `long double` then need the quad-float helpers
+  (`__addtf3` and the rest), which nothing here links yet.
+- `0003-undefine-alloc-size.patch`: `_HAVE_ALLOC_SIZE`, which makes `cc`
+  refuse `stdlib.h` and `malloc.h` ("cc does not know the attribute
+  '__alloc_size__'"). Goes when DevTools sends a notice that `cc` reads
+  `__alloc_size__`.
+- `0004-undefine-extern-inline.patch`: `_HAVE_ATTRIBUTE_ALWAYS_INLINE` and
+  `_HAVE_ATTRIBUTE_GNU_INLINE`, which together make `sys/cdefs.h` define
+  `__declare_extern_inline`, and `cc` then refuses `ctype.h` and, through
+  `fenv.h`, `machine/fenv-fp.h`. Either alone changes nothing. Goes when
+  DevTools sends a notice that `cc` reads `__declare_extern_inline`.
+
+The other seven stay as the probes define them, since they cost `cc`
+nothing: `_HAVE_ALIAS_ATTRIBUTE`, `_HAVE_BITFIELDS_IN_PACKED_STRUCTS`,
+`_HAVE_BUILTIN_COMPLEX`, `_HAVE_COMPLEX`, `_HAVE_FORMAT_ATTRIBUTE`,
+`_HAVE_NO_BUILTIN_ATTRIBUTE` and `_HAVE_WEAK_ATTRIBUTE` (each header compiled
+alone by `cc`: 26 of 136 refused with them defined, the same 26 as without).
+`<complex.h>` is still removed, by `scripts/build-picolibc.sh` rather than a
+deletion hunk (which would hold the whole file): `cc` refuses `_Complex`,
+and the complex functions in `libc.a` need helpers (`__muldc3` and the rest)
+nothing here links.

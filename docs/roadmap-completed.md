@@ -2352,3 +2352,30 @@ item's own text follows as it stood when it was open.
 >       review of #301's measurement); the spawn buffer that blocked it is
 >       1 MiB since 2026-10-16 (`roadmap-completed.md`). Note:
 >       [`handoffs/closed/2026-10-15-from-devtools-build-with-cc-and-as.md`](handoffs/closed/2026-10-15-from-devtools-build-with-cc-and-as.md).
+
+## The probed macros, each on its own condition, DONE (2026-10-16)
+
+Moved from [`ROADMAP.md`](ROADMAP.md)'s libc section on 2026-10-16, from the
+block "What DevTools asks of Ouroboros next", where a held item for the
+three remaining patches stays. Marked done with what was built; the item's
+own text follows as it stood when it was open.
+
+> - [x] **DONE 2026-10-16** **The eleven probed macros, each on its own condition.**
+>       Built as planned: `0002` became three patches, one per condition,
+>       the seven others defined, `<complex.h>` still removed. `cc` refuses
+>       the same 26 of 136 headers either way, assembles all 19 of Edit's
+>       and cpp's sources identically, and the 32 C binaries here are the
+>       same bytes. DevTools's notice was sent before the header pin moved.
+>
+>       *As written while open (2026-10-16):*
+>       DevTools's finding of 2026-10-16: `libc/picolibc-patches/0002`
+>       undefines all eleven `_HAVE_` macros the fixed probes define, and its
+>       README brings them back together when DevTools's `cc` takes `long
+>       double`. Three that hurt `cc` have nothing to do with `long double`
+>       (`_HAVE_ALLOC_SIZE` refuses `stdlib.h` and `malloc.h`; the two
+>       inline macros together, `ctype.h` and `fenv.h`), and seven cost it
+>       nothing. Split the patch by condition (long double; `alloc_size`;
+>       the inline pair), each going on DevTools's `notice`, define the
+>       seven, keep `<complex.h>` removed, and send DevTools a notice
+>       before `check-picolibc`'s header pin moves. Its own PR. Note:
+>       [`handoffs/closed/2026-10-16-from-devtools-probed-macros.md`](handoffs/closed/2026-10-16-from-devtools-probed-macros.md).

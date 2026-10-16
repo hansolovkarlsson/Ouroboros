@@ -1,0 +1,15 @@
+--- a/include/picolibc.h
++++ b/include/picolibc.h
+@@ -69,10 +69,10 @@
+ #undef _HAVE_ARM_SEMIHOST
+ 
+ /* The compiler supports the always_inline function attribute */
+-#define _HAVE_ATTRIBUTE_ALWAYS_INLINE
++#undef _HAVE_ATTRIBUTE_ALWAYS_INLINE
+ 
+ /* The compiler supports the gnu_inline function attribute */
+-#define _HAVE_ATTRIBUTE_GNU_INLINE
++#undef _HAVE_ATTRIBUTE_GNU_INLINE
+ 
+ /* Use bitfields in packed structs */
+ #define _HAVE_BITFIELDS_IN_PACKED_STRUCTS
