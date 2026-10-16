@@ -52,10 +52,32 @@ pub const NP_REPLY_PAYLOAD: u64 = 8;
 /// both protocols during the migration without any collision.
 pub const NP_BASE: u64 = 0x100;
 
-/// List a directory's entries into the reply (`name\n` / `name/\n`). Params:
-/// `a0` = path length, `a1` = result-window size, at least 1 (a window of 0
-/// is refused `FS_ERROR`, as for every path read verb). Status = bytes written.
+/// List a directory's entries into the reply (`name\n` / `name/\n`), one
+/// page at a time. Params: `a0` = path length, `a1` = result-window size, at
+/// least 1 (a window of 0 is refused `FS_ERROR`, as for every path read verb),
+/// `a2` = the index of the first entry wanted, `0` for the first. Status =
+/// bytes written.
+///
+/// A page is the entries from `a2` on, in the server's walk order, whole,
+/// until the next would not fit the window: a run with no gaps. The next page
+/// starts at `a2` plus the number of lines this one holds, and a page of `0`
+/// bytes is the end; [`readdir_next`] is that rule, once. An entry that would
+/// not fit an empty window is refused `FS_ERROR` (a page of 0 bytes would read
+/// as the end). The index is stateless: a directory changed between pages
+/// can repeat or miss an entry. Since 2026-10-16; until then there was no
+/// `a2`, and a name that did not fit was skipped while the walk went on, so a
+/// listing longer than one reply came back with holes and no word of them.
 pub const NP_READDIR: u64 = NP_BASE;
+
+/// The start of the `NP_READDIR` page after `page`, which was asked for at
+/// `start`: `None` when `page` is empty (the end of the listing), else
+/// `start` plus the entries it holds, one per `\n`.
+pub fn readdir_next(start: u64, page: &[u8]) -> Option<u64> {
+    if page.is_empty() {
+        return None;
+    }
+    Some(start + page.iter().filter(|&&b| b == b'\n').count() as u64)
+}
 /// Read a file inline: the reply carries the bytes (capped by the message
 /// limit). Params: `a0` = path length, `a1` = want, at least 1 (a want of 0 is
 /// refused `FS_ERROR`, as for every path read verb). Status = the file's *real*
@@ -979,6 +1001,15 @@ mod tests {
     //! --target aarch64-apple-darwin`). No I/O, no syscalls - the cheapest
     //! foreign observer this project has.
     use super::*;
+
+    #[test]
+    fn readdir_next_counts_the_lines_and_ends_on_an_empty_page() {
+        assert_eq!(readdir_next(0, b""), None);
+        assert_eq!(readdir_next(7, b""), None);
+        assert_eq!(readdir_next(0, b"a\n"), Some(1));
+        assert_eq!(readdir_next(0, b"a\nbin/\nc\n"), Some(3));
+        assert_eq!(readdir_next(40, b"x/\ny\n"), Some(42));
+    }
 
     #[test]
     fn open_writes_is_every_flag_that_changes_the_file() {

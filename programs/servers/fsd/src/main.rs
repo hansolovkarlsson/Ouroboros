@@ -702,12 +702,32 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             let Some(want) = want_len(p[1]) else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
+            // One page of the listing: entries from index `p[2]` (0 = the
+            // first) in the filesystem's walk order, whole, until the next
+            // would not fit, and then no more. Until 2026-10-16 a name that did
+            // not fit was skipped and the walk went on, so a shorter one
+            // further on still got in: a listing with holes, and no word of
+            // them. Now a page is a run with no gaps, the client's next start
+            // is this one's plus the lines it got, and an empty page is the
+            // end. An entry that would not fit an empty page is refused
+            // FS_ERROR, since a page of 0 bytes would read as the end.
+            let start = p[2];
+            let mut index = 0u64;
             let mut written = 0usize;
+            let mut full = false;
+            let mut too_long = false;
             let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
             let outcome = fs.list_dir(path, |name, is_dir, _size| {
+                let here = index;
+                index += 1;
+                if full || here < start {
+                    return;
+                }
                 let suffix: &[u8] = if is_dir { b"/\n" } else { b"\n" };
                 let entry_len = name.len() + suffix.len();
                 if written + entry_len > result.len() {
+                    full = true;
+                    too_long = written == 0;
                     return;
                 }
                 result[written..written + name.len()].copy_from_slice(name.as_bytes());
@@ -716,6 +736,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 written += suffix.len();
             });
             match outcome {
+                Ok(()) if too_long => status_reply(reply, syscall_abi::FS_ERROR),
                 Ok(()) => {
                     status_slot[..8].copy_from_slice(&(written as u64).to_le_bytes());
                     REPLY_PAYLOAD + written

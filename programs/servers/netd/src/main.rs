@@ -989,7 +989,9 @@ fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<Di
             // A clone read takes the first free connection slot; which one is
             // known before it does, so a reply nobody hears can free it.
             let clone_slot = if path == b"/tcp/clone" { alloc_dial_slot(dials) } else { None };
-            let (status, dlen) = net_op(op, path, a1, want.min(cap), data_in, &mut r[8..], dials, &mac);
+            // `offset` is a read's a1, or a listing's start index, its a2.
+            let offset = if op == ninep_abi::NP_READDIR { a2 } else { a1 };
+            let (status, dlen) = net_op(op, path, offset, want.min(cap), data_in, &mut r[8..], dials, &mac);
             r[0..8].copy_from_slice(&status.to_le_bytes());
             // A caller that left the call (REPLY_STALE: cut short by Ctrl+C,
             // or dead) never learned the connection a clone made, so nobody
@@ -5190,10 +5192,15 @@ fn dial_path(sub: &[u8]) -> Option<(usize, &[u8])> {
 
 /// The `/net/tcp` file model (Plan 9 connection files, handle-in-path). `sub` is
 /// the path after `/tcp`. Pure state mutation - the event loop (`pump_dials` /
-/// `dial_on_segment`) does the actual TCP. `data_in` is a write's payload.
+/// `dial_on_segment`) does the actual TCP. `data_in` is a write's payload;
+/// `start` a listing's first entry (`NP_READDIR`'s a2).
+// One over clippy's argument limit since `start` (2026-10-16): the state it
+// works on is the caller's, passed in rather than bundled, as net_op's is.
+#[allow(clippy::too_many_arguments)]
 fn dial_file_op(
     verb: u64,
     sub: &[u8],
+    start: u64,
     want: usize,
     data_in: &[u8],
     out: &mut [u8],
@@ -5208,10 +5215,7 @@ fn dial_file_op(
     // /tcp (dir): readdir lists clone (per-conn dirs omitted - minimal).
     if sub.is_empty() || sub == b"/" {
         if verb == ninep_abi::NP_READDIR {
-            let listing: &[u8] = b"clone\n";
-            let m = listing.len().min(want).min(out.len());
-            out[..m].copy_from_slice(&listing[..m]);
-            return (m as u64, m);
+            return listing_page(b"clone\n", start, want, out);
         }
         return (syscall_abi::FS_ERR_NOT_A_FILE, 0);
     }
@@ -5666,10 +5670,37 @@ fn dial_accept(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; MAX_D
 /// dial table + our MAC let the tcp subtree drive real connections. Shared by
 /// the export gateway (remote) and the local client path (`handle_client`).
 #[allow(clippy::too_many_arguments)]
+/// One page of a fixed listing (`name\n` lines), as fsd pages one
+/// (`ninep_abi::NP_READDIR`): the lines from the `start`-th, whole, until the
+/// next would not fit `want`; empty past the end. A line too long for an empty
+/// window is `FS_ERROR`, as fsd answers. Until 2026-10-16 these listings came
+/// back whole for every start, and a pager asking for the next page got the
+/// same names forever.
+fn listing_page(listing: &[u8], start: u64, want: usize, out: &mut [u8]) -> (u64, usize) {
+    let cap = want.min(out.len());
+    let mut written = 0usize;
+    for (index, line) in listing.split_inclusive(|&b| b == b'\n').enumerate() {
+        if (index as u64) < start {
+            continue;
+        }
+        if written + line.len() > cap {
+            if written == 0 {
+                return (syscall_abi::FS_ERROR, 0);
+            }
+            break;
+        }
+        out[written..written + line.len()].copy_from_slice(line);
+        written += line.len();
+    }
+    (written as u64, written)
+}
+
+/// `offset` is a read's byte offset, or for `NP_READDIR` the index of the
+/// first entry of the page (the request's `a2`).
 fn net_op(verb: u64, fspath: &[u8], offset: u64, want: usize, data_in: &[u8], out: &mut [u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6]) -> (u64, usize) {
     // The dial-out connection files (Plan 9 /net/tcp), a read-WRITE subtree.
     if fspath.starts_with(b"/tcp") {
-        return dial_file_op(verb, &fspath[4..], want, data_in, out, dials, mac);
+        return dial_file_op(verb, &fspath[4..], offset, want, data_in, out, dials, mac);
     }
     // The file contents (tiny), rebuilt each call from the live NIC state.
     let mut content = [0u8; 24];
@@ -5677,10 +5708,7 @@ fn net_op(verb: u64, fspath: &[u8], offset: u64, want: usize, data_in: &[u8], ou
 
     if verb == ninep_abi::NP_READDIR {
         if fspath == b"/" {
-            let listing: &[u8] = b"ip\nmac\n";
-            let n = listing.len().min(want).min(out.len());
-            out[..n].copy_from_slice(&listing[..n]);
-            return (n as u64, n);
+            return listing_page(b"ip\nmac\n", offset, want, out);
         }
         return (syscall_abi::FS_ERR_NOT_A_DIRECTORY, 0);
     }
@@ -6069,7 +6097,9 @@ fn build_9p_reply(
                 } else {
                     &[]
                 };
-                let (status, dlen) = net_op(verb, &pbuf[..resolved.len], p1, want.min(ndata.len()), data_in, &mut ndata, dials, mac);
+                // `offset` is a read's p1, or a listing's start index, its p2.
+                let offset = if verb == ninep_abi::NP_READDIR { p2 } else { p1 };
+                let (status, dlen) = net_op(verb, &pbuf[..resolved.len], offset, want.min(ndata.len()), data_in, &mut ndata, dials, mac);
                 return frame_reply(out, status, &ndata[..dlen]);
             }
             // A remote binding in the export namespace would be transitive mounting -
@@ -6087,7 +6117,8 @@ fn build_9p_reply(
             // The inline verbs (readdir / read_file) are capped at fsd's inline
             // reply size (FS_DATA_MAX 512); fsd rejects a larger `want`.
             let want = (p1 as usize).min(DATA_INLINE);
-            let status = list_dir(who, fspath, tree, &mut buf[..want]);
+            // p2 is the page's start index, forwarded to fsd.
+            let status = list_dir(who, fspath, tree, p2, &mut buf[..want]);
             frame_reply(out, status, ok_data(status, &buf))
         }
         v if v == ninep_abi::NP_READ || v == ninep_abi::NP_READ_AT => {
@@ -6398,7 +6429,10 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
     } else {
         // A directory? (list succeeds.) Build a browsable HTML index.
         let mut names = [0u8; syscall_abi::FS_DATA_MAX as usize];
-        let listed = list_dir(As::Anonymous, path, 0, &mut names);
+        // The first page only: the index lives in one response buffer, so a
+        // directory longer than a page is shown as far as its first page
+        // goes, a run with no gaps since listings page (2026-10-16).
+        let listed = list_dir(As::Anonymous, path, 0, 0, &mut names);
         if listed < syscall_abi::FS_ERR_MIN {
             c.prefix_len = build_listing(path, &names[..listed as usize], &mut c.prefix);
         } else if size == syscall_abi::FS_ERR_PERM || listed == syscall_abi::FS_ERR_PERM {
@@ -6771,14 +6805,16 @@ fn stat_size(who: As, path: &[u8], tree: u64) -> u64 {
 
 /// List a directory's entries into `out` as newline-separated names (dirs
 /// suffixed `/`, the same format the shell's `ls` uses); status is the byte
-/// count, or an error code. Bounded by fsd's inline reply cap.
-fn list_dir(who: As, path: &[u8], tree: u64, out: &mut [u8]) -> u64 {
-    fsd_call(
+/// count, or an error code. One page from entry `start`
+/// (`ninep_abi::NP_READDIR`), bounded by fsd's inline reply cap.
+fn list_dir(who: As, path: &[u8], tree: u64, start: u64, out: &mut [u8]) -> u64 {
+    fsd_call3(
         who,
         ninep_abi::NP_READDIR,
         tree,
         path.len() as u64,
         out.len() as u64,
+        start,
         path,
         out,
     )

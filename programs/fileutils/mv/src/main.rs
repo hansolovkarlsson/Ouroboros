@@ -75,22 +75,21 @@ pub extern "C" fn _start() -> ! {
     let src_path = core::str::from_utf8(&src_path_buf[..src_path_len]).unwrap_or("");
 
     // `mv file dir` moves *into* an existing directory, keeping the source's
-    // basename. Probe with fs_list_dir: a successful listing means dst is a
-    // directory, so the real destination becomes dst/<basename of src>; any
-    // error just means "not a directory" and dst is used as-is.
+    // basename. Probe with fs_stat: a directory's record makes the real
+    // destination dst/<basename of src>; any error just means "no such
+    // directory" and dst is used as-is. (It listed dst into an 8-byte buffer
+    // until 2026-10-16, when a listing page began refusing a first name too
+    // long for its window: a directory would then have read as an error.)
     let mut final_dst_buf = [0u8; PATH_MAX];
     final_dst_buf[..dst_path_len].copy_from_slice(&dst_path_buf[..dst_path_len]);
     let mut final_dst_len = dst_path_len;
-    let mut scratch = [0u8; 8];
-    let list = ulib::fs_list_dir(
-        core::str::from_utf8(&dst_path_buf[..dst_path_len]).unwrap_or(""),
-        &mut scratch,
-    );
-    if list == syscall_abi::NO_FS {
-        ulib::fs_error("mv", list);
+    let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
+    let st = ulib::fs_stat(core::str::from_utf8(&dst_path_buf[..dst_path_len]).unwrap_or(""), &mut info);
+    if st == syscall_abi::NO_FS {
+        ulib::fs_error("mv", st);
         ulib::exit(1);
     }
-    if !ulib::is_fs_error(list) {
+    if !ulib::is_fs_error(st) && ulib::stat_is_dir(&info) {
         // dst is an existing directory: append "/" + basename(src).
         let src_bytes = &src_path_buf[..src_path_len];
         let base_start = src_bytes

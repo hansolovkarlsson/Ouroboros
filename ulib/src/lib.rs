@@ -1148,9 +1148,12 @@ fn np_remote(endpoint: &[u8; ninep_abi::NS_ENDPOINT_LEN], verb: u64, params: [u6
     status
 }
 
-/// List `path`'s entries into `buf` as `name\n`/`name/\n`. Returns a byte
-/// count, [`NO_FS`], or a specific `FS_ERR_*` code.
-pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
+/// One page of `path`'s listing, from entry `start` (0 = the first), into
+/// `buf` as `name\n`/`name/\n`: a run of whole entries with no gaps, and
+/// empty at the end (see [`ninep_abi::NP_READDIR`]). Returns a byte count,
+/// [`NO_FS`], or a specific `FS_ERR_*` code; `FS_ERROR` when the next entry
+/// does not fit `buf` at all.
+pub fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
     // The remote export caps an inline listing at FS_DATA_MAX (512); the local
@@ -1158,16 +1161,56 @@ pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     let want = if r.server == syscall_abi::NET_TASK {
         buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64
     } else {
-        buf.len() as u64
+        buf.len().min(syscall_abi::FS_DATA_MAX as usize) as u64
     };
     np_dispatch(
         &r,
         ninep_abi::NP_READDIR,
-        [r.len as u64, want, 0, 0],
+        [r.len as u64, want, start, 0],
         &fsp[..r.len],
         &[],
         buf,
     )
+}
+
+/// `path`'s whole listing into `buf`, page after page ([`fs_list_dir_page`]),
+/// as `name\n`/`name/\n`. Returns `Ok((bytes, complete))`, `complete` false
+/// when `buf` filled before the listing ended (the caller says so, rather
+/// than show a listing with names missing), or `Err` with [`NO_FS`] or an
+/// `FS_ERR_*` code. Every listing went through one reply, holes and all,
+/// until 2026-10-16.
+pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
+    let mut start = 0u64;
+    let mut written = 0usize;
+    loop {
+        let room = buf.len() - written;
+        // With no room left, a one-byte window still tells "more" (an entry
+        // is at least two bytes, so it is refused) from "the end" (empty).
+        let mut probe = [0u8; 1];
+        let page: &mut [u8] = if room == 0 { &mut probe } else { &mut buf[written..] };
+        let n = fs_list_dir_page(path, start, page);
+        if is_fs_error(n) {
+            if n == syscall_abi::FS_ERROR && (written > 0 || room == 0) {
+                return Ok((written, false));
+            }
+            return Err(n);
+        }
+        if room == 0 {
+            return Ok((written, n == 0));
+        }
+        let got = (n as usize).min(room);
+        // A server from before paging ignores the start and answers page one
+        // again: no later page can equal it (a directory has no name twice),
+        // so stop there, the listing not known to be whole, rather than loop.
+        if start > 0 && got > 0 && buf[written..written + got] == buf[..got] {
+            return Ok((written, false));
+        }
+        let Some(next) = ninep_abi::readdir_next(start, &buf[written..written + got]) else {
+            return Ok((written, true));
+        };
+        start = next;
+        written += got;
+    }
 }
 
 /// Invoke a single path-only filesystem op (`FSOP_MKDIR`/`RMDIR`/`TOUCH`/`RM`):

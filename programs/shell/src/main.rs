@@ -377,48 +377,35 @@ fn expand_one_glob(tok: &str, cwd: &str, out: &mut [u8]) -> usize {
         }
     };
 
-    let mut listing = [0u8; LIST_SIZE];
-    let r = fs_list_dir(dir, &mut listing);
-    if r >= FS_ERR_MIN {
-        return 0;
-    }
-    let data = &listing[..r as usize];
     let match_dot = pat.first() == Some(&b'.');
 
     let mut written = 0usize;
     let mut count = 0usize;
-    let mut start = 0usize;
-    for i in 0..=data.len() {
-        if i == data.len() || data[i] == b'\n' {
-            if i > start {
-                let mut line = &data[start..i];
-                if line.last() == Some(&b'/') {
-                    line = &line[..line.len() - 1]; // strip the dir marker
-                }
-                let skip = !match_dot && line.first() == Some(&b'.');
-                if !skip && !line.is_empty() && wildcard_match(pat, line) {
-                    if count > 0 && written < out.len() {
-                        out[written] = b' ';
-                        written += 1;
-                    }
-                    // <dir_part><name>
-                    for &b in dir_part {
-                        if written < out.len() {
-                            out[written] = b;
-                            written += 1;
-                        }
-                    }
-                    for &b in line {
-                        if written < out.len() {
-                            out[written] = b;
-                            written += 1;
-                        }
-                    }
-                    count += 1;
+    let r = for_each_dir_entry(dir, |line, _is_dir| {
+        let skip = !match_dot && line.first() == Some(&b'.');
+        if !skip && !line.is_empty() && wildcard_match(pat, line) {
+            if count > 0 && written < out.len() {
+                out[written] = b' ';
+                written += 1;
+            }
+            // <dir_part><name>
+            for &b in dir_part {
+                if written < out.len() {
+                    out[written] = b;
+                    written += 1;
                 }
             }
-            start = i + 1;
+            for &b in line {
+                if written < out.len() {
+                    out[written] = b;
+                    written += 1;
+                }
+            }
+            count += 1;
         }
+    });
+    if r >= FS_ERR_MIN {
+        return 0;
     }
     if count == 0 {
         0
@@ -461,7 +448,7 @@ fn expand_globs<'a>(line: &str, cwd: &str, out: &'a mut [u8]) -> &'a str {
     core::str::from_utf8(&out[..len]).unwrap_or("")
 }
 
-/// Iterate a `fs_list_dir` listing (`name\n`/`name/\n` lines), calling `f` with
+/// Iterate one page of a listing (`name\n`/`name/\n` lines), calling `f` with
 /// each entry's name (trailing `/` stripped) and whether it's a directory.
 fn for_each_entry(data: &[u8], mut f: impl FnMut(&[u8], bool)) {
     let mut start = 0usize;
@@ -531,21 +518,16 @@ fn complete_word(buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &[u8; CWD_SI
     };
     let Ok(dir) = core::str::from_utf8(&dirbuf[..dir_len]) else { return };
 
-    let mut listing = [0u8; LIST_SIZE];
-    let r = fs_list_dir(dir, &mut listing);
-    if r >= FS_ERR_MIN {
-        return;
-    }
-    let data = &listing[..r as usize];
     let match_dot = prefix.first() == Some(&b'.');
 
-    // One pass: longest common prefix of all matches, the count, and (for a
-    // lone match) whether it's a directory.
+    // One pass over the listing, page after page: longest common prefix of
+    // all matches, the count, and (for a lone match) whether it's a
+    // directory.
     let mut lcp = [0u8; PATH_SIZE];
     let mut lcp_len = 0usize;
     let mut count = 0usize;
     let mut only_is_dir = false;
-    for_each_entry(data, |name, is_dir| {
+    let r = for_each_dir_entry(dir, |name, is_dir| {
         if name.is_empty() || (!match_dot && name.first() == Some(&b'.')) || !starts_with_ci(name, prefix) {
             return;
         }
@@ -563,8 +545,7 @@ fn complete_word(buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &[u8; CWD_SI
         }
         count += 1;
     });
-
-    if count == 0 {
+    if r >= FS_ERR_MIN || count == 0 {
         return;
     }
 
@@ -593,10 +574,11 @@ fn complete_word(buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &[u8; CWD_SI
             putc(sep);
         }
     } else if lcp_len == prefix.len() {
-        // Ambiguous, no further common prefix: list the matches, then redraw.
+        // Ambiguous, no further common prefix: list the matches (the
+        // directory read again, page by page), then redraw.
         putc(CR);
         putc(LF);
-        for_each_entry(data, |name, is_dir| {
+        for_each_dir_entry(dir, |name, is_dir| {
             if name.is_empty() || (!match_dot && name.first() == Some(&b'.')) || !starts_with_ci(name, prefix) {
                 return;
             }
@@ -638,7 +620,7 @@ const LF: u8 = b'\n';
 const GLOB_LINE_SIZE: usize = 1024;
 
 /// A directory listing buffer for globbing and tab completion (the same
-/// `name\n`/`name/\n` format `fs_list_dir` fills, bounded by its reply cap).
+/// `name\n`/`name/\n` format), one page of it at a time ([`for_each_dir_entry`]).
 const LIST_SIZE: usize = 512;
 
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
@@ -2003,12 +1985,14 @@ fn cmd_cd(arg: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
         return;
     };
 
-    // No dedicated "does this directory exist" syscall - listing it (into
-    // a throwaway buffer, contents unused) both validates the path and
-    // confirms it's a directory, reusing fs_list_dir rather than adding a
-    // syscall just for this.
-    let mut scratch = [0u8; 8];
-    match fs_list_dir(path, &mut scratch) {
+    // No dedicated "does this directory exist" syscall - listing its first
+    // page (into a throwaway buffer, contents unused) both validates the path
+    // and confirms it's a directory. A whole page's window, since 2026-10-16:
+    // a page refuses an entry too long for its window, so the 8-byte buffer
+    // this used would have called a directory with a long first name an
+    // error.
+    let mut scratch = [0u8; LIST_SIZE];
+    match fs_list_dir_page(path, 0, &mut scratch) {
         NO_FS => {
             print_no_fs();
             return;
@@ -3304,28 +3288,66 @@ fn ns_add(prefix: &[u8], target: &[u8], tree: u8) -> bool {
     syscall4(syscall_abi::NS_SET, ns.as_ptr() as u64, (nlen + entry) as u64, 0, 0) == 0
 }
 
-fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
+/// One page of `path`'s listing from entry `start`, as `ulib::fs_list_dir_page`
+/// (the shell keeps its own fs layer): a run of whole `name\n`/`name/\n`
+/// entries, empty at the end. A byte count, [`NO_FS`] or an `FS_ERR_*` code.
+fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
     let want = if r.server == syscall_abi::NET_TASK {
         buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64
     } else {
-        buf.len() as u64
+        buf.len().min(syscall_abi::FS_DATA_MAX as usize) as u64
     };
     np_dispatch(
         &r,
         ninep_abi::NP_READDIR,
-        [r.len as u64, want, 0, 0],
+        [r.len as u64, want, start, 0],
         &fsp[..r.len],
         &[],
         buf,
     )
 }
 
+/// Every entry of `dir`, page after page, each passed to `f` as
+/// [`for_each_entry`] does (name with the `/` stripped, and whether it is a
+/// directory). Returns `0`, or the first page's error ([`NO_FS`] or an
+/// `FS_ERR_*` code). One page's buffer at a time, so a directory of any size
+/// is seen whole: until 2026-10-16 the shell read one reply, and a glob or a
+/// completion in a directory longer than it missed names with no sign.
+fn for_each_dir_entry(dir: &str, mut f: impl FnMut(&[u8], bool)) -> u64 {
+    let mut page = [0u8; LIST_SIZE];
+    let mut first = [0u8; LIST_SIZE];
+    let mut first_len = 0usize;
+    let mut start = 0u64;
+    loop {
+        let n = fs_list_dir_page(dir, start, &mut page);
+        if n >= FS_ERR_MIN {
+            return n;
+        }
+        let got = &page[..(n as usize).min(page.len())];
+        // A server from before paging (an older peer's export) ignores the
+        // start and answers page one again; no later page can equal it, so
+        // that is where the listing stops, as it did before paging.
+        if start > 0 && !got.is_empty() && got == &first[..first_len] {
+            return 0;
+        }
+        let Some(next) = ninep_abi::readdir_next(start, got) else {
+            return 0;
+        };
+        if start == 0 {
+            first[..got.len()].copy_from_slice(got);
+            first_len = got.len();
+        }
+        for_each_entry(got, &mut f);
+        start = next;
+    }
+}
+
 /// Reads `path`'s contents into `buf`. Returns the file's *real* size
 /// on success (which may exceed `buf.len()` - compare to detect
 /// truncation), [`NO_FS`], or a specific `FS_ERR_*` code - same
-/// contract as ever, same reasoning as [`fs_list_dir`].
+/// contract as ever, same reasoning as [`fs_list_dir_page`].
 fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
