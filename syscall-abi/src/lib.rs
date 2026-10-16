@@ -1806,7 +1806,13 @@ pub const FS_ERR_AUTH: u64 = u64::MAX - 30;
 /// sizes its buffer from this constant. (The other spawn bound, the most
 /// a loaded IMAGE may occupy, is the running kernel's to report, not a
 /// literal: [`HEAP_INFO_IMAGE_MAX`].)
-pub const SPAWN_STAGING_SIZE: usize = 131072;
+///
+/// 1 MiB since 2026-10-16, 128 KiB before: `/bin/CPP` was 107,648 bytes
+/// and grows with DevTools's tree, and built by DevTools's `cc` and `as`
+/// it is about 238 KB. The kernel asserts at build time that this is at
+/// least the image bound, so a program is refused for its image, not its
+/// file, unless its file carries more than about 60 KiB past its image.
+pub const SPAWN_STAGING_SIZE: usize = 1024 * 1024;
 
 /// The file was read, but isn't a loadable program (bad ELF header,
 /// unsupported relocation, malformed program headers, ...).

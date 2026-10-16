@@ -588,14 +588,24 @@ fn copy_out(ptr: u64, cap: u64, entry: &[u8]) -> Option<u64> {
     Some(entry.len() as u64)
 }
 
-/// Sized generously for a real userland program - the default shell is
-/// currently ~45KB. A fixed EL1 static, not a heap allocation: `alloc` is
-/// unavailable this deep into boot (see `loader.rs`'s own reasoning for
-/// why it's fine on the *boot-services* side but not here), and this
-/// matches this project's established "fixed static buffer, no heap"
-/// pattern for every other runtime buffer (`fat32.rs`'s callers,
-/// `shell/src/main.rs`'s own read buffers).
+/// The whole program file, staged before `SPAWN` parses it, sized by the
+/// ABI's constant (1 MiB since 2026-10-16). A fixed EL1 static, not a heap
+/// allocation: `alloc` is unavailable this deep into boot (see `loader.rs`'s
+/// own reasoning for why it's fine on the *boot-services* side but not
+/// here), and this matches this project's established "fixed static buffer,
+/// no heap" pattern for every other runtime buffer. Zeroed, so it is RAM
+/// only: the PE image's `.data` carries no bytes for it.
 const SPAWN_STAGING_SIZE: usize = syscall_abi::SPAWN_STAGING_SIZE;
+
+/// The file bound must not refuse what the image bound accepts: a program
+/// whose loaded image fits its slot ([`loader::image_max`]) has a file at
+/// least about that large, since its segments sit in the file at their
+/// image offsets. At 128 KiB the file bound bound first, at about an
+/// eighth of the image room (`/bin/CPP` at 107,648 bytes, 2026-10-16).
+const _: () = assert!(
+    SPAWN_STAGING_SIZE as u64 >= loader::image_max(),
+    "the spawn staging buffer is smaller than the image a program may occupy"
+);
 
 static SPAWN_STAGING: SyncCell<[u8; SPAWN_STAGING_SIZE]> = SyncCell::new([0; SPAWN_STAGING_SIZE]);
 
