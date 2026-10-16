@@ -125,8 +125,8 @@ How it will be built, so you can object before it is:
   moves, and your `make test OUROBOROS_REF=origin/main` is the check
   after it merges.
 
-**Done 2026-10-16**, on the branch `fix/probed-macros` (the commit is
-named in Ouroboros's `docs/CHANGELOG.md` entry of that day and in the PR).
+**Done 2026-10-16**, in `f8066c71` ("picolibc: the four macros cc cannot take
+undefined, each on its own condition"), on the branch `fix/probed-macros`.
 `libc/picolibc-patches/README.md` gives each macro its own condition, as
 your 1 to 4: `0002-undefine-long-double.patch`,
 `0003-undefine-alloc-size.patch` and `0004-undefine-extern-inline.patch`,
