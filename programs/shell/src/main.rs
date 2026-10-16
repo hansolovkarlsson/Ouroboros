@@ -2707,8 +2707,10 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
         }
         if staged != 0 {
             // Only reachable by staging past the kernel's staging buffer
-            // - the same refusal SPAWN itself gives for that. The chunks
-            // before this one are ours to give up.
+            // - the same refusal SPAWN itself gives for that. (The other
+            // SPAWN_STAGE refusal, a chunk out of order, cannot come from
+            // this loop: it stages from 0, each chunk at the last one's
+            // end.) The chunks before this one are ours to give up.
             abandon_staging();
             return Err(syscall_abi::SPAWN_ERR_TOO_LARGE);
         }

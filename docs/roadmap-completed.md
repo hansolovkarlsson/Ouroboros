@@ -2251,7 +2251,9 @@ built; the item's own text follows as it stood when it was open.
 >       `-fno-builtin` goes to the 33 files picolibc marks, not every file.
 >       `make test-cfenv` (`/bin/CPICO fenv`) checks the exceptions and
 >       fails on the old library; every C rig passed with both linkers
->       before `LIB_PIN` moved (`CHANGELOG.md`). Found
+>       before `LIB_PIN` moved (`CHANGELOG.md`).
+>
+>       *As written while open (2026-10-15):* Found
 >       2026-10-15: `libc/picolibc-cross.txt` puts `--ld-path` on the
 >       compiler line, clang warns it unused on every compile, and meson
 >       probes with `-Werror=unused-command-line-argument`, so picolibc has
@@ -2305,6 +2307,8 @@ follows as it stood when it was open, its 131,072 the bound of then.
 >       as staged, so a new owner could spawn a binary it may not read.
 >       `SPAWN_STAGE` takes chunks in order since, checked by
 >       `test-spawn-owner`'s `stageprobe sparse`.
+>
+>       *As written while open (2026-10-15):*
 >       `SPAWN_STAGING_SIZE` (131,072, `syscall-abi`) bounds every program
 >       file: spawn refuses a larger one. clang's `/bin/CPP` is 107,648
 >       bytes, about 23 KB under it, and cpp is built unpinned from

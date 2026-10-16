@@ -218,9 +218,9 @@ pub const CORE_INFO_BAD_OP: u64 = u64::MAX;
 /// staging until its own next `SPAWN` or its end, and every other spawner
 /// is refused meanwhile. A child gets no more than its owner staged: the
 /// argv and cwd lengths are capped to the `ARGS_STAGE`/`CWD_STAGE` lengths
-/// the owner gave, and a total past the end of its highest `SPAWN_STAGE`
-/// chunk is [`SPAWN_ERROR`], so the previous stager's bytes never reach a
-/// new owner's child.
+/// the owner gave, and a total past the end of the program it staged (its
+/// chunks in order from 0, see [`SPAWN_STAGE`]) is [`SPAWN_ERROR`], so the
+/// previous stager's bytes never reach a new owner's child.
 pub const SPAWN: u64 = 16;
 
 /// `(exit code)` -> **does not return** on success: the calling task is
@@ -479,9 +479,11 @@ pub const ACCT_TASK: u64 = 5;
 /// half of the two-step spawn (see [`SPAWN`]'s contract-change note).
 /// Chunks are bounded by the same 512-byte per-syscall buffer cap as
 /// everything else; offsets past the staging buffer are refused, and so,
-/// since 2026-10-16, is a chunk that does not start where the caller's last
-/// one ended (the first at 0): the staged program is a prefix its owner
-/// wrote whole, never a previous stager's bytes with a chunk on top. The first
+/// since 2026-10-16, is a chunk that starts neither at 0 nor where the
+/// caller's last one ended, without claiming the staging: the staged
+/// program is a prefix its owner wrote whole, never a previous stager's
+/// bytes with a chunk on top. A chunk at 0 starts the program over (the
+/// argv, cwd and env staged stand). The first
 /// staging call claims the staging for the caller; another task's call is
 /// [`SPAWN_ERR_STAGING_BUSY`] until the owner spawns or ends (see
 /// [`SPAWN`]).

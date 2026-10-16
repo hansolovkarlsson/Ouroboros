@@ -17,9 +17,12 @@
 //!                                 total past what this owner staged), never
 //!                                 read the previous stager's bytes as a program
 //! stageprobe sparse <total>      one 16-byte chunk ending at <total>, with
-//!                                 nothing staged below it, then a SPAWN of
-//!                                 <total>: the kernel must refuse the chunk
-//!                                 and the SPAWN with SPAWN_ERROR. Given the
+//!                                 nothing staged below it, three seconds'
+//!                                 wait (the refusal must have claimed
+//!                                 nothing, so another task spawns
+//!                                 meanwhile), then a SPAWN of <total>: the
+//!                                 kernel must refuse the chunk and the
+//!                                 SPAWN with SPAWN_ERROR. Given the
 //!                                 size of /bin/STAGEPROBE, the buffer below
 //!                                 the chunk holds the shell's copy of this
 //!                                 program, so a kernel that took the chunk
@@ -118,6 +121,7 @@ pub extern "C" fn _start() -> ! {
         let offset = total - CHUNK.len() as u64;
         let r = ulib::syscall4(syscall_abi::SPAWN_STAGE, offset, CHUNK.as_ptr() as u64, CHUNK.len() as u64, 0);
         say(target, me, b"a chunk with nothing staged below it answered code ", Some(r));
+        sleep_ms(3000);
         let s = ulib::syscall4(syscall_abi::SPAWN, total, syscall_abi::CON_TASK, 0, 0);
         say(target, me, b"spawn of the sparse total answered code ", Some(s));
         ulib::end_of_stream(target);

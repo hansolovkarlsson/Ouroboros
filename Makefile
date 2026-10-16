@@ -2105,7 +2105,8 @@ test-spawn-owner: image
 # copy of the image, /bin/ARGS zero-padded to 200 KiB (past the 128 KiB bound
 # of before 2026-10-16), to exactly SPAWN_STAGING_SIZE, and one byte more;
 # the first two run, the third is refused with the shell's message, and a
-# spawn after it runs. One boot, about a minute; run it whenever
+# spawn after it runs. Its control, the constant back at 131072, builds only
+# with the kernel's image-bound assert taken out. One boot, about a minute; run it whenever
 # SPAWN_STAGING_SIZE, SPAWN_STAGE or the shell's spawn_path changes (netd's
 # cpu loop has no rig at this size).
 test-spawn-size: image

@@ -2648,7 +2648,10 @@ be reviewed after the fact from the saved screenshots.
 >       copies the file under the kernel lock. Options: a bulk
 >       `SPAWN_STAGE` (a grant, as `BLOCK_*` uses), a retry in the shell's
 >       and `netd`'s loops on `BUSY`, or the file read into the child's
->       region with no global staging. Not urgent while no program near the
+>       region with no global staging. A file over the bound is found out
+>       only after the whole buffer is staged (2.2 s for 1 MiB plus a byte),
+>       where a size read first would refuse it holding nothing (the
+>       second review). Not urgent while no program near the
 >       bound exists; the cc-and-as item makes `/bin/CPP` about 238 KB.
 
 **The goal, restated honestly.** The original `notes.txt` intent was

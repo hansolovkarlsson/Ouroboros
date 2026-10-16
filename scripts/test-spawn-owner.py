@@ -22,9 +22,12 @@ is refused and then until it succeeds. One boot, in this order:
    owner staged, so the previous stager's bytes are never parsed).
    `stageprobe sparse <size of /bin/STAGEPROBE>`: one chunk ending there
    with nothing staged below it, where the shell's copy of stageprobe still
-   lies; the chunk and the SPAWN must each answer `SPAWN_ERROR`, and that
-   copy must not start (it would print its usage line). With `SPAWN_STAGE`
-   taking a chunk anywhere, as until 2026-10-16, all three fail.
+   lies, run in the background; the chunk and the SPAWN must each answer
+   `SPAWN_ERROR`, that copy must not start (it would print its usage line),
+   and `echo ok-sparse`, typed in the three seconds between, must run (a
+   refused chunk claims nothing). With `SPAWN_STAGE` taking a chunk
+   anywhere, as until 2026-10-16, the first three fail; with the order
+   checked after the claim, the echo is refused.
 1. `exec /bin/stageprobe check 6000`, then `exec /bin/stageprobe hold 12000` (both in
    the background). While the holder holds, `echo refused-one` must be
    refused by the shell with the code's message and print nothing; the
@@ -84,9 +87,14 @@ def drive(guest):
     # 0b. in order: a chunk with nothing staged below it is refused, so the
     # shell's copy of stageprobe left in the buffer below it is never
     # started (it would print its usage line).
+    # In the background, and while it waits after its refused chunk, `echo
+    # ok-sparse` must run: a refused chunk claims nothing.
     start = len(guest.transcript())
-    guest.type_line(f"/bin/stageprobe sparse {os.path.getsize(STAGEPROBE)}")
-    guest.wait_for(r"spawn of the sparse total answered code \d+[\s\S]*" + PROMPT, timeout=30)
+    guest.type_line(f"exec /bin/stageprobe sparse {os.path.getsize(STAGEPROBE)}")
+    guest.wait_for(r"a chunk with nothing staged below it answered code \d+", timeout=30)
+    guest.type_line("echo ok-sparse")
+    guest.wait_for(r"spawn of the sparse total answered code \d+", timeout=30)
+    guest.wait_for(PROMPT, timeout=10)
     got["sparse_out"] = guest.transcript()[start:]
     # 1. the checker first (it waits six seconds before it tries), then the holder.
     guest.type_line("exec /bin/stageprobe check 6000")
@@ -144,7 +152,13 @@ def checks(got, out, faults):
          f"a chunk with nothing staged below it answered code {SPAWN_ERROR}" in got["sparse_out"]),
         ("the spawn of the sparse total is SPAWN_ERROR",
          f"spawn of the sparse total answered code {SPAWN_ERROR}" in got["sparse_out"]),
-        ("the previous stager's program was not started (no usage line)", "usage: stageprobe" not in got["sparse_out"]),
+        ("a refused chunk claims nothing: echo ran while the probe waited",
+         0 <= got["sparse_out"].find("\nok-sparse") < got["sparse_out"].find("spawn of the sparse total answered")),
+        # The whole run's transcript, not step 0b's slice: a copy the kernel
+        # started runs on its own, on another core with SMP, and may print
+        # after the slice is taken (the second review of #303). No other
+        # step prints the usage.
+        ("the previous stager's program was not started (no usage line in the run)", "usage: stageprobe" not in out),
         ("the checker and the first holder started", bool(got["checker"] and got["holder1"]) and None not in (checker, holder1)),
         ("echo refused while a program held the staging (the message)", bool(re.search(REFUSAL, one))),
         ("echo printed nothing while refused", "\nrefused-one" not in one),

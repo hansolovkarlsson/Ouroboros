@@ -1522,22 +1522,31 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             if end > staging.len() {
                 return SPAWN_ERROR;
             }
+            // In order: a chunk starts at 0 or where this owner's last one
+            // ended, so STAGED_IMAGE_END is a prefix the owner wrote whole.
+            // It was a high-water mark until 2026-10-16, and one chunk near
+            // the end made every byte below it count as staged: the previous
+            // stager's program, a binary the new owner may not read, could
+            // be spawned, or its bytes taken as data by an ELF header the
+            // new owner wrote over them (the high review of #303). Checked
+            // before the claim, so a refused chunk claims nothing (the
+            // second review); a non-owner's expected offset is 0, since a
+            // free staging's latches are cleared on its claim. A chunk at 0
+            // starts the image over (an owner's retry, or one whose claim
+            // leaked), resetting this latch only: the argv, cwd and env it
+            // staged stand.
+            let expected = match staging_state() {
+                Staging::Mine => STAGED_IMAGE_END.load(Ordering::Relaxed),
+                Staging::Held => return syscall_abi::SPAWN_ERR_STAGING_BUSY,
+                Staging::Free => 0,
+            };
+            if offset != 0 && offset != expected {
+                return SPAWN_ERROR;
+            }
             // The first chunk claims the staging for this task; another
             // task's chunk is refused until the owner spawns or ends.
             if let Err(code) = claim_staging() {
                 return code;
-            }
-            // In order: a chunk starts where this owner's last one ended, so
-            // STAGED_IMAGE_END is a prefix the owner wrote whole. It was a
-            // high-water mark until 2026-10-16, and one chunk near the end
-            // made every byte below it count as staged: the previous
-            // stager's program, a binary the new owner may not read, could
-            // be spawned, or its bytes taken as data by an ELF header the
-            // new owner wrote over them (the high review of #303). The
-            // claim stands on a refusal; a SPAWN or the task's end releases
-            // it, as for every other refusal after a claim.
-            if offset != STAGED_IMAGE_END.load(Ordering::Relaxed) {
-                return SPAWN_ERROR;
             }
             // SAFETY: bounds sanity-checked above, same trust model as
             // every other userland pointer argument.
