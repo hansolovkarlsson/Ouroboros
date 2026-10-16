@@ -6,7 +6,7 @@
 # sysroot`) into a resolved copy before invoking meson, so no host-specific path
 # is committed. See libc/ and docs/processes.md's "Writing a program in C".
 [binaries]
-c = ['clang', '-target', 'aarch64-none-elf', '-nostdlib', '-fPIC', '--ld-path=@LLVM_BIN@/gcc-ld/ld.lld']
+c = ['clang', '-target', 'aarch64-none-elf', '-nostdlib', '-fPIC']
 ar = '@LLVM_BIN@/llvm-ar'
 as = '@LLVM_BIN@/llvm-as'
 nm = '@LLVM_BIN@/llvm-nm'
@@ -21,30 +21,21 @@ endian = 'little'
 [properties]
 skip_sanity_check = true
 
-# Two defects of this file, found 2026-10-15, explain the options below.
+# --ld-path is a link option and lives in c_link_args, not on the `c` line
+# above. Until 2026-10-16 it rode every compile there: clang warned it unused,
+# meson probes each optional flag with -Werror=unused-command-line-argument,
+# and 30 of picolibc's 31 optional flags probed NO, so the library was built
+# without -frounding-math, -ffunction-sections, -fno-common,
+# -fno-stack-protector, and the -fno-builtin, -fno-builtin-malloc and
+# -fno-builtin-free picolibc gives the files that need them (without the last,
+# nano-malloc's realloc dropped a size store and could hang). Four still probe
+# NO, each GCC-only or a link probe -nostdlib cannot pass.
 #
-# --ld-path above rides every compile, clang warns it unused there, and meson
-# probes each optional flag with -Werror=unused-command-line-argument, so 30
-# of picolibc's 31 optional flags probe NO (only -Wno-unused-command-line-
-# argument says YES) and the library is built without them. That also leaves
-# _HAVE_LONG_DOUBLE undefined in picolibc.h, which hides the prototypes of
-# four long double functions (fcvtl_r, ecvtl_r, frexpl, __math_with_errnol)
-# from the files that call them: that, not picolibc itself, is why the
-# implicit-function-declaration error has to be demoted. Fixing the probes
-# (--ld-path into c_link_args, tried) defines eleven _HAVE_ macros, long
-# double among them, and DevTools's cc refuses long double here
-# (docs/handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md), so
-# that waits on ROADMAP.md's item for it.
-#
-# Until then the two flags picolibc gives its malloc are given here, for every
-# file. Without -fno-builtin-free clang deletes, as dead, the size nano-malloc
-# writes on a chunk just before freeing it (realloc's split of a remainder,
-# __malloc_grow_chunk, memalign), so the chunk joins the free list with a
-# garbage size and a later call can loop for good: the libc.a shipped until
-# 2026-10-15 hung so in realloc. -fno-builtin-malloc changes memalign and
-# eight callers of malloc (newlib's binned malloc needs it outright: without
-# it calloc compiled to memset(mem, 0, -8)). `make test-malloc` fails with
-# either dropped: cmalloc hangs.
+# The fixed probes also define eleven _HAVE_ macros in picolibc.h, long
+# double and complex among them, and install complex.h. DevTools's cc refuses
+# long double here (docs/handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md),
+# so libc/picolibc-patches/0002 undefines the eleven and removes complex.h in
+# the installed headers: programs see what they saw before, and the library
+# itself is built with them.
 [built-in options]
-c_args = ['-Wno-error=implicit-function-declaration',
-          '-fno-builtin-malloc', '-fno-builtin-free']
+c_link_args = ['--ld-path=@LLVM_BIN@/gcc-ld/ld.lld']

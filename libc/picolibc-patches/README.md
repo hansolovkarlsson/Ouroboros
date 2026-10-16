@@ -12,3 +12,13 @@ prebuilt tree, where the next regeneration would drop it.
   has no statement expressions or `__typeof__`, and has the six builtins.
   Asked by DevTools on 2026-10-13
   (`docs/handoffs/closed/2026-10-13-from-devtools-picolibc-comparison-builtins.md`).
+- `0002-undefine-probed-macros.patch`: `<picolibc.h>` leaves undefined the
+  eleven `_HAVE_` macros (`_HAVE_LONG_DOUBLE`, `_HAVE_COMPLEX` and nine
+  attribute macros) that picolibc's probes define once they work, and
+  `<complex.h>` is removed, so programs see the headers they saw before the
+  probes were fixed on 2026-10-16 while the library is built with them.
+  DevTools's `cc` refuses `long double` here
+  (`docs/handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md`);
+  when it takes binary128, this patch goes, with a notice to DevTools, and
+  programs that use `long double` need the quad-float helpers (`__addtf3`
+  and the rest), which nothing here links yet.
