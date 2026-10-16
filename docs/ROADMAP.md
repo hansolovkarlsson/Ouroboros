@@ -2622,6 +2622,18 @@ be reviewed after the fact from the saved screenshots.
 >       cpp runs out of memory at about 70 KB of input before nano's walk
 >       costs anything (at 35 KB both finish in the same time). Note:
 >       [`handoffs/2026-10-14-from-devtools-nano-malloc.md`](handoffs/2026-10-14-from-devtools-nano-malloc.md).
+> - [ ] **fix** **The eleven probed macros, each on its own condition.**
+>       DevTools's finding of 2026-10-16: `libc/picolibc-patches/0002`
+>       undefines all eleven `_HAVE_` macros the fixed probes define, and its
+>       README brings them back together when DevTools's `cc` takes `long
+>       double`. Three that hurt `cc` have nothing to do with `long double`
+>       (`_HAVE_ALLOC_SIZE` refuses `stdlib.h` and `malloc.h`; the two
+>       inline macros together, `ctype.h` and `fenv.h`), and seven cost it
+>       nothing. Split the patch by condition (long double; `alloc_size`;
+>       the inline pair), each going on DevTools's `notice`, define the
+>       seven, keep `<complex.h>` removed, and send DevTools a notice
+>       before `check-picolibc`'s header pin moves. Its own PR. Note:
+>       [`handoffs/2026-10-16-from-devtools-probed-macros.md`](handoffs/2026-10-16-from-devtools-probed-macros.md).
 > - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
 >       the high review of #303: a file is staged 512 bytes a call, each a
 >       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused
