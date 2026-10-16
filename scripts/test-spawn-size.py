@@ -20,7 +20,8 @@ kernel is:
 Each run's wall time is reported, not graded: a file is staged in 512-byte
 chunks, one fsd read each. No fault line in QEMU's trace. The control: with
 the constant at 131072 (and the kernel's assert that it covers the image
-bound taken out so it builds), `past128` and `atmax` fail. One boot, about a
+bound taken out so it builds), the bound check and `past128` fail, while
+`atmax` and `overmax` pass at the old bound, as they should. One boot, about a
 minute. Run it whenever SPAWN_STAGING_SIZE, SPAWN_STAGE or a spawner's
 staging loop (the shell's spawn_path, netd's cpu) changes.
 """
@@ -75,9 +76,9 @@ def detach(mp):
 
 def main() -> int:
     size = staging_size()
+    # past128 is 200 KiB whatever the constant says, so with the constant
+    # back at the old bound it is refused and this rig fails (the control).
     files = {"past128": 200 * 1024, "atmax": size, "overmax": size + 1}
-    if not OLD_BOUND < files["past128"] <= size:
-        sys.exit(f"test-spawn-size: SPAWN_STAGING_SIZE {size} leaves no room past the old {OLD_BOUND}")
 
     shutil.copyfile(IMAGE, COPY)
     mp = attach(COPY)
@@ -123,6 +124,7 @@ def main() -> int:
     over = block("/spawn/overmax p3")
     checks = [
         ("driven to the end", driven),
+        (f"SPAWN_STAGING_SIZE ({size}) is past the old {OLD_BOUND} by 200 KiB or more", size >= files["past128"]),
         (f"past128 ({files['past128']} bytes, past the old {OLD_BOUND}) ran", "argv[1] = p1" in block("/spawn/past128 p1")),
         (f"atmax ({files['atmax']} bytes, the bound) ran", "argv[1] = p2" in block("/spawn/atmax p2")),
         (f"overmax ({files['overmax']} bytes) refused: {refusal!r}", refusal in over),
