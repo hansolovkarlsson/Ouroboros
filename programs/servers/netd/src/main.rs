@@ -5664,12 +5664,6 @@ fn dial_accept(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; MAX_D
     true
 }
 
-/// The `/net` server, served by `netd` itself: the read-only identity files
-/// (`/ip` dotted-quad, `/mac` colon-hex) AND the read-write `/net/tcp` dial-out
-/// connection files (see `dial_file_op`). `data_in` is a write's payload; the
-/// dial table + our MAC let the tcp subtree drive real connections. Shared by
-/// the export gateway (remote) and the local client path (`handle_client`).
-#[allow(clippy::too_many_arguments)]
 /// One page of a fixed listing (`name\n` lines), as fsd pages one
 /// (`ninep_abi::NP_READDIR`): the lines from the `start`-th, whole, until the
 /// next would not fit `want`; empty past the end. A line too long for an empty
@@ -5695,8 +5689,15 @@ fn listing_page(listing: &[u8], start: u64, want: usize, out: &mut [u8]) -> (u64
     (written as u64, written)
 }
 
+/// The `/net` server, served by `netd` itself: the read-only identity files
+/// (`/ip` dotted-quad, `/mac` colon-hex) AND the read-write `/net/tcp` dial-out
+/// connection files (see `dial_file_op`). `data_in` is a write's payload; the
+/// dial table + our MAC let the tcp subtree drive real connections. Shared by
+/// the export gateway (remote) and the local client path (`handle_client`).
+///
 /// `offset` is a read's byte offset, or for `NP_READDIR` the index of the
 /// first entry of the page (the request's `a2`).
+#[allow(clippy::too_many_arguments)]
 fn net_op(verb: u64, fspath: &[u8], offset: u64, want: usize, data_in: &[u8], out: &mut [u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6]) -> (u64, usize) {
     // The dial-out connection files (Plan 9 /net/tcp), a read-WRITE subtree.
     if fspath.starts_with(b"/tcp") {
@@ -6431,10 +6432,15 @@ fn start_response(c: &mut TcpConn, request: &[u8]) {
         let mut names = [0u8; syscall_abi::FS_DATA_MAX as usize];
         // The first page only: the index lives in one response buffer, so a
         // directory longer than a page is shown as far as its first page
-        // goes, a run with no gaps since listings page (2026-10-16).
+        // goes, a run with no gaps since listings page (2026-10-16), and says
+        // so: a one-byte window at the next start answers FS_ERROR while an
+        // entry remains (no entry fits one byte) and 0 at the end.
         let listed = list_dir(As::Anonymous, path, 0, 0, &mut names);
         if listed < syscall_abi::FS_ERR_MIN {
-            c.prefix_len = build_listing(path, &names[..listed as usize], &mut c.prefix);
+            let page = &names[..listed as usize];
+            let more = ninep_abi::readdir_next(0, page)
+                .is_some_and(|next| list_dir(As::Anonymous, path, 0, next, &mut [0u8; 1]) == syscall_abi::FS_ERROR);
+            c.prefix_len = build_listing(path, page, more, &mut c.prefix);
         } else if size == syscall_abi::FS_ERR_PERM || listed == syscall_abi::FS_ERR_PERM {
             // It exists; anonymous just may not have it. 403, not 404 - saying
             // "not found" about a file that is there is the kind of small lie
@@ -6826,7 +6832,9 @@ fn list_dir(who: As, path: &[u8], tree: u64, start: u64, out: &mut [u8]) -> u64 
 /// navigate into subdirectories and open files. No `Content-Length` (the body
 /// is generated; `Connection: close` delimits it); truncated if it exceeds
 /// `out`.
-fn build_listing(dir_path: &[u8], entries: &[u8], out: &mut [u8]) -> usize {
+/// `more`: the directory goes on past `entries` (the first page); the index
+/// then says so in its last line rather than end as if whole.
+fn build_listing(dir_path: &[u8], entries: &[u8], more: bool, out: &mut [u8]) -> usize {
     // The directory path without a trailing slash (except root itself), for
     // joining hrefs cleanly.
     let base: &[u8] = if dir_path.len() > 1 && *dir_path.last().unwrap() == b'/' {
@@ -6873,6 +6881,9 @@ fn build_listing(dir_path: &[u8], entries: &[u8], out: &mut [u8]) -> usize {
         put(b"</a></li>", &mut w);
     }
 
+    if more {
+        put(b"<li>(more entries than this index shows)</li>", &mut w);
+    }
     put(b"</ul></body></html>", &mut w);
     w
 }

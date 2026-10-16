@@ -22,9 +22,11 @@ and the ext2 and exFAT images copy the same tree. One boot of each image
   one directory must be longer than a page, or paging is not exercised;
 - `cat` of three files, a nested one, a `__` one and target.h, must give the
   host's bytes;
-- the shell's glob `echo s*` in /include must give exactly the staged names
-  that begin with `s`: the shell pages a listing on its own (globs and tab
-  completion), and on FAT32 those names lie past the first page;
+- the shell's glob `echo st*` in /include must give exactly the staged names
+  that begin with `st`: the shell pages a listing on its own (globs and tab
+  completion), and on FAT32 those names lie past the first page. The words
+  must fit the shell's argument limit (MAX_ARGS), checked first, so a header
+  staged later fails that check, not the paging one (the review of #306);
 - names the guest's fsd creates keep their case: a lowercase file, a mixed
   case one, a directory, and a case-only `mv`, read back by `ls /` (on FAT32
   a lowercase 8.3 name is stored with byte 12's case flags, a mixed one as a
@@ -60,7 +62,10 @@ FENCE = "echo ==fence=="
 # mode, owner, group, size, then a date and time or a lone `-` (ext2 records
 # none here), then the name.
 # The shell's own pager, through a glob in a directory longer than a page.
-GLOB = "echo s*"
+GLOB = "echo st*"
+GLOB_PREFIX = "st"
+# The shell's argv limit (programs/shell's MAX_ARGS): `echo` and its matches.
+MAX_ARGS = 16
 # One NP_READDIR page: `ls` asks for at most this much at a time (the inline
 # reply's FS_DATA_MAX), `name\n` or `name/\n` per entry.
 PAGE = 512
@@ -203,8 +208,10 @@ def main() -> int:
                            cat_text(block, f"cat /include/{f}") == host))
         glob = blocks[len(dirs) + len(operands) + len(CATS)] if len(blocks) >= nblocks else ""
         got_s = set(glob.split(GLOB, 1)[-1].split("Ouroboros kernel", 1)[0].split())
-        want_s = {n for n in want["/include"] if n.lower().startswith("s")}
-        checks.append((f"{name}: {GLOB} in /include gives the {len(want_s)} staged names that begin with s"
+        want_s = {n for n in want["/include"] if n.lower().startswith(GLOB_PREFIX)}
+        checks.append((f"{name}: {GLOB}'s {len(want_s)} matches and `echo` fit the shell's {MAX_ARGS} words",
+                       len(want_s) + 1 <= MAX_ARGS))
+        checks.append((f"{name}: {GLOB} in /include gives the {len(want_s)} staged names that begin with {GLOB_PREFIX}"
                        + ("" if got_s == want_s else f" (missing {sorted(want_s - got_s)[:4]}, extra {sorted(got_s - want_s)[:4]})"),
                        got_s == want_s))
         root = blocks[len(dirs) + len(operands) + len(CATS) + 2] if len(blocks) >= nblocks else ""

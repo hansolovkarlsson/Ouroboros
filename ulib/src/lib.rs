@@ -1173,44 +1173,32 @@ pub fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
     )
 }
 
-/// `path`'s whole listing into `buf`, page after page ([`fs_list_dir_page`]),
-/// as `name\n`/`name/\n`. Returns `Ok((bytes, complete))`, `complete` false
-/// when `buf` filled before the listing ended (the caller says so, rather
-/// than show a listing with names missing), or `Err` with [`NO_FS`] or an
-/// `FS_ERR_*` code. Every listing went through one reply, holes and all,
-/// until 2026-10-16.
+/// `path`'s whole listing into `buf`, page after page
+/// ([`ninep_abi::readdir_pages`], the one paging loop), as `name\n`/`name/\n`.
+/// Returns `Ok((bytes, complete))`, `complete` false when `buf` filled before
+/// the listing ended or the server answered as one from before paging (the
+/// caller says so, rather than show a listing with names missing), or `Err`
+/// with [`NO_FS`] or an `FS_ERR_*` code, a page's error passed through as it
+/// came. Every listing went through one reply, holes and all, until
+/// 2026-10-16.
 pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
-    let mut start = 0u64;
+    let mut page = [0u8; ninep_abi::READDIR_PAGE];
+    let mut first = [0u8; ninep_abi::READDIR_PAGE];
     let mut written = 0usize;
-    loop {
-        let room = buf.len() - written;
-        // With no room left, a one-byte window still tells "more" (an entry
-        // is at least two bytes, so it is refused) from "the end" (empty).
-        let mut probe = [0u8; 1];
-        let page: &mut [u8] = if room == 0 { &mut probe } else { &mut buf[written..] };
+    let fetch = |start: u64, page: &mut [u8]| {
         let n = fs_list_dir_page(path, start, page);
-        if is_fs_error(n) {
-            if n == syscall_abi::FS_ERROR && (written > 0 || room == 0) {
-                return Ok((written, false));
-            }
-            return Err(n);
+        if is_fs_error(n) { Err(n) } else { Ok(n as usize) }
+    };
+    let end = ninep_abi::readdir_pages(&mut page, &mut first, fetch, |line| {
+        if written + line.len() + 1 > buf.len() {
+            return false;
         }
-        if room == 0 {
-            return Ok((written, n == 0));
-        }
-        let got = (n as usize).min(room);
-        // A server from before paging ignores the start and answers page one
-        // again: no later page can equal it (a directory has no name twice),
-        // so stop there, the listing not known to be whole, rather than loop.
-        if start > 0 && got > 0 && buf[written..written + got] == buf[..got] {
-            return Ok((written, false));
-        }
-        let Some(next) = ninep_abi::readdir_next(start, &buf[written..written + got]) else {
-            return Ok((written, true));
-        };
-        start = next;
-        written += got;
-    }
+        buf[written..written + line.len()].copy_from_slice(line);
+        buf[written + line.len()] = b'\n';
+        written += line.len() + 1;
+        true
+    })?;
+    Ok((written, end == ninep_abi::ReaddirEnd::Complete))
 }
 
 /// Invoke a single path-only filesystem op (`FSOP_MKDIR`/`RMDIR`/`TOUCH`/`RM`):

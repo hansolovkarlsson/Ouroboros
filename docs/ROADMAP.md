@@ -4183,6 +4183,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   after five seconds, where it used SIGKILL, which dropped what the log still
   held; and `Guest.aborts()` stops the guest itself before reading, so no rig
   can read the trace early. Every rig gets it without an edit of its own.
+- **A listing page walks the whole directory.** Since `NP_READDIR` pages
+  (2026-10-16), fsd answers a page by walking every entry through
+  `list_dir`, skipping those before the start and those after the page fills,
+  so a listing of `p` pages reads the directory `p` times (the high review of
+  #306): `ls` of a 4 KiB listing is about nine walks, each reading every
+  directory cluster, slow on the Pi's USB stick. An early stop from
+  `list_dir`'s callback (a `ControlFlow` through the four filesystem walkers
+  and `/proc`) bounds a walk at its page's end; a cursor kept per fid would
+  bound it at the page itself. Tab completion on an ambiguous prefix also
+  lists the directory twice, once to count and once to print.
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970

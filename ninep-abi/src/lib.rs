@@ -78,6 +78,63 @@ pub fn readdir_next(start: u64, page: &[u8]) -> Option<u64> {
     }
     Some(start + page.iter().filter(|&&b| b == b'\n').count() as u64)
 }
+
+/// The window [`readdir_pages`] asks for: the inline reply's data cap
+/// (`syscall_abi::FS_DATA_MAX`), so an entry of any legal name fits an empty
+/// page and `FS_ERROR` from a page is a real error, never "no room".
+pub const READDIR_PAGE: usize = 512;
+
+/// How [`readdir_pages`] ended, when no page failed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReaddirEnd {
+    /// An empty page: every entry was given to the caller.
+    Complete,
+    /// The caller's `entry` returned `false` (its buffer is full).
+    Stopped,
+    /// A later page equal to the first: a server from before paging, which
+    /// ignores the start and answers page one for every one. No paging server
+    /// can answer so, a directory having no name twice. The listing is page
+    /// one, as it was before paging, and not known to be whole.
+    OldServer,
+}
+
+/// Walk a directory listing page by page: the one copy of the paging loop,
+/// for `ulib` and the shell alike (the review of #306 found the two copies
+/// already apart). `fetch(start, page)` asks for the page from entry `start`
+/// into `page` ([`READDIR_PAGE`] bytes) and answers its byte count or the
+/// server's error code; `entry` is given each line without its `\n` (a
+/// directory's with its `/`), and returns `false` to stop. `first` holds
+/// page one for the [`ReaddirEnd::OldServer`] check, at least as long as
+/// `page`.
+pub fn readdir_pages(
+    page: &mut [u8],
+    first: &mut [u8],
+    mut fetch: impl FnMut(u64, &mut [u8]) -> Result<usize, u64>,
+    mut entry: impl FnMut(&[u8]) -> bool,
+) -> Result<ReaddirEnd, u64> {
+    let mut start = 0u64;
+    let mut first_len = 0usize;
+    loop {
+        let n = fetch(start, page)?.min(page.len());
+        let got = &page[..n];
+        if start > 0 && n > 0 && got == &first[..first_len] {
+            return Ok(ReaddirEnd::OldServer);
+        }
+        let Some(next) = readdir_next(start, got) else {
+            return Ok(ReaddirEnd::Complete);
+        };
+        if start == 0 {
+            first[..n].copy_from_slice(got);
+            first_len = n;
+        }
+        for line in got.split(|&b| b == b'\n') {
+            if !line.is_empty() && !entry(line) {
+                return Ok(ReaddirEnd::Stopped);
+            }
+        }
+        start = next;
+    }
+}
 /// Read a file inline: the reply carries the bytes (capped by the message
 /// limit). Params: `a0` = path length, `a1` = want, at least 1 (a want of 0 is
 /// refused `FS_ERROR`, as for every path read verb). Status = the file's *real*
@@ -1001,6 +1058,66 @@ mod tests {
     //! --target aarch64-apple-darwin`). No I/O, no syscalls - the cheapest
     //! foreign observer this project has.
     use super::*;
+
+    /// A paging server over `names`, as fsd answers: whole entries from
+    /// `start` until the next would not fit `page`.
+    fn serve(names: &[&[u8]], start: u64, page: &mut [u8]) -> Result<usize, u64> {
+        let mut n = 0;
+        for name in names.iter().skip(start as usize) {
+            if n + name.len() + 1 > page.len() {
+                break;
+            }
+            page[n..n + name.len()].copy_from_slice(name);
+            page[n + name.len()] = b'\n';
+            n += name.len() + 1;
+        }
+        Ok(n)
+    }
+
+    fn collect(fetch: impl FnMut(u64, &mut [u8]) -> Result<usize, u64>, limit: usize) -> (Result<ReaddirEnd, u64>, [[u8; 16]; 64], usize) {
+        let mut page = [0u8; 24];
+        let mut first = [0u8; 24];
+        let mut got = [[0u8; 16]; 64];
+        let mut count = 0;
+        let end = readdir_pages(&mut page, &mut first, fetch, |line| {
+            if count == limit {
+                return false;
+            }
+            got[count][..line.len()].copy_from_slice(line);
+            count += 1;
+            true
+        });
+        (end, got, count)
+    }
+
+    const NAMES: [&[u8]; 9] = [b"alpha", b"beta/", b"gamma.h", b"d", b"epsilon", b"zeta", b"eta/", b"theta.c", b"iota"];
+
+    #[test]
+    fn readdir_pages_gives_every_entry_once_across_pages() {
+        let (end, got, count) = collect(|s, p| serve(&NAMES, s, p), 64);
+        assert_eq!(end, Ok(ReaddirEnd::Complete));
+        assert_eq!(count, NAMES.len());
+        for (i, name) in NAMES.iter().enumerate() {
+            assert_eq!(&got[i][..name.len()], *name);
+        }
+    }
+
+    #[test]
+    fn readdir_pages_stops_on_a_server_that_repeats_page_one() {
+        // A server from before paging: the start ignored.
+        let (end, _, count) = collect(|_, p| serve(&NAMES, 0, p), 64);
+        assert_eq!(end, Ok(ReaddirEnd::OldServer));
+        assert!(count > 0 && count < NAMES.len());
+    }
+
+    #[test]
+    fn readdir_pages_passes_an_error_through_and_stops_when_asked() {
+        let (end, _, _) = collect(|s, p| if s == 0 { serve(&NAMES, s, p) } else { Err(77) }, 64);
+        assert_eq!(end, Err(77));
+        let (end, _, count) = collect(|s, p| serve(&NAMES, s, p), 4);
+        assert_eq!(end, Ok(ReaddirEnd::Stopped));
+        assert_eq!(count, 4);
+    }
 
     #[test]
     fn readdir_next_counts_the_lines_and_ends_on_an_empty_page() {

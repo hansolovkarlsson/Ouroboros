@@ -3311,36 +3311,26 @@ fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
 
 /// Every entry of `dir`, page after page, each passed to `f` as
 /// [`for_each_entry`] does (name with the `/` stripped, and whether it is a
-/// directory). Returns `0`, or the first page's error ([`NO_FS`] or an
+/// directory). Returns `0`, or a page's error ([`NO_FS`] or an
 /// `FS_ERR_*` code). One page's buffer at a time, so a directory of any size
 /// is seen whole: until 2026-10-16 the shell read one reply, and a glob or a
 /// completion in a directory longer than it missed names with no sign.
 fn for_each_dir_entry(dir: &str, mut f: impl FnMut(&[u8], bool)) -> u64 {
-    let mut page = [0u8; LIST_SIZE];
-    let mut first = [0u8; LIST_SIZE];
-    let mut first_len = 0usize;
-    let mut start = 0u64;
-    loop {
-        let n = fs_list_dir_page(dir, start, &mut page);
-        if n >= FS_ERR_MIN {
-            return n;
-        }
-        let got = &page[..(n as usize).min(page.len())];
-        // A server from before paging (an older peer's export) ignores the
-        // start and answers page one again; no later page can equal it, so
-        // that is where the listing stops, as it did before paging.
-        if start > 0 && !got.is_empty() && got == &first[..first_len] {
-            return 0;
-        }
-        let Some(next) = ninep_abi::readdir_next(start, got) else {
-            return 0;
-        };
-        if start == 0 {
-            first[..got.len()].copy_from_slice(got);
-            first_len = got.len();
-        }
-        for_each_entry(got, &mut f);
-        start = next;
+    let mut page = [0u8; ninep_abi::READDIR_PAGE];
+    let mut first = [0u8; ninep_abi::READDIR_PAGE];
+    let fetch = |start: u64, page: &mut [u8]| {
+        let n = fs_list_dir_page(dir, start, page);
+        if n >= FS_ERR_MIN { Err(n) } else { Ok(n as usize) }
+    };
+    // ninep_abi::readdir_pages is the one paging loop; a server from before
+    // paging (an older peer's export) ends the listing at page one, as it
+    // did before paging.
+    match ninep_abi::readdir_pages(&mut page, &mut first, fetch, |line| {
+        for_each_entry(line, &mut f);
+        true
+    }) {
+        Ok(_) => 0,
+        Err(code) => code,
     }
 }
 

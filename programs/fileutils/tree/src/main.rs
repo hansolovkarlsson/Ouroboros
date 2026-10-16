@@ -176,13 +176,20 @@ fn walk(path: &str, prefix: &str, target: u64, depth: usize, cap: usize, counts:
     }
     // Every entry of this level held: the listing ended in the buffer, and
     // the record array did not fill first.
-    let held = complete && i >= data.len();
+    // A line left after the record array filled counts only if it would have
+    // been an entry (`.` and `..` would not).
+    let held = complete
+        && data[i.min(data.len())..].split(|&b| b == b'\n').all(|line| {
+            let name = line.strip_suffix(b"/").unwrap_or(line);
+            name.is_empty() || is_dot(name)
+        });
     sort_entries(&mut entries[..count], data);
 
     // Emit each entry, recursing into directories - in sorted order.
     for (idx, e) in entries[..count].iter().enumerate() {
         let name = &data[e.start as usize..e.start as usize + e.len as usize];
-        let is_last = idx + 1 == count;
+        // When the level is cut short, its marker below is the last child.
+        let is_last = idx + 1 == count && held;
 
         emit_entry(target, prefix, is_last, name);
 

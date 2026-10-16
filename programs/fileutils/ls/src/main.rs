@@ -272,8 +272,15 @@ fn show_listing(target: u64, dir: &str, data: &[u8], all: bool, dots: bool, long
         };
         count += 1;
     }
-    // Whether every entry got a record: the loop stops at MAX_ENTRIES.
-    let held = pos >= data.len();
+    // Whether every entry that would be shown got a record: the loop stops at
+    // MAX_ENTRIES, and a line left after it counts only if it would have been
+    // shown (a dotfile without -a would not; the review of #306).
+    let held = data[pos.min(data.len())..]
+        .split(|&b| b == b'\n')
+        .all(|line| {
+            let name = line.strip_suffix(b"/").unwrap_or(line);
+            name.is_empty() || (!all && name[0] == b'.')
+        });
     sort_entries(&mut entries[..count], data);
     if long {
         print_long(target, dir, &entries[..count], data);
