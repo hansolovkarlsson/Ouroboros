@@ -20,7 +20,10 @@ copy of build/esp.img, onto which the host first writes the inputs (/src):
   dependence on char's sign shows as the two references disagreeing;
 - clang, for this target (CFLAGS_OS, PICO_INC), must compile what the guest
   wrote: a foreign observer that the output is the program;
-- and `cpp /src/hello.c`, the handoff's Done when, prints it and exits 0.
+- and `cpp /src/hello.c`, the handoff's Done when, prints it and exits 0;
+- and the image's /bin/CPP, read back, is CPP_BIN, the binary the Makefile
+  built (cpp.bin, or cpp-ld-cc.bin and the like for DevTools's tools, CLINK
+  and CCOMP), so a run says which toolchain made what it ran.
 
 Token for token against `clang -E` is DevTools's own `make pico-check`, on the
 host, and not repeated here. No fault line in QEMU's trace. About a minute and
@@ -33,7 +36,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -78,23 +80,21 @@ def env(name):
     return value
 
 
-def attach(image, readonly):
-    """Mount a FAT32 image on the host; returns the mount point."""
-    mp = tempfile.mkdtemp(prefix="test-cpp.")
-    args = ["hdiutil", "attach", "-nobrowse", "-mountpoint", mp, image]
-    if readonly:
-        args.insert(2, "-readonly")
-    subprocess.run(args, check=True, capture_output=True)
-    return mp
+attach = drive_qemu.attach
+detach = drive_qemu.detach
 
 
-def detach(mp):
-    """Detach, forcing it if macOS holds the volume (Spotlight, fseventsd), as
-    the Makefile's image-stall does; the mount point is removed either way."""
-    r = subprocess.run(["hdiutil", "detach", mp], capture_output=True)
-    if r.returncode != 0:
-        subprocess.run(["hdiutil", "detach", "-force", mp], check=True, capture_output=True)
-    os.rmdir(mp)
+def objects_check(program, dir_var, rig):
+    """The check that the program's objects were made by the compiler asked
+    (CCOMP): all by clang, or none, read from the objects themselves."""
+    ccomp = drive_qemu.required_env("CCOMP", rig)
+    objdir = os.path.join(ROOT, drive_qemu.required_env(dir_var, rig))
+    objs = sorted(os.path.join(objdir, f) for f in os.listdir(objdir) if f.endswith(".o"))
+    by_clang = drive_qemu.clang_objects(objs)
+    print(f"     {program}'s objects ({os.path.relpath(objdir, ROOT)}): {by_clang} of {len(objs)} carry clang's version string")
+    want = 0 if ccomp == "devtools" else len(objs)
+    who = "DevTools's cc and as" if ccomp == "devtools" else "clang"
+    return (f"{program}'s {len(objs)} objects were made by {who} (CCOMP={ccomp})", bool(objs) and by_clang == want)
 
 
 def strip_sidecars(mp):
@@ -198,15 +198,25 @@ def run() -> int:
                    "int main(void)" in plain and 'printf("hello, world\\n")' in plain
                    and bool(pcode) and pcode.group(1) == "0"))
 
-    # The guest's output, read off the image by the host.
+    # The guest's output, read off the image by the host, and /bin/CPP, which
+    # must be CPP_BIN, the binary the Makefile built for this toolchain
+    # (cpp.bin, or cpp-ld-cc.bin and the like for DevTools's tools).
     got = {}
+    built = os.path.join(ROOT, drive_qemu.required_env("CPP_BIN", "test-cpp"))
     mp = attach(COPY, readonly=True)
     try:
         for name in SOURCES:
             path = os.path.join(mp, name[:-2] + ".i")
             got[name] = open(path, "rb").read() if os.path.exists(path) else None
+        with open(os.path.join(mp, "bin", "CPP"), "rb") as fh:
+            staged = fh.read()
     finally:
         detach(mp)
+    with open(built, "rb") as fh:
+        is_built = staged == fh.read()
+    print(f"     /bin/CPP is {len(staged)} bytes; {os.path.relpath(built, ROOT)} {'matches' if is_built else 'DIFFERS'}")
+    checks.append((f"the image's /bin/CPP is {os.path.relpath(built, ROOT)}, byte for byte", is_built))
+    checks.append(objects_check("cpp", "CPP_OBJ_DIR", "test-cpp"))
 
     # The same cpp on the Mac, from the same staged headers and the same
     # sources, under a host directory that stands in for the guest's root.

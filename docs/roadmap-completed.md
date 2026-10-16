@@ -2316,3 +2316,39 @@ follows as it stood when it was open, its 131,072 the bound of then.
 >       a program streamed into its region rather than staged whole, is the
 >       choice; the staging owner (`claim_staging`) and `make
 >       test-spawn-owner` are what it touches.
+
+## Edit's and cpp's sources through DevTools's cc, as and ld, DONE (2026-10-16)
+
+Moved from [`ROADMAP.md`](ROADMAP.md)'s libc section on 2026-10-16, from
+the block "What DevTools asks of Ouroboros next", which keeps the
+allocator and the staging hold. Marked done with what was built; the
+item's own text follows as it stood when it was open.
+
+> - [x] **DONE 2026-10-16** **Compile `/bin/edit` and `/bin/cpp` with DevTools's `cc` and
+>       `as`, as well as linking them with `ld`.** Built as planned:
+>       `CCOMP=devtools` beside `CLINK`, clang the default; `cc` (with
+>       cpp's library compiled in, picolibc's prebuilt headers its
+>       Ouroboros system directory) and `as` built here from `CC_DIR` and
+>       `AS_DIR`; objects per compiler and binaries per toolchain
+>       (`cpp-ld-cc.bin`). With both settings `/bin/CPP` is 237,792 bytes
+>       and `/bin/EDIT` 144,288, and `test-cpp` and `test-edit` pass with
+>       each read back off the image and found to be that binary; the
+>       other three combinations pass too, and each rig checks its
+>       program's objects were made by the compiler asked (clang's version
+>       string in each, or in none). The port's objects, `libc.a` and
+>       `libnsresolve.a` are still clang's and rustc's. `srcid.py`'s scan
+>       took a stamp of eight lines and this one has eleven, so its bound is 32 and
+>       `write` refuses a stamp past it (`CHANGELOG.md`).
+>
+>       *As written while open (2026-10-15):* A setting beside `CLINK`,
+>       clang and `ld.lld` staying the default; `cc` and `as` built here from
+>       DevTools's sources as `ld` is, never by DevTools's build; each source
+>       in two commands (`cc --target=ouroboros -I -D` to `.s`, `as` to
+>       `.o`), every object depending on all its program's sources, since
+>       `cc` writes no dependency files; outputs named per toolchain and the
+>       tools in the image stamp; `test-edit` and `test-cpp` on that image
+>       with `/bin/EDIT` and `/bin/CPP` read back and compared. Built that
+>       way `/bin/CPP` is about 238 KB and `/bin/EDIT` about 144 KB (the
+>       review of #301's measurement); the spawn buffer that blocked it is
+>       1 MiB since 2026-10-16 (`roadmap-completed.md`). Note:
+>       [`handoffs/closed/2026-10-15-from-devtools-build-with-cc-and-as.md`](handoffs/closed/2026-10-15-from-devtools-build-with-cc-and-as.md).

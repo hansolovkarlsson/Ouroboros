@@ -19,7 +19,10 @@ run saves never reaches build/esp.img:
    ate all of `abcdef` (one delete would leave `bcdef` after it), the
    arrow moved the cursor, and the save wrote the file.
 
-QEMU's own trace must hold no fault line. About a minute. Needs Edit's
+Before the boot, the image's /bin/EDIT is read back and must be EDIT_BIN,
+the binary the Makefile built (`edit.bin`, or `edit-ld-cc.bin` and the like
+for DevTools's tools, CLINK and CCOMP), so a run says which toolchain made
+what it ran. QEMU's own trace must hold no fault line. About a minute. Needs Edit's
 sources at EDIT_DIR. Run it whenever libc's poll, termios or read of fd 0
 changes, or when DevTools changes Edit's Ouroboros platform file.
 """
@@ -41,12 +44,33 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-edit.txt")
 PROMPT = "# "
 
 
+def read_back(image, path):
+    """One file's bytes off a FAT32 image, mounted read-only on the host."""
+    mp = drive_qemu.attach(image, readonly=True, prefix="test-edit.")
+    try:
+        with open(os.path.join(mp, path), "rb") as fh:
+            return fh.read()
+    finally:
+        drive_qemu.detach(mp)
+
+
 def ctrl(letter):
     return bytes([ord(letter.upper()) - 64])
 
 
 def main() -> int:
     shutil.copy(IMAGE, COPY)
+    built = os.path.join(ROOT, drive_qemu.required_env("EDIT_BIN", "test-edit"))
+    ccomp = drive_qemu.required_env("CCOMP", "test-edit")
+    objdir = os.path.join(ROOT, drive_qemu.required_env("EDIT_OBJ_DIR", "test-edit"))
+    objs = sorted(os.path.join(objdir, f) for f in os.listdir(objdir) if f.endswith(".o"))
+    by_clang = drive_qemu.clang_objects(objs)
+    print(f"     Edit's objects ({os.path.relpath(objdir, ROOT)}): {by_clang} of {len(objs)} carry clang's version string")
+    objs_ok = bool(objs) and by_clang == (0 if ccomp == "devtools" else len(objs))
+    staged = read_back(COPY, "bin/EDIT")
+    with open(built, "rb") as fh:
+        is_built = staged == fh.read()
+    print(f"     /bin/EDIT is {len(staged)} bytes; {os.path.relpath(built, ROOT)} {'matches' if is_built else 'DIFFERS'}")
     guest = drive_qemu.Guest(COPY, label="test-edit: ")
     seg = {}
     try:
@@ -90,6 +114,8 @@ def main() -> int:
 
     cat_lines = [line.strip() for line in seg.get("cat", "").splitlines()]
     checks = [
+        (f"the image's /bin/EDIT is {os.path.relpath(built, ROOT)}, byte for byte", is_built),
+        (f"Edit's {len(objs)} objects were made by {'DevTools' + chr(39) + 's cc and as' if ccomp == 'devtools' else 'clang'} (CCOMP={ccomp})", objs_ok),
         ("driven to the end", ok),
         ("`edit hello.txt` opens the editor (its status line: the name, Line 1 Col 1)",
          "Line 1  Col 1" in seg.get("open", "")),
