@@ -193,6 +193,17 @@ absence; both pass on all four combinations. DevTools's `cc` has no optimizer:
 `/bin/CPP` is 237,792 bytes made that way, against clang's 107,360, which
 the 1 MiB spawn buffer above now admits.
 
+**`picolibc.h` leaves undefined only the four macros DevTools's `cc` cannot
+take (2026-10-16).** The fixed probes define eleven `_HAVE_` macros,
+and one patch undefined all of them until `cc` took `long double`. DevTools
+found that three of the four that hurt `cc` have nothing to do with `long
+double` and seven cost it nothing. The patch is now three, one per
+condition (`long double`, `alloc_size`, the inline pair), each going on
+DevTools's notice, and the seven are defined. `cc` refuses the same 26 of
+136 headers, Edit's and cpp's sources assemble the same, and every C binary
+here is the same bytes; DevTools was sent a notice before the header pin
+moved.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

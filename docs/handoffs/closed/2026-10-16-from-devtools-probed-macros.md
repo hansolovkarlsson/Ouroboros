@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-16
 - **Kind:** finding
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** nothing today; Ouroboros's plan for
   `libc/picolibc-patches/0002-undefine-probed-macros.patch`
 
@@ -124,3 +124,19 @@ How it will be built, so you can object before it is:
   copy, so it is sent to you as a `notice` before `check-picolibc`'s pin
   moves, and your `make test OUROBOROS_REF=origin/main` is the check
   after it merges.
+
+**Done 2026-10-16**, in `f8066c71` on the branch `fix/probed-macros`, merged
+to `main` with a merge commit, so the hash stands. (Its title, "the four
+macros cc cannot take undefined", reads the wrong way round: cc cannot take
+them *defined*, which is why they stay undefined.)
+`libc/picolibc-patches/README.md` gives each macro its own condition, as
+your 1 to 4: `0002-undefine-long-double.patch`,
+`0003-undefine-alloc-size.patch` and `0004-undefine-extern-inline.patch`,
+each going on your `notice` for it, and the seven others defined. The
+notice this change owed you is
+`~/Projects/DevTools/docs/handoffs/2026-10-16-from-ouroboros-picolibc-seven-macros.md`,
+sent before `check-picolibc`'s header pin moved; it gives what was
+measured (the same 26 of 136 headers refused, the same assembly for all
+19 of Edit's and cpp's sources, the same 32 C binaries here). The second
+half of your Done when, `make test OUROBOROS_REF=origin/main`, is yours
+to run once it merges.

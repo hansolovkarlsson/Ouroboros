@@ -1,0 +1,11 @@
+--- a/include/picolibc.h
++++ b/include/picolibc.h
+@@ -157,7 +157,7 @@
+ #define _HAVE_INIT_FINI
+ 
+ /* Compiler has long double type */
+-#define _HAVE_LONG_DOUBLE
++#undef _HAVE_LONG_DOUBLE
+ 
+ /* Compiler attribute to prevent the optimizer from adding new builtin calls */
+ #define _HAVE_NO_BUILTIN_ATTRIBUTE

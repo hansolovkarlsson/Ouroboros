@@ -60,7 +60,7 @@
 
 #undef _FVWRITE_IN_STREAMIO
 
-#undef _HAVE_ALIAS_ATTRIBUTE
+#define _HAVE_ALIAS_ATTRIBUTE
 
 /* The compiler REALLY has the attribute __alloc_size__ */
 #undef _HAVE_ALLOC_SIZE
@@ -75,7 +75,7 @@
 #undef _HAVE_ATTRIBUTE_GNU_INLINE
 
 /* Use bitfields in packed structs */
-#undef _HAVE_BITFIELDS_IN_PACKED_STRUCTS
+#define _HAVE_BITFIELDS_IN_PACKED_STRUCTS
 
 /* Compiler has __builtin_add_overflow */
 #define _HAVE_BUILTIN_ADD_OVERFLOW
@@ -84,7 +84,7 @@
 #define _HAVE_BUILTIN_ALLOCA
 
 /* Compiler has __builtin_complex */
-#undef _HAVE_BUILTIN_COMPLEX
+#define _HAVE_BUILTIN_COMPLEX
 
 /* The compiler supports __builtin_copysign */
 #define _HAVE_BUILTIN_COPYSIGN
@@ -141,11 +141,11 @@
 #undef _HAVE_CC_INHIBIT_LOOP_TO_LIBCALL
 
 /* Compiler supports _Complex */
-#undef _HAVE_COMPLEX
+#define _HAVE_COMPLEX
 
 #undef _HAVE_FCNTL
 
-#undef _HAVE_FORMAT_ATTRIBUTE
+#define _HAVE_FORMAT_ATTRIBUTE
 
 /* IEEE fp funcs available */
 #undef _HAVE_IEEEFP_FUNCS
@@ -160,7 +160,7 @@
 #undef _HAVE_LONG_DOUBLE
 
 /* Compiler attribute to prevent the optimizer from adding new builtin calls */
-#undef _HAVE_NO_BUILTIN_ATTRIBUTE
+#define _HAVE_NO_BUILTIN_ATTRIBUTE
 
 /* _set_tls and _init_tls functions available */
 #undef _HAVE_PICOLIBC_TLS_API
@@ -171,7 +171,7 @@
 /* Semihost APIs supported */
 #undef _HAVE_SEMIHOST
 
-#undef _HAVE_WEAK_ATTRIBUTE
+#define _HAVE_WEAK_ATTRIBUTE
 
 /* math library does not set errno (offering only ieee semantics) */
 #define _IEEE_LIBM
