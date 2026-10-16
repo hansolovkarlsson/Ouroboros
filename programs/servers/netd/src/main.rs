@@ -5672,21 +5672,14 @@ fn dial_accept(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; MAX_D
 /// same names forever.
 fn listing_page(listing: &[u8], start: u64, want: usize, out: &mut [u8]) -> (u64, usize) {
     let cap = want.min(out.len());
-    let mut written = 0usize;
-    for (index, line) in listing.split_inclusive(|&b| b == b'\n').enumerate() {
-        if (index as u64) < start {
-            continue;
-        }
-        if written + line.len() > cap {
-            if written == 0 {
-                return (syscall_abi::FS_ERROR, 0);
-            }
-            break;
-        }
-        out[written..written + line.len()].copy_from_slice(line);
-        written += line.len();
+    let mut fill = ninep_abi::ReaddirFill::new(&mut out[..cap], start);
+    for line in listing.split_inclusive(|&b| b == b'\n') {
+        fill.push(line, b"");
     }
-    (written as u64, written)
+    match fill.finish() {
+        Some(written) => (written as u64, written),
+        None => (syscall_abi::FS_ERROR, 0),
+    }
 }
 
 /// The `/net` server, served by `netd` itself: the read-only identity files

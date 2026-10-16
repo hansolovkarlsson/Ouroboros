@@ -4192,7 +4192,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `list_dir`'s callback (a `ControlFlow` through the four filesystem walkers
   and `/proc`) bounds a walk at its page's end; a cursor kept per fid would
   bound it at the page itself. Tab completion on an ambiguous prefix also
-  lists the directory twice, once to count and once to print.
+  lists the directory twice, once to count and once to print, and netd's HTTP
+  index walks it twice, its page and then a one-byte page at the next start
+  to learn whether there is more (the second review of #306). The pager's
+  question to a server, a start past any end, is one more walk per listing
+  of more than a page; an early stop ends that one at once.
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970

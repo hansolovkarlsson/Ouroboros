@@ -619,8 +619,9 @@ const LF: u8 = b'\n';
 /// overflows is truncated.
 const GLOB_LINE_SIZE: usize = 1024;
 
-/// A directory listing buffer for globbing and tab completion (the same
-/// `name\n`/`name/\n` format), one page of it at a time ([`for_each_dir_entry`]).
+/// `cd`'s window for the first page of the directory it checks. Globs and
+/// tab completion page through [`ninep_abi::READDIR_PAGE`] instead
+/// ([`for_each_dir_entry`]).
 const LIST_SIZE: usize = 512;
 
 // Syscall numbers and sentinel values come from the shared `syscall-abi`
@@ -3317,15 +3318,15 @@ fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
 /// completion in a directory longer than it missed names with no sign.
 fn for_each_dir_entry(dir: &str, mut f: impl FnMut(&[u8], bool)) -> u64 {
     let mut page = [0u8; ninep_abi::READDIR_PAGE];
-    let mut first = [0u8; ninep_abi::READDIR_PAGE];
+    let mut spare = [0u8; ninep_abi::READDIR_PAGE];
     let fetch = |start: u64, page: &mut [u8]| {
         let n = fs_list_dir_page(dir, start, page);
         if n >= FS_ERR_MIN { Err(n) } else { Ok(n as usize) }
     };
     // ninep_abi::readdir_pages is the one paging loop; a server from before
     // paging (an older peer's export) ends the listing at page one, as it
-    // did before paging.
-    match ninep_abi::readdir_pages(&mut page, &mut first, fetch, |line| {
+    // did before paging, and a broken page ends it where it broke.
+    match ninep_abi::readdir_pages(&mut page, &mut spare, fetch, |line| {
         for_each_entry(line, &mut f);
         true
     }) {

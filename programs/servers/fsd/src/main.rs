@@ -710,38 +710,20 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             // them. Now a page is a run with no gaps, the client's next start
             // is this one's plus the lines it got, and an empty page is the
             // end. An entry that would not fit an empty page is refused
-            // FS_ERROR, since a page of 0 bytes would read as the end.
-            let start = p[2];
-            let mut index = 0u64;
-            let mut written = 0usize;
-            let mut full = false;
-            let mut too_long = false;
+            // FS_ERROR, since a page of 0 bytes would read as the end. The
+            // rule is ninep_abi::ReaddirFill, which netd's listings share.
             let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
+            let mut fill = ninep_abi::ReaddirFill::new(result, p[2]);
             let outcome = fs.list_dir(path, |name, is_dir, _size| {
-                let here = index;
-                index += 1;
-                if full || here < start {
-                    return;
-                }
-                let suffix: &[u8] = if is_dir { b"/\n" } else { b"\n" };
-                let entry_len = name.len() + suffix.len();
-                if written + entry_len > result.len() {
-                    full = true;
-                    too_long = written == 0;
-                    return;
-                }
-                result[written..written + name.len()].copy_from_slice(name.as_bytes());
-                written += name.len();
-                result[written..written + suffix.len()].copy_from_slice(suffix);
-                written += suffix.len();
+                fill.push(name.as_bytes(), if is_dir { b"/\n" } else { b"\n" });
             });
-            match outcome {
-                Ok(()) if too_long => status_reply(reply, syscall_abi::FS_ERROR),
-                Ok(()) => {
+            match (outcome, fill.finish()) {
+                (Err(e), _) => status_reply(reply, error_code(&e)),
+                (Ok(()), None) => status_reply(reply, syscall_abi::FS_ERROR),
+                (Ok(()), Some(written)) => {
                     status_slot[..8].copy_from_slice(&(written as u64).to_le_bytes());
                     REPLY_PAYLOAD + written
                 }
-                Err(e) => status_reply(reply, error_code(&e)),
             }
         }
         ninep_abi::NP_READ_FILE => {

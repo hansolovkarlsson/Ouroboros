@@ -213,9 +213,12 @@ now takes the index of the first entry in `a2` and answers a page: whole
 entries until the next would not fit, an empty page at the end. fsd,
 netd's export and its `/net` listings, the host 9P server, `ulib` and the
 shell page; `ls` and `tree` say so when a directory is longer than they can
-hold, rather than drop names. A pager stops on a later page equal to the
-first, which is what an older peer that ignores the index answers, so a
-mixed cluster lists as before rather than looping.
+hold, rather than drop names. Before a second page the pager asks for an
+index past any directory's end: a paging server answers an empty page, an
+older peer that ignores the index answers page one, and the listing is then
+page one, so a mixed cluster lists as before rather than looping. One
+helper fills a page for fsd and netd, and one loop reads them for `ulib` and
+the shell.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

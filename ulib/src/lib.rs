@@ -1176,20 +1176,22 @@ pub fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
 /// `path`'s whole listing into `buf`, page after page
 /// ([`ninep_abi::readdir_pages`], the one paging loop), as `name\n`/`name/\n`.
 /// Returns `Ok((bytes, complete))`, `complete` false when `buf` filled before
-/// the listing ended or the server answered as one from before paging (the
-/// caller says so, rather than show a listing with names missing), or `Err`
+/// the listing ended or a page broke the rule (the caller says so, rather than
+/// show a listing with names missing), or `Err`
 /// with [`NO_FS`] or an `FS_ERR_*` code, a page's error passed through as it
-/// came. Every listing went through one reply, holes and all, until
-/// 2026-10-16.
+/// came. A server from before paging (an older peer's export) gives page
+/// one, and that is called complete, as every listing was until 2026-10-16,
+/// when each went through one reply, holes and all: such a server says no
+/// more than that, so a mixed cluster lists as it did.
 pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
     let mut page = [0u8; ninep_abi::READDIR_PAGE];
-    let mut first = [0u8; ninep_abi::READDIR_PAGE];
+    let mut spare = [0u8; ninep_abi::READDIR_PAGE];
     let mut written = 0usize;
     let fetch = |start: u64, page: &mut [u8]| {
         let n = fs_list_dir_page(path, start, page);
         if is_fs_error(n) { Err(n) } else { Ok(n as usize) }
     };
-    let end = ninep_abi::readdir_pages(&mut page, &mut first, fetch, |line| {
+    let end = ninep_abi::readdir_pages(&mut page, &mut spare, fetch, |line| {
         if written + line.len() + 1 > buf.len() {
             return false;
         }
@@ -1198,7 +1200,8 @@ pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
         written += line.len() + 1;
         true
     })?;
-    Ok((written, end == ninep_abi::ReaddirEnd::Complete))
+    let complete = matches!(end, ninep_abi::ReaddirEnd::Complete | ninep_abi::ReaddirEnd::OldServer);
+    Ok((written, complete))
 }
 
 /// Invoke a single path-only filesystem op (`FSOP_MKDIR`/`RMDIR`/`TOUCH`/`RM`):
