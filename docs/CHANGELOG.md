@@ -147,6 +147,21 @@ also runs `scripts/check-picolibc.py`: `libc.a`, which rebuilds byte for
 byte, and the two header trees DevTools's `cc` reads from this tree, each
 against a pin.
 
+**picolibc is built with the flags it asks for (2026-10-16).** The cross
+file's `--ld-path` moved to `c_link_args`, so meson's probes for picolibc's
+optional flags work: 27 of 31 answer YES, where one did. `libc.a` gains
+`-frounding-math`, `-ffunction-sections`, `-fno-common`,
+`-fno-stack-protector`, and the `-fno-builtin` flags picolibc gives the
+files that need them, so the cross file no longer passes the two malloc
+flags by hand. Without `-frounding-math` clang computed both arms of a
+choice and selected one, so `round(1e308)` and `fdim(-1e308, 1e308)`
+raised overflow and inexact; `make test-cfenv` runs `/bin/CPICO fenv` and
+fails on the old library. The probes also define eleven `_HAVE_` macros,
+`long double` among them, which DevTools's `cc` refuses, so a second
+header patch undefines them: every header is unchanged byte for byte.
+Every C rig passed with `ld.lld` and `CLINK=devtools` before `LIB_PIN`
+moved.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

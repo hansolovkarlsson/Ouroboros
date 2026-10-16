@@ -1,0 +1,75 @@
+--- a/include/picolibc.h
++++ b/include/picolibc.h
+@@ -60,22 +60,22 @@
+ 
+ #undef _FVWRITE_IN_STREAMIO
+ 
+-#define _HAVE_ALIAS_ATTRIBUTE
++#undef _HAVE_ALIAS_ATTRIBUTE
+ 
+ /* The compiler REALLY has the attribute __alloc_size__ */
+-#define _HAVE_ALLOC_SIZE
++#undef _HAVE_ALLOC_SIZE
+ 
+ /* ARM Semihost APIs supported */
+ #undef _HAVE_ARM_SEMIHOST
+ 
+ /* The compiler supports the always_inline function attribute */
+-#define _HAVE_ATTRIBUTE_ALWAYS_INLINE
++#undef _HAVE_ATTRIBUTE_ALWAYS_INLINE
+ 
+ /* The compiler supports the gnu_inline function attribute */
+-#define _HAVE_ATTRIBUTE_GNU_INLINE
++#undef _HAVE_ATTRIBUTE_GNU_INLINE
+ 
+ /* Use bitfields in packed structs */
+-#define _HAVE_BITFIELDS_IN_PACKED_STRUCTS
++#undef _HAVE_BITFIELDS_IN_PACKED_STRUCTS
+ 
+ /* Compiler has __builtin_add_overflow */
+ #define _HAVE_BUILTIN_ADD_OVERFLOW
+@@ -84,7 +84,7 @@
+ #define _HAVE_BUILTIN_ALLOCA
+ 
+ /* Compiler has __builtin_complex */
+-#define _HAVE_BUILTIN_COMPLEX
++#undef _HAVE_BUILTIN_COMPLEX
+ 
+ /* The compiler supports __builtin_copysign */
+ #define _HAVE_BUILTIN_COPYSIGN
+@@ -141,11 +141,11 @@
+ #undef _HAVE_CC_INHIBIT_LOOP_TO_LIBCALL
+ 
+ /* Compiler supports _Complex */
+-#define _HAVE_COMPLEX
++#undef _HAVE_COMPLEX
+ 
+ #undef _HAVE_FCNTL
+ 
+-#define _HAVE_FORMAT_ATTRIBUTE
++#undef _HAVE_FORMAT_ATTRIBUTE
+ 
+ /* IEEE fp funcs available */
+ #undef _HAVE_IEEEFP_FUNCS
+@@ -157,10 +157,10 @@
+ #define _HAVE_INIT_FINI
+ 
+ /* Compiler has long double type */
+-#define _HAVE_LONG_DOUBLE
++#undef _HAVE_LONG_DOUBLE
+ 
+ /* Compiler attribute to prevent the optimizer from adding new builtin calls */
+-#define _HAVE_NO_BUILTIN_ATTRIBUTE
++#undef _HAVE_NO_BUILTIN_ATTRIBUTE
+ 
+ /* _set_tls and _init_tls functions available */
+ #undef _HAVE_PICOLIBC_TLS_API
+@@ -171,7 +171,7 @@
+ /* Semihost APIs supported */
+ #undef _HAVE_SEMIHOST
+ 
+-#define _HAVE_WEAK_ATTRIBUTE
++#undef _HAVE_WEAK_ATTRIBUTE
+ 
+ /* math library does not set errno (offering only ieee semantics) */
+ #define _IEEE_LIBM

@@ -72,6 +72,10 @@ for p in "$ROOT"/libc/picolibc-patches/*.patch; do
     [ -e "$p" ] || continue
     patch -s -p1 -d "$PREBUILT" < "$p" || { echo "build-picolibc: $p no longer applies"; exit 1; }
 done
+# complex.h goes with 0002, which undefines _HAVE_COMPLEX: removed here, not
+# by a deletion hunk, which would hold the whole file and stop the script at
+# any upstream change to it.
+rm -f "$PREBUILT/include/complex.h"
 echo "$VERSION" > "$PREBUILT/VERSION"
 # The compiler that built it, as meson ran it (the cross file's `c`, resolved
 # by meson, not whatever clang is first on PATH): a new Apple clang alone

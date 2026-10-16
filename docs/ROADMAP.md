@@ -2588,7 +2588,8 @@ be reviewed after the fact from the saved screenshots.
 > allocator item came from DevTools too and moved here from Proem's block
 > that day; the flag probes were found building it, the cc-and-as item is
 > DevTools's request of the same day, and the review of #301 found the spawn
-> buffer limit that blocks it:
+> buffer limit that blocks it. The flag probes are done and moved to
+> [`roadmap-completed.md`](roadmap-completed.md) on 2026-10-16:
 >
 > - [ ] **fix** **An allocator that is not linear in the free blocks**, chosen
 >       with the per-program heap above. picolibc's nano-malloc keeps one
@@ -2609,7 +2610,13 @@ be reviewed after the fact from the saved screenshots.
 >       128 KB spawn buffer. The choice is that, with an `sbrk` that sets
 >       `ENOMEM` and gives memory back and trimming off, or an allocator of
 >       our own over `sbrk` (DevTools's 35-line size-class one was its
->       measure); either way `test-malloc`'s timing becomes graded again,
+>       measure). An allocator of our own replaces the whole family, not
+>       `malloc` and `free` alone: since the probes work (2026-10-16)
+>       nano-malloc's `memalign` and `realloc` call `__malloc_malloc` and
+>       `__malloc_free`, aliases defined in the members that define `malloc`
+>       and `free`, so a program's own pair beside them is a duplicate
+>       symbol (before, it linked, and nano's `memalign` wrote its chunk
+>       headers into the other allocator's block); either way `test-malloc`'s timing becomes graded again,
 >       with a band, not a ceiling. Inside 1 MiB the gain does not show:
 >       cpp runs out of memory at about 70 KB of input before nano's walk
 >       costs anything (at 35 KB both finish in the same time). Note:
@@ -2635,37 +2642,6 @@ be reviewed after the fact from the saved screenshots.
 >       a program streamed into its region rather than staged whole, is the
 >       choice; the staging owner (`claim_staging`) and `make
 >       test-spawn-owner` are what it touches.
-> - [ ] **fix** **picolibc's optional flags, 30 of 31 probed NO.** Found
->       2026-10-15: `libc/picolibc-cross.txt` puts `--ld-path` on the
->       compiler line, clang warns it unused on every compile, and meson
->       probes with `-Werror=unused-command-line-argument`, so picolibc has
->       been built since 2026-08-28 without `-fno-builtin`,
->       `-ffunction-sections`, `-frounding-math`, `-fno-common`,
->       `-fno-stack-protector` and the rest. `-fno-builtin-malloc` and
->       `-free` are passed by hand now: without them nano-malloc's `realloc`
->       and `memalign` dropped size stores and `main`'s library could hang.
->       Without `-frounding-math`, `round()` and `fdim()` raise spurious
->       overflow and inexact exceptions (`round(1e308)` sets both; the review
->       of #301). Moving `--ld-path` to `c_link_args` fixes every probe
->       (tried: four NO remain, each GCC-only or a link probe `-nostdlib`
->       cannot pass) but also defines `_HAVE_LONG_DOUBLE`, `_HAVE_COMPLEX`
->       and nine others in `picolibc.h`, installs `complex.h`, ends the
->       implicit declarations the cross file now demotes (four long double
->       functions whose prototypes those macros hide), and needs the
->       quad-float helpers (`__addtf3` and the rest) once a program uses
->       `long double`. DevTools's `cc` refuses `long double` here, binary128
->       in software, which is on DevTools's roadmap. **Waits on** that:
->       [`handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md`](handoffs/closed/2026-10-15-from-devtools-picolibc-long-double.md).
->       **It need not wait** (the max review of #301 showed): move
->       `--ld-path` to `c_link_args`, and add a second header patch in
->       `libc/picolibc-patches/` that undefines the eleven macros, and drop
->       `complex.h` (Apple `patch` leaves it empty: `rm`, or `patch -E`); the
->       include tree then hashes to `check-picolibc`'s pin unchanged, and
->       `libc.a` gains `-frounding-math`, `-fno-builtin` and the rest. Its
->       cost: the archive grows about 600 KB (programs shrink), every object
->       changes, so the C rigs and `test-malloc` run on it and `LIB_PIN`
->       moves. Its own PR. When DevTools's `long double` lands, the macros
->       patch goes, with a notice.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
