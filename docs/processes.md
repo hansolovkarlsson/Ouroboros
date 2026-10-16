@@ -561,16 +561,14 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   flag clang does not have, and five link probes, each for picolibc's own
   test links (off here), Apple's linker, or a fallback for one that says
   YES.
-- **The probes define eleven `_HAVE_` macros** in `picolibc.h` and
-  install `complex.h`. Four of the macros make DevTools's `cc` refuse a
-  header (`long double`, `alloc_size`, and the two inline attributes
-  together), so `libc/picolibc-patches/0002` to `0004` undefine them in the
-  installed tree, each until DevTools's `notice` that `cc` takes it, and
-  `build-picolibc.sh` removes `complex.h`; the other seven stay defined
-  (since 2026-10-16, DevTools's finding; they change no byte of any C
-  program here). The library is built with all eleven, and the quad-float
-  helpers (`__addtf3` and the rest) its long double members need are
-  linked by nothing yet.
+- **The probes define `_HAVE_` macros** in `picolibc.h`, some of which
+  DevTools's `cc` cannot take, and install `complex.h`. The patches in
+  `libc/picolibc-patches/` undefine those in the installed tree and
+  `build-picolibc.sh` removes `complex.h`; that directory's `README.md` is
+  the one list of which macros, why, and the notice from DevTools that
+  removes each patch. The library is built with every macro the probes
+  define, and the quad-float helpers (`__addtf3` and the rest) its long
+  double members need are linked by nothing yet.
 
 **Closed 2026-08-29** (this was the arc's one open follow-up): picolibc's
 `posix-console` stdout is *unbuffered* — one `write(1,&c,1)` per char, so console

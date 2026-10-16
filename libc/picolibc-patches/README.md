@@ -42,8 +42,13 @@ a reply naming the commit.
 The other seven stay as the probes define them, since they cost `cc`
 nothing: `_HAVE_ALIAS_ATTRIBUTE`, `_HAVE_BITFIELDS_IN_PACKED_STRUCTS`,
 `_HAVE_BUILTIN_COMPLEX`, `_HAVE_COMPLEX`, `_HAVE_FORMAT_ATTRIBUTE`,
-`_HAVE_NO_BUILTIN_ATTRIBUTE` and `_HAVE_WEAK_ATTRIBUTE` (each header compiled
-alone by `cc`: 26 of 136 refused with them defined, the same 26 as without).
+`_HAVE_NO_BUILTIN_ATTRIBUTE` and `_HAVE_WEAK_ATTRIBUTE`. Each of the tree's 136
+headers compiled alone, `#include <H>` and an empty `main`, by `cc
+--target=ouroboros -nostdinc -I <cc>/include -I
+third_party/picolibc-prebuilt/include` (DevTools's reproduction): 26
+refused with the seven defined, the same 26 as without (25 with `-I
+libc/pico/include` added, as the Makefile passes for Edit and cpp, again
+the same either way).
 `<complex.h>` is still removed, by `scripts/build-picolibc.sh` rather than a
 deletion hunk (which would hold the whole file): `cc` refuses `_Complex`,
 and the complex functions in `libc.a` need helpers (`__muldc3` and the rest)

@@ -34,11 +34,10 @@ skip_sanity_check = true
 # test links, which this build turns off, -alias is Apple's linker's, and
 # --defsym=start=0 is a fallback for the --defsym=_start=0 that says YES.
 #
-# The fixed probes also define eleven _HAVE_ macros in picolibc.h and install
-# complex.h. Four of the macros make DevTools's cc refuse a header, so
-# libc/picolibc-patches/0002 to 0004 undefine them in the installed headers,
-# each until DevTools's notice for it, and build-picolibc.sh removes
-# complex.h; the other seven stay defined (its README says which and why).
-# The library itself is built with all eleven.
+# The fixed probes also define _HAVE_ macros in picolibc.h, some of which
+# DevTools's cc cannot take; the patches in libc/picolibc-patches/ undefine
+# those in the installed headers, and that directory's README is the one
+# list of which, why, and what removes each. The library itself is built
+# with every macro the probes define.
 [built-in options]
 c_link_args = ['--ld-path=@LLVM_BIN@/gcc-ld/ld.lld']

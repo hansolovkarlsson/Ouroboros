@@ -125,8 +125,10 @@ How it will be built, so you can object before it is:
   moves, and your `make test OUROBOROS_REF=origin/main` is the check
   after it merges.
 
-**Done 2026-10-16**, in `f8066c71` ("picolibc: the four macros cc cannot take
-undefined, each on its own condition"), on the branch `fix/probed-macros`.
+**Done 2026-10-16**, in `f8066c71` on the branch `fix/probed-macros`, merged
+to `main` with a merge commit, so the hash stands. (Its title, "the four
+macros cc cannot take undefined", reads the wrong way round: cc cannot take
+them *defined*, which is why they stay undefined.)
 `libc/picolibc-patches/README.md` gives each macro its own condition, as
 your 1 to 4: `0002-undefine-long-double.patch`,
 `0003-undefine-alloc-size.patch` and `0004-undefine-extern-inline.patch`,

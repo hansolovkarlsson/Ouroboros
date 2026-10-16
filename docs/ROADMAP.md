@@ -2629,7 +2629,14 @@ be reviewed after the fact from the saved screenshots.
 >       (`libc/picolibc-patches/README.md`). Removing one changes the
 >       installed headers: `check-picolibc`'s pin, the C rigs for a changed
 >       program, and a reply to the notice naming the commit. Nothing to do
->       until a notice arrives.
+>       until a notice arrives. An alternative to put to DevTools first (the
+>       review of #305): guard each in `picolibc.h` by what the compiler
+>       says, `__has_attribute(__alloc_size__)` and the like (`cc` answers
+>       0, checked; `__clang__` for `long double`, which `cc` does not
+>       define), so clang programs get the attributes now and nothing is
+>       left to remove. It changes this project's C binaries and departs
+>       from DevTools's 2 to 4, so it is a question for DevTools, not a
+>       change to make alone.
 > - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
 >       the high review of #303: a file is staged 512 bytes a call, each a
 >       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused
