@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-15
 - **Kind:** requirement
-- **Status:** accepted
+- **Status:** done
 - **Blocks:** DevTools's roadmap item "Edit and cpp built by DevTools
   alone, booted on Ouroboros", the first rung of the toolchain's
   destination after its step 8 closed on 2026-10-15
@@ -118,3 +118,40 @@ How it will be built, so you can object before it is:
 occupy, so `/bin/CPP` at about 238 KB and `/bin/EDIT` at about 144 KB fit.
 `make test-spawn-size` checks the bound. The item itself is next on the
 roadmap; the status stays `accepted` until it is done.
+
+**Done 2026-10-16**, in `d38b10cf` ("CCOMP=devtools: /bin/edit and
+/bin/cpp compiled by DevTools's cc and assembled by its as"), on the
+branch `feat/devtools-cc-as`. Its Makefile has the three steps:
+
+- `CCOMP=devtools` (clang the default) builds `cc` and `as` for the host
+  from `CC_DIR` and `AS_DIR` (`../DevTools/cc` and `../DevTools/as`) by
+  this Makefile's own recipe: `cc` from `cc/lib/*.c`, `cc/driver/cc.c`
+  and `cpp/lib/*.c`, with `CC_INCLUDE_DIR` your `cc/include`,
+  `CC_OUROBOROS_SYSTEM_DIR` our `third_party/picolibc-prebuilt/include`
+  and `CC_MACOS_SYSTEM_DIR` empty; `as` from `as/lib/*.c` and
+  `as/driver/as.c`.
+- Each source of the two programs is compiled in two commands, as your
+  `ld/tests/pie/check.sh` does: `cc --target=ouroboros -I <src dir>
+  $(PICO_INC) [-DCPP_SYSTEM_DIRS=...] -o file.s file.c`, then `as -o
+  file.o file.s`; every object depends on all its program's sources and
+  headers, the C library's headers and `cc`'s own.
+- `CLINK=devtools` links them with your `ld`, as since #298.
+
+With `CCOMP=devtools CLINK=devtools`, `/bin/CPP` is 237,792 bytes and
+`/bin/EDIT` 144,288. `make test-cpp` (25 checks) and `make test-edit` (5)
+passed on that image, and each now reads its program back off the image
+and compares it with the binary built: `build/cpp-ld-cc.bin` and
+`build/edit-ld-cc.bin` matched byte for byte. Told to expect clang's
+`edit.bin` instead, the read-back check fails. The other three
+combinations pass the same two rigs, each image holding its own
+toolchain's binary (`cpp.bin` 107,360, `cpp-ld.bin` 110,352,
+`cpp-cc.bin` 235,000 bytes).
+
+Two things you may want to know. The link order is your `check.sh`'s
+only up to the object list: the Makefile puts `cpp.o` (the driver) after
+`lib/*.o`, so a shell glob over the objects, which puts it first, makes
+a different `/bin/CPP` of the same size (a different string order, the
+same program). And an image's source stamp now names your `cc/lib`,
+`cc/driver`, `cc/include`, `as/lib` and `as/driver` when they make its
+programs, twelve lines in all, which was past what our stamp scanner
+took: fixed in the same commit.

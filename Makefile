@@ -375,7 +375,7 @@ $(error CLINK=$(CLINK): must be lld or devtools)
 endif
 
 # The compiler and assembler for /bin/edit and /bin/cpp (the accepted note
-# docs/handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md): CCOMP=clang,
+# docs/handoffs/closed/2026-10-15-from-devtools-build-with-cc-and-as.md): CCOMP=clang,
 # the default, compiles each source to an object with CFLAGS_OS like every
 # other C program here; CCOMP=devtools is DevTools's cc and as, built here
 # from CC_DIR and AS_DIR (sibling checkouts, only read), each source in two

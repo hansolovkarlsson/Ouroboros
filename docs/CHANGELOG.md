@@ -178,6 +178,18 @@ task that may not read its file (the review of this change; the hole was
 as old as the staging's owner, 2026-10-11). `make test-spawn-owner`
 stages one such chunk over the shell's copy of `/bin/STAGEPROBE`.
 
+**Edit and cpp made by DevTools's tools alone (2026-10-16).** `make
+CCOMP=devtools` compiles `/bin/edit` and `/bin/cpp` with DevTools's `cc` and
+assembles them with its `as`, both built here from the sibling checkout,
+each source in two commands, `cc` to assembly and `as` to an object; with
+`CLINK=devtools` too, its `ld` links them, and the two programs are made by
+DevTools's toolchain alone. clang and `ld.lld` stay the default. `make
+test-cpp` and `make test-edit` now read `/bin/CPP` and `/bin/EDIT` back off
+the image and check them against the binary built for the toolchain asked;
+both pass on all four combinations. DevTools's `cc` has no optimizer:
+`/bin/CPP` is 237,792 bytes made that way, against clang's 107,360, which
+the 1 MiB spawn buffer above now admits.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

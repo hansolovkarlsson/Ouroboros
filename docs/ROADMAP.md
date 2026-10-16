@@ -2588,9 +2588,9 @@ be reviewed after the fact from the saved screenshots.
 > allocator item came from DevTools too and moved here from Proem's block
 > that day; the flag probes were found building it, the cc-and-as item is
 > DevTools's request of the same day, and the review of #301 found the spawn
-> buffer limit that blocked it. The flag probes and the spawn buffer are
-> done and moved to [`roadmap-completed.md`](roadmap-completed.md) on
-> 2026-10-16:
+> buffer limit that blocked it. The flag probes, the spawn buffer and the
+> cc-and-as item are done and moved to
+> [`roadmap-completed.md`](roadmap-completed.md) on 2026-10-16:
 >
 > - [ ] **fix** **An allocator that is not linear in the free blocks**, chosen
 >       with the per-program heap above. picolibc's nano-malloc keeps one
@@ -2622,19 +2622,6 @@ be reviewed after the fact from the saved screenshots.
 >       cpp runs out of memory at about 70 KB of input before nano's walk
 >       costs anything (at 35 KB both finish in the same time). Note:
 >       [`handoffs/2026-10-14-from-devtools-nano-malloc.md`](handoffs/2026-10-14-from-devtools-nano-malloc.md).
-> - [ ] **new** **Compile `/bin/edit` and `/bin/cpp` with DevTools's `cc` and
->       `as`, as well as linking them with `ld`.** A setting beside `CLINK`,
->       clang and `ld.lld` staying the default; `cc` and `as` built here from
->       DevTools's sources as `ld` is, never by DevTools's build; each source
->       in two commands (`cc --target=ouroboros -I -D` to `.s`, `as` to
->       `.o`), every object depending on all its program's sources, since
->       `cc` writes no dependency files; outputs named per toolchain and the
->       tools in the image stamp; `test-edit` and `test-cpp` on that image
->       with `/bin/EDIT` and `/bin/CPP` read back and compared. Built that
->       way `/bin/CPP` is about 238 KB and `/bin/EDIT` about 144 KB (the
->       review of #301's measurement); the spawn buffer that blocked it is
->       1 MiB since 2026-10-16 (`roadmap-completed.md`). Note:
->       [`handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md`](handoffs/2026-10-15-from-devtools-build-with-cc-and-as.md).
 > - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
 >       the high review of #303: a file is staged 512 bytes a call, each a
 >       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused
