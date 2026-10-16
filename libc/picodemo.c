@@ -13,8 +13,9 @@
  * value with OVERFLOW and INEXACT set. The first four checks are the
  * observer's own: flags raised and then cleared, and two operations that must
  * raise them.
- * The mode lives here, not in a program of its own, because /bin's listing is
- * nearly at its 512-byte reply (ROADMAP.md, the paged NP_READDIR item). */
+ * The mode lives here, not in a program of its own, because /bin's listing was
+ * nearly at its 512-byte reply when it was written (2026-10-16, the same day
+ * NP_READDIR began to page and that limit went). */
 #include <fenv.h>
 #include <math.h>
 #include <stdio.h>
