@@ -2317,7 +2317,7 @@ follows as it stood when it was open, its 131,072 the bound of then.
 >       choice; the staging owner (`claim_staging`) and `make
 >       test-spawn-owner` are what it touches.
 
-## Edit and cpp made by DevTools's tools alone, DONE (2026-10-16)
+## Edit's and cpp's sources through DevTools's cc, as and ld, DONE (2026-10-16)
 
 Moved from [`ROADMAP.md`](ROADMAP.md)'s libc section on 2026-10-16, from
 the block "What DevTools asks of Ouroboros next", which keeps the
@@ -2333,8 +2333,11 @@ item's own text follows as it stood when it was open.
 >       (`cpp-ld-cc.bin`). With both settings `/bin/CPP` is 237,792 bytes
 >       and `/bin/EDIT` 144,288, and `test-cpp` and `test-edit` pass with
 >       each read back off the image and found to be that binary; the
->       other three combinations pass too. `srcid.py`'s scan took a stamp
->       of eight lines and this one has twelve, so its bound is 32 and
+>       other three combinations pass too, and each rig checks its
+>       program's objects were made by the compiler asked (clang's version
+>       string in each, or in none). The port's objects, `libc.a` and
+>       `libnsresolve.a` are still clang's and rustc's. `srcid.py`'s scan
+>       took a stamp of eight lines and this one has eleven, so its bound is 32 and
 >       `write` refuses a stamp past it (`CHANGELOG.md`).
 >
 >       *As written while open (2026-10-15):* A setting beside `CLINK`,

@@ -33,9 +33,7 @@ import importlib.util
 import os
 import re
 import shutil
-import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,21 +61,6 @@ def staging_size():
     return size
 
 
-def attach(image):
-    """Mount a FAT32 image on the host, writable; returns the mount point."""
-    mp = tempfile.mkdtemp(prefix="test-spawn-size.")
-    subprocess.run(["hdiutil", "attach", "-nobrowse", "-mountpoint", mp, image], check=True, capture_output=True)
-    return mp
-
-
-def detach(mp):
-    """Detach, forcing it if macOS holds the volume, as test-cpp.py does."""
-    r = subprocess.run(["hdiutil", "detach", mp], capture_output=True)
-    if r.returncode != 0:
-        subprocess.run(["hdiutil", "detach", "-force", mp], check=True, capture_output=True)
-    os.rmdir(mp)
-
-
 def main() -> int:
     size = staging_size()
     # past128 is 200 KiB whatever the constant says, so with the constant
@@ -85,7 +68,7 @@ def main() -> int:
     files = {"past128": 200 * 1024, "atmax": size, "overmax": size + 1}
 
     shutil.copyfile(IMAGE, COPY)
-    mp = attach(COPY)
+    mp = drive_qemu.attach(COPY, readonly=False, prefix="test-spawn-size.")
     try:
         with open(os.path.join(mp, "bin", "ARGS"), "rb") as fh:
             args = fh.read()
@@ -98,7 +81,7 @@ def main() -> int:
                 if f.startswith("._"):
                     os.remove(os.path.join(dirpath, f))
     finally:
-        detach(mp)
+        drive_qemu.detach(mp)
     print(f"     /bin/ARGS is {len(args)} bytes; padded to {files['past128']}, {files['atmax']} and {files['overmax']}")
 
     runs = [("past128", "/spawn/past128 p1"), ("atmax", "/spawn/atmax p2"),

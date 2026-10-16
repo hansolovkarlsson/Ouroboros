@@ -67,9 +67,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 # The stamp's framing, found by a scan of the image's raw bytes. One line for
 # this repository and one per directory another project's programs are
 # compiled from; bounded so a scan of a whole disk image cannot run away.
-# Twelve lines since CCOMP=devtools (2026-10-16), where the bound of eight let
-# `write` stamp an image the scan could not find; `write` now refuses a stamp
-# past it, so the two cannot part again.
+# Eleven lines with CCOMP=devtools and CLINK=devtools (2026-10-16: this
+# repository and ten directories), where the bound of eight let `write` stamp
+# an image the scan could not find; `write` now refuses a stamp past the
+# bound, so the two cannot part again.
 STAMP_LINES = 32
 HEAD = b"ouroboros-srcid v1\n"
 STAMP_RX = re.compile(re.escape(HEAD) + rb"((?:[^\n\0]*\t[0-9a-z:]+\n){1,%d})end\n" % STAMP_LINES)

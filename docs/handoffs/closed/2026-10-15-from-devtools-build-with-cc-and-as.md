@@ -142,7 +142,13 @@ With `CCOMP=devtools CLINK=devtools`, `/bin/CPP` is 237,792 bytes and
 passed on that image, and each now reads its program back off the image
 and compares it with the binary built: `build/cpp-ld-cc.bin` and
 `build/edit-ld-cc.bin` matched byte for byte. Told to expect clang's
-`edit.bin` instead, the read-back check fails. The other three
+`edit.bin` instead, the read-back check fails. Each rig also checks that
+its program's objects were made by the compiler asked: every object clang
+writes carries its `clang version` string and none of yours does, so the
+check reads the objects, not the Makefile's word. What the two programs
+link with (our five port objects, `libc.a`, `libnsresolve.a`) is still
+built by clang and rustc: your tools make everything of Edit's and cpp's
+own, not the whole image. The other three
 combinations pass the same two rigs, each image holding its own
 toolchain's binary (`cpp.bin` 107,360, `cpp-ld.bin` 110,352,
 `cpp-cc.bin` 235,000 bytes).
@@ -153,5 +159,5 @@ only up to the object list: the Makefile puts `cpp.o` (the driver) after
 a different `/bin/CPP` of the same size (a different string order, the
 same program). And an image's source stamp now names your `cc/lib`,
 `cc/driver`, `cc/include`, `as/lib` and `as/driver` when they make its
-programs, twelve lines in all, which was past what our stamp scanner
+programs, eleven lines in all, which was past what our stamp scanner
 took: fixed in the same commit.

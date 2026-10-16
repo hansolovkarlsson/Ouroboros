@@ -41,6 +41,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import importlib.util
@@ -251,6 +252,50 @@ def fault_text(n) -> str:
     if n is None:
         return "NO TRACE (health bar unavailable - this is not a pass)"
     return f"{n} fault lines (Abort/SError)"
+
+
+def attach(image, readonly, prefix="ouroboros-image."):
+    """Mount a FAT32 image on the host; returns the mount point. The one
+    copy the rigs that read or write an image's files share (test-cpp,
+    test-edit, test-spawn-size), with `detach` below."""
+    mp = tempfile.mkdtemp(prefix=prefix)
+    args = ["hdiutil", "attach", "-nobrowse", "-mountpoint", mp, image]
+    if readonly:
+        args.insert(2, "-readonly")
+    subprocess.run(args, check=True, capture_output=True)
+    return mp
+
+
+def detach(mp):
+    """Detach, forcing it if macOS holds the volume (Spotlight, fseventsd), as
+    the Makefile's image-stall does; the mount point is removed either way."""
+    r = subprocess.run(["hdiutil", "detach", mp], capture_output=True)
+    if r.returncode != 0:
+        subprocess.run(["hdiutil", "detach", "-force", mp], check=True, capture_output=True)
+    os.rmdir(mp)
+
+
+def clang_objects(paths):
+    """How many of the object files at `paths` clang made: each object clang
+    writes carries its `clang version` string, and none that DevTools's cc and
+    as write does (19 of 19 against 0 of 19 for cpp's and Edit's, 2026-10-16).
+    The linked program keeps no trace of it, so the objects a link took are
+    where a rig can see which compiler made a program, without taking the
+    Makefile's word for it (the review of #304)."""
+    n = 0
+    for p in paths:
+        with open(p, "rb") as fh:
+            n += b"clang version" in fh.read()
+    return n
+
+
+def required_env(name, rig):
+    """A value only the Makefile gives a rig: exit naming the target if it is
+    missing, rather than guess one (a guess compares against the wrong build)."""
+    value = os.environ.get(name)
+    if not value:
+        sys.exit(f"{rig}: {name} is not set - run it as `make {rig}`, which passes it")
+    return value
 
 
 def main() -> int:

@@ -29,9 +29,7 @@ changes, or when DevTools changes Edit's Ouroboros platform file.
 import importlib.util
 import os
 import shutil
-import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,17 +46,12 @@ PROMPT = "# "
 
 def read_back(image, path):
     """One file's bytes off a FAT32 image, mounted read-only on the host."""
-    mp = tempfile.mkdtemp(prefix="test-edit.")
-    subprocess.run(["hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", mp, image],
-                   check=True, capture_output=True)
+    mp = drive_qemu.attach(image, readonly=True, prefix="test-edit.")
     try:
         with open(os.path.join(mp, path), "rb") as fh:
             return fh.read()
     finally:
-        r = subprocess.run(["hdiutil", "detach", mp], capture_output=True)
-        if r.returncode != 0:
-            subprocess.run(["hdiutil", "detach", "-force", mp], check=True, capture_output=True)
-        os.rmdir(mp)
+        drive_qemu.detach(mp)
 
 
 def ctrl(letter):
@@ -67,7 +60,13 @@ def ctrl(letter):
 
 def main() -> int:
     shutil.copy(IMAGE, COPY)
-    built = os.path.join(ROOT, os.environ.get("EDIT_BIN", "build/edit.bin"))
+    built = os.path.join(ROOT, drive_qemu.required_env("EDIT_BIN", "test-edit"))
+    ccomp = drive_qemu.required_env("CCOMP", "test-edit")
+    objdir = os.path.join(ROOT, drive_qemu.required_env("EDIT_OBJ_DIR", "test-edit"))
+    objs = sorted(os.path.join(objdir, f) for f in os.listdir(objdir) if f.endswith(".o"))
+    by_clang = drive_qemu.clang_objects(objs)
+    print(f"     Edit's objects ({os.path.relpath(objdir, ROOT)}): {by_clang} of {len(objs)} carry clang's version string")
+    objs_ok = bool(objs) and by_clang == (0 if ccomp == "devtools" else len(objs))
     staged = read_back(COPY, "bin/EDIT")
     with open(built, "rb") as fh:
         is_built = staged == fh.read()
@@ -116,6 +115,7 @@ def main() -> int:
     cat_lines = [line.strip() for line in seg.get("cat", "").splitlines()]
     checks = [
         (f"the image's /bin/EDIT is {os.path.relpath(built, ROOT)}, byte for byte", is_built),
+        (f"Edit's {len(objs)} objects were made by {'DevTools' + chr(39) + 's cc and as' if ccomp == 'devtools' else 'clang'} (CCOMP={ccomp})", objs_ok),
         ("driven to the end", ok),
         ("`edit hello.txt` opens the editor (its status line: the name, Line 1 Col 1)",
          "Line 1  Col 1" in seg.get("open", "")),

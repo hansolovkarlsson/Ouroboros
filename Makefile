@@ -380,9 +380,13 @@ endif
 # other C program here; CCOMP=devtools is DevTools's cc and as, built here
 # from CC_DIR and AS_DIR (sibling checkouts, only read), each source in two
 # commands, cc to assembly, as to an object. With CLINK=devtools too the two
-# programs are made by DevTools's tools alone, which is what its note asks.
+# programs' own sources are compiled, assembled and linked by DevTools's tools,
+# which is what its note asks; what they link with (PICO_PORT, libc.a and
+# libnsresolve.a) is still built by clang and rustc.
 # cc takes --target, -I, -D, -U, -nostdinc and -o only, so it gets PICO_INC
-# and the program's own -I and -D, none of clang's flags: it has no optimizer
+# (the -I list DevTools's own check passes, in clang's order; the two trees
+# share no header name, so the order picks no different file) and the
+# program's own -I and -D, none of clang's flags: it has no optimizer
 # and writes for -pie already. Its driver carries three include directories:
 # its own include/, and picolibc's prebuilt headers here as its Ouroboros
 # system directory (the macOS one empty, as nothing here compiles for the
@@ -410,8 +414,18 @@ AS_ID        := $(shell echo '$(AS_CMD) $(AS_SRCS)' | shasum -a 256 | cut -c1-12
 DEVTOOLS_AS  := $(BUILD_DIR)/host/as-$(AS_ID)
 # What every object of /bin/cpp or /bin/edit depends on besides its program's
 # own files: both tools, the headers they read, and this Makefile.
+# The C library's headers at any depth (picolibc's bits/types/ is three down;
+# a two-level glob missed it, the review of #304).
 CCOMP_DEPS   := $(DEVTOOLS_CC) $(DEVTOOLS_AS) $(wildcard $(CC_DIR)/include/*.h) \
-                $(wildcard $(PICO_DIR)/include/*.h $(PICO_DIR)/include/*/*.h libc/pico/include/*.h libc/pico/include/*/*.h) Makefile
+                $(shell find $(PICO_DIR)/include libc/pico/include -name '*.h') Makefile
+# One object from one source: cc to assembly beside the object, then as; $(1)
+# is the program's cc flags. The one copy of the two commands (the review of
+# #304 found them pasted three times).
+define CCOMP_COMPILE
+	@mkdir -p $(dir $@)
+	"$(DEVTOOLS_CC)" $(1) -o $(@:.o=.s) $<
+	"$(DEVTOOLS_AS)" -o $@ $(@:.o=.s)
+endef
 ifneq ($(CLINK_GOALS),)
 ifeq ($(wildcard $(CC_DIR)/driver/cc.c),)
 $(error CCOMP=devtools: no cc sources at $(CC_DIR) (set CC_DIR))
@@ -882,13 +896,9 @@ ifeq ($(CCOMP),devtools)
 CPP_CCFLAGS := --target=ouroboros -I $(CPP_DIR)/lib $(PICO_INC) '-DCPP_SYSTEM_DIRS="/include:/include/clang"'
 CPP_ALL     := $(wildcard $(CPP_DIR)/lib/*.c $(CPP_DIR)/lib/*.h) $(CPP_DIR)/driver/cpp.c $(wildcard $(CPP_DIR)/driver/*.h)
 $(CPP_OBJ_DIR)/%.o: $(CPP_DIR)/lib/%.c $(CPP_ALL) $(CCOMP_DEPS)
-	@mkdir -p $(CPP_OBJ_DIR)
-	"$(DEVTOOLS_CC)" $(CPP_CCFLAGS) -o $(@:.o=.s) $<
-	"$(DEVTOOLS_AS)" -o $@ $(@:.o=.s)
+	$(call CCOMP_COMPILE,$(CPP_CCFLAGS))
 $(CPP_OBJ_DIR)/cpp.o: $(CPP_DIR)/driver/cpp.c $(CPP_ALL) $(CCOMP_DEPS)
-	@mkdir -p $(CPP_OBJ_DIR)
-	"$(DEVTOOLS_CC)" $(CPP_CCFLAGS) -o $(@:.o=.s) $<
-	"$(DEVTOOLS_AS)" -o $@ $(@:.o=.s)
+	$(call CCOMP_COMPILE,$(CPP_CCFLAGS))
 else
 $(CPP_OBJ_DIR)/%.o: $(CPP_DIR)/lib/%.c Makefile
 	@mkdir -p $(CPP_OBJ_DIR)
@@ -912,9 +922,7 @@ ifeq ($(CCOMP),devtools)
 EDIT_CCFLAGS := --target=ouroboros -I $(EDIT_DIR)/src $(PICO_INC)
 EDIT_ALL     := $(EDIT_SRCS) $(wildcard $(EDIT_DIR)/src/*.h)
 $(EDIT_OBJ_DIR)/%.o: $(EDIT_DIR)/src/%.c $(EDIT_ALL) $(CCOMP_DEPS)
-	@mkdir -p $(EDIT_OBJ_DIR)
-	"$(DEVTOOLS_CC)" $(EDIT_CCFLAGS) -o $(@:.o=.s) $<
-	"$(DEVTOOLS_AS)" -o $@ $(@:.o=.s)
+	$(call CCOMP_COMPILE,$(EDIT_CCFLAGS))
 else
 $(EDIT_OBJ_DIR)/%.o: $(EDIT_DIR)/src/%.c Makefile
 	@mkdir -p $(EDIT_OBJ_DIR)
@@ -2339,9 +2347,13 @@ measure-syscost: image
 # `hXi`. One boot on a copy of the image, about a minute; needs Edit's sources.
 # With CLINK=devtools too whenever kernel/src/loader.rs, programs/linker.ld
 # or the C link flags change: DevTools's ld then links /bin/edit, and nothing
-# routine boots that path.
+# routine boots that path; and with CCOMP=devtools CLINK=devtools (DevTools's
+# cc, as and ld) whenever the C headers or PICO_INC change. Before the boot it
+# reads /bin/EDIT back off the image, which must be EDIT_BIN, and checks that
+# Edit's objects were made by the compiler CCOMP names, by clang's version
+# string in each object or its absence.
 test-edit: image
-	EDIT_BIN="$(EDIT_BIN)" python3 scripts/test-edit.py
+	EDIT_BIN="$(EDIT_BIN)" EDIT_OBJ_DIR="$(EDIT_OBJ_DIR)" CCOMP="$(CCOMP)" python3 scripts/test-edit.py
 
 # argv in a C program (scripts/test-cargs.py, /bin/CARGS): three pairs of runs,
 # the Rust /bin/ARGS and its C twin with the same arguments, which must print
@@ -2404,11 +2416,14 @@ test-include: image image-ext2 image-exfat
 # needs DevTools's cpp at CPP_DIR. Run it whenever the C runtime, the header
 # stage or cpp-bin changes; with CLINK=devtools too (DevTools's ld links it,
 # and nothing routine boots that path) whenever kernel/src/loader.rs,
-# programs/linker.ld or the C link flags change, as test-edit.
+# programs/linker.ld or the C link flags change, as test-edit, and with
+# CCOMP=devtools CLINK=devtools whenever the C headers or PICO_INC change.
+# It reads /bin/CPP back off the image, which must be CPP_BIN, and checks
+# cpp's objects were made by the compiler CCOMP names, as test-edit does.
 # Without cpp's sources there is nothing to test: test-cpp sets
 # NEED_CPP=required (above), which stops before the image is built, not after.
 test-cpp: image
-	CPP_DIR="$(CPP_DIR)" CPP_BIN="$(CPP_BIN)" CFLAGS_OS="$(CFLAGS_OS)" PICO_INC="$(PICO_INC)" python3 scripts/test-cpp.py
+	CPP_DIR="$(CPP_DIR)" CPP_BIN="$(CPP_BIN)" CPP_OBJ_DIR="$(CPP_OBJ_DIR)" CCOMP="$(CCOMP)" CFLAGS_OS="$(CFLAGS_OS)" PICO_INC="$(PICO_INC)" python3 scripts/test-cpp.py
 
 # `unmount` with a partition mount and an open file, on a copy of the ext2
 # image (scripts/test-unmount.py): both trees cleared, a held fid answering
