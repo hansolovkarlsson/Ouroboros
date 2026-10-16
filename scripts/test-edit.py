@@ -19,14 +19,19 @@ run saves never reaches build/esp.img:
    ate all of `abcdef` (one delete would leave `bcdef` after it), the
    arrow moved the cursor, and the save wrote the file.
 
-QEMU's own trace must hold no fault line. About a minute. Needs Edit's
+Before the boot, the image's /bin/EDIT is read back and must be EDIT_BIN,
+the binary the Makefile built (`edit.bin`, or `edit-ld-cc.bin` and the like
+for DevTools's tools, CLINK and CCOMP), so a run says which toolchain made
+what it ran. QEMU's own trace must hold no fault line. About a minute. Needs Edit's
 sources at EDIT_DIR. Run it whenever libc's poll, termios or read of fd 0
 changes, or when DevTools changes Edit's Ouroboros platform file.
 """
 import importlib.util
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,12 +46,32 @@ TRANSCRIPT = os.path.join(ROOT, "build", "test-edit.txt")
 PROMPT = "# "
 
 
+def read_back(image, path):
+    """One file's bytes off a FAT32 image, mounted read-only on the host."""
+    mp = tempfile.mkdtemp(prefix="test-edit.")
+    subprocess.run(["hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", mp, image],
+                   check=True, capture_output=True)
+    try:
+        with open(os.path.join(mp, path), "rb") as fh:
+            return fh.read()
+    finally:
+        r = subprocess.run(["hdiutil", "detach", mp], capture_output=True)
+        if r.returncode != 0:
+            subprocess.run(["hdiutil", "detach", "-force", mp], check=True, capture_output=True)
+        os.rmdir(mp)
+
+
 def ctrl(letter):
     return bytes([ord(letter.upper()) - 64])
 
 
 def main() -> int:
     shutil.copy(IMAGE, COPY)
+    built = os.path.join(ROOT, os.environ.get("EDIT_BIN", "build/edit.bin"))
+    staged = read_back(COPY, "bin/EDIT")
+    with open(built, "rb") as fh:
+        is_built = staged == fh.read()
+    print(f"     /bin/EDIT is {len(staged)} bytes; {os.path.relpath(built, ROOT)} {'matches' if is_built else 'DIFFERS'}")
     guest = drive_qemu.Guest(COPY, label="test-edit: ")
     seg = {}
     try:
@@ -90,6 +115,7 @@ def main() -> int:
 
     cat_lines = [line.strip() for line in seg.get("cat", "").splitlines()]
     checks = [
+        (f"the image's /bin/EDIT is {os.path.relpath(built, ROOT)}, byte for byte", is_built),
         ("driven to the end", ok),
         ("`edit hello.txt` opens the editor (its status line: the name, Line 1 Col 1)",
          "Line 1  Col 1" in seg.get("open", "")),

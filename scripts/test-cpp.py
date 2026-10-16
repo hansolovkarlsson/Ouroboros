@@ -20,7 +20,10 @@ copy of build/esp.img, onto which the host first writes the inputs (/src):
   dependence on char's sign shows as the two references disagreeing;
 - clang, for this target (CFLAGS_OS, PICO_INC), must compile what the guest
   wrote: a foreign observer that the output is the program;
-- and `cpp /src/hello.c`, the handoff's Done when, prints it and exits 0.
+- and `cpp /src/hello.c`, the handoff's Done when, prints it and exits 0;
+- and the image's /bin/CPP, read back, is CPP_BIN, the binary the Makefile
+  built (cpp.bin, or cpp-ld-cc.bin and the like for DevTools's tools, CLINK
+  and CCOMP), so a run says which toolchain made what it ran.
 
 Token for token against `clang -E` is DevTools's own `make pico-check`, on the
 host, and not repeated here. No fault line in QEMU's trace. About a minute and
@@ -198,15 +201,24 @@ def run() -> int:
                    "int main(void)" in plain and 'printf("hello, world\\n")' in plain
                    and bool(pcode) and pcode.group(1) == "0"))
 
-    # The guest's output, read off the image by the host.
+    # The guest's output, read off the image by the host, and /bin/CPP, which
+    # must be CPP_BIN, the binary the Makefile built for this toolchain
+    # (cpp.bin, or cpp-ld-cc.bin and the like for DevTools's tools).
     got = {}
+    built = os.path.join(ROOT, os.environ.get("CPP_BIN", "build/cpp.bin"))
     mp = attach(COPY, readonly=True)
     try:
         for name in SOURCES:
             path = os.path.join(mp, name[:-2] + ".i")
             got[name] = open(path, "rb").read() if os.path.exists(path) else None
+        with open(os.path.join(mp, "bin", "CPP"), "rb") as fh:
+            staged = fh.read()
     finally:
         detach(mp)
+    with open(built, "rb") as fh:
+        is_built = staged == fh.read()
+    print(f"     /bin/CPP is {len(staged)} bytes; {os.path.relpath(built, ROOT)} {'matches' if is_built else 'DIFFERS'}")
+    checks.append((f"the image's /bin/CPP is {os.path.relpath(built, ROOT)}, byte for byte", is_built))
 
     # The same cpp on the Mac, from the same staged headers and the same
     # sources, under a host directory that stands in for the guest's root.

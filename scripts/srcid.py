@@ -64,9 +64,15 @@ import sys
 import tempfile
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-# The stamp's framing, found by a scan of the image's raw bytes.
+# The stamp's framing, found by a scan of the image's raw bytes. One line for
+# this repository and one per directory another project's programs are
+# compiled from; bounded so a scan of a whole disk image cannot run away.
+# Twelve lines since CCOMP=devtools (2026-10-16), where the bound of eight let
+# `write` stamp an image the scan could not find; `write` now refuses a stamp
+# past it, so the two cannot part again.
+STAMP_LINES = 32
 HEAD = b"ouroboros-srcid v1\n"
-STAMP_RX = re.compile(re.escape(HEAD) + rb"((?:[^\n\0]*\t[0-9a-z:]+\n){1,8})end\n")
+STAMP_RX = re.compile(re.escape(HEAD) + rb"((?:[^\n\0]*\t[0-9a-z:]+\n){1,%d})end\n" % STAMP_LINES)
 # Pathspecs left out of this repository's identity; see the module doc.
 EXCLUDE = ("docs", "scripts/test-*")
 
@@ -159,8 +165,13 @@ def write(stamp, begun, dirs):
               "no stamp can say what they were built from - run the build again",
               file=sys.stderr)
         return 1
+    body = HEAD + now.encode() + b"end\n"
+    if not STAMP_RX.fullmatch(body):
+        print(f"srcid: a stamp of {len(now.splitlines())} lines is past what the scan finds "
+              f"({STAMP_LINES}), so no rig could read it - raise STAMP_LINES", file=sys.stderr)
+        return 1
     with open(stamp, "wb") as f:
-        f.write(HEAD + now.encode() + b"end\n")
+        f.write(body)
     return 0
 
 
