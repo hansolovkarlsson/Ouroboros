@@ -2240,8 +2240,10 @@ with the allocator, the spawn buffer and DevTools's cc-and-as item.
 
 > - [x] **DONE 2026-10-16** **picolibc's optional flags, 30 of 31 probed NO.**
 >       Built as the last paragraph says: `--ld-path` in `c_link_args`, 27 of
->       31 probing YES, `libc/picolibc-patches/0002` undefining the eleven
->       macros and removing `complex.h` (`patch -E`), the include tree the
+>       31 compiler probes YES (the four NO are flags clang lacks; five link
+>       probes say NO, none used by this build), `libc/picolibc-patches/0002`
+>       undefining the eleven macros and `build-picolibc.sh` removing
+>       `complex.h` (`rm`, not a deletion hunk), the include tree the
 >       pinned one byte for byte, the two hand-passed malloc flags and the
 >       implicit-declaration demotion dropped (picolibc passes the first to
 >       its 13 malloc files; the second has nothing left to demote).

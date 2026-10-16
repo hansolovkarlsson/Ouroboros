@@ -10,17 +10,18 @@ clang computed both arms of a choice and selected one: round(1e308) and
 fdim(-1e308, 1e308) returned the right value with OVERFLOW and INEXACT set.
 One boot:
 
-- `cpico fenv` prints each of CHECKS, every one `ok`, then `7 checks, 0
+- `cpico fenv` prints each of CHECKS, every one `ok`, then `8 checks, 0
   failed`, and exits 0;
-- the first three are the observer's own (flags that clear, 1e308 * 10
-  raising OVERFLOW and INEXACT, 1 / 3 raising INEXACT), so a fetestexcept that
-  always answered 0, or flags lost across the kernel, fail here and not
+- the first four are the observer's own (flags feraiseexcept set, then
+  cleared by feclearexcept, 1e308 * 10 raising OVERFLOW and INEXACT, 1 / 3
+  raising INEXACT), so a fetestexcept that always answered 0, a feclearexcept
+  that did nothing, or flags lost across the kernel, fail here and not
   silently in the four after;
 - `cpico` with no argument still runs the demo to `done.`.
 
 No fault line in QEMU's trace. The control: built against main's libc.a of
 2026-10-15, the round and fdim(-1e308, 1e308) lines fail and the observer's
-three pass. About a minute. Run it whenever picolibc is rebuilt or
+four pass. About a minute. Run it whenever picolibc is rebuilt or
 libc/picolibc-cross.txt changes.
 """
 import importlib.util
@@ -38,7 +39,7 @@ IMAGE = os.path.join(ROOT, "build", "esp.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-cfenv.txt")
 SUMMARY = r"cpico: (\d+) checks, (\d+) failed\r?\n"
 # Each check's name as cpico prints it, in its order.
-CHECKS = ["feclearexcept clears", "1e308 * 10", "1 / 3", "round(1e308)", "round(-1e308)",
+CHECKS = ["feraiseexcept raises", "feclearexcept clears", "1e308 * 10", "1 / 3", "round(1e308)", "round(-1e308)",
           "fdim(-1e308, 1e308)", "fdim(1e308, -1e308)"]
 
 

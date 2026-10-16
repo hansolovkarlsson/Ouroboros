@@ -2610,7 +2610,13 @@ be reviewed after the fact from the saved screenshots.
 >       128 KB spawn buffer. The choice is that, with an `sbrk` that sets
 >       `ENOMEM` and gives memory back and trimming off, or an allocator of
 >       our own over `sbrk` (DevTools's 35-line size-class one was its
->       measure); either way `test-malloc`'s timing becomes graded again,
+>       measure). An allocator of our own replaces the whole family, not
+>       `malloc` and `free` alone: since the probes work (2026-10-16)
+>       nano-malloc's `memalign` and `realloc` call `__malloc_malloc` and
+>       `__malloc_free`, aliases defined in the members that define `malloc`
+>       and `free`, so a program's own pair beside them is a duplicate
+>       symbol (before, it linked, and nano's `memalign` wrote its chunk
+>       headers into the other allocator's block); either way `test-malloc`'s timing becomes graded again,
 >       with a band, not a ceiling. Inside 1 MiB the gain does not show:
 >       cpp runs out of memory at about 70 KB of input before nano's walk
 >       costs anything (at 35 KB both finish in the same time). Note:

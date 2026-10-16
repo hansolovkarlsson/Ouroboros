@@ -10,8 +10,9 @@
  * Until 2026-10-16 picolibc was built without -frounding-math, and clang
  * computed both arms of a choice and selected one, so round(1e308) and
  * fdim(-1e308, 1e308) overflowed inside the function and returned the right
- * value with OVERFLOW and INEXACT set. The first three checks are the
- * observer's own: flags that clear, and two operations that must raise them.
+ * value with OVERFLOW and INEXACT set. The first four checks are the
+ * observer's own: flags raised and then cleared, and two operations that must
+ * raise them.
  * The mode lives here, not in a program of its own, because /bin's listing is
  * nearly at its 512-byte reply (ROADMAP.md, the paged NP_READDIR item). */
 #include <fenv.h>
@@ -28,15 +29,24 @@ static int cmp_int(const void *a, const void *b) {
 static int g_checks;
 static int g_failed;
 
+static const struct {
+    int flag;
+    const char *name;
+} g_flags[] = {
+    {FE_INVALID, "INVALID"},   {FE_DIVBYZERO, "DIVBYZERO"}, {FE_OVERFLOW, "OVERFLOW"},
+    {FE_UNDERFLOW, "UNDERFLOW"}, {FE_INEXACT, "INEXACT"},
+};
+
 /* The flags as names, "none" for none: what the check line prints. */
 static const char *flag_names(int f, char *buf, size_t len) {
+    size_t at = 0;
     buf[0] = 0;
-    if (f & FE_INVALID) strncat(buf, " INVALID", len - strlen(buf) - 1);
-    if (f & FE_DIVBYZERO) strncat(buf, " DIVBYZERO", len - strlen(buf) - 1);
-    if (f & FE_OVERFLOW) strncat(buf, " OVERFLOW", len - strlen(buf) - 1);
-    if (f & FE_UNDERFLOW) strncat(buf, " UNDERFLOW", len - strlen(buf) - 1);
-    if (f & FE_INEXACT) strncat(buf, " INEXACT", len - strlen(buf) - 1);
-    return buf[0] ? buf + 1 : "none";
+    for (size_t i = 0; i < sizeof g_flags / sizeof g_flags[0]; i++) {
+        if ((f & g_flags[i].flag) && at < len) {
+            at += snprintf(buf + at, len - at, "%s%s", at ? " " : "", g_flags[i].name);
+        }
+    }
+    return at ? buf : "none";
 }
 
 /* One check: the value is `want` (both infinite of one sign counts) and
@@ -58,7 +68,13 @@ static int fenv_checks(void) {
     volatile double big = 1e308, ten = 10.0, one = 1.0, three = 3.0, r;
     int f;
 
+    feclearexcept(FE_ALL_EXCEPT);
     feraiseexcept(FE_OVERFLOW | FE_INEXACT);
+    f = fetestexcept(FE_ALL_EXCEPT);
+    check("feraiseexcept raises", 0.0, 0.0, f, FE_OVERFLOW | FE_INEXACT);
+
+    /* The flags just raised, cleared: so a feclearexcept that does nothing
+     * fails here, not only one that sets something. */
     feclearexcept(FE_ALL_EXCEPT);
     f = fetestexcept(FE_ALL_EXCEPT);
     check("feclearexcept clears", 0.0, 0.0, f, 0);

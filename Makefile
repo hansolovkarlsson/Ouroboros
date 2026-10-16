@@ -2266,8 +2266,8 @@ test-cclock: image
 	python3 scripts/test-cclock.py
 
 # The floating-point exception flags picolibc's math leaves
-# (scripts/test-cfenv.py, `/bin/CPICO fenv`): flags that clear and two
-# operations that must raise them, then round(1e308), round(-1e308) and
+# (scripts/test-cfenv.py, `/bin/CPICO fenv`): flags raised and then cleared,
+# and two operations that must raise them, then round(1e308), round(-1e308) and
 # fdim(-1e308, 1e308) raising none and fdim(1e308, -1e308) a real overflow;
 # fails on the libc.a built until 2026-10-16 without -frounding-math. One boot,
 # about a minute; run it whenever picolibc is rebuilt or

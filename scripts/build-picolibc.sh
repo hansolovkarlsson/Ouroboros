@@ -68,12 +68,14 @@ cp -R "$INSTALL/include" "$PREBUILT/include"
 # longer applies stops the script rather than drop the change silently. The
 # first: C11's comparison macros as builtins for a compiler that has them
 # (DevTools's cc, docs/handoffs/closed/2026-10-13-from-devtools-picolibc-comparison-builtins.md).
-# -E because a patch may remove a header (0002 removes complex.h), and Apple's
-# patch otherwise leaves it behind empty.
 for p in "$ROOT"/libc/picolibc-patches/*.patch; do
     [ -e "$p" ] || continue
-    patch -s -E -p1 -d "$PREBUILT" < "$p" || { echo "build-picolibc: $p no longer applies"; exit 1; }
+    patch -s -p1 -d "$PREBUILT" < "$p" || { echo "build-picolibc: $p no longer applies"; exit 1; }
 done
+# complex.h goes with 0002, which undefines _HAVE_COMPLEX: removed here, not
+# by a deletion hunk, which would hold the whole file and stop the script at
+# any upstream change to it.
+rm -f "$PREBUILT/include/complex.h"
 echo "$VERSION" > "$PREBUILT/VERSION"
 # The compiler that built it, as meson ran it (the cross file's `c`, resolved
 # by meson, not whatever clang is first on PATH): a new Apple clang alone

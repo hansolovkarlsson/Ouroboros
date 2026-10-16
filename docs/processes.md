@@ -557,13 +557,15 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   freeing it, so the library shipped until 2026-10-15 could hang in
   `realloc`; and without `-frounding-math` clang computed both arms of a
   choice, so `round(1e308)` and `fdim(-1e308, 1e308)` raised overflow and
-  inexact (`make test-cfenv`). Four still probe NO, each GCC-only or a link
-  probe `-nostdlib` cannot pass.
+  inexact (`make test-cfenv`). Four compiler probes still say NO, each a
+  flag clang does not have, and five link probes, each for picolibc's own
+  test links (off here), Apple's linker, or a fallback for one that says
+  YES.
 - **The probes define eleven `_HAVE_` macros** in `picolibc.h`,
   `_HAVE_LONG_DOUBLE` and `_HAVE_COMPLEX` among them, and install
   `complex.h`. DevTools's `cc` refuses `long double` here, so
-  `libc/picolibc-patches/0002` undefines the eleven and removes `complex.h`
-  in the installed tree: a program sees the headers it saw before, the
+  `libc/picolibc-patches/0002` undefines the eleven and
+  `build-picolibc.sh` removes `complex.h` in the installed tree: a program sees the headers it saw before, the
   library is built with them, and the quad-float helpers (`__addtf3` and
   the rest) its long double members need are linked by nothing yet.
 
