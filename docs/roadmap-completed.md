@@ -2281,3 +2281,27 @@ with the allocator, the spawn buffer and DevTools's cc-and-as item.
 >       changes, so the C rigs and `test-malloc` run on it and `LIB_PIN`
 >       moves. Its own PR. When DevTools's `long double` lands, the macros
 >       patch goes, with a notice.
+
+## The spawn staging buffer, DONE (2026-10-16)
+
+Moved verbatim from [`ROADMAP.md`](ROADMAP.md)'s libc section on 2026-10-16,
+from the block "What DevTools asks of Ouroboros next", where the cc-and-as
+item it blocked stays.
+
+> - [x] **DONE 2026-10-16** **A program file larger than the 128 KB spawn buffer.**
+>       The larger buffer, not streaming: `SPAWN_STAGING_SIZE` is 1 MiB, and
+>       the kernel asserts at build time that it covers `loader::image_max()`
+>       (964 KiB), so a program is refused for its image before its file.
+>       Streaming would have changed `SPAWN`'s ABI and the region
+>       allocator's order for 896 KiB of RAM; the static is zeroed, so the
+>       PE file is unchanged. `make test-spawn-size` runs `/bin/ARGS` padded
+>       past the old bound and to the new one, refuses it one byte over, and
+>       spawns after the refusal; with the old constant it fails. A 1 MiB
+>       file stages in about 2 s on QEMU (`CHANGELOG.md`).
+>       `SPAWN_STAGING_SIZE` (131,072, `syscall-abi`) bounds every program
+>       file: spawn refuses a larger one. clang's `/bin/CPP` is 107,648
+>       bytes, about 23 KB under it, and cpp is built unpinned from
+>       `../DevTools/cpp`, so its own growth closes that. A larger buffer, or
+>       a program streamed into its region rather than staged whole, is the
+>       choice; the staging owner (`claim_staging`) and `make
+>       test-spawn-owner` are what it touches.

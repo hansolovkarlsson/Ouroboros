@@ -124,7 +124,7 @@ def main() -> int:
     over = block("/spawn/overmax p3")
     checks = [
         ("driven to the end", driven),
-        (f"SPAWN_STAGING_SIZE ({size}) is past the old {OLD_BOUND} by 200 KiB or more", size >= files["past128"]),
+        (f"SPAWN_STAGING_SIZE ({size}) holds past128's {files['past128']} bytes", size >= files["past128"]),
         (f"past128 ({files['past128']} bytes, past the old {OLD_BOUND}) ran", "argv[1] = p1" in block("/spawn/past128 p1")),
         (f"atmax ({files['atmax']} bytes, the bound) ran", "argv[1] = p2" in block("/spawn/atmax p2")),
         (f"overmax ({files['overmax']} bytes) refused: {refusal!r}", refusal in over),
