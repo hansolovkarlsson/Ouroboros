@@ -267,17 +267,22 @@ resolutions exactly: a program padded to 200 KiB must resolve its path as
 many more times than the plain one as it makes more requests, 23, where
 resolving once a 2 KiB piece makes 93 and once a 512 bytes 374.
 
-**exFAT resumes a read where the last one ended (2026-10-17).** exFAT's
-`read_entry` walked a file's cluster chain from the first cluster for every
-piece, a FAT sector read a step, where FAT32 has kept a read cursor since
-its large-read fix. A file fsd writes is always FAT-chained, so a spawn of a
-200 KiB program `cp`'d onto exFAT made 2,441 FAT reads where one walk of its
-50 clusters is 49. exFAT keeps the same cursor now, keyed by the file's
-first cluster and its `NoFatChain` flag and dropped by every FAT write.
-`make test-spawn-reads` copies two programs with the guest's `cp` and
-requires the FAT reads of their spawns to differ by exactly the steps of
-their chains, 46. The files the host puts on the image are not affected:
-the ones in `/bin` are contiguous, which exFAT reads with no FAT at all.
+**exFAT walks a file's cluster chain once, through a FAT cache
+(2026-10-17).** exFAT read a FAT sector for every step along a chain, and
+walked a file's chain from its first cluster for every 2 KiB piece read
+and every 2 KiB written, where FAT32 has kept a read cursor and a
+one-sector FAT cache for both. A file fsd writes is always FAT-chained, so
+a spawn of a 200 KiB program `cp`'d onto exFAT made 2,441 FAT reads where
+one walk of its 50 clusters is 49, and the `cp` itself 3,838. exFAT keeps
+both now: the cursor keyed by the file's first cluster and its `NoFatChain`
+flag, dropped by every FAT write, and the cache kept in step by those
+writes. The `cp` reads 116. `make test-spawn-reads` copies a 640 KiB
+program with the guest's `cp` and requires a spawn of it to read exactly
+the FAT sectors one walk of its chain reads through the cache, as the host
+reads the chain off the disk: 6, where ignoring the cursor reads 1,436 and
+bypassing the cache 159. A file macOS wrote contiguous reads no FAT at all;
+the image's `/bin` is written that way today, but macOS may write a file
+either way.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

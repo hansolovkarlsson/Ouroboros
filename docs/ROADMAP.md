@@ -4250,15 +4250,32 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   program that reads a chained file, changes the chain under it (the file
   removed and its first cluster reused by a file whose chain differs) and
   reads past the old position again. That is a probe program like
-  `CFIDHOLD`. Found while giving exFAT its cursor (2026-10-17).
-- **exFAT keeps no FAT sector cache.** FAT32's `fat_cache` holds the last
-  FAT sector read; exFAT reads one for every step of a chain. Small with
-  the read cursor (one run of `ls` reads 14 FAT sectors of its 272, all
-  one sector, for `/bin`'s four-cluster directory walked once a
-  resolution), and that walk again is the larger cost: `/bin` read seven
-  times a run, 168 of the 272. Recorded 2026-10-17, correcting the item
-  this replaces, which put exFAT's 290 sectors against FAT32's 199 down to
-  the chain walk; the files in `/bin` are contiguous and walk no chain.
+  `CFIDHOLD`. Found while giving exFAT its cursor (2026-10-17). A FAT
+  cache not kept in step by `write_fat_entry` is seen: `/CHAIN` does not
+  run (`make test-spawn-reads`).
+- **One read cursor a volume.** FAT32's and exFAT's cursors each remember
+  one file, so two clients reading two chained files in turn each walk
+  from the first cluster again, a piece at a time; the FAT cache keeps
+  that to the sectors the chain crosses, which a fragmented file makes
+  many. A cursor a fid is the fid item's question (above). From the review
+  of #314.
+- **A write walks the chain from the first cluster.** `write_at` on FAT32
+  and exFAT seeks from the file's first cluster for every 2 KiB a client
+  writes. With the FAT cache it costs the FAT sectors the chain crosses,
+  each time: a `cp` of a 200 KiB file onto exFAT reads 116 FAT sectors,
+  from 3,838 without the cache. A write cursor, dropped like the read
+  cursor, would make it one walk. From the review of #314.
+- **FAT32's and exFAT's read walks are two copies.** exFAT's `read_entry`
+  repeats FAT32's `read_at` (the cursor lookup, the seek, the sector loop,
+  the cursor update), differing in the step (`advance` against
+  `next_cluster`) and in exFAT's `NoFatChain` key. One helper over a step
+  function would hold the cursor's invariant once. From the review of #314.
+- **`/bin` is read again for each path resolution.** One run of `ls` on
+  exFAT reads 272 sectors, 168 of them `/bin`'s four-cluster directory
+  read once for each of seven resolutions (the shell's lookup, its spawn's
+  requests). Recorded 2026-10-17, correcting the earlier exFAT item, which
+  put exFAT's 290 sectors against FAT32's 199 down to the chain walk; the
+  files in `/bin` are contiguous and walk no chain.
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970
