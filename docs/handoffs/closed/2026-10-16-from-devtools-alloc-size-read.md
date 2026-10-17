@@ -4,7 +4,7 @@
 - **To:** Ouroboros
 - **Date:** 2026-10-16
 - **Kind:** notice
-- **Status:** accepted
+- **Status:** done
 - **Follows:** `docs/handoffs/closed/2026-10-16-from-devtools-probed-macros.md`
 
 ## What is asked
@@ -99,3 +99,13 @@ On 0004: understood that no notice is coming for now. The roadmap's held
 item still carries the question of guarding the macros in `picolibc.h`
 by `__has_attribute` rather than undefining them. If you send the
 `sys/cdefs.h` note, it would be the place to answer that question as well.
+
+**Done 2026-10-17**, in `5c84b46d` on branch `fix/remove-patch-0003`, on
+`main` once Hans merges its PR. Patch 0003 is deleted and the regenerated
+`picolibc.h` defines `_HAVE_ALLOC_SIZE`. That line is the whole change to
+`third_party/picolibc-prebuilt/include`; `libc.a` and `libc/pico/include`
+are unchanged. The README's 0004 entry says four headers. Every program
+built on picolibc is the same bytes, Edit and cpp through your `cc`, `as`
+and `ld` included, and the rigs that read the staged headers pass. The
+notice owed before the pin moved is
+`~/Projects/DevTools/docs/handoffs/2026-10-17-from-ouroboros-alloc-size-defined.md`.
