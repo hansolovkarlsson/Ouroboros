@@ -503,8 +503,19 @@ pub const SPAWN_STAGE: u64 = 30;
 /// while the granter is blocked in the [`MSG_CALL`] to it that the copy
 /// names (see [`SAFECOPY`]). Each task has exactly one grant slot; a new grant
 /// overwrites the old, and a task's grant is cleared when it dies.
-/// `buf len` is capped at [`SAFECOPY_MAX`].
+/// `buf len` is capped at [`GRANT_MAX`]; each [`SAFECOPY`] into or out of
+/// it moves at most [`SAFECOPY_MAX`], at an offset within it.
 pub const GRANT: u64 = 31;
+
+/// The largest buffer a single [`GRANT`] may name, in bytes. Larger than
+/// [`SAFECOPY_MAX`] since 2026-10-17, when it was the same: a server fills
+/// a large grant a `SAFECOPY` at a time, each at its own offset, so one
+/// request can move more than one copy's worth and the server does its work
+/// for it once (fsd resolves an `NP_READ`'s path once, `ninep_abi::NP_READ_MAX`,
+/// which equals this). The bound is the caller's own region either way,
+/// which [`GRANT`] checks for the whole buffer and every `SAFECOPY` checks
+/// again for its piece.
+pub const GRANT_MAX: u64 = 64 * 1024;
 
 /// `(call, client offset, local buf ptr, len, dir)` -> `len` on
 /// success, or [`SAFECOPY_ERR`]. Issued by a *server* to copy `len`
@@ -527,10 +538,11 @@ pub const GRANT: u64 = 31;
 /// task acting as a server can use it.
 pub const SAFECOPY: u64 = 32;
 
-/// The largest buffer a single [`GRANT`]/[`SAFECOPY`] may name, in
-/// bytes. This is the per-operation bulk-transfer chunk size; callers
-/// wanting more loop, streaming one chunk at a time (the shell's `cat`
-/// does exactly this). A 4x lift over the old [`FS_DATA_MAX`], chosen
+/// The most a single [`SAFECOPY`] moves, in bytes (and until 2026-10-17
+/// the largest buffer a [`GRANT`] could name too, now [`GRANT_MAX`]). This
+/// is the per-operation bulk-transfer chunk size; callers wanting more
+/// loop, streaming one chunk at a time (the shell's `cat` does exactly
+/// this), or grant a larger buffer that the server fills a chunk at a time. A 4x lift over the old [`FS_DATA_MAX`], chosen
 /// when a task's stack was 8KB so that a chunk sat comfortably inside
 /// both a client's and the filesystem server's stack alongside their
 /// other buffers. The stack has grown several times since (the loader's

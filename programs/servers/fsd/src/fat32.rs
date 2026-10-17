@@ -913,10 +913,37 @@ impl Fs {
     /// cluster actually read, sectors entirely before `offset` are
     /// skipped the same way.
     pub fn read_at(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
+        let file = self.find_file(path)?;
+        self.read_entry(&file, offset, buf)
+    }
+
+    /// Read up to `want` bytes from `offset` in pieces of at most `buf.len()`,
+    /// handing each to `sink`, with `path` resolved once for all of them
+    /// ([`crate::vfs::read_pieces`]). Until 2026-10-17 a large read was one
+    /// request a piece, each resolving the path from the root again.
+    pub fn read_each(
+        &mut self,
+        path: &str,
+        offset: u64,
+        want: u64,
+        buf: &mut [u8],
+        sink: impl FnMut(&[u8]) -> ControlFlow<()>,
+    ) -> Result<(u64, bool), Error> {
+        let file = self.find_file(path)?;
+        crate::vfs::read_pieces(offset, want, buf, |o, b| self.read_entry(&file, o, b), sink)
+    }
+
+    /// `path`'s entry, refused [`Error::NotAFile`] when it is a directory.
+    fn find_file(&mut self, path: &str) -> Result<DirEntry, Error> {
         let file = self.find(path)?;
         if file.is_dir {
             return Err(Error::NotAFile);
         }
+        Ok(file)
+    }
+
+    /// [`read_at`](Self::read_at) of a file already found.
+    fn read_entry(&mut self, file: &DirEntry, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
         let total = file.size as u64;
         if offset >= total || buf.is_empty() || file.cluster == 0 {
             return Ok(0);

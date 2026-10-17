@@ -4974,6 +4974,27 @@ enum CpuSpawnError {
     Other,
 }
 
+/// The bytes a `cpu` spawn reads a request ([`cpu_read_buffer`]).
+const CPU_READ: usize = 8 * 1024;
+
+/// The read buffer of a `cpu` spawn: the first [`CPU_READ`] bytes of this
+/// task's heap region (`HEAP_INFO`), or `None` if it has none that large.
+/// Not the stack: netd's is 14 pages, most of it resident tables under every
+/// chain, and an 8 KiB buffer there faulted netd into its guard page at boot
+/// (2026-10-17), before any `cpu` ran, the frame being the caller's once
+/// inlined. netd keeps no other state in its heap, and one spawn runs at a
+/// time (the kernel's staging has one owner), so nothing else holds it.
+fn cpu_read_buffer() -> Option<&'static mut [u8]> {
+    let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE);
+    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE) as usize;
+    if base == 0 || size < CPU_READ {
+        return None;
+    }
+    // SAFETY: HEAP_INFO reports this task's own heap region, EL0-writable and
+    // mapped for the task's life; netd hands out no other slice of it.
+    Some(unsafe { core::slice::from_raw_parts_mut(base as *mut u8, CPU_READ) })
+}
+
 fn cpu_spawn(cmdline: &[u8]) -> Result<u8, CpuSpawnError> {
     const ARGV_CAP: usize = syscall_abi::ARGV_MAX as usize;
     let mut blob = [0u8; ARGV_CAP]; // [argc:u32][ (len:u32, bytes) ... ]
@@ -5019,17 +5040,20 @@ fn cpu_spawn(cmdline: &[u8]) -> Result<u8, CpuSpawnError> {
     }
     blob[0..4].copy_from_slice(&argc.to_le_bytes());
 
-    // Read the ELF from /bin (disk, tree 0) and feed it to the kernel's spawn
-    // staging buffer chunk by chunk, exactly as the shell's spawn_path does. The
-    // chunk is 512 bytes - the kernel's per-syscall pointer cap (`MAX_USER_LEN`)
-    // that both the read (into `chunk`) and the `SPAWN_STAGE` copy must fit.
-    let mut chunk = [0u8; 512];
+    // Read the ELF from /bin (disk, tree 0) up to CPU_READ bytes a request
+    // (one NP_READ, fsd resolving the path once for it) and feed it to the
+    // kernel's spawn staging buffer 512 bytes a SPAWN_STAGE - the kernel's
+    // per-syscall pointer cap (`MAX_USER_LEN`) - as the shell's spawn_path
+    // does. Until 2026-10-17 each 512 bytes was its own read, resolving the
+    // path from the root again. A read of 0 is the end.
+    let mut small = [0u8; 512];
+    let read = cpu_read_buffer().unwrap_or(&mut small);
     let mut offset = 0u64;
     loop {
         // FirstParty = netd's own credential - which, for the length of a
         // `cpu` spawn, IS the remote user (see `AsUser`), so a user who may
         // not read the binary cannot run it.
-        let n = read_file_chunk(As::FirstParty, &path[..plen], 0, offset, &mut chunk);
+        let n = read_file_chunk(As::FirstParty, &path[..plen], 0, offset, read);
         if n >= syscall_abi::FS_ERR_MIN {
             if offset > 0 {
                 abandon_staging();
@@ -5039,31 +5063,30 @@ fn cpu_spawn(cmdline: &[u8]) -> Result<u8, CpuSpawnError> {
         if n == 0 {
             break;
         }
-        // Alive between chunks: the supervisor pings a server it sees Blocked,
+        // Alive between reads: the supervisor pings a server it sees Blocked,
         // and this loop is Blocked in fsd calls for its whole length (98 for a
-        // 49 KB binary, each re-walking the FAT chain from the start) without
-        // returning to the loop that acks. A ping landing with more than
-        // PING_TIMEOUT of it left restarted netd about one `cpu` run in ten
-        // (2026-09-27). A call that never returns still sends no beat, so a
-        // real wedge in fsd is still caught.
+        // 49 KB binary until 2026-10-17, each re-walking the FAT chain from
+        // the start; about seven now) without returning to the loop that acks. A
+        // ping landing with more than PING_TIMEOUT of it left restarted netd
+        // about one `cpu` run in ten (2026-09-27). A call that never returns
+        // still sends no beat, so a real wedge in fsd is still caught.
         heartbeat();
-        let n = (n as usize).min(chunk.len());
-        let staged = syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n as u64, 0);
-        if staged == syscall_abi::SPAWN_ERR_STAGING_BUSY {
-            // Another task's staging is mid-spawn; nothing of ours went in.
-            return Err(CpuSpawnError::StagingBusy);
-        }
-        if staged != 0 {
-            // Staged past the kernel's buffer: the chunks before are ours
-            // to give up.
-            if offset > 0 {
-                abandon_staging();
+        for chunk in read[..(n as usize).min(read.len())].chunks(512) {
+            let staged = syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, chunk.len() as u64, 0);
+            if staged == syscall_abi::SPAWN_ERR_STAGING_BUSY {
+                // Another task's staging is mid-spawn; nothing of ours went
+                // in (only the first chunk, which claims, can meet this).
+                return Err(CpuSpawnError::StagingBusy);
             }
-            return Err(CpuSpawnError::Other);
-        }
-        offset += n as u64;
-        if n < chunk.len() {
-            break;
+            if staged != 0 {
+                // Staged past the kernel's buffer: the chunks before are
+                // ours to give up.
+                if offset > 0 {
+                    abandon_staging();
+                }
+                return Err(CpuSpawnError::Other);
+            }
+            offset += chunk.len() as u64;
         }
     }
     if offset == 0 {

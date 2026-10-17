@@ -123,6 +123,20 @@ impl Fs {
         self.read_at(path, 0, buf)
     }
 
+    /// [`read_at`](Self::read_at) a piece at a time, as the disk arms do. A
+    /// /proc file is made anew for every read and is one line, so it is read
+    /// by path each piece: there is nothing on a disk to resolve once.
+    pub fn read_each(
+        &mut self,
+        path: &str,
+        offset: u64,
+        want: u64,
+        buf: &mut [u8],
+        sink: impl FnMut(&[u8]) -> ControlFlow<()>,
+    ) -> Result<(u64, bool), Error> {
+        crate::vfs::read_pieces(offset, want, buf, |o, b| self.read_at(path, o, b), sink)
+    }
+
     pub fn read_at(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
         match parse(path) {
             Node::Root | Node::Task => Err(Error::NotAFile),

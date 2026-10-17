@@ -773,11 +773,33 @@ impl Fs {
     /// copied (`0` at/past EOF). The windowed primitive behind
     /// `FSOP_READ_AT`/`READ_BULK`.
     pub fn read_at(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
+        let inode = self.find_file(path)?;
+        Ok(self.read_range(&inode, offset, buf)? as u32)
+    }
+
+    /// Read up to `want` bytes from `offset` in pieces of at most `buf.len()`,
+    /// handing each to `sink`, with `path` resolved once for all of them
+    /// ([`crate::vfs::read_pieces`]). Until 2026-10-17 a large read was one
+    /// request a piece, each resolving the path from the root again.
+    pub fn read_each(
+        &mut self,
+        path: &str,
+        offset: u64,
+        want: u64,
+        buf: &mut [u8],
+        sink: impl FnMut(&[u8]) -> ControlFlow<()>,
+    ) -> Result<(u64, bool), Error> {
+        let inode = self.find_file(path)?;
+        crate::vfs::read_pieces(offset, want, buf, |o, b| Ok(self.read_range(&inode, o, b)? as u32), sink)
+    }
+
+    /// `path`'s inode, refused [`Error::NotAFile`] unless a regular file.
+    fn find_file(&mut self, path: &str) -> Result<Inode, Error> {
         let inode = self.find(path)?;
         if !inode.is_reg() {
             return Err(Error::NotAFile);
         }
-        Ok(self.read_range(&inode, offset, buf)? as u32)
+        Ok(inode)
     }
 
     /// Copy the file's bytes starting at `start`, up to `buf.len()` and clamped
