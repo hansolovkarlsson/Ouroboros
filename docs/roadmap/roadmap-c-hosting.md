@@ -267,7 +267,9 @@ tree at `4dcbddd` leaves of them, read from the code.
   listing); the whole listing of each directory that fits one reply, names
   and case included (seven of nine), and for the other two that every name
   listed is a staged one in its case; three files `cat` to the host's bytes;
-  and names made on the guest keep their case. The card (`make sdcard`)
+  and names made on the guest keep their case. (Update 2026-10-16: the
+  listing gap is closed, `NP_READDIR` pages, and the rig requires every
+  listing whole.) The card (`make sdcard`)
   skips `/include`, which only the stick can serve.
 - **Steps 7 and 8, room to run and `/bin/cpp`: done 2026-10-06, #226, the arc's
   finish line.** `make cpp-bin` compiles DevTools's cpp (`lib/*.c` and

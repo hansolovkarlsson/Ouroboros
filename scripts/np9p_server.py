@@ -416,6 +416,19 @@ def listing(path):
     return out
 
 
+def readdir_page(out, start, want):
+    """One NP_READDIR page of a listing, as fsd answers (2026-10-16): the
+    entries from index `start`, whole, until the next would not fit `want`;
+    empty past the end; None (FS_ERROR) when the first would not fit an empty
+    window, since an empty page reads as the end."""
+    page = b""
+    for line in out.splitlines(keepends=True)[start:]:
+        if len(page) + len(line) > want:
+            return page if page else None
+        page += line
+    return page
+
+
 def stat_info(path):
     """A 27-byte StatInfo for a path in the served tree, or None if absent.
 
@@ -557,9 +570,10 @@ def serve_np(body, name, sealed):
         out = listing(path)
         if out is None:
             return sealed(FS_ERR_NOT_FOUND)
-        want = a1
-        out = out[:want]
-        return sealed(len(out), out)
+        page = readdir_page(out, a2, a1)
+        if page is None:
+            return sealed(FS_ERROR)
+        return sealed(len(page), page)
 
     if verb == NP_STAT:
         info = stat_info(path)
@@ -791,6 +805,28 @@ def self_test(quiet=True):
                            f"this table says {want}")
             elif not quiet:
                 print(f"  {name:14} 0x{verb:x} -> {got}")
+
+        # NP_READDIR pages (2026-10-16): "/" through a 10-byte window comes
+        # back one entry a page, whole and in order, then an empty page; a
+        # window too small for the first entry is refused, not empty (which
+        # would read as the end). A server ignoring a2 repeats the first page.
+        pages = []
+        start = 0
+        for _ in range(8):
+            st, page = _call(_frame(NP_BASE + 0, ("PLEN", 10, start), b"/", fid), quiet)
+            if st != len(page):
+                bad.append(f"  - readdir paging: status {st} for a {len(page)}-byte page at {start}")
+                break
+            if not page:
+                break
+            pages.append(page)
+            start += page.count(b"\n")
+        if pages != [b"HELLO.TXT\n", b"BIG.TXT\n", b"SUB/\n"]:
+            bad.append(f"  - readdir paging: pages {pages!r}, expected one entry each, then the end")
+        st, _ = _call(_frame(NP_BASE + 0, ("PLEN", 9, 0), b"/", fid), quiet)
+        if classify(st) != "generic-error":
+            bad.append(f"  - readdir paging: a window too small for the first entry gave {classify(st)}, "
+                       f"expected the generic error, not an empty page")
 
         # The round trip Step 2 is actually for: open -> fstat -> pread (in two
         # chunks, so an offset that is ignored shows up) -> clunk -> the fid is

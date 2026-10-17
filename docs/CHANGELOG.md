@@ -204,6 +204,22 @@ DevTools's notice, and the seven are defined. `cc` refuses the same 26 of
 here is the same bytes; DevTools was sent a notice before the header pin
 moved.
 
+**A directory listing longer than one reply comes back whole (2026-10-16).**
+`NP_READDIR` had no way to ask for the rest: fsd filled one 512-byte reply,
+skipped any name that did not fit and walked on, so `ls /include` showed
+about 60 of its 72 names, with gaps anywhere and no sign of them, and
+`/bin` was 506 bytes from losing names to `ls` and tab completion. The verb
+now takes the index of the first entry in `a2` and answers a page: whole
+entries until the next would not fit, an empty page at the end. fsd,
+netd's export and its `/net` listings, the host 9P server, `ulib` and the
+shell page; `ls` and `tree` say so when a directory is longer than they can
+hold, rather than drop names. Before a second page the pager asks for an
+index past any directory's end: a paging server answers an empty page, an
+older peer that ignores the index answers page one, and the listing is then
+page one, so a mixed cluster lists as before rather than looping. One
+helper fills a page for fsd and netd, and one loop reads them for `ulib` and
+the shell.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

@@ -14,13 +14,19 @@ and the ext2 and exFAT images copy the same tree. One boot of each image
   proves existence and size only: `ls` echoes an operand as typed, and FAT32
   and exFAT look names up regardless of case;
 - the listing, `ls -l` of each directory: names with their case, `__` and `_`
-  prefixes, subdirectories. One small enough to come back in one NP_READDIR
-  reply (LISTING_MAX) must list exactly the host's names and sizes; a larger
-  one is cut at that size with no sign of it (a gap of its own in
-  docs/ROADMAP.md), so every name it does list must be a staged one, in its
-  case, with its size;
+  prefixes, subdirectories. Every directory must list exactly the host's
+  names and sizes, those longer than one NP_READDIR page (PAGE, 512 bytes)
+  included: since 2026-10-16 `ls` reads page after page. Until then a
+  directory past one reply came back with names missing and no sign of it,
+  and this rig could only check that what was listed was staged. At least
+  one directory must be longer than a page, or paging is not exercised;
 - `cat` of three files, a nested one, a `__` one and target.h, must give the
   host's bytes;
+- the shell's glob `echo st*` in /include must give exactly the staged names
+  that begin with `st`: the shell pages a listing on its own (globs and tab
+  completion), and on FAT32 those names lie past the first page. The words
+  must fit the shell's argument limit (MAX_ARGS), checked first, so a header
+  staged later fails that check, not the paging one (the review of #306);
 - names the guest's fsd creates keep their case: a lowercase file, a mixed
   case one, a directory, and a case-only `mv`, read back by `ls /` (on FAT32
   a lowercase 8.3 name is stored with byte 12's case flags, a mixed one as a
@@ -55,10 +61,14 @@ MADE_NAMES = ["lower.txt", "Mixed.Txt", "lowdir", "case.txt"]
 FENCE = "echo ==fence=="
 # mode, owner, group, size, then a date and time or a lone `-` (ext2 records
 # none here), then the name.
-# What one `ls` of a directory can show: the 512-byte listing buffer, filled
-# with `name\n` or `name/\n` per entry by NP_READDIR, which stops at the first
-# name that does not fit.
-LISTING_MAX = 512
+# The shell's own pager, through a glob in a directory longer than a page.
+GLOB = "echo st*"
+GLOB_PREFIX = "st"
+# The shell's argv limit (programs/shell's MAX_ARGS): `echo` and its matches.
+MAX_ARGS = 16
+# One NP_READDIR page: `ls` asks for at most this much at a time (the inline
+# reply's FS_DATA_MAX), `name\n` or `name/\n` per entry.
+PAGE = 512
 # The shell's input line and word limits, for the file-operand commands.
 LINE_MAX = 120
 WORDS_MAX = 14
@@ -122,6 +132,7 @@ def boot(name, image, dirs, operands):
         steps += [("# ", FENCE), ("# ", cmd)]
     for f in CATS:
         steps += [("# ", FENCE), ("# ", f"cat /include/{f}")]
+    steps += [("# ", "cd /include"), ("# ", FENCE), ("# ", GLOB)]
     steps += [("# ", "cd /"), ("# ", FENCE)]
     steps += [("# ", c) for c in MADE]
     steps += [("# ", FENCE), ("# ", "ls /")]
@@ -154,15 +165,15 @@ def cat_text(block, command):
 def main() -> int:
     want = host_dirs()
     dirs = sorted(want)
-    whole = {d for d in dirs if listing_bytes(want[d]) <= LISTING_MAX}
+    paged = sorted(d for d in dirs if listing_bytes(want[d]) > PAGE)
     operands = operand_commands(want)
     nfiles = sum(len(names) for _, _, names in operands)
-    nblocks = len(dirs) + len(operands) + len(CATS) + 2
-    print(f"     {nfiles} staged files; whole listings compared for {', '.join(sorted(whole))}")
+    nblocks = len(dirs) + len(operands) + len(CATS) + 3
+    print(f"     {nfiles} staged files; listings longer than one page: {', '.join(paged)}")
     checks = [("the staged tree has /include and /include/clang",
                "/include" in want and "/include/clang" in want),
-              ("some directory's listing fits one reply, so whole listings are compared at all",
-               len(whole) > 0)]
+              (f"some directory's listing is longer than one {PAGE}-byte page, so paging is exercised",
+               len(paged) > 0)]
     for name, image in IMAGES:
         driven, out, faults = boot(name, image, dirs, operands)
         blocks = re.split(r"^==fence==\r?$", out, flags=re.M)[1:]
@@ -185,13 +196,9 @@ def main() -> int:
             missing = sorted(set(want[d]) - set(got))
             extra = sorted(set(got) - set(want[d]))
             wrong = sorted(n for n in want[d] if n in got and got[n] != want[d][n])
-            if d in whole:
-                ok = not (missing or extra or wrong)
-                what = f"{len(want[d])} names and sizes as staged"
-            else:
-                # Cut at one reply: what it lists must be staged, as staged.
-                ok = bool(got) and not (extra or wrong)
-                what = f"{len(got)} of {len(want[d])} names listed (one reply), each staged, in its case"
+            ok = not (missing or extra or wrong)
+            what = (f"{len(want[d])} names and sizes as staged"
+                    + (f" ({listing_bytes(want[d])} bytes, more than one page)" if d in paged else ""))
             detail = "" if ok else f" (missing {missing[:3]}, extra {extra[:3]}, wrong size {wrong[:3]})"
             checks.append((f"{name}: ls -l {d}: {what}{detail}", ok))
         for f, block in zip(CATS, blocks[len(dirs) + len(operands):]):
@@ -199,7 +206,15 @@ def main() -> int:
                 host = fh.read()
             checks.append((f"{name}: cat /include/{f} gives the staged bytes",
                            cat_text(block, f"cat /include/{f}") == host))
-        root = blocks[len(dirs) + len(operands) + len(CATS) + 1] if len(blocks) >= nblocks else ""
+        glob = blocks[len(dirs) + len(operands) + len(CATS)] if len(blocks) >= nblocks else ""
+        got_s = set(glob.split(GLOB, 1)[-1].split("Ouroboros kernel", 1)[0].split())
+        want_s = {n for n in want["/include"] if n.lower().startswith(GLOB_PREFIX)}
+        checks.append((f"{name}: {GLOB}'s {len(want_s)} matches and `echo` fit the shell's {MAX_ARGS} words",
+                       len(want_s) + 1 <= MAX_ARGS))
+        checks.append((f"{name}: {GLOB} in /include gives the {len(want_s)} staged names that begin with {GLOB_PREFIX}"
+                       + ("" if got_s == want_s else f" (missing {sorted(want_s - got_s)[:4]}, extra {sorted(got_s - want_s)[:4]})"),
+                       got_s == want_s))
+        root = blocks[len(dirs) + len(operands) + len(CATS) + 2] if len(blocks) >= nblocks else ""
         listed = [w.rstrip("/") for w in root.split("ls /", 1)[-1].split("Ouroboros kernel", 1)[0].split()]
         for n in MADE_NAMES:
             checks.append((f"{name}: a name made on the guest keeps its case: {n}",

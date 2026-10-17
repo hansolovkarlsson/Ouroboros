@@ -290,11 +290,14 @@ pub extern "C" fn _start() -> ! {
 #[inline(never)]
 fn populate_home(home: &str, uid: u32, gid: u32) {
     let mut listing = [0u8; 512];
-    let n = ulib::fs_list_dir(SKEL_DIR, &mut listing);
-    if ulib::is_fs_error(n) {
-        return; // no /etc/skel - the normal case, nothing to say
+    let (n, complete) = match ulib::fs_list_dir(SKEL_DIR, &mut listing) {
+        Ok(got) => got,
+        Err(_) => return, // no /etc/skel - the normal case, nothing to say
+    };
+    if !complete {
+        ulib::con_write(b"useradd: /etc/skel lists more than 512 bytes of names; copying those that fit\r\n");
     }
-    let listing = &listing[..(n as usize).min(listing.len())];
+    let listing = &listing[..n];
 
     for entry in listing.split(|&c| c == b'\n') {
         if entry.is_empty() {

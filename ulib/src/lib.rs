@@ -1148,9 +1148,12 @@ fn np_remote(endpoint: &[u8; ninep_abi::NS_ENDPOINT_LEN], verb: u64, params: [u6
     status
 }
 
-/// List `path`'s entries into `buf` as `name\n`/`name/\n`. Returns a byte
-/// count, [`NO_FS`], or a specific `FS_ERR_*` code.
-pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
+/// One page of `path`'s listing, from entry `start` (0 = the first), into
+/// `buf` as `name\n`/`name/\n`: a run of whole entries with no gaps, and
+/// empty at the end (see [`ninep_abi::NP_READDIR`]). Returns a byte count,
+/// [`NO_FS`], or a specific `FS_ERR_*` code; `FS_ERROR` when the next entry
+/// does not fit `buf` at all.
+pub fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
     // The remote export caps an inline listing at FS_DATA_MAX (512); the local
@@ -1158,16 +1161,47 @@ pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> u64 {
     let want = if r.server == syscall_abi::NET_TASK {
         buf.len().min(ninep_abi::NP_REMOTE_CHUNK) as u64
     } else {
-        buf.len() as u64
+        buf.len().min(syscall_abi::FS_DATA_MAX as usize) as u64
     };
     np_dispatch(
         &r,
         ninep_abi::NP_READDIR,
-        [r.len as u64, want, 0, 0],
+        [r.len as u64, want, start, 0],
         &fsp[..r.len],
         &[],
         buf,
     )
+}
+
+/// `path`'s whole listing into `buf`, page after page
+/// ([`ninep_abi::readdir_pages`], the one paging loop), as `name\n`/`name/\n`.
+/// Returns `Ok((bytes, complete))`, `complete` false when `buf` filled before
+/// the listing ended or a page broke the rule (the caller says so, rather than
+/// show a listing with names missing), or `Err`
+/// with [`NO_FS`] or an `FS_ERR_*` code, a page's error passed through as it
+/// came. A server from before paging (an older peer's export) gives page
+/// one, and that is called complete, as every listing was until 2026-10-16,
+/// when each went through one reply, holes and all: such a server says no
+/// more than that, so a mixed cluster lists as it did.
+pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
+    let mut page = [0u8; ninep_abi::READDIR_PAGE];
+    let mut spare = [0u8; ninep_abi::READDIR_PAGE];
+    let mut written = 0usize;
+    let fetch = |start: u64, page: &mut [u8]| {
+        let n = fs_list_dir_page(path, start, page);
+        if is_fs_error(n) { Err(n) } else { Ok(n as usize) }
+    };
+    let end = ninep_abi::readdir_pages(&mut page, &mut spare, fetch, |line| {
+        if written + line.len() + 1 > buf.len() {
+            return false;
+        }
+        buf[written..written + line.len()].copy_from_slice(line);
+        buf[written + line.len()] = b'\n';
+        written += line.len() + 1;
+        true
+    })?;
+    let complete = matches!(end, ninep_abi::ReaddirEnd::Complete | ninep_abi::ReaddirEnd::OldServer);
+    Ok((written, complete))
 }
 
 /// Invoke a single path-only filesystem op (`FSOP_MKDIR`/`RMDIR`/`TOUCH`/`RM`):

@@ -25,9 +25,15 @@
 /// conventional fallback).
 const TERM_WIDTH: usize = 80;
 
-/// Most entries laid out per directory. The listing buffer bounds the byte
-/// count; this bounds the record array (a larger directory drops the overflow).
-const MAX_ENTRIES: usize = 128;
+/// Most entries laid out per directory. The listing buffer ([`LIST_BUF`])
+/// bounds the byte count; this bounds the record array. A directory past
+/// either is listed as far as it fits and named as cut short, with exit 1:
+/// until 2026-10-16 the overflow was dropped with no word.
+const MAX_ENTRIES: usize = 256;
+
+/// One directory's whole listing, read page by page (`ulib::fs_list_dir`):
+/// `ls` sorts, so it needs every name at once.
+const LIST_BUF: usize = 4096;
 
 /// Most path operands accepted on one command line (a big glob is truncated).
 const MAX_PATHS: usize = 64;
@@ -153,14 +159,19 @@ pub extern "C" fn _start() -> ! {
             ulib::write_out(target, argstr.as_bytes());
             ulib::write_out(target, b":\r\n");
         }
-        let mut listing = [0u8; 512];
-        let n = ulib::fs_list_dir(dirpath, &mut listing);
-        if ulib::is_fs_error(n) {
-            ls_err(argstr, n);
+        let mut listing = [0u8; LIST_BUF];
+        let (n, complete) = match ulib::fs_list_dir(dirpath, &mut listing) {
+            Ok(got) => got,
+            Err(code) => {
+                ls_err(argstr, code);
+                failed = true;
+                continue;
+            }
+        };
+        if !show_listing(target, dirpath, &listing[..n], all, all, long) || !complete {
+            ls_err_msg(argstr, b"more entries than ls can hold; the listing above is cut short");
             failed = true;
-            continue;
         }
-        show_listing(target, dirpath, &listing[..n as usize], all, all, long);
     }
 
     ulib::end_of_stream(target);
@@ -206,6 +217,9 @@ fn ls_err_msg(arg: &str, msg: &[u8]) {
     ulib::con_write(b"\r\n");
 }
 
+/// Whether every entry of `data` was shown: `false` when the record array
+/// ([`MAX_ENTRIES`]) filled first.
+///
 /// Collect a `name\n`/`name/\n` listing into entries, sort by name, and display
 /// it - columns (default) or the long form (`-l`). `dir` is the path the entries
 /// are relative to (for `-l`'s per-entry `stat`); `all` keeps dotfiles, and
@@ -220,7 +234,7 @@ fn ls_err_msg(arg: &str, msg: &[u8]) {
 /// `-l` then stats them like any other name, and `ulib::resolve` normalizes
 /// `<dir>/.` and `<dir>/..` before the call - so the modes shown are the real
 /// ones for this directory and its parent, which is the whole point of asking.
-fn show_listing(target: u64, dir: &str, data: &[u8], all: bool, dots: bool, long: bool) {
+fn show_listing(target: u64, dir: &str, data: &[u8], all: bool, dots: bool, long: bool) -> bool {
     let mut entries = [Entry { start: 0, len: 0, is_dir: false, synth: false }; MAX_ENTRIES];
     let mut count = 0usize;
     if dots {
@@ -258,12 +272,22 @@ fn show_listing(target: u64, dir: &str, data: &[u8], all: bool, dots: bool, long
         };
         count += 1;
     }
+    // Whether every entry that would be shown got a record: the loop stops at
+    // MAX_ENTRIES, and a line left after it counts only if it would have been
+    // shown (a dotfile without -a would not; the review of #306).
+    let held = data[pos.min(data.len())..]
+        .split(|&b| b == b'\n')
+        .all(|line| {
+            let name = line.strip_suffix(b"/").unwrap_or(line);
+            name.is_empty() || (!all && name[0] == b'.')
+        });
     sort_entries(&mut entries[..count], data);
     if long {
         print_long(target, dir, &entries[..count], data);
     } else {
         print_columns(target, &entries[..count], data);
     }
+    held
 }
 
 /// Default layout: names in columns, filled top-to-bottom then left-to-right

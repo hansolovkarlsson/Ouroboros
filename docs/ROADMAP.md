@@ -4183,21 +4183,20 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   after five seconds, where it used SIGKILL, which dropped what the log still
   held; and `Guest.aborts()` stops the guest itself before reading, so no rig
   can read the trace early. Every rig gets it without an edit of its own.
-- **A directory listing is cut at one reply, with no sign of it.**
-  `NP_READDIR` has no offset: fsd writes `name\n` per entry into the reply
-  window, skips any name that no longer fits and goes on walking, so a
-  shorter name further on can still get in; `ls` asks for 512 bytes. So `ls
-  /include` shows about 60 of its 72 names and `ls /include/clang` 30 of 31,
-  and what is left out can be anywhere in the walk: the listing has holes,
-  it is not a prefix, which a paged design must not assume. Tab completion,
-  globs and `tree` read the same way. A paged verb (an offset in the request,
-  "more" in the reply) is a wire change: fsd, `netd`'s export, both host
-  peers and `ulib`. cpp is not affected: it opens headers by path. Found
-  2026-10-06 staging the C headers (step 6 of the C-hosting plan).
-  `/bin` is close too: since `/bin/CMALLOC` its 80 names take 499 bytes as
-  `name\n` (the review of #301 measured 506 of the reply on FAT32), so a
-  program or two more staged there drops a name from `ls /bin` and tab
-  completion.
+- **A listing page walks the whole directory.** Since `NP_READDIR` pages
+  (2026-10-16), fsd answers a page by walking every entry through
+  `list_dir`, skipping those before the start and those after the page fills,
+  so a listing of `p` pages reads the directory `p` times (the high review of
+  #306): `ls` of a 4 KiB listing is about nine walks, each reading every
+  directory cluster, slow on the Pi's USB stick. An early stop from
+  `list_dir`'s callback (a `ControlFlow` through the four filesystem walkers
+  and `/proc`) bounds a walk at its page's end; a cursor kept per fid would
+  bound it at the page itself. Tab completion on an ambiguous prefix also
+  lists the directory twice, once to count and once to print, and netd's HTTP
+  index walks it twice, its page and then a one-byte page at the next start
+  to learn whether there is more (the second review of #306). The pager's
+  question to a server, a start past any end, is one more walk per listing
+  of more than a page; an early stop ends that one at once.
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970

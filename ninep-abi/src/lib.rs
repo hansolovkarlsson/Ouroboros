@@ -52,10 +52,161 @@ pub const NP_REPLY_PAYLOAD: u64 = 8;
 /// both protocols during the migration without any collision.
 pub const NP_BASE: u64 = 0x100;
 
-/// List a directory's entries into the reply (`name\n` / `name/\n`). Params:
-/// `a0` = path length, `a1` = result-window size, at least 1 (a window of 0
-/// is refused `FS_ERROR`, as for every path read verb). Status = bytes written.
+/// List a directory's entries into the reply (`name\n` / `name/\n`), one
+/// page at a time. Params: `a0` = path length, `a1` = result-window size, at
+/// least 1 (a window of 0 is refused `FS_ERROR`, as for every path read verb),
+/// `a2` = the index of the first entry wanted, `0` for the first. Status =
+/// bytes written.
+///
+/// A page is the entries from `a2` on, in the server's walk order, whole,
+/// until the next would not fit the window: a run with no gaps. The next page
+/// starts at `a2` plus the number of lines this one holds, and a page of `0`
+/// bytes is the end; [`readdir_next`] is that rule, once. An entry that would
+/// not fit an empty window is refused `FS_ERROR` (a page of 0 bytes would read
+/// as the end). A start past the last entry is an empty page, which is how a
+/// client tells a paging server from one before it ([`READDIR_PAST_END`]).
+/// The index is stateless: a directory changed between pages
+/// can repeat or miss an entry. Since 2026-10-16; until then there was no
+/// `a2`, and a name that did not fit was skipped while the walk went on, so a
+/// listing longer than one reply came back with holes and no word of them.
 pub const NP_READDIR: u64 = NP_BASE;
+
+/// The start of the `NP_READDIR` page after `page`, which was asked for at
+/// `start`: `None` when `page` is empty (the end of the listing), else
+/// `start` plus the entries it holds, one per `\n`.
+pub fn readdir_next(start: u64, page: &[u8]) -> Option<u64> {
+    if page.is_empty() {
+        return None;
+    }
+    Some(start + page.iter().filter(|&&b| b == b'\n').count() as u64)
+}
+
+/// The window [`readdir_pages`] asks for: the inline reply's data cap
+/// (`syscall_abi::FS_DATA_MAX`), so an entry of any legal name fits an empty
+/// page and `FS_ERROR` from a page is a real error, never "no room".
+pub const READDIR_PAGE: usize = 512;
+
+/// The start [`readdir_pages`] asks for once, to tell a paging server from one
+/// before paging: an index past the last entry of any directory. A paging
+/// server answers it with the empty page that ends a listing; a server from
+/// before paging ignores the start and answers page one again. An explicit
+/// question, where the first version compared a later page with page one, and
+/// could not tell an old server from a directory that changed between pages,
+/// so a listing that changed under it never ended (the second review of #306).
+pub const READDIR_PAST_END: u64 = u32::MAX as u64;
+
+/// How [`readdir_pages`] ended, when no page failed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReaddirEnd {
+    /// An empty page: every entry was given to the caller.
+    Complete,
+    /// The caller's `entry` returned `false` (its buffer is full).
+    Stopped,
+    /// A server from before paging, which ignores the start and answers page
+    /// one for every page. The caller was given page one, which is all such a
+    /// server ever gave anyone.
+    OldServer,
+    /// A page that was not empty and held no whole entry (no `\n`), which no
+    /// server keeping the rule sends: the listing stops there rather than ask
+    /// for the same page again.
+    Broken,
+}
+
+/// Walk a directory listing page by page: the one copy of the paging loop,
+/// for `ulib` and the shell alike (the review of #306 found the two copies
+/// already apart). `fetch(start, page)` asks for the page from entry `start`
+/// into `page` ([`READDIR_PAGE`] bytes) and answers its byte count or the
+/// server's error code; `entry` is given each line without its `\n` (a
+/// directory's with its `/`), and returns `false` to stop. `spare`, as long
+/// as `page`, holds the second page while the server is asked, at
+/// [`READDIR_PAST_END`], whether it pages at all.
+///
+/// Every page asked for starts past the one before, so a listing ends: at an
+/// empty page, at a [`ReaddirEnd::Broken`] one, at the caller's word, or
+/// at a page's error (a call cut short by Ctrl+C among them).
+pub fn readdir_pages(
+    page: &mut [u8],
+    spare: &mut [u8],
+    mut fetch: impl FnMut(u64, &mut [u8]) -> Result<usize, u64>,
+    mut entry: impl FnMut(&[u8]) -> bool,
+) -> Result<ReaddirEnd, u64> {
+    let mut start = 0u64;
+    let mut paging = false;
+    loop {
+        let n = fetch(start, page)?.min(page.len());
+        let Some(next) = readdir_next(start, &page[..n]) else {
+            return Ok(ReaddirEnd::Complete);
+        };
+        if next == start {
+            return Ok(ReaddirEnd::Broken);
+        }
+        let lines: &[u8] = if start > 0 && !paging {
+            spare[..n].copy_from_slice(&page[..n]);
+            if fetch(READDIR_PAST_END, page)? > 0 {
+                return Ok(ReaddirEnd::OldServer);
+            }
+            paging = true;
+            &spare[..n]
+        } else {
+            &page[..n]
+        };
+        for line in lines.split(|&b| b == b'\n') {
+            if !line.is_empty() && !entry(line) {
+                return Ok(ReaddirEnd::Stopped);
+            }
+        }
+        start = next;
+    }
+}
+
+/// One `NP_READDIR` page being filled: the server's half of the paging rule,
+/// once, for fsd and netd (np9p_server.py's `readdir_page` is the Python
+/// copy). Each entry of the walk is [`push`](Self::push)ed in order; the
+/// page takes those from `start` on, whole, until the next would not fit
+/// `out`, and then no more.
+pub struct ReaddirFill<'a> {
+    out: &'a mut [u8],
+    start: u64,
+    index: u64,
+    written: usize,
+    full: bool,
+    too_long: bool,
+}
+
+impl<'a> ReaddirFill<'a> {
+    /// A page into `out` (the window), from entry `start`.
+    pub fn new(out: &'a mut [u8], start: u64) -> Self {
+        ReaddirFill { out, start, index: 0, written: 0, full: false, too_long: false }
+    }
+
+    /// The walk's next entry: `name` then `suffix` (`"\n"`, or `"/\n"` for
+    /// a directory).
+    pub fn push(&mut self, name: &[u8], suffix: &[u8]) {
+        let here = self.index;
+        self.index += 1;
+        if self.full || here < self.start {
+            return;
+        }
+        let w = self.written;
+        let len = name.len() + suffix.len();
+        if w + len > self.out.len() {
+            self.full = true;
+            self.too_long = w == 0;
+            return;
+        }
+        self.out[w..w + name.len()].copy_from_slice(name);
+        self.out[w + name.len()..w + len].copy_from_slice(suffix);
+        self.written = w + len;
+    }
+
+    /// The page's length, or `None` when its first entry would not fit an
+    /// empty window, which the server refuses `FS_ERROR` (a page of 0 bytes
+    /// would read as the end).
+    pub fn finish(&self) -> Option<usize> {
+        if self.too_long { None } else { Some(self.written) }
+    }
+}
+
 /// Read a file inline: the reply carries the bytes (capped by the message
 /// limit). Params: `a0` = path length, `a1` = want, at least 1 (a want of 0 is
 /// refused `FS_ERROR`, as for every path read verb). Status = the file's *real*
@@ -979,6 +1130,147 @@ mod tests {
     //! --target aarch64-apple-darwin`). No I/O, no syscalls - the cheapest
     //! foreign observer this project has.
     use super::*;
+
+    /// A paging server over `names`, as fsd answers: whole entries from
+    /// `start` until the next would not fit `page`.
+    fn serve(names: &[&[u8]], start: u64, page: &mut [u8]) -> Result<usize, u64> {
+        let mut n = 0;
+        for name in names.iter().skip(start as usize) {
+            if n + name.len() + 1 > page.len() {
+                break;
+            }
+            page[n..n + name.len()].copy_from_slice(name);
+            page[n + name.len()] = b'\n';
+            n += name.len() + 1;
+        }
+        Ok(n)
+    }
+
+    fn collect(fetch: impl FnMut(u64, &mut [u8]) -> Result<usize, u64>, limit: usize) -> (Result<ReaddirEnd, u64>, [[u8; 16]; 64], usize) {
+        let mut page = [0u8; 24];
+        let mut first = [0u8; 24];
+        let mut got = [[0u8; 16]; 64];
+        let mut count = 0;
+        let end = readdir_pages(&mut page, &mut first, fetch, |line| {
+            if count == limit {
+                return false;
+            }
+            got[count][..line.len()].copy_from_slice(line);
+            count += 1;
+            true
+        });
+        (end, got, count)
+    }
+
+    const NAMES: [&[u8]; 9] = [b"alpha", b"beta/", b"gamma.h", b"d", b"epsilon", b"zeta", b"eta/", b"theta.c", b"iota"];
+
+    #[test]
+    fn readdir_pages_gives_every_entry_once_across_pages() {
+        let (end, got, count) = collect(|s, p| serve(&NAMES, s, p), 64);
+        assert_eq!(end, Ok(ReaddirEnd::Complete));
+        assert_eq!(count, NAMES.len());
+        for (i, name) in NAMES.iter().enumerate() {
+            assert_eq!(&got[i][..name.len()], *name);
+        }
+    }
+
+    #[test]
+    fn readdir_pages_asks_a_paging_server_once_whether_it_pages() {
+        let mut starts = [0u64; 16];
+        let mut calls = 0;
+        let (end, _, count) = collect(
+            |s, p| {
+                starts[calls] = s;
+                calls += 1;
+                serve(&NAMES, s, p)
+            },
+            64,
+        );
+        assert_eq!(end, Ok(ReaddirEnd::Complete));
+        assert_eq!(count, NAMES.len());
+        assert_eq!(starts[..calls].iter().filter(|&&s| s == READDIR_PAST_END).count(), 1);
+        // One page only: the empty second page ends it, with no question.
+        let mut calls = 0;
+        let (end, _, count) = collect(|s, p| { calls += 1; serve(&NAMES[..2], s, p) }, 64);
+        assert_eq!((end, count, calls), (Ok(ReaddirEnd::Complete), 2, 2));
+    }
+
+    #[test]
+    fn readdir_pages_gives_page_one_of_a_server_that_ignores_the_start() {
+        // A server from before paging, its directory longer than a page and
+        // then shorter: page one, once, either way.
+        for names in [&NAMES[..], &NAMES[..2]] {
+            let mut one = [0u8; 24];
+            let n = serve(names, 0, &mut one).unwrap();
+            let lines = one[..n].iter().filter(|&&b| b == b'\n').count();
+            let (end, _, count) = collect(|_, p| serve(names, 0, p), 64);
+            assert_eq!(end, Ok(ReaddirEnd::OldServer));
+            assert_eq!(count, lines);
+        }
+    }
+
+    #[test]
+    fn readdir_pages_ends_on_a_server_whose_pages_never_repeat() {
+        // Such a server whose directory changes on every call (a /proc as
+        // tasks come and go): the first version compared page k with page
+        // one and never ended here.
+        let mut calls = 0usize;
+        let (end, _, count) = collect(
+            |_, p| {
+                calls += 1;
+                p[..3].copy_from_slice(&[b'a' + (calls % 26) as u8, b'0' + (calls / 26) as u8, b'\n']);
+                Ok(3)
+            },
+            64,
+        );
+        assert_eq!((end, count, calls), (Ok(ReaddirEnd::OldServer), 1, 3));
+    }
+
+    #[test]
+    fn readdir_pages_stops_at_a_page_with_no_whole_entry() {
+        let (end, _, count) = collect(|_, p| { p[..3].copy_from_slice(b"abc"); Ok(3) }, 64);
+        assert_eq!((end, count), (Ok(ReaddirEnd::Broken), 0));
+    }
+
+    #[test]
+    fn readdir_fill_takes_whole_entries_from_start_until_one_does_not_fit() {
+        let mut out = [0u8; 12];
+        let mut fill = ReaddirFill::new(&mut out, 1);
+        for name in [&b"alpha"[..], b"bb", b"ccc", b"d", b"e"] {
+            fill.push(name, b"/\n");
+        }
+        // From the second entry: 4 + 5 + 3 bytes fill the 12 exactly, and
+        // "e/\n" does not fit.
+        assert_eq!(fill.finish(), Some(12));
+        assert_eq!(&out, b"bb/\nccc/\nd/\n");
+        let mut out = [0u8; 4];
+        let mut fill = ReaddirFill::new(&mut out, 0);
+        fill.push(b"toolong", b"\n");
+        fill.push(b"a", b"\n");
+        assert_eq!(fill.finish(), None);
+        let mut out = [0u8; 4];
+        let mut fill = ReaddirFill::new(&mut out, 5);
+        fill.push(b"a", b"\n");
+        assert_eq!(fill.finish(), Some(0));
+    }
+
+    #[test]
+    fn readdir_pages_passes_an_error_through_and_stops_when_asked() {
+        let (end, _, _) = collect(|s, p| if s == 0 { serve(&NAMES, s, p) } else { Err(77) }, 64);
+        assert_eq!(end, Err(77));
+        let (end, _, count) = collect(|s, p| serve(&NAMES, s, p), 4);
+        assert_eq!(end, Ok(ReaddirEnd::Stopped));
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn readdir_next_counts_the_lines_and_ends_on_an_empty_page() {
+        assert_eq!(readdir_next(0, b""), None);
+        assert_eq!(readdir_next(7, b""), None);
+        assert_eq!(readdir_next(0, b"a\n"), Some(1));
+        assert_eq!(readdir_next(0, b"a\nbin/\nc\n"), Some(3));
+        assert_eq!(readdir_next(40, b"x/\ny\n"), Some(42));
+    }
 
     #[test]
     fn open_writes_is_every_flag_that_changes_the_file() {

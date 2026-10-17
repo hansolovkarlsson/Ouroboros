@@ -42,7 +42,10 @@ fn depth_cap(stack_size: usize) -> usize {
     if levels < MAX_DEPTH { levels } else { MAX_DEPTH }
 }
 
-/// One directory's listing, as `fs_list_dir` fills it (`name\n`/`name/\n`).
+/// One directory's listing, as `fs_list_dir` fills it (`name\n`/`name/\n`),
+/// page by page. One per level of recursion, so it stays small ([`depth_cap`]
+/// is computed from the frame it is part of); a directory longer than it is
+/// shown as far as it fits, with a line saying the rest is not.
 const LIST_BUF: usize = 512;
 
 /// Room for the accumulated indent prefix: 4 bytes per ancestor level.
@@ -126,16 +129,18 @@ pub extern "C" fn _start() -> ! {
 /// accumulates the directory/file totals for the summary.
 fn walk(path: &str, prefix: &str, target: u64, depth: usize, cap: usize, counts: &mut Counts) {
     let mut listing = [0u8; LIST_BUF];
-    let n = ulib::fs_list_dir(path, &mut listing);
-    if ulib::is_fs_error(n) {
-        // Only worth reporting for the root (a deeper unreadable dir just
-        // isn't descended - it was already printed as an entry).
-        if depth == 0 {
-            ulib::fs_error("tree", n);
+    let (n, complete) = match ulib::fs_list_dir(path, &mut listing) {
+        Ok(got) => got,
+        Err(code) => {
+            // Only worth reporting for the root (a deeper unreadable dir just
+            // isn't descended - it was already printed as an entry).
+            if depth == 0 {
+                ulib::fs_error("tree", code);
+            }
+            return;
         }
-        return;
-    }
-    let data = &listing[..n as usize];
+    };
+    let data = &listing[..n];
 
     // Collect the real entries (offset+len into `data`), skipping empty lines
     // and the `.`/`..` FAT returns, then sort them alphabetically so the tree
@@ -169,12 +174,22 @@ fn walk(path: &str, prefix: &str, target: u64, depth: usize, cap: usize, counts:
         };
         count += 1;
     }
+    // Every entry of this level held: the listing ended in the buffer, and
+    // the record array did not fill first.
+    // A line left after the record array filled counts only if it would have
+    // been an entry (`.` and `..` would not).
+    let held = complete
+        && data[i.min(data.len())..].split(|&b| b == b'\n').all(|line| {
+            let name = line.strip_suffix(b"/").unwrap_or(line);
+            name.is_empty() || is_dot(name)
+        });
     sort_entries(&mut entries[..count], data);
 
     // Emit each entry, recursing into directories - in sorted order.
     for (idx, e) in entries[..count].iter().enumerate() {
         let name = &data[e.start as usize..e.start as usize + e.len as usize];
-        let is_last = idx + 1 == count;
+        // When the level is cut short, its marker below is the last child.
+        let is_last = idx + 1 == count && held;
 
         emit_entry(target, prefix, is_last, name);
 
@@ -196,6 +211,9 @@ fn walk(path: &str, prefix: &str, target: u64, depth: usize, cap: usize, counts:
         } else {
             counts.files += 1;
         }
+    }
+    if !held {
+        emit_entry(target, prefix, true, b"(cut short: more entries than tree can hold)");
     }
 }
 
