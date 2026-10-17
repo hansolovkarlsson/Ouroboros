@@ -63,7 +63,7 @@
 #define _HAVE_ALIAS_ATTRIBUTE
 
 /* The compiler REALLY has the attribute __alloc_size__ */
-#undef _HAVE_ALLOC_SIZE
+#define _HAVE_ALLOC_SIZE
 
 /* ARM Semihost APIs supported */
 #undef _HAVE_ARM_SEMIHOST
