@@ -47,8 +47,10 @@ pub struct Fs;
 enum Node {
     /// `/` - the set of task slots.
     Root,
-    /// `/<n>` - one task slot's directory.
-    Task(u64),
+    /// `/<n>` - one task slot's directory. `parse` has checked the slot
+    /// exists, and every slot's directory lists the same two files, so the
+    /// number is not kept.
+    Task,
     /// `/<n>/state` - the slot's state file.
     State(u64),
     /// `/<n>/core` - the core executing the slot's task now, or `none`.
@@ -76,7 +78,7 @@ impl Fs {
     pub fn list_dir(
         &mut self,
         path: &str,
-        mut f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
+        mut f: impl FnMut(&str, bool) -> ControlFlow<()>,
     ) -> Result<(), Error> {
         match parse(path) {
             Node::Root => {
@@ -84,8 +86,7 @@ impl Fs {
                 // slot (0.. until the kernel reports no such slot). Includes
                 // unused slots - their `state` file just reads "unused", the
                 // same as `ps` shows.
-                let mut cpus = [0u8; LINE_MAX];
-                if f("cpus", false, cpus_bytes(&mut cpus) as u32).is_break() {
+                if f("cpus", false).is_break() {
                     return Ok(());
                 }
                 let mut i = 0u64;
@@ -98,7 +99,7 @@ impl Fs {
                     let mut buf = [0u8; 20];
                     let n = u64_decimal(i, &mut buf);
                     if let Ok(name) = core::str::from_utf8(&buf[..n]) {
-                        if f(name, true, 0).is_break() {
+                        if f(name, true).is_break() {
                             return Ok(());
                         }
                     }
@@ -106,11 +107,10 @@ impl Fs {
                 }
                 Ok(())
             }
-            Node::Task(n) => {
+            Node::Task => {
                 // A slot's directory holds `state` and `core`.
-                let mut line = [0u8; LINE_MAX];
-                if f("state", false, file_bytes(&Node::State(n), &mut line) as u32).is_continue() {
-                    let _ = f("core", false, file_bytes(&Node::Core(n), &mut line) as u32);
+                if f("state", false).is_continue() {
+                    let _ = f("core", false);
                 }
                 Ok(())
             }
@@ -125,7 +125,7 @@ impl Fs {
 
     pub fn read_at(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
         match parse(path) {
-            Node::Root | Node::Task(_) => Err(Error::NotAFile),
+            Node::Root | Node::Task => Err(Error::NotAFile),
             Node::UnderFile => Err(Error::NotADirectory),
             Node::NotFound => Err(Error::NotFound),
             file => {
@@ -140,7 +140,7 @@ impl Fs {
     /// timestamp (`time: None`). Backs `ls -l`.
     pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
         let (size, is_dir) = match parse(path) {
-            Node::Root | Node::Task(_) => (0u64, true),
+            Node::Root | Node::Task => (0u64, true),
             Node::UnderFile => return Err(Error::NotADirectory),
             Node::NotFound => return Err(Error::NotFound),
             file => {
@@ -194,7 +194,7 @@ fn file_bytes(node: &Node, buf: &mut [u8; LINE_MAX]) -> usize {
         Node::Core(n) => core_bytes(*n, buf),
         Node::Cpus => cpus_bytes(buf),
         // Not files; the callers' matches keep them out.
-        Node::Root | Node::Task(_) | Node::UnderFile | Node::NotFound => 0,
+        Node::Root | Node::Task | Node::UnderFile | Node::NotFound => 0,
     }
 }
 
@@ -299,7 +299,7 @@ fn parse(path: &str) -> Node {
         return Node::NotFound;
     }
     if i >= b.len() {
-        return Node::Task(n); // "/<n>"
+        return Node::Task; // "/<n>"
     }
     // There is a second component after the '/'.
     i += 1; // skip '/'

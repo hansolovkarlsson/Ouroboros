@@ -4203,21 +4203,17 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   2026-10-17 a page's walk stops at the first entry that does not fit
   (`ReaddirFill::push` answers `Break`, and the four walkers and `/proc`
   stop on it), where before each page read the whole directory (the high
-  review of #306). What is left, seen by `make test-listing-walk` (QEMU's
-  virtio-blk trace; `/include` is two pages, and one listing of it reads 69
-  sectors on FAT32, 888 on ext2 and 126 on exFAT, from 72, 924 and 132
-  before the stop):
+  review of #306), and ext2's walk reads no inode (the kind from the
+  entry's `file_type` byte), where it read one an entry. What is left, seen
+  by `make test-listing-walk` (QEMU's virtio-blk trace; one listing of the
+  two-page `/include` reads 69 sectors on FAT32 and 126 on exFAT, and of a
+  three-page directory of 300 files 74 on ext2, from 3,698):
   - **Three walks of every listing still read it all**: the last page, the
     pager's question (a start past any end, which only a whole walk can
     answer; the roadmap said an early stop would end it at once, and it
     cannot), and the empty page that ends the listing. So a listing of `p`
     pages walks `p + 2` times, the first `p - 1` only to their page's end.
     A cursor kept per fid would make each page a walk of the page alone.
-  - **ext2 reads every entry's inode during the walk**, the entries before
-    the start included, for a kind and a size: 288 of the 888 sectors, one
-    sector read per entry per walk. fsd's `NP_READDIR` drops the size, and an
-    ext2 directory entry carries the file type itself when the `filetype`
-    feature is on (mke2fs's default), so the walk need not read an inode.
   - Tab completion on an ambiguous prefix lists the directory twice, once
     to count and once to print, and netd's HTTP index twice, its page and
     then a one-byte page at the next start to learn whether there is more

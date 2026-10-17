@@ -70,8 +70,9 @@ const NEW_FILE_MODE: u16 = S_IFREG | 0o644;
 const NEW_DIR_MODE: u16 = S_IFDIR | 0o755;
 
 /// Directory-entry `file_type` values (when the `filetype` feature is present).
+/// `FT_UNKNOWN` says nothing of the kind, so a listing reads the inode for it.
+const FT_UNKNOWN: u8 = 0;
 const FT_REG: u8 = 1;
-#[allow(dead_code)] // Stage C (mkdir)
 const FT_DIR: u8 = 2;
 
 /// `s_feature_incompat` bit for the `filetype` feature.
@@ -611,17 +612,23 @@ impl Fs {
         Ok((ino, inode))
     }
 
-    /// Lists a directory, calling `f(name, is_dir, size)` for each entry until
-    /// it answers `Break`. `""` or `"/"` lists the root. Skips the `.`/`..`
+    /// Lists a directory, calling `f(name, is_dir)` for each entry until it
+    /// answers `Break`. `""` or `"/"` lists the root. Skips the `.`/`..`
     /// self/parent links (FAT/exFAT don't surface those, so this matches their
-    /// `list_dir`). The scan is
-    /// inlined rather than reusing [`walk_dir`](Self::walk_dir) so each entry's
-    /// inode can be read *during* the walk for its kind and size (a closure
-    /// can't, since it can't also borrow `self`); it needs no per-entry `alloc`.
+    /// `list_dir`). The kind comes from the entry's `file_type` byte when the
+    /// volume has the `filetype` feature (mke2fs's default, and this module's
+    /// mkfs), so a listing reads no inode; on a volume without it, or for an
+    /// entry whose type is 0 (unknown), the entry's inode is read for it.
+    /// Until 2026-10-17 every entry's inode was read, entries walked past
+    /// included, for a kind and a size no caller used: 288 of the 888 sectors
+    /// a listing of `/include` read (`make test-listing-walk`). The scan is
+    /// inlined rather than reusing [`walk_dir`](Self::walk_dir) so that inode
+    /// can be read *during* the walk (a closure can't, since it can't also
+    /// borrow `self`); it needs no per-entry `alloc`.
     pub fn list_dir(
         &mut self,
         path: &str,
-        mut f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
+        mut f: impl FnMut(&str, bool) -> ControlFlow<()>,
     ) -> Result<(), Error> {
         let dir = self.find(path)?;
         if !dir.is_dir() {
@@ -651,8 +658,12 @@ impl Fs {
                         namebuf[..n].copy_from_slice(&buf[off + 8..off + 8 + n]);
                         let name = core::str::from_utf8(&namebuf[..n]).unwrap_or("");
                         if name != "." && name != ".." {
-                            let child = self.read_inode(entry_ino)?;
-                            if f(name, child.is_dir(), child.size).is_break() {
+                            let is_dir = match e[7] {
+                                FT_DIR if self.has_filetype => true,
+                                t if self.has_filetype && t != FT_UNKNOWN => false,
+                                _ => self.read_inode(entry_ino)?.is_dir(),
+                            };
+                            if f(name, is_dir).is_break() {
                                 return Ok(());
                             }
                         }

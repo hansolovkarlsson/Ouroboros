@@ -719,7 +719,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             // short by Ctrl+C always could.
             let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
             let mut fill = ninep_abi::ReaddirFill::new(result, p[2]);
-            let outcome = fs.list_dir(path, |name, is_dir, _size| {
+            let outcome = fs.list_dir(path, |name, is_dir| {
                 fill.push(name.as_bytes(), if is_dir { b"/\n" } else { b"\n" })
             });
             match (outcome, fill.finish()) {
