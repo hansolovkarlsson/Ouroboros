@@ -4242,15 +4242,23 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   have to answer what an open file is after that. Found while fixing
   spawn's reads (2026-10-17), whose fix holds the resolved file only for
   the length of one request.
-- **exFAT walks a file's cluster chain from its start for every piece.**
-  exFAT's `read_entry` keeps no cursor, so the pieces of one `NP_READ`
-  (2 KiB each, up to 64 KiB) each walk the chain from the first cluster
-  through the FAT, where FAT32's `read_cursor` resumes the walk; a
-  contiguous file (`NoFatChain`) skips the FAT and is not affected. Not new
-  (each request walked from the start before 2026-10-17 too), and seen in
-  `make test-spawn-reads`: a run of `ls` reads 290 sectors on exFAT against
-  199 on FAT32. A cursor needs exFAT's FAT writes to invalidate it, as
-  FAT32's `write_fat_entry` does (the review of #312).
+- **No rig sees a read cursor go stale.** FAT32 and exFAT each keep one
+  read cursor, a position in a file's cluster chain, and drop it in
+  `write_fat_entry`, every chain change passing through there. Nothing
+  checks that the drop is there: each shell command's spawn reads its
+  binary and replaces the cursor, so a stale one shows only inside one
+  program that reads a chained file, changes the chain under it (the file
+  removed and its first cluster reused by a file whose chain differs) and
+  reads past the old position again. That is a probe program like
+  `CFIDHOLD`. Found while giving exFAT its cursor (2026-10-17).
+- **exFAT keeps no FAT sector cache.** FAT32's `fat_cache` holds the last
+  FAT sector read; exFAT reads one for every step of a chain. Small with
+  the read cursor (one run of `ls` reads 14 FAT sectors of its 272, all
+  one sector, for `/bin`'s four-cluster directory walked once a
+  resolution), and that walk again is the larger cost: `/bin` read seven
+  times a run, 168 of the 272. Recorded 2026-10-17, correcting the item
+  this replaces, which put exFAT's 290 sectors against FAT32's 199 down to
+  the chain walk; the files in `/bin` are contiguous and walk no chain.
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970

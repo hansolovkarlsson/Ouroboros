@@ -32,7 +32,19 @@ The root directory's first sector is found on the host: from the FAT32 or
 exFAT boot sector, and on ext2 by debugfs. Reported too: the sectors one
 spawn of each reads.
 
-About three minutes; needs e2fsprogs, as the ext2 image does.
+On exFAT two more boots grade the walk along a file's cluster chain. The
+host's files are contiguous (NoFatChain), which exFAT reads with no FAT at
+all (and macOS may write them either way), so each boot copies /SMALL to
+/CSMALL and /BIG to /CHAIN with the guest's `cp`: fsd writes every file it
+makes FAT-chained. One boot then spawns /CSMALL and the other /CHAIN, and
+the FAT sectors a spawn of /CHAIN reads more than one of /CSMALL must be the
+difference in their chains' steps (clusters less one): exFAT keeps no FAT
+sector cache, so a step is one read, and with the read cursor a spawn walks
+the chain once, each piece resuming where the last one ended. Until
+2026-10-17 every 2 KiB piece walked it from the first cluster, about a
+hundredth of the file's clusters squared.
+
+About four minutes; needs e2fsprogs, as the ext2 image does.
 """
 import math
 import os
@@ -148,8 +160,19 @@ def root_exfat(image):
     return start + heap + ((root - 2) << b[109])
 
 
-def boot(name, prepared, image, program):
+def exfat_fat(image):
+    """[first LBA, end LBA) of the exFAT partition's FAT, and its cluster size in bytes."""
+    start, _ = partition(image, 0x07)
+    with open(image, "rb") as fh:
+        fh.seek(start * SECTOR)
+        b = fh.read(SECTOR)
+    offset, length = struct.unpack_from("<II", b, 80)
+    return start + offset, start + offset + length, SECTOR << b[109]
+
+
+def boot(name, prepared, image, program, setup=()):
     steps = [("login:", "root"), ("assword", "root"), ("# ", "/SMALL w")]
+    steps += [("# ", cmd) for cmd in setup]
     steps += [("# ", f"{program} a")] * RUNS + [("# ", "")]
     problems, lines, count = disktrace.boot(f"test-spawn-reads-{name}", prepared, image, steps)
     said = sum(1 for ln in lines if ln.strip() == "argv[1] = a")
@@ -189,7 +212,39 @@ def main() -> int:
         for p in problems:
             print(f"     {p}")
         failed += bool(problems)
+    failed += chain_walk(files)
     return 1 if failed else 0
+
+
+def chain_walk(files):
+    """The exFAT boots that grade the cursor's walk along a FAT chain; 1 on a failure."""
+    name, image = "exfat-chain", "espexfat.img"
+    prepared = os.path.join(ROOT, "build", f"test-spawn-reads-{name}-prepared.img")
+    shutil.copyfile(os.path.join(ROOT, "build", image), prepared)
+    try:
+        place_mounted(prepared, files)
+        fat_lo, fat_hi, cluster = exfat_fat(prepared)
+        setup = ["cp /SMALL /CSMALL", "cp /BIG /CHAIN"]
+        p0, base = boot(name, prepared, image, "/CSMALL", setup)
+        p1, more = boot(name, prepared, image, "/CHAIN", setup)
+    finally:
+        os.remove(prepared)
+    problems = p0 + p1
+    fat = lambda count: sum(c for s, c in count.items() if fat_lo <= s < fat_hi)
+    delta = (fat(more) - fat(base)) / RUNS
+    steps = lambda size: math.ceil(size / cluster) - 1
+    want = steps(BIG) - steps(len(files["SMALL"]))
+    if not problems and fat(base) == 0:
+        problems.append("no FAT sector was read in either boot: the observer sees nothing")
+    if not problems and delta != want:
+        problems.append(f"a spawn of /CHAIN reads {delta:g} more FAT sectors than /CSMALL, not {want}: "
+                        "one walk of the chain a spawn is the rule")
+    verdict = "FAIL" if problems else "ok  "
+    print(f"{verdict} exfat: /CHAIN and /CSMALL, copied by the guest's cp (FAT-chained), differ by "
+          f"{delta:g} FAT sectors a spawn, {want} steps of their chains")
+    for p in problems:
+        print(f"     {p}")
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

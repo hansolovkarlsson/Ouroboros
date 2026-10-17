@@ -2358,8 +2358,11 @@ test-listing-walk: image image-ext2 image-exfat
 # /bin/ARGS in the root as /SMALL and padded to 200 KiB as /BIG, and per spawn
 # the root directory's first sector, read once a resolution, must be read
 # exactly as many more times for /BIG as it makes more requests (QEMU's
-# virtio-blk trace). Needs e2fsprogs. About three minutes; run it whenever the shell's or
-# netd's spawn read, fsd's NP_READ or a filesystem's read_each changes.
+# virtio-blk trace). On exFAT two more boots copy /SMALL and /BIG with the
+# guest's cp (fsd writes FAT-chained files), and the FAT sectors their spawns
+# read must differ by exactly the steps of their chains: one walk a spawn,
+# the read cursor. Needs e2fsprogs. About four minutes; run it whenever the shell's or
+# netd's spawn read, fsd's NP_READ, a filesystem's read_each or read cursor changes.
 test-spawn-reads: image image-ext2 image-exfat
 	python3 scripts/test-spawn-reads.py
 
