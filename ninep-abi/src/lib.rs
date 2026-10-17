@@ -185,8 +185,9 @@ impl<'a> ReaddirFill<'a> {
     }
 
     /// The walk's next entry: `name` then `suffix` (`"\n"`, or `"/\n"` for
-    /// a directory). `Break` once an entry did not fit: the page is done, and
-    /// nothing pushed after it changes the page, so the walk should stop.
+    /// a directory). `Break` once the page is done, so the walk should stop:
+    /// an entry did not fit, or this one filled the window exactly, so none
+    /// can. Nothing pushed after that changes the page.
     pub fn push(&mut self, name: &[u8], suffix: &[u8]) -> ControlFlow<()> {
         let here = self.index;
         self.index += 1;
@@ -206,6 +207,10 @@ impl<'a> ReaddirFill<'a> {
         self.out[w..w + name.len()].copy_from_slice(name);
         self.out[w + name.len()..w + len].copy_from_slice(suffix);
         self.written = w + len;
+        if self.written == self.out.len() {
+            self.full = true;
+            return ControlFlow::Break(());
+        }
         ControlFlow::Continue(())
     }
 
@@ -1249,13 +1254,19 @@ mod tests {
         let flow: [_; 6] = core::array::from_fn(|i| {
             fill.push([&b"alpha"[..], b"bb", b"ccc", b"d", b"e", b"f"][i], b"/\n")
         });
-        // From the second entry: 4 + 5 + 3 bytes fill the 12 exactly, and
-        // "e/\n" does not fit, which is where the walk is told to stop; an
-        // entry pushed after that is told so again.
+        // From the second entry: 4 + 5 + 3 bytes fill the 12 exactly, so the
+        // walk is told to stop at "d/\n", the entry that filled it, without
+        // reading "e"; an entry pushed after that is told so again.
         let (go, stop) = (ControlFlow::Continue(()), ControlFlow::Break(()));
-        assert_eq!(flow, [go, go, go, go, stop, stop]);
+        assert_eq!(flow, [go, go, go, stop, stop, stop]);
         assert_eq!(fill.finish(), Some(12));
         assert_eq!(&out, b"bb/\nccc/\nd/\n");
+        // One that does not fit stops it too, and is left out.
+        let mut out = [0u8; 8];
+        let mut fill = ReaddirFill::new(&mut out, 0);
+        assert_eq!(fill.push(b"abc", b"\n"), go);
+        assert_eq!(fill.push(b"defgh", b"\n"), stop);
+        assert_eq!(fill.finish(), Some(4));
         let mut out = [0u8; 4];
         let mut fill = ReaddirFill::new(&mut out, 0);
         assert_eq!(fill.push(b"toolong", b"\n"), stop);

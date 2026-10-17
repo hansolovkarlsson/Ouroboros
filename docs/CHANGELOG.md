@@ -232,12 +232,13 @@ sent a notice before the header pin moved.
 **A listing page stops reading at its end (2026-10-17).** fsd walked the
 whole directory for every `NP_READDIR` page and kept only the page, so a
 listing of many pages read the directory once a page. The walk now stops
-at the first entry that does not fit. `make measure-listing` counts the
-sectors a listing reads through QEMU's virtio-blk trace; on the two-page
-`/include` the stop saves 3 to 36 sectors, and the measurement found where
-the rest goes: three whole walks a listing still needs, ext2 reading an
-inode for every entry it walks past, and spawn resolving a program's path
-again for every 512 bytes it stages (`ROADMAP.md`).
+where the page ends. `make test-listing-walk` sees it through QEMU's
+virtio-blk trace, the one observer that can, since a walker that went on
+gives the same pages; on the two-page `/include` the stop saves 3 to 36
+sectors a listing, and the trace showed where the rest goes: three whole
+walks a listing still needs, ext2 reading an inode for every entry it walks
+past, and spawn resolving a program's path again for every 512 bytes it
+stages (`ROADMAP.md`).
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

@@ -2670,8 +2670,9 @@ be reviewed after the fact from the saved screenshots.
 >       bound exists; the cc-and-as item makes `/bin/CPP` about 238 KB.
 >       Each 512-byte chunk is a separate `fsd` read by path, resolved
 >       from the root and walking `/bin` again: starting `ls` once reads
->       about 1,100 sectors on FAT32, twenty times what it reads to list
->       `/include` (`make measure-listing`, 2026-10-17). A bulk read, or
+>       about 1,040 sectors more than starting `echo` on FAT32, fifteen
+>       times what listing `/include` reads (QEMU's virtio-blk trace,
+>       2026-10-17, as `make test-listing-walk` counts it). A bulk read, or
 >       one opened fid, would resolve the path once.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
@@ -4202,10 +4203,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   2026-10-17 a page's walk stops at the first entry that does not fit
   (`ReaddirFill::push` answers `Break`, and the four walkers and `/proc`
   stop on it), where before each page read the whole directory (the high
-  review of #306). What is left, measured by `make measure-listing`
-  (QEMU's virtio-blk trace; `/include` is two pages, and one `ls` of it
-  reads 55 sectors on FAT32, 883 on ext2 and 100 on exFAT, from 58, 919
-  and 106 before the stop):
+  review of #306). What is left, seen by `make test-listing-walk` (QEMU's
+  virtio-blk trace; `/include` is two pages, and one listing of it reads 69
+  sectors on FAT32, 888 on ext2 and 126 on exFAT, from 72, 924 and 132
+  before the stop):
   - **Three walks of every listing still read it all**: the last page, the
     pager's question (a start past any end, which only a whole walk can
     answer; the roadmap said an early stop would end it at once, and it
@@ -4213,8 +4214,8 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
     pages walks `p + 2` times, the first `p - 1` only to their page's end.
     A cursor kept per fid would make each page a walk of the page alone.
   - **ext2 reads every entry's inode during the walk**, the entries before
-    the start included, for a kind and a size: 287 of the 883 sectors, one
-    sector per entry per walk. fsd's `NP_READDIR` drops the size, and an
+    the start included, for a kind and a size: 288 of the 888 sectors, one
+    sector read per entry per walk. fsd's `NP_READDIR` drops the size, and an
     ext2 directory entry carries the file type itself when the `filetype`
     feature is on (mke2fs's default), so the walk need not read an inode.
   - Tab completion on an ambiguous prefix lists the directory twice, once

@@ -612,8 +612,9 @@ impl Fs {
     }
 
     /// Lists a directory, calling `f(name, is_dir, size)` for each entry until
-    /// it answers `Break`. `""` or `"/"` lists the root. Skips the `.`/`..` self/parent links (FAT/exFAT
-    /// don't surface those, so this matches their `list_dir`). The scan is
+    /// it answers `Break`. `""` or `"/"` lists the root. Skips the `.`/`..`
+    /// self/parent links (FAT/exFAT don't surface those, so this matches their
+    /// `list_dir`). The scan is
     /// inlined rather than reusing [`walk_dir`](Self::walk_dir) so each entry's
     /// inode can be read *during* the walk for its kind and size (a closure
     /// can't, since it can't also borrow `self`); it needs no per-entry `alloc`.
