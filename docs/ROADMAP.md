@@ -4218,6 +4218,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
     to count and once to print, and netd's HTTP index twice, its page and
     then a one-byte page at the next start to learn whether there is more
     (the second review of #306).
+  - ext2's `list_dir` keeps its own copy of `walk_dir`'s block and record
+    scan (`rec_len`, `name_len`, bounds), so a fix to one must be made in
+    the other. It was kept to read an inode during the walk, which only the
+    fallback for a volume without `filetype` does now; `walk_dir` handing
+    out the entry's `file_type` would let `list_dir` use it (the review of
+    #311).
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970
