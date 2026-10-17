@@ -13,6 +13,8 @@
 //! refactor: `main.rs` calls `Filesystem` exactly as it called `fat32::Fs`, and
 //! behaviour is byte-identical while FAT32 is the only format.
 
+use core::ops::ControlFlow;
+
 use crate::disk::Disk;
 use crate::exfat;
 use crate::ext2;
@@ -209,7 +211,13 @@ impl Filesystem {
         }
     }
 
-    pub fn list_dir(&mut self, path: &str, f: impl FnMut(&str, bool, u32)) -> Result<(), Error> {
+    /// Calls `f(name, is_dir, size)` for each entry of the directory at
+    /// `path` until it answers `Break` (a full `NP_READDIR` page).
+    pub fn list_dir(
+        &mut self,
+        path: &str,
+        f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
+    ) -> Result<(), Error> {
         match self {
             Filesystem::Fat32(fs) => fs.list_dir(path, f),
             Filesystem::ExFat(fs) => fs.list_dir(path, f),

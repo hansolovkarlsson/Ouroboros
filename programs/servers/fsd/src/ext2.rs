@@ -46,6 +46,8 @@
 //! metadata it can't model - created entries get fixed 0644/0755 modes, and
 //! symlinks are reported but not followed. Root is always inode 2.
 
+use core::ops::ControlFlow;
+
 use crate::disk::Disk;
 use crate::fat32::{split_parent, Error};
 
@@ -609,16 +611,17 @@ impl Fs {
         Ok((ino, inode))
     }
 
-    /// Lists a directory, calling `f(name, is_dir, size)` for each entry. `""`
-    /// or `"/"` lists the root. Skips the `.`/`..` self/parent links (FAT/exFAT
-    /// don't surface those, so this matches their `list_dir`). The scan is
+    /// Lists a directory, calling `f(name, is_dir, size)` for each entry until
+    /// it answers `Break`. `""` or `"/"` lists the root. Skips the `.`/`..`
+    /// self/parent links (FAT/exFAT don't surface those, so this matches their
+    /// `list_dir`). The scan is
     /// inlined rather than reusing [`walk_dir`](Self::walk_dir) so each entry's
     /// inode can be read *during* the walk for its kind and size (a closure
     /// can't, since it can't also borrow `self`); it needs no per-entry `alloc`.
     pub fn list_dir(
         &mut self,
         path: &str,
-        mut f: impl FnMut(&str, bool, u32),
+        mut f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
     ) -> Result<(), Error> {
         let dir = self.find(path)?;
         if !dir.is_dir() {
@@ -649,7 +652,9 @@ impl Fs {
                         let name = core::str::from_utf8(&namebuf[..n]).unwrap_or("");
                         if name != "." && name != ".." {
                             let child = self.read_inode(entry_ino)?;
-                            f(name, child.is_dir(), child.size);
+                            if f(name, child.is_dir(), child.size).is_break() {
+                                return Ok(());
+                            }
                         }
                     }
                     off += rec_len;

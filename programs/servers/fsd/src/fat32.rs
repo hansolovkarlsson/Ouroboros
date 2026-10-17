@@ -30,6 +30,8 @@
 //! and `make run`'s vvfat disk is still FAT16 - so mounting fails there
 //! and every request answers `NO_FS`, same degradation as always.
 
+use core::ops::ControlFlow;
+
 use crate::disk::{Disk, DiskError};
 
 const SECTOR_SIZE: usize = 512;
@@ -833,20 +835,17 @@ impl Fs {
     }
 
     /// Lists a directory's entries, calling `f(name, is_dir, size)` for
-    /// each. `path` `""` or `"/"` lists the root.
+    /// each until it answers `Break`. `path` `""` or `"/"` lists the root.
     pub fn list_dir(
         &mut self,
         path: &str,
-        mut f: impl FnMut(&str, bool, u32),
+        mut f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
     ) -> Result<(), Error> {
         let dir = self.find(path)?;
         if !dir.is_dir {
             return Err(Error::NotADirectory);
         }
-        self.walk_dir(dir.cluster, |entry| {
-            f(entry.name(), entry.is_dir, entry.size);
-            false
-        })
+        self.walk_dir(dir.cluster, |entry| f(entry.name(), entry.is_dir, entry.size).is_break())
     }
 
     /// Metadata for one path: size, directory flag, and the FAT "write" time

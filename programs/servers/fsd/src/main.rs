@@ -711,11 +711,16 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             // is this one's plus the lines it got, and an empty page is the
             // end. An entry that would not fit an empty page is refused
             // FS_ERROR, since a page of 0 bytes would read as the end. The
-            // rule is ninep_abi::ReaddirFill, which netd's listings share.
+            // rule is ninep_abi::ReaddirFill, which netd's listings share; the
+            // walk stops where the page ends (since 2026-10-17; it read the
+            // rest of the directory for nothing). So a read error past a
+            // page's end fails the page that reaches it, not every page: a
+            // listing can give its first pages and then fail, as one cut
+            // short by Ctrl+C always could.
             let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
             let mut fill = ninep_abi::ReaddirFill::new(result, p[2]);
             let outcome = fs.list_dir(path, |name, is_dir, _size| {
-                fill.push(name.as_bytes(), if is_dir { b"/\n" } else { b"\n" });
+                fill.push(name.as_bytes(), if is_dir { b"/\n" } else { b"\n" })
             });
             match (outcome, fill.finish()) {
                 (Err(e), _) => status_reply(reply, error_code(&e)),

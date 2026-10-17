@@ -36,6 +36,8 @@
 //! parsing is byte scanning (no `str` range-indexing / char-pattern splits, which
 //! pull in a core lookup table and an `R_AARCH64_ABS64` - see docs/processes.md).
 
+use core::ops::ControlFlow;
+
 use crate::fat32::Error;
 
 /// The synthetic process filesystem. Zero-sized - all state lives in the kernel.
@@ -71,7 +73,11 @@ impl Fs {
         0
     }
 
-    pub fn list_dir(&mut self, path: &str, mut f: impl FnMut(&str, bool, u32)) -> Result<(), Error> {
+    pub fn list_dir(
+        &mut self,
+        path: &str,
+        mut f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
+    ) -> Result<(), Error> {
         match parse(path) {
             Node::Root => {
                 // The cores file first, then one directory per valid scheduler
@@ -79,7 +85,9 @@ impl Fs {
                 // unused slots - their `state` file just reads "unused", the
                 // same as `ps` shows.
                 let mut cpus = [0u8; LINE_MAX];
-                f("cpus", false, cpus_bytes(&mut cpus) as u32);
+                if f("cpus", false, cpus_bytes(&mut cpus) as u32).is_break() {
+                    return Ok(());
+                }
                 let mut i = 0u64;
                 loop {
                     if crate::syscall4(syscall_abi::TASK_STATE, i, 0, 0, 0)
@@ -90,7 +98,9 @@ impl Fs {
                     let mut buf = [0u8; 20];
                     let n = u64_decimal(i, &mut buf);
                     if let Ok(name) = core::str::from_utf8(&buf[..n]) {
-                        f(name, true, 0);
+                        if f(name, true, 0).is_break() {
+                            return Ok(());
+                        }
                     }
                     i += 1;
                 }
@@ -99,8 +109,9 @@ impl Fs {
             Node::Task(n) => {
                 // A slot's directory holds `state` and `core`.
                 let mut line = [0u8; LINE_MAX];
-                f("state", false, file_bytes(&Node::State(n), &mut line) as u32);
-                f("core", false, file_bytes(&Node::Core(n), &mut line) as u32);
+                if f("state", false, file_bytes(&Node::State(n), &mut line) as u32).is_continue() {
+                    let _ = f("core", false, file_bytes(&Node::Core(n), &mut line) as u32);
+                }
                 Ok(())
             }
             Node::State(_) | Node::Core(_) | Node::Cpus | Node::UnderFile => Err(Error::NotADirectory),

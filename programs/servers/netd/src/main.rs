@@ -5674,7 +5674,9 @@ fn listing_page(listing: &[u8], start: u64, want: usize, out: &mut [u8]) -> (u64
     let cap = want.min(out.len());
     let mut fill = ninep_abi::ReaddirFill::new(&mut out[..cap], start);
     for line in listing.split_inclusive(|&b| b == b'\n') {
-        fill.push(line, b"");
+        if fill.push(line, b"").is_break() {
+            break;
+        }
     }
     match fill.finish() {
         Some(written) => (written as u64, written),

@@ -37,6 +37,8 @@
 //! payload cap stays `FS_DATA_MAX` (512), all within `MSG_MAX_LEN` (768).
 #![no_std]
 
+use core::ops::ControlFlow;
+
 /// Request header size: `verb`(8) + `tree`(8) + four `u64` params(32) - the
 /// last of which (`a3`) is the identity word, not an op param. The
 /// inline payload (path, then any data) starts here. One `u64` larger than
@@ -163,7 +165,10 @@ pub fn readdir_pages(
 /// once, for fsd and netd (np9p_server.py's `readdir_page` is the Python
 /// copy). Each entry of the walk is [`push`](Self::push)ed in order; the
 /// page takes those from `start` on, whole, until the next would not fit
-/// `out`, and then no more.
+/// `out`, and then no more. `push` says when that is, so the walk can stop
+/// there rather than read the rest of the directory for nothing (until
+/// 2026-10-17 every page walked the whole directory, so a listing of `p`
+/// pages read it `p` times).
 pub struct ReaddirFill<'a> {
     out: &'a mut [u8],
     start: u64,
@@ -180,23 +185,33 @@ impl<'a> ReaddirFill<'a> {
     }
 
     /// The walk's next entry: `name` then `suffix` (`"\n"`, or `"/\n"` for
-    /// a directory).
-    pub fn push(&mut self, name: &[u8], suffix: &[u8]) {
+    /// a directory). `Break` once the page is done, so the walk should stop:
+    /// an entry did not fit, or this one filled the window exactly, so none
+    /// can. Nothing pushed after that changes the page.
+    pub fn push(&mut self, name: &[u8], suffix: &[u8]) -> ControlFlow<()> {
         let here = self.index;
         self.index += 1;
-        if self.full || here < self.start {
-            return;
+        if self.full {
+            return ControlFlow::Break(());
+        }
+        if here < self.start {
+            return ControlFlow::Continue(());
         }
         let w = self.written;
         let len = name.len() + suffix.len();
         if w + len > self.out.len() {
             self.full = true;
             self.too_long = w == 0;
-            return;
+            return ControlFlow::Break(());
         }
         self.out[w..w + name.len()].copy_from_slice(name);
         self.out[w + name.len()..w + len].copy_from_slice(suffix);
         self.written = w + len;
+        if self.written == self.out.len() {
+            self.full = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
     }
 
     /// The page's length, or `None` when its first entry would not fit an
@@ -1236,21 +1251,32 @@ mod tests {
     fn readdir_fill_takes_whole_entries_from_start_until_one_does_not_fit() {
         let mut out = [0u8; 12];
         let mut fill = ReaddirFill::new(&mut out, 1);
-        for name in [&b"alpha"[..], b"bb", b"ccc", b"d", b"e"] {
-            fill.push(name, b"/\n");
-        }
-        // From the second entry: 4 + 5 + 3 bytes fill the 12 exactly, and
-        // "e/\n" does not fit.
+        let flow: [_; 6] = core::array::from_fn(|i| {
+            fill.push([&b"alpha"[..], b"bb", b"ccc", b"d", b"e", b"f"][i], b"/\n")
+        });
+        // From the second entry: 4 + 5 + 3 bytes fill the 12 exactly, so the
+        // walk is told to stop at "d/\n", the entry that filled it, without
+        // reading "e"; an entry pushed after that is told so again.
+        let (go, stop) = (ControlFlow::Continue(()), ControlFlow::Break(()));
+        assert_eq!(flow, [go, go, go, stop, stop, stop]);
         assert_eq!(fill.finish(), Some(12));
         assert_eq!(&out, b"bb/\nccc/\nd/\n");
+        // One that does not fit stops it too, and is left out.
+        let mut out = [0u8; 8];
+        let mut fill = ReaddirFill::new(&mut out, 0);
+        assert_eq!(fill.push(b"abc", b"\n"), go);
+        assert_eq!(fill.push(b"defgh", b"\n"), stop);
+        assert_eq!(fill.finish(), Some(4));
         let mut out = [0u8; 4];
         let mut fill = ReaddirFill::new(&mut out, 0);
-        fill.push(b"toolong", b"\n");
-        fill.push(b"a", b"\n");
+        assert_eq!(fill.push(b"toolong", b"\n"), stop);
+        assert_eq!(fill.push(b"a", b"\n"), stop);
         assert_eq!(fill.finish(), None);
+        // A start past the last entry never stops the walk: only the whole
+        // walk shows that nothing is left.
         let mut out = [0u8; 4];
         let mut fill = ReaddirFill::new(&mut out, 5);
-        fill.push(b"a", b"\n");
+        assert_eq!(fill.push(b"a", b"\n"), go);
         assert_eq!(fill.finish(), Some(0));
     }
 
