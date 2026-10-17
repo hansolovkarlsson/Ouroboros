@@ -148,6 +148,45 @@ pub struct Fs {
     bitmap_first_cluster: u32,
     /// The allocation bitmap's size in bytes (`DataLength` of its `0x81` entry).
     bitmap_bytes: u64,
+    /// Where the last read's walk along a file's clusters ended, so the next
+    /// read of the same file at or past it resumes there - `fat32::Fs`'s
+    /// `read_cursor`, for the same reason. A file `fsd` writes is always
+    /// FAT-chained, and [`read_each`](Self::read_each) reads one in 2 KiB
+    /// pieces, so without it every piece walked the chain from the first
+    /// cluster: a spawn of a 640 KiB file reads 1,436 FAT sectors that
+    /// way, through the FAT cache, where one walk reads 6 (`make
+    /// test-spawn-reads`, 2026-10-17). Only the position is kept, never data, and
+    /// [`write_fat_entry`](Self::write_fat_entry) drops it, so a read never
+    /// follows a stale chain.
+    read_cursor: Option<ReadCursor>,
+    /// The last FAT sector read or written, for [`fat_entry`](Self::fat_entry):
+    /// `fat32::Fs`'s `fat_cache`. One sector holds 128 entries, so a walk
+    /// along a chain reads each sector once, not once a step; without it
+    /// `write_at` walked a file's chain from its first cluster, a disk read a
+    /// step, for every 2 KiB a client wrote. Kept across requests for
+    /// `fat32`'s reason: this `Fs` is the only writer of its FAT while it is
+    /// mounted, and [`write_fat_entry`](Self::write_fat_entry) keeps it in
+    /// step with its own writes.
+    fat_cache: Option<FatSector>,
+}
+
+/// One sector of the FAT, as cached by [`Fs::fat_cache`].
+struct FatSector {
+    lba: u64,
+    data: [u8; SECTOR_SIZE],
+}
+
+/// A point in a file's cluster walk, for [`Fs::read_cursor`].
+#[derive(Clone, Copy)]
+struct ReadCursor {
+    /// The file's first cluster and its `NoFatChain` flag, which together say
+    /// which file and which walk the cursor is for.
+    file_cluster: u32,
+    contiguous: bool,
+    /// A cluster reached by walking forward from the file's first, covering
+    /// the file's bytes `[cluster_pos, cluster_pos + cluster size)`.
+    cluster: u32,
+    cluster_pos: usize,
 }
 
 impl Fs {
@@ -186,6 +225,8 @@ impl Fs {
             root_cluster,
             bitmap_first_cluster: 0,
             bitmap_bytes: 0,
+            read_cursor: None,
+            fat_cache: None,
         };
         // Best-effort: reads don't need the bitmap, so a volume without one
         // (malformed) still mounts read-only; only writes require it.
@@ -417,22 +458,38 @@ impl Fs {
         if cluster < 2 || cluster - 2 >= self.cluster_count {
             return Ok(None);
         }
-        let byte = cluster as u64 * 4;
-        let sector = self.fat_lba as u64 + byte / SECTOR_SIZE as u64;
-        let offset = (byte % SECTOR_SIZE as u64) as usize;
-        let mut buf = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(sector, &mut buf)?;
-        let value = u32::from_le_bytes([
-            buf[offset],
-            buf[offset + 1],
-            buf[offset + 2],
-            buf[offset + 3],
-        ]);
+        let value = self.fat_entry(cluster)?;
         if value == 0 || value >= END_OF_CHAIN_MIN {
             Ok(None)
         } else {
             Ok(Some(value))
         }
+    }
+
+    /// The FAT sector holding `cluster`'s entry and the entry's offset in it.
+    fn fat_place(&self, cluster: u32) -> (u64, usize) {
+        let byte = cluster as u64 * 4;
+        (self.fat_lba as u64 + byte / SECTOR_SIZE as u64, (byte % SECTOR_SIZE as u64) as usize)
+    }
+
+    /// The FAT sector at `lba`, through the one-sector [`fat_cache`](Self::fat_cache).
+    fn fat_sector(&mut self, lba: u64) -> Result<&[u8; SECTOR_SIZE], Error> {
+        let sector = match self.fat_cache.take() {
+            Some(c) if c.lba == lba => c,
+            _ => {
+                let mut data = [0u8; SECTOR_SIZE];
+                self.disk.read_sector(lba, &mut data)?;
+                FatSector { lba, data }
+            }
+        };
+        Ok(&self.fat_cache.insert(sector).data)
+    }
+
+    /// `cluster`'s FAT entry.
+    fn fat_entry(&mut self, cluster: u32) -> Result<u32, Error> {
+        let (lba, offset) = self.fat_place(cluster);
+        let data = self.fat_sector(lba)?;
+        Ok(u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]))
     }
 
     /// Advance one cluster, honouring the `contiguous` (`NoFatChain`) flag: a
@@ -740,8 +797,18 @@ impl Fs {
         let offset = offset as usize;
 
         let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
-        let mut cluster = file.first_cluster;
-        let mut cluster_pos = 0usize;
+        // From the cursor when it is this file's and not past `offset`, else
+        // from the first cluster: the same walk either way, only shorter.
+        let (mut cluster, mut cluster_pos) = match self.read_cursor {
+            Some(c)
+                if c.file_cluster == file.first_cluster
+                    && c.contiguous == file.contiguous
+                    && c.cluster_pos <= offset =>
+            {
+                (c.cluster, c.cluster_pos)
+            }
+            _ => (file.first_cluster, 0usize),
+        };
         while cluster_pos + cluster_bytes <= offset {
             match self.advance(cluster, file.contiguous)? {
                 Some(next) => cluster = next,
@@ -777,6 +844,14 @@ impl Fs {
             }
             cluster_pos += cluster_bytes;
         }
+        // `cluster` and `cluster_pos` only ever moved together, so they still
+        // name one cluster of this file and the bytes it holds.
+        self.read_cursor = Some(ReadCursor {
+            file_cluster: file.first_cluster,
+            contiguous: file.contiguous,
+            cluster,
+            cluster_pos,
+        });
         Ok(written as u32)
     }
 
@@ -794,13 +869,17 @@ impl Fs {
     /// Writes one 32-bit FAT entry (exFAT has a single active FAT). `value` is a
     /// next-cluster number, `END_OF_CHAIN`, or `0` to free.
     fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
-        let byte = cluster as u64 * 4;
-        let sector = self.fat_lba as u64 + byte / SECTOR_SIZE as u64;
-        let offset = (byte % SECTOR_SIZE as u64) as usize;
-        let mut buf = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(sector, &mut buf)?;
+        // Every FAT entry written goes through here, `alloc_cluster`'s for
+        // each cluster it hands out among them, so a FAT-chained cursor is
+        // dropped before any chain changes. A cursor on a contiguous file
+        // never read the FAT and cannot go stale that way; its clusters are
+        // only reused through `alloc_cluster`, which drops it here too.
+        self.read_cursor = None;
+        let (lba, offset) = self.fat_place(cluster);
+        let mut buf = *self.fat_sector(lba)?;
         buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-        self.disk.write_sector(sector, &buf)?;
+        self.disk.write_sector(lba, &buf)?;
+        self.fat_cache = Some(FatSector { lba, data: buf });
         Ok(())
     }
 

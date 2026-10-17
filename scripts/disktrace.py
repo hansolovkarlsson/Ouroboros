@@ -25,22 +25,30 @@ _spec.loader.exec_module(drive_qemu)
 READ = re.compile(rb"virtio_blk_handle_read .*?sector (\d+) nsectors (\d+)")
 
 
-def boot(tag, source, image, steps):
+def boot(tag, source, image, steps, inspect=None):
     """Boot a copy of `source` (the stale-image guard reads build/`image`),
     drive `steps`, and return (problems, transcript lines, sectors read by
-    sector number). `tag` names the copy and its log under build/."""
+    sector number). `tag` names the copy and its log under build/. When
+    given, `inspect` is called with the copy's path after a boot whose steps
+    all ran, before the copy is removed, to read what the guest wrote; what
+    it raises is the caller's."""
     copy = os.path.join(ROOT, "build", f"{tag}.img")
     log = os.path.join(ROOT, "build", f"{tag}.log")
     shutil.copyfile(source, copy)
     guest = drive_qemu.Guest(copy, extra_args=["-trace", "enable=virtio_blk_handle_read"],
                              intlog=log, label=f"{tag}: ",
                              stamp_from=os.path.join(ROOT, "build", image))
+    driven = False
     try:
         driven = guest.run(steps)
         out = guest.transcript().replace("\r\n", "\n")
     finally:
         guest.stop()
-        os.remove(copy)
+        try:
+            if inspect and driven:
+                inspect(copy)
+        finally:
+            os.remove(copy)
     problems = []
     if not driven:
         problems.append("a step timed out")
