@@ -229,6 +229,16 @@ patches still keep a macro from `cc`, `long double` and the inline pair;
 the pair makes `cc` refuse four headers, not two as recorded. DevTools was
 sent a notice before the header pin moved.
 
+**A listing page stops reading at its end (2026-10-17).** fsd walked the
+whole directory for every `NP_READDIR` page and kept only the page, so a
+listing of many pages read the directory once a page. The walk now stops
+at the first entry that does not fit. `make measure-listing` counts the
+sectors a listing reads through QEMU's virtio-blk trace; on the two-page
+`/include` the stop saves 3 to 36 sectors, and the measurement found where
+the rest goes: three whole walks a listing still needs, ext2 reading an
+inode for every entry it walks past, and spawn resolving a program's path
+again for every 512 bytes it stages (`ROADMAP.md`).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

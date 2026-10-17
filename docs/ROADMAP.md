@@ -2668,6 +2668,11 @@ be reviewed after the fact from the saved screenshots.
 >       where a size read first would refuse it holding nothing (the
 >       second review). Not urgent while no program near the
 >       bound exists; the cc-and-as item makes `/bin/CPP` about 238 KB.
+>       Each 512-byte chunk is a separate `fsd` read by path, resolved
+>       from the root and walking `/bin` again: starting `ls` once reads
+>       about 1,100 sectors on FAT32, twenty times what it reads to list
+>       `/include` (`make measure-listing`, 2026-10-17). A bulk read, or
+>       one opened fid, would resolve the path once.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
@@ -4193,20 +4198,29 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   after five seconds, where it used SIGKILL, which dropped what the log still
   held; and `Guest.aborts()` stops the guest itself before reading, so no rig
   can read the trace early. Every rig gets it without an edit of its own.
-- **A listing page walks the whole directory.** Since `NP_READDIR` pages
-  (2026-10-16), fsd answers a page by walking every entry through
-  `list_dir`, skipping those before the start and those after the page fills,
-  so a listing of `p` pages reads the directory `p` times (the high review of
-  #306): `ls` of a 4 KiB listing is about nine walks, each reading every
-  directory cluster, slow on the Pi's USB stick. An early stop from
-  `list_dir`'s callback (a `ControlFlow` through the four filesystem walkers
-  and `/proc`) bounds a walk at its page's end; a cursor kept per fid would
-  bound it at the page itself. Tab completion on an ambiguous prefix also
-  lists the directory twice, once to count and once to print, and netd's HTTP
-  index walks it twice, its page and then a one-byte page at the next start
-  to learn whether there is more (the second review of #306). The pager's
-  question to a server, a start past any end, is one more walk per listing
-  of more than a page; an early stop ends that one at once.
+- **A listing still walks the directory more than once.** Since
+  2026-10-17 a page's walk stops at the first entry that does not fit
+  (`ReaddirFill::push` answers `Break`, and the four walkers and `/proc`
+  stop on it), where before each page read the whole directory (the high
+  review of #306). What is left, measured by `make measure-listing`
+  (QEMU's virtio-blk trace; `/include` is two pages, and one `ls` of it
+  reads 55 sectors on FAT32, 883 on ext2 and 100 on exFAT, from 58, 919
+  and 106 before the stop):
+  - **Three walks of every listing still read it all**: the last page, the
+    pager's question (a start past any end, which only a whole walk can
+    answer; the roadmap said an early stop would end it at once, and it
+    cannot), and the empty page that ends the listing. So a listing of `p`
+    pages walks `p + 2` times, the first `p - 1` only to their page's end.
+    A cursor kept per fid would make each page a walk of the page alone.
+  - **ext2 reads every entry's inode during the walk**, the entries before
+    the start included, for a kind and a size: 287 of the 883 sectors, one
+    sector per entry per walk. fsd's `NP_READDIR` drops the size, and an
+    ext2 directory entry carries the file type itself when the `filetype`
+    feature is on (mke2fs's default), so the walk need not read an inode.
+  - Tab completion on an ambiguous prefix lists the directory twice, once
+    to count and once to print, and netd's HTTP index twice, its page and
+    then a one-byte page at the next start to learn whether there is more
+    (the second review of #306).
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970
