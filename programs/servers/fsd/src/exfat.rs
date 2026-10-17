@@ -54,6 +54,8 @@
 //!   `fat32.rs` already uses), correct for the ASCII names this system uses, and
 //!   the same ASCII up-case feeds the `NameHash` we write.
 
+use core::ops::ControlFlow;
+
 use crate::disk::Disk;
 use crate::fat32::{split_parent, Error};
 
@@ -625,20 +627,20 @@ impl Fs {
         Ok(current)
     }
 
-    /// Lists a directory, calling `f(name, is_dir, size)` for each entry. `""`
-    /// or `"/"` lists the root. Mirrors `fat32::Fs::list_dir`.
+    /// Lists a directory, calling `f(name, is_dir, size)` for each entry until
+    /// it answers `Break`. `""` or `"/"` lists the root. Mirrors
+    /// `fat32::Fs::list_dir`.
     pub fn list_dir(
         &mut self,
         path: &str,
-        mut f: impl FnMut(&str, bool, u32),
+        mut f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
     ) -> Result<(), Error> {
         let dir = self.find(path)?;
         if !dir.is_dir {
             return Err(Error::NotADirectory);
         }
         self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry, _slot, _len| {
-            f(entry.name(), entry.is_dir, saturate_u32(entry.size));
-            false
+            f(entry.name(), entry.is_dir, saturate_u32(entry.size)).is_break()
         })
     }
 

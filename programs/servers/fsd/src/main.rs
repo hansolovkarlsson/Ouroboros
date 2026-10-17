@@ -711,11 +711,13 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             // is this one's plus the lines it got, and an empty page is the
             // end. An entry that would not fit an empty page is refused
             // FS_ERROR, since a page of 0 bytes would read as the end. The
-            // rule is ninep_abi::ReaddirFill, which netd's listings share.
+            // rule is ninep_abi::ReaddirFill, which netd's listings share; the
+            // walk stops at the first entry that does not fit (since
+            // 2026-10-17; it read the rest of the directory for nothing).
             let (status_slot, result) = reply[..REPLY_PAYLOAD + want].split_at_mut(REPLY_PAYLOAD);
             let mut fill = ninep_abi::ReaddirFill::new(result, p[2]);
             let outcome = fs.list_dir(path, |name, is_dir, _size| {
-                fill.push(name.as_bytes(), if is_dir { b"/\n" } else { b"\n" });
+                fill.push(name.as_bytes(), if is_dir { b"/\n" } else { b"\n" })
             });
             match (outcome, fill.finish()) {
                 (Err(e), _) => status_reply(reply, error_code(&e)),
