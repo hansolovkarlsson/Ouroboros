@@ -229,8 +229,19 @@ impl<'a> ReaddirFill<'a> {
 pub const NP_READ_FILE: u64 = NP_BASE + 1;
 /// Read a file via the bulk `grant`/`safecopy` path (data delivered straight
 /// into the client's `GRANT_WRITE` buffer, not the reply). Params: `a0` = path
-/// length, `a1` = offset, `a2` = want. Status = bytes delivered (0 at EOF).
+/// length, `a1` = offset, `a2` = want. Status = bytes delivered (0 at EOF),
+/// at most [`NP_READ_MAX`]; fewer than asked is not the end, only 0 is.
 pub const NP_READ: u64 = NP_BASE + 2;
+
+/// The most one [`NP_READ`] delivers on this machine: fsd resolves the path
+/// once and copies the file to the client a `SAFECOPY_MAX` piece at a time
+/// up to here. Until 2026-10-17 one request was one piece, 2 KiB, each
+/// resolving the path from the root again, and a program spawned 512 bytes a
+/// request paid that per 512 bytes. A bound because fsd answers one request
+/// at a time: a client asking for a megabyte would hold every other client
+/// for the whole read. Equal to `syscall_abi::GRANT_MAX`, the largest buffer
+/// a client may grant (fsd asserts it; this crate depends on nothing).
+pub const NP_READ_MAX: u64 = 64 * 1024;
 /// Create/overwrite a file from the client's `GRANT_READ` buffer via
 /// `safecopy` (empty = truncate-to-empty, no grant). Params: `a0` = path
 /// length, `a1` = data length. Status = 0.

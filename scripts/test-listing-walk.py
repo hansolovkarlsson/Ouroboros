@@ -23,7 +23,9 @@ feature, whose listing takes each kind from the entry, and without it, the
 one path that still reads an inode for the kind. e2fsck -fn must pass on
 each, and ownership is not kept (rdump cannot set it without root), which a
 rig that lists as root does not see. Two boots of each copy, each logging
-in and typing one command RUNS times:
+in, listing DIR once to warm fsd's caches (the same in both, so every
+measured run starts from the same state: FAT32 keeps the last FAT sector it
+read across requests), and then typing one command RUNS times:
 
 - `echo DIR/qqq*`: the shell lists DIR page by page for the glob (the same
   `readdir_pages` loop as `ls`), matches nothing, and keeps the word as
@@ -61,18 +63,16 @@ main before that (3,698 sectors). On both ext2 volumes `ls /kinds` must
 mark exactly the two directories: fails without `filetype` when the byte
 (0 there) is trusted with the feature off.
 
-The sectors one listing reads are reported, not graded: 69 for /include on
-FAT32 and 126 on exFAT (72 and 132 before the stop), and 74 for /walk on
+The sectors one listing reads are reported, not graded: 70 for /include on
+FAT32 and 126 on exFAT (72 and 132 before the stop, measured without the
+warm-up listing, which adds FAT32 one read a run), and 74 for /walk on
 ext2 (3,698 when its walk read an inode an entry, and still without
 `filetype`). The boots are deterministic: the same build reads the same
 sectors each time. About six minutes; needs e2fsprogs (`brew install
 e2fsprogs`), as the ext2 image does.
 """
-import collections
-import importlib.util
 import math
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -80,17 +80,14 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-_spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
-drive_qemu = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(drive_qemu)
 sys.path.insert(0, HERE)
+import disktrace  # noqa: E402  (the trace-counting boot, shared with test-spawn-reads.py)
 import bootstick  # noqa: E402  (its e2fsprogs lookup, `tool`)
 import mbrdisk  # noqa: E402  (its MBR reader, `entries`)
 
 RUNS = 2
 SECTOR = 512
 WALK_FILES = 300
-READ = re.compile(rb"virtio_blk_handle_read .*?sector (\d+) nsectors (\d+)")
 
 
 def std_names():
@@ -183,46 +180,26 @@ IMAGES = [
 UNDER_ONE_AN_ENTRY = {"ext2": WALK_FILES}
 
 
-def boot(name, prepared, image, word, check, want, kinds):
-    """Boot a copy of `prepared`, log in, `echo word` RUNS times, then the
-    check glob, then (with `kinds`) `ls /kinds`, which must mark exactly its
-    directories. Returns (problems, sectors read by sector number)."""
-    copy = os.path.join(ROOT, "build", f"test-listing-walk-{name}.img")
-    log = os.path.join(ROOT, "build", f"test-listing-walk-{name}.log")
-    shutil.copyfile(prepared, copy)
-    steps = [("login:", "root"), ("assword", "root")]
+def boot(name, prepared, image, warm, word, check, want, kinds):
+    """Boot a copy of `prepared`, log in, `echo warm` once, `echo word` RUNS
+    times, then the check glob, then (with `kinds`) `ls /kinds`, which must
+    mark exactly its directories. Returns (problems, sectors read by sector
+    number). Both boots start with the same `warm`, a listing, so each
+    measured run starts from the same state of fsd's caches (FAT32 keeps the
+    last FAT sector it read across requests: without it the first run of
+    each boot differed by one read, from whatever login left there)."""
+    steps = [("login:", "root"), ("assword", "root"), ("# ", f"echo {warm}")]
     steps += [("# ", f"echo {word}")] * RUNS + [("# ", f"echo {check}")]
     steps += [("# ", "ls /kinds")] if kinds else []
     steps += [("# ", "")]
-    guest = drive_qemu.Guest(copy, extra_args=["-trace", "enable=virtio_blk_handle_read"],
-                             intlog=log, label=f"test-listing-walk {name}: ",
-                             stamp_from=os.path.join(ROOT, "build", image))
-    try:
-        driven = guest.run(steps)
-        out = guest.transcript().replace("\r\n", "\n")
-    finally:
-        guest.stop()
-        os.remove(copy)
-    problems = []
-    if not driven:
-        problems.append("a step timed out")
-    lines = out.split("\n")
-    if lines.count(word) < RUNS:
-        problems.append(f"`echo {word}` printed it back {lines.count(word)} times, not {RUNS}")
+    problems, lines, count = disktrace.boot(f"test-listing-walk-{name}", prepared, image, steps)
+    wanted = RUNS + (word == warm)
+    if lines.count(word) < wanted:
+        problems.append(f"`echo {word}` printed it back {lines.count(word)} times, not {wanted}")
     if not any(sorted(line.split()) == want for line in lines):
         problems.append(f"`echo {check}` did not print {' '.join(want)}: the listing failed")
     if kinds and not any(sorted(line.split()) == sorted(KINDS) for line in lines):
         problems.append(f"`ls /kinds` did not print {' '.join(KINDS)}: a kind is wrong")
-    if guest.aborts():
-        problems.append("fault lines in QEMU's trace")
-    with open(log, "rb") as fh:
-        hits = READ.findall(fh.read())
-    count = collections.Counter()
-    for sector, n in hits:
-        for s in range(int(n)):
-            count[int(sector) + s] += 1
-    if not count:
-        problems.append("no virtio_blk_handle_read events: the observer sees nothing")
     return problems, count
 
 
@@ -237,16 +214,15 @@ def main() -> int:
             if setup:
                 setup(prepared)
             want = names()
-            p0, base = boot(name, prepared if setup else source, image, f"{d}/qqqq", check, want, kinds)
-            p1, listed = boot(name, prepared if setup else source, image, f"{d}/qqq*", check, want, kinds)
+            src, warm = (prepared if setup else source), f"{d}/qqq*"
+            p0, base = boot(name, src, image, warm, f"{d}/qqqq", check, want, kinds)
+            p1, listed = boot(name, src, image, warm, f"{d}/qqq*", check, want, kinds)
         finally:
             if setup and os.path.exists(prepared):
                 os.remove(prepared)
-        problems = p0 + p1
-        diff = listed - base
-        if sum(base.values()) > sum(listed.values()) or any(c % RUNS for c in diff.values()):
-            problems.append("the two boots differ by more than the listings")
-        per = [c // RUNS for c in diff.values()]
+        differ, counts = disktrace.per_run(base, listed, RUNS)
+        problems = p0 + p1 + differ
+        per = list(counts.values())
         common = math.gcd(*per) if per else 0
         total = sum(per)
         if not problems and common != 1:

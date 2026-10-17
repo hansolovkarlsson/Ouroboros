@@ -39,6 +39,7 @@ mod proc;
 mod vfs;
 
 use core::arch::asm;
+use core::ops::ControlFlow;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::panic::PanicInfo;
 
@@ -760,27 +761,35 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             let Some(path) = path_from(payload, 0, p[0]) else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
+            // The path resolved once, then the file copied to the client's
+            // grant a SAFECOPY_MAX piece at a time, at the grant offset each
+            // piece lands at, up to NP_READ_MAX (since 2026-10-17; one piece
+            // a request before, each resolving the path again).
+            // One NP_READ fills at most one grant: the most fsd delivers a
+            // request is the largest buffer a client may grant.
+            const _: () = assert!(ninep_abi::NP_READ_MAX == syscall_abi::GRANT_MAX);
             let offset = p[1];
-            let want = (p[2] as usize).min(syscall_abi::SAFECOPY_MAX as usize);
+            let want = p[2].min(ninep_abi::NP_READ_MAX);
             let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
-            match fs.read_at(path, offset, &mut chunk[..want]) {
-                Ok(copied) => {
-                    let copied = copied as usize;
-                    if copied > 0 {
-                        let r = syscall5(
-                            syscall_abi::SAFECOPY,
-                            call,
-                            0,
-                            chunk.as_ptr() as u64,
-                            copied as u64,
-                            syscall_abi::GRANT_WRITE,
-                        );
-                        if r >= syscall_abi::FS_ERR_MIN {
-                            return status_reply(reply, syscall_abi::FS_ERROR);
-                        }
-                    }
-                    status_reply(reply, copied as u64)
+            let mut at = 0u64;
+            let read = fs.read_each(path, offset, want, &mut chunk, |piece| {
+                let r = syscall5(
+                    syscall_abi::SAFECOPY,
+                    call,
+                    at,
+                    piece.as_ptr() as u64,
+                    piece.len() as u64,
+                    syscall_abi::GRANT_WRITE,
+                );
+                if r >= syscall_abi::FS_ERR_MIN {
+                    return ControlFlow::Break(());
                 }
+                at += piece.len() as u64;
+                ControlFlow::Continue(())
+            });
+            match read {
+                Ok((copied, false)) => status_reply(reply, copied),
+                Ok((_, true)) => status_reply(reply, syscall_abi::FS_ERROR),
                 Err(e) => status_reply(reply, error_code(&e)),
             }
         }

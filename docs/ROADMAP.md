@@ -2668,12 +2668,13 @@ be reviewed after the fact from the saved screenshots.
 >       where a size read first would refuse it holding nothing (the
 >       second review). Not urgent while no program near the
 >       bound exists; the cc-and-as item makes `/bin/CPP` about 238 KB.
->       Each 512-byte chunk is a separate `fsd` read by path, resolved
->       from the root and walking `/bin` again: starting `ls` once reads
->       about 1,040 sectors more than starting `echo` on FAT32, fifteen
->       times what listing `/include` reads (QEMU's virtio-blk trace,
->       2026-10-17, as `make test-listing-walk` counts it). A bulk read, or
->       one opened fid, would resolve the path once.
+>       The read itself costs less since 2026-10-17: the shell and `netd`
+>       read 8 KiB a request through `NP_READ`, which fsd answers with the
+>       path resolved once (it was 512 bytes a request, each resolving the
+>       path from the root again; one run of `ls` read 1,201 sectors on
+>       FAT32 and reads 199, `make test-spawn-reads`). So the hold is
+>       shorter, but it is still the whole file: the staging is claimed from
+>       the first chunk to the `SPAWN`.
 
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
@@ -4224,6 +4225,25 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
     fallback for a volume without `filetype` does now; `walk_dir` handing
     out the entry's `file_type` would let `list_dir` use it (the review of
     #311).
+- **A fid read resolves its path on every read.** fsd's `Fid` keeps the
+  path it was opened with, and `NP_PREAD` reads by that path, so every
+  `read()` of a C program (picolibc reads through fids) walks the path from
+  the root again, as spawn's 512-byte reads did until 2026-10-17. Keeping
+  the resolved file in the fid would end it, but a fid outlives requests,
+  so the file can change under it (a rename, a remove, a truncate by
+  another client), which is why the path is kept: each filesystem would
+  have to answer what an open file is after that. Found while fixing
+  spawn's reads (2026-10-17), whose fix holds the resolved file only for
+  the length of one request.
+- **exFAT walks a file's cluster chain from its start for every piece.**
+  exFAT's `read_entry` keeps no cursor, so the pieces of one `NP_READ`
+  (2 KiB each, up to 64 KiB) each walk the chain from the first cluster
+  through the FAT, where FAT32's `read_cursor` resumes the walk; a
+  contiguous file (`NoFatChain`) skips the FAT and is not affected. Not new
+  (each request walked from the start before 2026-10-17 too), and seen in
+  `make test-spawn-reads`: a run of `ls` reads 290 sectors on exFAT against
+  199 on FAT32. A cursor needs exFAT's FAT writes to invalidate it, as
+  FAT32's `write_fat_entry` does (the review of #312).
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970

@@ -70,6 +70,11 @@ use core::panic::PanicInfo;
 const BUFFER_SIZE: usize = 128;
 const CWD_SIZE: usize = 128;
 const PATH_SIZE: usize = 128;
+/// The bytes of a program [`spawn_path`] reads a request (`NP_READ`, fsd
+/// resolving the path once each), in the heap's last 8 KiB
+/// ([`spawn_read_buffer`]): five requests for `ls` (32,864 bytes) and 128
+/// for a 1 MiB program, each with one more for the read of 0 that ends it.
+const SPAWN_READ: usize = 8 * 1024;
 // Max argv entries passed to a spawned program (`exec prog a b c ...`), the
 // command's own name included. The 128-byte input line holds many more words
 // than this (64 one-letter ones), so a longer command is refused with a line
@@ -775,13 +780,40 @@ fn on_byte(byte: u8, buf: &mut [u8; BUFFER_SIZE], len: &mut usize, cwd: &mut [u8
 /// nested), so each call's slice is used and dropped within one command -
 /// no aliasing in practice, the same single-address-space discipline the
 /// shell already uses for its syscall buffers.
+///
+/// The last [`SPAWN_READ`] bytes are not in it: they are [`spawn_read_buffer`]'s,
+/// split here once so the two can never overlap, since a pipeline stage is
+/// spawned while the capture of the stage before it is live.
 fn get_heap() -> &'static mut [u8] {
-    let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE);
-    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE) as usize;
-    if base == 0 || size == 0 {
+    let (base, capture, _) = heap_split();
+    if base == 0 || capture == 0 {
         return &mut [];
     }
-    unsafe { core::slice::from_raw_parts_mut(base as *mut u8, size) }
+    unsafe { core::slice::from_raw_parts_mut(base as *mut u8, capture) }
+}
+
+/// [`spawn_path`]'s read buffer: the last [`SPAWN_READ`] bytes of the heap,
+/// past every capture ([`get_heap`]), or `None` with no heap that large. Not
+/// the stack: 8 KiB there is a frame past the single guard page, which with
+/// no stack probes can step over it into the top of the heap, the capture,
+/// without a fault (an 8 KiB buffer on `netd`'s stack faulted it at boot,
+/// 2026-10-17). One spawn runs at a time, so one buffer is enough.
+fn spawn_read_buffer() -> Option<&'static mut [u8]> {
+    let (base, capture, size) = heap_split();
+    if base == 0 || size - capture != SPAWN_READ {
+        return None;
+    }
+    Some(unsafe { core::slice::from_raw_parts_mut((base as usize + capture) as *mut u8, SPAWN_READ) })
+}
+
+/// The heap's base, the bytes the capture may use, and its whole size: the
+/// one place the split between [`get_heap`] and [`spawn_read_buffer`] is
+/// made. A heap no larger than [`SPAWN_READ`] is all capture.
+fn heap_split() -> (u64, usize, usize) {
+    let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE);
+    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE) as usize;
+    let capture = if size > SPAWN_READ { size - SPAWN_READ } else { size };
+    (base, capture, size)
 }
 
 fn run_line(line: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize, env: &mut Env) {
@@ -2615,15 +2647,6 @@ fn capture_program_output(slot: u64, out: &mut Output) {
     let _ = syscall(syscall_abi::WAIT, slot);
 }
 
-/// Resolves `arg` against the cwd and runs the two-step spawn flow
-/// (the kernel has no filesystem to read a path with: read the program
-/// via the filesystem server in 512-byte chunks - the per-buffer cap -
-/// feed each into the kernel's staging buffer via SPAWN_STAGE, then
-/// SPAWN the staged total, which returns the new task's slot index).
-/// Shared by `exec` and the pipeline flow (`left | program`), which
-/// needs the slot to stream input to and wait on. `Err(0)` means the
-/// path didn't resolve/encode (too long); any other `Err` is a real
-/// code for [`print_fs_error`] (or [`NO_FS`]).
 /// Encode `argv` into the `ARGS_STAGE` blob format (`[argc: u32 LE]` then
 /// `[len: u32 LE][bytes]` per arg) and stage it in the kernel for the next
 /// `SPAWN` to attach. Returns the blob length (SPAWN's arg2), or `Err(())`
@@ -2661,6 +2684,16 @@ fn abandon_staging() {
     syscall4(syscall_abi::SPAWN, 0, syscall_abi::CON_TASK, 0, 0);
 }
 
+/// Resolves `arg` against the cwd and runs the two-step spawn flow
+/// (the kernel has no filesystem to read a path with: read the program
+/// via the filesystem server [`SPAWN_READ`] bytes a request, feed it into
+/// the kernel's staging buffer via SPAWN_STAGE 512 bytes a call - the
+/// per-call cap - then SPAWN the staged total, which returns the new
+/// task's slot index).
+/// Shared by `exec` and the pipeline flow (`left | program`), which
+/// needs the slot to stream input to and wait on. `Err(0)` means the
+/// path didn't resolve/encode (too long); any other `Err` is a real
+/// code for [`print_fs_error`] (or [`NO_FS`]).
 fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, env: &Env, stdout_target: u64) -> Result<u64, u64> {
     let mut path_buf = [0u8; PATH_SIZE];
     let Some(path_len) = resolve_path(cwd_str(cwd, cwd_len), path, &mut path_buf) else {
@@ -2670,11 +2703,18 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
         return Err(0);
     };
 
-    // A short read (or 0 for an empty file) ends the chunk loop.
+    // The file is read SPAWN_READ bytes a request ([`fs_read_bulk`]: fsd
+    // resolves the path once a request) and staged from memory, 512 bytes
+    // a SPAWN_STAGE (the kernel's per-call cap). Until 2026-10-17 each
+    // 512 bytes was its own read, resolving the path from the root again:
+    // starting `ls` read about 1,040 sectors more than starting `echo`. A
+    // read of 0 is the end; a short one is not (a remote mount answers 512
+    // at most).
     let mut offset: u64 = 0;
-    let mut chunk = [0u8; 512];
+    let mut small = [0u8; 512];
+    let read = spawn_read_buffer().unwrap_or(&mut small);
     loop {
-        let n = fs_read_at(path, offset, &mut chunk);
+        let n = fs_read_bulk(path, offset, read);
         if n >= FS_ERR_MIN {
             if offset > 0 {
                 abandon_staging();
@@ -2684,24 +2724,25 @@ fn spawn_path(path: &str, argv: &[&str], cwd: &[u8; CWD_SIZE], cwd_len: usize, e
         if n == 0 {
             break;
         }
-        let staged = syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, n, 0);
-        if staged == syscall_abi::SPAWN_ERR_STAGING_BUSY {
-            // Another task is mid-spawn and holds the staging; nothing of
-            // ours went in, so there is nothing to give up.
-            return Err(staged);
-        }
-        if staged != 0 {
-            // Only reachable by staging past the kernel's staging buffer
-            // - the same refusal SPAWN itself gives for that. (The other
-            // SPAWN_STAGE refusal, a chunk out of order, cannot come from
-            // this loop: it stages from 0, each chunk at the last one's
-            // end.) The chunks before this one are ours to give up.
-            abandon_staging();
-            return Err(syscall_abi::SPAWN_ERR_TOO_LARGE);
-        }
-        offset += n;
-        if n < chunk.len() as u64 {
-            break;
+        for chunk in read[..(n as usize).min(read.len())].chunks(512) {
+            let staged = syscall4(syscall_abi::SPAWN_STAGE, offset, chunk.as_ptr() as u64, chunk.len() as u64, 0);
+            if staged == syscall_abi::SPAWN_ERR_STAGING_BUSY {
+                // Another task is mid-spawn and holds the staging; nothing
+                // of ours went in (only the first chunk can meet this: it
+                // is the one that claims), so there is nothing to give up.
+                return Err(staged);
+            }
+            if staged != 0 {
+                // Only reachable by staging past the kernel's staging
+                // buffer - the same refusal SPAWN itself gives for that.
+                // (The other SPAWN_STAGE refusal, a chunk out of order,
+                // cannot come from this loop: it stages from 0, each chunk
+                // at the last one's end.) The chunks before this one are
+                // ours to give up.
+                abandon_staging();
+                return Err(syscall_abi::SPAWN_ERR_TOO_LARGE);
+            }
+            offset += chunk.len() as u64;
         }
     }
     if offset == 0 {
@@ -3357,10 +3398,29 @@ fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
     )
 }
 
+/// Reads up to `buf.len()` bytes of `path` from `offset` for
+/// [`spawn_path`]: from the local filesystem server through a grant
+/// (`NP_READ`, the path resolved once for up to `NP_READ_MAX` bytes), and
+/// anywhere else as [`fs_read_at`] does, inline. Returns the bytes copied
+/// (`0` at end of file; fewer than asked is not the end), [`NO_FS`], or an
+/// `FS_ERR_*` code. A duplicate of `ulib::fs_read_bulk`'s local case.
+fn fs_read_bulk(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
+    let mut fsp = [0u8; FSP_MAX];
+    let r = mount_resolve(path, &mut fsp);
+    if r.server == syscall_abi::CON_TASK || r.server == syscall_abi::NET_TASK {
+        return fs_read_at(path, offset, buf);
+    }
+    let want = buf.len() as u64;
+    if syscall4(syscall_abi::GRANT, syscall_abi::FSD_TASK, buf.as_mut_ptr() as u64, want, syscall_abi::GRANT_WRITE) != 0 {
+        return syscall_abi::FS_ERROR;
+    }
+    np_call(ninep_abi::NP_READ, r.tree, [r.len as u64, offset, want, 0], &fsp[..r.len], &[], &mut [])
+}
+
 /// Reads up to `buf.len()` bytes of `path` starting at byte `offset`,
-/// returning how many were copied (`0` at/past end of file) - the
-/// chunked-read primitive [`cmd_exec`]'s two-step spawn flow loops
-/// over. Same error space as [`fs_read_file`].
+/// returning how many were copied (`0` at/past end of file), inline: the
+/// reply carries the bytes, 512 at most. Same error space as
+/// [`fs_read_file`].
 fn fs_read_at(path: &str, offset: u64, buf: &mut [u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);

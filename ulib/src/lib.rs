@@ -1253,7 +1253,8 @@ pub fn fs_chown(path: &str, uid: Option<u16>, gid: Option<u16>) -> u64 {
 /// Read a whole small file into `buf`, returning its length, or `0` on any error
 /// (missing file / no filesystem). A convenience over [`fs_read_bulk`] for
 /// config-sized files like `/etc/passwd` / `/etc/group` (the account tools use
-/// it); `buf` should be `<= SAFECOPY_MAX` so one bulk read covers it.
+/// it). One bulk read covers `buf` up to `GRANT_MAX` (64 KiB, since
+/// 2026-10-17; `SAFECOPY_MAX`, 2048, before).
 /// Read a whole small file, distinguishing **"could not read it"** from
 /// **"it is empty or absent"**: `None` on a read error or a file that did not
 /// fit `buf`, `Some(len)` otherwise (`Some(0)` for a genuinely missing file).

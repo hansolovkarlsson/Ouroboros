@@ -2108,7 +2108,10 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             let dir = arg3;
             let valid_dir =
                 dir != 0 && dir & !(syscall_abi::GRANT_READ | syscall_abi::GRANT_WRITE) == 0;
-            if !valid_dir || arg2 == 0 || arg2 > syscall_abi::SAFECOPY_MAX || !in_caller_region(arg1, arg2) {
+            // The grant may name up to GRANT_MAX; each SAFECOPY within it
+            // is still SAFECOPY_MAX at most, bounded by the grant and the
+            // client's live region again at copy time (tasks::safecopy).
+            if !valid_dir || arg2 == 0 || arg2 > syscall_abi::GRANT_MAX || !in_caller_region(arg1, arg2) {
                 return syscall_abi::GRANT_ERR;
             }
             let Some(grantee) = tasks::live_index(arg0 as usize) else {

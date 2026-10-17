@@ -251,6 +251,22 @@ test-listing-walk` lists that directory on ext2 (since without the inode
 reads `/include` is too short to show a walk stopping) and fails a listing
 that reads a sector an entry.
 
+**Spawning a program resolves its path once a read, not once a 512 bytes
+(2026-10-17).** The shell and `netd`'s `cpu` read a program 512 bytes a
+request, and fsd resolved the path from the root for each, walking `/bin`
+again: one run of `ls` read 1,201 sectors on FAT32 (1,032 on ext2, 1,942
+on exFAT). They read 8 KiB a request now, and fsd answers an `NP_READ` with
+the path resolved once and the file copied to the client's grant a
+`SAFECOPY_MAX` piece at a time, up to `NP_READ_MAX` (64 KiB). A grant may
+name `GRANT_MAX`, 64 KiB, where it was capped at one copy's 2048 bytes;
+each copy within it is still 2048 at most. One run of `ls` reads 199
+sectors (187, 290). netd's read buffer is in its heap region: on its stack
+it faulted netd at boot, and the shell's is the heap's last 8 KiB, kept
+apart from its pipeline captures. `make test-spawn-reads` counts the
+resolutions exactly: a program padded to 200 KiB must resolve its path as
+many more times than the plain one as it makes more requests, 23, where
+resolving once a 2 KiB piece makes 93 and once a 512 bytes 374.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

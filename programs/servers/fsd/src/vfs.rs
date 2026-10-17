@@ -258,6 +258,25 @@ impl Filesystem {
         }
     }
 
+    /// Read up to `want` bytes of `path` from `offset`, a piece of at most
+    /// `buf.len()` at a time, each handed to `sink`, with the path resolved
+    /// once: see [`read_pieces`]. `NP_READ` copies each piece to its client.
+    pub fn read_each(
+        &mut self,
+        path: &str,
+        offset: u64,
+        want: u64,
+        buf: &mut [u8],
+        sink: impl FnMut(&[u8]) -> ControlFlow<()>,
+    ) -> Result<(u64, bool), Error> {
+        match self {
+            Filesystem::Fat32(fs) => fs.read_each(path, offset, want, buf, sink),
+            Filesystem::ExFat(fs) => fs.read_each(path, offset, want, buf, sink),
+            Filesystem::Ext2(fs) => fs.read_each(path, offset, want, buf, sink),
+            Filesystem::Proc(fs) => fs.read_each(path, offset, want, buf, sink),
+        }
+    }
+
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), Error> {
         match self {
             Filesystem::Fat32(fs) => fs.write_file(path, data),
@@ -432,4 +451,38 @@ pub fn root_order(
         }
     }
     RootOrder { order, len: n, candidates, typed }
+}
+
+/// The piece loop of every `read_each`, once: `read(offset, piece)` reads the
+/// file its caller resolved, and each piece goes to `sink` until `want` bytes
+/// have, the file ends (a short or empty piece), or `sink` answers `Break`.
+/// Returns the bytes read and whether `sink` stopped it. On the disk arms
+/// nothing can change the file between pieces: fsd answers one request at a
+/// time, the whole loop is one request, and only fsd writes its disks. A
+/// `/proc` file is made anew each piece from kernel state that other cores
+/// change meanwhile, so a read longer than one piece could mix two moments;
+/// every `/proc` file is one line, far under a piece.
+pub fn read_pieces(
+    offset: u64,
+    want: u64,
+    buf: &mut [u8],
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<u32, Error>,
+    mut sink: impl FnMut(&[u8]) -> ControlFlow<()>,
+) -> Result<(u64, bool), Error> {
+    let mut done = 0u64;
+    while done < want && !buf.is_empty() {
+        let len = ((want - done) as usize).min(buf.len());
+        let n = read(offset + done, &mut buf[..len])? as usize;
+        if n == 0 {
+            break;
+        }
+        if sink(&buf[..n]).is_break() {
+            return Ok((done, true));
+        }
+        done += n as u64;
+        if n < len {
+            break;
+        }
+    }
+    Ok((done, false))
 }
