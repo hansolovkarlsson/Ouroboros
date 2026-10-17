@@ -2630,18 +2630,22 @@ be reviewed after the fact from the saved screenshots.
 >       `sys/cdefs.h` drops `__inline` for a compiler that is not GNU, so
 >       the macro's expansion is not inline under any such compiler, and
 >       if DevTools takes it further it will be a note asking for a change
->       to `sys/cdefs.h`
->       ([`handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md`](handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md)). Removing one changes the
->       installed headers: `check-picolibc`'s pin, the C rigs for a changed
->       program, and a reply to the notice naming the commit. Nothing to do
->       until a notice arrives. An alternative to put to DevTools first (the
->       review of #305): guard each in `picolibc.h` by what the compiler
->       says, `__has_attribute(__alloc_size__)` and the like (`cc` answers
->       0, checked; `__clang__` for `long double`, which `cc` does not
->       define), so clang programs get the attributes now and nothing is
->       left to remove. It changes this project's C binaries and departs
->       from DevTools's 2 to 4, so it is a question for DevTools, not a
->       change to make alone.
+>       to `sys/cdefs.h` (its notice,
+>       [`handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md`](handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md)).
+>       Removing one changes the installed headers: `check-picolibc`'s pin,
+>       the C rigs for a changed program, and a reply to the notice naming the
+>       commit. Nothing to do until a notice arrives. An alternative to put to
+>       DevTools first (the review of #305): guard each in `picolibc.h` by
+>       what the compiler says, `__has_attribute(__gnu_inline__)` and the like
+>       (`__clang__` for `long double`, which `cc` does not define), so clang
+>       programs get the attributes now and nothing is left to remove. Know
+>       first that `cc` answers 0 to `__has_attribute` for every attribute,
+>       including `__alloc_size__`, which it has read since its `c06cc3b`
+>       (checked 2026-10-17 at DevTools `84a8cc9`): a guard of that kind would
+>       have kept `alloc_size` from `cc` after it could take it, so `cc` would
+>       have to answer truthfully first. It changes this project's C binaries
+>       and departs from DevTools's 2 to 4, so it is a question for DevTools,
+>       not a change to make alone.
 > - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
 >       the high review of #303: a file is staged 512 bytes a call, each a
 >       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused

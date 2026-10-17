@@ -2430,5 +2430,6 @@ was built; the item's own text follows as it stood when it was open.
 >       moves. In the same change, correct the README's 0004 entry: the
 >       inline pair makes `cc` refuse four headers, `ctype.h`, `fenv.h`,
 >       `math.h` and `fastmath.h`, not two. Then the note's reply names the
->       commit and it moves to `closed/`. Note:
+>       commit and it moves to `closed/`. Note (the link updated to
+>       `closed/`, where the note now is):
 >       [`handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md`](handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md).

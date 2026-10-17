@@ -46,16 +46,17 @@ number is not reused.
   `asm`. If DevTools goes further, it will ask for a change to
   `sys/cdefs.h` in a note of its own.
 
-The other seven stay as the probes define them, since they cost `cc`
-nothing: `_HAVE_ALIAS_ATTRIBUTE`, `_HAVE_BITFIELDS_IN_PACKED_STRUCTS`,
-`_HAVE_BUILTIN_COMPLEX`, `_HAVE_COMPLEX`, `_HAVE_FORMAT_ATTRIBUTE`,
-`_HAVE_NO_BUILTIN_ATTRIBUTE` and `_HAVE_WEAK_ATTRIBUTE`. Each of the tree's 136
-headers compiled alone, `#include <H>` and an empty `main`, by `cc
---target=ouroboros -nostdinc -I <cc>/include -I
-third_party/picolibc-prebuilt/include` (DevTools's reproduction): 26
-refused with the seven defined, the same 26 as without (25 with `-I
-libc/pico/include` added, as the Makefile passes for Edit and cpp, again
-the same either way).
+The other eight stay as the probes define them, since they cost `cc`
+nothing: `_HAVE_ALIAS_ATTRIBUTE`, `_HAVE_ALLOC_SIZE` (since 0003 went),
+`_HAVE_BITFIELDS_IN_PACKED_STRUCTS`, `_HAVE_BUILTIN_COMPLEX`,
+`_HAVE_COMPLEX`, `_HAVE_FORMAT_ATTRIBUTE`, `_HAVE_NO_BUILTIN_ATTRIBUTE` and
+`_HAVE_WEAK_ATTRIBUTE`. Each of the tree's 136 headers compiled alone,
+`#include <H>` and an empty `main`, by `cc --target=ouroboros -nostdinc -I
+<cc>/include -I third_party/picolibc-prebuilt/include` (DevTools's
+reproduction): 26 refused with the seven defined, the same 26 as without
+(25 with `-I libc/pico/include` added, as the Makefile passes for Edit and
+cpp, again the same either way); and on 2026-10-17, with a `cc` from
+DevTools's `84a8cc9`, the same 26 with `_HAVE_ALLOC_SIZE` defined as well.
 `<complex.h>` is still removed, by `scripts/build-picolibc.sh` rather than a
 deletion hunk (which would hold the whole file): `cc` refuses `_Complex`,
 and the complex functions in `libc.a` need helpers (`__muldc3` and the rest)
