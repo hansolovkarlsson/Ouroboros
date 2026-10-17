@@ -2399,3 +2399,37 @@ Moved from [`ROADMAP.md`](ROADMAP.md)'s open gaps on 2026-10-16. Built: `NP_READ
   `name\n` (the review of #301 measured 506 of the reply on FAT32), so a
   program or two more staged there drops a name from `ls /bin` and tab
   completion.
+
+## Patch 0003 removed: `picolibc.h` defines `_HAVE_ALLOC_SIZE`, DONE (2026-10-17)
+
+Moved from [`ROADMAP.md`](ROADMAP.md)'s libc section on 2026-10-17, beside
+the held item for patches 0002 and 0004, which stays. Marked done with what
+was built; the item's own text follows as it stood when it was open.
+
+> - [x] **DONE 2026-10-17** **Remove patch 0003: `cc` reads `__alloc_size__`.**
+>       Built as planned: the patch deleted, the tree regenerated, `libc.a`
+>       the same bytes and `picolibc.h` changed in that one line, so `malloc`
+>       and the rest are declared with `__alloc_size__`. No program changed:
+>       the 12 picolibc programs and the port's objects built by clang, and
+>       Edit's and cpp's objects and binaries under all four `CCOMP`/`CLINK`
+>       combinations, are the same bytes. The rigs that read the staged
+>       headers pass (`test-include`, `test-cpp` with clang and with
+>       DevTools's tools, `test-edit` with DevTools's tools). The README's
+>       0004 entry says four headers. DevTools's notice was sent before the
+>       header pin moved.
+>
+>       *As written while open (2026-10-17):*
+>       DevTools's notice of 2026-10-16 (DevTools `c06cc3b`), checked: its
+>       `cc` refuses the same 26 of the 136 headers with
+>       `_HAVE_ALLOC_SIZE` defined as without, where the `cc` before
+>       `c06cc3b` also refuses `stdlib.h` and `malloc.h`. Delete
+>       `0003-undefine-alloc-size.patch`, regenerate the prebuilt headers,
+>       move `check-picolibc`'s header pin, run the C rigs for every
+>       program whose objects change (clang now sees `alloc_size` on
+>       `malloc` and the rest), and send DevTools a notice before the pin
+>       moves. In the same change, correct the README's 0004 entry: the
+>       inline pair makes `cc` refuse four headers, `ctype.h`, `fenv.h`,
+>       `math.h` and `fastmath.h`, not two. Then the note's reply names the
+>       commit and it moves to `closed/`. Note (the link updated to
+>       `closed/`, where the note now is):
+>       [`handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md`](handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md).

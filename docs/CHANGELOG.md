@@ -220,6 +220,15 @@ page one, so a mixed cluster lists as before rather than looping. One
 helper fills a page for fsd and netd, and one loop reads them for `ulib` and
 the shell.
 
+**`picolibc.h` defines `_HAVE_ALLOC_SIZE` (2026-10-17).** DevTools's `cc`
+reads `__alloc_size__` since its `c06cc3b`, which was the condition for
+patch 0003, so the patch is gone and `malloc` and the rest are declared with
+the attribute. `libc.a` is the same bytes, and so is every program built
+on picolibc, whether clang or DevTools's `cc`, `as` and `ld` build it. Two
+patches still keep a macro from `cc`, `long double` and the inline pair;
+the pair makes `cc` refuse four headers, not two as recorded. DevTools was
+sent a notice before the header pin moved.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

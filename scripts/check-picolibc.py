@@ -35,7 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = "third_party/picolibc-prebuilt/lib/libc.a"
 LIB_PIN = "83f0897ee0a6be792f0d65984d6bb2ae41d47edd3983e42533889d71b07f842e"
 TREES = {
-    "third_party/picolibc-prebuilt/include": "f9c2f2531cdba0d8c9418966251bbd7cf4fb1ee90a8e089ce2e198fdf09f2d2d",
+    "third_party/picolibc-prebuilt/include": "c297c48071d13a5d0657a6dc427c1a696861b31c21cc399757386ecffd5419a2",
     "libc/pico/include": "19440640c0ac66d24f2a71018ff315fbe670b3b349063f2013a9252b5eb0c5a6",
 }
 

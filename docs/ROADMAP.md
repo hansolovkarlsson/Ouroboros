@@ -2622,20 +2622,6 @@ be reviewed after the fact from the saved screenshots.
 >       cpp runs out of memory at about 70 KB of input before nano's walk
 >       costs anything (at 35 KB both finish in the same time). Note:
 >       [`handoffs/2026-10-14-from-devtools-nano-malloc.md`](handoffs/2026-10-14-from-devtools-nano-malloc.md).
-> - [ ] **fix** **Remove patch 0003: `cc` reads `__alloc_size__`.**
->       DevTools's notice of 2026-10-16 (DevTools `c06cc3b`), checked: its
->       `cc` refuses the same 26 of the 136 headers with
->       `_HAVE_ALLOC_SIZE` defined as without, where the `cc` before
->       `c06cc3b` also refuses `stdlib.h` and `malloc.h`. Delete
->       `0003-undefine-alloc-size.patch`, regenerate the prebuilt headers,
->       move `check-picolibc`'s header pin, run the C rigs for every
->       program whose objects change (clang now sees `alloc_size` on
->       `malloc` and the rest), and send DevTools a notice before the pin
->       moves. In the same change, correct the README's 0004 entry: the
->       inline pair makes `cc` refuse four headers, `ctype.h`, `fenv.h`,
->       `math.h` and `fastmath.h`, not two. Then the note's reply names the
->       commit and it moves to `closed/`. Note:
->       [`handoffs/2026-10-16-from-devtools-alloc-size-read.md`](handoffs/2026-10-16-from-devtools-alloc-size-read.md).
 > - [ ] **held** **Patches 0002 and 0004 go on DevTools's notices.** Each
 >       keeps one condition's macros undefined in `picolibc.h` until
 >       DevTools says `cc` takes them: `0002` `long double`, `0004`
@@ -2644,17 +2630,22 @@ be reviewed after the fact from the saved screenshots.
 >       `sys/cdefs.h` drops `__inline` for a compiler that is not GNU, so
 >       the macro's expansion is not inline under any such compiler, and
 >       if DevTools takes it further it will be a note asking for a change
->       to `sys/cdefs.h` (the note above). Removing one changes the
->       installed headers: `check-picolibc`'s pin, the C rigs for a changed
->       program, and a reply to the notice naming the commit. Nothing to do
->       until a notice arrives. An alternative to put to DevTools first (the
->       review of #305): guard each in `picolibc.h` by what the compiler
->       says, `__has_attribute(__alloc_size__)` and the like (`cc` answers
->       0, checked; `__clang__` for `long double`, which `cc` does not
->       define), so clang programs get the attributes now and nothing is
->       left to remove. It changes this project's C binaries and departs
->       from DevTools's 2 to 4, so it is a question for DevTools, not a
->       change to make alone.
+>       to `sys/cdefs.h` (its notice,
+>       [`handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md`](handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md)).
+>       Removing one changes the installed headers: `check-picolibc`'s pin,
+>       the C rigs for a changed program, and a reply to the notice naming the
+>       commit. Nothing to do until a notice arrives. An alternative to put to
+>       DevTools first (the review of #305): guard each in `picolibc.h` by
+>       what the compiler says, `__has_attribute(__gnu_inline__)` and the like
+>       (`__clang__` for `long double`, which `cc` does not define), so clang
+>       programs get the attributes now and nothing is left to remove. Know
+>       first that `cc` answers 0 to `__has_attribute` for every attribute,
+>       including `__alloc_size__`, which it has read since its `c06cc3b`
+>       (checked 2026-10-17 at DevTools `84a8cc9`): a guard of that kind would
+>       have kept `alloc_size` from `cc` after it could take it, so `cc` would
+>       have to answer truthfully first. It changes this project's C binaries
+>       and departs from DevTools's 2 to 4, so it is a question for DevTools,
+>       not a change to make alone.
 > - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
 >       the high review of #303: a file is staged 512 bytes a call, each a
 >       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused
