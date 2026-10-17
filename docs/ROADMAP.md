@@ -2643,9 +2643,10 @@ be reviewed after the fact from the saved screenshots.
 >       including `__alloc_size__`, which it has read since its `c06cc3b`
 >       (checked 2026-10-17 at DevTools `84a8cc9`): a guard of that kind would
 >       have kept `alloc_size` from `cc` after it could take it, so `cc` would
->       have to answer truthfully first. It changes this project's C binaries
->       and departs from DevTools's 2 to 4, so it is a question for DevTools,
->       not a change to make alone.
+>       have to answer truthfully first (sent to DevTools as a finding,
+>       `~/Projects/DevTools/docs/handoffs/2026-10-17-from-ouroboros-has-attribute-zero.md`).
+>       It changes this project's C binaries and departs from DevTools's 2
+>       to 4, so it is a question for DevTools, not a change to make alone.
 > - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
 >       the high review of #303: a file is staged 512 bytes a call, each a
 >       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused
