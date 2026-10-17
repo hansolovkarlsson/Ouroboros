@@ -4235,6 +4235,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   have to answer what an open file is after that. Found while fixing
   spawn's reads (2026-10-17), whose fix holds the resolved file only for
   the length of one request.
+- **exFAT walks a file's cluster chain from its start for every piece.**
+  exFAT's `read_entry` keeps no cursor, so the pieces of one `NP_READ`
+  (2 KiB each, up to 64 KiB) each walk the chain from the first cluster
+  through the FAT, where FAT32's `read_cursor` resumes the walk; a
+  contiguous file (`NoFatChain`) skips the FAT and is not affected. Not new
+  (each request walked from the start before 2026-10-17 too), and seen in
+  `make test-spawn-reads`: a run of `ls` reads 290 sectors on exFAT against
+  199 on FAT32. A cursor needs exFAT's FAT writes to invalidate it, as
+  FAT32's `write_fat_entry` does (the review of #312).
 - **There is no wall clock.** The kernel has `MONOTONIC_US`, time since boot,
   and nothing reads the platform's RTC (PL031 on QEMU's `virt`; the Pi 4 has
   none and Parallels exposes its own), so a C program's `time()` says 1970

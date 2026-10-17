@@ -2353,11 +2353,12 @@ measure-syscost: image
 test-listing-walk: image image-ext2 image-exfat
 	python3 scripts/test-listing-walk.py
 
-# Spawning a program resolves its path once a read, not once a 512 bytes
-# (scripts/test-spawn-reads.py): `ls /include/stdio.h` once and three times
-# on FAT32, ext2 and exFAT, QEMU's virtio-blk trace per sector, and no
-# sector may be read in one run as many times as /bin/ls has 512-byte chunks
-# (a resolution a chunk read /bin's directory that often). About three minutes; run it whenever the shell's or
+# Spawning a program resolves its path once a read request, exactly
+# (scripts/test-spawn-reads.py): on FAT32, ext2 and exFAT the host puts
+# /bin/ARGS in the root as /SMALL and padded to 200 KiB as /BIG, and per spawn
+# the root directory's first sector, read once a resolution, must be read
+# exactly as many more times for /BIG as it makes more requests (QEMU's
+# virtio-blk trace). Needs e2fsprogs. About three minutes; run it whenever the shell's or
 # netd's spawn read, fsd's NP_READ or a filesystem's read_each changes.
 test-spawn-reads: image image-ext2 image-exfat
 	python3 scripts/test-spawn-reads.py

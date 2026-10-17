@@ -678,7 +678,8 @@ Worth knowing before building further on this:
   kernel-mediated copy between two regions, authorized by an explicit
   grant plus an active call), which lifted the 512-byte cap for file
   reads/writes to `SAFECOPY_MAX` (2048) per op and lets `cat` stream any
-  size. What remains: the 512-byte inline cap still bounds directory
+  size. A grant may name up to `GRANT_MAX` (64 KiB) since 2026-10-17, which
+  fsd's `NP_READ` fills a `SAFECOPY_MAX` piece at a time in one request. What remains: the 512-byte inline cap still bounds directory
   *listings* (`ls`); a single non-streaming transfer is
   userland-memory-bound, but a program has a 1 MiB raw heap area now
   (`heap_info`) on top of its fixed stack, which the shell uses to capture

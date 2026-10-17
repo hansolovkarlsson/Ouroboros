@@ -40,10 +40,6 @@ mod vfs;
 
 use core::arch::asm;
 use core::ops::ControlFlow;
-
-// One NP_READ fills at most one grant: the most fsd delivers a request is
-// the largest buffer a client may grant.
-const _: () = assert!(ninep_abi::NP_READ_MAX == syscall_abi::GRANT_MAX);
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::panic::PanicInfo;
 
@@ -769,6 +765,9 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             // grant a SAFECOPY_MAX piece at a time, at the grant offset each
             // piece lands at, up to NP_READ_MAX (since 2026-10-17; one piece
             // a request before, each resolving the path again).
+            // One NP_READ fills at most one grant: the most fsd delivers a
+            // request is the largest buffer a client may grant.
+            const _: () = assert!(ninep_abi::NP_READ_MAX == syscall_abi::GRANT_MAX);
             let offset = p[1];
             let want = p[2].min(ninep_abi::NP_READ_MAX);
             let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];

@@ -72,7 +72,8 @@ pub const NAME_MAX: usize = 32;
 /// authorized", which was the opposite of true. One constant, both readers.
 ///
 /// About fourteen peers at 72 bytes a line. It is a stack budget, not a format
-/// limit: `netd` has no heap and a 32 KB stack that has hit its guard page five
+/// limit: `netd` has no allocator and a fixed stack (the loader's
+/// `STACK_PAGES`, 56 KB) that has hit its guard page five
 /// times.
 pub const AUTHORIZED_MAX: usize = 1024;
 

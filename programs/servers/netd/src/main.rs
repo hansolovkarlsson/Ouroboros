@@ -10,7 +10,8 @@
 //! target IPv4; `netd` ARP-resolves it, sends an ICMP echo request, waits
 //! for the reply, and answers with a `NET_PING_*` status. Everything is
 //! hand-rolled fixed-buffer (the ACPI/FAT32/virtio precedent) - no crates,
-//! no heap.
+//! no allocator. Its heap region holds one buffer, `cpu`'s program read
+//! (`cpu_spawn`), since 2026-10-17.
 //!
 //! Scope, deliberate: **guest-initiated ping only**. Replying to a host's
 //! ping needs an asynchronous receive loop (the poll/select gap), out of
@@ -203,7 +204,7 @@ fn main() -> ! {
 ///
 /// About fourteen peers at 72 bytes a line. It lives in `Auth`, on `serve`'s
 /// frame, because that is where the rest of the auth config already lives and
-/// this server has no heap - and 1 KB against a fixed stack (the loader's
+/// this server has no allocator - and 1 KB against a fixed stack (the loader's
 /// `STACK_PAGES`) that has hit its guard page five times is a deliberate,
 /// measured choice rather than a comfortable one. A file
 /// longer than this is REPORTED at boot rather than silently half-read: the
@@ -4974,27 +4975,6 @@ enum CpuSpawnError {
     Other,
 }
 
-/// The bytes a `cpu` spawn reads a request ([`cpu_read_buffer`]).
-const CPU_READ: usize = 8 * 1024;
-
-/// The read buffer of a `cpu` spawn: the first [`CPU_READ`] bytes of this
-/// task's heap region (`HEAP_INFO`), or `None` if it has none that large.
-/// Not the stack: netd's is 14 pages, most of it resident tables under every
-/// chain, and an 8 KiB buffer there faulted netd into its guard page at boot
-/// (2026-10-17), before any `cpu` ran, the frame being the caller's once
-/// inlined. netd keeps no other state in its heap, and one spawn runs at a
-/// time (the kernel's staging has one owner), so nothing else holds it.
-fn cpu_read_buffer() -> Option<&'static mut [u8]> {
-    let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE);
-    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE) as usize;
-    if base == 0 || size < CPU_READ {
-        return None;
-    }
-    // SAFETY: HEAP_INFO reports this task's own heap region, EL0-writable and
-    // mapped for the task's life; netd hands out no other slice of it.
-    Some(unsafe { core::slice::from_raw_parts_mut(base as *mut u8, CPU_READ) })
-}
-
 fn cpu_spawn(cmdline: &[u8]) -> Result<u8, CpuSpawnError> {
     const ARGV_CAP: usize = syscall_abi::ARGV_MAX as usize;
     let mut blob = [0u8; ARGV_CAP]; // [argc:u32][ (len:u32, bytes) ... ]
@@ -5046,6 +5026,27 @@ fn cpu_spawn(cmdline: &[u8]) -> Result<u8, CpuSpawnError> {
     // per-syscall pointer cap (`MAX_USER_LEN`) - as the shell's spawn_path
     // does. Until 2026-10-17 each 512 bytes was its own read, resolving the
     // path from the root again. A read of 0 is the end.
+    /// The bytes a `cpu` spawn reads a request.
+    const CPU_READ: usize = 8 * 1024;
+    /// The read buffer: the first `CPU_READ` bytes of netd's heap region
+    /// (`HEAP_INFO`), or `None` with no heap that large. Not the stack:
+    /// netd's is 14 pages, most of it resident tables under every chain, and
+    /// an 8 KiB buffer there faulted netd into its guard page at boot
+    /// (2026-10-17), the frame being the caller's once inlined. Declared in
+    /// here so nothing else in netd can name it: this is the heap's only use,
+    /// and `cpu_spawn` is synchronous and never re-entered (it never returns
+    /// to the event loop), so the slice it makes is the only one alive.
+    fn cpu_read_buffer() -> Option<&'static mut [u8]> {
+        let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE);
+        let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE) as usize;
+        if base == 0 || size < CPU_READ {
+            return None;
+        }
+        // SAFETY: HEAP_INFO reports this task's own heap region, EL0-writable
+        // and mapped for the task's life; see above for why no other slice
+        // of it exists.
+        Some(unsafe { core::slice::from_raw_parts_mut(base as *mut u8, CPU_READ) })
+    }
     let mut small = [0u8; 512];
     let read = cpu_read_buffer().unwrap_or(&mut small);
     let mut offset = 0u64;
@@ -7124,7 +7125,10 @@ fn parse_path<'a>(request: &[u8], buf: &'a mut [u8]) -> &'a [u8] {
 /// mechanism the shell's `cat` uses, ported here so netd can serve files.
 /// Returns the byte count copied into `buf` (`0` at/past EOF), or an
 /// `FS_ERR_*`/`TASK_ERR_*` code (`>= FS_ERR_MIN`). `buf.len()` must be
-/// `<= SAFECOPY_MAX`.
+/// `<= GRANT_MAX` (the kernel refuses a larger grant), and fsd delivers up to
+/// `ninep_abi::NP_READ_MAX` a call, the same; fewer than asked is not the
+/// end, only 0 is. Most callers pass `SAFECOPY_MAX` or less; `cpu_spawn`
+/// passes 8 KiB (since 2026-10-17).
 fn read_file_chunk(who: As, path: &[u8], tree: u64, offset: u64, buf: &mut [u8]) -> u64 {
     let want = buf.len() as u64;
     // Grant the buffer to fsd (GRANT_WRITE - the server writes file bytes into

@@ -261,8 +261,11 @@ the path resolved once and the file copied to the client's grant a
 name `GRANT_MAX`, 64 KiB, where it was capped at one copy's 2048 bytes;
 each copy within it is still 2048 at most. One run of `ls` reads 199
 sectors (187, 290). netd's read buffer is in its heap region: on its stack
-it faulted netd at boot. `make test-spawn-reads` fails a run in which any
-sector is read as many times as `ls` has chunks.
+it faulted netd at boot, and the shell's is the heap's last 8 KiB, kept
+apart from its pipeline captures. `make test-spawn-reads` counts the
+resolutions exactly: a program padded to 200 KiB must resolve its path as
+many more times than the plain one as it makes more requests, 23, where
+resolving once a 2 KiB piece makes 93 and once a 512 bytes 374.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

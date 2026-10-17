@@ -456,9 +456,12 @@ pub fn root_order(
 /// The piece loop of every `read_each`, once: `read(offset, piece)` reads the
 /// file its caller resolved, and each piece goes to `sink` until `want` bytes
 /// have, the file ends (a short or empty piece), or `sink` answers `Break`.
-/// Returns the bytes read and whether `sink` stopped it. Nothing can change
-/// the file between pieces: fsd answers one request at a time, and the
-/// whole loop is one request.
+/// Returns the bytes read and whether `sink` stopped it. On the disk arms
+/// nothing can change the file between pieces: fsd answers one request at a
+/// time, the whole loop is one request, and only fsd writes its disks. A
+/// `/proc` file is made anew each piece from kernel state that other cores
+/// change meanwhile, so a read longer than one piece could mix two moments;
+/// every `/proc` file is one line, far under a piece.
 pub fn read_pieces(
     offset: u64,
     want: u64,
