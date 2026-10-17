@@ -162,9 +162,9 @@ def exfat_layout(image):
     with open(image, "rb") as fh:
         fh.seek(start * SECTOR)
         b = fh.read(SECTOR)
-    fat, fat_len, heap, _, root = struct.unpack_from("<IIIII", b, 80)
+    fat, fat_len, heap, count, root = struct.unpack_from("<IIIII", b, 80)
     return {"fat": start + fat, "fat_end": start + fat + fat_len, "heap": start + heap,
-            "root": root, "spc": 1 << b[109]}
+            "count": count, "root": root, "spc": 1 << b[109]}
 
 
 def root_exfat(image):
@@ -173,8 +173,10 @@ def root_exfat(image):
 
 
 def exfat_chain(image, name):
-    """`name`'s clusters in the exFAT root of `image`, in chain order, read
-    by the host from the FAT; None when the file is contiguous (NoFatChain)."""
+    """(the root directory's clusters, `name`'s) in the exFAT root of `image`,
+    each in chain order, read by the host from the FAT; `name`'s is None when
+    the file is contiguous (NoFatChain). Raises ValueError for a chain longer
+    than the volume (a loop) or a name not there."""
     g = exfat_layout(image)
     with open(image, "rb") as fh:
         def fat(c):
@@ -184,11 +186,14 @@ def exfat_chain(image, name):
         def chain(first):
             out = [first]
             while 2 <= fat(out[-1]) < 0xFFFFFFF7:
+                if len(out) == g["count"]:
+                    raise ValueError(f"the FAT chain from cluster {first} is longer than the volume: a loop")
                 out.append(fat(out[-1]))
             return out
 
+        root = chain(g["root"])
         data = b""
-        for c in chain(g["root"]):
+        for c in root:
             fh.seek((g["heap"] + (c - 2) * g["spc"]) * SECTOR)
             data += fh.read(g["spc"] * SECTOR)
         i = 0
@@ -199,16 +204,18 @@ def exfat_chain(image, name):
                 names = b"".join(data[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
                 if names.decode("utf-16le")[:stream[3]] == name:
                     first = struct.unpack_from("<I", stream, 20)[0]
-                    return None if stream[1] & 0x02 else chain(first)
+                    return root, None if stream[1] & 0x02 else chain(first)
             i += 32 * count
-    raise SystemExit(f"{image}: no {name} in the exFAT root")
+    raise ValueError(f"no {name} in the exFAT root of the boot's disk")
 
 
 def chain_reads(chain, g):
     """The FAT sectors one more read of `chain` from its start to its end
     makes, as the design has it: one walk (the read cursor), each entry
     looked up through a one-sector cache, which the read before left on the
-    sector of the last entry looked up."""
+    sector of the last entry looked up. Nothing else in a spawn looks up a
+    FAT entry while the root directory is one cluster: each resolution finds
+    the name in it without stepping on (chain_walk checks that it is)."""
     sector = lambda c: c * 4 // SECTOR
     cached, reads = sector(chain[-2]), 0
     for c in chain[:-1]:
@@ -270,14 +277,25 @@ def chain_walk(prepared, image):
     """The two exFAT boots that grade the walk along a FAT chain; 1 on a failure."""
     g = exfat_layout(prepared)
     setup = ["cp /HUGE /CHAIN", "/CHAIN w"]
-    chains = []
-    p0, base = boot("exfat-chain", prepared, image, "/CHAIN", RUNS, setup,
-                    lambda copy: chains.append(exfat_chain(copy, "CHAIN")))
-    p1, more = boot("exfat-chain", prepared, image, "/CHAIN", 2 * RUNS, setup)
-    problems = p0 + p1
-    chain = chains[0] if chains else None
-    if not problems and not chain:
+    read, read_problems = [], []
+
+    def inspect(copy):
+        try:
+            read.append(exfat_chain(copy, "CHAIN"))
+        except ValueError as e:
+            read_problems.append(str(e))
+
+    p0, base = boot("exfat-chain-base", prepared, image, "/CHAIN", RUNS, setup, inspect)
+    p1, more = boot("exfat-chain-more", prepared, image, "/CHAIN", 2 * RUNS, setup)
+    problems = p0 + p1 + read_problems
+    root, chain = read[0] if read else (None, None)
+    if not problems and not read:
+        problems.append("the first boot's disk was not read")
+    elif not problems and not chain:
         problems.append("/CHAIN, written by the guest's cp, is contiguous: no FAT chain to walk")
+    elif not problems and len(root) > 1:
+        problems.append(f"the root directory spans {len(root)} clusters: a resolution may step "
+                        "along its chain, which the prediction does not count")
     elif not problems and len({c * 4 // SECTOR for c in chain[:-1]}) < 2:
         problems.append(f"/CHAIN's chain lies in one FAT sector: a walk from its start would cost "
                         "no more reads, so the cursor could not be seen")

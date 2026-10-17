@@ -472,17 +472,23 @@ impl Fs {
         (self.fat_lba as u64 + byte / SECTOR_SIZE as u64, (byte % SECTOR_SIZE as u64) as usize)
     }
 
-    /// `cluster`'s FAT entry, through the one-sector [`fat_cache`](Self::fat_cache).
-    fn fat_entry(&mut self, cluster: u32) -> Result<u32, Error> {
-        let (lba, offset) = self.fat_place(cluster);
-        let data = match &self.fat_cache {
-            Some(c) if c.lba == lba => &c.data,
+    /// The FAT sector at `lba`, through the one-sector [`fat_cache`](Self::fat_cache).
+    fn fat_sector(&mut self, lba: u64) -> Result<&[u8; SECTOR_SIZE], Error> {
+        let sector = match self.fat_cache.take() {
+            Some(c) if c.lba == lba => c,
             _ => {
                 let mut data = [0u8; SECTOR_SIZE];
                 self.disk.read_sector(lba, &mut data)?;
-                &self.fat_cache.insert(FatSector { lba, data }).data
+                FatSector { lba, data }
             }
         };
+        Ok(&self.fat_cache.insert(sector).data)
+    }
+
+    /// `cluster`'s FAT entry.
+    fn fat_entry(&mut self, cluster: u32) -> Result<u32, Error> {
+        let (lba, offset) = self.fat_place(cluster);
+        let data = self.fat_sector(lba)?;
         Ok(u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]))
     }
 
@@ -870,14 +876,7 @@ impl Fs {
         // only reused through `alloc_cluster`, which drops it here too.
         self.read_cursor = None;
         let (lba, offset) = self.fat_place(cluster);
-        let mut buf = match &self.fat_cache {
-            Some(c) if c.lba == lba => c.data,
-            _ => {
-                let mut buf = [0u8; SECTOR_SIZE];
-                self.disk.read_sector(lba, &mut buf)?;
-                buf
-            }
-        };
+        let mut buf = *self.fat_sector(lba)?;
         buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         self.disk.write_sector(lba, &buf)?;
         self.fat_cache = Some(FatSector { lba, data: buf });

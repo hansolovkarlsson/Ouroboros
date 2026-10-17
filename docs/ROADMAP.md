@@ -4268,8 +4268,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - **FAT32's and exFAT's read walks are two copies.** exFAT's `read_entry`
   repeats FAT32's `read_at` (the cursor lookup, the seek, the sector loop,
   the cursor update), differing in the step (`advance` against
-  `next_cluster`) and in exFAT's `NoFatChain` key. One helper over a step
-  function would hold the cursor's invariant once. From the review of #314.
+  `next_cluster`) and in exFAT's `NoFatChain` key, and its `ReadCursor`,
+  `FatSector` and cached sector lookup repeat FAT32's too. One cursor and
+  cache helper over a step function would hold the invariant (cluster and
+  position move together, both dropped or refreshed by every FAT write)
+  once. From the two reviews of #314.
 - **`/bin` is read again for each path resolution.** One run of `ls` on
   exFAT reads 272 sectors, 168 of them `/bin`'s four-cluster directory
   read once for each of seven resolutions (the shell's lookup, its spawn's
