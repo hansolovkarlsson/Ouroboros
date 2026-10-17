@@ -240,6 +240,17 @@ walks a listing still needs, ext2 reading an inode for every entry it walks
 past, and spawn resolving a program's path again for every 512 bytes it
 stages (`ROADMAP.md`).
 
+**An ext2 listing reads no inodes (2026-10-17).** ext2's walk read every
+entry's inode, entries walked past included, for a kind and a size: one
+sector an entry, every walk. It takes the kind from the entry's
+`file_type` byte now (the `filetype` feature, mke2fs's default and fsd's
+own mkfs), reading the inode only on a volume without it or for an entry
+of unknown type, and `list_dir` passes no size, which nothing used. One
+listing of a 300-file directory reads 74 sectors, from 3,698. `make
+test-listing-walk` lists that directory on ext2 (since without the inode
+reads `/include` is too short to show a walk stopping) and fails a listing
+that reads a sector an entry.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

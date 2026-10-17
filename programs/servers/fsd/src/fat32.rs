@@ -834,18 +834,18 @@ impl Fs {
         Ok(current)
     }
 
-    /// Lists a directory's entries, calling `f(name, is_dir, size)` for
-    /// each until it answers `Break`. `path` `""` or `"/"` lists the root.
+    /// Lists a directory's entries, calling `f(name, is_dir)` for each until
+    /// it answers `Break`. `path` `""` or `"/"` lists the root.
     pub fn list_dir(
         &mut self,
         path: &str,
-        mut f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
+        mut f: impl FnMut(&str, bool) -> ControlFlow<()>,
     ) -> Result<(), Error> {
         let dir = self.find(path)?;
         if !dir.is_dir {
             return Err(Error::NotADirectory);
         }
-        self.walk_dir(dir.cluster, |entry| f(entry.name(), entry.is_dir, entry.size).is_break())
+        self.walk_dir(dir.cluster, |entry| f(entry.name(), entry.is_dir).is_break())
     }
 
     /// Metadata for one path: size, directory flag, and the FAT "write" time

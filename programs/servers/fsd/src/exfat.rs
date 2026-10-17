@@ -627,20 +627,20 @@ impl Fs {
         Ok(current)
     }
 
-    /// Lists a directory, calling `f(name, is_dir, size)` for each entry until
+    /// Lists a directory, calling `f(name, is_dir)` for each entry until
     /// it answers `Break`. `""` or `"/"` lists the root. Mirrors
     /// `fat32::Fs::list_dir`.
     pub fn list_dir(
         &mut self,
         path: &str,
-        mut f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
+        mut f: impl FnMut(&str, bool) -> ControlFlow<()>,
     ) -> Result<(), Error> {
         let dir = self.find(path)?;
         if !dir.is_dir {
             return Err(Error::NotADirectory);
         }
         self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry, _slot, _len| {
-            f(entry.name(), entry.is_dir, saturate_u32(entry.size)).is_break()
+            f(entry.name(), entry.is_dir).is_break()
         })
     }
 

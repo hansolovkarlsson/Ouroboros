@@ -211,12 +211,13 @@ impl Filesystem {
         }
     }
 
-    /// Calls `f(name, is_dir, size)` for each entry of the directory at
-    /// `path` until it answers `Break` (a full `NP_READDIR` page).
+    /// Calls `f(name, is_dir)` for each entry of the directory at `path`
+    /// until it answers `Break` (a full `NP_READDIR` page). No size: nothing
+    /// listing needs one, and on ext2 it would cost an inode read an entry.
     pub fn list_dir(
         &mut self,
         path: &str,
-        f: impl FnMut(&str, bool, u32) -> ControlFlow<()>,
+        f: impl FnMut(&str, bool) -> ControlFlow<()>,
     ) -> Result<(), Error> {
         match self {
             Filesystem::Fat32(fs) => fs.list_dir(path, f),

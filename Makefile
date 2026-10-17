@@ -2342,10 +2342,14 @@ measure-syscost: image
 	python3 scripts/measure-syscost.py
 
 # A listing page's walk stops at the page's end (scripts/test-listing-walk.py),
-# on FAT32, ext2 and exFAT, seen by QEMU's virtio-blk trace, the one observer
-# that can: a walker ignoring ControlFlow gives the same pages. Reports the
-# sectors one listing of /include reads. About five minutes; run it whenever
-# a filesystem's list_dir, ReaddirFill or fsd's NP_READDIR changes.
+# seen by QEMU's virtio-blk trace, the one observer that can: a walker ignoring
+# ControlFlow gives the same pages. /include on FAT32 and exFAT; on ext2 /walk,
+# 300 files, on a root the rig rebuilds from the image's own tree with
+# e2fsprogs (debugfs, mke2fs, e2fsck), once with the filetype feature, whose
+# listing must read under a sector an entry, and once without, whose kinds
+# come from the inodes; both must list /kinds with its directories marked.
+# Reports the sectors one listing reads. About six minutes; run it whenever a
+# filesystem's list_dir, ReaddirFill or fsd's NP_READDIR changes.
 test-listing-walk: image image-ext2 image-exfat
 	python3 scripts/test-listing-walk.py
 
