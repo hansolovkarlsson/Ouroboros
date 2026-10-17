@@ -2638,15 +2638,22 @@ be reviewed after the fact from the saved screenshots.
 >       DevTools first (the review of #305): guard each in `picolibc.h` by
 >       what the compiler says, `__has_attribute(__gnu_inline__)` and the like
 >       (`__clang__` for `long double`, which `cc` does not define), so clang
->       programs get the attributes now and nothing is left to remove. Know
->       first that `cc` answers 0 to `__has_attribute` for every attribute,
->       including `__alloc_size__`, which it has read since its `c06cc3b`
->       (checked 2026-10-17 at DevTools `84a8cc9`): a guard of that kind would
->       have kept `alloc_size` from `cc` after it could take it, so `cc` would
->       have to answer truthfully first (sent to DevTools as a finding,
->       `~/Projects/DevTools/docs/handoffs/2026-10-17-from-ouroboros-has-attribute-zero.md`).
->       It changes this project's C binaries and departs from DevTools's 2
->       to 4, so it is a question for DevTools, not a change to make alone.
+>       programs get the attributes now and nothing is left to remove. `cc`
+>       answered 0 to `__has_attribute` for every attribute until 2026-10-17,
+>       `alloc_size` included, so such a guard would have kept from it what
+>       it could take; sent to DevTools as a finding, it is done there the
+>       same day (DevTools's commit "cc answers __has_attribute for the
+>       attributes it takes", its note in DevTools's
+>       `docs/handoffs/closed/2026-10-17-from-ouroboros-has-attribute-zero.md`):
+>       `cc` answers 1 for the eleven it takes anywhere a header writes them
+>       (`format`, `format_arg`, `deprecated`, `unavailable`, `noreturn`,
+>       `const`, `unused`, `alloc_size`, `always_inline`, `weak`,
+>       `gnu_inline`), and 0 for `aligned`, which it takes only on a
+>       struct's definition, and for `packed`. Whether to take the
+>       alternative is Hans's; DevTools says that if he does it will come as
+>       its `sys/cdefs.h` note. It changes this project's C binaries and
+>       departs from DevTools's 2 to 4, so it is a question for DevTools, not
+>       a change to make alone.
 > - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
 >       the high review of #303: a file is staged 512 bytes a call, each a
 >       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused
