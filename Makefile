@@ -443,7 +443,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -2365,6 +2365,17 @@ test-listing-walk: image image-ext2 image-exfat
 # netd's spawn read, fsd's NP_READ, a filesystem's read_each or read cursor changes.
 test-spawn-reads: image image-ext2 image-exfat
 	python3 scripts/test-spawn-reads.py
+
+# A write walks a file's cluster chain once, on exFAT and FAT32, exactly
+# (scripts/test-write-walk.py): on the exFAT image, with the ESP mounted at
+# /mnt/f, `cp` of 640 KiB from one filesystem to the other, so the source's
+# FAT reads and the destination's land in different FATs; the destination's
+# FAT reads must be what the design predicts from the chain cp built, read
+# off the disk and simulated a request at a time through the FAT cache, and
+# the copy must hold the source's bytes. About four minutes; run it whenever
+# a filesystem's write_at, write cursor, FAT cache or allocator changes.
+test-write-walk: image-exfat
+	python3 scripts/test-write-walk.py
 
 # DevTools's editor on Ouroboros (scripts/test-edit.py, /bin/edit from
 # EDIT_DIR): `edit hello.txt` opens, ^Q Q repeats a delete on poll's timeout,

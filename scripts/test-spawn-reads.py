@@ -87,16 +87,16 @@ def partition(image, ptype):
     return found[0][2], found[0][3]
 
 
-def place_mounted(image, files):
-    """Write `files` ({name: bytes}) to the root of partition 1 of `image`
-    (FAT32 or exFAT), attached without mounting and mounted alone, since
-    the exFAT image has the ESP beside it."""
+def place_mounted(image, files, part=1):
+    """Write `files` ({name: bytes}) to the root of partition `part` of
+    `image` (FAT32 or exFAT), attached without mounting and mounted alone,
+    since the exFAT image has the ESP beside it."""
     out = subprocess.run(["hdiutil", "attach", "-nobrowse", "-nomount", image],
                          check=True, capture_output=True, text=True).stdout
     disk = out.split()[0]
     mp = tempfile.mkdtemp(prefix="test-spawn-reads.")
     try:
-        subprocess.run(["diskutil", "mount", "-mountPoint", mp, f"{disk}s1"], check=True, capture_output=True)
+        subprocess.run(["diskutil", "mount", "-mountPoint", mp, f"{disk}s{part}"], check=True, capture_output=True)
         for name, data in files.items():
             with open(os.path.join(mp, name), "wb") as fh:
                 fh.write(data)

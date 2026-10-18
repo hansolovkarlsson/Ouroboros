@@ -4259,12 +4259,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   that to the sectors the chain crosses, which a fragmented file makes
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
-- **A write walks the chain from the first cluster.** `write_at` on FAT32
-  and exFAT seeks from the file's first cluster for every 2 KiB a client
-  writes. With the FAT cache it costs the FAT sectors the chain crosses,
-  each time: a `cp` of a 200 KiB file onto exFAT reads 116 FAT sectors,
-  from 3,838 without the cache. A write cursor, dropped like the read
-  cursor, would make it one walk. From the review of #314.
+- **FAT32 reads the second FAT copy for every FAT write.** `write_fat_entry`
+  keeps every copy of the FAT in step, and reads the second copy's sector
+  from the disk each time; only the first goes through the FAT cache. A
+  `cp` of 640 KiB onto the ESP (512-byte clusters, 1,280 of them) reads
+  2,689 FAT sectors, 2,559 of them the second copy (`make
+  test-write-walk`, 2026-10-17). Writing the first copy's sector to every
+  copy would read none, but it would also overwrite a second copy that had
+  come to differ, which is a decision about what the backup copy is for.
 - **FAT32's and exFAT's read walks are two copies.** exFAT's `read_entry`
   repeats FAT32's `read_at` (the cursor lookup, the seek, the sector loop,
   the cursor update), differing in the step (`advance` against

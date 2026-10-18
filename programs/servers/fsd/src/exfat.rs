@@ -158,7 +158,15 @@ pub struct Fs {
     /// test-spawn-reads`, 2026-10-17). Only the position is kept, never data, and
     /// [`write_fat_entry`](Self::write_fat_entry) drops it, so a read never
     /// follows a stale chain.
-    read_cursor: Option<ReadCursor>,
+    read_cursor: Option<ChainCursor>,
+    /// Where the last [`write_at`](Self::write_at) ended in its file's chain,
+    /// so the next write of the same file at or past it seeks from there:
+    /// `fat32::Fs`'s `write_cursor`, for the same reason. Kept apart from the
+    /// read cursor because `cp` reads one file and writes another in turn;
+    /// dropped by every FAT write and set again at the end of a write, from
+    /// the chain it has just walked and built. Always on a FAT-chained walk:
+    /// `write_at` converts a contiguous file first.
+    write_cursor: Option<ChainCursor>,
     /// The last FAT sector read or written, for [`fat_entry`](Self::fat_entry):
     /// `fat32::Fs`'s `fat_cache`. One sector holds 128 entries, so a walk
     /// along a chain reads each sector once, not once a step; without it
@@ -176,9 +184,9 @@ struct FatSector {
     data: [u8; SECTOR_SIZE],
 }
 
-/// A point in a file's cluster walk, for [`Fs::read_cursor`].
+/// A point in a file's cluster walk, for [`Fs::read_cursor`] and [`Fs::write_cursor`].
 #[derive(Clone, Copy)]
-struct ReadCursor {
+struct ChainCursor {
     /// The file's first cluster and its `NoFatChain` flag, which together say
     /// which file and which walk the cursor is for.
     file_cluster: u32,
@@ -226,6 +234,7 @@ impl Fs {
             bitmap_first_cluster: 0,
             bitmap_bytes: 0,
             read_cursor: None,
+            write_cursor: None,
             fat_cache: None,
         };
         // Best-effort: reads don't need the bitmap, so a volume without one
@@ -846,7 +855,7 @@ impl Fs {
         }
         // `cluster` and `cluster_pos` only ever moved together, so they still
         // name one cluster of this file and the bytes it holds.
-        self.read_cursor = Some(ReadCursor {
+        self.read_cursor = Some(ChainCursor {
             file_cluster: file.first_cluster,
             contiguous: file.contiguous,
             cluster,
@@ -873,8 +882,11 @@ impl Fs {
         // each cluster it hands out among them, so a FAT-chained cursor is
         // dropped before any chain changes. A cursor on a contiguous file
         // never read the FAT and cannot go stale that way; its clusters are
-        // only reused through `alloc_cluster`, which drops it here too.
+        // only reused through `alloc_cluster`, which drops it here too. The
+        // write cursor likewise; a write that extends a chain sets it again
+        // once it is done.
         self.read_cursor = None;
+        self.write_cursor = None;
         let (lba, offset) = self.fat_place(cluster);
         let mut buf = *self.fat_sector(lba)?;
         buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -1381,9 +1393,15 @@ impl Fs {
         let write_start = old_size.min(offset);
         let write_end = offset + data.len() as u64;
 
-        // Walk to the cluster holding `write_start`, extending if needed.
-        let mut cluster = head_cluster;
-        let mut cluster_pos = 0u64;
+        // Walk to the cluster holding `write_start`, extending if needed:
+        // from the write cursor when it is this file's and not past
+        // `write_start`, else from the head cluster.
+        let (mut cluster, mut cluster_pos) = match self.write_cursor {
+            Some(c) if c.file_cluster == head_cluster && c.cluster_pos as u64 <= write_start => {
+                (c.cluster, c.cluster_pos as u64)
+            }
+            _ => (head_cluster, 0u64),
+        };
         while cluster_pos + cluster_bytes <= write_start {
             cluster = match self.next_cluster(cluster)? {
                 Some(next) => next,
@@ -1428,6 +1446,14 @@ impl Fs {
             pos += n as u64;
         }
 
+        // `cluster` and `cluster_pos` moved together through the chain this
+        // write walked and extended, so they name one of its clusters.
+        self.write_cursor = Some(ChainCursor {
+            file_cluster: head_cluster,
+            contiguous: false,
+            cluster,
+            cluster_pos: cluster_pos as usize,
+        });
         let new_size = old_size.max(write_end);
         self.patch_stream_ext(
             parent.first_cluster,

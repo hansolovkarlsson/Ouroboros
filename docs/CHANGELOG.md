@@ -284,6 +284,18 @@ bypassing the cache 159. A file macOS wrote contiguous reads no FAT at all;
 the image's `/bin` is written that way today, but macOS may write a file
 either way.
 
+**A write resumes where the last one ended (2026-10-17).** FAT32's and
+exFAT's `write_at` walked a file's chain from its first cluster for every
+2 KiB a client wrote, so a copy cost a walk of the file's chain so far per
+request. Each keeps a write cursor now, apart from the read cursor since
+`cp` reads one file and writes another in turn: dropped by every FAT write
+and set again at the end of a write from the chain it walked and built. A
+`cp` of 640 KiB reads 19 FAT sectors on exFAT, from 1,412, and 2,689 on the
+ESP's FAT32, from 9,389. `make test-write-walk` copies between the exFAT
+root and the ESP, so each destination's FAT sees only its own writes, and
+requires those counts exactly, simulated from the chain `cp` built, and the
+copy to hold the source's bytes.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
