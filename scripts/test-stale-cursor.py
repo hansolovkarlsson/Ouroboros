@@ -4,7 +4,8 @@
     python3 scripts/test-stale-cursor.py    (or `make test-stale-cursor`, which builds the image)
 
 fsd's FAT32 and exFAT each keep a read cursor and a write cursor, keyed by a
-file's first cluster, and drop both at every FAT write. `test-write-walk` and
+file's first cluster, and drop both when a FAT write rewrites a link (at
+every FAT write until 2026-10-18). `test-write-walk` and
 `test-spawn-reads` grade what the cursors save, and both pass with the drop
 removed, since each read or write sets its cursor again at its end. What the
 drop guards is a sequence no `cp` makes: a file removed, its first cluster

@@ -4,8 +4,9 @@
 //!
 //! FAT32 and exFAT each keep a read cursor and a write cursor (where the last
 //! read or write ended in a file's cluster chain), keyed by the file's first
-//! cluster, and drop both at every FAT write (`write_fat_entry`). Without the
-//! drop, a cursor outlives its file: once the file is removed and a new file
+//! cluster, and drop both when a FAT write rewrites a link (`write_fat_entry`;
+//! at every FAT write until 2026-10-18). Without the drop, a cursor outlives
+//! its file: once the file is removed and a new file
 //! is given the same first cluster on a different chain, the next read or
 //! write of the new file at or past the cursor resumes on the old chain. A
 //! read returns another file's bytes; a write puts the new file's bytes into
