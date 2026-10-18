@@ -17,11 +17,21 @@
 //! cursorprobe <dir> <cluster bytes>
 //! ```
 //!
-//! In `<dir>`, which it creates and removes, on a volume whose clusters are
-//! `<cluster bytes>` (the rig reads it off the disk), three sequences. Every
-//! byte written is a pattern of its file's tag and its offset, so a read of the
+//! In `<dir>`, which it creates, on a volume whose clusters are `<cluster
+//! bytes>` (the rig reads it off the disk), three sequences, each in a
+//! directory of its own (`R`, `I`, `P`) whose files it keeps. Every byte
+//! written is a pattern of its file's tag and its offset, so a read of the
 //! wrong cluster cannot pass. Each file is read back whole at the end of its
 //! sequence.
+//!
+//! A sequence tests a stale cursor only if the allocator laid it out as below:
+//! B on A's first cluster, and A's cursor cluster somewhere else in B's chain.
+//! The probe cannot see clusters, so each sequence writes a one-cluster witness
+//! just before A (`W1`) and one just after A's last cluster (`W2`); the rig
+//! reads the kept files' chains off the disk after the boot and checks that A
+//! lay between them, B starts where A did, and the cursor cluster is G's or
+//! D's. Without that check a change in allocation would let every sequence
+//! pass with nothing tested.
 //!
 //! - `read`: A of four clusters written and read whole (the read cursor at its
 //!   last cluster), A removed, B and G written a cluster each in turn (B takes
@@ -39,8 +49,8 @@
 //! clusters of at most `SAFECOPY_MAX / 2` bytes; on larger ones (exFAT's 4 KiB)
 //! they print `skip` and the rig gives that volume only `read`. A line a
 //! sequence (`cursorprobe: ok read`, `cursorprobe: FAIL write-append: ...`),
-//! then `cursorprobe: ok` or `cursorprobe: FAIL`, and exit 0 or 1. Since
-//! 2026-10-18.
+//! then `cursorprobe: ok` or `cursorprobe: FAIL` on every exit, a refused
+//! argument included, and exit 0 or 1. Since 2026-10-18.
 
 #![no_std]
 #![no_main]
@@ -51,11 +61,19 @@ const PIECE: usize = SAFECOPY_MAX as usize;
 /// The clusters of A, B and G in `read`.
 const READ_CLUSTERS: usize = 4;
 const PATH_MAX: usize = 128;
+/// The largest cluster exFAT allows, 32 MiB; the arithmetic stays far from overflow.
+const CLUSTER_MAX: u64 = 32 << 20;
+
+/// The summary line the rig waits for, then the exit: every way out ends here.
+fn finish(target: u64, failed: bool) -> ! {
+    ulib::write_out(target, if failed { b"cursorprobe: FAIL\r\n" } else { b"cursorprobe: ok\r\n" });
+    ulib::end_of_stream(target);
+    ulib::exit(if failed { 1 } else { 0 });
+}
 
 fn usage(target: u64) -> ! {
     ulib::write_out(target, b"usage: cursorprobe <dir> <cluster bytes>\r\n");
-    ulib::end_of_stream(target);
-    ulib::exit(2);
+    finish(target, true)
 }
 
 /// The byte at `offset` of a file tagged `tag`: each aligned four bytes are the
@@ -79,6 +97,8 @@ struct Probe {
     dir: [u8; PATH_MAX],
     dir_len: usize,
     cluster: usize,
+    /// The running sequence's directory under `dir`.
+    sub: core::cell::Cell<u8>,
 }
 
 impl Probe {
@@ -96,14 +116,26 @@ impl Probe {
         ulib::write_out(self.target, &out[..n]);
     }
 
-    /// `<dir>/<name>` in `buf`, as the `&str` ulib takes.
+    /// `<dir>/<sequence>/<name>` in `buf`, as the `&str` ulib takes.
     fn path<'b>(&self, name: &[u8], buf: &'b mut [u8; PATH_MAX]) -> &'b str {
         let mut n = 0;
         ulib::emit(buf, &mut n, &self.dir[..self.dir_len]);
         ulib::emit(buf, &mut n, b"/");
-        ulib::emit(buf, &mut n, name);
+        ulib::emit(buf, &mut n, &[self.sub.get()]);
+        if !name.is_empty() {
+            ulib::emit(buf, &mut n, b"/");
+            ulib::emit(buf, &mut n, name);
+        }
         // Built from the argument and ASCII names only.
         core::str::from_utf8(&buf[..n]).unwrap_or("")
+    }
+
+    /// The sequence's directory, `sub` under `dir`.
+    fn enter(&self, seq: &[u8], sub: u8) -> Result<(), ()> {
+        self.sub.set(sub);
+        let mut buf = [0u8; PATH_MAX];
+        let r = ulib::fs_op_path(syscall_abi::FSOP_MKDIR, self.path(b"", &mut buf));
+        self.check_status(seq, b"mkdir ", &[sub], r)
     }
 
     /// An empty file `name`, or the failure.
@@ -199,8 +231,12 @@ impl Probe {
         let seq = b"read";
         let c = self.cluster;
         let size = READ_CLUSTERS * c;
+        self.enter(seq, b'R')?;
+        self.write_whole(seq, b"W1", 1, b'W')?;
         self.create(seq, b"A")?;
         self.write_at(seq, b"A", 0, size, b'A')?;
+        self.write_whole(seq, b"W2", 1, b'W')?;
+        // The read cursor at A's last cluster.
         self.verify(seq, b"A", 0, &[(0, size, b'A')])?;
         self.remove(seq, b"A")?;
         self.create(seq, b"B")?;
@@ -213,8 +249,6 @@ impl Probe {
         self.verify(seq, b"B", size - c, &[(0, size, b'B')])?;
         self.verify(seq, b"B", 0, &[(0, size, b'B')])?;
         self.verify(seq, b"G", 0, &[(0, size, b'G')])?;
-        self.remove(seq, b"B")?;
-        self.remove(seq, b"G")?;
         Ok(true)
     }
 
@@ -229,6 +263,8 @@ impl Probe {
             return Ok(false);
         }
         let whole = k * c;
+        self.enter(seq, if append { b'P' } else { b'I' })?;
+        self.write_whole(seq, b"W1", 1, b'W')?;
         self.create(seq, b"A")?;
         self.create(seq, b"F")?;
         for i in 0..k - 1 {
@@ -239,6 +275,7 @@ impl Probe {
         // whole-file chain and in D's.
         self.write_at(seq, b"F", (k - 1) * c, c, b'F')?;
         self.write_at(seq, b"A", (k - 1) * c, c, b'A')?;
+        self.write_whole(seq, b"W2", 1, b'W')?;
         self.remove(seq, b"A")?;
         self.remove(seq, b"F")?;
         self.write_whole(seq, b"B", whole, b'B')?;
@@ -251,8 +288,6 @@ impl Probe {
             self.verify(seq, b"B", 0, &[(0, whole - c, b'B'), (whole - c, whole, b'X')])?;
         }
         self.verify(seq, b"D", 0, &[(0, whole, b'D')])?;
-        self.remove(seq, b"B")?;
-        self.remove(seq, b"D")?;
         Ok(true)
     }
 }
@@ -262,9 +297,10 @@ impl Probe {
 pub extern "C" fn _start() -> ! {
     ulib::usage_if_requested(b"usage: cursorprobe <dir> <cluster bytes>\r\n");
     let target = ulib::stdout_target();
-    let mut probe = Probe { target, dir: [0; PATH_MAX], dir_len: 0, cluster: 0 };
+    let mut probe =
+        Probe { target, dir: [0; PATH_MAX], dir_len: 0, cluster: 0, sub: core::cell::Cell::new(0) };
     let Some(len) = ulib::arg(1, &mut probe.dir) else { usage(target) };
-    // Room for "/<name>" after it.
+    // Room for "/<sequence>/<name>" after it.
     if len == 0 || len > PATH_MAX - 8 {
         usage(target);
     }
@@ -274,7 +310,7 @@ pub extern "C" fn _start() -> ! {
     let Some(cluster) = core::str::from_utf8(&num[..len]).ok().and_then(ulib::parse_u64) else {
         usage(target)
     };
-    if cluster == 0 || cluster % 512 != 0 {
+    if cluster == 0 || cluster % 512 != 0 || cluster > CLUSTER_MAX {
         usage(target);
     }
     probe.cluster = cluster as usize;
@@ -283,9 +319,10 @@ pub extern "C" fn _start() -> ! {
     let r = ulib::fs_op_path(syscall_abi::FSOP_MKDIR, dir);
     if ulib::is_fs_error(r) {
         probe.say(&[b"FAIL mkdir: ", ulib::fs_error_msg(r)], None);
-        ulib::end_of_stream(target);
-        ulib::exit(1);
+        finish(target, true);
     }
+    // Each sequence in its own directory, so one that fails leaves nothing in
+    // another's way; the rig checks each one's layout on its own.
     let mut failed = false;
     for (seq, result) in [
         (&b"read"[..], probe.read()),
@@ -298,15 +335,6 @@ pub extern "C" fn _start() -> ! {
             Err(()) => failed = true,
         }
     }
-    // Left in place on a failure, for the rig's host-side look.
-    if !failed {
-        let r = ulib::fs_op_path(syscall_abi::FSOP_RMDIR, dir);
-        if ulib::is_fs_error(r) {
-            probe.say(&[b"FAIL rmdir: ", ulib::fs_error_msg(r)], None);
-            failed = true;
-        }
-    }
-    probe.say(&[if failed { b"FAIL" } else { b"ok" }], None);
-    ulib::end_of_stream(target);
-    ulib::exit(if failed { 1 } else { 0 });
+    // Every file is kept: the rig reads their chains off the disk.
+    finish(target, failed)
 }
