@@ -4,7 +4,8 @@
     python3 scripts/test-stale-cursor.py    (or `make test-stale-cursor`, which builds the image)
 
 fsd's FAT32 and exFAT each keep a read cursor and a write cursor, keyed by a
-file's first cluster, and drop both at every FAT write. `test-write-walk` and
+file's first cluster, and drop both when a FAT write rewrites a link (at
+every FAT write until 2026-10-18). `test-write-walk` and
 `test-spawn-reads` grade what the cursors save, and both pass with the drop
 removed, since each read or write sets its cursor again at its end. What the
 drop guards is a sequence no `cp` makes: a file removed, its first cluster
@@ -18,10 +19,10 @@ build/esp.img as build/espexfat.img, with a third partition added: an empty
 exFAT of 512-byte clusters made by newfs_exfat. One boot runs the probe on:
 
 - the exFAT root, 4 KiB clusters: the read sequence (a whole-file write is
-  at most SAFECOPY_MAX, 2 KiB, one cluster there, so the write sequences
+  at most SAFECOPY_MAX, 2 KiB, half a cluster there, so the write sequences
   cannot be built and the probe says `skip`);
-- the FAT32 ESP at /mnt/f, 512-byte clusters: all three;
-- the small exFAT at /mnt/x: all three, so exFAT's write cursor is graded.
+- the FAT32 ESP at /mnt/f, 512-byte clusters: all four;
+- the small exFAT at /mnt/x: all four, so exFAT's write cursor is graded.
 
 Each volume's cluster size is read off the disk and passed to the probe; a
 volume that should take the write sequences and has clusters too large for
@@ -32,14 +33,28 @@ probe intends, which the probe cannot see. So after the boot the host reads
 the files each sequence keeps (its witnesses W1 and W2, written just before A
 and just after A's last cluster, and B, G or D) and checks the layout: A lay
 between the witnesses, B starts on A's first cluster (the cursor's key), and
-A's cursor cluster is not B's at that position but G's (read) or D's
-(write). A change in allocation then fails the rig instead of leaving every
+A's cursor cluster is G's (read) or D's (write), so not B's. A change in allocation then fails the rig instead of leaving every
 sequence passing with nothing tested.
 
+Every sequence builds its stale case by removing a file: a free, then ends
+of chain written (`write-one` writes nothing else before the stale use). A
+rule wrong only for a truncation or a relink passes it, since fsd makes
+neither today.
+
+Also on the small exFAT, an entry the exFAT spec forbids and a tool may
+leave: the host gives P (NoFatChain) a size of 0 while it keeps its cluster,
+whose FAT entry it points at Q's, and the guest writes past P's first
+cluster with `writeat`. Q's bytes must be unchanged and P's on a chain of
+its own (ensure_chained ends the cluster first, since 2026-10-18; without it
+the write followed the entry into Q, and the narrowed cursor drop could keep
+a cursor that write set on a chain it had cut, the max review's finding 1).
+
 Fails with either drop removed from either filesystem's write_fat_entry,
-each on its own sequences, and with FAT32's free path not lowering its
-next-free hint, where the probe passes all three with nothing tested and the
-disk check refuses each. KEEP_IMAGE=1 keeps build/test-stale-cursor.img for a
+each on its own sequences; with FAT32's free path not lowering its
+next-free hint, where the probe passes every sequence with nothing tested
+and the disk check refuses each; with the drop decided on the value written
+rather than the entry it replaces, which only `write-one` sees; and with
+ensure_chained skipping a size-0 entry, Q's bytes. KEEP_IMAGE=1 keeps build/test-stale-cursor.img for a
 look. One boot, about a minute.
 """
 import importlib.util
@@ -63,7 +78,7 @@ SMALL = os.path.join(BUILD, "test-stale-cursor-x.part")
 IMAGE = os.path.join(BUILD, "test-stale-cursor.img")
 ABI = os.path.join(ROOT, "syscall-abi", "src", "lib.rs")
 READ_CLUSTERS = 4  # the probe's READ_CLUSTERS
-SEQUENCES = (("read", "R"), ("write-in-place", "I"), ("write-append", "P"))
+SEQUENCES = (("read", "R"), ("write-in-place", "I"), ("write-append", "P"), ("write-one", "O"))
 
 
 def safecopy_max():
@@ -76,7 +91,9 @@ def safecopy_max():
 
 
 def small_exfat():
-    """An empty 8 MiB exFAT of 512-byte clusters (newfs_exfat -c 1) at SMALL."""
+    """An 8 MiB exFAT of 512-byte clusters (newfs_exfat -c 1) at SMALL, holding
+    P and Q as macOS writes them (contiguous, NoFatChain), then P made the
+    entry `plant_empty` describes."""
     with open(SMALL, "wb") as fh:
         fh.truncate(8 * 1024 * 1024)
     att = subprocess.run(["hdiutil", "attach", "-nomount", "-imagekey", "diskimage-class=CRawDiskImage", SMALL],
@@ -84,14 +101,94 @@ def small_exfat():
     if att.returncode != 0:
         sys.exit(f"test-stale-cursor: hdiutil attach failed: {att.stderr.strip()}")
     dev = att.stdout.split()[0]
+    failed = None
     try:
         mk = subprocess.run(["newfs_exfat", "-c", "1", "-v", "CURSORX", dev], capture_output=True, text=True)
+        if mk.returncode != 0:
+            failed = f"newfs_exfat failed: {mk.stderr.strip()}"
+        else:
+            failed = place_pq(dev)
     finally:
         det = subprocess.run(["hdiutil", "detach", dev], capture_output=True, text=True)
-    if mk.returncode != 0:
-        sys.exit(f"test-stale-cursor: newfs_exfat failed: {mk.stderr.strip()}")
+    if failed:
+        sys.exit(f"test-stale-cursor: {failed}")
     if det.returncode != 0:
         sys.exit(f"test-stale-cursor: hdiutil detach {dev} failed: {det.stderr.strip()}")
+    plant_empty()
+
+
+P_BYTES = b"p" * 100
+Q_BYTES = bytes((i * 13 + 5) & 0xFF for i in range(512))
+P_WRITES = ((0, "aaa"), (600, "bbb"))  # the guest's writeats into P
+
+
+def place_pq(dev):
+    """P and Q written through macOS on `dev`; None, or what failed."""
+    if subprocess.run(["diskutil", "mount", dev], capture_output=True).returncode != 0:
+        return f"diskutil mount {dev} failed"
+    info = subprocess.run(["diskutil", "info", dev], capture_output=True, text=True).stdout
+    mp = re.search(r"Mount Point:\s*(\S.*)$", info, re.M)
+    try:
+        if not mp:
+            return f"no mount point for {dev}"
+        for name, data in (("P", P_BYTES), ("Q", Q_BYTES)):
+            with open(os.path.join(mp.group(1), name), "wb") as fh:
+                fh.write(data)
+        subprocess.run(["find", mp.group(1), "-name", "._*", "-delete"], capture_output=True)
+        for junk in (".fseventsd", ".Trashes", ".Spotlight-V100"):
+            subprocess.run(["rm", "-rf", os.path.join(mp.group(1), junk)], capture_output=True)
+    finally:
+        subprocess.run(["diskutil", "unmount", dev], capture_output=True)
+    return None
+
+
+def set_checksum(entries):
+    """An exFAT entry set's SetChecksum: every byte but the primary's 2 and 3."""
+    total = 0
+    for i, b in enumerate(entries):
+        if i not in (2, 3):
+            total = (((total << 15) | (total >> 1)) + b) & 0xFFFF
+    return total
+
+
+def plant_empty():
+    """P made a NoFatChain entry of size 0 that still names its cluster, whose
+    FAT entry is set to Q's cluster: the case the spec forbids (DataLength > 0
+    with NoFatChain) and a tool may leave. A write to P past its first cluster
+    then followed that entry into Q until 2026-10-18, when ensure_chained came
+    to end the cluster first; the guest's writeats make that write."""
+    with open(SMALL, "r+b") as fh:
+        b = fh.read(512)
+        sector = 1 << b[108]
+        fat, _, heap, _, root = struct.unpack_from("<IIIII", b, 80)
+        cluster = sector << b[109]
+        fh.seek(heap * sector + (root - 2) * cluster)
+        d = bytearray(fh.read(cluster))
+        found = {}
+        i = 0
+        while i < len(d) and d[i]:
+            count = d[i + 1] + 1 if d[i] == 0x85 else 1
+            if d[i] == 0x85:
+                stream = d[i + 32:i + 64]
+                name = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
+                found[name.decode("utf-16le")[:stream[3]]] = (i, count)
+            i += 32 * count
+        if set(found) < {"P", "Q"}:
+            sys.exit(f"test-stale-cursor: macOS did not leave P and Q in the small exFAT's root: {sorted(found)}")
+        firsts = {}
+        for name, (at, _) in found.items():
+            stream = d[at + 32:at + 64]
+            if name in ("P", "Q") and not stream[1] & 0x02:
+                sys.exit(f"test-stale-cursor: macOS wrote {name} FAT-chained, not NoFatChain: nothing to plant")
+            firsts[name] = struct.unpack_from("<I", stream, 20)[0]
+        at, count = found["P"]
+        struct.pack_into("<Q", d, at + 32 + 8, 0)   # ValidDataLength
+        struct.pack_into("<Q", d, at + 32 + 24, 0)  # DataLength
+        struct.pack_into("<H", d, at + 2, set_checksum(d[at:at + 32 * count]))
+        fh.seek(heap * sector + (root - 2) * cluster)
+        fh.write(d)
+        fh.seek(fat * sector + firsts["P"] * 4)
+        fh.write(struct.pack("<I", firsts["Q"]))
 
 
 class Volume:
@@ -223,10 +320,10 @@ def layout(vol, d, seq, sub, k):
     mine = set(b) | set(other)
     between = range(w1[0] + 1, w2[0])
     taken = [c for c in between if c in mine]  # A's and F's clusters, in allocation order
-    span = READ_CLUSTERS if seq == "read" else 2 * k
-    # A's clusters in that order: all of them in `read`; in the write
-    # sequences A0 F0 A1 F1 ... F(k-1) A(k-1), so A's last is the last taken.
-    index = READ_CLUSTERS - 1 if seq == "read" else k - 1  # A's cursor cluster's position in A, and in B
+    # A's clusters, with F's: in allocation order all of A's in `read` and
+    # `write-one`, and A0 F0 A1 F1 ... F(k-1) A(k-1) in the other two. A's
+    # last, its cursor cluster, is the last taken in each.
+    span = {"read": READ_CLUSTERS, "write-one": 2}.get(seq, 2 * k)
     free = [c for c in between if c not in mine and not vol.used(c)]
     if free:
         problems.append(f"clusters {free[:8]} between the witnesses are free: A and F did not take "
@@ -239,10 +336,12 @@ def layout(vol, d, seq, sub, k):
         if b[0] != taken[0]:
             problems.append(f"B starts at cluster {b[0]}, not A's first ({taken[0]}): "
                             "the old cursor's key never matches")
-        elif len(b) <= index or b[index] == cursor:
-            problems.append(f"B's cluster {index} is A's cursor cluster ({cursor}): the old cursor is not stale")
+        elif set(b) & set(other):
+            problems.append(f"B and {oname} share clusters {sorted(set(b) & set(other))}: a cross-link")
         elif cursor not in other:
-            problems.append(f"A's cursor cluster ({cursor}) is not in {oname}'s chain")
+            # In the other file's chain, and the two are disjoint, so not B's.
+            # Only the setup is judged here, never what the stale use did.
+            problems.append(f"A's cursor cluster ({cursor}) is not in {oname}'s chain: the old cursor is not stale")
     if problems:
         problems.append(f"chains: W1 {w1}, W2 {w2}, B {b}, {oname} {other}")
     return problems
@@ -260,7 +359,10 @@ def grade(where, vol, d, writes, out, bound):
         checks.append((f"{where}: clusters of {vol.cluster} bytes take the write sequences "
                        f"(at most {bound // 2})", k >= 2))
     for seq, sub in SEQUENCES:
-        want = "ok" if writes or seq == "read" else "skip"
+        # The probe's own rules: write-in-place and write-append need a
+        # whole-file write of two clusters, write-one of one.
+        runs = {"write-in-place": k >= 2, "write-append": k >= 2, "write-one": vol.cluster <= bound}.get(seq, True)
+        want = "ok" if runs else "skip"
         said = [ln for ln in lines if re.match(rf"cursorprobe: (ok|skip|FAIL) {seq}\b", ln)]
         checks.append((f"{where}: {want} {seq}", len(said) == 1 and said[0].startswith(f"cursorprobe: {want} {seq}")))
         if want == "ok":
@@ -273,6 +375,32 @@ def grade(where, vol, d, writes, out, bound):
                 print(f"     {where}: {seq}: {p}")
     checks.append((f"{where}: the probe's summary is ok", lines[-1:] == ["cursorprobe: ok"]))
     return checks
+
+
+def empty_entry(vol):
+    """The checks of the planted entry on the small exFAT after the guest's
+    writeats: Q's bytes as macOS wrote them, and P its own bytes on a chain of
+    its own (the cluster it named, ended, then one allocated)."""
+    names = vol.listing(vol.root)
+    pf, psize, pchained = names.get("P", (0, 0, False))
+    qf, _, _ = names.get("Q", (0, 0, False))
+    end = max(o + len(t) for o, t in P_WRITES)
+    want = bytearray(end)
+    for o, t in P_WRITES:
+        want[o:o + len(t)] = t.encode()
+    try:
+        chain = vol.chain(pf) if pchained else [pf]
+        q = vol.data([qf])[:len(Q_BYTES)]
+        p = vol.data(chain)[:end]
+    except ValueError as e:
+        return [("exfat-512 /mnt/x: the planted entry's files read off the disk", False)], [str(e)]
+    notes = [f"P: first cluster {pf}, {psize} bytes, chain {chain}; Q: cluster {qf}"]
+    return [
+        ("exfat-512 /mnt/x: a write past a size-0 NoFatChain file's cluster leaves Q's bytes as they were",
+         q == Q_BYTES),
+        ("exfat-512 /mnt/x: P holds its own bytes on a chain of its own, Q's cluster not in it",
+         pchained and psize == end and p == bytes(want) and qf not in chain),
+    ], notes
 
 
 def main() -> int:
@@ -298,6 +426,9 @@ def main() -> int:
         for _, d, v, _ in runs:
             steps.append((prev, f"cursorprobe {d} {v.cluster}"))
             prev = r"cursorprobe: (ok|FAIL)\r?\n"
+        for offset, text in P_WRITES:
+            steps.append((prev, f"writeat /mnt/x/P {offset} {text}"))
+            prev = "# "
         steps.append((prev, ""))
         # The image itself is what the stale-image guard reads: the ESP's
         # stamp and the exFAT root's /etc/srcid, both in the bytes that boot.
@@ -320,6 +451,10 @@ def main() -> int:
         for (where, d, _, writes), vol in zip(runs, vols):
             local = d.split("/", 3)[-1] if d.startswith("/mnt/") else d
             checks += grade(where, vol, local, writes, by_dir.get(d, ""), bound)
+        more, notes = empty_entry(vols[2])
+        checks += more
+        for n in notes:
+            print(f"     exfat-512 /mnt/x: {n}")
     finally:
         if os.environ.get("KEEP_IMAGE") != "1":
             os.remove(IMAGE)

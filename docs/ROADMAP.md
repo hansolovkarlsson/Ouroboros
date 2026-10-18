@@ -4242,37 +4242,50 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   have to answer what an open file is after that. Found while fixing
   spawn's reads (2026-10-17), whose fix holds the resolved file only for
   the length of one request.
-- **Every FAT write drops every cursor, a tail extension too.** A cluster
-  added at a chain's end makes no cursor stale, but `write_fat_entry`
-  drops both cursors for it, so a `cp` within one filesystem drops the
-  source's read cursor each time the destination grows a cluster, and the
-  source's next read walks from its first cluster (through the FAT cache,
-  so the cost is the sectors its chain crosses). `make test-write-walk`
-  copies between two filesystems and does not see it. Dropping only when an
-  entry that was a link is rewritten, or a cluster freed, would keep both
-  cursors across an extension; it changes the rule the cursors' safety
-  rests on, and `make test-stale-cursor` (2026-10-18) is the check that
-  rule is held to: it fails with either drop removed from either
-  filesystem. NEXT. From the review of #316.
-- **exFAT does not chain an empty contiguous file that owns a cluster.**
-  `ensure_chained` does nothing for a `NoFatChain` entry of size 0, and a
-  tool may leave one with a first cluster; `write_at` then follows that
-  cluster's FAT entry, whose value is undefined for a contiguous file.
-  Older than the write cursor, which now also records the walk. Setting
-  the entry to end of chain when converting would close it. From the
-  review of #316.
 - **One read cursor a volume.** FAT32's and exFAT's cursors each remember
   one file, so two clients reading two chained files in turn each walk
   from the first cluster again, a piece at a time; the FAT cache keeps
   that to the sectors the chain crosses, which a fragmented file makes
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
+- **FAT32's `next_cluster` follows any link below end of chain, unbounded.**
+  exFAT's bounds a link to the volume's clusters; FAT32's follows any value
+  under `0x0FFFFFF8`, the bad-cluster mark `0x0FFFFFF7` and links past
+  `cluster_end` among them. On a damaged FAT, `rm`'s `free_chain` then reads
+  and zeroes an entry far past the FAT (for `0x0FFFFFF7`, a sector about
+  1 GiB on), in every FAT copy: a data sector on a large stick. Bounding the
+  link to `2..cluster_end` in `next_cluster`, as exFAT does, closes it.
+  Older than the cursors; read in the code, not reproduced. From the max
+  review of the finer cursor rule (2026-10-18).
+- **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
+  leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
+  the link. An allocation over such an entry drops both cursors under the
+  rule of 2026-10-18, so a copy within a stick last written on Linux costs
+  what it did before the rule (867 FAT sectors for the rig's copy, not 323).
+  A cost, never a stale cursor. Skipping the drop for an allocation (the
+  bitmap says the cluster is free) was declined: on a damaged volume a
+  bitmap-free cluster can be on a live chain, the max review's finding 1,
+  and the gain is speed on Linux-written sticks only.
+- **`MOUNT` with `replace` set has no caller check.** The kernel's `MOUNT`
+  arm (`kernel/src/syscall.rs`) swaps the block device for a USB stick when
+  arg0 is nonzero, trusting that "the caller has already confirmed with the
+  server that nothing is mounted"; nothing checks who the caller is, so any
+  task can swap the disk under a mounted fsd and its cached geometry. Read
+  in the code, not exercised. Found by the max review of the finer cursor
+  rule (2026-10-18), outside its diff.
+- **exFAT's `grow_dir` does not raise a directory's DataLength.** It links a
+  new cluster to a full directory's chain, but `walk_dir` stops at a
+  subdirectory's DataLength, so entries written into the new cluster would
+  not be listed or found (the root has none, so it is not affected). Read in
+  the code, not reproduced; a subdirectory with more entry sets than its
+  first cluster holds is the test. Found by the max review of the finer
+  cursor rule (2026-10-18), outside its diff.
 - **FAT32 reads the second FAT copy for every FAT write.** `write_fat_entry`
   keeps every copy of the FAT in step, and reads the second copy's sector
   from the disk each time; only the first goes through the FAT cache. A
   `cp` of 640 KiB onto the ESP (512-byte clusters, 1,280 of them) reads
   2,689 FAT sectors, 2,559 of them the second copy (`make
-  test-write-walk`, 2026-10-17). Writing the first copy's sector to every
+  test-write-walk`, 2026-10-17; 2,690 on the image of 2026-10-18). Writing the first copy's sector to every
   copy would read none, but it would also overwrite a second copy that had
   come to differ, which is a decision about what the backup copy is for.
 - **FAT32's and exFAT's read walks are two copies.** exFAT's `read_entry`
@@ -4282,9 +4295,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `FatSector` and cached sector lookup repeat FAT32's too, as does
   `write_at`'s seek. Within each filesystem `ChainCursor::start` holds the
   cursor's starting rule once for reads and writes (the review of #316);
-  across the two it is still two copies. One cursor and cache helper over a
-  step function would hold the invariant (cluster and position move
-  together, both dropped or refreshed by every FAT write) once. From the
+  across the two it is still two copies, and so is the rule for which FAT
+  writes drop the cursors (`ends_walk`, since 2026-10-18). One cursor and
+  cache helper over a step function would hold the invariant (cluster and
+  position move together, both dropped when a link is rewritten) once. From the
   reviews of #314 and #316.
 - **`/bin` is read again for each path resolution.** One run of `ls` on
   exFAT reads 272 sectors, 168 of them `/bin`'s four-cluster directory

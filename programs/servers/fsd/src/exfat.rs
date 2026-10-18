@@ -87,6 +87,13 @@ const END_OF_CHAIN_MIN: u32 = 0xffff_fff7;
 /// The end-of-chain value we *write* into the FAT (the canonical marker).
 const END_OF_CHAIN: u32 = 0xffff_ffff;
 
+/// Whether a FAT entry stops a chain walk: `0` or end of chain (a bad-cluster
+/// mark among them). [`Fs::next_cluster`]'s rule, which [`Fs::write_fat_entry`]
+/// asks of it to decide whether a write leaves the cursors standing.
+fn ends_walk(value: u32) -> bool {
+    value == 0 || value >= END_OF_CHAIN_MIN
+}
+
 /// Longest reconstructed name we keep - the exFAT maximum.
 const LONG_NAME_MAX: usize = 255;
 
@@ -156,15 +163,18 @@ pub struct Fs {
     /// cluster: a spawn of a 640 KiB file reads 1,436 FAT sectors that
     /// way, through the FAT cache, where one walk reads 6 (`make
     /// test-spawn-reads`, 2026-10-17). Only the position is kept, never data, and
-    /// [`write_fat_entry`](Self::write_fat_entry) drops it, so a read never
-    /// follows a stale chain.
+    /// [`write_fat_entry`](Self::write_fat_entry) drops it when it rewrites a
+    /// link (since 2026-10-18 a tail extension leaves it, and so does an
+    /// allocation over a FAT entry of 0, which fsd's own frees leave; another
+    /// driver may leave a link there, which drops it),
+    /// so a read never follows a stale chain.
     read_cursor: Option<ChainCursor>,
     /// Where the last [`write_at`](Self::write_at) ended in its file's chain,
     /// so the next write of the same file at or past it seeks from there:
     /// `fat32::Fs`'s `write_cursor`, for the same reason. Kept apart from the
     /// read cursor because `cp` reads one file and writes another in turn;
-    /// dropped by every FAT write and set again at the end of a write, from
-    /// the chain it has just walked and built. Always on a FAT-chained walk:
+    /// dropped with it when a FAT write rewrites a link, and set again at the
+    /// end of a write, from the chain it has just walked and built. Always on a FAT-chained walk:
     /// `write_at` converts a contiguous file first.
     write_cursor: Option<ChainCursor>,
     /// The last FAT sector read or written, for [`fat_entry`](Self::fat_entry):
@@ -483,7 +493,7 @@ impl Fs {
             return Ok(None);
         }
         let value = self.fat_entry(cluster)?;
-        if value == 0 || value >= END_OF_CHAIN_MIN {
+        if ends_walk(value) {
             Ok(None)
         } else {
             Ok(Some(value))
@@ -885,15 +895,20 @@ impl Fs {
     /// Writes one 32-bit FAT entry (exFAT has a single active FAT). `value` is a
     /// next-cluster number, `END_OF_CHAIN`, or `0` to free.
     fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
-        // Every FAT entry written goes through here, `alloc_cluster`'s for
-        // each cluster it hands out among them, so a FAT-chained cursor is
-        // dropped before any chain changes. A cursor on a contiguous file
-        // never read the FAT and cannot go stale that way; its clusters are
-        // only reused through `alloc_cluster`, which drops it here too. The
-        // write cursor likewise; a write that extends a chain sets it again
-        // once it is done.
-        self.read_cursor = None;
-        self.write_cursor = None;
+        // Every FAT entry written goes through here, so the cursors are
+        // dropped here when a walk would go on from this cluster:
+        // `fat32.rs`'s rule and reason, asked of `next_cluster` itself. An
+        // entry where every walk stopped (`0` or end of chain) had no
+        // FAT-chained cursor past it, so writing it (an allocation, a tail
+        // extension) moves no cluster of any walk. A cursor on a contiguous
+        // file never read the FAT, and its file's clusters are reused only by
+        // a FAT-chained file, which its `contiguous` key does not match.
+        // `make test-stale-cursor` builds stale cases by removal; a
+        // truncation or a relink has no sequence there (fsd makes neither).
+        if self.next_cluster(cluster)?.is_some() {
+            self.read_cursor = None;
+            self.write_cursor = None;
+        }
         let (lba, offset) = self.fat_place(cluster);
         let mut buf = *self.fat_sector(lba)?;
         buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -1228,12 +1243,19 @@ impl Fs {
     /// existing consecutive clusters; the caller then clears the entry's
     /// `NoFatChain` flag (which `patch_stream_ext` does). No-op if already
     /// chained. The bitmap is unaffected (the clusters stay allocated).
+    ///
+    /// An entry of size 0 that names a cluster gets that one cluster ended:
+    /// the spec wants `DataLength > 0` with `NoFatChain`, but a tool may
+    /// leave one, and its cluster's FAT entry is then undefined, so a write
+    /// following it as a link went into whatever cluster it named (the
+    /// review of #316) and could leave the write cursor on a chain the write
+    /// itself had cut (the review of the finer cursor rule, 2026-10-18).
     fn ensure_chained(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
-        if !contiguous || first < 2 || size == 0 {
+        if !contiguous || first < 2 {
             return Ok(());
         }
         let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
-        let n = size.div_ceil(cluster_bytes) as u32;
+        let n = (size.div_ceil(cluster_bytes) as u32).max(1);
         for i in 0..n {
             let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
             self.write_fat_entry(first + i, value)?;

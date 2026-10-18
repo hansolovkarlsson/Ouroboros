@@ -4,8 +4,9 @@
 //!
 //! FAT32 and exFAT each keep a read cursor and a write cursor (where the last
 //! read or write ended in a file's cluster chain), keyed by the file's first
-//! cluster, and drop both at every FAT write (`write_fat_entry`). Without the
-//! drop, a cursor outlives its file: once the file is removed and a new file
+//! cluster, and drop both when a FAT write rewrites a link (`write_fat_entry`;
+//! at every FAT write until 2026-10-18). Without the drop, a cursor outlives
+//! its file: once the file is removed and a new file
 //! is given the same first cluster on a different chain, the next read or
 //! write of the new file at or past the cursor resumes on the old chain. A
 //! read returns another file's bytes; a write puts the new file's bytes into
@@ -18,14 +19,15 @@
 //! ```
 //!
 //! In `<dir>`, which it creates, on a volume whose clusters are `<cluster
-//! bytes>` (the rig reads it off the disk), three sequences, each in a
-//! directory of its own (`R`, `I`, `P`) whose files it keeps. Every byte
+//! bytes>` (the rig reads it off the disk), four sequences, each in a
+//! directory of its own (`R`, `I`, `P`, `O`) whose files it keeps. Every byte
 //! written is a pattern of its file's tag and its offset, so a read of the
 //! wrong cluster cannot pass. Each file is read back whole at the end of its
 //! sequence.
 //!
 //! A sequence tests a stale cursor only if the allocator laid it out as below:
-//! B on A's first cluster, and A's cursor cluster somewhere else in B's chain.
+//! B on A's first cluster, and A's cursor cluster in another file's chain
+//! (G's or D's), so not B's.
 //! The probe cannot see clusters, so each sequence writes a one-cluster witness
 //! just before A (`W1`) and one just after A's last cluster (`W2`); the rig
 //! reads the kept files' chains off the disk after the boot and checks that A
@@ -44,10 +46,17 @@
 //!   the stale cursor writes into D.
 //! - `write-append`: the same, then B appended to at its end: the stale cursor
 //!   extends D's chain, and B's new bytes are not in B's.
+//! - `write-one`: A of two clusters (the write cursor at its second), A
+//!   removed, B and then D written whole as one cluster each (B on A's first,
+//!   D on A's second), then B appended to at its end: the stale cursor writes
+//!   into D. No link is written between the remove and the append, only ends
+//!   of chain, so this is the sequence that sees a rule dropping the cursors
+//!   on the value written rather than the one it replaces (2026-10-18).
 //!
-//! The write sequences need a whole-file write of at least two clusters, so
-//! clusters of at most `SAFECOPY_MAX / 2` bytes; on larger ones (exFAT's 4 KiB)
-//! they print `skip` and the rig gives that volume only `read`. A line a
+//! `write-in-place` and `write-append` need a whole-file write of at least two
+//! clusters, so clusters of at most `SAFECOPY_MAX / 2` bytes; `write-one` a
+//! whole-file write of one, at most `SAFECOPY_MAX`. On larger ones (exFAT's
+//! 4 KiB) they print `skip` and the rig gives that volume only `read`. A line a
 //! sequence (`cursorprobe: ok read`, `cursorprobe: FAIL write-append: ...`),
 //! then `cursorprobe: ok` or `cursorprobe: FAIL` on every exit, a refused
 //! argument included, and exit 0 or 1. Since 2026-10-18.
@@ -252,6 +261,30 @@ impl Probe {
         Ok(true)
     }
 
+    /// `write-one`, in the module doc. `Ok(false)`: skipped.
+    fn write_one(&self) -> Result<bool, ()> {
+        let seq = b"write-one";
+        let c = self.cluster;
+        if c > PIECE {
+            self.say(&[b"skip ", seq, b": a whole-file write is less than a cluster of "], Some(c as u64));
+            return Ok(false);
+        }
+        self.enter(seq, b'O')?;
+        self.write_whole(seq, b"W1", 1, b'W')?;
+        self.create(seq, b"A")?;
+        // A write leaves its cursor on the cluster holding its last byte: A's second.
+        self.write_at(seq, b"A", 0, c, b'A')?;
+        self.write_at(seq, b"A", c, c, b'A')?;
+        self.write_whole(seq, b"W2", 1, b'W')?;
+        self.remove(seq, b"A")?;
+        self.write_whole(seq, b"B", c, b'B')?;
+        self.write_whole(seq, b"D", c, b'D')?;
+        self.write_at(seq, b"B", c, c, b'X')?;
+        self.verify(seq, b"B", 0, &[(0, c, b'B'), (c, 2 * c, b'X')])?;
+        self.verify(seq, b"D", 0, &[(0, c, b'D')])?;
+        Ok(true)
+    }
+
     /// `write-in-place` (`append` false) and `write-append`, in the module doc.
     /// `Ok(false)`: skipped, the clusters too large to build it.
     fn write(&self, append: bool) -> Result<bool, ()> {
@@ -259,7 +292,7 @@ impl Probe {
         let c = self.cluster;
         let k = PIECE / c;
         if k < 2 {
-            self.say(&[b"skip ", seq, b": a whole-file write is one cluster of "], Some(c as u64));
+            self.say(&[b"skip ", seq, b": a whole-file write is less than two clusters of "], Some(c as u64));
             return Ok(false);
         }
         let whole = k * c;
@@ -328,6 +361,7 @@ pub extern "C" fn _start() -> ! {
         (&b"read"[..], probe.read()),
         (&b"write-in-place"[..], probe.write(false)),
         (&b"write-append"[..], probe.write(true)),
+        (&b"write-one"[..], probe.write_one()),
     ] {
         match result {
             Ok(true) => probe.say(&[b"ok ", seq], None),

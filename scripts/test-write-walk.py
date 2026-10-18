@@ -33,8 +33,29 @@ shell's lookup of `cp` stepped past, on the ESP the root's one FAT sector.
 The copy must hold /HUGE's bytes, and its chain must cross a FAT sector, or
 the cursor could not be seen; each is checked.
 
-About four minutes.
+Two more pairs copy within one volume:
+
+- exFAT: `cp /SRC /CHAIN` against `cp /EMPTY /CEMPTY`, after a first copy
+  from the ESP has made /SRC FAT-chained in both boots of the pair (macOS
+  writes /HUGE contiguous, which reads no FAT);
+- FAT32: `cp /mnt/f/HUGE /mnt/f/C32` against `cp /mnt/f/EMPTY /mnt/f/CEMPTY`.
+
+Here the source's reads share the FAT and its cache with the destination's
+writes, and the model walks the source on from its read cursor before each
+write. Since 2026-10-18 a FAT write drops the cursors only when it rewrites a
+link, so the destination's allocations, which write only entries where a walk
+stopped, leave the source's read cursor standing (on these images, where a
+free cluster's FAT entry is 0: fsd's own frees write it so, but on exFAT a
+driver may leave a link in a freed cluster's entry, Linux's does, and an
+allocation over it drops both cursors, which this pair would show as a
+higher count); with the old rule (a drop at every FAT write) the source walks
+from its first cluster after each, and the pairs read 867 and 5,048
+FAT sectors where the model has 323 and 3,333 (measured on the
+tree of 2026-10-18; the counts move with every file staged on the image).
+
+About two and a half minutes.
 """
+import functools
 import importlib.util
 import os
 import shutil
@@ -137,41 +158,68 @@ class Cache:
             self.reads, self.sector = self.reads + 1, s
 
 
-def simulate(size, cluster_bytes, resolve, new_cluster, cache):
+def simulate(size, cluster_bytes, passed, new_cluster, cache, src=None, src_passed=()):
     """Run `cp`'s writes of `size` bytes, REQUEST bytes each, through `cache`:
-    each request first resolves the path (`resolve(cache)`), then allocates,
-    in order, each cluster index its bytes reach that the file does not have
-    yet (`new_cluster(cache, index)`). With the write cursor nothing else in
-    a write looks up the FAT. Returns the reads, or None if `new_cluster`
-    found the model does not describe the copy."""
+    each request first resolves the path, looking up the entries of the
+    directory clusters it steps past (`passed`), then allocates, in order,
+    each cluster index its bytes reach that the file does not have yet
+    (`new_cluster(cache, index)`). With the write cursor nothing else in a
+    write looks up the FAT. Returns the reads, or None if `new_cluster` found
+    the model does not describe the copy.
+
+    `src`, the source's chain for a copy within one volume (its resolution
+    stepping past `src_passed`): before each write, `cp` reads the same
+    REQUEST bytes of the source through the same cache, resolving its path
+    and then walking on from its read cursor, which no allocation drops
+    (since 2026-10-18, where free clusters' FAT entries are 0), looking up the entry of each cluster it leaves for
+    the next, up to the one holding the request's last byte. The read that
+    returns 0 at the end resolves the path too."""
+    def resolve(through):
+        for c in through:
+            cache.access(c)
+
     have = 0
+    # The source's read cursor, a cluster index: the first read is at offset
+    # 0, which starts at the head (cp's 1-byte probe goes through
+    # NP_READ_FILE, which leaves the cursor alone).
+    at = 0
     for start in range(0, size, REQUEST):
-        resolve(cache)
-        last = (min(start + REQUEST, size) - 1) // cluster_bytes
+        end = min(start + REQUEST, size)
+        if src:
+            resolve(src_passed)
+            while (at + 1) * cluster_bytes < end:
+                cache.access(src[at])
+                at += 1
+        resolve(passed)
+        last = (end - 1) // cluster_bytes
         while have <= last:
             if new_cluster(cache, have) is False:
                 return None
             have += 1
+    if src:
+        resolve(src_passed)
     return cache.reads
 
 
-def exfat_reads(chain, cluster_bytes, start_sector):
+def exfat_reads(chain, cluster_bytes, start_sector, src=None):
     """exFAT: the head's allocation writes its entry; each later cluster looks
     up the full one's entry (the end), writes the new one's and links the full
-    one. The root is one cluster, so a resolution looks up nothing."""
+    one. The root is one cluster, so a resolution looks up nothing. `src`:
+    the source's chain, for a copy within the volume."""
     def new(cache, i):
         for c in ([chain[0]] if i == 0 else [chain[i - 1], chain[i], chain[i - 1]]):
             cache.access(c)
-    return simulate(HUGE, cluster_bytes, lambda cache: None, new, Cache(start_sector))
+    return simulate(HUGE, cluster_bytes, (), new, Cache(start_sector), src)
 
 
-def fat32_reads(chain, cluster_bytes, free_before, nfats, passed, start_sector, end):
+def fat32_reads(chain, cluster_bytes, free_before, nfats, passed, start_sector, end, src=None, src_passed=()):
     """FAT32: find_free_cluster scans from its hint (2 at mount) through the
     cache to the first free entry below `end` (the volume's cluster_end),
     which must be the chain's next cluster;
     write_fat_entry writes the first copy through the cache and reads every
     other copy from the disk; a resolution looks up the root clusters it
-    steps past (`passed`)."""
+    steps past (`passed`, `src_passed` for the source of a copy within the
+    volume, whose chain is `src`)."""
     state = {"hint": 2}
 
     def find_free(cache):
@@ -197,11 +245,7 @@ def fat32_reads(chain, cluster_bytes, free_before, nfats, passed, start_sector, 
         if i > 0:
             write(cache, chain[i - 1])
 
-    def resolve(cache):
-        for c in passed:
-            cache.access(c)
-
-    return simulate(HUGE, cluster_bytes, resolve, new, Cache(start_sector))
+    return simulate(HUGE, cluster_bytes, passed, new, Cache(start_sector), src, src_passed)
 
 
 def exfat_entries(image, chain):
@@ -222,19 +266,25 @@ def exfat_entries(image, chain):
     return out
 
 
-def boot(tag, prepared, cmd, inspect=None):
-    steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f"), ("# ", cmd), ("# ", "")]
+def boot(tag, prepared, cmd, inspect=None, setup=()):
+    typed = list(setup) + [cmd]
+    steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
+    steps += [("# ", c) for c in typed] + [("# ", "")]
     problems, lines, count = disktrace.boot(f"test-write-walk-{tag}", prepared, IMAGE, steps, inspect)
-    refused = [ln for ln in lines if ln.startswith("cp:")]
-    if refused:
-        problems.append(f"`{cmd}` said: {refused[0]}")
+    # Each `cp:` line is charged to the command typed before it.
+    current = None
+    for ln in lines:
+        current = next((c for c in typed if ln.rstrip().endswith(c)), current)
+        if ln.startswith("cp:"):
+            problems.append(f"`{current}` said: {ln.rstrip()}")
     return problems, count
 
 
-def grade(name, prepared, base_cmd, cmd, region, inspect):
-    """Boot the pair, then compare the destination FAT's extra reads with the
-    prediction `inspect` leaves in `found` ({"want", "what"}) or the problems
-    it found; print the verdict and return 1 on a failure."""
+def grade(name, prepared, base_cmd, cmd, region, inspect, setup=()):
+    """Boot the pair, each after the commands `setup`, then compare the
+    destination FAT's extra reads with the prediction `inspect` leaves in
+    `found` ({"want", "what"}) or the problems it found; print the verdict
+    and return 1 on a failure."""
     found, inspect_problems = {}, []
 
     def run_inspect(copy):
@@ -243,8 +293,8 @@ def grade(name, prepared, base_cmd, cmd, region, inspect):
         except ValueError as e:
             inspect_problems.append(str(e))
 
-    p0, base = boot(f"{name}-base", prepared, base_cmd)
-    p1, more = boot(f"{name}-more", prepared, cmd, run_inspect)
+    p0, base = boot(f"{name}-base", prepared, base_cmd, setup=setup)
+    p1, more = boot(f"{name}-more", prepared, cmd, run_inspect, setup=setup)
     problems = p0 + p1 + inspect_problems
     if not problems and "want" not in found:
         problems.append("the copy's disk was not read")
@@ -256,11 +306,11 @@ def grade(name, prepared, base_cmd, cmd, region, inspect):
         delta = sum(c for s, c in per.items() if lo <= s < hi)
         want = found["want"]
         if not problems and delta != want:
-            problems.append(f"`{cmd}` reads {delta} FAT sectors, not {want}: one walk of the chain it "
-                            "writes, through the FAT cache, is the rule")
+            problems.append(f"`{cmd}` reads {delta} FAT sectors, not {want}: one walk of each chain it "
+                            "reads and writes, through the FAT cache, is the rule")
     verdict = "FAIL" if problems else "ok  "
-    print(f"{verdict} {name}: `{cmd}` ({found.get('what', '?')}) reads {delta} FAT sectors of the "
-          f"destination, {want} for one walk of its chain")
+    print(f"{verdict} {name}: `{cmd}` ({found.get('what', '?')}) reads {delta} sectors of the "
+          f"destination's FAT, {want} for one walk of each chain it reads and writes there")
     for p in problems:
         print(f"     {p}")
     return 1 if problems else 0
@@ -281,11 +331,12 @@ def main() -> int:
         f32_root_len = len(f32.chain(f32.root))
         f32.fh.close()
 
-        def exfat_inspect(copy, found, problems):
+        def exfat_inspect(copy, found, problems, src_name=None):
             root, chain = spawn_reads.exfat_chain(copy, "CHAIN")
             _, bin_chain = spawn_reads.exfat_chain(copy, "bin")
-            if chain is None or bin_chain is None:
-                problems.append("/CHAIN or /bin is contiguous: fsd writes every file FAT-chained, "
+            src = spawn_reads.exfat_chain(copy, src_name)[1] if src_name else None
+            if chain is None or bin_chain is None or (src_name and src is None):
+                problems.append("/CHAIN, /bin or the source is contiguous: fsd writes every file FAT-chained, "
                                 "and the model reads where the cache starts off /bin's chain")
                 return
             sectors = {c * 4 // SECTOR for c in chain}
@@ -305,22 +356,32 @@ def main() -> int:
                                 f"{-(-HUGE // cluster_bytes)}")
             elif exfat_read(copy, chain, HUGE) != data:
                 problems.append("/CHAIN does not hold /HUGE's bytes")
+            elif src and len({c * 4 // SECTOR for c in src} | sectors) < 3:
+                problems.append("the source's and the copy's chains lie in fewer than three FAT sectors: "
+                                "a source walked from its start could cost no more reads")
             else:
                 start = bin_chain[cp[0] - 1] * 4 // SECTOR
-                found["want"] = exfat_reads(chain, g["spc"] * SECTOR, start)
+                found["want"] = exfat_reads(chain, g["spc"] * SECTOR, start, src)
                 found["what"] = f"{len(chain)} clusters across {len(sectors)} FAT sectors"
 
-        def fat32_inspect(copy, found, problems):
+        def fat32_inspect(copy, found, problems, src_name=None):
             fs = Fat32(copy)
             try:
                 root = fs.chain(fs.root)
-                dst = [e for e in fs.listing(fs.root) if e[1] == "C32"]
-                if len(dst) != 1:
-                    problems.append("no C32 in the ESP's root after the copy")
+                listing = fs.listing(fs.root)
+                dst = [e for e in listing if e[1] == "C32"]
+                srcs = [e for e in listing if e[1] == src_name]
+                if len(dst) != 1 or (src_name and len(srcs) != 1):
+                    problems.append("no C32, or no source, in the ESP's root after the copy")
                     return
                 chain = fs.chain(dst[0][2])
                 mine = set(chain)
                 sectors = {c * 4 // SECTOR for c in chain}
+                src, src_passed = None, ()
+                if src_name:
+                    # The source's chain and the root clusters its resolution
+                    # steps past.
+                    src, src_passed = fs.chain(srcs[0][2]), root[:srcs[0][0]]
                 if len(root) != f32_root_len:
                     problems.append("the ESP's root grew during the copy: the model does not count that")
                 elif len({c * 4 // SECTOR for c in root}) != 1:
@@ -335,7 +396,7 @@ def main() -> int:
                 else:
                     want = fat32_reads(chain, fs.spc * SECTOR, lambda c: fs.entry(c) == 0 or c in mine,
                                        fs.nfats, root[:dst[0][0]], root[0] * 4 // SECTOR,
-                                       fs.cluster_end)
+                                       fs.cluster_end, src, src_passed)
                     if want is None:
                         problems.append("C32's chain is not the one the free-cluster scan chooses: the "
                                         "model does not describe this copy")
@@ -349,6 +410,14 @@ def main() -> int:
                         (g["fat"], g["fat_end"]), exfat_inspect)
         failed += grade("fat32", prepared, "cp /EMPTY /mnt/f/CEMPTY", "cp /HUGE /mnt/f/C32",
                         f32_region, fat32_inspect)
+        # Within one volume. On exFAT the source is made FAT-chained by a copy
+        # from the other first, in both boots of the pair (macOS wrote /HUGE
+        # contiguous, which reads no FAT); every FAT32 file is chained.
+        failed += grade("exfat-same", prepared, "cp /EMPTY /CEMPTY", "cp /SRC /CHAIN",
+                        (g["fat"], g["fat_end"]), functools.partial(exfat_inspect, src_name="SRC"),
+                        setup=["cp /mnt/f/HUGE /SRC"])
+        failed += grade("fat32-same", prepared, "cp /mnt/f/EMPTY /mnt/f/CEMPTY", "cp /mnt/f/HUGE /mnt/f/C32",
+                        f32_region, functools.partial(fat32_inspect, src_name="HUGE"))
     finally:
         os.remove(prepared)
     return 1 if failed else 0
