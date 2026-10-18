@@ -33,7 +33,21 @@ shell's lookup of `cp` stepped past, on the ESP the root's one FAT sector.
 The copy must hold /HUGE's bytes, and its chain must cross a FAT sector, or
 the cursor could not be seen; each is checked.
 
-About four minutes.
+Two more pairs copy within one volume, after a first copy from the other has
+made /SRC (FAT-chained) in both boots of the pair:
+
+- exFAT: `cp /SRC /CHAIN` against `cp /EMPTY /CEMPTY`;
+- FAT32: `cp /mnt/f/SRC /mnt/f/C32` against `cp /mnt/f/EMPTY /mnt/f/CEMPTY`.
+
+Here the source's reads share the FAT and its cache with the destination's
+writes, and the model walks the source on from its read cursor before each
+write. Since 2026-10-18 a FAT write drops the cursors only when it rewrites a
+link, so the destination's allocations, which write only entries where a walk
+stopped, leave the source's read cursor standing; with the old rule (a drop at
+every FAT write) the source walks from its first cluster after each, and the
+pairs read 867 and 9,711 FAT sectors where the model has 323 and 3,279.
+
+About six minutes.
 """
 import functools
 import importlib.util

@@ -316,6 +316,22 @@ The write sequences need a whole-file write of two clusters, so they run only
 where clusters are at most 1 KiB; on the root's 4 KiB clusters no guest
 operation can build them.
 
+**A tail extension keeps the cursors (2026-10-18).** FAT32's and exFAT's
+`write_fat_entry` dropped both cursors at every FAT write, so a `cp` within
+one volume lost the source's read cursor each time the destination grew a
+cluster, and the source's next read walked from its first cluster. Now a
+write drops them only when the entry it replaces was a link: an entry where
+every walk stopped (free, or end of chain) has no cursor past it, so an
+allocation or a tail extension moves no cluster of any walk. The predicate is
+`next_cluster`'s own (`ends_walk`, once per filesystem). A 640 KiB copy within
+the exFAT root reads 323 FAT sectors, from 867, and within the ESP 3,279,
+from 9,711. `make test-write-walk` grades both exactly from the chains on the
+disk, the source walked on from its cursor before each write, and fails with
+the old rule. `make test-stale-cursor` gained `write-one`, where only ends of
+chain are written between the remove and the stale append: it is the
+sequence that fails a rule deciding on the value written rather than the
+entry it replaces, which passes the other three.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

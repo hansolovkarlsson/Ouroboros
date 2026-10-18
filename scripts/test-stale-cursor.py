@@ -33,8 +33,7 @@ probe intends, which the probe cannot see. So after the boot the host reads
 the files each sequence keeps (its witnesses W1 and W2, written just before A
 and just after A's last cluster, and B, G or D) and checks the layout: A lay
 between the witnesses, B starts on A's first cluster (the cursor's key), and
-A's cursor cluster is not B's at that position but G's (read) or D's
-(write). A change in allocation then fails the rig instead of leaving every
+A's cursor cluster is G's (read) or D's (write), so not B's. A change in allocation then fails the rig instead of leaving every
 sequence passing with nothing tested.
 
 Fails with either drop removed from either filesystem's write_fat_entry,
@@ -225,10 +224,10 @@ def layout(vol, d, seq, sub, k):
     mine = set(b) | set(other)
     between = range(w1[0] + 1, w2[0])
     taken = [c for c in between if c in mine]  # A's and F's clusters, in allocation order
-    # A's clusters, with F's, and its cursor cluster's position in A and in B.
-    # In that order: all of A's in `read` and `write-one`; in the other two
-    # A0 F0 A1 F1 ... F(k-1) A(k-1). A's last is the last taken in each.
-    span, index = {"read": (READ_CLUSTERS, READ_CLUSTERS - 1), "write-one": (2, 1)}.get(seq, (2 * k, k - 1))
+    # A's clusters, with F's: in allocation order all of A's in `read` and
+    # `write-one`, and A0 F0 A1 F1 ... F(k-1) A(k-1) in the other two. A's
+    # last, its cursor cluster, is the last taken in each.
+    span = {"read": READ_CLUSTERS, "write-one": 2}.get(seq, 2 * k)
     free = [c for c in between if c not in mine and not vol.used(c)]
     if free:
         problems.append(f"clusters {free[:8]} between the witnesses are free: A and F did not take "
@@ -241,10 +240,10 @@ def layout(vol, d, seq, sub, k):
         if b[0] != taken[0]:
             problems.append(f"B starts at cluster {b[0]}, not A's first ({taken[0]}): "
                             "the old cursor's key never matches")
-        elif len(b) <= index or b[index] == cursor:
-            problems.append(f"B's cluster {index} is A's cursor cluster ({cursor}): the old cursor is not stale")
         elif cursor not in other:
-            problems.append(f"A's cursor cluster ({cursor}) is not in {oname}'s chain")
+            # In the other file's chain, so not B's: the files are disjoint.
+            # Only the setup is judged here, never what the stale use did.
+            problems.append(f"A's cursor cluster ({cursor}) is not in {oname}'s chain: the old cursor is not stale")
     if problems:
         problems.append(f"chains: W1 {w1}, W2 {w2}, B {b}, {oname} {other}")
     return problems

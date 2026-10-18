@@ -4242,18 +4242,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   have to answer what an open file is after that. Found while fixing
   spawn's reads (2026-10-17), whose fix holds the resolved file only for
   the length of one request.
-- **Every FAT write drops every cursor, a tail extension too.** A cluster
-  added at a chain's end makes no cursor stale, but `write_fat_entry`
-  drops both cursors for it, so a `cp` within one filesystem drops the
-  source's read cursor each time the destination grows a cluster, and the
-  source's next read walks from its first cluster (through the FAT cache,
-  so the cost is the sectors its chain crosses). `make test-write-walk`
-  copies between two filesystems and does not see it. Dropping only when an
-  entry that was a link is rewritten, or a cluster freed, would keep both
-  cursors across an extension; it changes the rule the cursors' safety
-  rests on, and `make test-stale-cursor` (2026-10-18) is the check that
-  rule is held to: it fails with either drop removed from either
-  filesystem. NEXT. From the review of #316.
 - **exFAT does not chain an empty contiguous file that owns a cluster.**
   `ensure_chained` does nothing for a `NoFatChain` entry of size 0, and a
   tool may leave one with a first cluster; `write_at` then follows that
@@ -4282,9 +4270,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `FatSector` and cached sector lookup repeat FAT32's too, as does
   `write_at`'s seek. Within each filesystem `ChainCursor::start` holds the
   cursor's starting rule once for reads and writes (the review of #316);
-  across the two it is still two copies. One cursor and cache helper over a
-  step function would hold the invariant (cluster and position move
-  together, both dropped or refreshed by every FAT write) once. From the
+  across the two it is still two copies, and so is the rule for which FAT
+  writes drop the cursors (`ends_walk`, since 2026-10-18). One cursor and
+  cache helper over a step function would hold the invariant (cluster and
+  position move together, both dropped when a link is rewritten) once. From the
   reviews of #314 and #316.
 - **`/bin` is read again for each path resolution.** One run of `ls` on
   exFAT reads 272 sectors, 168 of them `/bin`'s four-cluster directory
