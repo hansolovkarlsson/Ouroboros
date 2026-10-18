@@ -341,6 +341,31 @@ chain are written between the remove and the stale append: it is the
 sequence that fails a rule deciding on the value written rather than the
 entry it replaces, which passes the other three.
 
+**An exFAT directory grows past its first cluster (2026-10-18).** When a
+directory's clusters were full, fsd's `grow_dir` linked another and wrote the
+new entry there, but left the directory's DataLength where it was, and every
+reader stops there (fsd's own `walk_dir`, and macOS's `fsck_exfat`, which
+called the chain "too many clusters for its size"). On 4 KiB clusters the
+43rd file made in a directory could not be found. The free-slot scan did not
+stop at the size either, and for a directory macOS or Windows made, one
+NoFatChain run, it went on into the clusters after the directory and wrote
+entry sets there: on the test image into `/man`'s directory and over the new
+files' own data. The image's `/etc`, `/Users` and `/SUB` are such
+directories. Now the scan ends at the size, and `grow_dir` gives a NoFatChain
+directory a FAT chain first (`ensure_chained`, as `write_at` does for a
+file), links a cluster, and writes the chain's whole length into the
+directory's set in its parent. `create_entry` takes the directory with that
+set's location, so no create path can grow one without it. A chain an older
+fsd left past its size is covered by the next growth, and the entries written
+there come back into view. `make test-grow-dir` (`/bin/DIRPROBE`) makes 100
+files in a new directory on the exFAT root, in an empty one macOS made, and on
+the ESP as the FAT32 control, then finds, lists and touches each again. After
+the boot the host checks each directory's chain and size, that every other
+cluster holds the bytes it held, and runs `fsck_exfat -n` and `fsck_msdos -n`.
+It fails with the scan unbounded, with the size not recorded (the directory
+then grows at every create until the volume is full), and with the NoFatChain
+directory not converted first.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

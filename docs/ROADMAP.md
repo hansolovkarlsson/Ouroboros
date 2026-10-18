@@ -4273,13 +4273,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   task can swap the disk under a mounted fsd and its cached geometry. Read
   in the code, not exercised. Found by the max review of the finer cursor
   rule (2026-10-18), outside its diff.
-- **exFAT's `grow_dir` does not raise a directory's DataLength.** It links a
-  new cluster to a full directory's chain, but `walk_dir` stops at a
-  subdirectory's DataLength, so entries written into the new cluster would
-  not be listed or found (the root has none, so it is not affected). Read in
-  the code, not reproduced; a subdirectory with more entry sets than its
-  first cluster holds is the test. Found by the max review of the finer
-  cursor rule (2026-10-18), outside its diff.
 - **FAT32 reads the second FAT copy for every FAT write.** `write_fat_entry`
   keeps every copy of the FAT in step, and reads the second copy's sector
   from the disk each time; only the first goes through the FAT cache. A
