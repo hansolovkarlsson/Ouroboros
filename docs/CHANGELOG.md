@@ -323,11 +323,20 @@ cluster, and the source's next read walked from its first cluster. Now a
 write drops them only when the entry it replaces was a link: an entry where
 every walk stopped (free, or end of chain) has no cursor past it, so an
 allocation or a tail extension moves no cluster of any walk. The predicate is
-`next_cluster`'s own (`ends_walk`, once per filesystem). A 640 KiB copy within
-the exFAT root reads 323 FAT sectors, from 867, and within the ESP 3,283,
-from 9,711. `make test-write-walk` grades both exactly from the chains on the
-disk, the source walked on from its cursor before each write, and fails with
-the old rule. `make test-stale-cursor` gained `write-one`, where only ends of
+`next_cluster`'s own, asked of it before the write (`ends_walk`, once per
+filesystem). A 640 KiB copy within the exFAT root reads 323 FAT sectors, from
+867, and within the ESP 3,333, from 5,048. `make test-write-walk` grades both
+exactly from the chains on the disk, the source walked on from its cursor
+before each write, and fails with the old rule. On exFAT that holds where a
+free cluster's FAT entry is 0, as fsd's own frees leave it; a driver that
+leaves a link there (Linux's does) makes an allocation drop the cursors, a
+cost, never a stale one. The max review found the one way the narrowed rule
+could keep a stale cursor: exFAT's `ensure_chained` skipped a NoFatChain
+entry of size 0 that names a cluster, which the spec forbids and a tool may
+leave, so a write followed that cluster's undefined FAT entry, and could set
+a cursor on a chain it had itself cut. It now ends that cluster first, and
+`make test-stale-cursor` plants such an entry, pointing at another file, and
+requires that file's bytes untouched by a write past it. `make test-stale-cursor` gained `write-one`, where only ends of
 chain are written between the remove and the stale append: it is the
 sequence that fails a rule deciding on the value written rather than the
 entry it replaces, which passes the other three.

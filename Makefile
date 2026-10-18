@@ -2378,11 +2378,15 @@ test-spawn-reads: image image-ext2 image-exfat
 # A write walks a file's cluster chain once, on exFAT and FAT32, exactly
 # (scripts/test-write-walk.py): on the exFAT image, with the ESP mounted at
 # /mnt/f, `cp` of 640 KiB from one filesystem to the other, so the source's
-# FAT reads and the destination's land in different FATs; the destination's
-# FAT reads must be what the design predicts from the chain cp built, read
-# off the disk and simulated a request at a time through the FAT cache, and
-# the copy must hold the source's bytes. About four minutes; run it whenever
-# a filesystem's write_at, write cursor, FAT cache or allocator changes.
+# FAT reads and the destination's land in different FATs, and since
+# 2026-10-18 within each, where they share one FAT and its cache and the
+# source walks on from its read cursor; the FAT reads must be what the design
+# predicts from the chains, read off the disk and simulated a request at a
+# time through the FAT cache, and the copy must hold the source's bytes. The
+# pairs within a volume are the rig that fails if the cursors are dropped at
+# every FAT write again. About two and a half minutes; run it whenever a
+# filesystem's write_at, cursors, FAT cache, allocator, write_fat_entry or
+# ends_walk changes.
 test-write-walk: image-exfat
 	python3 scripts/test-write-walk.py
 
@@ -2392,8 +2396,11 @@ test-write-walk: image-exfat
 # clusters: the read cursor), on the ESP at /mnt/f and on the small exFAT at
 # /mnt/x (both cursors): a file removed and its first cluster given to a new
 # file on another chain, then the new file read or written where the old
-# cursor was, every file read back. One boot, about a minute; run it whenever
-# a filesystem's cursors, write_fat_entry, allocator or free path changes.
+# cursor was, every file read back and the setup confirmed on the disk; and a
+# write past a size-0 NoFatChain file's cluster the host planted (Q's bytes
+# unchanged). One boot, about a minute; run it whenever a filesystem's
+# cursors, write_fat_entry, ends_walk, ensure_chained, allocator or free path
+# changes.
 test-stale-cursor: image-exfat
 	python3 scripts/test-stale-cursor.py
 

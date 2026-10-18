@@ -49,11 +49,11 @@ free cluster's FAT entry is 0: fsd's own frees write it so, but on exFAT a
 driver may leave a link in a freed cluster's entry, Linux's does, and an
 allocation over it drops both cursors, which this pair would show as a
 higher count); with the old rule (a drop at every FAT write) the source walks
-from its first cluster after each, and the pairs read EXFAT_OLD and FAT32_OLD
-FAT sectors where the model has EXFAT_NEW and FAT32_NEW (measured on the
+from its first cluster after each, and the pairs read 867 and 5,048
+FAT sectors where the model has 323 and 3,333 (measured on the
 tree of 2026-10-18; the counts move with every file staged on the image).
 
-About RUNTIME.
+About two and a half minutes.
 """
 import functools
 import importlib.util
