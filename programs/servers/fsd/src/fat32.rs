@@ -384,6 +384,19 @@ struct ChainCursor {
     cluster_pos: usize,
 }
 
+impl ChainCursor {
+    /// Where a walk to byte `pos` of the file whose first cluster is `head`
+    /// starts, as (cluster, its first byte's position): at `cursor` when it is
+    /// that file's and not past `pos`, else at the head. The one rule for both
+    /// cursors; resuming is the same walk as from the head, only shorter.
+    fn start(cursor: Option<Self>, head: u32, pos: usize) -> (u32, usize) {
+        match cursor {
+            Some(c) if c.file_cluster == head && c.cluster_pos <= pos => (c.cluster, c.cluster_pos),
+            _ => (head, 0),
+        }
+    }
+}
+
 impl Fs {
     /// Mount the FAT32 volume whose first sector is at `partition_lba`: read
     /// and validate its BPB and compute the FAT/data region layout. Returns
@@ -972,13 +985,7 @@ impl Fs {
         // its `cluster` covers `[cluster_pos, cluster_pos + cluster_bytes)`
         // of the current chain, so resuming is exactly equivalent to
         // walking from the start, only shorter.
-        let (mut cluster, mut cluster_pos) = match self.read_cursor {
-            Some(c) if c.file_cluster == file.cluster && c.cluster_pos <= offset => {
-                (c.cluster, c.cluster_pos)
-            }
-            // Byte position (within the file) of `cluster`'s first byte.
-            _ => (file.cluster, 0usize),
-        };
+        let (mut cluster, mut cluster_pos) = ChainCursor::start(self.read_cursor, file.cluster, offset);
         while cluster_pos + cluster_bytes <= offset {
             match self.next_cluster(cluster)? {
                 Some(next) => cluster = next,
@@ -1476,12 +1483,8 @@ impl Fs {
         // the walk runs off the end: from the write cursor when it is this
         // file's and not past `write_start`, else from the head cluster.
         // `cluster_pos` is the file byte offset of `cluster`'s first byte.
-        let (mut cluster, mut cluster_pos) = match self.write_cursor {
-            Some(c) if c.file_cluster == head_cluster && c.cluster_pos as u64 <= write_start => {
-                (c.cluster, c.cluster_pos as u64)
-            }
-            _ => (head_cluster, 0u64),
-        };
+        let (mut cluster, pos) = ChainCursor::start(self.write_cursor, head_cluster, write_start as usize);
+        let mut cluster_pos = pos as u64;
         while cluster_pos + cluster_bytes <= write_start {
             cluster = match self.next_cluster(cluster)? {
                 Some(next) => next,

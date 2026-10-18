@@ -197,6 +197,21 @@ struct ChainCursor {
     cluster_pos: usize,
 }
 
+impl ChainCursor {
+    /// Where a walk to byte `pos` of the file whose first cluster is `head`
+    /// starts, as (cluster, its first byte's position): at `cursor` when it is
+    /// that file's, on the same walk (`contiguous`), and not past `pos`, else
+    /// at the head. The one rule for both cursors, as in `fat32.rs`.
+    fn start(cursor: Option<Self>, head: u32, contiguous: bool, pos: usize) -> (u32, usize) {
+        match cursor {
+            Some(c) if c.file_cluster == head && c.contiguous == contiguous && c.cluster_pos <= pos => {
+                (c.cluster, c.cluster_pos)
+            }
+            _ => (head, 0),
+        }
+    }
+}
+
 impl Fs {
     /// Mount the exFAT volume whose first sector (the boot sector / VBR) is at
     /// `partition_lba`. Returns [`Error::NotExFat`] if that sector isn't an
@@ -808,16 +823,8 @@ impl Fs {
         let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
         // From the cursor when it is this file's and not past `offset`, else
         // from the first cluster: the same walk either way, only shorter.
-        let (mut cluster, mut cluster_pos) = match self.read_cursor {
-            Some(c)
-                if c.file_cluster == file.first_cluster
-                    && c.contiguous == file.contiguous
-                    && c.cluster_pos <= offset =>
-            {
-                (c.cluster, c.cluster_pos)
-            }
-            _ => (file.first_cluster, 0usize),
-        };
+        let (mut cluster, mut cluster_pos) =
+            ChainCursor::start(self.read_cursor, file.first_cluster, file.contiguous, offset);
         while cluster_pos + cluster_bytes <= offset {
             match self.advance(cluster, file.contiguous)? {
                 Some(next) => cluster = next,
@@ -1396,12 +1403,9 @@ impl Fs {
         // Walk to the cluster holding `write_start`, extending if needed:
         // from the write cursor when it is this file's and not past
         // `write_start`, else from the head cluster.
-        let (mut cluster, mut cluster_pos) = match self.write_cursor {
-            Some(c) if c.file_cluster == head_cluster && c.cluster_pos as u64 <= write_start => {
-                (c.cluster, c.cluster_pos as u64)
-            }
-            _ => (head_cluster, 0u64),
-        };
+        // A write's walk is always FAT-chained: `ensure_chained` ran above.
+        let (mut cluster, pos) = ChainCursor::start(self.write_cursor, head_cluster, false, write_start as usize);
+        let mut cluster_pos = pos as u64;
         while cluster_pos + cluster_bytes <= write_start {
             cluster = match self.next_cluster(cluster)? {
                 Some(next) => next,

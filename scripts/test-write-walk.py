@@ -72,8 +72,14 @@ class Fat32:
         self.fat_end = self.fat + self.nfats * fatsz
         self.data = self.fat_end
         self.count = fatsz * SECTOR // 4
+        total = struct.unpack_from("<H", b, 19)[0] or struct.unpack_from("<I", b, 32)[0]
+        # One past the last cluster, as fsd's cluster_end: the data sectors
+        # over the cluster size plus 2, never past what the FAT describes.
+        self.cluster_end = min((total - reserved - self.nfats * fatsz) // self.spc + 2, self.count)
 
     def entry(self, c):
+        if not 0 <= c < self.count:
+            raise ValueError(f"cluster {c} is past the ESP's FAT")
         self.fh.seek(self.fat * SECTOR + c * 4)
         return struct.unpack("<I", self.fh.read(4))[0] & 0x0FFFFFFF
 
@@ -86,7 +92,7 @@ class Fat32:
         return out
 
     def listing(self, first):
-        """[(index of the directory's cluster holding the entry, short name, first cluster)]."""
+        """[(index of the directory's cluster holding the entry, short name, first cluster, size)]."""
         out = []
         for i, c in enumerate(self.chain(first)):
             self.fh.seek((self.data + (c - 2) * self.spc) * SECTOR)
@@ -97,7 +103,8 @@ class Fat32:
                     return out
                 if e[0] != 0xE5 and e[11] != 0x0F:
                     first_c = (struct.unpack_from("<H", e, 20)[0] << 16) | struct.unpack_from("<H", e, 26)[0]
-                    out.append((i, e[:11].decode("latin1").rstrip(), first_c))
+                    out.append((i, e[:11].decode("latin1").rstrip(), first_c,
+                                struct.unpack_from("<I", e, 28)[0]))
         return out
 
     def read(self, chain, size):
@@ -158,9 +165,10 @@ def exfat_reads(chain, cluster_bytes, start_sector):
     return simulate(HUGE, cluster_bytes, lambda cache: None, new, Cache(start_sector))
 
 
-def fat32_reads(chain, cluster_bytes, free_before, nfats, passed, start_sector):
+def fat32_reads(chain, cluster_bytes, free_before, nfats, passed, start_sector, end):
     """FAT32: find_free_cluster scans from its hint (2 at mount) through the
-    cache to the first free entry, which must be the chain's next cluster;
+    cache to the first free entry below `end` (the volume's cluster_end),
+    which must be the chain's next cluster;
     write_fat_entry writes the first copy through the cache and reads every
     other copy from the disk; a resolution looks up the root clusters it
     steps past (`passed`)."""
@@ -168,12 +176,13 @@ def fat32_reads(chain, cluster_bytes, free_before, nfats, passed, start_sector):
 
     def find_free(cache):
         c = state["hint"]
-        while True:
+        while c < end:
             cache.access(c)
             if free_before(c):
                 state["hint"] = c + 1
                 return c
             c += 1
+        return None  # fsd would wrap to cluster 2, which the model does not follow
 
     def write(cache, c):
         cache.access(c)
@@ -196,8 +205,8 @@ def fat32_reads(chain, cluster_bytes, free_before, nfats, passed, start_sector):
 
 
 def exfat_entries(image, chain):
-    """[(index of the directory's cluster holding the entry set, name)] of an
-    exFAT directory whose clusters are `chain`."""
+    """[(index of the directory's cluster holding the entry set, name, data
+    length)] of an exFAT directory whose clusters are `chain`."""
     g = spawn_reads.exfat_layout(image)
     cluster_bytes = g["spc"] * SECTOR
     data = exfat_read(image, chain, len(chain) * cluster_bytes)
@@ -207,7 +216,8 @@ def exfat_entries(image, chain):
         if data[i] == 0x85:
             stream = data[i + 32:i + 64]
             names = b"".join(data[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-            out.append((i // cluster_bytes, names.decode("utf-16le")[:stream[3]]))
+            out.append((i // cluster_bytes, names.decode("utf-16le")[:stream[3]],
+                        struct.unpack_from("<Q", stream, 24)[0]))
         i += 32 * count
     return out
 
@@ -279,7 +289,9 @@ def main() -> int:
                                 "and the model reads where the cache starts off /bin's chain")
                 return
             sectors = {c * 4 // SECTOR for c in chain}
-            cp = [i for i, n in exfat_entries(copy, bin_chain) if n.upper() == "CP"]
+            cp = [i for i, n, _ in exfat_entries(copy, bin_chain) if n.upper() == "CP"]
+            size = [n_len for _, n, n_len in exfat_entries(copy, root) if n == "CHAIN"]
+            cluster_bytes = g["spc"] * SECTOR
             if len(root) > 1:
                 problems.append(f"the exFAT root spans {len(root)} clusters: resolving /CHAIN may step along it")
             elif len(sectors) < 2:
@@ -288,6 +300,9 @@ def main() -> int:
             elif len(cp) != 1 or cp[0] == 0:
                 problems.append("/bin/CP's entry is not past /bin's first cluster: where the FAT cache "
                                 "starts the copy is not known from the disk")
+            elif size != [HUGE] or len(chain) != -(-HUGE // cluster_bytes):
+                problems.append(f"/CHAIN records {size} bytes in {len(chain)} clusters, not {HUGE} in "
+                                f"{-(-HUGE // cluster_bytes)}")
             elif exfat_read(copy, chain, HUGE) != data:
                 problems.append("/CHAIN does not hold /HUGE's bytes")
             else:
@@ -312,11 +327,15 @@ def main() -> int:
                     problems.append("the ESP's root crosses a FAT sector: where the cache starts is not known")
                 elif len(sectors) < 2:
                     problems.append("C32's chain lies in one FAT sector: the cursor could not be seen")
+                elif dst[0][3] != HUGE or len(chain) != -(-HUGE // (fs.spc * SECTOR)):
+                    problems.append(f"C32 records {dst[0][3]} bytes in {len(chain)} clusters, not {HUGE} "
+                                    f"in {-(-HUGE // (fs.spc * SECTOR))}")
                 elif fs.read(chain, HUGE) != data:
                     problems.append("C32 does not hold /HUGE's bytes")
                 else:
                     want = fat32_reads(chain, fs.spc * SECTOR, lambda c: fs.entry(c) == 0 or c in mine,
-                                       fs.nfats, root[:dst[0][0]], root[0] * 4 // SECTOR)
+                                       fs.nfats, root[:dst[0][0]], root[0] * 4 // SECTOR,
+                                       fs.cluster_end)
                     if want is None:
                         problems.append("C32's chain is not the one the free-cluster scan chooses: the "
                                         "model does not describe this copy")
