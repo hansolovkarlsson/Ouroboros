@@ -50,8 +50,8 @@ const DIR_ENTRY_END: u8 = 0x00;
 const END_OF_CHAIN_MIN: u32 = 0x0fff_fff8;
 
 /// Whether a FAT entry's low 28 bits stop a chain walk: free (`0`) or end of
-/// chain. The one rule for [`Fs::next_cluster`] and for which FAT writes leave
-/// the cursors standing ([`Fs::write_fat_entry`]).
+/// chain. [`Fs::next_cluster`]'s rule, which [`Fs::write_fat_entry`] asks of it
+/// to decide whether a write leaves the cursors standing.
 fn ends_walk(value: u32) -> bool {
     value == 0 || value >= END_OF_CHAIN_MIN
 }
@@ -629,6 +629,25 @@ impl Fs {
     /// 4 reserved bits, masking `value` to the low 28 - same split
     /// `next_cluster` already reads.
     fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
+        // The single choke point for all chain mutation, so the one place
+        // the cursors are dropped: when a walk would go on from this
+        // cluster, that is when the entry is a link. A cursor sits on a
+        // cluster a walk reached from its file's head, so an entry where
+        // every walk stopped (free, or end of chain) had no cursor past it,
+        // and writing it (an allocation, a tail extension) moves no cluster
+        // of any walk; a link rewritten (a free, a truncation) may. A file
+        // freed from its head rewrites the head's link first; a one-cluster
+        // file's cursor is its head at position 0, the same walk as from
+        // the head. Asked of `next_cluster` itself, so the rule is the
+        // walk's own, through the FAT cache (copy 0's sector, which the loop
+        // below then takes from the cache). See `Fs::read_cursor`. `make
+        // test-stale-cursor` builds stale cases by removal (`write-one` with
+        // only ends of chain written before the stale use); a truncation or
+        // a relink has no sequence there, since fsd makes neither today.
+        if self.next_cluster(cluster)?.is_some() {
+            self.read_cursor = None;
+            self.write_cursor = None;
+        }
         let fat_byte_offset = cluster * 4;
         let sector_offset = fat_byte_offset / SECTOR_SIZE as u32;
         let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
@@ -647,21 +666,6 @@ impl Fs {
                 buf[offset + 2],
                 buf[offset + 3],
             ]);
-            // The single choke point for all chain mutation, so the one place
-            // the cursors are dropped: when the entry was a link. A cursor
-            // sits on a cluster a walk reached from its file's head, so an
-            // entry where every walk stopped (free, or end of chain) had no
-            // cursor past it, and writing it (an allocation, a tail
-            // extension) moves no cluster of any walk; a link rewritten (a
-            // free, a truncation) may. A file freed from its head rewrites the
-            // head's link first; a one-cluster file's cursor is its head at
-            // position 0, the same walk as from the head. See
-            // `Fs::read_cursor`; `make test-stale-cursor` makes the sequences
-            // a wrong rule here would let through.
-            if i == 0 && !ends_walk(existing & 0x0fff_ffff) {
-                self.read_cursor = None;
-                self.write_cursor = None;
-            }
             let new = (existing & 0xf000_0000) | (value & 0x0fff_ffff);
             buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
             self.disk.write_sector(sector as u64, &buf)?;

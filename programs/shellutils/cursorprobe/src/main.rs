@@ -26,7 +26,8 @@
 //! sequence.
 //!
 //! A sequence tests a stale cursor only if the allocator laid it out as below:
-//! B on A's first cluster, and A's cursor cluster somewhere else in B's chain.
+//! B on A's first cluster, and A's cursor cluster in another file's chain
+//! (G's or D's), so not B's.
 //! The probe cannot see clusters, so each sequence writes a one-cluster witness
 //! just before A (`W1`) and one just after A's last cluster (`W2`); the rig
 //! reads the kept files' chains off the disk after the boot and checks that A
@@ -271,7 +272,7 @@ impl Probe {
         self.enter(seq, b'O')?;
         self.write_whole(seq, b"W1", 1, b'W')?;
         self.create(seq, b"A")?;
-        // A cluster a request, so the second write leaves the cursor at A's second.
+        // A write leaves its cursor on the cluster holding its last byte: A's second.
         self.write_at(seq, b"A", 0, c, b'A')?;
         self.write_at(seq, b"A", c, c, b'A')?;
         self.write_whole(seq, b"W2", 1, b'W')?;
@@ -291,7 +292,7 @@ impl Probe {
         let c = self.cluster;
         let k = PIECE / c;
         if k < 2 {
-            self.say(&[b"skip ", seq, b": a whole-file write is one cluster of "], Some(c as u64));
+            self.say(&[b"skip ", seq, b": a whole-file write is less than two clusters of "], Some(c as u64));
             return Ok(false);
         }
         let whole = k * c;
