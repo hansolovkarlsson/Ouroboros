@@ -56,15 +56,14 @@ Volume = load("test_stale_cursor", "test-stale-cursor.py").Volume
 BUILD = os.path.join(ROOT, "build")
 IMAGE = os.path.join(BUILD, "test-grow-dir.img")
 PART = os.path.join(BUILD, "test-grow-dir-x.part")
-W_BYTES = bytes(0x20 + (i * 7) % 0x5F for i in range(4096))  # every byte's high bit clear
 COUNT = 100
 NAMES = [f"F{i:03d}" for i in range(COUNT)]
 
 
 def mac_dir():
-    """PART: a copy of build/exfatpart.img with an empty directory MAC and a
-    file W after it, both written by macOS, which makes a directory one
-    contiguous (NoFatChain) cluster, as it made /SUB, /Users and /etc."""
+    """PART: a copy of build/exfatpart.img with an empty directory MAC made by
+    macOS, which makes a directory one contiguous (NoFatChain) cluster, as
+    it made /SUB, /Users and /etc."""
     with open(os.path.join(BUILD, "exfatpart.img"), "rb") as src, open(PART, "wb") as dst:
         dst.write(src.read())
     att = subprocess.run(["hdiutil", "attach", "-nomount", "-imagekey", "diskimage-class=CRawDiskImage", PART],
@@ -79,8 +78,6 @@ def mac_dir():
         mp = re.search(r"Mount Point:\s*(\S.*)$", info, re.M).group(1)
         try:
             os.mkdir(os.path.join(mp, "MAC"))
-            with open(os.path.join(mp, "W"), "wb") as fh:
-                fh.write(W_BYTES)
             subprocess.run(["find", mp, "-name", "._*", "-delete"], capture_output=True)
             for junk in (".fseventsd", ".Trashes", ".Spotlight-V100", "MAC/.DS_Store", ".DS_Store"):
                 subprocess.run(["rm", "-rf", os.path.join(mp, junk)], capture_output=True)
@@ -149,8 +146,17 @@ def names_check(where, names):
     return (f"{where}: on the disk the directory holds each of the {COUNT} files once", not (dup or missing or extra))
 
 
+def clusters(vol):
+    """Every cluster's bytes and whether it is in use, by cluster number."""
+    return {c: (vol.data([c]), vol.used(c)) for c in range(2, vol.count + 2)}
+
+
 def mac_checks(exf, before):
-    """MAC grown and listed as /grow is, and W's bytes as macOS wrote them."""
+    """MAC grown and listed as /grow is, and no cluster fsd had no reason to
+    write changed: every one but the root directory's, the allocation
+    bitmap's, MAC's own and those allocated during the boot holds the bytes
+    it held before it. A scan for free slots that ran past MAC's one cluster
+    wrote into whatever lay after it, in use or free."""
     checks = []
     first, size, valid, chained = exfat_dir(exf, "MAC")
     chain = exf.chain(first) if chained else [first]
@@ -160,9 +166,15 @@ def mac_checks(exf, before):
     checks.append((f"exfat /MAC: grew past its first cluster ({COUNT} files), FAT-chained", chained and len(chain) >= 3))
     checks.append(("exfat /MAC: DataLength and ValidDataLength are its whole chain", size == whole and valid == whole))
     checks.append(names_check("exfat /MAC", exfat_names(exf.data(chain)[:size])))
-    w = exf.listing(exf.root).get("W")
-    checks.append(("exfat /W: macOS's bytes unchanged, in the cluster after MAC's",
-                   w is not None and w[0] == before["W"][0] and exf.data([w[0]]) == W_BYTES))
+    mine = set(exf.chain(exf.root)) | {exf.bitmap} | set(chain)
+    after = clusters(exf)
+    stray = [c for c, (data, used) in after.items()
+             if c not in mine and data != before[c][0] and not (used and not before[c][1])]
+    if stray:
+        print(f"     exfat: clusters written with no reason: {stray[:8]}{' ...' if len(stray) > 8 else ''}"
+              f" ({', '.join('in use' if before[c][1] else 'free' for c in stray[:8])} before the boot)")
+    checks.append(("exfat: no cluster outside the root, the bitmap, MAC and the boot's allocations changed",
+                   not stray))
     return checks
 
 
@@ -224,12 +236,13 @@ def main() -> int:
             os.remove(PART)
     try:
         exf = Volume(IMAGE, parts[0][0])
-        before = exf.listing(exf.root)
-        mac, w = before.get("MAC"), before.get("W")
-        # The case is built only if MAC is one NoFatChain cluster with W's right after it.
-        if not (mac and w and not mac[2] and mac[1] == exf.cluster and w[0] == mac[0] + 1):
-            sys.exit(f"test-grow-dir: macOS did not lay out MAC and W as the rig needs: MAC {mac}, W {w}")
-        runs = [("exfat root", "/grow"), ("exfat /MAC", "/MAC"), ("fat32 /mnt/f", "/mnt/f/grow")]
+        mac = exf.listing(exf.root).get("MAC")
+        # The case is built only if MAC is one NoFatChain cluster.
+        if not (mac and not mac[2] and mac[1] == exf.cluster):
+            sys.exit(f"test-grow-dir: macOS did not make MAC one NoFatChain cluster: {mac}")
+        before = clusters(exf)
+        # MAC first, before anything else on the volume is allocated.
+        runs = [("exfat /MAC", "/MAC"), ("exfat root", "/grow"), ("fat32 /mnt/f", "/mnt/f/grow")]
         steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
         prev = "# "
         for _, d in runs:
