@@ -19,10 +19,10 @@ build/esp.img as build/espexfat.img, with a third partition added: an empty
 exFAT of 512-byte clusters made by newfs_exfat. One boot runs the probe on:
 
 - the exFAT root, 4 KiB clusters: the read sequence (a whole-file write is
-  at most SAFECOPY_MAX, 2 KiB, one cluster there, so the write sequences
+  at most SAFECOPY_MAX, 2 KiB, half a cluster there, so the write sequences
   cannot be built and the probe says `skip`);
-- the FAT32 ESP at /mnt/f, 512-byte clusters: all three;
-- the small exFAT at /mnt/x: all three, so exFAT's write cursor is graded.
+- the FAT32 ESP at /mnt/f, 512-byte clusters: all four;
+- the small exFAT at /mnt/x: all four, so exFAT's write cursor is graded.
 
 Each volume's cluster size is read off the disk and passed to the probe; a
 volume that should take the write sequences and has clusters too large for
@@ -39,8 +39,9 @@ sequence passing with nothing tested.
 
 Fails with either drop removed from either filesystem's write_fat_entry,
 each on its own sequences, and with FAT32's free path not lowering its
-next-free hint, where the probe passes all three with nothing tested and the
-disk check refuses each. KEEP_IMAGE=1 keeps build/test-stale-cursor.img for a
+next-free hint, where the probe passes every sequence with nothing tested
+and the disk check refuses each, and with the drop decided on the value
+written rather than the entry it replaces, which only `write-one` sees. KEEP_IMAGE=1 keeps build/test-stale-cursor.img for a
 look. One boot, about a minute.
 """
 import importlib.util
@@ -64,7 +65,7 @@ SMALL = os.path.join(BUILD, "test-stale-cursor-x.part")
 IMAGE = os.path.join(BUILD, "test-stale-cursor.img")
 ABI = os.path.join(ROOT, "syscall-abi", "src", "lib.rs")
 READ_CLUSTERS = 4  # the probe's READ_CLUSTERS
-SEQUENCES = (("read", "R"), ("write-in-place", "I"), ("write-append", "P"))
+SEQUENCES = (("read", "R"), ("write-in-place", "I"), ("write-append", "P"), ("write-one", "O"))
 
 
 def safecopy_max():
@@ -224,10 +225,10 @@ def layout(vol, d, seq, sub, k):
     mine = set(b) | set(other)
     between = range(w1[0] + 1, w2[0])
     taken = [c for c in between if c in mine]  # A's and F's clusters, in allocation order
-    span = READ_CLUSTERS if seq == "read" else 2 * k
-    # A's clusters in that order: all of them in `read`; in the write
-    # sequences A0 F0 A1 F1 ... F(k-1) A(k-1), so A's last is the last taken.
-    index = READ_CLUSTERS - 1 if seq == "read" else k - 1  # A's cursor cluster's position in A, and in B
+    # A's clusters, with F's, and its cursor cluster's position in A and in B.
+    # In that order: all of A's in `read` and `write-one`; in the other two
+    # A0 F0 A1 F1 ... F(k-1) A(k-1). A's last is the last taken in each.
+    span, index = {"read": (READ_CLUSTERS, READ_CLUSTERS - 1), "write-one": (2, 1)}.get(seq, (2 * k, k - 1))
     free = [c for c in between if c not in mine and not vol.used(c)]
     if free:
         problems.append(f"clusters {free[:8]} between the witnesses are free: A and F did not take "
