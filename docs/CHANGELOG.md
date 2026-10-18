@@ -296,6 +296,21 @@ root and the ESP, so each destination's FAT sees only its own writes, and
 requires those counts exactly, simulated from the chain `cp` built, and the
 copy to hold the source's bytes.
 
+**A rig sees a chain cursor go stale (2026-10-18).** FAT32's and exFAT's read
+and write cursors are keyed by a file's first cluster and dropped at every
+FAT write, and nothing checked the drop: `make test-write-walk` and `make
+test-spawn-reads` pass without it, since each read or write sets its cursor
+again. `/bin/CURSORPROBE` makes the sequences the drop guards against: a file
+removed, its first cluster given to a new file on another chain, then the new
+file read or written where the old cursor was, every byte a pattern of its
+file and offset. `make test-stale-cursor` runs it on the exFAT root, the ESP
+and a third partition, an exFAT of 512-byte clusters. With either drop
+removed from either filesystem the probe fails where it should: a read
+returns another file's bytes, an overwrite lands in another file, an append
+extends the other file's chain. The write sequences need a whole-file write
+of two clusters, so they run only where clusters are at most 1 KiB; on the
+root's 4 KiB clusters no guest operation can build them.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

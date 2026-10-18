@@ -4242,22 +4242,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   have to answer what an open file is after that. Found while fixing
   spawn's reads (2026-10-17), whose fix holds the resolved file only for
   the length of one request.
-- **No rig sees a cursor go stale, and a stale write cursor corrupts
-  another file.** FAT32 and exFAT each keep a read cursor and a write
-  cursor, positions in a file's cluster chain, and drop both in
-  `write_fat_entry`, every chain change passing through there. Nothing
-  checks that the drops are there. A stale read cursor reads wrong bytes;
-  a stale write cursor writes a file's bytes into a cluster that is free or
-  another file's (the review of #316: `cp` a file, `rm` it, a whole-file
-  write of a new file reusing its first cluster on a different chain, then
-  an append past the old position). `make test-write-walk` passes with the
-  drop removed, since each write sets its cursor again at its end, and a
-  stale read cursor shows only inside one program, since every spawn
-  replaces it. The check is a probe program like `CFIDHOLD` that does each
-  sequence in one run and reads the bytes back. NEXT, before the finer
-  invalidation below. Found while giving exFAT its cursor (2026-10-17). A
-  FAT cache not kept in step by `write_fat_entry` is seen: `/CHAIN` does
-  not run (`make test-spawn-reads`).
 - **Every FAT write drops every cursor, a tail extension too.** A cluster
   added at a chain's end makes no cursor stale, but `write_fat_entry`
   drops both cursors for it, so a `cp` within one filesystem drops the
@@ -4267,8 +4251,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   copies between two filesystems and does not see it. Dropping only when an
   entry that was a link is rewritten, or a cluster freed, would keep both
   cursors across an extension; it changes the rule the cursors' safety
-  rests on, so it waits for the stale-cursor probe above. From the review
-  of #316.
+  rests on, and `make test-stale-cursor` (2026-10-18) is the check that
+  rule is held to: it fails with either drop removed from either
+  filesystem. NEXT. From the review of #316.
 - **exFAT does not chain an empty contiguous file that owns a cluster.**
   `ensure_chained` does nothing for a `NoFatChain` entry of size 0, and a
   tool may leave one with a first cluster; `write_at` then follows that
