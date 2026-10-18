@@ -328,7 +328,17 @@ pub struct Fs {
     /// is cached, never data - reads still fetch every sector fresh - and
     /// it is invalidated on any FAT mutation ([`write_fat_entry`]), so a
     /// read can never follow a stale chain. `None` = no valid cursor.
-    read_cursor: Option<ReadCursor>,
+    read_cursor: Option<ChainCursor>,
+    /// Where the last [`write_at`](Self::write_at) ended in its file's chain,
+    /// so the next write of the same file at or past it seeks from there:
+    /// the read cursor's fix, for writes. A client writes 2 KiB a request
+    /// (`cp`, `>>`), and each request walked the chain from the first
+    /// cluster to its offset. Kept apart from the read cursor because `cp`
+    /// reads one file and writes another in turn. A write that extends the
+    /// chain drops it through [`write_fat_entry`](Self::write_fat_entry) like
+    /// any FAT write, and sets it again at its end, from the chain it has
+    /// just walked and built.
+    write_cursor: Option<ChainCursor>,
     /// The last FAT sector read, for [`fat_entry`](Self::fat_entry): one
     /// FAT sector holds 128 entries, so a chain walk or a free-cluster scan
     /// that read a sector per entry now reads it once. Before this, `cp` of
@@ -357,12 +367,12 @@ struct FatSector {
     data: [u8; SECTOR_SIZE],
 }
 
-/// A remembered point in a file's cluster chain for [`Fs::read_at`]'s
-/// sequential-read fast path - see [`Fs::read_cursor`].
+/// A remembered point in a file's cluster chain, for the sequential fast
+/// paths of reads and writes - see [`Fs::read_cursor`] and [`Fs::write_cursor`].
 #[derive(Clone, Copy)]
-struct ReadCursor {
+struct ChainCursor {
     /// The file's start cluster - identifies which file this cursor is for.
-    /// A read whose file has a different start cluster ignores the cursor.
+    /// A read or write whose file has a different start cluster ignores it.
     file_cluster: u32,
     /// A cluster in that file's chain reachable by walking forward from the
     /// file's start, and...
@@ -372,6 +382,19 @@ struct ReadCursor {
     /// on: `cluster` is the chain cluster covering `[cluster_pos,
     /// cluster_pos + cluster_bytes)`.
     cluster_pos: usize,
+}
+
+impl ChainCursor {
+    /// Where a walk to byte `pos` of the file whose first cluster is `head`
+    /// starts, as (cluster, its first byte's position): at `cursor` when it is
+    /// that file's and not past `pos`, else at the head. The one rule for both
+    /// cursors; resuming is the same walk as from the head, only shorter.
+    fn start(cursor: Option<Self>, head: u32, pos: usize) -> (u32, usize) {
+        match cursor {
+            Some(c) if c.file_cluster == head && c.cluster_pos <= pos => (c.cluster, c.cluster_pos),
+            _ => (head, 0),
+        }
+    }
 }
 
 impl Fs {
@@ -433,6 +456,7 @@ impl Fs {
             fat_size_32,
             cluster_end,
             read_cursor: None,
+            write_cursor: None,
             fat_cache: None,
             next_free_hint: 2,
         })
@@ -602,8 +626,10 @@ impl Fs {
         // (allocation, free, extend), so invalidating here alone is
         // sufficient; an in-place data overwrite that leaves the chain
         // untouched never reaches this method and correctly keeps the
-        // cursor. See `Fs::read_cursor`.
+        // cursor. See `Fs::read_cursor`. The write cursor likewise; a write
+        // that extends the chain sets it again once it is done.
         self.read_cursor = None;
+        self.write_cursor = None;
         let fat_byte_offset = cluster * 4;
         let sector_offset = fat_byte_offset / SECTOR_SIZE as u32;
         let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
@@ -959,13 +985,7 @@ impl Fs {
         // its `cluster` covers `[cluster_pos, cluster_pos + cluster_bytes)`
         // of the current chain, so resuming is exactly equivalent to
         // walking from the start, only shorter.
-        let (mut cluster, mut cluster_pos) = match self.read_cursor {
-            Some(c) if c.file_cluster == file.cluster && c.cluster_pos <= offset => {
-                (c.cluster, c.cluster_pos)
-            }
-            // Byte position (within the file) of `cluster`'s first byte.
-            _ => (file.cluster, 0usize),
-        };
+        let (mut cluster, mut cluster_pos) = ChainCursor::start(self.read_cursor, file.cluster, offset);
         while cluster_pos + cluster_bytes <= offset {
             match self.next_cluster(cluster)? {
                 Some(next) => cluster = next,
@@ -1010,7 +1030,7 @@ impl Fs {
         // only ever advanced in lock-step with `next_cluster`, and every exit
         // path above leaves them paired). Only set on a real read; the early
         // `Ok(0)` returns leave any existing cursor untouched.
-        self.read_cursor = Some(ReadCursor {
+        self.read_cursor = Some(ChainCursor {
             file_cluster: file.cluster,
             cluster,
             cluster_pos,
@@ -1460,9 +1480,11 @@ impl Fs {
         let write_end = offset + data.len() as u64;
 
         // Walk to the cluster holding `write_start`, extending the chain if
-        // the walk runs off the end.
-        let mut cluster = head_cluster;
-        let mut cluster_pos = 0u64; // file byte offset of `cluster`'s first byte
+        // the walk runs off the end: from the write cursor when it is this
+        // file's and not past `write_start`, else from the head cluster.
+        // `cluster_pos` is the file byte offset of `cluster`'s first byte.
+        let (mut cluster, pos) = ChainCursor::start(self.write_cursor, head_cluster, write_start as usize);
+        let mut cluster_pos = pos as u64;
         while cluster_pos + cluster_bytes <= write_start {
             cluster = match self.next_cluster(cluster)? {
                 Some(next) => next,
@@ -1516,6 +1538,13 @@ impl Fs {
             pos += n as u64;
         }
 
+        // `cluster` and `cluster_pos` moved together through the chain this
+        // write walked and extended, so they name one of its clusters.
+        self.write_cursor = Some(ChainCursor {
+            file_cluster: head_cluster,
+            cluster,
+            cluster_pos: cluster_pos as usize,
+        });
         // Grow-only size, and record the head cluster (which changed if
         // the file was previously empty).
         let new_size = old_size.max(write_end) as u32;
