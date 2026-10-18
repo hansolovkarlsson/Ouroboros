@@ -37,7 +37,10 @@ A's cursor cluster is not B's at that position but G's (read) or D's
 sequence passing with nothing tested.
 
 Fails with either drop removed from either filesystem's write_fat_entry,
-each on its own sequences. One boot, about a minute.
+each on its own sequences, and with FAT32's free path not lowering its
+next-free hint, where the probe passes all three with nothing tested and the
+disk check refuses each. KEEP_IMAGE=1 keeps build/test-stale-cursor.img for a
+look. One boot, about a minute.
 """
 import importlib.util
 import os

@@ -307,9 +307,14 @@ file and offset. `make test-stale-cursor` runs it on the exFAT root, the ESP
 and a third partition, an exFAT of 512-byte clusters. With either drop
 removed from either filesystem the probe fails where it should: a read
 returns another file's bytes, an overwrite lands in another file, an append
-extends the other file's chain. The write sequences need a whole-file write
-of two clusters, so they run only where clusters are at most 1 KiB; on the
-root's 4 KiB clusters no guest operation can build them.
+extends the other file's chain. The probe cannot see clusters, so each
+sequence keeps its files, with one-cluster witnesses written before and after
+the removed file, and the rig reads their chains off the disk to confirm the
+stale case was built: with FAT32's free path not lowering its hint the probe
+passes everything with nothing tested, and the disk check refuses all three.
+The write sequences need a whole-file write of two clusters, so they run only
+where clusters are at most 1 KiB; on the root's 4 KiB clusters no guest
+operation can build them.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
