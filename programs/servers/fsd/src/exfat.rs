@@ -132,6 +132,26 @@ impl DirEntry {
     }
 }
 
+/// Where an entry set lies: the directory holding it, its primary slot and
+/// its entry count.
+#[derive(Clone, Copy)]
+struct SetAt {
+    dir_cluster: u32,
+    dir_contiguous: bool,
+    slot: usize,
+    len: usize,
+}
+
+/// A directory to create an entry in: its own entry, and where that entry's
+/// set lies (`None` for the root, which has none). Growing a directory past
+/// its clusters raises its DataLength, which a reader stops at, so whoever
+/// grows it must know where that length is recorded; `create_entry` takes
+/// only this, built by `dir_at` and `parent_for_create`.
+struct Dir {
+    entry: DirEntry,
+    at: Option<SetAt>,
+}
+
 pub struct Fs {
     disk: Disk,
     /// The volume's first sector (the VBR) - kept so `mount`-info can report
@@ -694,28 +714,50 @@ impl Fs {
     /// case-insensitive (ASCII case-fold, see the module doc). Unlike FAT32
     /// there's no `.`/`..`/cluster-0-means-root quirk to special-case.
     fn find(&mut self, path: &str) -> Result<DirEntry, Error> {
+        Ok(self.find_at(path)?.0)
+    }
+
+    /// [`find`](Self::find), and where the entry's set lies (`None` for the root).
+    fn find_at(&mut self, path: &str) -> Result<(DirEntry, Option<SetAt>), Error> {
         let mut current = self.root_entry();
+        let mut at = None;
         for component in path.split('/').filter(|c| !c.is_empty()) {
             if !current.is_dir {
                 return Err(Error::NotADirectory);
             }
-            let mut found: Option<DirEntry> = None;
+            let mut found: Option<(DirEntry, usize, usize)> = None;
             self.walk_dir(
                 current.first_cluster,
                 current.contiguous,
                 current.size,
-                |entry, _slot, _len| {
+                |entry, slot, len| {
                     if entry.name().eq_ignore_ascii_case(component) {
-                        found = Some(*entry);
+                        found = Some((*entry, slot, len));
                         true
                     } else {
                         false
                     }
                 },
             )?;
-            current = found.ok_or(Error::NotFound)?;
+            let (entry, slot, len) = found.ok_or(Error::NotFound)?;
+            at = Some(SetAt {
+                dir_cluster: current.first_cluster,
+                dir_contiguous: current.contiguous,
+                slot,
+                len,
+            });
+            current = entry;
         }
-        Ok(current)
+        Ok((current, at))
+    }
+
+    /// The directory at `path`, to create an entry in (`NotADirectory` for a file).
+    fn dir_at(&mut self, path: &str) -> Result<Dir, Error> {
+        let (entry, at) = self.find_at(path)?;
+        if !entry.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        Ok(Dir { entry, at })
     }
 
     /// Lists a directory, calling `f(name, is_dir)` for each entry until
@@ -1049,37 +1091,68 @@ impl Fs {
         }
     }
 
-    /// Append one zeroed, FAT-linked cluster to a directory's chain. Refuses to
-    /// grow a contiguous directory (would break its `NoFatChain` layout - not a
-    /// case we create; directories we make are always FAT-chained).
-    fn grow_dir(&mut self, dir_cluster: u32, contiguous: bool) -> Result<(), Error> {
-        if contiguous {
-            return Err(Error::DiskFull);
+    /// Grow a directory past its end by a cluster, and record its new size.
+    ///
+    /// The root has no size of its own anywhere (its chain is its extent): a
+    /// zeroed cluster is linked to its chain's tail. Any other directory's
+    /// DataLength and ValidDataLength, in its set in its parent, are where every
+    /// reader stops (`walk_dir` included), so they are raised to the whole
+    /// chain; until 2026-10-18 they were not, and entries written past the
+    /// first cluster could not be found. A `NoFatChain` directory (as macOS and
+    /// Windows make them) is first given a FAT chain over its run, as
+    /// `write_at` does for a file, and its set then says FAT-chained. A chain
+    /// already longer than the size (a directory an older fsd grew) is not
+    /// grown further: the size is raised over it, which brings the entries
+    /// written there back into view. The cluster is linked before the size is
+    /// written, so a failure between them leaves that same case.
+    fn grow_dir(&mut self, dir: &mut Dir) -> Result<(), Error> {
+        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+        let e = &mut dir.entry;
+        if e.contiguous {
+            self.ensure_chained(e.first_cluster, true, e.size)?;
+            e.contiguous = false;
         }
-        let mut tail = dir_cluster;
+        let mut tail = e.first_cluster;
+        let mut clusters = 1u64;
         while let Some(next) = self.next_cluster(tail)? {
             tail = next;
+            clusters += 1;
         }
-        let new = self.alloc_cluster()?;
-        self.zero_cluster(new)?;
-        self.write_fat_entry(tail, new)?;
+        let Some(at) = dir.at else {
+            let new = self.alloc_cluster()?;
+            self.zero_cluster(new)?;
+            return self.write_fat_entry(tail, new);
+        };
+        if clusters * cluster_bytes <= e.size {
+            let new = self.alloc_cluster()?;
+            self.zero_cluster(new)?;
+            self.write_fat_entry(tail, new)?;
+            clusters += 1;
+        }
+        let size = clusters * cluster_bytes;
+        self.patch_stream_ext(at.dir_cluster, at.dir_contiguous, at.slot, at.len, e.first_cluster, size)?;
+        e.size = size;
         Ok(())
     }
 
     /// Global slot index of the first of `need` consecutive available slots in a
     /// directory (available = end-marker `0x00` or a deleted entry), growing the
-    /// directory by a cluster whenever the walk runs off the end.
-    fn find_free_run(
-        &mut self,
-        dir_cluster: u32,
-        contiguous: bool,
-        need: usize,
-    ) -> Result<usize, Error> {
+    /// directory by a cluster whenever the walk runs off its end: its size, or
+    /// the root's chain. Bounded by the size since 2026-10-18: a contiguous
+    /// directory's walk runs on into the clusters after it, and the slots there
+    /// were taken as free and written, another file's bytes or a free cluster.
+    fn find_free_run(&mut self, dir: &mut Dir, need: usize) -> Result<usize, Error> {
         let mut run_start = 0usize;
         let mut run = 0usize;
         let mut slot = 0usize;
         loop {
-            match self.slot_addr(dir_cluster, contiguous, slot)? {
+            let inside = dir.at.is_none() || ((slot + 1) * ENTRY_SIZE) as u64 <= dir.entry.size;
+            let addr = if inside {
+                self.slot_addr(dir.entry.first_cluster, dir.entry.contiguous, slot)?
+            } else {
+                None
+            };
+            match addr {
                 Some((lba, off)) => {
                     let mut buf = [0u8; SECTOR_SIZE];
                     self.disk.read_sector(lba, &mut buf)?;
@@ -1097,7 +1170,7 @@ impl Fs {
                     }
                     slot += 1;
                 }
-                None => self.grow_dir(dir_cluster, contiguous)?, // then re-read this slot
+                None => self.grow_dir(dir)?, // then re-read this slot
             }
         }
     }
@@ -1131,8 +1204,7 @@ impl Fs {
     #[allow(clippy::too_many_arguments)] // a directory target + a full entry description
     fn create_entry(
         &mut self,
-        dir_cluster: u32,
-        dir_contiguous: bool,
+        dir: &mut Dir,
         name: &str,
         is_dir: bool,
         first_cluster: u32,
@@ -1143,21 +1215,19 @@ impl Fs {
         let entries = build_entry_set(name, is_dir, first_cluster, data_len, data_contiguous, &mut set)
             .ok_or(Error::InvalidName)?;
         let total_bytes = entries * ENTRY_SIZE;
-        let start = self.find_free_run(dir_cluster, dir_contiguous, entries)?;
-        self.write_set_at(dir_cluster, dir_contiguous, start, &set[..total_bytes])
+        let start = self.find_free_run(dir, entries)?;
+        self.write_set_at(dir.entry.first_cluster, dir.entry.contiguous, start, &set[..total_bytes])
     }
 
     /// Resolve a path's *parent* to a mountable directory entry, checking it's a
     /// directory and that `name` doesn't already exist - the shared front half
-    /// of `touch`/`mkdir`. Returns the parent's cluster + contiguity.
-    fn parent_for_create(&mut self, path: &str) -> Result<(u32, bool, ExistingKind), Error> {
+    /// of `touch`/`mkdir`. Returns the parent, to create in.
+    fn parent_for_create(&mut self, path: &str) -> Result<(Dir, ExistingKind), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let parent = self.find(parent_path)?;
-        if !parent.is_dir {
-            return Err(Error::NotADirectory);
-        }
+        let parent = self.dir_at(parent_path)?;
+        let p = parent.entry;
         let mut kind = ExistingKind::None;
-        self.walk_dir(parent.first_cluster, parent.contiguous, parent.size, |entry, _slot, _len| {
+        self.walk_dir(p.first_cluster, p.contiguous, p.size, |entry, _slot, _len| {
             if entry.name().eq_ignore_ascii_case(name) {
                 kind = if entry.is_dir {
                     ExistingKind::Dir
@@ -1169,7 +1239,7 @@ impl Fs {
                 false
             }
         })?;
-        Ok((parent.first_cluster, parent.contiguous, kind))
+        Ok((parent, kind))
     }
 
     /// Locate a named entry in a directory, also returning its set's on-disk
@@ -1326,13 +1396,13 @@ impl Fs {
     /// needs no cluster: first cluster `0`, length `0` - just one entry set.
     pub fn touch(&mut self, path: &str) -> Result<(), Error> {
         let (_parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let (dir_cluster, dir_contig, kind) = self.parent_for_create(path)?;
+        let (mut dir, kind) = self.parent_for_create(path)?;
         match kind {
             ExistingKind::File => return Ok(()),
             ExistingKind::Dir => return Err(Error::NotAFile),
             ExistingKind::None => {}
         }
-        self.create_entry(dir_cluster, dir_contig, name, false, 0, 0, false)
+        self.create_entry(&mut dir, name, false, 0, 0, false)
     }
 
     /// Create a file with exactly `data`, or fully replace an existing file's
@@ -1342,10 +1412,8 @@ impl Fs {
     /// the entry patched (or a new entry created).
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let parent = self.find(parent_path)?;
-        if !parent.is_dir {
-            return Err(Error::NotADirectory);
-        }
+        let mut dir = self.dir_at(parent_path)?;
+        let parent = dir.entry;
         let existing =
             self.find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?;
         if let Some((entry, _, _)) = existing {
@@ -1371,15 +1439,7 @@ impl Fs {
                     data.len() as u64,
                 )
             }
-            None => self.create_entry(
-                parent.first_cluster,
-                parent.contiguous,
-                name,
-                false,
-                new_cluster,
-                data.len() as u64,
-                false,
-            ),
+            None => self.create_entry(&mut dir, name, false, new_cluster, data.len() as u64, false),
         }
     }
 
@@ -1518,7 +1578,7 @@ impl Fs {
     /// a zeroed cluster whose first slot is the end-of-directory marker.
     pub fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         let (_parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let (dir_cluster, dir_contig, kind) = self.parent_for_create(path)?;
+        let (mut dir, kind) = self.parent_for_create(path)?;
         if kind != ExistingKind::None {
             return Err(Error::AlreadyExists);
         }
@@ -1526,7 +1586,7 @@ impl Fs {
         let new_cluster = self.alloc_cluster()?;
         self.zero_cluster(new_cluster)?;
         let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
-        self.create_entry(dir_cluster, dir_contig, name, true, new_cluster, cluster_bytes, false)
+        self.create_entry(&mut dir, name, true, new_cluster, cluster_bytes, false)
     }
 
     /// Remove a file (rejects a directory with `NotAFile`). Frees its clusters
@@ -1598,10 +1658,10 @@ impl Fs {
         if !src_parent.is_dir {
             return Err(Error::NotADirectory);
         }
-        let dst_parent = self.find(dst_parent_path)?;
-        if !dst_parent.is_dir {
-            return Err(Error::NotADirectory);
-        }
+        let mut dst_dir = self.dir_at(dst_parent_path)?;
+        // As it was found: a create that grows the directory changes its size
+        // and chaining, and the slots found in it address the same clusters.
+        let dst_parent = dst_dir.entry;
 
         let (src_entry, src_slot, src_len) = self
             .find_in_parent(src_parent.first_cluster, src_parent.contiguous, src_parent.size, src_name)?
@@ -1644,8 +1704,7 @@ impl Fs {
             // fills a free run and moves nothing - so the recorded `dst_slot`
             // still addresses the old set afterwards.
             self.create_entry(
-                dst_parent.first_cluster,
-                dst_parent.contiguous,
+                &mut dst_dir,
                 dst_name,
                 src_entry.is_dir,
                 src_entry.first_cluster,
@@ -1669,8 +1728,7 @@ impl Fs {
 
         // Link dst to the same clusters first, then unlink src.
         self.create_entry(
-            dst_parent.first_cluster,
-            dst_parent.contiguous,
+            &mut dst_dir,
             dst_name,
             src_entry.is_dir,
             src_entry.first_cluster,
