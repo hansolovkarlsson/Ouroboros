@@ -1100,11 +1100,11 @@ impl Fs {
     /// chain; until 2026-10-18 they were not, and entries written past the
     /// first cluster could not be found. A `NoFatChain` directory (as macOS and
     /// Windows make them) is first given a FAT chain over its run, as
-    /// `write_at` does for a file, and its set then says FAT-chained. A chain
-    /// already longer than the size (a directory an older fsd grew) is not
-    /// grown further: the size is raised over it, which brings the entries
-    /// written there back into view. The cluster is linked before the size is
-    /// written, so a failure between them leaves that same case.
+    /// `write_at` does for a file, and its set then says FAT-chained. The size
+    /// is the chain's, counted, not the old size and a cluster: a chain already
+    /// past its size (a directory an older fsd grew, or a failure between the
+    /// link and the size write, which come in that order) is then covered too,
+    /// and the entries written there come back into view.
     fn grow_dir(&mut self, dir: &mut Dir) -> Result<(), Error> {
         let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
         let e = &mut dir.entry;
@@ -1118,18 +1118,13 @@ impl Fs {
             tail = next;
             clusters += 1;
         }
+        let new = self.alloc_cluster()?;
+        self.zero_cluster(new)?;
+        self.write_fat_entry(tail, new)?;
         let Some(at) = dir.at else {
-            let new = self.alloc_cluster()?;
-            self.zero_cluster(new)?;
-            return self.write_fat_entry(tail, new);
+            return Ok(());
         };
-        if clusters * cluster_bytes <= e.size {
-            let new = self.alloc_cluster()?;
-            self.zero_cluster(new)?;
-            self.write_fat_entry(tail, new)?;
-            clusters += 1;
-        }
-        let size = clusters * cluster_bytes;
+        let size = (clusters + 1) * cluster_bytes;
         self.patch_stream_ext(at.dir_cluster, at.dir_contiguous, at.slot, at.len, e.first_cluster, size)?;
         e.size = size;
         Ok(())
