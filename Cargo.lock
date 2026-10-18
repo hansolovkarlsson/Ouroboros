@@ -130,6 +130,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cursorprobe"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "dial"
 version = "0.1.0"
 dependencies = [

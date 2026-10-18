@@ -81,6 +81,8 @@ COREPROBE_ELF := target/$(USER_TARGET)/release/coreprobe
 COREPROBE_BIN := target/$(USER_TARGET)/release/coreprobe.bin
 STAGEPROBE_ELF := target/$(USER_TARGET)/release/stageprobe
 STAGEPROBE_BIN := target/$(USER_TARGET)/release/stageprobe.bin
+CURSORPROBE_ELF := target/$(USER_TARGET)/release/cursorprobe
+CURSORPROBE_BIN := target/$(USER_TARGET)/release/cursorprobe.bin
 VTPROBE_ELF  := target/$(USER_TARGET)/release/vtprobe
 VTPROBE_BIN  := target/$(USER_TARGET)/release/vtprobe.bin
 ID_ELF       := target/$(USER_TARGET)/release/id
@@ -443,7 +445,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -621,6 +623,12 @@ coreprobe-bin:
 stageprobe-bin:
 	cargo build -p stageprobe --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(STAGEPROBE_ELF) $(STAGEPROBE_BIN)
+
+# fsd's chain cursors after their file is gone (programs/shellutils/cursorprobe):
+# the sequences that make a stale cursor, for scripts/test-stale-cursor.py.
+cursorprobe-bin:
+	cargo build -p cursorprobe --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(CURSORPROBE_ELF) $(CURSORPROBE_BIN)
 
 vtprobe-bin:
 	cargo build -p vtprobe --target $(USER_TARGET) --release
@@ -1104,7 +1112,7 @@ srcid-begin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: srcid-begin build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin) $(if $(HAVE_EDIT),edit-bin)
+esp: srcid-begin build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin) $(if $(HAVE_EDIT),edit-bin)
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -1175,6 +1183,7 @@ esp: srcid-begin build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin n
 	cp $(FPPROBE_BIN) $(ESP_DIR)/bin/FPPROBE
 	cp $(COREPROBE_BIN) $(ESP_DIR)/bin/COREPROBE
 	cp $(STAGEPROBE_BIN) $(ESP_DIR)/bin/STAGEPROBE
+	cp $(CURSORPROBE_BIN) $(ESP_DIR)/bin/CURSORPROBE
 	cp $(VTPROBE_BIN) $(ESP_DIR)/bin/VTPROBE
 	cp $(ID_BIN) $(ESP_DIR)/bin/ID
 	cp $(PASSWD_BIN) $(ESP_DIR)/bin/PASSWD
@@ -2376,6 +2385,17 @@ test-spawn-reads: image image-ext2 image-exfat
 # a filesystem's write_at, write cursor, FAT cache or allocator changes.
 test-write-walk: image-exfat
 	python3 scripts/test-write-walk.py
+
+# No chain cursor outlives its file (scripts/test-stale-cursor.py,
+# /bin/CURSORPROBE): on the exFAT image with a third partition, an empty exFAT
+# of 512-byte clusters, the probe's sequences on the exFAT root (4 KiB
+# clusters: the read cursor), on the ESP at /mnt/f and on the small exFAT at
+# /mnt/x (both cursors): a file removed and its first cluster given to a new
+# file on another chain, then the new file read or written where the old
+# cursor was, every file read back. One boot, about a minute; run it whenever
+# a filesystem's cursors, write_fat_entry, allocator or free path changes.
+test-stale-cursor: image-exfat
+	python3 scripts/test-stale-cursor.py
 
 # DevTools's editor on Ouroboros (scripts/test-edit.py, /bin/edit from
 # EDIT_DIR): `edit hello.txt` opens, ^Q Q repeats a delete on poll's timeout,
