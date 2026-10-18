@@ -117,6 +117,23 @@ class Volume:
             self.end = 0x0FFFFFF8
         self.fat = base + fat * sector
         self.heap = base + heap * sector
+        if self.exfat:
+            # The allocation bitmap's first cluster, from the root's 0x81 entry
+            # (assumed contiguous, as fsd's exfat.rs assumes it).
+            d = self.data(self.chain(self.root))
+            hits = [struct.unpack_from("<I", d, i + 20)[0] for i in range(0, len(d), 32) if d[i] == 0x81]
+            if not hits:
+                raise ValueError("no allocation bitmap in the exFAT root")
+            self.bitmap = hits[0]
+
+    def used(self, c):
+        """Whether cluster `c` is allocated: its FAT entry on FAT32, its
+        allocation bitmap bit on exFAT (a contiguous file leaves its FAT
+        entries 0)."""
+        if not self.exfat:
+            return self.entry(c) != 0
+        self.fh.seek(self.heap + (self.bitmap - 2) * self.cluster + (c - 2) // 8)
+        return bool(self.fh.read(1)[0] >> ((c - 2) % 8) & 1)
 
     def entry(self, c):
         self.fh.seek(self.fat + c * 4)
@@ -181,28 +198,50 @@ class Volume:
 
 def layout(vol, d, seq, sub, k):
     """The problems with the stale case `seq` built in `d`/`sub`, or [] when
-    it is laid out as the probe intends (see the module doc)."""
+    it is laid out as the probe intends (see the module doc).
+
+    Both allocators hand out free clusters in ascending order (FAT32 from its
+    hint, lowered to the lowest cluster freed; exFAT from the bitmap's first
+    free bit), and nothing below W1 was free when it was written. So A's
+    clusters, with F's in the write sequences, were the free clusters
+    between W1 and W2, in ascending order, and once A and F are removed B and
+    G or D take those clusters back first. Every cluster between the
+    witnesses is then B's or the other file's, in A's interleaved order, or
+    in use by something that was there before: a free one means the model
+    does not describe the run."""
     def chain(name):
         return vol.file_chain(f"{d}/{sub}/{name}")
 
     w1, w2, b = chain("W1"), chain("W2"), chain("B")
-    a = w1[0] + 1  # A's first cluster
-    span = READ_CLUSTERS if seq == "read" else 2 * k  # A's clusters, with F's in the write sequences
-    cursor = a + (READ_CLUSTERS - 1 if seq == "read" else 2 * k - 1)  # A's last cluster
-    index = READ_CLUSTERS - 1 if seq == "read" else k - 1  # its position in A, and in B
     other, oname = (chain("G"), "G") if seq == "read" else (chain("D"), "D")
     problems = []
     if len(w1) != 1 or len(w2) != 1:
-        problems.append("a witness is not one cluster")
-    elif w2[0] != a + span:
-        problems.append(f"W2 is at cluster {w2[0]}, not {a + span}: A did not lie in the {span} clusters "
-                        f"after W1 ({w1[0]}), so its cursor cluster is not known")
-    elif b[0] != a:
-        problems.append(f"B starts at cluster {b[0]}, not A's first ({a}): the old cursor's key never matches")
-    elif len(b) <= index or b[index] == cursor:
-        problems.append(f"B's cluster {index} is A's cursor cluster ({cursor}): the old cursor is not stale")
-    elif cursor not in other:
-        problems.append(f"A's cursor cluster ({cursor}) is not in {oname}'s chain {other}")
+        return ["a witness is not one cluster", f"chains: W1 {w1}, W2 {w2}"]
+    mine = set(b) | set(other)
+    between = range(w1[0] + 1, w2[0])
+    taken = [c for c in between if c in mine]  # A's and F's clusters, in allocation order
+    span = READ_CLUSTERS if seq == "read" else 2 * k
+    # A's clusters in that order: all of them in `read`; in the write
+    # sequences A0 F0 A1 F1 ... F(k-1) A(k-1), so A's last is the last taken.
+    index = READ_CLUSTERS - 1 if seq == "read" else k - 1  # A's cursor cluster's position in A, and in B
+    free = [c for c in between if c not in mine and not vol.used(c)]
+    if free:
+        problems.append(f"clusters {free[:8]} between the witnesses are free: A and F did not take "
+                        "every free cluster between them, so where A lay is not known")
+    elif len(taken) != span:
+        problems.append(f"{len(taken)} clusters between the witnesses are B's or {oname}'s, not {span}: "
+                        "A and F did not lie between them, or B and the other file did not take them back")
+    else:
+        cursor = taken[-1]
+        if b[0] != taken[0]:
+            problems.append(f"B starts at cluster {b[0]}, not A's first ({taken[0]}): "
+                            "the old cursor's key never matches")
+        elif len(b) <= index or b[index] == cursor:
+            problems.append(f"B's cluster {index} is A's cursor cluster ({cursor}): the old cursor is not stale")
+        elif cursor not in other:
+            problems.append(f"A's cursor cluster ({cursor}) is not in {oname}'s chain")
+    if problems:
+        problems.append(f"chains: W1 {w1}, W2 {w2}, B {b}, {oname} {other}")
     return problems
 
 
@@ -279,7 +318,8 @@ def main() -> int:
             local = d.split("/", 3)[-1] if d.startswith("/mnt/") else d
             checks += grade(where, vol, local, writes, by_dir.get(d, ""), bound)
     finally:
-        os.remove(IMAGE)
+        if os.environ.get("KEEP_IMAGE") != "1":
+            os.remove(IMAGE)
     failed = 0
     for name, ok in checks:
         print(f"{'ok  ' if ok else 'FAIL'} {name}")
