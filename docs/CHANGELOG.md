@@ -324,7 +324,7 @@ write drops them only when the entry it replaces was a link: an entry where
 every walk stopped (free, or end of chain) has no cursor past it, so an
 allocation or a tail extension moves no cluster of any walk. The predicate is
 `next_cluster`'s own (`ends_walk`, once per filesystem). A 640 KiB copy within
-the exFAT root reads 323 FAT sectors, from 867, and within the ESP 3,279,
+the exFAT root reads 323 FAT sectors, from 867, and within the ESP 3,283,
 from 9,711. `make test-write-walk` grades both exactly from the chains on the
 disk, the source walked on from its cursor before each write, and fails with
 the old rule. `make test-stale-cursor` gained `write-one`, where only ends of

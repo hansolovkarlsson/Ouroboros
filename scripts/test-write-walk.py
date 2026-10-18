@@ -45,7 +45,7 @@ write. Since 2026-10-18 a FAT write drops the cursors only when it rewrites a
 link, so the destination's allocations, which write only entries where a walk
 stopped, leave the source's read cursor standing; with the old rule (a drop at
 every FAT write) the source walks from its first cluster after each, and the
-pairs read 867 and 9,711 FAT sectors where the model has 323 and 3,279.
+pairs read 867 and 9,711 FAT sectors where the model has 323 and 3,283.
 
 About six minutes.
 """
