@@ -55,8 +55,39 @@ Volume = load("test_stale_cursor", "test-stale-cursor.py").Volume
 
 BUILD = os.path.join(ROOT, "build")
 IMAGE = os.path.join(BUILD, "test-grow-dir.img")
+PART = os.path.join(BUILD, "test-grow-dir-x.part")
+W_BYTES = bytes(0x20 + (i * 7) % 0x5F for i in range(4096))  # every byte's high bit clear
 COUNT = 100
 NAMES = [f"F{i:03d}" for i in range(COUNT)]
+
+
+def mac_dir():
+    """PART: a copy of build/exfatpart.img with an empty directory MAC and a
+    file W after it, both written by macOS, which makes a directory one
+    contiguous (NoFatChain) cluster, as it made /SUB, /Users and /etc."""
+    with open(os.path.join(BUILD, "exfatpart.img"), "rb") as src, open(PART, "wb") as dst:
+        dst.write(src.read())
+    att = subprocess.run(["hdiutil", "attach", "-nomount", "-imagekey", "diskimage-class=CRawDiskImage", PART],
+                         capture_output=True, text=True)
+    if att.returncode != 0:
+        sys.exit(f"test-grow-dir: hdiutil attach failed: {att.stderr.strip()}")
+    dev = att.stdout.split()[0]
+    try:
+        if subprocess.run(["diskutil", "mount", dev], capture_output=True).returncode != 0:
+            sys.exit(f"test-grow-dir: diskutil mount {dev} failed")
+        info = subprocess.run(["diskutil", "info", dev], capture_output=True, text=True).stdout
+        mp = re.search(r"Mount Point:\s*(\S.*)$", info, re.M).group(1)
+        try:
+            os.mkdir(os.path.join(mp, "MAC"))
+            with open(os.path.join(mp, "W"), "wb") as fh:
+                fh.write(W_BYTES)
+            subprocess.run(["find", mp, "-name", "._*", "-delete"], capture_output=True)
+            for junk in (".fseventsd", ".Trashes", ".Spotlight-V100", "MAC/.DS_Store", ".DS_Store"):
+                subprocess.run(["rm", "-rf", os.path.join(mp, junk)], capture_output=True)
+        finally:
+            subprocess.run(["diskutil", "unmount", dev], capture_output=True)
+    finally:
+        subprocess.run(["hdiutil", "detach", dev], capture_output=True)
 
 
 def exfat_dir(vol, name):
@@ -78,11 +109,14 @@ def exfat_dir(vol, name):
 
 def exfat_names(d):
     """Every live file name in the entry sets of directory bytes `d`, in
-    order, a name twice if two sets carry it."""
+    order, a name twice if two sets carry it; a set cut off by the end of
+    `d` is not read."""
     out = []
     i = 0
     while i + 32 <= len(d) and d[i]:
         count = d[i + 1] + 1 if d[i] == 0x85 else 1
+        if i + 32 * count > len(d):
+            break
         if d[i] == 0x85:
             stream = d[i + 32:i + 64]
             got = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
@@ -115,9 +149,26 @@ def names_check(where, names):
     return (f"{where}: on the disk the directory holds each of the {COUNT} files once", not (dup or missing or extra))
 
 
-def disk_checks(vols):
-    exf, esp = vols
+def mac_checks(exf, before):
+    """MAC grown and listed as /grow is, and W's bytes as macOS wrote them."""
     checks = []
+    first, size, valid, chained = exfat_dir(exf, "MAC")
+    chain = exf.chain(first) if chained else [first]
+    whole = len(chain) * exf.cluster
+    print(f"     exfat /MAC: first cluster {first}, {'chained' if chained else 'NoFatChain'}, "
+          f"chain of {len(chain)} clusters, DataLength {size}, ValidDataLength {valid}")
+    checks.append((f"exfat /MAC: grew past its first cluster ({COUNT} files), FAT-chained", chained and len(chain) >= 3))
+    checks.append(("exfat /MAC: DataLength and ValidDataLength are its whole chain", size == whole and valid == whole))
+    checks.append(names_check("exfat /MAC", exfat_names(exf.data(chain)[:size])))
+    w = exf.listing(exf.root).get("W")
+    checks.append(("exfat /W: macOS's bytes unchanged, in the cluster after MAC's",
+                   w is not None and w[0] == before["W"][0] and exf.data([w[0]]) == W_BYTES))
+    return checks
+
+
+def disk_checks(vols, before):
+    exf, esp = vols
+    checks = mac_checks(exf, before)
     found = exfat_dir(exf, "grow")
     if not found:
         return [("exfat root: /grow is on the disk", False)]
@@ -162,12 +213,23 @@ def fsck():
 
 
 def main() -> int:
-    parts = mbrdisk.assemble(IMAGE, [
-        (0x07, mbrdisk.exfat_payload(os.path.join(BUILD, "exfatpart.img")), False),
-        (0x0B, mbrdisk.esp_payload(os.path.join(BUILD, "esp.img")), True),
-    ])
     try:
-        runs = [("exfat root", "/grow"), ("fat32 /mnt/f", "/mnt/f/grow")]
+        mac_dir()
+        parts = mbrdisk.assemble(IMAGE, [
+            (0x07, mbrdisk.exfat_payload(PART), False),
+            (0x0B, mbrdisk.esp_payload(os.path.join(BUILD, "esp.img")), True),
+        ])
+    finally:
+        if os.path.exists(PART):
+            os.remove(PART)
+    try:
+        exf = Volume(IMAGE, parts[0][0])
+        before = exf.listing(exf.root)
+        mac, w = before.get("MAC"), before.get("W")
+        # The case is built only if MAC is one NoFatChain cluster with W's right after it.
+        if not (mac and w and not mac[2] and mac[1] == exf.cluster and w[0] == mac[0] + 1):
+            sys.exit(f"test-grow-dir: macOS did not lay out MAC and W as the rig needs: MAC {mac}, W {w}")
+        runs = [("exfat root", "/grow"), ("exfat /MAC", "/MAC"), ("fat32 /mnt/f", "/mnt/f/grow")]
         steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
         prev = "# "
         for _, d in runs:
@@ -194,7 +256,7 @@ def main() -> int:
             for step in ("create", "find", "list", "retouch"):
                 checks.append((f"{where}: ok {step}", f"dirprobe: ok {step}" in lines))
             checks.append((f"{where}: the probe's summary is ok", lines[-1:] == ["dirprobe: ok"]))
-        checks += disk_checks([Volume(IMAGE, start) for start, _ in parts])
+        checks += disk_checks([Volume(IMAGE, start) for start, _ in parts], before)
         more, notes = fsck()
         checks += more
         for n in notes:

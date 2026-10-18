@@ -6,7 +6,8 @@
 //! dirprobe <dir> <count>
 //! ```
 //!
-//! Makes `<dir>` and writes `<count>` files in it, `F000`, `F001`, ..., each
+//! Makes `<dir>` (or takes it as it is, if it exists: the rig gives it an
+//! empty one macOS made) and writes `<count>` files in it, `F000`, `F001`, ..., each
 //! holding its own name, so the directory outgrows its first cluster and fsd
 //! links more to it (`grow_dir`). Then, in turn:
 //!
@@ -133,7 +134,9 @@ impl Probe {
             return false;
         }
         let mut seen = [0u8; COUNT_MAX];
-        for line in buf[..len].split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        // FAT32 lists a subdirectory's `.` and `..`; exFAT has neither.
+        let own = |l: &[u8]| matches!(l, b"" | b"./" | b"../");
+        for line in buf[..len].split(|&b| b == b'\n').filter(|l| !own(l)) {
             let i = match line {
                 [b'F', d @ ..] if d.len() == 3 && d.iter().all(u8::is_ascii_digit) => {
                     (d[0] - b'0') as usize * 100 + (d[1] - b'0') as usize * 10 + (d[2] - b'0') as usize
@@ -189,8 +192,10 @@ pub extern "C" fn _start() -> ! {
     }
     probe.count = count as usize;
 
+    // A directory that is already there is used as it is: the rig gives the
+    // probe an empty one another driver made.
     let r = ulib::fs_op_path(syscall_abi::FSOP_MKDIR, probe.dir());
-    if ulib::is_fs_error(r) {
+    if ulib::is_fs_error(r) && r != syscall_abi::FS_ERR_ALREADY_EXISTS {
         probe.say(&[b"FAIL mkdir: ", ulib::fs_error_msg(r)]);
         finish(target, true);
     }
