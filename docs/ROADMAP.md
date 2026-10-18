@@ -4273,6 +4273,46 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   task can swap the disk under a mounted fsd and its cached geometry. Read
   in the code, not exercised. Found by the max review of the finer cursor
   rule (2026-10-18), outside its diff.
+- **A case-only `mv` of a directory moves it into itself, on FAT32 and
+  exFAT.** `mkdir /Docs; mv /Docs /docs`: `/bin/mv` stats `/docs`, finds
+  `Docs`, and sends `NP_MV("/Docs", "/docs/Docs")`. fsd's `is_within`
+  (`programs/servers/fsd/src/main.rs`) compares bytes, so it lets the pair
+  through, while the filesystem resolves `/docs` to `Docs` itself. The new
+  set is written inside `Docs`, the old one deleted, and the subtree becomes
+  a cycle nothing reaches, its clusters still allocated. The entry above
+  (`mv -f /Lowdir /lowdir` answering "exists") holds only for the raw pair,
+  which `/bin/mv` never sends. Fold case in `is_within` on a
+  case-insensitive tree, or refuse a destination that resolves to the source
+  or under it. Read in the code, not reproduced. Found by the max review of
+  the exFAT grow_dir fix (2026-10-18), outside its diff.
+- **exFAT's `patch_stream_ext` checksums at most 19 entries of a set.** It
+  reads `min(set_len, MAX_SET_ENTRIES)` entries, so a set of more (a name of
+  241 to 255 characters with a vendor secondary, which the spec allows and
+  cameras write) gets a SetChecksum over part of it, and fsck.exfat may
+  delete the set on repair. Since 2026-10-18 it also patches directories'
+  sets. Checksum all `set_len` entries a step at a time. The same function
+  writes the File and Stream entries as two sector writes even when they
+  share a sector, so a crash between them leaves a set whose checksum does
+  not match. Read in the code. Found by the same review.
+- **exFAT's free-slot scan reads a sector for every slot.** `find_free_run`
+  reads the whole sector for each 32-byte slot it tests and calls
+  `slot_addr`, which walks the chain from the first cluster each time: about
+  15,000 reads to make 100 files in one directory, where keeping the last
+  sector and cluster would need about 1,000. A cost only. Found by the same
+  review.
+- **exFAT says which set a name means in three places.** `find_at`,
+  `find_in_parent` and `parent_for_create` each carry the name-match rule,
+  and `write_at`, `rm`, `rmdir` and `mv` assemble a set's location by hand
+  rather than as a `SetAt`. A change to matching (the up-case table, which
+  ASCII folding approximates) made in one copy would make two paths resolve
+  different sets. Found by the same review.
+- **A directory chain past its size can be adopted over another file.**
+  `dir_at` sets a FAT-chained directory's size to its chain, ending before a
+  cluster the bitmap holds free; a link left past the size to a cluster
+  since given to another file (allocated, so not caught) would make the
+  directory cover that file's data, and the free-slot scan write sets into
+  it. It needs a FAT damaged by another tool. Linux instead refuses a
+  directory whose chain and size disagree. Found by the same review.
 - **FAT32 reads the second FAT copy for every FAT write.** `write_fat_entry`
   keeps every copy of the FAT in step, and reads the second copy's sector
   from the disk each time; only the first goes through the FAT cache. A

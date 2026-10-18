@@ -2414,13 +2414,18 @@ test-stale-cursor: image-exfat
 	python3 scripts/test-stale-cursor.py
 
 # A directory grown past its first cluster lists and finds every entry
-# (scripts/test-grow-dir.py, /bin/DIRPROBE): on a copy of the exFAT image, 100
-# files made in a new directory on the exFAT root (4 KiB clusters, grown
-# twice) and on the ESP at /mnt/f (the FAT32 control), each found, listed and
-# touched again by the probe, then the directory read off the disk (its
-# chain, and on exFAT its DataLength) and the host's fsck run on each volume.
-# One boot, about a minute; run it whenever a filesystem's grow_dir,
-# find_free_run, walk_dir or directory entry writing changes.
+# (scripts/test-grow-dir.py, /bin/DIRPROBE): on a copy of the exFAT image, the
+# probe's files made in five directories: an empty NoFatChain one macOS made
+# (as it made /etc), one the host made of size 0 with no cluster, one the host
+# made as an older fsd left a directory it grew (a chain past its size, 50
+# files of which a reader sees 42), a new one on the exFAT root (4 KiB
+# clusters, grown twice) and one on the ESP at /mnt/f (the FAT32 control),
+# each file found, listed and touched again; then each directory read off the
+# disk (its chain, and on exFAT its DataLength), every other exFAT cluster and
+# everything before the heap but the FAT's cluster entries unchanged, and the
+# host's fsck run on each volume. One boot, about a minute and a half; run it
+# whenever a filesystem's grow_dir, find_free_run, create_entry, dir_at,
+# walk_dir, rmdir or directory entry writing changes.
 test-grow-dir: image-exfat
 	python3 scripts/test-grow-dir.py
 

@@ -355,16 +355,28 @@ directories. Now the scan ends at the size, and `grow_dir` gives a NoFatChain
 directory a FAT chain first (`ensure_chained`, as `write_at` does for a
 file), links a cluster, and writes the chain's whole length into the
 directory's set in its parent. `create_entry` takes the directory with that
-set's location, so no create path can grow one without it. A chain an older
-fsd left past its size is covered by the next growth, and the entries written
-there come back into view. `make test-grow-dir` (`/bin/DIRPROBE`) makes 100
-files in a new directory on the exFAT root, in an empty one macOS made, and on
-the ESP as the FAT32 control, then finds, lists and touches each again. After
-the boot the host checks each directory's chain and size, that every other
-cluster holds the bytes it held, and runs `fsck_exfat -n` and `fsck_msdos -n`.
-It fails with the scan unbounded, with the size not recorded (the directory
-then grows at every create until the volume is full), and with the NoFatChain
-directory not converted first.
+set's location, so no create path can grow one without it. A directory an
+older fsd grew holds entries past its size; `dir_at` sets its size to its
+chain (ending before a cluster the bitmap holds free, refusing a loop) before
+anything reads it to change it, `rmdir`'s emptiness check included, so a
+create's name check sees them, where the review found that adopting them only
+at the next growth wrote a second set under a name one of them carried. A
+directory of size 0 with no cluster (the spec allows one) is given its first,
+where fsd wrote FAT entry 0 and the set before the cluster heap; and a
+NoFatChain directory's set is written FAT-chained before anything is linked,
+so a failed size write cannot lose the linked cluster. `make test-grow-dir`
+(`/bin/DIRPROBE`) makes the probe's files in an empty directory macOS made, a
+size-0 one, one planted as an older fsd left it, a new one on the exFAT root
+and one on the ESP as the FAT32 control, then finds, lists and touches each
+again. After the boot the host checks each directory's chain and size, that
+every other cluster and everything before the heap holds what it held, and
+runs `fsck_exfat -n` and `fsck_msdos -n`. It fails with the scan unbounded,
+with the size not recorded (the directory then grows at every create until
+the volume is full), with the NoFatChain directory not converted first, with
+the size not set to the chain at `dir_at` (F042 twice in /OLD), and with a
+size-0 directory given no cluster (fsd lost its volume). The failed size
+write is not built by the rig, and neither is an `rmdir` of a directory an
+older fsd grew.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
