@@ -53,6 +53,14 @@ impl Disk {
         TABLE_REWRITTEN.store(true, Ordering::Relaxed);
     }
 
+    /// The kernel installed another device in this one's place (fsd's own
+    /// `MOUNT` rescan): the old disk's [`table_rewritten`](Self::table_rewritten)
+    /// verdict is not the new one's, so a stick the kernel matched as the boot
+    /// disk answers its boot partition again.
+    pub fn device_replaced(&self) {
+        TABLE_REWRITTEN.store(false, Ordering::Relaxed);
+    }
+
     /// The start LBA of the partition the system booted from, when the kernel
     /// matched this device as the disk it is on, else `None`: the firmware
     /// named no partition, or the device is a fallback or a stick taken late

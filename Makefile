@@ -85,6 +85,8 @@ CURSORPROBE_ELF := target/$(USER_TARGET)/release/cursorprobe
 CURSORPROBE_BIN := target/$(USER_TARGET)/release/cursorprobe.bin
 DIRPROBE_ELF := target/$(USER_TARGET)/release/dirprobe
 DIRPROBE_BIN := target/$(USER_TARGET)/release/dirprobe.bin
+MOUNTPROBE_ELF := target/$(USER_TARGET)/release/mountprobe
+MOUNTPROBE_BIN := target/$(USER_TARGET)/release/mountprobe.bin
 VTPROBE_ELF  := target/$(USER_TARGET)/release/vtprobe
 VTPROBE_BIN  := target/$(USER_TARGET)/release/vtprobe.bin
 ID_ELF       := target/$(USER_TARGET)/release/id
@@ -447,7 +449,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename test-mv-into test-fat-link clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename test-mv-into test-fat-link test-mount-gate clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -637,6 +639,13 @@ cursorprobe-bin:
 dirprobe-bin:
 	cargo build -p dirprobe --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(DIRPROBE_ELF) $(DIRPROBE_BIN)
+
+# The MOUNT syscall from an ordinary task (programs/shellutils/mountprobe):
+# the kernel must answer it to the filesystem server alone, checked by
+# scripts/test-mount-gate.py.
+mountprobe-bin:
+	cargo build -p mountprobe --target $(USER_TARGET) --release
+	"$(OBJCOPY)" --strip-all $(MOUNTPROBE_ELF) $(MOUNTPROBE_BIN)
 
 vtprobe-bin:
 	cargo build -p vtprobe --target $(USER_TARGET) --release
@@ -1120,7 +1129,7 @@ srcid-begin:
 # below are not, so a BUILD_DIR containing whitespace fails the build noisily
 # (and can leave a stray directory) rather than deleting anything. That is the
 # right trade at 70-odd paths; quoting them all is churn without a hazard.
-esp: srcid-begin build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin) $(if $(HAVE_EDIT),edit-bin)
+esp: srcid-begin build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin tail-bin nl-bin rev-bin uniq-bin sort-bin $(if $(HAVE_CPP),cpp-bin) $(if $(HAVE_EDIT),edit-bin)
 	@test ! -e "$(ESP_DIR)" || test -f "$(ESP_DIR)/EFI/ORBS/INIT.CFG" || { \
 		echo "esp: $(ESP_DIR) is not an Ouroboros ESP tree - refusing to delete it"; \
 		echo "esp: (remove it by hand if that is really where you want the ESP staged)"; \
@@ -1193,6 +1202,7 @@ esp: srcid-begin build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin n
 	cp $(STAGEPROBE_BIN) $(ESP_DIR)/bin/STAGEPROBE
 	cp $(CURSORPROBE_BIN) $(ESP_DIR)/bin/CURSORPROBE
 	cp $(DIRPROBE_BIN) $(ESP_DIR)/bin/DIRPROBE
+	cp $(MOUNTPROBE_BIN) $(ESP_DIR)/bin/MOUNTPROBE
 	cp $(VTPROBE_BIN) $(ESP_DIR)/bin/VTPROBE
 	cp $(ID_BIN) $(ESP_DIR)/bin/ID
 	cp $(PASSWD_BIN) $(ESP_DIR)/bin/PASSWD
@@ -2552,6 +2562,15 @@ test-mv-into: image image-exfat image-ext2
 # cluster_end changes.
 test-fat-link: image $(EXT2_PART)
 	python3 scripts/test-fat-link.py
+
+# The MOUNT syscall answers the filesystem server alone
+# (scripts/test-mount-gate.py, /bin/MOUNTPROBE): esp.img on virtio and
+# usbstick.img on USB; `mountprobe` must be denied and `ls /` still list the
+# ESP, then with the virtio disk erased `mount -a` must mount the stick
+# through fsd's own rescan. One boot, about a minute; run it whenever the
+# MOUNT arm, fsd's FSOP_MOUNT or the shell's mount -a changes.
+test-mount-gate: image $(USBSTICK_IMG)
+	python3 scripts/test-mount-gate.py
 
 # Host unit tests for the PURE crates - the ones with no I/O, no syscalls and no
 # target dependency, so they run natively on the build machine. This exists

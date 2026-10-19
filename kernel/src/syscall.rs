@@ -161,7 +161,7 @@ pub(crate) fn net_ack_interrupt() {
 /// block device the filesystem server operates on, at boot only
 /// (`main.rs::install_boot_disk`). The `MOUNT` syscall's rescan, for a stick
 /// passed through after boot on Parallels, has its own replace-capable copy
-/// inline and asks no question. A no-op if a device is already in the cell.
+/// inline, asks no question, and answers only the filesystem server. A no-op if a device is already in the cell.
 /// The *filesystem* half of mounting lives in the server (`FSOP_MOUNT`); the
 /// kernel only handles the device.
 ///
@@ -1730,19 +1730,26 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
         }
         syscall_abi::MOUNT => {
             // The device half only - the filesystem half is the
-            // server's FSOP_MOUNT request (see cmd_mount's server-first
-            // flow). arg0 != 0 means "replace": the caller has already
-            // confirmed with the server that nothing is mounted, so an
-            // installed-but-unmountable device (e.g. `make run`'s
-            // FAT16 vvfat virtio disk) may be swapped for a found USB
-            // stick - without the flag, an occupied cell answers
-            // MOUNT_ALREADY untouched. Swapping under a *mounted*
-            // filesystem would hand the server's cached geometry a
-            // different disk; the server-first check is what rules
-            // that out. Rescan first (devices that attached after the
-            // boot scan - the Parallels case), then install. Runs with
-            // IRQs masked like every SVC - ticks pause for the
-            // sub-second setup, an accepted cost.
+            // server's FSOP_MOUNT request, and since 2026-10-19 the
+            // server is also the only caller: CAP_BLOCK, the BLOCK_*
+            // gate. arg0 != 0 means "replace": an installed-but-
+            // unmountable device (e.g. `make run`'s FAT16 vvfat virtio
+            // disk) may be swapped for a found USB stick - without the
+            // flag, an occupied cell answers MOUNT_ALREADY untouched.
+            // Swapping under a *mounted* filesystem would hand the
+            // server's cached geometry a different disk, and the server
+            // is the one task that knows whether anything is mounted:
+            // fsd asks only when its own mount found nothing and no
+            // disk filesystem is mounted. Until the gate any task could
+            // swap the disk under a mounted fsd, an ordinary user
+            // included (FSOP_MOUNT itself is root-only). Rescan first
+            // (devices that attached after the boot scan - the
+            // Parallels case), then install. Runs with IRQs masked like
+            // every SVC - ticks pause for the sub-second setup, an
+            // accepted cost.
+            if !block_access_allowed() {
+                return syscall_abi::BLOCK_ERR_DENIED;
+            }
             let replace = arg0 != 0;
             if !replace && block_device_installed() {
                 return syscall_abi::MOUNT_ALREADY;
