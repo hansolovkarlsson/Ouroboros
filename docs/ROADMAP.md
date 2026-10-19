@@ -4331,7 +4331,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   case-insensitive tree, or refuse a destination that resolves to the source
   or under it. Read in the code, not reproduced. Found by the max review of
   the exFAT grow_dir fix (2026-10-18), outside its diff.
-- **exFAT's `patch_stream_ext` checksums at most 19 entries of a set.** It
+- ~~**exFAT's `patch_stream_ext` checksums at most 19 entries of a set.**~~
+  *Done 2026-10-19:* the sum runs over every entry of the set, a sector at a
+  time, and File and Stream go out in one sector write when they share a
+  sector (two when the set starts in a sector's last slot, which only a
+  journal would make safe). Reproduced first by `make test-long-set`'s
+  control: a planted 20-entry set appended to on the guest, after which
+  fsck_exfat said "Incorrect checksum for directory entry set. Delete?". The
+  record as found: It
   reads `min(set_len, MAX_SET_ENTRIES)` entries, so a set of more (a name of
   241 to 255 characters with a vendor secondary, which the spec allows and
   cameras write) gets a SetChecksum over part of it, and fsck.exfat may

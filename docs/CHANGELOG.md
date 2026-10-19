@@ -481,6 +481,20 @@ Without the gate the probe installs the stick under the mounted ESP, `ls /`
 reads it and `erase disk` erases it; without fsd's rescan `mount -a` finds
 nothing.
 
+**An exFAT set longer than fsd builds keeps a whole checksum (2026-10-19).**
+When a write changes a file's Stream entry, `patch_stream_ext` recomputes the
+set's SetChecksum, and it summed at most 19 entries, the longest set fsd
+itself builds. The spec allows longer ones (vendor secondaries after the
+name, which cameras write), and such a set was left with a checksum over part
+of it: fsck_exfat calls it an incorrect checksum and offers to delete the set.
+The sum now runs over every entry, read a sector at a time, and the File and
+Stream entries go out in one sector write when they share a sector, where
+they were two. `make test-long-set` plants a 20-entry set (17 vendor
+extension entries) on a copy of the exFAT image and appends to it on the
+guest; with the old sum the checksum is wrong and fsck_exfat offers to delete
+the set. The one-write half has no check that can fail: QEMU does not crash
+between two writes.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
