@@ -437,6 +437,27 @@ test-mv-into` boots FAT32, exFAT and ext2, and fails with the guard comparing
 bytes (both `/Docs` and `/docs` gone) and with it folding case on ext2 too
 (`mv /A /a` refused).
 
+**FAT32 never reaches past its volume (2026-10-19).** FAT32 took any cluster
+number it was given to the disk: a link below end of chain was followed (the
+bad-cluster mark and the reserved `1` among them), and a directory entry's
+first cluster was used as it stood. A damaged one sent an append to the
+sectors after the volume, which on a disk with another partition there are
+that partition's; a read returned them as the file's; and `rm` zeroed its FAT
+entry far past the FAT, in every copy, or FAT entry 1. Now the three places a
+cluster reaches the disk, `cluster_to_lba`, `fat_entry` and
+`write_fat_entry`, refuse one outside `2..cluster_end` with an I/O error; a
+link to one ends the chain, as on exFAT since #320; and `free_chain` frees
+nothing for a first cluster outside it, so `rm` removes such a file. A
+read or an append of one answers "device I/O error". `cluster_end` is
+computed in u64 and capped below the bad-cluster mark, so a malformed BPB
+cannot widen the bound by overflow. It still comes from the BPB alone, not the
+partition's size (the roadmap). `make test-fat-link` builds a disk with a
+witness partition of 0xFF bytes after the ESP and plants eight kinds of
+damage; with `main`'s `fat32.rs` the witness is written by two appends and two
+frees, in both FAT copies, two reads count its bytes, `rm` of a link to the
+bad-cluster mark fails, and FAT entry 1 is zeroed. `scripts/fat32img.py` is
+the FAT32 reader that rig and `test-write-walk` share.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

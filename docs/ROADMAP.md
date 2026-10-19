@@ -4253,7 +4253,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   that to the sectors the chain crosses, which a fragmented file makes
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
-- **FAT32's `next_cluster` follows any link below end of chain, unbounded.**
+- ~~**FAT32's `next_cluster` follows any link below end of chain, unbounded.**~~
+  *Done 2026-10-19:* `cluster_to_lba`, `fat_entry` and `write_fat_entry`
+  refuse a cluster outside `2..cluster_end`, so a damaged first cluster is
+  refused as well as a link, and a link outside it ends the chain (exFAT's
+  `next_cluster` checks the link too since #320). Reproduced first by `make
+  test-fat-link`'s control on a disk with a witness partition after the ESP:
+  appends wrote past the volume into it, `rm` zeroed FAT entries there in both
+  copies and FAT entry 1, and reads returned its bytes as the file's. The
+  record as found:
   exFAT's directory walk refuses a link outside the heap (since 2026-10-18;
   its `next_cluster` checks only the cluster it is given, so a file's walk
   may still use one bad link before it ends); FAT32's follows any value
@@ -4264,6 +4272,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   link to `2..cluster_end` in `next_cluster` closes it, on both.
   Older than the cursors; read in the code, not reproduced. From the max
   review of the finer cursor rule (2026-10-18).
+- **FAT32's `cluster_end` is the BPB's word, not the partition's.** Since
+  2026-10-19 every cluster FAT32 takes to the disk is checked against
+  `cluster_end`, so that bound is the one guard left, and it comes from the
+  BPB's total sectors alone. A BPB claiming more sectors than its partition
+  has puts clusters of the next partition inside it, and a link to one is
+  followed into that partition, the same harm `make test-fat-link` checks
+  for a link past `cluster_end`. fsd's `mount_at` is given the partition's
+  start but not its length; passing the length and taking the smaller would
+  close it, for exFAT's cluster count too. Read in the code, not reproduced.
+  From the review of the FAT32 bound (2026-10-19).
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the

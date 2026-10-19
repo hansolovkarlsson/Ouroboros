@@ -48,10 +48,15 @@ const ATTR_LFN: u8 = 0x0f;
 const DIR_ENTRY_FREE: u8 = 0xe5;
 const DIR_ENTRY_END: u8 = 0x00;
 const END_OF_CHAIN_MIN: u32 = 0x0fff_fff8;
+/// The bad-cluster mark: the first FAT32 value that names no cluster, so one
+/// past the highest cluster number a volume can have.
+const BAD_CLUSTER: u32 = 0x0fff_fff7;
 
-/// Whether a FAT entry's low 28 bits stop a chain walk: free (`0`) or end of
-/// chain. [`Fs::next_cluster`]'s rule, which [`Fs::write_fat_entry`] asks of it
-/// to decide whether a write leaves the cursors standing.
+/// Whether a FAT entry's low 28 bits mark the end of a chain: free (`0`) or an
+/// end-of-chain value. Half of [`Fs::next_cluster`]'s rule; the other half is a
+/// link outside the volume's clusters ([`Fs::in_heap`]), which ends a walk too.
+/// [`Fs::write_fat_entry`] decides whether the cursors stand by asking
+/// `next_cluster` itself, so both halves decide it, not this alone.
 fn ends_walk(value: u32) -> bool {
     value == 0 || value >= END_OF_CHAIN_MIN
 }
@@ -451,8 +456,14 @@ impl Fs {
             return Err(Error::NotFat32);
         }
         let clusters = (total_sectors - meta_sectors) / sectors_per_cluster;
-        // Never past what the FAT can describe either.
-        let cluster_end = (clusters + 2).min(fat_size_32 * (SECTOR_SIZE as u32 / 4));
+        // Never past what the FAT can describe either, and never as far as the
+        // bad-cluster mark (`0x0FFFFFF7`), the first value that is no cluster:
+        // `cluster_end` is the bound every cluster is checked against
+        // (`in_heap`), so a malformed BPB must not widen it. In u64, since
+        // `fat_size_32 * 128` and `clusters + 2` can both pass a u32.
+        let cluster_end = (clusters as u64 + 2)
+            .min(fat_size_32 as u64 * (SECTOR_SIZE as u64 / 4))
+            .min(BAD_CLUSTER as u64) as u32;
 
         Ok(Fs {
             disk,
@@ -587,26 +598,63 @@ impl Fs {
         Ok(())
     }
 
-    fn cluster_to_lba(&self, cluster: u32) -> u32 {
-        self.data_start_lba + (cluster - 2) * self.sectors_per_cluster
+    /// The first sector of `cluster`, refused with [`Error::Io`] for a cluster
+    /// outside the volume's (`2..cluster_end`, [`in_heap`](Self::in_heap)):
+    /// a damaged first cluster in a directory entry, or a link no walk should
+    /// have followed, would otherwise name sectors past the volume (another
+    /// partition's) or, for `0` and `1`, wrap. One of the three choke points
+    /// every cluster passes on its way to the disk, with
+    /// [`fat_entry`](Self::fat_entry) and
+    /// [`write_fat_entry`](Self::write_fat_entry), so no caller has to
+    /// remember a check (since 2026-10-19).
+    fn cluster_to_lba(&self, cluster: u32) -> Result<u32, Error> {
+        self.check_in_heap(cluster)?;
+        Ok(self.data_start_lba + (cluster - 2) * self.sectors_per_cluster)
     }
 
     /// The next cluster in a chain, or `None` at the end of it. FAT32 FAT
     /// entries are 32 bits wide but only the low 28 are significant; a
     /// value `>= 0x0FFFFFF8` marks end-of-chain (values above that up to
     /// `0x0FFFFFFF` are all valid EOC markers per the spec, not just one).
+    ///
+    /// A link outside the volume's clusters (`2..cluster_end`) ends the chain
+    /// too, as exFAT's does since 2026-10-19: the bad-cluster mark
+    /// `0x0FFFFFF7`, a reserved `1`, or a damaged link past the last cluster.
+    /// Until then every walk followed one: a write past the file's last good
+    /// cluster went to sectors past the volume (on a disk with a partition
+    /// after it, into that partition), and `rm`'s `free_chain` read and zeroed
+    /// the link's FAT entry far past the FAT, in every copy (`make
+    /// test-fat-link`). `cluster` itself must be the volume's:
+    /// [`fat_entry`](Self::fat_entry) refuses any other, so a walk that starts
+    /// at a damaged first cluster is an error, not an empty chain.
     fn next_cluster(&mut self, cluster: u32) -> Result<Option<u32>, Error> {
         let value = self.fat_entry(cluster)?;
-        if ends_walk(value) {
+        if ends_walk(value) || !self.in_heap(value) {
             Ok(None)
         } else {
             Ok(Some(value))
         }
     }
 
+    /// Whether `cluster` is one of the volume's clusters, `2..cluster_end`.
+    fn in_heap(&self, cluster: u32) -> bool {
+        (2..self.cluster_end).contains(&cluster)
+    }
+
+    /// [`in_heap`](Self::in_heap) as a refusal: [`Error::Io`] for a cluster
+    /// outside the volume, the damage a fsck repairs.
+    fn check_in_heap(&self, cluster: u32) -> Result<(), Error> {
+        if self.in_heap(cluster) {
+            Ok(())
+        } else {
+            Err(Error::Io(DiskError::Io))
+        }
+    }
+
     /// One FAT entry's low 28 bits, from the first FAT copy, through the
     /// one-sector cache ([`fat_cache`](Self::fat_cache)).
     fn fat_entry(&mut self, cluster: u32) -> Result<u32, Error> {
+        self.check_in_heap(cluster)?;
         let fat_byte_offset = cluster * 4;
         let lba = self.fat_start_lba + fat_byte_offset / SECTOR_SIZE as u32;
         let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
@@ -629,6 +677,9 @@ impl Fs {
     /// 4 reserved bits, masking `value` to the low 28 - same split
     /// `next_cluster` already reads.
     fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
+        // Its entry would lie past the FAT for a cluster outside the volume:
+        // refused before the cursor check reads it or any copy is written.
+        self.check_in_heap(cluster)?;
         // The single choke point for all chain mutation, so the one place
         // the cursors are dropped: when a walk would go on from this
         // cluster, that is when the entry is a link. A cursor sits on a
@@ -703,7 +754,7 @@ impl Fs {
     /// looks "no more entries" to [`walk_dir`](Self::walk_dir)) before
     /// writing its real `.`/`..` entries into the first sector.
     fn zero_cluster(&mut self, cluster: u32) -> Result<(), Error> {
-        let lba = self.cluster_to_lba(cluster);
+        let lba = self.cluster_to_lba(cluster)?;
         let zero = [0u8; SECTOR_SIZE];
         for s in 0..self.sectors_per_cluster {
             self.disk.write_sector((lba + s) as u64, &zero)?;
@@ -720,7 +771,15 @@ impl Fs {
     /// free-exactly-one-cluster code was correct only while every
     /// directory was single-cluster by construction and would have
     /// silently leaked extension clusters otherwise.
+    ///
+    /// A `start` outside the volume's clusters (a damaged directory entry)
+    /// frees nothing: no cluster of the volume is its, and its FAT entry would
+    /// lie past the FAT. So `rm` of such a file removes the entry and touches
+    /// no FAT, where [`write_fat_entry`](Self::write_fat_entry) would refuse.
     fn free_chain(&mut self, start: u32) -> Result<(), Error> {
+        if !self.in_heap(start) {
+            return Ok(());
+        }
         let mut cluster = start;
         loop {
             let next = self.next_cluster(cluster)?;
@@ -766,7 +825,7 @@ impl Fs {
         let mut lfn_len = 0usize;
         let mut lfn_sum = 0u8;
         loop {
-            let lba = self.cluster_to_lba(cluster);
+            let lba = self.cluster_to_lba(cluster)?;
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
                 self.disk.read_sector((lba + s) as u64, &mut buf)?;
@@ -921,7 +980,7 @@ impl Fs {
         let mut written = 0usize;
         let total = file.size as usize;
         'clusters: loop {
-            let lba = self.cluster_to_lba(cluster);
+            let lba = self.cluster_to_lba(cluster)?;
             for s in 0..self.sectors_per_cluster {
                 if written >= total || written >= buf.len() {
                     break 'clusters;
@@ -1017,7 +1076,7 @@ impl Fs {
 
         let mut written = 0usize;
         'clusters: loop {
-            let lba = self.cluster_to_lba(cluster);
+            let lba = self.cluster_to_lba(cluster)?;
             for s in 0..self.sectors_per_cluster {
                 if written >= want {
                     break 'clusters;
@@ -1121,7 +1180,7 @@ impl Fs {
             dotdot_cluster,
             0,
         );
-        let lba = self.cluster_to_lba(new_cluster);
+        let lba = self.cluster_to_lba(new_cluster)?;
         self.disk.write_sector(lba as u64, &first_sector)?;
 
         self.insert_named_entry(parent.cluster, name, ATTR_DIRECTORY, new_cluster, 0)
@@ -1359,7 +1418,7 @@ impl Fs {
                 self.write_fat_entry(prev_cluster, cluster)?;
             }
 
-            let lba = self.cluster_to_lba(cluster);
+            let lba = self.cluster_to_lba(cluster)?;
             for s in 0..self.sectors_per_cluster {
                 let mut sector_buf = [0u8; SECTOR_SIZE];
                 let start = written;
@@ -1522,7 +1581,7 @@ impl Fs {
                 cluster_pos += cluster_bytes;
             }
             let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
-            let sector_lba = self.cluster_to_lba(cluster) as u64 + sector_in_cluster;
+            let sector_lba = self.cluster_to_lba(cluster)? as u64 + sector_in_cluster;
             let sector_start = cluster_pos + sector_in_cluster * SECTOR_SIZE as u64;
             let in_off = (pos - sector_start) as usize;
             let n = ((SECTOR_SIZE - in_off) as u64).min(write_end - pos) as usize;
@@ -1720,7 +1779,7 @@ impl Fs {
             } else {
                 dst_parent.cluster
             };
-            let moved_lba = self.cluster_to_lba(src_entry.cluster);
+            let moved_lba = self.cluster_to_lba(src_entry.cluster)?;
             // The `..` entry is always the second 32-byte entry in a
             // directory's first sector - `mkdir` writes it there
             // unconditionally, so every directory this kernel (or any
@@ -1757,7 +1816,7 @@ impl Fs {
     ) -> Result<(), Error> {
         let mut current = start_cluster;
         loop {
-            let lba = self.cluster_to_lba(current);
+            let lba = self.cluster_to_lba(current)?;
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
                 self.disk.read_sector((lba + s) as u64, &mut buf)?;
@@ -1913,7 +1972,7 @@ impl Fs {
     fn short_alias_exists(&mut self, dir_cluster: u32, short: &[u8; 11]) -> Result<bool, Error> {
         let mut cluster = dir_cluster;
         loop {
-            let lba = self.cluster_to_lba(cluster);
+            let lba = self.cluster_to_lba(cluster)?;
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
                 self.disk.read_sector((lba + s) as u64, &mut buf)?;
@@ -1957,7 +2016,7 @@ impl Fs {
         let mut run = 0usize;
         let mut cluster = dir_cluster;
         loop {
-            let lba = self.cluster_to_lba(cluster);
+            let lba = self.cluster_to_lba(cluster)?;
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
                 self.disk.read_sector((lba + s) as u64, &mut buf)?;
@@ -2050,7 +2109,7 @@ impl Fs {
 
         let mut cluster = dir_cluster;
         'walk: loop {
-            let lba0 = self.cluster_to_lba(cluster);
+            let lba0 = self.cluster_to_lba(cluster)?;
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
                 self.disk.read_sector((lba0 + s) as u64, &mut buf)?;
