@@ -4325,6 +4325,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   owns it and nothing gives it back: one cluster for each such entry, which
   `fsck_exfat` reports. Reusing it was how a write reached another file's
   cluster; a leak is the safe side. Found by the high review of 2026-10-19.
+- **A subdirectory naming the exFAT root's cluster is read as the root.**
+  `dir_extent` tells the root by its first cluster, so a cross-linked set
+  that names the root's cluster gets the root's whole chain, and a create
+  in it writes into the root, grows the root's chain, and records the root's
+  length as the subdirectory's size. It needs a cross-linked volume. A set
+  other than the root's naming the root cluster could be refused instead.
+  Found by the medium reviews of 2026-10-19.
 - **A damaged exFAT directory answers "device I/O error".** A create in a
   directory whose chain is not its size, a cluster outside the heap and a
   looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a

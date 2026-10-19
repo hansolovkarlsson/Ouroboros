@@ -379,10 +379,15 @@ wherever its set is read, whatever it names: the cluster may be another's,
 and a write to such a file wrote into it, an overwrite or removal freed its
 chain, an `mv` carried it, and an `rmdir` freed it. A create that fails after
 its data was allocated (a directory that cannot grow on a full volume) gives
-the data back; a file is freed to its size in clusters at most, where a link
-past it freed another file's clusters and a loop never ended; and a link
-outside the heap ends a directory's chain, where one in the root's made every
-lookup fail. A directory with no
+the data back unless part of its set was written, and so do a chain write
+failing part way, a cluster whose zeroing fails, and a growth whose size
+write fails (its link undone, where the chain past the size had every later
+create in the directory refused). A file is freed to its size in clusters at
+most and written past them by extending, where a link past it freed, or an
+append wrote into, another file's cluster, and a free on a loop never ended.
+A link outside the heap ends every chain, a file's or a directory's, where
+one in the root's made every lookup fail and the root's slot scan wrote out
+of the heap; a NoFatChain run past the heap is read as far as it goes. A directory with no
 cluster is given its first, where fsd wrote FAT entry 0 and the set before
 the cluster heap; and a NoFatChain directory's set is written FAT-chained
 before anything is linked, so a failed size write cannot lose the linked
@@ -395,8 +400,8 @@ found and an append and a create must be refused while a `touch` of a file
 inside the size goes ahead, with nothing of it changed and nothing leaked
 by a refused `mkdir` or `write`; and a directory and two files of size 0
 that name `/man`'s cluster are removed, overwritten and appended to, and a
-file whose chain links on past its size into `/man`'s cluster is removed,
-`/man`'s cluster allocated and as it was after. After the boot the host checks each directory's chain and size,
+file whose chain links on past its size into `/man`'s cluster is removed and
+another appended to, `/man`'s cluster allocated and as it was after. After the boot the host checks each directory's chain and size,
 that every other cluster and everything before the heap holds what it held,
 and runs `fsck_exfat -n` (only the planted chain may be named) and
 `fsck_msdos -n`. It fails with the scan unbounded, with the size not
@@ -407,10 +412,11 @@ own the cluster it names, with `rmdir` and an overwrite freeing a size-0
 entry's named chain, with a size-0 entry's cluster kept at the parse (the
 append), with `mkdir`'s refusal taken after its allocation (fsck: the
 bitmap), with `rmdir` refusing before its emptiness check, with a file freed along its
-whole chain, and with a directory with no cluster given none (fsd
+whole chain, with an append following a link past the file's size, and with a directory with no cluster given none (fsd
 lost its volume). The failed size
-write is not built by the rig, nor is the root's growth, an `mv`, a create
-failing on a full volume, or a bad link in the root's chain.
+write is not built by the rig, nor is the root's growth, an `mv`, any of the
+give-backs on a failure, a link outside the heap, or a NoFatChain run past
+the heap.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
