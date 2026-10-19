@@ -66,6 +66,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import disktrace  # noqa: E402
+import fat32img  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("spawn_reads", os.path.join(HERE, "test-spawn-reads.py"))
 spawn_reads = importlib.util.module_from_spec(_spec)
@@ -77,63 +78,12 @@ HUGE = 640 * 1024
 REQUEST = 2048  # cp's chunk, SAFECOPY_MAX
 
 
-class Fat32:
-    """The ESP partition of an image as the host reads it: geometry, FAT
-    entries from the first copy, chains, directories (short names only)."""
-
-    def __init__(self, image):
-        start, _ = spawn_reads.partition(image, 0x0B)
-        self.fh = open(image, "rb")
-        self.fh.seek(start * SECTOR)
-        b = self.fh.read(SECTOR)
-        self.spc, reserved, self.nfats = b[13], struct.unpack_from("<H", b, 14)[0], b[16]
-        fatsz = struct.unpack_from("<I", b, 36)[0]
-        self.root = struct.unpack_from("<I", b, 44)[0]
-        self.fat = start + reserved
-        self.fat_end = self.fat + self.nfats * fatsz
-        self.data = self.fat_end
-        self.count = fatsz * SECTOR // 4
-        total = struct.unpack_from("<H", b, 19)[0] or struct.unpack_from("<I", b, 32)[0]
-        # One past the last cluster, as fsd's cluster_end: the data sectors
-        # over the cluster size plus 2, never past what the FAT describes.
-        self.cluster_end = min((total - reserved - self.nfats * fatsz) // self.spc + 2, self.count)
-
-    def entry(self, c):
-        if not 0 <= c < self.count:
-            raise ValueError(f"cluster {c} is past the ESP's FAT")
-        self.fh.seek(self.fat * SECTOR + c * 4)
-        return struct.unpack("<I", self.fh.read(4))[0] & 0x0FFFFFFF
-
-    def chain(self, first):
-        out = [first]
-        while 2 <= self.entry(out[-1]) < 0x0FFFFFF8:
-            if len(out) == self.count:
-                raise ValueError(f"the FAT32 chain from cluster {first} is longer than the volume: a loop")
-            out.append(self.entry(out[-1]))
-        return out
-
-    def listing(self, first):
-        """[(index of the directory's cluster holding the entry, short name, first cluster, size)]."""
-        out = []
-        for i, c in enumerate(self.chain(first)):
-            self.fh.seek((self.data + (c - 2) * self.spc) * SECTOR)
-            d = self.fh.read(self.spc * SECTOR)
-            for j in range(0, len(d), 32):
-                e = d[j:j + 32]
-                if e[0] == 0:
-                    return out
-                if e[0] != 0xE5 and e[11] != 0x0F:
-                    first_c = (struct.unpack_from("<H", e, 20)[0] << 16) | struct.unpack_from("<H", e, 26)[0]
-                    out.append((i, e[:11].decode("latin1").rstrip(), first_c,
-                                struct.unpack_from("<I", e, 28)[0]))
-        return out
-
-    def read(self, chain, size):
-        out = b""
-        for c in chain:
-            self.fh.seek((self.data + (c - 2) * self.spc) * SECTOR)
-            out += self.fh.read(self.spc * SECTOR)
-        return out[:size]
+def Fat32(image):
+    """The ESP partition of an image as the host reads it (scripts/fat32img.py,
+    the reader the rigs share): geometry, FAT entries from the first copy,
+    chains, directories (short names only)."""
+    start, _ = spawn_reads.partition(image, 0x0B)
+    return fat32img.Fat32(open(image, "rb"), start)
 
 
 def exfat_read(image, chain, size):
