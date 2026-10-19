@@ -148,9 +148,8 @@ struct SetAt {
 struct Extent {
     clusters: u64,
     tail: u32,
-    /// The chain went on past `tail`, past the directory's size, into a
-    /// cluster the bitmap holds free: a link a writer cuts.
-    cut: bool,
+    /// The chain goes on past `tail`, past the directory's size.
+    past_size: bool,
 }
 
 /// A directory's extent as it is walked: what [`Fs::extent_next`] needs to
@@ -167,8 +166,8 @@ struct ExtentRule {
 enum Next {
     Cluster(u32),
     End,
-    /// The chain goes on past the size into a cluster the bitmap holds free.
-    Cut,
+    /// The extent ends at the size, and the chain goes on past it.
+    PastSize,
 }
 
 /// A directory to create an entry in: its own entry, where its entry's set
@@ -742,9 +741,12 @@ impl Fs {
                 }
             }
             read += 1;
+            if !rule.root && read >= rule.sized {
+                return Ok(()); // at the size, with no FAT read, as before
+            }
             match self.extent_next(rule, cluster, read)? {
                 Next::Cluster(next) => cluster = next,
-                Next::End | Next::Cut => return Ok(()),
+                Next::End | Next::PastSize => return Ok(()),
             }
         }
     }
@@ -761,20 +763,16 @@ impl Fs {
     ///   says: DataLength 0 is no allocation, and the cluster a tool left
     ///   named may be free or another file's.
     /// - A NoFatChain directory: its run, its size in clusters.
-    /// - A FAT-chained directory: its chain to its size, followed as it is,
-    ///   and past the size, where fsd before 2026-10-18 linked the clusters
-    ///   it grew a directory by without recording them, only while the
-    ///   bitmap holds the next cluster allocated, as that growth left it. A
-    ///   link past the size to a free cluster ends the extent (`cut`). A
-    ///   chain shorter than the size is the chain.
+    /// - A FAT-chained directory: its chain, to its size at most (`past_size`
+    ///   when the chain goes on), as every other driver reads it.
     ///
     /// A cluster outside the heap, or a chain longer than the volume (a
-    /// loop), is refused.
+    /// loop), is refused; a link past the size is not read further.
     fn dir_extent(&mut self, first: u32, contiguous: bool, size: u64) -> Result<Extent, Error> {
         let Some(rule) = self.extent_rule(first, contiguous, size)? else {
-            return Ok(Extent { clusters: 0, tail: 0, cut: false });
+            return Ok(Extent { clusters: 0, tail: 0, past_size: false });
         };
-        let mut extent = Extent { clusters: 1, tail: first, cut: false };
+        let mut extent = Extent { clusters: 1, tail: first, past_size: false };
         loop {
             match self.extent_next(rule, extent.tail, extent.clusters)? {
                 Next::Cluster(next) => {
@@ -782,8 +780,8 @@ impl Fs {
                     extent.clusters += 1;
                 }
                 Next::End => return Ok(extent),
-                Next::Cut => {
-                    extent.cut = true;
+                Next::PastSize => {
+                    extent.past_size = true;
                     return Ok(extent);
                 }
             }
@@ -816,11 +814,11 @@ impl Fs {
         if ends_walk(next) {
             return Ok(Next::End);
         }
+        if !rule.root && clusters >= rule.sized {
+            return Ok(Next::PastSize);
+        }
         if !self.in_heap(next) || clusters >= self.cluster_count as u64 {
             return Err(Error::Io(DiskError::Io));
-        }
-        if !rule.root && clusters >= rule.sized && !self.bitmap_get(next)? {
-            return Ok(Next::Cut);
         }
         Ok(Next::Cluster(next))
     }
@@ -871,17 +869,20 @@ impl Fs {
     }
 
     /// The directory at `path`, to create an entry in or remove
-    /// (`NotADirectory` for a file), its size first made its extent's.
+    /// (`NotADirectory` for a file).
     ///
-    /// fsd grew directories until 2026-10-18 without raising their size, so a
-    /// directory may hold clusters past its DataLength. fsd reads them
-    /// (`dir_extent`); other drivers stop at the size, so a writer records it,
-    /// and cuts a link past the size to a free cluster, which an allocation
-    /// could otherwise hand to a file the directory would then take in. A
-    /// chain shorter than its size is refused, as Linux refuses it: growing
-    /// it would record a smaller size than the one other drivers read.
+    /// A FAT-chained directory whose chain is not its size is refused, as
+    /// Linux refuses it: fsd grew directories until 2026-10-18 without
+    /// raising their size, and such a directory holds entries past it that
+    /// no reader sees. A create there checked its name at the size and wrote
+    /// a second set under a hidden one's name, and taking the chain as the
+    /// size on a write (2026-10-18, the review's second pass) made reads and
+    /// writes disagree: an append that saw no file truncated it. Adopting
+    /// clusters past the size on both sides would take a stale link to a
+    /// cluster since allocated into the directory. So the directory is left
+    /// as it is, read to its size, until a fsck repairs it.
     fn dir_at(&mut self, path: &str) -> Result<Dir, Error> {
-        let (mut entry, at) = self.find_at(path)?;
+        let (entry, at) = self.find_at(path)?;
         if !entry.is_dir {
             return Err(Error::NotADirectory);
         }
@@ -889,20 +890,13 @@ impl Fs {
             return Ok(Dir { entry, at, extent: None });
         };
         let extent = self.dir_extent(entry.first_cluster, entry.contiguous, entry.size)?;
-        if !entry.contiguous && extent.clusters > 0 {
-            let size = extent.clusters * self.cluster_bytes();
-            if size < entry.size {
-                return Err(Error::Io(DiskError::Io));
-            }
-            if extent.cut {
-                self.write_fat_entry(extent.tail, END_OF_CHAIN)?;
-            }
-            if size != entry.size {
-                self.patch_set_stream(at, entry.first_cluster, size)?;
-                entry.size = size;
-            }
+        if !entry.contiguous
+            && extent.clusters > 0
+            && (extent.past_size || extent.clusters * self.cluster_bytes() != entry.size)
+        {
+            return Err(Error::Io(DiskError::Io));
         }
-        Ok(Dir { entry, at: Some(at), extent: Some(Extent { cut: false, ..extent }) })
+        Ok(Dir { entry, at: Some(at), extent: Some(extent) })
     }
 
     fn cluster_bytes(&self) -> u64 {
@@ -1125,19 +1119,6 @@ impl Fs {
         self.cluster_to_lba(self.bitmap_first_cluster) as u64 + byte_index / SECTOR_SIZE as u64
     }
 
-    /// Whether the bitmap holds `cluster` allocated (`true` when no bitmap was
-    /// located at mount: nothing then says otherwise).
-    fn bitmap_get(&mut self, cluster: u32) -> Result<bool, Error> {
-        if self.bitmap_first_cluster == 0 {
-            return Ok(true);
-        }
-        let bit = cluster - 2;
-        let byte_index = (bit / 8) as u64;
-        let mut buf = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(self.bitmap_sector_lba(byte_index), &mut buf)?;
-        Ok(buf[(byte_index % SECTOR_SIZE as u64) as usize] >> (bit % 8) & 1 != 0)
-    }
-
     /// Set or clear the bitmap bit for `cluster` (bit index `cluster - 2`).
     fn bitmap_set(&mut self, cluster: u32, allocated: bool) -> Result<(), Error> {
         let bit = cluster - 2;
@@ -1263,14 +1244,14 @@ impl Fs {
     /// DataLength and ValidDataLength, in its set in its parent, are where
     /// other drivers stop, so they are raised by the cluster; until 2026-10-18
     /// they were not, and entries written past the first cluster could not be
-    /// found. The size is the extent's on entry (`dir_at`).
+    /// found. The size is the chain's on entry (`dir_at`).
     ///
     /// A directory with no cluster is given its first. A `NoFatChain`
     /// directory (as macOS and Windows make them) is first given a FAT chain
     /// over its run, as `write_at` does for a file, and its set is written
     /// FAT-chained at once, before anything is linked: a failure after the
     /// link then leaves a chain past the size, which the next `dir_at`
-    /// records, where a set still saying `NoFatChain` would have its run
+    /// refuses, where a set still saying `NoFatChain` would have its run
     /// ended again by the next growth and the linked cluster lost.
     fn grow_dir(&mut self, dir: &mut Dir) -> Result<(), Error> {
         let cluster_bytes = self.cluster_bytes();
@@ -1288,7 +1269,7 @@ impl Fs {
             e.first_cluster = new;
             e.contiguous = false;
             e.size = cluster_bytes;
-            *x = Extent { clusters: 1, tail: new, cut: false };
+            *x = Extent { clusters: 1, tail: new, past_size: false };
             return Ok(());
         }
         if e.contiguous {
@@ -1793,7 +1774,7 @@ impl Fs {
     /// root). Frees its cluster(s), then deletes its entry set.
     pub fn rmdir(&mut self, path: &str) -> Result<(), Error> {
         split_parent(path).ok_or(Error::CannotRemoveRoot)?;
-        // Its size its extent's: a set past an older fsd's size counts too.
+        // Refused when its chain is not its size: a set past it would be lost.
         let dir = self.dir_at(path)?;
         let at = dir.at.ok_or(Error::CannotRemoveRoot)?;
         let entry = dir.entry;
@@ -1806,7 +1787,7 @@ impl Fs {
         if !empty {
             return Err(Error::DirectoryNotEmpty);
         }
-        // Its extent: the chain ends there, `dir_at` having cut a link past it.
+        // Its extent: its chain, which `dir_at` found its size.
         let clusters = dir.extent.map_or(0, |x| x.clusters);
         if clusters > 0 {
             let bytes = clusters * self.cluster_bytes();
