@@ -180,6 +180,19 @@ struct Dir {
     at: Option<SetAt>,
 }
 
+/// A create that failed ([`Fs::create_entry`]), and whether any of its set
+/// was written.
+struct CreateFailed {
+    error: Error,
+    written: bool,
+}
+
+impl From<CreateFailed> for Error {
+    fn from(f: CreateFailed) -> Self {
+        f.error
+    }
+}
+
 /// Where a create in a directory may write, by [`Fs::room`]: the root, whose
 /// extent, its whole chain, is walked only when it grows (a create that
 /// finds a slot reads no FAT, as before 2026-10-18), or a subdirectory's set
@@ -550,7 +563,11 @@ impl Fs {
             return Ok(None);
         }
         let value = self.fat_entry(cluster)?;
-        if ends_walk(value) {
+        // A link outside the heap ends the chain too: every walk (a file's
+        // read and write, a free, a directory's slots) then stops where
+        // `extent_next` does, where one followed a damaged link out of the
+        // heap and wrote there (the medium reviews of 2026-10-19).
+        if ends_walk(value) || !self.in_heap(value) {
             Ok(None)
         } else {
             Ok(Some(value))
@@ -813,9 +830,11 @@ impl Fs {
         if !self.in_heap(first) {
             return Err(Error::Io(DiskError::Io));
         }
-        let sized = size.div_ceil(self.cluster_bytes());
-        if contiguous && first as u64 - 2 + sized > self.cluster_count as u64 {
-            return Err(Error::Io(DiskError::Io));
+        let mut sized = size.div_ceil(self.cluster_bytes());
+        if contiguous {
+            // A run past the heap's end is read as far as the heap goes; it is
+            // then shorter than its size, which `room` refuses to create in.
+            sized = sized.min(self.cluster_count as u64 - (first as u64 - 2));
         }
         Ok(Some(ExtentRule { root, contiguous, sized }))
     }
@@ -833,8 +852,8 @@ impl Fs {
             return Ok(Next::PastSize);
         }
         if !self.in_heap(next) {
-            // A link outside the heap ends the chain, as next_cluster ends a
-            // walk there: one bad link in the root's chain refused every
+            // A link outside the heap ends the chain, as `next_cluster` ends
+            // every walk there: one bad link in the root's chain refused every
             // lookup on the volume. A subdirectory cut short by one is then
             // shorter than its size, which `room` refuses to create in.
             return Ok(Next::End);
@@ -1198,7 +1217,9 @@ impl Fs {
         Err(Error::DiskFull)
     }
 
-    /// Free a data allocation: clear each cluster's bitmap bit (and, for a
+    /// Free a data allocation (none for a first cluster below 2: an entry of
+    /// size 0 has none, `walk_dir` giving it no cluster): clear each
+    /// cluster's bitmap bit (and, for a
     /// FAT-chained allocation, its FAT entry). Handles both a file we created
     /// (FAT-chained) and a contiguous one another tool wrote (`NoFatChain`,
     /// walked by count from `size`).
@@ -1236,13 +1257,14 @@ impl Fs {
         Ok(())
     }
 
-    /// Free a file's data, if it has any (an entry of size 0 has none:
-    /// `walk_dir` gives it no cluster).
-    fn free_file(&mut self, e: &DirEntry) -> Result<(), Error> {
-        if e.first_cluster >= 2 {
-            self.free_data(e.first_cluster, e.contiguous, e.size)?;
+    /// A zeroed cluster, allocated, and given back if the zeroing fails.
+    fn alloc_zeroed(&mut self) -> Result<u32, Error> {
+        let cluster = self.alloc_cluster()?;
+        if let Err(e) = self.zero_cluster(cluster) {
+            let _ = self.free_data(cluster, false, self.cluster_bytes());
+            return Err(e);
         }
-        Ok(())
+        Ok(cluster)
     }
 
     // ---- directory-entry-set writing ----------------------------------------
@@ -1291,22 +1313,24 @@ impl Fs {
     /// directory (as macOS and Windows make them) is first given a FAT chain
     /// over its run, as `write_at` does for a file, and its set is written
     /// FAT-chained at once, before anything is linked: a failure after the
-    /// link then leaves a chain past the size, which the next `room`
-    /// refuses, where a set still saying `NoFatChain` would have its run
-    /// ended again by the next growth and the linked cluster lost.
+    /// link and the size write is undone, and should the undoing fail too, the
+    /// chain past the size is refused by the next `room` rather than lost,
+    /// where a set still saying `NoFatChain` would have its run ended again
+    /// by the next growth and the linked cluster lost.
     fn grow_dir(&mut self, e: &mut DirEntry, room: &mut Room) -> Result<(), Error> {
         let cluster_bytes = self.cluster_bytes();
         let Room::Sub(at, x) = room else {
             let root = self.dir_extent(e.first_cluster, false, 0)?;
-            let new = self.alloc_cluster()?;
-            self.zero_cluster(new)?;
+            let new = self.alloc_zeroed()?;
             return self.write_fat_entry(root.tail, new);
         };
         let at = *at;
         if x.clusters == 0 {
-            let new = self.alloc_cluster()?;
-            self.zero_cluster(new)?;
-            self.patch_set_stream(at, new, cluster_bytes)?;
+            let new = self.alloc_zeroed()?;
+            if let Err(err) = self.patch_set_stream(at, new, cluster_bytes) {
+                let _ = self.free_data(new, false, cluster_bytes);
+                return Err(err);
+            }
             e.first_cluster = new;
             e.contiguous = false;
             e.size = cluster_bytes;
@@ -1319,13 +1343,20 @@ impl Fs {
             self.patch_set_stream(at, e.first_cluster, size)?;
             e.contiguous = false;
         }
-        let new = self.alloc_cluster()?;
-        self.zero_cluster(new)?;
+        let new = self.alloc_zeroed()?;
         self.write_fat_entry(x.tail, new)?;
+        let size = (x.clusters + 1) * cluster_bytes;
+        if let Err(err) = self.patch_set_stream(at, e.first_cluster, size) {
+            // Undone, or the chain would run past the size, and `room` would
+            // refuse every later create in the directory until a fsck (the
+            // medium review of 2026-10-19): one failed write, a locked
+            // directory, on the Pi with no fsck at hand.
+            let _ = self.write_fat_entry(x.tail, END_OF_CHAIN);
+            let _ = self.free_data(new, false, cluster_bytes);
+            return Err(err);
+        }
         x.clusters += 1;
         x.tail = new;
-        let size = x.clusters * cluster_bytes;
-        self.patch_set_stream(at, e.first_cluster, size)?;
         e.size = size;
         Ok(())
     }
@@ -1405,6 +1436,11 @@ impl Fs {
     /// which a caller takes before it allocates anything for the new entry: a
     /// create refused after an allocation leaked it (the high review of
     /// 2026-10-19).
+    ///
+    /// A failure says whether any of the set reached the disk: until then the
+    /// caller may give back what it allocated for the entry, after that a
+    /// partly written set may name it, and it is left (a leak a fsck finds,
+    /// where a cluster freed under a set is a cross-link to come).
     #[allow(clippy::too_many_arguments)] // a directory, its room + a full entry description
     fn create_entry(
         &mut self,
@@ -1415,13 +1451,16 @@ impl Fs {
         first_cluster: u32,
         data_len: u64,
         data_contiguous: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<(), CreateFailed> {
+        let unwritten = |error| CreateFailed { error, written: false };
         let mut set = [0u8; MAX_SET_BYTES];
         let entries = build_entry_set(name, is_dir, first_cluster, data_len, data_contiguous, &mut set)
-            .ok_or(Error::InvalidName)?;
+            .ok_or(Error::InvalidName)
+            .map_err(unwritten)?;
         let total_bytes = entries * ENTRY_SIZE;
-        let start = self.find_free_run(&mut dir.entry, &mut room, entries)?;
+        let start = self.find_free_run(&mut dir.entry, &mut room, entries).map_err(unwritten)?;
         self.write_set_at(dir.entry.first_cluster, dir.entry.contiguous, start, &set[..total_bytes])
+            .map_err(|error| CreateFailed { error, written: true })
     }
 
     /// Resolve a path's *parent* to a mountable directory entry, checking it's a
@@ -1474,18 +1513,30 @@ impl Fs {
     /// `fat32::write_chain`: each cluster is bitmap-claimed and FAT-end-marked by
     /// `alloc_cluster`, then linked to its predecessor.
     fn write_chain(&mut self, data: &[u8]) -> Result<u32, Error> {
+        let mut first = 0u32;
+        let made = self.write_chain_from(data, &mut first);
+        if made.is_err() && first >= 2 {
+            // Out of space or an I/O error part way: nothing names the part
+            // already linked, so it is given back (it leaked until 2026-10-19).
+            let _ = self.free_data(first, false, data.len() as u64);
+        }
+        made
+    }
+
+    /// [`write_chain`](Self::write_chain)'s body, leaving its first cluster in
+    /// `first` as soon as there is one.
+    fn write_chain_from(&mut self, data: &[u8], first: &mut u32) -> Result<u32, Error> {
         if data.is_empty() {
             return Ok(0);
         }
         let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
         let num = data.len().div_ceil(cluster_bytes);
-        let mut first = 0u32;
         let mut prev = 0u32;
         let mut written = 0usize;
         for i in 0..num {
             let cluster = self.alloc_cluster()?;
             if i == 0 {
-                first = cluster;
+                *first = cluster;
             } else {
                 self.write_fat_entry(prev, cluster)?;
             }
@@ -1502,7 +1553,16 @@ impl Fs {
             }
             prev = cluster;
         }
-        Ok(first)
+        Ok(*first)
+    }
+
+    /// The cluster after `cluster` in a file being written: the next of its
+    /// chain while that is still the file's own (`owned`), else one appended.
+    fn file_step(&mut self, cluster: u32, owned: bool) -> Result<u32, Error> {
+        match self.next_cluster(cluster)? {
+            Some(next) if owned => Ok(next),
+            _ => self.extend_chain(cluster),
+        }
     }
 
     /// Append one freshly allocated cluster after `tail`, returning it - the
@@ -1612,7 +1672,7 @@ impl Fs {
             ExistingKind::None => {}
         }
         let room = self.room(&dir)?;
-        self.create_entry(&mut dir, room, name, false, 0, 0, false)
+        Ok(self.create_entry(&mut dir, room, name, false, 0, 0, false)?)
     }
 
     /// Create a file with exactly `data`, or fully replace an existing file's
@@ -1643,7 +1703,7 @@ impl Fs {
 
         match plan {
             Plan::Replace(entry, primary_slot, set_len) => {
-                self.free_file(&entry)?;
+                self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
                 self.patch_stream_ext(
                     parent.first_cluster,
                     parent.contiguous,
@@ -1655,12 +1715,12 @@ impl Fs {
             }
             Plan::Create(room) => {
                 let made = self.create_entry(&mut dir, room, name, false, new_cluster, data.len() as u64, false);
-                if made.is_err() {
+                if let Err(CreateFailed { written: false, .. }) = made {
                     // The directory could not take the set (it could not grow,
                     // say): nothing names the chain, so it is given back.
                     let _ = self.free_data(new_cluster, false, data.len() as u64);
                 }
-                made
+                Ok(made?)
             }
         }
     }
@@ -1703,6 +1763,12 @@ impl Fs {
 
         let write_start = old_size.min(offset);
         let write_end = offset + data.len() as u64;
+        // The bytes the file's own clusters hold: a link past them (a crash
+        // between a chain's extension and its size write, or another tool)
+        // may name another file's cluster, so a walk past them extends the
+        // chain from there, cutting the link, where it followed it and wrote
+        // into that cluster (the medium review of 2026-10-19).
+        let owned = old_size.div_ceil(cluster_bytes) * cluster_bytes;
 
         // Walk to the cluster holding `write_start`, extending if needed:
         // from the write cursor when it is this file's and not past
@@ -1711,20 +1777,14 @@ impl Fs {
         let (mut cluster, pos) = ChainCursor::start(self.write_cursor, head_cluster, false, write_start as usize);
         let mut cluster_pos = pos as u64;
         while cluster_pos + cluster_bytes <= write_start {
-            cluster = match self.next_cluster(cluster)? {
-                Some(next) => next,
-                None => self.extend_chain(cluster)?,
-            };
+            cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
             cluster_pos += cluster_bytes;
         }
 
         let mut pos = write_start;
         while pos < write_end {
             while pos >= cluster_pos + cluster_bytes {
-                cluster = match self.next_cluster(cluster)? {
-                    Some(next) => next,
-                    None => self.extend_chain(cluster)?,
-                };
+                cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
                 cluster_pos += cluster_bytes;
             }
             let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
@@ -1807,14 +1867,13 @@ impl Fs {
         // Refused before the cluster is claimed, or it would leak.
         let room = self.room(&dir)?;
         // Claim + zero the new directory's cluster before linking it in.
-        let new_cluster = self.alloc_cluster()?;
-        self.zero_cluster(new_cluster)?;
+        let new_cluster = self.alloc_zeroed()?;
         let cluster_bytes = self.cluster_bytes();
         let made = self.create_entry(&mut dir, room, name, true, new_cluster, cluster_bytes, false);
-        if made.is_err() {
+        if let Err(CreateFailed { written: false, .. }) = made {
             let _ = self.free_data(new_cluster, false, cluster_bytes); // nothing names it
         }
-        made
+        Ok(made?)
     }
 
     /// Remove a file (rejects a directory with `NotAFile`). Frees its clusters
@@ -1831,7 +1890,7 @@ impl Fs {
         if entry.is_dir {
             return Err(Error::NotAFile);
         }
-        self.free_file(&entry)?;
+        self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
         self.delete_set(parent.first_cluster, parent.contiguous, slot, len)
     }
 
@@ -1946,7 +2005,7 @@ impl Fs {
                 // cross-linked image can give two sets the same first cluster.
                 // Freeing then destroys the data the surviving name points at.
                 if dst_entry.first_cluster != src_entry.first_cluster {
-                    self.free_file(&dst_entry)?;
+                    self.free_data(dst_entry.first_cluster, dst_entry.contiguous, dst_entry.size)?;
                 }
             }
             return Ok(());
