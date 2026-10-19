@@ -2421,12 +2421,13 @@ test-stale-cursor: image-exfat
 # at /mnt/f (the FAT32 control), each file found, listed and touched again;
 # and a directory planted as an older fsd left one it grew (a chain past its
 # size) left unchanged, its hidden file not found, an append and a create
-# refused. Then each directory read off the disk (its chain, and on exFAT its
+# refused, a touch of a file inside the size allowed; and a directory and a
+# file of size 0 naming /man's cluster removed and overwritten. Then each directory read off the disk (its chain, and on exFAT its
 # DataLength), every other exFAT cluster and everything before the heap but
 # the FAT's cluster entries unchanged, and the host's fsck run on each volume.
 # One boot, about a minute and a half; run it whenever a filesystem's
-# grow_dir, find_free_run, create_entry, dir_at, dir_extent, walk_dir, rmdir
-# or directory entry writing changes.
+# grow_dir, find_free_run, create_entry, room, dir_extent, walk_dir, rmdir,
+# free_file or directory entry writing changes.
 test-grow-dir: image-exfat
 	python3 scripts/test-grow-dir.py
 

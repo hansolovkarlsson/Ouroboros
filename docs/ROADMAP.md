@@ -4317,6 +4317,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   them out before the repair; taking the chain as the size inside fsd was
   tried three ways and each cost more than it saved (the CHANGELOG entry of
   2026-10-18). Hans's decision, 2026-10-18.
+- **A damaged exFAT directory answers "device I/O error".** A create in a
+  directory whose chain is not its size, a cluster outside the heap and a
+  looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a
+  failing disk when the directory only needs a fsck. An error of its own
+  ("needs repair") would take a new `FS_ERR_*` code through `syscall-abi`,
+  ulib's message table and the C and Python peers that
+  `check-wire-constants.py` holds to it, and `test-grow-dir`, which matches
+  "I/O error". Found by the high review of the grow_dir fix, 2026-10-19.
 - **FAT32 reads the second FAT copy for every FAT write.** `write_fat_entry`
   keeps every copy of the FAT in step, and reads the second copy's sector
   from the disk each time; only the first goes through the FAT cache. A

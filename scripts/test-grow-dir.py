@@ -389,7 +389,10 @@ def disk_checks(parts, snap, old):
         checks += exfat_checks(exf, where, name, COUNT)
     man = man_cluster(exf)
     checks.append(("exfat /RMZ: removed", exfat_dir(exf, "RMZ") is None))
-    checks.append(("exfat /RMZ and /Z0FILE: /man's cluster, which they named, still allocated", exf.used(man)))
+    # Allocated and as it was: a cluster freed early in the boot is soon
+    # allocated again, to a file whose bytes then replace /man's entries.
+    checks.append(("exfat /RMZ and /Z0FILE: /man's cluster, which they named, allocated and as it was",
+                   exf.used(man) and exf.data([man]) == before[man][0]))
     print(f"     exfat /OLD: before the boot {old}, after it {exfat_dir(exf, 'OLD')}")
     checks.append(("exfat /OLD: its set as it was (first cluster, DataLength, ValidDataLength, chained)",
                    exfat_dir(exf, "OLD") == old))

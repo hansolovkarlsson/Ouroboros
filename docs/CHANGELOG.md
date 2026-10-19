@@ -360,15 +360,21 @@ and writer of a directory takes its clusters from one rule, `dir_extent`
 (the root's whole chain; none for any other directory of size 0, whatever
 its FirstCluster names; a NoFatChain run; a FAT chain to its size, a link
 outside the heap or a loop refused), walked a cluster at a time so a lookup
-reads the FAT only where it leaves one. A directory an older fsd grew holds
-sets past its size: fsd reads it to its size, as every driver does, and
-refuses to write to it with an I/O error, as Linux does, until a fsck
-repairs it (macOS's drops the hidden files). Two reviews found what the
+reads the FAT only where it leaves one, and stopped at a subdirectory's size
+to the byte. A directory an older fsd grew holds sets past its size: fsd
+reads it to its size, as every driver does, and refuses a create in it, or
+its `rmdir`, with an I/O error, as Linux does, until a fsck repairs it
+(macOS's drops the hidden files); so does a directory whose size is not
+whole clusters. A change to a set inside the size (an overwrite, an append,
+a removal, a `touch` of a file there) creates nothing and goes ahead. Two reviews found what the
 other ways cost: adopting the chain at the next growth wrote a second set
 under a hidden name; adopting it on writes alone made `echo x >>` truncate
 a file a read could not see; adopting it everywhere, bounded by the bitmap,
 took a stale link to a cluster fsd's own allocator had since given to
-another directory (Hans chose the refusal, 2026-10-18). A directory with no
+another directory (Hans chose the refusal, 2026-10-18). A file of size 0 that
+names a cluster no longer has that cluster's chain freed when it is
+overwritten, removed or replaced by `mv`, nor a directory of size 0 when it
+is removed: the cluster may be another's. A directory with no
 cluster is given its first, where fsd wrote FAT entry 0 and the set before
 the cluster heap; and a NoFatChain directory's set is written FAT-chained
 before anything is linked, so a failed size write cannot lose the linked
@@ -377,16 +383,20 @@ an empty directory macOS made, a size-0 one with no cluster, a size-0
 NoFatChain one still naming a freed cluster, a new one on the exFAT root and
 one on the ESP as the FAT32 control, then finds, lists and touches each
 again; on one planted as an older fsd left it, a hidden file must not be
-found and an append and a create must be refused, with nothing of it
-changed. After the boot the host checks each directory's chain and size,
+found and an append and a create must be refused while a `touch` of a file
+inside the size goes ahead, with nothing of it changed; and a directory and
+a file of size 0 that name `/man`'s cluster are removed and overwritten,
+`/man`'s cluster still allocated after. After the boot the host checks each directory's chain and size,
 that every other cluster and everything before the heap holds what it held,
 and runs `fsck_exfat -n` (only the planted chain may be named) and
 `fsck_msdos -n`. It fails with the scan unbounded, with the size not
 recorded (the directory then grows at every create until the volume is
 full), with the NoFatChain directory not converted first, with the refusal
-removed, with a size-0 directory taken to own the cluster it names, and with
-a directory with no cluster given none (fsd lost its volume). The failed size
-write is not built by the rig, nor is the root's growth.
+removed or made at `dir_at` (the `touch`), with a size-0 directory taken to
+own the cluster it names, with `rmdir` and an overwrite freeing a size-0
+entry's named chain, and with a directory with no cluster given none (fsd
+lost its volume). The failed size
+write is not built by the rig, nor is the root's growth, nor an `mv`.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
