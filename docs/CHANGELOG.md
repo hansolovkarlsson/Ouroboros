@@ -501,6 +501,19 @@ offers the delete; with the old walker the misshapen sets' slots are written.
 `test-grow-dir` share. The one-write half has no check that can fail: QEMU
 does not crash between two writes.
 
+**An exFAT directory's slots walked once, a sector read once (2026-10-19).**
+Every slot exFAT addressed in a directory (the free-slot scan before a
+create, a set's write and delete, a Stream patch) was found by walking the
+directory's chain from its first cluster, and the free-slot scan read the
+slot's whole sector for each slot it tested, sixteen reads of a sector where
+one serves. A `SlotCursor` now steps forward through each walk, the scan
+holds the sector it read, and a set's write and delete go out once a sector.
+Making 100 files in one directory (`dirprobe /D 100`) reads 4,686 more sectors
+than one file, from 19,026; the directory's own sectors are read 4.3 passes a
+create, from 19.0. `make test-dir-scan` counts QEMU's reads of those sectors
+and fails above eight passes. A cost, not a correctness fix: `test-grow-dir`,
+`test-long-set`, `test-stale-cursor` and `test-mv-into` pass on it.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

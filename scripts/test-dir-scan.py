@@ -21,7 +21,10 @@ set is three slots, F000 to F099), the cost of one pass a create. The reads
 must be at most PASSES x W: fsd now makes a few passes a create (the
 existence check, the free-slot scan, the set's write) and the probe a few
 more over the finished directory. Fails with the scan reading a sector a
-slot again (the main tree before 2026-10-19). Reports both numbers. About a
+slot again (the main tree before 2026-10-19: 18,496 reads, 19.0 passes,
+against 4,152 and 4.3 after). It grades the directory's sectors only: the
+cursor's saving is chain walks, whose FAT lookups mostly hit fsd's one-sector
+FAT cache and are not graded. Reports both numbers. About a
 minute and a half. Run it whenever exFAT's find_free_run, slot_at,
 write_set_at, delete_set, walk_dir or room changes.
 """
