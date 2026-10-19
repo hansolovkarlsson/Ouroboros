@@ -418,6 +418,19 @@ write is not built by the rig, nor is the root's growth, an `mv`, any of the
 give-backs on a failure, a link outside the heap, or a NoFatChain run past
 the heap.
 
+**A case-only `mv` of a directory no longer moves it into itself
+(2026-10-19).** On FAT32 and exFAT a stat of `/docs` finds `/Docs`, so `mv
+/Docs /docs` reached fsd as `/Docs` to `/docs/Docs`. fsd's guard against a
+move into the mover's own subtree compared bytes and let it through: the
+directory was linked under itself, its subtree lost, and `mv` exited 0. The
+guard now compares in the filesystem's own case rule
+(`Filesystem::folds_case`: FAT32 and exFAT fold ASCII case, ext2 matches
+bytes), so the move is refused with "invalid name" for every client of
+`NP_MV`. A case-only rename of a directory is still refused, not done (the
+roadmap's entry for it stands). `make test-mv-into` boots FAT32, exFAT and
+ext2; it fails with the guard comparing bytes (both `/Docs` and `/docs` gone)
+and with it folding case on ext2 too (`mv /A /a` refused).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
