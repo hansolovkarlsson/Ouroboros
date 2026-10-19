@@ -2433,3 +2433,73 @@ was built; the item's own text follows as it stood when it was open.
 >       commit and it moves to `closed/`. Note (the link updated to
 >       `closed/`, where the note now is):
 >       [`handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md`](handoffs/closed/2026-10-16-from-devtools-alloc-size-read.md).
+
+## The stale-cursor probe and a drop at a link only, DONE (2026-10-18)
+
+Deleted from [`ROADMAP.md`](ROADMAP.md)'s filesystem follow-ups by #318 and
+#319 on 2026-10-18, rather than moved, and restored here by that day's
+closeout. Built: `/bin/CURSORPROBE` and `make test-stale-cursor` (#318), the
+stale sequences on the exFAT root, the ESP and an exFAT of 512-byte clusters,
+each confirmed built by its witnesses' chains read off the disk; then (#319)
+`write_fat_entry` dropping the cursors only when the entry it replaces was a
+link (`ends_walk`, next_cluster's own predicate), a copy within the exFAT root
+867 FAT reads to 323 and within the ESP 5,048 to 3,333, and `ensure_chained`
+ending a size-0 NoFatChain entry's cluster, planted by the rig. That last case
+is the parse's since 2026-10-19 (an entry of size 0 holds no cluster). The
+items as they were recorded:
+
+- **No rig sees a cursor go stale, and a stale write cursor corrupts
+  another file.** FAT32 and exFAT each keep a read cursor and a write
+  cursor, positions in a file's cluster chain, and drop both in
+  `write_fat_entry`, every chain change passing through there. Nothing
+  checks that the drops are there. A stale read cursor reads wrong bytes;
+  a stale write cursor writes a file's bytes into a cluster that is free or
+  another file's (the review of #316: `cp` a file, `rm` it, a whole-file
+  write of a new file reusing its first cluster on a different chain, then
+  an append past the old position). `make test-write-walk` passes with the
+  drop removed, since each write sets its cursor again at its end, and a
+  stale read cursor shows only inside one program, since every spawn
+  replaces it. The check is a probe program like `CFIDHOLD` that does each
+  sequence in one run and reads the bytes back. NEXT, before the finer
+  invalidation below. Found while giving exFAT its cursor (2026-10-17). A
+  FAT cache not kept in step by `write_fat_entry` is seen: `/CHAIN` does
+  not run (`make test-spawn-reads`).
+- **Every FAT write drops every cursor, a tail extension too.** A cluster
+  added at a chain's end makes no cursor stale, but `write_fat_entry`
+  drops both cursors for it, so a `cp` within one filesystem drops the
+  source's read cursor each time the destination grows a cluster, and the
+  source's next read walks from its first cluster (through the FAT cache,
+  so the cost is the sectors its chain crosses). `make test-write-walk`
+  copies between two filesystems and does not see it. Dropping only when an
+  entry that was a link is rewritten, or a cluster freed, would keep both
+  cursors across an extension; it changes the rule the cursors' safety
+  rests on, so it waits for the stale-cursor probe above. From the review
+  of #316.
+- **exFAT does not chain an empty contiguous file that owns a cluster.**
+  `ensure_chained` does nothing for a `NoFatChain` entry of size 0, and a
+  tool may leave one with a first cluster; `write_at` then follows that
+  cluster's FAT entry, whose value is undefined for a contiguous file.
+  Older than the write cursor, which now also records the walk. Setting
+  the entry to end of chain when converting would close it. From the
+  review of #316.
+
+## exFAT directories past their first cluster, DONE (2026-10-19)
+
+Added to [`ROADMAP.md`](ROADMAP.md) by #319's max review on 2026-10-18 and
+deleted from it by #320, merged on 2026-10-19, restored here by the closeout.
+Built: `make test-grow-dir` (`/bin/DIRPROBE`), which reproduced the item and
+a worse defect beside it, a free-slot scan unbounded by the size writing into
+the clusters after a NoFatChain directory; one extent rule, `dir_extent`, for
+every reader and writer of a directory; growth that records the size. A
+directory an older fsd grew is refused a create until a fsck repairs it, as
+Linux refuses it, Hans's choice after three ways of adopting its hidden
+clusters each cost more than they saved (the CHANGELOG entry of 2026-10-18 has
+them). The item as it was recorded:
+
+- **exFAT's `grow_dir` does not raise a directory's DataLength.** It links a
+  new cluster to a full directory's chain, but `walk_dir` stops at a
+  subdirectory's DataLength, so entries written into the new cluster would
+  not be listed or found (the root has none, so it is not affected). Read in
+  the code, not reproduced; a subdirectory with more entry sets than its
+  first cluster holds is the test. Found by the max review of the finer
+  cursor rule (2026-10-18), outside its diff.
