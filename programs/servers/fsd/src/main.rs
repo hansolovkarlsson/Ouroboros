@@ -206,15 +206,6 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     }
 }
 
-/// Whether `inner` names a path strictly below `outer` (`/d/sub` below `/d`,
-/// not `/dd`), ignoring a trailing `/` on `outer`. For `NP_MV`'s refusal of a
-/// move into the mover's own subtree.
-fn is_within(outer: &str, inner: &str) -> bool {
-    let outer = outer.trim_end_matches('/');
-    let (o, i) = (outer.as_bytes(), inner.as_bytes());
-    i.len() > o.len() && i.starts_with(o) && (o.is_empty() || i[o.len()] == b'/')
-}
-
 /// The tree that already holds `candidate`'s partition, if any. A partition
 /// is mounted at most once (since 2026-10-05): two trees over one partition
 /// would be two filesystems over one set of on-disk structures, each with its
@@ -874,10 +865,13 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             // unlinked from its parent and linked under its own descendant,
             // a cycle no path reaches: silent loss of the subtree. No format
             // checks it, so it is refused here, for every client (POSIX
-            // `rename` answers EINVAL). By the names as sent: libc and ulib
-            // collapse `.` and `..` first, and a path that hides the overlap
-            // behind a `..` is not caught (the review of #215).
-            if is_within(src, dst) {
+            // `rename` answers EINVAL). As the filesystem resolves the two
+            // paths, not by their bytes: `//`, `.` and `..` resolved (libc and
+            // ulib collapse them, a raw NP_MV from a 9P peer need not), and
+            // names compared by the filesystem's own rule, so on FAT32 and
+            // exFAT `/docs/Docs` is below `/Docs` (until 2026-10-19 all of
+            // these got through, and the subtree was lost).
+            if ninep_abi::is_within(src, dst, |a, b| fs.names_match(a, b)) {
                 return status_reply(reply, syscall_abi::FS_ERR_INVALID_NAME);
             }
             match fs.mv(src, dst) {

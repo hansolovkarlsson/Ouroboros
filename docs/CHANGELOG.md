@@ -418,6 +418,25 @@ write is not built by the rig, nor is the root's growth, an `mv`, any of the
 give-backs on a failure, a link outside the heap, or a NoFatChain run past
 the heap.
 
+**A case-only `mv` of a directory no longer moves it into itself
+(2026-10-19).** On FAT32 and exFAT a stat of `/docs` finds `/Docs`, so `mv
+/Docs /docs` reached fsd as `/Docs` to `/docs/Docs`. fsd's guard against a
+move into the mover's own subtree compared bytes and let it through: the
+directory was linked under itself, its subtree lost, and `mv` exited 0. The
+guard (`ninep_abi::is_within`) now compares the two paths as the filesystem
+resolves them: empty components skipped, `.` and `..` resolved, and names by
+the filesystem's own rule, `Filesystem::names_match`, the one function every
+lookup of that format also calls (FAT32 and exFAT fold ASCII case, ext2
+matches bytes). So `//docs/Docs`, `/docs/./Docs` and `/x/../Docs/y`, which
+a 9P peer can send unnormalised, are refused too, for every client of
+`NP_MV`. `/bin/mv` says `cannot move /Docs to a subdirectory of itself,
+/docs/Docs` where the refusal said "invalid name". A case-only rename of a
+directory is still refused, not done (the roadmap's entry for it stands).
+`ninep-abi`'s host tests cover the spellings in `make test`; `make
+test-mv-into` boots FAT32, exFAT and ext2, and fails with the guard comparing
+bytes (both `/Docs` and `/docs` gone) and with it folding case on ext2 too
+(`mv /A /a` refused).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

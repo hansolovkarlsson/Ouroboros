@@ -190,6 +190,20 @@ impl Filesystem {
         !matches!(self, Filesystem::Proc(_))
     }
 
+    /// Whether directory entry name `entry` answers to `name` here, the rule
+    /// every lookup of this filesystem uses (`fat32::names_match`, which exFAT
+    /// shares, folds ASCII case; `ext2::names_match` matches bytes; `/proc`'s
+    /// names are its own bytes). `NP_MV`'s guard against a move into the
+    /// mover's own subtree compares paths by it, so it cannot state a different
+    /// rule from the lookups it guards.
+    pub fn names_match(&self, entry: &str, name: &str) -> bool {
+        match self {
+            Filesystem::Fat32(_) | Filesystem::ExFat(_) => fat32::names_match(entry, name),
+            Filesystem::Ext2(_) => ext2::names_match(entry, name),
+            Filesystem::Proc(_) => entry == name,
+        }
+    }
+
     /// The first sector of the mounted volume - `mount`-info reporting only
     /// (disk-tools milestone 1).
     pub fn partition_lba(&self) -> u32 {

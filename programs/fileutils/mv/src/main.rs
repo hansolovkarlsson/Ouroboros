@@ -150,6 +150,21 @@ pub extern "C" fn _start() -> ! {
     }
 
     let code = ulib::fs_mv(src_path, final_dst);
+    // fsd refuses a move into the mover's own subtree with "invalid name",
+    // which says nothing of why. The commonest case is a case-only rename of
+    // a directory on FAT32 or exFAT: a stat of `/docs` finds `/Docs` itself,
+    // so the rewrite above made it `/docs/Docs`. Folding case here only
+    // chooses the message; fsd made the decision by its filesystem's rule.
+    if code == syscall_abi::FS_ERR_INVALID_NAME
+        && ninep_abi::is_within(src_path, final_dst, |a, b| a.eq_ignore_ascii_case(b))
+    {
+        ulib::con_write(b"mv: cannot move ");
+        ulib::con_write(src_path.as_bytes());
+        ulib::con_write(b" to a subdirectory of itself, ");
+        ulib::con_write(final_dst.as_bytes());
+        ulib::con_write(b"\r\n");
+        ulib::exit(1);
+    }
     if ulib::is_fs_error(code) {
         ulib::fs_error("mv", code);
         ulib::exit(1);

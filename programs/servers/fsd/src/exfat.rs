@@ -50,14 +50,14 @@
 //! - **An allocation *bitmap*** replaces FAT free-cluster scanning: reads ignore
 //!   it entirely, writes drive it (see the write model above). The up-case table
 //!   (`0x82`) that would drive case-insensitive comparison per spec is ignored -
-//!   we approximate with ASCII case-folding ([`str::eq_ignore_ascii_case`], what
+//!   we approximate with ASCII case-folding ([`crate::fat32::names_match`], what
 //!   `fat32.rs` already uses), correct for the ASCII names this system uses, and
 //!   the same ASCII up-case feeds the `NameHash` we write.
 
 use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};
-use crate::fat32::{split_parent, Error};
+use crate::fat32::{names_match, split_parent, Error};
 
 const SECTOR_SIZE: usize = 512;
 const ENTRY_SIZE: usize = 32;
@@ -889,7 +889,7 @@ impl Fs {
                 current.contiguous,
                 current.size,
                 |entry, slot, len| {
-                    if entry.name().eq_ignore_ascii_case(component) {
+                    if names_match(entry.name(), component) {
                         found = Some((*entry, slot, len));
                         true
                     } else {
@@ -1472,7 +1472,7 @@ impl Fs {
         let p = parent.entry;
         let mut kind = ExistingKind::None;
         self.walk_dir(p.first_cluster, p.contiguous, p.size, |entry, _slot, _len| {
-            if entry.name().eq_ignore_ascii_case(name) {
+            if names_match(entry.name(), name) {
                 kind = if entry.is_dir {
                     ExistingKind::Dir
                 } else {
@@ -1498,7 +1498,7 @@ impl Fs {
     ) -> Result<Option<(DirEntry, usize, usize)>, Error> {
         let mut found: Option<(DirEntry, usize, usize)> = None;
         self.walk_dir(dir_cluster, dir_contig, dir_size, |entry, slot, len| {
-            if entry.name().eq_ignore_ascii_case(name) {
+            if names_match(entry.name(), name) {
                 found = Some((*entry, slot, len));
                 true
             } else {
