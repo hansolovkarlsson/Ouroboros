@@ -4249,12 +4249,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
 - **FAT32's `next_cluster` follows any link below end of chain, unbounded.**
-  exFAT's bounds a link to the volume's clusters; FAT32's follows any value
+  exFAT's directory walk refuses a link outside the heap (since 2026-10-18;
+  its `next_cluster` checks only the cluster it is given, so a file's walk
+  may still use one bad link before it ends); FAT32's follows any value
   under `0x0FFFFFF8`, the bad-cluster mark `0x0FFFFFF7` and links past
   `cluster_end` among them. On a damaged FAT, `rm`'s `free_chain` then reads
   and zeroes an entry far past the FAT (for `0x0FFFFFF7`, a sector about
   1 GiB on), in every FAT copy: a data sector on a large stick. Bounding the
-  link to `2..cluster_end` in `next_cluster`, as exFAT does, closes it.
+  link to `2..cluster_end` in `next_cluster` closes it, on both.
   Older than the cursors; read in the code, not reproduced. From the max
   review of the finer cursor rule (2026-10-18).
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
@@ -4306,13 +4308,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   rather than as a `SetAt`. A change to matching (the up-case table, which
   ASCII folding approximates) made in one copy would make two paths resolve
   different sets. Found by the same review.
-- **A directory chain past its size can be adopted over another file.**
-  `dir_at` sets a FAT-chained directory's size to its chain, ending before a
-  cluster the bitmap holds free; a link left past the size to a cluster
-  since given to another file (allocated, so not caught) would make the
-  directory cover that file's data, and the free-slot scan write sets into
-  it. It needs a FAT damaged by another tool. Linux instead refuses a
-  directory whose chain and size disagree. Found by the same review.
+- **fsd will not write to an exFAT directory an older fsd grew.** Until
+  2026-10-18 fsd grew a directory without raising its DataLength, so such a
+  directory's chain runs past its size, with sets there no driver reads.
+  fsd now reads it to its size and refuses to write to it (an I/O error),
+  as Linux does; `fsck_exfat` repairs it by truncating the chain, which
+  drops the hidden files. Recovering them would need a tool that copies
+  them out before the repair; taking the chain as the size inside fsd was
+  tried three ways and each cost more than it saved (the CHANGELOG entry of
+  2026-10-18). Hans's decision, 2026-10-18.
 - **FAT32 reads the second FAT copy for every FAT write.** `write_fat_entry`
   keeps every copy of the FAT in step, and reads the second copy's sector
   from the disk each time; only the first goes through the FAT cache. A
