@@ -4311,8 +4311,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - **fsd will not write to an exFAT directory an older fsd grew.** Until
   2026-10-18 fsd grew a directory without raising its DataLength, so such a
   directory's chain runs past its size, with sets there no driver reads.
-  fsd now reads it to its size and refuses to write to it (an I/O error),
-  as Linux does; `fsck_exfat` repairs it by truncating the chain, which
+  fsd now reads it to its size and refuses a create in it, or its `rmdir`
+  (an I/O error), as Linux does, while a change to a set inside the size
+  (an overwrite, an append, a removal) goes ahead; `fsck_exfat` repairs it by truncating the chain, which
   drops the hidden files. Recovering them would need a tool that copies
   them out before the repair; taking the chain as the size inside fsd was
   tried three ways and each cost more than it saved (the CHANGELOG entry of

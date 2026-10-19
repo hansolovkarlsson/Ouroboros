@@ -29,18 +29,20 @@ the exFAT root first, each one contiguous (NoFatChain) cluster, as it made
   took the named one without its bit, which the next allocation could hand
   back (a FAT loop, or another file over its entries);
 - /RMZ, made a FAT-chained directory of size 0 naming /man's directory
-  cluster, in use, and /Z0FILE an empty file naming the same: the guest
-  removes RMZ and overwrites Z0FILE, and /man's cluster must stay
-  allocated, where freeing the chain a size-0 entry names freed another
-  directory's;
+  cluster, in use, and /Z0FILE and /Z0APP empty files naming the same: the
+  guest removes RMZ, overwrites Z0FILE and appends to Z0APP, and /man's
+  cluster must stay allocated and as it was, where freeing the chain a
+  size-0 entry names freed another directory's, and an append wrote into
+  the cluster it names;
 - /OLD, as fsd before 2026-10-18 left a directory it grew: a FAT chain of
   two clusters, a DataLength of one, and OLD_COUNT files' sets across both,
   so a reader sees 42; those past the size (HIDDEN) hold their own names.
   fsd reads it to its size, as every driver does, and refuses to write to
   it (as Linux does) until a fsck repairs it: a read of a hidden file finds
-  nothing, an append to one and a create are refused while a touch of a
-  file inside the size goes ahead (it creates nothing), and nothing of OLD
-  changes on the disk, where taking its chain as its size on a write alone
+  nothing, an append to one, a create, a mkdir and a write of a new file are
+  refused while a touch of a file inside the size goes ahead (it creates
+  nothing), and nothing of OLD changes on the disk (nor is a cluster
+  allocated for a refused create: fsck would say the bitmap needs repair), where taking its chain as its size on a write alone
   truncated the append's file, and a create's name check at the size wrote
   a second set under a hidden name;
 - /grow, a new directory on the exFAT root, 4 KiB clusters: 128 entries a
@@ -127,7 +129,8 @@ def mac_dirs():
         try:
             for name in MADE:
                 os.mkdir(os.path.join(mp, name))
-            open(os.path.join(mp, "Z0FILE"), "w").close()
+            for name in ("Z0FILE", "Z0APP"):
+                open(os.path.join(mp, name), "w").close()
             subprocess.run(["find", mp, "-name", "._*", "-delete"], capture_output=True)
             for junk in (".fseventsd", ".Trashes", ".Spotlight-V100", ".DS_Store",
                          *(f"{name}/.DS_Store" for name in MADE)):
@@ -249,6 +252,7 @@ def plant():
         bitmap(rmz, False)
         stream("RMZ", 0x01, man_cluster(vol), 0)
         stream("Z0FILE", 0x01, man_cluster(vol), 0)
+        stream("Z0APP", 0x01, man_cluster(vol), 0)
 
         for k, c in enumerate(root):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
@@ -259,7 +263,7 @@ def plant():
     if exfat_dir(vol, "NAMED")[1:] != (0, 0, False) or vol.used(named):
         sys.exit("test-grow-dir: NAMED is not a NoFatChain directory of size 0 naming a free cluster")
     first, size, _, _ = exfat_dir(vol, "OLD")
-    for name in ("RMZ", "Z0FILE"):
+    for name in ("RMZ", "Z0FILE", "Z0APP"):
         if exfat_dir(vol, name) != (man_cluster(vol), 0, 0, True):
             sys.exit(f"test-grow-dir: {name} is not a FAT-chained entry of size 0 naming /man's cluster")
     return exfat_names(vol.data([first])[:size]), set(data.values())
@@ -391,7 +395,7 @@ def disk_checks(parts, snap, old):
     checks.append(("exfat /RMZ: removed", exfat_dir(exf, "RMZ") is None))
     # Allocated and as it was: a cluster freed early in the boot is soon
     # allocated again, to a file whose bytes then replace /man's entries.
-    checks.append(("exfat /RMZ and /Z0FILE: /man's cluster, which they named, allocated and as it was",
+    checks.append(("exfat /RMZ, /Z0FILE and /Z0APP: /man's cluster, which they named, allocated and as it was",
                    exf.used(man) and exf.data([man]) == before[man][0]))
     print(f"     exfat /OLD: before the boot {old}, after it {exfat_dir(exf, 'OLD')}")
     checks.append(("exfat /OLD: its set as it was (first cluster, DataLength, ValidDataLength, chained)",
@@ -497,8 +501,9 @@ def main() -> int:
                 ("exfat root /grow", "/grow", COUNT), ("fat32 /mnt/f", "/mnt/f/grow", COUNT)]
         # OLD: a read of a file past its size, an append to one (the
         # shell's read of it first), and a create.
-        reads = [f"cat /OLD/{HIDDEN[3]}", f"echo x >> /OLD/{HIDDEN[-1]}", "touch /OLD/NEW", "touch /OLD/F000",
-                 "rmdir /RMZ", "write /Z0FILE y"]
+        refused = [f"echo x >> /OLD/{HIDDEN[-1]}", "touch /OLD/NEW", "mkdir /OLD/X", "write /OLD/NEW2 abc"]
+        allowed = ["touch /OLD/F000", "rmdir /RMZ", "write /Z0FILE y", "echo y >> /Z0APP"]
+        reads = [f"cat /OLD/{HIDDEN[3]}", *refused, *allowed]
         steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
         steps += [("# ", cmd) for cmd in reads]
         prev = "# "
@@ -533,10 +538,10 @@ def main() -> int:
             print(f"     exfat /OLD: `{cmd}` printed {got!r}")
         checks.append((f"exfat /OLD: {HIDDEN[3]}, past the size, is not found (read to the size)",
                        "no such file" in (said_by[reads[0]] or "")))
-        for cmd in reads[3:]:
+        for cmd in allowed:
             got = said_by[cmd]
             checks.append((f"`{cmd}` goes ahead", got is not None and "error" not in got and "(code 0)" in got))
-        for cmd in reads[1:3]:
+        for cmd in refused:
             checks.append((f"exfat /OLD: `{cmd}` is refused with an I/O error", "I/O error" in (said_by[cmd] or "")))
         pieces = re.split(r"dirprobe (/\S+) \d+\n", out)
         by_dir = dict(zip(pieces[1::2], pieces[2::2]))
