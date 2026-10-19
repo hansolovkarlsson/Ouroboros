@@ -153,6 +153,24 @@ struct Extent {
     cut: bool,
 }
 
+/// A directory's extent as it is walked: what [`Fs::extent_next`] needs to
+/// decide whether a walk goes on to the next cluster.
+#[derive(Clone, Copy)]
+struct ExtentRule {
+    root: bool,
+    contiguous: bool,
+    /// The directory's size in clusters (rounded up).
+    sized: u64,
+}
+
+/// The step after a cluster of a directory's extent.
+enum Next {
+    Cluster(u32),
+    End,
+    /// The chain goes on past the size into a cluster the bitmap holds free.
+    Cut,
+}
+
 /// A directory to create an entry in: its own entry, its extent, and where
 /// its entry's set lies (`None` for the root, which has none). Growing a
 /// directory past its clusters raises its DataLength, which other drivers
@@ -608,7 +626,11 @@ impl Fs {
         dir_size: u64,
         mut f: impl FnMut(&DirEntry, usize, usize) -> bool,
     ) -> Result<(), Error> {
-        let extent = self.dir_extent(start_cluster, contiguous, dir_size)?;
+        // The extent's rule, a cluster at a time: no FAT read until the walk
+        // leaves a cluster, as when it stopped at the chain's end.
+        let Some(rule) = self.extent_rule(start_cluster, contiguous, dir_size)? else {
+            return Ok(());
+        };
         let mut cluster = start_cluster;
         let mut read = 0u64; // clusters read
         let mut consumed: u64 = 0;
@@ -627,7 +649,7 @@ impl Fs {
         let mut name_cap = 0usize; // total chars the set declares (NameLength)
         let mut name_len = 0usize; // chars filled so far
 
-        while read < extent.clusters {
+        loop {
             let lba = self.cluster_to_lba(cluster);
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
@@ -718,11 +740,11 @@ impl Fs {
                 }
             }
             read += 1;
-            if read < extent.clusters {
-                cluster = self.advance(cluster, contiguous)?.ok_or(Error::Io(DiskError::Io))?;
+            match self.extent_next(rule, cluster, read)? {
+                Next::Cluster(next) => cluster = next,
+                Next::End | Next::Cut => return Ok(()),
             }
         }
-        Ok(())
     }
 
     /// The clusters of the directory at `first` (`contiguous`, `size`): the
@@ -747,36 +769,58 @@ impl Fs {
     /// A cluster outside the heap, or a chain longer than the volume (a
     /// loop), is refused.
     fn dir_extent(&mut self, first: u32, contiguous: bool, size: u64) -> Result<Extent, Error> {
+        let Some(rule) = self.extent_rule(first, contiguous, size)? else {
+            return Ok(Extent { clusters: 0, tail: 0, cut: false });
+        };
+        let mut extent = Extent { clusters: 1, tail: first, cut: false };
+        loop {
+            match self.extent_next(rule, extent.tail, extent.clusters)? {
+                Next::Cluster(next) => {
+                    extent.tail = next;
+                    extent.clusters += 1;
+                }
+                Next::End => return Ok(extent),
+                Next::Cut => {
+                    extent.cut = true;
+                    return Ok(extent);
+                }
+            }
+        }
+    }
+
+    /// The rule [`dir_extent`](Self::dir_extent) walks by, or `None` for a
+    /// directory with no cluster; its first cluster checked.
+    fn extent_rule(&self, first: u32, contiguous: bool, size: u64) -> Result<Option<ExtentRule>, Error> {
         let root = first == self.root_cluster && !contiguous;
         if !root && size == 0 {
-            return Ok(Extent { clusters: 0, tail: 0, cut: false });
+            return Ok(None);
         }
         if !self.in_heap(first) {
             return Err(Error::Io(DiskError::Io));
         }
         let sized = size.div_ceil(self.cluster_bytes());
-        if contiguous {
-            if first as u64 - 2 + sized > self.cluster_count as u64 {
-                return Err(Error::Io(DiskError::Io));
-            }
-            return Ok(Extent { clusters: sized, tail: first + sized as u32 - 1, cut: false });
+        if contiguous && first as u64 - 2 + sized > self.cluster_count as u64 {
+            return Err(Error::Io(DiskError::Io));
         }
-        let mut extent = Extent { clusters: 1, tail: first, cut: false };
-        loop {
-            let next = self.fat_entry(extent.tail)?;
-            if ends_walk(next) {
-                return Ok(extent);
-            }
-            if !self.in_heap(next) || extent.clusters >= self.cluster_count as u64 {
-                return Err(Error::Io(DiskError::Io));
-            }
-            if !root && extent.clusters >= sized && !self.bitmap_get(next)? {
-                extent.cut = true;
-                return Ok(extent);
-            }
-            extent.tail = next;
-            extent.clusters += 1;
+        Ok(Some(ExtentRule { root, contiguous, sized }))
+    }
+
+    /// The cluster after `cluster`, the `clusters`th of a directory's extent.
+    fn extent_next(&mut self, rule: ExtentRule, cluster: u32, clusters: u64) -> Result<Next, Error> {
+        if rule.contiguous {
+            return Ok(if clusters < rule.sized { Next::Cluster(cluster + 1) } else { Next::End });
         }
+        let next = self.fat_entry(cluster)?;
+        if ends_walk(next) {
+            return Ok(Next::End);
+        }
+        if !self.in_heap(next) || clusters >= self.cluster_count as u64 {
+            return Err(Error::Io(DiskError::Io));
+        }
+        if !rule.root && clusters >= rule.sized && !self.bitmap_get(next)? {
+            return Ok(Next::Cut);
+        }
+        Ok(Next::Cluster(next))
     }
 
     fn in_heap(&self, cluster: u32) -> bool {
