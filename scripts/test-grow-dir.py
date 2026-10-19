@@ -470,7 +470,9 @@ def main() -> int:
         checks = [("driven to the end", driven), ("no fault lines", faults == 0)]
 
         def said(cmd):
-            m = re.search(re.escape(cmd) + r"\n([^\n]*)", out)
+            # Everything up to the next prompt: the kernel's line for the
+            # task's exit can come before the shell's message.
+            m = re.search(re.escape(cmd) + r"\n(.*?)\n# ", out, re.S)
             return m.group(1) if m else ""
         said_by = {cmd: said(cmd) for cmd in reads}
         for cmd, got in said_by.items():
