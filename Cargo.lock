@@ -302,6 +302,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mountprobe"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "mv"
 version = "0.1.0"
 dependencies = [

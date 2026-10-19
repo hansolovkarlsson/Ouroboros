@@ -4243,52 +4243,27 @@ fn mount_info(out: &mut Output) {
     }
 }
 
-/// `mount -a` - rescans the USB ports for a storage device that attached
-/// after boot and mounts its filesystem. The Parallels workflow:
-/// a passed-through stick appears a few seconds after the VM starts,
-/// later than the kernel's boot-time scan - boot, wait a moment, type
-/// `mount -a`, and the disk commands come alive.
+/// `mount -a` - mounts the disk's filesystem, rescanning the USB ports for a
+/// storage device that attached after boot if the disk the kernel holds has
+/// none. The Parallels workflow: a passed-through stick appears a few seconds
+/// after the VM starts, later than the kernel's boot-time scan - boot, wait a
+/// moment, type `mount -a`, and the disk commands come alive.
+///
+/// One request (`FSOP_MOUNT`): the server mounts what the kernel holds, and if
+/// that gives nothing and nothing is mounted, has the kernel rescan and install
+/// a found stick in its place, then mounts that. An unmountable boot-time
+/// device (e.g. `make run`'s FAT16 vvfat disk) never blocks a later USB stick
+/// from becoming the disk. The shell made the rescan itself until 2026-10-19
+/// (the `MOUNT` syscall, on the server's word that nothing was mounted); the
+/// kernel answers it to the server alone now, the one task that knows.
 fn mount_disk() {
-    // Server-first, then the device: ask the filesystem server to
-    // mount whatever block device the kernel already holds
-    // (FSOP_MOUNT). Only if that can't produce a filesystem - nothing
-    // mounted and the current device (if any) isn't mountable - ask
-    // the kernel to rescan the USB ports and install a found stick as
-    // a *replacement* device (MOUNT with the replace flag, safe
-    // exactly because the server just confirmed nothing is mounted),
-    // then ask the server again. This preserves the old
-    // first-MOUNTED-wins behavior: an unmountable boot-time device
-    // (e.g. `make run`'s FAT16 vvfat disk) never blocks a later USB
-    // stick from becoming the disk.
-    match fs_call(syscall_abi::FSOP_MOUNT, [0; 4], &[], &[], &mut []) {
-        0 => {
-            print_line("mounted - disk commands available");
-            return;
-        }
-        MOUNT_ALREADY => {
-            print_line("mount: a filesystem is already mounted");
-            return;
-        }
-        NO_FS => {}
-        _ => {
-            print_line("mount: unexpected return");
-            return;
-        }
-    }
-    match syscall(syscall_abi::MOUNT, 1) {
-        0 => {}
-        MOUNT_NO_DEVICE => {
-            print_line("mount: no USB storage device found (see the kernel log; is the stick attached to the VM?)");
-            return;
-        }
-        _ => {
-            print_line("mount: unexpected return");
-            return;
-        }
-    }
     match fs_call(syscall_abi::FSOP_MOUNT, [0; 4], &[], &[], &mut []) {
         0 => print_line("mounted - disk commands available"),
-        NO_FS => print_line("mount: device found, but no mountable filesystem on it (see the server's log line)"),
+        MOUNT_ALREADY => print_line("mount: a filesystem is already mounted"),
+        MOUNT_NO_DEVICE => {
+            print_line("mount: no USB storage device found (see the kernel log; is the stick attached to the VM?)")
+        }
+        NO_FS => print_line("mount: no mountable filesystem on the disk or a USB stick (see the server's log line)"),
         _ => print_line("mount: unexpected return"),
     }
 }

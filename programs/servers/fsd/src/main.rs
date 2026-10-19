@@ -206,6 +206,28 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     }
 }
 
+/// `mount -a`: mount tree 0 from the block device the kernel holds, and when
+/// that finds nothing, have the kernel rescan the USB ports and install a stick
+/// in its place (the `MOUNT` syscall, replace set), then try again. The
+/// replace is passed only with no disk filesystem mounted, here where that is
+/// known: a swap under a mounted one would hand its cached geometry another
+/// disk. Since 2026-10-19 the kernel answers `MOUNT` to this server alone
+/// (`CAP_BLOCK`); until then the shell called it on fsd's earlier word, and
+/// so could any task, on nobody's. Answers `try_mount`'s codes, or
+/// `MOUNT_NO_DEVICE` when the rescan found no stick.
+fn mount_or_rescan(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
+    let first = try_mount(mounts);
+    if first != syscall_abi::NO_FS || mounts.iter().flatten().any(|m| m.is_disk()) {
+        return first;
+    }
+    match syscall4(syscall_abi::MOUNT, 1, 0, 0, 0) {
+        0 => try_mount(mounts),
+        syscall_abi::MOUNT_NO_DEVICE => syscall_abi::MOUNT_NO_DEVICE,
+        // A stick there whose init failed answers as nothing mountable did.
+        _ => syscall_abi::NO_FS,
+    }
+}
+
 /// The tree that already holds `candidate`'s partition, if any. A partition
 /// is mounted at most once (since 2026-10-05): two trees over one partition
 /// would be two filesystems over one set of on-disk structures, each with its
@@ -508,7 +530,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         }
         // The auto-mount at tree 0 (the default the shell's `mount -a`
         // triggers); `try_mount` answers MOUNT_ALREADY when tree 0 is full.
-        return status_reply(reply, try_mount(mounts));
+        return status_reply(reply, mount_or_rescan(mounts));
     }
 
     if op == syscall_abi::FSOP_MOUNT_AT {

@@ -328,18 +328,21 @@ pub const WAIT: u64 = 21;
 
 /// `(replace)` -> `0` (a USB storage device was found and installed
 /// as the kernel's block device), [`MOUNT_ALREADY`] (a device is
-/// already installed and `replace` was `0`; nothing changed), or
-/// [`MOUNT_NO_DEVICE`]. Rescans the USB (xHCI) ports for storage
+/// already installed and `replace` was `0`; nothing changed),
+/// [`MOUNT_NO_DEVICE`], or [`BLOCK_ERR_DENIED`] for any caller but the
+/// filesystem server ([`FSD_TASK`], the `CAP_BLOCK` holder, as for the
+/// `BLOCK_*` calls). Rescans the USB (xHCI) ports for storage
 /// devices that attached after boot - on Parallels, a passed-through
 /// stick appears a few seconds *after* the kernel's boot-time scan
 /// (confirmed by the enumeration diagnostics). **The device half
 /// only** since the filesystem moved to userland: actually mounting
-/// what the device holds is the server's [`FSOP_MOUNT`] request, and
-/// the shell's `mount` command composes the two (server first - see
-/// its cmd_mount). `replace != 0` allows swapping out an installed
-/// device; callers may only pass it after the server confirms nothing
-/// is mounted, or a live filesystem's cached geometry would suddenly
-/// describe a different disk.
+/// what the device holds is the server's [`FSOP_MOUNT`] request, which
+/// calls this itself when its own mount finds nothing. `replace != 0`
+/// allows swapping out an installed device, which the server passes
+/// only when no disk filesystem is mounted, or a live filesystem's
+/// cached geometry would suddenly describe a different disk; it is the
+/// one task that knows, which is why it is the only caller (since
+/// 2026-10-19: until then any task could swap the disk).
 pub const MOUNT: u64 = 22;
 
 /// `(dest task, buf ptr, len)` -> `0`, [`TASK_ERR_NO_SUCH_TASK`],
@@ -1548,10 +1551,13 @@ pub const FSOP_RM: u64 = 8;
 /// on it); a directory on either side of an existing name is refused.
 pub const FSOP_MV: u64 = 9;
 /// no params -> `0` (mounted now), [`MOUNT_ALREADY`] (tree 0 is mounted,
-/// or the partition found is already another tree), or [`NO_FS`] (a device
-/// is present but carries no mountable filesystem). The FS half of
-/// the `mount` command - the device half is the [`MOUNT`] syscall,
-/// which must succeed (or report already-installed) first.
+/// or the partition found is already another tree), [`NO_FS`] (a device
+/// is present but carries no mountable filesystem), or
+/// [`MOUNT_NO_DEVICE`]. Root only. The `mount -a` command whole: when the
+/// device the kernel holds (if any) gives no filesystem and no disk
+/// filesystem is mounted, the server rescans the USB ports for a stick
+/// itself (the [`MOUNT`] syscall, replace set, which only it may call)
+/// and tries again; [`MOUNT_NO_DEVICE`] means the rescan found none.
 pub const FSOP_MOUNT: u64 = 10;
 
 /// params: `(path len, offset, want)`; payload: path. The bulk sibling
