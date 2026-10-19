@@ -466,8 +466,14 @@ fsd's word that nothing was mounted, and a swap under a mounted filesystem
 hands fsd's cached geometry another disk. It is gated now as the `BLOCK_*`
 calls are (`CAP_BLOCK`, fsd's alone, else `BLOCK_ERR_DENIED`), and fsd's
 `FSOP_MOUNT` makes the rescan itself, only when its own mount found nothing
-and no disk filesystem is mounted, where that is known. `mount -a` is one
-request, answering `MOUNT_NO_DEVICE` when the rescan found no stick. `make
+and no disk filesystem is mounted, where that is known; not when the disk's
+partition table would not read (`FS_ERR_IO`), so a failing disk is not
+swapped for whatever stick is attached. A device the rescan installs resets
+fsd's "table rewritten" state, so a boot-matched stick answers its boot
+partition. `mount -a` is one request, answering `MOUNT_NO_DEVICE` when the
+rescan found no stick; a kernel refusal of the rescan reaches the shell by
+name. No rig reaches the I/O refusal or the reset: QEMU gives no transient
+read error, and the reset needs a boot stick whose boot-time init failed. `make
 test-mount-gate` boots esp.img on virtio with a USB stick beside it:
 `/bin/MOUNTPROBE` (MOUNT from an ordinary task) must be denied and `/` still
 the ESP, then with the virtio disk erased `mount -a` must mount the stick.

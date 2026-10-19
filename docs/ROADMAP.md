@@ -4272,6 +4272,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   link to `2..cluster_end` in `next_cluster` closes it, on both.
   Older than the cursors; read in the code, not reproduced. From the max
   review of the finer cursor rule (2026-10-18).
+- **A read error inside a partition's probe reads as "no filesystem".**
+  `vfs::Filesystem::probe` returns `None` for any failure of FAT32's, exFAT's
+  and ext2's `mount_at`, an I/O error among them, so `mount` cannot tell a
+  disk that failed a read from one with nothing on it, except when the
+  partition table itself would not read (`FS_ERR_IO` since 2026-10-19). Since
+  then `mount -a`'s USB rescan, which fsd makes on "no filesystem", is skipped
+  on that one error; a read error inside a probe still lets a failing boot
+  disk be swapped for an attached stick. Probing to a three-way answer (this
+  format, not this format, the disk failed) would close it. Read in the code;
+  from the review of the MOUNT gate (2026-10-19).
 - **FAT32's `cluster_end` is the BPB's word, not the partition's.** Since
   2026-10-19 every cluster FAT32 takes to the disk is checked against
   `cluster_end`, so that bound is the one guard left, and it comes from the
