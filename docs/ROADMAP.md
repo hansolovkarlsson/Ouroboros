@@ -4194,11 +4194,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `-f`.** `mkdir /Lowdir; mv -f /Lowdir /lowdir` answers "exists": the
   rename's "the destination is a directory" guard (`fat32.rs`, `exfat.rs`)
   fires although the destination is the source itself. The guard should let
-  the same entry through. Found by the second review of #225, 2026-10-06. Through
-  `/bin/mv` the refusal is "invalid name" since 2026-10-19: `mv` sends the
-  pair as `/lowdir/Lowdir`, which fsd now refuses as a move into itself. A
-  case-only rename needs `mv` to send the raw pair, which it cannot tell from
-  a move into a second directory on ext2 without the server saying.
+  the same entry through. Found by the second review of #225, 2026-10-06.
+  Through `/bin/mv` the refusal is "cannot move ... to a subdirectory of
+  itself" since 2026-10-19: `mv` sends the pair as `/lowdir/Lowdir`, which
+  fsd now refuses as a move into itself. A case-only rename needs `mv` to
+  send the raw pair, which it cannot tell from a move into a second directory
+  on ext2 without the server saying.
 - **fsd's FAT32 rename rebuilds the entry, losing its attributes and date.**
   `rename` re-inserts the name with only the directory bit in its attribute
   byte and zeroed timestamps, so a file's read-only, hidden, system and
@@ -4281,8 +4282,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   rule (2026-10-18), outside its diff.
 - ~~**A case-only `mv` of a directory moves it into itself, on FAT32 and
   exFAT.**~~ *Done 2026-10-19:* fsd's guard compares in the filesystem's case
-  rule (`Filesystem::folds_case`), so the move is refused with "invalid
-  name"; reproduced first by `make test-mv-into`'s control (both names gone,
+  rule (`Filesystem::names_match`, which the lookups call) and on resolved
+  paths (`ninep_abi::is_within`), so the move is refused and `/bin/mv` says
+  `cannot move /Docs to a subdirectory of itself, /docs/Docs`; reproduced first by `make test-mv-into`'s control (both names gone,
   `mv` exiting 0), which checks it on all three formats. The record as found:
   `mkdir /Docs; mv /Docs /docs`: `/bin/mv` stats `/docs`, finds
   `Docs`, and sends `NP_MV("/Docs", "/docs/Docs")`. fsd's `is_within`
