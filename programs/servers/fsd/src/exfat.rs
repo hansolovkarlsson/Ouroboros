@@ -171,15 +171,17 @@ enum Next {
     Cut,
 }
 
-/// A directory to create an entry in: its own entry, its extent, and where
-/// its entry's set lies (`None` for the root, which has none). Growing a
+/// A directory to create an entry in: its own entry, where its entry's set
+/// lies, and its extent (both `None` for the root, which has no set, and
+/// whose extent, its whole chain, is walked only when it grows: a create
+/// that finds a slot reads no FAT, as before 2026-10-18). Growing a
 /// directory past its clusters raises its DataLength, which other drivers
 /// stop at, so whoever grows it must know where that length is recorded;
 /// `create_entry` takes only this, built by `dir_at` and `parent_for_create`.
 struct Dir {
     entry: DirEntry,
-    extent: Extent,
     at: Option<SetAt>,
+    extent: Option<Extent>,
 }
 
 pub struct Fs {
@@ -883,23 +885,24 @@ impl Fs {
         if !entry.is_dir {
             return Err(Error::NotADirectory);
         }
+        let Some(at) = at else {
+            return Ok(Dir { entry, at, extent: None });
+        };
         let extent = self.dir_extent(entry.first_cluster, entry.contiguous, entry.size)?;
-        if let Some(at) = at {
-            if !entry.contiguous && extent.clusters > 0 {
-                let size = extent.clusters * self.cluster_bytes();
-                if size < entry.size {
-                    return Err(Error::Io(DiskError::Io));
-                }
-                if extent.cut {
-                    self.write_fat_entry(extent.tail, END_OF_CHAIN)?;
-                }
-                if size != entry.size {
-                    self.patch_set_stream(at, entry.first_cluster, size)?;
-                    entry.size = size;
-                }
+        if !entry.contiguous && extent.clusters > 0 {
+            let size = extent.clusters * self.cluster_bytes();
+            if size < entry.size {
+                return Err(Error::Io(DiskError::Io));
+            }
+            if extent.cut {
+                self.write_fat_entry(extent.tail, END_OF_CHAIN)?;
+            }
+            if size != entry.size {
+                self.patch_set_stream(at, entry.first_cluster, size)?;
+                entry.size = size;
             }
         }
-        Ok(Dir { entry, extent: Extent { cut: false, ..extent }, at })
+        Ok(Dir { entry, at: Some(at), extent: Some(Extent { cut: false, ..extent }) })
     }
 
     fn cluster_bytes(&self) -> u64 {
@@ -1272,10 +1275,13 @@ impl Fs {
     fn grow_dir(&mut self, dir: &mut Dir) -> Result<(), Error> {
         let cluster_bytes = self.cluster_bytes();
         let e = &mut dir.entry;
-        let x = &mut dir.extent;
+        let (Some(at), Some(x)) = (dir.at, dir.extent.as_mut()) else {
+            let root = self.dir_extent(e.first_cluster, false, 0)?;
+            let new = self.alloc_cluster()?;
+            self.zero_cluster(new)?;
+            return self.write_fat_entry(root.tail, new);
+        };
         if x.clusters == 0 {
-            // Never the root, whose extent is at least its first cluster.
-            let at = dir.at.ok_or(Error::Io(DiskError::Io))?;
             let new = self.alloc_cluster()?;
             self.zero_cluster(new)?;
             self.patch_set_stream(at, new, cluster_bytes)?;
@@ -1286,8 +1292,6 @@ impl Fs {
             return Ok(());
         }
         if e.contiguous {
-            // Never the root, which is FAT-chained.
-            let at = dir.at.ok_or(Error::Io(DiskError::Io))?;
             let size = x.clusters * cluster_bytes;
             self.ensure_chained(e.first_cluster, true, size)?;
             self.patch_set_stream(at, e.first_cluster, size)?;
@@ -1299,11 +1303,9 @@ impl Fs {
         self.write_fat_entry(x.tail, new)?;
         x.clusters += 1;
         x.tail = new;
-        if let Some(at) = dir.at {
-            let size = x.clusters * cluster_bytes;
-            self.patch_set_stream(at, e.first_cluster, size)?;
-            e.size = size;
-        }
+        let size = x.clusters * cluster_bytes;
+        self.patch_set_stream(at, e.first_cluster, size)?;
+        e.size = size;
         Ok(())
     }
 
@@ -1318,8 +1320,10 @@ impl Fs {
         let mut run = 0usize;
         let mut slot = 0usize;
         loop {
+            // The root's scan ends where its chain does (slot_addr), as its
+            // extent does.
             let slots_per_cluster = self.sectors_per_cluster as u64 * SLOTS_PER_SECTOR as u64;
-            let inside = (slot as u64) < dir.extent.clusters * slots_per_cluster;
+            let inside = dir.extent.is_none_or(|x| (slot as u64) < x.clusters * slots_per_cluster);
             let addr = if inside {
                 self.slot_addr(dir.entry.first_cluster, dir.entry.contiguous, slot)?
             } else {
@@ -1805,8 +1809,9 @@ impl Fs {
             return Err(Error::DirectoryNotEmpty);
         }
         // Its extent: the chain ends there, `dir_at` having cut a link past it.
-        if dir.extent.clusters > 0 {
-            let bytes = dir.extent.clusters * self.cluster_bytes();
+        let clusters = dir.extent.map_or(0, |x| x.clusters);
+        if clusters > 0 {
+            let bytes = clusters * self.cluster_bytes();
             self.free_data(entry.first_cluster, entry.contiguous, bytes)?;
         }
         self.delete_set(at.dir_cluster, at.dir_contiguous, at.slot, at.len)
