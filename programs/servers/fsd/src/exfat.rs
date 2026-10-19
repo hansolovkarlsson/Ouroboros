@@ -780,8 +780,9 @@ impl Fs {
     /// - A FAT-chained directory: its chain, to its size at most (`past_size`
     ///   when the chain goes on), as every other driver reads it.
     ///
-    /// A cluster outside the heap, or a chain longer than the volume (a
-    /// loop), is refused; a link past the size is not read further.
+    /// A first cluster outside the heap, or a chain longer than the volume (a
+    /// loop), is refused; a link outside the heap ends the chain, and a link
+    /// past the size is not read further.
     fn dir_extent(&mut self, first: u32, contiguous: bool, size: u64) -> Result<Extent, Error> {
         let Some(rule) = self.extent_rule(first, contiguous, size)? else {
             return Ok(Extent { clusters: 0, tail: 0, past_size: false });
@@ -831,8 +832,15 @@ impl Fs {
         if !rule.root && clusters >= rule.sized {
             return Ok(Next::PastSize);
         }
-        if !self.in_heap(next) || clusters >= self.cluster_count as u64 {
-            return Err(Error::Io(DiskError::Io));
+        if !self.in_heap(next) {
+            // A link outside the heap ends the chain, as next_cluster ends a
+            // walk there: one bad link in the root's chain refused every
+            // lookup on the volume. A subdirectory cut short by one is then
+            // shorter than its size, which `room` refuses to create in.
+            return Ok(Next::End);
+        }
+        if clusters >= self.cluster_count as u64 {
+            return Err(Error::Io(DiskError::Io)); // a loop
         }
         Ok(Next::Cluster(next))
     }
@@ -1209,14 +1217,19 @@ impl Fs {
                 self.bitmap_set(c, false)?;
             }
         } else {
+            // To its size, at most: a link past it (a crash between a chain's
+            // extension and its size write, or another tool) may name a
+            // cluster since given to another file, and a loop has no end.
+            // What lies past the size stays allocated, a leak a fsck finds.
+            let n = size.div_ceil(self.cluster_bytes());
             let mut c = first;
-            loop {
+            for i in 0..n {
                 let next = self.next_cluster(c)?;
                 self.bitmap_set(c, false)?;
                 self.write_fat_entry(c, 0)?;
                 match next {
-                    Some(n) => c = n,
-                    None => break,
+                    Some(next) if i + 1 < n => c = next,
+                    _ => break,
                 }
             }
         }
@@ -1506,18 +1519,17 @@ impl Fs {
     /// `NoFatChain` flag (which `patch_stream_ext` does). No-op if already
     /// chained. The bitmap is unaffected (the clusters stay allocated).
     ///
-    /// An entry of size 0 that names a cluster gets that one cluster ended:
-    /// the spec wants `DataLength > 0` with `NoFatChain`, but a tool may
-    /// leave one, and its cluster's FAT entry is then undefined, so a write
-    /// following it as a link went into whatever cluster it named (the
-    /// review of #316) and could leave the write cursor on a chain the write
-    /// itself had cut (the review of the finer cursor rule, 2026-10-18).
+    /// An entry of size 0 never comes here: `walk_dir` gives it no cluster,
+    /// whatever its set names (since 2026-10-19). Until then this ended the
+    /// one cluster such an entry named, whose FAT entry a tool leaves
+    /// undefined, after a write following it as a link went into whatever
+    /// cluster it named (the review of #316).
     fn ensure_chained(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
         if !contiguous || first < 2 {
             return Ok(());
         }
         let cluster_bytes = self.cluster_bytes();
-        let n = (size.div_ceil(cluster_bytes) as u32).max(1);
+        let n = size.div_ceil(cluster_bytes) as u32;
         for i in 0..n {
             let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
             self.write_fat_entry(first + i, value)?;
@@ -1614,18 +1626,23 @@ impl Fs {
         let parent = dir.entry;
         let existing =
             self.find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?;
+        #[allow(clippy::large_enum_variant)] // one, on the stack, for one call
+        enum Plan {
+            Replace(DirEntry, usize, usize),
+            Create(Room),
+        }
         // A create is refused before the chain is written, or it would leak.
-        let room = match existing {
+        let plan = match existing {
             Some((entry, _, _)) if entry.is_dir => return Err(Error::NotAFile),
-            Some(_) => None,
-            None => Some(self.room(&dir)?),
+            Some((entry, slot, len)) => Plan::Replace(entry, slot, len),
+            None => Plan::Create(self.room(&dir)?),
         };
 
         // Write the replacement chain first (nothing existing touched yet).
         let new_cluster = self.write_chain(data)?;
 
-        match (existing, room) {
-            (Some((entry, primary_slot, set_len)), _) => {
+        match plan {
+            Plan::Replace(entry, primary_slot, set_len) => {
                 self.free_file(&entry)?;
                 self.patch_stream_ext(
                     parent.first_cluster,
@@ -1636,10 +1653,15 @@ impl Fs {
                     data.len() as u64,
                 )
             }
-            (None, Some(room)) => {
-                self.create_entry(&mut dir, room, name, false, new_cluster, data.len() as u64, false)
+            Plan::Create(room) => {
+                let made = self.create_entry(&mut dir, room, name, false, new_cluster, data.len() as u64, false);
+                if made.is_err() {
+                    // The directory could not take the set (it could not grow,
+                    // say): nothing names the chain, so it is given back.
+                    let _ = self.free_data(new_cluster, false, data.len() as u64);
+                }
+                made
             }
-            (None, None) => unreachable!("a create's room is taken above"),
         }
     }
 
@@ -1788,7 +1810,11 @@ impl Fs {
         let new_cluster = self.alloc_cluster()?;
         self.zero_cluster(new_cluster)?;
         let cluster_bytes = self.cluster_bytes();
-        self.create_entry(&mut dir, room, name, true, new_cluster, cluster_bytes, false)
+        let made = self.create_entry(&mut dir, room, name, true, new_cluster, cluster_bytes, false);
+        if made.is_err() {
+            let _ = self.free_data(new_cluster, false, cluster_bytes); // nothing names it
+        }
+        made
     }
 
     /// Remove a file (rejects a directory with `NotAFile`). Frees its clusters
