@@ -693,8 +693,18 @@ impl Fs {
                         return Ok(()); // end of directory
                     }
                     if t & 0x80 == 0 {
-                        continue; // not in use (deleted / free slot)
+                        // Not in use (deleted / free slot). A set is
+                        // contiguous, so one this cuts is no set: its slots
+                        // would not be `set_start..set_start + set_len`, which
+                        // every writer of a set addresses (2026-10-19).
+                        in_set = false;
+                        continue;
                     }
+                    // The spec's shape, which the writers rely on: the Stream
+                    // is the first secondary and the only one, and a primary
+                    // cuts a set short (patch_stream_ext wrote its Stream
+                    // fields over whatever sat at the set's second slot).
+                    let first_secondary = in_set && this_slot == set_start + 1;
 
                     match t {
                         ET_FILE => {
@@ -708,9 +718,17 @@ impl Fs {
                             set_contig = false;
                             name_cap = 0;
                             name_len = 0;
-                            in_set = true;
+                            // No secondaries is no Stream: no set.
+                            in_set = raw[1] != 0;
                         }
-                        ET_STREAM_EXT if in_set => {
+                        _ if !in_set => {
+                            // A primary we ignore (bitmap 0x81, up-case 0x82,
+                            // volume label 0x83) - not part of a File set -
+                            // or a secondary of no set.
+                        }
+                        _ if t & 0x40 == 0 => in_set = false, // a primary inside a set
+                        _ if (t == ET_STREAM_EXT) != first_secondary => in_set = false,
+                        ET_STREAM_EXT => {
                             set_contig = raw[1] & NO_FAT_CHAIN != 0;
                             name_cap = raw[3] as usize;
                             set_cluster =
@@ -721,7 +739,7 @@ impl Fs {
                             ]);
                             secondaries_left = secondaries_left.saturating_sub(1);
                         }
-                        ET_FILE_NAME if in_set => {
+                        ET_FILE_NAME => {
                             // 15 UTF-16LE chars at bytes 2..32, capped by the
                             // set's declared NameLength (a name spans several
                             // 0xC1 entries).
@@ -737,14 +755,11 @@ impl Fs {
                             }
                             secondaries_left = secondaries_left.saturating_sub(1);
                         }
-                        _ if in_set => {
-                            // A secondary type we don't model (none exist in a
-                            // File set today) - still count it so the set closes.
-                            secondaries_left = secondaries_left.saturating_sub(1);
-                        }
                         _ => {
-                            // A primary we ignore (bitmap 0x81, up-case 0x82,
-                            // volume label 0x83) - not part of a File set.
+                            // A secondary we don't model (a vendor extension
+                            // 0xE0, a vendor allocation 0xE1) - still counted
+                            // so the set closes.
+                            secondaries_left = secondaries_left.saturating_sub(1);
                         }
                     }
 
@@ -1611,8 +1626,19 @@ impl Fs {
     /// first-cluster / data-length (FAT-chained), then recompute the
     /// `SetChecksum` over the whole set - the exFAT equivalent of
     /// `fat32::patch_entry_cluster_size`, plus the checksum the format requires.
-    /// Reads all `set_len` entries (to checksum), rewrites the File + Stream
-    /// entries (the two that changed; the name entries are untouched).
+    /// Rewrites the File + Stream entries (the two that changed; the name
+    /// entries and any others are untouched).
+    ///
+    /// The checksum runs over all `set_len` entries, read a sector at a time
+    /// as it goes: a set may hold more than the largest fsd builds (a name of
+    /// 241 to 255 characters with a vendor secondary, or vendor entries after
+    /// any name, which the spec allows and cameras write), and until
+    /// 2026-10-19 the sum stopped at [`MAX_SET_ENTRIES`], so such a set was
+    /// left with a checksum over part of it, which a fsck may repair by
+    /// deleting the set. File and Stream go out in ONE sector write when they
+    /// share a sector, as they do unless the set starts in a sector's last
+    /// slot: then two writes, and a crash between them leaves the checksum
+    /// unmatched, which nothing short of a journal avoids.
     fn patch_stream_ext(
         &mut self,
         dir_cluster: u32,
@@ -1622,33 +1648,69 @@ impl Fs {
         first_cluster: u32,
         data_len: u64,
     ) -> Result<(), Error> {
-        let mut set = [0u8; MAX_SET_BYTES];
-        let count = set_len.min(MAX_SET_ENTRIES);
-        for i in 0..count {
+        // File and Stream as they are, then the Stream changed.
+        let mut head = [0u8; 2 * ENTRY_SIZE];
+        let mut at = [(0u64, 0usize); 2];
+        let mut sec = [0u8; SECTOR_SIZE];
+        let mut sec_lba = None;
+        for (i, place) in at.iter_mut().enumerate() {
             let (lba, off) = self
                 .slot_addr(dir_cluster, dir_contig, primary_slot + i)?
                 .ok_or(Error::NotFound)?;
-            let mut sec = [0u8; SECTOR_SIZE];
-            self.disk.read_sector(lba, &mut sec)?;
-            set[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE].copy_from_slice(&sec[off..off + ENTRY_SIZE]);
+            if sec_lba != Some(lba) {
+                self.disk.read_sector(lba, &mut sec)?;
+                sec_lba = Some(lba);
+            }
+            head[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE].copy_from_slice(&sec[off..off + ENTRY_SIZE]);
+            *place = (lba, off);
         }
         let se = ENTRY_SIZE;
-        set[se + 1] = SECONDARY_ALLOC_POSSIBLE; // FAT-chained now (NoFatChain clear)
-        set[se + 8..se + 16].copy_from_slice(&data_len.to_le_bytes()); // ValidDataLength
-        set[se + 20..se + 24].copy_from_slice(&first_cluster.to_le_bytes());
-        set[se + 24..se + 32].copy_from_slice(&data_len.to_le_bytes()); // DataLength
-        let sum = set_checksum(&set[..count * ENTRY_SIZE]);
-        set[2..4].copy_from_slice(&sum.to_le_bytes());
-        // Rewrite the two changed entries (File carries the new checksum).
-        for i in 0..2 {
+        // `walk_dir` closes a set only in this shape, so this is a check that
+        // the slots still hold the set it found, not a second rule.
+        if set_len < 2 || head[0] != ET_FILE || head[se] != ET_STREAM_EXT {
+            return Err(Error::Io(DiskError::Io));
+        }
+        head[se + 1] = SECONDARY_ALLOC_POSSIBLE; // FAT-chained now (NoFatChain clear)
+        head[se + 8..se + 16].copy_from_slice(&data_len.to_le_bytes()); // ValidDataLength
+        head[se + 20..se + 24].copy_from_slice(&first_cluster.to_le_bytes());
+        head[se + 24..se + 32].copy_from_slice(&data_len.to_le_bytes()); // DataLength
+        // The checksum: File (but its own two bytes) and the new Stream, then
+        // every secondary after them as it is on the disk.
+        let mut sum = set_checksum(&head);
+        for i in 2..set_len {
             let (lba, off) = self
                 .slot_addr(dir_cluster, dir_contig, primary_slot + i)?
                 .ok_or(Error::NotFound)?;
-            let mut sec = [0u8; SECTOR_SIZE];
-            self.disk.read_sector(lba, &mut sec)?;
-            sec[off..off + ENTRY_SIZE]
-                .copy_from_slice(&set[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE]);
+            if sec_lba != Some(lba) {
+                self.disk.read_sector(lba, &mut sec)?;
+                sec_lba = Some(lba);
+            }
+            for &b in &sec[off..off + ENTRY_SIZE] {
+                sum = checksum_step(sum, b);
+            }
+        }
+        head[2..4].copy_from_slice(&sum.to_le_bytes());
+        // Rewrite the two changed entries (File carries the new checksum): one
+        // write when they share a sector, the sector already read if `sec`
+        // still holds it.
+        if at[0].0 == at[1].0 {
+            let (lba, _) = at[0];
+            if sec_lba != Some(lba) {
+                self.disk.read_sector(lba, &mut sec)?;
+            }
+            for (i, &(_, off)) in at.iter().enumerate() {
+                sec[off..off + ENTRY_SIZE].copy_from_slice(&head[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE]);
+            }
             self.disk.write_sector(lba, &sec)?;
+        } else {
+            for (i, &(lba, off)) in at.iter().enumerate() {
+                if sec_lba != Some(lba) {
+                    self.disk.read_sector(lba, &mut sec)?;
+                }
+                sec[off..off + ENTRY_SIZE].copy_from_slice(&head[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE]);
+                self.disk.write_sector(lba, &sec)?;
+                sec_lba = Some(lba);
+            }
         }
         Ok(())
     }

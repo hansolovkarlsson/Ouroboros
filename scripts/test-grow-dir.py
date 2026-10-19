@@ -82,6 +82,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import exfatimg  # noqa: E402
 import mbrdisk  # noqa: E402
 
 
@@ -479,33 +480,25 @@ def disk_checks(parts, snap, old):
 
 def fsck():
     """fsck_exfat -n and fsck_msdos -n on the image's two partitions."""
-    att = subprocess.run(["hdiutil", "attach", "-nomount", "-imagekey", "diskimage-class=CRawDiskImage", IMAGE],
-                         capture_output=True, text=True)
-    if att.returncode != 0:
-        return [("the image attaches for fsck", False)], [att.stderr.strip()]
-    dev = att.stdout.split()[0]
     checks, notes = [], []
     try:
-        for part, tool, where in (("s1", "fsck_exfat", "exfat root"), ("s2", "fsck_msdos", "fat32 /mnt/f")):
-            r = subprocess.run([tool, "-n", dev + part], capture_output=True, text=True)
-            lines = (r.stdout + r.stderr).strip().splitlines()
-            if tool == "fsck_exfat":
-                # It ran its checks, it names /OLD's chain, the case planted
-                # and left for a fsck, and nothing else: every line is one of
-                # its stages, a complaint or its "No" to a repair.
-                problems = [ln for ln in lines if ln.startswith("   ")]
-                other = [ln for ln in lines if not (ln.startswith(("** ", "   ")) or ln.endswith("? NO"))]
-                ok = ("** Checking file system hierarchy." in lines and not other and
-                      problems == ["   Cluster chain for /OLD has too many clusters for its size."])
-                checks.append((f"{where}: {tool} -n finds nothing to repair but /OLD's chain, as planted", ok))
-            else:
-                ok = r.returncode == 0
-                checks.append((f"{where}: {tool} -n finds nothing to repair", ok))
-            if not ok:
-                notes += [f"{where}: {ln}" for ln in lines]
-    finally:
-        if subprocess.run(["hdiutil", "detach", dev], capture_output=True).returncode != 0:
-            notes.append(f"hdiutil detach {dev} failed: the device is still attached")
+        with exfatimg.attached(IMAGE) as dev:
+            for part, tool, where in (("s1", "fsck_exfat", "exfat root"), ("s2", "fsck_msdos", "fat32 /mnt/f")):
+                rc, lines = exfatimg.fsck(dev + part, tool)
+                if tool == "fsck_exfat":
+                    # It ran its checks, it names /OLD's chain, the case planted
+                    # and left for a fsck, and nothing else: every line is one of
+                    # its stages, a complaint or its "No" to a repair.
+                    ok = ("** Checking file system hierarchy." in lines and not exfatimg.unexpected(lines) and
+                          exfatimg.complaints(lines) == ["   Cluster chain for /OLD has too many clusters for its size."])
+                    checks.append((f"{where}: {tool} -n finds nothing to repair but /OLD's chain, as planted", ok))
+                else:
+                    ok = rc == 0
+                    checks.append((f"{where}: {tool} -n finds nothing to repair", ok))
+                if not ok:
+                    notes += [f"{where}: {ln}" for ln in lines]
+    except RuntimeError as e:
+        return [("the image attaches for fsck", False)], [str(e)]
     return checks, notes
 
 

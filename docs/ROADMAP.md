@@ -4331,7 +4331,17 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   case-insensitive tree, or refuse a destination that resolves to the source
   or under it. Read in the code, not reproduced. Found by the max review of
   the exFAT grow_dir fix (2026-10-18), outside its diff.
-- **exFAT's `patch_stream_ext` checksums at most 19 entries of a set.** It
+- ~~**exFAT's `patch_stream_ext` checksums at most 19 entries of a set.**~~
+  *Done 2026-10-19:* the sum runs over every entry of the set, a sector at a
+  time, and File and Stream go out in one sector write when they share a
+  sector (two when the set starts in a sector's last slot, which only a
+  journal would make safe), and `walk_dir` takes a set only in the spec's
+  shape (contiguous, its Stream first), so the patch can no longer write
+  Stream fields into another slot. Reproduced first by `make test-long-set`'s
+  control: a planted 20-entry set appended to on the guest, after which
+  fsck_exfat said "Incorrect checksum for directory entry set. Delete?", and
+  sets with a deleted slot or a primary inside had their slots written. The
+  record as found: It
   reads `min(set_len, MAX_SET_ENTRIES)` entries, so a set of more (a name of
   241 to 255 characters with a vendor secondary, which the spec allows and
   cameras write) gets a SetChecksum over part of it, and fsck.exfat may
@@ -4345,7 +4355,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `slot_addr`, which walks the chain from the first cluster each time: about
   15,000 reads to make 100 files in one directory, where keeping the last
   sector and cluster would need about 1,000. A cost only. Found by the same
-  review.
+  review. `patch_stream_ext` pays the same per entry: since 2026-10-19 it sums
+  every entry of a set, so a set of 256 entries costs 256 chain walks on every
+  write that patches it (a set of fsd's own, three entries, costs what it did).
+  Resolving the primary's place once and stepping it forward would serve both.
+- **`mv` on exFAT drops a set's vendor entries.** A rename deletes the set
+  and builds a new one of File, Stream and name, so vendor extension (0xE0)
+  and vendor allocation (0xE1) entries a camera wrote are lost, and a vendor
+  allocation's clusters leaked. Since 2026-10-19 a write keeps them (`make
+  test-long-set`); a rename should copy the secondaries past the name into
+  the new set. Read in the code; from the review of the set checksum.
 - **exFAT says which set a name means in three places.** `find_at`,
   `find_in_parent` and `parent_for_create` each carry the name-match rule,
   and `write_at`, `rm`, `rmdir` and `mv` assemble a set's location by hand
