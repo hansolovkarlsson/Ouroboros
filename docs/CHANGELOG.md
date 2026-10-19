@@ -458,6 +458,23 @@ frees, in both FAT copies, two reads count its bytes, `rm` of a link to the
 bad-cluster mark fails, and FAT entry 1 is zeroed. `scripts/fat32img.py` is
 the FAT32 reader that rig and `test-write-walk` share.
 
+**`MOUNT` answers the filesystem server alone (2026-10-19).** The kernel's
+`MOUNT` with replace set rescans the USB ports and installs a found stick in
+place of the block device. Any task could call it, an ordinary user
+included, though fsd's `FSOP_MOUNT` is root-only; the shell called it on
+fsd's word that nothing was mounted, and a swap under a mounted filesystem
+hands fsd's cached geometry another disk. It is gated now as the `BLOCK_*`
+calls are (`CAP_BLOCK`, fsd's alone, else `BLOCK_ERR_DENIED`), and fsd's
+`FSOP_MOUNT` makes the rescan itself, only when its own mount found nothing
+and no disk filesystem is mounted, where that is known. `mount -a` is one
+request, answering `MOUNT_NO_DEVICE` when the rescan found no stick. `make
+test-mount-gate` boots esp.img on virtio with a USB stick beside it:
+`/bin/MOUNTPROBE` (MOUNT from an ordinary task) must be denied and `/` still
+the ESP, then with the virtio disk erased `mount -a` must mount the stick.
+Without the gate the probe installs the stick under the mounted ESP, `ls /`
+reads it and `erase disk` erases it; without fsd's rescan `mount -a` finds
+nothing.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

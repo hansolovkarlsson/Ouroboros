@@ -4291,7 +4291,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bitmap says the cluster is free) was declined: on a damaged volume a
   bitmap-free cluster can be on a live chain, the max review's finding 1,
   and the gain is speed on Linux-written sticks only.
-- **`MOUNT` with `replace` set has no caller check.** The kernel's `MOUNT`
+- ~~**`MOUNT` with `replace` set has no caller check.**~~ *Done 2026-10-19:*
+  the kernel answers `MOUNT` to the `CAP_BLOCK` holder alone (fsd), as the
+  `BLOCK_*` calls, and fsd's `FSOP_MOUNT` makes the rescan itself when its
+  mount found nothing and no disk filesystem is mounted; the shell's `mount
+  -a` is one request. Reproduced first by `make test-mount-gate`'s control: an
+  ordinary task swapped a USB stick in under the mounted ESP, `ls /` then read
+  the stick, and `erase disk` erased the stick. The record as found: The kernel's `MOUNT`
   arm (`kernel/src/syscall.rs`) swaps the block device for a USB stick when
   arg0 is nonzero, trusting that "the caller has already confirmed with the
   server that nothing is mounted"; nothing checks who the caller is, so any
