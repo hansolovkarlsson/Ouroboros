@@ -56,7 +56,7 @@
 
 use core::ops::ControlFlow;
 
-use crate::disk::Disk;
+use crate::disk::{Disk, DiskError};
 use crate::fat32::{split_parent, Error};
 
 const SECTOR_SIZE: usize = 512;
@@ -130,6 +130,76 @@ impl DirEntry {
         // Built from UTF-16 rendered to ASCII (non-ASCII -> '?'), always valid.
         core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
     }
+}
+
+/// Where an entry set lies: the directory holding it, its primary slot and
+/// its entry count.
+#[derive(Clone, Copy)]
+struct SetAt {
+    dir_cluster: u32,
+    dir_contiguous: bool,
+    slot: usize,
+    len: usize,
+}
+
+/// The clusters a directory holds, by [`Fs::dir_extent`]: how many, and the
+/// last (`0` when there are none).
+#[derive(Clone, Copy)]
+struct Extent {
+    clusters: u64,
+    tail: u32,
+    /// The chain goes on past `tail`, past the directory's size.
+    past_size: bool,
+}
+
+/// A directory's extent as it is walked: what [`Fs::extent_next`] needs to
+/// decide whether a walk goes on to the next cluster.
+#[derive(Clone, Copy)]
+struct ExtentRule {
+    root: bool,
+    contiguous: bool,
+    /// The directory's size in clusters (rounded up).
+    sized: u64,
+}
+
+/// The step after a cluster of a directory's extent.
+enum Next {
+    Cluster(u32),
+    End,
+    /// The extent ends at the size, and the chain goes on past it.
+    PastSize,
+}
+
+/// A directory to create an entry in: its own entry, and where that entry's
+/// set lies (`None` for the root, which has none). Growing a directory past
+/// its clusters raises its DataLength, which other drivers stop at, so
+/// whoever grows it must know where that length is recorded; `create_entry`
+/// takes only this, built by `dir_at` and `parent_for_create`.
+struct Dir {
+    entry: DirEntry,
+    at: Option<SetAt>,
+}
+
+/// A create that failed ([`Fs::create_entry`]), and whether any of its set
+/// was written.
+struct CreateFailed {
+    error: Error,
+    written: bool,
+}
+
+impl From<CreateFailed> for Error {
+    fn from(f: CreateFailed) -> Self {
+        f.error
+    }
+}
+
+/// Where a create in a directory may write, by [`Fs::room`]: the root, whose
+/// extent, its whole chain, is walked only when it grows (a create that
+/// finds a slot reads no FAT, as before 2026-10-18), or a subdirectory's set
+/// and its extent, found to be its size.
+enum Room {
+    Root,
+    Sub(SetAt, Extent),
 }
 
 pub struct Fs {
@@ -489,11 +559,15 @@ impl Fs {
     /// The next cluster in a FAT chain, or `None` at the end. exFAT FAT entries
     /// are a full 32 bits (no reserved top nibble, unlike FAT32).
     fn next_cluster(&mut self, cluster: u32) -> Result<Option<u32>, Error> {
-        if cluster < 2 || cluster - 2 >= self.cluster_count {
+        if !self.in_heap(cluster) {
             return Ok(None);
         }
         let value = self.fat_entry(cluster)?;
-        if ends_walk(value) {
+        // A link outside the heap ends the chain too: every walk (a file's
+        // read and write, a free, a directory's slots) then stops where
+        // `extent_next` does, where one followed a damaged link out of the
+        // heap and wrote there (the medium reviews of 2026-10-19).
+        if ends_walk(value) || !self.in_heap(value) {
             Ok(None)
         } else {
             Ok(Some(value))
@@ -534,7 +608,7 @@ impl Fs {
     fn advance(&mut self, cluster: u32, contiguous: bool) -> Result<Option<u32>, Error> {
         if contiguous {
             let next = cluster + 1;
-            if next < 2 || next - 2 >= self.cluster_count {
+            if !self.in_heap(next) {
                 Ok(None)
             } else {
                 Ok(Some(next))
@@ -560,8 +634,10 @@ impl Fs {
     /// Reassemble every entry *set* in a directory into a [`DirEntry`], calling
     /// `f` for each and stopping early the first time it returns `true`. The
     /// directory's own data is a cluster run described by `(start_cluster,
-    /// contiguous, dir_size)`; `dir_size == 0` means "unknown" (the root), in
-    /// which case only the end-of-directory marker / chain end terminates it.
+    /// contiguous, dir_size)`, read as far as [`dir_extent`](Self::dir_extent)
+    /// says: the root's whole chain, any other directory to its size (none at
+    /// all for size 0). An entry of size 0 is given no cluster, whatever its
+    /// set names (see where the set closes).
     ///
     /// A set is: a File entry (`0x85`, attributes + how many secondaries
     /// follow) then a Stream-Extension entry (`0xC0`, first cluster + data
@@ -576,7 +652,13 @@ impl Fs {
         dir_size: u64,
         mut f: impl FnMut(&DirEntry, usize, usize) -> bool,
     ) -> Result<(), Error> {
+        // The extent's rule, a cluster at a time: no FAT read until the walk
+        // leaves a cluster, as when it stopped at the chain's end.
+        let Some(rule) = self.extent_rule(start_cluster, contiguous, dir_size)? else {
+            return Ok(());
+        };
         let mut cluster = start_cluster;
+        let mut read = 0u64; // clusters read
         let mut consumed: u64 = 0;
         let mut slot = 0usize; // global directory-entry slot index
 
@@ -599,8 +681,8 @@ impl Fs {
                 let mut buf = [0u8; SECTOR_SIZE];
                 self.disk.read_sector((lba + s) as u64, &mut buf)?;
                 for raw in buf.chunks_exact(ENTRY_SIZE) {
-                    if dir_size != 0 && consumed >= dir_size {
-                        return Ok(());
+                    if !rule.root && consumed >= dir_size {
+                        return Ok(()); // at the size, as every driver stops
                     }
                     consumed += ENTRY_SIZE as u64;
                     let this_slot = slot;
@@ -669,13 +751,19 @@ impl Fs {
                     // A set closes once every declared secondary is consumed.
                     if in_set && t != ET_FILE && secondaries_left == 0 {
                         in_set = false;
+                        // DataLength 0 is no allocation: a cluster a tool left
+                        // named in such a set may be free or another's, so no
+                        // path (a write, a free, a rename, a directory's
+                        // extent) takes it as this entry's (the high reviews
+                        // of 2026-10-19).
+                        let held = set_size > 0;
                         let entry = DirEntry {
                             name,
                             name_len: name_len as u16,
                             is_dir: set_is_dir,
                             size: set_size,
-                            first_cluster: set_cluster,
-                            contiguous: set_contig,
+                            first_cluster: if held { set_cluster } else { 0 },
+                            contiguous: held && set_contig,
                         };
                         if f(&entry, set_start, set_len) {
                             return Ok(());
@@ -683,39 +771,182 @@ impl Fs {
                     }
                 }
             }
-            match self.advance(cluster, contiguous)? {
-                Some(next) => cluster = next,
-                None => return Ok(()),
+            read += 1;
+            if !rule.root && read >= rule.sized {
+                return Ok(()); // at the size, with no FAT read, as before
+            }
+            match self.extent_next(rule, cluster, read)? {
+                Next::Cluster(next) => cluster = next,
+                Next::End | Next::PastSize => return Ok(()),
             }
         }
+    }
+
+    /// The clusters of the directory at `first` (`contiguous`, `size`): the
+    /// one rule every reader and writer of a directory takes its extent from,
+    /// so a name a lookup cannot see is never one a create finds, nor the
+    /// other way about (the review of 2026-10-18). The root is the directory
+    /// at the volume's root cluster; a set naming that cluster would be read
+    /// as the root, which its chain is.
+    ///
+    /// - The root has no size: its whole chain.
+    /// - Any other directory of size 0 has none, whatever its FirstCluster
+    ///   says: DataLength 0 is no allocation, and the cluster a tool left
+    ///   named may be free or another file's.
+    /// - A NoFatChain directory: its run, its size in clusters.
+    /// - A FAT-chained directory: its chain, to its size at most (`past_size`
+    ///   when the chain goes on), as every other driver reads it.
+    ///
+    /// A first cluster outside the heap, or a chain longer than the volume (a
+    /// loop), is refused; a link outside the heap ends the chain, and a link
+    /// past the size is not read further.
+    fn dir_extent(&mut self, first: u32, contiguous: bool, size: u64) -> Result<Extent, Error> {
+        let Some(rule) = self.extent_rule(first, contiguous, size)? else {
+            return Ok(Extent { clusters: 0, tail: 0, past_size: false });
+        };
+        let mut extent = Extent { clusters: 1, tail: first, past_size: false };
+        loop {
+            match self.extent_next(rule, extent.tail, extent.clusters)? {
+                Next::Cluster(next) => {
+                    extent.tail = next;
+                    extent.clusters += 1;
+                }
+                Next::End => return Ok(extent),
+                Next::PastSize => {
+                    extent.past_size = true;
+                    return Ok(extent);
+                }
+            }
+        }
+    }
+
+    /// The rule [`dir_extent`](Self::dir_extent) walks by, or `None` for a
+    /// directory with no cluster; its first cluster checked.
+    fn extent_rule(&self, first: u32, contiguous: bool, size: u64) -> Result<Option<ExtentRule>, Error> {
+        let root = first == self.root_cluster && !contiguous;
+        if !root && size == 0 {
+            return Ok(None);
+        }
+        if !self.in_heap(first) {
+            return Err(Error::Io(DiskError::Io));
+        }
+        let mut sized = size.div_ceil(self.cluster_bytes());
+        if contiguous {
+            // A run past the heap's end is read as far as the heap goes; it is
+            // then shorter than its size, which `room` refuses to create in.
+            sized = sized.min(self.cluster_count as u64 - (first as u64 - 2));
+        }
+        Ok(Some(ExtentRule { root, contiguous, sized }))
+    }
+
+    /// The cluster after `cluster`, the `clusters`th of a directory's extent.
+    fn extent_next(&mut self, rule: ExtentRule, cluster: u32, clusters: u64) -> Result<Next, Error> {
+        if rule.contiguous {
+            return Ok(if clusters < rule.sized { Next::Cluster(cluster + 1) } else { Next::End });
+        }
+        let next = self.fat_entry(cluster)?;
+        if ends_walk(next) {
+            return Ok(Next::End);
+        }
+        if !rule.root && clusters >= rule.sized {
+            return Ok(Next::PastSize);
+        }
+        if !self.in_heap(next) {
+            // A link outside the heap ends the chain, as `next_cluster` ends
+            // every walk there: one bad link in the root's chain refused every
+            // lookup on the volume. A subdirectory cut short by one is then
+            // shorter than its size, which `room` refuses to create in.
+            return Ok(Next::End);
+        }
+        if clusters >= self.cluster_count as u64 {
+            return Err(Error::Io(DiskError::Io)); // a loop
+        }
+        Ok(Next::Cluster(next))
+    }
+
+    fn in_heap(&self, cluster: u32) -> bool {
+        cluster >= 2 && cluster - 2 < self.cluster_count
     }
 
     /// Resolve an absolute, `/`-separated path to its entry set. Matching is
     /// case-insensitive (ASCII case-fold, see the module doc). Unlike FAT32
     /// there's no `.`/`..`/cluster-0-means-root quirk to special-case.
     fn find(&mut self, path: &str) -> Result<DirEntry, Error> {
+        Ok(self.find_at(path)?.0)
+    }
+
+    /// [`find`](Self::find), and where the entry's set lies (`None` for the root).
+    fn find_at(&mut self, path: &str) -> Result<(DirEntry, Option<SetAt>), Error> {
         let mut current = self.root_entry();
+        let mut at = None;
         for component in path.split('/').filter(|c| !c.is_empty()) {
             if !current.is_dir {
                 return Err(Error::NotADirectory);
             }
-            let mut found: Option<DirEntry> = None;
+            let mut found: Option<(DirEntry, usize, usize)> = None;
             self.walk_dir(
                 current.first_cluster,
                 current.contiguous,
                 current.size,
-                |entry, _slot, _len| {
+                |entry, slot, len| {
                     if entry.name().eq_ignore_ascii_case(component) {
-                        found = Some(*entry);
+                        found = Some((*entry, slot, len));
                         true
                     } else {
                         false
                     }
                 },
             )?;
-            current = found.ok_or(Error::NotFound)?;
+            let (entry, slot, len) = found.ok_or(Error::NotFound)?;
+            at = Some(SetAt {
+                dir_cluster: current.first_cluster,
+                dir_contiguous: current.contiguous,
+                slot,
+                len,
+            });
+            current = entry;
         }
-        Ok(current)
+        Ok((current, at))
+    }
+
+    /// The directory at `path`, to create an entry in or remove
+    /// (`NotADirectory` for a file).
+    fn dir_at(&mut self, path: &str) -> Result<Dir, Error> {
+        let (entry, at) = self.find_at(path)?;
+        if !entry.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        Ok(Dir { entry, at })
+    }
+
+    /// Where a create in `dir` may write, or an I/O error for a directory
+    /// whose chain or run is not exactly its size, as Linux refuses it.
+    ///
+    /// fsd grew directories until 2026-10-18 without raising their size, so
+    /// such a directory holds sets past its size that no reader sees. A
+    /// create there checked its name at the size and wrote a second set under
+    /// a hidden one's name; taking the chain as the size on a write alone
+    /// (2026-10-18, the review's second pass) made reads and writes disagree,
+    /// so an append that saw no file truncated it; and adopting clusters past
+    /// the size everywhere took a stale link to a cluster fsd had since
+    /// allocated elsewhere. A size that is not whole clusters leaves room past
+    /// it no reader sees either. So a create, and `rmdir`, are refused there
+    /// until a fsck repairs the directory; a change to a set inside the size
+    /// (an overwrite, an append, a removal) is not a create and goes ahead.
+    fn room(&mut self, dir: &Dir) -> Result<Room, Error> {
+        let Some(at) = dir.at else {
+            return Ok(Room::Root);
+        };
+        let e = &dir.entry;
+        let extent = self.dir_extent(e.first_cluster, e.contiguous, e.size)?;
+        if extent.clusters > 0 && (extent.past_size || extent.clusters * self.cluster_bytes() != e.size) {
+            return Err(Error::Io(DiskError::Io));
+        }
+        Ok(Room::Sub(at, extent))
+    }
+
+    fn cluster_bytes(&self) -> u64 {
+        self.sectors_per_cluster as u64 * SECTOR_SIZE as u64
     }
 
     /// Lists a directory, calling `f(name, is_dir)` for each entry until
@@ -973,7 +1204,7 @@ impl Fs {
             if buf[off] != 0xff {
                 let bitpos = buf[off].trailing_ones(); // first 0 bit
                 let cluster = (byte_index as u32) * 8 + bitpos + 2;
-                if cluster - 2 >= self.cluster_count {
+                if !self.in_heap(cluster) {
                     break; // past the last real cluster
                 }
                 buf[off] |= 1u8 << bitpos;
@@ -986,7 +1217,9 @@ impl Fs {
         Err(Error::DiskFull)
     }
 
-    /// Free a data allocation: clear each cluster's bitmap bit (and, for a
+    /// Free a data allocation (none for a first cluster below 2: an entry of
+    /// size 0 has none, `walk_dir` giving it no cluster): clear each
+    /// cluster's bitmap bit (and, for a
     /// FAT-chained allocation, its FAT entry). Handles both a file we created
     /// (FAT-chained) and a contiguous one another tool wrote (`NoFatChain`,
     /// walked by count from `size`).
@@ -995,28 +1228,43 @@ impl Fs {
             return Ok(());
         }
         if contiguous {
-            let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+            let cluster_bytes = self.cluster_bytes();
             let n = size.div_ceil(cluster_bytes.max(1)) as u32;
             for i in 0..n {
                 let c = first + i;
-                if c - 2 >= self.cluster_count {
+                if !self.in_heap(c) {
                     break;
                 }
                 self.bitmap_set(c, false)?;
             }
         } else {
+            // To its size, at most: a link past it (a crash between a chain's
+            // extension and its size write, or another tool) may name a
+            // cluster since given to another file, and a loop has no end.
+            // What lies past the size stays allocated, a leak a fsck finds.
+            let n = size.div_ceil(self.cluster_bytes());
             let mut c = first;
-            loop {
+            for i in 0..n {
                 let next = self.next_cluster(c)?;
                 self.bitmap_set(c, false)?;
                 self.write_fat_entry(c, 0)?;
                 match next {
-                    Some(n) => c = n,
-                    None => break,
+                    Some(next) if i + 1 < n => c = next,
+                    _ => break,
                 }
             }
         }
         Ok(())
+    }
+
+    /// A zeroed cluster, allocated, and given back if the zeroing fails.
+    fn alloc_zeroed(&mut self) -> Result<u32, Error> {
+        let cluster = self.alloc_cluster()?;
+        if let Err(e) = self.zero_cluster(cluster) {
+            let _ = self.free_data(cluster, false, self.cluster_bytes());
+            return Err(e);
+        }
+        Ok(cluster)
     }
 
     // ---- directory-entry-set writing ----------------------------------------
@@ -1030,6 +1278,9 @@ impl Fs {
         contiguous: bool,
         slot: usize,
     ) -> Result<Option<(u64, usize)>, Error> {
+        if dir_cluster < 2 {
+            return Ok(None); // a directory of size 0 has no cluster
+        }
         let slots_per_cluster = self.sectors_per_cluster as usize * SLOTS_PER_SECTOR;
         let mut cluster = dir_cluster;
         let mut base = 0usize;
@@ -1049,37 +1300,91 @@ impl Fs {
         }
     }
 
-    /// Append one zeroed, FAT-linked cluster to a directory's chain. Refuses to
-    /// grow a contiguous directory (would break its `NoFatChain` layout - not a
-    /// case we create; directories we make are always FAT-chained).
-    fn grow_dir(&mut self, dir_cluster: u32, contiguous: bool) -> Result<(), Error> {
-        if contiguous {
-            return Err(Error::DiskFull);
+    /// Grow a directory past its extent by a cluster, and record its new size.
+    ///
+    /// The root has no size of its own anywhere (its chain is its extent): a
+    /// zeroed cluster is linked to its chain's tail. Any other directory's
+    /// DataLength and ValidDataLength, in its set in its parent, are where
+    /// other drivers stop, so they are raised by the cluster; until 2026-10-18
+    /// they were not, and entries written past the first cluster could not be
+    /// found. The size is the chain's on entry (`room`).
+    ///
+    /// A directory with no cluster is given its first. A `NoFatChain`
+    /// directory (as macOS and Windows make them) is first given a FAT chain
+    /// over its run, as `write_at` does for a file, and its set is written
+    /// FAT-chained at once, before anything is linked: a failure after the
+    /// link and the size write is undone, and should the undoing fail too, the
+    /// chain past the size is refused by the next `room` rather than lost,
+    /// where a set still saying `NoFatChain` would have its run ended again
+    /// by the next growth and the linked cluster lost.
+    fn grow_dir(&mut self, e: &mut DirEntry, room: &mut Room) -> Result<(), Error> {
+        let cluster_bytes = self.cluster_bytes();
+        let Room::Sub(at, x) = room else {
+            let root = self.dir_extent(e.first_cluster, false, 0)?;
+            let new = self.alloc_zeroed()?;
+            return self.write_fat_entry(root.tail, new);
+        };
+        let at = *at;
+        if x.clusters == 0 {
+            let new = self.alloc_zeroed()?;
+            if let Err(err) = self.patch_set_stream(at, new, cluster_bytes) {
+                let _ = self.free_data(new, false, cluster_bytes);
+                return Err(err);
+            }
+            e.first_cluster = new;
+            e.contiguous = false;
+            e.size = cluster_bytes;
+            *x = Extent { clusters: 1, tail: new, past_size: false };
+            return Ok(());
         }
-        let mut tail = dir_cluster;
-        while let Some(next) = self.next_cluster(tail)? {
-            tail = next;
+        if e.contiguous {
+            let size = x.clusters * cluster_bytes;
+            self.ensure_chained(e.first_cluster, true, size)?;
+            self.patch_set_stream(at, e.first_cluster, size)?;
+            e.contiguous = false;
         }
-        let new = self.alloc_cluster()?;
-        self.zero_cluster(new)?;
-        self.write_fat_entry(tail, new)?;
+        let new = self.alloc_zeroed()?;
+        self.write_fat_entry(x.tail, new)?;
+        let size = (x.clusters + 1) * cluster_bytes;
+        if let Err(err) = self.patch_set_stream(at, e.first_cluster, size) {
+            // Undone, or the chain would run past the size, and `room` would
+            // refuse every later create in the directory until a fsck (the
+            // medium review of 2026-10-19): one failed write, a locked
+            // directory, on the Pi with no fsck at hand.
+            let _ = self.write_fat_entry(x.tail, END_OF_CHAIN);
+            let _ = self.free_data(new, false, cluster_bytes);
+            return Err(err);
+        }
+        x.clusters += 1;
+        x.tail = new;
+        e.size = size;
         Ok(())
     }
 
     /// Global slot index of the first of `need` consecutive available slots in a
     /// directory (available = end-marker `0x00` or a deleted entry), growing the
-    /// directory by a cluster whenever the walk runs off the end.
-    fn find_free_run(
-        &mut self,
-        dir_cluster: u32,
-        contiguous: bool,
-        need: usize,
-    ) -> Result<usize, Error> {
+    /// directory by a cluster whenever the walk runs off its extent. Bounded by
+    /// the extent since 2026-10-18: a contiguous directory's walk ran on into
+    /// the clusters after it, and the slots there were taken as free and
+    /// written, another file's bytes or a free cluster.
+    fn find_free_run(&mut self, e: &mut DirEntry, room: &mut Room, need: usize) -> Result<usize, Error> {
         let mut run_start = 0usize;
         let mut run = 0usize;
         let mut slot = 0usize;
         loop {
-            match self.slot_addr(dir_cluster, contiguous, slot)? {
+            // The root's scan ends where its chain does (slot_addr), as its
+            // extent does.
+            let slots_per_cluster = self.sectors_per_cluster as u64 * SLOTS_PER_SECTOR as u64;
+            let inside = match room {
+                Room::Root => true,
+                Room::Sub(_, x) => (slot as u64) < x.clusters * slots_per_cluster,
+            };
+            let addr = if inside {
+                self.slot_addr(e.first_cluster, e.contiguous, slot)?
+            } else {
+                None
+            };
+            match addr {
                 Some((lba, off)) => {
                     let mut buf = [0u8; SECTOR_SIZE];
                     self.disk.read_sector(lba, &mut buf)?;
@@ -1097,7 +1402,7 @@ impl Fs {
                     }
                     slot += 1;
                 }
-                None => self.grow_dir(dir_cluster, contiguous)?, // then re-read this slot
+                None => self.grow_dir(e, room)?, // then re-read this slot
             }
         }
     }
@@ -1127,37 +1432,46 @@ impl Fs {
     /// Build an entry set and insert it into a directory: the full create path
     /// shared by `touch`/`mkdir`/`write_file`/`mv`. `data_len` is the file's
     /// size (or a directory's allocated size); `first_cluster` its first cluster
-    /// (`0` for an empty file).
-    #[allow(clippy::too_many_arguments)] // a directory target + a full entry description
+    /// (`0` for an empty file). `room` is the directory's [`room`](Self::room),
+    /// which a caller takes before it allocates anything for the new entry: a
+    /// create refused after an allocation leaked it (the high review of
+    /// 2026-10-19).
+    ///
+    /// A failure says whether any of the set reached the disk: until then the
+    /// caller may give back what it allocated for the entry, after that a
+    /// partly written set may name it, and it is left (a leak a fsck finds,
+    /// where a cluster freed under a set is a cross-link to come).
+    #[allow(clippy::too_many_arguments)] // a directory, its room + a full entry description
     fn create_entry(
         &mut self,
-        dir_cluster: u32,
-        dir_contiguous: bool,
+        dir: &mut Dir,
+        mut room: Room,
         name: &str,
         is_dir: bool,
         first_cluster: u32,
         data_len: u64,
         data_contiguous: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<(), CreateFailed> {
+        let unwritten = |error| CreateFailed { error, written: false };
         let mut set = [0u8; MAX_SET_BYTES];
         let entries = build_entry_set(name, is_dir, first_cluster, data_len, data_contiguous, &mut set)
-            .ok_or(Error::InvalidName)?;
+            .ok_or(Error::InvalidName)
+            .map_err(unwritten)?;
         let total_bytes = entries * ENTRY_SIZE;
-        let start = self.find_free_run(dir_cluster, dir_contiguous, entries)?;
-        self.write_set_at(dir_cluster, dir_contiguous, start, &set[..total_bytes])
+        let start = self.find_free_run(&mut dir.entry, &mut room, entries).map_err(unwritten)?;
+        self.write_set_at(dir.entry.first_cluster, dir.entry.contiguous, start, &set[..total_bytes])
+            .map_err(|error| CreateFailed { error, written: true })
     }
 
     /// Resolve a path's *parent* to a mountable directory entry, checking it's a
     /// directory and that `name` doesn't already exist - the shared front half
-    /// of `touch`/`mkdir`. Returns the parent's cluster + contiguity.
-    fn parent_for_create(&mut self, path: &str) -> Result<(u32, bool, ExistingKind), Error> {
+    /// of `touch`/`mkdir`. Returns the parent, to create in.
+    fn parent_for_create(&mut self, path: &str) -> Result<(Dir, ExistingKind), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let parent = self.find(parent_path)?;
-        if !parent.is_dir {
-            return Err(Error::NotADirectory);
-        }
+        let parent = self.dir_at(parent_path)?;
+        let p = parent.entry;
         let mut kind = ExistingKind::None;
-        self.walk_dir(parent.first_cluster, parent.contiguous, parent.size, |entry, _slot, _len| {
+        self.walk_dir(p.first_cluster, p.contiguous, p.size, |entry, _slot, _len| {
             if entry.name().eq_ignore_ascii_case(name) {
                 kind = if entry.is_dir {
                     ExistingKind::Dir
@@ -1169,7 +1483,7 @@ impl Fs {
                 false
             }
         })?;
-        Ok((parent.first_cluster, parent.contiguous, kind))
+        Ok((parent, kind))
     }
 
     /// Locate a named entry in a directory, also returning its set's on-disk
@@ -1199,18 +1513,30 @@ impl Fs {
     /// `fat32::write_chain`: each cluster is bitmap-claimed and FAT-end-marked by
     /// `alloc_cluster`, then linked to its predecessor.
     fn write_chain(&mut self, data: &[u8]) -> Result<u32, Error> {
+        let mut first = 0u32;
+        let made = self.write_chain_from(data, &mut first);
+        if made.is_err() && first >= 2 {
+            // Out of space or an I/O error part way: nothing names the part
+            // already linked, so it is given back (it leaked until 2026-10-19).
+            let _ = self.free_data(first, false, data.len() as u64);
+        }
+        made
+    }
+
+    /// [`write_chain`](Self::write_chain)'s body, leaving its first cluster in
+    /// `first` as soon as there is one.
+    fn write_chain_from(&mut self, data: &[u8], first: &mut u32) -> Result<u32, Error> {
         if data.is_empty() {
             return Ok(0);
         }
         let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
         let num = data.len().div_ceil(cluster_bytes);
-        let mut first = 0u32;
         let mut prev = 0u32;
         let mut written = 0usize;
         for i in 0..num {
             let cluster = self.alloc_cluster()?;
             if i == 0 {
-                first = cluster;
+                *first = cluster;
             } else {
                 self.write_fat_entry(prev, cluster)?;
             }
@@ -1227,7 +1553,16 @@ impl Fs {
             }
             prev = cluster;
         }
-        Ok(first)
+        Ok(*first)
+    }
+
+    /// The cluster after `cluster` in a file being written: the next of its
+    /// chain while that is still the file's own (`owned`), else one appended.
+    fn file_step(&mut self, cluster: u32, owned: bool) -> Result<u32, Error> {
+        match self.next_cluster(cluster)? {
+            Some(next) if owned => Ok(next),
+            _ => self.extend_chain(cluster),
+        }
     }
 
     /// Append one freshly allocated cluster after `tail`, returning it - the
@@ -1244,18 +1579,17 @@ impl Fs {
     /// `NoFatChain` flag (which `patch_stream_ext` does). No-op if already
     /// chained. The bitmap is unaffected (the clusters stay allocated).
     ///
-    /// An entry of size 0 that names a cluster gets that one cluster ended:
-    /// the spec wants `DataLength > 0` with `NoFatChain`, but a tool may
-    /// leave one, and its cluster's FAT entry is then undefined, so a write
-    /// following it as a link went into whatever cluster it named (the
-    /// review of #316) and could leave the write cursor on a chain the write
-    /// itself had cut (the review of the finer cursor rule, 2026-10-18).
+    /// An entry of size 0 never comes here: `walk_dir` gives it no cluster,
+    /// whatever its set names (since 2026-10-19). Until then this ended the
+    /// one cluster such an entry named, whose FAT entry a tool leaves
+    /// undefined, after a write following it as a link went into whatever
+    /// cluster it named (the review of #316).
     fn ensure_chained(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
         if !contiguous || first < 2 {
             return Ok(());
         }
-        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
-        let n = (size.div_ceil(cluster_bytes) as u32).max(1);
+        let cluster_bytes = self.cluster_bytes();
+        let n = size.div_ceil(cluster_bytes) as u32;
         for i in 0..n {
             let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
             self.write_fat_entry(first + i, value)?;
@@ -1319,6 +1653,11 @@ impl Fs {
         Ok(())
     }
 
+    /// [`patch_stream_ext`](Self::patch_stream_ext) of the set at `at`.
+    fn patch_set_stream(&mut self, at: SetAt, first_cluster: u32, data_len: u64) -> Result<(), Error> {
+        self.patch_stream_ext(at.dir_cluster, at.dir_contiguous, at.slot, at.len, first_cluster, data_len)
+    }
+
     // ---- write surface ------------------------------------------------------
 
     /// Create an empty (zero-byte) file, or succeed as a no-op if a file already
@@ -1326,13 +1665,14 @@ impl Fs {
     /// needs no cluster: first cluster `0`, length `0` - just one entry set.
     pub fn touch(&mut self, path: &str) -> Result<(), Error> {
         let (_parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let (dir_cluster, dir_contig, kind) = self.parent_for_create(path)?;
+        let (mut dir, kind) = self.parent_for_create(path)?;
         match kind {
             ExistingKind::File => return Ok(()),
             ExistingKind::Dir => return Err(Error::NotAFile),
             ExistingKind::None => {}
         }
-        self.create_entry(dir_cluster, dir_contig, name, false, 0, 0, false)
+        let room = self.room(&dir)?;
+        Ok(self.create_entry(&mut dir, room, name, false, 0, 0, false)?)
     }
 
     /// Create a file with exactly `data`, or fully replace an existing file's
@@ -1342,26 +1682,28 @@ impl Fs {
     /// the entry patched (or a new entry created).
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let parent = self.find(parent_path)?;
-        if !parent.is_dir {
-            return Err(Error::NotADirectory);
-        }
+        let mut dir = self.dir_at(parent_path)?;
+        let parent = dir.entry;
         let existing =
             self.find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?;
-        if let Some((entry, _, _)) = existing {
-            if entry.is_dir {
-                return Err(Error::NotAFile);
-            }
+        #[allow(clippy::large_enum_variant)] // one, on the stack, for one call
+        enum Plan {
+            Replace(DirEntry, usize, usize),
+            Create(Room),
         }
+        // A create is refused before the chain is written, or it would leak.
+        let plan = match existing {
+            Some((entry, _, _)) if entry.is_dir => return Err(Error::NotAFile),
+            Some((entry, slot, len)) => Plan::Replace(entry, slot, len),
+            None => Plan::Create(self.room(&dir)?),
+        };
 
         // Write the replacement chain first (nothing existing touched yet).
         let new_cluster = self.write_chain(data)?;
 
-        match existing {
-            Some((entry, primary_slot, set_len)) => {
-                if entry.first_cluster >= 2 {
-                    self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
-                }
+        match plan {
+            Plan::Replace(entry, primary_slot, set_len) => {
+                self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
                 self.patch_stream_ext(
                     parent.first_cluster,
                     parent.contiguous,
@@ -1371,15 +1713,15 @@ impl Fs {
                     data.len() as u64,
                 )
             }
-            None => self.create_entry(
-                parent.first_cluster,
-                parent.contiguous,
-                name,
-                false,
-                new_cluster,
-                data.len() as u64,
-                false,
-            ),
+            Plan::Create(room) => {
+                let made = self.create_entry(&mut dir, room, name, false, new_cluster, data.len() as u64, false);
+                if let Err(CreateFailed { written: false, .. }) = made {
+                    // The directory could not take the set (it could not grow,
+                    // say): nothing names the chain, so it is given back.
+                    let _ = self.free_data(new_cluster, false, data.len() as u64);
+                }
+                Ok(made?)
+            }
         }
     }
 
@@ -1413,7 +1755,7 @@ impl Fs {
         // Make the existing allocation FAT-chained so it can be extended.
         self.ensure_chained(entry.first_cluster, entry.contiguous, old_size)?;
 
-        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+        let cluster_bytes = self.cluster_bytes();
         let mut head_cluster = entry.first_cluster;
         if head_cluster < 2 {
             head_cluster = self.alloc_cluster()?;
@@ -1421,6 +1763,12 @@ impl Fs {
 
         let write_start = old_size.min(offset);
         let write_end = offset + data.len() as u64;
+        // The bytes the file's own clusters hold: a link past them (a crash
+        // between a chain's extension and its size write, or another tool)
+        // may name another file's cluster, so a walk past them extends the
+        // chain from there, cutting the link, where it followed it and wrote
+        // into that cluster (the medium review of 2026-10-19).
+        let owned = old_size.div_ceil(cluster_bytes) * cluster_bytes;
 
         // Walk to the cluster holding `write_start`, extending if needed:
         // from the write cursor when it is this file's and not past
@@ -1429,20 +1777,14 @@ impl Fs {
         let (mut cluster, pos) = ChainCursor::start(self.write_cursor, head_cluster, false, write_start as usize);
         let mut cluster_pos = pos as u64;
         while cluster_pos + cluster_bytes <= write_start {
-            cluster = match self.next_cluster(cluster)? {
-                Some(next) => next,
-                None => self.extend_chain(cluster)?,
-            };
+            cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
             cluster_pos += cluster_bytes;
         }
 
         let mut pos = write_start;
         while pos < write_end {
             while pos >= cluster_pos + cluster_bytes {
-                cluster = match self.next_cluster(cluster)? {
-                    Some(next) => next,
-                    None => self.extend_chain(cluster)?,
-                };
+                cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
                 cluster_pos += cluster_bytes;
             }
             let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
@@ -1518,15 +1860,20 @@ impl Fs {
     /// a zeroed cluster whose first slot is the end-of-directory marker.
     pub fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         let (_parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
-        let (dir_cluster, dir_contig, kind) = self.parent_for_create(path)?;
+        let (mut dir, kind) = self.parent_for_create(path)?;
         if kind != ExistingKind::None {
             return Err(Error::AlreadyExists);
         }
+        // Refused before the cluster is claimed, or it would leak.
+        let room = self.room(&dir)?;
         // Claim + zero the new directory's cluster before linking it in.
-        let new_cluster = self.alloc_cluster()?;
-        self.zero_cluster(new_cluster)?;
-        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
-        self.create_entry(dir_cluster, dir_contig, name, true, new_cluster, cluster_bytes, false)
+        let new_cluster = self.alloc_zeroed()?;
+        let cluster_bytes = self.cluster_bytes();
+        let made = self.create_entry(&mut dir, room, name, true, new_cluster, cluster_bytes, false);
+        if let Err(CreateFailed { written: false, .. }) = made {
+            let _ = self.free_data(new_cluster, false, cluster_bytes); // nothing names it
+        }
+        Ok(made?)
     }
 
     /// Remove a file (rejects a directory with `NotAFile`). Frees its clusters
@@ -1543,27 +1890,18 @@ impl Fs {
         if entry.is_dir {
             return Err(Error::NotAFile);
         }
-        if entry.first_cluster >= 2 {
-            self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
-        }
+        self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
         self.delete_set(parent.first_cluster, parent.contiguous, slot, len)
     }
 
     /// Remove an empty subdirectory (rejects a non-empty one, a file, and the
     /// root). Frees its cluster(s), then deletes its entry set.
     pub fn rmdir(&mut self, path: &str) -> Result<(), Error> {
-        let (parent_path, name) = split_parent(path).ok_or(Error::CannotRemoveRoot)?;
-        let parent = self.find(parent_path)?;
-        if !parent.is_dir {
-            return Err(Error::NotADirectory);
-        }
-        let (entry, slot, len) = self
-            .find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?
-            .ok_or(Error::NotFound)?;
-        if !entry.is_dir {
-            return Err(Error::NotADirectory);
-        }
-        // Empty means the directory has no in-use entry set at all.
+        split_parent(path).ok_or(Error::CannotRemoveRoot)?;
+        let dir = self.dir_at(path)?;
+        let entry = dir.entry;
+        // Empty means the directory has no in-use entry set at all, to its
+        // size: a directory with a set there is not empty, damaged or not.
         let mut empty = true;
         self.walk_dir(entry.first_cluster, entry.contiguous, entry.size, |_e, _s, _l| {
             empty = false;
@@ -1572,10 +1910,17 @@ impl Fs {
         if !empty {
             return Err(Error::DirectoryNotEmpty);
         }
-        if entry.first_cluster >= 2 {
-            self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
+        // Refused when its chain is not its size: a set past it would be lost.
+        let Room::Sub(at, extent) = self.room(&dir)? else {
+            return Err(Error::CannotRemoveRoot);
+        };
+        // Its extent, which `room` found its size: none for size 0, whatever
+        // cluster the entry names.
+        if extent.clusters > 0 {
+            let bytes = extent.clusters * self.cluster_bytes();
+            self.free_data(entry.first_cluster, entry.contiguous, bytes)?;
         }
-        self.delete_set(parent.first_cluster, parent.contiguous, slot, len)
+        self.delete_set(at.dir_cluster, at.dir_contiguous, at.slot, at.len)
     }
 
     /// Rename or move a file/directory. Re-points a new entry set at `src`'s
@@ -1598,10 +1943,10 @@ impl Fs {
         if !src_parent.is_dir {
             return Err(Error::NotADirectory);
         }
-        let dst_parent = self.find(dst_parent_path)?;
-        if !dst_parent.is_dir {
-            return Err(Error::NotADirectory);
-        }
+        let mut dst_dir = self.dir_at(dst_parent_path)?;
+        // As it was found: a create that grows the directory changes its size
+        // and chaining, and the slots found in it address the same clusters.
+        let dst_parent = dst_dir.entry;
 
         let (src_entry, src_slot, src_len) = self
             .find_in_parent(src_parent.first_cluster, src_parent.contiguous, src_parent.size, src_name)?
@@ -1643,9 +1988,10 @@ impl Fs {
             // there. Slot indices are stable across a create - `create_entry`
             // fills a free run and moves nothing - so the recorded `dst_slot`
             // still addresses the old set afterwards.
+            let room = self.room(&dst_dir)?;
             self.create_entry(
-                dst_parent.first_cluster,
-                dst_parent.contiguous,
+                &mut dst_dir,
+                room,
                 dst_name,
                 src_entry.is_dir,
                 src_entry.first_cluster,
@@ -1658,9 +2004,7 @@ impl Fs {
                 // Two guards: a case-only rename re-links the same set, and a
                 // cross-linked image can give two sets the same first cluster.
                 // Freeing then destroys the data the surviving name points at.
-                if dst_entry.first_cluster >= 2
-                    && dst_entry.first_cluster != src_entry.first_cluster
-                {
+                if dst_entry.first_cluster != src_entry.first_cluster {
                     self.free_data(dst_entry.first_cluster, dst_entry.contiguous, dst_entry.size)?;
                 }
             }
@@ -1668,9 +2012,10 @@ impl Fs {
         }
 
         // Link dst to the same clusters first, then unlink src.
+        let room = self.room(&dst_dir)?;
         self.create_entry(
-            dst_parent.first_cluster,
-            dst_parent.contiguous,
+            &mut dst_dir,
+            room,
             dst_name,
             src_entry.is_dir,
             src_entry.first_cluster,

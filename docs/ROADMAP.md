@@ -4249,12 +4249,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
 - **FAT32's `next_cluster` follows any link below end of chain, unbounded.**
-  exFAT's bounds a link to the volume's clusters; FAT32's follows any value
+  exFAT's directory walk refuses a link outside the heap (since 2026-10-18;
+  its `next_cluster` checks only the cluster it is given, so a file's walk
+  may still use one bad link before it ends); FAT32's follows any value
   under `0x0FFFFFF8`, the bad-cluster mark `0x0FFFFFF7` and links past
   `cluster_end` among them. On a damaged FAT, `rm`'s `free_chain` then reads
   and zeroes an entry far past the FAT (for `0x0FFFFFF7`, a sector about
   1 GiB on), in every FAT copy: a data sector on a large stick. Bounding the
-  link to `2..cluster_end` in `next_cluster`, as exFAT does, closes it.
+  link to `2..cluster_end` in `next_cluster` closes it, on both.
   Older than the cursors; read in the code, not reproduced. From the max
   review of the finer cursor rule (2026-10-18).
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
@@ -4273,13 +4275,84 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   task can swap the disk under a mounted fsd and its cached geometry. Read
   in the code, not exercised. Found by the max review of the finer cursor
   rule (2026-10-18), outside its diff.
-- **exFAT's `grow_dir` does not raise a directory's DataLength.** It links a
-  new cluster to a full directory's chain, but `walk_dir` stops at a
-  subdirectory's DataLength, so entries written into the new cluster would
-  not be listed or found (the root has none, so it is not affected). Read in
-  the code, not reproduced; a subdirectory with more entry sets than its
-  first cluster holds is the test. Found by the max review of the finer
-  cursor rule (2026-10-18), outside its diff.
+- **A case-only `mv` of a directory moves it into itself, on FAT32 and
+  exFAT.** `mkdir /Docs; mv /Docs /docs`: `/bin/mv` stats `/docs`, finds
+  `Docs`, and sends `NP_MV("/Docs", "/docs/Docs")`. fsd's `is_within`
+  (`programs/servers/fsd/src/main.rs`) compares bytes, so it lets the pair
+  through, while the filesystem resolves `/docs` to `Docs` itself. The new
+  set is written inside `Docs`, the old one deleted, and the subtree becomes
+  a cycle nothing reaches, its clusters still allocated. The entry above
+  (`mv -f /Lowdir /lowdir` answering "exists") holds only for the raw pair,
+  which `/bin/mv` never sends. Fold case in `is_within` on a
+  case-insensitive tree, or refuse a destination that resolves to the source
+  or under it. Read in the code, not reproduced. Found by the max review of
+  the exFAT grow_dir fix (2026-10-18), outside its diff.
+- **exFAT's `patch_stream_ext` checksums at most 19 entries of a set.** It
+  reads `min(set_len, MAX_SET_ENTRIES)` entries, so a set of more (a name of
+  241 to 255 characters with a vendor secondary, which the spec allows and
+  cameras write) gets a SetChecksum over part of it, and fsck.exfat may
+  delete the set on repair. Since 2026-10-18 it also patches directories'
+  sets. Checksum all `set_len` entries a step at a time. The same function
+  writes the File and Stream entries as two sector writes even when they
+  share a sector, so a crash between them leaves a set whose checksum does
+  not match. Read in the code. Found by the same review.
+- **exFAT's free-slot scan reads a sector for every slot.** `find_free_run`
+  reads the whole sector for each 32-byte slot it tests and calls
+  `slot_addr`, which walks the chain from the first cluster each time: about
+  15,000 reads to make 100 files in one directory, where keeping the last
+  sector and cluster would need about 1,000. A cost only. Found by the same
+  review.
+- **exFAT says which set a name means in three places.** `find_at`,
+  `find_in_parent` and `parent_for_create` each carry the name-match rule,
+  and `write_at`, `rm`, `rmdir` and `mv` assemble a set's location by hand
+  rather than as a `SetAt`. A change to matching (the up-case table, which
+  ASCII folding approximates) made in one copy would make two paths resolve
+  different sets. Found by the same review.
+- **fsd will not write to an exFAT directory an older fsd grew.** Until
+  2026-10-18 fsd grew a directory without raising its DataLength, so such a
+  directory's chain runs past its size, with sets there no driver reads.
+  fsd now reads it to its size and refuses a create in it, or its `rmdir`
+  (an I/O error), as Linux does, while a change to a set inside the size
+  (an overwrite, an append, a removal) goes ahead; `fsck_exfat` repairs it by truncating the chain, which
+  drops the hidden files. Recovering them would need a tool that copies
+  them out before the repair; taking the chain as the size inside fsd was
+  tried three ways and each cost more than it saved (the CHANGELOG entry of
+  2026-10-18). Hans's decision, 2026-10-18.
+- **A cluster a size-0 exFAT entry names stays allocated for good.** Since
+  2026-10-19 fsd reads an entry of size 0 as holding no cluster, whatever
+  its set names, so a write to it takes a new one and its removal frees
+  nothing. When the bitmap still marks the named cluster allocated, nothing
+  owns it and nothing gives it back: one cluster for each such entry, which
+  `fsck_exfat` reports. Reusing it was how a write reached another file's
+  cluster; a leak is the safe side. Found by the high review of 2026-10-19.
+- **`test-grow-dir` hung once in 31 runs, fsd silent mid-probe.** On
+  2026-10-19, with the tree at e6655482, one boot stopped answering during
+  `dirprobe /ZERO 100`: no fault line, no restart, the step's 90 s gone
+  where a probe takes about 1.5 s. The disk showed where: F085's data
+  cluster allocated, ZERO's third cluster (its next allocation) not, so in
+  the free-slot scan's run of about 256 sector reads or the bitmap scan
+  after it. The image and every allocation are the same from run to run
+  (the next 30 runs, the same code, all passed, cluster for cluster), so a
+  logic bug in fsd would hang every time; something timing-dependent below
+  it (the block path, the cores, QEMU) is the likelier cause, not shown.
+  The transcript was not kept. If it recurs: keep `build/test-grow-dir.txt`
+  and the image (a failing run keeps it), and look at what the boot core
+  and fsd were doing.
+- **A subdirectory naming the exFAT root's cluster is read as the root.**
+  `dir_extent` tells the root by its first cluster, so a cross-linked set
+  that names the root's cluster gets the root's whole chain, and a create
+  in it writes into the root, grows the root's chain, and records the root's
+  length as the subdirectory's size. It needs a cross-linked volume. A set
+  other than the root's naming the root cluster could be refused instead.
+  Found by the medium reviews of 2026-10-19.
+- **A damaged exFAT directory answers "device I/O error".** A create in a
+  directory whose chain is not its size, a cluster outside the heap and a
+  looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a
+  failing disk when the directory only needs a fsck. An error of its own
+  ("needs repair") would take a new `FS_ERR_*` code through `syscall-abi`,
+  ulib's message table and the C and Python peers that
+  `check-wire-constants.py` holds to it, and `test-grow-dir`, which matches
+  "I/O error". Found by the high review of the grow_dir fix, 2026-10-19.
 - **FAT32 reads the second FAT copy for every FAT write.** `write_fat_entry`
   keeps every copy of the FAT in step, and reads the second copy's sector
   from the disk each time; only the first goes through the FAT cache. A

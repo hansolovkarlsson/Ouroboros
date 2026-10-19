@@ -341,6 +341,83 @@ chain are written between the remove and the stale append: it is the
 sequence that fails a rule deciding on the value written rather than the
 entry it replaces, which passes the other three.
 
+**An exFAT directory grows past its first cluster (2026-10-18).** When a
+directory's clusters were full, fsd's `grow_dir` linked another and wrote the
+new entry there, but left the directory's DataLength where it was, and every
+reader stops there (fsd's own `walk_dir`, and macOS's `fsck_exfat`, which
+called the chain "too many clusters for its size"). On 4 KiB clusters the
+43rd file made in a directory could not be found. The free-slot scan did not
+stop at the size either, and for a directory macOS or Windows made, one
+NoFatChain run, it went on into the clusters after the directory and wrote
+entry sets there: on the test image into `/man`'s directory and over the new
+files' own data. The image's `/etc`, `/Users` and `/SUB` are such
+directories. Now the scan ends at the size, and `grow_dir` gives a NoFatChain
+directory a FAT chain first (`ensure_chained`, as `write_at` does for a
+file), links a cluster, and writes the chain's whole length into the
+directory's set in its parent. `create_entry` takes the directory with that
+set's location, so no create path can grow one without it. Every reader
+and writer of a directory takes its clusters from one rule, `dir_extent`
+(the root's whole chain; none for any other directory of size 0, whatever
+its FirstCluster names; a NoFatChain run; a FAT chain to its size, a link
+outside the heap or a loop refused), walked a cluster at a time so a lookup
+reads the FAT only where it leaves one, and stopped at a subdirectory's size
+to the byte. A directory an older fsd grew holds sets past its size: fsd
+reads it to its size, as every driver does, and refuses a create in it, or
+its `rmdir`, with an I/O error, as Linux does, until a fsck repairs it
+(macOS's drops the hidden files); so does a directory whose size is not
+whole clusters. A change to a set inside the size (an overwrite, an append,
+a removal, a `touch` of a file there) creates nothing and goes ahead. Two reviews found what the
+other ways cost: adopting the chain at the next growth wrote a second set
+under a hidden name; adopting it on writes alone made `echo x >>` truncate
+a file a read could not see; adopting it everywhere, bounded by the bitmap,
+took a stale link to a cluster fsd's own allocator had since given to
+another directory (Hans chose the refusal, 2026-10-18). A create's refusal is
+taken before it allocates (`create_entry` takes the `Room`), so a refused
+`mkdir` or new file leaks nothing, and `rmdir` of a damaged directory with
+files in it answers "not empty". An entry of size 0 holds no cluster
+wherever its set is read, whatever it names: the cluster may be another's,
+and a write to such a file wrote into it, an overwrite or removal freed its
+chain, an `mv` carried it, and an `rmdir` freed it. A create that fails after
+its data was allocated (a directory that cannot grow on a full volume) gives
+the data back unless part of its set was written, and so do a chain write
+failing part way, a cluster whose zeroing fails, and a growth whose size
+write fails (its link undone, where the chain past the size had every later
+create in the directory refused). A file is freed to its size in clusters at
+most and written past them by extending, where a link past it freed, or an
+append wrote into, another file's cluster, and a free on a loop never ended.
+A link outside the heap ends every chain, a file's or a directory's, where
+one in the root's made every lookup fail and the root's slot scan wrote out
+of the heap; a NoFatChain run past the heap is read as far as it goes. A directory with no
+cluster is given its first, where fsd wrote FAT entry 0 and the set before
+the cluster heap; and a NoFatChain directory's set is written FAT-chained
+before anything is linked, so a failed size write cannot lose the linked
+cluster. `make test-grow-dir` (`/bin/DIRPROBE`) makes the probe's files in
+an empty directory macOS made, a size-0 one with no cluster, a size-0
+NoFatChain one still naming a freed cluster, a new one on the exFAT root and
+one on the ESP as the FAT32 control, then finds, lists and touches each
+again; on one planted as an older fsd left it, a hidden file must not be
+found and an append and a create must be refused while a `touch` of a file
+inside the size goes ahead, with nothing of it changed and nothing leaked
+by a refused `mkdir` or `write`; and a directory and two files of size 0
+that name `/man`'s cluster are removed, overwritten and appended to, and a
+file whose chain links on past its size into `/man`'s cluster is removed and
+another appended to, `/man`'s cluster allocated and as it was after. After the boot the host checks each directory's chain and size,
+that every other cluster and everything before the heap holds what it held,
+and runs `fsck_exfat -n` (only the planted chain may be named) and
+`fsck_msdos -n`. It fails with the scan unbounded, with the size not
+recorded (the directory then grows at every create until the volume is
+full), with the NoFatChain directory not converted first, with the refusal
+removed or made at `dir_at` (the `touch`), with a size-0 directory taken to
+own the cluster it names, with `rmdir` and an overwrite freeing a size-0
+entry's named chain, with a size-0 entry's cluster kept at the parse (the
+append), with `mkdir`'s refusal taken after its allocation (fsck: the
+bitmap), with `rmdir` refusing before its emptiness check, with a file freed along its
+whole chain, with an append following a link past the file's size, and with a directory with no cluster given none (fsd
+lost its volume). The failed size
+write is not built by the rig, nor is the root's growth, an `mv`, any of the
+give-backs on a failure, a link outside the heap, or a NoFatChain run past
+the heap.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

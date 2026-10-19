@@ -45,16 +45,18 @@ Also on the small exFAT, an entry the exFAT spec forbids and a tool may
 leave: the host gives P (NoFatChain) a size of 0 while it keeps its cluster,
 whose FAT entry it points at Q's, and the guest writes past P's first
 cluster with `writeat`. Q's bytes must be unchanged and P's on a chain of
-its own (ensure_chained ends the cluster first, since 2026-10-18; without it
-the write followed the entry into Q, and the narrowed cursor drop could keep
-a cursor that write set on a chain it had cut, the max review's finding 1).
+its own: since 2026-10-19 fsd reads an entry of size 0 as holding no cluster,
+whatever its set names, so the write takes a new one (from 2026-10-18
+ensure_chained ended the named cluster first; before that the write followed
+the entry into Q, and the narrowed cursor drop could keep a cursor that
+write set on a chain it had cut, the max review's finding 1).
 
 Fails with either drop removed from either filesystem's write_fat_entry,
 each on its own sequences; with FAT32's free path not lowering its
 next-free hint, where the probe passes every sequence with nothing tested
 and the disk check refuses each; with the drop decided on the value written
 rather than the entry it replaces, which only `write-one` sees; and with
-ensure_chained skipping a size-0 entry, Q's bytes. KEEP_IMAGE=1 keeps build/test-stale-cursor.img for a
+the size-0 entry's named cluster kept where its set is read, Q's bytes. KEEP_IMAGE=1 keeps build/test-stale-cursor.img for a
 look. One boot, about a minute.
 """
 import importlib.util
@@ -156,7 +158,8 @@ def plant_empty():
     FAT entry is set to Q's cluster: the case the spec forbids (DataLength > 0
     with NoFatChain) and a tool may leave. A write to P past its first cluster
     then followed that entry into Q until 2026-10-18, when ensure_chained came
-    to end the cluster first; the guest's writeats make that write."""
+    to end the cluster first, and since 2026-10-19 the entry holds no cluster
+    at all; the guest's writeats make that write."""
     with open(SMALL, "r+b") as fh:
         b = fh.read(512)
         sector = 1 << b[108]
