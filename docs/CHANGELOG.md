@@ -437,6 +437,18 @@ test-mv-into` boots FAT32, exFAT and ext2, and fails with the guard comparing
 bytes (both `/Docs` and `/docs` gone) and with it folding case on ext2 too
 (`mv /A /a` refused).
 
+**A FAT32 chain ends at a link outside the volume (2026-10-19).** FAT32's
+`next_cluster` followed any link below end of chain, so a damaged FAT, a
+link to the bad-cluster mark or to a cluster past the volume's last, sent a
+walk off the volume: an append wrote to the sectors after it, which on a disk
+with another partition there are that partition's; a read returned them as
+the file's; and `rm` zeroed the link's FAT entry far past the FAT, in every
+copy. A link outside `2..cluster_end` now ends the chain, as exFAT's does
+since #320, and every FAT32 walk goes through it. `make test-fat-link`
+builds a disk with a witness partition of 0xFF bytes after the ESP and plants
+three such links; with the bound removed the witness is written by the
+append and by `rm`, in both FAT copies, and the read counts its bytes.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

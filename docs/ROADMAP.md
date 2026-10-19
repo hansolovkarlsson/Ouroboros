@@ -4253,7 +4253,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   that to the sectors the chain crosses, which a fragmented file makes
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
-- **FAT32's `next_cluster` follows any link below end of chain, unbounded.**
+- ~~**FAT32's `next_cluster` follows any link below end of chain, unbounded.**~~
+  *Done 2026-10-19:* a link outside `2..cluster_end` ends the chain, as
+  exFAT's does (whose `next_cluster` checks the link too since #320).
+  Reproduced first by `make test-fat-link`'s control on a disk with a witness
+  partition after the ESP: an append wrote past the volume into it, `rm`
+  zeroed a FAT entry there in both copies, and a read returned its bytes as
+  the file's. The record as found:
   exFAT's directory walk refuses a link outside the heap (since 2026-10-18;
   its `next_cluster` checks only the cluster it is given, so a file's walk
   may still use one bad link before it ends); FAT32's follows any value
