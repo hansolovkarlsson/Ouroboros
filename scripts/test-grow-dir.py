@@ -503,7 +503,7 @@ def main() -> int:
         # shell's read of it first), and a create.
         refused = [f"echo x >> /OLD/{HIDDEN[-1]}", "touch /OLD/NEW", "mkdir /OLD/X", "write /OLD/NEW2 abc"]
         allowed = ["touch /OLD/F000", "rmdir /RMZ", "write /Z0FILE y", "echo y >> /Z0APP"]
-        reads = [f"cat /OLD/{HIDDEN[3]}", *refused, *allowed]
+        reads = [f"cat /OLD/{HIDDEN[3]}", *refused, *allowed, "rmdir /OLD"]
         steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
         steps += [("# ", cmd) for cmd in reads]
         prev = "# "
@@ -538,6 +538,8 @@ def main() -> int:
             print(f"     exfat /OLD: `{cmd}` printed {got!r}")
         checks.append((f"exfat /OLD: {HIDDEN[3]}, past the size, is not found (read to the size)",
                        "no such file" in (said_by[reads[0]] or "")))
+        checks.append(("exfat /OLD: `rmdir /OLD` answers that it is not empty, before any refusal",
+                       "directory not empty" in (said_by["rmdir /OLD"] or "")))
         for cmd in allowed:
             got = said_by[cmd]
             checks.append((f"`{cmd}` goes ahead", got is not None and "error" not in got and "(code 0)" in got))
