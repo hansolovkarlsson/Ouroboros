@@ -36,7 +36,9 @@ the exFAT root first, each one contiguous (NoFatChain) cluster, as it made
   the cluster it names; and /LONGF, a one-byte file whose cluster's FAT
   entry links on, past its size, to /man's cluster: the guest removes it,
   and /man's cluster must stay as it was, where freeing a file walked its
-  whole chain;
+  whole chain; and /LONGA, a file of one whole cluster linked on the same
+  way: the guest appends to it, which must extend it, where the write
+  followed the link and wrote into /man's cluster;
 - /OLD, as fsd before 2026-10-18 left a directory it grew: a FAT chain of
   two clusters, a DataLength of one, and OLD_COUNT files' sets across both,
   so a reader sees 42; those past the size (HIDDEN) hold their own names.
@@ -136,6 +138,8 @@ def mac_dirs():
                 open(os.path.join(mp, name), "w").close()
             with open(os.path.join(mp, "LONGF"), "w") as fh:
                 fh.write("L")
+            with open(os.path.join(mp, "LONGA"), "w") as fh:
+                fh.write("A" * 4096)
             subprocess.run(["find", mp, "-name", "._*", "-delete"], capture_output=True)
             for junk in (".fseventsd", ".Trashes", ".Spotlight-V100", ".DS_Store",
                          *(f"{name}/.DS_Store" for name in MADE)):
@@ -263,6 +267,10 @@ def plant():
         longf = struct.unpack_from("<I", d, sets["LONGF"][0] + 32 + 20)[0]
         stream("LONGF", 0x01, longf, 1)
         fat(longf, man_cluster(vol))
+        # LONGA the same, its one cluster full.
+        longa = struct.unpack_from("<I", d, sets["LONGA"][0] + 32 + 20)[0]
+        stream("LONGA", 0x01, longa, vol.cluster)
+        fat(longa, man_cluster(vol))
 
         for k, c in enumerate(root):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
@@ -276,6 +284,10 @@ def plant():
     longf = exfat_dir(vol, "LONGF")
     if not (longf and longf[1:] == (1, 1, True) and vol.chain(longf[0])[:2] == [longf[0], man_cluster(vol)]):
         sys.exit(f"test-grow-dir: LONGF is not a one-byte chained file linked on to /man's cluster: {longf}")
+    longa = exfat_dir(vol, "LONGA")
+    if not (longa and longa[1:] == (vol.cluster, vol.cluster, True)
+            and vol.chain(longa[0])[:2] == [longa[0], man_cluster(vol)]):
+        sys.exit(f"test-grow-dir: LONGA is not a one-cluster chained file linked on to /man's cluster: {longa}")
     for name in ("RMZ", "Z0FILE", "Z0APP"):
         if exfat_dir(vol, name) != (man_cluster(vol), 0, 0, True):
             sys.exit(f"test-grow-dir: {name} is not a FAT-chained entry of size 0 naming /man's cluster")
@@ -411,7 +423,10 @@ def disk_checks(parts, snap, old):
     # Allocated and as it was: a cluster freed early in the boot is soon
     # allocated again, to a file whose bytes then replace /man's entries.
     checks.append(("exfat /LONGF: removed", exfat_dir(exf, "LONGF") is None))
-    checks.append(("exfat /RMZ, /Z0FILE, /Z0APP and /LONGF: /man's cluster, which they named, allocated and as it was",
+    longa = exfat_dir(exf, "LONGA")
+    checks.append(("exfat /LONGA: grew by the append, on a chain of its own",
+                   bool(longa) and longa[1] > exf.cluster and man not in exf.chain(longa[0])))
+    checks.append(("exfat /RMZ, /Z0FILE, /Z0APP, /LONGF and /LONGA: /man's cluster, which they named, allocated and as it was",
                    exf.used(man) and exf.data([man]) == before[man][0]))
     print(f"     exfat /OLD: before the boot {old}, after it {exfat_dir(exf, 'OLD')}")
     checks.append(("exfat /OLD: its set as it was (first cluster, DataLength, ValidDataLength, chained)",
@@ -518,7 +533,8 @@ def main() -> int:
         # OLD: a read of a file past its size, an append to one (the
         # shell's read of it first), and a create.
         refused = [f"echo x >> /OLD/{HIDDEN[-1]}", "touch /OLD/NEW", "mkdir /OLD/X", "write /OLD/NEW2 abc"]
-        allowed = ["touch /OLD/F000", "rmdir /RMZ", "write /Z0FILE y", "echo y >> /Z0APP", "rm /LONGF"]
+        allowed = ["touch /OLD/F000", "rmdir /RMZ", "write /Z0FILE y", "echo y >> /Z0APP", "rm /LONGF",
+                   "echo z >> /LONGA"]
         reads = [f"cat /OLD/{HIDDEN[3]}", *refused, *allowed, "rmdir /OLD"]
         steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
         steps += [("# ", cmd) for cmd in reads]
