@@ -4318,6 +4318,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   them out before the repair; taking the chain as the size inside fsd was
   tried three ways and each cost more than it saved (the CHANGELOG entry of
   2026-10-18). Hans's decision, 2026-10-18.
+- **A cluster a size-0 exFAT entry names stays allocated for good.** Since
+  2026-10-19 fsd reads an entry of size 0 as holding no cluster, whatever
+  its set names, so a write to it takes a new one and its removal frees
+  nothing. When the bitmap still marks the named cluster allocated, nothing
+  owns it and nothing gives it back: one cluster for each such entry, which
+  `fsck_exfat` reports. Reusing it was how a write reached another file's
+  cluster; a leak is the safe side. Found by the high review of 2026-10-19.
 - **A damaged exFAT directory answers "device I/O error".** A create in a
   directory whose chain is not its size, a cluster outside the heap and a
   looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a

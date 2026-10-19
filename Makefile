@@ -2423,7 +2423,8 @@ test-stale-cursor: image-exfat
 # size) left unchanged, its hidden file not found, an append and a create
 # refused (nothing leaked), a touch of a file inside the size allowed; and a
 # directory and two files of size 0 naming /man's cluster removed,
-# overwritten and appended to, /man's cluster as it was. Then each directory read off the disk (its chain, and on exFAT its
+# overwritten and appended to, and a file linked on past its size into it
+# removed, /man's cluster as it was. Then each directory read off the disk (its chain, and on exFAT its
 # DataLength), every other exFAT cluster and everything before the heap but
 # the FAT's cluster entries unchanged, and the host's fsck run on each volume.
 # One boot, about a minute and a half; run it whenever a filesystem's
