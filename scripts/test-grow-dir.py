@@ -28,9 +28,11 @@ the exFAT root first, each one contiguous (NoFatChain) cluster, as it made
   one), COUNT files: it must be given a cluster of its own, where fsd once
   took the named one without its bit, which the next allocation could hand
   back (a FAT loop, or another file over its entries);
-- /RMZ, made the same but naming /man's directory cluster, in use: the
-  guest removes it, and /man's cluster must stay allocated, where freeing
-  the cluster a size-0 directory names freed another directory's;
+- /RMZ, made a FAT-chained directory of size 0 naming /man's directory
+  cluster, in use, and /Z0FILE an empty file naming the same: the guest
+  removes RMZ and overwrites Z0FILE, and /man's cluster must stay
+  allocated, where freeing the chain a size-0 entry names freed another
+  directory's;
 - /OLD, as fsd before 2026-10-18 left a directory it grew: a FAT chain of
   two clusters, a DataLength of one, and OLD_COUNT files' sets across both,
   so a reader sees 42; those past the size (HIDDEN) hold their own names.
@@ -125,6 +127,7 @@ def mac_dirs():
         try:
             for name in MADE:
                 os.mkdir(os.path.join(mp, name))
+            open(os.path.join(mp, "Z0FILE"), "w").close()
             subprocess.run(["find", mp, "-name", "._*", "-delete"], capture_output=True)
             for junk in (".fseventsd", ".Trashes", ".Spotlight-V100", ".DS_Store",
                          *(f"{name}/.DS_Store" for name in MADE)):
@@ -244,7 +247,8 @@ def plant():
 
         rmz = struct.unpack_from("<I", d, sets["RMZ"][0] + 32 + 20)[0]
         bitmap(rmz, False)
-        stream("RMZ", 0x03, man_cluster(vol), 0)
+        stream("RMZ", 0x01, man_cluster(vol), 0)
+        stream("Z0FILE", 0x01, man_cluster(vol), 0)
 
         for k, c in enumerate(root):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
@@ -255,8 +259,9 @@ def plant():
     if exfat_dir(vol, "NAMED")[1:] != (0, 0, False) or vol.used(named):
         sys.exit("test-grow-dir: NAMED is not a NoFatChain directory of size 0 naming a free cluster")
     first, size, _, _ = exfat_dir(vol, "OLD")
-    if exfat_dir(vol, "RMZ") != (man_cluster(vol), 0, 0, False):
-        sys.exit("test-grow-dir: RMZ is not a NoFatChain directory of size 0 naming /man's cluster")
+    for name in ("RMZ", "Z0FILE"):
+        if exfat_dir(vol, name) != (man_cluster(vol), 0, 0, True):
+            sys.exit(f"test-grow-dir: {name} is not a FAT-chained entry of size 0 naming /man's cluster")
     return exfat_names(vol.data([first])[:size]), set(data.values())
 
 
@@ -384,7 +389,7 @@ def disk_checks(parts, snap, old):
         checks += exfat_checks(exf, where, name, COUNT)
     man = man_cluster(exf)
     checks.append(("exfat /RMZ: removed", exfat_dir(exf, "RMZ") is None))
-    checks.append(("exfat /RMZ: /man's cluster, which it named, still allocated", exf.used(man)))
+    checks.append(("exfat /RMZ and /Z0FILE: /man's cluster, which they named, still allocated", exf.used(man)))
     print(f"     exfat /OLD: before the boot {old}, after it {exfat_dir(exf, 'OLD')}")
     checks.append(("exfat /OLD: its set as it was (first cluster, DataLength, ValidDataLength, chained)",
                    exfat_dir(exf, "OLD") == old))
@@ -490,7 +495,7 @@ def main() -> int:
         # OLD: a read of a file past its size, an append to one (the
         # shell's read of it first), and a create.
         reads = [f"cat /OLD/{HIDDEN[3]}", f"echo x >> /OLD/{HIDDEN[-1]}", "touch /OLD/NEW", "touch /OLD/F000",
-                 "rmdir /RMZ"]
+                 "rmdir /RMZ", "write /Z0FILE y"]
         steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
         steps += [("# ", cmd) for cmd in reads]
         prev = "# "
