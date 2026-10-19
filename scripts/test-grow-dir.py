@@ -24,9 +24,13 @@ the exFAT root first, each one contiguous (NoFatChain) cluster, as it made
   given its first cluster, where fsd once wrote FAT entry 0 and an entry
   set before the cluster heap;
 - /OLD, as fsd before 2026-10-18 left a directory it grew: a FAT chain of
-  two clusters, a DataLength of one, and OLD_COUNT empty files' sets across
-  both, so a reader sees 42; the probe writes the same names, and each must
-  replace its file, where a name check at the old size wrote a second set;
+  two clusters, a DataLength of one, and OLD_COUNT files' sets across both,
+  so a reader that stops at the size sees 42. Those past it (HIDDEN) hold
+  their own names. Before any write the guest reads one and appends to
+  another, which must read and keep their bytes (a lookup stopping at the
+  size, and a write that did not, truncated the append's file); then the
+  probe writes the same names, and each must replace its file, where a name
+  check at the old size wrote a second set;
 - /grow, a new directory on the exFAT root, 4 KiB clusters: 128 entries a
   cluster, three to each file's entry set, so COUNT files grow it twice;
 - /mnt/f/grow on the FAT32 ESP, 512-byte clusters: the control, a FAT32
@@ -81,6 +85,9 @@ COUNT = 100
 # 150 slots: past OLD's first cluster (128 slots, F042's set across the two)
 # and within its second.
 OLD_COUNT = 50
+# OLD's files whose sets lie past its first cluster's slot 125, so past the
+# size: each given a cluster holding its name.
+HIDDEN = [f"F{i:03d}" for i in range(42, OLD_COUNT)]
 MADE = ("MAC", "ZERO", "OLD")
 
 
@@ -125,8 +132,8 @@ def mac_dirs():
             sys.exit(f"test-grow-dir: hdiutil detach {dev} failed")
 
 
-def entry_set(name):
-    """An empty file's entry set, as fsd's build_entry_set makes it."""
+def entry_set(name, first=0, size=0):
+    """A file's entry set, FAT-chained, as fsd's build_entry_set makes it."""
     n = name.encode("utf-16le")
     k = -(-len(name) // 15)
     s = bytearray(32 * (2 + k))
@@ -136,6 +143,9 @@ def entry_set(name):
     for b in name.upper().encode("utf-16le"):
         h = (((h << 15) | (h >> 1)) + b) & 0xFFFF
     struct.pack_into("<H", s, 36, h)
+    struct.pack_into("<Q", s, 40, size)  # ValidDataLength
+    struct.pack_into("<I", s, 52, first)
+    struct.pack_into("<Q", s, 56, size)  # DataLength
     for e in range(k):
         chunk = n[30 * e:30 * e + 30]
         s[64 + 32 * e] = 0xC1
@@ -147,7 +157,8 @@ def entry_set(name):
 def plant():
     """OLD made as fsd before 2026-10-18 left a directory it grew, and ZERO a
     directory of size 0 with no cluster (see the module doc). Returns the
-    names a reader sees in OLD before the boot, which the run checks."""
+    names a reader stopping at the size sees in OLD before the boot, which
+    the run checks, and the clusters planted for HIDDEN's data."""
     vol = Volume(PART, 0)
     root = vol.chain(vol.root)
     d = bytearray(vol.data(root))
@@ -185,11 +196,17 @@ def plant():
             struct.pack_into("<H", d, at + 2, set_checksum(d[at:at + 32 * count]))
 
         old = struct.unpack_from("<I", d, sets["OLD"][0] + 32 + 20)[0]
-        second = next(c for c in range(2, vol.count + 2) if not vol.used(c))
-        bitmap(second, True)
+        free = [c for c in range(2, vol.count + 2) if not vol.used(c)]
+        second, data = free[0], dict(zip(HIDDEN, free[1:]))
+        for c in [second, *data.values()]:
+            bitmap(c, True)
+            fat(c, 0xFFFFFFFF)
         fat(old, second)
-        fat(second, 0xFFFFFFFF)
-        files = b"".join(entry_set(f"F{i:03d}") for i in range(OLD_COUNT))
+        for name, c in data.items():
+            fh.seek(vol.heap + (c - 2) * vol.cluster)
+            fh.write(name.encode().ljust(vol.cluster, b"\0"))
+        files = b"".join(entry_set(n, data.get(n, 0), len(n) if n in data else 0)
+                         for n in (f"F{i:03d}" for i in range(OLD_COUNT)))
         files = files.ljust(2 * vol.cluster, b"\0")
         for c, piece in ((old, files[:vol.cluster]), (second, files[vol.cluster:])):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
@@ -207,7 +224,7 @@ def plant():
     if exfat_dir(vol, "ZERO")[:2] != (0, 0):
         sys.exit(f"test-grow-dir: ZERO is not a directory of size 0 with no cluster: {exfat_dir(vol, 'ZERO')}")
     first, size, _, _ = exfat_dir(vol, "OLD")
-    return exfat_names(vol.data(vol.chain(first))[:size])
+    return exfat_names(vol.data(vol.chain(first))[:size]), set(data.values())
 
 
 def exfat_dir(vol, name):
@@ -288,12 +305,13 @@ def before_heap(vol, start):
     return out
 
 
-def snapshot(vol, start):
+def snapshot(vol, start, planted):
     """What the boot is compared with: every cluster, the bytes before the
     heap, and the clusters fsd may write without allocating them: the
-    root's, the bitmap's, and those of the directories MADE."""
+    root's, the bitmap's, those of the directories MADE, and `planted`, the
+    data of OLD's files, which the probe's writes free."""
     bitmap = -(-vol.count // 8 // vol.cluster)  # its clusters, ceil(count / 8 / cluster)
-    mine = set(vol.chain(vol.root)) | set(range(vol.bitmap, vol.bitmap + bitmap))
+    mine = set(vol.chain(vol.root)) | set(range(vol.bitmap, vol.bitmap + bitmap)) | planted
     for name in MADE:
         first, _, _, chained = exfat_dir(vol, name)
         if first >= 2:
@@ -385,7 +403,7 @@ def fsck():
 def main() -> int:
     try:
         mac_dirs()
-        old_seen = plant()
+        old_seen, planted = plant()
         parts = mbrdisk.assemble(IMAGE, [
             (0x07, mbrdisk.exfat_payload(PART), False),
             (0x0B, mbrdisk.esp_payload(os.path.join(BUILD, "esp.img")), True),
@@ -398,11 +416,15 @@ def main() -> int:
         print(f"     exfat /OLD: before the boot a reader sees {len(old_seen)} of its {OLD_COUNT} files")
         if len(old_seen) >= OLD_COUNT:
             sys.exit("test-grow-dir: OLD's files are all in view before the boot: the case is not built")
-        snap = snapshot(Volume(IMAGE, parts[0][0]), parts[0][0])
+        snap = snapshot(Volume(IMAGE, parts[0][0]), parts[0][0], planted)
         # MAC first, before anything else on the volume is allocated.
         runs = [("exfat /MAC", "/MAC", COUNT), ("exfat /ZERO", "/ZERO", COUNT), ("exfat /OLD", "/OLD", OLD_COUNT),
                 ("exfat root /grow", "/grow", COUNT), ("fat32 /mnt/f", "/mnt/f/grow", COUNT)]
+        # Before anything writes to OLD: a read of a file past its size, and
+        # an append to one, the shell's read of it first.
+        reads = [f"cat /OLD/{HIDDEN[3]}", f"echo x >> /OLD/{HIDDEN[-1]}", f"cat /OLD/{HIDDEN[-1]}"]
         steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
+        steps += [("# ", cmd) for cmd in reads]
         prev = "# "
         for _, d, count in runs:
             steps.append((prev, f"dirprobe {d} {count}"))
@@ -419,6 +441,16 @@ def main() -> int:
             fh.write(out)
 
         checks = [("driven to the end", driven), ("no fault lines", faults == 0)]
+
+        def said(cmd):
+            m = re.search(re.escape(cmd) + r"\n([^\n]*)", out)
+            return m.group(1) if m else ""
+        got, appended = said(reads[0]), said(reads[2])
+        print(f"     exfat /OLD: `{reads[0]}` printed {got!r}, `{reads[2]}` after the append {appended!r}")
+        checks.append((f"exfat /OLD: {HIDDEN[3]}, past the size, reads its bytes before any write",
+                       got.startswith(HIDDEN[3])))
+        checks.append((f"exfat /OLD: an append to {HIDDEN[-1]}, past the size, keeps its bytes",
+                       appended.startswith(HIDDEN[-1] + "x")))
         pieces = re.split(r"dirprobe (/\S+) \d+\n", out)
         by_dir = dict(zip(pieces[1::2], pieces[2::2]))
         for where, d, _ in runs:
