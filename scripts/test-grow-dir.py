@@ -33,7 +33,10 @@ the exFAT root first, each one contiguous (NoFatChain) cluster, as it made
   guest removes RMZ, overwrites Z0FILE and appends to Z0APP, and /man's
   cluster must stay allocated and as it was, where freeing the chain a
   size-0 entry names freed another directory's, and an append wrote into
-  the cluster it names;
+  the cluster it names; and /LONGF, a one-byte file whose cluster's FAT
+  entry links on, past its size, to /man's cluster: the guest removes it,
+  and /man's cluster must stay as it was, where freeing a file walked its
+  whole chain;
 - /OLD, as fsd before 2026-10-18 left a directory it grew: a FAT chain of
   two clusters, a DataLength of one, and OLD_COUNT files' sets across both,
   so a reader sees 42; those past the size (HIDDEN) hold their own names.
@@ -131,6 +134,8 @@ def mac_dirs():
                 os.mkdir(os.path.join(mp, name))
             for name in ("Z0FILE", "Z0APP"):
                 open(os.path.join(mp, name), "w").close()
+            with open(os.path.join(mp, "LONGF"), "w") as fh:
+                fh.write("L")
             subprocess.run(["find", mp, "-name", "._*", "-delete"], capture_output=True)
             for junk in (".fseventsd", ".Trashes", ".Spotlight-V100", ".DS_Store",
                          *(f"{name}/.DS_Store" for name in MADE)):
@@ -254,6 +259,11 @@ def plant():
         stream("Z0FILE", 0x01, man_cluster(vol), 0)
         stream("Z0APP", 0x01, man_cluster(vol), 0)
 
+        # LONGF FAT-chained, one byte, its cluster linked on to /man's.
+        longf = struct.unpack_from("<I", d, sets["LONGF"][0] + 32 + 20)[0]
+        stream("LONGF", 0x01, longf, 1)
+        fat(longf, man_cluster(vol))
+
         for k, c in enumerate(root):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
             fh.write(d[k * vol.cluster:(k + 1) * vol.cluster])
@@ -263,6 +273,9 @@ def plant():
     if exfat_dir(vol, "NAMED")[1:] != (0, 0, False) or vol.used(named):
         sys.exit("test-grow-dir: NAMED is not a NoFatChain directory of size 0 naming a free cluster")
     first, size, _, _ = exfat_dir(vol, "OLD")
+    longf = exfat_dir(vol, "LONGF")
+    if not (longf and longf[1:] == (1, 1, True) and vol.chain(longf[0]) == [longf[0], man_cluster(vol)]):
+        sys.exit(f"test-grow-dir: LONGF is not a one-byte chained file linked on to /man's cluster: {longf}")
     for name in ("RMZ", "Z0FILE", "Z0APP"):
         if exfat_dir(vol, name) != (man_cluster(vol), 0, 0, True):
             sys.exit(f"test-grow-dir: {name} is not a FAT-chained entry of size 0 naming /man's cluster")
@@ -350,14 +363,16 @@ def before_heap(vol, start):
 def snapshot(vol, start):
     """What the boot is compared with: every cluster, the bytes before the
     heap, and the clusters fsd may write without allocating them: the
-    root's, the bitmap's, and those of the directories MADE but OLD, which
-    fsd must leave as it is, and its files' data with it."""
+    root's, the bitmap's, those of the directories MADE but OLD, which fsd
+    must leave as it is, and its files' data with it, and LONGF's."""
     bitmap = -(-vol.count // 8 // vol.cluster)  # its clusters, ceil(count / 8 / cluster)
     mine = set(vol.chain(vol.root)) | set(range(vol.bitmap, vol.bitmap + bitmap))
     for name in MADE:
         first, size, _, _ = exfat_dir(vol, name)
         if size and name != "OLD":
             mine.add(first)  # one NoFatChain cluster
+    # LONGF's own cluster, which its removal frees for the boot to reuse.
+    mine.add(exfat_dir(vol, "LONGF")[0])
     return clusters(vol), before_heap(vol, start), mine
 
 
@@ -395,7 +410,8 @@ def disk_checks(parts, snap, old):
     checks.append(("exfat /RMZ: removed", exfat_dir(exf, "RMZ") is None))
     # Allocated and as it was: a cluster freed early in the boot is soon
     # allocated again, to a file whose bytes then replace /man's entries.
-    checks.append(("exfat /RMZ, /Z0FILE and /Z0APP: /man's cluster, which they named, allocated and as it was",
+    checks.append(("exfat /LONGF: removed", exfat_dir(exf, "LONGF") is None))
+    checks.append(("exfat /RMZ, /Z0FILE, /Z0APP and /LONGF: /man's cluster, which they named, allocated and as it was",
                    exf.used(man) and exf.data([man]) == before[man][0]))
     print(f"     exfat /OLD: before the boot {old}, after it {exfat_dir(exf, 'OLD')}")
     checks.append(("exfat /OLD: its set as it was (first cluster, DataLength, ValidDataLength, chained)",
@@ -502,7 +518,7 @@ def main() -> int:
         # OLD: a read of a file past its size, an append to one (the
         # shell's read of it first), and a create.
         refused = [f"echo x >> /OLD/{HIDDEN[-1]}", "touch /OLD/NEW", "mkdir /OLD/X", "write /OLD/NEW2 abc"]
-        allowed = ["touch /OLD/F000", "rmdir /RMZ", "write /Z0FILE y", "echo y >> /Z0APP"]
+        allowed = ["touch /OLD/F000", "rmdir /RMZ", "write /Z0FILE y", "echo y >> /Z0APP", "rm /LONGF"]
         reads = [f"cat /OLD/{HIDDEN[3]}", *refused, *allowed, "rmdir /OLD"]
         steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
         steps += [("# ", cmd) for cmd in reads]
