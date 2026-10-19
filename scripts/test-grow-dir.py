@@ -367,11 +367,27 @@ def disk_checks(parts, snap, old):
     print(f"     exfat /OLD: before the boot {old}, after it {exfat_dir(exf, 'OLD')}")
     checks.append(("exfat /OLD: its set as it was (first cluster, DataLength, ValidDataLength, chained)",
                    exfat_dir(exf, "OLD") == old))
-    named = exfat_dir(exf, "NAMED")
-    if named:
-        chain = exf.chain(named[0])
-        checks.append(("exfat /NAMED: every cluster of its chain allocated, none twice",
-                       all(exf.used(c) for c in chain) and len(set(chain)) == len(chain)))
+    # Each cluster of the probed directories and their files has one owner:
+    # a directory that took a cluster it named but did not hold shares it
+    # with the file the allocator later gave it to.
+    owners = {}
+    for name in ("MAC", "ZERO", "NAMED", "OLD", "grow"):
+        found = exfat_dir(exf, name)
+        if not found or found[0] < 2:
+            continue
+        first, _, _, chained = found
+        dirs = exf.chain(first) if chained else [first]
+        for c in dirs:
+            owners.setdefault(c, []).append(f"/{name}")
+        for fname, (ffirst, fsize, fchained) in exf.listing(first, chained).items():
+            if ffirst >= 2 and fsize:
+                run = exf.chain(ffirst) if fchained else range(ffirst, ffirst + -(-fsize // exf.cluster))
+                for c in run:
+                    owners.setdefault(c, []).append(f"/{name}/{fname}")
+    shared = {c: who for c, who in owners.items() if len(who) > 1}
+    if shared:
+        print(f"     exfat: clusters with two owners: {dict(list(shared.items())[:4])}")
+    checks.append(("exfat: every cluster of the probed directories and their files has one owner", not shared))
 
     # A scan for free slots that ran past MAC's one cluster wrote into
     # whatever lay after it, in use or free; a directory of size 0 had its
