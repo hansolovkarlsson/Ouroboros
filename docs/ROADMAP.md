@@ -4325,6 +4325,19 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   owns it and nothing gives it back: one cluster for each such entry, which
   `fsck_exfat` reports. Reusing it was how a write reached another file's
   cluster; a leak is the safe side. Found by the high review of 2026-10-19.
+- **`test-grow-dir` hung once in 31 runs, fsd silent mid-probe.** On
+  2026-10-19, with the tree at e6655482, one boot stopped answering during
+  `dirprobe /ZERO 100`: no fault line, no restart, the step's 90 s gone
+  where a probe takes about 1.5 s. The disk showed where: F085's data
+  cluster allocated, ZERO's third cluster (its next allocation) not, so in
+  the free-slot scan's run of about 256 sector reads or the bitmap scan
+  after it. The image and every allocation are the same from run to run
+  (the next 30 runs, the same code, all passed, cluster for cluster), so a
+  logic bug in fsd would hang every time; something timing-dependent below
+  it (the block path, the cores, QEMU) is the likelier cause, not shown.
+  The transcript was not kept. If it recurs: keep `build/test-grow-dir.txt`
+  and the image (a failing run keeps it), and look at what the boot core
+  and fsd were doing.
 - **A subdirectory naming the exFAT root's cluster is read as the root.**
   `dir_extent` tells the root by its first cluster, so a cross-linked set
   that names the root's cluster gets the root's whole chain, and a create
