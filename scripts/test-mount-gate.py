@@ -16,6 +16,8 @@ One boot of a copy of build/esp.img on virtio, a copy of build/usbstick.img
 (a FAT32 stick) 1 MiB longer on USB beside it, so it is told from the ESP by
 its size; as root:
 
+- `mount` must report the virtio copy's size (the stick is FAT32 too, so
+  the format alone would not tell which disk is `/`);
 - `mountprobe` (/bin/MOUNTPROBE, MOUNT with replace set from an ordinary
   task) must print `mountprobe: denied`, and `ls /` after it must still list
   the ESP (EFI, BIN), not the stick;
@@ -42,16 +44,13 @@ ROOT = os.path.dirname(HERE)
 _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
 drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
-_spec = importlib.util.spec_from_file_location("test_usb_hub", os.path.join(HERE, "test-usb-hub.py"))
-usb_hub = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(usb_hub)
 
 COPY = os.path.join(ROOT, "build", "test-mount-gate.img")
 STICK = os.path.join(ROOT, "build", "usbstick.img")
 # The rig's own copy of the stick, 1 MiB longer than esp.img and usbstick.img
 # (both 64 MiB, with the same partition table), so `mount` tells it by size.
 STICK_COPY = os.path.join(ROOT, "build", "test-mount-gate-stick.img")
-COMMANDS = ["mountprobe", "ls /", "unmount", "erase disk", "mount -a", "mount"]
+COMMANDS = ["mount", "mountprobe", "ls /", "unmount", "erase disk", "mount -a", "mount"]
 EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M)
 
 
@@ -68,7 +67,12 @@ def boot():
         shutil.copyfile(STICK, STICK_COPY)
         with open(STICK_COPY, "ab") as fh:
             fh.write(bytes(1024 * 1024))
-        guest = drive_qemu.Guest(COPY, extra_args=usb_hub.layout(True, STICK_COPY), label="test-mount-gate: ")
+        # The stick alone on its own controller: no keyboard and no monitor
+        # socket, so this rig shares nothing with test-usb-hub's.
+        usb = ["-device", "qemu-xhci,id=xhci0",
+               "-drive", f"file={STICK_COPY},format=raw,if=none,id=usbstick",
+               "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1"]
+        guest = drive_qemu.Guest(COPY, extra_args=usb, label="test-mount-gate: ")
         driven = guest.run(steps)
         out = guest.transcript()
         faults = guest.aborts()
@@ -109,21 +113,21 @@ def main():
     esp = os.path.getsize(os.path.join(ROOT, "build", "esp.img")) // 512
     driven, out, faults = boot()
     o = outputs(out)
-    names = {w.rstrip("/").upper() for w in (o[1] or "").split()}
+    names = {w.rstrip("/").upper() for w in (o[2] or "").split()}
     checks = [
         ("driven to the end, every command's output found", driven and None not in o),
-        ("the boot disk is the virtio copy, fsd mounted FAT32",
-         re.search(r"^fsd: FAT32 mounted", out, re.M) is not None),
-        (f"mountprobe denied (got {o[0]!r})", o[0] == "mountprobe: denied"),
+        (f"/ is the virtio copy at boot (its {esp} sectors): {o[0]!r}",
+         stick != esp and f"(disk {esp} sectors" in (o[0] or "")),
+        (f"mountprobe denied (got {o[1]!r})", o[1] == "mountprobe: denied"),
         ("ls / after it lists the ESP, not the stick",
          {"EFI", "BIN"} <= names and "USBTEST.TXT" not in names),
-        ("unmount", o[2] == "unmounted"),
-        ("erase disk", (o[3] or "").startswith("erased")),
-        (f"mount -a mounted through fsd's rescan, the stick installed (got {o[4]!r})",
-         (o[4] or "").endswith("mounted - disk commands available")
-         and "usb-msd block device installed" in (o[4] or "")),
-        (f"mount reports the stick's disk ({stick} sectors; the ESP image has {esp}): {o[5]!r}",
-         stick != esp and f"(disk {stick} sectors" in (o[5] or "")),
+        ("unmount", o[3] == "unmounted"),
+        ("erase disk", (o[4] or "").startswith("erased")),
+        (f"mount -a mounted through fsd's rescan, the stick installed (got {o[5]!r})",
+         (o[5] or "").endswith("mounted - disk commands available")
+         and "usb-msd block device installed" in (o[5] or "")),
+        (f"mount reports the stick's disk ({stick} sectors): {o[6]!r}",
+         f"(disk {stick} sectors" in (o[6] or "")),
         ("no fault lines", faults == 0),
     ]
     failed = 0

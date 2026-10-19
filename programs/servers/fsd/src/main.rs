@@ -146,9 +146,11 @@ fn mutates(verb: u64, p: &[u64; 4]) -> bool {
 /// Parallels-before-`mount` case); logs the outcome whenever a device is
 /// actually present. Returns `0` (mounted), [`MOUNT_ALREADY`] (tree 0 is
 /// full, or the partition it found is already another tree's, see
-/// [`tree_of`]), or [`NO_FS`].
+/// [`tree_of`]), [`FS_ERR_IO`] (the partition table could not be read: the
+/// disk is there and failing, which is not "no filesystem"), or [`NO_FS`].
 ///
 /// [`MOUNT_ALREADY`]: syscall_abi::MOUNT_ALREADY
+/// [`FS_ERR_IO`]: syscall_abi::FS_ERR_IO
 /// [`NO_FS`]: syscall_abi::NO_FS
 fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     if mounts[0].is_some() {
@@ -201,30 +203,42 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             print("fsd: mount failed (");
             print(error_name(&e));
             print(") - disk commands won't work\r\n");
-            syscall_abi::NO_FS
+            match e {
+                fat32::Error::Io(_) => syscall_abi::FS_ERR_IO,
+                _ => syscall_abi::NO_FS,
+            }
         }
     }
 }
 
 /// `mount -a`: mount tree 0 from the block device the kernel holds, and when
-/// that finds nothing, have the kernel rescan the USB ports and install a stick
-/// in its place (the `MOUNT` syscall, replace set), then try again. The
+/// that finds no filesystem, have the kernel rescan the USB ports and install a
+/// stick in its place (the `MOUNT` syscall, replace set), then try again. The
 /// replace is passed only with no disk filesystem mounted, here where that is
 /// known: a swap under a mounted one would hand its cached geometry another
 /// disk. Since 2026-10-19 the kernel answers `MOUNT` to this server alone
 /// (`CAP_BLOCK`); until then the shell called it on fsd's earlier word, and
-/// so could any task, on nobody's. Answers `try_mount`'s codes, or
-/// `MOUNT_NO_DEVICE` when the rescan found no stick.
+/// so could any task, on nobody's.
+///
+/// Not on an I/O error: a disk whose partition table would not read is there
+/// and failing, and swapping in whatever stick is attached would put the stick
+/// at `/` with the real disk out of reach until a reboot. (A read error inside
+/// a partition's probe still reads as "no filesystem": `vfs::Filesystem::probe`
+/// does not tell them apart, the roadmap.) Answers `try_mount`'s codes,
+/// `MOUNT_NO_DEVICE` when the rescan found no stick, or the kernel's own
+/// refusal of the rescan as it came (`BLOCK_ERR_DENIED`: this task without
+/// `CAP_BLOCK`, a policy fault the shell names).
 fn mount_or_rescan(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     let first = try_mount(mounts);
     if first != syscall_abi::NO_FS || mounts.iter().flatten().any(|m| m.is_disk()) {
         return first;
     }
     match syscall4(syscall_abi::MOUNT, 1, 0, 0, 0) {
-        0 => try_mount(mounts),
-        syscall_abi::MOUNT_NO_DEVICE => syscall_abi::MOUNT_NO_DEVICE,
-        // A stick there whose init failed answers as nothing mountable did.
-        _ => syscall_abi::NO_FS,
+        0 => {
+            disk::Disk.device_replaced();
+            try_mount(mounts)
+        }
+        other => other,
     }
 }
 

@@ -22,29 +22,24 @@
 pub extern "C" fn _start() -> ! {
     ulib::usage_if_requested(b"usage: mountprobe  (MOUNT with replace set, from this task; prints the kernel's answer)\r\n");
     let r = ulib::syscall(syscall_abi::MOUNT, 1);
-    let name: &[u8] = match r {
-        syscall_abi::BLOCK_ERR_DENIED => b"denied",
-        0 => b"installed",
-        syscall_abi::MOUNT_NO_DEVICE => b"no device",
-        syscall_abi::MOUNT_ALREADY => b"already",
-        _ => b"other",
+    // One table: the name, or None for "other", which prints the number.
+    let name: Option<&[u8]> = match r {
+        syscall_abi::BLOCK_ERR_DENIED => Some(b"denied"),
+        0 => Some(b"installed"),
+        syscall_abi::MOUNT_NO_DEVICE => Some(b"no device"),
+        syscall_abi::MOUNT_ALREADY => Some(b"already"),
+        _ => None,
     };
     ulib::con_write(b"mountprobe: ");
-    ulib::con_write(name);
-    if !matches!(r, syscall_abi::BLOCK_ERR_DENIED | 0 | syscall_abi::MOUNT_NO_DEVICE | syscall_abi::MOUNT_ALREADY) {
-        let mut digits = [0u8; 20];
-        let mut n = r;
-        let mut i = digits.len();
-        loop {
-            i -= 1;
-            digits[i] = b'0' + (n % 10) as u8;
-            n /= 10;
-            if n == 0 {
-                break;
-            }
+    match name {
+        Some(name) => ulib::con_write(name),
+        None => {
+            let mut line = [0u8; 32];
+            let mut n = 0;
+            ulib::emit(&mut line, &mut n, b"other ");
+            ulib::emit_dec(&mut line, &mut n, r);
+            ulib::con_write(&line[..n]);
         }
-        ulib::con_write(b" ");
-        ulib::con_write(&digits[i..]);
     }
     ulib::con_write(b"\r\n");
     ulib::exit(if r == syscall_abi::BLOCK_ERR_DENIED { 0 } else { 1 });

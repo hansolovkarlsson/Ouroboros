@@ -4263,7 +4263,11 @@ fn mount_disk() {
         MOUNT_NO_DEVICE => {
             print_line("mount: no USB storage device found (see the kernel log; is the stick attached to the VM?)")
         }
-        NO_FS => print_line("mount: no mountable filesystem on the disk or a USB stick (see the server's log line)"),
+        // Whether a stick was found and installed is the kernel's line just
+        // above (`usb-msd block device installed`); one code covers both.
+        NO_FS => print_line("mount: no mountable filesystem (on the disk, or on the USB stick if the kernel just installed one; see the server's log line)"),
+        syscall_abi::FS_ERR_IO => print_line("mount: the disk answered with an I/O error; it was not replaced by a USB stick"),
+        syscall_abi::BLOCK_ERR_DENIED => print_line("mount: the kernel refused the server's USB rescan (the server lacks CAP_BLOCK)"),
         _ => print_line("mount: unexpected return"),
     }
 }
