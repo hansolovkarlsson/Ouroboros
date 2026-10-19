@@ -28,12 +28,16 @@ the exFAT root first, each one contiguous (NoFatChain) cluster, as it made
   one), COUNT files: it must be given a cluster of its own, where fsd once
   took the named one without its bit, which the next allocation could hand
   back (a FAT loop, or another file over its entries);
+- /RMZ, made the same but naming /man's directory cluster, in use: the
+  guest removes it, and /man's cluster must stay allocated, where freeing
+  the cluster a size-0 directory names freed another directory's;
 - /OLD, as fsd before 2026-10-18 left a directory it grew: a FAT chain of
   two clusters, a DataLength of one, and OLD_COUNT files' sets across both,
   so a reader sees 42; those past the size (HIDDEN) hold their own names.
   fsd reads it to its size, as every driver does, and refuses to write to
   it (as Linux does) until a fsck repairs it: a read of a hidden file finds
-  nothing, an append to one and a create are refused, and nothing of OLD
+  nothing, an append to one and a create are refused while a touch of a
+  file inside the size goes ahead (it creates nothing), and nothing of OLD
   changes on the disk, where taking its chain as its size on a write alone
   truncated the append's file, and a create's name check at the size wrote
   a second set under a hidden name;
@@ -95,7 +99,7 @@ OLD_COUNT = 50
 # OLD's files whose sets lie past its first cluster's slot 125, so past the
 # size: each given a cluster holding its name.
 HIDDEN = [f"F{i:03d}" for i in range(42, OLD_COUNT)]
-MADE = ("MAC", "ZERO", "NAMED", "OLD")
+MADE = ("MAC", "ZERO", "NAMED", "OLD", "RMZ")
 
 
 def mac_dirs():
@@ -159,6 +163,14 @@ def entry_set(name, first=0, size=0):
         s[64 + 32 * e + 2:64 + 32 * e + 2 + len(chunk)] = chunk
     struct.pack_into("<H", s, 2, set_checksum(s))
     return bytes(s)
+
+
+def man_cluster(vol):
+    """/man's first cluster, a directory in use that RMZ names."""
+    found = exfat_dir(vol, "man")
+    if not found or found[0] < 2:
+        sys.exit("test-grow-dir: no /man directory on the exFAT image")
+    return found[0]
 
 
 def plant():
@@ -230,6 +242,10 @@ def plant():
         bitmap(named, False)
         stream("NAMED", 0x03, named, 0)
 
+        rmz = struct.unpack_from("<I", d, sets["RMZ"][0] + 32 + 20)[0]
+        bitmap(rmz, False)
+        stream("RMZ", 0x03, man_cluster(vol), 0)
+
         for k, c in enumerate(root):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
             fh.write(d[k * vol.cluster:(k + 1) * vol.cluster])
@@ -239,6 +255,8 @@ def plant():
     if exfat_dir(vol, "NAMED")[1:] != (0, 0, False) or vol.used(named):
         sys.exit("test-grow-dir: NAMED is not a NoFatChain directory of size 0 naming a free cluster")
     first, size, _, _ = exfat_dir(vol, "OLD")
+    if exfat_dir(vol, "RMZ") != (man_cluster(vol), 0, 0, False):
+        sys.exit("test-grow-dir: RMZ is not a NoFatChain directory of size 0 naming /man's cluster")
     return exfat_names(vol.data([first])[:size]), set(data.values())
 
 
@@ -364,6 +382,9 @@ def disk_checks(parts, snap, old):
     for where, name in (("exfat /MAC", "MAC"), ("exfat /ZERO", "ZERO"), ("exfat /NAMED", "NAMED"),
                         ("exfat root /grow", "grow")):
         checks += exfat_checks(exf, where, name, COUNT)
+    man = man_cluster(exf)
+    checks.append(("exfat /RMZ: removed", exfat_dir(exf, "RMZ") is None))
+    checks.append(("exfat /RMZ: /man's cluster, which it named, still allocated", exf.used(man)))
     print(f"     exfat /OLD: before the boot {old}, after it {exfat_dir(exf, 'OLD')}")
     checks.append(("exfat /OLD: its set as it was (first cluster, DataLength, ValidDataLength, chained)",
                    exfat_dir(exf, "OLD") == old))
@@ -426,10 +447,13 @@ def fsck():
             r = subprocess.run([tool, "-n", dev + part], capture_output=True, text=True)
             lines = (r.stdout + r.stderr).strip().splitlines()
             if tool == "fsck_exfat":
-                # Every complaint (indented) about /OLD's chain, the case
-                # planted and left for a fsck: nothing else.
+                # It ran its checks, it names /OLD's chain, the case planted
+                # and left for a fsck, and nothing else: every line is one of
+                # its stages, a complaint or its "No" to a repair.
                 problems = [ln for ln in lines if ln.startswith("   ")]
-                ok = all("/OLD" in ln and "too many clusters" in ln for ln in problems)
+                other = [ln for ln in lines if not (ln.startswith(("** ", "   ")) or ln.endswith("? NO"))]
+                ok = ("** Checking file system hierarchy." in lines and not other and
+                      problems == ["   Cluster chain for /OLD has too many clusters for its size."])
                 checks.append((f"{where}: {tool} -n finds nothing to repair but /OLD's chain, as planted", ok))
             else:
                 ok = r.returncode == 0
@@ -465,7 +489,8 @@ def main() -> int:
                 ("exfat root /grow", "/grow", COUNT), ("fat32 /mnt/f", "/mnt/f/grow", COUNT)]
         # OLD: a read of a file past its size, an append to one (the
         # shell's read of it first), and a create.
-        reads = [f"cat /OLD/{HIDDEN[3]}", f"echo x >> /OLD/{HIDDEN[-1]}", "touch /OLD/NEW"]
+        reads = [f"cat /OLD/{HIDDEN[3]}", f"echo x >> /OLD/{HIDDEN[-1]}", "touch /OLD/NEW", "touch /OLD/F000",
+                 "rmdir /RMZ"]
         steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
         steps += [("# ", cmd) for cmd in reads]
         prev = "# "
@@ -486,17 +511,25 @@ def main() -> int:
         checks = [("driven to the end", driven), ("no fault lines", faults == 0)]
 
         def said(cmd):
-            # Everything up to the next prompt: the kernel's line for the
-            # task's exit can come before the shell's message.
-            m = re.search(re.escape(cmd) + r"\n(.*?)\n# ", out, re.S)
-            return m.group(1) if m else ""
+            """Everything `cmd` printed, up to the next prompt (the kernel's
+            line for the task's exit can come before the shell's message),
+            or None if it was not run."""
+            i = out.find(cmd + "\n")
+            if i < 0:
+                return None
+            rest = out[i + len(cmd) + 1:]
+            m = re.search(r"(?m)^# ", rest)
+            return rest[:m.start()] if m else rest
         said_by = {cmd: said(cmd) for cmd in reads}
         for cmd, got in said_by.items():
             print(f"     exfat /OLD: `{cmd}` printed {got!r}")
         checks.append((f"exfat /OLD: {HIDDEN[3]}, past the size, is not found (read to the size)",
-                       "no such file" in said_by[reads[0]]))
-        for cmd in reads[1:]:
-            checks.append((f"exfat /OLD: `{cmd}` is refused with an I/O error", "I/O error" in said_by[cmd]))
+                       "no such file" in (said_by[reads[0]] or "")))
+        for cmd in reads[3:]:
+            got = said_by[cmd]
+            checks.append((f"`{cmd}` goes ahead", got is not None and "error" not in got and "(code 0)" in got))
+        for cmd in reads[1:3]:
+            checks.append((f"exfat /OLD: `{cmd}` is refused with an I/O error", "I/O error" in (said_by[cmd] or "")))
         pieces = re.split(r"dirprobe (/\S+) \d+\n", out)
         by_dir = dict(zip(pieces[1::2], pieces[2::2]))
         for where, d, _ in runs:
