@@ -601,7 +601,7 @@ impl Fs {
             }
             let mut found: Option<u32> = None;
             self.walk_dir(&inode, |entry| {
-                if entry.name() == component {
+                if names_match(entry.name(), component) {
                     found = Some(entry.inode);
                     true
                 } else {
@@ -1143,7 +1143,7 @@ impl Fs {
     fn lookup_in(&mut self, dir: &Inode, name: &str) -> Result<Option<(u32, u16)>, Error> {
         let mut found: Option<u32> = None;
         self.walk_dir(dir, |entry| {
-            if entry.name() == name {
+            if names_match(entry.name(), name) {
                 found = Some(entry.inode);
                 true
             } else {
@@ -1693,6 +1693,13 @@ impl Fs {
             Ok(())
         }
     }
+}
+
+/// Whether directory entry name `entry` answers to `name`: ext2 matches bytes.
+/// Every lookup calls it, and so does `NP_MV`'s guard against a move into the
+/// mover's own subtree (`vfs::Filesystem::names_match`).
+pub(crate) fn names_match(entry: &str, name: &str) -> bool {
+    entry == name
 }
 
 /// Round `n` up to a multiple of 4 - ext2 directory entries are 4-byte aligned.

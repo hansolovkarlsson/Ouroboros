@@ -11,18 +11,23 @@ Three boots, each of a COPY of the image: FAT32 (build/esp.img), exFAT
   as `/docs/Docs`: into the directory being moved. fsd's guard against a move
   into the mover's own subtree compared bytes until 2026-10-19, missed it, and
   the subtree was unlinked from the root and linked under itself, with success
-  reported. Now `mv` must say `invalid name` and `ls /Docs` must still list
-  `keep.txt`. On ext2, which matches names by bytes, `/docs` does not exist:
-  the same `mv` is a plain rename and `ls /docs` must list `keep.txt`;
+  reported. Now `mv` must say `cannot move /Docs to a subdirectory of
+  itself, /docs/Docs` and `ls /Docs` must still list `keep.txt`. On ext2,
+  which matches names by bytes, `/docs` does not exist: the same `mv` is a
+  plain rename and `ls /docs` must list `keep.txt`;
 - `mkdir /Same`, `mv /Same /Same/sub`: the byte-equal case the guard always
-  caught, refused with `invalid name` on all three;
+  caught, refused with the same message on all three;
 - on ext2 only, `mkdir /A`, `mkdir /a`, `mv /A /a`: two directories, so the move
   goes into `/a` and `ls /a` must list `A`. A guard folding case on ext2 too
   would refuse it.
 
-No fault line in QEMU's trace. Fails with the guard comparing bytes (the
-FAT32 and exFAT `keep.txt` checks: the subtree gone) and with it folding case
-on every format (ext2's `/A` into `/a`). About two minutes. Run it whenever
+Each boot must say it mounted the format named (FAT32 folds case too, so an
+exFAT boot whose root came up as the ESP would pass while testing FAT32), and
+no fault line in QEMU's trace. The other spellings of a move into itself
+(`//`, `.`, `..`), which `/bin/mv` cannot send, are ninep-abi's host tests.
+Fails with the guard comparing bytes (the FAT32 and exFAT `keep.txt` checks:
+the subtree gone) and with it folding case on every format (ext2's `/A` into
+`/a`). About two minutes. Run it whenever
 fsd's NP_MV guard, a filesystem's mv or its name matching, or `/bin/mv`'s
 into-a-directory rewrite changes.
 """
@@ -38,7 +43,9 @@ _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, 
 drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
 
-IMAGES = [("fat32", "esp.img", True), ("exfat", "espexfat.img", True), ("ext2", "espext2.img", False)]
+# (name, image, the format fsd must say it mounted, whether names fold case)
+IMAGES = [("fat32", "esp.img", "FAT32", True), ("exfat", "espexfat.img", "exFAT", True),
+          ("ext2", "espext2.img", "ext2", False)]
 # Each command's output is the text between its marker and the next one.
 COMMON = [
     "mkdir /Docs",
@@ -54,19 +61,24 @@ EXT2_ONLY = ["mkdir /A", "mkdir /a", "mv /A /a", "ls /a"]
 
 def boot(name, image, commands):
     copy = os.path.join(ROOT, "build", f"test-mv-into-{name}.img")
-    shutil.copyfile(os.path.join(ROOT, "build", image), copy)
     steps = [("login:", "root"), ("assword", "root")]
     for i, cmd in enumerate(commands):
         steps += [("# ", f"echo ==m{i}=="), ("# ", cmd)]
     steps += [("# ", "echo ==end=="), ("==end==", "")]
-    guest = drive_qemu.Guest(copy, label=f"test-mv-into {name}: ")
+    guest = None
     try:
+        # Inside the try: a Guest that cannot start (a stale image, say)
+        # must not leave the copy in build/.
+        shutil.copyfile(os.path.join(ROOT, "build", image), copy)
+        guest = drive_qemu.Guest(copy, label=f"test-mv-into {name}: ")
         driven = guest.run(steps)
         out = guest.transcript()
         faults = guest.aborts()
     finally:
-        guest.stop()
-        os.remove(copy)
+        if guest:
+            guest.stop()
+        if os.path.exists(copy):
+            os.remove(copy)
     with open(os.path.join(ROOT, "build", f"test-mv-into-{name}.txt"), "w") as fh:
         fh.write(out)
     return driven, out, faults
@@ -106,21 +118,24 @@ def names(block):
     return {w.rstrip("/").lower() for w in text(block).split()}
 
 
-def verdicts(name, folds, driven, out, faults, commands):
+def verdicts(name, fstype, folds, driven, out, faults, commands):
     o = outputs(out, commands)
     checks = [
         (f"{name}: driven to the end", driven),
+        # FAT32 folds case too, so an image whose root came up as the ESP
+        # would pass every exFAT check while testing FAT32.
+        (f"{name}: fsd mounted {fstype}", re.search(rf"^fsd: {fstype} mounted", out, re.M) is not None),
         (f"{name}: every command's output found", len(o) == len(commands)),
         (f"{name}: mkdir /Docs and touch /Docs/keep.txt exit 0",
          code(o.get("mkdir /Docs", "")) == 0 and code(o.get("touch /Docs/keep.txt", "")) == 0),
-        (f"{name}: mv /Same /Same/sub refused, invalid name, exit 1",
-         text(o.get("mv /Same /Same/sub", "")) == "mv: invalid name" and code(o.get("mv /Same /Same/sub", "")) == 1),
+        (f"{name}: mv /Same /Same/sub refused as a move into itself, exit 1",
+         text(o.get("mv /Same /Same/sub", "")) == "mv: cannot move /Same to a subdirectory of itself, /Same/sub" and code(o.get("mv /Same /Same/sub", "")) == 1),
         (f"{name}: no fault lines", faults == 0),
     ]
     if folds:
         checks += [
-            (f"{name}: mv /Docs /docs refused, invalid name, exit 1",
-             text(o.get("mv /Docs /docs", "")) == "mv: invalid name" and code(o.get("mv /Docs /docs", "")) == 1),
+            (f"{name}: mv /Docs /docs refused as a move into itself, exit 1",
+             text(o.get("mv /Docs /docs", "")) == "mv: cannot move /Docs to a subdirectory of itself, /docs/Docs" and code(o.get("mv /Docs /docs", "")) == 1),
             (f"{name}: ls /Docs still lists keep.txt", "keep.txt" in names(o.get("ls /Docs", ""))),
         ]
     else:
@@ -136,10 +151,10 @@ def verdicts(name, folds, driven, out, faults, commands):
 
 def main():
     failed = 0
-    for name, image, folds in IMAGES:
+    for name, image, fstype, folds in IMAGES:
         commands = COMMON + ([] if folds else EXT2_ONLY)
         driven, out, faults = boot(name, image, commands)
-        for label, ok in verdicts(name, folds, driven, out, faults, commands):
+        for label, ok in verdicts(name, fstype, folds, driven, out, faults, commands):
             print(("PASS  " if ok else "FAIL  ") + label)
             failed += not ok
     print(f"test-mv-into: {'all checks passed' if failed == 0 else f'{failed} check(s) FAILED'}")

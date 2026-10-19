@@ -1150,6 +1150,67 @@ pub fn resolve_ns(ns: &[u8], path: &[u8], out: &mut [u8]) -> NsResolved {
     NsResolved { target, len: n }
 }
 
+/// The most components [`is_within`] reads from one path: a path of at most
+/// `FS_DATA_MAX` (512) bytes, the longest an `NP_*` request carries, has at
+/// most 256 non-empty ones.
+pub const WITHIN_MAX_COMPONENTS: usize = 256;
+
+/// Whether `inner` names an entry strictly below `outer`, as a filesystem
+/// resolves them: empty components skipped (`//`), `.` the directory itself,
+/// `..` its parent (no further than the root), and two names the same entry
+/// when `same(a, b)` says so, the filesystem's own name rule. For `NP_MV`'s
+/// refusal of a move into the mover's own subtree, which compared bytes until
+/// 2026-10-19 and so let `/Docs` to `/docs/Docs` through on FAT32 and exFAT,
+/// and `//docs/Docs`, `/docs/./Docs` and `/x/../Docs/y` everywhere.
+///
+/// `..` is taken lexically, which is how these filesystems resolve it (none
+/// has a link that leads elsewhere); where the disk has no `..` to walk (FAT32's
+/// root) the move fails on its own, and the guard only refuses earlier. A path
+/// with more than [`WITHIN_MAX_COMPONENTS`] components answers `true`: a
+/// refusal, the safe side, and no request can carry one.
+pub fn is_within(outer: &str, inner: &str, same: impl Fn(&str, &str) -> bool) -> bool {
+    let mut o = [(0u16, 0u16); WITHIN_MAX_COMPONENTS];
+    let mut i = [(0u16, 0u16); WITHIN_MAX_COMPONENTS];
+    let (outer, inner) = (outer.as_bytes(), inner.as_bytes());
+    let (Some(on), Some(inn)) = (components(outer, &mut o), components(inner, &mut i)) else {
+        return true;
+    };
+    inn > on && (0..on).all(|k| same(component(outer, o[k]), component(inner, i[k])))
+}
+
+/// The component at `(start, len)` in `path`, as [`components`] found it.
+/// Bytes, sliced and then made a `str`: slicing a `str` by a runtime index
+/// brings in `core::fmt`, which a userland link cannot take (fsd calls this).
+/// A slice between two `/` of a `str` is whole UTF-8, so the empty fallback is
+/// never taken.
+fn component(path: &[u8], (start, len): (u16, u16)) -> &str {
+    core::str::from_utf8(&path[start as usize..start as usize + len as usize]).unwrap_or("")
+}
+
+/// `path`'s components after `.`, `..` and empty ones are resolved, as
+/// `(start, len)` in `path`, into `out`; their count, or `None` past `out`'s
+/// length or a path longer than a `u16` offsets.
+fn components(path: &[u8], out: &mut [(u16, u16)]) -> Option<usize> {
+    if path.len() > u16::MAX as usize {
+        return None;
+    }
+    let mut n = 0usize;
+    let mut start = 0;
+    while start <= path.len() {
+        let end = path[start..].iter().position(|&c| c == b'/').map_or(path.len(), |p| start + p);
+        match &path[start..end] {
+            [] | [b'.'] => {}
+            [b'.', b'.'] => n = n.saturating_sub(1),
+            part => {
+                *out.get_mut(n)? = (start as u16, part.len() as u16);
+                n += 1;
+            }
+        }
+        start = end + 1;
+    }
+    Some(n)
+}
+
 #[cfg(test)]
 mod tests {
     //! Host tests for the pure parts of the ABI (`cargo test -p ninep-abi
@@ -1513,5 +1574,71 @@ mod tests {
         // `a3` is the identity field, so the header must still have room for it
         // after a0..a2 - i.e. nothing may grow the params into offset 40.
         assert_eq!(NP_REQ_PAYLOAD, 48);
+    }
+
+    fn bytes(a: &str, b: &str) -> bool {
+        a == b
+    }
+
+    fn fold(a: &str, b: &str) -> bool {
+        a.eq_ignore_ascii_case(b)
+    }
+
+    #[test]
+    fn within_by_components_not_bytes() {
+        assert!(is_within("/d", "/d/sub", bytes));
+        assert!(is_within("/d/", "/d/sub/x", bytes));
+        assert!(!is_within("/d", "/dd", bytes));
+        assert!(!is_within("/d", "/dd/x", bytes));
+        assert!(!is_within("/d", "/d", bytes));
+        assert!(!is_within("/d/sub", "/d", bytes));
+        assert!(!is_within("/a/d", "/b/d/x", bytes));
+        // The root holds everything but itself.
+        assert!(is_within("/", "/x", bytes));
+        assert!(!is_within("/", "/", bytes));
+        assert!(!is_within("/", "//", bytes));
+    }
+
+    #[test]
+    fn within_in_the_filesystems_case_rule() {
+        // The case-only `mv /Docs /docs`, as /bin/mv sends it.
+        assert!(is_within("/Docs", "/docs/Docs", fold));
+        assert!(!is_within("/Docs", "/docs/Docs", bytes));
+        // Folding never makes a sibling a child.
+        assert!(!is_within("/Docs", "/docsx/Docs", fold));
+        assert!(!is_within("/Docs", "/docs", fold));
+    }
+
+    #[test]
+    fn within_resolves_dots_and_empty_components() {
+        assert!(is_within("/Docs", "//Docs/x", bytes));
+        assert!(is_within("/Docs", "/Docs//x", bytes));
+        assert!(is_within("/Docs", "/./Docs/./x", bytes));
+        assert!(is_within("//Docs/", "/Docs/x", bytes));
+        assert!(is_within("/Docs", "/x/../Docs/y", bytes));
+        assert!(is_within("/a/b", "/a/c/../b/y", bytes));
+        assert!(is_within("/Docs", "/../Docs/y", bytes));
+        assert!(is_within("/a/../Docs", "/Docs/y", bytes));
+        assert!(!is_within("/Docs", "/Docs/x/..", bytes));
+        assert!(!is_within("/Docs", "/Docs/x/../..", bytes));
+        assert!(is_within("/Docs", "//docs/./Docs", fold));
+        // A component that only starts with a dot is a name.
+        assert!(!is_within("/Docs", "/..Docs/x", bytes));
+        assert!(is_within("/.d", "/.d/x", bytes));
+    }
+
+    #[test]
+    fn within_refuses_past_its_component_bound() {
+        let mut deep = [0u8; 2 * WITHIN_MAX_COMPONENTS + 2];
+        for pair in deep.chunks_mut(2) {
+            pair.copy_from_slice(b"/a");
+        }
+        let deep = core::str::from_utf8(&deep).unwrap();
+        assert!(is_within("/b", deep, bytes));
+        assert!(is_within(deep, "/b", bytes));
+        // At the bound exactly, an answer.
+        let at = &deep[..2 * WITHIN_MAX_COMPONENTS];
+        assert!(!is_within("/b", at, bytes));
+        assert!(is_within("/a", at, bytes));
     }
 }

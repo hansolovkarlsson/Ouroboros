@@ -856,7 +856,7 @@ impl Fs {
             }
             let mut found: Option<DirEntry> = None;
             self.walk_dir(current.cluster, |entry| {
-                if entry.name().eq_ignore_ascii_case(component) {
+                if names_match(entry.name(), component) {
                     found = Some(*entry);
                     true
                 } else {
@@ -1079,7 +1079,7 @@ impl Fs {
 
         let mut exists = false;
         self.walk_dir(parent.cluster, |entry| {
-            if entry.name().eq_ignore_ascii_case(name) {
+            if names_match(entry.name(), name) {
                 exists = true;
                 true
             } else {
@@ -1173,7 +1173,7 @@ impl Fs {
         let parent = self.find(parent_path)?;
         let mut location: Option<(u64, usize)> = None;
         self.walk_dir_with_location(parent.cluster, |entry, lba, offset| {
-            if entry.name().eq_ignore_ascii_case(name) {
+            if names_match(entry.name(), name) {
                 location = Some((lba, offset));
                 true
             } else {
@@ -1217,7 +1217,7 @@ impl Fs {
 
         let mut existing: Option<DirEntry> = None;
         self.walk_dir(parent.cluster, |entry| {
-            if entry.name().eq_ignore_ascii_case(name) {
+            if names_match(entry.name(), name) {
                 existing = Some(*entry);
                 true
             } else {
@@ -1260,7 +1260,7 @@ impl Fs {
         let parent = self.find(parent_path)?;
         let mut location: Option<(u64, usize)> = None;
         self.walk_dir_with_location(parent.cluster, |entry, lba, offset| {
-            if entry.name().eq_ignore_ascii_case(name) {
+            if names_match(entry.name(), name) {
                 location = Some((lba, offset));
                 true
             } else {
@@ -1298,7 +1298,7 @@ impl Fs {
         let mut existing: Option<(u64, usize, u32)> = None;
         let mut found_dir = false;
         self.walk_dir_with_location(parent.cluster, |entry, lba, offset| {
-            if entry.name().eq_ignore_ascii_case(name) {
+            if names_match(entry.name(), name) {
                 if entry.is_dir {
                     found_dir = true;
                 } else {
@@ -1462,7 +1462,7 @@ impl Fs {
         let mut loc: Option<(u64, usize, u32, u32)> = None; // (dir_lba, dir_off, cluster, size)
         let mut found_dir = false;
         self.walk_dir_with_location(parent.cluster, |entry, lba, off| {
-            if entry.name().eq_ignore_ascii_case(name) {
+            if names_match(entry.name(), name) {
                 if entry.is_dir {
                     found_dir = true;
                 } else {
@@ -1618,7 +1618,7 @@ impl Fs {
         let mut src_location: Option<(u64, usize)> = None;
         let mut src_entry: Option<DirEntry> = None;
         self.walk_dir_with_location(src_parent.cluster, |entry, lba, offset| {
-            if entry.name().eq_ignore_ascii_case(src_name) {
+            if names_match(entry.name(), src_name) {
                 src_location = Some((lba, offset));
                 src_entry = Some(*entry);
                 true
@@ -1640,7 +1640,7 @@ impl Fs {
         let mut dst_found: Option<(u64, usize)> = None;
         let mut dst_entry: Option<DirEntry> = None;
         self.walk_dir_with_location(dst_parent.cluster, |entry, lba, offset| {
-            if entry.name().eq_ignore_ascii_case(dst_name) {
+            if names_match(entry.name(), dst_name) {
                 dst_found = Some((lba, offset));
                 dst_entry = Some(*entry);
                 true
@@ -2153,6 +2153,16 @@ fn dotdot_name() -> [u8; 11] {
 
 fn is_dot_or_dotdot(name: &str) -> bool {
     name == "." || name == ".."
+}
+
+/// Whether directory entry name `entry` answers to `name`: FAT32 and exFAT
+/// look every name up ignoring ASCII case. THE one statement of the rule for
+/// both: every lookup calls it, and so does `NP_MV`'s guard against a move
+/// into the mover's own subtree (`vfs::Filesystem::names_match`), which let a
+/// case-only `mv` of a directory through while it compared bytes. A change to
+/// the rule (exFAT's up-case table, say) is made here, and both follow.
+pub(crate) fn names_match(entry: &str, name: &str) -> bool {
+    entry.eq_ignore_ascii_case(name)
 }
 
 /// Splits an absolute path into `(parent_path, name)` - e.g.
