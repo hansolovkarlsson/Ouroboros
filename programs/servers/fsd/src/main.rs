@@ -208,11 +208,19 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
 
 /// Whether `inner` names a path strictly below `outer` (`/d/sub` below `/d`,
 /// not `/dd`), ignoring a trailing `/` on `outer`. For `NP_MV`'s refusal of a
-/// move into the mover's own subtree.
-fn is_within(outer: &str, inner: &str) -> bool {
+/// move into the mover's own subtree. `fold` compares in ASCII case, as the
+/// filesystem's own lookups do ([`vfs::Filesystem::folds_case`]): by bytes,
+/// `/docs/Docs` is not below `/Docs`, and on FAT32 and exFAT it is (a
+/// case-only `mv /Docs /docs`, which `/bin/mv` sends as `/docs/Docs` because a
+/// stat of `/docs` finds the directory itself, lost the subtree until
+/// 2026-10-19).
+fn is_within(outer: &str, inner: &str, fold: bool) -> bool {
     let outer = outer.trim_end_matches('/');
     let (o, i) = (outer.as_bytes(), inner.as_bytes());
-    i.len() > o.len() && i.starts_with(o) && (o.is_empty() || i[o.len()] == b'/')
+    if i.len() <= o.len() || !(o.is_empty() || i[o.len()] == b'/') {
+        return false;
+    }
+    if fold { i[..o.len()].eq_ignore_ascii_case(o) } else { i.starts_with(o) }
 }
 
 /// The tree that already holds `candidate`'s partition, if any. A partition
@@ -876,8 +884,10 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             // checks it, so it is refused here, for every client (POSIX
             // `rename` answers EINVAL). By the names as sent: libc and ulib
             // collapse `.` and `..` first, and a path that hides the overlap
-            // behind a `..` is not caught (the review of #215).
-            if is_within(src, dst) {
+            // behind a `..` is not caught (the review of #215). In the
+            // filesystem's case rule: on FAT32 and exFAT `/docs/Docs` is below
+            // `/Docs`.
+            if is_within(src, dst, fs.folds_case()) {
                 return status_reply(reply, syscall_abi::FS_ERR_INVALID_NAME);
             }
             match fs.mv(src, dst) {

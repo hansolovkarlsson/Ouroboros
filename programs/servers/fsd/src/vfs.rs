@@ -190,6 +190,15 @@ impl Filesystem {
         !matches!(self, Filesystem::Proc(_))
     }
 
+    /// Whether two names that differ only in ASCII case name the same entry
+    /// here: FAT32 and exFAT look every name up with
+    /// [`str::eq_ignore_ascii_case`]; ext2 and `/proc` match bytes. A check on
+    /// paths (`NP_MV`'s refusal of a move into the mover's own subtree) must
+    /// compare by this rule, or it disagrees with the lookups it guards.
+    pub fn folds_case(&self) -> bool {
+        matches!(self, Filesystem::Fat32(_) | Filesystem::ExFat(_))
+    }
+
     /// The first sector of the mounted volume - `mount`-info reporting only
     /// (disk-tools milestone 1).
     pub fn partition_lba(&self) -> u32 {
