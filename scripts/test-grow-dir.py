@@ -23,9 +23,16 @@ the exFAT root first, each one contiguous (NoFatChain) cluster, as it made
   and other drivers and fsck repairs make them), COUNT files: it must be
   given its first cluster, where fsd once wrote FAT entry 0 and an entry
   set before the cluster heap;
+- /NAMED, made a NoFatChain directory of size 0 that still names the
+  cluster macOS gave it, that cluster freed in the bitmap (a tool may leave
+  one), COUNT files: it must be given a cluster of its own, where fsd once
+  took the named one without its bit, which the next allocation could hand
+  back (a FAT loop, or another file over its entries);
 - /OLD, as fsd before 2026-10-18 left a directory it grew: a FAT chain of
   two clusters, a DataLength of one, and OLD_COUNT files' sets across both,
-  so a reader that stops at the size sees 42. Those past it (HIDDEN) hold
+  so a reader that stops at the size sees 42, and its second cluster's FAT
+  entry links on to a free cluster, a link a writer must cut before an
+  allocation hands that cluster to a file. Those past the size (HIDDEN) hold
   their own names. Before any write the guest reads one and appends to
   another, which must read and keep their bytes (a lookup stopping at the
   size, and a write that did not, truncated the append's file); then the
@@ -48,7 +55,8 @@ the three directories' as they were before the boot, and those the boot
 allocated) must hold the bytes it held before, and so must everything
 before the cluster heap but the FAT entries of clusters. Then fsck_exfat -n
 and fsck_msdos -n on the two partitions, the foreign observer.
-KEEP_IMAGE=1 keeps build/test-grow-dir.img for a look. One boot, about a
+KEEP_IMAGE=1 keeps build/test-grow-dir.img for a look, and a failing run
+keeps it anyway. One boot, about a
 minute and a half.
 """
 import importlib.util
@@ -88,7 +96,7 @@ OLD_COUNT = 50
 # OLD's files whose sets lie past its first cluster's slot 125, so past the
 # size: each given a cluster holding its name.
 HIDDEN = [f"F{i:03d}" for i in range(42, OLD_COUNT)]
-MADE = ("MAC", "ZERO", "OLD")
+MADE = ("MAC", "ZERO", "NAMED", "OLD")
 
 
 def mac_dirs():
@@ -207,15 +215,25 @@ def plant():
             fh.write(name.encode().ljust(vol.cluster, b"\0"))
         files = b"".join(entry_set(n, data.get(n, 0), len(n) if n in data else 0)
                          for n in (f"F{i:03d}" for i in range(OLD_COUNT)))
+        if len(files) > 2 * vol.cluster:
+            sys.exit(f"test-grow-dir: OLD's sets need {len(files)} bytes, more than two {vol.cluster}-byte clusters")
         files = files.ljust(2 * vol.cluster, b"\0")
         for c, piece in ((old, files[:vol.cluster]), (second, files[vol.cluster:])):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
             fh.write(piece)
         stream("OLD", 0x01, old, vol.cluster)
 
+        # A free cluster past OLD's second, the stale link's end; nothing
+        # else is planted on it.
+        fat(second, free[len(data) + 1])
+
         zero = struct.unpack_from("<I", d, sets["ZERO"][0] + 32 + 20)[0]
         bitmap(zero, False)
         stream("ZERO", 0x01, 0, 0)
+
+        named = struct.unpack_from("<I", d, sets["NAMED"][0] + 32 + 20)[0]
+        bitmap(named, False)
+        stream("NAMED", 0x03, named, 0)
 
         for k, c in enumerate(root):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
@@ -223,8 +241,10 @@ def plant():
     vol = Volume(PART, 0)
     if exfat_dir(vol, "ZERO")[:2] != (0, 0):
         sys.exit(f"test-grow-dir: ZERO is not a directory of size 0 with no cluster: {exfat_dir(vol, 'ZERO')}")
+    if exfat_dir(vol, "NAMED")[1:] != (0, 0, False) or vol.used(named):
+        sys.exit("test-grow-dir: NAMED is not a NoFatChain directory of size 0 naming a free cluster")
     first, size, _, _ = exfat_dir(vol, "OLD")
-    return exfat_names(vol.data(vol.chain(first))[:size]), set(data.values())
+    return exfat_names(vol.data([first])[:size]), set(data.values())
 
 
 def exfat_dir(vol, name):
@@ -313,9 +333,10 @@ def snapshot(vol, start, planted):
     bitmap = -(-vol.count // 8 // vol.cluster)  # its clusters, ceil(count / 8 / cluster)
     mine = set(vol.chain(vol.root)) | set(range(vol.bitmap, vol.bitmap + bitmap)) | planted
     for name in MADE:
-        first, _, _, chained = exfat_dir(vol, name)
-        if first >= 2:
-            mine |= set(vol.chain(first)) if chained else {first}
+        first, size, _, chained = exfat_dir(vol, name)
+        if size:
+            # OLD's two clusters, not the free one its stale link names.
+            mine |= set(vol.chain(first)[:2]) if name == "OLD" else {first}
     return clusters(vol), before_heap(vol, start), mine
 
 
@@ -352,9 +373,15 @@ def disk_checks(parts, snap):
     before, head, mine = snap
     checks = []
     for where, name, count, grows in (("exfat /MAC", "MAC", COUNT, True), ("exfat /ZERO", "ZERO", COUNT, True),
+                                      ("exfat /NAMED", "NAMED", COUNT, True),
                                       ("exfat /OLD", "OLD", OLD_COUNT, False),
                                       ("exfat root /grow", "grow", COUNT, True)):
         checks += exfat_checks(exf, where, name, count, grows)
+    named = exfat_dir(exf, "NAMED")
+    if named:
+        chain = exf.chain(named[0])
+        checks.append(("exfat /NAMED: every cluster of its chain allocated, none twice",
+                       all(exf.used(c) for c in chain) and len(set(chain)) == len(chain)))
 
     # A scan for free slots that ran past MAC's one cluster wrote into
     # whatever lay after it, in use or free; a directory of size 0 had its
@@ -460,14 +487,22 @@ def main() -> int:
             for step in ("create", "find", "list", "retouch"):
                 checks.append((f"{where}: ok {step}", f"dirprobe: ok {step}" in lines))
             checks.append((f"{where}: the probe's summary is ok", lines[-1:] == ["dirprobe: ok"]))
-        checks += disk_checks(parts, snap)
+        try:
+            checks += disk_checks(parts, snap)
+        except (ValueError, struct.error, UnicodeDecodeError) as exc:
+            # A reader of a damaged disk: the image is kept for a look.
+            print(f"     the host could not read the disk: {exc!r}")
+            checks.append(("the host reads the disk after the boot", False))
         more, notes = fsck()
         checks += more
         for n in notes:
             print(f"     {n}")
     finally:
-        if os.environ.get("KEEP_IMAGE") != "1":
+        failed = not all(ok for _, ok in checks) if "checks" in locals() else True
+        if os.environ.get("KEEP_IMAGE") != "1" and not failed:
             os.remove(IMAGE)
+        elif os.path.exists(IMAGE):
+            print(f"     kept {os.path.relpath(IMAGE, ROOT)}")
     failed = 0
     for name, ok in checks:
         print(f"{'ok  ' if ok else 'FAIL'} {name}")

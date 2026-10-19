@@ -1296,7 +1296,6 @@ impl Fs {
             self.ensure_chained(e.first_cluster, true, size)?;
             self.patch_set_stream(at, e.first_cluster, size)?;
             e.contiguous = false;
-            e.size = size;
         }
         let new = self.alloc_cluster()?;
         self.zero_cluster(new)?;
@@ -1378,7 +1377,6 @@ impl Fs {
     /// shared by `touch`/`mkdir`/`write_file`/`mv`. `data_len` is the file's
     /// size (or a directory's allocated size); `first_cluster` its first cluster
     /// (`0` for an empty file).
-    #[allow(clippy::too_many_arguments)] // a directory target + a full entry description
     fn create_entry(
         &mut self,
         dir: &mut Dir,
