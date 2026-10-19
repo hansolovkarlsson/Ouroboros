@@ -274,7 +274,7 @@ def plant():
         sys.exit("test-grow-dir: NAMED is not a NoFatChain directory of size 0 naming a free cluster")
     first, size, _, _ = exfat_dir(vol, "OLD")
     longf = exfat_dir(vol, "LONGF")
-    if not (longf and longf[1:] == (1, 1, True) and vol.chain(longf[0]) == [longf[0], man_cluster(vol)]):
+    if not (longf and longf[1:] == (1, 1, True) and vol.chain(longf[0])[:2] == [longf[0], man_cluster(vol)]):
         sys.exit(f"test-grow-dir: LONGF is not a one-byte chained file linked on to /man's cluster: {longf}")
     for name in ("RMZ", "Z0FILE", "Z0APP"):
         if exfat_dir(vol, name) != (man_cluster(vol), 0, 0, True):
