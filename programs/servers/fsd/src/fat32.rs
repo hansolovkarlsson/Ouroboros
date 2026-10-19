@@ -595,13 +595,30 @@ impl Fs {
     /// entries are 32 bits wide but only the low 28 are significant; a
     /// value `>= 0x0FFFFFF8` marks end-of-chain (values above that up to
     /// `0x0FFFFFFF` are all valid EOC markers per the spec, not just one).
+    ///
+    /// A link outside the volume's clusters (`2..cluster_end`) ends the chain
+    /// too, as exFAT's does since 2026-10-19: the bad-cluster mark
+    /// `0x0FFFFFF7`, a reserved `1`, or a damaged link past the last cluster.
+    /// Until then every walk followed one: a write past the file's last good
+    /// cluster went to sectors past the volume (on a disk with a partition
+    /// after it, into that partition), and `rm`'s `free_chain` read and zeroed
+    /// the link's FAT entry far past the FAT, in every copy (`make
+    /// test-fat-link`).
     fn next_cluster(&mut self, cluster: u32) -> Result<Option<u32>, Error> {
+        if !self.in_heap(cluster) {
+            return Ok(None);
+        }
         let value = self.fat_entry(cluster)?;
-        if ends_walk(value) {
+        if ends_walk(value) || !self.in_heap(value) {
             Ok(None)
         } else {
             Ok(Some(value))
         }
+    }
+
+    /// Whether `cluster` is one of the volume's clusters, `2..cluster_end`.
+    fn in_heap(&self, cluster: u32) -> bool {
+        (2..self.cluster_end).contains(&cluster)
     }
 
     /// One FAT entry's low 28 bits, from the first FAT copy, through the
