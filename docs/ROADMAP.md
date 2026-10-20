@@ -4277,11 +4277,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   from the review of the MOUNT gate (2026-10-19).
 - ~~**FAT32's `cluster_end` is the BPB's word, not the partition's.**~~ *Done
   2026-10-20:* each `mount_at` is given the most its volume may span
-  (`vfs::volume_bound`: the table's length, cut to the disk and to sector
-  2^32, or the disk's when the table gives none) and refuses, as "not this
+  (`vfs::volume_bound`: the table's length, or none when it gives 0, cut to
+  the next partition, the disk and sector 2^32) and refuses, as "not this
   filesystem", a volume claiming more, or one whose layout does not fit what
-  it claims (exFAT's heap, FAT and root, FAT32's root and FATs, ext2's
-  first block and groups). FAT32's metadata sum is made in u64, where two
+  it claims (exFAT's heap, FAT and root, FAT32's root, FATs and reserved
+  sectors, ext2's block size, first block, inodes, groups and descriptor
+  table); exFAT's bitmap sectors are bounded where they are made. FAT32's metadata sum is made in u64, where two
   BPB fields multiplied wrapped under the check. The stale exFAT boot sector
   below now reads as no filesystem, so `format` takes the disk, also when
   the table claims past the disk; `format` sizes its volume by the same

@@ -572,16 +572,22 @@ than its partition put the next partition's sectors inside the volume, and a
 stale one left by a larger image named a root past the end of the disk, whose
 failed read made `format` refuse the disk since #329. Each `mount_at` now
 takes the most its volume may span (`vfs::volume_bound`: the table's length,
-cut to the disk's capacity and to sector 2^32, past which every arm's 32-bit
-sectors wrap, or the disk's from the start when the table gives no length,
-as an entry of size 0 mounted before) and refuses, as not its filesystem, a
+none when it gives 0, as an entry of size 0 mounted before, cut to the start
+of the next partition, the disk's capacity and sector 2^32, past which every
+arm's 32-bit sectors wrap) and refuses, as not its filesystem, a
 FAT32 whose total sectors, an exFAT whose VolumeLength, or an ext2 whose
 block count exceed it. The layout must also fit what it claims: exFAT's heap
 inside the volume, its FAT from sector 24 (past the boot regions) to the heap
 and long enough for every cluster, its root inside the heap and its cluster
-shift the spec's, checked before it is used; FAT32's root inside the heap and
-at least one FAT; ext2's first data block below its block count and no more
-groups than its blocks make. FAT32's metadata size is summed in u64: two FATs
+shift the spec's, checked before it is used; FAT32's root inside the heap, at
+least one FAT and at least one reserved sector (so no FAT write lands on the
+BPB); ext2's block-size shift checked before it is made, its first data block
+below its block count, at least the root's inodes, no more groups than its
+blocks make, and its descriptor table inside the volume. exFAT's allocation
+bitmap, named by its root directory and never checked, is bounded where its
+sectors are made (`bitmap_sector_lba`): a sector outside its own length, or
+outside the heap, is refused as an I/O error, which also ends the free path's
+write below the heap on a volume with no bitmap. FAT32's metadata size is summed in u64: two FATs
 of 0x80000000 sectors wrapped to 0 and passed the old check. `format` sizes
 the volume it lays by the same bound. `make test-volume-bound` boots nine
 disks from NVMe, built by `scripts/mbrdisk.py` from the images' own volumes:
@@ -591,10 +597,16 @@ a whole exFAT (both mount) beside a FAT32 at sector 2^32 - 65,536 on a 2 TiB
 sparse disk (refused); a 16 MiB disk with a stale exFAT boot sector claiming
 24 MiB, its root past the end, with its table entry the disk's size and then
 the volume's (each boots to "no mountable partition" and takes `format ext2`);
-the wrapping FAT32; and ten volumes each with one field changed to break
+the wrapping FAT32; fifteen volumes each with one field changed to break
 exactly one layout rule, which a model of the rules confirms on the host
-before the boot (each refused). Each rule was taken out in turn, and the boot
-that holds its case then fails. ext2's block numbers are still unbounded, to
+before the boot (each refused); and a size-0 FAT32 with the next partition
+inside it (refused) beside an exFAT whose bitmap starts at the next
+partition's first sector (it mounts, a write answers an I/O error and the
+partition after it is unchanged). Each rule was taken out in turn, and the
+boot that holds its case then fails, but for ext2's first-block rule, which
+guards a subtraction and refuses nothing the descriptor rule does not. The
+MBR entry layout is
+`scripts/mbrdisk.py`'s alone (`entry`, `set_entry`). ext2's block numbers are still unbounded, to
 the roadmap.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)

@@ -72,7 +72,10 @@ size-0 entry refused (MIXED), without the 2^32 cut (MIXED's last mounts),
 with FAT32's sum in u32 (WRAP), with each shape rule removed (its SHAPES
 case mounts), and with the bitmap's sectors unbounded (BESIDE: the write
 lands on the next partition). Not reached: FAT32's sums made before the
-bound overflow only in a build with overflow checks. About eight minutes. Run it
+bound overflow only in a build with overflow checks, and ext2's first-block
+rule alone, since a first data block at its block count puts the descriptor
+table past the blocks too (it guards the subtraction the groups rule makes;
+its case breaks both rules, and taking it out leaves the case refused). About eight minutes. Run it
 whenever a filesystem's `mount_at`, fsd's probe or `volume_bound`, or the
 partition table's sizes change.
 """
@@ -158,9 +161,12 @@ def broken(vol, bound):
     bs = 1024 << lb
     if bc * (bs // SECT) > bound:
         out.add("length")
-    if fdb >= bc:
-        return out | {"ext2-firstblock"}
     groups = -(-ic // ipg)
+    if fdb >= bc:
+        # The descriptor table, a block after the first data block, is past
+        # the blocks too: the first-block rule guards fsd's subtraction
+        # below, and refuses nothing the descriptor rule would not.
+        return out | {"ext2-firstblock", "ext2-bgdt"}
     if ic < 2:
         out.add("ext2-inodes")
     if groups > -(-(bc - fdb) // bpg):
@@ -327,7 +333,7 @@ def build_shapes(ext2, fat, exfat, which):
     pre = []
     for (rule, v), (_, sectors) in zip(vols, layout[1:]):
         got = broken(v, sectors)
-        want = {rule}
+        want = {"ext2-firstblock", "ext2-bgdt"} if rule == "ext2-firstblock" else {rule}
         pre.append((f"the {rule} case breaks only that rule (got {sorted(got)})", got == want))
     return pre, [(n, f"the {rule} case", False) for n, (rule, _) in enumerate(vols, 1)]
 
