@@ -522,9 +522,12 @@ cost, not a correctness fix: `test-grow-dir`, `test-long-set`,
 walked a directory and matched names (`find_at`, `find_in_parent`,
 `parent_for_create`), and the writers built a set's location from loose
 fields. `entry_in` is now the one place a name in a directory picks a set, and
-the set's place travels as a `SetAt` into `delete_set` and `patch_stream_ext`.
-A change to matching, such as reading the volume's up-case table, now lands
-in one function. A refactor: `test-mv-into`, `test-grow-dir`, `test-long-set`,
+the set's place travels as a `SetAt` into `delete_set`, `patch_stream_ext`
+and the sector-run helper. exFAT matched names by FAT32's rule while its
+NameHash up-cased by `upcase`, two statements of one folding; it now has its
+own `names_match` built on `upcase`, so reading the volume's up-case table
+would be a change to `upcase` alone, and matching and NameHash would move
+together. A refactor: `test-mv-into`, `test-grow-dir`, `test-long-set`,
 `test-stale-cursor`, `test-dir-scan`, `test-write-walk` and `test-spawn-reads`
 pass, the last three with the same exact counts.
 

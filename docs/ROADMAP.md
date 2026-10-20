@@ -4376,13 +4376,24 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   2026-10-19:* `entry_in` is the one place a name in a directory picks a set,
   returning the entry and its `SetAt`, which `delete_set` and
   `patch_stream_ext` take; `find_at`, `parent_for_create`, `write_file`,
-  `write_at`, `rm` and `mv` all go through it. No change in behaviour: the
-  exFAT rigs pass with the same exact counts. The record as found: `find_at`,
+  `write_at`, `rm` and `mv` all go through it. Its rule is exFAT's own
+  `names_match`, built on the `upcase` its NameHash uses (it was FAT32's), so
+  the up-case table would be a change to `upcase` alone. No change in
+  behaviour: the exFAT rigs pass with the same exact counts. The record as
+  found: `find_at`,
   `find_in_parent` and `parent_for_create` each carry the name-match rule,
   and `write_at`, `rm`, `rmdir` and `mv` assemble a set's location by hand
   rather than as a `SetAt`. A change to matching (the up-case table, which
   ASCII folding approximates) made in one copy would make two paths resolve
   different sets. Found by the same review.
+- **exFAT names outside ASCII collide.** `walk_dir` renders each UTF-16
+  name to ASCII with `?` for anything else, so `café` and `cafè` (which macOS
+  writes) are both `caf?`, and `entry_in` takes whichever set comes first: an
+  `rm`, a write or an `mv` of one may act on the other, and a `touch` says
+  the other exists. Keeping names as UTF-16 through the lookup, and
+  comparing them by `upcase`, would end it; the shell's ASCII-only userland is
+  why it has not mattered. Read in the code; from the review of the one
+  lookup (2026-10-19).
 - **fsd will not write to an exFAT directory an older fsd grew.** Until
   2026-10-18 fsd grew a directory without raising its DataLength, so such a
   directory's chain runs past its size, with sets there no driver reads.
