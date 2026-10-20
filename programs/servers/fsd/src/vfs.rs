@@ -191,14 +191,16 @@ impl Filesystem {
     }
 
     /// Whether directory entry name `entry` answers to `name` here, the rule
-    /// every lookup of this filesystem uses (`fat32::names_match`, which exFAT
-    /// shares, folds ASCII case; `ext2::names_match` matches bytes; `/proc`'s
-    /// names are its own bytes). `NP_MV`'s guard against a move into the
+    /// every lookup of this filesystem uses (`fat32::names_match` and
+    /// `exfat::names_match` fold ASCII case, exFAT's by the `upcase` its
+    /// NameHash uses; `ext2::names_match` matches bytes; `/proc`'s names are its
+    /// own bytes). `NP_MV`'s guard against a move into the
     /// mover's own subtree compares paths by it, so it cannot state a different
     /// rule from the lookups it guards.
     pub fn names_match(&self, entry: &str, name: &str) -> bool {
         match self {
-            Filesystem::Fat32(_) | Filesystem::ExFat(_) => fat32::names_match(entry, name),
+            Filesystem::Fat32(_) => fat32::names_match(entry, name),
+            Filesystem::ExFat(_) => exfat::names_match(entry, name),
             Filesystem::Ext2(_) => ext2::names_match(entry, name),
             Filesystem::Proc(_) => entry == name,
         }
