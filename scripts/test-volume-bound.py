@@ -56,7 +56,8 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
   superblock), ext2 with more groups than its blocks make (C); exFAT's FAT running
   into its heap (D); FAT32 with no reserved sectors (its FAT on its BPB),
   ext2's block-size shift 32 (masked to 0 in a release build, so only the
-  shift rule refuses it), its descriptor table past its blocks (E); ext2
+  shift rule refuses it), its descriptor table past its blocks (a volume of
+  two blocks, the only kind where it can lie past them now) (E); ext2
   with no inodes (F); ext2 with more blocks or inodes a group than one
   bitmap block holds (G). All refused.
 - BESIDE: the FAT32 cut short in a table entry of size 0, the next
@@ -327,7 +328,9 @@ def build_shapes(ext2, fat, exfat, which):
         "SHAPES-E": [
             ("fat32-reserved", fat, [("<H", 14, 0)]),
             ("ext2-blocksize", ext2, [("<I", sb + 24, 32)]),  # masked to 0 in release: only the shift rule refuses it
-            ("ext2-bgdt", ext2, [("<I", sb + 20, bc - 1), ("<I", sb + 0, ipg)]),
+            # With the first data block the superblock's and the groups bounded,
+            # the table lies past the blocks only on a volume of two or fewer.
+            ("ext2-bgdt", ext2, [("<I", sb + 4, 2), ("<I", sb + 0, ipg)]),
         ],
         "SHAPES-F": [
             ("ext2-inodes", ext2, [("<I", sb + 0, 0)]),
