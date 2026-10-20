@@ -284,9 +284,8 @@ impl Fs {
         // No larger than its partition (s_blocks_count): a superblock
         // claiming more is not this volume, as on FAT32 and exFAT (a stale one
         // left by a larger image; the review of #329). Linux refuses it too
-        // ("block count exceeds size of device"). This bounds the volume, not
-        // a block number read from an inode, which nothing checks yet (the
-        // roadmap).
+        // ("block count exceeds size of device"). This bounds the volume; a
+        // block number read from it is bounded by it in `Volume`.
         let blocks_count = u32::from_le_bytes([sb[4], sb[5], sb[6], sb[7]]);
         let volume_sectors = blocks_count as u64 * (block_size as u64 / SECTOR_SIZE as u64);
         if volume_sectors > partition_sectors {
@@ -298,8 +297,9 @@ impl Fs {
         // as Linux requires (fewer let a block of the volume name a group past
         // the descriptor table; the review of #331), and the
         // descriptor table, one 32-byte descriptor a group from the block after
-        // the superblock's, inside the volume (the reviews of #330). What a
-        // descriptor's own block numbers say is the roadmap's per-block bound.
+        // the superblock's, inside the volume (the reviews of #330). A
+        // descriptor's own block numbers are bounded where they meet the disk,
+        // in `Volume`.
         let groups_count = inodes_count.div_ceil(inodes_per_group);
         let bgdt_end = first_data_block as u64 + 1 + (groups_count as u64 * 32).div_ceil(block_size as u64);
         // The first data block is the superblock's own: block 1 with 1 KiB
@@ -510,6 +510,27 @@ impl Fs {
     /// The volume's sector holding the start of filesystem block `block`.
     fn block_sector(&self, block: u32) -> u64 {
         block as u64 * (self.block_size as u64 / SECTOR_SIZE as u64)
+    }
+
+    /// Whether block `block` is the volume's: `Volume`'s bound, in blocks. The
+    /// free path asks it before reading what a block holds, where `Volume`
+    /// would refuse partway through a free whose file is already unlinked.
+    fn in_volume(&self, block: u32) -> bool {
+        block < self.blocks_count
+    }
+
+    /// The pointers in sector `s` of pointer block `block`, read with one
+    /// sector's buffer: the free path walks pointer blocks a sector at a time,
+    /// each sector once, so it holds no block buffer of its own above the
+    /// bitmap's (fsd's stack; the third review of #331).
+    fn pointer_sector(&mut self, block: u32, s: u32) -> Result<[u32; SECTOR_SIZE / 4], Error> {
+        let mut sec = [0u8; SECTOR_SIZE];
+        self.vol.read(self.block_sector(block) + s as u64, &mut sec)?;
+        let mut out = [0u32; SECTOR_SIZE / 4];
+        for (o, p) in out.iter_mut().zip(sec.chunks_exact(4)) {
+            *o = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+        }
+        Ok(out)
     }
 
     /// Read one filesystem block into `buf` (`buf` must be >= block_size).
@@ -762,7 +783,7 @@ impl Fs {
                         if name != "." && name != ".." {
                             let is_dir = if self.has_filetype && FT_KNOWN.contains(&e[7]) {
                                 e[7] == FT_DIR
-                            } else if entry_ino > self.inodes_count {
+                            } else if self.inode_place(entry_ino).is_err() {
                                 // An entry naming an inode the volume does not
                                 // have lists as a file, as on a volume with
                                 // filetype, and opening it is refused: one
@@ -1006,7 +1027,7 @@ impl Fs {
     /// ([`free_all_blocks`](Self::free_all_blocks)); both from the second
     /// review of #331.
     fn bitmap_free(&mut self, bitmap_block: u32, bit: u32) -> Result<bool, Error> {
-        if bitmap_block >= self.blocks_count {
+        if !self.in_volume(bitmap_block) {
             return Ok(false);
         }
         let bs = self.block_size as usize;
@@ -1053,7 +1074,7 @@ impl Fs {
         // A block outside the volume's is no one's to free: a damaged pointer
         // past it named a group past the descriptor table. The file goes, as
         // FAT32's free_chain frees only the volume's clusters.
-        if block < self.first_data_block || block >= self.blocks_count {
+        if block < self.first_data_block || !self.in_volume(block) {
             return Ok(());
         }
         let rel = block - self.first_data_block;
@@ -1118,6 +1139,13 @@ impl Fs {
     /// is left), all in the one sector [`inode_sector`](Self::inode_sector)
     /// names.
     fn write_inode(&mut self, ino: u32, node: &Inode) -> Result<(), Error> {
+        self.write_inode_with_dtime(ino, node, 0)
+    }
+
+    /// [`write_inode`](Self::write_inode) with `i_dtime` (offset 20) set in
+    /// the same write, so a freed inode is never on disk with links 0 and no
+    /// deletion time, and a free costs one read and write of its sector.
+    fn write_inode_with_dtime(&mut self, ino: u32, node: &Inode, dtime: u32) -> Result<(), Error> {
         let (rel, within) = self.inode_sector(ino)?;
         let mut sec = [0u8; SECTOR_SIZE];
         self.vol.read(rel, &mut sec)?;
@@ -1131,6 +1159,7 @@ impl Fs {
         slot[4..8].copy_from_slice(&node.size.to_le_bytes());
         slot[26..28].copy_from_slice(&node.links.to_le_bytes());
         slot[28..32].copy_from_slice(&node.i_blocks.to_le_bytes());
+        slot[20..24].copy_from_slice(&dtime.to_le_bytes());
         for (b, ptr) in node.block.iter().enumerate() {
             let o = 40 + b * 4;
             slot[o..o + 4].copy_from_slice(&ptr.to_le_bytes());
@@ -1239,6 +1268,14 @@ impl Fs {
     /// present. The kind check callers need without a second inode read for the
     /// name match itself.
     fn lookup_in(&mut self, dir: &Inode, name: &str) -> Result<Option<(u32, u16)>, Error> {
+        match self.entry_in(dir, name)? {
+            Some(ino) => Ok(Some((ino, self.read_inode(ino)?.mode))),
+            None => Ok(None),
+        }
+    }
+
+    /// The inode number entry `name` in `dir` names, unread.
+    fn entry_in(&mut self, dir: &Inode, name: &str) -> Result<Option<u32>, Error> {
         let mut found: Option<u32> = None;
         self.walk_dir(dir, |entry| {
             if names_match(entry.name(), name) {
@@ -1248,10 +1285,7 @@ impl Fs {
                 false
             }
         })?;
-        match found {
-            Some(ino) => Ok(Some((ino, self.read_inode(ino)?.mode))),
-            None => Ok(None),
-        }
+        Ok(found)
     }
 
     // ---- write infrastructure (Stage B: data blocks) ------------------------
@@ -1313,7 +1347,14 @@ impl Fs {
     /// committed its new content (`rm`, `rmdir`, an overwrite), so refusing
     /// partway left the inode allocated and half freed (the reviews of #331).
     /// A disk's own read error still stops it there.
+    ///
+    /// An inode holding no blocks (`i_blocks` 0) frees none: a fast symlink
+    /// keeps its target's text in the pointers, which were freed as blocks
+    /// (Linux's fast-symlink test; the third review of #331).
     fn free_all_blocks(&mut self, node: &Inode) -> Result<(), Error> {
+        if node.i_blocks == 0 {
+            return Ok(());
+        }
         let per_blk = self.block_size / 4;
         let mut left = (node.size as u64).div_ceil(self.block_size as u64) as u32;
         for &b in node.block.iter().take(DIRECT_BLOCKS.min(left as usize)) {
@@ -1325,14 +1366,12 @@ impl Fs {
         self.free_pointed(node.block[12], left.min(per_blk))?;
         left = left.saturating_sub(per_blk);
         if node.block[13] != 0 {
-            if node.block[13] < self.blocks_count {
-                let bs = self.block_size as usize;
-                let mut sibs = [0u8; MAX_BLOCK_SIZE];
-                self.read_block(node.block[13], &mut sibs[..bs])?;
-                for sib in sibs[..bs].chunks_exact(4) {
-                    let sib = u32::from_le_bytes([sib[0], sib[1], sib[2], sib[3]]);
-                    self.free_pointed(sib, left.min(per_blk))?;
-                    left = left.saturating_sub(per_blk);
+            if self.in_volume(node.block[13]) {
+                for s in 0..self.block_size / SECTOR_SIZE as u32 {
+                    for sib in self.pointer_sector(node.block[13], s)? {
+                        self.free_pointed(sib, left.min(per_blk))?;
+                        left = left.saturating_sub(per_blk);
+                    }
                 }
             }
             self.free_block(node.block[13])?;
@@ -1341,21 +1380,24 @@ impl Fs {
     }
 
     /// Free the first `count` blocks pointer block `block` names, then the
-    /// pointer block itself; for a block past the volume, neither. The
-    /// pointer block is read once, not a sector a pointer.
+    /// pointer block itself; for a block past the volume, neither. Only the
+    /// sectors holding those `count` pointers are read, each once.
     fn free_pointed(&mut self, block: u32, count: u32) -> Result<(), Error> {
         if block == 0 {
             return Ok(());
         }
-        if block < self.blocks_count {
-            let bs = self.block_size as usize;
-            let mut ptrs = [0u8; MAX_BLOCK_SIZE];
-            self.read_block(block, &mut ptrs[..bs])?;
-            for p in ptrs[..bs].chunks_exact(4).take(count as usize) {
-                let p = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
-                if p != 0 {
-                    self.free_block(p)?;
+        if count > 0 && self.in_volume(block) {
+            let mut left = count;
+            for s in 0..self.block_size / SECTOR_SIZE as u32 {
+                if left == 0 {
+                    break;
                 }
+                for p in self.pointer_sector(block, s)?.into_iter().take(left as usize) {
+                    if p != 0 {
+                        self.free_block(p)?;
+                    }
+                }
+                left = left.saturating_sub((SECTOR_SIZE / 4) as u32);
             }
         }
         self.free_block(block)
@@ -1623,11 +1665,17 @@ impl Fs {
         if !parent.is_dir() {
             return Err(Error::NotADirectory);
         }
-        let (tino, mode) = self.lookup_in(&parent, name)?.ok_or(Error::NotFound)?;
-        if mode & S_IFMT == S_IFDIR {
-            return Err(Error::NotAFile);
+        let tino = self.entry_in(&parent, name)?.ok_or(Error::NotFound)?;
+        // An entry naming an inode the volume does not have names nothing to
+        // free: the entry alone goes, so a damaged name can be removed (it
+        // could be listed, then never removed; the third review of #331).
+        if self.inode_place(tino).is_err() {
+            return self.remove_dirent(&parent, name);
         }
         let target = self.read_inode(tino)?;
+        if target.mode & S_IFMT == S_IFDIR {
+            return Err(Error::NotAFile);
+        }
         self.remove_dirent(&parent, name)?;
         self.drop_link(tino, &target)
     }
@@ -1698,10 +1746,7 @@ impl Fs {
             i_blocks: 0,
             block: [0; INODE_BLOCK_PTRS],
         };
-        self.write_inode(ino, &dead)?;
-        // i_dtime lives at offset 20 within the inode.
-        let (rel, within) = self.inode_sector(ino)?;
-        self.write_int_at(rel * SECTOR_SIZE as u64 + within as u64 + 20, DELETION_TIME, 4)
+        self.write_inode_with_dtime(ino, &dead, DELETION_TIME)
     }
 
     /// Point directory `dir`'s `..` entry at `new_parent` (after a

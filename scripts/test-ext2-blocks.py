@@ -113,6 +113,8 @@ COMMANDS = [
     "echo x > /mnt/a/OWI",
     "cat /mnt/a/OWI",
     "rm /mnt/a/DUP",
+    "rm /mnt/a/L",
+    "rm /mnt/a/GHOST",
     "ls /mnt/c",
     "echo x >> /mnt/c/G",
     "rm /mnt/c/F",
@@ -162,6 +164,12 @@ class Ext2:
 
     def size(self, ino):
         return self.u32(self.inode_off(ino) + 4)
+
+    def mode(self, ino):
+        return struct.unpack("<H", self.read(self.inode_off(ino), 2))[0]
+
+    def i_blocks(self, ino):
+        return self.u32(self.inode_off(ino) + 28)
 
     def entries(self):
         """{name: (inode, byte offset of the entry)} of the root directory."""
@@ -214,8 +222,9 @@ def free_delta(v):
     return (v.u32(1024 + 12) - zeros, struct.unpack("<H", v.read(v.desc(0) + 12, 2))[0] - zeros)
 
 
-def mkvol(files, features=()):
-    """A 4 MiB ext2 with 1 KiB blocks holding `files`, made by mke2fs -d."""
+def mkvol(files, features=(), links=None):
+    """A 4 MiB ext2 with 1 KiB blocks holding `files` and the symlinks
+    `links` ({name: target}), made by mke2fs -d."""
     mke2fs = bootstick.tool("mke2fs")
     with tempfile.TemporaryDirectory(dir=BUILD) as tmp:
         src = os.path.join(tmp, "src")
@@ -223,6 +232,8 @@ def mkvol(files, features=()):
         for name, data in files.items():
             with open(os.path.join(src, name), "wb") as fh:
                 fh.write(data)
+        for name, target in (links or {}).items():
+            os.symlink(target, os.path.join(src, name))
         img = os.path.join(tmp, "vol.img")
         made = subprocess.run([mke2fs, "-q", "-t", "ext2", "-b", "1024", *features, "-d", src, "-F", img, "4m"],
                               capture_output=True, text=True)
@@ -241,7 +252,7 @@ def witness_bytes():
 def build():
     """Write the disk and plant the damage; return the plan and the checks."""
     root = volume(EXT2, 1)
-    a, c, b = mkvol(FILES_A), mkvol(FILES_C, ("-O", "^filetype")), mkvol({})
+    a, c, b = mkvol(FILES_A, links={"L": "ab"}), mkvol(FILES_C, ("-O", "^filetype")), mkvol({})
     layout = mbrdisk.assemble(DISK, [(mbrdisk.EXT2_TYPE, v, False) for v in (root, a, c, b)])
     (_, _), (a_start, _), (c_start, _), (b_start, b_sectors) = layout
     wit_start = os.path.getsize(DISK) // SECT
@@ -281,7 +292,6 @@ def build():
         va.write(va.desc(1), va.read(va.desc(0), 32))
         plan.update(ino=ino, rd_block0=va.ptr(ino["RD"], 0), a_bitmap=va.bitmap(0),
                     direct={n: [va.ptr(ino[n], k) for k in range(12)] for n in ("RMI", "OWI")})
-        # C: its block bitmap in the witness.
         # C: its block and inode bitmaps in the witness, and H's entry naming
         # an inode past its count, on a volume without filetype (so a listing
         # reads each entry's inode).
@@ -290,6 +300,12 @@ def build():
         c_ents = vc.entries()
         vc.set_u32(c_ents["H"][1], vc.ic + 5)
         plan.update(c_free=(vc.u32(1024 + 12), vc.u32(1024 + 16)))
+        # A: L, a fast symlink (its target's text in its pointers), made to
+        # name SRC's block as its text's first four bytes, as a target of
+        # those bytes would.
+        lino = ents["L"][0]
+        va.set_ptr(lino, 0, va.ptr(ino["SRC"], 0))
+        plan.update(l_ino=lino, src_block=va.ptr(ino["SRC"], 0))
         # A: DUP's second pointer names a block already free.
         free_blk = va.fdb + max(n for n in range(va.bc - va.fdb) if not bit(va.bitmap(0), n))
         va.set_ptr(ino["DUP"], 1, free_blk)
@@ -325,6 +341,9 @@ def build():
              in_wit(vc, c_start, vc.u32(vc.desc(0)), AT_BMP) and in_wit(vc, c_start, vc.u32(vc.desc(0) + 4), AT_IBMP)),
             ("plant: C has no filetype feature, its files, and H naming an inode past its count",
              not vc.u32(1024 + 96) & 2 and set(FILES_C) <= set(c_ents) and vc.entries()["H"][0] > vc.ic),
+            ("plant: L is a fast symlink (no blocks) whose first pointer names SRC's block",
+             va.mode(lino) & 0xF000 == 0xA000 and va.i_blocks(lino) == 0
+             and va.ptr(lino, 0) == va.ptr(ino["SRC"], 0) != 0),
             ("plant: DUP's second pointer names a block A's bitmap holds free",
              not bit(va.bitmap(0), va.ptr(ino["DUP"], 1) - va.fdb) and va.ptr(ino["DUP"], 1) < va.bc),
             ("plant: B ends where the witness starts, its next free block bit the block past it",
@@ -426,6 +445,7 @@ def verdicts(plan, driven, out, faults):
         owi_size = va.size(owi) if owi else None
         owi_data = va.read(owi_new * va.bs, owi_size) if owi_new and owi_size else b""
         rmi_inode_bit = bit(va.bitmap(4), ino["RMI"] - 1)
+        src_bit = bit(va.bitmap(0), plan["src_block"] - va.fdb)
         a_bitmap = va.bitmap(0)
         b_names = set(vb.entries())
         b_inode_bits = [bit(vb.bitmap(4), n) for n in range(plan["b_inodes_used"] + 2)]
@@ -462,6 +482,10 @@ def verdicts(plan, driven, out, faults):
          a_bitmap == want_bitmap),
         (f"rm of DUP, its second block already free, succeeds (got {o.get('rm /mnt/a/DUP')!r})",
          o.get("rm /mnt/a/DUP") == "" and "DUP" not in ents),
+        (f"rm of L succeeds and SRC's block is still allocated (got {o.get('rm /mnt/a/L')!r})",
+         o.get("rm /mnt/a/L") == "" and "L" not in ents and src_bit == 1),
+        (f"rm of GHOST, its inode past the count, drops the entry (got {o.get('rm /mnt/a/GHOST')!r})",
+         o.get("rm /mnt/a/GHOST") == "" and "GHOST" not in ents),
         (f"A's free counts still match its bitmap ({a_free_delta} vs {plan['a_free_delta']} past it)",
          a_free_delta == plan["a_free_delta"]),
         (f"ls /mnt/c lists F, G and H, H's inode past the count (got {o.get('ls /mnt/c')!r})",
