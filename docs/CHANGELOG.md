@@ -582,14 +582,16 @@ and long enough for every cluster, its root inside the heap and its cluster
 shift the spec's, checked before it is used; FAT32's root inside the heap, at
 least one FAT and at least one reserved sector (so no FAT write lands on the
 BPB); ext2's block-size shift checked before it is made, its first data block
-below its block count, at least the root's inodes, no more groups than its
-blocks make, and its descriptor table inside the volume. exFAT's allocation
+the superblock's own (1 with 1 KiB blocks, else 0, so the descriptor table
+after it is never the superblock), at least the root's inodes, no more blocks
+or inodes a group than one bitmap block holds, no more groups than its blocks
+make, and its descriptor table inside the volume. exFAT's allocation
 bitmap, named by its root directory and never checked, is bounded where its
 sectors are made (`bitmap_sector_lba`): a sector outside its own length, or
 outside the heap, is refused as an I/O error, which also ends the free path's
 write below the heap on a volume with no bitmap. FAT32's metadata size is summed in u64: two FATs
 of 0x80000000 sectors wrapped to 0 and passed the old check. `format` sizes
-the volume it lays by the same bound. `make test-volume-bound` boots nine
+the volume it lays by the same bound. `make test-volume-bound` boots thirteen
 disks from NVMe, built by `scripts/mbrdisk.py` from the images' own volumes:
 a FAT32, an exFAT and an ext2 each in a partition shorter than its volume,
 the next partition inside it (none mounts); a FAT32 in an entry of size 0 and
@@ -597,15 +599,15 @@ a whole exFAT (both mount) beside a FAT32 at sector 2^32 - 65,536 on a 2 TiB
 sparse disk (refused); a 16 MiB disk with a stale exFAT boot sector claiming
 24 MiB, its root past the end, with its table entry the disk's size and then
 the volume's (each boots to "no mountable partition" and takes `format ext2`);
-the wrapping FAT32; fifteen volumes each with one field changed to break
+the wrapping FAT32; sixteen volumes each with one field changed to break
 exactly one layout rule, which a model of the rules confirms on the host
 before the boot (each refused); and a size-0 FAT32 with the next partition
 inside it (refused) beside an exFAT whose bitmap starts at the next
 partition's first sector (it mounts, a write answers an I/O error and the
 partition after it is unchanged). Each rule was taken out in turn, and the
 boot that holds its case then fails, but for ext2's first-block rule, which
-guards a subtraction and refuses nothing the descriptor rule does not. The
-MBR entry layout is
+since the first-data rule can break only on a volume of one block and guards
+a subtraction. The MBR entry layout is
 `scripts/mbrdisk.py`'s alone (`entry`, `set_entry`). ext2's block numbers are still unbounded, to
 the roadmap.
 

@@ -4315,7 +4315,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   having; checking every block number where it meets the disk (`block_lba`,
   made fallible, its callers few), as FAT32's `cluster_to_lba` does since
   2026-10-19, would close it. Read in the code while bounding the volume
-  (2026-10-20).
+  (2026-10-20). **The allocator too:** `alloc_block` takes any clear bit of a
+  group's bitmap up to `blocks_per_group`, so a last group shorter than the
+  others, whose bitmap's padding bits are clear (damage, or a block count
+  shrunk), hands out a block past `s_blocks_count` and past the partition.
+  A rig for it needs an ext2 whose earlier groups are full; the bound in
+  `block_lba` refuses it as an I/O error, and the allocator should skip such
+  bits as not free. From the third review of #330.
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the
