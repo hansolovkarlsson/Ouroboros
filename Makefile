@@ -2590,7 +2590,7 @@ test-probe-ioerr: image image-exfat $(USBSTICK_IMG)
 # volumes in partitions shorter than they claim, an entry of size 0, a
 # partition past sector 2^32 (a 2 TiB sparse file), a stale exFAT boot sector
 # past the disk's end (also with the table claiming past it), a FAT32 whose
-# FAT size wraps u32, sixteen volumes each breaking one layout rule, and an
+# FAT size wraps u32, seventeen volumes each breaking one layout rule, and an
 # exFAT whose bitmap lies past its heap (a write refused, the next partition
 # unchanged). About eight minutes; run it whenever a filesystem's mount_at, fsd's probe or
 # volume_bound, or the table's sizes change.

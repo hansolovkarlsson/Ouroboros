@@ -4320,8 +4320,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   others, whose bitmap's padding bits are clear (damage, or a block count
   shrunk), hands out a block past `s_blocks_count` and past the partition.
   A rig for it needs an ext2 whose earlier groups are full; the bound in
-  `block_lba` refuses it as an I/O error, and the allocator should skip such
-  bits as not free. From the third review of #330.
+  `block_lba`, once it is made, would refuse such a block as an I/O error,
+  and the allocator should skip such bits as not free. Nothing refuses it
+  today. From the third review of #330.
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the

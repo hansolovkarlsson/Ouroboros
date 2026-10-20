@@ -58,7 +58,7 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
   ext2's block-size shift 32 (masked to 0 in a release build, so only the
   shift rule refuses it), its descriptor table past its blocks (a volume of
   two blocks, the only kind where it can lie past them now) (E); ext2
-  with no inodes (F); ext2 with more blocks or inodes a group than one
+  with no inodes, or inodes of 64 bytes (F); ext2 with more blocks or inodes a group than one
   bitmap block holds (G). All refused.
 - BESIDE: the FAT32 cut short in a table entry of size 0, the next
   partition inside its volume (refused: the bound stops at the next
@@ -157,11 +157,17 @@ def broken(vol, bound):
         }
         return {k for k, v in rules.items() if v}
     assert u("<H", 1024 + 56) == 0xEF53, "no volume"
-    ic, bc, fdb, lb, bpg, ipg = (u("<I", 1024 + o) for o in (0, 4, 20, 24, 32, 40))
+    ic, bc, fdb, lb, bpg, ipg, rev = (u("<I", 1024 + o) for o in (0, 4, 20, 24, 32, 40, 76))
     if lb > 2:
         return {"ext2-blocksize"}
     out = set()
     bs = 1024 << lb
+    isz = u("<H", 1024 + 88) if rev >= 1 else 128
+    if isz < 128 or isz > bs or isz & (isz - 1):
+        out.add("ext2-inodesize")
+    if bpg == 0 or ipg == 0:
+        # fsd refuses before the groups' arithmetic, which divides by both.
+        return out | {"ext2-bpg" if bpg == 0 else "ext2-ipg"}
     if bc * (bs // SECT) > bound:
         out.add("length")
     if bpg == 0 or bpg > bs * 8:
@@ -172,8 +178,9 @@ def broken(vol, bound):
         out.add("ext2-firstdata")
     groups = -(-ic // ipg)
     if fdb >= bc:
-        # Past the first-data rule only when the volume has one block: the
-        # first-block rule guards fsd's subtraction below.
+        # Past the first-data rule only when the volume ends at the
+        # superblock's block; the table after it is then past the end too, so
+        # the first-block rule never breaks alone (it guards fsd's subtraction).
         return out | {"ext2-firstblock", "ext2-bgdt"}
     if ic < 2:
         out.add("ext2-inodes")
@@ -304,8 +311,12 @@ def build_shapes(ext2, fat, exfat, which):
     meta = struct.unpack_from("<H", fat, 14)[0] + fat[16] * u32(fat, 36)
     fat_end = min((total - meta) // fat[13] + 2, u32(fat, 36) * 128, 0x0FFFFFF7)
     sb = 1024
-    ic, bc, fdb, bpg, ipg = (u32(ext2, sb + o) for o in (0, 4, 20, 32, 40))
+    ic, bc, fdb, lb, bpg, ipg = (u32(ext2, sb + o) for o in (0, 4, 20, 24, 32, 40))
+    bs = 1024 << lb
     groups = -(-(bc - fdb) // bpg)
+    # The superblock's block is 1 with 1 KiB blocks, else 0; each case is
+    # made from the base's own block size, not an assumed 1 KiB.
+    sb_block = 1024 // bs
     cases = {
         "SHAPES-A": [
             ("exfat-heap", exfat, [("<I", 88, vl - (cc << sh) + 8)]),
@@ -319,7 +330,7 @@ def build_shapes(ext2, fat, exfat, which):
         ],
         "SHAPES-C": [
             ("fat32-nofats", fat, [("<B", 16, 0)]),
-            ("ext2-firstdata", ext2, [("<I", sb + 20, 0)]),
+            ("ext2-firstdata", ext2, [("<I", sb + 20, 1 - sb_block)]),
             ("ext2-groups", ext2, [("<I", sb + 0, ipg * (groups + 1))]),
         ],
         "SHAPES-D": [
@@ -329,15 +340,17 @@ def build_shapes(ext2, fat, exfat, which):
             ("fat32-reserved", fat, [("<H", 14, 0)]),
             ("ext2-blocksize", ext2, [("<I", sb + 24, 32)]),  # masked to 0 in release: only the shift rule refuses it
             # With the first data block the superblock's and the groups bounded,
-            # the table lies past the blocks only on a volume of two or fewer.
-            ("ext2-bgdt", ext2, [("<I", sb + 4, 2), ("<I", sb + 0, ipg)]),
+            # the table lies past the blocks only on a volume ending at the
+            # superblock's block and the one after it.
+            ("ext2-bgdt", ext2, [("<I", sb + 4, sb_block + 1), ("<I", sb + 0, ipg)]),
         ],
         "SHAPES-F": [
             ("ext2-inodes", ext2, [("<I", sb + 0, 0)]),
+            ("ext2-inodesize", ext2, [("<I", sb + 76, 1), ("<H", sb + 88, 64)]),
         ],
         "SHAPES-G": [
-            ("ext2-bpg", ext2, [("<I", sb + 32, 1024 * 8 + 8)]),
-            ("ext2-ipg", ext2, [("<I", sb + 40, 1024 * 8 + 8)]),
+            ("ext2-bpg", ext2, [("<I", sb + 32, bs * 8 + 8)]),
+            ("ext2-ipg", ext2, [("<I", sb + 40, bs * 8 + 8)]),
         ],
     }[which]
     vols = [(rule, patched(base, edits)) for rule, base, edits in cases]

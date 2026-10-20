@@ -599,15 +599,18 @@ a whole exFAT (both mount) beside a FAT32 at sector 2^32 - 65,536 on a 2 TiB
 sparse disk (refused); a 16 MiB disk with a stale exFAT boot sector claiming
 24 MiB, its root past the end, with its table entry the disk's size and then
 the volume's (each boots to "no mountable partition" and takes `format ext2`);
-the wrapping FAT32; sixteen volumes each with one field changed to break
+the wrapping FAT32; seventeen volumes each with one field changed to break
 exactly one layout rule, which a model of the rules confirms on the host
 before the boot (each refused); and a size-0 FAT32 with the next partition
 inside it (refused) beside an exFAT whose bitmap starts at the next
 partition's first sector (it mounts, a write answers an I/O error and the
 partition after it is unchanged). Each rule was taken out in turn, and the
-boot that holds its case then fails, but for ext2's first-block rule, which
-since the first-data rule can break only on a volume of one block and guards
-a subtraction. The MBR entry layout is
+boot that holds its case then fails, but for ext2's first-block rule (a
+first data block not below the block count). It cannot break alone: the
+descriptor table starts after the first data block, so the table rule breaks
+with it, and the rule stays to guard the subtraction in the groups rule.
+ext2's inode size is bounded too, 128 bytes to a block and a power of two (a
+64-byte inode panicked fsd on its first write; the fourth review). The MBR entry layout is
 `scripts/mbrdisk.py`'s alone (`entry`, `set_entry`). ext2's block numbers are still unbounded, to
 the roadmap.
 

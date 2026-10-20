@@ -219,6 +219,13 @@ impl Fs {
         if inode_size == 0 || inodes_per_group == 0 {
             return Err(Error::NotExt2);
         }
+        // An inode holds at least rev 0's 128 bytes, the fields read and
+        // written here (write_inode's block pointers end at 100), and is a
+        // power of two no larger than a block, as Linux requires: a smaller
+        // one panicked fsd on its first write (the fourth review of #330).
+        if inode_size < 128 || inode_size > block_size || !inode_size.is_power_of_two() {
+            return Err(Error::NotExt2);
+        }
         let inodes_count = u32::from_le_bytes([sb[0], sb[1], sb[2], sb[3]]);
         let blocks_per_group = u32::from_le_bytes([sb[32], sb[33], sb[34], sb[35]]);
         let first_ino = if rev_level >= 1 {
@@ -227,8 +234,9 @@ impl Fs {
             11
         };
         // A group's blocks and inodes each fit its one bitmap block, as the
-        // bitmap code indexes them (8 bits a byte of one block: past that it
-        // reads past its buffer; the third review of #330).
+        // bitmap code indexes them (8 bits a byte of one block: past that
+        // bitmap_free's clear lands past the block, lost or, past its 4 KiB
+        // buffer, a panic; the third review of #330).
         let bits_per_block = block_size * 8;
         if blocks_per_group == 0 || blocks_per_group > bits_per_block || inodes_per_group > bits_per_block {
             return Err(Error::NotExt2);
