@@ -14,11 +14,16 @@ partition table was told apart (#324).
 
 One boot. The firmware boots esp.img from NVMe, which the kernel cannot
 drive, so the virtio disk goes in as the fallback block device. That disk is
-a copy of esp.img, signed again (scripts/disksig.py) so it is not taken for
-the boot disk, attached through QEMU's blkdebug driver with every read of its
-partition's first sector (the BPB, which every probe reads first) failing
-with EIO. Beside it on USB, a copy of build/usbstick.img (a FAT32 stick). As
-the fallback root session (nothing mounts, so login has no accounts):
+a copy of build/espexfat.img with its ESP's partition entry zeroed, so it
+holds one partition, exFAT, signed again (scripts/disksig.py) so it is not
+taken for the boot disk. It is attached through QEMU's blkdebug driver, every
+read of the exFAT root directory's first sector failing with EIO: a sector
+the exFAT probe reads (`locate_bitmap`) and the partition table's reads
+(sectors 0 and 1) never do, which the rig checks before the boot. On esp.img
+there is no such sector, since its FAT32 starts at sector 1, where the table
+looks for a GPT header, and FAT32's probe reads its first sector only. Beside
+it on USB, a copy of build/usbstick.img (a FAT32 stick). As the fallback root
+session (nothing mounts, so login has no accounts):
 
 - fsd's boot line must say the mount failed with a disk I/O error;
 - `format ext2` must be refused (the shell's I/O message), and after the
@@ -48,6 +53,7 @@ drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
 
 ESP = os.path.join(BUILD, "esp.img")
+EXFAT = os.path.join(BUILD, "espexfat.img")
 STICK = os.path.join(BUILD, "usbstick.img")
 COPY = os.path.join(BUILD, "test-probe-ioerr.img")
 STICK_COPY = os.path.join(BUILD, "test-probe-ioerr-stick.img")
@@ -56,12 +62,27 @@ COMMANDS = ["format ext2", "mount -a", "mount"]
 EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M)
 
 
-def partition_start(image):
-    """MBR partition 1's start LBA, read on the host."""
-    with open(image, "rb") as fh:
-        mbr = fh.read(512)
-    assert mbr[510:512] == b"\x55\xaa", f"{image}: no MBR"
-    return int.from_bytes(mbr[0x1BE + 8:0x1BE + 12], "little")
+def prepare():
+    """The virtio copy, its one exFAT partition's start and the sector that
+    fails: the root directory's first, from the volume's boot sector."""
+    shutil.copyfile(EXFAT, COPY)
+    with open(COPY, "r+b") as fh:
+        mbr = bytearray(fh.read(512))
+        assert mbr[510:512] == b"\x55\xaa", f"{EXFAT}: no MBR"
+        assert mbr[0x1BE + 4] == 0x07, f"{EXFAT}: partition 1 is not exFAT"
+        start = int.from_bytes(mbr[0x1BE + 8:0x1BE + 12], "little")
+        mbr[0x1CE:0x1DE] = bytes(16)  # the ESP's entry: one partition left
+        fh.seek(0)
+        fh.write(mbr)
+        fh.seek(start * 512)
+        vbr = fh.read(512)
+    assert vbr[3:11] == b"EXFAT   ", f"{EXFAT}: partition 1 holds no exFAT"
+    heap = int.from_bytes(vbr[88:92], "little")
+    root = int.from_bytes(vbr[96:100], "little")
+    failing = start + heap + ((root - 2) << vbr[109])
+    subprocess.run([sys.executable, os.path.join(HERE, "disksig.py"), "set", COPY], check=True,
+                   stdout=subprocess.DEVNULL)
+    return start, failing
 
 
 def partition_bytes(image, start, sectors=64):
@@ -70,23 +91,22 @@ def partition_bytes(image, start, sectors=64):
         return fh.read(sectors * 512)
 
 
-def boot(start):
+def boot():
     steps = [("# ", cmd) for cmd in COMMANDS] + [("# ", "")]
     guest = None
     try:
-        shutil.copyfile(ESP, COPY)
-        subprocess.run([sys.executable, os.path.join(HERE, "disksig.py"), "set", COPY], check=True,
-                       stdout=subprocess.DEVNULL)
+        start, failing = prepare()
         shutil.copyfile(STICK, STICK_COPY)
         before = partition_bytes(COPY, start)
         with open(BLKDEBUG, "w") as fh:
-            fh.write(f'[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "{start}"\n')
+            fh.write(f'[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "{failing}"\n')
         extra = [
             # bootindex=0 pins the firmware to the NVMe disk, which it boots
             # and the kernel cannot drive (test-boot-partition's fallback case).
             "-drive", f"file={ESP},format=raw,if=none,id=nvboot,snapshot=on",
             "-device", "nvme,serial=boot,drive=nvboot,bootindex=0",
-            # The failing disk: every read touching its BPB answers EIO.
+            # The failing disk: every read of the exFAT root's first sector
+            # answers EIO.
             "-drive", f"file=blkdebug:{BLKDEBUG}:{COPY},format=raw,if=none,id=hd0,rerror=report",
             "-device", "virtio-blk-device,drive=hd0",
             "-device", "qemu-xhci,id=xhci0",
@@ -109,7 +129,7 @@ def boot(start):
                 os.remove(f)
     with open(os.path.join(BUILD, "test-probe-ioerr.txt"), "w") as fh:
         fh.write(out)
-    return driven, out, faults, before == after
+    return driven, out, faults, before == after, start, failing
 
 
 def outputs(out):
@@ -132,14 +152,17 @@ def outputs(out):
 
 
 def main():
-    for f in (ESP, STICK):
+    for f in (ESP, EXFAT, STICK):
         if not os.path.exists(f):
             sys.exit(f"{f} not found - run `make test-probe-ioerr`, which builds it")
-    start = partition_start(ESP)
-    driven, out, faults, untouched = boot(start)
+    driven, out, faults, untouched, start, failing = boot()
     o = outputs(out)
     boot_log = out.split("# format ext2")[0]
     checks = [
+        # The table's reads are sectors 0 and 1 (MBR, GPT header): the error
+        # must land past them, where only the probe reads.
+        (f"the failing sector, {failing}, is read by the probe alone (partition at {start})",
+         failing > start > 1),
         ("driven to the end, every command's output found", driven and None not in o),
         # fsd prints its failure line in three pieces, so another task's
         # line can land inside it: its two halves, before the first command.
