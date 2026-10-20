@@ -185,6 +185,14 @@ class Ext2:
         self.write(self.u32(self.desc(0) + which) * self.bs, data)
 
 
+def intact(fh, start):
+    """Whether the volume at `start` still has an ext2 superblock the reader
+    can walk: a control can zero it (C's, by a write to block 1)."""
+    fh.seek(start * SECT + 1024)
+    sb = fh.read(1024)
+    return struct.unpack_from("<H", sb, 56)[0] == 0xEF53 and struct.unpack_from("<I", sb, 40)[0] > 0
+
+
 def bit(bm, n):
     return bm[n // 8] >> (n % 8) & 1
 
@@ -389,10 +397,17 @@ def verdicts(plan, driven, out, faults):
         expect = witness_bytes()
         changed = [i // SECT for i in range(0, len(witness), SECT)
                    if witness[i:i + SECT] != expect[i:i + SECT]]
-        va, vb, vc = Ext2(fh, plan["a"]), Ext2(fh, plan["b"]), Ext2(fh, plan["c"])
-        c_ents = vc.entries()
-        c_free = (vc.u32(1024 + 12), vc.u32(1024 + 16))
-        g_size = vc.size(c_ents["G"][0]) if "G" in c_ents else None
+        whole = {k: intact(fh, plan[k]) for k in ("a", "b", "c")}
+        if not (whole["a"] and whole["b"]):
+            return [(f"A's and B's superblocks intact ({whole})", False),
+                    (f"the witness unchanged (changed sectors: {changed[:8]})", changed == [])]
+        va, vb = Ext2(fh, plan["a"]), Ext2(fh, plan["b"])
+        c_ents, c_free, g_size = {}, None, None
+        if whole["c"]:
+            vc = Ext2(fh, plan["c"])
+            c_ents = vc.entries()
+            c_free = (vc.u32(1024 + 12), vc.u32(1024 + 16))
+            g_size = vc.size(c_ents["G"][0]) if "G" in c_ents else None
         a_free_delta = free_delta(va)
         ents = va.entries()
         ino = plan["ino"]
@@ -421,6 +436,7 @@ def verdicts(plan, driven, out, faults):
         ("driven to the end, every command's output found", driven and len(o) == len(COMMANDS)),
         ("fsd mounted ext2 as /", re.search(r"^fsd: ext2 mounted", out, re.M) is not None),
         ("A, C and B mount", all(o.get(c) == "" for c in COMMANDS[:3])),
+        ("C's superblock intact after the boot", whole["c"]),
         ("ls /mnt/a lists the eight files", set(FILES_A) <= listed),
         (f"SRC reads whole, 100 bytes (got {wc_bytes(o.get('cat /mnt/a/SRC | wc'))})",
          wc_bytes(o.get("cat /mnt/a/SRC | wc")) == 100),
