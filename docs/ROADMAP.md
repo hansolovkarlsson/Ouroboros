@@ -4350,7 +4350,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   writes the File and Stream entries as two sector writes even when they
   share a sector, so a crash between them leaves a set whose checksum does
   not match. Read in the code. Found by the same review.
-- **exFAT's free-slot scan reads a sector for every slot.** `find_free_run`
+- ~~**exFAT's free-slot scan reads a sector for every slot.**~~ *Done
+  2026-10-19:* a `SlotCursor` steps forward through every walk over a
+  directory's slots (`slot_at`, the scan, `write_set_at`, `delete_set`,
+  `patch_stream_ext`), the scan holds the sector it read, and a set's write
+  and delete go out once a sector. Measured by QEMU's reads: 100 files in one
+  directory read 4,686 more sectors than one file, from 19,026, and the
+  directory's own sectors 4.3 passes a create, from 19.0, and written 1.36
+  times a file, from 3.24 (`make test-dir-scan`). The record as found: `find_free_run`
   reads the whole sector for each 32-byte slot it tests and calls
   `slot_addr`, which walks the chain from the first cluster each time: about
   15,000 reads to make 100 files in one directory, where keeping the last

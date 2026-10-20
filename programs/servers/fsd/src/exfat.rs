@@ -1286,33 +1286,32 @@ impl Fs {
 
     /// The on-disk (LBA, byte offset) of a directory's global slot `slot`
     /// (0-based over the whole directory), or `None` if it's past the current
-    /// allocation. Walks the chain a cluster at a time.
-    fn slot_addr(
-        &mut self,
-        dir_cluster: u32,
-        contiguous: bool,
-        slot: usize,
-    ) -> Result<Option<(u64, usize)>, Error> {
-        if dir_cluster < 2 {
+    /// allocation, found from `cur`: forward from the cluster it holds, from
+    /// the directory's first only for a slot before it. Every walk over a
+    /// directory's slots in order keeps one cursor, so it walks the chain once;
+    /// until 2026-10-19 each slot walked it from the first cluster again, and a
+    /// free-slot scan read its sector again too, about 19,000 sector reads to
+    /// make 100 files in one directory.
+    fn slot_at(&mut self, cur: &mut SlotCursor, slot: usize) -> Result<Option<(u64, usize)>, Error> {
+        if cur.first < 2 {
             return Ok(None); // a directory of size 0 has no cluster
         }
+        if slot < cur.base {
+            *cur = SlotCursor::new(cur.first, cur.contiguous);
+        }
         let slots_per_cluster = self.sectors_per_cluster as usize * SLOTS_PER_SECTOR;
-        let mut cluster = dir_cluster;
-        let mut base = 0usize;
-        loop {
-            if slot < base + slots_per_cluster {
-                let local = slot - base;
-                let sector_in = local / SLOTS_PER_SECTOR;
-                let slot_in = local % SLOTS_PER_SECTOR;
-                let lba = self.cluster_to_lba(cluster) as u64 + sector_in as u64;
-                return Ok(Some((lba, slot_in * ENTRY_SIZE)));
-            }
-            base += slots_per_cluster;
-            match self.advance(cluster, contiguous)? {
-                Some(next) => cluster = next,
+        while slot >= cur.base + slots_per_cluster {
+            match self.advance(cur.cluster, cur.contiguous)? {
+                Some(next) => {
+                    cur.cluster = next;
+                    cur.base += slots_per_cluster;
+                }
                 None => return Ok(None),
             }
         }
+        let local = slot - cur.base;
+        let lba = self.cluster_to_lba(cur.cluster) as u64 + (local / SLOTS_PER_SECTOR) as u64;
+        Ok(Some((lba, (local % SLOTS_PER_SECTOR) * ENTRY_SIZE)))
     }
 
     /// Grow a directory past its extent by a cluster, and record its new size.
@@ -1332,7 +1331,25 @@ impl Fs {
     /// chain past the size is refused by the next `room` rather than lost,
     /// where a set still saying `NoFatChain` would have its run ended again
     /// by the next growth and the linked cluster lost.
-    fn grow_dir(&mut self, e: &mut DirEntry, room: &mut Room) -> Result<(), Error> {
+    ///
+    /// `cur`, the caller's walk over the directory's slots, is kept true to
+    /// it here, where the directory changes, so no cursor outlives a growth
+    /// stale: made anew when the directory got its first cluster, told its
+    /// run is a FAT chain now (`ensure_chained` chains the run in place, so
+    /// where the cursor stands is still a slot of the directory), and kept as
+    /// it is when a cluster was linked after the tail.
+    fn grow_dir(&mut self, e: &mut DirEntry, room: &mut Room, cur: &mut SlotCursor) -> Result<(), Error> {
+        self.grow_extent(e, room)?;
+        if cur.first != e.first_cluster {
+            *cur = SlotCursor::new(e.first_cluster, e.contiguous);
+        } else {
+            cur.contiguous = e.contiguous;
+        }
+        Ok(())
+    }
+
+    /// [`grow_dir`](Self::grow_dir)'s work on the disk and on `e` and `room`.
+    fn grow_extent(&mut self, e: &mut DirEntry, room: &mut Room) -> Result<(), Error> {
         let cluster_bytes = self.cluster_bytes();
         let Room::Sub(at, x) = room else {
             let root = self.dir_extent(e.first_cluster, false, 0)?;
@@ -1386,23 +1403,25 @@ impl Fs {
         let mut run_start = 0usize;
         let mut run = 0usize;
         let mut slot = 0usize;
+        let mut cur = SlotCursor::new(e.first_cluster, e.contiguous);
+        // The sector last read: sixteen slots are tested from one read.
+        let mut buf = [0u8; SECTOR_SIZE];
+        let mut held = None;
         loop {
-            // The root's scan ends where its chain does (slot_addr), as its
+            // The root's scan ends where its chain does (slot_at), as its
             // extent does.
             let slots_per_cluster = self.sectors_per_cluster as u64 * SLOTS_PER_SECTOR as u64;
             let inside = match room {
                 Room::Root => true,
                 Room::Sub(_, x) => (slot as u64) < x.clusters * slots_per_cluster,
             };
-            let addr = if inside {
-                self.slot_addr(e.first_cluster, e.contiguous, slot)?
-            } else {
-                None
-            };
+            let addr = if inside { self.slot_at(&mut cur, slot)? } else { None };
             match addr {
                 Some((lba, off)) => {
-                    let mut buf = [0u8; SECTOR_SIZE];
-                    self.disk.read_sector(lba, &mut buf)?;
+                    if held != Some(lba) {
+                        self.disk.read_sector(lba, &mut buf)?;
+                        held = Some(lba);
+                    }
                     let t = buf[off];
                     if t == 0x00 || t & ET_IN_USE == 0 {
                         if run == 0 {
@@ -1417,14 +1436,52 @@ impl Fs {
                     }
                     slot += 1;
                 }
-                None => self.grow_dir(e, room)?, // then re-read this slot
+                None => {
+                    // Then re-read this slot, past the old end: grow_dir keeps
+                    // the cursor true to the directory, and no sector is held
+                    // (the new cluster was zeroed after it was read).
+                    self.grow_dir(e, room, &mut cur)?;
+                    held = None;
+                }
             }
         }
     }
 
-    /// Write `set` (a built entry set, `set.len()/32` entries) into `need`
-    /// consecutive slots starting at global slot `start`, one 32-byte
-    /// read-modify-write per entry (slots may straddle sector/cluster edges).
+    /// Rewrite `n` consecutive slots of a directory from global slot `start`,
+    /// one read-modify-write a sector, in order: `f(sector, i, off, k)` changes
+    /// the run's slots `i..i + k`, which lie at byte `off` of the sector read.
+    /// The one copy of the arithmetic that splits a run at sector edges (a
+    /// sector belongs to one cluster, so a run's slots in it are adjacent),
+    /// for [`write_set_at`](Self::write_set_at) and
+    /// [`delete_set`](Self::delete_set). `missing` is the error for a slot past
+    /// the directory's clusters.
+    fn rewrite_slots(
+        &mut self,
+        dir_cluster: u32,
+        contiguous: bool,
+        start: usize,
+        n: usize,
+        missing: fn() -> Error,
+        mut f: impl FnMut(&mut [u8; SECTOR_SIZE], usize, usize, usize),
+    ) -> Result<(), Error> {
+        let mut cur = SlotCursor::new(dir_cluster, contiguous);
+        let mut i = 0;
+        while i < n {
+            let (lba, off) = self.slot_at(&mut cur, start + i)?.ok_or_else(missing)?;
+            let k = (n - i).min((SECTOR_SIZE - off) / ENTRY_SIZE);
+            let mut sec = [0u8; SECTOR_SIZE];
+            self.disk.read_sector(lba, &mut sec)?;
+            f(&mut sec, i, off, k);
+            self.disk.write_sector(lba, &sec)?;
+            i += k;
+        }
+        Ok(())
+    }
+
+    /// Write `set` (a built entry set, `set.len()/32` entries) into
+    /// consecutive slots starting at global slot `start`: one read-modify-write
+    /// per sector it touches, in order (slots may straddle sector/cluster
+    /// edges), where it was one a slot until 2026-10-19.
     fn write_set_at(
         &mut self,
         dir_cluster: u32,
@@ -1432,16 +1489,10 @@ impl Fs {
         start: usize,
         set: &[u8],
     ) -> Result<(), Error> {
-        for (i, entry) in set.chunks_exact(ENTRY_SIZE).enumerate() {
-            let (lba, off) = self
-                .slot_addr(dir_cluster, contiguous, start + i)?
-                .ok_or(Error::DiskFull)?;
-            let mut buf = [0u8; SECTOR_SIZE];
-            self.disk.read_sector(lba, &mut buf)?;
-            buf[off..off + ENTRY_SIZE].copy_from_slice(entry);
-            self.disk.write_sector(lba, &buf)?;
-        }
-        Ok(())
+        let n = set.len() / ENTRY_SIZE;
+        self.rewrite_slots(dir_cluster, contiguous, start, n, || Error::DiskFull, |sec, i, off, k| {
+            sec[off..off + k * ENTRY_SIZE].copy_from_slice(&set[i * ENTRY_SIZE..(i + k) * ENTRY_SIZE]);
+        })
     }
 
     /// Build an entry set and insert it into a directory: the full create path
@@ -1649,14 +1700,13 @@ impl Fs {
         data_len: u64,
     ) -> Result<(), Error> {
         // File and Stream as they are, then the Stream changed.
+        let mut cur = SlotCursor::new(dir_cluster, dir_contig);
         let mut head = [0u8; 2 * ENTRY_SIZE];
         let mut at = [(0u64, 0usize); 2];
         let mut sec = [0u8; SECTOR_SIZE];
         let mut sec_lba = None;
         for (i, place) in at.iter_mut().enumerate() {
-            let (lba, off) = self
-                .slot_addr(dir_cluster, dir_contig, primary_slot + i)?
-                .ok_or(Error::NotFound)?;
+            let (lba, off) = self.slot_at(&mut cur, primary_slot + i)?.ok_or(Error::NotFound)?;
             if sec_lba != Some(lba) {
                 self.disk.read_sector(lba, &mut sec)?;
                 sec_lba = Some(lba);
@@ -1678,9 +1728,7 @@ impl Fs {
         // every secondary after them as it is on the disk.
         let mut sum = set_checksum(&head);
         for i in 2..set_len {
-            let (lba, off) = self
-                .slot_addr(dir_cluster, dir_contig, primary_slot + i)?
-                .ok_or(Error::NotFound)?;
+            let (lba, off) = self.slot_at(&mut cur, primary_slot + i)?.ok_or(Error::NotFound)?;
             if sec_lba != Some(lba) {
                 self.disk.read_sector(lba, &mut sec)?;
                 sec_lba = Some(lba);
@@ -1897,7 +1945,7 @@ impl Fs {
 
     /// Mark every entry of a set deleted by clearing its in-use bit (`0x85` ->
     /// `0x05`, `0xC0` -> `0x40`, `0xC1` -> `0x41`) - how exFAT removes a set (no
-    /// `0xE5` tombstone byte like FAT). RMW one 32-byte slot at a time.
+    /// `0xE5` tombstone byte like FAT). One read-modify-write a sector.
     fn delete_set(
         &mut self,
         dir_cluster: u32,
@@ -1905,16 +1953,11 @@ impl Fs {
         primary_slot: usize,
         set_len: usize,
     ) -> Result<(), Error> {
-        for i in 0..set_len {
-            let (lba, off) = self
-                .slot_addr(dir_cluster, dir_contig, primary_slot + i)?
-                .ok_or(Error::NotFound)?;
-            let mut sec = [0u8; SECTOR_SIZE];
-            self.disk.read_sector(lba, &mut sec)?;
-            sec[off] &= !ET_IN_USE;
-            self.disk.write_sector(lba, &sec)?;
-        }
-        Ok(())
+        self.rewrite_slots(dir_cluster, dir_contig, primary_slot, set_len, || Error::NotFound, |sec, _, off, k| {
+            for j in 0..k {
+                sec[off + j * ENTRY_SIZE] &= !ET_IN_USE;
+            }
+        })
     }
 
     /// Create an empty subdirectory. Fails if the name exists. An exFAT
@@ -2085,6 +2128,24 @@ impl Fs {
             src_entry.contiguous,
         )?;
         self.delete_set(src_parent.first_cluster, src_parent.contiguous, src_slot, src_len)
+    }
+}
+
+/// Where a walk over a directory's slots stands ([`Fs::slot_at`]): the
+/// cluster holding slots `base..` (a cluster's worth), so a later slot is
+/// found by stepping on from there. Made anew whenever the directory's first
+/// cluster or layout changes (a growth that chains a `NoFatChain` run).
+#[derive(Clone, Copy)]
+struct SlotCursor {
+    first: u32,
+    contiguous: bool,
+    cluster: u32,
+    base: usize,
+}
+
+impl SlotCursor {
+    fn new(first: u32, contiguous: bool) -> Self {
+        SlotCursor { first, contiguous, cluster: first, base: 0 }
     }
 }
 

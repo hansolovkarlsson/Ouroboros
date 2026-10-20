@@ -23,19 +23,25 @@ drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
 
 READ = re.compile(rb"virtio_blk_handle_read .*?sector (\d+) nsectors (\d+)")
+WRITE = re.compile(rb"virtio_blk_handle_write .*?sector (\d+) nsectors (\d+)")
 
 
-def boot(tag, source, image, steps, inspect=None):
+def boot(tag, source, image, steps, inspect=None, writes=None):
     """Boot a copy of `source` (the stale-image guard reads build/`image`),
     drive `steps`, and return (problems, transcript lines, sectors read by
     sector number). `tag` names the copy and its log under build/. When
     given, `inspect` is called with the copy's path after a boot whose steps
     all ran, before the copy is removed, to read what the guest wrote; what
-    it raises is the caller's."""
+    it raises is the caller's. When `writes` (a Counter) is given, QEMU traces
+    writes too and it is filled with the sectors written, as the reads are
+    returned."""
     copy = os.path.join(ROOT, "build", f"{tag}.img")
     log = os.path.join(ROOT, "build", f"{tag}.log")
     shutil.copyfile(source, copy)
-    guest = drive_qemu.Guest(copy, extra_args=["-trace", "enable=virtio_blk_handle_read"],
+    trace = ["-trace", "enable=virtio_blk_handle_read"]
+    if writes is not None:
+        trace += ["-trace", "enable=virtio_blk_handle_write"]
+    guest = drive_qemu.Guest(copy, extra_args=trace,
                              intlog=log, label=f"{tag}: ",
                              stamp_from=os.path.join(ROOT, "build", image))
     driven = False
@@ -55,11 +61,15 @@ def boot(tag, source, image, steps, inspect=None):
     if guest.aborts():
         problems.append("fault lines in QEMU's trace")
     with open(log, "rb") as fh:
-        hits = READ.findall(fh.read())
+        text = fh.read()
     count = collections.Counter()
-    for sector, n in hits:
+    for sector, n in READ.findall(text):
         for s in range(int(n)):
             count[int(sector) + s] += 1
+    if writes is not None:
+        for sector, n in WRITE.findall(text):
+            for s in range(int(n)):
+                writes[int(sector) + s] += 1
     if not count:
         problems.append("no virtio_blk_handle_read events: the observer sees nothing")
     return problems, out.split("\n"), count
