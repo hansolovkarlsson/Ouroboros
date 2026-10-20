@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-10-12. Five PRs, no new subsystem, and four defects that were all
+through 2026-10-19. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -1037,6 +1037,33 @@ review also found the closure's "every halt on a secondary goes through
 the verdict held, since such a core never ran a task, but an "every" offered
 as evidence is a claim of its own, the kind the paragraph above it said to
 read the code for.
+
+## Three claims false on arrival (2026-10-19)
+
+Three statements written on 2026-10-19 were false the day they were written,
+and a review found each.
+
+The first was mine, in the code and the CHANGELOG of #327: with one exFAT
+lookup, "a change to matching, such as reading the volume's up-case table, now
+lands in one function". exFAT matched names by FAT32's `names_match`, and the
+NameHash it writes up-cased by its own `upcase`: a change made where the claim
+pointed would have left NameHash on the old rule, or changed FAT32's matching.
+The fix was to make the claim true rather than reword it: exFAT's own
+`names_match`, built on `upcase`, so matching and NameHash are one rule, and a
+byte-compare control shows the new rule is the one in force.
+
+The second, in #323's CHANGELOG: "every FAT32 walk goes through it", of a
+bound on the links a walk follows. A walk starts at a directory entry's first
+cluster, which no link check sees, and a damaged one still reached past the
+volume. The bound moved to the three places a cluster meets the disk, and the
+CHANGELOG was rewritten to claim what the rig shows.
+
+The third was the document's oldest shape. #326 renamed `slot_addr` to
+`slot_at`, and CLAUDE.md, the Makefile and `test-long-set.py` still listed
+`slot_addr` among the changes that owe `make test-long-set` a run. A session
+changing `slot_at` and searching for its name would not have found the rig
+that covers it. **A rename is an edit to every record that names the old
+name, and a search for the old name is the check.**
 
 ## What actually worked
 

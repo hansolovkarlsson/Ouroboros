@@ -4253,25 +4253,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   that to the sectors the chain crosses, which a fragmented file makes
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
-- ~~**FAT32's `next_cluster` follows any link below end of chain, unbounded.**~~
-  *Done 2026-10-19:* `cluster_to_lba`, `fat_entry` and `write_fat_entry`
-  refuse a cluster outside `2..cluster_end`, so a damaged first cluster is
-  refused as well as a link, and a link outside it ends the chain (exFAT's
-  `next_cluster` checks the link too since #320). Reproduced first by `make
-  test-fat-link`'s control on a disk with a witness partition after the ESP:
-  appends wrote past the volume into it, `rm` zeroed FAT entries there in both
-  copies and FAT entry 1, and reads returned its bytes as the file's. The
-  record as found:
-  exFAT's directory walk refuses a link outside the heap (since 2026-10-18;
-  its `next_cluster` checks only the cluster it is given, so a file's walk
-  may still use one bad link before it ends); FAT32's follows any value
-  under `0x0FFFFFF8`, the bad-cluster mark `0x0FFFFFF7` and links past
-  `cluster_end` among them. On a damaged FAT, `rm`'s `free_chain` then reads
-  and zeroes an entry far past the FAT (for `0x0FFFFFF7`, a sector about
-  1 GiB on), in every FAT copy: a data sector on a large stick. Bounding the
-  link to `2..cluster_end` in `next_cluster` closes it, on both.
-  Older than the cursors; read in the code, not reproduced. From the max
-  review of the finer cursor rule (2026-10-18).
 - **A read error inside a partition's probe reads as "no filesystem".**
   `vfs::Filesystem::probe` returns `None` for any failure of FAT32's, exFAT's
   and ext2's `mount_at`, an I/O error among them, so `mount` cannot tell a
@@ -4301,91 +4282,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bitmap says the cluster is free) was declined: on a damaged volume a
   bitmap-free cluster can be on a live chain, the max review's finding 1,
   and the gain is speed on Linux-written sticks only.
-- ~~**`MOUNT` with `replace` set has no caller check.**~~ *Done 2026-10-19:*
-  the kernel answers `MOUNT` to the `CAP_BLOCK` holder alone (fsd), as the
-  `BLOCK_*` calls, and fsd's `FSOP_MOUNT` makes the rescan itself when its
-  mount found nothing and no disk filesystem is mounted; the shell's `mount
-  -a` is one request. Reproduced first by `make test-mount-gate`'s control: an
-  ordinary task swapped a USB stick in under the mounted ESP, `ls /` then read
-  the stick, and `erase disk` erased the stick. The record as found: The kernel's `MOUNT`
-  arm (`kernel/src/syscall.rs`) swaps the block device for a USB stick when
-  arg0 is nonzero, trusting that "the caller has already confirmed with the
-  server that nothing is mounted"; nothing checks who the caller is, so any
-  task can swap the disk under a mounted fsd and its cached geometry. Read
-  in the code, not exercised. Found by the max review of the finer cursor
-  rule (2026-10-18), outside its diff.
-- ~~**A case-only `mv` of a directory moves it into itself, on FAT32 and
-  exFAT.**~~ *Done 2026-10-19:* fsd's guard compares in the filesystem's case
-  rule (`Filesystem::names_match`, which the lookups call) and on resolved
-  paths (`ninep_abi::is_within`), so the move is refused and `/bin/mv` says
-  `cannot move /Docs to a subdirectory of itself, /docs/Docs`; reproduced first by `make test-mv-into`'s control (both names gone,
-  `mv` exiting 0), which checks it on all three formats. The record as found:
-  `mkdir /Docs; mv /Docs /docs`: `/bin/mv` stats `/docs`, finds
-  `Docs`, and sends `NP_MV("/Docs", "/docs/Docs")`. fsd's `is_within`
-  (`programs/servers/fsd/src/main.rs`) compares bytes, so it lets the pair
-  through, while the filesystem resolves `/docs` to `Docs` itself. The new
-  set is written inside `Docs`, the old one deleted, and the subtree becomes
-  a cycle nothing reaches, its clusters still allocated. The entry above
-  (`mv -f /Lowdir /lowdir` answering "exists") holds only for the raw pair,
-  which `/bin/mv` never sends. Fold case in `is_within` on a
-  case-insensitive tree, or refuse a destination that resolves to the source
-  or under it. Read in the code, not reproduced. Found by the max review of
-  the exFAT grow_dir fix (2026-10-18), outside its diff.
-- ~~**exFAT's `patch_stream_ext` checksums at most 19 entries of a set.**~~
-  *Done 2026-10-19:* the sum runs over every entry of the set, a sector at a
-  time, and File and Stream go out in one sector write when they share a
-  sector (two when the set starts in a sector's last slot, which only a
-  journal would make safe), and `walk_dir` takes a set only in the spec's
-  shape (contiguous, its Stream first), so the patch can no longer write
-  Stream fields into another slot. Reproduced first by `make test-long-set`'s
-  control: a planted 20-entry set appended to on the guest, after which
-  fsck_exfat said "Incorrect checksum for directory entry set. Delete?", and
-  sets with a deleted slot or a primary inside had their slots written. The
-  record as found: It
-  reads `min(set_len, MAX_SET_ENTRIES)` entries, so a set of more (a name of
-  241 to 255 characters with a vendor secondary, which the spec allows and
-  cameras write) gets a SetChecksum over part of it, and fsck.exfat may
-  delete the set on repair. Since 2026-10-18 it also patches directories'
-  sets. Checksum all `set_len` entries a step at a time. The same function
-  writes the File and Stream entries as two sector writes even when they
-  share a sector, so a crash between them leaves a set whose checksum does
-  not match. Read in the code. Found by the same review.
-- ~~**exFAT's free-slot scan reads a sector for every slot.**~~ *Done
-  2026-10-19:* a `SlotCursor` steps forward through every walk over a
-  directory's slots (`slot_at`, the scan, `write_set_at`, `delete_set`,
-  `patch_stream_ext`), the scan holds the sector it read, and a set's write
-  and delete go out once a sector. Measured by QEMU's reads: 100 files in one
-  directory read 4,686 more sectors than one file, from 19,026, and the
-  directory's own sectors 4.3 passes a create, from 19.0, and written 1.36
-  times a file, from 3.24 (`make test-dir-scan`). The record as found: `find_free_run`
-  reads the whole sector for each 32-byte slot it tests and calls
-  `slot_addr`, which walks the chain from the first cluster each time: about
-  15,000 reads to make 100 files in one directory, where keeping the last
-  sector and cluster would need about 1,000. A cost only. Found by the same
-  review. `patch_stream_ext` pays the same per entry: since 2026-10-19 it sums
-  every entry of a set, so a set of 256 entries costs 256 chain walks on every
-  write that patches it (a set of fsd's own, three entries, costs what it did).
-  Resolving the primary's place once and stepping it forward would serve both.
 - **`mv` on exFAT drops a set's vendor entries.** A rename deletes the set
   and builds a new one of File, Stream and name, so vendor extension (0xE0)
   and vendor allocation (0xE1) entries a camera wrote are lost, and a vendor
   allocation's clusters leaked. Since 2026-10-19 a write keeps them (`make
   test-long-set`); a rename should copy the secondaries past the name into
   the new set. Read in the code; from the review of the set checksum.
-- ~~**exFAT says which set a name means in three places.**~~ *Done
-  2026-10-19:* `entry_in` is the one place a name in a directory picks a set,
-  returning the entry and its `SetAt`, which `delete_set` and
-  `patch_stream_ext` take; `find_at`, `parent_for_create`, `write_file`,
-  `write_at`, `rm` and `mv` all go through it. Its rule is exFAT's own
-  `names_match`, built on the `upcase` its NameHash uses (it was FAT32's), so
-  the up-case table would be a change to `upcase` alone. No change in
-  behaviour: the exFAT rigs pass with the same exact counts. The record as
-  found: `find_at`,
-  `find_in_parent` and `parent_for_create` each carry the name-match rule,
-  and `write_at`, `rm`, `rmdir` and `mv` assemble a set's location by hand
-  rather than as a `SetAt`. A change to matching (the up-case table, which
-  ASCII folding approximates) made in one copy would make two paths resolve
-  different sets. Found by the same review.
 - **exFAT names outside ASCII collide.** `walk_dir` renders each UTF-16
   name to ASCII with `?` for anything else, so `café` and `cafè` (which macOS
   writes) are both `caf?`, and `entry_in` takes whichever set comes first: an

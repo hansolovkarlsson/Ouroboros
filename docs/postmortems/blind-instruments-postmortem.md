@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-15. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-19. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -1876,4 +1876,53 @@ control was replaced with a calloc that leaves a byte set, and the docs now
 say the calloc and memalign counters cannot fail under nano at all. **A
 mutation tests the check only where the system under it can show the
 fault.**
+
+## Five more, from the filesystem hardening (2026-10-19)
+
+Six pull requests (#322 to #327) each built a rig that reproduced its defect
+before the fix, and each rig had a control. The controls were sound; five of
+the instruments around them were not, and three of the five were found by a
+review, not by me.
+
+**A check that could not tell two disks apart.** `make test-mount-gate`'s
+"the boot disk is the virtio copy, fsd mounted FAT32" passed whichever disk
+was `/`: the USB stick beside it was FAT32 too, the same 64 MiB, the same
+partition table. The review found it. The rig now attaches a copy of the
+stick 1 MiB longer, and the builtin `mount` must report the virtio disk's
+size before the swap and the stick's after. **A check names one thing; make
+sure nothing else answers to that name.**
+
+**A rig that never asked what it booted.** `make test-mv-into` ran its exFAT
+checks on `espexfat.img`, which carries the FAT32 ESP beside the exFAT root.
+Had fsd ever mounted the ESP there, every exFAT check would have passed while
+testing FAT32, which folds case the same way. The review found it; every boot
+now checks fsd's mount line. **When two configurations would pass the same
+checks, check which one ran.**
+
+**An observer that reported corruption that was not there.** `make
+test-fat-link` failed "FAT entry 1 as it was in both copies": copy 1 read 52
+where it had been `0x0FFFFFFF`. Dumping both copies' first sectors showed them
+identical. The rig had seeked to copy 1's entry and then, in the same
+expression, called the reader's `entry(1)`, which seeks to copy 0's and reads;
+the next read took bytes from the wrong place. The shared reader,
+`scripts/fat32img.py`, now reads an entry from a copy by number. **A failure
+from an observer is a claim about the observer first.**
+
+**A rig that graded half of its change.** `make test-dir-scan` bounded the
+reads of a directory's sectors, which the scan's held sector cut, and passed
+whether or not the set's writes were batched or the slot cursor kept. The
+review found it. The rig now counts writes too (`disktrace` gained a write
+counter), and says the cursor cannot be graded at all: its saving is FAT
+lookups that hit fsd's one-sector cache and reach no disk counter. My first
+write bound, 3 a file, sat 8% under the old code's 3.24; it is 2.5. **Grade
+each part of a change, and say which part no instrument can see.**
+
+**A planted case the old code would also pass.** `make test-long-set` plants
+PRIM, a set with a volume label primary inside it, for the walker to refuse.
+As first written its SecondaryCount did not count the label, so the old
+walker closed the set before its name, never found it, and would have passed
+the check too. I saw it while working out what the old code would do, before
+the first run, and planted it as the old walker takes it; the control then
+failed on PRIM's slots, as it should. **Work out what the old code does with a
+planted case before relying on the case.**
 
