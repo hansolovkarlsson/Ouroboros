@@ -354,10 +354,13 @@ def verdicts(plan, driven, out, faults):
         want_bitmap = plan["a_bitmap"]
         for blk in [plan["rd_block0"]] + plan["direct"]["RMI"] + plan["direct"]["OWI"]:
             want_bitmap = with_bits(want_bitmap, blk - va.fdb, blk - va.fdb + 1, 0)
-        owi_new = va.ptr(ino["OWI"], 0) if "OWI" in ents else 0
+        # The overwrite may give OWI a new inode: read it by its entry.
+        owi = ents["OWI"][0] if "OWI" in ents else 0
+        owi_new = va.ptr(owi, 0) if owi else 0
         if owi_new:
             want_bitmap = with_bits(want_bitmap, owi_new - va.fdb, owi_new - va.fdb + 1, 1)
-        owi_size = va.size(ino["OWI"])
+        owi_size = va.size(owi) if owi else None
+        owi_data = va.read(owi_new * va.bs, owi_size) if owi_new and owi_size else b""
         rmi_inode_bit = bit(va.bitmap(4), ino["RMI"] - 1)
         a_bitmap = va.bitmap(0)
         b_names = set(vb.entries())
@@ -387,8 +390,9 @@ def verdicts(plan, driven, out, faults):
          o.get("rm /mnt/a/RD") == "" and "RD" not in ents),
         (f"rm of RMI, its indirect pointer past A, succeeds and frees its inode (got {o.get('rm /mnt/a/RMI')!r})",
          o.get("rm /mnt/a/RMI") == "" and "RMI" not in ents and rmi_inode_bit == 0),
-        (f"OWI, its indirect pointer past A, overwritten without an error (got {o.get('echo x > /mnt/a/OWI')!r})",
-         o.get("echo x > /mnt/a/OWI") == "" and o.get("cat /mnt/a/OWI") == "x" and owi_size == 2),
+        (f"OWI, its indirect pointer past A, overwritten without an error (got {o.get('echo x > /mnt/a/OWI')!r}, holding {owi_data!r})",
+         o.get("echo x > /mnt/a/OWI") == "" and o.get("cat /mnt/a/OWI") == "x" and owi_data == b"x\r\n"
+         and owi == ino["OWI"]),
         ("A's block bitmap as before but RD's, RMI's and OWI's direct blocks freed and OWI's new one taken",
          a_bitmap == want_bitmap),
         (f"C's new file's write refused with an I/O error (got {o.get('echo x > /mnt/c/NEW')!r})",
