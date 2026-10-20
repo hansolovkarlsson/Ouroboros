@@ -50,14 +50,14 @@
 //! - **An allocation *bitmap*** replaces FAT free-cluster scanning: reads ignore
 //!   it entirely, writes drive it (see the write model above). The up-case table
 //!   (`0x82`) that would drive case-insensitive comparison per spec is ignored -
-//!   we approximate with ASCII case-folding ([`crate::fat32::names_match`], what
-//!   `fat32.rs` already uses), correct for the ASCII names this system uses, and
-//!   the same ASCII up-case feeds the `NameHash` we write.
+//!   we approximate with ASCII case-folding ([`upcase`]), correct for the ASCII
+//!   names this system uses; it is the one rule both name matching
+//!   ([`names_match`]) and the `NameHash` we write go through.
 
 use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};
-use crate::fat32::{names_match, split_parent, Error};
+use crate::fat32::{split_parent, Error};
 
 const SECTOR_SIZE: usize = 512;
 const ENTRY_SIZE: usize = 32;
@@ -1428,7 +1428,7 @@ impl Fs {
         }
     }
 
-    /// Rewrite `n` consecutive slots of a directory from global slot `start`,
+    /// Rewrite the `run.len` consecutive slots of a directory from `run.slot`,
     /// one read-modify-write a sector, in order: `f(sector, i, off, k)` changes
     /// the run's slots `i..i + k`, which lie at byte `off` of the sector read.
     /// The one copy of the arithmetic that splits a run at sector edges (a
@@ -1438,18 +1438,15 @@ impl Fs {
     /// the directory's clusters.
     fn rewrite_slots(
         &mut self,
-        dir_cluster: u32,
-        contiguous: bool,
-        start: usize,
-        n: usize,
+        run: SetAt,
         missing: fn() -> Error,
         mut f: impl FnMut(&mut [u8; SECTOR_SIZE], usize, usize, usize),
     ) -> Result<(), Error> {
-        let mut cur = SlotCursor::new(dir_cluster, contiguous);
+        let mut cur = SlotCursor::new(run.dir_cluster, run.dir_contiguous);
         let mut i = 0;
-        while i < n {
-            let (lba, off) = self.slot_at(&mut cur, start + i)?.ok_or_else(missing)?;
-            let k = (n - i).min((SECTOR_SIZE - off) / ENTRY_SIZE);
+        while i < run.len {
+            let (lba, off) = self.slot_at(&mut cur, run.slot + i)?.ok_or_else(missing)?;
+            let k = (run.len - i).min((SECTOR_SIZE - off) / ENTRY_SIZE);
             let mut sec = [0u8; SECTOR_SIZE];
             self.disk.read_sector(lba, &mut sec)?;
             f(&mut sec, i, off, k);
@@ -1470,8 +1467,8 @@ impl Fs {
         start: usize,
         set: &[u8],
     ) -> Result<(), Error> {
-        let n = set.len() / ENTRY_SIZE;
-        self.rewrite_slots(dir_cluster, contiguous, start, n, || Error::DiskFull, |sec, i, off, k| {
+        let run = SetAt { dir_cluster, dir_contiguous: contiguous, slot: start, len: set.len() / ENTRY_SIZE };
+        self.rewrite_slots(run, || Error::DiskFull, |sec, i, off, k| {
             sec[off..off + k * ENTRY_SIZE].copy_from_slice(&set[i * ENTRY_SIZE..(i + k) * ENTRY_SIZE]);
         })
     }
@@ -1528,9 +1525,9 @@ impl Fs {
     /// one place a name in a directory picks a set (since 2026-10-19). Path
     /// resolution (`find_at`), the existence check before a create
     /// (`parent_for_create`) and every write, removal and rename go through
-    /// it, so a change to matching (the up-case table, which `names_match`'s
-    /// ASCII folding approximates) cannot make two paths pick two sets, and
-    /// no caller assembles a set's location by hand.
+    /// it, so no two paths can pick two sets for one name, and no caller
+    /// assembles a set's location by hand. The rule it matches by is
+    /// [`names_match`], which shares [`upcase`] with the NameHash fsd writes.
     fn entry_in(&mut self, dir: &DirEntry, name: &str) -> Result<Option<(DirEntry, SetAt)>, Error> {
         let mut found = None;
         self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry, slot, len| {
@@ -1661,27 +1658,26 @@ impl Fs {
     /// share a sector, as they do unless the set starts in a sector's last
     /// slot: then two writes, and a crash between them leaves the checksum
     /// unmatched, which nothing short of a journal avoids.
-    fn patch_stream_ext(&mut self, at: SetAt, first_cluster: u32, data_len: u64) -> Result<(), Error> {
-        let SetAt { dir_cluster, dir_contiguous: dir_contig, slot: primary_slot, len: set_len } = at;
+    fn patch_stream_ext(&mut self, set: SetAt, first_cluster: u32, data_len: u64) -> Result<(), Error> {
         // File and Stream as they are, then the Stream changed.
-        let mut cur = SlotCursor::new(dir_cluster, dir_contig);
+        let mut cur = SlotCursor::new(set.dir_cluster, set.dir_contiguous);
         let mut head = [0u8; 2 * ENTRY_SIZE];
-        let mut place = [(0u64, 0usize); 2];
+        let mut at = [(0u64, 0usize); 2];
         let mut sec = [0u8; SECTOR_SIZE];
         let mut sec_lba = None;
-        for (i, spot) in place.iter_mut().enumerate() {
-            let (lba, off) = self.slot_at(&mut cur, primary_slot + i)?.ok_or(Error::NotFound)?;
+        for (i, place) in at.iter_mut().enumerate() {
+            let (lba, off) = self.slot_at(&mut cur, set.slot + i)?.ok_or(Error::NotFound)?;
             if sec_lba != Some(lba) {
                 self.disk.read_sector(lba, &mut sec)?;
                 sec_lba = Some(lba);
             }
             head[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE].copy_from_slice(&sec[off..off + ENTRY_SIZE]);
-            *spot = (lba, off);
+            *place = (lba, off);
         }
         let se = ENTRY_SIZE;
         // `walk_dir` closes a set only in this shape, so this is a check that
         // the slots still hold the set it found, not a second rule.
-        if set_len < 2 || head[0] != ET_FILE || head[se] != ET_STREAM_EXT {
+        if set.len < 2 || head[0] != ET_FILE || head[se] != ET_STREAM_EXT {
             return Err(Error::Io(DiskError::Io));
         }
         head[se + 1] = SECONDARY_ALLOC_POSSIBLE; // FAT-chained now (NoFatChain clear)
@@ -1691,8 +1687,8 @@ impl Fs {
         // The checksum: File (but its own two bytes) and the new Stream, then
         // every secondary after them as it is on the disk.
         let mut sum = set_checksum(&head);
-        for i in 2..set_len {
-            let (lba, off) = self.slot_at(&mut cur, primary_slot + i)?.ok_or(Error::NotFound)?;
+        for i in 2..set.len {
+            let (lba, off) = self.slot_at(&mut cur, set.slot + i)?.ok_or(Error::NotFound)?;
             if sec_lba != Some(lba) {
                 self.disk.read_sector(lba, &mut sec)?;
                 sec_lba = Some(lba);
@@ -1705,17 +1701,17 @@ impl Fs {
         // Rewrite the two changed entries (File carries the new checksum): one
         // write when they share a sector, the sector already read if `sec`
         // still holds it.
-        if place[0].0 == place[1].0 {
-            let (lba, _) = place[0];
+        if at[0].0 == at[1].0 {
+            let (lba, _) = at[0];
             if sec_lba != Some(lba) {
                 self.disk.read_sector(lba, &mut sec)?;
             }
-            for (i, &(_, off)) in place.iter().enumerate() {
+            for (i, &(_, off)) in at.iter().enumerate() {
                 sec[off..off + ENTRY_SIZE].copy_from_slice(&head[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE]);
             }
             self.disk.write_sector(lba, &sec)?;
         } else {
-            for (i, &(lba, off)) in place.iter().enumerate() {
+            for (i, &(lba, off)) in at.iter().enumerate() {
                 if sec_lba != Some(lba) {
                     self.disk.read_sector(lba, &mut sec)?;
                 }
@@ -1889,7 +1885,7 @@ impl Fs {
     /// `0x05`, `0xC0` -> `0x40`, `0xC1` -> `0x41`) - how exFAT removes a set (no
     /// `0xE5` tombstone byte like FAT). One read-modify-write a sector.
     fn delete_set(&mut self, at: SetAt) -> Result<(), Error> {
-        self.rewrite_slots(at.dir_cluster, at.dir_contiguous, at.slot, at.len, || Error::NotFound, |sec, _, off, k| {
+        self.rewrite_slots(at, || Error::NotFound, |sec, _, off, k| {
             for j in 0..k {
                 sec[off + j * ENTRY_SIZE] &= !ET_IN_USE;
             }
@@ -2004,6 +2000,10 @@ impl Fs {
             // happen. The create-first order below performs it: write the set
             // under the new name, delete the old one, and skip both the
             // source-side delete (same slot) and the data free (same file).
+            // The same slot of the same first cluster is the same set on the
+            // disk, whichever directory reached it: two directories a damaged
+            // volume cross-links share their slots, so their sets there are
+            // one, deleted once.
             let same_set = src_at.dir_cluster == dst_at.dir_cluster && src_at.slot == dst_at.slot;
             if same_set && src_name.as_bytes() == dst_name.as_bytes() {
                 return Ok(());
@@ -2141,6 +2141,22 @@ fn sectors_per_cluster_shift_for(total_sectors: u32) -> u8 {
 /// ASCII up-case one UTF-16 unit (the standard exFAT up-case table is the
 /// identity for non-ASCII, and ASCII `a-z -> A-Z` for the rest - correct for
 /// the ASCII names this system creates; see the module doc).
+/// Whether directory entry name `entry` answers to `name` on exFAT: equal once
+/// each character is put through [`upcase`], the one case rule this arm has.
+/// [`name_hash`] up-cases by it too, so the NameHash fsd writes and the match
+/// it looks names up by cannot disagree, and reading the volume's up-case
+/// table (`0x82`) is a change to `upcase` alone. [`Fs::entry_in`] is the one
+/// lookup that calls it, and `vfs::Filesystem::names_match` gives it to
+/// `NP_MV`'s guard. Its own since 2026-10-19: until then exFAT matched by
+/// FAT32's rule, a second statement of the same folding.
+pub(crate) fn names_match(entry: &str, name: &str) -> bool {
+    let (a, b) = (entry.as_bytes(), name.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| upcase(x as u16) == upcase(y as u16))
+}
+
+/// exFAT's case rule: ASCII `a`-`z` up-cased, every other code unit as it is,
+/// which the spec's up-case table maps the same way for the ASCII names this
+/// system makes. The volume's own table (`0x82`) is not read.
 fn upcase(c: u16) -> u16 {
     if (0x61..=0x7a).contains(&c) {
         c - 0x20

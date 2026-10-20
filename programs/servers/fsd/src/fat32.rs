@@ -2214,12 +2214,12 @@ fn is_dot_or_dotdot(name: &str) -> bool {
     name == "." || name == ".."
 }
 
-/// Whether directory entry name `entry` answers to `name`: FAT32 and exFAT
-/// look every name up ignoring ASCII case. THE one statement of the rule for
-/// both: every lookup calls it, and so does `NP_MV`'s guard against a move
-/// into the mover's own subtree (`vfs::Filesystem::names_match`), which let a
-/// case-only `mv` of a directory through while it compared bytes. A change to
-/// the rule (exFAT's up-case table, say) is made here, and both follow.
+/// Whether directory entry name `entry` answers to `name` on FAT32: equal
+/// ignoring ASCII case. THE one statement of FAT32's rule: every lookup calls
+/// it, and so does `NP_MV`'s guard against a move into the mover's own subtree
+/// (`vfs::Filesystem::names_match`), which let a case-only `mv` of a directory
+/// through while it compared bytes. exFAT has its own (`exfat::names_match`,
+/// since 2026-10-19), on the up-case rule its NameHash uses.
 pub(crate) fn names_match(entry: &str, name: &str) -> bool {
     entry.eq_ignore_ascii_case(name)
 }
