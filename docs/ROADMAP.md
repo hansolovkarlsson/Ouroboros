@@ -4372,7 +4372,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   allocation's clusters leaked. Since 2026-10-19 a write keeps them (`make
   test-long-set`); a rename should copy the secondaries past the name into
   the new set. Read in the code; from the review of the set checksum.
-- **exFAT says which set a name means in three places.** `find_at`,
+- ~~**exFAT says which set a name means in three places.**~~ *Done
+  2026-10-19:* `entry_in` is the one place a name in a directory picks a set,
+  returning the entry and its `SetAt`, which `delete_set` and
+  `patch_stream_ext` take; `find_at`, `parent_for_create`, `write_file`,
+  `write_at`, `rm` and `mv` all go through it. No change in behaviour: the
+  exFAT rigs pass with the same exact counts. The record as found: `find_at`,
   `find_in_parent` and `parent_for_create` each carry the name-match rule,
   and `write_at`, `rm`, `rmdir` and `mv` assemble a set's location by hand
   rather than as a `SetAt`. A change to matching (the up-case table, which

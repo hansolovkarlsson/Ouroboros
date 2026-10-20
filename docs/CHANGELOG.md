@@ -514,8 +514,19 @@ create, from 19.0, and written 1.36 times a file, from 3.24. `make
 test-dir-scan` counts QEMU's reads and writes of those sectors and fails
 above eight passes or two and a half writes a file; the cursor's saving,
 FAT lookups that hit fsd's FAT cache, no disk counter sees. A growth keeps
-the scan's cursor (`grow_dir` takes it), so no cursor outlives one stale. A cost, not a correctness fix: `test-grow-dir`,
-`test-long-set`, `test-stale-cursor` and `test-mv-into` pass on it.
+the scan's cursor (`grow_dir` takes it), so no cursor outlives one stale. A
+cost, not a correctness fix: `test-grow-dir`, `test-long-set`,
+`test-stale-cursor` and `test-mv-into` pass on it.
+
+**One exFAT lookup picks a name's set (2026-10-19).** Three functions each
+walked a directory and matched names (`find_at`, `find_in_parent`,
+`parent_for_create`), and the writers built a set's location from loose
+fields. `entry_in` is now the one place a name in a directory picks a set, and
+the set's place travels as a `SetAt` into `delete_set` and `patch_stream_ext`.
+A change to matching, such as reading the volume's up-case table, now lands
+in one function. A refactor: `test-mv-into`, `test-grow-dir`, `test-long-set`,
+`test-stale-cursor`, `test-dir-scan`, `test-write-walk` and `test-spawn-reads`
+pass, the last three with the same exact counts.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
