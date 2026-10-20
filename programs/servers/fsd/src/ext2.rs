@@ -48,7 +48,7 @@
 
 use core::ops::ControlFlow;
 
-use crate::disk::Disk;
+use crate::disk::{Disk, DiskError};
 use crate::fat32::{split_parent, Error};
 
 const SECTOR_SIZE: usize = 512;
@@ -147,10 +147,46 @@ impl DirEntry {
     }
 }
 
-pub struct Fs {
+/// The volume's sectors, and the only way this arm reaches the disk once it
+/// is mounted: every read and write names a sector from the partition's start
+/// and is refused, as an I/O error, past the volume's `s_blocks_count`
+/// blocks. A block number is read off the disk (an inode's pointer, an
+/// indirect block's, a descriptor's bitmap or table) and nothing else bounds
+/// it, so a damaged one read and wrote past the volume, into the next
+/// partition or past the disk. Checking where the sector meets the disk
+/// leaves no caller to remember it, as FAT32's `cluster_to_lba` does for its
+/// clusters (since 2026-10-20).
+struct Volume {
     disk: Disk,
     /// Absolute LBA of the partition's first sector (byte 0 of the volume).
-    part_lba: u32,
+    lba: u64,
+    /// The volume's length in sectors, `s_blocks_count` blocks, which mount
+    /// has bounded by the partition.
+    sectors: u64,
+}
+
+impl Volume {
+    fn sector(&self, rel: u64) -> Result<u64, Error> {
+        if rel < self.sectors {
+            Ok(self.lba + rel)
+        } else {
+            Err(Error::Io(DiskError::Io))
+        }
+    }
+
+    fn read(&mut self, rel: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), Error> {
+        let at = self.sector(rel)?;
+        Ok(self.disk.read_sector(at, buf)?)
+    }
+
+    fn write(&mut self, rel: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), Error> {
+        let at = self.sector(rel)?;
+        Ok(self.disk.write_sector(at, buf)?)
+    }
+}
+
+pub struct Fs {
+    vol: Volume,
     /// Block size in bytes (1024 << s_log_block_size).
     block_size: u32,
     inodes_per_group: u32,
@@ -168,6 +204,10 @@ pub struct Fs {
     first_ino: u32,
     /// Number of block groups (`ceil(inodes_count / inodes_per_group)`).
     groups_count: u32,
+    /// `s_blocks_count` and `s_inodes_count`: the last group may hold fewer
+    /// than a whole group of either, and the allocator stops at them.
+    blocks_count: u32,
+    inodes_count: u32,
     /// Whether the volume has the `filetype` incompat feature - if so, byte 7 of
     /// a directory entry is `file_type`; if not, it's the high byte of a u16
     /// `name_len` (so writes must leave it `0`). mke2fs sets this by default.
@@ -274,8 +314,11 @@ impl Fs {
         }
 
         Ok(Fs {
-            disk,
-            part_lba: partition_lba,
+            vol: Volume {
+                disk,
+                lba: partition_lba as u64,
+                sectors: blocks_count as u64 * (block_size as u64 / SECTOR_SIZE as u64),
+            },
             block_size,
             inodes_per_group,
             inode_size,
@@ -286,6 +329,8 @@ impl Fs {
             first_data_block,
             first_ino,
             groups_count,
+            blocks_count,
+            inodes_count,
             has_filetype: u32::from_le_bytes([sb[96], sb[97], sb[98], sb[99]]) & INCOMPAT_FILETYPE
                 != 0,
             creator_uid: 0,
@@ -303,7 +348,7 @@ impl Fs {
 
     /// The volume's first sector - for `mount`-info reporting only.
     pub fn partition_lba(&self) -> u32 {
-        self.part_lba
+        self.vol.lba as u32
     }
 
     /// Create a fresh ext2 filesystem (mkfs) in the partition
@@ -459,18 +504,18 @@ impl Fs {
         Ok(())
     }
 
-    /// Absolute LBA of the first sector of filesystem block `block`.
-    fn block_lba(&self, block: u32) -> u64 {
-        self.part_lba as u64 + block as u64 * (self.block_size as u64 / SECTOR_SIZE as u64)
+    /// The volume's sector holding the start of filesystem block `block`.
+    fn block_sector(&self, block: u32) -> u64 {
+        block as u64 * (self.block_size as u64 / SECTOR_SIZE as u64)
     }
 
     /// Read one filesystem block into `buf` (`buf` must be >= block_size).
     fn read_block(&mut self, block: u32, buf: &mut [u8]) -> Result<(), Error> {
-        let lba = self.block_lba(block);
+        let first = self.block_sector(block);
         let sectors = self.block_size as usize / SECTOR_SIZE;
         for s in 0..sectors {
             let mut sec = [0u8; SECTOR_SIZE];
-            self.disk.read_sector(lba + s as u64, &mut sec)?;
+            self.vol.read(first + s as u64, &mut sec)?;
             buf[s * SECTOR_SIZE..(s + 1) * SECTOR_SIZE].copy_from_slice(&sec);
         }
         Ok(())
@@ -479,10 +524,9 @@ impl Fs {
     /// Read a `u32` at absolute byte `offset` (used for a single pointer inside
     /// an indirect block, without buffering the whole block).
     fn read_u32_at(&mut self, byte_offset: u64) -> Result<u32, Error> {
-        let lba = self.part_lba as u64 + byte_offset / SECTOR_SIZE as u64;
         let within = (byte_offset % SECTOR_SIZE as u64) as usize;
         let mut sec = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(lba, &mut sec)?;
+        self.vol.read(byte_offset / SECTOR_SIZE as u64, &mut sec)?;
         Ok(u32::from_le_bytes([
             sec[within],
             sec[within + 1],
@@ -529,35 +573,40 @@ impl Fs {
         Ok(0)
     }
 
+    /// Inode number `ino` (1-based)'s group and index in that group, or an I/O
+    /// error for one the volume does not have: a directory entry's damaged
+    /// inode number named a group past the descriptor table, whose
+    /// "descriptor" was then whatever followed it (since 2026-10-20).
+    fn inode_place(&self, ino: u32) -> Result<(u32, u32), Error> {
+        if ino == 0 || ino > self.inodes_count {
+            return Err(Error::Io(DiskError::Io));
+        }
+        Ok(((ino - 1) / self.inodes_per_group, (ino - 1) % self.inodes_per_group))
+    }
+
+    /// The volume's sector holding inode `ino`, and the inode's offset in it.
+    /// The slot fsd touches (at most 256 bytes) never crosses a sector: mount
+    /// requires an inode size of a power of two from 128, so a slot starts on
+    /// a multiple of its size, or of 512 past it.
+    fn inode_sector(&mut self, ino: u32) -> Result<(u64, usize), Error> {
+        let (group, index) = self.inode_place(ino)?;
+        // bg_inode_table is at offset 8 within the 32-byte descriptor.
+        let inode_table = self.read_u32_at(self.desc_byte(group) + 8)?;
+        let inode_byte =
+            inode_table as u64 * self.block_size as u64 + index as u64 * self.inode_size as u64;
+        Ok((inode_byte / SECTOR_SIZE as u64, (inode_byte % SECTOR_SIZE as u64) as usize))
+    }
+
     /// Read inode number `ino` (1-based) from its block group's inode table.
     fn read_inode(&mut self, ino: u32) -> Result<Inode, Error> {
         if ino == 0 {
             return Err(Error::NotFound);
         }
-        let group = (ino - 1) / self.inodes_per_group;
-        let index = (ino - 1) % self.inodes_per_group;
-
-        // Block group descriptor: 32 bytes each, in the BGDT; bg_inode_table is
-        // at offset 8 within the descriptor.
-        let desc_byte = self.bgdt_block as u64 * self.block_size as u64 + group as u64 * 32;
-        let inode_table = self.read_u32_at(desc_byte + 8)?;
-
-        // The inode itself.
-        let inode_byte =
-            inode_table as u64 * self.block_size as u64 + index as u64 * self.inode_size as u64;
-        let lba = self.part_lba as u64 + inode_byte / SECTOR_SIZE as u64;
-        let within = (inode_byte % SECTOR_SIZE as u64) as usize;
-
-        // An inode (128 bytes of the fields we read) can straddle two sectors,
-        // so read two consecutive sectors into a window and index from `within`.
-        let mut win = [0u8; SECTOR_SIZE * 2];
+        let (rel, within) = self.inode_sector(ino)?;
         let mut sec = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(lba, &mut sec)?;
-        win[..SECTOR_SIZE].copy_from_slice(&sec);
-        self.disk.read_sector(lba + 1, &mut sec)?;
-        win[SECTOR_SIZE..].copy_from_slice(&sec);
+        self.vol.read(rel, &mut sec)?;
 
-        let i = &win[within..within + 128];
+        let i = &sec[within..within + 128];
         let mode = u16::from_le_bytes([i[0], i[1]]);
         let uid = u16::from_le_bytes([i[2], i[3]]);
         let size = u32::from_le_bytes([i[4], i[5], i[6], i[7]]);
@@ -789,29 +838,11 @@ impl Fs {
     /// timestamps and flags. `f` receives the inode's 128-byte slice; the
     /// mode/uid/gid fields it touches all live within it.
     fn patch_inode<F: FnOnce(&mut [u8])>(&mut self, ino: u32, f: F) -> Result<(), Error> {
-        let group = (ino - 1) / self.inodes_per_group;
-        let index = (ino - 1) % self.inodes_per_group;
-        let inode_table = self.read_u32_at(self.desc_byte(group) + 8)?;
-        let inode_byte =
-            inode_table as u64 * self.block_size as u64 + index as u64 * self.inode_size as u64;
-        let lba = self.part_lba as u64 + inode_byte / SECTOR_SIZE as u64;
-        let within = (inode_byte % SECTOR_SIZE as u64) as usize;
-
-        let mut win = [0u8; SECTOR_SIZE * 2];
+        let (rel, within) = self.inode_sector(ino)?;
         let mut sec = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(lba, &mut sec)?;
-        win[..SECTOR_SIZE].copy_from_slice(&sec);
-        self.disk.read_sector(lba + 1, &mut sec)?;
-        win[SECTOR_SIZE..].copy_from_slice(&sec);
-
-        f(&mut win[within..within + 128]);
-
-        let mut out = [0u8; SECTOR_SIZE];
-        out.copy_from_slice(&win[..SECTOR_SIZE]);
-        self.disk.write_sector(lba, &out)?;
-        out.copy_from_slice(&win[SECTOR_SIZE..]);
-        self.disk.write_sector(lba + 1, &out)?;
-        Ok(())
+        self.vol.read(rel, &mut sec)?;
+        f(&mut sec[within..within + 128]);
+        self.vol.write(rel, &sec)
     }
 
     /// Reads up to `buf.len()` bytes from byte `offset`, returning how many were
@@ -886,11 +917,11 @@ impl Fs {
 
     /// Write one filesystem block from `buf` (`buf.len() >= block_size`).
     fn write_block(&mut self, block: u32, buf: &[u8]) -> Result<(), Error> {
-        let lba = self.block_lba(block);
+        let first = self.block_sector(block);
         for s in 0..self.block_size as usize / SECTOR_SIZE {
             let mut sec = [0u8; SECTOR_SIZE];
             sec.copy_from_slice(&buf[s * SECTOR_SIZE..(s + 1) * SECTOR_SIZE]);
-            self.disk.write_sector(lba + s as u64, &sec)?;
+            self.vol.write(first + s as u64, &sec)?;
         }
         Ok(())
     }
@@ -903,22 +934,21 @@ impl Fs {
     /// Read a `u16` at a partition-relative byte offset (fields here are aligned,
     /// never straddling a sector).
     fn read_u16_at(&mut self, byte_offset: u64) -> Result<u16, Error> {
-        let lba = self.part_lba as u64 + byte_offset / SECTOR_SIZE as u64;
         let w = (byte_offset % SECTOR_SIZE as u64) as usize;
         let mut sec = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(lba, &mut sec)?;
+        self.vol.read(byte_offset / SECTOR_SIZE as u64, &mut sec)?;
         Ok(u16::from_le_bytes([sec[w], sec[w + 1]]))
     }
 
     /// RMW `len` bytes (<= 4) of a little-endian integer at a partition-relative
     /// byte offset.
     fn write_int_at(&mut self, byte_offset: u64, value: u32, len: usize) -> Result<(), Error> {
-        let lba = self.part_lba as u64 + byte_offset / SECTOR_SIZE as u64;
+        let rel = byte_offset / SECTOR_SIZE as u64;
         let w = (byte_offset % SECTOR_SIZE as u64) as usize;
         let mut sec = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(lba, &mut sec)?;
+        self.vol.read(rel, &mut sec)?;
         sec[w..w + len].copy_from_slice(&value.to_le_bytes()[..len]);
-        self.disk.write_sector(lba, &sec)?;
+        self.vol.write(rel, &sec)?;
         Ok(())
     }
 
@@ -974,7 +1004,12 @@ impl Fs {
     fn alloc_block(&mut self, zero: bool) -> Result<u32, Error> {
         for group in 0..self.groups_count {
             let bmp = self.read_u32_at(self.desc_byte(group))?;
-            if let Some(bit) = self.bitmap_alloc(bmp, self.blocks_per_group)? {
+            // The last group may be short: its bitmap's bits past the volume's
+            // last block (padding, set by mke2fs, clear on a damaged or shrunk
+            // volume) are not blocks.
+            let blocks = (self.blocks_count - self.first_data_block - group * self.blocks_per_group)
+                .min(self.blocks_per_group);
+            if let Some(bit) = self.bitmap_alloc(bmp, blocks)? {
                 let block = self.first_data_block + group * self.blocks_per_group + bit;
                 self.adjust_group_u16(group, 12, -1)?; // bg_free_blocks_count
                 self.adjust_super_u32(12, -1)?; // s_free_blocks_count
@@ -990,7 +1025,10 @@ impl Fs {
     /// Free a data block: clear its block-bitmap bit and bump the free counts.
     #[allow(dead_code)] // Stage B overwrite / Stage C rm
     fn free_block(&mut self, block: u32) -> Result<(), Error> {
-        if block < self.first_data_block {
+        // A block outside the volume's is no one's to free: a damaged pointer
+        // past it named a group past the descriptor table. The file goes, as
+        // FAT32's free_chain frees only the volume's clusters.
+        if block < self.first_data_block || block >= self.blocks_count {
             return Ok(());
         }
         let rel = block - self.first_data_block;
@@ -1014,7 +1052,8 @@ impl Fs {
     fn alloc_inode(&mut self, is_dir: bool) -> Result<u32, Error> {
         for group in 0..self.groups_count {
             let bmp = self.read_u32_at(self.desc_byte(group) + 4)?;
-            if let Some(bit) = self.bitmap_alloc(bmp, self.inodes_per_group)? {
+            let inodes = (self.inodes_count - group * self.inodes_per_group).min(self.inodes_per_group);
+            if let Some(bit) = self.bitmap_alloc(bmp, inodes)? {
                 let ino = group * self.inodes_per_group + bit + 1;
                 self.adjust_group_u16(group, 14, -1)?; // bg_free_inodes_count
                 self.adjust_super_u32(16, -1)?; // s_free_inodes_count
@@ -1031,8 +1070,7 @@ impl Fs {
     /// a directory decrement `bg_used_dirs_count`.
     #[allow(dead_code)] // Stage C (rm/rmdir)
     fn free_inode(&mut self, ino: u32, is_dir: bool) -> Result<(), Error> {
-        let group = (ino - 1) / self.inodes_per_group;
-        let bit = (ino - 1) % self.inodes_per_group;
+        let (group, bit) = self.inode_place(ino)?;
         let bmp = self.read_u32_at(self.desc_byte(group) + 4)?;
         self.bitmap_free(bmp, bit)?;
         self.adjust_group_u16(group, 14, 1)?;
@@ -1045,26 +1083,16 @@ impl Fs {
 
     /// Write inode `ino`'s managed fields (mode, links, size, i_blocks, the 15
     /// block pointers) from `node`, zeroing the rest of the slot for a freshly
-    /// allocated inode. Assumes `inode_size <= 256` (mke2fs's default) so the
-    /// slot fits the 2-sector window.
+    /// allocated inode, up to its first 256 bytes (the rest of a larger slot
+    /// is left), all in the one sector [`inode_sector`](Self::inode_sector)
+    /// names.
     fn write_inode(&mut self, ino: u32, node: &Inode) -> Result<(), Error> {
-        let group = (ino - 1) / self.inodes_per_group;
-        let index = (ino - 1) % self.inodes_per_group;
-        let inode_table = self.read_u32_at(self.desc_byte(group) + 8)?;
-        let inode_byte =
-            inode_table as u64 * self.block_size as u64 + index as u64 * self.inode_size as u64;
-        let lba = self.part_lba as u64 + inode_byte / SECTOR_SIZE as u64;
-        let within = (inode_byte % SECTOR_SIZE as u64) as usize;
-
-        let mut win = [0u8; SECTOR_SIZE * 2];
+        let (rel, within) = self.inode_sector(ino)?;
         let mut sec = [0u8; SECTOR_SIZE];
-        self.disk.read_sector(lba, &mut sec)?;
-        win[..SECTOR_SIZE].copy_from_slice(&sec);
-        self.disk.read_sector(lba + 1, &mut sec)?;
-        win[SECTOR_SIZE..].copy_from_slice(&sec);
+        self.vol.read(rel, &mut sec)?;
 
         let sz = (self.inode_size as usize).min(256);
-        let slot = &mut win[within..within + sz];
+        let slot = &mut sec[within..within + sz];
         slot.fill(0);
         slot[0..2].copy_from_slice(&node.mode.to_le_bytes());
         slot[2..4].copy_from_slice(&node.uid.to_le_bytes());
@@ -1076,13 +1104,7 @@ impl Fs {
             let o = 40 + b * 4;
             slot[o..o + 4].copy_from_slice(&ptr.to_le_bytes());
         }
-
-        let mut out = [0u8; SECTOR_SIZE];
-        out.copy_from_slice(&win[..SECTOR_SIZE]);
-        self.disk.write_sector(lba, &out)?;
-        out.copy_from_slice(&win[SECTOR_SIZE..]);
-        self.disk.write_sector(lba + 1, &out)?;
-        Ok(())
+        self.vol.write(rel, &sec)
     }
 
     /// Insert a `(name -> ino)` record into directory `dir` (inode number
@@ -1617,12 +1639,8 @@ impl Fs {
         };
         self.write_inode(ino, &dead)?;
         // i_dtime lives at offset 20 within the inode.
-        let group = (ino - 1) / self.inodes_per_group;
-        let index = (ino - 1) % self.inodes_per_group;
-        let inode_table = self.read_u32_at(self.desc_byte(group) + 8)?;
-        let inode_byte =
-            inode_table as u64 * self.block_size as u64 + index as u64 * self.inode_size as u64;
-        self.write_int_at(inode_byte + 20, DELETION_TIME, 4)
+        let (rel, within) = self.inode_sector(ino)?;
+        self.write_int_at(rel * SECTOR_SIZE as u64 + within as u64 + 20, DELETION_TIME, 4)
     }
 
     /// Point directory `dir`'s `..` entry at `new_parent` (after a
