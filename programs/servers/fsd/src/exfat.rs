@@ -1185,17 +1185,28 @@ impl Fs {
         Ok(())
     }
 
-    /// LBA of the bitmap sector holding `byte_index` (bitmap assumed contiguous
-    /// - see the field doc). The bitmap starts at `bitmap_first_cluster`.
-    fn bitmap_sector_lba(&self, byte_index: u64) -> u64 {
-        self.cluster_to_lba(self.bitmap_first_cluster) as u64 + byte_index / SECTOR_SIZE as u64
+    /// LBA of the bitmap sector holding `byte_index` (bitmap assumed
+    /// contiguous, see the field doc). The bitmap starts at
+    /// `bitmap_first_cluster`. Refused with [`Error::Io`] for a byte past the bitmap's own length or a
+    /// cluster of it outside the heap: both come from the root directory's
+    /// bitmap entry, unchecked, and every bitmap read and write is made here,
+    /// so a damaged entry (or none: a first cluster of 0, which the free
+    /// path once took to sector `heap - 2 clusters`) cannot reach past the
+    /// heap (the second review of #330; FAT32's `cluster_to_lba` the same).
+    fn bitmap_sector_lba(&self, byte_index: u64) -> Result<u64, Error> {
+        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+        let cluster = self.bitmap_first_cluster as u64 + byte_index / cluster_bytes;
+        if byte_index >= self.bitmap_bytes || !self.in_heap(self.bitmap_first_cluster) || cluster > u32::MAX as u64 || !self.in_heap(cluster as u32) {
+            return Err(Error::Io(DiskError::Io));
+        }
+        Ok(self.cluster_to_lba(self.bitmap_first_cluster) as u64 + byte_index / SECTOR_SIZE as u64)
     }
 
     /// Set or clear the bitmap bit for `cluster` (bit index `cluster - 2`).
     fn bitmap_set(&mut self, cluster: u32, allocated: bool) -> Result<(), Error> {
         let bit = cluster - 2;
         let byte_index = (bit / 8) as u64;
-        let lba = self.bitmap_sector_lba(byte_index);
+        let lba = self.bitmap_sector_lba(byte_index)?;
         let off = (byte_index % SECTOR_SIZE as u64) as usize;
         let mask = 1u8 << (bit % 8);
         let mut buf = [0u8; SECTOR_SIZE];
@@ -1221,7 +1232,7 @@ impl Fs {
         let mut sector_lba = u64::MAX;
         let mut buf = [0u8; SECTOR_SIZE];
         while byte_index < nbytes {
-            let lba = self.bitmap_sector_lba(byte_index);
+            let lba = self.bitmap_sector_lba(byte_index)?;
             if lba != sector_lba {
                 self.disk.read_sector(lba, &mut buf)?;
                 sector_lba = lba;

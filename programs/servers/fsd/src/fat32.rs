@@ -452,13 +452,18 @@ impl Fs {
         // In u64: the FATs' size is two BPB fields multiplied, which a
         // malformed BPB can carry past u32 and wrap under this check.
         let meta_sectors = reserved_sectors as u64 + num_fats as u64 * fat_size_32 as u64;
-        if sectors_per_cluster == 0 || num_fats == 0 || total_sectors as u64 <= meta_sectors {
+        // At least the boot sector reserved, so no FAT write lands on the BPB
+        // (the second review of #330), as exFAT's FatOffset keeps its FAT off
+        // its boot regions.
+        if sectors_per_cluster == 0
+            || num_fats == 0
+            || reserved_sectors == 0
+            || total_sectors as u64 <= meta_sectors
+        {
             return Err(Error::NotFat32);
         }
         // Below the total sectors, so in u32 from here.
         let meta_sectors = meta_sectors as u32;
-        let fat_start_lba = partition_lba + reserved_sectors;
-        let data_start_lba = partition_lba + meta_sectors;
         // No larger than its partition: `cluster_end` is the bound every
         // cluster is checked against, and it comes from these total sectors,
         // so a BPB claiming more than the partition holds would put the next
@@ -468,6 +473,11 @@ impl Fs {
         if total_sectors as u64 > partition_sectors {
             return Err(Error::NotFat32);
         }
+        // After the bound, which keeps the volume below sector 2^32
+        // (`vfs::volume_bound`), so these sums cannot wrap (the second review
+        // of #330 found them made before it).
+        let fat_start_lba = partition_lba + reserved_sectors;
+        let data_start_lba = partition_lba + meta_sectors;
         let clusters = (total_sectors - meta_sectors) / sectors_per_cluster;
         // Never past what the FAT can describe either, and never as far as the
         // bad-cluster mark (`0x0FFFFFF7`), the first value that is no cluster:

@@ -200,10 +200,12 @@ impl Fs {
         }
 
         let log_block_size = u32::from_le_bytes([sb[24], sb[25], sb[26], sb[27]]);
-        let block_size = 1024u32 << log_block_size;
-        if block_size as usize > MAX_BLOCK_SIZE {
+        // The shift checked before it is made: past 2 the block is over 4 KiB,
+        // and a garbage field would overflow it (the second review of #330).
+        if log_block_size > MAX_BLOCK_SIZE.trailing_zeros() - 10 {
             return Err(Error::NotExt2); // unsupported (>4 KiB) block size
         }
+        let block_size = 1024u32 << log_block_size;
         let first_data_block = u32::from_le_bytes([sb[20], sb[21], sb[22], sb[23]]);
         let inodes_per_group = u32::from_le_bytes([sb[40], sb[41], sb[42], sb[43]]);
         // s_rev_level at 76: rev 0 has a fixed 128-byte inode; rev 1 stores
@@ -237,14 +239,18 @@ impl Fs {
         if blocks_count as u64 * (block_size as u64 / SECTOR_SIZE as u64) > partition_sectors {
             return Err(Error::NotExt2);
         }
-        // The groups inside that count: the first data block below it, and no
-        // more groups (counted from the inodes, as `groups_count` is) than its
-        // blocks make, so no group's descriptor names a group past the volume
-        // (the review of #330). What a descriptor's own block numbers say is
-        // the roadmap's per-block bound.
+        // The groups inside that count: the first data block below it, at
+        // least one group holding the root inode, no more groups (counted from
+        // the inodes, as `groups_count` is) than its blocks make, and the
+        // descriptor table, one 32-byte descriptor a group from the block after
+        // the superblock's, inside the volume (the reviews of #330). What a
+        // descriptor's own block numbers say is the roadmap's per-block bound.
         let groups_count = inodes_count.div_ceil(inodes_per_group);
+        let bgdt_end = first_data_block as u64 + 1 + (groups_count as u64 * 32).div_ceil(block_size as u64);
         if first_data_block >= blocks_count
+            || inodes_count < ROOT_INO
             || groups_count as u64 > (blocks_count - first_data_block).div_ceil(blocks_per_group) as u64
+            || bgdt_end > blocks_count as u64
         {
             return Err(Error::NotExt2);
         }

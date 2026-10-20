@@ -53,6 +53,21 @@ def align_up(lba, to=2048):
     return (lba + to - 1) // to * to
 
 
+def entry(ptype, start, sectors, bootable=False):
+    """One 16-byte MBR partition entry, LBA-only (the CHS fields 0xFF): the one
+    statement of the layout, which `assemble` and `set_entry` both write."""
+    return (bytes([0x80 if bootable else 0x00, 0xFF, 0xFF, 0xFF, ptype, 0xFF, 0xFF, 0xFF])
+            + struct.pack("<II", start, sectors))
+
+
+def set_entry(path, number, ptype, start, sectors, bootable=False):
+    """Rewrite MBR entry `number` (1 to 4) of the disk image at `path` in
+    place; the rest of the image is left as it is, its signature included."""
+    with open(path, "r+b") as f:
+        f.seek(0x1BE + (number - 1) * 16)
+        f.write(entry(ptype, start, sectors, bootable))
+
+
 def assemble(dst, parts):
     """Write `dst`: an MBR disk whose partitions are `parts`, a list of
     (MBR type, payload bytes, bootable), in table order, the first at LBA
@@ -70,12 +85,7 @@ def assemble(dst, parts):
     disk = bytearray(lba * SECT)
     for i, ((ptype, data, bootable), (start, sectors)) in enumerate(zip(parts, layout)):
         e = 0x1BE + i * 16
-        disk[e] = 0x80 if bootable else 0x00
-        disk[e + 1:e + 4] = bytes([0xFF, 0xFF, 0xFF])  # CHS start (LBA-only reader)
-        disk[e + 4] = ptype
-        disk[e + 5:e + 8] = bytes([0xFF, 0xFF, 0xFF])  # CHS end
-        disk[e + 8:e + 12] = struct.pack("<I", start)
-        disk[e + 12:e + 16] = struct.pack("<I", sectors)
+        disk[e:e + 16] = entry(ptype, start, sectors, bootable)
         disk[start * SECT:start * SECT + len(data)] = data
     disk[510], disk[511] = 0x55, 0xAA
     with open(dst, "wb") as f:

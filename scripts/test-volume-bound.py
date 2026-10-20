@@ -18,7 +18,7 @@ failed, so since #329 `format` refused that disk with an I/O error. Since
 or the disk's when the table gives none) and refuses a boot sector claiming
 more, or one whose layout does not fit inside what it claims.
 
-Nine boots. In each the firmware boots esp.img from NVMe, which the kernel
+Twelve boots. In each the firmware boots esp.img from NVMe, which the kernel
 cannot drive, so the virtio disk the rig builds (scripts/mbrdisk.py, from the
 images' own volumes) goes in as the fallback, and the boot partition is not
 known to fsd. Where the disk's first partition is the ext2 root of
@@ -45,7 +45,7 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
 - WRAP: a copy of esp.img whose BPB has 2 FATs of 0x80000000 sectors, a
   product that wraps to 0 in 32 bits, under which the old check passed. Not
   mounted.
-- SHAPES-A to SHAPES-D: whole volumes in partitions of their own
+- SHAPES-A to SHAPES-F: whole volumes in partitions of their own
   size, each with one field of its boot sector changed so that it breaks
   exactly one of the rules the mounts check, which a model of those rules
   confirms on the host before the boot: exFAT's heap past its volume, its
@@ -53,16 +53,30 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
   short for its clusters, its cluster shift 64, FAT32's root at its
   cluster_end (B); FAT32 with no FATs, ext2's first data block at its block
   count, ext2 with more groups than its blocks make (C); exFAT's FAT running
-  into its heap (D). All refused.
+  into its heap (D); FAT32 with no reserved sectors (its FAT on its BPB),
+  ext2's block-size shift 32 (masked to 0 in a release build, so only the
+  shift rule refuses it), its descriptor table past its blocks (E); ext2
+  with no inodes (F). All refused.
+- BESIDE: the FAT32 cut short in a table entry of size 0, the next
+  partition inside its volume (refused: the bound stops at the next
+  partition), and the exFAT whole with its bitmap moved to the cluster past
+  its heap, the next partition's first sector: it mounts, a write to it must
+  answer an I/O error, and the partition after it must be as it was, every
+  byte (bitmap_sector_lba refuses a sector outside the bitmap's extent in
+  the heap).
 
 No fault line in QEMU's trace. Fails with the partition's length not passed
 (PARTS's three mount, STALE and LONG answer an I/O error), with the length
-not cut to the disk (LONG), with a size-0 entry refused (MIXED), without the
-2^32 cut (MIXED's last mounts), with FAT32's sum in u32 (WRAP), and with the
-shape rules removed (each SHAPES case mounts). About six minutes. Run it
+not cut to the disk (LONG), not cut at the next partition (BESIDE), with a
+size-0 entry refused (MIXED), without the 2^32 cut (MIXED's last mounts),
+with FAT32's sum in u32 (WRAP), with each shape rule removed (its SHAPES
+case mounts), and with the bitmap's sectors unbounded (BESIDE: the write
+lands on the next partition). Not reached: FAT32's sums made before the
+bound overflow only in a build with overflow checks. About eight minutes. Run it
 whenever a filesystem's `mount_at`, fsd's probe or `volume_bound`, or the
 partition table's sizes change.
 """
+import hashlib
 import importlib.util
 import os
 import re
@@ -88,6 +102,9 @@ DISK = os.path.join(BUILD, "test-volume-bound.img")
 EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M)
 NO_FS = "mount: no such partition, no filesystem on it, or `/` not mounted yet (`mount -a` first)"
 HIGH = (1 << 32) - 65536
+# (start, sectors) of a partition the boot must leave as it was, and its
+# digest before the boot; set by a build that has one (BESIDE).
+WITNESS = {}
 
 
 def volume(image, number):
@@ -96,14 +113,6 @@ def volume(image, number):
         entry = [e for e in mbrdisk.entries(fh.read(SECT)) if e[0] == number][0]
         fh.seek(entry[2] * SECT)
         return fh.read(entry[3] * SECT)
-
-
-def set_entry(path, number, kind, start, sectors):
-    """Rewrite MBR entry `number` (1-based) of `path` in place."""
-    with open(path, "r+b") as fh:
-        e = 0x1BE + (number - 1) * 16
-        fh.seek(e)
-        fh.write(bytes([0, 0xFF, 0xFF, 0xFF, kind, 0xFF, 0xFF, 0xFF]) + struct.pack("<II", start, sectors))
 
 
 # --- A model of the mounts' rules, to confirm each case breaks one ----------
@@ -118,6 +127,8 @@ def broken(vol, bound):
         out = set()
         if nf == 0:
             return {"fat32-nofats"}
+        if res == 0:
+            return {"fat32-reserved"}
         if spc == 0 or total <= meta:
             return {"fat32-meta"}
         if total > bound:
@@ -141,13 +152,21 @@ def broken(vol, bound):
         return {k for k, v in rules.items() if v}
     assert u("<H", 1024 + 56) == 0xEF53, "no volume"
     ic, bc, fdb, lb, bpg, ipg = (u("<I", 1024 + o) for o in (0, 4, 20, 24, 32, 40))
+    if lb > 2:
+        return {"ext2-blocksize"}
     out = set()
-    if bc * ((1024 << lb) // SECT) > bound:
+    bs = 1024 << lb
+    if bc * (bs // SECT) > bound:
         out.add("length")
     if fdb >= bc:
-        out.add("ext2-firstblock")
-    elif -(-ic // ipg) > -(-(bc - fdb) // bpg):
+        return out | {"ext2-firstblock"}
+    groups = -(-ic // ipg)
+    if ic < 2:
+        out.add("ext2-inodes")
+    if groups > -(-(bc - fdb) // bpg):
         out.add("ext2-groups")
+    if fdb + 1 + -(-(groups * 32) // bs) > bc:
+        out.add("ext2-bgdt")
     return out
 
 
@@ -183,8 +202,8 @@ def build_parts(ext2, fat, exfat):
 
 def build_mixed(ext2, fat, exfat):
     layout = mbrdisk.assemble(DISK, [(0x83, ext2, False), (0x0B, fat, False), (0x07, exfat, False)])
-    set_entry(DISK, 2, 0x0B, layout[1][0], 0)  # the FAT32's entry: no size
-    set_entry(DISK, 4, 0x0B, HIGH, len(fat) // SECT)
+    mbrdisk.set_entry(DISK, 2, 0x0B, layout[1][0], 0)  # the FAT32's entry: no size
+    mbrdisk.set_entry(DISK, 4, 0x0B, HIGH, len(fat) // SECT)
     with open(DISK, "r+b") as fh:
         fh.seek(HIGH * SECT)
         fh.write(fat)
@@ -195,6 +214,44 @@ def build_mixed(ext2, fat, exfat):
          broken(fat, (1 << 32) - HIGH) == {"length"}),
     ]
     return pre, [(1, "the FAT32 with no size", True), (2, "the whole exFAT", True), (3, "the FAT32 at 2^32", False)]
+
+
+def bitmap_entry(vol):
+    """The byte offset in `vol` of the exFAT root directory's bitmap entry."""
+    ho, rc, sh = u32(vol, 88), u32(vol, 96), vol[109]
+    root = (ho + ((rc - 2) << sh)) * SECT
+    for off in range(root, root + (SECT << sh), 32):
+        if vol[off] == 0x81:
+            return off
+    sys.exit("the exFAT root holds no bitmap entry")
+
+
+def build_beside(ext2, fat, exfat):
+    """The FAT32 cut short in an entry of size 0, the next partition inside
+    it; the exFAT whole with its bitmap moved to the first cluster past its
+    heap, the next partition's first sector, with an ext2 there as witness."""
+    cc = u32(exfat, 92)
+    bitmapped = bytearray(exfat)
+    struct.pack_into("<I", bitmapped, bitmap_entry(exfat) + 20, cc + 2)
+    layout = mbrdisk.assemble(DISK, [(0x83, ext2, False), (0x0B, fat[:len(fat) // 2], False),
+                                     (0x07, bytes(bitmapped), False), (0x83, ext2, False)])
+    mbrdisk.set_entry(DISK, 2, 0x0B, layout[1][0], 0)
+    (fat_start, _), (ex_start, ex_sectors), (wit_start, wit_sectors) = layout[1:]
+    WITNESS["range"] = (wit_start, wit_sectors)
+    WITNESS["before"] = digest(wit_start, wit_sectors)
+    pre = [
+        ("the size-0 FAT32 breaks only the length rule, cut at the next partition",
+         broken(fat, ex_start - fat_start) == {"length"}),
+        ("the exFAT passes every mount rule", broken(bytes(bitmapped), ex_sectors) == set()),
+        ("its bitmap's first sector is the next partition's first", ex_start + ex_sectors == wit_start),
+    ]
+    return pre, [(1, "the FAT32 with no size", False), (2, "the exFAT with its bitmap past its heap", "write")]
+
+
+def digest(start, sectors):
+    with open(DISK, "rb") as fh:
+        fh.seek(start * SECT)
+        return hashlib.sha256(fh.read(sectors * SECT)).hexdigest()
 
 
 def stale_volume(exfat):
@@ -210,7 +267,7 @@ def build_stale(exfat, claim_long):
     disk = 16 * 2048
     (start, sectors), = mbrdisk.assemble(DISK, [(0x07, vbr + bytes((disk - 2048) * SECT - len(vbr)), False)])
     if claim_long:
-        set_entry(DISK, 1, 0x07, start, struct.unpack_from("<Q", vbr, 72)[0])
+        mbrdisk.set_entry(DISK, 1, 0x07, start, struct.unpack_from("<Q", vbr, 72)[0])
     claimed = struct.unpack_from("<Q", vbr, 72)[0]
     pre = [(f"the exFAT claims {claimed} sectors, the disk holds {disk - start} after 2048", claimed > disk - start),
            (f"its root, sector {root}, is past the disk's end ({disk})", root >= disk)]
@@ -254,6 +311,14 @@ def build_shapes(ext2, fat, exfat, which):
         "SHAPES-D": [
             ("exfat-fatplace", exfat, [("<I", 84, ho - fo + 1)]),
         ],
+        "SHAPES-E": [
+            ("fat32-reserved", fat, [("<H", 14, 0)]),
+            ("ext2-blocksize", ext2, [("<I", sb + 24, 32)]),  # masked to 0 in release: only the shift rule refuses it
+            ("ext2-bgdt", ext2, [("<I", sb + 20, bc - 1), ("<I", sb + 0, ipg)]),
+        ],
+        "SHAPES-F": [
+            ("ext2-inodes", ext2, [("<I", sb + 0, 0)]),
+        ],
     }[which]
     vols = [(rule, patched(base, edits)) for rule, base, edits in cases]
     parts = [(0x83, ext2, False)] + [
@@ -267,7 +332,8 @@ def build_shapes(ext2, fat, exfat, which):
     return pre, [(n, f"the {rule} case", False) for n, (rule, _) in enumerate(vols, 1)]
 
 
-BOOTS = ["PARTS", "MIXED", "STALE", "LONG", "WRAP", "SHAPES-A", "SHAPES-B", "SHAPES-C", "SHAPES-D"]
+BOOTS = ["PARTS", "MIXED", "STALE", "LONG", "WRAP", "SHAPES-A", "SHAPES-B", "SHAPES-C", "SHAPES-D", "SHAPES-E",
+         "SHAPES-F", "BESIDE"]
 
 
 def build(name):
@@ -280,6 +346,8 @@ def build(name):
         return build_stale(exfat, name == "LONG")
     if name == "WRAP":
         return build_wrap(fat)
+    if name == "BESIDE":
+        return build_beside(ext2, fat, exfat)
     return build_shapes(ext2, fat, exfat, name)
 
 
@@ -291,7 +359,9 @@ def commands(name, cases):
     out = []
     for n, _, whole in cases:
         out.append(f"mount {n} /mnt/p{n}")
-        if whole:
+        if whole == "write":
+            out.append(f"echo bitmap > /mnt/p{n}/NEW.TXT")
+        elif whole:
             out.append(f"ls /mnt/p{n}")
     return out + ["ls /"]
 
@@ -315,6 +385,9 @@ def boot(name, cmds):
         driven = guest.run(steps)
         out = guest.transcript()
         faults = guest.aborts()
+        guest.stop()
+        if "range" in WITNESS:
+            WITNESS["after"] = digest(*WITNESS["range"])
     finally:
         guest.stop()
         if os.path.exists(DISK):
@@ -372,7 +445,15 @@ def checks_of(name):
         checks.append(("the ext2 root mounted at boot", "fsd: ext2 mounted, disk commands available" in boot_log))
         for n, what, whole in cases:
             got = o[f"mount {n} /mnt/p{n}"]
-            if whole:
+            if whole == "write":
+                wrote = o[f"echo bitmap > /mnt/p{n}/NEW.TXT"] or ""
+                checks += [
+                    (f"mount {n}, {what}, mounts (got {got!r})", got == ""),
+                    (f"a write to it is refused (got {wrote!r})", "error" in wrote),
+                    ("the partition after it as it was, every byte",
+                     WITNESS.get("after") is not None and WITNESS.get("after") == WITNESS.get("before")),
+                ]
+            elif whole:
                 # Both whole volumes carry an /etc of their own.
                 listing = [w.lower() for w in (o[f"ls /mnt/p{n}"] or "").split()]
                 checks.append((f"mount {n}, {what}, mounts and lists (got {got!r}, ls {listing[:4]})",
