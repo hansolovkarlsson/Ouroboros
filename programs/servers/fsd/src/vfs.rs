@@ -93,11 +93,15 @@ impl Filesystem {
     /// FAT32 ([`fat32::Fs::mount_at`]), exFAT ([`exfat::Fs::mount_at`]) and
     /// ext2 ([`ext2::Fs::mount_at`]), in table order, except as below.
     /// Returns [`Error::NoFat32Partition`] if no partition mounts as any
-    /// known format. The [`Fallback`] is set when what mounted is not the
-    /// root's candidate, every one of which failed to mount: the caller says
+    /// known format, or the [`Error::Io`] of a probe whose read failed when
+    /// none mounts ([`first_mounting`](Self::first_mounting)). The
+    /// [`Fallback`] is set when what mounted is not the root's candidate,
+    /// every one of which failed to mount: the caller says
     /// so and mounts it read-only, since a root that did not probe then
     /// leaves the ESP or another partition as `/` (the high review of #288,
-    /// the review of #295).
+    /// the review of #295). The last of the three is whether a partition
+    /// tried before the one that mounted would not read, for the caller to
+    /// say: a disk failing a read is not a partition with nothing on it.
     ///
     /// The partition the system booted from, when the kernel knows it is on
     /// this disk ([`Disk::boot_partition_start`]), is passed over while any
@@ -106,53 +110,86 @@ impl Filesystem {
     /// filesystem is the boot partition mounts it as before (one-disk step 4,
     /// docs/roadmap/roadmap-one-disk.md). A partition typed as a root is
     /// tried before, and in place of, any untyped one ([`root_order`]).
-    pub fn mount(mut disk: Disk) -> Result<(Self, Option<Fallback>), Error> {
+    pub fn mount(mut disk: Disk) -> Result<(Self, Option<Fallback>, bool), Error> {
         let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
         let count = partition::discover(&mut disk, &mut parts)?;
         let boot = disk.boot_partition_start();
         let roots = root_order(&parts, count, boot);
-        for (i, &lba) in roots.order[..roots.len].iter().enumerate() {
-            // The layout arithmetic is 32-bit (partitions past 2 TB aren't a
-            // concern here); a start LBA that doesn't fit just isn't tried.
+        let probed = Self::first_mounting(&roots.order[..roots.len]);
+        let Some((i, fs)) = probed.found else {
+            return Err(probed.failed.unwrap_or(Error::NoFat32Partition));
+        };
+        let fallback = roots.is_fallback(i).then_some(Fallback {
+            typed_root: roots.typed,
+            boot_partition: Some(roots.order[i]) == boot,
+        });
+        Ok((fs, fallback, probed.failed.is_some()))
+    }
+
+    /// The first of the partitions starting at `lbas` that [`probe`](Self::probe)
+    /// mounts, with its index in `lbas`, and the [`Error::Io`] of a probe
+    /// before it whose read failed (of any, when none mounts). A partition
+    /// that would not read is passed over, so a root that will not read still
+    /// leaves the ESP beside it to come up read-only, but it is never taken
+    /// for one with nothing on it: when nothing mounts [`mount`](Self::mount)
+    /// answers the read's error, so `mount -a` does not swap a stick in for a
+    /// disk that is there and failing, and `format` refuses whenever a read
+    /// failed, rather than laying a filesystem over a partition it could not
+    /// read or over a later one that did. The one rule `mount` and `format`
+    /// both pick by. A start LBA past 32 bits is not tried (the layout
+    /// arithmetic is 32-bit; partitions past 2 TB aren't a concern here).
+    pub fn first_mounting(lbas: &[u64]) -> Probed {
+        let mut failed = None;
+        for (i, &lba) in lbas.iter().enumerate() {
             let Ok(lba32) = u32::try_from(lba) else {
                 continue;
             };
-            if let Some(fs) = Self::probe(lba32) {
-                let fallback = roots.is_fallback(i).then_some(Fallback {
-                    typed_root: roots.typed,
-                    boot_partition: Some(lba) == boot,
-                });
-                return Ok((fs, fallback));
+            match Self::probe(lba32) {
+                Ok(Some(fs)) => return Probed { found: Some((i, fs)), failed },
+                Ok(None) => {}
+                Err(e) => failed = failed.or(Some(e)),
             }
         }
-        Err(Error::NoFat32Partition)
+        Probed { found: None, failed }
     }
 
     /// The filesystem at `lba`, as FAT32, exFAT or ext2, the first that
-    /// validates; `None` when none does. What [`mount`](Self::mount) tries
-    /// at each partition, and what `format` asks to find the root by the
-    /// same rule.
-    pub fn probe(lba: u32) -> Option<Self> {
-        if let Ok(fs) = fat32::Fs::mount_at(Disk, lba) {
-            return Some(Filesystem::Fat32(fs));
+    /// validates; `None` when none does. Every arm is tried, since they read
+    /// different sectors (ext2's superblock is the partition's third and
+    /// fourth, FAT32's and exFAT's boot sector its first), so one arm's
+    /// failed read does not hide another arm's volume; when none validates,
+    /// a read that failed is [`Error::Io`], never `None`: a partition that
+    /// could not be read has not been shown to hold no filesystem. What
+    /// [`first_mounting`](Self::first_mounting) tries at each partition.
+    pub fn probe(lba: u32) -> Result<Option<Self>, Error> {
+        let mut failed = None;
+        match fat32::Fs::mount_at(Disk, lba) {
+            Ok(fs) => return Ok(Some(Filesystem::Fat32(fs))),
+            Err(e @ Error::Io(_)) => failed = failed.or(Some(e)),
+            Err(_) => {}
         }
-        if let Ok(fs) = exfat::Fs::mount_at(Disk, lba) {
-            return Some(Filesystem::ExFat(fs));
+        match exfat::Fs::mount_at(Disk, lba) {
+            Ok(fs) => return Ok(Some(Filesystem::ExFat(fs))),
+            Err(e @ Error::Io(_)) => failed = failed.or(Some(e)),
+            Err(_) => {}
         }
-        if let Ok(fs) = ext2::Fs::mount_at(Disk, lba) {
-            return Some(Filesystem::Ext2(fs));
+        match ext2::Fs::mount_at(Disk, lba) {
+            Ok(fs) => return Ok(Some(Filesystem::Ext2(fs))),
+            Err(e @ Error::Io(_)) => failed = failed.or(Some(e)),
+            Err(_) => {}
         }
-        None
+        failed.map_or(Ok(None), Err)
     }
 
     /// Mount the disk's `index`-th partition, counted in the MBR/GPT
     /// discovery order (the table's, not [`mount`](Self::mount)'s, which tries
     /// the boot partition last: on `disk.img` tree 0 is index 1). Probes
-    /// FAT32-then-exFAT-then-ext2 at that one partition. The multi-mount entry
-    /// point (cluster Phase 0): a client mounts a *specific* partition into a
-    /// tree rather than taking whatever validates first. Returns
+    /// FAT32-then-exFAT-then-ext2 at that one partition ([`probe`](Self::probe)).
+    /// The multi-mount entry point (cluster Phase 0): a client mounts a
+    /// *specific* partition into a tree rather than taking whatever validates
+    /// first. Returns
     /// [`Error::NoFat32Partition`] if `index` is out of range or the partition
-    /// mounts as no known format.
+    /// mounts as no known format, [`Error::Io`] if a read failed.
     pub fn mount_partition(mut disk: Disk, index: usize) -> Result<Self, Error> {
         let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
         let count = partition::discover(&mut disk, &mut parts)?;
@@ -162,16 +199,7 @@ impl Filesystem {
         let Ok(lba32) = u32::try_from(parts[index].start) else {
             return Err(Error::NoFat32Partition);
         };
-        if let Ok(fs) = fat32::Fs::mount_at(Disk, lba32) {
-            return Ok(Filesystem::Fat32(fs));
-        }
-        if let Ok(fs) = exfat::Fs::mount_at(Disk, lba32) {
-            return Ok(Filesystem::ExFat(fs));
-        }
-        if let Ok(fs) = ext2::Fs::mount_at(Disk, lba32) {
-            return Ok(Filesystem::Ext2(fs));
-        }
-        Err(Error::NoFat32Partition)
+        Self::probe(lba32)?.ok_or(Error::NoFat32Partition)
     }
 
     /// The mounted format's name, for the startup/mount log line.
@@ -375,6 +403,14 @@ impl Filesystem {
             _ => Err(Error::Unsupported),
         }
     }
+}
+
+/// What [`Filesystem::first_mounting`] found: the first partition that
+/// mounted, with its index, and the error of a read that failed in a probe
+/// before it (or in any probe, when none mounted).
+pub struct Probed {
+    pub found: Option<(usize, Filesystem)>,
+    pub failed: Option<Error>,
 }
 
 /// What [`Filesystem::mount`] fell back to when the root did not mount: for

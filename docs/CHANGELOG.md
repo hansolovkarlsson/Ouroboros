@@ -531,6 +531,38 @@ together. A refactor: `test-mv-into`, `test-grow-dir`, `test-long-set`,
 `test-stale-cursor`, `test-dir-scan`, `test-write-walk` and `test-spawn-reads`
 pass, the last three with the same exact counts.
 
+**A read error inside a partition's probe is an I/O error (2026-10-20).**
+`vfs::Filesystem::probe` answered `None` for any failure of FAT32's, exFAT's
+and ext2's `mount_at`, a failed read among them, so a disk that was there and
+failing read the same as one with nothing on it. `mount -a` then had the
+kernel swap in whatever USB stick was attached (#324 told apart only a read
+error in the partition table), and `format` took the partition it could not
+read as empty: it laid ext2 over it and then failed on the sector that would
+not read. The probe now answers the read's `Error::Io`, and
+`first_mounting`, the one rule `mount` and `format` both pick a partition by,
+passes over a partition whose read failed, as before, so a root that will not
+read still leaves the ESP beside it to come up read-only, but answers the I/O
+error when nothing mounts, and the boot line says when a partition before the
+one that mounted would not read. The probe tries every arm before answering a
+read's error, since ext2's superblock is not the sector FAT32 and exFAT read.
+`format` refuses with `FS_ERR_IO` whenever a candidate's read failed, so
+neither the partition it could not read nor a later one (the ESP, with the
+boot partition unknown) is formatted in its place, and on a partition table
+that would not read too (it said "no partition" until now); `mount N`
+answers the I/O error. `make test-probe-ioerr` boots four times from NVMe
+with a disk on virtio one of whose sectors fails every read (QEMU's blkdebug)
+and a USB stick beside it: on a one-partition exFAT disk `mount -a` must
+answer the I/O error with no stick installed and `format ext2` must leave the
+partition as it was; on the exFAT disk with its ESP the ESP mounts with the
+line, `mount 0` answers the I/O error and `format` leaves both partitions;
+and an ext2 disk whose first sector fails must still mount. Each check fails
+with its part of the change taken out: with the probe's old rule the stick is
+installed and mounted at `/` and the partition overwritten, with the probe
+stopping at its first arm's error the ext2 does not mount, and with `format`
+going on past the failed read it formats the ESP. fsd's "mount failed" line
+is one write now, as its "mounted" line was made in the third review of #288:
+it was three, and accountd's ready line landed inside it.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

@@ -160,8 +160,8 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
         return syscall_abi::NO_FS;
     }
     match vfs::Filesystem::mount(disk::Disk) {
-        Ok((mounted, _)) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
-        Ok((mounted, fallback)) => {
+        Ok((mounted, ..)) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
+        Ok((mounted, fallback, unread)) => {
             // One write, so no other task's line lands inside it: three
             // pieces let accountd's ready line split "fsd: FAT32 mounted" on a
             // boot `make test-boot-partition` read (the review of #288). When
@@ -186,9 +186,12 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
                     "fsd: no partition beside the boot partition mounted - the boot partition is `/`, read-only\r\n"
                 }
             };
-            let mut line = [0u8; 160];
+            // A partition tried before it would not read: said, since what
+            // it held is not known (a failing disk, not an empty partition).
+            let unread = if unread { "fsd: a partition before it would not read (disk I/O error)\r\n" } else { "" };
+            let mut line = [0u8; 224];
             let mut len = 0;
-            for part in [fallback, "fsd: ", mounted.name(), " mounted, disk commands available\r\n"] {
+            for part in [unread, fallback, "fsd: ", mounted.name(), " mounted, disk commands available\r\n"] {
                 // Bounded, so a longer name or message is cut, never a panic
                 // in the storage server (the third review of #288).
                 let take = part.len().min(line.len() - len);
@@ -200,9 +203,16 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             0
         }
         Err(e) => {
-            print("fsd: mount failed (");
-            print(error_name(&e));
-            print(") - disk commands won't work\r\n");
+            // One write, as the line above, so no other task's line lands
+            // inside it (accountd's did, in `make test-probe-ioerr`).
+            let mut line = [0u8; 160];
+            let mut len = 0;
+            for part in ["fsd: mount failed (", error_name(&e), ") - disk commands won't work\r\n"] {
+                let take = part.len().min(line.len() - len);
+                line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
+                len += take;
+            }
+            con_write(&line[..len]);
             match e {
                 fat32::Error::Io(_) => syscall_abi::FS_ERR_IO,
                 _ => syscall_abi::NO_FS,
@@ -222,9 +232,10 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
 ///
 /// Not on an I/O error: a disk whose partition table would not read is there
 /// and failing, and swapping in whatever stick is attached would put the stick
-/// at `/` with the real disk out of reach until a reboot. (A read error inside
-/// a partition's probe still reads as "no filesystem": `vfs::Filesystem::probe`
-/// does not tell them apart, the roadmap.) Answers `try_mount`'s codes,
+/// at `/` with the real disk out of reach until a reboot. The same for a read
+/// error inside a partition's probe when no partition mounts
+/// (`vfs::Filesystem::first_mounting`, since 2026-10-20; until then the probe
+/// read it as "no filesystem"). Answers `try_mount`'s codes,
 /// `MOUNT_NO_DEVICE` when the rescan found no stick, or the kernel's own
 /// refusal of the rescan as it came (`BLOCK_ERR_DENIED`: this task without
 /// `CAP_BLOCK`, a policy fault the shell names).
@@ -338,20 +349,25 @@ fn partition_disk(type_byte: u8) -> u64 {
 /// root by `vfs::mount`'s own order ([`vfs::root_order`]), from the one
 /// partition parser ([`partition::discover`]), with the size the table
 /// gives it. `None` on a GPT disk, which this MBR-only formatter refuses,
-/// when the disk has no partition, or when the size does not fit 32 bits.
-fn find_partition() -> Option<(u32, u32)> {
+/// when the disk has no partition, or when the size does not fit 32 bits;
+/// [`fat32::Error::Io`] when the table, or the probe of a candidate before
+/// the one chosen, would not read: a partition that could not be read is not
+/// shown to be empty, and neither it nor a later candidate is formatted on
+/// that word (the review of #329: the next candidate, an ESP among them when
+/// the boot partition is not known, was formatted in its place).
+fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
     // A GPT disk, by the test `mount` reads it with: this formatter writes
     // MBR partitions only, and on a GPT disk it would lay the filesystem from
     // LBA 1 over the GPT and every partition in it, the ESP included (the
     // medium review of #288). Refused.
-    if partition::is_gpt(&mut disk::Disk).ok()? {
-        return None;
+    if partition::is_gpt(&mut disk::Disk)? {
+        return Ok(None);
     }
     // The partitions `mount` sees, from the one parser it uses, so `format`
     // never picks an entry `mount` would not list (one starting at LBA 0,
     // the MBR itself), each with its size.
     let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
-    let count = partition::discover(&mut disk::Disk, &mut parts).ok()?;
+    let count = partition::discover(&mut disk::Disk, &mut parts)?;
     // The size from the same parse that chose the partition, not a second
     // read of the table (the review of #296).
     let size_of = |lba: u64| {
@@ -371,9 +387,15 @@ fn find_partition() -> Option<(u32, u32)> {
     let boot = disk::Disk.boot_partition_start();
     let roots = vfs::root_order(&parts, count, boot);
     let candidates = roots.format_targets();
-    let probing = candidates.iter().find(|&&lba| u32::try_from(lba).ok().and_then(vfs::Filesystem::probe).is_some());
-    let target = *probing.or(candidates.first())?;
-    Some((u32::try_from(target).ok()?, size_of(target)?))
+    let probed = vfs::Filesystem::first_mounting(candidates);
+    if let Some(e) = probed.failed {
+        return Err(e);
+    }
+    let probing = probed.found.map(|(i, _)| candidates[i]);
+    let Some(target) = probing.or(candidates.first().copied()) else {
+        return Ok(None);
+    };
+    Ok(u32::try_from(target).ok().zip(size_of(target)))
 }
 
 /// Lay a fresh filesystem of type `fstype` into the disk's root partition
@@ -381,13 +403,16 @@ fn find_partition() -> Option<(u32, u32)> {
 /// refused as having no partition this can format. FAT32, exFAT, and ext2 are all supported (milestone 3);
 /// any other `fstype` returns [`FS_ERROR`]. Returns `0`, [`MOUNT_NO_DEVICE`],
 /// [`FS_ERR_NOT_FOUND`] (no partition - run `partition` first),
-/// [`FS_ERR_DISK_FULL`] (partition too small), or [`FS_ERR_IO`].
+/// [`FS_ERR_DISK_FULL`] (partition too small), or [`FS_ERR_IO`] (also when
+/// the partition table or the probe would not read).
 fn format_disk(fstype: u64) -> u64 {
     if disk::Disk.capacity_sectors().is_err() {
         return syscall_abi::MOUNT_NO_DEVICE;
     }
-    let Some((start, sectors)) = find_partition() else {
-        return syscall_abi::FS_ERR_NOT_FOUND;
+    let (start, sectors) = match find_partition() {
+        Ok(Some(found)) => found,
+        Ok(None) => return syscall_abi::FS_ERR_NOT_FOUND,
+        Err(_) => return syscall_abi::FS_ERR_IO,
     };
     let result = match fstype {
         syscall_abi::FMT_FAT32 => fat32::Fs::format(disk::Disk, start, sectors),
@@ -570,6 +595,9 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         let index = p[0] as usize;
         let fs = match vfs::Filesystem::mount_partition(disk::Disk, index) {
             Ok(fs) => fs,
+            // A partition that would not read is a failing disk, not "no
+            // filesystem" (the review of #329).
+            Err(fat32::Error::Io(_)) => return status_reply(reply, syscall_abi::FS_ERR_IO),
             Err(_) => return status_reply(reply, syscall_abi::NO_FS),
         };
         if let Some(existing) = tree_of(mounts, &fs) {

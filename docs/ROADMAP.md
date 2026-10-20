@@ -4253,8 +4253,20 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   that to the sectors the chain crosses, which a fragmented file makes
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
-- **A read error inside a partition's probe reads as "no filesystem".**
-  `vfs::Filesystem::probe` returns `None` for any failure of FAT32's, exFAT's
+- ~~**A read error inside a partition's probe reads as "no filesystem".**~~ *Done
+  2026-10-20:* the probe answers the read's I/O error, and
+  `vfs::Filesystem::first_mounting`, the one rule `mount` and `format` pick a
+  partition by, passes over a partition whose read failed but answers the
+  error when nothing mounts: `mount -a` no longer swaps the disk for a stick,
+  and `format` no longer lays a filesystem over a partition it could not read
+  (it did, then failed), nor over a later candidate that did read (the
+  review of #329: with the boot partition unknown, the ESP after a failing
+  exFAT). Every arm is tried before a read's error is answered, since
+  ext2's superblock is not where FAT32 and exFAT read; `mount N` answers
+  the I/O error too, and the boot line says when a partition before the one
+  that mounted would not read. `make test-probe-ioerr`, through QEMU's blkdebug,
+  a persistent read error QEMU does give, which the MOUNT gate's CHANGELOG
+  entry took to be unreachable. The record as found: `vfs::Filesystem::probe` returns `None` for any failure of FAT32's, exFAT's
   and ext2's `mount_at`, an I/O error among them, so `mount` cannot tell a
   disk that failed a read from one with nothing on it, except when the
   partition table itself would not read (`FS_ERR_IO` since 2026-10-19). Since
@@ -4272,7 +4284,17 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   for a link past `cluster_end`. fsd's `mount_at` is given the partition's
   start but not its length; passing the length and taking the smaller would
   close it, for exFAT's cluster count too. Read in the code, not reproduced.
-  From the review of the FAT32 bound (2026-10-19).
+  From the review of the FAT32 bound (2026-10-19). **Since 2026-10-20 it also
+  decides a probe's answer:** a read error in a probe is an I/O error now,
+  not "no filesystem", and the exFAT probe reads the root directory at the
+  cluster its boot sector names, unbounded. A stale exFAT boot sector whose
+  root lies past the end of the device (a larger image written to a smaller
+  stick, then `erase disk`, which zeroes only the first 2,048 sectors, and
+  `partition`, which starts there) makes that read fail, so `format` on the
+  disk refuses with an I/O error where it went ahead, and `mount -a` does
+  not swap a stick in. Bounding the boot sector's geometry by the
+  partition's length, and answering "not this filesystem" for one that
+  passes it, would close both. Read in the code, from the review of #329.
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the
