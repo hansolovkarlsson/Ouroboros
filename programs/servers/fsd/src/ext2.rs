@@ -237,6 +237,17 @@ impl Fs {
         if blocks_count as u64 * (block_size as u64 / SECTOR_SIZE as u64) > partition_sectors {
             return Err(Error::NotExt2);
         }
+        // The groups inside that count: the first data block below it, and no
+        // more groups (counted from the inodes, as `groups_count` is) than its
+        // blocks make, so no group's descriptor names a group past the volume
+        // (the review of #330). What a descriptor's own block numbers say is
+        // the roadmap's per-block bound.
+        let groups_count = inodes_count.div_ceil(inodes_per_group);
+        if first_data_block >= blocks_count
+            || groups_count as u64 > (blocks_count - first_data_block).div_ceil(blocks_per_group) as u64
+        {
+            return Err(Error::NotExt2);
+        }
 
         Ok(Fs {
             disk,
@@ -250,7 +261,7 @@ impl Fs {
             blocks_per_group,
             first_data_block,
             first_ino,
-            groups_count: inodes_count.div_ceil(inodes_per_group),
+            groups_count,
             has_filetype: u32::from_le_bytes([sb[96], sb[97], sb[98], sb[99]]) & INCOMPAT_FILETYPE
                 != 0,
             creator_uid: 0,

@@ -391,8 +391,10 @@ fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
         return Ok(None);
     };
     // The size from the same parse that chose the partition, not a second
-    // read of the table (the review of #296).
-    let sectors = u32::try_from(target.sectors).ok().filter(|&s| s != 0);
+    // read of the table (the review of #296), cut to what `mount` will take
+    // as the volume's bound (the disk's end, sector 2^32; the review of
+    // #330). A table that gives no size is refused, as it always was.
+    let sectors = (target.sectors != 0).then(|| vfs::volume_bound(&target)).and_then(|s| u32::try_from(s).ok());
     Ok(u32::try_from(target.start).ok().zip(sectors))
 }
 

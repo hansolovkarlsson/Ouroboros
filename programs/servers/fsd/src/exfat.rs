@@ -328,12 +328,18 @@ impl Fs {
         // zeroes the first 1 MiB, `partition` starts there) named a root
         // past the end of the disk, and its probe answered an I/O error (the
         // review of #329). The spec's own limits (bytes per sector and
-        // cluster at most 2^25) keep the shift sane. In u64 throughout.
+        // cluster at most 2^25) keep the shift sane, checked before it is
+        // used; the FAT starts past the main and backup boot regions (sector
+        // 24, the spec's least FatOffset), so no FAT write lands on them. In
+        // u64 throughout; the volume's sectors fit 32 bits from here
+        // (`volume_bound`).
+        if sectors_per_cluster_shift > 25 - 9 {
+            return Err(Error::NotExFat);
+        }
         let heap_end = cluster_heap_offset as u64 + ((cluster_count as u64) << sectors_per_cluster_shift);
-        if sectors_per_cluster_shift > 25 - 9
-            || volume_length > partition_sectors
+        if volume_length > partition_sectors
             || heap_end > volume_length
-            || (fat_offset as u64) < 1
+            || fat_offset < 24
             || fat_offset as u64 + fat_length as u64 > cluster_heap_offset as u64
             || (fat_length as u64) * (SECTOR_SIZE as u64 / 4) < cluster_count as u64 + 2
             || root_cluster < 2

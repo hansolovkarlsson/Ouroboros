@@ -452,7 +452,7 @@ impl Fs {
         // In u64: the FATs' size is two BPB fields multiplied, which a
         // malformed BPB can carry past u32 and wrap under this check.
         let meta_sectors = reserved_sectors as u64 + num_fats as u64 * fat_size_32 as u64;
-        if sectors_per_cluster == 0 || total_sectors as u64 <= meta_sectors {
+        if sectors_per_cluster == 0 || num_fats == 0 || total_sectors as u64 <= meta_sectors {
             return Err(Error::NotFat32);
         }
         // Below the total sectors, so in u32 from here.
@@ -477,6 +477,12 @@ impl Fs {
         let cluster_end = (clusters as u64 + 2)
             .min(fat_size_32 as u64 * (SECTOR_SIZE as u64 / 4))
             .min(BAD_CLUSTER as u64) as u32;
+        // The root inside the heap, as exFAT's must be: a root past it made a
+        // `/` every operation on which answered an I/O error, where exFAT's
+        // read as no filesystem (the review of #330).
+        if root_cluster < 2 || root_cluster >= cluster_end {
+            return Err(Error::NotFat32);
+        }
 
         Ok(Fs {
             disk,

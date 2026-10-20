@@ -144,7 +144,7 @@ impl Filesystem {
             let Ok(lba32) = u32::try_from(p.start) else {
                 continue;
             };
-            match Self::probe(lba32, p.sectors) {
+            match Self::probe(lba32, volume_bound(p)) {
                 Ok(Some(fs)) => return Probed { found: Some((i, fs)), failed },
                 Ok(None) => {}
                 Err(e) => failed = failed.or(Some(e)),
@@ -161,9 +161,9 @@ impl Filesystem {
     /// a read that failed is [`Error::Io`], never `None`: a partition that
     /// could not be read has not been shown to hold no filesystem. What
     /// [`first_mounting`](Self::first_mounting) tries at each partition.
-    /// `sectors` is the partition's length by its table: each arm refuses a
-    /// volume claiming more, so no cluster or block it names lies past the
-    /// partition, in the next one or past the disk.
+    /// `sectors` is the most the volume may span ([`volume_bound`]): each arm
+    /// refuses a volume claiming more, so no cluster or block it names lies
+    /// past the partition, in the next one or past the disk.
     pub fn probe(lba: u32, sectors: u64) -> Result<Option<Self>, Error> {
         let mut failed = None;
         match fat32::Fs::mount_at(Disk, lba, sectors) {
@@ -202,7 +202,7 @@ impl Filesystem {
         let Ok(lba32) = u32::try_from(parts[index].start) else {
             return Err(Error::NoFat32Partition);
         };
-        Self::probe(lba32, parts[index].sectors)?.ok_or(Error::NoFat32Partition)
+        Self::probe(lba32, volume_bound(&parts[index]))?.ok_or(Error::NoFat32Partition)
     }
 
     /// The mounted format's name, for the startup/mount log line.
@@ -406,6 +406,22 @@ impl Filesystem {
             _ => Err(Error::Unsupported),
         }
     }
+}
+
+/// The most sectors a volume in `p` may span, the bound every arm's
+/// `mount_at` checks its boot sector against: the table's length, cut to the
+/// disk's capacity (an entry longer than the device, as on an image written to
+/// a smaller stick, the review of #330), or the disk's from `p.start` when the
+/// table gives no length (an MBR entry of size 0, a GPT entry ending before it
+/// starts, which mounted from the boot sector alone before 2026-10-20), and
+/// never past sector 2^32, since the layout arithmetic of every arm is 32-bit:
+/// a volume reaching past it would wrap its sectors onto the start of the
+/// disk. A capacity the kernel does not answer cuts nothing. `format` sizes
+/// the volume it lays by it too, so a new volume never claims past the disk.
+pub fn volume_bound(p: &partition::Partition) -> u64 {
+    let disk = Disk.capacity_sectors().map_or(u64::MAX, |c| c.saturating_sub(p.start));
+    let table = if p.sectors == 0 { u64::MAX } else { p.sectors };
+    table.min(disk).min((1u64 << 32).saturating_sub(p.start))
 }
 
 /// What [`Filesystem::first_mounting`] found: the first partition that
