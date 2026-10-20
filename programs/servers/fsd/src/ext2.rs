@@ -288,12 +288,15 @@ impl Fs {
         // a block number read from an inode, which nothing checks yet (the
         // roadmap).
         let blocks_count = u32::from_le_bytes([sb[4], sb[5], sb[6], sb[7]]);
-        if blocks_count as u64 * (block_size as u64 / SECTOR_SIZE as u64) > partition_sectors {
+        let volume_sectors = blocks_count as u64 * (block_size as u64 / SECTOR_SIZE as u64);
+        if volume_sectors > partition_sectors {
             return Err(Error::NotExt2);
         }
         // The groups inside that count: the first data block below it, at
-        // least one group holding the root inode, no more groups (counted from
-        // the inodes, as `groups_count` is) than its blocks make, and the
+        // least one group holding the root inode, exactly as many groups
+        // (counted from the inodes, as `groups_count` is) as its blocks make,
+        // as Linux requires (fewer let a block of the volume name a group past
+        // the descriptor table; the review of #331), and the
         // descriptor table, one 32-byte descriptor a group from the block after
         // the superblock's, inside the volume (the reviews of #330). What a
         // descriptor's own block numbers say is the roadmap's per-block bound.
@@ -307,7 +310,7 @@ impl Fs {
         if first_data_block != superblock_block
             || first_data_block >= blocks_count
             || inodes_count < ROOT_INO
-            || groups_count as u64 > (blocks_count - first_data_block).div_ceil(blocks_per_group) as u64
+            || groups_count as u64 != (blocks_count - first_data_block).div_ceil(blocks_per_group) as u64
             || bgdt_end > blocks_count as u64
         {
             return Err(Error::NotExt2);
@@ -317,7 +320,7 @@ impl Fs {
             vol: Volume {
                 disk,
                 lba: partition_lba as u64,
-                sectors: blocks_count as u64 * (block_size as u64 / SECTOR_SIZE as u64),
+                sectors: volume_sectors,
             },
             block_size,
             inodes_per_group,
@@ -1006,8 +1009,10 @@ impl Fs {
             let bmp = self.read_u32_at(self.desc_byte(group))?;
             // The last group may be short: its bitmap's bits past the volume's
             // last block (padding, set by mke2fs, clear on a damaged or shrunk
-            // volume) are not blocks.
-            let blocks = (self.blocks_count - self.first_data_block - group * self.blocks_per_group)
+            // volume) are not blocks. Mount makes every group start inside the
+            // volume; saturating, a group that did not would offer nothing.
+            let blocks = (self.blocks_count - self.first_data_block)
+                .saturating_sub(group * self.blocks_per_group)
                 .min(self.blocks_per_group);
             if let Some(bit) = self.bitmap_alloc(bmp, blocks)? {
                 let block = self.first_data_block + group * self.blocks_per_group + bit;
@@ -1052,7 +1057,10 @@ impl Fs {
     fn alloc_inode(&mut self, is_dir: bool) -> Result<u32, Error> {
         for group in 0..self.groups_count {
             let bmp = self.read_u32_at(self.desc_byte(group) + 4)?;
-            let inodes = (self.inodes_count - group * self.inodes_per_group).min(self.inodes_per_group);
+            let inodes = self
+                .inodes_count
+                .saturating_sub(group * self.inodes_per_group)
+                .min(self.inodes_per_group);
             if let Some(bit) = self.bitmap_alloc(bmp, inodes)? {
                 let ino = group * self.inodes_per_group + bit + 1;
                 self.adjust_group_u16(group, 14, -1)?; // bg_free_inodes_count
@@ -1275,29 +1283,50 @@ impl Fs {
     /// Free every data block of `node` (direct + indirect data blocks *and* the
     /// indirect pointer blocks themselves). Reads indirection while it's still
     /// intact, then frees the pointer blocks last.
+    ///
+    /// A pointer block past the volume is not read: what it names is not the
+    /// volume's to free, and every caller has already unlinked the file or
+    /// committed its new content (`rm`, `rmdir`, an overwrite), so refusing
+    /// partway left the inode allocated and half freed (the review of #331).
     fn free_all_blocks(&mut self, node: &Inode) -> Result<(), Error> {
-        let bs = self.block_size as usize;
         let per_blk = self.block_size / 4;
-        let nblocks = (node.size as usize).div_ceil(bs) as u32;
-        for d in 0..nblocks {
-            let phys = self.block_for(node, d)?;
-            if phys != 0 {
-                self.free_block(phys)?;
+        let mut left = (node.size as u64).div_ceil(self.block_size as u64) as u32;
+        for &b in node.block.iter().take(DIRECT_BLOCKS.min(left as usize)) {
+            if b != 0 {
+                self.free_block(b)?;
             }
         }
-        if node.block[12] != 0 {
-            self.free_block(node.block[12])?;
-        }
+        left = left.saturating_sub(DIRECT_BLOCKS as u32);
+        self.free_pointed(node.block[12], left.min(per_blk))?;
+        left = left.saturating_sub(per_blk);
         if node.block[13] != 0 {
-            for l1 in 0..per_blk {
-                let sib = self.indirect_lookup(node.block[13], l1)?;
-                if sib != 0 {
-                    self.free_block(sib)?;
+            if node.block[13] < self.blocks_count {
+                for l1 in 0..per_blk {
+                    let sib = self.indirect_lookup(node.block[13], l1)?;
+                    self.free_pointed(sib, left.min(per_blk))?;
+                    left = left.saturating_sub(per_blk);
                 }
             }
             self.free_block(node.block[13])?;
         }
         Ok(())
+    }
+
+    /// Free the first `count` blocks pointer block `block` names, then the
+    /// pointer block itself; for a block past the volume, neither.
+    fn free_pointed(&mut self, block: u32, count: u32) -> Result<(), Error> {
+        if block == 0 {
+            return Ok(());
+        }
+        if block < self.blocks_count {
+            for i in 0..count {
+                let p = self.indirect_lookup(block, i)?;
+                if p != 0 {
+                    self.free_block(p)?;
+                }
+            }
+        }
+        self.free_block(block)
     }
 
     // ---- write surface ------------------------------------------------------

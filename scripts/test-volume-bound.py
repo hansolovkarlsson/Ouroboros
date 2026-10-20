@@ -58,7 +58,9 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
   ext2's block-size shift 32 (masked to 0 in a release build, so only the
   shift rule refuses it), its descriptor table past its blocks (a volume of
   two blocks, the only kind where it can lie past them now) (E); ext2
-  with no inodes, or inodes of 64 bytes (F); ext2 with more blocks or inodes a group than one
+  with no inodes, inodes of 64 bytes, or fewer groups than its blocks make
+  (since the review of #331, which a block in the group past them freed
+  through no descriptor) (F); ext2 with more blocks or inodes a group than one
   bitmap block holds (G). All refused.
 - BESIDE: the FAT32 cut short in a table entry of size 0, the next
   partition inside its volume (refused: the bound stops at the next
@@ -184,7 +186,7 @@ def broken(vol, bound):
         return out | {"ext2-firstblock", "ext2-bgdt"}
     if ic < 2:
         out.add("ext2-inodes")
-    if groups > -(-(bc - fdb) // bpg):
+    if groups != -(-(bc - fdb) // bpg):
         out.add("ext2-groups")
     if fdb + 1 + -(-(groups * 32) // bs) > bc:
         out.add("ext2-bgdt")
@@ -345,12 +347,14 @@ def build_shapes(ext2, fat, exfat, which):
             ("ext2-bgdt", ext2, [("<I", sb + 4, sb_block + 1), ("<I", sb + 0, ipg)]),
         ],
         "SHAPES-F": [
-            ("ext2-inodes", ext2, [("<I", sb + 0, 0)]),
+            # One group's blocks, so the one group the inodes make is all of them.
+            ("ext2-inodes", ext2, [("<I", sb + 0, 1), ("<I", sb + 4, fdb + bpg)]),
             ("ext2-inodesize", ext2, [("<I", sb + 76, 1), ("<H", sb + 88, 64)]),
+            ("ext2-groups", ext2, [("<I", sb + 0, ipg * (groups - 1))]),
         ],
         "SHAPES-G": [
             ("ext2-bpg", ext2, [("<I", sb + 32, bs * 8 + 8)]),
-            ("ext2-ipg", ext2, [("<I", sb + 40, bs * 8 + 8)]),
+            ("ext2-ipg", ext2, [("<I", sb + 40, bs * 8 + 8), ("<I", sb + 0, (bs * 8 + 8) * groups)]),
         ],
     }[which]
     vols = [(rule, patched(base, edits)) for rule, base, edits in cases]

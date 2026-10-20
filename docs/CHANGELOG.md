@@ -633,6 +633,13 @@ small damaged ext2 volumes and an unpartitioned witness after them: every
 damaged pointer's read or write is refused, the inode past the count is
 refused rather than read as another file, the full volume answers disk full,
 and the witness is unchanged. Each of the five rules taken out fails it.
+A file whose indirect pointer lies past the volume is still removed or
+overwritten whole: `free_all_blocks` reads no pointer block past the volume
+(it failed partway, after the directory entry was gone, leaving the inode
+allocated). And mount now requires as many groups, counted from the inodes,
+as the blocks make, as Linux does, not merely no more: with fewer, a block
+of the volume belonged to a group past the descriptor table. `make
+test-volume-bound` gains that case, eighteen volumes in all.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

@@ -4331,6 +4331,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `block_lba`, once it is made, would refuse such a block as an I/O error,
   and the allocator should skip such bits as not free. Nothing refuses it
   today. From the third review of #330.
+- **ext2 leaks a block on a write past the double-indirect range.**
+  `ensure_block` allocates the data block before it checks the logical
+  block's range, so a write past 12 + k + k^2 blocks (k pointers a block:
+  about 64 MiB of file on 1 KiB blocks) takes a block, then answers disk
+  full without recording it: one block lost each attempt, a bitmap bit set
+  that no inode names. Checking the range first closes it. A rig needs a
+  1 KiB-block volume over 65 MiB and a `cp` of a file past 64.3 MiB onto it,
+  minutes under TCG, which is why it waits. Older than #331; from its review.
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the

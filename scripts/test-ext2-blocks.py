@@ -77,10 +77,10 @@ EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M
 WITNESS_BYTES = 1024 * 1024
 # 1 KiB blocks into the witness each plant names, apart so a changed sector
 # names the case that wrote it. B's overflow lands at block 0.
-AT_RD, AT_WR, AT_IND, AT_BMP = 8, 16, 24, 32
+AT_RD, AT_WR, AT_IND, AT_BMP, AT_RMI, AT_OWI = 8, 16, 24, 32, 40, 48
 ZEROED = (AT_IND, AT_BMP)
 FILES_A = {"RD": b"R" * 2048, "WR": b"W" * 1100, "IND": b"I" * 12 * 1024, "SRC": b"S" * 100,
-           "GHOST": b"G" * 10}
+           "GHOST": b"G" * 10, "RMI": b"M" * 13 * 1024, "OWI": b"O" * 13 * 1024}
 COMMANDS = [
     "mount 1 /mnt/a", "mount 2 /mnt/c", "mount 3 /mnt/b",
     "ls /mnt/a",
@@ -90,6 +90,9 @@ COMMANDS = [
     "echo tail >> /mnt/a/IND",
     "cat /mnt/a/GHOST | wc",
     "rm /mnt/a/RD",
+    "rm /mnt/a/RMI",
+    "echo x > /mnt/a/OWI",
+    "cat /mnt/a/OWI",
     "echo x > /mnt/c/NEW",
     "echo x > /mnt/b/NEW",
     "touch /mnt/b/NEW2",
@@ -221,7 +224,7 @@ def build():
             return at == wit_start + k * 2 and blk >= v.bc and at < wit_end
 
         ents = va.entries()
-        checks.append(("plant: A has 1 KiB blocks and its five files", va.bs == 1024 and set(FILES_A) <= set(ents)))
+        checks.append(("plant: A has 1 KiB blocks and its seven files", va.bs == 1024 and set(FILES_A) <= set(ents)))
         if not checks[-1][1]:
             return plan, checks
         ino = {n: ents[n][0] for n in FILES_A}
@@ -230,11 +233,16 @@ def build():
         va.set_ptr(ino["WR"], 1, wblock(va, a_start, AT_WR))
         indirect_before = va.ptr(ino["IND"], 12)
         va.set_ptr(ino["IND"], 12, wblock(va, a_start, AT_IND))
+        # A: RMI's and OWI's own indirect blocks swapped for witness blocks.
+        own_indirect = [va.ptr(ino[n], 12) for n in ("RMI", "OWI")]
+        va.set_ptr(ino["RMI"], 12, wblock(va, a_start, AT_RMI))
+        va.set_ptr(ino["OWI"], 12, wblock(va, a_start, AT_OWI))
         # A: GHOST names SRC's inode one group on, whose descriptor is group 0's.
         ghost = va.ipg + ino["SRC"]
         va.set_u32(ents["GHOST"][1], ghost)
         va.write(va.desc(1), va.read(va.desc(0), 32))
-        plan.update(ino=ino, rd_block0=va.ptr(ino["RD"], 0), a_bitmap=va.bitmap(0))
+        plan.update(ino=ino, rd_block0=va.ptr(ino["RD"], 0), a_bitmap=va.bitmap(0),
+                    direct={n: [va.ptr(ino[n], k) for k in range(12)] for n in ("RMI", "OWI")})
         # C: its block bitmap in the witness.
         vc.set_u32(vc.desc(0), wblock(vc, c_start, AT_BMP))
         # B: every block used, the padding past the volume clear; the inode
@@ -253,6 +261,14 @@ def build():
             ("plant: IND has twelve blocks and no indirect block of its own; its pointer names a zeroed witness block",
              va.size(ino["IND"]) == 12 * 1024 and indirect_before == 0
              and in_wit(va, a_start, va.ptr(ino["IND"], 12), AT_IND)),
+            ("plant: RMI and OWI had indirect blocks of their own, now witness blocks",
+             all(own_indirect) and in_wit(va, a_start, va.ptr(ino["RMI"], 12), AT_RMI)
+             and in_wit(va, a_start, va.ptr(ino["OWI"], 12), AT_OWI)),
+            # Without free_block's bound RD's witness block frees through the
+            # group past A's one, whose descriptor slot holds group 0's: the
+            # bitmap check can see it only while that group is 1.
+            ("plant: RD's witness block lies in group 1, whose descriptor slot copies group 0's",
+             (va.ptr(ino["RD"], 1) - va.fdb) // va.bpg == 1),
             ("plant: GHOST names an inode past A's count, whose group's descriptor names SRC's table",
              va.entries()["GHOST"][0] == ghost > va.ic and va.read(va.desc(1), 32) == va.read(va.desc(0), 32)
              and va.ic == va.ipg),
@@ -327,13 +343,22 @@ def verdicts(plan, driven, out, faults):
         wit_start, wit_sectors = plan["witness"]
         fh.seek(wit_start * SECT)
         witness = fh.read(wit_sectors * SECT)
+        expect = witness_bytes()
         changed = [i // SECT for i in range(0, len(witness), SECT)
-                   if witness[i:i + SECT] != witness_bytes()[i:i + SECT]]
+                   if witness[i:i + SECT] != expect[i:i + SECT]]
         va, vb = Ext2(fh, plan["a"]), Ext2(fh, plan["b"])
         ents = va.entries()
         ino = plan["ino"]
-        rd_bit = plan["rd_block0"] - va.fdb
-        want_bitmap = with_bits(plan["a_bitmap"], rd_bit, rd_bit + 1, 0)
+        # Freed: RD's own block, RMI's and OWI's twelve direct blocks; taken:
+        # OWI's new block. Their own indirect blocks are no file's now.
+        want_bitmap = plan["a_bitmap"]
+        for blk in [plan["rd_block0"]] + plan["direct"]["RMI"] + plan["direct"]["OWI"]:
+            want_bitmap = with_bits(want_bitmap, blk - va.fdb, blk - va.fdb + 1, 0)
+        owi_new = va.ptr(ino["OWI"], 0) if "OWI" in ents else 0
+        if owi_new:
+            want_bitmap = with_bits(want_bitmap, owi_new - va.fdb, owi_new - va.fdb + 1, 1)
+        owi_size = va.size(ino["OWI"])
+        rmi_inode_bit = bit(va.bitmap(4), ino["RMI"] - 1)
         a_bitmap = va.bitmap(0)
         b_names = set(vb.entries())
         b_inode_bits = [bit(vb.bitmap(4), n) for n in range(plan["b_inodes_used"] + 2)]
@@ -346,7 +371,7 @@ def verdicts(plan, driven, out, faults):
         ("driven to the end, every command's output found", driven and len(o) == len(COMMANDS)),
         ("fsd mounted ext2 as /", re.search(r"^fsd: ext2 mounted", out, re.M) is not None),
         ("A, C and B mount", all(o.get(c) == "" for c in COMMANDS[:3])),
-        ("ls /mnt/a lists the five files", set(FILES_A) <= listed),
+        ("ls /mnt/a lists the seven files", set(FILES_A) <= listed),
         (f"SRC reads whole, 100 bytes (got {wc_bytes(o.get('cat /mnt/a/SRC | wc'))})",
          wc_bytes(o.get("cat /mnt/a/SRC | wc")) == 100),
         (f"RD's read stops at an I/O error, no witness byte counted (got {rd!r})",
@@ -360,7 +385,12 @@ def verdicts(plan, driven, out, faults):
          io in (ghost or "") and wc_bytes(ghost) in (None, 0)),
         (f"rm of RD succeeds and RD is gone (got {o.get('rm /mnt/a/RD')!r})",
          o.get("rm /mnt/a/RD") == "" and "RD" not in ents),
-        ("A's block bitmap as before but RD's own block freed", a_bitmap == want_bitmap),
+        (f"rm of RMI, its indirect pointer past A, succeeds and frees its inode (got {o.get('rm /mnt/a/RMI')!r})",
+         o.get("rm /mnt/a/RMI") == "" and "RMI" not in ents and rmi_inode_bit == 0),
+        (f"OWI, its indirect pointer past A, overwritten without an error (got {o.get('echo x > /mnt/a/OWI')!r})",
+         o.get("echo x > /mnt/a/OWI") == "" and o.get("cat /mnt/a/OWI") == "x" and owi_size == 2),
+        ("A's block bitmap as before but RD's, RMI's and OWI's direct blocks freed and OWI's new one taken",
+         a_bitmap == want_bitmap),
         (f"C's new file's write refused with an I/O error (got {o.get('echo x > /mnt/c/NEW')!r})",
          io in (o.get("echo x > /mnt/c/NEW") or "")),
         (f"B's write answers disk full (got {o.get('echo x > /mnt/b/NEW')!r})",
