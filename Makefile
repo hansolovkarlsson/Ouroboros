@@ -2601,10 +2601,12 @@ test-volume-bound: image image-exfat image-ext2
 # (scripts/test-ext2-blocks.py): one boot from esp.img on NVMe, on virtio the
 # ext2 root and three small ext2 volumes made by mke2fs, an unpartitioned
 # witness after them; damaged direct and indirect pointers, an inode number
-# past the count, a block bitmap in the witness and a last group whose padding
-# bits are clear, each refused, the witness unchanged. About a minute, needs
-# e2fsprogs; run it whenever ext2's Volume, inode_place, its allocators,
-# free_block or ensure_block change.
+# past the count, bitmaps in the witness and a last group whose padding bits
+# are clear, each refused, files whose pointers or bitmaps lie past the volume
+# still removed whole, the free counts matching the bitmap, the witness
+# unchanged. About a minute, needs e2fsprogs; run it whenever ext2's Volume,
+# inode_place, its allocators, its free path (free_block, free_inode,
+# bitmap_free, free_all_blocks, free_pointed), ensure_block or list_dir change.
 test-ext2-blocks: image image-ext2
 	python3 scripts/test-ext2-blocks.py
 

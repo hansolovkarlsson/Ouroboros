@@ -9,14 +9,17 @@ read or a write past the volume, into the next partition or past the disk.
 Since #330 the volume itself is bounded by its partition at mount, and now
 every sector the arm reads or writes goes through one `Volume`, which refuses
 a sector past `s_blocks_count` blocks as an I/O error; an inode number past
-`s_inodes_count` is refused the same way, and the allocator takes no bit of
-the last group's bitmaps past the volume's last block or inode.
+`s_inodes_count` is refused the same way, and the allocators take no bit of
+the last group's bitmaps past the volume's last block or inode. A free reads
+nothing past the volume, neither a pointer block nor a bitmap, so a file
+whose pointers or bitmaps lie there is still removed whole, and the free
+counts rise only for a bit actually cleared (the reviews of #331).
 
 The firmware boots esp.img from NVMe, so the virtio disk the rig builds goes
 in as the fallback: build/espext2.img's ext2 root as partition 0 (it mounts
 at boot), three 4 MiB ext2 volumes made by mke2fs with 1 KiB blocks, A, C and
 B, as partitions 1 to 3, and after B, unpartitioned, a WITNESS of 0xA5 bytes
-with two zeroed blocks, which nothing may change. The host plants:
+with three zeroed blocks, which nothing may change. The host plants:
 
 - on A, RD (two blocks), its second pointer into the witness: `cat` must
   stop at an I/O error, not read the witness's bytes; WR (1,100 bytes), its
@@ -26,10 +29,18 @@ with two zeroed blocks, which nothing may change. The host plants:
   there; GHOST, its directory entry naming inode `inodes_per_group` past
   SRC's, in a second group whose descriptor slot holds a copy of the first
   group's: `cat` must answer an I/O error, not SRC's bytes; SRC itself must
-  still read whole (100 bytes); and `rm` of RD must remove it and free only
-  its own block, not the witness block's bit in another group's bitmap;
-- on C, group 0's block bitmap pointed at the other zeroed witness block: a
-  new file's write must be refused, where it set a bit there;
+  still read whole (100 bytes); `rm` of RD must remove it and free only its
+  own block, not the witness block's bit in another group's bitmap; RMI and
+  OWI (thirteen blocks each), their indirect blocks swapped for witness
+  blocks: `rm RMI` must free its inode and `echo x > OWI` must leave it
+  holding `x` CR LF, each with no error; and DUP (two blocks), its second
+  pointer naming a block already free: `rm` must succeed, and A's free
+  counts must still match its bitmap after every case;
+- on C, made without the filetype feature (a listing reads each entry's
+  inode), group 0's block and inode bitmaps pointed at zeroed witness
+  blocks and H's entry naming an inode past the count: `ls` must list F, G
+  and H, an append to G (one full block) must be refused, where it set a
+  bit there, and `rm F` must succeed and change no free count;
 - on B, every block of the volume marked used and the last group's padding
   bits clear, so the next free bit is the block just past the volume (the
   witness's first): `echo x > NEW` must answer disk full; and the inode count
@@ -39,15 +50,20 @@ with two zeroed blocks, which nothing may change. The host plants:
 
 Before the boot the host reads back every plant and checks it lands where
 this says (the observer's own checks). Fails with Volume's bound taken out
-(RD reads 2,048 bytes, WR's and IND's appends and C's bitmap write the
-witness), with the inode-number
-bound out (GHOST reads SRC), with the allocator's block cap out (B's write an
-I/O error, not disk full: Volume refuses the block the allocator handed
-out), with its inode cap out (NEW2 an I/O error, its bit set past the count)
-and with free_block freeing a block past the volume (a bit of A's bitmap
-cleared, through the second group's descriptor). One boot, about a minute, needs
+(RD reads 2,048 bytes, WR's and IND's appends and G's write the witness),
+with the inode-number bound out (GHOST reads SRC), with the allocator's
+block cap out (B's write an I/O error, not disk full: Volume refuses the
+block the allocator handed out), with its inode cap out (NEW2 an I/O error,
+its bit set past the count), with free_block freeing a block past the volume
+(a bit of A's bitmap cleared, through the second group's descriptor), with
+free_pointed reading a pointer block past the volume (RMI's rm and OWI's
+overwrite an I/O error), with bitmap_free reading a bitmap past the volume
+(F's rm an I/O error), with the free counts raised for a bit already clear
+(A's counts one past its bitmap) and with the listing reading an inode past
+the count (`ls /mnt/c` an I/O error). One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
-alloc_block, alloc_inode, free_block or ensure_block changes.
+alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
+free_all_blocks, free_pointed, ensure_block or list_dir changes.
 """
 import importlib.util
 import os

@@ -4339,6 +4339,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   that no inode names. Checking the range first closes it. A rig needs a
   1 KiB-block volume over 65 MiB and a `cp` of a file past 64.3 MiB onto it,
   minutes under TCG, which is why it waits. Older than #331; from its review.
+  **A second path, the same order:** `ensure_block` allocates the data block
+  before the indirect or double-indirect pointer block it needs, so with one
+  block free an append crossing from logical block 11 to 12 takes the last
+  block, fails to take the pointer block, and loses the first. Allocating
+  the pointer blocks first, and giving back what a later step could not
+  use, closes both; a rig for this one needs only a volume with one block
+  free. From the second review of #331.
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the

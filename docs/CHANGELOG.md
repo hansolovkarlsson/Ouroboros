@@ -632,11 +632,15 @@ where it was two. `make test-ext2-blocks` boots the ext2 root beside three
 small damaged ext2 volumes and an unpartitioned witness after them: every
 damaged pointer's read or write is refused, the inode past the count is
 refused rather than read as another file, the full volume answers disk full,
-and the witness is unchanged. Each of the five rules taken out fails it.
-A file whose indirect pointer lies past the volume is still removed or
-overwritten whole: `free_all_blocks` reads no pointer block past the volume
+and the witness is unchanged. A file whose indirect pointer or bitmap lies
+past the volume is still removed or overwritten whole: the free path reads
+no pointer block (`free_pointed`) or bitmap (`bitmap_free`) past the volume
 (it failed partway, after the directory entry was gone, leaving the inode
-allocated). And mount now requires as many groups, counted from the inodes,
+allocated), and the free counts rise only for a bit `bitmap_free` actually
+cleared (a pointer naming a free block raised them past the bitmap). On a
+volume without the filetype feature, a listing lists an entry naming an
+inode past the count as a file instead of failing whole. Each of the nine
+rules taken out fails the rig. And mount now requires as many groups, counted from the inodes,
 as the blocks make, as Linux does, not merely no more: with fewer, a block
 of the volume belonged to a group past the descriptor table. `make
 test-volume-bound` gains that case, eighteen volumes in all.
