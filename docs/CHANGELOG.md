@@ -510,8 +510,11 @@ one serves. A `SlotCursor` now steps forward through each walk, the scan
 holds the sector it read, and a set's write and delete go out once a sector.
 Making 100 files in one directory (`dirprobe /D 100`) reads 4,686 more sectors
 than one file, from 19,026; the directory's own sectors are read 4.3 passes a
-create, from 19.0. `make test-dir-scan` counts QEMU's reads of those sectors
-and fails above eight passes. A cost, not a correctness fix: `test-grow-dir`,
+create, from 19.0, and written 1.36 times a file, from 3.24. `make
+test-dir-scan` counts QEMU's reads and writes of those sectors and fails
+above eight passes or two and a half writes a file; the cursor's saving,
+FAT lookups that hit fsd's FAT cache, no disk counter sees. A growth keeps
+the scan's cursor (`grow_dir` takes it), so no cursor outlives one stale. A cost, not a correctness fix: `test-grow-dir`,
 `test-long-set`, `test-stale-cursor` and `test-mv-into` pass on it.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)

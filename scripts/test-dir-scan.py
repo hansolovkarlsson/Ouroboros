@@ -19,9 +19,10 @@ the disk. Graded: the reads of /D's own sectors in the second boot, against
 W, the sum over the 100 creates of the sectors holding an entry when each
 began (each file's set is three slots, F000 to F099, so ceil(3i/16), and at
 least one), the cost of one pass over what the directory held a create; and
-the writes to /D's sectors, at most three a file (its set written once a
-sector, its Stream patched once, the growths' zeroing), where a set written a
-slot at a time was three by itself. The rig prints how many more sectors the
+the writes to /D's sectors, at most two and a half a file (its set written
+once a sector, its Stream patched once, the growths' zeroing: 1.36 on the
+tree of 2026-10-19), where a set written a slot at a time was three by
+itself (3.24 a file). The rig prints how many more sectors the
 100-file boot read in all than the 1-file boot (the records' 4,686 against
 19,026). The reads
 must be at most PASSES x W: fsd now makes a few passes a create (the
@@ -65,7 +66,7 @@ PASSES = 8
 # sector edge), and its Stream patched once by the probe's write; the
 # directory's growths zero their clusters. Slot by slot, the set alone was
 # three writes.
-WRITES_PER_FILE = 3
+WRITES_PER_FILE = 2.5  # 1.36 on the tree of 2026-10-19, 3.24 slot by slot
 
 
 def steps(n):
@@ -108,7 +109,7 @@ def main():
         (f"/D found on the disk after the boot, {len(sectors)} sectors", bool(sectors)),
         (f"/D's sectors read {reads} times, at most {PASSES} x W = {PASSES * w} (W = {w}, {reads / w:.1f} passes)",
          bool(sectors) and 0 < reads <= PASSES * w),
-        (f"/D's sectors written {writes} times, at most {WRITES_PER_FILE} a file ({COUNT * WRITES_PER_FILE}; "
+        (f"/D's sectors written {writes} times, at most {WRITES_PER_FILE} a file ({COUNT * WRITES_PER_FILE:g}; "
          f"{writes / COUNT:.2f} a file)",
          bool(sectors) and 0 < writes <= COUNT * WRITES_PER_FILE),
     ]

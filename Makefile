@@ -2584,9 +2584,10 @@ test-long-set: image-exfat
 # Making files in an exFAT directory reads its sectors a few passes a file,
 # not one a slot (scripts/test-dir-scan.py, /bin/DIRPROBE): `dirprobe /D 1`
 # against `dirprobe /D 100`, QEMU's virtio-blk reads of /D's sectors at most
-# eight passes of the directory a create. Two boots, about a minute and a
-# half; run it whenever exFAT's find_free_run, slot_at, write_set_at,
-# delete_set, walk_dir or room changes.
+# eight passes of the directory a create, and its writes at most two and a
+# half a file. Two boots, about a minute and a half; run it whenever exFAT's
+# find_free_run, slot_at, rewrite_slots, write_set_at, delete_set, grow_dir,
+# walk_dir or room changes.
 test-dir-scan: image-exfat
 	python3 scripts/test-dir-scan.py
 
