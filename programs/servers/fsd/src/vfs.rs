@@ -121,13 +121,13 @@ impl Filesystem {
         };
         let fallback = roots.is_fallback(i).then_some(Fallback {
             typed_root: roots.typed,
-            boot_partition: Some(roots.order[i]) == boot,
+            boot_partition: Some(roots.order[i].start) == boot,
         });
         Ok((fs, fallback, probed.failed.is_some()))
     }
 
-    /// The first of the partitions starting at `lbas` that [`probe`](Self::probe)
-    /// mounts, with its index in `lbas`, and the [`Error::Io`] of a probe
+    /// The first of `parts` that [`probe`](Self::probe)
+    /// mounts, with its index in `parts`, and the [`Error::Io`] of a probe
     /// before it whose read failed (of any, when none mounts). A partition
     /// that would not read is passed over, so a root that will not read still
     /// leaves the ESP beside it to come up read-only, but it is never taken
@@ -138,13 +138,13 @@ impl Filesystem {
     /// read or over a later one that did. The one rule `mount` and `format`
     /// both pick by. A start LBA past 32 bits is not tried (the layout
     /// arithmetic is 32-bit; partitions past 2 TB aren't a concern here).
-    pub fn first_mounting(lbas: &[u64]) -> Probed {
+    pub fn first_mounting(parts: &[partition::Partition]) -> Probed {
         let mut failed = None;
-        for (i, &lba) in lbas.iter().enumerate() {
-            let Ok(lba32) = u32::try_from(lba) else {
+        for (i, p) in parts.iter().enumerate() {
+            let Ok(lba32) = u32::try_from(p.start) else {
                 continue;
             };
-            match Self::probe(lba32) {
+            match Self::probe(lba32, p.sectors) {
                 Ok(Some(fs)) => return Probed { found: Some((i, fs)), failed },
                 Ok(None) => {}
                 Err(e) => failed = failed.or(Some(e)),
@@ -161,19 +161,22 @@ impl Filesystem {
     /// a read that failed is [`Error::Io`], never `None`: a partition that
     /// could not be read has not been shown to hold no filesystem. What
     /// [`first_mounting`](Self::first_mounting) tries at each partition.
-    pub fn probe(lba: u32) -> Result<Option<Self>, Error> {
+    /// `sectors` is the partition's length by its table: each arm refuses a
+    /// volume claiming more, so no cluster or block it names lies past the
+    /// partition, in the next one or past the disk.
+    pub fn probe(lba: u32, sectors: u64) -> Result<Option<Self>, Error> {
         let mut failed = None;
-        match fat32::Fs::mount_at(Disk, lba) {
+        match fat32::Fs::mount_at(Disk, lba, sectors) {
             Ok(fs) => return Ok(Some(Filesystem::Fat32(fs))),
             Err(e @ Error::Io(_)) => failed = failed.or(Some(e)),
             Err(_) => {}
         }
-        match exfat::Fs::mount_at(Disk, lba) {
+        match exfat::Fs::mount_at(Disk, lba, sectors) {
             Ok(fs) => return Ok(Some(Filesystem::ExFat(fs))),
             Err(e @ Error::Io(_)) => failed = failed.or(Some(e)),
             Err(_) => {}
         }
-        match ext2::Fs::mount_at(Disk, lba) {
+        match ext2::Fs::mount_at(Disk, lba, sectors) {
             Ok(fs) => return Ok(Some(Filesystem::Ext2(fs))),
             Err(e @ Error::Io(_)) => failed = failed.or(Some(e)),
             Err(_) => {}
@@ -199,7 +202,7 @@ impl Filesystem {
         let Ok(lba32) = u32::try_from(parts[index].start) else {
             return Err(Error::NoFat32Partition);
         };
-        Self::probe(lba32)?.ok_or(Error::NoFat32Partition)
+        Self::probe(lba32, parts[index].sectors)?.ok_or(Error::NoFat32Partition)
     }
 
     /// The mounted format's name, for the startup/mount log line.
@@ -423,13 +426,13 @@ pub struct Fallback {
     pub boot_partition: bool,
 }
 
-/// Where a root is looked for on one disk ([`root_order`]): the start LBAs
-/// in order, how many there are, and how many of the first of them are the
+/// Where a root is looked for on one disk ([`root_order`]): the partitions
+/// in order, each with the length its table gives it, how many there are, and how many of the first of them are the
 /// root's candidates. A partition past the candidates is a fallback, mounted
 /// read-only (decision D5) so that the system comes up to be repaired with
 /// nothing written to it, and never a partition `format` takes.
 pub struct RootOrder {
-    pub order: [u64; partition::MAX_PARTITIONS],
+    pub order: [partition::Partition; partition::MAX_PARTITIONS],
     pub len: usize,
     pub candidates: usize,
     /// Whether the candidates are partitions typed as a root.
@@ -440,7 +443,7 @@ impl RootOrder {
     /// The partitions `format` may lay a root on: the candidates, or every
     /// partition when there are none (a disk whose only partition is the
     /// boot one, or a table that names no root and no boot partition).
-    pub fn format_targets(&self) -> &[u64] {
+    pub fn format_targets(&self) -> &[partition::Partition] {
         if self.candidates > 0 { &self.order[..self.candidates] } else { &self.order[..self.len] }
     }
 
@@ -475,17 +478,17 @@ pub fn root_order(
     count: usize,
     boot: Option<u64>,
 ) -> RootOrder {
-    let mut order = [0u64; partition::MAX_PARTITIONS];
+    let mut order = [partition::Partition::default(); partition::MAX_PARTITIONS];
     let mut n = 0;
     let beside = |p: &&partition::Partition| Some(p.start) != boot;
     for p in parts[..count].iter().filter(beside).filter(|p| p.root) {
-        order[n] = p.start;
+        order[n] = *p;
         n += 1;
     }
     let typed = n > 0;
     if !typed || boot.is_none() {
         for p in parts[..count].iter().filter(beside).filter(|p| !p.root) {
-            order[n] = p.start;
+            order[n] = *p;
             n += 1;
         }
     }
@@ -498,7 +501,7 @@ pub fn root_order(
     };
     for p in &parts[..count] {
         if Some(p.start) == boot {
-            order[n] = p.start;
+            order[n] = *p;
             n += 1;
         }
     }

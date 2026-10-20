@@ -296,7 +296,7 @@ impl Fs {
     /// Mount the exFAT volume whose first sector (the boot sector / VBR) is at
     /// `partition_lba`. Returns [`Error::NotExFat`] if that sector isn't an
     /// exFAT VBR, so `vfs::mount` can try the next partition/format.
-    pub fn mount_at(mut disk: Disk, partition_lba: u32) -> Result<Self, Error> {
+    pub fn mount_at(mut disk: Disk, partition_lba: u32, partition_sectors: u64) -> Result<Self, Error> {
         let mut vbr = [0u8; SECTOR_SIZE];
         disk.read_sector(partition_lba as u64, &mut vbr)?;
 
@@ -317,6 +317,30 @@ impl Fs {
         let cluster_heap_offset = u32::from_le_bytes([vbr[88], vbr[89], vbr[90], vbr[91]]);
         let cluster_count = u32::from_le_bytes([vbr[92], vbr[93], vbr[94], vbr[95]]);
         let root_cluster = u32::from_le_bytes([vbr[96], vbr[97], vbr[98], vbr[99]]);
+        let volume_length = u64::from_le_bytes(vbr[72..80].try_into().unwrap());
+        let fat_length = u32::from_le_bytes([vbr[84], vbr[85], vbr[86], vbr[87]]);
+
+        // The volume as its boot sector lays it out, inside its partition:
+        // `in_heap` (`cluster_count`) is the bound every cluster is checked
+        // against, and the FAT entry of every such cluster must lie in the
+        // FAT. A boot sector claiming more than the partition holds is not
+        // this volume: a stale one left by a larger image (`erase disk`
+        // zeroes the first 1 MiB, `partition` starts there) named a root
+        // past the end of the disk, and its probe answered an I/O error (the
+        // review of #329). The spec's own limits (bytes per sector and
+        // cluster at most 2^25) keep the shift sane. In u64 throughout.
+        let heap_end = cluster_heap_offset as u64 + ((cluster_count as u64) << sectors_per_cluster_shift);
+        if sectors_per_cluster_shift > 25 - 9
+            || volume_length > partition_sectors
+            || heap_end > volume_length
+            || (fat_offset as u64) < 1
+            || fat_offset as u64 + fat_length as u64 > cluster_heap_offset as u64
+            || (fat_length as u64) * (SECTOR_SIZE as u64 / 4) < cluster_count as u64 + 2
+            || root_cluster < 2
+            || root_cluster - 2 >= cluster_count
+        {
+            return Err(Error::NotExFat);
+        }
 
         let mut fs = Fs {
             disk,

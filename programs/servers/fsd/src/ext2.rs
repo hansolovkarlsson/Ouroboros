@@ -185,7 +185,7 @@ impl Fs {
     /// Mount the ext2 volume at `partition_lba`, reading and validating the
     /// superblock. Returns [`Error::NotExt2`] if the `0xEF53` magic is absent,
     /// so `vfs::mount` can try the next partition/format.
-    pub fn mount_at(mut disk: Disk, partition_lba: u32) -> Result<Self, Error> {
+    pub fn mount_at(mut disk: Disk, partition_lba: u32, partition_sectors: u64) -> Result<Self, Error> {
         // The superblock sits 1024 bytes in; with 512-byte sectors that's the
         // second sector of the partition. Read it.
         let mut sb = [0u8; SECTOR_SIZE];
@@ -225,6 +225,16 @@ impl Fs {
             11
         };
         if blocks_per_group == 0 {
+            return Err(Error::NotExt2);
+        }
+        // No larger than its partition (s_blocks_count): a superblock
+        // claiming more is not this volume, as on FAT32 and exFAT (a stale one
+        // left by a larger image; the review of #329). Linux refuses it too
+        // ("block count exceeds size of device"). This bounds the volume, not
+        // a block number read from an inode, which nothing checks yet (the
+        // roadmap).
+        let blocks_count = u32::from_le_bytes([sb[4], sb[5], sb[6], sb[7]]);
+        if blocks_count as u64 * (block_size as u64 / SECTOR_SIZE as u64) > partition_sectors {
             return Err(Error::NotExt2);
         }
 

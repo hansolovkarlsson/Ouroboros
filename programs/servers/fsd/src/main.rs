@@ -368,11 +368,6 @@ fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
     // the MBR itself), each with its size.
     let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
     let count = partition::discover(&mut disk::Disk, &mut parts)?;
-    // The size from the same parse that chose the partition, not a second
-    // read of the table (the review of #296).
-    let size_of = |lba: u64| {
-        parts[..count].iter().find(|p| p.start == lba && p.sectors != 0).and_then(|p| u32::try_from(p.sectors).ok())
-    };
     // The root by `vfs::mount`'s rule, so `format` writes over what `/`
     // showed: among the candidates beside the one the system booted from
     // (a partition typed as a root, else every other one), the first holding
@@ -395,7 +390,10 @@ fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
     let Some(target) = probing.or(candidates.first().copied()) else {
         return Ok(None);
     };
-    Ok(u32::try_from(target).ok().zip(size_of(target)))
+    // The size from the same parse that chose the partition, not a second
+    // read of the table (the review of #296).
+    let sectors = u32::try_from(target.sectors).ok().filter(|&s| s != 0);
+    Ok(u32::try_from(target.start).ok().zip(sectors))
 }
 
 /// Lay a fresh filesystem of type `fstype` into the disk's root partition
