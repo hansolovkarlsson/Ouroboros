@@ -4275,7 +4275,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   disk be swapped for an attached stick. Probing to a three-way answer (this
   format, not this format, the disk failed) would close it. Read in the code;
   from the review of the MOUNT gate (2026-10-19).
-- **FAT32's `cluster_end` is the BPB's word, not the partition's.** Since
+- ~~**FAT32's `cluster_end` is the BPB's word, not the partition's.**~~ *Done
+  2026-10-20:* each `mount_at` is given the partition's length by its table
+  and refuses, as "not this filesystem", a volume claiming more: FAT32's
+  total sectors, exFAT's VolumeLength (and the heap inside it, the FAT
+  inside its offsets and long enough for every cluster, the root inside the
+  heap), ext2's block count. FAT32's metadata sum is made in u64, where two
+  BPB fields multiplied wrapped under the check. The stale exFAT boot sector
+  below now reads as no filesystem, so `format` takes the disk. `make
+  test-volume-bound`. The record as found: Since
   2026-10-19 every cluster FAT32 takes to the disk is checked against
   `cluster_end`, so that bound is the one guard left, and it comes from the
   BPB's total sectors alone. A BPB claiming more sectors than its partition
@@ -4295,6 +4303,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   not swap a stick in. Bounding the boot sector's geometry by the
   partition's length, and answering "not this filesystem" for one that
   passes it, would close both. Read in the code, from the review of #329.
+- **ext2 takes a block number from an inode unbounded.** `block_lba`
+  computes a sector from any block number, and nothing checks it against
+  `s_blocks_count`, so a damaged inode's pointer (direct, indirect, or a
+  block group descriptor's table) reads or writes past the volume, into the
+  next partition or past the disk. Since 2026-10-20 the volume itself is
+  bounded by its partition at mount, so `s_blocks_count` is a bound worth
+  having; checking every block number where it meets the disk (`block_lba`,
+  made fallible, its callers few), as FAT32's `cluster_to_lba` does since
+  2026-10-19, would close it. Read in the code while bounding the volume
+  (2026-10-20).
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the

@@ -563,6 +563,32 @@ going on past the failed read it formats the ESP. fsd's "mount failed" line
 is one write now, as its "mounted" line was made in the third review of #288:
 it was three, and accountd's ready line landed inside it.
 
+**A volume claiming more than its partition is not mounted (2026-10-20).**
+fsd took a volume's size from its own boot sector alone: `mount_at` was given
+where the partition starts and not how long it is. Since 2026-10-19 FAT32's
+`cluster_end` and exFAT's cluster count are the bounds every cluster meets on
+its way to the disk, and both came from the boot sector, so one claiming more
+than its partition put the next partition's sectors inside the volume, and a
+stale one left by a larger image named a root past the end of the disk, whose
+failed read made `format` refuse the disk since #329. Each `mount_at` now
+takes the partition's length from the table and refuses, as not its
+filesystem, a FAT32 whose total sectors, an exFAT whose VolumeLength, or an
+ext2 whose block count exceed it; exFAT's heap must also lie inside the
+volume, its FAT between its offset and the heap and long enough for every
+cluster, and its root inside the heap. FAT32's metadata size is summed in u64:
+two FATs of 0x80000000 sectors wrapped to 0 and passed the old check. `make
+test-volume-bound` boots three disks from NVMe: one holding the ext2 root and
+then a FAT32, an exFAT and an ext2 each in a partition shorter than its
+volume, the next partition starting inside it, where `mount 1`, `2` and `3`
+must each find no filesystem; a 16 MiB disk with a stale exFAT boot sector
+claiming 24 MiB and a root past its end, which must boot to "no mountable
+partition" and take `format ext2`; and a FAT32 whose FAT size wraps, which
+must not mount. With the partition's length not given, all three short
+partitions mount and the stale disk answers an I/O error; with the sum in
+u32, the wrapped FAT32 mounts. exFAT's other new conditions (the heap, the
+FAT, the root) are not reached by the rig: its volumes are only longer than
+their partitions. ext2's block numbers are still unbounded, to the roadmap.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
