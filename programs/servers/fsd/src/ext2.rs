@@ -762,6 +762,13 @@ impl Fs {
                         if name != "." && name != ".." {
                             let is_dir = if self.has_filetype && FT_KNOWN.contains(&e[7]) {
                                 e[7] == FT_DIR
+                            } else if entry_ino > self.inodes_count {
+                                // An entry naming an inode the volume does not
+                                // have lists as a file, as on a volume with
+                                // filetype, and opening it is refused: one
+                                // damaged entry failed the whole listing (the
+                                // second review of #331).
+                                false
                             } else {
                                 self.read_inode(entry_ino)?.is_dir()
                             };
@@ -991,14 +998,27 @@ impl Fs {
         Ok(None)
     }
 
-    /// Clear bit `bit` in the bitmap at `bitmap_block` (free it).
-    #[allow(dead_code)] // Stage C (rm/rmdir)
-    fn bitmap_free(&mut self, bitmap_block: u32, bit: u32) -> Result<(), Error> {
+    /// Clear bit `bit` in the bitmap at `bitmap_block` (free it), answering
+    /// whether it was set, so a caller raises the free counts only for what
+    /// it freed: a damaged pointer naming a free block, or two naming one,
+    /// raised them past the bitmap. A bitmap past the volume is not read and
+    /// frees nothing, since its file is already unlinked
+    /// ([`free_all_blocks`](Self::free_all_blocks)); both from the second
+    /// review of #331.
+    fn bitmap_free(&mut self, bitmap_block: u32, bit: u32) -> Result<bool, Error> {
+        if bitmap_block >= self.blocks_count {
+            return Ok(false);
+        }
         let bs = self.block_size as usize;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         self.read_block(bitmap_block, &mut buf[..bs])?;
-        buf[(bit / 8) as usize] &= !(1u8 << (bit % 8));
-        self.write_block(bitmap_block, &buf[..bs])
+        let (byte, mask) = ((bit / 8) as usize, 1u8 << (bit % 8));
+        if buf[byte] & mask == 0 {
+            return Ok(false);
+        }
+        buf[byte] &= !mask;
+        self.write_block(bitmap_block, &buf[..bs])?;
+        Ok(true)
     }
 
     /// Allocate one data block: find a free bit in some group's block bitmap,
@@ -1040,9 +1060,11 @@ impl Fs {
         let group = rel / self.blocks_per_group;
         let bit = rel % self.blocks_per_group;
         let bmp = self.read_u32_at(self.desc_byte(group))?;
-        self.bitmap_free(bmp, bit)?;
-        self.adjust_group_u16(group, 12, 1)?;
-        self.adjust_super_u32(12, 1)
+        if self.bitmap_free(bmp, bit)? {
+            self.adjust_group_u16(group, 12, 1)?;
+            self.adjust_super_u32(12, 1)?;
+        }
+        Ok(())
     }
 
     /// Zero a whole filesystem block.
@@ -1080,11 +1102,12 @@ impl Fs {
     fn free_inode(&mut self, ino: u32, is_dir: bool) -> Result<(), Error> {
         let (group, bit) = self.inode_place(ino)?;
         let bmp = self.read_u32_at(self.desc_byte(group) + 4)?;
-        self.bitmap_free(bmp, bit)?;
-        self.adjust_group_u16(group, 14, 1)?;
-        self.adjust_super_u32(16, 1)?;
-        if is_dir {
-            self.adjust_group_u16(group, 16, -1)?;
+        if self.bitmap_free(bmp, bit)? {
+            self.adjust_group_u16(group, 14, 1)?;
+            self.adjust_super_u32(16, 1)?;
+            if is_dir {
+                self.adjust_group_u16(group, 16, -1)?;
+            }
         }
         Ok(())
     }
@@ -1284,10 +1307,12 @@ impl Fs {
     /// indirect pointer blocks themselves). Reads indirection while it's still
     /// intact, then frees the pointer blocks last.
     ///
-    /// A pointer block past the volume is not read: what it names is not the
+    /// Nothing past the volume is read on the way, a pointer block here and a
+    /// bitmap in [`bitmap_free`](Self::bitmap_free): what it names is not the
     /// volume's to free, and every caller has already unlinked the file or
     /// committed its new content (`rm`, `rmdir`, an overwrite), so refusing
-    /// partway left the inode allocated and half freed (the review of #331).
+    /// partway left the inode allocated and half freed (the reviews of #331).
+    /// A disk's own read error still stops it there.
     fn free_all_blocks(&mut self, node: &Inode) -> Result<(), Error> {
         let per_blk = self.block_size / 4;
         let mut left = (node.size as u64).div_ceil(self.block_size as u64) as u32;
@@ -1301,8 +1326,11 @@ impl Fs {
         left = left.saturating_sub(per_blk);
         if node.block[13] != 0 {
             if node.block[13] < self.blocks_count {
-                for l1 in 0..per_blk {
-                    let sib = self.indirect_lookup(node.block[13], l1)?;
+                let bs = self.block_size as usize;
+                let mut sibs = [0u8; MAX_BLOCK_SIZE];
+                self.read_block(node.block[13], &mut sibs[..bs])?;
+                for sib in sibs[..bs].chunks_exact(4) {
+                    let sib = u32::from_le_bytes([sib[0], sib[1], sib[2], sib[3]]);
                     self.free_pointed(sib, left.min(per_blk))?;
                     left = left.saturating_sub(per_blk);
                 }
@@ -1313,14 +1341,18 @@ impl Fs {
     }
 
     /// Free the first `count` blocks pointer block `block` names, then the
-    /// pointer block itself; for a block past the volume, neither.
+    /// pointer block itself; for a block past the volume, neither. The
+    /// pointer block is read once, not a sector a pointer.
     fn free_pointed(&mut self, block: u32, count: u32) -> Result<(), Error> {
         if block == 0 {
             return Ok(());
         }
         if block < self.blocks_count {
-            for i in 0..count {
-                let p = self.indirect_lookup(block, i)?;
+            let bs = self.block_size as usize;
+            let mut ptrs = [0u8; MAX_BLOCK_SIZE];
+            self.read_block(block, &mut ptrs[..bs])?;
+            for p in ptrs[..bs].chunks_exact(4).take(count as usize) {
+                let p = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
                 if p != 0 {
                     self.free_block(p)?;
                 }
