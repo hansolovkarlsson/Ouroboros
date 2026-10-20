@@ -571,23 +571,31 @@ its way to the disk, and both came from the boot sector, so one claiming more
 than its partition put the next partition's sectors inside the volume, and a
 stale one left by a larger image named a root past the end of the disk, whose
 failed read made `format` refuse the disk since #329. Each `mount_at` now
-takes the partition's length from the table and refuses, as not its
-filesystem, a FAT32 whose total sectors, an exFAT whose VolumeLength, or an
-ext2 whose block count exceed it; exFAT's heap must also lie inside the
-volume, its FAT between its offset and the heap and long enough for every
-cluster, and its root inside the heap. FAT32's metadata size is summed in u64:
-two FATs of 0x80000000 sectors wrapped to 0 and passed the old check. `make
-test-volume-bound` boots three disks from NVMe: one holding the ext2 root and
-then a FAT32, an exFAT and an ext2 each in a partition shorter than its
-volume, the next partition starting inside it, where `mount 1`, `2` and `3`
-must each find no filesystem; a 16 MiB disk with a stale exFAT boot sector
-claiming 24 MiB and a root past its end, which must boot to "no mountable
-partition" and take `format ext2`; and a FAT32 whose FAT size wraps, which
-must not mount. With the partition's length not given, all three short
-partitions mount and the stale disk answers an I/O error; with the sum in
-u32, the wrapped FAT32 mounts. exFAT's other new conditions (the heap, the
-FAT, the root) are not reached by the rig: its volumes are only longer than
-their partitions. ext2's block numbers are still unbounded, to the roadmap.
+takes the most its volume may span (`vfs::volume_bound`: the table's length,
+cut to the disk's capacity and to sector 2^32, past which every arm's 32-bit
+sectors wrap, or the disk's from the start when the table gives no length,
+as an entry of size 0 mounted before) and refuses, as not its filesystem, a
+FAT32 whose total sectors, an exFAT whose VolumeLength, or an ext2 whose
+block count exceed it. The layout must also fit what it claims: exFAT's heap
+inside the volume, its FAT from sector 24 (past the boot regions) to the heap
+and long enough for every cluster, its root inside the heap and its cluster
+shift the spec's, checked before it is used; FAT32's root inside the heap and
+at least one FAT; ext2's first data block below its block count and no more
+groups than its blocks make. FAT32's metadata size is summed in u64: two FATs
+of 0x80000000 sectors wrapped to 0 and passed the old check. `format` sizes
+the volume it lays by the same bound. `make test-volume-bound` boots nine
+disks from NVMe, built by `scripts/mbrdisk.py` from the images' own volumes:
+a FAT32, an exFAT and an ext2 each in a partition shorter than its volume,
+the next partition inside it (none mounts); a FAT32 in an entry of size 0 and
+a whole exFAT (both mount) beside a FAT32 at sector 2^32 - 65,536 on a 2 TiB
+sparse disk (refused); a 16 MiB disk with a stale exFAT boot sector claiming
+24 MiB, its root past the end, with its table entry the disk's size and then
+the volume's (each boots to "no mountable partition" and takes `format ext2`);
+the wrapping FAT32; and ten volumes each with one field changed to break
+exactly one layout rule, which a model of the rules confirms on the host
+before the boot (each refused). Each rule was taken out in turn, and the boot
+that holds its case then fails. ext2's block numbers are still unbounded, to
+the roadmap.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

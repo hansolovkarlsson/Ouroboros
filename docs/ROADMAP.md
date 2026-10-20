@@ -4276,14 +4276,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   format, not this format, the disk failed) would close it. Read in the code;
   from the review of the MOUNT gate (2026-10-19).
 - ~~**FAT32's `cluster_end` is the BPB's word, not the partition's.**~~ *Done
-  2026-10-20:* each `mount_at` is given the partition's length by its table
-  and refuses, as "not this filesystem", a volume claiming more: FAT32's
-  total sectors, exFAT's VolumeLength (and the heap inside it, the FAT
-  inside its offsets and long enough for every cluster, the root inside the
-  heap), ext2's block count. FAT32's metadata sum is made in u64, where two
+  2026-10-20:* each `mount_at` is given the most its volume may span
+  (`vfs::volume_bound`: the table's length, cut to the disk and to sector
+  2^32, or the disk's when the table gives none) and refuses, as "not this
+  filesystem", a volume claiming more, or one whose layout does not fit what
+  it claims (exFAT's heap, FAT and root, FAT32's root and FATs, ext2's
+  first block and groups). FAT32's metadata sum is made in u64, where two
   BPB fields multiplied wrapped under the check. The stale exFAT boot sector
-  below now reads as no filesystem, so `format` takes the disk. `make
-  test-volume-bound`. The record as found: Since
+  below now reads as no filesystem, so `format` takes the disk, also when
+  the table claims past the disk; `format` sizes its volume by the same
+  bound. `make test-volume-bound`. The record as found: Since
   2026-10-19 every cluster FAT32 takes to the disk is checked against
   `cluster_end`, so that bound is the one guard left, and it comes from the
   BPB's total sectors alone. A BPB claiming more sectors than its partition

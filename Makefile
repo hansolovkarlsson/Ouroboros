@@ -2585,13 +2585,14 @@ test-probe-ioerr: image image-exfat $(USBSTICK_IMG)
 	python3 scripts/test-probe-ioerr.py
 
 # A volume claiming more than its partition is not mounted
-# (scripts/test-volume-bound.py): three boots from esp.img on NVMe, on virtio
-# a disk the rig builds: the ext2 root then a FAT32, an exFAT and an ext2 each
-# in a partition shorter than its volume (`mount 1`, `2`, `3` must find no
-# filesystem); a stale exFAT boot sector claiming more than its disk, its
-# root past the end (no mountable partition, then `format ext2` must work);
-# a FAT32 whose FAT size wraps u32 (must not mount). About two minutes; run it
-# whenever a filesystem's mount_at, fsd's probe or the table's sizes change.
+# (scripts/test-volume-bound.py): nine boots from esp.img on NVMe, on virtio a
+# disk the rig builds with scripts/mbrdisk.py from the images' own volumes:
+# volumes in partitions shorter than they claim, an entry of size 0, a
+# partition past sector 2^32 (a 2 TiB sparse file), a stale exFAT boot sector
+# past the disk's end (also with the table claiming past it), a FAT32 whose
+# FAT size wraps u32, and ten volumes each breaking one layout rule. About
+# six minutes; run it whenever a filesystem's mount_at, fsd's probe or
+# volume_bound, or the table's sizes change.
 test-volume-bound: image image-exfat image-ext2
 	python3 scripts/test-volume-bound.py
 
