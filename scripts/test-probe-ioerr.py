@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""A read error inside a partition's probe is an I/O error, not "no filesystem".
+
+    python3 scripts/test-probe-ioerr.py     (or `make test-probe-ioerr`, which builds the images)
+
+fsd probes each partition as FAT32, exFAT and ext2. Until 2026-10-20 a read
+that failed inside a probe read the same as a partition holding none of them
+(`vfs::Filesystem::probe` answered `None` for both), so on a disk that was
+there and failing, `mount -a` found "no filesystem" and had the kernel swap
+in whatever USB stick was attached, putting the stick at `/` with the real
+disk out of reach until a reboot, and `format` took the partition it could
+not read as empty and laid a new filesystem over it. Only a read error in the
+partition table was told apart (#324).
+
+One boot. The firmware boots esp.img from NVMe, which the kernel cannot
+drive, so the virtio disk goes in as the fallback block device. That disk is
+a copy of esp.img, signed again (scripts/disksig.py) so it is not taken for
+the boot disk, attached through QEMU's blkdebug driver with every read of its
+partition's first sector (the BPB, which every probe reads first) failing
+with EIO. Beside it on USB, a copy of build/usbstick.img (a FAT32 stick). As
+the fallback root session (nothing mounts, so login has no accounts):
+
+- fsd's boot line must say the mount failed with a disk I/O error;
+- `format ext2` must be refused (the shell's I/O message), and after the
+  boot the virtio copy's partition must be byte for byte as it was;
+- `mount -a` must answer that the disk gave an I/O error and was not
+  replaced, with no `usb-msd block device installed` line;
+- the builtin `mount` after it must say nothing is mounted.
+
+No fault line in QEMU's trace. Fails with the probe answering `None` for a
+read error, as on main before 2026-10-20 (the stick installed and mounted,
+the virtio partition formatted). That the stick can be swapped in at all is
+test-mount-gate's check. About a minute. Run it whenever fsd's probe, mount,
+format or `mount -a`'s rescan changes.
+"""
+import importlib.util
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+BUILD = os.path.join(ROOT, "build")
+_spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
+drive_qemu = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(drive_qemu)
+
+ESP = os.path.join(BUILD, "esp.img")
+STICK = os.path.join(BUILD, "usbstick.img")
+COPY = os.path.join(BUILD, "test-probe-ioerr.img")
+STICK_COPY = os.path.join(BUILD, "test-probe-ioerr-stick.img")
+BLKDEBUG = os.path.join(BUILD, "test-probe-ioerr.blkdebug")
+COMMANDS = ["format ext2", "mount -a", "mount"]
+EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M)
+
+
+def partition_start(image):
+    """MBR partition 1's start LBA, read on the host."""
+    with open(image, "rb") as fh:
+        mbr = fh.read(512)
+    assert mbr[510:512] == b"\x55\xaa", f"{image}: no MBR"
+    return int.from_bytes(mbr[0x1BE + 8:0x1BE + 12], "little")
+
+
+def partition_bytes(image, start, sectors=64):
+    with open(image, "rb") as fh:
+        fh.seek(start * 512)
+        return fh.read(sectors * 512)
+
+
+def boot(start):
+    steps = [("# ", cmd) for cmd in COMMANDS] + [("# ", "")]
+    guest = None
+    try:
+        shutil.copyfile(ESP, COPY)
+        subprocess.run([sys.executable, os.path.join(HERE, "disksig.py"), "set", COPY], check=True,
+                       stdout=subprocess.DEVNULL)
+        shutil.copyfile(STICK, STICK_COPY)
+        before = partition_bytes(COPY, start)
+        with open(BLKDEBUG, "w") as fh:
+            fh.write(f'[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "{start}"\n')
+        extra = [
+            # bootindex=0 pins the firmware to the NVMe disk, which it boots
+            # and the kernel cannot drive (test-boot-partition's fallback case).
+            "-drive", f"file={ESP},format=raw,if=none,id=nvboot,snapshot=on",
+            "-device", "nvme,serial=boot,drive=nvboot,bootindex=0",
+            # The failing disk: every read touching its BPB answers EIO.
+            "-drive", f"file=blkdebug:{BLKDEBUG}:{COPY},format=raw,if=none,id=hd0,rerror=report",
+            "-device", "virtio-blk-device,drive=hd0",
+            "-device", "qemu-xhci,id=xhci0",
+            "-drive", f"file={STICK_COPY},format=raw,if=none,id=usbstick",
+            "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
+        ]
+        guest = drive_qemu.Guest(COPY, extra_args=extra, virtio_disk=False, stamp_from=ESP,
+                                 label="test-probe-ioerr: ")
+        driven = guest.run(steps)
+        out = guest.transcript()
+        faults = guest.aborts()
+        guest.stop()
+        guest = None
+        after = partition_bytes(COPY, start)
+    finally:
+        if guest:
+            guest.stop()
+        for f in (COPY, STICK_COPY, BLKDEBUG):
+            if os.path.exists(f):
+                os.remove(f)
+    with open(os.path.join(BUILD, "test-probe-ioerr.txt"), "w") as fh:
+        fh.write(out)
+    return driven, out, faults, before == after
+
+
+def outputs(out):
+    """[output of each command], in order: the lines after its prompt line
+    (`# cmd`) up to the next prompt, the kernel's exit lines dropped. netd's
+    boot lines can land after a prompt, so a command may be echoed on a line
+    of its own."""
+    got = []
+    at = 0
+    for cmd in COMMANDS:
+        m = re.compile(rf"^(?:# )?{re.escape(cmd)}\r?$", re.M).search(out, at)
+        if not m:
+            got.append(None)
+            continue
+        nxt = re.compile(r"^# ", re.M).search(out, m.end())
+        block = out[m.end():nxt.start() if nxt else len(out)]
+        at = nxt.start() if nxt else len(out)
+        got.append(EXIT.sub("", block).strip())
+    return got
+
+
+def main():
+    for f in (ESP, STICK):
+        if not os.path.exists(f):
+            sys.exit(f"{f} not found - run `make test-probe-ioerr`, which builds it")
+    start = partition_start(ESP)
+    driven, out, faults, untouched = boot(start)
+    o = outputs(out)
+    boot_log = out.split("# format ext2")[0]
+    checks = [
+        ("driven to the end, every command's output found", driven and None not in o),
+        # fsd prints its failure line in three pieces, so another task's
+        # line can land inside it: its two halves, before the first command.
+        ("fsd's boot mount failed with a disk I/O error",
+         "fsd: mount failed (" in boot_log
+         and "disk I/O error) - disk commands won't work" in boot_log),
+        (f"format ext2 refused (got {o[0]!r})",
+         o[0] == "format: the partition is too small, or an I/O error occurred"),
+        (f"the virtio copy's partition unchanged from LBA {start}", untouched),
+        (f"mount -a answered the I/O error, the disk not replaced (got {o[1]!r})",
+         (o[1] or "").endswith("mount: the disk answered with an I/O error; it was not replaced by a USB stick")),
+        ("no stick installed", "usb-msd block device installed" not in out),
+        (f"mount after it: nothing mounted (got {o[2]!r})",
+         (o[2] or "").startswith("nothing mounted")),
+        ("no fault lines", faults == 0),
+    ]
+    failed = 0
+    for label, ok in checks:
+        print(("PASS  " if ok else "FAIL  ") + label)
+        failed += not ok
+    print(f"test-probe-ioerr: {'all checks passed' if failed == 0 else f'{failed} check(s) FAILED'}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
