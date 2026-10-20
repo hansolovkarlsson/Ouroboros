@@ -4253,8 +4253,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   that to the sectors the chain crosses, which a fragmented file makes
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
-- **A read error inside a partition's probe reads as "no filesystem".**
-  `vfs::Filesystem::probe` returns `None` for any failure of FAT32's, exFAT's
+- ~~**A read error inside a partition's probe reads as "no filesystem".**~~ *Done
+  2026-10-20:* the probe answers the read's I/O error, and
+  `vfs::Filesystem::first_mounting`, the one rule `mount` and `format` pick a
+  partition by, passes over a partition whose read failed but answers the
+  error when nothing mounts: `mount -a` no longer swaps the disk for a stick,
+  and `format` no longer lays a filesystem over a partition it could not read
+  (it did, then failed). `make test-probe-ioerr`, through QEMU's blkdebug,
+  a persistent read error QEMU does give, which the MOUNT gate's CHANGELOG
+  entry took to be unreachable. The record as found: `vfs::Filesystem::probe` returns `None` for any failure of FAT32's, exFAT's
   and ext2's `mount_at`, an I/O error among them, so `mount` cannot tell a
   disk that failed a read from one with nothing on it, except when the
   partition table itself would not read (`FS_ERR_IO` since 2026-10-19). Since
