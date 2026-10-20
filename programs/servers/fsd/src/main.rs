@@ -160,8 +160,8 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
         return syscall_abi::NO_FS;
     }
     match vfs::Filesystem::mount(disk::Disk) {
-        Ok((mounted, _)) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
-        Ok((mounted, fallback)) => {
+        Ok((mounted, ..)) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
+        Ok((mounted, fallback, unread)) => {
             // One write, so no other task's line lands inside it: three
             // pieces let accountd's ready line split "fsd: FAT32 mounted" on a
             // boot `make test-boot-partition` read (the review of #288). When
@@ -186,9 +186,12 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
                     "fsd: no partition beside the boot partition mounted - the boot partition is `/`, read-only\r\n"
                 }
             };
-            let mut line = [0u8; 160];
+            // A partition tried before it would not read: said, since what
+            // it held is not known (a failing disk, not an empty partition).
+            let unread = if unread { "fsd: a partition before it would not read (disk I/O error)\r\n" } else { "" };
+            let mut line = [0u8; 224];
             let mut len = 0;
-            for part in [fallback, "fsd: ", mounted.name(), " mounted, disk commands available\r\n"] {
+            for part in [unread, fallback, "fsd: ", mounted.name(), " mounted, disk commands available\r\n"] {
                 // Bounded, so a longer name or message is cut, never a panic
                 // in the storage server (the third review of #288).
                 let take = part.len().min(line.len() - len);
@@ -340,9 +343,11 @@ fn partition_disk(type_byte: u8) -> u64 {
 /// partition parser ([`partition::discover`]), with the size the table
 /// gives it. `None` on a GPT disk, which this MBR-only formatter refuses,
 /// when the disk has no partition, or when the size does not fit 32 bits;
-/// [`fat32::Error::Io`] when the table, or the probe of every candidate that
-/// mounted nothing, would not read: a partition that could not be read is not
-/// shown to be empty, and is not formatted on that word.
+/// [`fat32::Error::Io`] when the table, or the probe of a candidate before
+/// the one chosen, would not read: a partition that could not be read is not
+/// shown to be empty, and neither it nor a later candidate is formatted on
+/// that word (the review of #329: the next candidate, an ESP among them when
+/// the boot partition is not known, was formatted in its place).
 fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
     // A GPT disk, by the test `mount` reads it with: this formatter writes
     // MBR partitions only, and on a GPT disk it would lay the filesystem from
@@ -375,7 +380,11 @@ fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
     let boot = disk::Disk.boot_partition_start();
     let roots = vfs::root_order(&parts, count, boot);
     let candidates = roots.format_targets();
-    let probing = vfs::Filesystem::first_mounting(candidates)?.map(|(i, _)| candidates[i]);
+    let probed = vfs::Filesystem::first_mounting(candidates);
+    if let Some(e) = probed.failed {
+        return Err(e);
+    }
+    let probing = probed.found.map(|(i, _)| candidates[i]);
     let Some(target) = probing.or(candidates.first().copied()) else {
         return Ok(None);
     };
@@ -579,6 +588,9 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         let index = p[0] as usize;
         let fs = match vfs::Filesystem::mount_partition(disk::Disk, index) {
             Ok(fs) => fs,
+            // A partition that would not read is a failing disk, not "no
+            // filesystem" (the review of #329).
+            Err(fat32::Error::Io(_)) => return status_reply(reply, syscall_abi::FS_ERR_IO),
             Err(_) => return status_reply(reply, syscall_abi::NO_FS),
         };
         if let Some(existing) = tree_of(mounts, &fs) {
