@@ -422,7 +422,7 @@ impl Fs {
     /// answering with a capacity) - every sector call in this module
     /// relies on that, probed once by the caller rather than at each
     /// call site.
-    pub fn mount_at(mut disk: Disk, partition_lba: u32) -> Result<Self, Error> {
+    pub fn mount_at(mut disk: Disk, partition_lba: u32, partition_sectors: u64) -> Result<Self, Error> {
         let mut bpb = [0u8; SECTOR_SIZE];
         disk.read_sector(partition_lba as u64, &mut bpb)?;
 
@@ -446,15 +446,38 @@ impl Fs {
             return Err(Error::NotFat32);
         }
 
-        let fat_start_lba = partition_lba + reserved_sectors;
-        let data_start_lba = fat_start_lba + num_fats * fat_size_32;
         let total_sectors_16 = u16::from_le_bytes([bpb[19], bpb[20]]) as u32;
         let total_sectors_32 = u32::from_le_bytes([bpb[32], bpb[33], bpb[34], bpb[35]]);
         let total_sectors = if total_sectors_16 != 0 { total_sectors_16 } else { total_sectors_32 };
-        let meta_sectors = reserved_sectors + num_fats * fat_size_32;
-        if sectors_per_cluster == 0 || total_sectors <= meta_sectors {
+        // In u64: the FATs' size is two BPB fields multiplied, which a
+        // malformed BPB can carry past u32 and wrap under this check.
+        let meta_sectors = reserved_sectors as u64 + num_fats as u64 * fat_size_32 as u64;
+        // At least the boot sector reserved, so no FAT write lands on the BPB
+        // (the second review of #330), as exFAT's FatOffset keeps its FAT off
+        // its boot regions.
+        if sectors_per_cluster == 0
+            || num_fats == 0
+            || reserved_sectors == 0
+            || total_sectors as u64 <= meta_sectors
+        {
             return Err(Error::NotFat32);
         }
+        // Below the total sectors, so in u32 from here.
+        let meta_sectors = meta_sectors as u32;
+        // No larger than its partition: `cluster_end` is the bound every
+        // cluster is checked against, and it comes from these total sectors,
+        // so a BPB claiming more than the partition holds would put the next
+        // partition's sectors, or none, inside the volume. A stale BPB left by
+        // a larger image (`erase disk` zeroes the first 1 MiB, `partition`
+        // starts there) is not this volume (the review of #329).
+        if total_sectors as u64 > partition_sectors {
+            return Err(Error::NotFat32);
+        }
+        // After the bound, which keeps the volume below sector 2^32
+        // (`vfs::volume_bound`), so these sums cannot wrap (the second review
+        // of #330 found them made before it).
+        let fat_start_lba = partition_lba + reserved_sectors;
+        let data_start_lba = partition_lba + meta_sectors;
         let clusters = (total_sectors - meta_sectors) / sectors_per_cluster;
         // Never past what the FAT can describe either, and never as far as the
         // bad-cluster mark (`0x0FFFFFF7`), the first value that is no cluster:
@@ -464,8 +487,7 @@ impl Fs {
         let cluster_end = (clusters as u64 + 2)
             .min(fat_size_32 as u64 * (SECTOR_SIZE as u64 / 4))
             .min(BAD_CLUSTER as u64) as u32;
-
-        Ok(Fs {
+        let fs = Fs {
             disk,
             partition_lba,
             sectors_per_cluster,
@@ -479,7 +501,15 @@ impl Fs {
             write_cursor: None,
             fat_cache: None,
             next_free_hint: 2,
-        })
+        };
+        // The root inside the heap, by the rule every later cluster meets
+        // (`in_heap`), as exFAT's must be: a root past it made a `/` every
+        // operation on which answered an I/O error, where exFAT's read as no
+        // filesystem (the review of #330).
+        if !fs.in_heap(fs.root_cluster) {
+            return Err(Error::NotFat32);
+        }
+        Ok(fs)
     }
 
     /// The volume's first sector - for `mount`-info reporting only.

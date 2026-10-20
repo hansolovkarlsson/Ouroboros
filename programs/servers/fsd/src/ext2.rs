@@ -185,7 +185,7 @@ impl Fs {
     /// Mount the ext2 volume at `partition_lba`, reading and validating the
     /// superblock. Returns [`Error::NotExt2`] if the `0xEF53` magic is absent,
     /// so `vfs::mount` can try the next partition/format.
-    pub fn mount_at(mut disk: Disk, partition_lba: u32) -> Result<Self, Error> {
+    pub fn mount_at(mut disk: Disk, partition_lba: u32, partition_sectors: u64) -> Result<Self, Error> {
         // The superblock sits 1024 bytes in; with 512-byte sectors that's the
         // second sector of the partition. Read it.
         let mut sb = [0u8; SECTOR_SIZE];
@@ -200,10 +200,12 @@ impl Fs {
         }
 
         let log_block_size = u32::from_le_bytes([sb[24], sb[25], sb[26], sb[27]]);
-        let block_size = 1024u32 << log_block_size;
-        if block_size as usize > MAX_BLOCK_SIZE {
+        // The shift checked before it is made: past 2 the block is over 4 KiB,
+        // and a garbage field would overflow it (the second review of #330).
+        if log_block_size > MAX_BLOCK_SIZE.trailing_zeros() - 10 {
             return Err(Error::NotExt2); // unsupported (>4 KiB) block size
         }
+        let block_size = 1024u32 << log_block_size;
         let first_data_block = u32::from_le_bytes([sb[20], sb[21], sb[22], sb[23]]);
         let inodes_per_group = u32::from_le_bytes([sb[40], sb[41], sb[42], sb[43]]);
         // s_rev_level at 76: rev 0 has a fixed 128-byte inode; rev 1 stores
@@ -217,6 +219,13 @@ impl Fs {
         if inode_size == 0 || inodes_per_group == 0 {
             return Err(Error::NotExt2);
         }
+        // An inode holds at least rev 0's 128 bytes, the fields read and
+        // written here (write_inode's block pointers end at 100), and is a
+        // power of two no larger than a block, as Linux requires: a smaller
+        // one panicked fsd on its first write (the fourth review of #330).
+        if inode_size < 128 || inode_size > block_size || !inode_size.is_power_of_two() {
+            return Err(Error::NotExt2);
+        }
         let inodes_count = u32::from_le_bytes([sb[0], sb[1], sb[2], sb[3]]);
         let blocks_per_group = u32::from_le_bytes([sb[32], sb[33], sb[34], sb[35]]);
         let first_ino = if rev_level >= 1 {
@@ -224,7 +233,43 @@ impl Fs {
         } else {
             11
         };
-        if blocks_per_group == 0 {
+        // A group's blocks and inodes each fit its one bitmap block, as the
+        // bitmap code indexes them (8 bits a byte of one block: past that
+        // bitmap_free's clear lands past the block, lost or, past its 4 KiB
+        // buffer, a panic; the third review of #330).
+        let bits_per_block = block_size * 8;
+        if blocks_per_group == 0 || blocks_per_group > bits_per_block || inodes_per_group > bits_per_block {
+            return Err(Error::NotExt2);
+        }
+        // No larger than its partition (s_blocks_count): a superblock
+        // claiming more is not this volume, as on FAT32 and exFAT (a stale one
+        // left by a larger image; the review of #329). Linux refuses it too
+        // ("block count exceeds size of device"). This bounds the volume, not
+        // a block number read from an inode, which nothing checks yet (the
+        // roadmap).
+        let blocks_count = u32::from_le_bytes([sb[4], sb[5], sb[6], sb[7]]);
+        if blocks_count as u64 * (block_size as u64 / SECTOR_SIZE as u64) > partition_sectors {
+            return Err(Error::NotExt2);
+        }
+        // The groups inside that count: the first data block below it, at
+        // least one group holding the root inode, no more groups (counted from
+        // the inodes, as `groups_count` is) than its blocks make, and the
+        // descriptor table, one 32-byte descriptor a group from the block after
+        // the superblock's, inside the volume (the reviews of #330). What a
+        // descriptor's own block numbers say is the roadmap's per-block bound.
+        let groups_count = inodes_count.div_ceil(inodes_per_group);
+        let bgdt_end = first_data_block as u64 + 1 + (groups_count as u64 * 32).div_ceil(block_size as u64);
+        // The first data block is the superblock's own: block 1 with 1 KiB
+        // blocks, else block 0, so the descriptor table after it is never the
+        // superblock (a 1 KiB volume giving 0 put it there; the third review
+        // of #330).
+        let superblock_block = (SUPERBLOCK_OFFSET / block_size as u64) as u32;
+        if first_data_block != superblock_block
+            || first_data_block >= blocks_count
+            || inodes_count < ROOT_INO
+            || groups_count as u64 > (blocks_count - first_data_block).div_ceil(blocks_per_group) as u64
+            || bgdt_end > blocks_count as u64
+        {
             return Err(Error::NotExt2);
         }
 
@@ -240,7 +285,7 @@ impl Fs {
             blocks_per_group,
             first_data_block,
             first_ino,
-            groups_count: inodes_count.div_ceil(inodes_per_group),
+            groups_count,
             has_filetype: u32::from_le_bytes([sb[96], sb[97], sb[98], sb[99]]) & INCOMPAT_FILETYPE
                 != 0,
             creator_uid: 0,

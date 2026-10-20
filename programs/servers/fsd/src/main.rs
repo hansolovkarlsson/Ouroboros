@@ -347,9 +347,12 @@ fn partition_disk(type_byte: u8) -> u64 {
 
 /// The partition `format` lays a root on (start LBA, sector count): the
 /// root by `vfs::mount`'s own order ([`vfs::root_order`]), from the one
-/// partition parser ([`partition::discover`]), with the size the table
-/// gives it. `None` on a GPT disk, which this MBR-only formatter refuses,
-/// when the disk has no partition, or when the size does not fit 32 bits;
+/// partition parser ([`partition::discover`]), sized by the bound `mount`
+/// checks a volume against ([`vfs::volume_bound`]: the table's length cut to
+/// the next partition, the disk and sector 2^32), so the volume laid is one
+/// `mount` takes. `None` on a GPT disk, which this MBR-only formatter
+/// refuses, when the disk has no partition, or when the table gives the
+/// partition no size;
 /// [`fat32::Error::Io`] when the table, or the probe of a candidate before
 /// the one chosen, would not read: a partition that could not be read is not
 /// shown to be empty, and neither it nor a later candidate is formatted on
@@ -368,11 +371,6 @@ fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
     // the MBR itself), each with its size.
     let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
     let count = partition::discover(&mut disk::Disk, &mut parts)?;
-    // The size from the same parse that chose the partition, not a second
-    // read of the table (the review of #296).
-    let size_of = |lba: u64| {
-        parts[..count].iter().find(|p| p.start == lba && p.sectors != 0).and_then(|p| u32::try_from(p.sectors).ok())
-    };
     // The root by `vfs::mount`'s rule, so `format` writes over what `/`
     // showed: among the candidates beside the one the system booted from
     // (a partition typed as a root, else every other one), the first holding
@@ -385,17 +383,23 @@ fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
     // typed root is formatted, not a data partition or an ESP beside it,
     // whether or not the boot partition is known (the review of #295).
     let boot = disk::Disk.boot_partition_start();
-    let roots = vfs::root_order(&parts, count, boot);
+    let roots = vfs::root_order(&parts, count, boot, disk::Disk.capacity_sectors().ok());
     let candidates = roots.format_targets();
     let probed = vfs::Filesystem::first_mounting(candidates);
     if let Some(e) = probed.failed {
         return Err(e);
     }
     let probing = probed.found.map(|(i, _)| candidates[i]);
+    // `target` is a vfs::Candidate: the partition and its bound.
     let Some(target) = probing.or(candidates.first().copied()) else {
         return Ok(None);
     };
-    Ok(u32::try_from(target).ok().zip(size_of(target)))
+    // The size from the same parse that chose the partition, not a second
+    // read of the table (the review of #296), as the bound `mount` will check
+    // the volume against (the review of #330). A table that gives no size is
+    // refused, as it always was.
+    let sectors = (target.part.sectors != 0).then_some(target.bound).and_then(|s| u32::try_from(s).ok());
+    Ok(u32::try_from(target.part.start).ok().zip(sectors))
 }
 
 /// Lay a fresh filesystem of type `fstype` into the disk's root partition

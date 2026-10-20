@@ -296,7 +296,7 @@ impl Fs {
     /// Mount the exFAT volume whose first sector (the boot sector / VBR) is at
     /// `partition_lba`. Returns [`Error::NotExFat`] if that sector isn't an
     /// exFAT VBR, so `vfs::mount` can try the next partition/format.
-    pub fn mount_at(mut disk: Disk, partition_lba: u32) -> Result<Self, Error> {
+    pub fn mount_at(mut disk: Disk, partition_lba: u32, partition_sectors: u64) -> Result<Self, Error> {
         let mut vbr = [0u8; SECTOR_SIZE];
         disk.read_sector(partition_lba as u64, &mut vbr)?;
 
@@ -310,13 +310,43 @@ impl Fs {
         // This whole stack assumes 512-byte sectors (see `disk.rs`); a volume
         // formatted with a different sector size isn't something we read.
         if bytes_per_sector_shift != 9 {
-            return Err(Error::UnsupportedSectorSize(1u16 << bytes_per_sector_shift));
+            // The size named only when it fits the error's u16: the shift is
+            // the boot sector's byte, unchecked (the third review of #330).
+            return Err(Error::UnsupportedSectorSize(1u16.checked_shl(bytes_per_sector_shift as u32).unwrap_or(0)));
         }
 
         let fat_offset = u32::from_le_bytes([vbr[80], vbr[81], vbr[82], vbr[83]]);
         let cluster_heap_offset = u32::from_le_bytes([vbr[88], vbr[89], vbr[90], vbr[91]]);
         let cluster_count = u32::from_le_bytes([vbr[92], vbr[93], vbr[94], vbr[95]]);
         let root_cluster = u32::from_le_bytes([vbr[96], vbr[97], vbr[98], vbr[99]]);
+        let volume_length = u64::from_le_bytes(vbr[72..80].try_into().unwrap());
+        let fat_length = u32::from_le_bytes([vbr[84], vbr[85], vbr[86], vbr[87]]);
+
+        // The volume as its boot sector lays it out, inside its partition:
+        // `in_heap` (`cluster_count`) is the bound every cluster is checked
+        // against, and the FAT entry of every such cluster must lie in the
+        // FAT. A boot sector claiming more than the partition holds is not
+        // this volume: a stale one left by a larger image (`erase disk`
+        // zeroes the first 1 MiB, `partition` starts there) named a root
+        // past the end of the disk, and its probe answered an I/O error (the
+        // review of #329). The spec's own limits (bytes per sector and
+        // cluster at most 2^25) keep the shift sane, checked before it is
+        // used; the FAT starts past the main and backup boot regions (sector
+        // 24, the spec's least FatOffset), so no FAT write lands on them. In
+        // u64 throughout; the volume's sectors fit 32 bits from here
+        // (`volume_bound`).
+        if sectors_per_cluster_shift > 25 - 9 {
+            return Err(Error::NotExFat);
+        }
+        let heap_end = cluster_heap_offset as u64 + ((cluster_count as u64) << sectors_per_cluster_shift);
+        if volume_length > partition_sectors
+            || heap_end > volume_length
+            || fat_offset < 24
+            || fat_offset as u64 + fat_length as u64 > cluster_heap_offset as u64
+            || (fat_length as u64) * (SECTOR_SIZE as u64 / 4) < cluster_count as u64 + 2
+        {
+            return Err(Error::NotExFat);
+        }
 
         let mut fs = Fs {
             disk,
@@ -332,6 +362,10 @@ impl Fs {
             write_cursor: None,
             fat_cache: None,
         };
+        // The root inside the heap, by the rule every later cluster meets.
+        if !fs.in_heap(fs.root_cluster) {
+            return Err(Error::NotExFat);
+        }
         // Best-effort: reads don't need the bitmap, so a volume without one
         // (malformed) still mounts read-only; only writes require it.
         fs.locate_bitmap()?;
@@ -1155,17 +1189,28 @@ impl Fs {
         Ok(())
     }
 
-    /// LBA of the bitmap sector holding `byte_index` (bitmap assumed contiguous
-    /// - see the field doc). The bitmap starts at `bitmap_first_cluster`.
-    fn bitmap_sector_lba(&self, byte_index: u64) -> u64 {
-        self.cluster_to_lba(self.bitmap_first_cluster) as u64 + byte_index / SECTOR_SIZE as u64
+    /// LBA of the bitmap sector holding `byte_index` (bitmap assumed
+    /// contiguous, see the field doc). The bitmap starts at
+    /// `bitmap_first_cluster`. Refused with [`Error::Io`] for a byte past the bitmap's own length or a
+    /// cluster of it outside the heap: both come from the root directory's
+    /// bitmap entry, unchecked, and every bitmap read and write is made here,
+    /// so a damaged entry (or none: a first cluster of 0, which the free
+    /// path once took to sector `heap - 2 clusters`) cannot reach past the
+    /// heap (the second review of #330; FAT32's `cluster_to_lba` the same).
+    fn bitmap_sector_lba(&self, byte_index: u64) -> Result<u64, Error> {
+        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+        let cluster = self.bitmap_first_cluster as u64 + byte_index / cluster_bytes;
+        if byte_index >= self.bitmap_bytes || !self.in_heap(self.bitmap_first_cluster) || cluster > u32::MAX as u64 || !self.in_heap(cluster as u32) {
+            return Err(Error::Io(DiskError::Io));
+        }
+        Ok(self.cluster_to_lba(self.bitmap_first_cluster) as u64 + byte_index / SECTOR_SIZE as u64)
     }
 
     /// Set or clear the bitmap bit for `cluster` (bit index `cluster - 2`).
     fn bitmap_set(&mut self, cluster: u32, allocated: bool) -> Result<(), Error> {
         let bit = cluster - 2;
         let byte_index = (bit / 8) as u64;
-        let lba = self.bitmap_sector_lba(byte_index);
+        let lba = self.bitmap_sector_lba(byte_index)?;
         let off = (byte_index % SECTOR_SIZE as u64) as usize;
         let mask = 1u8 << (bit % 8);
         let mut buf = [0u8; SECTOR_SIZE];
@@ -1191,7 +1236,7 @@ impl Fs {
         let mut sector_lba = u64::MAX;
         let mut buf = [0u8; SECTOR_SIZE];
         while byte_index < nbytes {
-            let lba = self.bitmap_sector_lba(byte_index);
+            let lba = self.bitmap_sector_lba(byte_index)?;
             if lba != sector_lba {
                 self.disk.read_sector(lba, &mut buf)?;
                 sector_lba = lba;
