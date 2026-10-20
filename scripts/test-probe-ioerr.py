@@ -25,18 +25,24 @@ looks for a GPT header, and FAT32's probe reads its first sector only. Beside
 it on USB, a copy of build/usbstick.img (a FAT32 stick). As the fallback root
 session (nothing mounts, so login has no accounts):
 
-- fsd's boot line must say the mount failed with a disk I/O error;
-- `format ext2` must be refused (the shell's I/O message), and after the
-  boot the virtio copy's partition must be byte for byte as it was;
-- `mount -a` must answer that the disk gave an I/O error and was not
-  replaced, with no `usb-msd block device installed` line;
-- the builtin `mount` after it must say nothing is mounted.
+Two boots, each on fresh copies, each checking that fsd's boot line says the
+mount failed with a disk I/O error:
+
+- MOUNT: `mount -a` must answer that the disk gave an I/O error and was not
+  replaced, with no `usb-msd block device installed` line, and the builtin
+  `mount` after it must say nothing is mounted;
+- FORMAT: `format ext2` must be refused, and after the boot the virtio
+  copy's partition must be byte for byte as it was. The bytes are the check:
+  on main before 2026-10-20 the format wrote ext2 over the partition and then
+  failed on the sector that would not read, printing the same refusal.
 
 No fault line in QEMU's trace. Fails with the probe answering `None` for a
-read error, as on main before 2026-10-20 (the stick installed and mounted,
-the virtio partition formatted). That the stick can be swapped in at all is
-test-mount-gate's check. About a minute. Run it whenever fsd's probe, mount,
-format or `mount -a`'s rescan changes.
+read error, as on main before 2026-10-20 (MOUNT: the stick installed and
+mounted; FORMAT: the partition overwritten). One boot each because the
+format, when it goes ahead, leaves an ext2 that `mount -a` then mounts, and
+the swap is never tried. That the stick can be swapped in at all is
+test-mount-gate's check. About a minute and a half. Run it whenever fsd's
+probe, mount, format or `mount -a`'s rescan changes.
 """
 import importlib.util
 import os
@@ -58,7 +64,7 @@ STICK = os.path.join(BUILD, "usbstick.img")
 COPY = os.path.join(BUILD, "test-probe-ioerr.img")
 STICK_COPY = os.path.join(BUILD, "test-probe-ioerr-stick.img")
 BLKDEBUG = os.path.join(BUILD, "test-probe-ioerr.blkdebug")
-COMMANDS = ["format ext2", "mount -a", "mount"]
+BOOTS = {"MOUNT": ["mount -a", "mount"], "FORMAT": ["format ext2"]}
 EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M)
 
 
@@ -91,8 +97,16 @@ def partition_bytes(image, start, sectors=64):
         return fh.read(sectors * 512)
 
 
-def boot():
-    steps = [("# ", cmd) for cmd in COMMANDS] + [("# ", "")]
+def partition_bytes(image, start, sectors=64):
+    with open(image, "rb") as fh:
+        fh.seek(start * 512)
+        return fh.read(sectors * 512)
+
+
+def boot(name, commands):
+    """One boot on fresh copies: (driven, transcript, faults, partition
+    unchanged, partition start, failing sector)."""
+    steps = [("# ", cmd) for cmd in commands] + [("# ", "")]
     guest = None
     try:
         start, failing = prepare()
@@ -114,7 +128,7 @@ def boot():
             "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
         ]
         guest = drive_qemu.Guest(COPY, extra_args=extra, virtio_disk=False, stamp_from=ESP,
-                                 label="test-probe-ioerr: ")
+                                 label=f"test-probe-ioerr[{name}]: ")
         driven = guest.run(steps)
         out = guest.transcript()
         faults = guest.aborts()
@@ -127,19 +141,19 @@ def boot():
         for f in (COPY, STICK_COPY, BLKDEBUG):
             if os.path.exists(f):
                 os.remove(f)
-    with open(os.path.join(BUILD, "test-probe-ioerr.txt"), "w") as fh:
+    with open(os.path.join(BUILD, f"test-probe-ioerr-{name.lower()}.txt"), "w") as fh:
         fh.write(out)
     return driven, out, faults, before == after, start, failing
 
 
-def outputs(out):
+def outputs(out, commands):
     """[output of each command], in order: the lines after its prompt line
     (`# cmd`) up to the next prompt, the kernel's exit lines dropped. netd's
     boot lines can land after a prompt, so a command may be echoed on a line
     of its own."""
     got = []
     at = 0
-    for cmd in COMMANDS:
+    for cmd in commands:
         m = re.compile(rf"^(?:# )?{re.escape(cmd)}\r?$", re.M).search(out, at)
         if not m:
             got.append(None)
@@ -151,13 +165,10 @@ def outputs(out):
     return got
 
 
-def main():
-    for f in (ESP, EXFAT, STICK):
-        if not os.path.exists(f):
-            sys.exit(f"{f} not found - run `make test-probe-ioerr`, which builds it")
-    driven, out, faults, untouched, start, failing = boot()
-    o = outputs(out)
-    boot_log = out.split("# format ext2")[0]
+def checks_of(name, commands):
+    driven, out, faults, untouched, start, failing = boot(name, commands)
+    o = outputs(out, commands)
+    boot_log = out.split(f"# {commands[0]}")[0]
     checks = [
         # The table's reads are sectors 0 and 1 (MBR, GPT header): the error
         # must land past them, where only the probe reads.
@@ -169,16 +180,32 @@ def main():
         ("fsd's boot mount failed with a disk I/O error",
          "fsd: mount failed (" in boot_log
          and "disk I/O error) - disk commands won't work" in boot_log),
-        (f"format ext2 refused (got {o[0]!r})",
-         o[0] == "format: the partition is too small, or an I/O error occurred"),
-        (f"the virtio copy's partition unchanged from LBA {start}", untouched),
-        (f"mount -a answered the I/O error, the disk not replaced (got {o[1]!r})",
-         (o[1] or "").endswith("mount: the disk answered with an I/O error; it was not replaced by a USB stick")),
-        ("no stick installed", "usb-msd block device installed" not in out),
-        (f"mount after it: nothing mounted (got {o[2]!r})",
-         (o[2] or "").startswith("nothing mounted")),
-        ("no fault lines", faults == 0),
     ]
+    if name == "MOUNT":
+        checks += [
+            (f"mount -a answered the I/O error, the disk not replaced (got {o[0]!r})",
+             (o[0] or "").endswith("mount: the disk answered with an I/O error; it was not replaced by a USB stick")),
+            ("no stick installed", "usb-msd block device installed" not in out),
+            (f"mount after it: nothing mounted (got {o[1]!r})",
+             (o[1] or "").startswith("nothing mounted")),
+        ]
+    else:
+        checks += [
+            (f"format ext2 refused (got {o[0]!r})",
+             o[0] == "format: the partition is too small, or an I/O error occurred"),
+            (f"the virtio copy's partition unchanged from LBA {start}", untouched),
+        ]
+    checks.append(("no fault lines", faults == 0))
+    return [(f"{name}: {label}", ok) for label, ok in checks]
+
+
+def main():
+    for f in (ESP, EXFAT, STICK):
+        if not os.path.exists(f):
+            sys.exit(f"{f} not found - run `make test-probe-ioerr`, which builds it")
+    checks = []
+    for name, commands in BOOTS.items():
+        checks += checks_of(name, commands)
     failed = 0
     for label, ok in checks:
         print(("PASS  " if ok else "FAIL  ") + label)
