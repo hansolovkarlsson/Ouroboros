@@ -50,7 +50,9 @@ with three zeroed blocks, which nothing may change. The host plants:
 
 Before the boot the host reads back every plant and checks it lands where
 this says (the observer's own checks). Fails with Volume's bound taken out
-(RD reads 2,048 bytes, WR's and IND's appends and G's write the witness),
+(RD reads 2,048 bytes, WR's and IND's appends and G's write the witness,
+and G's block, bit 0 of the witness's zeroed "bitmap", is C's superblock,
+which it zeroes),
 with the inode-number bound out (GHOST reads SRC), with the allocator's
 block cap out (B's write an I/O error, not disk full: Volume refuses the
 block the allocator handed out), with its inode cap out (NEW2 an I/O error,
