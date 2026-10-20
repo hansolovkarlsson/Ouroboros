@@ -446,6 +446,10 @@ def verdicts(plan, driven, out, faults):
         owi_data = va.read(owi_new * va.bs, owi_size) if owi_new and owi_size else b""
         rmi_inode_bit = bit(va.bitmap(4), ino["RMI"] - 1)
         src_bit = bit(va.bitmap(0), plan["src_block"] - va.fdb)
+        # A freed inode carries a deletion time and no links (e2fsck reads a
+        # small i_dtime as an orphan-list pointer).
+        rd_off = va.inode_off(ino["RD"])
+        rd_dead = (va.u32(rd_off + 20), struct.unpack("<H", va.read(rd_off + 26, 2))[0])
         a_bitmap = va.bitmap(0)
         b_names = set(vb.entries())
         b_inode_bits = [bit(vb.bitmap(4), n) for n in range(plan["b_inodes_used"] + 2)]
@@ -471,8 +475,8 @@ def verdicts(plan, driven, out, faults):
          and ind_ptr == ((wit_start - plan["a"]) * SECT + AT_IND * 1024) // va.bs),
         (f"GHOST refused with an I/O error, not SRC's bytes (got {ghost!r})",
          io in (ghost or "") and wc_bytes(ghost) in (None, 0)),
-        (f"rm of RD succeeds and RD is gone (got {o.get('rm /mnt/a/RD')!r})",
-         o.get("rm /mnt/a/RD") == "" and "RD" not in ents),
+        (f"rm of RD succeeds and RD is gone, its inode with a deletion time and no links (got {o.get('rm /mnt/a/RD')!r}, {rd_dead})",
+         o.get("rm /mnt/a/RD") == "" and "RD" not in ents and rd_dead[0] != 0 and rd_dead[1] == 0),
         (f"rm of RMI, its indirect pointer past A, succeeds and frees its inode (got {o.get('rm /mnt/a/RMI')!r})",
          o.get("rm /mnt/a/RMI") == "" and "RMI" not in ents and rmi_inode_bit == 0),
         (f"OWI, its indirect pointer past A, overwritten without an error (got {o.get('echo x > /mnt/a/OWI')!r}, holding {owi_data!r})",
