@@ -898,27 +898,8 @@ impl Fs {
             if !current.is_dir {
                 return Err(Error::NotADirectory);
             }
-            let mut found: Option<(DirEntry, usize, usize)> = None;
-            self.walk_dir(
-                current.first_cluster,
-                current.contiguous,
-                current.size,
-                |entry, slot, len| {
-                    if names_match(entry.name(), component) {
-                        found = Some((*entry, slot, len));
-                        true
-                    } else {
-                        false
-                    }
-                },
-            )?;
-            let (entry, slot, len) = found.ok_or(Error::NotFound)?;
-            at = Some(SetAt {
-                dir_cluster: current.first_cluster,
-                dir_contiguous: current.contiguous,
-                slot,
-                len,
-            });
+            let (entry, set) = self.entry_in(&current, component)?.ok_or(Error::NotFound)?;
+            at = Some(set);
             current = entry;
         }
         Ok((current, at))
@@ -1359,7 +1340,7 @@ impl Fs {
         let at = *at;
         if x.clusters == 0 {
             let new = self.alloc_zeroed()?;
-            if let Err(err) = self.patch_set_stream(at, new, cluster_bytes) {
+            if let Err(err) = self.patch_stream_ext(at, new, cluster_bytes) {
                 let _ = self.free_data(new, false, cluster_bytes);
                 return Err(err);
             }
@@ -1372,13 +1353,13 @@ impl Fs {
         if e.contiguous {
             let size = x.clusters * cluster_bytes;
             self.ensure_chained(e.first_cluster, true, size)?;
-            self.patch_set_stream(at, e.first_cluster, size)?;
+            self.patch_stream_ext(at, e.first_cluster, size)?;
             e.contiguous = false;
         }
         let new = self.alloc_zeroed()?;
         self.write_fat_entry(x.tail, new)?;
         let size = (x.clusters + 1) * cluster_bytes;
-        if let Err(err) = self.patch_set_stream(at, e.first_cluster, size) {
+        if let Err(err) = self.patch_stream_ext(at, e.first_cluster, size) {
             // Undone, or the chain would run past the size, and `room` would
             // refuse every later create in the directory until a fsck (the
             // medium review of 2026-10-19): one failed write, a locked
@@ -1535,37 +1516,27 @@ impl Fs {
     fn parent_for_create(&mut self, path: &str) -> Result<(Dir, ExistingKind), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
         let parent = self.dir_at(parent_path)?;
-        let p = parent.entry;
-        let mut kind = ExistingKind::None;
-        self.walk_dir(p.first_cluster, p.contiguous, p.size, |entry, _slot, _len| {
-            if names_match(entry.name(), name) {
-                kind = if entry.is_dir {
-                    ExistingKind::Dir
-                } else {
-                    ExistingKind::File
-                };
-                true
-            } else {
-                false
-            }
-        })?;
+        let kind = match self.entry_in(&parent.entry, name)? {
+            None => ExistingKind::None,
+            Some((entry, _)) if entry.is_dir => ExistingKind::Dir,
+            Some(_) => ExistingKind::File,
+        };
         Ok((parent, kind))
     }
 
-    /// Locate a named entry in a directory, also returning its set's on-disk
-    /// position (primary slot + entry count) so the set can be patched or
-    /// deleted. The located sibling of the lookup `parent_for_create` does.
-    fn find_in_parent(
-        &mut self,
-        dir_cluster: u32,
-        dir_contig: bool,
-        dir_size: u64,
-        name: &str,
-    ) -> Result<Option<(DirEntry, usize, usize)>, Error> {
-        let mut found: Option<(DirEntry, usize, usize)> = None;
-        self.walk_dir(dir_cluster, dir_contig, dir_size, |entry, slot, len| {
+    /// The entry named `name` in directory `dir`, and where its set lies: THE
+    /// one place a name in a directory picks a set (since 2026-10-19). Path
+    /// resolution (`find_at`), the existence check before a create
+    /// (`parent_for_create`) and every write, removal and rename go through
+    /// it, so a change to matching (the up-case table, which `names_match`'s
+    /// ASCII folding approximates) cannot make two paths pick two sets, and
+    /// no caller assembles a set's location by hand.
+    fn entry_in(&mut self, dir: &DirEntry, name: &str) -> Result<Option<(DirEntry, SetAt)>, Error> {
+        let mut found = None;
+        self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry, slot, len| {
             if names_match(entry.name(), name) {
-                found = Some((*entry, slot, len));
+                let at = SetAt { dir_cluster: dir.first_cluster, dir_contiguous: dir.contiguous, slot, len };
+                found = Some((*entry, at));
                 true
             } else {
                 false
@@ -1690,29 +1661,22 @@ impl Fs {
     /// share a sector, as they do unless the set starts in a sector's last
     /// slot: then two writes, and a crash between them leaves the checksum
     /// unmatched, which nothing short of a journal avoids.
-    fn patch_stream_ext(
-        &mut self,
-        dir_cluster: u32,
-        dir_contig: bool,
-        primary_slot: usize,
-        set_len: usize,
-        first_cluster: u32,
-        data_len: u64,
-    ) -> Result<(), Error> {
+    fn patch_stream_ext(&mut self, at: SetAt, first_cluster: u32, data_len: u64) -> Result<(), Error> {
+        let SetAt { dir_cluster, dir_contiguous: dir_contig, slot: primary_slot, len: set_len } = at;
         // File and Stream as they are, then the Stream changed.
         let mut cur = SlotCursor::new(dir_cluster, dir_contig);
         let mut head = [0u8; 2 * ENTRY_SIZE];
-        let mut at = [(0u64, 0usize); 2];
+        let mut place = [(0u64, 0usize); 2];
         let mut sec = [0u8; SECTOR_SIZE];
         let mut sec_lba = None;
-        for (i, place) in at.iter_mut().enumerate() {
+        for (i, spot) in place.iter_mut().enumerate() {
             let (lba, off) = self.slot_at(&mut cur, primary_slot + i)?.ok_or(Error::NotFound)?;
             if sec_lba != Some(lba) {
                 self.disk.read_sector(lba, &mut sec)?;
                 sec_lba = Some(lba);
             }
             head[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE].copy_from_slice(&sec[off..off + ENTRY_SIZE]);
-            *place = (lba, off);
+            *spot = (lba, off);
         }
         let se = ENTRY_SIZE;
         // `walk_dir` closes a set only in this shape, so this is a check that
@@ -1741,17 +1705,17 @@ impl Fs {
         // Rewrite the two changed entries (File carries the new checksum): one
         // write when they share a sector, the sector already read if `sec`
         // still holds it.
-        if at[0].0 == at[1].0 {
-            let (lba, _) = at[0];
+        if place[0].0 == place[1].0 {
+            let (lba, _) = place[0];
             if sec_lba != Some(lba) {
                 self.disk.read_sector(lba, &mut sec)?;
             }
-            for (i, &(_, off)) in at.iter().enumerate() {
+            for (i, &(_, off)) in place.iter().enumerate() {
                 sec[off..off + ENTRY_SIZE].copy_from_slice(&head[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE]);
             }
             self.disk.write_sector(lba, &sec)?;
         } else {
-            for (i, &(lba, off)) in at.iter().enumerate() {
+            for (i, &(lba, off)) in place.iter().enumerate() {
                 if sec_lba != Some(lba) {
                     self.disk.read_sector(lba, &mut sec)?;
                 }
@@ -1761,11 +1725,6 @@ impl Fs {
             }
         }
         Ok(())
-    }
-
-    /// [`patch_stream_ext`](Self::patch_stream_ext) of the set at `at`.
-    fn patch_set_stream(&mut self, at: SetAt, first_cluster: u32, data_len: u64) -> Result<(), Error> {
-        self.patch_stream_ext(at.dir_cluster, at.dir_contiguous, at.slot, at.len, first_cluster, data_len)
     }
 
     // ---- write surface ------------------------------------------------------
@@ -1794,17 +1753,16 @@ impl Fs {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
         let mut dir = self.dir_at(parent_path)?;
         let parent = dir.entry;
-        let existing =
-            self.find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?;
+        let existing = self.entry_in(&parent, name)?;
         #[allow(clippy::large_enum_variant)] // one, on the stack, for one call
         enum Plan {
-            Replace(DirEntry, usize, usize),
+            Replace(DirEntry, SetAt),
             Create(Room),
         }
         // A create is refused before the chain is written, or it would leak.
         let plan = match existing {
-            Some((entry, _, _)) if entry.is_dir => return Err(Error::NotAFile),
-            Some((entry, slot, len)) => Plan::Replace(entry, slot, len),
+            Some((entry, _)) if entry.is_dir => return Err(Error::NotAFile),
+            Some((entry, at)) => Plan::Replace(entry, at),
             None => Plan::Create(self.room(&dir)?),
         };
 
@@ -1812,16 +1770,9 @@ impl Fs {
         let new_cluster = self.write_chain(data)?;
 
         match plan {
-            Plan::Replace(entry, primary_slot, set_len) => {
+            Plan::Replace(entry, at) => {
                 self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
-                self.patch_stream_ext(
-                    parent.first_cluster,
-                    parent.contiguous,
-                    primary_slot,
-                    set_len,
-                    new_cluster,
-                    data.len() as u64,
-                )
+                self.patch_stream_ext(at, new_cluster, data.len() as u64)
             }
             Plan::Create(room) => {
                 let made = self.create_entry(&mut dir, room, name, false, new_cluster, data.len() as u64, false);
@@ -1850,9 +1801,7 @@ impl Fs {
         if !parent.is_dir {
             return Err(Error::NotADirectory);
         }
-        let (entry, primary_slot, set_len) = self
-            .find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?
-            .ok_or(Error::NotFound)?;
+        let (entry, at) = self.entry_in(&parent, name)?.ok_or(Error::NotFound)?;
         if entry.is_dir {
             return Err(Error::NotAFile);
         }
@@ -1933,27 +1882,14 @@ impl Fs {
             cluster_pos: cluster_pos as usize,
         });
         let new_size = old_size.max(write_end);
-        self.patch_stream_ext(
-            parent.first_cluster,
-            parent.contiguous,
-            primary_slot,
-            set_len,
-            head_cluster,
-            new_size,
-        )
+        self.patch_stream_ext(at, head_cluster, new_size)
     }
 
     /// Mark every entry of a set deleted by clearing its in-use bit (`0x85` ->
     /// `0x05`, `0xC0` -> `0x40`, `0xC1` -> `0x41`) - how exFAT removes a set (no
     /// `0xE5` tombstone byte like FAT). One read-modify-write a sector.
-    fn delete_set(
-        &mut self,
-        dir_cluster: u32,
-        dir_contig: bool,
-        primary_slot: usize,
-        set_len: usize,
-    ) -> Result<(), Error> {
-        self.rewrite_slots(dir_cluster, dir_contig, primary_slot, set_len, || Error::NotFound, |sec, _, off, k| {
+    fn delete_set(&mut self, at: SetAt) -> Result<(), Error> {
+        self.rewrite_slots(at.dir_cluster, at.dir_contiguous, at.slot, at.len, || Error::NotFound, |sec, _, off, k| {
             for j in 0..k {
                 sec[off + j * ENTRY_SIZE] &= !ET_IN_USE;
             }
@@ -1989,14 +1925,12 @@ impl Fs {
         if !parent.is_dir {
             return Err(Error::NotADirectory);
         }
-        let (entry, slot, len) = self
-            .find_in_parent(parent.first_cluster, parent.contiguous, parent.size, name)?
-            .ok_or(Error::NotFound)?;
+        let (entry, at) = self.entry_in(&parent, name)?.ok_or(Error::NotFound)?;
         if entry.is_dir {
             return Err(Error::NotAFile);
         }
         self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
-        self.delete_set(parent.first_cluster, parent.contiguous, slot, len)
+        self.delete_set(at)
     }
 
     /// Remove an empty subdirectory (rejects a non-empty one, a file, and the
@@ -2025,7 +1959,7 @@ impl Fs {
             let bytes = extent.clusters * self.cluster_bytes();
             self.free_data(entry.first_cluster, entry.contiguous, bytes)?;
         }
-        self.delete_set(at.dir_cluster, at.dir_contiguous, at.slot, at.len)
+        self.delete_set(at)
     }
 
     /// Rename or move a file/directory. Re-points a new entry set at `src`'s
@@ -2053,9 +1987,7 @@ impl Fs {
         // and chaining, and the slots found in it address the same clusters.
         let dst_parent = dst_dir.entry;
 
-        let (src_entry, src_slot, src_len) = self
-            .find_in_parent(src_parent.first_cluster, src_parent.contiguous, src_parent.size, src_name)?
-            .ok_or(Error::NotFound)?;
+        let (src_entry, src_at) = self.entry_in(&src_parent, src_name)?.ok_or(Error::NotFound)?;
 
         // An existing destination is REPLACED when both it and `src` are
         // ordinary files. Like FAT32 and unlike ext2 this cannot be ATOMIC: an
@@ -2064,12 +1996,7 @@ impl Fs {
         // absent: the new set is written before the old one is deleted, so a
         // reader in between finds two and gets one of the two files, never
         // nothing.
-        if let Some((dst_entry, dst_slot, dst_len)) = self.find_in_parent(
-            dst_parent.first_cluster,
-            dst_parent.contiguous,
-            dst_parent.size,
-            dst_name,
-        )? {
+        if let Some((dst_entry, dst_at)) = self.entry_in(&dst_parent, dst_name)? {
             // Name matching is up-case folded, so `src` and `dst` can be the
             // SAME set two ways. `mv f f` is a genuine no-op; `mv FOO.TXT
             // foo.txt` is a real request to change the stored spelling, and
@@ -2077,8 +2004,7 @@ impl Fs {
             // happen. The create-first order below performs it: write the set
             // under the new name, delete the old one, and skip both the
             // source-side delete (same slot) and the data free (same file).
-            let same_set =
-                src_parent.first_cluster == dst_parent.first_cluster && src_slot == dst_slot;
+            let same_set = src_at.dir_cluster == dst_at.dir_cluster && src_at.slot == dst_at.slot;
             if same_set && src_name.as_bytes() == dst_name.as_bytes() {
                 return Ok(());
             }
@@ -2091,7 +2017,7 @@ impl Fs {
             // directory that cannot be extended, an allocation failure) would
             // return Err having already destroyed `dst` while `src` is still
             // there. Slot indices are stable across a create - `create_entry`
-            // fills a free run and moves nothing - so the recorded `dst_slot`
+            // fills a free run and moves nothing - so the recorded `dst_at`
             // still addresses the old set afterwards.
             let room = self.room(&dst_dir)?;
             self.create_entry(
@@ -2103,9 +2029,9 @@ impl Fs {
                 src_entry.size,
                 src_entry.contiguous,
             )?;
-            self.delete_set(dst_parent.first_cluster, dst_parent.contiguous, dst_slot, dst_len)?;
+            self.delete_set(dst_at)?;
             if !same_set {
-                self.delete_set(src_parent.first_cluster, src_parent.contiguous, src_slot, src_len)?;
+                self.delete_set(src_at)?;
                 // Two guards: a case-only rename re-links the same set, and a
                 // cross-linked image can give two sets the same first cluster.
                 // Freeing then destroys the data the surviving name points at.
@@ -2127,7 +2053,7 @@ impl Fs {
             src_entry.size,
             src_entry.contiguous,
         )?;
-        self.delete_set(src_parent.first_cluster, src_parent.contiguous, src_slot, src_len)
+        self.delete_set(src_at)
     }
 }
 
