@@ -2577,7 +2577,7 @@ test-mount-gate: image $(USBSTICK_IMG)
 # a 20-entry set (17 vendor extension entries); an append that patches its
 # Stream must leave the SetChecksum over all 20 and fsck_exfat clean. One
 # boot, about a minute; run it whenever exFAT's patch_stream_ext,
-# set_checksum, walk_dir's set assembly or slot_addr changes.
+# set_checksum, walk_dir's set assembly or slot_at changes.
 test-long-set: image-exfat
 	python3 scripts/test-long-set.py
 

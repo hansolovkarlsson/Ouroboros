@@ -16,18 +16,25 @@ count: `dirprobe /D 1` and `dirprobe /D 100` (/bin/DIRPROBE: make the files,
 then open, list and touch each). QEMU counts every virtio-blk read
 (scripts/disktrace.py); after the second boot the host reads /D's chain off
 the disk. Graded: the reads of /D's own sectors in the second boot, against
-W, one read of every sector /D held at each of the 100 creates (each file's
-set is three slots, F000 to F099), the cost of one pass a create. The reads
+W, the sum over the 100 creates of the sectors holding an entry when each
+began (each file's set is three slots, F000 to F099, so ceil(3i/16), and at
+least one), the cost of one pass over what the directory held a create; and
+the writes to /D's sectors, at most three a file (its set written once a
+sector, its Stream patched once, the growths' zeroing), where a set written a
+slot at a time was three by itself. The rig prints how many more sectors the
+100-file boot read in all than the 1-file boot (the records' 4,686 against
+19,026). The reads
 must be at most PASSES x W: fsd now makes a few passes a create (the
 existence check, the free-slot scan, the set's write) and the probe a few
 more over the finished directory. Fails with the scan reading a sector a
 slot again (the main tree before 2026-10-19: 18,496 reads, 19.0 passes,
 against 4,152 and 4.3 after). It grades the directory's sectors only: the
 cursor's saving is chain walks, whose FAT lookups mostly hit fsd's one-sector
-FAT cache and are not graded. Reports both numbers. About a
+FAT cache, which no disk counter sees, so it is not graded. Reports both numbers. About a
 minute and a half. Run it whenever exFAT's find_free_run, slot_at,
-write_set_at, delete_set, walk_dir or room changes.
+rewrite_slots, write_set_at, delete_set, grow_dir, walk_dir or room changes.
 """
+import collections
 import importlib.util
 import os
 import sys
@@ -54,6 +61,11 @@ COUNT = 100
 SET = 3  # slots a file's set takes: File, Stream, one name entry (F000)
 SLOTS_PER_SECTOR = 16
 PASSES = 8
+# A file's set is written once a sector it touches (one, or two across a
+# sector edge), and its Stream patched once by the probe's write; the
+# directory's growths zero their clusters. Slot by slot, the set alone was
+# three writes.
+WRITES_PER_FILE = 3
 
 
 def steps(n):
@@ -80,11 +92,15 @@ def main():
         heap = vol.heap // 512
         found["sectors"] = {heap + (c - 2) * spc + k for c in clusters for k in range(spc)}
 
-    problems, lines1, _ = disktrace.boot("test-dir-scan-1", SOURCE, "espexfat.img", steps(1))
-    more_problems, lines, count = disktrace.boot("test-dir-scan-100", SOURCE, "espexfat.img", steps(COUNT), inspect)
+    problems, lines1, count1 = disktrace.boot("test-dir-scan-1", SOURCE, "espexfat.img", steps(1))
+    written = collections.Counter()
+    more_problems, lines, count = disktrace.boot("test-dir-scan-100", SOURCE, "espexfat.img", steps(COUNT),
+                                                 inspect, writes=written)
     problems += more_problems
     sectors = found.get("sectors", set())
     reads = sum(count[s] for s in sectors)
+    writes = sum(written[s] for s in sectors)
+    more = sum(count.values()) - sum(count1.values())
     w = sum(-(-(i * SET) // SLOTS_PER_SECTOR) or 1 for i in range(COUNT))
     checks = [
         ("both boots driven, no fault lines", not problems),
@@ -92,7 +108,11 @@ def main():
         (f"/D found on the disk after the boot, {len(sectors)} sectors", bool(sectors)),
         (f"/D's sectors read {reads} times, at most {PASSES} x W = {PASSES * w} (W = {w}, {reads / w:.1f} passes)",
          bool(sectors) and 0 < reads <= PASSES * w),
+        (f"/D's sectors written {writes} times, at most {WRITES_PER_FILE} a file ({COUNT * WRITES_PER_FILE}; "
+         f"{writes / COUNT:.2f} a file)",
+         bool(sectors) and 0 < writes <= COUNT * WRITES_PER_FILE),
     ]
+    print(f"      the {COUNT}-file boot read {more} more sectors in all than the 1-file boot")
     failed = 0
     for label, ok in checks:
         print(("PASS  " if ok else "FAIL  ") + label)

@@ -34,7 +34,7 @@ No fault lines in QEMU's trace. Fails with the sum capped at 19 entries (the
 checksum, and fsck: "Incorrect checksum for directory entry set. Delete?")
 and with walk_dir taking either misshapen set (its slots written). About two
 minutes. Run it whenever exFAT's patch_stream_ext, set_checksum, walk_dir's
-set assembly or slot_addr changes.
+set assembly or slot_at changes.
 """
 import importlib.util
 import os

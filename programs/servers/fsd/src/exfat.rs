@@ -1331,7 +1331,25 @@ impl Fs {
     /// chain past the size is refused by the next `room` rather than lost,
     /// where a set still saying `NoFatChain` would have its run ended again
     /// by the next growth and the linked cluster lost.
-    fn grow_dir(&mut self, e: &mut DirEntry, room: &mut Room) -> Result<(), Error> {
+    ///
+    /// `cur`, the caller's walk over the directory's slots, is kept true to
+    /// it here, where the directory changes, so no cursor outlives a growth
+    /// stale: made anew when the directory got its first cluster, told its
+    /// run is a FAT chain now (`ensure_chained` chains the run in place, so
+    /// where the cursor stands is still a slot of the directory), and kept as
+    /// it is when a cluster was linked after the tail.
+    fn grow_dir(&mut self, e: &mut DirEntry, room: &mut Room, cur: &mut SlotCursor) -> Result<(), Error> {
+        self.grow_extent(e, room)?;
+        if cur.first != e.first_cluster {
+            *cur = SlotCursor::new(e.first_cluster, e.contiguous);
+        } else {
+            cur.contiguous = e.contiguous;
+        }
+        Ok(())
+    }
+
+    /// [`grow_dir`](Self::grow_dir)'s work on the disk and on `e` and `room`.
+    fn grow_extent(&mut self, e: &mut DirEntry, room: &mut Room) -> Result<(), Error> {
         let cluster_bytes = self.cluster_bytes();
         let Room::Sub(at, x) = room else {
             let root = self.dir_extent(e.first_cluster, false, 0)?;
@@ -1419,18 +1437,48 @@ impl Fs {
                     slot += 1;
                 }
                 None => {
-                    // Then re-read this slot: the growth may have given the
-                    // directory its first cluster or a FAT chain, so the
-                    // cursor starts again, and no sector is held.
-                    self.grow_dir(e, room)?;
-                    cur = SlotCursor::new(e.first_cluster, e.contiguous);
+                    // Then re-read this slot, past the old end: grow_dir keeps
+                    // the cursor true to the directory, and no sector is held
+                    // (the new cluster was zeroed after it was read).
+                    self.grow_dir(e, room, &mut cur)?;
                     held = None;
                 }
             }
         }
     }
 
-    /// Write `set` (a built entry set, `set.len()/32` entries) into `need`
+    /// Rewrite `n` consecutive slots of a directory from global slot `start`,
+    /// one read-modify-write a sector, in order: `f(sector, i, off, k)` changes
+    /// the run's slots `i..i + k`, which lie at byte `off` of the sector read.
+    /// The one copy of the arithmetic that splits a run at sector edges (a
+    /// sector belongs to one cluster, so a run's slots in it are adjacent),
+    /// for [`write_set_at`](Self::write_set_at) and
+    /// [`delete_set`](Self::delete_set). `missing` is the error for a slot past
+    /// the directory's clusters.
+    fn rewrite_slots(
+        &mut self,
+        dir_cluster: u32,
+        contiguous: bool,
+        start: usize,
+        n: usize,
+        missing: fn() -> Error,
+        mut f: impl FnMut(&mut [u8; SECTOR_SIZE], usize, usize, usize),
+    ) -> Result<(), Error> {
+        let mut cur = SlotCursor::new(dir_cluster, contiguous);
+        let mut i = 0;
+        while i < n {
+            let (lba, off) = self.slot_at(&mut cur, start + i)?.ok_or_else(missing)?;
+            let k = (n - i).min((SECTOR_SIZE - off) / ENTRY_SIZE);
+            let mut sec = [0u8; SECTOR_SIZE];
+            self.disk.read_sector(lba, &mut sec)?;
+            f(&mut sec, i, off, k);
+            self.disk.write_sector(lba, &sec)?;
+            i += k;
+        }
+        Ok(())
+    }
+
+    /// Write `set` (a built entry set, `set.len()/32` entries) into
     /// consecutive slots starting at global slot `start`: one read-modify-write
     /// per sector it touches, in order (slots may straddle sector/cluster
     /// edges), where it was one a slot until 2026-10-19.
@@ -1441,20 +1489,10 @@ impl Fs {
         start: usize,
         set: &[u8],
     ) -> Result<(), Error> {
-        let mut cur = SlotCursor::new(dir_cluster, contiguous);
-        let entries = set.len() / ENTRY_SIZE;
-        let mut i = 0;
-        while i < entries {
-            let (lba, off) = self.slot_at(&mut cur, start + i)?.ok_or(Error::DiskFull)?;
-            // The slots after it in this sector are the set's next ones.
-            let k = (entries - i).min((SECTOR_SIZE - off) / ENTRY_SIZE);
-            let mut buf = [0u8; SECTOR_SIZE];
-            self.disk.read_sector(lba, &mut buf)?;
-            buf[off..off + k * ENTRY_SIZE].copy_from_slice(&set[i * ENTRY_SIZE..(i + k) * ENTRY_SIZE]);
-            self.disk.write_sector(lba, &buf)?;
-            i += k;
-        }
-        Ok(())
+        let n = set.len() / ENTRY_SIZE;
+        self.rewrite_slots(dir_cluster, contiguous, start, n, || Error::DiskFull, |sec, i, off, k| {
+            sec[off..off + k * ENTRY_SIZE].copy_from_slice(&set[i * ENTRY_SIZE..(i + k) * ENTRY_SIZE]);
+        })
     }
 
     /// Build an entry set and insert it into a directory: the full create path
@@ -1915,21 +1953,11 @@ impl Fs {
         primary_slot: usize,
         set_len: usize,
     ) -> Result<(), Error> {
-        let mut cur = SlotCursor::new(dir_cluster, dir_contig);
-        let mut i = 0;
-        while i < set_len {
-            let (lba, off) = self.slot_at(&mut cur, primary_slot + i)?.ok_or(Error::NotFound)?;
-            // The slots after it in this sector are the set's next ones.
-            let k = (set_len - i).min((SECTOR_SIZE - off) / ENTRY_SIZE);
-            let mut sec = [0u8; SECTOR_SIZE];
-            self.disk.read_sector(lba, &mut sec)?;
+        self.rewrite_slots(dir_cluster, dir_contig, primary_slot, set_len, || Error::NotFound, |sec, _, off, k| {
             for j in 0..k {
                 sec[off + j * ENTRY_SIZE] &= !ET_IN_USE;
             }
-            self.disk.write_sector(lba, &sec)?;
-            i += k;
-        }
-        Ok(())
+        })
     }
 
     /// Create an empty subdirectory. Fails if the name exists. An exFAT
