@@ -4306,7 +4306,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   not swap a stick in. Bounding the boot sector's geometry by the
   partition's length, and answering "not this filesystem" for one that
   passes it, would close both. Read in the code, from the review of #329.
-- **ext2 takes a block number from an inode unbounded.** `block_lba`
+- ~~**ext2 takes a block number from an inode unbounded.**~~ *Done
+  2026-10-20:* the mounted arm reaches the disk only through `Volume`, which
+  refuses a sector past `s_blocks_count` blocks as an I/O error; an inode
+  number past `s_inodes_count` is refused the same way, the allocators stop
+  at the last group's last block and inode, and `free_block` frees nothing
+  past the volume. `make test-ext2-blocks`. A block number inside the volume
+  but in its metadata (an inode pointing at the inode table) is not checked;
+  that is damage inside the volume, e2fsck's territory. The record as
+  found: `block_lba`
   computes a sector from any block number, and nothing checks it against
   `s_blocks_count`, so a damaged inode's pointer (direct, indirect, or a
   block group descriptor's table) reads or writes past the volume, into the

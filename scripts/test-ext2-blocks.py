@@ -40,9 +40,12 @@ with two zeroed blocks, which nothing may change. The host plants:
 Before the boot the host reads back every plant and checks it lands where
 this says (the observer's own checks). Fails with Volume's bound taken out
 (RD reads 2,048 bytes, WR's and IND's appends and C's bitmap write the
-witness), with the inode-number bound out (GHOST reads SRC), with the
-allocator's block cap out (B's write lands in the witness) and with its inode
-cap out (NEW2 an I/O error, its bit set). One boot, about a minute, needs
+witness), with the inode-number
+bound out (GHOST reads SRC), with the allocator's block cap out (B's write an
+I/O error, not disk full: Volume refuses the block the allocator handed
+out), with its inode cap out (NEW2 an I/O error, its bit set past the count)
+and with free_block freeing a block past the volume (a bit of A's bitmap
+cleared, through the second group's descriptor). One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block or ensure_block changes.
 """
