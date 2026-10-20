@@ -310,7 +310,9 @@ impl Fs {
         // This whole stack assumes 512-byte sectors (see `disk.rs`); a volume
         // formatted with a different sector size isn't something we read.
         if bytes_per_sector_shift != 9 {
-            return Err(Error::UnsupportedSectorSize(1u16 << bytes_per_sector_shift));
+            // The size named only when it fits the error's u16: the shift is
+            // the boot sector's byte, unchecked (the third review of #330).
+            return Err(Error::UnsupportedSectorSize(1u16.checked_shl(bytes_per_sector_shift as u32).unwrap_or(0)));
         }
 
         let fat_offset = u32::from_le_bytes([vbr[80], vbr[81], vbr[82], vbr[83]]);
@@ -342,8 +344,6 @@ impl Fs {
             || fat_offset < 24
             || fat_offset as u64 + fat_length as u64 > cluster_heap_offset as u64
             || (fat_length as u64) * (SECTOR_SIZE as u64 / 4) < cluster_count as u64 + 2
-            || root_cluster < 2
-            || root_cluster - 2 >= cluster_count
         {
             return Err(Error::NotExFat);
         }
@@ -362,6 +362,10 @@ impl Fs {
             write_cursor: None,
             fat_cache: None,
         };
+        // The root inside the heap, by the rule every later cluster meets.
+        if !fs.in_heap(fs.root_cluster) {
+            return Err(Error::NotExFat);
+        }
         // Best-effort: reads don't need the bitmap, so a volume without one
         // (malformed) still mounts read-only; only writes require it.
         fs.locate_bitmap()?;

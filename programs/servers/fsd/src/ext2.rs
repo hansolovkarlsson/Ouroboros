@@ -226,7 +226,11 @@ impl Fs {
         } else {
             11
         };
-        if blocks_per_group == 0 {
+        // A group's blocks and inodes each fit its one bitmap block, as the
+        // bitmap code indexes them (8 bits a byte of one block: past that it
+        // reads past its buffer; the third review of #330).
+        let bits_per_block = block_size * 8;
+        if blocks_per_group == 0 || blocks_per_group > bits_per_block || inodes_per_group > bits_per_block {
             return Err(Error::NotExt2);
         }
         // No larger than its partition (s_blocks_count): a superblock
@@ -247,7 +251,13 @@ impl Fs {
         // descriptor's own block numbers say is the roadmap's per-block bound.
         let groups_count = inodes_count.div_ceil(inodes_per_group);
         let bgdt_end = first_data_block as u64 + 1 + (groups_count as u64 * 32).div_ceil(block_size as u64);
-        if first_data_block >= blocks_count
+        // The first data block is the superblock's own: block 1 with 1 KiB
+        // blocks, else block 0, so the descriptor table after it is never the
+        // superblock (a 1 KiB volume giving 0 put it there; the third review
+        // of #330).
+        let superblock_block = (SUPERBLOCK_OFFSET / block_size as u64) as u32;
+        if first_data_block != superblock_block
+            || first_data_block >= blocks_count
             || inodes_count < ROOT_INO
             || groups_count as u64 > (blocks_count - first_data_block).div_ceil(blocks_per_group) as u64
             || bgdt_end > blocks_count as u64

@@ -487,14 +487,7 @@ impl Fs {
         let cluster_end = (clusters as u64 + 2)
             .min(fat_size_32 as u64 * (SECTOR_SIZE as u64 / 4))
             .min(BAD_CLUSTER as u64) as u32;
-        // The root inside the heap, as exFAT's must be: a root past it made a
-        // `/` every operation on which answered an I/O error, where exFAT's
-        // read as no filesystem (the review of #330).
-        if root_cluster < 2 || root_cluster >= cluster_end {
-            return Err(Error::NotFat32);
-        }
-
-        Ok(Fs {
+        let fs = Fs {
             disk,
             partition_lba,
             sectors_per_cluster,
@@ -508,7 +501,15 @@ impl Fs {
             write_cursor: None,
             fat_cache: None,
             next_free_hint: 2,
-        })
+        };
+        // The root inside the heap, by the rule every later cluster meets
+        // (`in_heap`), as exFAT's must be: a root past it made a `/` every
+        // operation on which answered an I/O error, where exFAT's read as no
+        // filesystem (the review of #330).
+        if !fs.in_heap(fs.root_cluster) {
+            return Err(Error::NotFat32);
+        }
+        Ok(fs)
     }
 
     /// The volume's first sector - for `mount`-info reporting only.

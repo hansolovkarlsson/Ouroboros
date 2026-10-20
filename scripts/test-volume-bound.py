@@ -14,11 +14,11 @@ stale one left by a larger image (`erase disk` zeroes the first 1 MiB and
 `partition` starts there) named a root past the end of the disk, whose read
 failed, so since #329 `format` refused that disk with an I/O error. Since
 2026-10-20 each `mount_at` is given the most the volume may span
-(`vfs::volume_bound`: the table's length, cut to the disk and to sector 2^32,
-or the disk's when the table gives none) and refuses a boot sector claiming
+(`vfs::volume_bound`: the table's length, or none when it gives 0, cut to the
+start of the next partition, the disk and sector 2^32) and refuses a boot sector claiming
 more, or one whose layout does not fit inside what it claims.
 
-Twelve boots. In each the firmware boots esp.img from NVMe, which the kernel
+Thirteen boots. In each the firmware boots esp.img from NVMe, which the kernel
 cannot drive, so the virtio disk the rig builds (scripts/mbrdisk.py, from the
 images' own volumes) goes in as the fallback, and the boot partition is not
 known to fsd. Where the disk's first partition is the ext2 root of
@@ -45,18 +45,20 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
 - WRAP: a copy of esp.img whose BPB has 2 FATs of 0x80000000 sectors, a
   product that wraps to 0 in 32 bits, under which the old check passed. Not
   mounted.
-- SHAPES-A to SHAPES-F: whole volumes in partitions of their own
+- SHAPES-A to SHAPES-G: whole volumes in partitions of their own
   size, each with one field of its boot sector changed so that it breaks
   exactly one of the rules the mounts check, which a model of those rules
   confirms on the host before the boot: exFAT's heap past its volume, its
   FatOffset inside the boot regions, its root past the heap (A); its FAT too
   short for its clusters, its cluster shift 64, FAT32's root at its
-  cluster_end (B); FAT32 with no FATs, ext2's first data block at its block
-  count, ext2 with more groups than its blocks make (C); exFAT's FAT running
+  cluster_end (B); FAT32 with no FATs, ext2's first data block 0 with 1 KiB
+  blocks (the superblock's own is 1, so its descriptor table would be the
+  superblock), ext2 with more groups than its blocks make (C); exFAT's FAT running
   into its heap (D); FAT32 with no reserved sectors (its FAT on its BPB),
   ext2's block-size shift 32 (masked to 0 in a release build, so only the
   shift rule refuses it), its descriptor table past its blocks (E); ext2
-  with no inodes (F). All refused.
+  with no inodes (F); ext2 with more blocks or inodes a group than one
+  bitmap block holds (G). All refused.
 - BESIDE: the FAT32 cut short in a table entry of size 0, the next
   partition inside its volume (refused: the bound stops at the next
   partition), and the exFAT whole with its bitmap moved to the cluster past
@@ -72,10 +74,10 @@ size-0 entry refused (MIXED), without the 2^32 cut (MIXED's last mounts),
 with FAT32's sum in u32 (WRAP), with each shape rule removed (its SHAPES
 case mounts), and with the bitmap's sectors unbounded (BESIDE: the write
 lands on the next partition). Not reached: FAT32's sums made before the
-bound overflow only in a build with overflow checks, and ext2's first-block
-rule alone, since a first data block at its block count puts the descriptor
-table past the blocks too (it guards the subtraction the groups rule makes;
-its case breaks both rules, and taking it out leaves the case refused). About eight minutes. Run it
+bound overflow only in a build with overflow checks, exFAT's sector-size
+shift likewise, and ext2's first-block rule, which since the first-data rule
+can break only for a volume of one block (it guards the subtraction the
+groups rule makes). About eight minutes. Run it
 whenever a filesystem's `mount_at`, fsd's probe or `volume_bound`, or the
 partition table's sizes change.
 """
@@ -161,11 +163,16 @@ def broken(vol, bound):
     bs = 1024 << lb
     if bc * (bs // SECT) > bound:
         out.add("length")
+    if bpg == 0 or bpg > bs * 8:
+        out.add("ext2-bpg")
+    if ipg > bs * 8:
+        out.add("ext2-ipg")
+    if fdb != 1024 // bs:
+        out.add("ext2-firstdata")
     groups = -(-ic // ipg)
     if fdb >= bc:
-        # The descriptor table, a block after the first data block, is past
-        # the blocks too: the first-block rule guards fsd's subtraction
-        # below, and refuses nothing the descriptor rule would not.
+        # Past the first-data rule only when the volume has one block: the
+        # first-block rule guards fsd's subtraction below.
         return out | {"ext2-firstblock", "ext2-bgdt"}
     if ic < 2:
         out.add("ext2-inodes")
@@ -311,7 +318,7 @@ def build_shapes(ext2, fat, exfat, which):
         ],
         "SHAPES-C": [
             ("fat32-nofats", fat, [("<B", 16, 0)]),
-            ("ext2-firstblock", ext2, [("<I", sb + 20, bc)]),
+            ("ext2-firstdata", ext2, [("<I", sb + 20, 0)]),
             ("ext2-groups", ext2, [("<I", sb + 0, ipg * (groups + 1))]),
         ],
         "SHAPES-D": [
@@ -325,6 +332,10 @@ def build_shapes(ext2, fat, exfat, which):
         "SHAPES-F": [
             ("ext2-inodes", ext2, [("<I", sb + 0, 0)]),
         ],
+        "SHAPES-G": [
+            ("ext2-bpg", ext2, [("<I", sb + 32, 1024 * 8 + 8)]),
+            ("ext2-ipg", ext2, [("<I", sb + 40, 1024 * 8 + 8)]),
+        ],
     }[which]
     vols = [(rule, patched(base, edits)) for rule, base, edits in cases]
     parts = [(0x83, ext2, False)] + [
@@ -333,13 +344,13 @@ def build_shapes(ext2, fat, exfat, which):
     pre = []
     for (rule, v), (_, sectors) in zip(vols, layout[1:]):
         got = broken(v, sectors)
-        want = {"ext2-firstblock", "ext2-bgdt"} if rule == "ext2-firstblock" else {rule}
+        want = {rule}
         pre.append((f"the {rule} case breaks only that rule (got {sorted(got)})", got == want))
     return pre, [(n, f"the {rule} case", False) for n, (rule, _) in enumerate(vols, 1)]
 
 
 BOOTS = ["PARTS", "MIXED", "STALE", "LONG", "WRAP", "SHAPES-A", "SHAPES-B", "SHAPES-C", "SHAPES-D", "SHAPES-E",
-         "SHAPES-F", "BESIDE"]
+         "SHAPES-F", "SHAPES-G", "BESIDE"]
 
 
 def build(name):
