@@ -2573,12 +2573,14 @@ test-mount-gate: image $(USBSTICK_IMG)
 	python3 scripts/test-mount-gate.py
 
 # A read error inside a partition's probe is an I/O error, not "no
-# filesystem" (scripts/test-probe-ioerr.py): two boots from esp.img on NVMe,
-# a one-partition exFAT copy of espexfat.img on virtio whose root directory
-# sector fails every read (QEMU's blkdebug), usbstick.img on USB; `mount -a`
-# must answer the I/O error with no stick installed, and `format ext2` must
-# leave the partition as it was. About a minute and a half; run it whenever
-# fsd's probe, mount, format or mount -a's rescan changes.
+# filesystem" (scripts/test-probe-ioerr.py): four boots from esp.img on NVMe,
+# on virtio a copy of espexfat.img or espext2.img with one sector failing
+# every read (QEMU's blkdebug), usbstick.img on USB; `mount -a` must answer
+# the I/O error with no stick installed, `format ext2` must leave every
+# partition as it was (also with the ESP beside the failing exFAT), `mount 0`
+# must say I/O error, and an ext2 whose first sector fails must still mount.
+# About three minutes; run it whenever fsd's probe, mount, format, mount N or
+# mount -a's rescan changes.
 test-probe-ioerr: image image-exfat $(USBSTICK_IMG)
 	python3 scripts/test-probe-ioerr.py
 

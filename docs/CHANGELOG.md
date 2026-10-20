@@ -542,14 +542,26 @@ not read. The probe now answers the read's `Error::Io`, and
 `first_mounting`, the one rule `mount` and `format` both pick a partition by,
 passes over a partition whose read failed, as before, so a root that will not
 read still leaves the ESP beside it to come up read-only, but answers the I/O
-error when nothing mounts. `format` refuses with `FS_ERR_IO`, and on a
-partition table that would not read too (it said "no partition" until now).
-`make test-probe-ioerr` boots twice from NVMe with a one-partition exFAT disk
-on virtio whose root directory sector fails every read (QEMU's blkdebug, a
-sector the table never reads) and a USB stick beside it: `mount -a` must
-answer the I/O error with no stick installed, and `format ext2` must leave the
-partition as it was. With the probe's old rule the stick is installed and
-mounted at `/`, and the partition is overwritten.
+error when nothing mounts, and the boot line says when a partition before the
+one that mounted would not read. The probe tries every arm before answering a
+read's error, since ext2's superblock is not the sector FAT32 and exFAT read.
+`format` refuses with `FS_ERR_IO` whenever a candidate's read failed, so
+neither the partition it could not read nor a later one (the ESP, with the
+boot partition unknown) is formatted in its place, and on a partition table
+that would not read too (it said "no partition" until now); `mount N`
+answers the I/O error. `make test-probe-ioerr` boots four times from NVMe
+with a disk on virtio one of whose sectors fails every read (QEMU's blkdebug)
+and a USB stick beside it: on a one-partition exFAT disk `mount -a` must
+answer the I/O error with no stick installed and `format ext2` must leave the
+partition as it was; on the exFAT disk with its ESP the ESP mounts with the
+line, `mount 0` answers the I/O error and `format` leaves both partitions;
+and an ext2 disk whose first sector fails must still mount. Each check fails
+with its part of the change taken out: with the probe's old rule the stick is
+installed and mounted at `/` and the partition overwritten, with the probe
+stopping at its first arm's error the ext2 does not mount, and with `format`
+going on past the failed read it formats the ESP. fsd's "mount failed" line
+is one write now, as its "mounted" line was made in the third review of #288:
+it was three, and accountd's ready line landed inside it.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

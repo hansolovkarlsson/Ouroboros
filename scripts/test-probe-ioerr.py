@@ -217,10 +217,9 @@ def checks_of(name):
          failing >= start > 1),
         ("driven to the end, every command's output found", driven and None not in o),
     ]
-    # fsd prints its failure line in three pieces, so another task's line
-    # can land inside it: its two halves, before the first command.
-    io_at_boot = ("fsd: mount failed (" in boot_log
-                  and "disk I/O error) - disk commands won't work" in boot_log)
+    # One write since 2026-10-20 (it was three, and another task's line
+    # landed inside it), so the whole line, before the first command.
+    io_at_boot = "fsd: mount failed (disk I/O error) - disk commands won't work\r\n" in boot_log
     if name in ("MOUNT", "FORMAT"):
         checks.append(("fsd's boot mount failed with a disk I/O error", io_at_boot))
     if name == "MOUNT":

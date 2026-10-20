@@ -203,9 +203,16 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             0
         }
         Err(e) => {
-            print("fsd: mount failed (");
-            print(error_name(&e));
-            print(") - disk commands won't work\r\n");
+            // One write, as the line above, so no other task's line lands
+            // inside it (accountd's did, in `make test-probe-ioerr`).
+            let mut line = [0u8; 160];
+            let mut len = 0;
+            for part in ["fsd: mount failed (", error_name(&e), ") - disk commands won't work\r\n"] {
+                let take = part.len().min(line.len() - len);
+                line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
+                len += take;
+            }
+            con_write(&line[..len]);
             match e {
                 fat32::Error::Io(_) => syscall_abi::FS_ERR_IO,
                 _ => syscall_abi::NO_FS,
