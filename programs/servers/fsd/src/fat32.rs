@@ -700,12 +700,15 @@ impl Fs {
         Ok(raw & 0x0fff_ffff)
     }
 
-    /// Writes one FAT entry, in every copy of the FAT the volume has (per
-    /// spec - real FAT32 drivers only ever read the first copy, but keep
-    /// every copy in sync on write so a driver that *does* trust a backup
-    /// copy never sees a stale value). Preserves the existing entry's top
-    /// 4 reserved bits, masking `value` to the low 28 - same split
-    /// `next_cluster` already reads.
+    /// Writes one FAT entry: copy 0's sector, patched, is written to every
+    /// copy of the FAT the volume has, so no other copy is read. Every read
+    /// in fsd takes copy 0, so copy 0 is the truth and the others are its
+    /// mirror; a sector where a backup copy had come to differ becomes copy
+    /// 0's whole, as Linux's and FreeBSD's drivers write it. Decided by Hans
+    /// on 2026-10-21; until then each copy's own sector was read and patched
+    /// (2,559 of a 640 KiB `cp`'s 2,689 FAT reads, `make test-write-walk`).
+    /// Preserves the existing entry's top 4 reserved bits, masking `value`
+    /// to the low 28 - same split `next_cluster` already reads.
     fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
         // Its entry would lie past the FAT for a cluster outside the volume:
         // refused before the cursor check reads it or any copy is written.
@@ -732,27 +735,26 @@ impl Fs {
         let fat_byte_offset = cluster * 4;
         let sector_offset = fat_byte_offset / SECTOR_SIZE as u32;
         let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
+        let lba = self.fat_start_lba + sector_offset;
+        let mut buf = [0u8; SECTOR_SIZE];
+        // Copy 0's sector is in the cache: `next_cluster` above read it.
+        match &self.fat_cache {
+            Some(c) if c.lba == lba => buf = c.data,
+            _ => self.disk.read_sector(lba as u64, &mut buf)?,
+        }
+        let existing = u32::from_le_bytes([
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
+        ]);
+        let new = (existing & 0xf000_0000) | (value & 0x0fff_ffff);
+        buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
         for i in 0..self.num_fats {
-            let sector = self.fat_start_lba + i * self.fat_size_32 + sector_offset;
-            let mut buf = [0u8; SECTOR_SIZE];
-            // Copy 0's sector is often the one just read into the cache
-            // (by the scan or walk that chose this cluster).
-            match &self.fat_cache {
-                Some(c) if i == 0 && c.lba == sector => buf = c.data,
-                _ => self.disk.read_sector(sector as u64, &mut buf)?,
-            }
-            let existing = u32::from_le_bytes([
-                buf[offset],
-                buf[offset + 1],
-                buf[offset + 2],
-                buf[offset + 3],
-            ]);
-            let new = (existing & 0xf000_0000) | (value & 0x0fff_ffff);
-            buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
-            self.disk.write_sector(sector as u64, &buf)?;
+            self.disk.write_sector((lba + i * self.fat_size_32) as u64, &buf)?;
             // Keep the cache in step: copy 0's sector as now written.
             if i == 0 {
-                self.fat_cache = Some(FatSector { lba: sector, data: buf });
+                self.fat_cache = Some(FatSector { lba, data: buf });
             }
         }
         Ok(())

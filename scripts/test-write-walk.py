@@ -162,12 +162,13 @@ def exfat_reads(chain, cluster_bytes, start_sector, src=None):
     return simulate(HUGE, cluster_bytes, (), new, Cache(start_sector), src)
 
 
-def fat32_reads(chain, cluster_bytes, free_before, nfats, passed, start_sector, end, src=None, src_passed=()):
+def fat32_reads(chain, cluster_bytes, free_before, passed, start_sector, end, src=None, src_passed=()):
     """FAT32: find_free_cluster scans from its hint (2 at mount) through the
     cache to the first free entry below `end` (the volume's cluster_end),
     which must be the chain's next cluster;
-    write_fat_entry writes the first copy through the cache and reads every
-    other copy from the disk; a resolution looks up the root clusters it
+    write_fat_entry patches the first copy's sector through the cache and
+    writes it to every copy, reading no other (since 2026-10-21; before, it
+    read each other copy's sector from the disk); a resolution looks up the root clusters it
     steps past (`passed`, `src_passed` for the source of a copy within the
     volume, whose chain is `src`)."""
     state = {"hint": 2}
@@ -184,7 +185,6 @@ def fat32_reads(chain, cluster_bytes, free_before, nfats, passed, start_sector, 
 
     def write(cache, c):
         cache.access(c)
-        cache.reads += nfats - 1
 
     def new(cache, i):
         if i > 0:
@@ -214,6 +214,53 @@ def exfat_entries(image, chain):
                         struct.unpack_from("<Q", stream, 24)[0]))
         i += 32 * count
     return out
+
+
+def plant_backup(image):
+    """Make every free entry of the ESP's second FAT copy differ from the
+    first: the bad-cluster mark where the first copy has 0. fsd reads no copy
+    but the first, so the model is unchanged; `mirrored` then sees which
+    sectors fsd wrote whole. Returns the entries planted."""
+    start, _ = spawn_reads.partition(image, 0x0B)
+    with open(image, "r+b") as fh:
+        fs = fat32img.Fat32(fh, start)
+        if fs.nfats < 2:
+            raise ValueError("the ESP has one FAT copy: there is no mirror to check")
+        fh.seek(fs.fat * SECTOR)
+        first = bytearray(fh.read(fs.fatsz * SECTOR))
+        second = bytearray(first)
+        planted = 0
+        for c in range(2, fs.cluster_end):
+            if struct.unpack_from("<I", first, c * 4)[0] & 0x0FFFFFFF == 0:
+                struct.pack_into("<I", second, c * 4, fat32img.BAD_CLUSTER)
+                planted += 1
+        fh.seek((fs.fat + fs.fatsz) * SECTOR)
+        fh.write(second)
+    return planted
+
+
+def mirrored(fs, sectors):
+    """Each FAT sector in `sectors` (an index into one copy) must be the
+    first copy's, byte for byte, in every other copy: write_fat_entry writes
+    the first copy's sector to all of them. `plant_backup` left the bad-cluster
+    mark in the second copy at every entry the first had free, so a sector
+    that still has a free entry differs if only the written entries were
+    patched; at least one such sector is required, or the check could not
+    fail."""
+    problems, open_sectors = [], 0
+    for s in sorted(sectors):
+        fs.fh.seek((fs.fat + s) * SECTOR)
+        first = fs.fh.read(SECTOR)
+        if any(struct.unpack_from("<I", first, j)[0] & 0x0FFFFFFF == 0 for j in range(0, SECTOR, 4)):
+            open_sectors += 1
+        for copy in range(1, fs.nfats):
+            fs.fh.seek((fs.fat + copy * fs.fatsz + s) * SECTOR)
+            if fs.fh.read(SECTOR) != first:
+                problems.append(f"FAT sector {s} of copy {copy} is not copy 0's after the write: "
+                                "write_fat_entry must write the first copy's sector to every copy")
+    if not open_sectors:
+        problems.append("no sector C32's chain wrote has a free entry left: the mirror check could not fail")
+    return problems
 
 
 def boot(tag, prepared, cmd, inspect=None, setup=()):
@@ -275,6 +322,8 @@ def main() -> int:
     try:
         spawn_reads.place_mounted(prepared, files, part=1)
         spawn_reads.place_mounted(prepared, files, part=2)
+        planted = plant_backup(prepared)
+        print(f"     the ESP's second FAT copy differs from the first at {planted} free entries")
         g = spawn_reads.exfat_layout(prepared)
         f32 = Fat32(prepared)
         f32_region = (f32.fat, f32.fat_end)
@@ -345,7 +394,7 @@ def main() -> int:
                     problems.append("C32 does not hold /HUGE's bytes")
                 else:
                     want = fat32_reads(chain, fs.spc * SECTOR, lambda c: fs.entry(c) == 0 or c in mine,
-                                       fs.nfats, root[:dst[0][0]], root[0] * 4 // SECTOR,
+                                       root[:dst[0][0]], root[0] * 4 // SECTOR,
                                        fs.cluster_end, src, src_passed)
                     if want is None:
                         problems.append("C32's chain is not the one the free-cluster scan chooses: the "
@@ -353,6 +402,7 @@ def main() -> int:
                     else:
                         found["want"] = want
                         found["what"] = f"{len(chain)} clusters across {len(sectors)} FAT sectors"
+                    problems += mirrored(fs, sectors)
             finally:
                 fs.fh.close()
 
