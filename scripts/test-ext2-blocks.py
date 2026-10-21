@@ -64,7 +64,11 @@ with a zeroed block, which nothing may change. The host plants:
   H. Until 2026-10-21 C's bitmaps were planted in the witness as well; a
   descriptor outside its group is refused at mount now (test-volume-bound's
   SHAPES-H), so bitmap_free's and the allocator's bounds past the volume
-  sit behind that refusal and no rig reaches them;
+  sit behind that refusal and no rig reaches them; and since 2026-10-21 C
+  left one block free, its counts saying so, with DIND ending at its last
+  single-indirect block and TWELVE at its last direct one: appends to them
+  (three blocks needed, and two) must answer disk full and leave both files
+  as planted, and `echo q > ONEB` must then get the block;
 - on B, every block of the volume marked used and the last group's padding
   bits clear, so the next free bit is the block just past the volume (the
   witness's first): `echo x > NEW` must answer disk full; and the inode count
@@ -95,7 +99,9 @@ bitmap), with free_block freeing a group's bitmap or table block
 (META's T2 and MI's T3 freed) or one below meta_end (GD's descriptor-table
 block freed), and with free_pointed reading a metadata block as pointers
 (SRC's block freed through T3, and through R2 with is_metadata's meta_end
-arm out). One boot, about a minute, needs
+arm out), and with ensure_block taking a block before it knows it can take
+them all (ONEB disk full: main's order before 2026-10-21, the give-back
+out, the indirect branch not asking for its pointer block). One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
 free_all_blocks, free_pointed, pointer_sector, ensure_block, list_dir, rm,

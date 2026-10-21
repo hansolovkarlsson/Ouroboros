@@ -693,6 +693,21 @@ block that name another file's block (none freed). C's bitmaps, planted in the w
 until now, are refused at mount. Reads and writes through a pointer naming
 metadata are not checked yet, as in Linux's ext2 (the roadmap).
 
+**ext2 loses no block to a write that cannot finish (2026-10-21).**
+`ensure_block` took the data block first and the pointer blocks after it,
+so with one block free an append crossing into the indirect or the
+double-indirect range took the last block, failed to take the pointer block
+and answered disk full with the block still set in the bitmap and named by
+no inode; a write past the double-indirect range did the same before its
+range was checked. Now the range is checked first, every block the path
+lacks is taken before any is linked, and a failure gives back what it took.
+`make test-ext2-blocks` leaves C one block free: appends to DIND (three
+blocks needed) and TWELVE (two) must answer disk full and leave both files
+as planted, and ONEB must then get the block. Fails with main's
+`ensure_block`, with the give-back removed, and with the indirect branch
+not asking for its pointer block. The write past the double-indirect range
+has no rig: it needs a file over 64 MiB on 1 KiB blocks.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
