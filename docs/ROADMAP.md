@@ -4346,6 +4346,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   the pointer blocks first, and giving back what a later step could not
   use, closes both; a rig for this one needs only a volume with one block
   free. From the second review of #331.
+- **ext2 trusts a block number inside the volume.** Since #331 nothing past
+  the volume is read or written, but a descriptor or a pointer naming the
+  volume's own metadata is taken as it stands: a damaged `bg_inode_table` of
+  1 puts new inodes over the superblock, a bitmap pointer the same through
+  `bitmap_alloc`, and `rm` of a file whose pointer names an inode-table block
+  clears that block's bit, so the allocator later zeroes live inodes with
+  file data. Linux refuses both at their source: `ext2_check_descriptors` at
+  mount (each group's bitmaps and table inside the group, the table's blocks
+  whole) and `ext2_data_block_valid` on every pointer (not the superblock,
+  the descriptor table, a bitmap or the inode table). The free path also
+  never frees the triple-indirect tree (`block[14]`) or an inode's
+  extended-attribute block (`i_file_acl`), which `mke2fs -d` can attach, so
+  `rm` leaks those; and `bitmap_free` rewrites a whole bitmap block to clear
+  one bit (a sector would do, as `write_int_at` does for the counts). From
+  the fourth review of #331.
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the
