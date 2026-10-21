@@ -54,7 +54,8 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
   cluster_end (B); FAT32 with no FATs, ext2's first data block 0 with 1 KiB
   blocks (the superblock's own is 1, so its descriptor table would be the
   superblock), ext2 with more groups than its blocks make (C); exFAT's FAT running
-  into its heap (D); FAT32 with no reserved sectors (its FAT on its BPB),
+  into its heap, FAT32 with mirroring off and its second FAT live
+  (BPB_ExtFlags 0x0081, since 2026-10-21) (D); FAT32 with no reserved sectors (its FAT on its BPB),
   ext2's block-size shift 32 (masked to 0 in a release build, so only the
   shift rule refuses it), its descriptor table past its blocks (a volume of
   two blocks, the only kind where it can lie past them now) (E); ext2
@@ -139,6 +140,9 @@ def broken(vol, bound):
             return {"fat32-reserved"}
         if spc == 0 or total <= meta:
             return {"fat32-meta"}
+        ef = u("<H", 40)
+        if ef & 0x80 and ef & 0x0F:
+            return {"fat32-extflags"}
         if total > bound:
             out.add("length")
         end = min((total - meta) // spc + 2, fz * 128, 0x0FFFFFF7)
@@ -337,6 +341,9 @@ def build_shapes(ext2, fat, exfat, which):
         ],
         "SHAPES-D": [
             ("exfat-fatplace", exfat, [("<I", 84, ho - fo + 1)]),
+            # Mirroring off, FAT 1 live: fsd reads FAT 0 and writes its sectors to
+            # every copy, so it refuses this until ExtFlags is honoured.
+            ("fat32-extflags", fat, [("<H", 40, 0x0081)]),
         ],
         "SHAPES-E": [
             ("fat32-reserved", fat, [("<H", 14, 0)]),

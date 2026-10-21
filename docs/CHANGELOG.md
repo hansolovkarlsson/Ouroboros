@@ -662,8 +662,11 @@ to differ becomes copy 0's whole (Hans's decision). The copy onto the ESP
 reads 134 FAT sectors and the copy within it 774, from 2,690 and 3,333.
 `make test-write-walk` plants the bad-cluster mark at every free entry of
 the ESP's second copy, and each FAT sector the copy wrote must then be copy
-0's in both; it fails on the code before. `BPB_ExtFlags`, which can turn
-mirroring off, is still not read (the roadmap).
+0's in both, and a sector it did not write must still differ; it fails on
+the code before. A volume whose `BPB_ExtFlags` turns mirroring off with a
+FAT other than the first live, on which the mirror would overwrite the live
+FAT with a stale one, is refused at mount with a line saying so until
+ExtFlags is honoured (the roadmap); `make test-volume-bound` plants one.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

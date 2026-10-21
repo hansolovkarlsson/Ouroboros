@@ -4374,18 +4374,31 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   plants the bad-cluster mark at every free entry of the ESP's second copy
   and requires each FAT sector the copy wrote to be copy 0's in both; it
   fails with each copy's own sector patched.
-- **FAT32 ignores `BPB_ExtFlags`.** Bytes 40 to 41 of a FAT32 boot sector
-  say whether the FATs are mirrored: with bit 7 clear (what fsd's own
+- **FAT32 does not honour `BPB_ExtFlags`.** Bytes 40 to 41 of a FAT32 boot
+  sector say whether the FATs are mirrored: with bit 7 clear (what fsd's own
   `format` writes, and what every image here has) every copy is kept in
   step; with it set, mirroring is off and only the copy numbered in bits 0
-  to 3 is live. fsd reads no field of it: every read takes copy 0 and
-  every write goes to all copies, so on a volume made elsewhere with
-  mirroring off and copy 1 active, fsd reads a stale FAT and overwrites the
-  active one with it. Honouring it would read the active copy's number at
-  mount (refusing one at or past `BPB_NumFATs`) and, with bit 7 set, read
-  and write that copy alone. No rig here makes such a volume (`newfs_msdos`
-  and mkfs.fat both write 0); one would be planted on a copy of the ESP.
+  to 3 is live. Every read in fsd takes copy 0 and every write puts copy
+  0's sector in all copies, so on a volume made elsewhere with mirroring
+  off and another copy live, fsd would read a stale FAT and overwrite the
+  live one's sectors with it, 128 entries a write. Since 2026-10-21
+  `mount_at` refuses such a volume with a line saying so (the high review
+  of the FAT mirror, Hans's choice; `make test-volume-bound`'s SHAPES-D,
+  ExtFlags 0x0081); with mirroring off and copy 0 live it mounts, writing
+  the other copies too, which nothing reads. Honouring it would read the
+  live copy's number at mount (refusing one at or past `BPB_NumFATs`) and,
+  with bit 7 set, read and write that copy alone, so such a volume mounts.
   Found with the FAT mirror decision, 2026-10-21.
+- **FAT32 writes every FAT update straight through.** Each entry written
+  is one sector write per copy, though consecutive updates almost always
+  land in the same sector: a 640 KiB `cp` onto the ESP allocates 1,280
+  clusters, about 2,560 entry writes and some 5,000 sector writes into a
+  few dozen FAT sectors. Holding the cached sector dirty and writing it to
+  every copy when the cache moves to another sector, and at the end of
+  each operation, would make it tens. Not taken with the mirror: a dirty
+  sector held in memory is a crash-consistency question (what a power cut
+  between an operation's directory write and its FAT write leaves), to be
+  decided on its own. From the high review of the FAT mirror, 2026-10-21.
 - **FAT32's and exFAT's read walks are two copies.** exFAT's `read_entry`
   repeats FAT32's `read_at` (the cursor lookup, the seek, the sector loop,
   the cursor update), differing in the step (`advance` against

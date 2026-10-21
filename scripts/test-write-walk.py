@@ -61,7 +61,10 @@ free entry of the ESP's second copy before the boots, which fsd never reads,
 and after each FAT32 copy every FAT sector of the destination's chain must be
 the first copy's in the second, byte for byte (it fails with each copy's own
 sector patched, sector 54 differing); one of those sectors must still hold a
-free entry, or the check could not fail. On the tree of 2026-10-21 the FAT32
+free entry, and a sector the copy did not write must still differ (the
+planted marks survived the boot), or the check could not fail. A free
+(`rm`) is not planted against: it writes through the same write_fat_entry.
+On the tree of 2026-10-21 the FAT32
 pairs read 134 and 774 FAT sectors.
 
 About two and a half minutes.
@@ -256,9 +259,25 @@ def mirrored(fs, sectors):
     the first copy's sector to all of them. `plant_backup` left the bad-cluster
     mark in the second copy at every entry the first had free, so a sector
     that still has a free entry differs if only the written entries were
-    patched; at least one such sector is required, or the check could not
-    fail."""
+    patched; at least one such sector is required, and at least one sector
+    fsd did not write must still differ between the copies (the planted
+    marks survived the boot: nothing else, the firmware's FAT driver say,
+    mirrored the FAT), or the check could not fail. A free (`rm`) is not
+    planted against: it writes through the same write_fat_entry."""
     problems, open_sectors = [], 0
+    still_planted = False
+    for s in range(fs.fatsz):
+        if s in sectors:
+            continue
+        fs.fh.seek((fs.fat + s) * SECTOR)
+        first = fs.fh.read(SECTOR)
+        fs.fh.seek((fs.fat + fs.fatsz + s) * SECTOR)
+        if fs.fh.read(SECTOR) != first:
+            still_planted = True
+            break
+    if not still_planted:
+        problems.append("no FAT sector the copy did not write differs between the copies after the boot: "
+                        "the planted marks did not survive, so the mirror check could not fail")
     for s in sorted(sectors):
         fs.fh.seek((fs.fat + s) * SECTOR)
         first = fs.fh.read(SECTOR)
@@ -387,6 +406,7 @@ def main() -> int:
                 chain = fs.chain(dst[0][2])
                 mine = set(chain)
                 sectors = {c * 4 // SECTOR for c in chain}
+                problems += mirrored(fs, sectors)
                 src, src_passed = None, ()
                 if src_name:
                     # The source's chain and the root clusters its resolution
@@ -413,7 +433,6 @@ def main() -> int:
                     else:
                         found["want"] = want
                         found["what"] = f"{len(chain)} clusters across {len(sectors)} FAT sectors"
-                    problems += mirrored(fs, sectors)
             finally:
                 fs.fh.close()
 
