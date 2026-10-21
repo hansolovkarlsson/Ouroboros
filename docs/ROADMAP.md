@@ -2174,6 +2174,25 @@ The small open tails those arcs deliberately left:
 >       `scratch/usb-hub-runs.log` has a base rate, boot `--usb-boot` from
 >       a fresh copy, as `--stall` already does with its own image, and
 >       compare. Found by the review of `rig/usb-hub-inconclusive`.
+> - [ ] **new** **The rigs booting from NVMe grade a firmware stall as failed
+>       checks.** `test-volume-bound`, `test-probe-ioerr`, `test-ext2-blocks`
+>       and `test-boot-partition` have the firmware boot `esp.img` from
+>       NVMe. On 2026-10-21 four of their boots stopped in QEMU's firmware
+>       before the kernel started: SHAPES-F, then STALE and SHAPES-B, in
+>       `test-volume-bound`, and BESIDE in `test-probe-ioerr`. The three
+>       `test-volume-bound` transcripts were 11 lines each, the firmware's
+>       own lines ending at `Image type X64 can't be loaded on AARCH64 UEFI
+>       system.` and its screen clears, with no kernel line. Each such boot
+>       failed every check of the guest's output (its host-side checks
+>       passed), and each passed on a rerun. Give these rigs
+>       `test-usb-hub`'s INCONCLUSIVE verdict for a boot whose kernel
+>       printed nothing and whose transcript ends in the firmware's
+>       lines: exit 100, a run log for the rate, the stalled transcript
+>       kept. A kernel that started and then hung must still fail. Share
+>       one classifier rather than copy `firmware_stalled` into four
+>       rigs, with this stall's last line added to the self-test's
+>       fixtures. What causes the stall is unknown. Found 2026-10-21, on
+>       #335.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
