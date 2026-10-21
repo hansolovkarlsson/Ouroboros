@@ -14,7 +14,8 @@ the last group's bitmaps past the volume's last block or inode. A free reads
 nothing past the volume, neither a pointer block nor a bitmap, so a file
 whose pointers or bitmaps lie there is still removed whole, and the free
 counts rise only for a bit actually cleared; an inode holding no blocks (a
-fast symlink, its target's text in its pointers) frees none, and an entry
+fast symlink, its target's text in its pointers, told by its type and
+length, not by i_blocks) frees none, and an entry
 naming an inode past the count can be removed (the reviews of #331).
 
 The firmware boots esp.img from NVMe, so the virtio disk the rig builds goes
@@ -35,7 +36,9 @@ with three zeroed blocks, which nothing may change. The host plants:
   RD must remove it and free only its own block, not the witness block's
   bit in another group's bitmap, leaving its inode with a deletion time and
   no links; L, a fast symlink whose first pointer names SRC's block: `rm`
-  must leave that block allocated; RMI and
+  must leave that block allocated, its i_blocks raised to 2 as an
+  extended-attribute block raises it; Z, a regular file with i_blocks
+  damaged to 0: `rm` must free its block; RMI and
   OWI (thirteen blocks each), their indirect blocks swapped for witness
   blocks: `rm RMI` must free its inode and `echo x > OWI` must leave it
   holding `x` CR LF, each with no error; and DUP (two blocks), its second
@@ -67,8 +70,9 @@ free_pointed reading a pointer block past the volume (RMI's rm and OWI's
 overwrite an I/O error), with bitmap_free reading a bitmap past the volume
 (F's rm an I/O error), with the free counts raised for a bit already clear
 (A's counts one past its bitmap), with the listing reading an inode past
-the count (`ls /mnt/c` an I/O error), with blocks freed for an inode holding
-none (SRC's block freed by `rm L`), with rm reading GHOST's inode (an I/O
+the count (`ls /mnt/c` an I/O error), with the fast-symlink test taken out
+(SRC's block freed by `rm L`) or made by i_blocks (that, and Z's block
+kept), with rm reading GHOST's inode (an I/O
 error) and with the deletion time left out of a freed inode. One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
@@ -106,7 +110,7 @@ WITNESS_BYTES = 1024 * 1024
 AT_RD, AT_WR, AT_IND, AT_BMP, AT_RMI, AT_OWI, AT_IBMP = 8, 16, 24, 32, 40, 48, 56
 ZEROED = (AT_IND, AT_BMP, AT_IBMP)
 FILES_A = {"RD": b"R" * 2048, "WR": b"W" * 1100, "IND": b"I" * 12 * 1024, "SRC": b"S" * 100,
-           "GHOST": b"G" * 10, "RMI": b"M" * 13 * 1024, "OWI": b"O" * 13 * 1024, "DUP": b"D" * 2048}
+           "GHOST": b"G" * 10, "RMI": b"M" * 13 * 1024, "OWI": b"O" * 13 * 1024, "DUP": b"D" * 2048, "Z": b"Z" * 1024}
 FILES_C = {"F": b"F" * 1024, "G": b"g" * 1024, "H": b"h" * 10}
 COMMANDS = [
     "mount 1 /mnt/a", "mount 2 /mnt/c", "mount 3 /mnt/b",
@@ -122,6 +126,7 @@ COMMANDS = [
     "cat /mnt/a/OWI",
     "rm /mnt/a/DUP",
     "rm /mnt/a/L",
+    "rm /mnt/a/Z",
     "rm /mnt/a/GHOST",
     "ls /mnt/c",
     "echo x >> /mnt/c/G",
@@ -281,7 +286,7 @@ def build():
             return at == wit_start + k * 2 and blk >= v.bc and at < wit_end
 
         ents = va.entries()
-        checks.append(("plant: A has 1 KiB blocks and its eight files", va.bs == 1024 and set(FILES_A) <= set(ents)))
+        checks.append(("plant: A has 1 KiB blocks and its nine files", va.bs == 1024 and set(FILES_A) <= set(ents)))
         if not checks[-1][1]:
             return plan, checks
         ino = {n: ents[n][0] for n in FILES_A}
@@ -313,7 +318,11 @@ def build():
         # those bytes would.
         lino = ents["L"][0]
         va.set_ptr(lino, 0, va.ptr(ino["SRC"], 0))
-        plan.update(l_ino=lino, src_block=va.ptr(ino["SRC"], 0))
+        # Its i_blocks raised as an extended-attribute block raises it, and
+        # Z's (a regular file) damaged to 0: neither tells a fast symlink.
+        va.set_u32(va.inode_off(lino) + 28, va.bs // SECT)
+        va.set_u32(va.inode_off(ino["Z"]) + 28, 0)
+        plan.update(l_ino=lino, src_block=va.ptr(ino["SRC"], 0), z_block=va.ptr(ino["Z"], 0))
         # A: DUP's second pointer names a block already free.
         free_blk = va.fdb + max(n for n in range(va.bc - va.fdb) if not bit(va.bitmap(0), n))
         va.set_ptr(ino["DUP"], 1, free_blk)
@@ -349,8 +358,9 @@ def build():
              in_wit(vc, c_start, vc.u32(vc.desc(0)), AT_BMP) and in_wit(vc, c_start, vc.u32(vc.desc(0) + 4), AT_IBMP)),
             ("plant: C has no filetype feature, its files, and H naming an inode past its count",
              not vc.u32(1024 + 96) & 2 and set(FILES_C) <= set(c_ents) and vc.entries()["H"][0] > vc.ic),
-            ("plant: L is a fast symlink (no blocks) whose first pointer names SRC's block",
-             va.mode(lino) & 0xF000 == 0xA000 and va.i_blocks(lino) == 0
+            ("plant: L is a fast symlink (2 bytes) whose first pointer names SRC's block, its i_blocks 2; Z's 0",
+             va.mode(lino) & 0xF000 == 0xA000 and va.size(lino) == 2 and va.i_blocks(lino) == va.bs // SECT
+             and va.i_blocks(ino["Z"]) == 0 and va.ptr(ino["Z"], 0) != 0
              and va.ptr(lino, 0) == va.ptr(ino["SRC"], 0) != 0),
             ("plant: DUP's second pointer names a block A's bitmap holds free",
              not bit(va.bitmap(0), va.ptr(ino["DUP"], 1) - va.fdb) and va.ptr(ino["DUP"], 1) < va.bc),
@@ -443,7 +453,7 @@ def verdicts(plan, driven, out, faults):
         # Freed: RD's own block, RMI's and OWI's twelve direct blocks; taken:
         # OWI's new block. Their own indirect blocks are no file's now.
         want_bitmap = plan["a_bitmap"]
-        for blk in [plan["rd_block0"], plan["dup"][0]] + plan["direct"]["RMI"] + plan["direct"]["OWI"]:
+        for blk in [plan["rd_block0"], plan["dup"][0], plan["z_block"]] + plan["direct"]["RMI"] + plan["direct"]["OWI"]:
             want_bitmap = with_bits(want_bitmap, blk - va.fdb, blk - va.fdb + 1, 0)
         # The overwrite may give OWI a new inode: read it by its entry.
         owi = ents["OWI"][0] if "OWI" in ents else 0
@@ -454,6 +464,7 @@ def verdicts(plan, driven, out, faults):
         owi_data = va.read(owi_new * va.bs, owi_size) if owi_new and owi_size else b""
         rmi_inode_bit = bit(va.bitmap(4), ino["RMI"] - 1)
         src_bit = bit(va.bitmap(0), plan["src_block"] - va.fdb)
+        z_bit = bit(va.bitmap(0), plan["z_block"] - va.fdb)
         # A freed inode carries a deletion time and no links (e2fsck reads a
         # small i_dtime as an orphan-list pointer).
         rd_off = va.inode_off(ino["RD"])
@@ -471,7 +482,7 @@ def verdicts(plan, driven, out, faults):
         ("fsd mounted ext2 as /", re.search(r"^fsd: ext2 mounted", out, re.M) is not None),
         ("A, C and B mount", all(o.get(c) == "" for c in COMMANDS[:3])),
         ("C's superblock intact after the boot", whole["c"]),
-        ("ls /mnt/a lists the eight files", set(FILES_A) <= listed),
+        ("ls /mnt/a lists the nine files", set(FILES_A) <= listed),
         (f"SRC reads whole, 100 bytes (got {wc_bytes(o.get('cat /mnt/a/SRC | wc'))})",
          wc_bytes(o.get("cat /mnt/a/SRC | wc")) == 100),
         (f"RD's read stops at an I/O error, no witness byte counted (got {rd!r})",
@@ -490,12 +501,14 @@ def verdicts(plan, driven, out, faults):
         (f"OWI, its indirect pointer past A, overwritten without an error (got {o.get('echo x > /mnt/a/OWI')!r}, holding {owi_data!r})",
          o.get("echo x > /mnt/a/OWI") == "" and o.get("cat /mnt/a/OWI") == "x" and owi_data == b"x\r\n"
          and owi == ino["OWI"]),
-        ("A's block bitmap as before but RD's, DUP's, RMI's and OWI's direct blocks freed and OWI's new one taken",
+        ("A's block bitmap as before but RD's, DUP's, Z's, RMI's and OWI's direct blocks freed and OWI's new one taken",
          a_bitmap == want_bitmap),
         (f"rm of DUP, its second block already free, succeeds (got {o.get('rm /mnt/a/DUP')!r})",
          o.get("rm /mnt/a/DUP") == "" and "DUP" not in ents),
         (f"rm of L succeeds and SRC's block is still allocated (got {o.get('rm /mnt/a/L')!r})",
          o.get("rm /mnt/a/L") == "" and "L" not in ents and src_bit == 1),
+        (f"rm of Z, its i_blocks 0, frees its block (got {o.get('rm /mnt/a/Z')!r})",
+         o.get("rm /mnt/a/Z") == "" and "Z" not in ents and z_bit == 0),
         (f"rm of GHOST, its inode past the count, drops the entry (got {o.get('rm /mnt/a/GHOST')!r})",
          o.get("rm /mnt/a/GHOST") == "" and "GHOST" not in ents),
         (f"A's free counts still match its bitmap ({a_free_delta} vs {plan['a_free_delta']} past it)",

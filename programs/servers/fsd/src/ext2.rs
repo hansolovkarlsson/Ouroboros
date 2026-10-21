@@ -62,6 +62,10 @@ const ROOT_INO: u32 = 2;
 const S_IFMT: u16 = 0xf000;
 const S_IFREG: u16 = 0x8000; // regular file
 const S_IFDIR: u16 = 0x4000; // directory
+const S_IFLNK: u16 = 0xa000; // symbolic link
+/// A symlink target shorter than this is stored in the inode's 60 bytes of
+/// block pointers (a fast symlink), as Linux's ext2 makes one.
+const FAST_SYMLINK_MAX: u32 = 60;
 
 /// Default modes for entries this driver creates: a 0644 regular file, a 0755
 /// directory (the file-type bits ORed with rwx bits).
@@ -512,11 +516,12 @@ impl Fs {
         block as u64 * (self.block_size as u64 / SECTOR_SIZE as u64)
     }
 
-    /// Whether block `block` is the volume's: `Volume`'s bound, in blocks. The
-    /// free path asks it before reading what a block holds, where `Volume`
-    /// would refuse partway through a free whose file is already unlinked.
+    /// Whether block `block` is the volume's, asked of `Volume` itself so the
+    /// bound has one statement. The free path asks it before reading what a
+    /// block holds, where `Volume` would refuse partway through a free whose
+    /// file is already unlinked.
     fn in_volume(&self, block: u32) -> bool {
-        block < self.blocks_count
+        self.vol.sector(self.block_sector(block)).is_ok()
     }
 
     /// The pointers in sector `s` of pointer block `block`, read with one
@@ -1348,11 +1353,12 @@ impl Fs {
     /// partway left the inode allocated and half freed (the reviews of #331).
     /// A disk's own read error still stops it there.
     ///
-    /// An inode holding no blocks (`i_blocks` 0) frees none: a fast symlink
-    /// keeps its target's text in the pointers, which were freed as blocks
-    /// (Linux's fast-symlink test; the third review of #331).
+    /// A fast symlink frees none: its target's text is in the pointers, which
+    /// were freed as blocks. Told by its type and length, as Linux makes one,
+    /// not by `i_blocks`, which an extended-attribute block raises and damage
+    /// can zero (the reviews of #331).
     fn free_all_blocks(&mut self, node: &Inode) -> Result<(), Error> {
-        if node.i_blocks == 0 {
+        if node.mode & S_IFMT == S_IFLNK && node.size < FAST_SYMLINK_MAX {
             return Ok(());
         }
         let per_blk = self.block_size / 4;
@@ -1363,41 +1369,38 @@ impl Fs {
             }
         }
         left = left.saturating_sub(DIRECT_BLOCKS as u32);
-        self.free_pointed(node.block[12], left.min(per_blk))?;
+        self.free_pointed(node.block[12], left.min(per_blk), 0)?;
         left = left.saturating_sub(per_blk);
-        if node.block[13] != 0 {
-            if self.in_volume(node.block[13]) {
-                for s in 0..self.block_size / SECTOR_SIZE as u32 {
-                    for sib in self.pointer_sector(node.block[13], s)? {
-                        self.free_pointed(sib, left.min(per_blk))?;
-                        left = left.saturating_sub(per_blk);
-                    }
-                }
-            }
-            self.free_block(node.block[13])?;
-        }
-        Ok(())
+        self.free_pointed(node.block[13], left.min(per_blk * per_blk), 1)
     }
 
-    /// Free the first `count` blocks pointer block `block` names, then the
-    /// pointer block itself; for a block past the volume, neither. Only the
-    /// sectors holding those `count` pointers are read, each once.
-    fn free_pointed(&mut self, block: u32, count: u32) -> Result<(), Error> {
+    /// Free the first `count` data blocks under pointer block `block`, which
+    /// stands `depth` levels of pointer blocks above them (0: it names data
+    /// blocks), then every pointer block under it and itself; for a block
+    /// past the volume, none of it. Its sectors are read one at a time, each
+    /// once, and at depth 0 only those holding the `count` pointers.
+    fn free_pointed(&mut self, block: u32, count: u32, depth: u32) -> Result<(), Error> {
         if block == 0 {
             return Ok(());
         }
-        if count > 0 && self.in_volume(block) {
+        if (count > 0 || depth > 0) && self.in_volume(block) {
+            // The data blocks under each pointer this block holds.
+            let span = (self.block_size / 4).pow(depth);
             let mut left = count;
-            for s in 0..self.block_size / SECTOR_SIZE as u32 {
-                if left == 0 {
-                    break;
-                }
-                for p in self.pointer_sector(block, s)?.into_iter().take(left as usize) {
-                    if p != 0 {
-                        self.free_block(p)?;
+            'walk: for s in 0..self.block_size / SECTOR_SIZE as u32 {
+                for p in self.pointer_sector(block, s)? {
+                    if depth == 0 {
+                        if left == 0 {
+                            break 'walk;
+                        }
+                        if p != 0 {
+                            self.free_block(p)?;
+                        }
+                    } else {
+                        self.free_pointed(p, left.min(span), depth - 1)?;
                     }
+                    left = left.saturating_sub(span);
                 }
-                left = left.saturating_sub((SECTOR_SIZE / 4) as u32);
             }
         }
         self.free_block(block)
