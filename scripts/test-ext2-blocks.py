@@ -138,7 +138,10 @@ FILES_A = {"RD": b"R" * 2048, "WR": b"W" * 1100, "IND": b"I" * 12 * 1024, "SRC":
            "GHOST": b"G" * 10, "RMI": b"M" * 13 * 1024, "OWI": b"O" * 13 * 1024, "DUP": b"D" * 2048, "Z": b"Z" * 1024,
            "BIGD": b"B" * 270 * 1024, "META": b"T" * 2048, "MI": b"N" * 13 * 1024,
            "GD": b"Q" * 1024, "MG": b"K" * 13 * 1024}
-FILES_C = {"F": b"F" * 1024, "G": b"g" * 1024, "H": b"h" * 10}
+# TWELVE ends at its last direct block and DIND at its last single-indirect
+# one, so an append to either needs a pointer block it does not have.
+FILES_C = {"F": b"F" * 1024, "G": b"g" * 1024, "H": b"h" * 10, "TWELVE": b"2" * 12 * 1024,
+           "DIND": b"3" * (12 + 256) * 1024}
 COMMANDS = [
     "mount 1 /mnt/a", "mount 2 /mnt/c", "mount 3 /mnt/b",
     "ls /mnt/a",
@@ -161,6 +164,9 @@ COMMANDS = [
     "rm /mnt/a/GD",
     "rm /mnt/a/MG",
     "ls /mnt/c",
+    "echo y >> /mnt/c/DIND",
+    "echo y >> /mnt/c/TWELVE",
+    "echo q > /mnt/c/ONEB",
     "echo x > /mnt/b/NEW",
     "touch /mnt/b/NEW2",
 ]
@@ -394,6 +400,16 @@ def build():
         # its group came to be refused at mount (test-volume-bound's SHAPES-H).
         c_ents = vc.entries()
         vc.set_u32(c_ents["H"][1], vc.ic + 5)
+        # C: one block left free, the highest, and the counts saying so. An
+        # append to DIND needs three, one to TWELVE two: both must take none.
+        c_real = vc.bc - vc.fdb
+        c_free = max(n for n in range(c_real) if not bit(vc.bitmap(0), n))
+        vc.set_bitmap(0, with_bits(with_bits(vc.bitmap(0), 0, c_real, 1), c_free, c_free + 1, 0))
+        vc.set_u32(1024 + 12, 1)
+        vc.write(vc.desc(0) + 12, struct.pack("<H", 1))
+        c_ino = {n: vc.entries()[n][0] for n in ("TWELVE", "DIND")}
+        plan.update(c_free=vc.fdb + c_free, c_ino=c_ino,
+                    c_blocks={n: (vc.size(i), vc.i_blocks(i), vc.ptr(i, 12), vc.ptr(i, 13)) for n, i in c_ino.items()})
         # A: L, a fast symlink (its target's text in its pointers), made to
         # name SRC's block as its text's first four bytes, as a target of
         # those bytes would.
@@ -454,6 +470,13 @@ def build():
              and va.u32(t3 * va.bs) == va.ptr(ino["SRC"], 0) != 0 and all(mi_direct)),
             ("plant: C has no filetype feature, its files, and H naming an inode past its count",
              not vc.u32(1024 + 96) & 2 and set(FILES_C) <= set(c_ents) and vc.entries()["H"][0] > vc.ic),
+            ("plant: C has one block free, its counts 1; TWELVE has no indirect block, DIND an indirect "
+             "and no double-indirect block, each ending at its last block",
+             vc.bc - vc.fdb <= vc.bpg and [n for n in range(vc.bc - vc.fdb) if not bit(vc.bitmap(0), n)] == [plan["c_free"] - vc.fdb]
+             and free_delta(vc) == (0, 0)
+             and plan["c_blocks"]["TWELVE"][0] == 12 * 1024 and plan["c_blocks"]["TWELVE"][2] == 0
+             and plan["c_blocks"]["DIND"][0] == 268 * 1024 and plan["c_blocks"]["DIND"][2] != 0
+             and plan["c_blocks"]["DIND"][3] == 0),
             ("plant: L is a fast symlink (2 bytes) whose first pointer names SRC's block, its i_blocks 2; Z's 0",
              va.mode(lino) & 0xF000 == 0xA000 and va.size(lino) == 2 and va.i_blocks(lino) == va.bs // SECT
              and va.i_blocks(ino["Z"]) == 0 and va.ptr(ino["Z"], 0) != 0
@@ -539,6 +562,12 @@ def verdicts(plan, driven, out, faults):
             return [(f"A's and B's superblocks intact ({whole})", False),
                     (f"the witness unchanged (changed sectors: {changed[:8]})", changed == [])]
         va, vb = Ext2(fh, plan["a"]), Ext2(fh, plan["b"])
+        vc = Ext2(fh, plan["c"]) if whole["c"] else None
+        c_after = ({n: (vc.size(i), vc.i_blocks(i), vc.ptr(i, 12), vc.ptr(i, 13)) for n, i in plan["c_ino"].items()}
+                   if vc else {})
+        c_ents = vc.entries() if vc else {}
+        oneb = vc.ptr(c_ents["ONEB"][0], 0) if vc and "ONEB" in c_ents else None
+        c_counts = (free_delta(vc), bit(vc.bitmap(0), plan["c_free"] - vc.fdb)) if vc else None
         a_free_delta = free_delta(va)
         ents = va.entries()
         ino = plan["ino"]
@@ -638,6 +667,14 @@ def verdicts(plan, driven, out, faults):
          a_free_delta == tuple(d + 2 for d in plan["a_free_delta"])),
         (f"ls /mnt/c lists F, G and H, H's inode past the count (got {o.get('ls /mnt/c')!r})",
          set(FILES_C) <= set((o.get("ls /mnt/c") or "").split())),
+        (f"C's appends to DIND and TWELVE answer disk full (got {o.get('echo y >> /mnt/c/DIND')!r}, "
+         f"{o.get('echo y >> /mnt/c/TWELVE')!r})",
+         all("disk full" in (o.get(f"echo y >> /mnt/c/{n}") or "") for n in ("DIND", "TWELVE"))),
+        (f"DIND and TWELVE as planted: size, i_blocks, indirect and double-indirect pointers ({c_after})",
+         c_after == plan["c_blocks"]),
+        (f"C's one free block taken by ONEB, the counts level with the bitmap (got {o.get('echo q > /mnt/c/ONEB')!r}, "
+         f"ONEB's block {oneb}, the free block {plan['c_free']}, {c_counts})",
+         o.get("echo q > /mnt/c/ONEB") == "" and oneb == plan["c_free"] and c_counts == ((0, 0), 1)),
         (f"B's write answers disk full (got {o.get('echo x > /mnt/b/NEW')!r})",
          "disk full" in (o.get("echo x > /mnt/b/NEW") or "")),
         (f"B's touch NEW2 answers disk full and makes nothing (got {o.get('touch /mnt/b/NEW2')!r})",

@@ -1436,6 +1436,11 @@ impl Fs {
     /// physical block; allocates the block (zeroed) and any indirect blocks
     /// needed to reach it, updating `node.block`/`node.i_blocks` in place. Only
     /// direct + single/double indirect (triple returns `DiskFull`).
+    ///
+    /// Every block the path lacks is taken before any is linked, and a
+    /// failure gives back what it took: taking the data block first lost it
+    /// when the pointer block after it could not be had, or when the logical
+    /// block was past the double-indirect range (the second review of #331).
     fn ensure_block(&mut self, node: &mut Inode, logical: u32) -> Result<u32, Error> {
         let existing = self.block_for(node, logical)?;
         if existing != 0 {
@@ -1443,33 +1448,58 @@ impl Fs {
         }
         let per_blk = self.block_size / 4;
         let sectors_per_block = (self.block_size as usize / SECTOR_SIZE) as u32;
-        let blk = self.alloc_block(true)?;
-        node.i_blocks += sectors_per_block;
-
-        if logical < DIRECT_BLOCKS as u32 {
-            node.block[logical as usize] = blk;
-        } else if logical < DIRECT_BLOCKS as u32 + per_blk {
-            if node.block[12] == 0 {
-                node.block[12] = self.alloc_block(true)?;
-                node.i_blocks += sectors_per_block;
-            }
-            self.write_indirect_ptr(node.block[12], logical - DIRECT_BLOCKS as u32, blk)?;
-        } else if logical < DIRECT_BLOCKS as u32 + per_blk + per_blk * per_blk {
-            let dd = logical - DIRECT_BLOCKS as u32 - per_blk;
-            let (l1, l2) = (dd / per_blk, dd % per_blk);
-            if node.block[13] == 0 {
-                node.block[13] = self.alloc_block(true)?;
-                node.i_blocks += sectors_per_block;
-            }
-            let mut sib = self.indirect_lookup(node.block[13], l1)?;
-            if sib == 0 {
-                sib = self.alloc_block(true)?;
-                node.i_blocks += sectors_per_block;
-                self.write_indirect_ptr(node.block[13], l1, sib)?;
-            }
-            self.write_indirect_ptr(sib, l2, blk)?;
+        let direct = DIRECT_BLOCKS as u32;
+        // The pointer blocks the path still lacks: (top, second level).
+        let (top, sib) = if logical < direct {
+            (false, false)
+        } else if logical < direct + per_blk {
+            (node.block[12] == 0, false)
+        } else if logical < direct + per_blk + per_blk * per_blk {
+            let l1 = (logical - direct - per_blk) / per_blk;
+            let top = node.block[13] == 0;
+            (top, top || self.indirect_lookup(node.block[13], l1)? == 0)
         } else {
             return Err(Error::DiskFull); // triple indirect unsupported
+        };
+        let mut taken = [0u32; 3];
+        let wanted = 1 + top as usize + sib as usize;
+        for n in 0..wanted {
+            match self.alloc_block(true) {
+                Ok(b) => taken[n] = b,
+                Err(e) => {
+                    for &b in &taken[..n] {
+                        self.free_block(b)?;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        node.i_blocks += sectors_per_block * wanted as u32;
+        // taken[0] is the data block, then the top pointer block, then the
+        // second-level one, each present only if the path lacked it.
+        let blk = taken[0];
+        let at_sib = 1 + top as usize;
+
+        if logical < direct {
+            node.block[logical as usize] = blk;
+        } else if logical < direct + per_blk {
+            if top {
+                node.block[12] = taken[1];
+            }
+            self.write_indirect_ptr(node.block[12], logical - direct, blk)?;
+        } else {
+            let dd = logical - direct - per_blk;
+            let (l1, l2) = (dd / per_blk, dd % per_blk);
+            if top {
+                node.block[13] = taken[1];
+            }
+            let second = if sib {
+                self.write_indirect_ptr(node.block[13], l1, taken[at_sib])?;
+                taken[at_sib]
+            } else {
+                self.indirect_lookup(node.block[13], l1)?
+            };
+            self.write_indirect_ptr(second, l2, blk)?;
         }
         Ok(blk)
     }
