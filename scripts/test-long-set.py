@@ -36,15 +36,21 @@ and every vendor entry. Three boots, each of a copy of build/espexfat.img
   (two name entries: the vendor entries move right) and `mv
   /VendorRenamedLong /V2` (one: they move left), `ls /` after each; after,
   no set under either old name, /V2's 20 entries with the File entry's
-  bytes past its checksum and the 17 vendor entries as planted, the
-  SetChecksum whole, and fsck_exfat -n passing.
+  bytes past its checksum, the Stream's flags, ValidDataLength, cluster and
+  DataLength (a contiguous cluster of its own, 7 bytes of it valid) and the
+  17 vendor entries as planted, the SetChecksum whole; and STRAY, its name
+  entry after a vendor entry (fsck_exfat's one complaint before the boot),
+  `mv`'d to /S2, which must be File, Stream, the new name, the vendor entry,
+  with fsck_exfat -n passing after.
 
 No fault lines in QEMU's trace. Fails with the sum capped at 19 entries (the
 checksum, and fsck: "Incorrect checksum for directory entry set. Delete?")
 with walk_dir taking either misshapen set (its slots written), with a rename
 building its set afresh (main before 2026-10-21: the vendor entries, the
 attributes and the times gone) and with the vendor entries left where the
-old name ended (the set's shape, and fsck). About three minutes. Run it
+old name ended (the set's shape, and fsck), with the Stream built afresh
+(ValidDataLength raised) and with only the name entries after the Stream
+dropped (STRAY's carried). About three minutes. Run it
 whenever exFAT's patch_stream_ext, set_checksum, walk_dir's set assembly,
 slot_at, mv or renamed_set changes.
 """

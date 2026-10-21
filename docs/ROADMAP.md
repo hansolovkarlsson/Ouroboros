@@ -4357,7 +4357,8 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   a rename builds its set from the old one (`renamed_set`), the File entry
   and every secondary past the name kept, only the Stream and name entries
   new (`make test-long-set`'s RENAME). The File entry's attributes and times
-  were lost the same way and are kept too. `rm` still frees no vendor
+  were lost the same way and are kept too, and so is the Stream's
+  ValidDataLength (the high review). `rm` still frees no vendor
   allocation's clusters, nor does a replacing rename for the set it
   replaces: an item of its own, below. A rename deletes the set
   and builds a new one of File, Stream and name, so vendor extension (0xE0)
@@ -4365,6 +4366,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   allocation's clusters leaked. Since 2026-10-19 a write keeps them (`make
   test-long-set`); a rename should copy the secondaries past the name into
   the new set. Read in the code; from the review of the set checksum.
+- **fsd reads an exFAT file to its DataLength, not its ValidDataLength.**
+  `walk_dir` takes a file's size from the Stream's DataLength, so a file
+  another driver preallocated (ValidDataLength below DataLength) reads the
+  bytes past its valid length, stale data the spec says reads as zeros.
+  Found with the rename's high review, 2026-10-21, which kept the field
+  through a rename.
 - **exFAT's `rm` leaks a vendor allocation's clusters.** A vendor allocation
   entry (0xE1) names clusters of its own (its FirstCluster and DataLength),
   which `rm` and a replacing `mv` (for the set it replaces) never free, so
