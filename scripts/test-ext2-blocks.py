@@ -38,7 +38,8 @@ with three zeroed blocks, which nothing may change. The host plants:
   no links; L, a fast symlink whose first pointer names SRC's block: `rm`
   must leave that block allocated, its i_blocks raised to 2 as an
   extended-attribute block raises it; Z, a regular file with i_blocks
-  damaged to 0: `rm` must free its block; RMI and
+  damaged to 0: `rm` must free its block; BIGD (270 KiB, to its
+  double-indirect block): `rm` must free every block it holds; RMI and
   OWI (thirteen blocks each), their indirect blocks swapped for witness
   blocks: `rm RMI` must free its inode and `echo x > OWI` must leave it
   holding `x` CR LF, each with no error; and DUP (two blocks), its second
@@ -72,7 +73,8 @@ overwrite an I/O error), with bitmap_free reading a bitmap past the volume
 (A's counts one past its bitmap), with the listing reading an inode past
 the count (`ls /mnt/c` an I/O error), with the fast-symlink test taken out
 (SRC's block freed by `rm L`) or made by i_blocks (that, and Z's block
-kept), with rm reading GHOST's inode (an I/O
+kept), with the pointer walk's span a block a pointer at every depth (BIGD's
+last data block kept), with rm reading GHOST's inode (an I/O
 error) and with the deletion time left out of a freed inode. One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
@@ -110,7 +112,8 @@ WITNESS_BYTES = 1024 * 1024
 AT_RD, AT_WR, AT_IND, AT_BMP, AT_RMI, AT_OWI, AT_IBMP = 8, 16, 24, 32, 40, 48, 56
 ZEROED = (AT_IND, AT_BMP, AT_IBMP)
 FILES_A = {"RD": b"R" * 2048, "WR": b"W" * 1100, "IND": b"I" * 12 * 1024, "SRC": b"S" * 100,
-           "GHOST": b"G" * 10, "RMI": b"M" * 13 * 1024, "OWI": b"O" * 13 * 1024, "DUP": b"D" * 2048, "Z": b"Z" * 1024}
+           "GHOST": b"G" * 10, "RMI": b"M" * 13 * 1024, "OWI": b"O" * 13 * 1024, "DUP": b"D" * 2048, "Z": b"Z" * 1024,
+           "BIGD": b"B" * 270 * 1024}
 FILES_C = {"F": b"F" * 1024, "G": b"g" * 1024, "H": b"h" * 10}
 COMMANDS = [
     "mount 1 /mnt/a", "mount 2 /mnt/c", "mount 3 /mnt/b",
@@ -127,6 +130,7 @@ COMMANDS = [
     "rm /mnt/a/DUP",
     "rm /mnt/a/L",
     "rm /mnt/a/Z",
+    "rm /mnt/a/BIGD",
     "rm /mnt/a/GHOST",
     "ls /mnt/c",
     "echo x >> /mnt/c/G",
@@ -183,6 +187,21 @@ class Ext2:
 
     def i_blocks(self, ino):
         return self.u32(self.inode_off(ino) + 28)
+
+    def pointers(self, blk):
+        return [p for p in struct.unpack(f"<{self.bs // 4}I", self.read(blk * self.bs, self.bs)) if p]
+
+    def all_blocks(self, ino):
+        """Every block inode `ino` holds: data and pointer blocks, to double
+        indirect."""
+        out = [p for p in (self.ptr(ino, k) for k in range(12)) if p]
+        if self.ptr(ino, 12):
+            out += [self.ptr(ino, 12)] + self.pointers(self.ptr(ino, 12))
+        if self.ptr(ino, 13):
+            out.append(self.ptr(ino, 13))
+            for sib in self.pointers(self.ptr(ino, 13)):
+                out += [sib] + self.pointers(sib)
+        return out
 
     def entries(self):
         """{name: (inode, byte offset of the entry)} of the root directory."""
@@ -286,7 +305,7 @@ def build():
             return at == wit_start + k * 2 and blk >= v.bc and at < wit_end
 
         ents = va.entries()
-        checks.append(("plant: A has 1 KiB blocks and its nine files", va.bs == 1024 and set(FILES_A) <= set(ents)))
+        checks.append(("plant: A has 1 KiB blocks and its ten files", va.bs == 1024 and set(FILES_A) <= set(ents)))
         if not checks[-1][1]:
             return plan, checks
         ino = {n: ents[n][0] for n in FILES_A}
@@ -322,7 +341,8 @@ def build():
         # Z's (a regular file) damaged to 0: neither tells a fast symlink.
         va.set_u32(va.inode_off(lino) + 28, va.bs // SECT)
         va.set_u32(va.inode_off(ino["Z"]) + 28, 0)
-        plan.update(l_ino=lino, src_block=va.ptr(ino["SRC"], 0), z_block=va.ptr(ino["Z"], 0))
+        plan.update(l_ino=lino, src_block=va.ptr(ino["SRC"], 0), z_block=va.ptr(ino["Z"], 0),
+                    bigd=va.all_blocks(ino["BIGD"]))
         # A: DUP's second pointer names a block already free.
         free_blk = va.fdb + max(n for n in range(va.bc - va.fdb) if not bit(va.bitmap(0), n))
         va.set_ptr(ino["DUP"], 1, free_blk)
@@ -362,6 +382,8 @@ def build():
              va.mode(lino) & 0xF000 == 0xA000 and va.size(lino) == 2 and va.i_blocks(lino) == va.bs // SECT
              and va.i_blocks(ino["Z"]) == 0 and va.ptr(ino["Z"], 0) != 0
              and va.ptr(lino, 0) == va.ptr(ino["SRC"], 0) != 0),
+            (f"plant: BIGD reaches its double-indirect block, {len(plan['bigd'])} blocks in all",
+             va.ptr(ino["BIGD"], 13) != 0 and len(plan["bigd"]) == 270 + 1 + 1 + 1),
             ("plant: DUP's second pointer names a block A's bitmap holds free",
              not bit(va.bitmap(0), va.ptr(ino["DUP"], 1) - va.fdb) and va.ptr(ino["DUP"], 1) < va.bc),
             ("plant: B ends where the witness starts, its next free block bit the block past it",
@@ -453,7 +475,8 @@ def verdicts(plan, driven, out, faults):
         # Freed: RD's own block, RMI's and OWI's twelve direct blocks; taken:
         # OWI's new block. Their own indirect blocks are no file's now.
         want_bitmap = plan["a_bitmap"]
-        for blk in [plan["rd_block0"], plan["dup"][0], plan["z_block"]] + plan["direct"]["RMI"] + plan["direct"]["OWI"]:
+        for blk in ([plan["rd_block0"], plan["dup"][0], plan["z_block"]] + plan["direct"]["RMI"]
+                    + plan["direct"]["OWI"] + plan["bigd"]):
             want_bitmap = with_bits(want_bitmap, blk - va.fdb, blk - va.fdb + 1, 0)
         # The overwrite may give OWI a new inode: read it by its entry.
         owi = ents["OWI"][0] if "OWI" in ents else 0
@@ -482,7 +505,7 @@ def verdicts(plan, driven, out, faults):
         ("fsd mounted ext2 as /", re.search(r"^fsd: ext2 mounted", out, re.M) is not None),
         ("A, C and B mount", all(o.get(c) == "" for c in COMMANDS[:3])),
         ("C's superblock intact after the boot", whole["c"]),
-        ("ls /mnt/a lists the nine files", set(FILES_A) <= listed),
+        ("ls /mnt/a lists the ten files", set(FILES_A) <= listed),
         (f"SRC reads whole, 100 bytes (got {wc_bytes(o.get('cat /mnt/a/SRC | wc'))})",
          wc_bytes(o.get("cat /mnt/a/SRC | wc")) == 100),
         (f"RD's read stops at an I/O error, no witness byte counted (got {rd!r})",
@@ -501,7 +524,7 @@ def verdicts(plan, driven, out, faults):
         (f"OWI, its indirect pointer past A, overwritten without an error (got {o.get('echo x > /mnt/a/OWI')!r}, holding {owi_data!r})",
          o.get("echo x > /mnt/a/OWI") == "" and o.get("cat /mnt/a/OWI") == "x" and owi_data == b"x\r\n"
          and owi == ino["OWI"]),
-        ("A's block bitmap as before but RD's, DUP's, Z's, RMI's and OWI's direct blocks freed and OWI's new one taken",
+        ("A's block bitmap as before but RD's, DUP's, Z's, RMI's, OWI's direct and BIGD's every block freed and OWI's new one taken",
          a_bitmap == want_bitmap),
         (f"rm of DUP, its second block already free, succeeds (got {o.get('rm /mnt/a/DUP')!r})",
          o.get("rm /mnt/a/DUP") == "" and "DUP" not in ents),
@@ -509,6 +532,8 @@ def verdicts(plan, driven, out, faults):
          o.get("rm /mnt/a/L") == "" and "L" not in ents and src_bit == 1),
         (f"rm of Z, its i_blocks 0, frees its block (got {o.get('rm /mnt/a/Z')!r})",
          o.get("rm /mnt/a/Z") == "" and "Z" not in ents and z_bit == 0),
+        (f"rm of BIGD, past single indirect, succeeds (got {o.get('rm /mnt/a/BIGD')!r})",
+         o.get("rm /mnt/a/BIGD") == "" and "BIGD" not in ents),
         (f"rm of GHOST, its inode past the count, drops the entry (got {o.get('rm /mnt/a/GHOST')!r})",
          o.get("rm /mnt/a/GHOST") == "" and "GHOST" not in ents),
         (f"A's free counts still match its bitmap ({a_free_delta} vs {plan['a_free_delta']} past it)",
