@@ -27,7 +27,7 @@ the one-sector FAT cache: each request's path resolution looks up the
 entries of the directory clusters it passes, and its write, with the cursor,
 looks up only the entry it steps past to extend the chain, then allocates
 (exFAT: the new cluster's entry and the link; FAT32: the free-cluster scan
-from its hint, each FAT write reading the second FAT copy too). Where the
+from its hint, each FAT write reading no copy but the first). Where the
 cache starts comes from the disk as well: on exFAT the last /bin cluster the
 shell's lookup of `cp` stepped past, on the ESP the root's one FAT sector.
 The copy must hold /HUGE's bytes, and its chain must cross a FAT sector, or
@@ -52,6 +52,17 @@ higher count); with the old rule (a drop at every FAT write) the source walks
 from its first cluster after each, and the pairs read 867 and 5,048
 FAT sectors where the model has 323 and 3,333 (measured on the
 tree of 2026-10-18; the counts move with every file staged on the image).
+
+Since 2026-10-21 a FAT32 FAT write takes the first copy's sector, patches
+the entry and writes that sector to every copy; until then it read each
+other copy's sector and patched it, which was 2,559 of the 2,689 FAT reads
+of the copy onto the ESP. The host plants the bad-cluster mark at every
+free entry of the ESP's second copy before the boots, which fsd never reads,
+and after each FAT32 copy every FAT sector of the destination's chain must be
+the first copy's in the second, byte for byte (it fails with each copy's own
+sector patched, sector 54 differing); one of those sectors must still hold a
+free entry, or the check could not fail. On the tree of 2026-10-21 the FAT32
+pairs read 134 and 774 FAT sectors.
 
 About two and a half minutes.
 """
