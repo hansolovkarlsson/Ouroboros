@@ -1522,7 +1522,8 @@ impl Fs {
     }
 
     /// Build an entry set and insert it into a directory: the full create path
-    /// shared by `touch`/`mkdir`/`write_file`/`mv`. `data_len` is the file's
+    /// shared by `touch`/`mkdir`/`write_file` (a rename writes its set through
+    /// [`relink`](Self::relink)). `data_len` is the file's
     /// size (or a directory's allocated size); `first_cluster` its first cluster
     /// (`0` for an empty file). `room` is the directory's [`room`](Self::room),
     /// which a caller takes before it allocates anything for the new entry: a
@@ -1567,10 +1568,13 @@ impl Fs {
     /// secondary past the name are the old set's, as the disk holds them:
     /// its attributes and times, and vendor extension (0xE0) and vendor
     /// allocation (0xE1) entries a camera wrote, which a rename built afresh
-    /// dropped until 2026-10-21, leaking a vendor allocation's clusters. The
-    /// Stream and name entries are built as for a create, from `entry`, so a
-    /// size-0 entry still names no cluster. A name that would take the set
-    /// past 255 secondaries is refused.
+    /// dropped until 2026-10-21, leaking a vendor allocation's clusters. So is
+    /// the Stream, but for its NameLength and NameHash: its ValidDataLength
+    /// below a preallocated DataLength, raised to it, would read the stale
+    /// bytes past it as the file's. A size-0 entry's Stream is built as for
+    /// a create, so it still names no cluster. The name entries are new, and
+    /// every old one goes, wherever among the secondaries it sat. A name
+    /// that would take the set past 255 secondaries is refused.
     fn renamed_set(
         &mut self,
         at: SetAt,
@@ -1601,16 +1605,29 @@ impl Fs {
         if buf[0] != ET_FILE || buf[ENTRY_SIZE] != ET_STREAM_EXT {
             return Err(Error::Io(DiskError::Io));
         }
-        let old_names = (2..at.len).take_while(|&i| buf[i * ENTRY_SIZE] == ET_FILE_NAME).count();
-        let rest = at.len - 2 - old_names;
+        let mut stream = [0u8; ENTRY_SIZE];
+        stream.copy_from_slice(&buf[ENTRY_SIZE..2 * ENTRY_SIZE]);
+        // Every secondary but the Stream and the name entries, in order,
+        // packed down from slot 2 (each read at or past where it is written).
+        let mut rest = 0;
+        for i in 2..at.len {
+            if buf[i * ENTRY_SIZE] != ET_FILE_NAME {
+                buf.copy_within(i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE, (2 + rest) * ENTRY_SIZE);
+                rest += 1;
+            }
+        }
         let total = made + rest;
         if total > WHOLE_SET_ENTRIES {
             return Err(Error::InvalidName);
         }
         // The rest moved to follow the new name, then Stream and name over
         // what was there; the File entry's bytes past its checksum stay.
-        buf.copy_within((2 + old_names) * ENTRY_SIZE..at.len * ENTRY_SIZE, made * ENTRY_SIZE);
+        buf.copy_within(2 * ENTRY_SIZE..(2 + rest) * ENTRY_SIZE, made * ENTRY_SIZE);
         buf[ENTRY_SIZE..made * ENTRY_SIZE].copy_from_slice(&built[ENTRY_SIZE..made * ENTRY_SIZE]);
+        if entry.size > 0 {
+            stream[3..6].copy_from_slice(&built[ENTRY_SIZE + 3..ENTRY_SIZE + 6]); // NameLength, NameHash
+            buf[ENTRY_SIZE..2 * ENTRY_SIZE].copy_from_slice(&stream);
+        }
         buf[1] = (total - 1) as u8; // SecondaryCount
         let sum = set_checksum(&buf[..total * ENTRY_SIZE]);
         buf[2..4].copy_from_slice(&sum.to_le_bytes());
@@ -2125,16 +2142,13 @@ impl Fs {
             }
             // CREATE BEFORE DELETING, like the non-replacing path below.
             // Deleting the destination first survives a crash no worse, and is
-            // wrong against an ordinary error: a failing `create_entry` (a
+            // wrong against an ordinary error: a failing `relink` (a
             // directory that cannot be extended, an allocation failure) would
             // return Err having already destroyed `dst` while `src` is still
-            // there. Slot indices are stable across a create - `create_entry`
+            // there. Slot indices are stable across a create - `insert_set`
             // fills a free run and moves nothing - so the recorded `dst_at`
             // still addresses the old set afterwards.
-            let mut set = [0u8; WHOLE_SET_ENTRIES * ENTRY_SIZE];
-            let entries = self.renamed_set(src_at, &src_entry, dst_name, &mut set)?;
-            let room = self.room(&dst_dir)?;
-            self.insert_set(&mut dst_dir, room, &set[..entries * ENTRY_SIZE])?;
+            self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
             self.delete_set(dst_at)?;
             if !same_set {
                 self.delete_set(src_at)?;
@@ -2149,11 +2163,22 @@ impl Fs {
         }
 
         // Link dst to the same clusters first, then unlink src.
-        let mut set = [0u8; WHOLE_SET_ENTRIES * ENTRY_SIZE];
-        let entries = self.renamed_set(src_at, &src_entry, dst_name, &mut set)?;
-        let room = self.room(&dst_dir)?;
-        self.insert_set(&mut dst_dir, room, &set[..entries * ENTRY_SIZE])?;
+        self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
         self.delete_set(src_at)
+    }
+
+    /// Write `src`'s set, at `src_at`, again under `name` in `dir`
+    /// ([`renamed_set`](Self::renamed_set), then
+    /// [`insert_set`](Self::insert_set)): the step both of `mv`'s arms take
+    /// before deleting a set. Its one whole-set buffer is here, not in each
+    /// arm, so a debug build's frame holds one. Slot indices are stable
+    /// across it: `insert_set` fills a free run and moves nothing, so a set
+    /// found before it is still where it was.
+    fn relink(&mut self, dir: &mut Dir, src_at: SetAt, src_entry: &DirEntry, name: &str) -> Result<(), Error> {
+        let mut set = [0u8; WHOLE_SET_ENTRIES * ENTRY_SIZE];
+        let entries = self.renamed_set(src_at, src_entry, name, &mut set)?;
+        let room = self.room(dir)?;
+        Ok(self.insert_set(dir, room, &set[..entries * ENTRY_SIZE])?)
     }
 }
 

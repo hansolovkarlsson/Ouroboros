@@ -267,30 +267,63 @@ def run_rename():
     vol = Volume(IMAGE, start)
     d = bytearray(vol.data(vol.chain(vol.root)))
     end = root_end(d)
-    s = long_set(stamped=True)
-    if end + len(s) + 32 > len(d):
-        return [("rename: room for /VEND's set in the root", False)], []
+    # /VEND holds a cluster of its own, contiguous (NoFatChain), its
+    # ValidDataLength 7 within a DataLength of the whole cluster, junk past
+    # the 7 bytes: a rename must keep all four.
+    free = next(c for c in range(2, vol.count + 2) if not vol.used(c))
+    s = bytearray(long_set(stamped=True))
+    s[33] = 0x03  # GeneralSecondaryFlags: AllocationPossible, NoFatChain
+    struct.pack_into("<Q", s, 40, 7)
+    struct.pack_into("<I", s, 52, free)
+    struct.pack_into("<Q", s, 56, vol.cluster)
+    struct.pack_into("<H", s, 2, set_checksum(s))
+    s = bytes(s)
+    # STRAY: File, Stream, a vendor entry, then its name entry. walk_dir
+    # takes a name entry anywhere among the secondaries; a rename must drop
+    # it with the others, not carry it after the new name.
+    t = bytearray(entry_set("STRAY"))
+    stray = bytes(t[:64]) + vendor_entry(99) + bytes(t[64:96])
+    stray = bytearray(stray)
+    stray[1] = 3
+    struct.pack_into("<H", stray, 2, set_checksum(stray))
+    stray = bytes(stray)
+    if end + len(s) + len(stray) + 32 > len(d):
+        return [("rename: room for /VEND's and STRAY's sets in the root", False)], []
     d[end:end + len(s)] = s
+    d[end + len(s):end + len(s) + len(stray)] = stray
     write_root(vol, d)
+    with open(IMAGE, "r+b") as fh:
+        fh.seek(vol.heap + (vol.bitmap - 2) * vol.cluster + (free - 2) // 8)
+        b = fh.read(1)[0]
+        fh.seek(-1, 1)
+        fh.write(bytes([b | 1 << (free - 2) % 8]))
+        fh.seek(vol.heap + (free - 2) * vol.cluster)
+        fh.write(b"hello\r\n" + b"\xEE" * (vol.cluster - 7))
     vol = Volume(IMAGE, start)
     hit = exfatimg.find(vol.data(vol.chain(vol.root)), "VEND")
-    ok, lines = fsck()
+    # STRAY's shape is fsck's one complaint before the boot (the rename
+    # writes it in the spec's shape, so none after).
+    with exfatimg.attached(IMAGE) as dev:
+        rc, lines = exfatimg.fsck(dev + "s1", "fsck_exfat")
+    ok = exfatimg.complaints(lines) == ["   Invalid file name in /."] and not exfatimg.unexpected(lines)
     checks = [
-        ("rename: /VEND's stamped set reads back, 20 entries, its checksum whole",
-         hit is not None and hit.count == 20 and hit.data == s and s[4] == 0x20
+        ("rename: /VEND's stamped set reads back, 20 entries, its checksum whole, its cluster used",
+         hit is not None and hit.count == 20 and hit.data == s and s[4] == 0x20 and vol.used(free)
          and struct.unpack_from("<H", s, 2)[0] == set_checksum(s)),
-        ("rename: fsck_exfat -n passes the image before the boot", ok),
+        ("rename: fsck_exfat -n names only STRAY's misplaced name before the boot", ok),
     ]
     notes = [f"rename before: {ln}" for ln in lines] if not ok else []
     if not all(c for _, c in checks):
         return checks, notes
-    cmds = [f"mv /VEND /{LONG_NAME}", "ls /", f"mv /{LONG_NAME} /V2", "ls /"]
+    cmds = [f"mv /VEND /{LONG_NAME}", "ls /", f"mv /{LONG_NAME} /V2", "ls /", "mv /STRAY /S2"]
     driven, out, faults = boot("rename", cmds)
     listings = [blk.split("# ", 1)[0].split() for blk in out.split("# ls /")[1:3]]
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
     hit = exfatimg.find(root, "V2")
     got = hit.data if hit else b""
+    s2 = exfatimg.find(root, "S2")
+    s2_types = [s2.data[k] for k in range(0, len(s2.data), 32)] if s2 else []
     ok, lines = fsck()
     checks += [
         ("rename: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
@@ -304,6 +337,13 @@ def run_rename():
          and got[64] == 0xC1 and all(got[32 * k] == 0xE0 for k in range(3, 20))),
         ("rename: its vendor entries byte for byte as planted", got[96:] == s[96:]),
         ("rename: its File entry's attributes and times as planted", got[4:32] == s[4:32]),
+        (f"rename: its Stream's flags, ValidDataLength, cluster and DataLength as planted "
+         f"({got[33:34].hex()} {got[40:48].hex()} {got[52:64].hex()})",
+         got[33] == s[33] and got[40:48] == s[40:48] and got[52:64] == s[52:64]),
+        ("rename: its Stream's NameLength is V2's", len(got) > 35 and got[35] == 2),
+        (f"rename: STRAY renamed to S2 is File, Stream, the new name, its vendor entry ({[hex(t) for t in s2_types]})",
+         s2_types == [0x85, 0xC0, 0xC1, 0xE0] and s2.data[96:] == vendor_entry(99)
+         and exfatimg.find(root, "STRAY") is None),
         ("rename: its SetChecksum is the sum of all 20 entries",
          hit is not None and struct.unpack_from("<H", got, 2)[0] == set_checksum(got)),
         ("rename: fsck_exfat -n passes the image after the boot", ok),
