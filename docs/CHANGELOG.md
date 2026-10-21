@@ -646,7 +646,7 @@ told by its type and a length under 60 as Linux makes one, frees no blocks:
 that text named. The free path walks pointer blocks a sector at a time, one
 walk for every depth, (it had held three 4 KiB buffers at once on
 fsd's 56 KiB stack), and a freed inode's deletion time is written with the
-rest of it. A block number inside the volume but in its metadata is not checked yet (the
+rest of it. A block number inside the volume but in its metadata is not checked yet (since 2026-10-21 it is, at mount, free and allocation: the entry below; the
 roadmap). Each of the thirteen rules taken out fails the rig. And mount now requires as many groups, counted from the inodes,
 as the blocks make, as Linux does, not merely no more: with fewer, a block
 of the volume belonged to a group past the descriptor table. `make
@@ -676,17 +676,20 @@ an inode-table block cleared that block's bit, so a later allocation zeroed
 live inodes. Mount now refuses a group whose bitmaps or whole inode table
 lie outside the group, as Linux's `ext2_check_descriptors` does, and, past
 Linux, below `meta_end` (the superblock, the descriptor table and
-`resize_inode`'s reserved blocks) or overlapping one another. `free_block`
+`resize_inode`'s reserved blocks) or overlapping one another, as an I/O
+error: damage a fsck repairs, so that `format` does not take a repairable
+root for an empty partition. `free_block`
 frees no block of that zone or of a group's bitmaps and table, as Linux's
-`ext2_free_blocks`; `alloc_block` leaves such a block's bit set, counted
-used, and takes the next, as `ext2_new_blocks` retries; and the free path
+`ext2_free_blocks`; `alloc_block` leaves such a block's bit set, the free
+counts untouched, and takes the next, as `ext2_new_blocks` retries; and the free path
 reads no pointer block there as pointers, which freed whatever the inode
 table's bytes named. `make test-volume-bound` gains SHAPES-H, three
-descriptors refused, and `make test-ext2-blocks` four cases on A: an
-inode-table block its bitmap holds free (passed over, its bit set, its bytes
-kept), pointers naming the inode table and the descriptor table (left
-allocated), and an indirect pointer naming an inode-table block that names
-another file's block (neither freed). C's bitmaps, planted in the witness
+descriptors refused, and `make test-ext2-blocks` six cases on A: an
+inode-table block and a reserved descriptor block its bitmap holds free
+(passed over, their bits set, nothing counted, the first's bytes kept),
+pointers naming the inode table and the descriptor table (left allocated),
+and indirect pointers naming an inode-table block and a reserved descriptor
+block that name another file's block (none freed). C's bitmaps, planted in the witness
 until now, are refused at mount. Reads and writes through a pointer naming
 metadata are not checked yet, as in Linux's ext2 (the roadmap).
 

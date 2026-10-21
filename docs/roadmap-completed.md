@@ -2692,7 +2692,9 @@ stood, done notes included:
   at the last group's last block and inode, and `free_block` frees nothing
   past the volume. `make test-ext2-blocks`. A block number inside the volume
   but in its metadata (an inode pointing at the inode table) is not checked;
-  that is damage inside the volume, e2fsck's territory. The record as
+  that is damage inside the volume, e2fsck's territory. (Checked since
+  2026-10-21 at mount, free and allocation, though not on reads and writes:
+  the CHANGELOG's "ext2 frees and allocates none of its own metadata".) The record as
   found: `block_lba`
   computes a sector from any block number, and nothing checks it against
   `s_blocks_count`, so a damaged inode's pointer (direct, indirect, or a

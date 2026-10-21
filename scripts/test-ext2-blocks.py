@@ -50,13 +50,15 @@ with a zeroed block, which nothing may change. The host plants:
   pointer naming a block already free: `rm` must succeed, and A's free
   counts must still match its bitmap after every case;
 - on A too, since 2026-10-21, the last three blocks of group 0's inode
-  table, past every inode in use: T, its bit cleared and the free counts
-  raised to match, filled with 0x5A, where the next allocation (OWI's new
-  block) must pass over it, setting its bit, and leave its bytes; META, its
-  second pointer naming T2: `rm` must leave T2 allocated; MI (thirteen
-  blocks), its indirect pointer naming T3, every word of which names SRC's
-  block: `rm` must free neither; and GD, its pointer naming the descriptor
-  table's block: `rm` must leave it allocated;
+  table, past every inode in use, and the last two of the descriptor blocks
+  resize_inode reserves, below meta_end: T, filled with 0x5A, and R, their
+  bits cleared alone (damage to the bitmap, the counts left), where the next
+  allocation (OWI's new block) must pass over both, setting their bits and
+  counting nothing, and leave T's bytes; META, its second pointer naming
+  T2: `rm` must leave T2 allocated; MI and MG (thirteen blocks each), their
+  indirect pointers naming T3 and R2, every word of each naming SRC's
+  block: `rm` must free none of them; and GD, its pointer naming the
+  descriptor table's block: `rm` must leave it allocated;
 - on C, made without the filetype feature (a listing reads each entry's
   inode), H's entry naming an inode past the count: `ls` must list F, G and
   H. Until 2026-10-21 C's bitmaps were planted in the witness as well; a
@@ -87,10 +89,13 @@ kept), with the pointer walk's span a block a pointer at every depth (BIGD's
 last data block kept), with rm reading GHOST's inode (an I/O
 error), with the deletion time left out of a freed inode, with the
 allocator taking a metadata block (OWI's new block is T, its pattern
-overwritten), with free_block freeing a group's bitmap or table block
+overwritten, or R with the allocator's meta_end arm out), with the
+allocator counting a block it passes over (A's counts two below its
+bitmap), with free_block freeing a group's bitmap or table block
 (META's T2 and MI's T3 freed) or one below meta_end (GD's descriptor-table
 block freed), and with free_pointed reading a metadata block as pointers
-(SRC's block freed through T3). One boot, about a minute, needs
+(SRC's block freed through T3, and through R2 with is_metadata's meta_end
+arm out). One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
 free_all_blocks, free_pointed, pointer_sector, ensure_block, list_dir, rm,
