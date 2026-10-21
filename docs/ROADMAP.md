@@ -4364,14 +4364,41 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   ulib's message table and the C and Python peers that
   `check-wire-constants.py` holds to it, and `test-grow-dir`, which matches
   "I/O error". Found by the high review of the grow_dir fix, 2026-10-19.
-- **FAT32 reads the second FAT copy for every FAT write.** `write_fat_entry`
-  keeps every copy of the FAT in step, and reads the second copy's sector
-  from the disk each time; only the first goes through the FAT cache. A
-  `cp` of 640 KiB onto the ESP (512-byte clusters, 1,280 of them) reads
-  2,689 FAT sectors, 2,559 of them the second copy (`make
-  test-write-walk`, 2026-10-17; 2,690 on the image of 2026-10-18). Writing the first copy's sector to every
-  copy would read none, but it would also overwrite a second copy that had
-  come to differ, which is a decision about what the backup copy is for.
+- ~~**FAT32 reads the second FAT copy for every FAT write.**~~ *Done
+  2026-10-21:* `write_fat_entry` patches copy 0's sector and writes it to
+  every copy, reading no other, as Linux's and FreeBSD's drivers mirror the
+  FAT. Every read in fsd takes copy 0, so copy 0 is the truth; a sector where
+  a backup copy had come to differ becomes copy 0's whole. Hans's decision,
+  2026-10-21. The 640 KiB `cp` onto the ESP reads 134 FAT sectors, from
+  2,690, and the copy within the ESP 774, from 3,333. `make test-write-walk`
+  plants the bad-cluster mark at every free entry of the ESP's second copy
+  and requires each FAT sector the copy wrote to be copy 0's in both; it
+  fails with each copy's own sector patched.
+- **FAT32 does not honour `BPB_ExtFlags`.** Bytes 40 to 41 of a FAT32 boot
+  sector say whether the FATs are mirrored: with bit 7 clear (what fsd's own
+  `format` writes, and what every image here has) every copy is kept in
+  step; with it set, mirroring is off and only the copy numbered in bits 0
+  to 3 is live. Every read in fsd takes copy 0 and every write puts copy
+  0's sector in all copies, so on a volume made elsewhere with mirroring
+  off and another copy live, fsd would read a stale FAT and overwrite the
+  live one's sectors with it, 128 entries a write. Since 2026-10-21
+  `mount_at` refuses such a volume with a line saying so (the high review
+  of the FAT mirror, Hans's choice; `make test-volume-bound`'s SHAPES-D,
+  ExtFlags 0x0081); with mirroring off and copy 0 live it mounts, writing
+  the other copies too, which nothing reads. Honouring it would read the
+  live copy's number at mount (refusing one at or past `BPB_NumFATs`) and,
+  with bit 7 set, read and write that copy alone, so such a volume mounts.
+  Found with the FAT mirror decision, 2026-10-21.
+- **FAT32 writes every FAT update straight through.** Each entry written
+  is one sector write per copy, though consecutive updates almost always
+  land in the same sector: a 640 KiB `cp` onto the ESP allocates 1,280
+  clusters, about 2,560 entry writes and some 5,000 sector writes into a
+  few dozen FAT sectors. Holding the cached sector dirty and writing it to
+  every copy when the cache moves to another sector, and at the end of
+  each operation, would make it tens. Not taken with the mirror: a dirty
+  sector held in memory is a crash-consistency question (what a power cut
+  between an operation's directory write and its FAT write leaves), to be
+  decided on its own. From the high review of the FAT mirror, 2026-10-21.
 - **FAT32's and exFAT's read walks are two copies.** exFAT's `read_entry`
   repeats FAT32's `read_at` (the cursor lookup, the seek, the sector loop,
   the cursor update), differing in the step (`advance` against

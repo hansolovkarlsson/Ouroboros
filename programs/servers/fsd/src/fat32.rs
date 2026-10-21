@@ -462,6 +462,18 @@ impl Fs {
         {
             return Err(Error::NotFat32);
         }
+        // BPB_ExtFlags: with bit 7 set the FATs are not mirrored and only the
+        // copy numbered in bits 0-3 is live. fsd reads copy 0 and writes its
+        // sector to every copy (`write_fat_entry`), so on a volume whose live
+        // copy is another it would read a stale FAT and overwrite the live
+        // one's sector with it. Refused until ExtFlags is honoured (the
+        // roadmap, the high review of the FAT mirror). Copy 0 live with
+        // mirroring off mounts: the other copies are then not read by anyone.
+        let ext_flags = u16::from_le_bytes([bpb[40], bpb[41]]);
+        if ext_flags & 0x80 != 0 && ext_flags & 0x0f != 0 {
+            crate::print("fsd: a FAT32 volume with mirroring off and its live FAT not the first is not mounted\r\n");
+            return Err(Error::NotFat32);
+        }
         // Below the total sectors, so in u32 from here.
         let meta_sectors = meta_sectors as u32;
         // No larger than its partition: `cluster_end` is the bound every
@@ -681,31 +693,41 @@ impl Fs {
         }
     }
 
+    /// The first FAT copy's sector at `lba`, through the one-sector cache
+    /// ([`fat_cache`](Self::fat_cache)): read and kept there on a miss.
+    fn fat_sector(&mut self, lba: u32) -> Result<&[u8; SECTOR_SIZE], Error> {
+        if !matches!(&self.fat_cache, Some(c) if c.lba == lba) {
+            let mut data = [0u8; SECTOR_SIZE];
+            self.disk.read_sector(lba as u64, &mut data)?;
+            self.fat_cache = Some(FatSector { lba, data });
+        }
+        match &self.fat_cache {
+            Some(c) => Ok(&c.data),
+            None => Err(Error::Io(DiskError::Io)), // filled just above
+        }
+    }
+
     /// One FAT entry's low 28 bits, from the first FAT copy, through the
-    /// one-sector cache ([`fat_cache`](Self::fat_cache)).
+    /// one-sector cache ([`fat_sector`](Self::fat_sector)).
     fn fat_entry(&mut self, cluster: u32) -> Result<u32, Error> {
         self.check_in_heap(cluster)?;
         let fat_byte_offset = cluster * 4;
         let lba = self.fat_start_lba + fat_byte_offset / SECTOR_SIZE as u32;
         let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
-        let data = match &self.fat_cache {
-            Some(c) if c.lba == lba => &c.data,
-            _ => {
-                let mut data = [0u8; SECTOR_SIZE];
-                self.disk.read_sector(lba as u64, &mut data)?;
-                &self.fat_cache.insert(FatSector { lba, data }).data
-            }
-        };
+        let data = self.fat_sector(lba)?;
         let raw = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
         Ok(raw & 0x0fff_ffff)
     }
 
-    /// Writes one FAT entry, in every copy of the FAT the volume has (per
-    /// spec - real FAT32 drivers only ever read the first copy, but keep
-    /// every copy in sync on write so a driver that *does* trust a backup
-    /// copy never sees a stale value). Preserves the existing entry's top
-    /// 4 reserved bits, masking `value` to the low 28 - same split
-    /// `next_cluster` already reads.
+    /// Writes one FAT entry: copy 0's sector, patched, is written to every
+    /// copy of the FAT the volume has, so no other copy is read. Every read
+    /// in fsd takes copy 0, so copy 0 is the truth and the others are its
+    /// mirror; a sector where a backup copy had come to differ becomes copy
+    /// 0's whole, as Linux's and FreeBSD's drivers write it. Decided by Hans
+    /// on 2026-10-21; until then each copy's own sector was read and patched
+    /// (2,559 of a 640 KiB `cp`'s 2,689 FAT reads, `make test-write-walk`).
+    /// Preserves the existing entry's top 4 reserved bits, masking `value`
+    /// to the low 28 - same split `next_cluster` already reads.
     fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
         // Its entry would lie past the FAT for a cluster outside the volume:
         // refused before the cursor check reads it or any copy is written.
@@ -732,27 +754,22 @@ impl Fs {
         let fat_byte_offset = cluster * 4;
         let sector_offset = fat_byte_offset / SECTOR_SIZE as u32;
         let offset = (fat_byte_offset % SECTOR_SIZE as u32) as usize;
+        let lba = self.fat_start_lba + sector_offset;
+        // Through the cache, where `next_cluster` above has just put it.
+        let mut buf = *self.fat_sector(lba)?;
+        let existing = u32::from_le_bytes([
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
+        ]);
+        let new = (existing & 0xf000_0000) | (value & 0x0fff_ffff);
+        buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
         for i in 0..self.num_fats {
-            let sector = self.fat_start_lba + i * self.fat_size_32 + sector_offset;
-            let mut buf = [0u8; SECTOR_SIZE];
-            // Copy 0's sector is often the one just read into the cache
-            // (by the scan or walk that chose this cluster).
-            match &self.fat_cache {
-                Some(c) if i == 0 && c.lba == sector => buf = c.data,
-                _ => self.disk.read_sector(sector as u64, &mut buf)?,
-            }
-            let existing = u32::from_le_bytes([
-                buf[offset],
-                buf[offset + 1],
-                buf[offset + 2],
-                buf[offset + 3],
-            ]);
-            let new = (existing & 0xf000_0000) | (value & 0x0fff_ffff);
-            buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
-            self.disk.write_sector(sector as u64, &buf)?;
+            self.disk.write_sector((lba + i * self.fat_size_32) as u64, &buf)?;
             // Keep the cache in step: copy 0's sector as now written.
             if i == 0 {
-                self.fat_cache = Some(FatSector { lba: sector, data: buf });
+                self.fat_cache = Some(FatSector { lba, data: buf });
             }
         }
         Ok(())
