@@ -2585,12 +2585,13 @@ test-probe-ioerr: image image-exfat $(USBSTICK_IMG)
 	python3 scripts/test-probe-ioerr.py
 
 # A volume claiming more than its partition is not mounted
-# (scripts/test-volume-bound.py): thirteen boots from esp.img on NVMe, on virtio a
+# (scripts/test-volume-bound.py): fourteen boots from esp.img on NVMe, on virtio a
 # disk the rig builds with scripts/mbrdisk.py from the images' own volumes:
 # volumes in partitions shorter than they claim, an entry of size 0, a
 # partition past sector 2^32 (a 2 TiB sparse file), a stale exFAT boot sector
 # past the disk's end (also with the table claiming past it), a FAT32 whose
-# FAT size wraps u32, eighteen volumes each breaking one layout rule, and an
+# FAT size wraps u32, twenty-two volumes each breaking one layout rule (ext2's
+# group descriptors among them since 2026-10-21), and an
 # exFAT whose bitmap lies past its heap (a write refused, the next partition
 # unchanged). About eight minutes; run it whenever a filesystem's mount_at, fsd's probe or
 # volume_bound, or the table's sizes change.
@@ -2601,13 +2602,15 @@ test-volume-bound: image image-exfat image-ext2
 # (scripts/test-ext2-blocks.py): one boot from esp.img on NVMe, on virtio the
 # ext2 root and three small ext2 volumes made by mke2fs, an unpartitioned
 # witness after them; damaged direct and indirect pointers, an inode number
-# past the count, bitmaps in the witness and a last group whose padding bits
-# are clear, each refused, files whose pointers or bitmaps lie past the volume
-# still removed whole, the free counts matching the bitmap, the witness
-# unchanged. About a minute, needs e2fsprogs; run it whenever ext2's Volume,
+# past the count and a last group whose padding bits are clear, each refused,
+# files whose pointers lie past the volume still removed whole, no metadata
+# block freed, allocated or read as pointers (an inode-table block and a
+# reserved descriptor block marked free, pointers naming the inode table, the
+# descriptor table and its reserved blocks, since 2026-10-21), the free counts matching the bitmap, the witness unchanged.
+# About a minute, needs e2fsprogs; run it whenever ext2's Volume,
 # inode_place, its allocators, its free path (free_block, free_inode,
-# bitmap_free, free_all_blocks, free_pointed), ensure_block, list_dir, rm or
-# write_inode change.
+# bitmap_free, free_all_blocks, free_pointed, is_metadata, in_zone),
+# ensure_block, list_dir, rm or write_inode change.
 test-ext2-blocks: image image-ext2
 	python3 scripts/test-ext2-blocks.py
 

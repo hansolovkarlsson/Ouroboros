@@ -4281,21 +4281,41 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   the pointer blocks first, and giving back what a later step could not
   use, closes both; a rig for this one needs only a volume with one block
   free. From the second review of #331.
-- **ext2 trusts a block number inside the volume.** Since #331 nothing past
-  the volume is read or written, but a descriptor or a pointer naming the
-  volume's own metadata is taken as it stands: a damaged `bg_inode_table` of
-  1 puts new inodes over the superblock, a bitmap pointer the same through
-  `bitmap_alloc`, and `rm` of a file whose pointer names an inode-table block
-  clears that block's bit, so the allocator later zeroes live inodes with
-  file data. Linux refuses both at their source: `ext2_check_descriptors` at
-  mount (each group's bitmaps and table inside the group, the table's blocks
-  whole) and `ext2_data_block_valid` on every pointer (not the superblock,
-  the descriptor table, a bitmap or the inode table). The free path also
-  never frees the triple-indirect tree (`block[14]`) or an inode's
-  extended-attribute block (`i_file_acl`), which `mke2fs -d` can attach, so
-  `rm` leaks those; and `bitmap_free` rewrites a whole bitmap block to clear
-  one bit (a sector would do, as `write_int_at` does for the counts). From
-  the fourth review of #331.
+- ~~**ext2 trusts a block number inside the volume.**~~ *Done 2026-10-21:*
+  mount refuses a group whose block bitmap, inode bitmap or whole inode
+  table lies outside the group (Linux's `ext2_check_descriptors`), and, past
+  Linux, one lying below `meta_end` (the superblock, the descriptor table and
+  `resize_inode`'s reserved blocks after it, where Linux's range let a table
+  of 1 sit on the superblock of a 1 KiB volume) or overlapping another,
+  refused as an I/O error so `format` does not take it for empty; no
+  block of that zone or of a group's bitmaps and table is freed (Linux's
+  `ext2_free_blocks`) or allocated (an allocation over one leaves its bit
+  set, the counts untouched, and goes on, as `ext2_new_blocks` retries), and the
+  free path reads no pointer block there. `make test-volume-bound`'s
+  SHAPES-H and six new cases of `make test-ext2-blocks`. The item's claim
+  that Linux checks every pointer with `ext2_data_block_valid` was wrong:
+  read in Linux's source on 2026-10-21, that function checks only the range
+  and the superblock, and is called from `ext2_free_blocks` and for the
+  attribute block in `ext2_iget`, not from the mapping path.
+- **ext2 reads and writes through a pointer naming its metadata.** A file
+  whose pointer names an inode-table block, a bitmap or the descriptor table
+  reads that block as its data and, written, overwrites it: an append or an
+  overwrite in place through such a pointer damages live inodes (an append
+  to `test-ext2-blocks`'s MI writes its new pointer into the inode table
+  through `write_indirect_ptr`; the high review of the metadata bound, which
+  would check where a pointer is read, once for reads, writes and frees). Linux's
+  ext2 does the same (its mapping path checks nothing); ext4 refuses it
+  through its system zone (`ext4_inode_block_valid`). `is_metadata` would
+  answer it in `block_for` and `ensure_block` at one descriptor read a
+  pointer, which a one-group cache would make nearly free. Backup
+  superblocks and descriptor tables in later groups are in no zone either,
+  as in Linux's ext2. Found with the metadata bound, 2026-10-21.
+- **ext2's free path leaks the triple-indirect tree and the attribute
+  block, and `bitmap_free` rewrites a whole block.** `rm` never frees
+  `block[14]`'s tree or an inode's extended-attribute block (`i_file_acl`),
+  which `mke2fs -d` can attach; and `bitmap_free` rewrites a whole bitmap
+  block to clear one bit (a sector would do, as `write_int_at` does for the
+  counts). From the fourth review of #331.
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the

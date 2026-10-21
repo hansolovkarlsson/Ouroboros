@@ -18,7 +18,7 @@ failed, so since #329 `format` refused that disk with an I/O error. Since
 start of the next partition, the disk and sector 2^32) and refuses a boot sector claiming
 more, or one whose layout does not fit inside what it claims.
 
-Thirteen boots. In each the firmware boots esp.img from NVMe, which the kernel
+Fourteen boots. In each the firmware boots esp.img from NVMe, which the kernel
 cannot drive, so the virtio disk the rig builds (scripts/mbrdisk.py, from the
 images' own volumes) goes in as the fallback, and the boot partition is not
 known to fsd. Where the disk's first partition is the ext2 root of
@@ -45,7 +45,7 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
 - WRAP: a copy of esp.img whose BPB has 2 FATs of 0x80000000 sectors, a
   product that wraps to 0 in 32 bits, under which the old check passed. Not
   mounted.
-- SHAPES-A to SHAPES-G: whole volumes in partitions of their own
+- SHAPES-A to SHAPES-H: whole volumes in partitions of their own
   size, each with one field of its boot sector changed so that it breaks
   exactly one of the rules the mounts check, which a model of those rules
   confirms on the host before the boot: exFAT's heap past its volume, its
@@ -62,7 +62,13 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
   with no inodes, inodes of 64 bytes, or fewer groups than its blocks make
   (since the review of #331, which a block in the group past them freed
   through no descriptor) (F); ext2 with more blocks or inodes a group than one
-  bitmap block holds (G). All refused.
+  bitmap block holds (G); and, since 2026-10-21, ext2 whose group 0
+  descriptor puts its inode table past the group's last block, its block
+  bitmap on the descriptor table's own block (inside the group, which
+  Linux's ext2_check_descriptors accepts), or its inode bitmap on its block
+  bitmap (H), these three refused as damage, `mount` answering device I/O
+  error, so that `format` does not take a repairable ext2 for no
+  filesystem. All refused.
 - BESIDE: the FAT32 cut short in a table entry of size 0, the next
   partition inside its volume (refused: the bound stops at the next
   partition), and the exFAT whole with its bitmap moved to the cluster past
@@ -110,6 +116,10 @@ EXT2 = os.path.join(BUILD, "espext2.img")
 DISK = os.path.join(BUILD, "test-volume-bound.img")
 EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M)
 NO_FS = "mount: no such partition, no filesystem on it, or `/` not mounted yet (`mount -a` first)"
+# A damaged ext2 descriptor is damage a fsck repairs, refused as an I/O
+# error so that `format` does not take the volume for an empty one.
+IO = "mount: device I/O error"
+ANSWER = {f"the ext2-desc{k} case": IO for k in ("group", "meta", "overlap")}
 # The line fsd prints before a refusal, for the cases that have one.
 SAYS = {
     "the fat32-extflags case":
@@ -199,6 +209,27 @@ def broken(vol, bound):
         out.add("ext2-groups")
     if fdb + 1 + -(-(groups * 32) // bs) > bc:
         out.add("ext2-bgdt")
+    if out:
+        return out
+    # The descriptors, read only once every rule above holds (fsd's
+    # check_descriptors runs last): each group's bitmaps and whole inode
+    # table inside the group and past group 0's superblock, descriptor table
+    # and reserved descriptor blocks (meta_end), and none overlapping another.
+    reserved = u("<H", 1024 + 206) if u("<I", 1024 + 92) & 0x10 else 0
+    meta_end = fdb + 1 + -(-(groups * 32) // bs) + reserved
+    if meta_end > bc:
+        return {"ext2-metaend"}
+    itb = -(-(ipg * isz) // bs)
+    for g in range(groups):
+        d = (fdb + 1) * bs + g * 32
+        bb, ib, it = u("<I", d), u("<I", d + 4), u("<I", d + 8)
+        first, last = fdb + g * bpg, min(fdb + (g + 1) * bpg, bc) - 1
+        if not all(first <= b <= last for b in (bb, ib, it, it + itb - 1)):
+            out.add("ext2-descgroup")
+        elif min(bb, ib, it) < meta_end:
+            out.add("ext2-descmeta")
+        if bb == ib or it <= bb < it + itb or it <= ib < it + itb:
+            out.add("ext2-descoverlap")
     return out
 
 
@@ -328,6 +359,10 @@ def build_shapes(ext2, fat, exfat, which):
     # The superblock's block is 1 with 1 KiB blocks, else 0; each case is
     # made from the base's own block size, not an assumed 1 KiB.
     sb_block = 1024 // bs
+    desc0 = (fdb + 1) * bs
+    isz = struct.unpack_from("<H", ext2, sb + 88)[0]
+    itb = -(-(ipg * isz) // bs)
+    g0_last = min(fdb + bpg, bc) - 1
     cases = {
         "SHAPES-A": [
             ("exfat-heap", exfat, [("<I", 88, vl - (cc << sh) + 8)]),
@@ -364,6 +399,15 @@ def build_shapes(ext2, fat, exfat, which):
             ("ext2-inodesize", ext2, [("<I", sb + 76, 1), ("<H", sb + 88, 64)]),
             ("ext2-groups", ext2, [("<I", sb + 0, ipg * (groups - 1))]),
         ],
+        # Group 0's descriptor: its inode table running past the group's last
+        # block; its block bitmap on the descriptor table's own block (inside
+        # the group, so Linux's ext2_check_descriptors takes it); its inode
+        # bitmap the block bitmap's block.
+        "SHAPES-H": [
+            ("ext2-descgroup", ext2, [("<I", desc0 + 8, g0_last - itb + 2)]),
+            ("ext2-descmeta", ext2, [("<I", desc0, fdb + 1)]),
+            ("ext2-descoverlap", ext2, [("<I", desc0 + 4, u32(ext2, desc0))]),
+        ],
         "SHAPES-G": [
             ("ext2-bpg", ext2, [("<I", sb + 32, bs * 8 + 8)]),
             ("ext2-ipg", ext2, [("<I", sb + 40, bs * 8 + 8), ("<I", sb + 0, (bs * 8 + 8) * groups)]),
@@ -382,7 +426,7 @@ def build_shapes(ext2, fat, exfat, which):
 
 
 BOOTS = ["PARTS", "MIXED", "STALE", "LONG", "WRAP", "SHAPES-A", "SHAPES-B", "SHAPES-C", "SHAPES-D", "SHAPES-E",
-         "SHAPES-F", "SHAPES-G", "BESIDE"]
+         "SHAPES-F", "SHAPES-G", "SHAPES-H", "BESIDE"]
 
 
 def build(name):
@@ -508,7 +552,7 @@ def checks_of(name):
                 checks.append((f"mount {n}, {what}, mounts and lists (got {got!r}, ls {listing[:4]})",
                                got == "" and "etc/" in listing))
             else:
-                checks.append((f"mount {n}, {what}, refused (got {got!r})", got == SAYS.get(what, "") + NO_FS))
+                checks.append((f"mount {n}, {what}, refused (got {got!r})", got == SAYS.get(what, "") + ANSWER.get(what, NO_FS)))
         checks.append(("ls / still lists the root", "etc/" in (o["ls /"] or "").split()))
     checks.append(("no fault lines", faults == 0))
     return [(f"{name}: {label}", ok) for label, ok in checks]
