@@ -173,6 +173,8 @@ COMMANDS = [
     "echo y >> /mnt/c/DIND",
     "echo y >> /mnt/c/TWELVE",
     "echo q > /mnt/c/ONEB",
+    "rm /mnt/c/G",
+    "cp /mnt/c/TWELVE /mnt/c/CP",
     "echo x > /mnt/b/NEW",
     "touch /mnt/b/NEW2",
 ]
@@ -414,7 +416,7 @@ def build():
         vc.set_u32(1024 + 12, 1)
         vc.write(vc.desc(0) + 12, struct.pack("<H", 1))
         c_ino = {n: vc.entries()[n][0] for n in ("TWELVE", "DIND")}
-        plan.update(c_free=vc.fdb + c_free, c_ino=c_ino,
+        plan.update(c_free=vc.fdb + c_free, c_ino=c_ino, g_block=vc.ptr(vc.entries()["G"][0], 0),
                     c_blocks={n: (vc.size(i), vc.i_blocks(i), vc.ptr(i, 12), vc.ptr(i, 13)) for n, i in c_ino.items()})
         # A: L, a fast symlink (its target's text in its pointers), made to
         # name SRC's block as its text's first four bytes, as a target of
@@ -574,6 +576,10 @@ def verdicts(plan, driven, out, faults):
         c_ents = vc.entries() if vc else {}
         oneb = vc.ptr(c_ents["ONEB"][0], 0) if vc and "ONEB" in c_ents else None
         c_counts = (free_delta(vc), bit(vc.bitmap(0), plan["c_free"] - vc.fdb)) if vc else None
+        cp_ino = c_ents["CP"][0] if vc and "CP" in c_ents else 0
+        cp_now = ((vc.size(cp_ino), vc.i_blocks(cp_ino), vc.ptr(cp_ino, 0), vc.read(vc.ptr(cp_ino, 0) * vc.bs, 1024))
+                  if cp_ino else None)
+        g_bit = bit(vc.bitmap(0), plan["g_block"] - vc.fdb) if vc else None
         a_free_delta = free_delta(va)
         ents = va.entries()
         ino = plan["ino"]
@@ -681,6 +687,14 @@ def verdicts(plan, driven, out, faults):
         (f"C's one free block taken by ONEB, the counts level with the bitmap (got {o.get('echo q > /mnt/c/ONEB')!r}, "
          f"ONEB's block {oneb}, the free block {plan['c_free']}, {c_counts})",
          o.get("echo q > /mnt/c/ONEB") == "" and oneb == plan["c_free"] and c_counts == ((0, 0), 1)),
+        # cp writes 2 KiB a request: the first block takes G's, the second
+        # finds the disk full, and the file keeps the one it filled.
+        (f"cp onto C with one block free answers disk full and CP keeps its first block, G's "
+         f"(got {o.get('cp /mnt/c/TWELVE /mnt/c/CP')!r}, rm {o.get('rm /mnt/c/G')!r}, "
+         f"CP {cp_now[:3] if cp_now else None}, G's block {plan['g_block']} set {g_bit}, counts {c_counts})",
+         "disk full" in (o.get("cp /mnt/c/TWELVE /mnt/c/CP") or "") and o.get("rm /mnt/c/G") == ""
+         and cp_now == (1024, 1024 // SECT, plan["g_block"], b"2" * 1024) and g_bit == 1
+         and c_counts is not None and c_counts[0] == (0, 0)),
         (f"B's write answers disk full (got {o.get('echo x > /mnt/b/NEW')!r})",
          "disk full" in (o.get("echo x > /mnt/b/NEW") or "")),
         (f"B's touch NEW2 answers disk full and makes nothing (got {o.get('touch /mnt/b/NEW2')!r})",
