@@ -723,3 +723,51 @@ Carrying everything not ours would cure both by undoing the rule; a
 manifest written on the stick cures both and keeps it. He chose the
 manifest in one answer, as 0x83 was settled in one this morning.
 
+## Two branches, nine rounds, and a refusal past the commit point (2026-10-20)
+
+*#330 bounded every volume by its partition; #331 bounded every ext2 block
+number by the volume. #329 before them had one round and is left out.*
+
+| on | round | findings | taken | to the roadmap | declined |
+| --- | --- | --- | --- | --- | --- |
+| #330 | high | 10 | 10 | 0 | 0 |
+| #330 | high | 10 | 10 | 0 | 0 |
+| #330 | medium | 10 | 8 | 1 | 1 |
+| #330, round 3's commits | medium | 7 | 6 | 0 | 1 |
+| #330, round 4's commit | low | 0 | 0 | 0 | 0 |
+| #331 | high | 9 | 7 | 1 | 1 |
+| #331 | high | 8 | 5 | 1 | 2 |
+| #331 | high | 10 | 8 | 0 | 2 |
+| #331, from round 3 on | medium | 9 | 3 | 4 | 2 |
+
+**#330 converged; #331 did not, and the reason is the spine's.** #330's
+rounds found values its mount had never bounded, one after another, until
+the low round on the last commit found none (it read only that diff, and the
+question it should have asked I checked by hand). #331's bound drew findings
+in its first round only. Every later round found the same defect in a new
+place, and each place was made by a repair: a bound that refuses turns a
+silent wrong write into an error, and ext2's free path runs after its commit
+point, where an error leaves the file half removed. Round one found it on a
+pointer block the new bound refused; the repair skipped pointer blocks, and
+round two found it on a bitmap. **A repair that adds a refusal adds a
+question for every caller past its commit point: what happens there now.**
+
+**A repair's own defect, found by the next round.** Round three's fix for
+fast symlinks, "an inode with `i_blocks` 0 frees nothing", was wrong both
+ways, and round four said so: an attribute block raises `i_blocks` on a fast
+symlink, so its text was freed again, and damage can zero it on a regular
+file, which then leaked every block. The repair had taken Linux's
+fast-symlink test without the half of it that subtracts the attribute block.
+It is told by type and length now, with a control for each direction.
+
+**The 2026-09-07 stopping rule, met and answered as it says.** Rounds two
+and four found defects in the previous round's repairs, the condition that
+rule names as evidence of a missing check. Each time the answer was a rig
+case with a control, not only a fix: DUP and C's bitmaps for the free counts
+and the bitmap skip, L and Z for both directions of the symlink test, BIGD for
+a double-indirect walk no rig had run. The rule's last sentence held: the
+bound, which a rig reached from its first commit, converged after one round;
+the free path, which the rig reached only as each case was added, converged
+last. Round four's remaining findings were damage inside the volume and code
+older than the branch, and went to the roadmap as one item instead of into a
+fifth round.
