@@ -4288,8 +4288,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - ~~**ext2 leaks a block on a write past the double-indirect range.**~~
   *Done 2026-10-21, both paths:* the range is checked first, every block
   the path lacks is taken before any is linked, and a failure gives back
-  what it took; `make test-ext2-blocks`'s C, one block free, covers the
-  second path (the first has no rig, which needs over 64 MiB).
+  what it took; `write_at` keeps the blocks a short write filled, and
+  `write_file` gives back its blocks and inode; `make test-ext2-blocks`'s
+  C, one block free, covers the second path and the short write (the
+  first has no rig, which needs over 64 MiB).
   `ensure_block` allocates the data block before it checks the logical
   block's range, so a write past 12 + k + k^2 blocks (k pointers a block:
   about 64 MiB of file on 1 KiB blocks) takes a block, then answers disk

@@ -68,7 +68,9 @@ with a zeroed block, which nothing may change. The host plants:
   left one block free, its counts saying so, with DIND ending at its last
   single-indirect block and TWELVE at its last direct one: appends to them
   (three blocks needed, and two) must answer disk full and leave both files
-  as planted, and `echo q > ONEB` must then get the block;
+  as planted, `echo q > ONEB` must then get the block, and after `rm G`
+  `cp TWELVE CP` (2 KiB a request) must answer disk full with CP keeping
+  its first KiB in G's old block;
 - on B, every block of the volume marked used and the last group's padding
   bits clear, so the next free bit is the block just past the volume (the
   witness's first): `echo x > NEW` must answer disk full; and the inode count
@@ -101,7 +103,9 @@ block freed), and with free_pointed reading a metadata block as pointers
 (SRC's block freed through T3, and through R2 with is_metadata's meta_end
 arm out), and with ensure_block taking a block before it knows it can take
 them all (ONEB disk full: main's order before 2026-10-21, the give-back
-out, the indirect branch not asking for its pointer block). One boot, about a minute, needs
+out, the indirect branch not asking for its pointer block), and with
+write_at returning before its inode (CP empty, G's block named by none).
+One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
 free_all_blocks, free_pointed, pointer_sector, ensure_block, list_dir, rm,
