@@ -11,7 +11,9 @@ secondaries after the name, which cameras write), so such a set was left with
 a checksum over part of it, which fsck_exfat offers to repair by deleting the
 set. And `walk_dir` closed a set that was not contiguous, or whose first
 secondary was not the Stream, so the patch wrote Stream fields into whatever
-slot followed the File. Two boots, each of a copy of build/espexfat.img
+slot followed the File. And until 2026-10-21 a rename built the new set
+afresh (File, Stream, name), dropping the File entry's attributes and times
+and every vendor entry. Three boots, each of a copy of build/espexfat.img
 (exFAT root, partition 1):
 
 - LONG: the host gives the root a second cluster and plants /VEND, an empty
@@ -28,13 +30,23 @@ slot followed the File. Two boots, each of a copy of build/espexfat.img
   GAPPY (File, a deleted slot, Stream, name) and PRIM (File, Stream, a volume
   label primary, name). `echo x >> /GAPPY` and `echo x >> /PRIM` must leave
   every planted slot byte for byte as it was (fsd sees no such file and makes
-  new ones), and `ls /` lists each name once.
+  new ones), and `ls /` lists each name once;
+- RENAME: /VEND's 20-entry set after the root's last, its File entry given
+  the archive attribute and three timestamps. `mv /VEND /VendorRenamedLong`
+  (two name entries: the vendor entries move right) and `mv
+  /VendorRenamedLong /V2` (one: they move left), `ls /` after each; after,
+  no set under either old name, /V2's 20 entries with the File entry's
+  bytes past its checksum and the 17 vendor entries as planted, the
+  SetChecksum whole, and fsck_exfat -n passing.
 
 No fault lines in QEMU's trace. Fails with the sum capped at 19 entries (the
 checksum, and fsck: "Incorrect checksum for directory entry set. Delete?")
-and with walk_dir taking either misshapen set (its slots written). About two
-minutes. Run it whenever exFAT's patch_stream_ext, set_checksum, walk_dir's
-set assembly or slot_at changes.
+with walk_dir taking either misshapen set (its slots written), with a rename
+building its set afresh (main before 2026-10-21: the vendor entries, the
+attributes and the times gone) and with the vendor entries left where the
+old name ended (the set's shape, and fsck). About three minutes. Run it
+whenever exFAT's patch_stream_ext, set_checksum, walk_dir's set assembly,
+slot_at, mv or renamed_set changes.
 """
 import importlib.util
 import os
