@@ -110,6 +110,11 @@ EXT2 = os.path.join(BUILD, "espext2.img")
 DISK = os.path.join(BUILD, "test-volume-bound.img")
 EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M)
 NO_FS = "mount: no such partition, no filesystem on it, or `/` not mounted yet (`mount -a` first)"
+# The line fsd prints before a refusal, for the cases that have one.
+SAYS = {
+    "the fat32-extflags case":
+        "fsd: a FAT32 volume with mirroring off and its live FAT not the first is not mounted\r\n",
+}
 HIGH = (1 << 32) - 65536
 # (start, sectors) of a partition the boot must leave as it was, and its
 # digest before the boot; set by a build that has one (BESIDE).
@@ -503,7 +508,7 @@ def checks_of(name):
                 checks.append((f"mount {n}, {what}, mounts and lists (got {got!r}, ls {listing[:4]})",
                                got == "" and "etc/" in listing))
             else:
-                checks.append((f"mount {n}, {what}, refused (got {got!r})", got == NO_FS))
+                checks.append((f"mount {n}, {what}, refused (got {got!r})", got == SAYS.get(what, "") + NO_FS))
         checks.append(("ls / still lists the root", "etc/" in (o["ls /"] or "").split()))
     checks.append(("no fault lines", faults == 0))
     return [(f"{name}: {label}", ok) for label, ok in checks]
