@@ -2606,7 +2606,8 @@ test-volume-bound: image image-exfat image-ext2
 # still removed whole, the free counts matching the bitmap, the witness
 # unchanged. About a minute, needs e2fsprogs; run it whenever ext2's Volume,
 # inode_place, its allocators, its free path (free_block, free_inode,
-# bitmap_free, free_all_blocks, free_pointed), ensure_block or list_dir change.
+# bitmap_free, free_all_blocks, free_pointed), ensure_block, list_dir, rm or
+# write_inode change.
 test-ext2-blocks: image image-ext2
 	python3 scripts/test-ext2-blocks.py
 

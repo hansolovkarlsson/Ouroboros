@@ -13,7 +13,9 @@ a sector past `s_blocks_count` blocks as an I/O error; an inode number past
 the last group's bitmaps past the volume's last block or inode. A free reads
 nothing past the volume, neither a pointer block nor a bitmap, so a file
 whose pointers or bitmaps lie there is still removed whole, and the free
-counts rise only for a bit actually cleared (the reviews of #331).
+counts rise only for a bit actually cleared; an inode holding no blocks (a
+fast symlink, its target's text in its pointers) frees none, and an entry
+naming an inode past the count can be removed (the reviews of #331).
 
 The firmware boots esp.img from NVMe, so the virtio disk the rig builds goes
 in as the fallback: build/espext2.img's ext2 root as partition 0 (it mounts
@@ -29,8 +31,11 @@ with three zeroed blocks, which nothing may change. The host plants:
   there; GHOST, its directory entry naming inode `inodes_per_group` past
   SRC's, in a second group whose descriptor slot holds a copy of the first
   group's: `cat` must answer an I/O error, not SRC's bytes; SRC itself must
-  still read whole (100 bytes); `rm` of RD must remove it and free only its
-  own block, not the witness block's bit in another group's bitmap; RMI and
+  still read whole (100 bytes), and `rm GHOST` must drop the entry; `rm` of
+  RD must remove it and free only its own block, not the witness block's
+  bit in another group's bitmap, leaving its inode with a deletion time and
+  no links; L, a fast symlink whose first pointer names SRC's block: `rm`
+  must leave that block allocated; RMI and
   OWI (thirteen blocks each), their indirect blocks swapped for witness
   blocks: `rm RMI` must free its inode and `echo x > OWI` must leave it
   holding `x` CR LF, each with no error; and DUP (two blocks), its second
@@ -61,11 +66,14 @@ its bit set past the count), with free_block freeing a block past the volume
 free_pointed reading a pointer block past the volume (RMI's rm and OWI's
 overwrite an I/O error), with bitmap_free reading a bitmap past the volume
 (F's rm an I/O error), with the free counts raised for a bit already clear
-(A's counts one past its bitmap) and with the listing reading an inode past
-the count (`ls /mnt/c` an I/O error). One boot, about a minute, needs
+(A's counts one past its bitmap), with the listing reading an inode past
+the count (`ls /mnt/c` an I/O error), with blocks freed for an inode holding
+none (SRC's block freed by `rm L`), with rm reading GHOST's inode (an I/O
+error) and with the deletion time left out of a freed inode. One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
-free_all_blocks, free_pointed, ensure_block or list_dir changes.
+free_all_blocks, free_pointed, pointer_sector, ensure_block, list_dir, rm or
+write_inode changes.
 """
 import importlib.util
 import os

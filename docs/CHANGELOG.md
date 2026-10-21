@@ -639,8 +639,13 @@ no pointer block (`free_pointed`) or bitmap (`bitmap_free`) past the volume
 allocated), and the free counts rise only for a bit `bitmap_free` actually
 cleared (a pointer naming a free block raised them past the bitmap). On a
 volume without the filetype feature, a listing lists an entry naming an
-inode past the count as a file instead of failing whole. Each of the nine
-rules taken out fails the rig. And mount now requires as many groups, counted from the inodes,
+inode past the count as a file instead of failing whole, and `rm` of such
+an entry drops it (it could be listed, then never removed). An inode holding
+no blocks frees none: `rm` of a fast symlink, whose target's text sits in
+its block pointers, freed the blocks that text named. The free path walks
+pointer blocks a sector at a time (it had held three 4 KiB buffers at once on
+fsd's 56 KiB stack), and a freed inode's deletion time is written with the
+rest of it. Each of the twelve rules taken out fails the rig. And mount now requires as many groups, counted from the inodes,
 as the blocks make, as Linux does, not merely no more: with fewer, a block
 of the volume belonged to a group past the descriptor table. `make
 test-volume-bound` gains that case, eighteen volumes in all.
