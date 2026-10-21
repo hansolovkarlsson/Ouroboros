@@ -4306,7 +4306,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   not swap a stick in. Bounding the boot sector's geometry by the
   partition's length, and answering "not this filesystem" for one that
   passes it, would close both. Read in the code, from the review of #329.
-- **ext2 takes a block number from an inode unbounded.** `block_lba`
+- ~~**ext2 takes a block number from an inode unbounded.**~~ *Done
+  2026-10-20:* the mounted arm reaches the disk only through `Volume`, which
+  refuses a sector past `s_blocks_count` blocks as an I/O error; an inode
+  number past `s_inodes_count` is refused the same way, the allocators stop
+  at the last group's last block and inode, and `free_block` frees nothing
+  past the volume. `make test-ext2-blocks`. A block number inside the volume
+  but in its metadata (an inode pointing at the inode table) is not checked;
+  that is damage inside the volume, e2fsck's territory. The record as
+  found: `block_lba`
   computes a sector from any block number, and nothing checks it against
   `s_blocks_count`, so a damaged inode's pointer (direct, indirect, or a
   block group descriptor's table) reads or writes past the volume, into the
@@ -4323,6 +4331,36 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `block_lba`, once it is made, would refuse such a block as an I/O error,
   and the allocator should skip such bits as not free. Nothing refuses it
   today. From the third review of #330.
+- **ext2 leaks a block on a write past the double-indirect range.**
+  `ensure_block` allocates the data block before it checks the logical
+  block's range, so a write past 12 + k + k^2 blocks (k pointers a block:
+  about 64 MiB of file on 1 KiB blocks) takes a block, then answers disk
+  full without recording it: one block lost each attempt, a bitmap bit set
+  that no inode names. Checking the range first closes it. A rig needs a
+  1 KiB-block volume over 65 MiB and a `cp` of a file past 64.3 MiB onto it,
+  minutes under TCG, which is why it waits. Older than #331; from its review.
+  **A second path, the same order:** `ensure_block` allocates the data block
+  before the indirect or double-indirect pointer block it needs, so with one
+  block free an append crossing from logical block 11 to 12 takes the last
+  block, fails to take the pointer block, and loses the first. Allocating
+  the pointer blocks first, and giving back what a later step could not
+  use, closes both; a rig for this one needs only a volume with one block
+  free. From the second review of #331.
+- **ext2 trusts a block number inside the volume.** Since #331 nothing past
+  the volume is read or written, but a descriptor or a pointer naming the
+  volume's own metadata is taken as it stands: a damaged `bg_inode_table` of
+  1 puts new inodes over the superblock, a bitmap pointer the same through
+  `bitmap_alloc`, and `rm` of a file whose pointer names an inode-table block
+  clears that block's bit, so the allocator later zeroes live inodes with
+  file data. Linux refuses both at their source: `ext2_check_descriptors` at
+  mount (each group's bitmaps and table inside the group, the table's blocks
+  whole) and `ext2_data_block_valid` on every pointer (not the superblock,
+  the descriptor table, a bitmap or the inode table). The free path also
+  never frees the triple-indirect tree (`block[14]`) or an inode's
+  extended-attribute block (`i_file_acl`), which `mke2fs -d` can attach, so
+  `rm` leaks those; and `bitmap_free` rewrites a whole bitmap block to clear
+  one bit (a sector would do, as `write_int_at` does for the counts). From
+  the fourth review of #331.
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the

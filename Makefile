@@ -449,7 +449,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename test-mv-into test-fat-link test-mount-gate test-probe-ioerr test-volume-bound test-long-set test-dir-scan clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename test-mv-into test-fat-link test-mount-gate test-probe-ioerr test-volume-bound test-ext2-blocks test-long-set test-dir-scan clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -2590,12 +2590,26 @@ test-probe-ioerr: image image-exfat $(USBSTICK_IMG)
 # volumes in partitions shorter than they claim, an entry of size 0, a
 # partition past sector 2^32 (a 2 TiB sparse file), a stale exFAT boot sector
 # past the disk's end (also with the table claiming past it), a FAT32 whose
-# FAT size wraps u32, seventeen volumes each breaking one layout rule, and an
+# FAT size wraps u32, eighteen volumes each breaking one layout rule, and an
 # exFAT whose bitmap lies past its heap (a write refused, the next partition
 # unchanged). About eight minutes; run it whenever a filesystem's mount_at, fsd's probe or
 # volume_bound, or the table's sizes change.
 test-volume-bound: image image-exfat image-ext2
 	python3 scripts/test-volume-bound.py
+
+# ext2 never reaches past its volume by a block number read off the disk
+# (scripts/test-ext2-blocks.py): one boot from esp.img on NVMe, on virtio the
+# ext2 root and three small ext2 volumes made by mke2fs, an unpartitioned
+# witness after them; damaged direct and indirect pointers, an inode number
+# past the count, bitmaps in the witness and a last group whose padding bits
+# are clear, each refused, files whose pointers or bitmaps lie past the volume
+# still removed whole, the free counts matching the bitmap, the witness
+# unchanged. About a minute, needs e2fsprogs; run it whenever ext2's Volume,
+# inode_place, its allocators, its free path (free_block, free_inode,
+# bitmap_free, free_all_blocks, free_pointed), ensure_block, list_dir, rm or
+# write_inode change.
+test-ext2-blocks: image image-ext2
+	python3 scripts/test-ext2-blocks.py
 
 # An exFAT entry set longer than fsd builds keeps a whole checksum
 # (scripts/test-long-set.py): on a copy of the exFAT image, /VEND planted with

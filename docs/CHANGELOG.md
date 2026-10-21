@@ -611,8 +611,46 @@ descriptor table starts after the first data block, so the table rule breaks
 with it, and the rule stays to guard the subtraction in the groups rule.
 ext2's inode size is bounded too, 128 bytes to a block and a power of two (a
 64-byte inode panicked fsd on its first write; the fourth review). The MBR entry layout is
-`scripts/mbrdisk.py`'s alone (`entry`, `set_entry`). ext2's block numbers are still unbounded, to
-the roadmap.
+`scripts/mbrdisk.py`'s alone (`entry`, `set_entry`). ext2's block numbers
+were still unbounded; see the next entry.
+
+**ext2 never reaches past its volume by a block number (2026-10-20).** ext2
+took any block number it read off the disk to the disk: an inode's direct or
+indirect pointer, an indirect block's, a descriptor's bitmap or inode table.
+A damaged one read and wrote past the volume, into the next partition or
+past the disk. Now the mounted arm reaches the disk only through `Volume`,
+which refuses a sector past `s_blocks_count` blocks as an I/O error, the
+choke point FAT32's `cluster_to_lba` is for its clusters. An inode number
+past `s_inodes_count` (a damaged directory entry, which named a group past
+the descriptor table) is refused the same way; the allocators take no bit of
+the last group's bitmaps past the volume's last block or inode, which a
+damaged or shrunk volume leaves clear; and `free_block` frees nothing past
+the volume, as FAT32's `free_chain` frees only the volume's clusters. Since
+the inode size is a power of two from 128 (the previous entry), an inode's
+slot never crosses a sector, so an inode is read and written in one sector
+where it was two. `make test-ext2-blocks` boots the ext2 root beside three
+small damaged ext2 volumes and an unpartitioned witness after them: every
+damaged pointer's read or write is refused, the inode past the count is
+refused rather than read as another file, the full volume answers disk full,
+and the witness is unchanged. A file whose indirect pointer or bitmap lies
+past the volume is still removed or overwritten whole: the free path reads
+no pointer block (`free_pointed`) or bitmap (`bitmap_free`) past the volume
+(it failed partway, after the directory entry was gone, leaving the inode
+allocated), and the free counts rise only for a bit `bitmap_free` actually
+cleared (a pointer naming a free block raised them past the bitmap). On a
+volume without the filetype feature, a listing lists an entry naming an
+inode past the count as a file instead of failing whole, and `rm` of such
+an entry drops it (it could be listed, then never removed). A fast symlink,
+told by its type and a length under 60 as Linux makes one, frees no blocks:
+`rm` of one, whose target's text sits in its block pointers, freed the blocks
+that text named. The free path walks pointer blocks a sector at a time, one
+walk for every depth, (it had held three 4 KiB buffers at once on
+fsd's 56 KiB stack), and a freed inode's deletion time is written with the
+rest of it. A block number inside the volume but in its metadata is not checked yet (the
+roadmap). Each of the thirteen rules taken out fails the rig. And mount now requires as many groups, counted from the inodes,
+as the blocks make, as Linux does, not merely no more: with fewer, a block
+of the volume belonged to a group past the descriptor table. `make
+test-volume-bound` gains that case, eighteen volumes in all.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
