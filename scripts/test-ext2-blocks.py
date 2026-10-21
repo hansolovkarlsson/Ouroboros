@@ -109,11 +109,15 @@ EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M
 WITNESS_BYTES = 1024 * 1024
 # 1 KiB blocks into the witness each plant names, apart so a changed sector
 # names the case that wrote it. B's overflow lands at block 0.
-AT_RD, AT_WR, AT_IND, AT_BMP, AT_RMI, AT_OWI, AT_IBMP = 8, 16, 24, 32, 40, 48, 56
-ZEROED = (AT_IND, AT_BMP, AT_IBMP)
+AT_RD, AT_WR, AT_IND, AT_RMI, AT_OWI = 8, 16, 24, 40, 48
+ZEROED = (AT_IND,)
+# The pattern a planted inode-table block holds, which an allocation over it
+# would overwrite.
+TABLE_FILL = b"\x5a"
 FILES_A = {"RD": b"R" * 2048, "WR": b"W" * 1100, "IND": b"I" * 12 * 1024, "SRC": b"S" * 100,
            "GHOST": b"G" * 10, "RMI": b"M" * 13 * 1024, "OWI": b"O" * 13 * 1024, "DUP": b"D" * 2048, "Z": b"Z" * 1024,
-           "BIGD": b"B" * 270 * 1024}
+           "BIGD": b"B" * 270 * 1024, "META": b"T" * 2048, "MI": b"N" * 13 * 1024,
+           "GD": b"Q" * 1024}
 FILES_C = {"F": b"F" * 1024, "G": b"g" * 1024, "H": b"h" * 10}
 COMMANDS = [
     "mount 1 /mnt/a", "mount 2 /mnt/c", "mount 3 /mnt/b",
@@ -132,9 +136,10 @@ COMMANDS = [
     "rm /mnt/a/Z",
     "rm /mnt/a/BIGD",
     "rm /mnt/a/GHOST",
+    "rm /mnt/a/META",
+    "rm /mnt/a/MI",
+    "rm /mnt/a/GD",
     "ls /mnt/c",
-    "echo x >> /mnt/c/G",
-    "rm /mnt/c/F",
     "echo x > /mnt/b/NEW",
     "touch /mnt/b/NEW2",
 ]
@@ -305,7 +310,8 @@ def build():
             return at == wit_start + k * 2 and blk >= v.bc and at < wit_end
 
         ents = va.entries()
-        checks.append(("plant: A has 1 KiB blocks and its ten files", va.bs == 1024 and set(FILES_A) <= set(ents)))
+        checks.append((f"plant: A has 1 KiB blocks and its {len(FILES_A)} files",
+                       va.bs == 1024 and set(FILES_A) <= set(ents)))
         if not checks[-1][1]:
             return plan, checks
         ino = {n: ents[n][0] for n in FILES_A}
@@ -318,20 +324,42 @@ def build():
         own_indirect = [va.ptr(ino[n], 12) for n in ("RMI", "OWI")]
         va.set_ptr(ino["RMI"], 12, wblock(va, a_start, AT_RMI))
         va.set_ptr(ino["OWI"], 12, wblock(va, a_start, AT_OWI))
+        # A, before GHOST's descriptor copy (T's count is group 0's): the last three blocks of group 0's inode table, which hold no
+        # inode in use. T: its bit cleared, the free counts raised to match,
+        # filled with a pattern; an allocation must pass over it. META's
+        # second pointer names T2: rm must leave it allocated. MI's indirect
+        # pointer names T3, which holds SRC's block number in every word: rm
+        # must read no pointer there and free neither.
+        table = va.u32(va.desc(0) + 8)
+        itb = -(-(va.ipg * va.isz) // va.bs)
+        t, t2, t3 = table + itb - 1, table + itb - 2, table + itb - 3
+        va.write(t * va.bs, TABLE_FILL * va.bs)
+        va.set_bitmap(0, with_bits(va.bitmap(0), t - va.fdb, t - va.fdb + 1, 0))
+        va.set_u32(1024 + 12, va.u32(1024 + 12) + 1)
+        g0_free = struct.unpack("<H", va.read(va.desc(0) + 12, 2))[0]
+        va.write(va.desc(0) + 12, struct.pack("<H", g0_free + 1))
+        va.set_ptr(ino["META"], 1, t2)
+        va.write(t3 * va.bs, struct.pack("<I", va.ptr(ino["SRC"], 0)) * (va.bs // 4))
+        mi_direct = [va.ptr(ino["MI"], k) for k in range(12)]
+        va.set_ptr(ino["MI"], 12, t3)
+        first_table_ino = (t3 - table) * (va.bs // va.isz) + 1
+        # GD's one pointer names the descriptor table's block, below every
+        # group's bitmaps: rm must leave it allocated.
+        gd_own = va.ptr(ino["GD"], 0)
+        va.set_ptr(ino["GD"], 0, va.fdb + 1)
+        plan.update(t=t, t2=t2, t3=t3, meta0=va.ptr(ino["META"], 0), mi_direct=mi_direct)
         # A: GHOST names SRC's inode one group on, whose descriptor is group 0's.
         ghost = va.ipg + ino["SRC"]
         va.set_u32(ents["GHOST"][1], ghost)
         va.write(va.desc(1), va.read(va.desc(0), 32))
         plan.update(ino=ino, rd_block0=va.ptr(ino["RD"], 0), a_bitmap=va.bitmap(0),
                     direct={n: [va.ptr(ino[n], k) for k in range(12)] for n in ("RMI", "OWI")})
-        # C: its block and inode bitmaps in the witness, and H's entry naming
-        # an inode past its count, on a volume without filetype (so a listing
-        # reads each entry's inode).
-        vc.set_u32(vc.desc(0), wblock(vc, c_start, AT_BMP))
-        vc.set_u32(vc.desc(0) + 4, wblock(vc, c_start, AT_IBMP))
+        # C: H's entry naming an inode past its count, on a volume without
+        # filetype (so a listing reads each entry's inode). Its bitmaps were
+        # planted in the witness until 2026-10-21, when a descriptor outside
+        # its group came to be refused at mount (test-volume-bound's SHAPES-H).
         c_ents = vc.entries()
         vc.set_u32(c_ents["H"][1], vc.ic + 5)
-        plan.update(c_free=(vc.u32(1024 + 12), vc.u32(1024 + 16)))
         # A: L, a fast symlink (its target's text in its pointers), made to
         # name SRC's block as its text's first four bytes, as a target of
         # those bytes would.
@@ -374,8 +402,17 @@ def build():
             ("plant: GHOST names an inode past A's count, whose group's descriptor names SRC's table",
              va.entries()["GHOST"][0] == ghost > va.ic and va.read(va.desc(1), 32) == va.read(va.desc(0), 32)
              and va.ic == va.ipg),
-            ("plant: C's block and inode bitmaps name zeroed witness blocks",
-             in_wit(vc, c_start, vc.u32(vc.desc(0)), AT_BMP) and in_wit(vc, c_start, vc.u32(vc.desc(0) + 4), AT_IBMP)),
+            ("plant: T, T2 and T3 are the last blocks of A's group 0 inode table, past every inode in use",
+             not any(bit(va.bitmap(4), n) for n in range(first_table_ino - 1, va.ipg))
+             and t3 >= table and t < table + itb),
+            ("plant: T's bit is clear, its bytes the pattern, and A's free counts still match its bitmap",
+             not bit(va.bitmap(0), t - va.fdb) and va.read(t * va.bs, va.bs) == TABLE_FILL * va.bs
+             and free_delta(va) == plan["a_free_delta"]),
+            ("plant: GD's pointer names the descriptor table's block, set in A's bitmap",
+             va.ptr(ino["GD"], 0) == va.fdb + 1 and bit(va.bitmap(0), 1) and gd_own != 0),
+            ("plant: META's second pointer names T2, and MI's indirect pointer T3, which names SRC's block",
+             va.ptr(ino["META"], 1) == t2 and va.ptr(ino["MI"], 12) == t3
+             and va.u32(t3 * va.bs) == va.ptr(ino["SRC"], 0) != 0 and all(mi_direct)),
             ("plant: C has no filetype feature, its files, and H naming an inode past its count",
              not vc.u32(1024 + 96) & 2 and set(FILES_C) <= set(c_ents) and vc.entries()["H"][0] > vc.ic),
             ("plant: L is a fast symlink (2 bytes) whose first pointer names SRC's block, its i_blocks 2; Z's 0",
@@ -463,21 +500,20 @@ def verdicts(plan, driven, out, faults):
             return [(f"A's and B's superblocks intact ({whole})", False),
                     (f"the witness unchanged (changed sectors: {changed[:8]})", changed == [])]
         va, vb = Ext2(fh, plan["a"]), Ext2(fh, plan["b"])
-        c_ents, c_free, g_size = {}, None, None
-        if whole["c"]:
-            vc = Ext2(fh, plan["c"])
-            c_ents = vc.entries()
-            c_free = (vc.u32(1024 + 12), vc.u32(1024 + 16))
-            g_size = vc.size(c_ents["G"][0]) if "G" in c_ents else None
         a_free_delta = free_delta(va)
         ents = va.entries()
         ino = plan["ino"]
         # Freed: RD's own block, RMI's and OWI's twelve direct blocks; taken:
         # OWI's new block. Their own indirect blocks are no file's now.
         want_bitmap = plan["a_bitmap"]
-        for blk in ([plan["rd_block0"], plan["dup"][0], plan["z_block"]] + plan["direct"]["RMI"]
-                    + plan["direct"]["OWI"] + plan["bigd"]):
+        for blk in ([plan["rd_block0"], plan["dup"][0], plan["z_block"], plan["meta0"]] + plan["direct"]["RMI"]
+                    + plan["direct"]["OWI"] + plan["bigd"] + plan["mi_direct"]):
             want_bitmap = with_bits(want_bitmap, blk - va.fdb, blk - va.fdb + 1, 0)
+        # T, planted free, set again by the allocation that passes over it.
+        want_bitmap = with_bits(want_bitmap, plan["t"] - va.fdb, plan["t"] - va.fdb + 1, 1)
+        t_bytes = va.read(plan["t"] * va.bs, va.bs)
+        t2_bit, t3_bit = (bit(va.bitmap(0), plan[k] - va.fdb) for k in ("t2", "t3"))
+        gdt_bit = bit(va.bitmap(0), 1)
         # The overwrite may give OWI a new inode: read it by its entry.
         owi = ents["OWI"][0] if "OWI" in ents else 0
         owi_new = va.ptr(owi, 0) if owi else 0
@@ -505,7 +541,7 @@ def verdicts(plan, driven, out, faults):
         ("fsd mounted ext2 as /", re.search(r"^fsd: ext2 mounted", out, re.M) is not None),
         ("A, C and B mount", all(o.get(c) == "" for c in COMMANDS[:3])),
         ("C's superblock intact after the boot", whole["c"]),
-        ("ls /mnt/a lists the ten files", set(FILES_A) <= listed),
+        (f"ls /mnt/a lists the {len(FILES_A)} files", set(FILES_A) <= listed),
         (f"SRC reads whole, 100 bytes (got {wc_bytes(o.get('cat /mnt/a/SRC | wc'))})",
          wc_bytes(o.get("cat /mnt/a/SRC | wc")) == 100),
         (f"RD's read stops at an I/O error, no witness byte counted (got {rd!r})",
@@ -524,8 +560,21 @@ def verdicts(plan, driven, out, faults):
         (f"OWI, its indirect pointer past A, overwritten without an error (got {o.get('echo x > /mnt/a/OWI')!r}, holding {owi_data!r})",
          o.get("echo x > /mnt/a/OWI") == "" and o.get("cat /mnt/a/OWI") == "x" and owi_data == b"x\r\n"
          and owi == ino["OWI"]),
-        ("A's block bitmap as before but RD's, DUP's, Z's, RMI's, OWI's direct and BIGD's every block freed and OWI's new one taken",
+        ("A's block bitmap as before but RD's, DUP's, Z's, META's first, RMI's, OWI's and MI's direct and BIGD's every "
+         "block freed, OWI's new one taken and T's set again",
          a_bitmap == want_bitmap),
+        (f"OWI's new block is not T, the inode-table block A's bitmap held free, and T holds its pattern still "
+         f"(OWI's block {owi_new}, T {plan['t']})",
+         owi_new not in (0, plan["t"]) and t_bytes == TABLE_FILL * va.bs),
+        (f"rm of META, its second pointer naming an inode-table block, succeeds and leaves that block allocated "
+         f"(got {o.get('rm /mnt/a/META')!r})",
+         o.get("rm /mnt/a/META") == "" and "META" not in ents and t2_bit == 1),
+        (f"rm of MI, its indirect pointer naming an inode-table block holding SRC's block number, succeeds and "
+         f"frees neither (got {o.get('rm /mnt/a/MI')!r})",
+         o.get("rm /mnt/a/MI") == "" and "MI" not in ents and t3_bit == 1 and src_bit == 1),
+        (f"rm of GD, its pointer naming the descriptor table's block, succeeds and leaves that block allocated "
+         f"(got {o.get('rm /mnt/a/GD')!r})",
+         o.get("rm /mnt/a/GD") == "" and "GD" not in ents and gdt_bit == 1),
         (f"rm of DUP, its second block already free, succeeds (got {o.get('rm /mnt/a/DUP')!r})",
          o.get("rm /mnt/a/DUP") == "" and "DUP" not in ents),
         (f"rm of L succeeds and SRC's block is still allocated (got {o.get('rm /mnt/a/L')!r})",
@@ -540,10 +589,6 @@ def verdicts(plan, driven, out, faults):
          a_free_delta == plan["a_free_delta"]),
         (f"ls /mnt/c lists F, G and H, H's inode past the count (got {o.get('ls /mnt/c')!r})",
          set(FILES_C) <= set((o.get("ls /mnt/c") or "").split())),
-        (f"G's append refused with an I/O error, its size still 1024 (got {o.get('echo x >> /mnt/c/G')!r}, {g_size})",
-         io in (o.get("echo x >> /mnt/c/G") or "") and g_size == 1024),
-        (f"rm of F, C's bitmaps past the volume, succeeds and frees nothing (got {o.get('rm /mnt/c/F')!r}, free {c_free})",
-         o.get("rm /mnt/c/F") == "" and "F" not in c_ents and c_free == plan["c_free"]),
         (f"B's write answers disk full (got {o.get('echo x > /mnt/b/NEW')!r})",
          "disk full" in (o.get("echo x > /mnt/b/NEW") or "")),
         (f"B's touch NEW2 answers disk full and makes nothing (got {o.get('touch /mnt/b/NEW2')!r})",

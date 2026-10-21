@@ -62,7 +62,11 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
   with no inodes, inodes of 64 bytes, or fewer groups than its blocks make
   (since the review of #331, which a block in the group past them freed
   through no descriptor) (F); ext2 with more blocks or inodes a group than one
-  bitmap block holds (G). All refused.
+  bitmap block holds (G); and, since 2026-10-21, ext2 whose group 0
+  descriptor puts its inode table past the group's last block, its block
+  bitmap on the descriptor table's own block (inside the group, which
+  Linux's ext2_check_descriptors accepts), or its inode bitmap on its block
+  bitmap (H). All refused.
 - BESIDE: the FAT32 cut short in a table entry of size 0, the next
   partition inside its volume (refused: the bound stops at the next
   partition), and the exFAT whole with its bitmap moved to the cluster past
@@ -199,6 +203,25 @@ def broken(vol, bound):
         out.add("ext2-groups")
     if fdb + 1 + -(-(groups * 32) // bs) > bc:
         out.add("ext2-bgdt")
+    if out:
+        return out
+    # The descriptors, read only once every rule above holds (fsd's
+    # check_descriptors runs last): each group's bitmaps and whole inode
+    # table inside the group and past group 0's superblock, descriptor table
+    # and reserved descriptor blocks (meta_end), and none overlapping another.
+    reserved = u("<H", 1024 + 206) if u("<I", 1024 + 92) & 0x10 else 0
+    meta_end = fdb + 1 + -(-(groups * 32) // bs) + reserved
+    itb = -(-(ipg * isz) // bs)
+    for g in range(groups):
+        d = (fdb + 1) * bs + g * 32
+        bb, ib, it = u("<I", d), u("<I", d + 4), u("<I", d + 8)
+        first, last = fdb + g * bpg, min(fdb + (g + 1) * bpg, bc) - 1
+        if not all(first <= b <= last for b in (bb, ib, it, it + itb - 1)):
+            out.add("ext2-descgroup")
+        elif min(bb, ib, it) < meta_end:
+            out.add("ext2-descmeta")
+        if bb == ib or it <= bb < it + itb or it <= ib < it + itb:
+            out.add("ext2-descoverlap")
     return out
 
 
@@ -328,6 +351,10 @@ def build_shapes(ext2, fat, exfat, which):
     # The superblock's block is 1 with 1 KiB blocks, else 0; each case is
     # made from the base's own block size, not an assumed 1 KiB.
     sb_block = 1024 // bs
+    desc0 = (fdb + 1) * bs
+    isz = struct.unpack_from("<H", ext2, sb + 88)[0]
+    itb = -(-(ipg * isz) // bs)
+    g0_last = min(fdb + bpg, bc) - 1
     cases = {
         "SHAPES-A": [
             ("exfat-heap", exfat, [("<I", 88, vl - (cc << sh) + 8)]),
@@ -364,6 +391,15 @@ def build_shapes(ext2, fat, exfat, which):
             ("ext2-inodesize", ext2, [("<I", sb + 76, 1), ("<H", sb + 88, 64)]),
             ("ext2-groups", ext2, [("<I", sb + 0, ipg * (groups - 1))]),
         ],
+        # Group 0's descriptor: its inode table running past the group's last
+        # block; its block bitmap on the descriptor table's own block (inside
+        # the group, so Linux's ext2_check_descriptors takes it); its inode
+        # bitmap the block bitmap's block.
+        "SHAPES-H": [
+            ("ext2-descgroup", ext2, [("<I", desc0 + 8, g0_last - itb + 2)]),
+            ("ext2-descmeta", ext2, [("<I", desc0, fdb + 1)]),
+            ("ext2-descoverlap", ext2, [("<I", desc0 + 4, u32(ext2, desc0))]),
+        ],
         "SHAPES-G": [
             ("ext2-bpg", ext2, [("<I", sb + 32, bs * 8 + 8)]),
             ("ext2-ipg", ext2, [("<I", sb + 40, bs * 8 + 8), ("<I", sb + 0, (bs * 8 + 8) * groups)]),
@@ -382,7 +418,7 @@ def build_shapes(ext2, fat, exfat, which):
 
 
 BOOTS = ["PARTS", "MIXED", "STALE", "LONG", "WRAP", "SHAPES-A", "SHAPES-B", "SHAPES-C", "SHAPES-D", "SHAPES-E",
-         "SHAPES-F", "SHAPES-G", "BESIDE"]
+         "SHAPES-F", "SHAPES-G", "SHAPES-H", "BESIDE"]
 
 
 def build(name):
