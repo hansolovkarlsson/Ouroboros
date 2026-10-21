@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-10-19. Five PRs, no new subsystem, and four defects that were all
+through 2026-10-20. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -1064,6 +1064,41 @@ The third was the document's oldest shape. #326 renamed `slot_addr` to
 changing `slot_at` and searching for its name would not have found the rig
 that covers it. **A rename is an edit to every record that names the old
 name, and a search for the old name is the check.**
+
+## A claim that something can no longer happen (2026-10-20)
+
+Five statements written on 2026-10-20 were false: four the day they were
+written, and one by the next pull request, hours later, in the same file.
+
+Two were the old shape, a claim false on arrival that a review found. The
+roadmap's allocator paragraph, added from the third review of #330, said
+"the bound in `block_lba` refuses it as an I/O error" a paragraph after
+saying that bound did not exist. And a comment in ext2's mount, justifying
+the per-group bitmap limits, said the bitmap code "reads past its buffer";
+`bitmap_alloc` caps its scan, and the real effect was in `bitmap_free`,
+which the comment did not name. A later change relaxing the limit because
+"alloc is capped anyway" would have brought back the loss.
+
+The third was mine and the costliest. #331's free path got a doc comment
+saying a free could no longer stop halfway, after the first round taught it
+to skip a pointer block past the volume. The second round found it stopping
+halfway through a bitmap past the volume, a path the comment had not looked
+at. **A claim that something can no longer happen is a claim about every
+path to it; list the paths it covers, or it covers the one you fixed.**
+
+The fourth was the document's own shape: two of mount's comments in
+`ext2.rs`, written in #330, said block numbers read from an inode were
+unchecked "(the roadmap)", true that morning. #331 made `Volume` check them
+in the same file that afternoon and left both comments standing; its third
+review found them.
+
+The fifth was a rig's docstring: "with the allocator's block cap out, B's
+write lands in the witness". Running the control showed an I/O error instead,
+since `Volume` refuses the block the allocator hands out; the docstring was
+written from the design and corrected from the run. CLAUDE.md's figures for
+`test-listing-walk` (70, 74 and 126 sectors) had drifted the same way before
+this branch, and read 63, 64 and 121 when run. **A record of what a control
+shows is written after the control has run.**
 
 ## What actually worked
 

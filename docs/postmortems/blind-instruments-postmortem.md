@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-19. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-20. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds'. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -1926,3 +1926,54 @@ the first run, and planted it as the old walker takes it; the control then
 failed on PRIM's slots, as it should. **Work out what the old code does with a
 planted case before relying on the case.**
 
+## Six more, from the volume bounds (2026-10-20)
+
+Three pull requests (#329 to #331) each built a rig with a control, and each
+control in the end failed where it should. Six instruments around them did
+not do what they seemed to, and I found five of them by running, one by a
+review.
+
+**A fault injected where something else reads too.** `make test-probe-ioerr`
+failed one sector through QEMU's blkdebug to show the probe taking a read
+error for "no filesystem". As first written it passed with main's rule put
+back: the sector was LBA 1, which the partition table's GPT check reads
+before any probe, so the error stopped both trees at the same place. The rig
+now fails an exFAT root directory sector, which only the probe reads. **Put a
+fault where only the code under test goes, and show the control failing
+before trusting the pass.**
+
+**A mutation that reached one copy.** `make test-volume-bound`'s length rule
+was taken out, and the boot holding its case still passed: `mount_partition`
+had a second call site, and the mutation changed one. Both mutated, the boot
+failed. **A control is the rule removed everywhere it is stated; count the
+sites before reading the result.**
+
+**An observer that crashed on what a control did.** With `Volume`'s bound out,
+`make test-ext2-blocks` took a block from a "bitmap" in the zeroed witness,
+bit 0, block 1 of volume C: its superblock, which the write zeroed. The host's
+reader divided by the zeroed inodes-per-group and the rig died in a
+traceback, reporting none of its verdicts. A traceback is a
+failure, but not a report. The verdicts now check each volume's superblock
+first and say which one is gone. **An observer must survive the worst its
+controls do to the thing it reads.**
+
+**A failure from an observer, again.** The first OWI check, an overwrite of a
+file whose indirect pointer lay past the volume, failed on correct code: it
+wanted `x\n`, and `echo` writes CR LF. The transcript showed `cat` printing
+`x`, which pointed at the check, as 2026-10-19's FAT entry 1 had. It now reads
+the file's bytes off the disk. **The rule from 2026-10-19 held; it is still
+the first question.**
+
+**A control that never reached its case.** One control boot timed out at the
+login prompt and failed all twenty checks, which said nothing about the rule
+it removed. Rerun alone it failed exactly one, the free counts. **A control's
+result counts only if the boot reached the case; a failure everywhere is a
+broken boot, not a strong result.**
+
+**A control that holds by the layout.** The control for `free_block`
+freeing past the volume shows only because RD's witness block lies in group 1,
+whose descriptor slot the rig fills with group 0's. A larger root partition
+or a reordering would put it in group 2, where the clear lands in the boot
+block and the bitmap check passes with the rule removed. The review found
+it; the condition is now a plant check. **When a control depends on where
+something lands, check that it lands there before the boot.**
