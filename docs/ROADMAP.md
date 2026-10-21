@@ -2649,11 +2649,24 @@ be reviewed after the fact from the saved screenshots.
 >       (`format`, `format_arg`, `deprecated`, `unavailable`, `noreturn`,
 >       `const`, `unused`, `alloc_size`, `always_inline`, `weak`,
 >       `gnu_inline`), and 0 for `aligned`, which it takes only on a
->       struct's definition, and for `packed`. Whether to take the
->       alternative is Hans's; DevTools says that if he does it will come as
->       its `sys/cdefs.h` note. It changes this project's C binaries and
->       departs from DevTools's 2 to 4, so it is a question for DevTools, not
->       a change to make alone.
+>       struct's definition, and for `packed`. **Declined by Hans on
+>       2026-10-21: the patches stay as they are, for every compiler.** The
+>       guard as written would now break `cc`: with `picolibc.h` guarded so
+>       (a copy in a scratch directory, `cc` built from DevTools's tree of
+>       that day), `cc` answers 1 for `__gnu_inline__` and
+>       `__always_inline__`, the guard defines 0004's two macros for it, and
+>       it refuses `ctype.h` ("gnu_inline is taken on a declaration with
+>       inline, and this one of 'isblank' has none"), `fenv.h`
+>       (`feclearexcept`), `math.h` and `fastmath.h` (`sqrt`), all four of
+>       which it compiles on the committed headers; `stdlib.h` and `wchar.h`
+>       compiled either way, the `__clang__` guard for 0002 keeping `long
+>       double` from `cc`. What would work is a guard on the compiler's name,
+>       `__clang__` for both, and that was declined too: the headers would
+>       then say different things to clang and `cc`, so a program would not
+>       mean the same under both, and the gain is a few inlined `ctype` and
+>       math functions and `long double` declarations nothing here uses
+>       (whose arithmetic needs the quad-float helpers nothing links). The
+>       patches go only on DevTools's notices, as above.
 > - [ ] **fix** **A spawn holds the staging for its whole file.** Found by
 >       the high review of #303: a file is staged 512 bytes a call, each a
 >       `fsd` read and a `SPAWN_STAGE`, and every other spawner is refused
