@@ -64,7 +64,13 @@ with a zeroed block, which nothing may change. The host plants:
   H. Until 2026-10-21 C's bitmaps were planted in the witness as well; a
   descriptor outside its group is refused at mount now (test-volume-bound's
   SHAPES-H), so bitmap_free's and the allocator's bounds past the volume
-  sit behind that refusal and no rig reaches them;
+  sit behind that refusal and no rig reaches them; and since 2026-10-21 C
+  left one block free, its counts saying so, with DIND ending at its last
+  single-indirect block and TWELVE at its last direct one: appends to them
+  (three blocks needed, and two) must answer disk full and leave both files
+  as planted, `echo q > ONEB` must then get the block, and after `rm G`
+  `cp TWELVE CP` (2 KiB a request) must answer disk full with CP keeping
+  its first KiB in G's old block;
 - on B, every block of the volume marked used and the last group's padding
   bits clear, so the next free bit is the block just past the volume (the
   witness's first): `echo x > NEW` must answer disk full; and the inode count
@@ -95,7 +101,11 @@ bitmap), with free_block freeing a group's bitmap or table block
 (META's T2 and MI's T3 freed) or one below meta_end (GD's descriptor-table
 block freed), and with free_pointed reading a metadata block as pointers
 (SRC's block freed through T3, and through R2 with is_metadata's meta_end
-arm out). One boot, about a minute, needs
+arm out), and with ensure_block taking a block before it knows it can take
+them all (ONEB disk full: main's order before 2026-10-21, the give-back
+out, the indirect branch not asking for its pointer block), and with
+write_at returning before its inode (CP empty, G's block named by none).
+One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
 free_all_blocks, free_pointed, pointer_sector, ensure_block, list_dir, rm,
@@ -138,7 +148,10 @@ FILES_A = {"RD": b"R" * 2048, "WR": b"W" * 1100, "IND": b"I" * 12 * 1024, "SRC":
            "GHOST": b"G" * 10, "RMI": b"M" * 13 * 1024, "OWI": b"O" * 13 * 1024, "DUP": b"D" * 2048, "Z": b"Z" * 1024,
            "BIGD": b"B" * 270 * 1024, "META": b"T" * 2048, "MI": b"N" * 13 * 1024,
            "GD": b"Q" * 1024, "MG": b"K" * 13 * 1024}
-FILES_C = {"F": b"F" * 1024, "G": b"g" * 1024, "H": b"h" * 10}
+# TWELVE ends at its last direct block and DIND at its last single-indirect
+# one, so an append to either needs a pointer block it does not have.
+FILES_C = {"F": b"F" * 1024, "G": b"g" * 1024, "H": b"h" * 10, "TWELVE": b"2" * 12 * 1024,
+           "DIND": b"3" * (12 + 256) * 1024}
 COMMANDS = [
     "mount 1 /mnt/a", "mount 2 /mnt/c", "mount 3 /mnt/b",
     "ls /mnt/a",
@@ -161,6 +174,11 @@ COMMANDS = [
     "rm /mnt/a/GD",
     "rm /mnt/a/MG",
     "ls /mnt/c",
+    "echo y >> /mnt/c/DIND",
+    "echo y >> /mnt/c/TWELVE",
+    "echo q > /mnt/c/ONEB",
+    "rm /mnt/c/G",
+    "cp /mnt/c/TWELVE /mnt/c/CP",
     "echo x > /mnt/b/NEW",
     "touch /mnt/b/NEW2",
 ]
@@ -394,6 +412,16 @@ def build():
         # its group came to be refused at mount (test-volume-bound's SHAPES-H).
         c_ents = vc.entries()
         vc.set_u32(c_ents["H"][1], vc.ic + 5)
+        # C: one block left free, the highest, and the counts saying so. An
+        # append to DIND needs three, one to TWELVE two: both must take none.
+        c_real = vc.bc - vc.fdb
+        c_free = max(n for n in range(c_real) if not bit(vc.bitmap(0), n))
+        vc.set_bitmap(0, with_bits(with_bits(vc.bitmap(0), 0, c_real, 1), c_free, c_free + 1, 0))
+        vc.set_u32(1024 + 12, 1)
+        vc.write(vc.desc(0) + 12, struct.pack("<H", 1))
+        c_ino = {n: vc.entries()[n][0] for n in ("TWELVE", "DIND")}
+        plan.update(c_free=vc.fdb + c_free, c_ino=c_ino, g_block=vc.ptr(vc.entries()["G"][0], 0),
+                    c_blocks={n: (vc.size(i), vc.i_blocks(i), vc.ptr(i, 12), vc.ptr(i, 13)) for n, i in c_ino.items()})
         # A: L, a fast symlink (its target's text in its pointers), made to
         # name SRC's block as its text's first four bytes, as a target of
         # those bytes would.
@@ -454,6 +482,13 @@ def build():
              and va.u32(t3 * va.bs) == va.ptr(ino["SRC"], 0) != 0 and all(mi_direct)),
             ("plant: C has no filetype feature, its files, and H naming an inode past its count",
              not vc.u32(1024 + 96) & 2 and set(FILES_C) <= set(c_ents) and vc.entries()["H"][0] > vc.ic),
+            ("plant: C has one block free, its counts 1; TWELVE has no indirect block, DIND an indirect "
+             "and no double-indirect block, each ending at its last block",
+             vc.bc - vc.fdb <= vc.bpg and [n for n in range(vc.bc - vc.fdb) if not bit(vc.bitmap(0), n)] == [plan["c_free"] - vc.fdb]
+             and free_delta(vc) == (0, 0)
+             and plan["c_blocks"]["TWELVE"][0] == 12 * 1024 and plan["c_blocks"]["TWELVE"][2] == 0
+             and plan["c_blocks"]["DIND"][0] == 268 * 1024 and plan["c_blocks"]["DIND"][2] != 0
+             and plan["c_blocks"]["DIND"][3] == 0),
             ("plant: L is a fast symlink (2 bytes) whose first pointer names SRC's block, its i_blocks 2; Z's 0",
              va.mode(lino) & 0xF000 == 0xA000 and va.size(lino) == 2 and va.i_blocks(lino) == va.bs // SECT
              and va.i_blocks(ino["Z"]) == 0 and va.ptr(ino["Z"], 0) != 0
@@ -539,6 +574,16 @@ def verdicts(plan, driven, out, faults):
             return [(f"A's and B's superblocks intact ({whole})", False),
                     (f"the witness unchanged (changed sectors: {changed[:8]})", changed == [])]
         va, vb = Ext2(fh, plan["a"]), Ext2(fh, plan["b"])
+        vc = Ext2(fh, plan["c"]) if whole["c"] else None
+        c_after = ({n: (vc.size(i), vc.i_blocks(i), vc.ptr(i, 12), vc.ptr(i, 13)) for n, i in plan["c_ino"].items()}
+                   if vc else {})
+        c_ents = vc.entries() if vc else {}
+        oneb = vc.ptr(c_ents["ONEB"][0], 0) if vc and "ONEB" in c_ents else None
+        c_counts = (free_delta(vc), bit(vc.bitmap(0), plan["c_free"] - vc.fdb)) if vc else None
+        cp_ino = c_ents["CP"][0] if vc and "CP" in c_ents else 0
+        cp_now = ((vc.size(cp_ino), vc.i_blocks(cp_ino), vc.ptr(cp_ino, 0), vc.read(vc.ptr(cp_ino, 0) * vc.bs, 1024))
+                  if cp_ino else None)
+        g_bit = bit(vc.bitmap(0), plan["g_block"] - vc.fdb) if vc else None
         a_free_delta = free_delta(va)
         ents = va.entries()
         ino = plan["ino"]
@@ -638,6 +683,22 @@ def verdicts(plan, driven, out, faults):
          a_free_delta == tuple(d + 2 for d in plan["a_free_delta"])),
         (f"ls /mnt/c lists F, G and H, H's inode past the count (got {o.get('ls /mnt/c')!r})",
          set(FILES_C) <= set((o.get("ls /mnt/c") or "").split())),
+        (f"C's appends to DIND and TWELVE answer disk full (got {o.get('echo y >> /mnt/c/DIND')!r}, "
+         f"{o.get('echo y >> /mnt/c/TWELVE')!r})",
+         all("disk full" in (o.get(f"echo y >> /mnt/c/{n}") or "") for n in ("DIND", "TWELVE"))),
+        (f"DIND and TWELVE as planted: size, i_blocks, indirect and double-indirect pointers ({c_after})",
+         c_after == plan["c_blocks"]),
+        (f"C's one free block taken by ONEB, the counts level with the bitmap (got {o.get('echo q > /mnt/c/ONEB')!r}, "
+         f"ONEB's block {oneb}, the free block {plan['c_free']}, {c_counts})",
+         o.get("echo q > /mnt/c/ONEB") == "" and oneb == plan["c_free"] and c_counts == ((0, 0), 1)),
+        # cp writes 2 KiB a request: the first block takes G's, the second
+        # finds the disk full, and the file keeps the one it filled.
+        (f"cp onto C with one block free answers disk full and CP keeps its first block, G's "
+         f"(got {o.get('cp /mnt/c/TWELVE /mnt/c/CP')!r}, rm {o.get('rm /mnt/c/G')!r}, "
+         f"CP {cp_now[:3] if cp_now else None}, G's block {plan['g_block']} set {g_bit}, counts {c_counts})",
+         "disk full" in (o.get("cp /mnt/c/TWELVE /mnt/c/CP") or "") and o.get("rm /mnt/c/G") == ""
+         and cp_now == (1024, 1024 // SECT, plan["g_block"], b"2" * 1024) and g_bit == 1
+         and c_counts is not None and c_counts[0] == (0, 0)),
         (f"B's write answers disk full (got {o.get('echo x > /mnt/b/NEW')!r})",
          "disk full" in (o.get("echo x > /mnt/b/NEW") or "")),
         (f"B's touch NEW2 answers disk full and makes nothing (got {o.get('touch /mnt/b/NEW2')!r})",

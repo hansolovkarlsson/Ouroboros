@@ -2606,7 +2606,8 @@ test-volume-bound: image image-exfat image-ext2
 # files whose pointers lie past the volume still removed whole, no metadata
 # block freed, allocated or read as pointers (an inode-table block and a
 # reserved descriptor block marked free, pointers naming the inode table, the
-# descriptor table and its reserved blocks, since 2026-10-21), the free counts matching the bitmap, the witness unchanged.
+# descriptor table and its reserved blocks, since 2026-10-21), the free counts matching the bitmap, an append
+# that needs more blocks than are free taking none and a cp that runs out keeping what it wrote, the witness unchanged.
 # About a minute, needs e2fsprogs; run it whenever ext2's Volume,
 # inode_place, its allocators, its free path (free_block, free_inode,
 # bitmap_free, free_all_blocks, free_pointed, is_metadata, in_zone),

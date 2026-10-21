@@ -1436,40 +1436,95 @@ impl Fs {
     /// physical block; allocates the block (zeroed) and any indirect blocks
     /// needed to reach it, updating `node.block`/`node.i_blocks` in place. Only
     /// direct + single/double indirect (triple returns `DiskFull`).
+    ///
+    /// The path is walked once, and every block it lacks is taken before any
+    /// is linked: taking the data block first lost it when the pointer block
+    /// after it could not be had, or when the logical block was past the
+    /// double-indirect range (the second review of #331). A failed allocation
+    /// gives back what this call took and answers its own error. A disk
+    /// error while linking is not undone: a pointer already written into an
+    /// existing pointer block cannot be taken back on a disk failing writes.
     fn ensure_block(&mut self, node: &mut Inode, logical: u32) -> Result<u32, Error> {
-        let existing = self.block_for(node, logical)?;
-        if existing != 0 {
-            return Ok(existing);
+        enum Path {
+            Direct(usize),
+            Single { top: u32, idx: u32 },
+            Double { top: u32, second: u32, l1: u32, l2: u32 },
         }
         let per_blk = self.block_size / 4;
         let sectors_per_block = (self.block_size as usize / SECTOR_SIZE) as u32;
-        let blk = self.alloc_block(true)?;
-        node.i_blocks += sectors_per_block;
-
-        if logical < DIRECT_BLOCKS as u32 {
-            node.block[logical as usize] = blk;
-        } else if logical < DIRECT_BLOCKS as u32 + per_blk {
-            if node.block[12] == 0 {
-                node.block[12] = self.alloc_block(true)?;
-                node.i_blocks += sectors_per_block;
+        let direct = DIRECT_BLOCKS as u32;
+        let path = if logical < direct {
+            let b = node.block[logical as usize];
+            if b != 0 {
+                return Ok(b);
             }
-            self.write_indirect_ptr(node.block[12], logical - DIRECT_BLOCKS as u32, blk)?;
-        } else if logical < DIRECT_BLOCKS as u32 + per_blk + per_blk * per_blk {
-            let dd = logical - DIRECT_BLOCKS as u32 - per_blk;
+            Path::Direct(logical as usize)
+        } else if logical < direct + per_blk {
+            let (top, idx) = (node.block[12], logical - direct);
+            if top != 0 {
+                let b = self.indirect_lookup(top, idx)?;
+                if b != 0 {
+                    return Ok(b);
+                }
+            }
+            Path::Single { top, idx }
+        } else if logical < direct + per_blk + per_blk * per_blk {
+            let dd = logical - direct - per_blk;
             let (l1, l2) = (dd / per_blk, dd % per_blk);
-            if node.block[13] == 0 {
-                node.block[13] = self.alloc_block(true)?;
-                node.i_blocks += sectors_per_block;
+            let top = node.block[13];
+            let second = if top != 0 { self.indirect_lookup(top, l1)? } else { 0 };
+            if second != 0 {
+                let b = self.indirect_lookup(second, l2)?;
+                if b != 0 {
+                    return Ok(b);
+                }
             }
-            let mut sib = self.indirect_lookup(node.block[13], l1)?;
-            if sib == 0 {
-                sib = self.alloc_block(true)?;
-                node.i_blocks += sectors_per_block;
-                self.write_indirect_ptr(node.block[13], l1, sib)?;
-            }
-            self.write_indirect_ptr(sib, l2, blk)?;
+            Path::Double { top, second, l1, l2 }
         } else {
             return Err(Error::DiskFull); // triple indirect unsupported
+        };
+        let missing = match path {
+            Path::Direct(_) => 0,
+            Path::Single { top, .. } => (top == 0) as usize,
+            Path::Double { top, second, .. } => (top == 0) as usize + (second == 0) as usize,
+        };
+        // taken[0] is the data block, then each missing pointer block, top first.
+        let mut taken = [0u32; 3];
+        for n in 0..=missing {
+            match self.alloc_block(true) {
+                Ok(b) => taken[n] = b,
+                Err(e) => {
+                    // Every block is tried: one free failing on a disk error
+                    // leaves its own bit set, not the others'.
+                    for &b in &taken[..n] {
+                        let _ = self.free_block(b);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        node.i_blocks += sectors_per_block * (missing as u32 + 1);
+        let blk = taken[0];
+        match path {
+            Path::Direct(i) => node.block[i] = blk,
+            Path::Single { top, idx } => {
+                let top = if top == 0 { taken[1] } else { top };
+                node.block[12] = top;
+                self.write_indirect_ptr(top, idx, blk)?;
+            }
+            Path::Double { top, second, l1, l2 } => {
+                // A missing top block means a missing second-level one too;
+                // the second-level block is the last taken.
+                let top = if top == 0 { taken[1] } else { top };
+                node.block[13] = top;
+                let second = if second == 0 {
+                    self.write_indirect_ptr(top, l1, taken[missing])?;
+                    taken[missing]
+                } else {
+                    second
+                };
+                self.write_indirect_ptr(second, l2, blk)?;
+            }
         }
         Ok(blk)
     }
@@ -1569,7 +1624,12 @@ impl Fs {
             i_blocks: 0,
             block: [0; INODE_BLOCK_PTRS],
         };
-        self.write_file_data(&mut node, data)?;
+        if let Err(e) = self.write_file_data(&mut node, data) {
+            return Err(self.abandon(&node, None, e));
+        }
+        // The new blocks as written, for a give-back: `node` takes the old
+        // file's mode below, which could make it read as a fast symlink.
+        let fresh = node;
 
         match existing {
             Some((ino, _)) => {
@@ -1577,20 +1637,44 @@ impl Fs {
                 // identity: preserve the old owner and mode+links (creator_uid/
                 // gid apply only to a freshly created inode, the None arm).
                 // POSIX: writing a file never chowns it.
-                let old = self.read_inode(ino)?;
+                let old = match self.read_inode(ino) {
+                    Ok(old) => old,
+                    Err(e) => return Err(self.abandon(&fresh, None, e)),
+                };
                 node.mode = old.mode;
                 node.links = old.links;
                 node.uid = old.uid;
                 node.gid = old.gid;
-                self.write_inode(ino, &node)?;
+                if let Err(e) = self.write_inode(ino, &node) {
+                    return Err(self.abandon(&fresh, None, e));
+                }
                 self.free_all_blocks(&old)
             }
             None => {
-                let ino = self.alloc_inode(false)?;
-                self.write_inode(ino, &node)?;
-                self.insert_dirent(parent_ino, &mut parent, name, ino, FT_REG)
+                let ino = match self.alloc_inode(false) {
+                    Ok(ino) => ino,
+                    Err(e) => return Err(self.abandon(&fresh, None, e)),
+                };
+                let linked = self
+                    .write_inode(ino, &node)
+                    .and_then(|()| self.insert_dirent(parent_ino, &mut parent, name, ino, FT_REG));
+                linked.map_err(|e| self.abandon(&fresh, Some(ino), e))
             }
         }
+    }
+
+    /// Give back what a [`write_file`](Self::write_file) that cannot finish
+    /// took before its commit point: `node`'s blocks and, if it took one, its
+    /// inode, which no entry names yet. Returns the error that stopped it. A
+    /// give-back that fails on a disk error leaves that block or inode set, as
+    /// e2fsck would find; until 2026-10-21 every one was left set.
+    fn abandon(&mut self, node: &Inode, ino: Option<u32>, e: Error) -> Error {
+        let _ = self.free_all_blocks(node);
+        if let Some(ino) = ino {
+            let _ = self.free_inode(ino, false);
+            let _ = self.mark_inode_deleted(ino, node.mode);
+        }
+        e
     }
 
     /// Allocate and write every data block of `data` into `node` (block pointers
@@ -1626,28 +1710,40 @@ impl Fs {
         if offset > old_size && offset - old_size > MAX_GAP_FILL {
             return Err(Error::InvalidOffset);
         }
-        let bs = self.block_size as u64;
-        let write_start = old_size.min(offset);
-        let write_end = offset + data.len() as u64;
+        let mut pos = old_size.min(offset);
+        let written = self.write_span(&mut node, offset, data, &mut pos);
+        // A write that cannot finish keeps what it wrote, as Linux's does (a
+        // short write): the size covers every block it filled, so each is the
+        // file's and `rm` frees it. Returning before the inode, as until
+        // 2026-10-21, left them set in the bitmap and named by no inode.
+        node.size = old_size.max(pos) as u32;
+        self.write_inode(ino, &node)?;
+        written
+    }
 
+    /// [`write_at`](Self::write_at)'s loop: the bytes from `*pos` (the old
+    /// size, when the write starts past it, so the gap is zeroed) to the end
+    /// of `data` at `offset`, `*pos` left at the end of the last block piece
+    /// written.
+    fn write_span(&mut self, node: &mut Inode, offset: u64, data: &[u8], pos: &mut u64) -> Result<(), Error> {
+        let bs = self.block_size as u64;
+        let write_end = offset + data.len() as u64;
         let mut buf = [0u8; MAX_BLOCK_SIZE];
-        let mut pos = write_start;
-        while pos < write_end {
-            let logical = (pos / bs) as u32;
-            let in_block = (pos % bs) as usize;
-            let phys = self.ensure_block(&mut node, logical)?;
-            let n = (bs as usize - in_block).min((write_end - pos) as usize);
+        while *pos < write_end {
+            let at = *pos;
+            let logical = (at / bs) as u32;
+            let in_block = (at % bs) as usize;
+            let phys = self.ensure_block(node, logical)?;
+            let n = (bs as usize - in_block).min((write_end - at) as usize);
             self.read_block(phys, &mut buf[..bs as usize])?;
             for i in 0..n {
-                let fp = pos + i as u64;
+                let fp = at + i as u64;
                 buf[in_block + i] = if fp >= offset { data[(fp - offset) as usize] } else { 0 };
             }
             self.write_block(phys, &buf[..bs as usize])?;
-            pos += n as u64;
+            *pos = at + n as u64;
         }
-
-        node.size = old_size.max(write_end) as u32;
-        self.write_inode(ino, &node)
+        Ok(())
     }
 
     // ---- write infrastructure (Stage C: directories) ------------------------
