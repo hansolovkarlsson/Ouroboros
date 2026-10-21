@@ -76,8 +76,17 @@ def vendor_entry(k):
     return bytes(e)
 
 
-def long_set():
+# A FAT timestamp, 2024-01-02 03:04:06, which a rename must keep.
+STAMP = ((2024 - 1980) << 25) | (1 << 21) | (2 << 16) | (3 << 11) | (4 << 5) | 3
+LONG_NAME = "VendorRenamedLong"  # 17 characters: two name entries
+
+
+def long_set(stamped=False):
     s = bytearray(entry_set("VEND"))
+    if stamped:
+        struct.pack_into("<H", s, 4, 0x20)  # FileAttributes: archive
+        struct.pack_into("<III", s, 8, STAMP, STAMP + 1, STAMP + 2)  # create, modify, access
+        s[20:22] = bytes([7, 9])  # their 10 ms parts
     s += b"".join(vendor_entry(k) for k in range(VENDOR))
     s[1] = len(s) // 32 - 1  # SecondaryCount
     struct.pack_into("<H", s, 2, set_checksum(s))
@@ -239,9 +248,63 @@ def run_shape():
     ], []
 
 
+def run_rename():
+    """/VEND's 20-entry set, its File entry stamped, renamed to a name of two
+    entries and back to one: the vendor entries move right and then left."""
+    start = copy()
+    vol = Volume(IMAGE, start)
+    d = bytearray(vol.data(vol.chain(vol.root)))
+    end = root_end(d)
+    s = long_set(stamped=True)
+    if end + len(s) + 32 > len(d):
+        return [("rename: room for /VEND's set in the root", False)], []
+    d[end:end + len(s)] = s
+    write_root(vol, d)
+    vol = Volume(IMAGE, start)
+    hit = exfatimg.find(vol.data(vol.chain(vol.root)), "VEND")
+    ok, lines = fsck()
+    checks = [
+        ("rename: /VEND's stamped set reads back, 20 entries, its checksum whole",
+         hit is not None and hit.count == 20 and hit.data == s and s[4] == 0x20
+         and struct.unpack_from("<H", s, 2)[0] == set_checksum(s)),
+        ("rename: fsck_exfat -n passes the image before the boot", ok),
+    ]
+    notes = [f"rename before: {ln}" for ln in lines] if not ok else []
+    if not all(c for _, c in checks):
+        return checks, notes
+    cmds = [f"mv /VEND /{LONG_NAME}", "ls /", f"mv /{LONG_NAME} /V2", "ls /"]
+    driven, out, faults = boot("rename", cmds)
+    listings = [blk.split("# ", 1)[0].split() for blk in out.split("# ls /")[1:3]]
+    vol = Volume(IMAGE, start)
+    root = vol.data(vol.chain(vol.root))
+    hit = exfatimg.find(root, "V2")
+    got = hit.data if hit else b""
+    ok, lines = fsck()
+    checks += [
+        ("rename: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
+        (f"rename: ls / lists {LONG_NAME} and not VEND, then V2 and neither ({listings})",
+         len(listings) == 2 and LONG_NAME in listings[0] and "VEND" not in listings[0]
+         and "V2" in listings[1] and LONG_NAME not in listings[1]),
+        ("rename: no set named VEND or the long name is left",
+         exfatimg.find(root, "VEND") is None and exfatimg.find(root, LONG_NAME) is None),
+        ("rename: /V2's set is 20 entries, File, Stream, a name, 17 vendor entries",
+         hit is not None and hit.count == 20 and got[0] == 0x85 and got[32] == 0xC0
+         and got[64] == 0xC1 and all(got[32 * k] == 0xE0 for k in range(3, 20))),
+        ("rename: its vendor entries byte for byte as planted", got[96:] == s[96:]),
+        ("rename: its File entry's attributes and times as planted", got[4:32] == s[4:32]),
+        ("rename: its SetChecksum is the sum of all 20 entries",
+         hit is not None and struct.unpack_from("<H", got, 2)[0] == set_checksum(got)),
+        ("rename: fsck_exfat -n passes the image after the boot", ok),
+        ("rename: no fault lines", faults == 0),
+    ]
+    if not ok:
+        notes += [f"rename after: {ln}" for ln in lines]
+    return checks, notes
+
+
 def main():
     checks, notes = [], []
-    for run in (run_long, run_shape):
+    for run in (run_long, run_shape, run_rename):
         try:
             c, n = run()
         finally:

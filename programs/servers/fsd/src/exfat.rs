@@ -108,6 +108,9 @@ const NAME_CHARS_PER_ENTRY: usize = 15;
 const MAX_SET_ENTRIES: usize = 2 + LONG_NAME_MAX.div_ceil(NAME_CHARS_PER_ENTRY);
 /// Byte size of that largest set (the fixed buffer `build_entry_set` fills).
 const MAX_SET_BYTES: usize = MAX_SET_ENTRIES * ENTRY_SIZE;
+/// Most entries in any set the spec allows: a File entry and up to 255
+/// secondaries (SecondaryCount is a byte), vendor ones after the name.
+const WHOLE_SET_ENTRIES: usize = 1 + 255;
 /// Directory-entry slots per 512-byte sector.
 const SLOTS_PER_SECTOR: usize = SECTOR_SIZE / ENTRY_SIZE;
 
@@ -1534,7 +1537,7 @@ impl Fs {
     fn create_entry(
         &mut self,
         dir: &mut Dir,
-        mut room: Room,
+        room: Room,
         name: &str,
         is_dir: bool,
         first_cluster: u32,
@@ -1546,10 +1549,72 @@ impl Fs {
         let entries = build_entry_set(name, is_dir, first_cluster, data_len, data_contiguous, &mut set)
             .ok_or(Error::InvalidName)
             .map_err(unwritten)?;
-        let total_bytes = entries * ENTRY_SIZE;
-        let start = self.find_free_run(&mut dir.entry, &mut room, entries).map_err(unwritten)?;
-        self.write_set_at(dir.entry.first_cluster, dir.entry.contiguous, start, &set[..total_bytes])
+        self.insert_set(dir, room, &set[..entries * ENTRY_SIZE])
+    }
+
+    /// Insert a built entry set into a directory: [`create_entry`](Self::create_entry)'s tail,
+    /// and a rename's, whose set is [`renamed_set`](Self::renamed_set).
+    fn insert_set(&mut self, dir: &mut Dir, mut room: Room, set: &[u8]) -> Result<(), CreateFailed> {
+        let start = self
+            .find_free_run(&mut dir.entry, &mut room, set.len() / ENTRY_SIZE)
+            .map_err(|error| CreateFailed { error, written: false })?;
+        self.write_set_at(dir.entry.first_cluster, dir.entry.contiguous, start, set)
             .map_err(|error| CreateFailed { error, written: true })
+    }
+
+    /// The set a rename writes for `entry`, whose set lies at `at`, under
+    /// `name`, into `buf`; returns its entry count. The File entry and every
+    /// secondary past the name are the old set's, as the disk holds them:
+    /// its attributes and times, and vendor extension (0xE0) and vendor
+    /// allocation (0xE1) entries a camera wrote, which a rename built afresh
+    /// dropped until 2026-10-21, leaking a vendor allocation's clusters. The
+    /// Stream and name entries are built as for a create, from `entry`, so a
+    /// size-0 entry still names no cluster. A name that would take the set
+    /// past 255 secondaries is refused.
+    fn renamed_set(
+        &mut self,
+        at: SetAt,
+        entry: &DirEntry,
+        name: &str,
+        buf: &mut [u8; WHOLE_SET_ENTRIES * ENTRY_SIZE],
+    ) -> Result<usize, Error> {
+        let mut built = [0u8; MAX_SET_BYTES];
+        let made = build_entry_set(name, entry.is_dir, entry.first_cluster, entry.size, entry.contiguous, &mut built)
+            .ok_or(Error::InvalidName)?;
+        if at.len < 2 || at.len > WHOLE_SET_ENTRIES {
+            return Err(Error::Io(DiskError::Io));
+        }
+        let mut cur = SlotCursor::new(at.dir_cluster, at.dir_contiguous);
+        let mut sec = [0u8; SECTOR_SIZE];
+        let mut sec_lba = None;
+        for i in 0..at.len {
+            let (lba, off) = self.slot_at(&mut cur, at.slot + i)?.ok_or(Error::NotFound)?;
+            if sec_lba != Some(lba) {
+                self.disk.read_sector(lba, &mut sec)?;
+                sec_lba = Some(lba);
+            }
+            buf[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE].copy_from_slice(&sec[off..off + ENTRY_SIZE]);
+        }
+        // `walk_dir` closes a set only in the spec's shape: File, Stream, the
+        // name, then any other secondaries. A check that the slots still hold
+        // it, as in patch_stream_ext.
+        if buf[0] != ET_FILE || buf[ENTRY_SIZE] != ET_STREAM_EXT {
+            return Err(Error::Io(DiskError::Io));
+        }
+        let old_names = (2..at.len).take_while(|&i| buf[i * ENTRY_SIZE] == ET_FILE_NAME).count();
+        let rest = at.len - 2 - old_names;
+        let total = made + rest;
+        if total > WHOLE_SET_ENTRIES {
+            return Err(Error::InvalidName);
+        }
+        // The rest moved to follow the new name, then Stream and name over
+        // what was there; the File entry's bytes past its checksum stay.
+        buf.copy_within((2 + old_names) * ENTRY_SIZE..at.len * ENTRY_SIZE, made * ENTRY_SIZE);
+        buf[ENTRY_SIZE..made * ENTRY_SIZE].copy_from_slice(&built[ENTRY_SIZE..made * ENTRY_SIZE]);
+        buf[1] = (total - 1) as u8; // SecondaryCount
+        let sum = set_checksum(&buf[..total * ENTRY_SIZE]);
+        buf[2..4].copy_from_slice(&sum.to_le_bytes());
+        Ok(total)
     }
 
     /// Resolve a path's *parent* to a mountable directory entry, checking it's a
@@ -2005,7 +2070,9 @@ impl Fs {
 
     /// Rename or move a file/directory. Re-points a new entry set at `src`'s
     /// existing clusters (no data copy), preserving its `NoFatChain` layout,
-    /// then deletes `src`'s set - write-new-before-delete-old ordering. exFAT
+    /// then deletes `src`'s set - write-new-before-delete-old ordering. The
+    /// new set keeps the old one's File entry and the secondaries past its
+    /// name ([`renamed_set`](Self::renamed_set)). exFAT
     /// has no `..` entry, so a moved directory needs no fixup (unlike FAT32's
     /// `mv`).
     ///
@@ -2064,16 +2131,10 @@ impl Fs {
             // there. Slot indices are stable across a create - `create_entry`
             // fills a free run and moves nothing - so the recorded `dst_at`
             // still addresses the old set afterwards.
+            let mut set = [0u8; WHOLE_SET_ENTRIES * ENTRY_SIZE];
+            let entries = self.renamed_set(src_at, &src_entry, dst_name, &mut set)?;
             let room = self.room(&dst_dir)?;
-            self.create_entry(
-                &mut dst_dir,
-                room,
-                dst_name,
-                src_entry.is_dir,
-                src_entry.first_cluster,
-                src_entry.size,
-                src_entry.contiguous,
-            )?;
+            self.insert_set(&mut dst_dir, room, &set[..entries * ENTRY_SIZE])?;
             self.delete_set(dst_at)?;
             if !same_set {
                 self.delete_set(src_at)?;
@@ -2088,16 +2149,10 @@ impl Fs {
         }
 
         // Link dst to the same clusters first, then unlink src.
+        let mut set = [0u8; WHOLE_SET_ENTRIES * ENTRY_SIZE];
+        let entries = self.renamed_set(src_at, &src_entry, dst_name, &mut set)?;
         let room = self.room(&dst_dir)?;
-        self.create_entry(
-            &mut dst_dir,
-            room,
-            dst_name,
-            src_entry.is_dir,
-            src_entry.first_cluster,
-            src_entry.size,
-            src_entry.contiguous,
-        )?;
+        self.insert_set(&mut dst_dir, room, &set[..entries * ENTRY_SIZE])?;
         self.delete_set(src_at)
     }
 }
