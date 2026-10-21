@@ -132,7 +132,7 @@ TABLE_FILL = b"\x5a"
 FILES_A = {"RD": b"R" * 2048, "WR": b"W" * 1100, "IND": b"I" * 12 * 1024, "SRC": b"S" * 100,
            "GHOST": b"G" * 10, "RMI": b"M" * 13 * 1024, "OWI": b"O" * 13 * 1024, "DUP": b"D" * 2048, "Z": b"Z" * 1024,
            "BIGD": b"B" * 270 * 1024, "META": b"T" * 2048, "MI": b"N" * 13 * 1024,
-           "GD": b"Q" * 1024}
+           "GD": b"Q" * 1024, "MG": b"K" * 13 * 1024}
 FILES_C = {"F": b"F" * 1024, "G": b"g" * 1024, "H": b"h" * 10}
 COMMANDS = [
     "mount 1 /mnt/a", "mount 2 /mnt/c", "mount 3 /mnt/b",
@@ -154,6 +154,7 @@ COMMANDS = [
     "rm /mnt/a/META",
     "rm /mnt/a/MI",
     "rm /mnt/a/GD",
+    "rm /mnt/a/MG",
     "ls /mnt/c",
     "echo x > /mnt/b/NEW",
     "touch /mnt/b/NEW2",
@@ -348,11 +349,23 @@ def build():
         table = va.u32(va.desc(0) + 8)
         itb = -(-(va.ipg * va.isz) // va.bs)
         t, t2, t3 = table + itb - 1, table + itb - 2, table + itb - 3
+        # R and R2: the last two of the descriptor blocks resize_inode
+        # reserves, below meta_end. R's bit cleared, as T's, before T's in the
+        # bitmap: the allocation passes over both. MG's indirect pointer
+        # names R2, which holds SRC's block number in every word.
+        reserved = struct.unpack("<H", va.read(1024 + 206, 2))[0] if va.u32(1024 + 92) & 0x10 else 0
+        meta_end = va.fdb + 1 + -(-(-(-va.ic // va.ipg) * 32) // va.bs) + reserved
+        r, r2 = meta_end - 1, meta_end - 2
+        delta_before = free_delta(va)
         va.write(t * va.bs, TABLE_FILL * va.bs)
-        va.set_bitmap(0, with_bits(va.bitmap(0), t - va.fdb, t - va.fdb + 1, 0))
-        va.set_u32(1024 + 12, va.u32(1024 + 12) + 1)
-        g0_free = struct.unpack("<H", va.read(va.desc(0) + 12, 2))[0]
-        va.write(va.desc(0) + 12, struct.pack("<H", g0_free + 1))
+        # The bits cleared alone, the free counts as they were: damage to the
+        # bitmap, which an allocation passing over sets again and counts
+        # nothing for (Linux's ext2_new_blocks).
+        for blk in (r, t):
+            va.set_bitmap(0, with_bits(va.bitmap(0), blk - va.fdb, blk - va.fdb + 1, 0))
+        va.write(r2 * va.bs, struct.pack("<I", va.ptr(ino["SRC"], 0)) * (va.bs // 4))
+        mg_direct = [va.ptr(ino["MG"], k) for k in range(12)]
+        va.set_ptr(ino["MG"], 12, r2)
         va.set_ptr(ino["META"], 1, t2)
         va.write(t3 * va.bs, struct.pack("<I", va.ptr(ino["SRC"], 0)) * (va.bs // 4))
         mi_direct = [va.ptr(ino["MI"], k) for k in range(12)]
@@ -362,7 +375,8 @@ def build():
         # group's bitmaps: rm must leave it allocated.
         gd_own = va.ptr(ino["GD"], 0)
         va.set_ptr(ino["GD"], 0, va.fdb + 1)
-        plan.update(t=t, t2=t2, t3=t3, meta0=va.ptr(ino["META"], 0), mi_direct=mi_direct)
+        plan.update(t=t, t2=t2, t3=t3, r=r, r2=r2, meta0=va.ptr(ino["META"], 0), mi_direct=mi_direct,
+                    mg_direct=mg_direct)
         # A: GHOST names SRC's inode one group on, whose descriptor is group 0's.
         ghost = va.ipg + ino["SRC"]
         va.set_u32(ents["GHOST"][1], ghost)
@@ -420,9 +434,14 @@ def build():
             ("plant: T, T2 and T3 are the last blocks of A's group 0 inode table, past every inode in use",
              not any(bit(va.bitmap(4), n) for n in range(first_table_ino - 1, va.ipg))
              and t3 >= table and t < table + itb),
-            ("plant: T's bit is clear, its bytes the pattern, and A's free counts still match its bitmap",
-             not bit(va.bitmap(0), t - va.fdb) and va.read(t * va.bs, va.bs) == TABLE_FILL * va.bs
-             and free_delta(va) == plan["a_free_delta"]),
+            ("plant: T's and R's bits are clear, the free counts as they were, T's bytes the pattern",
+             not bit(va.bitmap(0), t - va.fdb) and not bit(va.bitmap(0), r - va.fdb)
+             and va.read(t * va.bs, va.bs) == TABLE_FILL * va.bs
+             and free_delta(va) == tuple(d - 2 for d in delta_before)),
+            (f"plant: A reserves descriptor blocks ({reserved}), R and R2 the last two, below its first bitmap; "
+             "MG's indirect pointer names R2, which names SRC's block",
+             reserved >= 2 and r < va.u32(va.desc(0)) and va.ptr(ino["MG"], 12) == r2
+             and va.u32(r2 * va.bs) == va.ptr(ino["SRC"], 0) and all(mg_direct)),
             ("plant: GD's pointer names the descriptor table's block, set in A's bitmap",
              va.ptr(ino["GD"], 0) == va.fdb + 1 and bit(va.bitmap(0), 1) and gd_own != 0),
             ("plant: META's second pointer names T2, and MI's indirect pointer T3, which names SRC's block",
@@ -522,13 +541,16 @@ def verdicts(plan, driven, out, faults):
         # OWI's new block. Their own indirect blocks are no file's now.
         want_bitmap = plan["a_bitmap"]
         for blk in ([plan["rd_block0"], plan["dup"][0], plan["z_block"], plan["meta0"]] + plan["direct"]["RMI"]
-                    + plan["direct"]["OWI"] + plan["bigd"] + plan["mi_direct"]):
+                    + plan["direct"]["OWI"] + plan["bigd"] + plan["mi_direct"]
+                    + plan["mg_direct"]):
             want_bitmap = with_bits(want_bitmap, blk - va.fdb, blk - va.fdb + 1, 0)
-        # T, planted free, set again by the allocation that passes over it.
-        want_bitmap = with_bits(want_bitmap, plan["t"] - va.fdb, plan["t"] - va.fdb + 1, 1)
+        # T and R, planted free, set again by the allocation that passes over them.
+        for blk in (plan["t"], plan["r"]):
+            want_bitmap = with_bits(want_bitmap, blk - va.fdb, blk - va.fdb + 1, 1)
         t_bytes = va.read(plan["t"] * va.bs, va.bs)
         t2_bit, t3_bit = (bit(va.bitmap(0), plan[k] - va.fdb) for k in ("t2", "t3"))
         gdt_bit = bit(va.bitmap(0), 1)
+        r2_bit = bit(va.bitmap(0), plan["r2"] - va.fdb)
         # The overwrite may give OWI a new inode: read it by its entry.
         owi = ents["OWI"][0] if "OWI" in ents else 0
         owi_new = va.ptr(owi, 0) if owi else 0
@@ -578,9 +600,10 @@ def verdicts(plan, driven, out, faults):
         ("A's block bitmap as before but RD's, DUP's, Z's, META's first, RMI's, OWI's and MI's direct and BIGD's every "
          "block freed, OWI's new one taken and T's set again",
          a_bitmap == want_bitmap),
-        (f"OWI's new block is not T, the inode-table block A's bitmap held free, and T holds its pattern still "
-         f"(OWI's block {owi_new}, T {plan['t']})",
-         owi_new not in (0, plan["t"]) and t_bytes == TABLE_FILL * va.bs),
+        (f"OWI's new block is neither T, the inode-table block A's bitmap held free, nor R, the reserved "
+         f"descriptor block it held free, and T holds its pattern still (OWI's block {owi_new}, T {plan['t']}, "
+         f"R {plan['r']})",
+         owi_new not in (0, plan["t"], plan["r"]) and t_bytes == TABLE_FILL * va.bs),
         (f"rm of META, its second pointer naming an inode-table block, succeeds and leaves that block allocated "
          f"(got {o.get('rm /mnt/a/META')!r})",
          o.get("rm /mnt/a/META") == "" and "META" not in ents and t2_bit == 1),
@@ -590,6 +613,9 @@ def verdicts(plan, driven, out, faults):
         (f"rm of GD, its pointer naming the descriptor table's block, succeeds and leaves that block allocated "
          f"(got {o.get('rm /mnt/a/GD')!r})",
          o.get("rm /mnt/a/GD") == "" and "GD" not in ents and gdt_bit == 1),
+        (f"rm of MG, its indirect pointer naming a reserved descriptor block holding SRC's block number, "
+         f"succeeds and frees neither (got {o.get('rm /mnt/a/MG')!r})",
+         o.get("rm /mnt/a/MG") == "" and "MG" not in ents and r2_bit == 1 and src_bit == 1),
         (f"rm of DUP, its second block already free, succeeds (got {o.get('rm /mnt/a/DUP')!r})",
          o.get("rm /mnt/a/DUP") == "" and "DUP" not in ents),
         (f"rm of L succeeds and SRC's block is still allocated (got {o.get('rm /mnt/a/L')!r})",
@@ -600,8 +626,11 @@ def verdicts(plan, driven, out, faults):
          o.get("rm /mnt/a/BIGD") == "" and "BIGD" not in ents),
         (f"rm of GHOST, its inode past the count, drops the entry (got {o.get('rm /mnt/a/GHOST')!r})",
          o.get("rm /mnt/a/GHOST") == "" and "GHOST" not in ents),
-        (f"A's free counts still match its bitmap ({a_free_delta} vs {plan['a_free_delta']} past it)",
-         a_free_delta == plan["a_free_delta"]),
+        # T's and R's bits were cleared with the counts left: set again with
+        # nothing counted, the counts are back level with the bitmap.
+        (f"A's free counts match its bitmap as before T's and R's bits were cleared "
+         f"({a_free_delta} vs {plan['a_free_delta']} with them clear)",
+         a_free_delta == tuple(d + 2 for d in plan["a_free_delta"])),
         (f"ls /mnt/c lists F, G and H, H's inode past the count (got {o.get('ls /mnt/c')!r})",
          set(FILES_C) <= set((o.get("ls /mnt/c") or "").split())),
         (f"B's write answers disk full (got {o.get('echo x > /mnt/b/NEW')!r})",

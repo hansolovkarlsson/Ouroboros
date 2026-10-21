@@ -192,6 +192,13 @@ impl Volume {
     }
 }
 
+/// A group descriptor's block bitmap, inode bitmap and inode table, from
+/// the sector `sec` holding it at byte `w`: the one decoding of the layout.
+fn desc_fields(sec: &[u8; SECTOR_SIZE], w: usize) -> (u32, u32, u32) {
+    let field = |o: usize| u32::from_le_bytes([sec[w + o], sec[w + o + 1], sec[w + o + 2], sec[w + o + 3]]);
+    (field(0), field(4), field(8))
+}
+
 pub struct Fs {
     vol: Volume,
     /// Block size in bytes (1024 << s_log_block_size).
@@ -367,15 +374,18 @@ impl Fs {
     }
 
     /// Each group's block bitmap, inode bitmap and whole inode table inside
-    /// that group's blocks, or [`Error::NotExt2`]: Linux's
-    /// `ext2_check_descriptors`, which fails the mount the same way. Past
+    /// that group's blocks: Linux's `ext2_check_descriptors`, which fails the
+    /// mount the same way. Refused as [`Error::Io`], the damage a fsck
+    /// repairs, as the rest of this arm answers it, not [`Error::NotExt2`]:
+    /// the superblock is a valid ext2's, and "no filesystem here" would let
+    /// `format` take a root that e2fsck could repair (the high review of the
+    /// metadata bound). Past
     /// Linux, each lies past [`meta_end`](Self::meta_end) and none overlaps
     /// another: Linux's range lets group 0's table start at its first block,
     /// the superblock's on 1 KiB blocks, and a damaged `bg_inode_table` of 1
     /// put new inodes over the superblock, a bitmap pointer the same through
     /// `bitmap_alloc` (since 2026-10-21). Backup superblocks in later groups
-    /// are not checked against. Read a sector of descriptors at a time; a
-    /// read that fails is an I/O error, not "no ext2".
+    /// are not checked against. Read a sector of descriptors at a time.
     fn check_descriptors(&mut self) -> Result<(), Error> {
         let mut sec = [0u8; SECTOR_SIZE];
         for group in 0..self.groups_count {
@@ -384,11 +394,11 @@ impl Fs {
             if group == 0 || w == 0 {
                 self.vol.read(at / SECTOR_SIZE as u64, &mut sec)?;
             }
-            let field = |o: usize| u32::from_le_bytes([sec[w + o], sec[w + o + 1], sec[w + o + 2], sec[w + o + 3]]) as u64;
+            let (bb, ib, table) = desc_fields(&sec, w);
+            let (bb, ib, table) = (bb as u64, ib as u64, table as u64);
             let (first, last) = self.group_blocks(group);
             let first = first.max(self.meta_end as u64);
             let inside = |b: u64| (first..=last).contains(&b);
-            let (bb, ib, table) = (field(0), field(4), field(8));
             let in_table = |b: u64| (table..table + self.itb_per_group as u64).contains(&b);
             if !inside(bb)
                 || !inside(ib)
@@ -398,7 +408,7 @@ impl Fs {
                 || in_table(bb)
                 || in_table(ib)
             {
-                return Err(Error::NotExt2);
+                return Err(Error::Io(DiskError::Io));
             }
         }
         Ok(())
@@ -420,8 +430,7 @@ impl Fs {
         let w = (at % SECTOR_SIZE as u64) as usize;
         let mut sec = [0u8; SECTOR_SIZE];
         self.vol.read(at / SECTOR_SIZE as u64, &mut sec)?;
-        let field = |o: usize| u32::from_le_bytes([sec[w + o], sec[w + o + 1], sec[w + o + 2], sec[w + o + 3]]);
-        Ok((field(0), field(4), field(8)))
+        Ok(desc_fields(&sec, w))
     }
 
     /// Whether block `block` is no file's to hold: below
@@ -725,7 +734,7 @@ impl Fs {
     fn inode_sector(&mut self, ino: u32) -> Result<(u64, usize), Error> {
         let (group, index) = self.inode_place(ino)?;
         // bg_inode_table is at offset 8 within the 32-byte descriptor.
-        let inode_table = self.read_u32_at(self.desc_byte(group) + 8)?;
+        let (_, _, inode_table) = self.descriptor(group)?;
         let inode_byte =
             inode_table as u64 * self.block_size as u64 + index as u64 * self.inode_size as u64;
         Ok((inode_byte / SECTOR_SIZE as u64, (inode_byte % SECTOR_SIZE as u64) as usize))
@@ -1135,7 +1144,9 @@ impl Fs {
     /// raised them past the bitmap. A bitmap past the volume is not read and
     /// frees nothing, since its file is already unlinked
     /// ([`free_all_blocks`](Self::free_all_blocks)); both from the second
-    /// review of #331.
+    /// review of #331. Since 2026-10-21 mount refuses a bitmap outside its
+    /// group ([`check_descriptors`](Self::check_descriptors)), so no rig
+    /// reaches the bound; it stays as the free path's own backstop.
     fn bitmap_free(&mut self, bitmap_block: u32, bit: u32) -> Result<bool, Error> {
         if !self.in_volume(bitmap_block) {
             return Ok(false);
@@ -1168,15 +1179,16 @@ impl Fs {
                 .min(self.blocks_per_group);
             while let Some(bit) = self.bitmap_alloc(bmp, blocks)? {
                 let block = self.first_data_block + group * self.blocks_per_group + bit;
-                self.adjust_group_u16(group, 12, -1)?; // bg_free_blocks_count
-                self.adjust_super_u32(12, -1)?; // s_free_blocks_count
-                // A damaged bitmap marking metadata free: its bit stays set,
-                // counted as used, and the scan goes on, as Linux's
-                // ext2_new_blocks retries ("Allocating block in system zone").
+                // A damaged bitmap marking metadata free: its bit stays set
+                // and the scan goes on, the free counts untouched, as Linux's
+                // ext2_new_blocks retries before it adjusts them ("Allocating
+                // block in system zone"): a count already at 0 must not wrap.
                 // Each pass sets a bit, so it ends.
                 if block < self.meta_end || self.in_zone(desc, block) {
                     continue;
                 }
+                self.adjust_group_u16(group, 12, -1)?; // bg_free_blocks_count
+                self.adjust_super_u32(12, -1)?; // s_free_blocks_count
                 if zero {
                     self.zero_block(block)?;
                 }
@@ -1224,7 +1236,7 @@ impl Fs {
     /// for a directory bump `bg_used_dirs_count`. Returns the inode number.
     fn alloc_inode(&mut self, is_dir: bool) -> Result<u32, Error> {
         for group in 0..self.groups_count {
-            let bmp = self.read_u32_at(self.desc_byte(group) + 4)?;
+            let (_, bmp, _) = self.descriptor(group)?;
             let inodes = self
                 .inodes_count
                 .saturating_sub(group * self.inodes_per_group)
@@ -1247,7 +1259,7 @@ impl Fs {
     #[allow(dead_code)] // Stage C (rm/rmdir)
     fn free_inode(&mut self, ino: u32, is_dir: bool) -> Result<(), Error> {
         let (group, bit) = self.inode_place(ino)?;
-        let bmp = self.read_u32_at(self.desc_byte(group) + 4)?;
+        let (_, bmp, _) = self.descriptor(group)?;
         if self.bitmap_free(bmp, bit)? {
             self.adjust_group_u16(group, 14, 1)?;
             self.adjust_super_u32(16, 1)?;

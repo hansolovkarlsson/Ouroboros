@@ -66,7 +66,9 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
   descriptor puts its inode table past the group's last block, its block
   bitmap on the descriptor table's own block (inside the group, which
   Linux's ext2_check_descriptors accepts), or its inode bitmap on its block
-  bitmap (H). All refused.
+  bitmap (H), these three refused as damage, `mount` answering device I/O
+  error, so that `format` does not take a repairable ext2 for no
+  filesystem. All refused.
 - BESIDE: the FAT32 cut short in a table entry of size 0, the next
   partition inside its volume (refused: the bound stops at the next
   partition), and the exFAT whole with its bitmap moved to the cluster past
@@ -114,6 +116,10 @@ EXT2 = os.path.join(BUILD, "espext2.img")
 DISK = os.path.join(BUILD, "test-volume-bound.img")
 EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M)
 NO_FS = "mount: no such partition, no filesystem on it, or `/` not mounted yet (`mount -a` first)"
+# A damaged ext2 descriptor is damage a fsck repairs, refused as an I/O
+# error so that `format` does not take the volume for an empty one.
+IO = "mount: device I/O error"
+ANSWER = {f"the ext2-desc{k} case": IO for k in ("group", "meta", "overlap")}
 # The line fsd prints before a refusal, for the cases that have one.
 SAYS = {
     "the fat32-extflags case":
@@ -211,6 +217,8 @@ def broken(vol, bound):
     # and reserved descriptor blocks (meta_end), and none overlapping another.
     reserved = u("<H", 1024 + 206) if u("<I", 1024 + 92) & 0x10 else 0
     meta_end = fdb + 1 + -(-(groups * 32) // bs) + reserved
+    if meta_end > bc:
+        return {"ext2-metaend"}
     itb = -(-(ipg * isz) // bs)
     for g in range(groups):
         d = (fdb + 1) * bs + g * 32
@@ -544,7 +552,7 @@ def checks_of(name):
                 checks.append((f"mount {n}, {what}, mounts and lists (got {got!r}, ls {listing[:4]})",
                                got == "" and "etc/" in listing))
             else:
-                checks.append((f"mount {n}, {what}, refused (got {got!r})", got == SAYS.get(what, "") + NO_FS))
+                checks.append((f"mount {n}, {what}, refused (got {got!r})", got == SAYS.get(what, "") + ANSWER.get(what, NO_FS)))
         checks.append(("ls / still lists the root", "etc/" in (o["ls /"] or "").split()))
     checks.append(("no fault lines", faults == 0))
     return [(f"{name}: {label}", ok) for label, ok in checks]
