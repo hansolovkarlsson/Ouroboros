@@ -17,12 +17,16 @@ counts rise only for a bit actually cleared; an inode holding no blocks (a
 fast symlink, its target's text in its pointers, told by its type and
 length, not by i_blocks) frees none, and an entry
 naming an inode past the count can be removed (the reviews of #331).
+Since 2026-10-21 no block of the volume's own metadata is freed or
+allocated: below `meta_end` (the superblock, the descriptor table and its
+reserved blocks) or a group's bitmaps or inode table, Linux's "system zone";
+nor is a pointer block there read as pointers.
 
 The firmware boots esp.img from NVMe, so the virtio disk the rig builds goes
 in as the fallback: build/espext2.img's ext2 root as partition 0 (it mounts
 at boot), three 4 MiB ext2 volumes made by mke2fs with 1 KiB blocks, A, C and
 B, as partitions 1 to 3, and after B, unpartitioned, a WITNESS of 0xA5 bytes
-with three zeroed blocks, which nothing may change. The host plants:
+with a zeroed block, which nothing may change. The host plants:
 
 - on A, RD (two blocks), its second pointer into the witness: `cat` must
   stop at an I/O error, not read the witness's bytes; WR (1,100 bytes), its
@@ -45,11 +49,20 @@ with three zeroed blocks, which nothing may change. The host plants:
   holding `x` CR LF, each with no error; and DUP (two blocks), its second
   pointer naming a block already free: `rm` must succeed, and A's free
   counts must still match its bitmap after every case;
+- on A too, since 2026-10-21, the last three blocks of group 0's inode
+  table, past every inode in use: T, its bit cleared and the free counts
+  raised to match, filled with 0x5A, where the next allocation (OWI's new
+  block) must pass over it, setting its bit, and leave its bytes; META, its
+  second pointer naming T2: `rm` must leave T2 allocated; MI (thirteen
+  blocks), its indirect pointer naming T3, every word of which names SRC's
+  block: `rm` must free neither; and GD, its pointer naming the descriptor
+  table's block: `rm` must leave it allocated;
 - on C, made without the filetype feature (a listing reads each entry's
-  inode), group 0's block and inode bitmaps pointed at zeroed witness
-  blocks and H's entry naming an inode past the count: `ls` must list F, G
-  and H, an append to G (one full block) must be refused, where it set a
-  bit there, and `rm F` must succeed and change no free count;
+  inode), H's entry naming an inode past the count: `ls` must list F, G and
+  H. Until 2026-10-21 C's bitmaps were planted in the witness as well; a
+  descriptor outside its group is refused at mount now (test-volume-bound's
+  SHAPES-H), so bitmap_free's and the allocator's bounds past the volume
+  sit behind that refusal and no rig reaches them;
 - on B, every block of the volume marked used and the last group's padding
   bits clear, so the next free bit is the block just past the volume (the
   witness's first): `echo x > NEW` must answer disk full; and the inode count
@@ -59,27 +72,29 @@ with three zeroed blocks, which nothing may change. The host plants:
 
 Before the boot the host reads back every plant and checks it lands where
 this says (the observer's own checks). Fails with Volume's bound taken out
-(RD reads 2,048 bytes, WR's and IND's appends and G's write the witness,
-and G's block, bit 0 of the witness's zeroed "bitmap", is C's superblock,
-which it zeroes),
+(RD reads 2,048 bytes, WR's and IND's appends write the witness),
 with the inode-number bound out (GHOST reads SRC), with the allocator's
 block cap out (B's write an I/O error, not disk full: Volume refuses the
 block the allocator handed out), with its inode cap out (NEW2 an I/O error,
 its bit set past the count), with free_block freeing a block past the volume
 (a bit of A's bitmap cleared, through the second group's descriptor), with
 free_pointed reading a pointer block past the volume (RMI's rm and OWI's
-overwrite an I/O error), with bitmap_free reading a bitmap past the volume
-(F's rm an I/O error), with the free counts raised for a bit already clear
+overwrite an I/O error), with the free counts raised for a bit already clear
 (A's counts one past its bitmap), with the listing reading an inode past
 the count (`ls /mnt/c` an I/O error), with the fast-symlink test taken out
 (SRC's block freed by `rm L`) or made by i_blocks (that, and Z's block
 kept), with the pointer walk's span a block a pointer at every depth (BIGD's
 last data block kept), with rm reading GHOST's inode (an I/O
-error) and with the deletion time left out of a freed inode. One boot, about a minute, needs
+error), with the deletion time left out of a freed inode, with the
+allocator taking a metadata block (OWI's new block is T, its pattern
+overwritten), with free_block freeing a group's bitmap or table block
+(META's T2 and MI's T3 freed) or one below meta_end (GD's descriptor-table
+block freed), and with free_pointed reading a metadata block as pointers
+(SRC's block freed through T3). One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
-free_all_blocks, free_pointed, pointer_sector, ensure_block, list_dir, rm or
-write_inode changes.
+free_all_blocks, free_pointed, pointer_sector, ensure_block, list_dir, rm,
+write_inode, is_metadata, in_zone or meta_end changes.
 """
 import importlib.util
 import os

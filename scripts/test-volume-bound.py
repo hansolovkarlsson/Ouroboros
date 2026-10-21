@@ -18,7 +18,7 @@ failed, so since #329 `format` refused that disk with an I/O error. Since
 start of the next partition, the disk and sector 2^32) and refuses a boot sector claiming
 more, or one whose layout does not fit inside what it claims.
 
-Thirteen boots. In each the firmware boots esp.img from NVMe, which the kernel
+Fourteen boots. In each the firmware boots esp.img from NVMe, which the kernel
 cannot drive, so the virtio disk the rig builds (scripts/mbrdisk.py, from the
 images' own volumes) goes in as the fallback, and the boot partition is not
 known to fsd. Where the disk's first partition is the ext2 root of
@@ -45,7 +45,7 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
 - WRAP: a copy of esp.img whose BPB has 2 FATs of 0x80000000 sectors, a
   product that wraps to 0 in 32 bits, under which the old check passed. Not
   mounted.
-- SHAPES-A to SHAPES-G: whole volumes in partitions of their own
+- SHAPES-A to SHAPES-H: whole volumes in partitions of their own
   size, each with one field of its boot sector changed so that it breaks
   exactly one of the rules the mounts check, which a model of those rules
   confirms on the host before the boot: exFAT's heap past its volume, its

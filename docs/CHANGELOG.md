@@ -668,6 +668,28 @@ FAT other than the first live, on which the mirror would overwrite the live
 FAT with a stale one, is refused at mount with a line saying so until
 ExtFlags is honoured (the roadmap); `make test-volume-bound` plants one.
 
+**ext2 frees and allocates none of its own metadata (2026-10-21).** Since
+#331 no ext2 block number reached past the volume, but one inside it naming
+the volume's metadata was taken as it stood: a damaged `bg_inode_table` of 1
+put new inodes over the superblock, and `rm` of a file whose pointer named
+an inode-table block cleared that block's bit, so a later allocation zeroed
+live inodes. Mount now refuses a group whose bitmaps or whole inode table
+lie outside the group, as Linux's `ext2_check_descriptors` does, and, past
+Linux, below `meta_end` (the superblock, the descriptor table and
+`resize_inode`'s reserved blocks) or overlapping one another. `free_block`
+frees no block of that zone or of a group's bitmaps and table, as Linux's
+`ext2_free_blocks`; `alloc_block` leaves such a block's bit set, counted
+used, and takes the next, as `ext2_new_blocks` retries; and the free path
+reads no pointer block there as pointers, which freed whatever the inode
+table's bytes named. `make test-volume-bound` gains SHAPES-H, three
+descriptors refused, and `make test-ext2-blocks` four cases on A: an
+inode-table block its bitmap holds free (passed over, its bit set, its bytes
+kept), pointers naming the inode table and the descriptor table (left
+allocated), and an indirect pointer naming an inode-table block that names
+another file's block (neither freed). C's bitmaps, planted in the witness
+until now, are refused at mount. Reads and writes through a pointer naming
+metadata are not checked yet, as in Linux's ext2 (the roadmap).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
