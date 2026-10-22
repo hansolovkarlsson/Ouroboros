@@ -4384,8 +4384,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   encoded to UTF-16, and a listing renders them UTF-8 (`utf8_name`), which a
   lookup takes back unchanged. Until then `walk_dir` rendered each name to
   ASCII with `?` for anything else, so `café` and `cafè` were both `caf?` and
-  the first set answered for both. A name holding an unpaired surrogate is
-  listed with U+FFFD and matches no lookup. `make test-exfat-names`.
+  the first set answered for both. A name a listing cannot show exactly (its
+  UTF-8 past 255 bytes, or an unpaired surrogate in it) is still listed that
+  way and reached by it, a lookup's `?` standing for each unit outside ASCII,
+  so two such names differing only there still answer to one spelling, the
+  first: Linux lists them whole, which a 512-byte page cannot. `make
+  test-exfat-names`.
+- **`/bin/ls` cuts a name past 82 bytes and runs it into the next.** Its
+  column printer builds each line in `TERM_WIDTH + 4` (84) bytes, so a longer
+  name is cut and the line's end lost (seen with an exFAT name listed as 100
+  `?`s, 2026-10-21); ext2's 255-byte names and FAT32's long ones meet it the
+  same way. A name wider than the line printed on a line of its own, whole,
+  would end it.
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
   rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
   `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume

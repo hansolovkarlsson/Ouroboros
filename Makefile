@@ -2630,7 +2630,9 @@ test-long-set: image-exfat
 # on a copy of the exFAT image, café, cafè and a name with a surrogate pair
 # planted, each reached by its own UTF-8 name in a read, a create, a removal
 # and a rename, and listed by it; until 2026-10-21 all were their `?`
-# rendering, and the first set answered for the others. One boot, about a
+# rendering, and the first set answered for the others. A name a listing
+# cannot show (past 255 bytes, or an unpaired surrogate) is still listed and
+# reached as its `?` rendering, and a create takes a pair. One boot, about a
 # minute; run it whenever exFAT's walk_dir name assembly, entry_in,
 # units_match, names_match, utf8_name or list_dir changes.
 test-exfat-names: image-exfat
