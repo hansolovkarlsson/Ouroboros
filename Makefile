@@ -2760,12 +2760,13 @@ test:
 	@# public page keeps serving a confident, stale answer. See check-site above.
 	@echo "== published site vs its sources"
 	@python3 scripts/check-site-freshness.py || exit 1
-	@# test-usb-hub reports one firmware stall as INCONCLUSIVE rather than as
-	@# failed checks; a classifier that grew too broad would turn a kernel
-	@# that never starts into that verdict, so it is checked on fixed
-	@# transcripts here, where it runs in a second.
-	@echo "== test-usb-hub's INCONCLUSIVE classifier"
-	@python3 scripts/test-usb-hub.py --self-test || exit 1
+	@# The rigs report a boot QEMU's firmware never handed to the kernel as
+	@# INCONCLUSIVE rather than as failed checks (drive-qemu.py's
+	@# firmware_stalled, one copy since 2026-10-22); a classifier that grew
+	@# too broad would turn a kernel that never starts into that verdict, so
+	@# it is checked on fixed transcripts here, where it runs in a second.
+	@echo "== the rigs' INCONCLUSIVE classifier"
+	@python3 scripts/drive-qemu.py --self-test || exit 1
 	@# The disk signature every image recipe writes (one-disk step 2): its
 	@# rules on synthetic images, so the check that an image carries one is
 	@# seen failing on an unsigned image, and the 0 rule and GPT refusal hold.

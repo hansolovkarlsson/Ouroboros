@@ -749,15 +749,15 @@ def main():
         return 1
     try:
         driven, out, faults = boot()
-        results = verdicts(plan, driven, out, faults)
+        stalled = drive_qemu.boot_stalled("test-ext2-blocks", "boot", out, faults)
+        results = [] if stalled else verdicts(plan, driven, out, faults)
     finally:
         if os.path.exists(DISK) and not os.environ.get("KEEP"):
             os.remove(DISK)
     for label, ok in results:
         print(("PASS  " if ok else "FAIL  ") + label)
         failed += not ok
-    print(f"test-ext2-blocks: {'all checks passed' if failed == 0 else f'{failed} check(s) FAILED'}")
-    return 1 if failed else 0
+    return drive_qemu.verdict("test-ext2-blocks", failed, int(stalled))
 
 
 if __name__ == "__main__":

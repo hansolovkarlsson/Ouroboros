@@ -254,6 +254,140 @@ def fault_text(n) -> str:
     return f"{n} fault lines (Abort/SError)"
 
 
+# A boot QEMU's own firmware never handed to the kernel. The checks would fail
+# for a kernel that never ran, so such a boot is INCONCLUSIVE: not a failed
+# check and not a pass. test-usb-hub met the first stall on 2026-10-04 (the
+# firmware stopped in its USB boot); the second, on 2026-10-21, stopped after
+# `Image type X64 can't be loaded`, on NVMe boots and on a virtio one, where a
+# boot that goes on prints `BdsDxe: loading` next. What causes either is
+# unknown, so every boot is logged with its verdict and a stall reads as a
+# rate: a change that makes it likelier shows as a rising count, which a retry
+# until green would hide. One copy for every rig (docs/ROADMAP.md, "The rigs
+# booting from NVMe grade a firmware stall as failed checks").
+INCONCLUSIVE = 100   # a rig's exit status when a boot stalled and no check failed
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STALL_LOG = os.path.join(_ROOT, "scratch", "firmware-stall-runs.log")
+STALL_DIR = os.path.join(_ROOT, "scratch", "firmware-stalls")
+STALL_LINES = ("UsbBootExecCmd", "Image type X64 can't be loaded on AARCH64 UEFI system.")
+_ESCAPE = re.compile(r"\x1b\[[0-9;=?]*[A-Za-z]")
+
+
+def firmware_stalled(out, aborts):
+    """True only for a boot QEMU's firmware never handed over: the kernel
+    printed nothing, the fault trace was read and is clean (`aborts` is 0,
+    not None), and the transcript's last line, the firmware's screen clears
+    taken out, is one of STALL_LINES. Anything else, a kernel hanging before
+    its first line included, is for the checks to fail."""
+    if "Ouroboros kernel" in out or aborts != 0:
+        return False
+    lines = [line for line in _ESCAPE.sub("", out).splitlines() if line.strip()]
+    return bool(lines) and any(stall in lines[-1] for stall in STALL_LINES)
+
+
+def record_run(label, verdict, kept=None, log=STALL_LOG):
+    """Appends this boot to `log` and returns (INCONCLUSIVE boots, all boots)
+    for `label`, which holds no space."""
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {label} {verdict}"
+    with open(log, "a") as fh:
+        fh.write(line + (f" {os.path.relpath(kept, _ROOT)}" if kept else "") + "\n")
+    with open(log) as fh:
+        mine = [entry.split() for entry in fh if entry.split()[2:3] == [label]]
+    return sum(1 for entry in mine if entry[3:4] == ["INCONCLUSIVE"]), len(mine)
+
+
+def boot_stalled(rig, boot, out, aborts):
+    """The verdict for one boot of `rig`: logs it, and for a stall keeps the
+    transcript (a rerun overwrites the one in build/), prints the verdict with
+    this boot's rate, and answers True, the caller then grading none of the
+    boot's checks."""
+    label = f"{rig}:{boot}"
+    if not firmware_stalled(out, aborts):
+        record_run(label, "booted")
+        return False
+    os.makedirs(STALL_DIR, exist_ok=True)
+    kept = os.path.join(STALL_DIR, f"{time.strftime('%Y%m%d-%H%M%S')}-{rig}-{boot}.txt")
+    with open(kept, "w") as fh:
+        fh.write(out)
+    stalled, runs = record_run(label, "INCONCLUSIVE", kept)
+    print(f"INCONCLUSIVE {boot}: QEMU's firmware never started the kernel; not a pass, run it again")
+    print(f"  {stalled} of {runs} {label} boot(s) in {os.path.relpath(STALL_LOG, _ROOT)} stalled; "
+          f"this one kept as {os.path.relpath(kept, _ROOT)}")
+    return True
+
+
+def verdict(rig, failed, stalled):
+    """A rig's exit status: 1 for a failed check, INCONCLUSIVE for a stalled
+    boot and none failed, else 0, with a line saying which."""
+    if failed:
+        print(f"{rig}: {failed} check(s) FAILED" + (f", and {stalled} boot(s) INCONCLUSIVE" if stalled else ""))
+        return 1
+    if stalled:
+        print(f"{rig}: {stalled} boot(s) INCONCLUSIVE (QEMU's firmware never started the kernel) "
+              "and no check failed: not a pass, run it again")
+        return INCONCLUSIVE
+    print(f"{rig}: all checks passed")
+    return 0
+
+
+# The 2026-10-04 stall (build/usb-hub-usb-boot.txt, 667 bytes, since
+# overwritten by a rerun; transcribed from the session that saw it), its last
+# line with the screen-control escapes it was captured with. The firmware's
+# lines up to `Image type X64` are what every boot prints first.
+FIRMWARE_HEAD = """UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 0005FDB6000 start failed: 00000001
+Error: Image at 0005FD6D000 start failed: Not Found
+Error: Image at 0005FCBA000 start failed: Unsupported
+Error: Image at 0005FC3F000 start failed: Not Found
+Error: Image at 0005FB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+Image type X64 can't be loaded on AARCH64 UEFI system.
+"""
+CLEARS = "\x1b[2J\x1b[01;01H\x1b[=3h\x1b[2J\x1b[01;01H\x1b[2J\x1b[01;01H\x1b[=3h\x1b[2J\x1b[01;01H"
+USB_STALLED = FIRMWARE_HEAD + CLEARS + "UsbBootExecCmd: Success to Exec 0x0 Cmd (Result = 1)\n"
+# The 2026-10-21 stall: 11 lines, the head and its screen clears, nothing
+# after (the transcripts were overwritten by reruns; this is their shape as
+# the roadmap records it, with a passing boot's own clears).
+X64_STALLED = FIRMWARE_HEAD + CLEARS
+# What a passing boot prints after the head, before the kernel's first line:
+# a kernel that hung there would end the transcript on BdsDxe.
+BDS_STARTED = (
+    CLEARS + 'BdsDxe: loading Boot0001 "UEFI QEMU NVMe Ctrl boot 1" from PciRoot(0x0)/Pci(0x2,0x0)/NVMe(0x1,00-00-00-00-00-00-00-00)\n'
+    "ConvertPages: failed to find range 140000000 - 14045FFFF\n"
+    'BdsDxe: starting Boot0001 "UEFI QEMU NVMe Ctrl boot 1" from PciRoot(0x0)/Pci(0x2,0x0)/NVMe(0x1,00-00-00-00-00-00-00-00)\n'
+)
+
+
+def self_test():
+    """The classifier on fixed transcripts: the two stalls are INCONCLUSIVE,
+    and nothing that could be a kernel's own failure is."""
+    cases = [
+        ("the USB stall as captured", USB_STALLED, 0, True),
+        ("the USB stall with trailing blank lines", USB_STALLED + "\n\n", 0, True),
+        ("the X64 stall, its screen clears last", X64_STALLED, 0, True),
+        ("the X64 stall, CR LF line ends", X64_STALLED.replace("\n", "\r\n"), 0, True),
+        ("the X64 stall without the clears", FIRMWARE_HEAD, 0, True),
+        ("the stall, but the fault trace has a fault", X64_STALLED, 1, False),
+        ("the stall, but no fault trace to read", USB_STALLED, None, False),
+        ("the kernel ran, then the firmware's line", USB_STALLED + "Ouroboros kernel: UEFI stage alive\n", 0, False),
+        ("a kernel line, firmware line last", "Ouroboros kernel: UEFI stage alive\n" + X64_STALLED, 0, False),
+        ("no kernel, a different last line", USB_STALLED + "Synchronous Exception at 0x5C5480EC\n", 0, False),
+        ("the firmware started the kernel, which printed nothing", FIRMWARE_HEAD + BDS_STARTED, 0, False),
+        ("the USB boot went on to start the kernel, which printed nothing", USB_STALLED + BDS_STARTED, 0, False),
+        ("the firmware stopped partway through its head", FIRMWARE_HEAD.split("Tpm2GetCapabilityPcrs")[0], 0, False),
+        ("an empty transcript", "", 0, False),
+    ]
+    failed = 0
+    for name, out, aborts, want in cases:
+        ok = firmware_stalled(out, aborts) == want
+        print(f"{'ok  ' if ok else 'FAIL'} {name}: {'INCONCLUSIVE' if want else 'graded'}")
+        failed += not ok
+    return failed
+
+
 def attach(image, readonly, prefix="ouroboros-image."):
     """Mount a FAT32 image on the host; returns the mount point. The one
     copy the rigs that read or write an image's files share (test-cpp,
@@ -304,6 +438,8 @@ def main() -> int:
         return 2
 
     argv = sys.argv[1:]
+    if argv == ["--self-test"]:
+        return self_test()
 
     # `--slirp` gives the guest QEMU user-mode networking, so it can reach a
     # server on the host at 10.0.2.2 - which is how the guest-signs /

@@ -67,6 +67,9 @@ import exfatimg  # noqa: E402
 import mbrdisk  # noqa: E402
 
 
+# The boots QEMU's firmware never handed to the kernel (drive_qemu.boot_stalled).
+STALLED = []
+
 def load(name, file):
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, file))
     mod = importlib.util.module_from_spec(spec)
@@ -214,6 +217,9 @@ def run_long():
     if not all(c for _, c in checks):
         return checks, notes
     driven, out, faults = boot("long", ["echo hello >> /VEND", "cat /VEND"])
+    if drive_qemu.boot_stalled("test-long-set", "long", out, faults):
+        STALLED.append("long")
+        return checks, notes
     vol = Volume(IMAGE, start)
     hit = exfatimg.find(vol.data(vol.chain(vol.root)), "VEND")
     got = hit.data if hit else b""
@@ -253,6 +259,9 @@ def run_shape():
     d[end:end + len(planted)] = planted
     write_root(vol, d)
     driven, out, faults = boot("shape", ["echo x >> /GAPPY", "echo x >> /PRIM", "ls /"])
+    if drive_qemu.boot_stalled("test-long-set", "shape", out, faults):
+        STALLED.append("shape")
+        return [], []
     vol = Volume(IMAGE, start)
     after = vol.data(vol.chain(vol.root))
     listing = out.split("# ls /", 1)[-1].split("# ", 1)[0].split()
@@ -323,6 +332,9 @@ def run_rename():
         return checks, notes
     cmds = [f"mv /VEND /{LONG_NAME}", "ls /", f"mv /{LONG_NAME} /V2", "ls /", "mv /STRAY /S2"]
     driven, out, faults = boot("rename", cmds)
+    if drive_qemu.boot_stalled("test-long-set", "rename", out, faults):
+        STALLED.append("rename")
+        return checks, notes
     listings = [blk.split("# ", 1)[0].split() for blk in out.split("# ls /")[1:3]]
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
@@ -376,8 +388,7 @@ def main():
         failed += not ok
     for n in notes:
         print("      " + n)
-    print(f"test-long-set: {'all checks passed' if failed == 0 else f'{failed} check(s) FAILED'}")
-    return 1 if failed else 0
+    return drive_qemu.verdict("test-long-set", failed, len(STALLED))
 
 
 if __name__ == "__main__":
