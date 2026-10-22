@@ -138,7 +138,11 @@ def prepare(source, keep_esp, rule):
         failing = start + heap + ((root - 2) << vbr[109])
     elif rule == "gpt-header":
         assert partitions(COPY)[0][0] == 0xEE, f"{source}: no protective MBR"
-        failing = 1
+        # The sector holding the primary header's signature, found rather
+        # than assumed, so the precondition that it is sector 1 can fail.
+        with open(COPY, "rb") as fh:
+            head = fh.read(34 * 512)
+        failing = next((i for i in range(34) if head[i * 512:i * 512 + 8] == b"EFI PART"), -1)
     else:
         failing = start
     # A GPT disk takes no MBR signature, and needs none: the boot partition
