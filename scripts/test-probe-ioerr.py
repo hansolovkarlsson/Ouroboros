@@ -19,7 +19,7 @@ is a copy of build/espexfat.img (exFAT, then the ESP) or build/espext2.img
 (ext2, then the ESP), signed again (scripts/disksig.py) so it is not taken
 for the boot disk, attached through QEMU's blkdebug driver with every read of
 one sector failing with EIO. A USB stick, a copy of build/usbstick.img, is
-beside it, except in SECTOR0.
+beside it.
 
 - MOUNT: the exFAT copy with the ESP's entry zeroed (one partition), its
   root directory's first sector failing (read by the exFAT probe's
@@ -48,14 +48,16 @@ beside it, except in SECTOR0.
   a reason to read the backup header: if that rule changes, the disk would
   mount from its backup and TABLE must fail some other way.
 - SECTOR0 (since 2026-10-22): the exFAT copy whole, its MBR (sector 0)
-  failing, and no stick. The kernel must hold the disk, unreadable twice, as
-  not the boot disk (D6) and install it as the fallback, with no stick
-  attached; fsd's boot line and `mount -a` must answer as in MOUNT. Until
-  2026-10-22 the kernel dropped such a disk, and a stick attached went in
-  instead. With a stick and the boot partition unknown, the stick still goes
-  in first, the order from before one-disk step 3, so the boot has none.
-  Its "held" check reads the kernel's line alone; the fallback line and
-  fsd's I/O error are the observations.
+  failing. The boot partition is known (esp.img's, on NVMe), so the kernel
+  must hold the disk, unreadable twice, as not the boot disk (D6), refuse
+  the stick, which is not the boot disk either, and install the disk as the
+  fallback; fsd's boot line and `mount -a` must answer as in MOUNT, with no
+  stick installed. Until 2026-10-22 the kernel dropped such a disk and the
+  stick came up at `/`. With the boot partition unknown to the kernel the
+  disk goes in first, as any virtio disk then does; no rig boots that way
+  (QEMU's firmware always names the partition). Its "held" check reads the
+  kernel's lines alone; the fallback line, no stick and fsd's I/O error are
+  the observations.
 - EXT2: the ext2 copy with the ESP's entry zeroed, the partition's first
   sector failing: FAT32's and exFAT's probes read it, ext2's reads its
   superblock two sectors on. ext2 must mount, as it did before the change:
@@ -74,8 +76,8 @@ error (EXT2: nothing mounts), with `format` going on past a candidate that
 would not read (BESIDE: the ESP formatted), with `mount N` answering
 "no filesystem" (BESIDE), and with an unreadable partition table read as
 one holding no partitions (TABLE: the stick installed and mounted), and
-with the kernel dropping a disk whose sector 0 will not read (SECTOR0: no
-disk, `mount -a` finding no stick). That the stick can be swapped in at all is
+with the kernel dropping a disk whose sector 0 will not read (SECTOR0: the
+stick installed and mounted). That the stick can be swapped in at all is
 test-mount-gate's check. About four minutes. Run it whenever fsd's probe,
 mount, format, `mount N`, `mount -a`'s rescan or the kernel's
 `init_storage` changes.
@@ -114,8 +116,6 @@ BOOTS = {
     "TABLE": (GPT, True, "gpt-header", ["mount -a", "mount"]),
     "SECTOR0": (EXFAT, True, "sector0", ["mount -a", "mount"]),
 }
-# The boots with no USB stick beside the disk.
-NO_STICK = {"SECTOR0"}
 
 
 def partitions(image):
@@ -203,13 +203,10 @@ def boot(name):
             # The failing disk: every read of the one sector answers EIO.
             "-drive", f"file=blkdebug:{BLKDEBUG}:{COPY},format=raw,if=none,id=hd0,rerror=report",
             "-device", "virtio-blk-device,drive=hd0",
+            "-device", "qemu-xhci,id=xhci0",
+            "-drive", f"file={STICK_COPY},format=raw,if=none,id=usbstick",
+            "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
         ]
-        if name not in NO_STICK:
-            extra += [
-                "-device", "qemu-xhci,id=xhci0",
-                "-drive", f"file={STICK_COPY},format=raw,if=none,id=usbstick",
-                "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
-            ]
         guest = drive_qemu.Guest(COPY, extra_args=extra, virtio_disk=False, stamp_from=ESP,
                                  label=f"test-probe-ioerr[{name}]: ")
         driven = guest.run(steps)
@@ -255,8 +252,9 @@ def checks_of(name):
     # header), so the error must land past them, except in TABLE, where it
     # is the GPT header's. The host's own check, graded even when the
     # firmware never started the kernel.
-    pre = [(f"{name}: the failing sector, {failing}, is the GPT header's", failing == 1) if name == "TABLE" else
-           (f"{name}: the failing sector, {failing}, is the MBR's", failing == 0) if name == "SECTOR0" else
+    # SECTOR0's sector is 0 by construction, so it has none.
+    pre = [] if name == "SECTOR0" else \
+          [(f"{name}: the failing sector, {failing}, is the GPT header's", failing == 1) if name == "TABLE" else
            (f"{name}: the failing sector, {failing}, is past the table's (partition 1 at {start})",
             failing >= start > 1)]
     if drive_qemu.boot_stalled("test-probe-ioerr", name, out, faults):
@@ -274,9 +272,10 @@ def checks_of(name):
     if name == "SECTOR0":
         checks += [
             ("the kernel held the disk, sector 0 unreadable twice",
-             "virtio-blk read failed twice" in boot_log and "held as not the boot disk" in boot_log),
-            ("and installed it as the fallback, no stick attached",
-             "virtio-blk installed as the fallback: no USB stick is attached" in boot_log),
+             "virtio-blk read of sector 0 failed twice" in boot_log
+             and "virtio-blk is not the boot disk - held" in boot_log),
+            ("and installed it as the fallback, the stick refused",
+             "virtio-blk installed as the fallback: the USB stick is not the boot disk either" in boot_log),
         ]
     if name in ("MOUNT", "TABLE", "SECTOR0"):
         checks += [
