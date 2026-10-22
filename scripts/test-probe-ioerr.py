@@ -89,7 +89,7 @@ with the kernel dropping a disk whose sector 0 will not read (SECTOR0: the
 stick installed and mounted), and with the kernel answering an unreadable
 sector 0 as not the boot disk itself (GPT0: the disk held, then the
 fallback). That the stick can be swapped in at all is
-test-mount-gate's check. About two minutes (103 s on 2026-10-22). Run it whenever fsd's probe,
+test-mount-gate's check. About two minutes (116 s on 2026-10-22). Run it whenever fsd's probe,
 mount, format, `mount N`, `mount -a`'s rescan or the kernel's
 `init_storage` changes.
 """

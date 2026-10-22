@@ -2584,7 +2584,7 @@ test-mount-gate: image $(USBSTICK_IMG)
 # copy for the boot disk from its GPT headers), `format ext2` must leave every
 # partition as it was (also with the ESP beside the failing exFAT), `mount 0`
 # must say I/O error, and an ext2 whose first sector fails must still mount.
-# About two minutes (103 s on 2026-10-22); run it whenever fsd's probe,
+# About two minutes (116 s on 2026-10-22); run it whenever fsd's probe,
 # mount, format, mount N, partition discovery, mount -a's rescan or the
 # kernel's init_storage changes.
 test-probe-ioerr: image image-exfat image-ext2 image-gpt $(USBSTICK_IMG)
