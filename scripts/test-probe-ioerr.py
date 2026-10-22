@@ -101,7 +101,10 @@ BOOTS = {
     "BESIDE": (EXFAT, True, "exfat-root", ["mount 0 /mnt/x", "unmount", "format ext2"]),
     "EXT2": (EXT2, False, "first", ["mount"]),
     "TABLE": (GPT, True, "gpt-header", ["mount -a", "mount"]),
+    "SECTOR0": (EXFAT, True, "sector0", ["mount -a", "mount"]),
 }
+# The boots with no USB stick beside the disk.
+NO_STICK = {"SECTOR0"}
 
 
 def partitions(image):
@@ -119,8 +122,8 @@ def partitions(image):
 
 def prepare(source, keep_esp, rule):
     """The virtio copy and the sector that fails: the exFAT root directory's
-    first (from the volume's boot sector), the GPT header (sector 1), or
-    partition 1's first."""
+    first (from the volume's boot sector), the GPT header (sector 1), the
+    MBR (sector 0), or partition 1's first."""
     shutil.copyfile(source, COPY)
     _, start, _ = partitions(COPY)[0]
     with open(COPY, "r+b") as fh:
@@ -143,6 +146,8 @@ def prepare(source, keep_esp, rule):
         with open(COPY, "rb") as fh:
             head = fh.read(34 * 512)
         failing = next((i for i in range(34) if head[i * 512:i * 512 + 8] == b"EFI PART"), -1)
+    elif rule == "sector0":
+        failing = 0
     else:
         failing = start
     # A GPT disk takes no MBR signature, and needs none: the boot partition
@@ -187,10 +192,13 @@ def boot(name):
             # The failing disk: every read of the one sector answers EIO.
             "-drive", f"file=blkdebug:{BLKDEBUG}:{COPY},format=raw,if=none,id=hd0,rerror=report",
             "-device", "virtio-blk-device,drive=hd0",
-            "-device", "qemu-xhci,id=xhci0",
-            "-drive", f"file={STICK_COPY},format=raw,if=none,id=usbstick",
-            "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
         ]
+        if name not in NO_STICK:
+            extra += [
+                "-device", "qemu-xhci,id=xhci0",
+                "-drive", f"file={STICK_COPY},format=raw,if=none,id=usbstick",
+                "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
+            ]
         guest = drive_qemu.Guest(COPY, extra_args=extra, virtio_disk=False, stamp_from=ESP,
                                  label=f"test-probe-ioerr[{name}]: ")
         driven = guest.run(steps)
@@ -236,9 +244,10 @@ def checks_of(name):
     # header), so the error must land past them, except in TABLE, where it
     # is the GPT header's. The host's own check, graded even when the
     # firmware never started the kernel.
-    pre = [(f"{name}: the failing sector, {failing}, is past the table's (partition 1 at {start})",
-            failing >= start > 1) if name != "TABLE" else
-           (f"{name}: the failing sector, {failing}, is the GPT header's", failing == 1)]
+    pre = [(f"{name}: the failing sector, {failing}, is the GPT header's", failing == 1) if name == "TABLE" else
+           (f"{name}: the failing sector, {failing}, is the MBR's", failing == 0) if name == "SECTOR0" else
+           (f"{name}: the failing sector, {failing}, is past the table's (partition 1 at {start})",
+            failing >= start > 1)]
     if drive_qemu.boot_stalled("test-probe-ioerr", name, out, faults):
         return pre, True
     o = outputs(out, commands)
@@ -249,9 +258,16 @@ def checks_of(name):
     # One write since 2026-10-20 (it was three, and another task's line
     # landed inside it), so the whole line, before the first command.
     io_at_boot = "fsd: mount failed (disk I/O error) - disk commands won't work\r\n" in boot_log
-    if name in ("MOUNT", "FORMAT", "TABLE"):
+    if name in ("MOUNT", "FORMAT", "TABLE", "SECTOR0"):
         checks.append(("fsd's boot mount failed with a disk I/O error", io_at_boot))
-    if name in ("MOUNT", "TABLE"):
+    if name == "SECTOR0":
+        checks += [
+            ("the kernel held the disk, sector 0 unreadable twice",
+             "virtio-blk read failed twice" in boot_log and "held as not the boot disk" in boot_log),
+            ("and installed it as the fallback, no stick attached",
+             "virtio-blk installed as the fallback: no USB stick is attached" in boot_log),
+        ]
+    if name in ("MOUNT", "TABLE", "SECTOR0"):
         checks += [
             (f"mount -a answered the I/O error, the disk not replaced (got {o[0]!r})",
              (o[0] or "").endswith("mount: the disk answered with an I/O error; it was not replaced by a USB stick")),

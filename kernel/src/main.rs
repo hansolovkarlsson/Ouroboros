@@ -1156,12 +1156,18 @@ fn init_storage() -> Option<virtio_blk::Device> {
     console::println!("Ouroboros kernel: virtio-blk ready, capacity {} sectors", device.capacity_sectors());
 
     let mut sector = [0u8; 512];
-    // Read twice before giving up, as the boot-disk check is (D6): the first
-    // read a disk sees is the likeliest to fail once (the review of #291).
+    // Read twice, as the boot-disk check is (D6): the first read a disk sees
+    // is the likeliest to fail once (the review of #291). Unreadable twice,
+    // the disk is held as not the boot disk, as one whose partition table
+    // will not read is: installed only if no other disk is, where fsd then
+    // answers its I/O error. Until 2026-10-22 it was dropped, and whatever
+    // USB stick was attached went in, the swap fsd's `mount -a` refuses.
     let first = unsafe { device.read_sector(0, &mut sector) };
     if let Err(e) = first.or_else(|_| unsafe { device.read_sector(0, &mut sector) }) {
-        console::println!("Ouroboros kernel: virtio-blk read failed twice ({e})");
-        return None;
+        console::println!(
+            "Ouroboros kernel: virtio-blk read failed twice ({e}) - held as not the boot disk, installed only if no other disk is"
+        );
+        return Some(device);
     }
     if !parttable::has_boot_signature(&sector) {
         let signature = (sector[511] as u16) << 8 | sector[510] as u16;
