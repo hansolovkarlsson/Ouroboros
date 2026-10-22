@@ -668,6 +668,27 @@ FAT other than the first live, on which the mirror would overwrite the live
 FAT with a stale one, is refused at mount with a line saying so until
 ExtFlags is honoured (the roadmap); `make test-volume-bound` plants one.
 
+**An exFAT rename keeps the set it renames (2026-10-21).** A rename built
+the new set afresh, File, Stream and name, so it dropped the File entry's
+attributes and times and every secondary past the name: vendor extension
+entries (0xE0) and vendor allocation entries (0xE1) a camera writes, the
+second leaking the clusters it names, and its Stream's ValidDataLength,
+raised to a preallocated DataLength. `renamed_set` now reads the old set
+whole and keeps its File entry, its Stream but for NameLength and NameHash
+(a size-0 entry's is built as for a create, so it still names no cluster)
+and every secondary but the name entries, moved to follow the new name;
+the name entries are new, and every old one goes wherever it sat, with
+SecondaryCount and SetChecksum new. A name that would take the set past 255
+secondaries is refused. `make test-long-set` gains RENAME: a stamped
+20-entry set holding a contiguous cluster, ValidDataLength 7 of it, renamed
+to a name of two entries and back, its attributes, times, Stream fields and
+17 vendor entries kept; and STRAY, a set whose name entry follows a vendor
+entry (fsck_exfat's one complaint before the boot), renamed into the spec's
+shape, fsck clean after. Fails with main's rename, with the vendor entries
+left where the old name ended, with the Stream built afresh and with only
+the name entries after the Stream dropped. `rm` still leaks a vendor allocation's clusters
+(the roadmap).
+
 **ext2 frees and allocates none of its own metadata (2026-10-21).** Since
 #331 no ext2 block number reached past the volume, but one inside it naming
 the volume's metadata was taken as it stood: a damaged `bg_inode_table` of 1

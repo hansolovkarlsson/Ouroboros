@@ -2618,9 +2618,11 @@ test-ext2-blocks: image image-ext2
 # An exFAT entry set longer than fsd builds keeps a whole checksum
 # (scripts/test-long-set.py): on a copy of the exFAT image, /VEND planted with
 # a 20-entry set (17 vendor extension entries); an append that patches its
-# Stream must leave the SetChecksum over all 20 and fsck_exfat clean. One
-# boot, about a minute; run it whenever exFAT's patch_stream_ext,
-# set_checksum, walk_dir's set assembly or slot_at changes.
+# Stream must leave the SetChecksum over all 20 and fsck_exfat clean; and
+# since 2026-10-21 a rename of such a set, to a longer name and back, must
+# keep its File entry's attributes and times and its vendor entries. Three
+# boots, about three minutes; run it whenever exFAT's patch_stream_ext,
+# set_checksum, walk_dir's set assembly, slot_at, mv or renamed_set changes.
 test-long-set: image-exfat
 	python3 scripts/test-long-set.py
 

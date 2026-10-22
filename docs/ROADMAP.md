@@ -2175,7 +2175,10 @@ The small open tails those arcs deliberately left:
 >       a fresh copy, as `--stall` already does with its own image, and
 >       compare. Found by the review of `rig/usb-hub-inconclusive`.
 > - [ ] **new** **The rigs booting from NVMe grade a firmware stall as failed
->       checks.** `test-volume-bound`, `test-probe-ioerr`, `test-ext2-blocks`
+>       checks.** *Not NVMe alone: the same stall (11 lines, the last
+>       `Image type X64 can't be loaded`) hit `test-long-set`'s LONG boot
+>       on 2026-10-21, a virtio-blk boot through `drive-qemu.py`, so every
+>       rig driving QEMU's firmware can meet it.* `test-volume-bound`, `test-probe-ioerr`, `test-ext2-blocks`
 >       and `test-boot-partition` have the firmware boot `esp.img` from
 >       NVMe. On 2026-10-21 four of their boots stopped in QEMU's firmware
 >       before the kernel started: SHAPES-F, then STALE and SHAPES-B, in
@@ -4350,12 +4353,31 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bitmap says the cluster is free) was declined: on a damaged volume a
   bitmap-free cluster can be on a live chain, the max review's finding 1,
   and the gain is speed on Linux-written sticks only.
-- **`mv` on exFAT drops a set's vendor entries.** A rename deletes the set
+- ~~**`mv` on exFAT drops a set's vendor entries.**~~ *Done 2026-10-21:*
+  a rename builds its set from the old one (`renamed_set`), the File entry
+  and every secondary past the name kept, only the Stream and name entries
+  new (`make test-long-set`'s RENAME). The File entry's attributes and times
+  were lost the same way and are kept too, and so is the Stream's
+  ValidDataLength (the high review). `rm` still frees no vendor
+  allocation's clusters, nor does a replacing rename for the set it
+  replaces: an item of its own, below. A rename deletes the set
   and builds a new one of File, Stream and name, so vendor extension (0xE0)
   and vendor allocation (0xE1) entries a camera wrote are lost, and a vendor
   allocation's clusters leaked. Since 2026-10-19 a write keeps them (`make
   test-long-set`); a rename should copy the secondaries past the name into
   the new set. Read in the code; from the review of the set checksum.
+- **fsd reads an exFAT file to its DataLength, not its ValidDataLength.**
+  `walk_dir` takes a file's size from the Stream's DataLength, so a file
+  another driver preallocated (ValidDataLength below DataLength) reads the
+  bytes past its valid length, stale data the spec says reads as zeros.
+  Found with the rename's high review, 2026-10-21, which kept the field
+  through a rename.
+- **exFAT's `rm` leaks a vendor allocation's clusters.** A vendor allocation
+  entry (0xE1) names clusters of its own (its FirstCluster and DataLength),
+  which `rm` and a replacing `mv` (for the set it replaces) never free, so
+  they stay set in the bitmap with no set naming them. Freeing them the way
+  the Stream's are, bounded by the volume, would end it. Read in the code,
+  found with the rename's fix, 2026-10-21.
 - **exFAT names outside ASCII collide.** `walk_dir` renders each UTF-16
   name to ASCII with `?` for anything else, so `café` and `cafè` (which macOS
   writes) are both `caf?`, and `entry_in` takes whichever set comes first: an
