@@ -2174,7 +2174,7 @@ The small open tails those arcs deliberately left:
 >       `scratch/usb-hub-runs.log` has a base rate, boot `--usb-boot` from
 >       a fresh copy, as `--stall` already does with its own image, and
 >       compare. Found by the review of `rig/usb-hub-inconclusive`.
-> - [ ] **new** **The rigs booting from NVMe grade a firmware stall as failed
+> - [x] **new** **The rigs booting from NVMe grade a firmware stall as failed
 >       checks.** *Not NVMe alone: the same stall (11 lines, the last
 >       `Image type X64 can't be loaded`) hit `test-long-set`'s LONG boot
 >       on 2026-10-21, a virtio-blk boot through `drive-qemu.py`, so every
@@ -2196,6 +2196,26 @@ The small open tails those arcs deliberately left:
 >       rigs, with this stall's last line added to the self-test's
 >       fixtures. What causes the stall is unknown. Found 2026-10-21, on
 >       #335.
+>       *Built 2026-10-22 on `rig/firmware-stall`: `drive-qemu.py`'s
+>       `firmware_stalled` knows both endings (UsbBootExecCmd, and the X64
+>       line with only the screen clears after it), `boot_stalled` logs
+>       every boot to `scratch/firmware-stall-runs.log` and keeps a stalled
+>       transcript in `scratch/firmware-stalls/`, `verdict` exits 100 when a
+>       boot stalled and no check failed. `test-usb-hub` and
+>       `test-boot-partition` use it in place of the usb-hub copy, and the
+>       four named rigs and `test-long-set` gain it; a stalled boot's
+>       host-side preconditions are still graded (`test-probe-ioerr`'s
+>       failing sector). `drive-qemu.py --self-test` (14 cases) runs in
+>       `make test`; dropping the escape strip, the X64 line, the kernel-line
+>       test, the trace's None, or the last-line anchor each fails it. No
+>       real X64 transcript survived (reruns overwrote them), so its fixture
+>       is the head every boot prints plus a passing boot's clears. Done.*
+> - [ ] **new** **The other QEMU rigs still grade a firmware stall as failed
+>       checks.** About forty rigs drive QEMU's firmware through
+>       `drive-qemu.py`; six use `boot_stalled`. The rest can meet the same
+>       stall (`test-long-set` did, on virtio). Each needs the call after its
+>       boot and `verdict` at its end, a few lines a rig, and a control that
+>       forces the stall. Taken a rig at a time, as each is next touched.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the

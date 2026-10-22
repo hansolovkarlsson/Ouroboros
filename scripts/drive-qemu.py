@@ -284,9 +284,10 @@ def firmware_stalled(out, aborts):
     return bool(lines) and any(stall in lines[-1] for stall in STALL_LINES)
 
 
-def record_run(label, verdict, kept=None, log=STALL_LOG):
-    """Appends this boot to `log` and returns (INCONCLUSIVE boots, all boots)
-    for `label`, which holds no space."""
+def record_run(label, verdict, kept=None, log=None):
+    """Appends this boot to `log` (STALL_LOG unless named) and returns
+    (INCONCLUSIVE boots, all boots) for `label`, which holds no space."""
+    log = log or STALL_LOG
     os.makedirs(os.path.dirname(log), exist_ok=True)
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {label} {verdict}"
     with open(log, "a") as fh:
