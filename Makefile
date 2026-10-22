@@ -2577,13 +2577,14 @@ test-mount-gate: image $(USBSTICK_IMG)
 # on virtio a copy of espexfat.img, espext2.img or espgpt.img with one sector
 # failing every read (QEMU's blkdebug), usbstick.img on USB; `mount -a` must
 # answer the I/O error with no stick installed (also with the GPT header
-# failing, the table itself unreadable, and with sector 0 failing and no
-# stick, where the kernel must hold the disk and install it as the
-# fallback), `format ext2` must leave every
+# failing, the table itself unreadable, and with sector 0 failing, a
+# stick beside it, where the kernel must hold the disk, refuse the stick and
+# install the disk as the fallback), `format ext2` must leave every
 # partition as it was (also with the ESP beside the failing exFAT), `mount 0`
 # must say I/O error, and an ext2 whose first sector fails must still mount.
-# About four minutes; run it whenever fsd's probe, mount, format, mount N,
-# partition discovery, mount -a's rescan or the kernel's init_storage changes.
+# About two minutes (103 s on 2026-10-22); run it whenever fsd's probe,
+# mount, format, mount N, partition discovery, mount -a's rescan or the
+# kernel's init_storage changes.
 test-probe-ioerr: image image-exfat image-gpt $(USBSTICK_IMG)
 	python3 scripts/test-probe-ioerr.py
 
