@@ -4363,12 +4363,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bitmap says the cluster is free) was declined: on a damaged volume a
   bitmap-free cluster can be on a live chain, the max review's finding 1,
   and the gain is speed on Linux-written sticks only.
-- **fsd reads an exFAT file to its DataLength, not its ValidDataLength.**
-  `walk_dir` takes a file's size from the Stream's DataLength, so a file
-  another driver preallocated (ValidDataLength below DataLength) reads the
-  bytes past its valid length, stale data the spec says reads as zeros.
-  Found with the rename's high review, 2026-10-21, which kept the field
-  through a rename.
+- ~~**fsd reads an exFAT file to its DataLength, not its ValidDataLength.**~~
+  *Done 2026-10-22:* reads return zeros past ValidDataLength, a write fills
+  its gap from it and sets it to the write's end, and the Stream's two
+  lengths are written apart (every write had raised ValidDataLength to
+  DataLength, making the stale bytes the file's for every driver). `make
+  test-valid-length` checks a copy, a write inside the preallocation, an
+  append and a write inside the valid bytes, and fails with each as on main.
+  A write more than 1 MiB past ValidDataLength is refused, inside a
+  preallocation too, the bound a write past the size has.
 - **exFAT's `rm` leaks a vendor allocation's clusters.** A vendor allocation
   entry (0xE1) names clusters of its own (its FirstCluster and DataLength),
   which `rm` and a replacing `mv` (for the set it replaces) never free, so
