@@ -1100,6 +1100,36 @@ written from the design and corrected from the run. CLAUDE.md's figures for
 this branch, and read 63, 64 and 121 when run. **A record of what a control
 shows is written after the control has run.**
 
+## A claim that was harmless until the code read it (2026-10-21)
+
+`upcase` in fsd's `exfat.rs` carried a doc comment saying the standard exFAT
+up-case table "is the identity for non-ASCII". It was false on the day it
+was written: the table maps `é` to `É`. It did no harm while every name was
+compared as its ASCII rendering, since then no unit outside ASCII ever
+reached `upcase`. #339 made lookups compare UTF-16 units, so the false
+sentence became the stated reason why `CAFÉ` and `café` are two names here.
+The review of #339 found it, and found it in a worse state: inserting
+`names_match` and `units_match` above `upcase` had left the comment sitting
+on `names_match`, so rustdoc gave `names_match` the text "ASCII up-case one
+UTF-16 unit". That is 2026-09-21's comment bound to the wrong symbol by a
+helper inserted mid-block. The same commit left the module doc naming
+`names_match` as the rule lookups go through, a line below one it had just
+updated, though `entry_in` no longer called it.
+
+**A claim's harm is set by what reads its subject, and that changes in
+another commit.** A claim about behaviour nothing exercises is safe only
+until something exercises it, and the commit that does is a change to the
+code, not to the comment, so the comment's review never comes. When a change
+lets new inputs reach a function, read that function's comments as claims
+about the new inputs.
+
+One more from the same day. #336's roadmap item called the firmware stall
+NVMe's, because all four boots that stalled were in rigs that boot from
+NVMe. `test-long-set`, which boots from virtio, stalled the same way that
+afternoon, and the item was corrected on #338. It is the 2026-10-12 shape: a
+diagnosis written before its cause was looked at, here named from the one
+property its few instances happened to share.
+
 ## What actually worked
 
 Three things, none of them "be more careful".

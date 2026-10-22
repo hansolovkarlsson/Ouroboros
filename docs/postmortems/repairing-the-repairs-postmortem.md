@@ -771,3 +771,41 @@ the free path, which the rig reached only as each case was added, converged
 last. Round four's remaining findings were damage inside the volume and code
 older than the branch, and went to the roadmap as one item instead of into a
 fifth round.
+
+## Three branches, one round each, and each first version's own defect (2026-10-21)
+
+#337, #338 and #339 each had one high review, and each review found a
+defect that the branch's first version had brought in itself, not one it
+had failed to fix.
+
+**#337, a repair that read again what it had just changed.** The fix for
+`ensure_block`'s leak took the missing blocks first and linked them after,
+and on the double-indirect path it read the second-level pointer again
+after the allocation. When the second-level block was among those just
+taken, that read could answer 0, and the write would go to block 0. Walking
+the path once, into a value the linking steps use and do not re-read, closed
+it.
+
+**#338, a repair that rebuilt what it should have kept.** The first rename
+kept the vendor entries but built the Stream afresh, which raised a
+preallocated file's ValidDataLength to its DataLength, so the bytes past the
+valid length, which the spec says read as zeros, became readable. The fix
+for one field dropped another. The old Stream is now kept, and only its
+name fields are rewritten.
+
+**#339, a repair that widened a value past the bound everyone met.** Before,
+a listed exFAT name was at most 255 bytes, because each unit became one
+byte. Rendering UTF-8 let a name grow to 765 bytes, past the 512-byte
+listing page, and a directory's listing failed at such a name. The control
+showed the root's listing failing, `/bin` with it, and the shell unable to
+find `cat`. The same widening made names with an unpaired surrogate
+unreachable where they had been reachable as `?`. **A repair that widens a
+value must be checked against every bound the old value met without anyone
+writing the bound down.** Here that bound was the listing page and the path
+buffer, and nothing in the diff named either.
+
+Each fix came with a rig case and a control that failed without it: CP and
+ONEB for the first, STRAY and the Stream fields for the second, and the
+overlong and lone-surrogate names for the third. Each round's findings were
+taken or declined with reasons, and no second round was run on any of the
+three, so whether those repairs carry defects of their own is not known.

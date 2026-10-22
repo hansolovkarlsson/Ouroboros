@@ -1977,3 +1977,56 @@ or a reordering would put it in group 2, where the clear lands in the boot
 block and the bitmap check passes with the rule removed. The review found
 it; the condition is now a plant check. **When a control depends on where
 something lands, check that it lands there before the boot.**
+
+## Five more, from the exFAT sets and names (2026-10-21)
+
+Two pull requests (#338 and #339) each built a rig with controls. Five
+instruments around them did not do what they seemed to. I found four of
+them by running and one by reading a transcript.
+
+**A control that failed for another reason.** `make test-exfat-names`'s
+first control was main's own `exfat.rs`, and it failed the rig, nine checks
+of it. None of them was the collision: main looked names up by their `?`
+rendering, so it found no UTF-8 name at all and answered every `cat`
+"no such file". A second control kept the new UTF-8 listing and folded
+every unit outside ASCII to one in the lookup, the old rule alone, and it
+failed four checks that were the bug itself: `cat /cafè` printed `café`'s
+bytes and `echo > /cafë` overwrote `café`. **A control is the old rule, not
+the old tree: when the tree differs in more than the rule, the control can
+fail before it reaches the case.**
+
+**A mutation that did not model the old code.** STRAY, in
+`test-long-set`, is a set whose name entry follows a vendor entry. Its first
+control, `|| i > 2 + rest`, was meant to stand for the old rule of dropping
+only the name entries straight after the Stream. It passed the rig, because
+it was not that rule. `|| rest > 0` was, and it failed the rig as it
+should. **A mutation that passes says nothing until it is shown to be the
+old rule; write it from the old code, not from the description of it.**
+
+**An observer that counted the wrong unit.** `scripts/exfatimg.py`, the
+one set walker the exFAT rigs share, cut a name at NameLength in Python
+characters. NameLength counts UTF-16 units, and a surrogate pair is two
+units and one Python character, so `caf` plus U+1F600 came back with a
+padding NUL. It was found because the new rig checks its own plants before
+the boot, and that check failed. Every exFAT rig before had planted only
+ASCII names, where characters and units are the same. **An observer is
+right only for the inputs it has been run on; a new kind of input is a new
+test of the observer.**
+
+**A display that cut what it showed.** The rig's 100-character fallback
+name came out of `ls /` as 84 `?`s run into the next name. `/bin/ls` builds
+each line in `TERM_WIDTH + 4` bytes and drops what does not fit, the
+newline included, for any name, ASCII names on ext2 too. fsd had listed the
+name whole: `echo /*`, through the shell's glob, printed all 100. **Before
+grading a listing, check the listing is what the server sent; the program
+showing it is a second observer.**
+
+**A rig that cannot tell a stall from a failure.** Four boots across
+`test-volume-bound` and `test-probe-ioerr` failed every guest check and
+passed on a rerun. Each had stopped in QEMU's firmware before the kernel
+printed a line. `test-usb-hub` already calls its own stall INCONCLUSIVE;
+these rigs report it as the code failing. The roadmap item (#336) at first
+blamed NVMe, since all four rigs boot from it, until `test-long-set`, which
+boots from virtio, stalled the same way. **A verdict needs a third answer
+for a run that never reached the code, and a cause named from four
+instances that share a property is a guess about that property.**
