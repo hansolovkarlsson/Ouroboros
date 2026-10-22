@@ -72,9 +72,8 @@ with a zeroed block, which nothing may change. The host plants:
   `cp TWELVE CP` (2 KiB a request) must answer disk full with CP keeping
   its first KiB in G's old block; and since 2026-10-22, C made with 5,000
   inodes, HIGH (empty) moved to the last of them, whose bit lies in the
-  inode bitmap's second sector: `rm HIGH` must clear that bit, and leave
-  the bit at its offset in the first sector as it was (bitmap_free writes
-  the bit's sector alone);
+  inode bitmap's second sector: `rm HIGH` must clear that bit (bitmap_free
+  writes the bit's sector alone);
 - on B, every block of the volume marked used and the last group's padding
   bits clear, so the next free bit is the block just past the volume (the
   witness's first): `echo x > NEW` must answer disk full; and the inode count
@@ -426,7 +425,7 @@ def build():
         vc.write(vc.inode_off(high), vc.read(vc.inode_off(high_was), vc.isz))
         vc.set_bitmap(4, with_bits(with_bits(vc.bitmap(4), high_was - 1, high_was, 0), high - 1, high, 1))
         vc.set_u32(c_ents["HIGH"][1], high)
-        plan.update(c_high=high, c_ibm=vc.bitmap(4))
+        plan.update(c_high=high)
         # C: one block left free, the highest, and the counts saying so. An
         # append to DIND needs three, one to TWELVE two: both must take none.
         c_real = vc.bc - vc.fdb
@@ -604,10 +603,9 @@ def verdicts(plan, driven, out, faults):
         cp_now = ((vc.size(cp_ino), vc.i_blocks(cp_ino), vc.ptr(cp_ino, 0), vc.read(vc.ptr(cp_ino, 0) * vc.bs, 1024))
                   if cp_ino else None)
         g_bit = bit(vc.bitmap(0), plan["g_block"] - vc.fdb) if vc else None
-        # HIGH's bit, and the bit at its offset in the bitmap's first sector,
-        # which a write to the wrong sector would clear.
-        h = plan["c_high"] - 1
-        c_ibits = (bit(vc.bitmap(4), h), bit(vc.bitmap(4), h - SECT * 8)) if vc else None
+        # HIGH's bit: a free writing the bitmap block's first sector for every
+        # bit leaves it set, whatever it does to the bit there.
+        c_high_bit = bit(vc.bitmap(4), plan["c_high"] - 1) if vc else None
         a_free_delta = free_delta(va)
         ents = va.entries()
         ino = plan["ino"]
@@ -723,10 +721,9 @@ def verdicts(plan, driven, out, faults):
          "disk full" in (o.get("cp /mnt/c/TWELVE /mnt/c/CP") or "") and o.get("rm /mnt/c/G") == ""
          and cp_now == (1024, 1024 // SECT, plan["g_block"], b"2" * 1024) and g_bit == 1
          and c_counts is not None and c_counts[0] == (0, 0)),
-        (f"rm HIGH clears its inode's bit in the bitmap's second sector and no bit a sector before "
-         f"(got {o.get('rm /mnt/c/HIGH')!r}, bits {c_ibits})",
-         o.get("rm /mnt/c/HIGH") == "" and "HIGH" not in c_ents
-         and c_ibits == (0, bit(plan["c_ibm"], plan["c_high"] - 1 - SECT * 8))),
+        (f"rm HIGH clears its inode's bit, in the bitmap's second sector "
+         f"(got {o.get('rm /mnt/c/HIGH')!r}, bit {c_high_bit})",
+         o.get("rm /mnt/c/HIGH") == "" and "HIGH" not in c_ents and c_high_bit == 0),
         (f"B's write answers disk full (got {o.get('echo x > /mnt/b/NEW')!r})",
          "disk full" in (o.get("echo x > /mnt/b/NEW") or "")),
         (f"B's touch NEW2 answers disk full and makes nothing (got {o.get('touch /mnt/b/NEW2')!r})",

@@ -45,6 +45,9 @@ beside it.
   takes one whose sector 1 will not read as not the boot disk (D6), so this
   disk goes in as the fallback. A failing sector 0 cannot be the case: the
   kernel drops such a disk and installs the stick itself (the roadmap).
+  TABLE rests on parttable's rule that sector 1 unread is `Unreadable`, not
+  a reason to read the backup header: if that rule changes, the disk would
+  mount from its backup and TABLE must fail some other way.
 - EXT2: the ext2 copy with the ESP's entry zeroed, the partition's first
   sector failing: FAT32's and exFAT's probes read it, ext2's reads its
   superblock two sectors on. ext2 must mount, as it did before the change:
@@ -116,7 +119,8 @@ def partitions(image):
 
 def prepare(source, keep_esp, rule):
     """The virtio copy and the sector that fails: the exFAT root directory's
-    first (from the volume's boot sector), or partition 1's first."""
+    first (from the volume's boot sector), the GPT header (sector 1), or
+    partition 1's first."""
     shutil.copyfile(source, COPY)
     _, start, _ = partitions(COPY)[0]
     with open(COPY, "r+b") as fh:
@@ -229,7 +233,7 @@ def checks_of(name):
     checks = [
         # A precondition: the table's reads are sectors 0 and 1 (MBR, GPT
         # header), so the error must land past them, except in TABLE, where
-        # it is the MBR's.
+        # it is the GPT header's.
         (f"the failing sector, {failing}, is past the table's (partition 1 at {start})",
          failing >= start > 1) if name != "TABLE" else
         (f"the failing sector, {failing}, is the GPT header's", failing == 1),
@@ -274,7 +278,7 @@ def checks_of(name):
 
 
 def main():
-    for f in (ESP, EXFAT, EXT2, STICK):
+    for f in (ESP, EXFAT, EXT2, GPT, STICK):
         if not os.path.exists(f):
             sys.exit(f"{f} not found - run `make test-probe-ioerr`, which builds it")
     checks = []

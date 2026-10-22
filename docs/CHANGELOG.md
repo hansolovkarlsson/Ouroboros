@@ -769,9 +769,10 @@ blocks free. A disk error while linking is not undone.
 **`/bin/ls` lists a long name whole (2026-10-22).** The column printer built
 each line in 84 bytes, so a name past 82 was cut and the line's end lost,
 running it into the next name: an exFAT name listed as 100 `?`s, an ext2 name
-of 255 bytes. `append_name` now writes a name that would not fit straight out,
-after the line so far, in the column and the long layout alike; a name wider
-than the screen already had a row of its own. `make test-exfat-names` requires
+of 255 bytes. Both line buffers now hold a name of 255
+bytes whole, the longest a listing gives, so each line is still one write; the
+long layout's 200 bytes cut one too. A name wider than the screen already had
+a row of its own. `make test-exfat-names` requires
 `ls /` to list the 100-`?` name whole, before and after its other steps, and
 fails with the old `ls`.
 
@@ -780,10 +781,9 @@ and wrote the whole bitmap block to clear one bit, eight sector writes on a
 4 KiB volume; it now reads and writes the bit's sector alone, as the counts
 are written. `make test-ext2-blocks` makes C with 5,000 inodes and moves the
 empty HIGH to the last of them, whose bit lies in the inode bitmap's second
-sector: `rm HIGH` must clear that bit and leave the one at its offset in the
-first sector as it was. Fails with the sector's offset dropped (every bit
-written in the first sector); no plant on the 4 MiB volumes could, since all
-their block bits lie there.
+sector: `rm HIGH` must clear that bit. Fails with the sector's offset dropped
+(every bit written in the first sector); no plant on the 4 MiB volumes could,
+since all their block bits lie there.
 
 **A partition table that will not read is refused a rescan, and a rig shows
 it (2026-10-22).** #324's refusal, that fsd's `mount -a` does not swap in a

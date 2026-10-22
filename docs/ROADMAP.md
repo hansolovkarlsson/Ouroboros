@@ -4308,7 +4308,8 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   whole bitmap block for one bit, was done 2026-10-22: the bit's sector
   alone is read and written, and `make test-ext2-blocks`'s HIGH, an inode
   whose bit is in the bitmap's second sector, fails with the sector's
-  offset dropped.)
+  offset dropped. `bitmap_alloc` still writes the whole block to set one
+  bit; the high review of the branch, deferred.)
 - **The kernel drops a virtio disk whose sector 0 will not read, and
   installs whatever USB stick is attached.** `init_storage` reads sector 0
   twice and, when both fail, returns no device rather than holding it as
@@ -4345,9 +4346,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   the Stream's are, bounded by the volume, would end it. Read in the code,
   found with the rename's fix, 2026-10-21.
 - ~~**`/bin/ls` cuts a name past 82 bytes and runs it into the next.**~~
-  *Done 2026-10-22:* `append_name` writes a name that would not fit in the
-  line's buffer straight out, after the line so far, in both layouts; a name
-  wider than the screen already had its own row, so it is now whole there.
+  *Done 2026-10-22:* both line buffers hold a name of 255 bytes (`NAME_MAX`,
+  the longest a listing gives) whole, each line one write; the long
+  layout's 200 bytes cut one too.
   `make test-exfat-names` requires `ls /` to list the 100-`?` name whole,
   and fails with main's `ls`.
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat

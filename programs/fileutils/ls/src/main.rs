@@ -25,6 +25,14 @@
 /// conventional fallback).
 const TERM_WIDTH: usize = 80;
 
+/// The longest name a listing gives, in bytes: ext2's limit, FAT32's long
+/// names rendered one byte a unit, and exFAT's, whose name past 255 bytes of
+/// UTF-8 is listed ASCII with `?` (2026-10-21). Each line buffer holds one
+/// of these whole, so a line is one write; until 2026-10-22 the column
+/// printer's held 84 bytes and the long layout's 200, cutting a longer name
+/// and losing its line's end.
+const NAME_MAX: usize = 255;
+
 /// Most entries laid out per directory. The listing buffer ([`LIST_BUF`])
 /// bounds the byte count; this bounds the record array. A directory past
 /// either is listed as far as it fits and named as cut short, with exit 1:
@@ -309,7 +317,9 @@ fn print_columns(target: u64, entries: &[Entry], data: &[u8]) {
     let cols = (TERM_WIDTH / col_width).max(1);
     let rows = n.div_ceil(cols);
 
-    let mut line = [0u8; TERM_WIDTH + 4];
+    // A row of columns fits the screen; a name wider than it is a row of
+    // its own (`cols` is 1).
+    let mut line = [0u8; TERM_WIDTH + NAME_MAX + 4];
     for r in 0..rows {
         let mut w = 0usize;
         // How many columns actually have an entry in this row.
@@ -326,7 +336,7 @@ fn print_columns(target: u64, entries: &[Entry], data: &[u8]) {
             }
             let e = &entries[idx];
             let name = entry_name(*e, data);
-            append_name(target, &mut line, &mut w, name);
+            append(&mut line, &mut w, name);
             if e.is_dir {
                 append(&mut line, &mut w, b"/");
             }
@@ -361,7 +371,7 @@ fn print_long(target: u64, dir: &str, entries: &[Entry], data: &[u8]) {
             }
         }
 
-        let mut line = [0u8; ulib::PATH_MAX + 72];
+        let mut line = [0u8; NAME_MAX + 72];
         let mut w = 0usize;
 
         // Type + permission bits (drwxr-xr-x): the real mode when the filesystem
@@ -407,7 +417,7 @@ fn print_long(target: u64, dir: &str, entries: &[Entry], data: &[u8]) {
         append(&mut line, &mut w, b" ");
 
         // Name (directories keep a trailing '/').
-        append_name(target, &mut line, &mut w, name);
+        append(&mut line, &mut w, name);
         if e.is_dir {
             append(&mut line, &mut w, b"/");
         }
@@ -458,21 +468,6 @@ fn append(buf: &mut [u8], n: &mut usize, src: &[u8]) {
             *n += 1;
         }
     }
-}
-
-/// Append a name to `buf` at `*n`, whole: a name that would not fit with the
-/// line's end (a `/` and `\r\n`) after it is written out directly, after the
-/// line so far, and the line goes on empty. [`append`] would cut it and drop
-/// the line's end, running it into the next line (an exFAT name of 100 `?`s
-/// against the column printer's 84 bytes, 2026-10-21).
-fn append_name(target: u64, buf: &mut [u8], n: &mut usize, name: &[u8]) {
-    if *n + name.len() + 3 <= buf.len() {
-        append(buf, n, name);
-        return;
-    }
-    ulib::write_out(target, &buf[..*n]);
-    ulib::write_out(target, name);
-    *n = 0;
 }
 
 /// Render the 10-char type+permission string (`drwxr-xr-x`) into `out`. `md` is

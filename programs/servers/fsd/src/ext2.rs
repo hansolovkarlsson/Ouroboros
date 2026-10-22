@@ -640,8 +640,9 @@ impl Fs {
 
     /// The pointers in sector `s` of pointer block `block`, read with one
     /// sector's buffer: the free path walks pointer blocks a sector at a time,
-    /// each sector once, so it holds no block buffer of its own above the
-    /// bitmap's (fsd's stack; the third review of #331).
+    /// each sector once, so it holds no block buffer of its own (fsd's
+    /// stack; the third review of #331). Since 2026-10-22 `bitmap_free`
+    /// holds none either, only the bit's sector.
     fn pointer_sector(&mut self, block: u32, s: u32) -> Result<[u32; SECTOR_SIZE / 4], Error> {
         let mut sec = [0u8; SECTOR_SIZE];
         self.vol.read(self.block_sector(block) + s as u64, &mut sec)?;
