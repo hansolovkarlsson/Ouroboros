@@ -4288,43 +4288,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   that to the sectors the chain crosses, which a fragmented file makes
   many. A cursor a fid is the fid item's question (above). From the review
   of #314.
-- ~~**ext2 leaks a block on a write past the double-indirect range.**~~
-  *Done 2026-10-21, both paths:* the range is checked first, every block
-  the path lacks is taken before any is linked, and a failure gives back
-  what it took; `write_at` keeps the blocks a short write filled, and
-  `write_file` gives back its blocks and inode; `make test-ext2-blocks`'s
-  C, one block free, covers the second path and the short write (the
-  first has no rig, which needs over 64 MiB).
-  `ensure_block` allocates the data block before it checks the logical
-  block's range, so a write past 12 + k + k^2 blocks (k pointers a block:
-  about 64 MiB of file on 1 KiB blocks) takes a block, then answers disk
-  full without recording it: one block lost each attempt, a bitmap bit set
-  that no inode names. Checking the range first closes it. A rig needs a
-  1 KiB-block volume over 65 MiB and a `cp` of a file past 64.3 MiB onto it,
-  minutes under TCG, which is why it waits. Older than #331; from its review.
-  **A second path, the same order:** `ensure_block` allocates the data block
-  before the indirect or double-indirect pointer block it needs, so with one
-  block free an append crossing from logical block 11 to 12 takes the last
-  block, fails to take the pointer block, and loses the first. Allocating
-  the pointer blocks first, and giving back what a later step could not
-  use, closes both; a rig for this one needs only a volume with one block
-  free. From the second review of #331.
-- ~~**ext2 trusts a block number inside the volume.**~~ *Done 2026-10-21:*
-  mount refuses a group whose block bitmap, inode bitmap or whole inode
-  table lies outside the group (Linux's `ext2_check_descriptors`), and, past
-  Linux, one lying below `meta_end` (the superblock, the descriptor table and
-  `resize_inode`'s reserved blocks after it, where Linux's range let a table
-  of 1 sit on the superblock of a 1 KiB volume) or overlapping another,
-  refused as an I/O error so `format` does not take it for empty; no
-  block of that zone or of a group's bitmaps and table is freed (Linux's
-  `ext2_free_blocks`) or allocated (an allocation over one leaves its bit
-  set, the counts untouched, and goes on, as `ext2_new_blocks` retries), and the
-  free path reads no pointer block there. `make test-volume-bound`'s
-  SHAPES-H and six new cases of `make test-ext2-blocks`. The item's claim
-  that Linux checks every pointer with `ext2_data_block_valid` was wrong:
-  read in Linux's source on 2026-10-21, that function checks only the range
-  and the superblock, and is called from `ext2_free_blocks` and for the
-  attribute block in `ext2_iget`, not from the mapping path.
 - **ext2 reads and writes through a pointer naming its metadata.** A file
   whose pointer names an inode-table block, a bitmap or the descriptor table
   reads that block as its data and, written, overwrites it: an append or an
@@ -4353,19 +4316,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bitmap says the cluster is free) was declined: on a damaged volume a
   bitmap-free cluster can be on a live chain, the max review's finding 1,
   and the gain is speed on Linux-written sticks only.
-- ~~**`mv` on exFAT drops a set's vendor entries.**~~ *Done 2026-10-21:*
-  a rename builds its set from the old one (`renamed_set`), the File entry
-  and every secondary past the name kept, only the Stream and name entries
-  new (`make test-long-set`'s RENAME). The File entry's attributes and times
-  were lost the same way and are kept too, and so is the Stream's
-  ValidDataLength (the high review). `rm` still frees no vendor
-  allocation's clusters, nor does a replacing rename for the set it
-  replaces: an item of its own, below. A rename deletes the set
-  and builds a new one of File, Stream and name, so vendor extension (0xE0)
-  and vendor allocation (0xE1) entries a camera wrote are lost, and a vendor
-  allocation's clusters leaked. Since 2026-10-19 a write keeps them (`make
-  test-long-set`); a rename should copy the secondaries past the name into
-  the new set. Read in the code; from the review of the set checksum.
 - **fsd reads an exFAT file to its DataLength, not its ValidDataLength.**
   `walk_dir` takes a file's size from the Stream's DataLength, so a file
   another driver preallocated (ValidDataLength below DataLength) reads the
@@ -4378,18 +4328,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   they stay set in the bitmap with no set naming them. Freeing them the way
   the Stream's are, bounded by the volume, would end it. Read in the code,
   found with the rename's fix, 2026-10-21.
-- ~~**exFAT names outside ASCII collide.**~~ *Done 2026-10-21:* a
-  `DirEntry` keeps its name as the set's UTF-16 units, `entry_in` compares
-  them (`units_match`, up-cased by `upcase`) against the name asked for,
-  encoded to UTF-16, and a listing renders them UTF-8 (`utf8_name`), which a
-  lookup takes back unchanged. Until then `walk_dir` rendered each name to
-  ASCII with `?` for anything else, so `café` and `cafè` were both `caf?` and
-  the first set answered for both. A name a listing cannot show exactly (its
-  UTF-8 past 255 bytes, or an unpaired surrogate in it) is still listed that
-  way and reached by it, a lookup's `?` standing for each unit outside ASCII,
-  so two such names differing only there still answer to one spelling, the
-  first: Linux lists them whole, which a 512-byte page cannot. `make
-  test-exfat-names`.
 - **`/bin/ls` cuts a name past 82 bytes and runs it into the next.** Its
   column printer builds each line in `TERM_WIDTH + 4` (84) bytes, so a longer
   name is cut and the line's end lost (seen with an exFAT name listed as 100
@@ -4457,16 +4395,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   ulib's message table and the C and Python peers that
   `check-wire-constants.py` holds to it, and `test-grow-dir`, which matches
   "I/O error". Found by the high review of the grow_dir fix, 2026-10-19.
-- ~~**FAT32 reads the second FAT copy for every FAT write.**~~ *Done
-  2026-10-21:* `write_fat_entry` patches copy 0's sector and writes it to
-  every copy, reading no other, as Linux's and FreeBSD's drivers mirror the
-  FAT. Every read in fsd takes copy 0, so copy 0 is the truth; a sector where
-  a backup copy had come to differ becomes copy 0's whole. Hans's decision,
-  2026-10-21. The 640 KiB `cp` onto the ESP reads 134 FAT sectors, from
-  2,690, and the copy within the ESP 774, from 3,333. `make test-write-walk`
-  plants the bad-cluster mark at every free entry of the ESP's second copy
-  and requires each FAT sector the copy wrote to be copy 0's in both; it
-  fails with each copy's own sector patched.
 - **FAT32 does not honour `BPB_ExtFlags`.** Bytes 40 to 41 of a FAT32 boot
   sector say whether the FATs are mirrored: with bit 7 clear (what fsd's own
   `format` writes, and what every image here has) every copy is kept in
