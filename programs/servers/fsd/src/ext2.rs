@@ -640,8 +640,9 @@ impl Fs {
 
     /// The pointers in sector `s` of pointer block `block`, read with one
     /// sector's buffer: the free path walks pointer blocks a sector at a time,
-    /// each sector once, so it holds no block buffer of its own above the
-    /// bitmap's (fsd's stack; the third review of #331).
+    /// each sector once, so it holds no block buffer of its own (fsd's
+    /// stack; the third review of #331). Since 2026-10-22 `bitmap_free`
+    /// holds none either, only the bit's sector.
     fn pointer_sector(&mut self, block: u32, s: u32) -> Result<[u32; SECTOR_SIZE / 4], Error> {
         let mut sec = [0u8; SECTOR_SIZE];
         self.vol.read(self.block_sector(block) + s as u64, &mut sec)?;
@@ -1151,15 +1152,19 @@ impl Fs {
         if !self.in_volume(bitmap_block) {
             return Ok(false);
         }
-        let bs = self.block_size as usize;
-        let mut buf = [0u8; MAX_BLOCK_SIZE];
-        self.read_block(bitmap_block, &mut buf[..bs])?;
+        // Only the bit's sector is read and written back, as `write_int_at`
+        // does for the counts: a whole block for one bit was eight sector
+        // writes on a 4 KiB volume (the fourth review of #331).
         let (byte, mask) = ((bit / 8) as usize, 1u8 << (bit % 8));
-        if buf[byte] & mask == 0 {
+        let rel = self.block_sector(bitmap_block) + (byte / SECTOR_SIZE) as u64;
+        let at = byte % SECTOR_SIZE;
+        let mut sec = [0u8; SECTOR_SIZE];
+        self.vol.read(rel, &mut sec)?;
+        if sec[at] & mask == 0 {
             return Ok(false);
         }
-        buf[byte] &= !mask;
-        self.write_block(bitmap_block, &buf[..bs])?;
+        sec[at] &= !mask;
+        self.vol.write(rel, &sec)?;
         Ok(true)
     }
 

@@ -22,8 +22,8 @@ UTF-8 on the serial line:
   outside it, and reached by that: the host also plants 100 of U+4E2D (300
   bytes of UTF-8, past the 255 a listed name takes, which until the review
   of 2026-10-21 failed the listing's page) and `lone` with an unpaired
-  surrogate; `echo /*` must give the first as 100 `?`s (the shell's glob:
-  /bin/ls cuts a line at 84 bytes) and `ls /` the second as `lone?`, `cat`
+  surrogate; `echo /*` and `ls /` must give the first as 100 `?`s, whole (`ls`
+  cut it at its 84-byte line until 2026-10-22), `ls /` the second as `lone?`, `cat`
   of each print its bytes, and `touch /lone?` must make no second set;
 - `cp /grave` to a name with a surrogate pair (U+1F601) must make it, five
   units, and `cat` of it print `grave`;
@@ -210,9 +210,11 @@ def run():
         ("driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         (f"ls / lists the three by their UTF-8 names ({[n for n in listing if n.startswith('caf')]})",
          all(n in listing for n, _ in FILES[:3])),
-        # /bin/ls cuts a name past its 84-byte line (the roadmap), so the
-        # overlong name is read from the shell's glob, which lists it whole.
         (f"ls / lists the unpaired surrogate's name as {SHOWN[LONE]}", SHOWN[LONE] in listing),
+        # Past its 84-byte column line, /bin/ls cut the name and ran it into
+        # the next until 2026-10-22, so both listings must hold it whole.
+        ("ls / lists the overlong name as 100 ?s, whole, before and after",
+         SHOWN[OVERLONG] in listing and SHOWN[OVERLONG] in last),
         ("echo /* gives the overlong name as 100 ?s, and the names after it",
          f"/{SHOWN[OVERLONG]}" in (answer(out, "echo /*") or "").split()
          and "/HELLO.TXT" in (answer(out, "echo /*") or "").split()),
