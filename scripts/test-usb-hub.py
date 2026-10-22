@@ -74,8 +74,11 @@ rate, which a retry until green would hide. Each stalled transcript is kept
 in scratch/usb-hub-inconclusive/, named in its log line, since the rerun
 overwrites build/usb-hub-<layout>.txt. The case is narrow on purpose: the kernel printed nothing, the fault trace
 was read and is clean, and the transcript ends in the firmware's
-UsbBootExecCmd. Anything else that never reaches the kernel, a kernel that
-hangs before its first line included, is still FAIL. The classifier is
+UsbBootExecCmd or, since 2026-10-22, just after its `Image type X64` line
+(the stall other rigs met on 2026-10-21). Anything else that never reaches
+the kernel, a kernel that hangs before its first line included, is still
+FAIL, and so is a layout that stalled on each of its last three runs, a hang
+every run meets rather than a random stall. The classifier is
 drive-qemu.py's since 2026-10-22, shared with the other rigs, and
 `drive-qemu.py --self-test` checks it on fixed transcripts; `make test` runs it.
 
@@ -87,7 +90,6 @@ import importlib.util
 import os
 import re
 import sys
-import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -184,15 +186,12 @@ def main():
         fh.write(out)
 
     aborts = g.aborts()
-    if firmware_stalled(out, aborts):
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        os.makedirs(STALLED_DIR, exist_ok=True)
-        kept = os.path.join(STALLED_DIR, f"{stamp}-{label}.txt")
-        with open(kept, "w") as fh:
-            fh.write(out)
-        stalled, runs = record_run(label, "INCONCLUSIVE", kept)
-        print("INCONCLUSIVE: QEMU's firmware never started the kernel (its transcript ends in UsbBootExecCmd or its X64 line); not a pass, run it again")
-        print(f"  {stalled} of {runs} {label} run(s) in {os.path.relpath(RUNS_LOG, ROOT)} stalled; this one kept as {os.path.relpath(kept, ROOT)}")
+    # The shared stall path, on this rig's own log, which grades every other
+    # run PASS or FAIL below; a stall it logs (INCONCLUSIVE, or graded as a
+    # hang every run meets) is not logged again.
+    logged = firmware_stalled(out, aborts)
+    if logged and drive_qemu.boot_stalled("test-usb-hub", label, out, aborts,
+                                          log=RUNS_LOG, kept_dir=STALLED_DIR, label=label):
         print(f"transcript: {os.path.relpath(log, ROOT)}; {drive_qemu.fault_text(aborts)}")
         return INCONCLUSIVE
 
@@ -220,7 +219,8 @@ def main():
     for name, ok in checks:
         print(f"{'ok  ' if ok else 'FAIL'} {name}")
         failed += not ok
-    record_run(label, "FAIL" if failed else "PASS")
+    if not logged:
+        record_run(label, "FAIL" if failed else "PASS")
     print(f"transcript: {os.path.relpath(log, ROOT)}; {drive_qemu.fault_text(aborts)}")
     return failed
 

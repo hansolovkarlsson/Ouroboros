@@ -195,11 +195,14 @@ started and printed nothing ends on `BdsDxe: starting` and is still graded.
 keeps a stalled transcript in `scratch/firmware-stalls/`; the rig then grades
 none of that boot's guest checks (host-side preconditions still count), and
 `verdict` exits 100 when a boot stalled and no check failed. Not a pass:
-run it again. `make test` runs `drive-qemu.py --self-test`. The rigs using it:
+run it again. A boot that stalled on each of its last three runs
+(`PERSISTENT`) is taken for a hang every run meets, such as a firmware
+stopped by the rig's own disk, and its checks are graded and fail. `make test` runs `drive-qemu.py --self-test`. The rigs using it:
 `test-usb-hub` (with its own run log, `scratch/usb-hub-runs.log`),
 `test-boot-partition`, `test-volume-bound`, `test-probe-ioerr`,
-`test-ext2-blocks` and `test-long-set`; the other rigs still grade a stall
-as failed checks.
+`test-ext2-blocks` and `test-long-set`. The other rigs still grade a stall
+as failed checks, but `Guest.aborts()`, which every rig calls, prints
+`QEMU's firmware never started the kernel` beside them.
 
 ## 2. Disk-format test images
 

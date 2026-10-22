@@ -513,11 +513,12 @@ def checks_of(name):
     pre, cases = build(name)
     if not all(ok for _, ok in pre):
         # The case was not built: booting it would prove nothing.
-        return [(f"{name}: {label}", ok) for label, ok in pre]
+        return [(f"{name}: {label}", ok) for label, ok in pre], False
     cmds = commands(name, cases)
     driven, out, faults = boot(name, cmds)
     if drive_qemu.boot_stalled("test-volume-bound", name, out, faults):
-        return None
+        # The host's model checks are graded still; the guest's are not.
+        return [(f"{name}: {label}", ok) for label, ok in pre], True
     o = dict(zip(cmds, outputs(out, cmds)))
     boot_log = out.split(f"# {cmds[0]}")[0]
     checks = pre + [("driven to the end, every command's output found", driven and None not in o.values())]
@@ -557,7 +558,7 @@ def checks_of(name):
                 checks.append((f"mount {n}, {what}, refused (got {got!r})", got == SAYS.get(what, "") + ANSWER.get(what, NO_FS)))
         checks.append(("ls / still lists the root", "etc/" in (o["ls /"] or "").split()))
     checks.append(("no fault lines", faults == 0))
-    return [(f"{name}: {label}", ok) for label, ok in checks]
+    return [(f"{name}: {label}", ok) for label, ok in checks], False
 
 
 def main():
@@ -568,11 +569,9 @@ def main():
     checks = []
     stalled = 0
     for name in only:
-        got = checks_of(name)
-        if got is None:
-            stalled += 1
-        else:
-            checks += got
+        got, stall = checks_of(name)
+        checks += got
+        stalled += stall
     failed = 0
     for label, ok in checks:
         print(("PASS  " if ok else "FAIL  ") + label)

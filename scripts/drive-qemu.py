@@ -206,12 +206,19 @@ class Guest:
         self.stop()
         try:
             with open(self.intlog, "rb") as fh:
-                return sum(
+                count = sum(
                     1 for line in fh
                     if b"Abort" in line or b"SError" in line
                 )
         except OSError:
             return None
+        # Every rig reads the trace here, so every rig's output names a boot
+        # the firmware never handed over, whether or not the rig grades it
+        # INCONCLUSIVE (boot_stalled); one that does not then fails its
+        # checks with this line to say why.
+        if firmware_stalled(self.transcript(), count):
+            self.report("QEMU's firmware never started the kernel (drive-qemu.py's firmware_stalled)")
+        return count
 
     def stop(self):
         """Shut QEMU down, gracefully first: on SIGTERM it exits through its
@@ -297,24 +304,51 @@ def record_run(label, verdict, kept=None, log=None):
     return sum(1 for entry in mine if entry[3:4] == ["INCONCLUSIVE"]), len(mine)
 
 
-def boot_stalled(rig, boot, out, aborts):
+def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None):
     """The verdict for one boot of `rig`: logs it, and for a stall keeps the
     transcript (a rerun overwrites the one in build/), prints the verdict with
     this boot's rate, and answers True, the caller then grading none of the
-    boot's checks."""
-    label = f"{rig}:{boot}"
+    boot's guest checks. A boot that stalled on each of its last
+    PERSISTENT runs, this one included, is no random stall but a hang every
+    run meets (a firmware stopped by the rig's own disk, say): it answers
+    False, and the checks fail. `log`, `kept_dir` and `label` default to
+    STALL_LOG, STALL_DIR and `rig:boot`; test-usb-hub keeps its own."""
+    log, kept_dir = log or STALL_LOG, kept_dir or STALL_DIR
+    label = label or f"{rig}:{boot}"
     if not firmware_stalled(out, aborts):
-        record_run(label, "booted")
+        record_run(label, "booted", log=log)
         return False
-    os.makedirs(STALL_DIR, exist_ok=True)
-    kept = os.path.join(STALL_DIR, f"{time.strftime('%Y%m%d-%H%M%S')}-{rig}-{boot}.txt")
+    os.makedirs(kept_dir, exist_ok=True)
+    kept = os.path.join(kept_dir, f"{time.strftime('%Y%m%d-%H%M%S')}-{rig}-{boot}.txt")
     with open(kept, "w") as fh:
         fh.write(out)
-    stalled, runs = record_run(label, "INCONCLUSIVE", kept)
+    stalled, runs = record_run(label, "INCONCLUSIVE", kept, log=log)
+    rate = (f"{stalled} of {runs} {label} boot(s) in {os.path.relpath(log, _ROOT)} stalled; "
+            f"this one kept as {os.path.relpath(kept, _ROOT)}")
+    if last_verdicts(label, PERSISTENT, log) == ["INCONCLUSIVE"] * PERSISTENT:
+        print(f"FAIL {boot}: QEMU's firmware never started the kernel, on each of this boot's "
+              f"last {PERSISTENT} runs: a hang every run meets, not a random stall, so its checks are graded")
+        print(f"  {rate}")
+        return False
     print(f"INCONCLUSIVE {boot}: QEMU's firmware never started the kernel; not a pass, run it again")
-    print(f"  {stalled} of {runs} {label} boot(s) in {os.path.relpath(STALL_LOG, _ROOT)} stalled; "
-          f"this one kept as {os.path.relpath(kept, _ROOT)}")
+    print(f"  {rate}")
     return True
+
+
+# Runs in a row a boot may stall before the stall is taken for a hang. The
+# worst rate seen, test-usb-hub's usb-boot on 2026-10-04, was one in three, so
+# three in a row by chance is one in 27 there and far rarer elsewhere.
+PERSISTENT = 3
+
+
+def last_verdicts(label, count, log=None):
+    """The verdicts of `label`'s last `count` runs in `log`, oldest first."""
+    try:
+        with open(log or STALL_LOG) as fh:
+            mine = [entry.split()[3] for entry in fh if entry.split()[2:3] == [label] and len(entry.split()) > 3]
+    except OSError:
+        return []
+    return mine[-count:]
 
 
 def verdict(rig, failed, stalled):
@@ -385,6 +419,20 @@ def self_test():
     for name, out, aborts, want in cases:
         ok = firmware_stalled(out, aborts) == want
         print(f"{'ok  ' if ok else 'FAIL'} {name}: {'INCONCLUSIVE' if want else 'graded'}")
+        failed += not ok
+    # The persistent rule, on a log of its own: stalls answer INCONCLUSIVE
+    # until PERSISTENT in a row, a boot between them starts the count again.
+    import contextlib, io
+    with tempfile.TemporaryDirectory() as tmp:
+        log = os.path.join(tmp, "runs.log")
+        def run(out):
+            with contextlib.redirect_stdout(io.StringIO()):
+                return boot_stalled("self", "test", out, 0, log=log, kept_dir=tmp)
+        got = [run(X64_STALLED) for _ in range(PERSISTENT - 1)] + [run(FIRMWARE_HEAD + BDS_STARTED)]
+        got += [run(X64_STALLED) for _ in range(PERSISTENT)] + [run(X64_STALLED)]
+        want = [True] * (PERSISTENT - 1) + [False] + [True] * (PERSISTENT - 1) + [False, False]
+        ok = got == want
+        print(f"{'ok  ' if ok else 'FAIL'} a stall on each of the last {PERSISTENT} runs is graded, a boot between them resets the count")
         failed += not ok
     return failed
 

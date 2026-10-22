@@ -810,7 +810,9 @@ of that boot's guest checks and exits 100 when nothing failed. `test-usb-hub`,
 `test-boot-partition`, `test-volume-bound`, `test-probe-ioerr`,
 `test-ext2-blocks` and `test-long-set` use it; `make test` runs its
 self-test (`drive-qemu.py --self-test`), which each of five mutations of the
-rule fails. The other rigs are a roadmap item.
+rule fails. A boot that stalls on each of its last three runs is graded,
+since a hang every run meets would otherwise stay INCONCLUSIVE for good. The
+other rigs are a roadmap item; meanwhile every rig's output names a stall.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

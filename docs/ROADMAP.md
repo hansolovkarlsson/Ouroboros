@@ -2209,13 +2209,23 @@ The small open tails those arcs deliberately left:
 >       `make test`; dropping the escape strip, the X64 line, the kernel-line
 >       test, the trace's None, or the last-line anchor each fails it. No
 >       real X64 transcript survived (reruns overwrote them), so its fixture
->       is the head every boot prints plus a passing boot's clears. Done.*
+>       is the head every boot prints plus a passing boot's clears. Its high
+>       review: the X64 line is one every boot prints, so a hang every run
+>       meets there (the firmware stopped by the rig's own failing disk) would
+>       be INCONCLUSIVE forever; a boot that stalled on each of its last three
+>       runs is now graded, and the self-test's fifteenth case checks it.
+>       `test-usb-hub` goes through `boot_stalled` too, on its own log. Done.*
 > - [ ] **new** **The other QEMU rigs still grade a firmware stall as failed
 >       checks.** About forty rigs drive QEMU's firmware through
 >       `drive-qemu.py`; six use `boot_stalled`. The rest can meet the same
 >       stall (`test-long-set` did, on virtio). Each needs the call after its
 >       boot and `verdict` at its end, a few lines a rig, and a control that
 >       forces the stall. Taken a rig at a time, as each is next touched.
+>       Meanwhile `Guest.aborts()` names a stall in every rig's output, so
+>       those FAILs say why. The high review of 2026-10-22 asked for the
+>       verdict in `Guest` itself; a rig grades its own checks, so it must
+>       still skip them, and `run()` answering three ways would change every
+>       rig's `if g.run(...)` at once.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
