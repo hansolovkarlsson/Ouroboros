@@ -12,14 +12,14 @@ disk out of reach until a reboot, and `format` took the partition it could
 not read as empty and laid a new filesystem over it. Only a read error in the
 partition table was told apart (#324).
 
-Five boots, each on fresh copies. In each the firmware boots esp.img from
+Six boots, each on fresh copies. In each the firmware boots esp.img from
 NVMe, which the kernel cannot drive, so the virtio disk goes in as the
 fallback block device, and the boot partition is not known to fsd. That disk
 is a copy of build/espexfat.img (exFAT, then the ESP) or build/espext2.img
 (ext2, then the ESP), signed again (scripts/disksig.py) so it is not taken
 for the boot disk, attached through QEMU's blkdebug driver with every read of
 one sector failing with EIO. A USB stick, a copy of build/usbstick.img, is
-beside it.
+beside it, except in SECTOR0.
 
 - MOUNT: the exFAT copy with the ESP's entry zeroed (one partition), its
   root directory's first sector failing (read by the exFAT probe's
@@ -43,11 +43,19 @@ beside it.
   so fsd's boot line and `mount -a` must answer as in MOUNT, and no stick be
   installed. The kernel reads sector 0 alone before it installs a disk, and
   takes one whose sector 1 will not read as not the boot disk (D6), so this
-  disk goes in as the fallback. A failing sector 0 cannot be the case: the
-  kernel drops such a disk and installs the stick itself (the roadmap).
+  disk goes in as the fallback.
   TABLE rests on parttable's rule that sector 1 unread is `Unreadable`, not
   a reason to read the backup header: if that rule changes, the disk would
   mount from its backup and TABLE must fail some other way.
+- SECTOR0 (since 2026-10-22): the exFAT copy whole, its MBR (sector 0)
+  failing, and no stick. The kernel must hold the disk, unreadable twice, as
+  not the boot disk (D6) and install it as the fallback, with no stick
+  attached; fsd's boot line and `mount -a` must answer as in MOUNT. Until
+  2026-10-22 the kernel dropped such a disk, and a stick attached went in
+  instead. With a stick and the boot partition unknown, the stick still goes
+  in first, the order from before one-disk step 3, so the boot has none.
+  Its "held" check reads the kernel's line alone; the fallback line and
+  fsd's I/O error are the observations.
 - EXT2: the ext2 copy with the ESP's entry zeroed, the partition's first
   sector failing: FAT32's and exFAT's probes read it, ext2's reads its
   superblock two sectors on. ext2 must mount, as it did before the change:
@@ -65,9 +73,12 @@ partition overwritten), with the probe stopping at its first arm's read
 error (EXT2: nothing mounts), with `format` going on past a candidate that
 would not read (BESIDE: the ESP formatted), with `mount N` answering
 "no filesystem" (BESIDE), and with an unreadable partition table read as
-one holding no partitions (TABLE: the stick installed and mounted). That the stick can be swapped in at all is
+one holding no partitions (TABLE: the stick installed and mounted), and
+with the kernel dropping a disk whose sector 0 will not read (SECTOR0: no
+disk, `mount -a` finding no stick). That the stick can be swapped in at all is
 test-mount-gate's check. About four minutes. Run it whenever fsd's probe,
-mount, format, `mount N` or `mount -a`'s rescan changes.
+mount, format, `mount N`, `mount -a`'s rescan or the kernel's
+`init_storage` changes.
 """
 import hashlib
 import importlib.util

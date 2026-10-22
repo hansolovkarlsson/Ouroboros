@@ -814,6 +814,19 @@ rule fails. A boot that stalls on each of its last three runs is graded,
 since a hang every run meets would otherwise stay INCONCLUSIVE for good. The
 other rigs are a roadmap item; meanwhile every rig's output names a stall.
 
+**A virtio disk whose sector 0 will not read is held, not dropped
+(2026-10-22).** `init_storage` read sector 0 twice and, when both failed,
+returned no device, so `install_boot_disk` installed whatever USB stick was
+attached, the swap fsd's `mount -a` refuses since #324, or no disk at all.
+Now the disk is held as not the boot disk, as one whose partition table will
+not read is under D6, and goes in only if no other disk does; fsd then
+answers its I/O error. With the boot partition unknown a stick attached
+still goes in first. Hans chose this of three (hold it, leave it, or
+install it outright, which would reopen D6). `make test-probe-ioerr` adds
+SECTOR0: sector 0 failing and no stick, the disk must go in as the fallback
+and fsd answer its I/O error; fails with the disk dropped. A disk whose
+sector 0 reads but carries no MBR signature is still dropped (the roadmap).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
