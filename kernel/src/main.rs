@@ -1116,8 +1116,8 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
     console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed), build {BUILD}");
 }
 
-/// Discovers and initializes the virtio-blk device, reads sector 0 (twice
-/// before taking it as unreadable), and installs the device for the
+/// Discovers and initializes the virtio-blk device, reads sector 0, and
+/// installs the device for the
 /// filesystem server (`syscall::install_block_device`), which mounts it;
 /// the kernel holds no filesystem itself. A disk whose sector 0 reads with
 /// no MBR boot signature (`0x55 0xAA` at bytes 510-511) is dropped; one
@@ -1154,21 +1154,22 @@ fn init_storage() -> Option<virtio_blk::Device> {
     console::println!("Ouroboros kernel: virtio-blk ready, capacity {} sectors", device.capacity_sectors());
 
     let mut sector = [0u8; 512];
-    // Read twice, as the boot-disk check is (D6): the first read a disk sees
-    // is the likeliest to fail once (the review of #291). Unreadable twice,
-    // the disk is not dropped: the boot-disk check below answers for it as
-    // for any disk, from the boot partition's own table (held as not the boot
-    // disk when its MBR will not read, a GPT disk asked of its headers, put
-    // first when the boot partition is unknown), and fsd then answers the
-    // I/O error. Until 2026-10-22 it was dropped, and whatever USB stick was
-    // attached went in, the swap fsd's `mount -a` refuses.
-    let first = unsafe { device.read_sector(0, &mut sector) };
-    match first.or_else(|_| unsafe { device.read_sector(0, &mut sector) }) {
-        Err(e) => console::println!("Ouroboros kernel: virtio-blk read of sector 0 failed twice ({e})"),
+    // Sector 0, for its signature alone. A read that fails is not retried
+    // here: the disk is not dropped, the boot-disk check below answers for it
+    // as for any disk, from the boot partition's own table, and that check
+    // holds D6's retry (held as not the boot disk when its MBR will not read
+    // twice, a GPT disk asked of its headers, put first when the boot
+    // partition is unknown); fsd then answers the I/O error. Until 2026-10-22
+    // such a disk was dropped, and whatever USB stick was attached went in,
+    // the swap fsd's `mount -a` refuses. A disk whose sector 0 failed once
+    // and then reads goes the same way unsigned or not: in as any disk, where
+    // fsd finds no filesystem on a blank one.
+    match unsafe { device.read_sector(0, &mut sector) } {
+        Err(e) => console::println!("Ouroboros kernel: virtio-blk read of sector 0 failed ({e}) - the boot-disk check asks again"),
         Ok(()) if !parttable::has_boot_signature(&sector) => {
             let signature = (sector[511] as u16) << 8 | sector[510] as u16;
             console::println!(
-                "Ouroboros kernel: virtio-blk sector 0 has no MBR signature ({signature:#06x}) - not attempting a FAT32 mount"
+                "Ouroboros kernel: virtio-blk sector 0 has no MBR signature ({signature:#06x}) - dropped, a USB stick may go in instead"
             );
             return None;
         }
@@ -1191,7 +1192,14 @@ fn init_storage() -> Option<virtio_blk::Device> {
     // (or contains) any filesystem itself; the server's own boot-time
     // auto-mount takes it from here.
     syscall::install_block_device(block::BlockDevice::Virtio(device), boot_start);
-    console::println!("Ouroboros kernel: block device installed for the filesystem server");
+    if boot_start == 0 {
+        console::println!("Ouroboros kernel: block device installed for the filesystem server");
+    } else {
+        // Only a disk the boot-disk check matched has a start to give.
+        console::println!(
+            "Ouroboros kernel: block device installed for the filesystem server, the boot disk (its boot partition at LBA {boot_start})"
+        );
+    }
     None
 }
 

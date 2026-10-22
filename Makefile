@@ -2573,7 +2573,8 @@ test-mount-gate: image $(USBSTICK_IMG)
 	python3 scripts/test-mount-gate.py
 
 # A read error inside a partition's probe is an I/O error, not "no
-# filesystem" (scripts/test-probe-ioerr.py): seven boots from esp.img on NVMe,
+# filesystem" (scripts/test-probe-ioerr.py): seven boots from esp.img on NVMe
+# (espgpt.img in one),
 # on virtio a copy of espexfat.img, espext2.img or espgpt.img with one sector
 # failing every read (QEMU's blkdebug), usbstick.img on USB; `mount -a` must
 # answer the I/O error with no stick installed (also with the GPT header

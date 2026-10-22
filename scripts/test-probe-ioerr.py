@@ -12,14 +12,16 @@ disk out of reach until a reboot, and `format` took the partition it could
 not read as empty and laid a new filesystem over it. Only a read error in the
 partition table was told apart (#324).
 
-Seven boots, each on fresh copies. In each the firmware boots esp.img from
-NVMe, which the kernel cannot drive, so the virtio disk goes in as the
-fallback block device, and the boot partition is not known to fsd. That disk
-is a copy of build/espexfat.img (exFAT, then the ESP) or build/espext2.img
-(ext2, then the ESP), signed again (scripts/disksig.py) so it is not taken
-for the boot disk, attached through QEMU's blkdebug driver with every read of
-one sector failing with EIO. A USB stick, a copy of build/usbstick.img, is
-beside it.
+Seven boots, each on fresh copies. In each but GPT0 the firmware boots
+esp.img from NVMe, which the kernel cannot drive, so the virtio disk goes in
+as the fallback block device, and the boot partition is not known to fsd.
+The virtio disk is a copy of build/espexfat.img (exFAT, then the ESP),
+build/espext2.img (ext2, then the ESP) or build/espgpt.img, attached through
+QEMU's blkdebug driver with every read of one sector failing with EIO. An
+MBR copy is signed again (scripts/disksig.py) so it is not taken for the
+boot disk; a GPT copy keeps espgpt.img's GUIDs, so it is the boot disk when
+the firmware boots espgpt.img, as in GPT0. A USB stick, a copy of
+build/usbstick.img, is beside it.
 
 - MOUNT: the exFAT copy with the ESP's entry zeroed (one partition), its
   root directory's first sector failing (read by the exFAT probe's
@@ -185,6 +187,13 @@ def prepare(source, keep_esp, rule):
     return failing
 
 
+def whole(image):
+    """The image's SHA-256, every byte, the table's sectors and the space
+    between partitions too."""
+    with open(image, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
 def digests(image):
     """Each partition's SHA-256, every byte of it."""
     out = []
@@ -208,7 +217,7 @@ def boot(name):
         failing = prepare(source, keep_esp, rule)
         start = partitions(COPY)[0][1]
         shutil.copyfile(STICK, STICK_COPY)
-        before = digests(COPY)
+        before = digests(COPY), whole(COPY)
         with open(BLKDEBUG, "w") as fh:
             fh.write(f'[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "{failing}"\n')
         extra = [
@@ -223,14 +232,14 @@ def boot(name):
             "-drive", f"file={STICK_COPY},format=raw,if=none,id=usbstick",
             "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
         ]
-        guest = drive_qemu.Guest(COPY, extra_args=extra, virtio_disk=False, stamp_from=ESP,
+        guest = drive_qemu.Guest(COPY, extra_args=extra, virtio_disk=False, stamp_from=NVME.get(name, ESP),
                                  label=f"test-probe-ioerr[{name}]: ")
         driven = guest.run(steps)
         out = guest.transcript()
         faults = guest.aborts()
         guest.stop()
         guest = None
-        after = digests(COPY)
+        after = digests(COPY), whole(COPY)
     finally:
         if guest:
             guest.stop()
@@ -239,7 +248,7 @@ def boot(name):
                 os.remove(f)
     with open(os.path.join(BUILD, f"test-probe-ioerr-{name.lower()}.txt"), "w") as fh:
         fh.write(out)
-    return driven, out, faults, before == after, failing, start
+    return driven, out, faults, (before[0] == after[0], before == after), failing, start
 
 
 def outputs(out, commands):
@@ -263,7 +272,7 @@ def outputs(out, commands):
 
 def checks_of(name):
     commands = BOOTS[name][3]
-    driven, out, faults, untouched, failing, start = boot(name)
+    driven, out, faults, (untouched, untouched_whole), failing, start = boot(name)
     # A precondition: the table's reads are sectors 0 and 1 (MBR, GPT
     # header), so the error must land past them, except in TABLE, where it
     # is the GPT header's. The host's own check, graded even when the
@@ -297,21 +306,24 @@ def checks_of(name):
     if name == "SECTOR0":
         checks += [
             ("the kernel held the disk, sector 0 unreadable twice",
-             "virtio-blk read of sector 0 failed twice" in boot_log
+             "virtio-blk read of sector 0 failed" in boot_log
+             and "reading its partition table failed twice" in boot_log
              and "virtio-blk is not the boot disk - held" in boot_log),
             ("and installed it as the fallback, the stick refused",
              "virtio-blk installed as the fallback: the USB stick is not the boot disk either" in boot_log),
-            ("the disk as it was, every byte", untouched),
+            ("the disk as it was, every byte, its table too", untouched_whole),
         ]
     if name == "GPT0":
         # Its protective MBR will not read, its GPT headers do: the check
         # answers from the headers, and the copy is the boot disk.
         checks += [
-            ("sector 0 unreadable twice", "virtio-blk read of sector 0 failed twice" in boot_log),
+            ("sector 0 unreadable", "virtio-blk read of sector 0 failed" in boot_log),
+            # Only a disk the boot-disk check matched is installed with a
+            # start, which the kernel's line names: the boot partition's.
             ("the kernel took the disk for the boot disk, from its GPT headers, and installed it first",
-             "block device installed for the filesystem server" in boot_log
-             and "virtio-blk is not the boot disk" not in boot_log),
-            ("the disk as it was, every byte", untouched),
+             "Ouroboros kernel: boot partition: 1 of GPT at LBA 2048" in boot_log
+             and "installed for the filesystem server, the boot disk (its boot partition at LBA 2048)" in boot_log),
+            ("the disk as it was, every byte, its table too", untouched_whole),
         ]
     if name in ("MOUNT", "TABLE", "SECTOR0", "GPT0"):
         checks += [
