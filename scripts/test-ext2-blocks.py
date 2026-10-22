@@ -70,7 +70,11 @@ with a zeroed block, which nothing may change. The host plants:
   (three blocks needed, and two) must answer disk full and leave both files
   as planted, `echo q > ONEB` must then get the block, and after `rm G`
   `cp TWELVE CP` (2 KiB a request) must answer disk full with CP keeping
-  its first KiB in G's old block;
+  its first KiB in G's old block; and since 2026-10-22, C made with 5,000
+  inodes, HIGH (empty) moved to the last of them, whose bit lies in the
+  inode bitmap's second sector: `rm HIGH` must clear that bit, and leave
+  the bit at its offset in the first sector as it was (bitmap_free writes
+  the bit's sector alone);
 - on B, every block of the volume marked used and the last group's padding
   bits clear, so the next free bit is the block just past the volume (the
   witness's first): `echo x > NEW` must answer disk full; and the inode count
@@ -104,7 +108,9 @@ block freed), and with free_pointed reading a metadata block as pointers
 arm out), and with ensure_block taking a block before it knows it can take
 them all (ONEB disk full: main's order before 2026-10-21, the give-back
 out, the indirect branch not asking for its pointer block), and with
-write_at returning before its inode (CP empty, G's block named by none).
+write_at returning before its inode (CP empty, G's block named by none),
+and with bitmap_free writing the bitmap block's first sector for every bit
+(HIGH's bit left set).
 One boot, about a minute, needs
 e2fsprogs. Run it whenever ext2's Volume, block_sector, inode_place,
 alloc_block, alloc_inode, free_block, free_inode, bitmap_free,
@@ -151,7 +157,7 @@ FILES_A = {"RD": b"R" * 2048, "WR": b"W" * 1100, "IND": b"I" * 12 * 1024, "SRC":
 # TWELVE ends at its last direct block and DIND at its last single-indirect
 # one, so an append to either needs a pointer block it does not have.
 FILES_C = {"F": b"F" * 1024, "G": b"g" * 1024, "H": b"h" * 10, "TWELVE": b"2" * 12 * 1024,
-           "DIND": b"3" * (12 + 256) * 1024}
+           "DIND": b"3" * (12 + 256) * 1024, "HIGH": b""}
 COMMANDS = [
     "mount 1 /mnt/a", "mount 2 /mnt/c", "mount 3 /mnt/b",
     "ls /mnt/a",
@@ -179,6 +185,7 @@ COMMANDS = [
     "echo q > /mnt/c/ONEB",
     "rm /mnt/c/G",
     "cp /mnt/c/TWELVE /mnt/c/CP",
+    "rm /mnt/c/HIGH",
     "echo x > /mnt/b/NEW",
     "touch /mnt/b/NEW2",
 ]
@@ -328,7 +335,7 @@ def witness_bytes():
 def build():
     """Write the disk and plant the damage; return the plan and the checks."""
     root = volume(EXT2, 1)
-    a, c, b = mkvol(FILES_A, links={"L": "ab"}), mkvol(FILES_C, ("-O", "^filetype")), mkvol({})
+    a, c, b = mkvol(FILES_A, links={"L": "ab"}), mkvol(FILES_C, ("-O", "^filetype", "-N", "5000")), mkvol({})
     layout = mbrdisk.assemble(DISK, [(mbrdisk.EXT2_TYPE, v, False) for v in (root, a, c, b)])
     (_, _), (a_start, _), (c_start, _), (b_start, b_sectors) = layout
     wit_start = os.path.getsize(DISK) // SECT
@@ -412,6 +419,14 @@ def build():
         # its group came to be refused at mount (test-volume-bound's SHAPES-H).
         c_ents = vc.entries()
         vc.set_u32(c_ents["H"][1], vc.ic + 5)
+        # C: HIGH (empty) moved to the last inode, whose bit lies in the
+        # inode bitmap's second sector (C has 5,000 inodes, a 1 KiB bitmap
+        # block): rm must clear that bit, in that sector.
+        high, high_was = vc.ic, c_ents["HIGH"][0]
+        vc.write(vc.inode_off(high), vc.read(vc.inode_off(high_was), vc.isz))
+        vc.set_bitmap(4, with_bits(with_bits(vc.bitmap(4), high_was - 1, high_was, 0), high - 1, high, 1))
+        vc.set_u32(c_ents["HIGH"][1], high)
+        plan.update(c_high=high, c_ibm=vc.bitmap(4))
         # C: one block left free, the highest, and the counts saying so. An
         # append to DIND needs three, one to TWELVE two: both must take none.
         c_real = vc.bc - vc.fdb
@@ -482,6 +497,11 @@ def build():
              and va.u32(t3 * va.bs) == va.ptr(ino["SRC"], 0) != 0 and all(mi_direct)),
             ("plant: C has no filetype feature, its files, and H naming an inode past its count",
              not vc.u32(1024 + 96) & 2 and set(FILES_C) <= set(c_ents) and vc.entries()["H"][0] > vc.ic),
+            (f"plant: HIGH names C's last inode ({high}), a regular file of size 0 with no block, its bit set "
+             "in the inode bitmap's second sector and its old bit clear",
+             vc.entries()["HIGH"][0] == high and (high - 1) // 8 >= SECT and (high - 1) // 8 < vc.bs
+             and bit(vc.bitmap(4), high - 1) and not bit(vc.bitmap(4), high_was - 1)
+             and vc.mode(high) & 0xF000 == 0x8000 and vc.size(high) == 0 and vc.ptr(high, 0) == 0),
             ("plant: C has one block free, its counts 1; TWELVE has no indirect block, DIND an indirect "
              "and no double-indirect block, each ending at its last block",
              vc.bc - vc.fdb <= vc.bpg and [n for n in range(vc.bc - vc.fdb) if not bit(vc.bitmap(0), n)] == [plan["c_free"] - vc.fdb]
@@ -584,6 +604,10 @@ def verdicts(plan, driven, out, faults):
         cp_now = ((vc.size(cp_ino), vc.i_blocks(cp_ino), vc.ptr(cp_ino, 0), vc.read(vc.ptr(cp_ino, 0) * vc.bs, 1024))
                   if cp_ino else None)
         g_bit = bit(vc.bitmap(0), plan["g_block"] - vc.fdb) if vc else None
+        # HIGH's bit, and the bit at its offset in the bitmap's first sector,
+        # which a write to the wrong sector would clear.
+        h = plan["c_high"] - 1
+        c_ibits = (bit(vc.bitmap(4), h), bit(vc.bitmap(4), h - SECT * 8)) if vc else None
         a_free_delta = free_delta(va)
         ents = va.entries()
         ino = plan["ino"]
@@ -699,6 +723,10 @@ def verdicts(plan, driven, out, faults):
          "disk full" in (o.get("cp /mnt/c/TWELVE /mnt/c/CP") or "") and o.get("rm /mnt/c/G") == ""
          and cp_now == (1024, 1024 // SECT, plan["g_block"], b"2" * 1024) and g_bit == 1
          and c_counts is not None and c_counts[0] == (0, 0)),
+        (f"rm HIGH clears its inode's bit in the bitmap's second sector and no bit a sector before "
+         f"(got {o.get('rm /mnt/c/HIGH')!r}, bits {c_ibits})",
+         o.get("rm /mnt/c/HIGH") == "" and "HIGH" not in c_ents
+         and c_ibits == (0, bit(plan["c_ibm"], plan["c_high"] - 1 - SECT * 8))),
         (f"B's write answers disk full (got {o.get('echo x > /mnt/b/NEW')!r})",
          "disk full" in (o.get("echo x > /mnt/b/NEW") or "")),
         (f"B's touch NEW2 answers disk full and makes nothing (got {o.get('touch /mnt/b/NEW2')!r})",

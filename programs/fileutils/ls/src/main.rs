@@ -326,7 +326,7 @@ fn print_columns(target: u64, entries: &[Entry], data: &[u8]) {
             }
             let e = &entries[idx];
             let name = entry_name(*e, data);
-            append(&mut line, &mut w, name);
+            append_name(target, &mut line, &mut w, name);
             if e.is_dir {
                 append(&mut line, &mut w, b"/");
             }
@@ -407,7 +407,7 @@ fn print_long(target: u64, dir: &str, entries: &[Entry], data: &[u8]) {
         append(&mut line, &mut w, b" ");
 
         // Name (directories keep a trailing '/').
-        append(&mut line, &mut w, name);
+        append_name(target, &mut line, &mut w, name);
         if e.is_dir {
             append(&mut line, &mut w, b"/");
         }
@@ -458,6 +458,21 @@ fn append(buf: &mut [u8], n: &mut usize, src: &[u8]) {
             *n += 1;
         }
     }
+}
+
+/// Append a name to `buf` at `*n`, whole: a name that would not fit with the
+/// line's end (a `/` and `\r\n`) after it is written out directly, after the
+/// line so far, and the line goes on empty. [`append`] would cut it and drop
+/// the line's end, running it into the next line (an exFAT name of 100 `?`s
+/// against the column printer's 84 bytes, 2026-10-21).
+fn append_name(target: u64, buf: &mut [u8], n: &mut usize, name: &[u8]) {
+    if *n + name.len() + 3 <= buf.len() {
+        append(buf, n, name);
+        return;
+    }
+    ulib::write_out(target, &buf[..*n]);
+    ulib::write_out(target, name);
+    *n = 0;
 }
 
 /// Render the 10-char type+permission string (`drwxr-xr-x`) into `out`. `md` is

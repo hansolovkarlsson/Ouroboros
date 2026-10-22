@@ -12,7 +12,7 @@ disk out of reach until a reboot, and `format` took the partition it could
 not read as empty and laid a new filesystem over it. Only a read error in the
 partition table was told apart (#324).
 
-Four boots, each on fresh copies. In each the firmware boots esp.img from
+Five boots, each on fresh copies. In each the firmware boots esp.img from
 NVMe, which the kernel cannot drive, so the virtio disk goes in as the
 fallback block device, and the boot partition is not known to fsd. That disk
 is a copy of build/espexfat.img (exFAT, then the ESP) or build/espext2.img
@@ -38,13 +38,20 @@ beside it.
   were: with the boot partition not known both are the root's candidates,
   and the format took the ESP when the exFAT before it would not read (the
   review of #329).
+- TABLE (since 2026-10-22): a copy of build/espgpt.img, its GPT header
+  (sector 1) failing, #324's own case: the partition table will not read,
+  so fsd's boot line and `mount -a` must answer as in MOUNT, and no stick be
+  installed. The kernel reads sector 0 alone before it installs a disk, and
+  takes one whose sector 1 will not read as not the boot disk (D6), so this
+  disk goes in as the fallback. A failing sector 0 cannot be the case: the
+  kernel drops such a disk and installs the stick itself (the roadmap).
 - EXT2: the ext2 copy with the ESP's entry zeroed, the partition's first
   sector failing: FAT32's and exFAT's probes read it, ext2's reads its
   superblock two sectors on. ext2 must mount, as it did before the change:
   the probe tries every arm before answering a read's error (the review of
   #329 found the first version stopping at FAT32's).
 
-In each, the failing sector must be past sectors 0 and 1, the partition
+In each but TABLE, the failing sector must be past sectors 0 and 1, the partition
 table's reads, and is checked before the boot: a precondition, not an
 observation, since blkdebug says nothing of which reads it failed. BESIDE is
 the evidence that the table reads through it (the ESP mounts), and the
@@ -53,9 +60,10 @@ trace. Fails with the probe answering `None` for a read error, as on main
 before 2026-10-20 (MOUNT: the stick installed and mounted; FORMAT: the
 partition overwritten), with the probe stopping at its first arm's read
 error (EXT2: nothing mounts), with `format` going on past a candidate that
-would not read (BESIDE: the ESP formatted), and with `mount N` answering
-"no filesystem" (BESIDE). That the stick can be swapped in at all is
-test-mount-gate's check. About three minutes. Run it whenever fsd's probe,
+would not read (BESIDE: the ESP formatted), with `mount N` answering
+"no filesystem" (BESIDE), and with an unreadable partition table read as
+one holding no partitions (TABLE: the stick installed and mounted). That the stick can be swapped in at all is
+test-mount-gate's check. About four minutes. Run it whenever fsd's probe,
 mount, format, `mount N` or `mount -a`'s rescan changes.
 """
 import hashlib
@@ -76,6 +84,7 @@ _spec.loader.exec_module(drive_qemu)
 ESP = os.path.join(BUILD, "esp.img")
 EXFAT = os.path.join(BUILD, "espexfat.img")
 EXT2 = os.path.join(BUILD, "espext2.img")
+GPT = os.path.join(BUILD, "espgpt.img")
 STICK = os.path.join(BUILD, "usbstick.img")
 COPY = os.path.join(BUILD, "test-probe-ioerr.img")
 STICK_COPY = os.path.join(BUILD, "test-probe-ioerr-stick.img")
@@ -88,6 +97,7 @@ BOOTS = {
     "FORMAT": (EXFAT, False, "exfat-root", ["format ext2"]),
     "BESIDE": (EXFAT, True, "exfat-root", ["mount 0 /mnt/x", "unmount", "format ext2"]),
     "EXT2": (EXT2, False, "first", ["mount"]),
+    "TABLE": (GPT, True, "gpt-header", ["mount -a", "mount"]),
 }
 
 
@@ -122,10 +132,16 @@ def prepare(source, keep_esp, rule):
         heap = int.from_bytes(vbr[88:92], "little")
         root = int.from_bytes(vbr[96:100], "little")
         failing = start + heap + ((root - 2) << vbr[109])
+    elif rule == "gpt-header":
+        assert partitions(COPY)[0][0] == 0xEE, f"{source}: no protective MBR"
+        failing = 1
     else:
         failing = start
-    subprocess.run([sys.executable, os.path.join(HERE, "disksig.py"), "set", COPY], check=True,
-                   stdout=subprocess.DEVNULL)
+    # A GPT disk takes no MBR signature, and needs none: the boot partition
+    # (esp.img's) is an MBR one, which no GPT disk matches.
+    if rule != "gpt-header":
+        subprocess.run([sys.executable, os.path.join(HERE, "disksig.py"), "set", COPY], check=True,
+                       stdout=subprocess.DEVNULL)
     return failing
 
 
@@ -212,17 +228,19 @@ def checks_of(name):
     boot_log = out.split(f"# {commands[0]}")[0]
     checks = [
         # A precondition: the table's reads are sectors 0 and 1 (MBR, GPT
-        # header), so the error must land past them.
+        # header), so the error must land past them, except in TABLE, where
+        # it is the MBR's.
         (f"the failing sector, {failing}, is past the table's (partition 1 at {start})",
-         failing >= start > 1),
+         failing >= start > 1) if name != "TABLE" else
+        (f"the failing sector, {failing}, is the GPT header's", failing == 1),
         ("driven to the end, every command's output found", driven and None not in o),
     ]
     # One write since 2026-10-20 (it was three, and another task's line
     # landed inside it), so the whole line, before the first command.
     io_at_boot = "fsd: mount failed (disk I/O error) - disk commands won't work\r\n" in boot_log
-    if name in ("MOUNT", "FORMAT"):
+    if name in ("MOUNT", "FORMAT", "TABLE"):
         checks.append(("fsd's boot mount failed with a disk I/O error", io_at_boot))
-    if name == "MOUNT":
+    if name in ("MOUNT", "TABLE"):
         checks += [
             (f"mount -a answered the I/O error, the disk not replaced (got {o[0]!r})",
              (o[0] or "").endswith("mount: the disk answered with an I/O error; it was not replaced by a USB stick")),
