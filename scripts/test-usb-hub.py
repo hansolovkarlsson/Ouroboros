@@ -109,7 +109,6 @@ RUNS_LOG = os.path.join(ROOT, "scratch", "usb-hub-runs.log")
 STALLED_DIR = os.path.join(ROOT, "scratch", "usb-hub-inconclusive")
 # The stall rule is drive-qemu.py's, shared with every rig since 2026-10-22;
 # this rig keeps its own run log, which grades every run PASS or FAIL too.
-firmware_stalled = drive_qemu.firmware_stalled
 
 
 def record_run(label, verdict, kept=None):
@@ -189,7 +188,7 @@ def main():
     # The shared stall path, on this rig's own log, which grades every other
     # run PASS or FAIL below; a stall it logs (INCONCLUSIVE, or graded as a
     # hang every run meets) is not logged again.
-    logged = firmware_stalled(out, aborts)
+    logged = drive_qemu.firmware_stalled(out, aborts)
     if logged and drive_qemu.boot_stalled("test-usb-hub", label, out, aborts,
                                           log=RUNS_LOG, kept_dir=STALLED_DIR, label=label):
         print(f"transcript: {os.path.relpath(log, ROOT)}; {drive_qemu.fault_text(aborts)}")
