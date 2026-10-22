@@ -4355,8 +4355,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   *Done 2026-10-22, Hans's choice of three (hold it, leave it, or install it
   outright, which would reopen D6): the disk is held as one whose table will
   not read is: with the boot partition known, held and installed only if no
-  other disk is the boot disk; unknown, installed first (the high review
-  found the first version holding it there too, behind the stick).
+  other disk is the boot disk; unknown, installed first. The answer is
+  `is_boot_disk_retrying`'s, asked as of any disk: the first version wrote
+  its own, which held the disk with the boot partition unknown too, and a
+  GPT boot disk whose protective MBR alone failed (two high reviews).
+  GPT0 boots espgpt.img with such a copy: it must go in first.
   `make test-probe-ioerr`'s SECTOR0 fails sector 0 with a stick beside it
   that is not the boot disk: the disk goes in as the fallback, the stick
   stays out and fsd answers its I/O error; it fails with the disk dropped

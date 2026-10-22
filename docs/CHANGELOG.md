@@ -823,10 +823,15 @@ D6: with the boot partition known, held as not the boot disk and installed
 only if no other disk is the boot disk; with it unknown, installed first, as
 any virtio disk then is. fsd then answers its I/O error. Hans chose this of
 three (hold it, leave it, or install it outright, which would reopen D6).
-`make test-probe-ioerr` adds SECTOR0: sector 0 failing, a stick that is not
-the boot disk beside it, the disk must go in as the fallback, the stick
-stay out and fsd answer the I/O error; fails with the disk dropped (the
-stick at `/`). A stick attached later stays out too, as beside a disk whose
+The answer is the boot-disk check's own, asked as of any disk: its high
+review found a first version answering "not the boot disk" itself, which
+held a GPT boot disk whose protective MBR alone failed. `make
+test-probe-ioerr` adds SECTOR0: sector 0 failing, a stick that is not the
+boot disk beside it, the disk must go in as the fallback, the stick stay out
+and fsd answer the I/O error; fails with the disk dropped (the stick at
+`/`). And GPT0: booted from espgpt.img with a copy of it on virtio, its
+protective MBR failing, the copy must go in first as the boot disk; fails
+with the kernel's own answer. A stick attached later stays out too, as beside a disk whose
 table will not read, since `mount -a` keeps a disk answering an I/O error.
 A disk whose sector 0 reads but carries no MBR signature is still dropped
 (the roadmap).

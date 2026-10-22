@@ -1116,17 +1116,15 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
     console::println!("Ouroboros kernel: framebuffer console live (fallback - no byte-stream console installed), build {BUILD}");
 }
 
-/// Discovers and initializes the virtio-blk device, reads sector 0 back
-/// as a sanity check (the MBR boot signature, `0x55 0xAA` at bytes
-/// 510-511 - a property of the actual disk contents, not something this
-/// code could produce by accident), then mounts a FAT32 filesystem on it
-/// if there is one and installs it (`syscall::install_fs`) so
-/// `fs_list_dir`/`fs_read_file` - and therefore the shell's `ls`/`cat`/
-/// `cd` - have something to operate on. Not fatal if any step fails -
+/// Discovers and initializes the virtio-blk device, reads sector 0 (twice
+/// before taking it as unreadable), and installs the device for the
+/// filesystem server (`syscall::install_block_device`), which mounts it;
+/// the kernel holds no filesystem itself. A disk whose sector 0 reads with
+/// no MBR boot signature (`0x55 0xAA` at bytes 510-511) is dropped; one
+/// whose sector 0 will not read is answered by the boot-disk check like any
+/// other (since 2026-10-22; dropped before). Not fatal if any step fails -
 /// nothing else depends on storage existing, unlike `program` above; the
-/// shell just won't have working disk commands (expected, not a bug, when
-/// booted via `make run`'s vvfat disk - FAT16, not FAT32, see
-/// `fat32.rs`'s module doc comment).
+/// shell just won't have working disk commands.
 ///
 /// Only ever called when `main`'s `virtio_mmio_probe_safe` is true -
 /// `virtio_blk::Device::discover` goes through the same
@@ -1158,29 +1156,29 @@ fn init_storage() -> Option<virtio_blk::Device> {
     let mut sector = [0u8; 512];
     // Read twice, as the boot-disk check is (D6): the first read a disk sees
     // is the likeliest to fail once (the review of #291). Unreadable twice,
-    // the disk is answered as one whose partition table will not read is
-    // (`is_boot_disk_retrying`): with the boot partition known, taken as not
-    // the boot disk and held, installed only if no other disk is; unknown,
-    // installed first, as any virtio disk is then. Either way fsd then
-    // answers its I/O error. Until 2026-10-22 it was dropped, and whatever
-    // USB stick was attached went in, the swap fsd's `mount -a` refuses.
+    // the disk is not dropped: the boot-disk check below answers for it as
+    // for any disk, from the boot partition's own table (held as not the boot
+    // disk when its MBR will not read, a GPT disk asked of its headers, put
+    // first when the boot partition is unknown), and fsd then answers the
+    // I/O error. Until 2026-10-22 it was dropped, and whatever USB stick was
+    // attached went in, the swap fsd's `mount -a` refuses.
     let first = unsafe { device.read_sector(0, &mut sector) };
-    let matched = if let Err(e) = first.or_else(|_| unsafe { device.read_sector(0, &mut sector) }) {
-        console::println!("Ouroboros kernel: virtio-blk read of sector 0 failed twice ({e})");
-        bootdisk::get().map(|_| bootdisk::Boot::Unreadable)
-    } else {
-        if !parttable::has_boot_signature(&sector) {
+    match first.or_else(|_| unsafe { device.read_sector(0, &mut sector) }) {
+        Err(e) => console::println!("Ouroboros kernel: virtio-blk read of sector 0 failed twice ({e})"),
+        Ok(()) if !parttable::has_boot_signature(&sector) => {
             let signature = (sector[511] as u16) << 8 | sector[510] as u16;
             console::println!(
                 "Ouroboros kernel: virtio-blk sector 0 has no MBR signature ({signature:#06x}) - not attempting a FAT32 mount"
             );
             return None;
         }
-        // SAFETY: the device is initialised, and nothing else holds it yet.
-        let capacity = device.capacity_sectors();
-        let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
-        bootdisk::is_boot_disk_retrying(&mut read, capacity, "virtio-blk")
-    };
+        Ok(()) => {}
+    }
+
+    // SAFETY: the device is initialised, and nothing else holds it yet.
+    let capacity = device.capacity_sectors();
+    let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
+    let matched = bootdisk::is_boot_disk_retrying(&mut read, capacity, "virtio-blk");
     // Not the boot disk, or unreadable twice (D6: taken as not the boot disk).
     if matches!(matched, Some(bootdisk::Boot::No | bootdisk::Boot::Unreadable)) {
         console::println!("Ouroboros kernel: virtio-blk is not the boot disk - held, installed only if no other disk is");
