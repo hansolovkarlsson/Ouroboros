@@ -36,7 +36,9 @@ def sets(d):
         if s[ENTRY] == STREAM:
             chars = s[ENTRY + 3]
             raw = b"".join(s[k + 2:k + ENTRY] for k in range(2 * ENTRY, len(s), ENTRY) if s[k] == NAME)
-            name = raw.decode("utf-16le", "replace")[:chars]
+            # NameLength counts UTF-16 units, so the cut is in bytes: a
+            # surrogate pair is one Python character and two units.
+            name = raw[:2 * chars].decode("utf-16le", "replace")
         yield Set(i, count, name, bytes(s))
         i = end
 
