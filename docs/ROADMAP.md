@@ -4302,11 +4302,27 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   superblocks and descriptor tables in later groups are in no zone either,
   as in Linux's ext2. Found with the metadata bound, 2026-10-21.
 - **ext2's free path leaks the triple-indirect tree and the attribute
-  block, and `bitmap_free` rewrites a whole block.** `rm` never frees
-  `block[14]`'s tree or an inode's extended-attribute block (`i_file_acl`),
-  which `mke2fs -d` can attach; and `bitmap_free` rewrites a whole bitmap
-  block to clear one bit (a sector would do, as `write_int_at` does for the
-  counts). From the fourth review of #331.
+  block.** `rm` never frees `block[14]`'s tree or an inode's
+  extended-attribute block (`i_file_acl`), which `mke2fs -d` can attach.
+  From the fourth review of #331. (Its third part, `bitmap_free` rewriting a
+  whole bitmap block for one bit, was done 2026-10-22: the bit's sector
+  alone is read and written, and `make test-ext2-blocks`'s HIGH, an inode
+  whose bit is in the bitmap's second sector, fails with the sector's
+  offset dropped.)
+- **The kernel drops a virtio disk whose sector 0 will not read, and
+  installs whatever USB stick is attached.** `init_storage` reads sector 0
+  twice and, when both fail, returns no device rather than holding it as
+  not the boot disk, so `install_boot_disk` has nothing held and installs
+  the stick, whatever it is: the swap #324 refuses in fsd's `mount -a`, made
+  at boot a layer below, with the failing disk out of reach until a reboot.
+  A disk unreadable at sector 1 is held (D6, "taken as not the boot disk"),
+  and so goes in as the fallback when the stick is not the boot disk. Seen
+  2026-10-22 when `test-probe-ioerr`'s first TABLE case failed sector 0 (the
+  stick came up at `/`); TABLE fails the GPT header instead. Holding the
+  disk, as D6 holds one whose table will not read, would end it, but the
+  rule for an unreadable disk is D6's, so it is a question for Hans. A
+  sector 0 without an MBR signature returns no device the same way (read in
+  the code, not run).
 - **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the
@@ -4328,12 +4344,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   they stay set in the bitmap with no set naming them. Freeing them the way
   the Stream's are, bounded by the volume, would end it. Read in the code,
   found with the rename's fix, 2026-10-21.
-- **`/bin/ls` cuts a name past 82 bytes and runs it into the next.** Its
-  column printer builds each line in `TERM_WIDTH + 4` (84) bytes, so a longer
-  name is cut and the line's end lost (seen with an exFAT name listed as 100
-  `?`s, 2026-10-21); ext2's 255-byte names and FAT32's long ones meet it the
-  same way. A name wider than the line printed on a line of its own, whole,
-  would end it.
+- ~~**`/bin/ls` cuts a name past 82 bytes and runs it into the next.**~~
+  *Done 2026-10-22:* `append_name` writes a name that would not fit in the
+  line's buffer straight out, after the line so far, in both layouts; a name
+  wider than the screen already had its own row, so it is now whole there.
+  `make test-exfat-names` requires `ls /` to list the 100-`?` name whole,
+  and fails with main's `ls`.
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
   rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
   `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume

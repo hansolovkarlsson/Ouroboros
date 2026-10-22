@@ -472,8 +472,8 @@ swapped for whatever stick is attached. A device the rescan installs resets
 fsd's "table rewritten" state, so a boot-matched stick answers its boot
 partition. `mount -a` is one request, answering `MOUNT_NO_DEVICE` when the
 rescan found no stick; a kernel refusal of the rescan reaches the shell by
-name. No rig reaches the I/O refusal or the reset: QEMU gives no transient
-read error, and the reset needs a boot stick whose boot-time init failed. `make
+name. No rig reached the I/O refusal until 2026-10-22 (below), and none
+reaches the reset, which needs a boot stick whose boot-time init failed. `make
 test-mount-gate` boots esp.img on virtio with a USB stick beside it:
 `/bin/MOUNTPROBE` (MOUNT from an ordinary task) must be denied and `/` still
 the ESP, then with the virtio disk erased `mount -a` must mount the stick.
@@ -765,6 +765,37 @@ block, and with `write_at` returning before its inode. No rig reaches
 with `write_at`), the write past the double-indirect range (a file over
 64 MiB on 1 KiB blocks), or a bitmap marking one of the path's own pointer
 blocks free. A disk error while linking is not undone.
+
+**`/bin/ls` lists a long name whole (2026-10-22).** The column printer built
+each line in 84 bytes, so a name past 82 was cut and the line's end lost,
+running it into the next name: an exFAT name listed as 100 `?`s, an ext2 name
+of 255 bytes. `append_name` now writes a name that would not fit straight out,
+after the line so far, in the column and the long layout alike; a name wider
+than the screen already had a row of its own. `make test-exfat-names` requires
+`ls /` to list the 100-`?` name whole, before and after its other steps, and
+fails with the old `ls`.
+
+**ext2 clears a bitmap bit with one sector (2026-10-22).** `bitmap_free` read
+and wrote the whole bitmap block to clear one bit, eight sector writes on a
+4 KiB volume; it now reads and writes the bit's sector alone, as the counts
+are written. `make test-ext2-blocks` makes C with 5,000 inodes and moves the
+empty HIGH to the last of them, whose bit lies in the inode bitmap's second
+sector: `rm HIGH` must clear that bit and leave the one at its offset in the
+first sector as it was. Fails with the sector's offset dropped (every bit
+written in the first sector); no plant on the 4 MiB volumes could, since all
+their block bits lie there.
+
+**A partition table that will not read is refused a rescan, and a rig shows
+it (2026-10-22).** #324's refusal, that fsd's `mount -a` does not swap in a
+stick for a disk whose partition table would not read, had no check. `make
+test-probe-ioerr` adds TABLE: a copy of `espgpt.img` with its GPT header,
+sector 1, failing every read; fsd's boot mount must fail with a disk I/O
+error and `mount -a` answer that the disk was not replaced, no stick
+installed. Fails with an unreadable table read as one holding no partitions
+(the stick at `/`). The first version failed sector 0 and found the kernel
+making the swap itself: `init_storage` drops a virtio disk whose sector 0 will
+not read, so the stick is installed at boot (the roadmap, a question for
+Hans).
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
