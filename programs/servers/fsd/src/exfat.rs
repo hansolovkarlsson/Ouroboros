@@ -2087,9 +2087,10 @@ impl Fs {
             if in_off == 0 && n == SECTOR_SIZE {
                 self.disk.write_sector(sector_lba, &chunk)?;
             } else if sector_start < valid {
-                // Valid bytes in the sector outside the write: kept. Past the
-                // valid length a sector is written whole, zeros after the
-                // write, never its stale bytes.
+                // Valid bytes in the sector outside the write: kept. A
+                // sector holding none is written whole, zeros after the
+                // write, and not read first; stale bytes left past the write
+                // in a sector read here lie past the new valid length.
                 self.write_partial_sector(sector_lba, in_off, &chunk[..n])?;
             } else {
                 let mut sector = [0u8; SECTOR_SIZE];
