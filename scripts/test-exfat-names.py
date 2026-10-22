@@ -141,12 +141,14 @@ def fsck():
 
 def answer(out, cmd, last=False):
     """What the guest printed for `cmd` (its first run, or its `last`): the
-    text after its echoed line, up to the next prompt."""
+    text after its echoed line, up to the next prompt, without the kernel's
+    own lines (a program's exit)."""
     marker = "# " + cmd + "\r"
     if marker not in out:
         return None
     after = out.rsplit(marker, 1)[1] if last else out.split(marker, 1)[1]
-    return after.split("# ", 1)[0].strip()
+    lines = after.split("# ", 1)[0].splitlines()
+    return "\n".join(ln for ln in lines if not ln.startswith("Ouroboros kernel:")).strip()
 
 
 def run():
