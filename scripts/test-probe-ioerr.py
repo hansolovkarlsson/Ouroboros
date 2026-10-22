@@ -232,15 +232,18 @@ def outputs(out, commands):
 def checks_of(name):
     commands = BOOTS[name][3]
     driven, out, faults, untouched, failing, start = boot(name)
+    # A precondition: the table's reads are sectors 0 and 1 (MBR, GPT
+    # header), so the error must land past them, except in TABLE, where it
+    # is the GPT header's. The host's own check, graded even when the
+    # firmware never started the kernel.
+    pre = [(f"{name}: the failing sector, {failing}, is past the table's (partition 1 at {start})",
+            failing >= start > 1) if name != "TABLE" else
+           (f"{name}: the failing sector, {failing}, is the GPT header's", failing == 1)]
+    if drive_qemu.boot_stalled("test-probe-ioerr", name, out, faults):
+        return pre, True
     o = outputs(out, commands)
     boot_log = out.split(f"# {commands[0]}")[0]
     checks = [
-        # A precondition: the table's reads are sectors 0 and 1 (MBR, GPT
-        # header), so the error must land past them, except in TABLE, where
-        # it is the GPT header's.
-        (f"the failing sector, {failing}, is past the table's (partition 1 at {start})",
-         failing >= start > 1) if name != "TABLE" else
-        (f"the failing sector, {failing}, is the GPT header's", failing == 1),
         ("driven to the end, every command's output found", driven and None not in o),
     ]
     # One write since 2026-10-20 (it was three, and another task's line
@@ -278,7 +281,7 @@ def checks_of(name):
              (o[0] or "").startswith(f"ext2 mounted at partition LBA {start} ")),
         ]
     checks.append(("no fault lines", faults == 0))
-    return [(f"{name}: {label}", ok) for label, ok in checks]
+    return pre + [(f"{name}: {label}", ok) for label, ok in checks], False
 
 
 def main():
@@ -286,14 +289,16 @@ def main():
         if not os.path.exists(f):
             sys.exit(f"{f} not found - run `make test-probe-ioerr`, which builds it")
     checks = []
+    stalled = 0
     for name in BOOTS:
-        checks += checks_of(name)
+        got, stall = checks_of(name)
+        checks += got
+        stalled += stall
     failed = 0
     for label, ok in checks:
         print(("PASS  " if ok else "FAIL  ") + label)
         failed += not ok
-    print(f"test-probe-ioerr: {'all checks passed' if failed == 0 else f'{failed} check(s) FAILED'}")
-    return 1 if failed else 0
+    return drive_qemu.verdict("test-probe-ioerr", failed, stalled)
 
 
 if __name__ == "__main__":

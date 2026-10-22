@@ -797,6 +797,23 @@ making the swap itself: `init_storage` drops a virtio disk whose sector 0 will
 not read, so the stick is installed at boot (the roadmap, a question for
 Hans).
 
+**A boot QEMU's firmware never starts is INCONCLUSIVE in six rigs, by one
+classifier (2026-10-22).** On 2026-10-21 four NVMe boots and one virtio boot
+stopped in QEMU's firmware after its `Image type X64` line, and each failed
+every guest check for a kernel that never ran. `test-usb-hub` already called
+its own firmware stall (in `UsbBootExecCmd`) INCONCLUSIVE. Its classifier
+moves to `drive-qemu.py` and learns the second ending: the kernel printed
+nothing, the fault trace is clean, and the last line, screen clears aside, is
+either one. Every boot is logged to `scratch/firmware-stall-runs.log` and a
+stalled transcript kept in `scratch/firmware-stalls/`; the rig grades none
+of that boot's guest checks and exits 100 when nothing failed. `test-usb-hub`,
+`test-boot-partition`, `test-volume-bound`, `test-probe-ioerr`,
+`test-ext2-blocks` and `test-long-set` use it; `make test` runs its
+self-test (`drive-qemu.py --self-test`), which each of five mutations of the
+rule fails. A boot that stalls on each of its last three runs is graded,
+since a hang every run meets would otherwise stay INCONCLUSIVE for good. The
+other rigs are a roadmap item; meanwhile every rig's output names a stall.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

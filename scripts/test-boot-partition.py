@@ -68,11 +68,12 @@ the root by its type, not the data partition that comes first:
 
 The ext2 and exFAT boots are the ones that can tell a kernel naming its boot
 partition from one naming the first partition. The stick's QEMU arguments
-and the stall rule are test-usb-hub.py's own (`layout`, `firmware_stalled`),
-imported rather than copied: a usb-boot where QEMU's firmware stalls in its
-own USB boot (no kernel line, a clean fault trace, UsbBootExecCmd last) is
-INCONCLUSIVE, not a failed check and not a pass, and exits 100 as there;
-anything else that keeps the kernel from printing fails. Every image's
+are test-usb-hub.py's own (`layout`), imported rather than copied, and the
+stall rule is drive-qemu.py's, every rig's: a boot QEMU's firmware never
+handed to the kernel (no kernel line, a clean fault trace, the firmware's
+UsbBootExecCmd or X64 line last) is INCONCLUSIVE, not a failed check and not
+a pass, and exits 100 when no check failed; anything else that keeps the
+kernel from printing fails. Every image's
 expected line is read before the first boot, so an image this script cannot
 read stops it before anything runs. About seven minutes. Run it whenever
 bootdisk.rs, main.rs's choice of block device, or how an image lays out its
@@ -310,11 +311,11 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         guest.stop()
     with open(TRANSCRIPT.format(label), "w") as fh:
         fh.write(out)
-    # Any boot with a stick attached, not only one booted from it: the
-    # firmware probes every USB disk, and its known stall in UsbBootExecCmd hit
-    # virtio-beside once (2026-10-13), graded as failed checks then.
-    if stick and usb_hub.firmware_stalled(out, faults):
-        return None, "QEMU's firmware stalled in its own USB boot"
+    # Every boot, not only one with a stick: the firmware's stall in its USB
+    # boot hit virtio-beside once (2026-10-13), and its stall after its X64
+    # line hit NVMe and virtio boots of other rigs (2026-10-21).
+    if drive_qemu.boot_stalled("test-boot-partition", label, out, faults):
+        return None, "QEMU's firmware never started the kernel"
     got = LINE.search(out)
     got = got.group(1).strip() if got else "no line"
     usb_installed = "usb-msd block device installed" in out
@@ -462,16 +463,13 @@ def main():
         print(f"     {label}: table says {want}")
         print(f"     {label}: kernel says {got}")
         if checks is None:
-            print(f"INCONCLUSIVE {label}: {got}")
             inconclusive += 1
             continue
         for check, ok in checks:
             print(f"{'ok  ' if ok else 'FAIL'} {check}")
             failed += 0 if ok else 1
     print(f"transcripts: {os.path.relpath(TRANSCRIPT.format('<boot>'), ROOT)}")
-    if failed:
-        return 1
-    return usb_hub.INCONCLUSIVE if inconclusive else 0
+    return drive_qemu.verdict("test-boot-partition", failed, inconclusive)
 
 
 if __name__ == "__main__":
