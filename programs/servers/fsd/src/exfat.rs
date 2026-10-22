@@ -45,8 +45,10 @@
 //!   entries (`0xC1`, 15 UTF-16 chars each). [`Fs::walk_dir`] reassembles a set
 //!   into one [`DirEntry`], the same shape FAT32's LFN reconstruction produces.
 //! - **Names are UTF-16, up to 255 chars** - no 8.3, no LFN checksum dance.
-//!   We render them ASCII (non-ASCII -> `?`), exactly as `fat32.rs` does for
-//!   its own long names, since the whole userland here is ASCII-only.
+//!   A [`DirEntry`] keeps them as UTF-16, and a lookup compares them so
+//!   ([`units_match`]); a listing renders them UTF-8 ([`utf8_name`]), which a
+//!   lookup takes back unchanged. Until 2026-10-21 they were rendered ASCII
+//!   (non-ASCII -> `?`) for both, so `café` and `cafè` were one name.
 //! - **An allocation *bitmap*** replaces FAT free-cluster scanning: reads ignore
 //!   it entirely, writes drive it (see the write model above). The up-case table
 //!   (`0x82`) that would drive case-insensitive comparison per spec is ignored -
@@ -120,7 +122,8 @@ const SLOTS_PER_SECTOR: usize = SECTOR_SIZE / ENTRY_SIZE;
 /// walk advances.
 #[derive(Clone, Copy)]
 struct DirEntry {
-    name: [u8; LONG_NAME_MAX],
+    /// The name's UTF-16 code units, as the set's name entries hold them.
+    name: [u16; LONG_NAME_MAX],
     name_len: u16,
     is_dir: bool,
     size: u64,
@@ -129,10 +132,56 @@ struct DirEntry {
 }
 
 impl DirEntry {
-    fn name(&self) -> &str {
-        // Built from UTF-16 rendered to ASCII (non-ASCII -> '?'), always valid.
-        core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
+    fn units(&self) -> &[u16] {
+        &self.name[..self.name_len as usize]
     }
+}
+
+/// The most bytes [`utf8_name`] makes of a name: 3 a code unit (a surrogate
+/// pair is 4 bytes for 2 units, an unpaired one U+FFFD's 3).
+const NAME_UTF8_MAX: usize = 3 * LONG_NAME_MAX;
+
+/// A name's UTF-16 `units` as UTF-8 in `out`, what a listing shows. A lookup
+/// encodes that back to the same units, so every name listed is a name found,
+/// except one holding an unpaired surrogate, which is shown as U+FFFD and
+/// matches no lookup (no other name either). Encoded by hand, without
+/// `char::encode_utf8`, whose panic formats (the PIE link's trap).
+fn utf8_name<'a>(units: &[u16], out: &'a mut [u8; NAME_UTF8_MAX]) -> &'a str {
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i < units.len() {
+        let u = units[i] as u32;
+        i += 1;
+        let c = match u {
+            0xd800..=0xdbff if i < units.len() && (0xdc00..=0xdfff).contains(&(units[i] as u32)) => {
+                let low = units[i] as u32;
+                i += 1;
+                0x10000 + ((u - 0xd800) << 10) + (low - 0xdc00)
+            }
+            0xd800..=0xdfff => 0xfffd,
+            _ => u,
+        };
+        if c < 0x80 {
+            out[n] = c as u8;
+            n += 1;
+        } else if c < 0x800 {
+            out[n] = 0xc0 | (c >> 6) as u8;
+            out[n + 1] = 0x80 | (c & 0x3f) as u8;
+            n += 2;
+        } else if c < 0x10000 {
+            out[n] = 0xe0 | (c >> 12) as u8;
+            out[n + 1] = 0x80 | ((c >> 6) & 0x3f) as u8;
+            out[n + 2] = 0x80 | (c & 0x3f) as u8;
+            n += 3;
+        } else {
+            out[n] = 0xf0 | (c >> 18) as u8;
+            out[n + 1] = 0x80 | ((c >> 12) & 0x3f) as u8;
+            out[n + 2] = 0x80 | ((c >> 6) & 0x3f) as u8;
+            out[n + 3] = 0x80 | (c & 0x3f) as u8;
+            n += 4;
+        }
+    }
+    core::str::from_utf8(&out[..n]).unwrap_or("")
 }
 
 /// Where an entry set lies: the directory holding it, its primary slot and
@@ -708,7 +757,7 @@ impl Fs {
         let mut set_size = 0u64;
         let mut set_cluster = 0u32;
         let mut set_contig = false;
-        let mut name = [0u8; LONG_NAME_MAX];
+        let mut name = [0u16; LONG_NAME_MAX];
         let mut name_cap = 0usize; // total chars the set declares (NameLength)
         let mut name_len = 0usize; // chars filled so far
 
@@ -785,8 +834,7 @@ impl Fs {
                                 && name_len < name_cap
                                 && name_len < LONG_NAME_MAX
                             {
-                                let c = u16::from_le_bytes([raw[i], raw[i + 1]]);
-                                name[name_len] = if c < 0x80 { c as u8 } else { b'?' };
+                                name[name_len] = u16::from_le_bytes([raw[i], raw[i + 1]]);
                                 name_len += 1;
                                 i += 2;
                             }
@@ -994,8 +1042,9 @@ impl Fs {
         if !dir.is_dir {
             return Err(Error::NotADirectory);
         }
+        let mut utf8 = [0u8; NAME_UTF8_MAX];
         self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry, _slot, _len| {
-            f(entry.name(), entry.is_dir).is_break()
+            f(utf8_name(entry.units(), &mut utf8), entry.is_dir).is_break()
         })
     }
 
@@ -1654,11 +1703,12 @@ impl Fs {
     /// (`parent_for_create`) and every write, removal and rename go through
     /// it, so no two paths can pick two sets for one name, and no caller
     /// assembles a set's location by hand. The rule it matches by is
-    /// [`names_match`], which shares [`upcase`] with the NameHash fsd writes.
+    /// [`units_match`], on the set's UTF-16 and `name` encoded to it, which
+    /// shares [`upcase`] with the NameHash fsd writes.
     fn entry_in(&mut self, dir: &DirEntry, name: &str) -> Result<Option<(DirEntry, SetAt)>, Error> {
         let mut found = None;
         self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry, slot, len| {
-            if names_match(entry.name(), name) {
+            if units_match(entry.units().iter().copied(), name.encode_utf16()) {
                 let at = SetAt { dir_cluster: dir.first_cluster, dir_contiguous: dir.contiguous, slot, len };
                 found = Some((*entry, at));
                 true
@@ -2266,17 +2316,30 @@ fn sectors_per_cluster_shift_for(total_sectors: u32) -> u8 {
 /// ASCII up-case one UTF-16 unit (the standard exFAT up-case table is the
 /// identity for non-ASCII, and ASCII `a-z -> A-Z` for the rest - correct for
 /// the ASCII names this system creates; see the module doc).
-/// Whether directory entry name `entry` answers to `name` on exFAT: equal once
-/// each character is put through [`upcase`], the one case rule this arm has.
-/// [`name_hash`] up-cases by it too, so the NameHash fsd writes and the match
-/// it looks names up by cannot disagree, and reading the volume's up-case
-/// table (`0x82`) is a change to `upcase` alone. [`Fs::entry_in`] is the one
-/// lookup that calls it, and `vfs::Filesystem::names_match` gives it to
-/// `NP_MV`'s guard. Its own since 2026-10-19: until then exFAT matched by
+/// Whether directory entry name `entry` answers to `name` on exFAT:
+/// [`units_match`] on both encoded to UTF-16. `vfs::Filesystem::names_match`
+/// gives it to `NP_MV`'s guard; [`Fs::entry_in`] calls `units_match` on the
+/// set's own units. Its own since 2026-10-19: until then exFAT matched by
 /// FAT32's rule, a second statement of the same folding.
 pub(crate) fn names_match(entry: &str, name: &str) -> bool {
-    let (a, b) = (entry.as_bytes(), name.as_bytes());
-    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| upcase(x as u16) == upcase(y as u16))
+    units_match(entry.encode_utf16(), name.encode_utf16())
+}
+
+/// Whether two names, as UTF-16 code units, are equal once each unit is put
+/// through [`upcase`], the one case rule this arm has. [`name_hash`] up-cases
+/// by it too, so the NameHash fsd writes and the match it looks names up by
+/// cannot disagree, and reading the volume's up-case table (`0x82`) is a
+/// change to `upcase` alone. Units, not bytes: until 2026-10-21 a name was
+/// compared as its ASCII rendering, `?` for every other unit, so `café`
+/// answered to `cafè` (and to `caf?`).
+fn units_match(a: impl Iterator<Item = u16>, mut b: impl Iterator<Item = u16>) -> bool {
+    for x in a {
+        match b.next() {
+            Some(y) if upcase(x) == upcase(y) => {}
+            _ => return false,
+        }
+    }
+    b.next().is_none()
 }
 
 /// exFAT's case rule: ASCII `a`-`z` up-cased, every other code unit as it is,
