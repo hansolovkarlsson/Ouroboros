@@ -18,6 +18,15 @@ read back and fsck_exfat -n pass (the observer's own check). Then, typed as
 UTF-8 on the serial line:
 
 - `ls /` must list all three by their UTF-8 names;
+- a name a listing cannot show exactly is shown ASCII with `?` for each unit
+  outside it, and reached by that: the host also plants 100 of U+4E2D (300
+  bytes of UTF-8, past the 255 a listed name takes, which until the review
+  of 2026-10-21 failed the listing's page) and `lone` with an unpaired
+  surrogate; `echo /*` must give the first as 100 `?`s (the shell's glob:
+  /bin/ls cuts a line at 84 bytes) and `ls /` the second as `lone?`, `cat`
+  of each print its bytes, and `touch /lone?` must make no second set;
+- `cp /grave` to a name with a surrogate pair (U+1F601) must make it, five
+  units, and `cat` of it print `grave`;
 - `cat /cafè` must print `grave`, the second set, not the first;
 - `cat /CAF` + U+1F600 must print `astral` (ASCII case still folded beside a
   pair);
@@ -65,14 +74,19 @@ Volume, set_checksum = stale_cursor.Volume, stale_cursor.set_checksum
 IMAGE = os.path.join(ROOT, "build", "test-exfat-names.img")
 ACUTE, GRAVE, UMLAUT = "café", "cafè", "cafë"
 ASTRAL = "caf\U0001F600"
-FILES = [(ACUTE, b"acute\r\n"), (GRAVE, b"grave\r\n"), (ASTRAL, b"astral\r\n")]
+OVERLONG = "\u4e2d" * 100  # 300 bytes of UTF-8, past the 255 a listing shows
+LONE = "lone\ud800"  # an unpaired surrogate
+MADE = "new\U0001F601"  # a pair, made by the guest
+FILES = [(ACUTE, b"acute\r\n"), (GRAVE, b"grave\r\n"), (ASTRAL, b"astral\r\n"),
+         (OVERLONG, b"long\r\n"), (LONE, b"lone\r\n")]
+SHOWN = {OVERLONG: "?" * 100, LONE: "lone?"}  # as a listing shows them
 
 
 def name_set(name, first, size):
     """`name`'s entry set, a contiguous file of `size` bytes at `first`, its
     NameLength in UTF-16 units and its NameHash up-cased as the volume's
     table (macOS's) up-cases, which Python's upper() matches for these."""
-    units = name.encode("utf-16le")
+    units = name.encode("utf-16le", "surrogatepass")
     count = len(units) // 2
     k = -(-count // 15)
     s = bytearray(32 * (2 + k))
@@ -80,7 +94,7 @@ def name_set(name, first, size):
     struct.pack_into("<H", s, 4, 0x20)  # archive
     s[32], s[33], s[35] = 0xC0, 0x03, count  # AllocationPossible, NoFatChain
     h = 0
-    for b in name.upper().encode("utf-16le"):
+    for b in name.upper().encode("utf-16le", "surrogatepass"):
         h = (((h << 15) | (h >> 1)) + b) & 0xFFFF
     struct.pack_into("<H", s, 36, h)
     struct.pack_into("<Q", s, 40, size)
@@ -96,7 +110,8 @@ def name_set(name, first, size):
 
 def find(d, name):
     """The set named exactly `name` (no folding: the names differ only past
-    ASCII), or None."""
+    ASCII), or None. An unpaired surrogate is read back as U+FFFD."""
+    name = name.encode("utf-16le", "surrogatepass").decode("utf-16le", "replace")
     return next((s for s in exfatimg.sets(d) if s.name == name), None)
 
 
@@ -168,8 +183,10 @@ def run():
         return checks, notes
 
     upper_astral = "CAF\U0001F600"
-    cmds = ["ls /", f"cat /{GRAVE}", f"cat /{upper_astral}", f"echo new > /{UMLAUT}",
-            f"cat /{UMLAUT}", f"cat /{ACUTE}", f"rm /{UMLAUT}", f"mv /{GRAVE} /grave", "ls /"]
+    cmds = ["ls /", "echo /*", f"cat /{GRAVE}", f"cat /{upper_astral}", f"echo new > /{UMLAUT}",
+            f"cat /{UMLAUT}", f"cat /{ACUTE}", f"rm /{UMLAUT}", f"mv /{GRAVE} /grave",
+            f"cat /{SHOWN[OVERLONG]}", f"cat /{SHOWN[LONE]}", f"touch /{SHOWN[LONE]}",
+            f"cp /grave /{MADE}", f"cat /{MADE}", "ls /"]
     steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in cmds] + [("# ", "")]
     guest = drive_qemu.Guest(IMAGE, label="test-exfat-names: ")
     try:
@@ -191,8 +208,20 @@ def run():
         notes += [f"after: {ln}" for ln in lines]
     checks += [
         ("driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
-        (f"ls / lists all three by their UTF-8 names ({[n for n in listing if n.startswith('caf')]})",
-         all(n in listing for n, _ in FILES)),
+        (f"ls / lists the three by their UTF-8 names ({[n for n in listing if n.startswith('caf')]})",
+         all(n in listing for n, _ in FILES[:3])),
+        # /bin/ls cuts a name past its 84-byte line (the roadmap), so the
+        # overlong name is read from the shell's glob, which lists it whole.
+        (f"ls / lists the unpaired surrogate's name as {SHOWN[LONE]}", SHOWN[LONE] in listing),
+        ("echo /* gives the overlong name as 100 ?s, and the names after it",
+         f"/{SHOWN[OVERLONG]}" in (answer(out, "echo /*") or "").split()
+         and "/HELLO.TXT" in (answer(out, "echo /*") or "").split()),
+        (f"cat of the overlong name's listing prints long ({answer(out, f'cat /{SHOWN[OVERLONG]}')!r})",
+         answer(out, f"cat /{SHOWN[OVERLONG]}") == "long"),
+        (f"cat /{SHOWN[LONE]} prints lone ({answer(out, f'cat /{SHOWN[LONE]}')!r})",
+         answer(out, f"cat /{SHOWN[LONE]}") == "lone"),
+        (f"cp /grave /{MADE} makes a name with a pair, cat of it grave ({answer(out, f'cat /{MADE}')!r})",
+         answer(out, f"cat /{MADE}") == "grave"),
         (f"cat /{GRAVE} prints grave, the second set ({answer(out, f'cat /{GRAVE}')!r})",
          answer(out, f"cat /{GRAVE}") == "grave"),
         (f"cat /{upper_astral} prints astral ({answer(out, f'cat /{upper_astral}')!r})",
@@ -209,6 +238,10 @@ def run():
          acute is not None and first_cluster(acute) == clusters[ACUTE]
          and vol.data([clusters[ACUTE]])[:7] == b"acute\r\n"),
         (f"no set is left named {GRAVE} or {UMLAUT}", find(root, GRAVE) is None and find(root, UMLAUT) is None),
+        (f"{MADE}'s set holds its pair, NameLength 5 units",
+         find(root, MADE) is not None and find(root, MADE).data[35] == 5),
+        (f"touch /{SHOWN[LONE]} made no second set (one set named lone with a lone surrogate)",
+         sum(1 for x in exfatimg.sets(root) if x.name == "lone\ufffd") == 1),
         ("fsck_exfat -n passes after", ok),
         (f"no fault lines in QEMU's trace ({faults})", faults == 0),
     ]
