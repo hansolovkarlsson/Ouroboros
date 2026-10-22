@@ -818,14 +818,18 @@ other rigs are a roadmap item; meanwhile every rig's output names a stall.
 (2026-10-22).** `init_storage` read sector 0 twice and, when both failed,
 returned no device, so `install_boot_disk` installed whatever USB stick was
 attached, the swap fsd's `mount -a` refuses since #324, or no disk at all.
-Now the disk is held as not the boot disk, as one whose partition table will
-not read is under D6, and goes in only if no other disk does; fsd then
-answers its I/O error. With the boot partition unknown a stick attached
-still goes in first. Hans chose this of three (hold it, leave it, or
-install it outright, which would reopen D6). `make test-probe-ioerr` adds
-SECTOR0: sector 0 failing and no stick, the disk must go in as the fallback
-and fsd answer its I/O error; fails with the disk dropped. A disk whose
-sector 0 reads but carries no MBR signature is still dropped (the roadmap).
+Now it is answered as a disk whose partition table will not read is under
+D6: with the boot partition known, held as not the boot disk and installed
+only if no other disk is the boot disk; with it unknown, installed first, as
+any virtio disk then is. fsd then answers its I/O error. Hans chose this of
+three (hold it, leave it, or install it outright, which would reopen D6).
+`make test-probe-ioerr` adds SECTOR0: sector 0 failing, a stick that is not
+the boot disk beside it, the disk must go in as the fallback, the stick
+stay out and fsd answer the I/O error; fails with the disk dropped (the
+stick at `/`). A stick attached later stays out too, as beside a disk whose
+table will not read, since `mount -a` keeps a disk answering an I/O error.
+A disk whose sector 0 reads but carries no MBR signature is still dropped
+(the roadmap).
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

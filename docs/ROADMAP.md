@@ -4354,11 +4354,17 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   rule for an unreadable disk is D6's, so it is a question for Hans.
   *Done 2026-10-22, Hans's choice of three (hold it, leave it, or install it
   outright, which would reopen D6): the disk is held as one whose table will
-  not read is, installed only if no other disk is. With the boot partition
-  unknown a stick attached still goes in first, the order from before step
-  3. `make test-probe-ioerr`'s SECTOR0 fails sector 0 with no stick: the disk
-  goes in as the fallback and fsd answers its I/O error; it fails with the
-  disk dropped.*
+  not read is: with the boot partition known, held and installed only if no
+  other disk is the boot disk; unknown, installed first (the high review
+  found the first version holding it there too, behind the stick).
+  `make test-probe-ioerr`'s SECTOR0 fails sector 0 with a stick beside it
+  that is not the boot disk: the disk goes in as the fallback, the stick
+  stays out and fsd answers its I/O error; it fails with the disk dropped
+  (the stick at `/`). The unknown case has no rig: QEMU's firmware always
+  names the partition. A stick hot-attached later stays out, as beside a
+  disk whose table will not read: `mount -a` keeps a disk answering an I/O
+  error (#324), and before the change it would have found no disk and taken
+  the stick.*
 - **A virtio disk whose sector 0 has no MBR signature is dropped.**
   `init_storage` returns no device for it, so a blank disk never reaches fsd
   and `format` cannot reach it. Whether it should is a question of its own,
