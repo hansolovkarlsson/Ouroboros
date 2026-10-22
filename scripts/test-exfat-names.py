@@ -28,8 +28,10 @@ UTF-8 on the serial line:
 After the boot, on the host: `grave`'s set names `cafè`'s cluster, `café`'s
 set and cluster are as planted (its bytes `acute`), no set is left named
 `cafè` or `cafë`, and fsck_exfat -n passes. No fault lines in QEMU's trace.
-Fails with main's exfat.rs before 2026-10-21 (`cat /cafè` prints `acute`, the
-pair is not found, `echo` overwrites `café`, `mv` moves it). A name fsd makes
+Fails with main's exfat.rs before 2026-10-21 (every UTF-8 name not found,
+the listing `caf?` and `caf??`) and with the lookup folding every unit
+outside ASCII to one, the old collision with the listing kept (`cat /cafè`
+prints `acute`, `echo` overwrites `café`, `mv` moves it). A name fsd makes
 outside ASCII carries a NameHash up-cased by ASCII alone, which fsck_exfat
 rejects ("Invalid file name"; the volume's up-case table is not read, a
 roadmap item), so the rig removes `cafë` in the boot that makes it. About a

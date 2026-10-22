@@ -4378,14 +4378,30 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   they stay set in the bitmap with no set naming them. Freeing them the way
   the Stream's are, bounded by the volume, would end it. Read in the code,
   found with the rename's fix, 2026-10-21.
-- **exFAT names outside ASCII collide.** `walk_dir` renders each UTF-16
-  name to ASCII with `?` for anything else, so `café` and `cafè` (which macOS
-  writes) are both `caf?`, and `entry_in` takes whichever set comes first: an
-  `rm`, a write or an `mv` of one may act on the other, and a `touch` says
-  the other exists. Keeping names as UTF-16 through the lookup, and
-  comparing them by `upcase`, would end it; the shell's ASCII-only userland is
-  why it has not mattered. Read in the code; from the review of the one
-  lookup (2026-10-19).
+- ~~**exFAT names outside ASCII collide.**~~ *Done 2026-10-21:* a
+  `DirEntry` keeps its name as the set's UTF-16 units, `entry_in` compares
+  them (`units_match`, up-cased by `upcase`) against the name asked for,
+  encoded to UTF-16, and a listing renders them UTF-8 (`utf8_name`), which a
+  lookup takes back unchanged. Until then `walk_dir` rendered each name to
+  ASCII with `?` for anything else, so `café` and `cafè` were both `caf?` and
+  the first set answered for both. A name holding an unpaired surrogate is
+  listed with U+FFFD and matches no lookup. `make test-exfat-names`.
+- **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
+  rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
+  `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume
+  not fsd's own `format`) says `Ë`, and fsck_exfat -n reports "Invalid file
+  name"; its repair deletes the file. Lookups fold the same way, so `CAFÉ`
+  does not find `café`, and a create of it makes a second set the spec takes
+  for the same name. Reading the volume's table (`0x82`) at mount, kept as a
+  sorted list of the units it changes (some 16 KiB in `Fs`), and putting
+  `upcase` through it would end both. Found 2026-10-21 by a planted set
+  hashed as fsd hashes; deferred by Hans the same day, the collision fixed
+  alone.
+- **FAT32's long names outside ASCII collide.** `lfn_chars` renders each
+  UTF-16 unit outside ASCII as `?`, as exFAT did until 2026-10-21, so two
+  long names differing there are one name to every lookup, and the first
+  entry answers for both. The exFAT fix's shape (the units kept, a listing in
+  UTF-8) would end it. Read in the code, 2026-10-21.
 - **fsd will not write to an exFAT directory an older fsd grew.** Until
   2026-10-18 fsd grew a directory without raising its DataLength, so such a
   directory's chain runs past its size, with sets there no driver reads.

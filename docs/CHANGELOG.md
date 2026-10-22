@@ -668,6 +668,23 @@ FAT other than the first live, on which the mirror would overwrite the live
 FAT with a stale one, is refused at mount with a line saying so until
 ExtFlags is honoured (the roadmap); `make test-volume-bound` plants one.
 
+**An exFAT name outside ASCII is a name of its own (2026-10-21).** fsd
+rendered each exFAT name to ASCII, `?` for any other UTF-16 unit, and looked
+names up by that rendering, so `café` and `cafè` were both `caf?` and the
+first set answered for both: a read, a write, an `rm` or an `mv` of one acted
+on the other. A `DirEntry` now keeps the set's UTF-16 units, the one lookup
+(`entry_in`) compares them up-cased by the arm's one rule (`units_match`),
+and a listing renders them UTF-8 (`utf8_name`, encoded by hand to keep
+`core::fmt` out of the PIE link), which a lookup takes back. A name with an
+unpaired surrogate is listed with U+FFFD and matches nothing. `make
+test-exfat-names` plants `café`, `cafè` and a name with a surrogate pair,
+types UTF-8 on the serial line, and reads, creates, removes and renames each
+by its own name. It fails with main's exfat.rs (no UTF-8 name found) and with
+the lookup folding every unit outside ASCII to one (`cat /cafè` reads
+`café`, and `echo > /cafë` overwrites it). The NameHash fsd writes for such a
+name is still ASCII-folded, which fsck_exfat rejects, and FAT32's long names
+collide the same way (both in the roadmap).
+
 **An exFAT rename keeps the set it renames (2026-10-21).** A rename built
 the new set afresh, File, Stream and name, so it dropped the File entry's
 attributes and times and every secondary past the name: vendor extension
