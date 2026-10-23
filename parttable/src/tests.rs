@@ -398,3 +398,35 @@ fn is_gpt_by_header_or_protective_entry() {
     m.fail.push(1);
     assert_eq!(is_gpt(&mut m.reader()), None);
 }
+
+#[test]
+fn blank_is_nothing_a_table_reader_or_firmware_takes() {
+    let m = Mem::new();
+    assert_eq!(is_blank(&mut m.reader()), Some(true), "zeros");
+    let mut m = Mem::new();
+    m.sectors[0][..446].fill(0xFF);
+    m.sectors[1].fill(0xFF);
+    assert_eq!(is_blank(&mut m.reader()), Some(true), "boot code and no signature, no entries");
+    let mut m = Mem::new();
+    m.mbr(&[], 0);
+    assert_eq!(is_blank(&mut m.reader()), Some(false), "the signature alone");
+    let mut m = Mem::new();
+    m.mbr(&[(0x0C, 2048, 100)], 0);
+    m.sectors[0][510..512].fill(0);
+    assert_eq!(is_blank(&mut m.reader()), Some(false), "a damaged signature, an entry fsd lists");
+    let mut m = Mem::new();
+    m.sectors[0][0x1BE + 4] = 0x0C;
+    assert_eq!(is_blank(&mut m.reader()), Some(true), "an entry at LBA 0, which discover leaves out");
+    let mut m = Mem::gpt_disk(&[(ESP_GUID, UNIQUE, 34, 133)]);
+    m.sectors[0][510..512].fill(0);
+    assert_eq!(is_blank(&mut m.reader()), Some(false), "a GPT whose protective MBR is unsigned");
+    let mut m = Mem::new();
+    m.sectors[0][0x1BE + 4] = PROTECTIVE;
+    assert_eq!(is_blank(&mut m.reader()), Some(false), "an unsigned protective entry, which EDK2 reads");
+    let mut m = Mem::new();
+    m.fail.push(0);
+    assert_eq!(is_blank(&mut m.reader()), None);
+    let mut m = Mem::new();
+    m.fail.push(1);
+    assert_eq!(is_blank(&mut m.reader()), None);
+}

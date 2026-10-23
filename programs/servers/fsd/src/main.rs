@@ -207,7 +207,19 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             // inside it (accountd's did, in `make test-probe-ioerr`).
             let mut line = [0u8; 160];
             let mut len = 0;
-            for part in ["fsd: mount failed (", error_name(&e), ") - disk commands won't work\r\n"] {
+            // A disk with no partition at all, a blank one the kernel installed
+            // since 2026-10-23 among them, is said with what prepares it:
+            // "disk commands won't work" and `mount -a`'s question about a
+            // stick both point away from `partition` (the max review).
+            let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
+            let empty = matches!(e, fat32::Error::NoFat32Partition)
+                && matches!(partition::discover(&mut disk::Disk, &mut parts), Ok(0));
+            let tail = if empty {
+                ") - the disk has no partition: `partition` then `format` prepare it\r\n"
+            } else {
+                ") - disk commands won't work\r\n"
+            };
+            for part in ["fsd: mount failed (", error_name(&e), tail] {
                 let take = part.len().min(line.len() - len);
                 line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
                 len += take;

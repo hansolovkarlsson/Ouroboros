@@ -871,7 +871,8 @@ extern "C" fn kernel_main() -> ! {
     // multi-device scan activated one, and the choice between it and a virtio
     // disk init_storage held back as not the boot disk (one-disk step 3,
     // install_boot_disk: the boot disk wins, the held virtio disk is the
-    // fallback; with no boot partition known, virtio first as before).
+    // fallback; with no boot partition known, virtio first as before, unless
+    // it is blank, which goes in after any stick).
     // On real Parallels hardware the passed-through stick usually
     // attaches a few seconds *after* this point (confirmed by the
     // enumeration diagnostics), so this boot-time attempt mostly serves
@@ -1119,9 +1120,10 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
 /// Discovers and initializes the virtio-blk device, reads sector 0, and
 /// installs the device for the
 /// filesystem server (`syscall::install_block_device`), which mounts it;
-/// the kernel holds no filesystem itself. A disk whose sector 0 reads with
-/// no MBR boot signature (`0x55 0xAA` at bytes 510-511) is held as blank
-/// (since 2026-10-23; dropped before); one whose sector 0 will not read is
+/// the kernel holds no filesystem itself. A disk holding no partition table
+/// or volume (`parttable::is_blank`) is held as blank, below any USB stick
+/// (since 2026-10-23; one with no boot signature was dropped before); one
+/// whose sector 0 will not read is
 /// answered by the boot-disk check like any other (since 2026-10-22;
 /// dropped before). Not fatal if any step fails -
 /// nothing else depends on storage existing, unlike `program` above; the
@@ -1154,41 +1156,43 @@ fn init_storage() -> Option<Held> {
     }
     console::println!("Ouroboros kernel: virtio-blk ready, capacity {} sectors", device.capacity_sectors());
 
-    let mut sector = [0u8; 512];
-    // Sector 0, for its signature alone. A read that fails is not retried
-    // here: the disk is not dropped, the boot-disk check below answers for it
-    // as for any disk, from the boot partition's own table, and that check
-    // holds D6's retry (held as not the boot disk when its MBR will not read
-    // twice, a GPT disk asked of its headers, put first when the boot
-    // partition is unknown); fsd then answers the I/O error. Until 2026-10-22
-    // such a disk was dropped, and whatever USB stick was attached went in,
-    // the swap fsd's `mount -a` refuses. A disk whose sector 0 failed once
-    // and then reads goes the same way unsigned or not: in as any disk, where
-    // fsd finds no filesystem on a blank one.
-    //
-    // A disk whose sector 0 reads with no signature is blank, or holds
-    // nothing this system reads: no partition table and no volume boot
-    // sector, which both end in it, so it is not the boot disk whether or not
-    // the boot partition is known. Held, and below any stick (Hans,
-    // 2026-10-23): a stick goes in whatever it is, and the blank disk only
-    // when none is attached, where fsd finds no filesystem and `partition`
-    // and `format` reach it. Until 2026-10-23 it was dropped, so a disk
-    // `erase disk` had zeroed could not be prepared after a reboot.
-    match unsafe { device.read_sector(0, &mut sector) } {
-        Err(e) => console::println!("Ouroboros kernel: virtio-blk read of sector 0 failed ({e}) - the boot-disk check asks again"),
-        Ok(()) if !parttable::has_boot_signature(&sector) => {
-            let signature = (sector[511] as u16) << 8 | sector[510] as u16;
-            console::println!(
-                "Ouroboros kernel: virtio-blk sector 0 has no MBR signature ({signature:#06x}) - held as blank, installed only if no USB stick is attached"
-            );
-            return Some(Held { device, blank: true });
-        }
-        Ok(()) => {}
-    }
-
     // SAFETY: the device is initialised, and nothing else holds it yet.
     let capacity = device.capacity_sectors();
     let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
+
+    // Blank first: a disk holding no partition table and no volume
+    // (`parttable::is_blank`: no "EFI PART" at LBA 1, and a sector 0 with no
+    // boot signature and no entry `fsd` lists or a firmware reads) is not the
+    // boot disk whether or not the boot partition is known, and `fsd` finds
+    // nothing on it. Held, and below any stick (Hans, 2026-10-23): a stick
+    // goes in whatever it is, and the blank disk when none does, where
+    // `partition` and `format` reach it. Until 2026-10-23 a disk with no
+    // signature was dropped, so a disk `erase disk` had zeroed could not be
+    // prepared after a reboot; the first version of this held one for its
+    // signature alone, which took a GPT boot disk with an unsigned protective
+    // MBR for blank (the max review). Asked again once when a read fails, as
+    // D6 asks the table: a blank disk whose first read failed would otherwise
+    // be held as an ordinary disk and keep a stick out. Unreadable twice, it
+    // goes to the boot-disk check, which answers for it as for any disk (D6:
+    // held as not the boot disk, put first when the boot partition is
+    // unknown); fsd then answers the I/O error. Until 2026-10-22 such a disk
+    // was dropped, and whatever stick was attached went in, the swap fsd's
+    // `mount -a` refuses.
+    let blank = parttable::is_blank(&mut read).or_else(|| {
+        console::println!("Ouroboros kernel: virtio-blk: a read of its first sectors failed - asking again");
+        parttable::is_blank(&mut read)
+    });
+    match blank {
+        Some(true) => {
+            console::println!(
+                "Ouroboros kernel: virtio-blk holds no partition table or volume - held as blank, installed only if no USB stick is"
+            );
+            return Some(Held { device, blank: true });
+        }
+        None => console::println!("Ouroboros kernel: virtio-blk: its first sectors failed twice - the boot-disk check answers"),
+        Some(false) => {}
+    }
+
     let matched = bootdisk::is_boot_disk_retrying(&mut read, capacity, "virtio-blk");
     // Not the boot disk, or unreadable twice (D6: taken as not the boot disk).
     if matches!(matched, Some(bootdisk::Boot::No | bootdisk::Boot::Unreadable)) {
@@ -1214,7 +1218,8 @@ fn init_storage() -> Option<Held> {
 }
 
 /// A virtio disk [`init_storage`] held back rather than installed: not the
-/// boot disk, or `blank`, its sector 0 without the boot signature.
+/// boot disk, or `blank`, holding no partition table or volume
+/// (`parttable::is_blank`).
 struct Held {
     device: virtio_blk::Device,
     blank: bool,
@@ -1223,9 +1228,10 @@ struct Held {
 /// The boot-time USB step, after [`init_storage`]: the USB stick is installed
 /// when it is the boot disk, and otherwise only if no virtio disk was held
 /// back, which goes in instead as the fallback. A blank held disk ranks below
-/// any stick, so it holds none back. With the boot partition
-/// unknown both answer `None` and the order is the one before step 3:
-/// virtio, then USB. The `MOUNT` syscall's later rescan, which replaces the
+/// any stick, so it holds none back. With the boot partition unknown both
+/// answer `None` and the order is the one before step 3, virtio then USB,
+/// except for a blank disk, the one virtio disk held then, which goes in
+/// after any stick. The `MOUNT` syscall's later rescan, which replaces the
 /// device with a stick attached late, installs whatever stick it finds but
 /// asks it the same question, so `BLOCK_BOOT_START` answers for it too.
 fn install_boot_disk(held: Option<Held>) {
@@ -1255,11 +1261,15 @@ fn install_boot_disk(held: Option<Held>) {
     // disk, and a fallback mounted now would keep it out for the whole boot,
     // since `mount -a` replaces the device only when `fsd` mounted nothing.
     // Left empty, `mount -a` retries the stick (the medium review of #287).
+    // A blank disk goes in all the same: `fsd` mounts nothing from it, so
+    // `mount -a` still retries the stick, and left out it could not be
+    // prepared for the whole boot (the max review of the blank disk).
     let why = match outcome {
         syscall::UsbInstall::Installed => return,
         syscall::UsbInstall::Refused => "the USB stick is not the boot disk either",
         syscall::UsbInstall::Absent if blank => "blank, and no USB stick is attached",
         syscall::UsbInstall::Absent => "no USB stick is attached",
+        syscall::UsbInstall::Failed if blank => "blank, and the USB stick's init failed (`mount -a` retries the stick)",
         syscall::UsbInstall::Failed => {
             console::println!(
                 "Ouroboros kernel: virtio-blk is not the boot disk and the USB stick's init failed - no disk installed, `mount -a` retries the stick"

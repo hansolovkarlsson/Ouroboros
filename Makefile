@@ -2599,7 +2599,7 @@ test-probe-ioerr: image image-exfat image-ext2 image-gpt $(USBSTICK_IMG)
 # beside a stick that is not the boot disk must leave the stick installed.
 # About two minutes; run it whenever init_storage, install_boot_disk or
 # `erase disk` changes.
-test-blank-disk: image $(USBSTICK_IMG)
+test-blank-disk: image image-gpt $(USBSTICK_IMG)
 	python3 scripts/test-blank-disk.py
 
 # A volume claiming more than its partition is not mounted
