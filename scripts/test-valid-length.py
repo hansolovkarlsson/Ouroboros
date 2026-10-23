@@ -24,14 +24,16 @@ cluster's end:
 - APP: `echo hi >> /APP`, at DataLength; both lengths the cluster's size and
   4, the gap zeros;
 - LOW: `writeat /LOW 2 Z`, inside the valid bytes; ValidDataLength still 7,
-  DataLength still the cluster's, the bytes `heZlo\\r\\n`.
+  DataLength still the cluster's, the bytes `heZlo\\r\\n`;
+- NEW: `echo made > /NEW`, a file made with its data; ValidDataLength its size.
 
 fsck_exfat -n passes the image before the boot and after it; no fault lines.
 Fails with the read ignoring ValidDataLength (RDC and MIDC hold 0xEE), with
 the gap filled from DataLength (MID's and APP's 0xEE), with both lengths
 written as one (MID's, LOW's ValidDataLength the cluster's), with
-ValidDataLength not decoded (main's reads and writes) and with a new file's
-ValidDataLength short of its size (RDC's and MIDC's lengths). A
+ValidDataLength not decoded (main's reads and writes), with a written
+file's ValidDataLength short of its size (RDC's and MIDC's) and with a file
+made with its data given ValidDataLength 0 (NEW's). A
 boot QEMU's firmware never starts is INCONCLUSIVE (exit 100). About a minute.
 Run it whenever exFAT's read_entry, read_file, write_at, patch_stream_ext or
 walk_dir's Stream decoding changes.
@@ -157,7 +159,7 @@ def main():
         checks.append(("fsck_exfat -n passes the image before the boot", ok))
         stalled = 0
         if all(c for _, c in checks):
-            cmds = ["cp /RD /RDC", "writeat /MID 100 x", "echo hi >> /APP", "writeat /LOW 2 Z", "cp /MID /MIDC"]
+            cmds = ["cp /RD /RDC", "writeat /MID 100 x", "echo hi >> /APP", "writeat /LOW 2 Z", "cp /MID /MIDC", "echo made > /NEW"]
             steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in cmds] + [("# ", "")]
             guest = drive_qemu.Guest(IMAGE, label="test-valid-length: ")
             try:
@@ -191,7 +193,8 @@ def graded(start, sets, driven, out, faults):
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
     size = vol.cluster
-    got = {n: stream(vol, root, n) for n in FILES + ("RDC", "MIDC")}
+    got = {n: stream(vol, root, n) for n in FILES + ("RDC", "MIDC", "NEW")}
+    new = got["NEW"] or (0, 0, 0, b"")
     none = (0, 0, 0, b"")
     rd, mid, app, low, rdc, midc = (got[n] or none for n in FILES + ("RDC", "MIDC"))
     zeros = lambda n: bytes(n)  # noqa: E731
@@ -215,6 +218,8 @@ def graded(start, sets, driven, out, faults):
          app[3] == HELLO + zeros(size - len(HELLO)) + b"hi\r\n"),
         (f"LOW: ValidDataLength still 7, DataLength {size} ({low[0]}, {low[2]})", low[0] == 7 and low[2] == size),
         ("LOW: its valid bytes heZlo\\r\\n", low[3][:7] == b"heZlo\r\n"),
+        (f"NEW, made whole by `echo made > /NEW`, has ValidDataLength its size ({new[0]}, {new[2]})",
+         new[2] == 6 and new[0] == 6 and new[3] == b"made\r\n"),
         ("no fault lines", faults == 0),
     ]
 
