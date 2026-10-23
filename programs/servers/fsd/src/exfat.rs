@@ -131,8 +131,8 @@ struct DirEntry {
     size: u64,
     /// The Stream's ValidDataLength, at most `size`: the bytes past it read as
     /// zeros, whatever their clusters hold (a file another driver preallocated).
-    /// A file's alone: a directory's is not kept (the root's is 0, a grown
-    /// directory's is not raised), and nothing reads it for one.
+    /// A directory's is its size, kept so where the size changes
+    /// (`grow_extent`); the root's size and so its valid length are 0.
     valid: u64,
     first_cluster: u32,
     contiguous: bool,
@@ -910,8 +910,10 @@ impl Fs {
                             is_dir: set_is_dir,
                             size: set_size,
                             // Past the size is damage, read as the size (all
-                            // valid), as before the field was read.
-                            valid: set_valid.min(set_size),
+                            // valid), as before the field was read. A
+                            // directory's is its size, as the spec has it,
+                            // whatever the disk says.
+                            valid: if set_is_dir { set_size } else { set_valid.min(set_size) },
                             first_cluster: if held { set_cluster } else { 0 },
                             contiguous: held && set_contig,
                         };
@@ -1115,20 +1117,16 @@ impl Fs {
     /// `fat32::Fs::read_file`.
     pub fn read_file(&mut self, path: &str, buf: &mut [u8]) -> Result<u32, Error> {
         // `read_entry` from the start: one copy of the read and of its
-        // ValidDataLength rule, where this kept a loop of its own. The read
-        // cursor is a streaming reader's, so a whole-file read leaves it as
-        // it was; and what a chain shorter than its size did not fill is
-        // zeroed, since the reply carries `buf` up to the size, and the
-        // buffer holds an earlier reply's bytes (the review of 2026-10-22).
+        // ValidDataLength rule, where this kept a loop of its own. The reply
+        // carries `buf` up to the size, and `read_entry` defines all of it,
+        // zeros where a short chain stopped, so no earlier reply's bytes go
+        // out (the reviews of 2026-10-22). The read cursor is a streaming
+        // reader's, so a whole-file read leaves it as it was.
         let file = self.find_file(path)?;
         let kept = self.read_cursor;
         let read = self.read_entry(&file, 0, buf);
         self.read_cursor = kept;
-        let filled = read? as usize;
-        let reach = (file.size.min(buf.len() as u64)) as usize;
-        if filled < reach {
-            buf[filled..reach].fill(0);
-        }
+        read?;
         Ok(saturate_u32(file.size))
     }
 
@@ -1173,12 +1171,19 @@ impl Fs {
     /// read the stale bytes its clusters held as its own.
     fn read_entry(&mut self, file: &DirEntry, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
         let total = file.size;
-        if offset >= total || buf.is_empty() || file.first_cluster == 0 {
+        if offset >= total || buf.is_empty() {
             return Ok(0);
         }
         let whole = ((total - offset) as usize).min(buf.len());
         let want = file.valid.saturating_sub(offset).min(whole as u64) as usize;
-        buf[want..whole].fill(0);
+        // All of `buf[..whole]` zeroed first, so it is defined however the
+        // read ends: zeros past the valid length, and zeros where a chain
+        // shorter than the size stopped, or a damaged entry names no cluster
+        // (the count returned says where).
+        buf[..whole].fill(0);
+        if file.first_cluster == 0 {
+            return Ok(0);
+        }
         if want == 0 {
             return Ok(whole as u32);
         }
@@ -1486,6 +1491,7 @@ impl Fs {
             e.first_cluster = new;
             e.contiguous = false;
             e.size = cluster_bytes;
+            e.valid = cluster_bytes;
             *x = Extent { clusters: 1, tail: new, past_size: false };
             return Ok(());
         }
@@ -1510,6 +1516,7 @@ impl Fs {
         x.clusters += 1;
         x.tail = new;
         e.size = size;
+        e.valid = size;
         Ok(())
     }
 

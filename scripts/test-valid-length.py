@@ -11,9 +11,9 @@ DataLength (the stale bytes read as the file's), filled a write's gap from
 DataLength (leaving them in place) and wrote both lengths as one on every
 write (raising ValidDataLength over them, for every driver after). One boot of
 a copy of build/espexfat.img (exFAT root, partition 1), where the host plants
-four files, each one contiguous cluster of its own (NoFatChain) with
-DataLength the whole cluster, ValidDataLength 7, `hello\\r\\n` then 0xEE to the
-cluster's end:
+five files, each a contiguous run of its own (NoFatChain, one cluster but
+BIG's) with DataLength the whole run, ValidDataLength 7, `hello\\r\\n` then
+0xEE to the run's end:
 
 - RD: `cp /RD /RDC`; RDC must be the cluster's size, `hello\\r\\n` then zeros,
   its ValidDataLength its size, and RD's set and cluster as planted;
@@ -26,7 +26,10 @@ cluster's end:
 - LOW: `writeat /LOW 2 Z`, inside the valid bytes; ValidDataLength still 7,
   DataLength still the cluster's, the bytes `heZlo\\r\\n`;
 - NEW: `write /NEW made`, a file made whole with its data (`write_file`, not
-  `write_at`); ValidDataLength its size.
+  `write_at`); ValidDataLength its size;
+- BIG: 2 MiB preallocated, ValidDataLength 7: `echo y >> /BIG`, more than
+  MAX_GAP_FILL (1 MiB) past the valid bytes, must be refused (Hans, option A),
+  its set and bytes as planted.
 
 fsck_exfat -n passes the image before the boot and after it; no fault lines.
 Fails with the read ignoring ValidDataLength (RDC and MIDC hold 0xEE), with
@@ -34,7 +37,8 @@ the gap filled from DataLength (MID's and APP's 0xEE), with both lengths
 written as one (MID's, LOW's ValidDataLength the cluster's), with
 ValidDataLength not decoded (main's reads and writes), with a written
 file's ValidDataLength short of its size (RDC's and MIDC's) and with a file
-made with its data given ValidDataLength 0 (NEW's). A
+made with its data given ValidDataLength 0 (NEW's) and with the gap bound
+measured from the size (BIG's append taken). A
 boot QEMU's firmware never starts is INCONCLUSIVE (exit 100). About a minute.
 Run it whenever exFAT's read_entry, read_file, write_at, patch_stream_ext or
 walk_dir's Stream decoding changes.
@@ -67,7 +71,10 @@ Volume, set_checksum, entry_set = stale_cursor.Volume, stale_cursor.set_checksum
 IMAGE = os.path.join(ROOT, "build", "test-valid-length.img")
 HELLO = b"hello\r\n"
 STALE = 0xEE
-FILES = ("RD", "MID", "APP", "LOW")
+FILES = ("RD", "MID", "APP", "LOW", "BIG")
+# BIG's DataLength: past ValidDataLength by more than fsd's MAX_GAP_FILL
+# (1 MiB), so an append at its size must be refused.
+BIG_BYTES = 2 << 20
 
 
 def copy():
@@ -84,51 +91,79 @@ def root_end(d):
     return i
 
 
+def span(vol, name):
+    """The clusters `name` is planted with: one, BIG's 2 MiB."""
+    return BIG_BYTES // vol.cluster if name == "BIG" else 1
+
+
+def planted_bytes(vol, n):
+    return HELLO + bytes([STALE]) * (n * vol.cluster - len(HELLO))
+
+
 def preallocated(vol, name, cluster):
-    """`name`'s set: one contiguous cluster, DataLength the cluster's,
+    """`name`'s set: a contiguous run of its span, DataLength the run's,
     ValidDataLength 7."""
     s = bytearray(entry_set(name))
     s[33] = 0x03  # GeneralSecondaryFlags: AllocationPossible, NoFatChain
     struct.pack_into("<Q", s, 40, len(HELLO))
     struct.pack_into("<I", s, 52, cluster)
-    struct.pack_into("<Q", s, 56, vol.cluster)
+    struct.pack_into("<Q", s, 56, span(vol, name) * vol.cluster)
     struct.pack_into("<H", s, 2, set_checksum(s))
     return bytes(s)
 
 
+def free_runs(vol, names):
+    """A free contiguous run for each name, in order: {name: first cluster}."""
+    out, c = {}, 2
+    for n in names:
+        need = span(vol, n)
+        while c + need <= vol.count + 2 and any(vol.used(k) for k in range(c, c + need)):
+            c += 1
+        if c + need > vol.count + 2:
+            return None
+        out[n] = c
+        c += need
+    return out
+
+
 def plant():
-    """The four files in the root, each set read back. Returns (start, the
+    """The five files in the root, each set read back. Returns (start, the
     planted sets by name, the checks)."""
     start = copy()
     vol = Volume(IMAGE, start)
     chain = vol.chain(vol.root)
     d = bytearray(vol.data(chain))
     end = root_end(d)
-    free = [c for c in range(2, vol.count + 2) if not vol.used(c)][:len(FILES)]
-    sets = {n: preallocated(vol, n, c) for n, c in zip(FILES, free)}
+    first = free_runs(vol, FILES)
+    if first is None:
+        return start, {}, [("plant: a free run for each file", False)]
+    sets = {n: preallocated(vol, n, c) for n, c in first.items()}
     blob = b"".join(sets.values())
-    if len(free) < len(FILES) or end + len(blob) + 32 > len(d):
-        return start, sets, [("plant: room for four files in the root and four free clusters", False)]
+    if end + len(blob) + 32 > len(d):
+        return start, sets, [("plant: room for the five sets in the root", False)]
     d[end:end + len(blob)] = blob
     with open(IMAGE, "r+b") as fh:
         for k, c in enumerate(chain):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
             fh.write(d[k * vol.cluster:(k + 1) * vol.cluster])
-        for c in free:
-            fh.seek(vol.heap + (vol.bitmap - 2) * vol.cluster + (c - 2) // 8)
-            b = fh.read(1)[0]
-            fh.seek(-1, 1)
-            fh.write(bytes([b | 1 << (c - 2) % 8]))
-            fh.seek(vol.heap + (c - 2) * vol.cluster)
-            fh.write(HELLO + bytes([STALE]) * (vol.cluster - len(HELLO)))
+        for n, f in first.items():
+            for c in range(f, f + span(vol, n)):
+                fh.seek(vol.heap + (vol.bitmap - 2) * vol.cluster + (c - 2) // 8)
+                b = fh.read(1)[0]
+                fh.seek(-1, 1)
+                fh.write(bytes([b | 1 << (c - 2) % 8]))
+            fh.seek(vol.heap + (f - 2) * vol.cluster)
+            fh.write(planted_bytes(vol, span(vol, n)))
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
     back = all((h := exfatimg.find(root, n)) is not None and h.data == s for n, s in sets.items())
-    stale = all(vol.data([c]) == HELLO + bytes([STALE]) * (vol.cluster - len(HELLO)) and vol.used(c) for c in free)
+    stale = all(vol.data(list(range(f, f + span(vol, n)))) == planted_bytes(vol, span(vol, n))
+                and all(vol.used(c) for c in range(f, f + span(vol, n))) for n, f in first.items())
     return start, sets, [
-        ("plant: the four sets read back as planted, each checksum whole",
+        ("plant: the five sets read back as planted, each checksum whole",
          back and all(struct.unpack_from("<H", s, 2)[0] == set_checksum(s) for s in sets.values())),
-        (f"plant: each file's cluster used, hello\\r\\n then 0xEE to its end ({vol.cluster} bytes)", stale),
+        (f"plant: each file's clusters used, hello\\r\\n then 0xEE to their end ({vol.cluster}-byte clusters, "
+         f"BIG {BIG_BYTES} bytes)", stale),
     ]
 
 
@@ -160,7 +195,7 @@ def main():
         checks.append(("fsck_exfat -n passes the image before the boot", ok))
         stalled = 0
         if all(c for _, c in checks):
-            cmds = ["cp /RD /RDC", "writeat /MID 100 x", "echo hi >> /APP", "writeat /LOW 2 Z", "cp /MID /MIDC", "write /NEW made"]
+            cmds = ["cp /RD /RDC", "writeat /MID 100 x", "echo hi >> /APP", "writeat /LOW 2 Z", "cp /MID /MIDC", "write /NEW made", "echo y >> /BIG"]
             steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in cmds] + [("# ", "")]
             guest = drive_qemu.Guest(IMAGE, label="test-valid-length: ")
             try:
@@ -197,7 +232,7 @@ def graded(start, sets, driven, out, faults):
     got = {n: stream(vol, root, n) for n in FILES + ("RDC", "MIDC", "NEW")}
     new = got["NEW"] or (0, 0, 0, b"")
     none = (0, 0, 0, b"")
-    rd, mid, app, low, rdc, midc = (got[n] or none for n in FILES + ("RDC", "MIDC"))
+    rd, mid, app, low, big, rdc, midc = (got[n] or none for n in FILES + ("RDC", "MIDC"))
     zeros = lambda n: bytes(n)  # noqa: E731
     mid_want = HELLO + zeros(100 - len(HELLO)) + b"x"
     return [
@@ -221,6 +256,10 @@ def graded(start, sets, driven, out, faults):
         ("LOW: its valid bytes heZlo\\r\\n", low[3][:7] == b"heZlo\r\n"),
         (f"NEW, made whole by `write /NEW made`, has ValidDataLength its size ({new[0]}, {new[2]})",
          new[2] == 4 and new[0] == 4 and new[3] == b"made"),
+        (f"BIG: the append past the gap bound refused, its set as planted ({big[0]}, {big[2]})",
+         (h := exfatimg.find(root, "BIG")) is not None and h.data == sets["BIG"]),
+        (f"BIG: its {BIG_BYTES} bytes as planted ({big[3].count(STALE)} of 0xEE)",
+         big[3] == planted_bytes(vol, span(vol, "BIG"))),
         ("no fault lines", faults == 0),
     ]
 
