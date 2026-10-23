@@ -1236,10 +1236,10 @@ fn install_boot_disk(held: Option<Held>) {
         // SAFETY: the stick is initialised and not yet installed.
         let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { usb.read_sector(lba, buf) }.is_ok();
         let matched = bootdisk::is_boot_disk_retrying(&mut read, capacity, "usb-msd");
-        // With no virtio disk held back the stick goes in whatever it is (the
-        // Pi and Parallels boot from a disk the kernel cannot drive and run
-        // from the stick); asked all the same, so `fsd` learns whether it holds
-        // the boot partition.
+        // With no virtio disk held back, or only a blank one, the stick goes
+        // in whatever it is (the Pi and Parallels boot from a disk the kernel
+        // cannot drive and run from the stick); asked all the same, so `fsd`
+        // learns whether it holds the boot partition.
         // D6: a stick unreadable twice is installed as not the boot disk,
         // over a held virtio disk too, and the line above has said the read
         // failed. Only a stick that was read and does not match is refused.

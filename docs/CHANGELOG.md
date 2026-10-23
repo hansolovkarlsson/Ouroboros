@@ -834,7 +834,25 @@ protective MBR failing, the copy must go in first as the boot disk; fails
 with the kernel's own answer. A stick attached later stays out too, as beside a disk whose
 table will not read, since `mount -a` keeps a disk answering an I/O error.
 A disk whose sector 0 reads but carries no MBR signature is still dropped
-(the roadmap).
+(the roadmap; held since 2026-10-23, below).
+
+**A virtio disk with no MBR signature is held as blank, below any USB stick
+(2026-10-23).** `init_storage` dropped a virtio disk whose sector 0 read
+without `0x55 0xAA`, a check from Phase 3c that proved bytes had come off the
+disk and became a drop later, so a blank disk never reached fsd, and a disk
+`erase disk` had zeroed was gone after a reboot, before `partition` could
+reach it. Now it is held as blank: not the boot disk, since a partition table
+and a volume boot sector both end in the signature, and ranked below any
+stick, the boot disk or not (`install_boot_disk` asks the stick as if
+nothing were held). With no stick attached it goes in as the fallback, the
+line saying why, and `partition`, `format` and `mount -a` prepare it. Hans's
+choice: holding it as any disk not the boot disk would refuse a stick that is
+not the boot disk and bring the boot up with nothing mounted, since fsd's
+boot mount does not rescan. `make test-blank-disk` boots a blank disk alone,
+a copy of esp.img erased by `erase disk` and booted again, and a blank disk
+beside a stick that is not the boot disk; it fails with the drop and with a
+blank disk holding the stick back. The boot partition unknown to the kernel
+has no rig, since QEMU's firmware always names the partition.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has

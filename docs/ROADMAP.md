@@ -4340,11 +4340,23 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   whose bit is in the bitmap's second sector, fails with the sector's
   offset dropped. `bitmap_alloc` still writes the whole block to set one
   bit; the high review of the branch, deferred.)
-- **A virtio disk whose sector 0 has no MBR signature is dropped.**
+- ~~**A virtio disk whose sector 0 has no MBR signature is dropped.**~~
   `init_storage` returns no device for it, so a blank disk never reaches fsd
   and `format` cannot reach it. Whether it should is a question of its own,
   kept apart from the unreadable disk above (2026-10-22). Read in the code,
   not run.
+  *Done 2026-10-23, Hans's choice of two: held as blank, not the boot disk
+  (a partition table and a volume boot sector both end in the signature),
+  and below any USB stick, the boot disk or not, so it is installed only
+  when no stick is attached; the other was to hold it as any disk not the
+  boot disk, which refuses a stick that is not the boot disk and brings the
+  boot up with nothing mounted. `make test-blank-disk`: a blank disk alone
+  is prepared by `partition`, `format` and `mount -a`; a copy of esp.img
+  erased by `erase disk` is prepared on the next boot; a blank disk beside a
+  stick that is not the boot disk leaves the stick installed. Fails with the
+  drop (8 checks) and with a blank disk holding the stick back (3). The
+  boot partition unknown to the kernel has no rig: QEMU's firmware always
+  names the partition.*
 - **An exFAT file preallocated more than 1 MiB past its ValidDataLength
   refuses every append.** A write fills zeros from ValidDataLength to its
   offset, and the fill is bounded by `MAX_GAP_FILL` (1 MiB), so a camera's
