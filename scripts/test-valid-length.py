@@ -25,7 +25,8 @@ cluster's end:
   4, the gap zeros;
 - LOW: `writeat /LOW 2 Z`, inside the valid bytes; ValidDataLength still 7,
   DataLength still the cluster's, the bytes `heZlo\\r\\n`;
-- NEW: `echo made > /NEW`, a file made with its data; ValidDataLength its size.
+- NEW: `write /NEW made`, a file made whole with its data (`write_file`, not
+  `write_at`); ValidDataLength its size.
 
 fsck_exfat -n passes the image before the boot and after it; no fault lines.
 Fails with the read ignoring ValidDataLength (RDC and MIDC hold 0xEE), with
@@ -159,7 +160,7 @@ def main():
         checks.append(("fsck_exfat -n passes the image before the boot", ok))
         stalled = 0
         if all(c for _, c in checks):
-            cmds = ["cp /RD /RDC", "writeat /MID 100 x", "echo hi >> /APP", "writeat /LOW 2 Z", "cp /MID /MIDC", "echo made > /NEW"]
+            cmds = ["cp /RD /RDC", "writeat /MID 100 x", "echo hi >> /APP", "writeat /LOW 2 Z", "cp /MID /MIDC", "write /NEW made"]
             steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in cmds] + [("# ", "")]
             guest = drive_qemu.Guest(IMAGE, label="test-valid-length: ")
             try:
@@ -218,8 +219,8 @@ def graded(start, sets, driven, out, faults):
          app[3] == HELLO + zeros(size - len(HELLO)) + b"hi\r\n"),
         (f"LOW: ValidDataLength still 7, DataLength {size} ({low[0]}, {low[2]})", low[0] == 7 and low[2] == size),
         ("LOW: its valid bytes heZlo\\r\\n", low[3][:7] == b"heZlo\r\n"),
-        (f"NEW, made whole by `echo made > /NEW`, has ValidDataLength its size ({new[0]}, {new[2]})",
-         new[2] == 6 and new[0] == 6 and new[3] == b"made\r\n"),
+        (f"NEW, made whole by `write /NEW made`, has ValidDataLength its size ({new[0]}, {new[2]})",
+         new[2] == 4 and new[0] == 4 and new[3] == b"made"),
         ("no fault lines", faults == 0),
     ]
 
