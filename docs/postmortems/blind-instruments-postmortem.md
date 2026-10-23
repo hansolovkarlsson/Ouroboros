@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-20. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-22. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds'. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2030,3 +2030,47 @@ blamed NVMe, since all four rigs boot from it, until `test-long-set`, which
 boots from virtio, stalled the same way. **A verdict needs a third answer
 for a run that never reached the code, and a cause named from four
 instances that share a property is a guess about that property.**
+
+## Four more, from the stall classifier and sector 0 (2026-10-22)
+
+Two branches built rigs with controls (#342, and #343 with its three high
+reviews). Four instruments did not do what they seemed to. Two were found by
+a control that passed when it should have failed, two by review.
+
+**A patch that never reached the copy.** The forced-stall control patched
+`drive_qemu.firmware_stalled` in memory, so every boot would read as
+stalled. `test-usb-hub` had taken the function into a name of its own at
+import (`firmware_stalled = drive_qemu.firmware_stalled`), so the patch
+never reached it and the rig graded its boots as if nothing had changed.
+It now calls `drive_qemu.firmware_stalled` directly. **A control that
+patches a name reaches only the callers that look the name up at the
+call; a copy taken at import is a second observer the control never
+touched.**
+
+**A default bound at definition.** `record_run(label, verdict,
+log=STALL_LOG)` took the log's path when the function was defined, so the
+same wrapper's redirect of `STALL_LOG` to its scratch file did nothing, and
+forced stalls were written into the real run log, the one that turns a
+stall into a rate. It now takes `log=None` and reads `STALL_LOG` when
+called. **A default argument is evaluated once; an instrument that is
+meant to be redirected must read its target at the call.**
+
+**A check with nothing to see.** SECTOR0's first version booted with no USB
+stick attached, and checked "no stick installed". With no stick there,
+that could not fail. The bug it guarded, the kernel installing the stick
+when it drops the disk, needs a stick to install. The high review found
+it; SECTOR0 boots with the stick now, and the control that drops the disk
+fails five checks, the stick at `/` among them. **A check that something
+did not happen proves nothing unless the rig provides the thing that
+could have happened.**
+
+**A grade that matched the wrong answer.** GPT0 checks that the kernel took
+a GPT disk with an unreadable protective MBR for the boot disk. Its first
+grade was the line saying the disk was installed, and the kernel prints
+that line whether the boot-disk check answered "yes" or "unknown". So a
+`parttable` that answered unknown for every GPT disk passed, which is the
+regression the case exists for. The install line now names the boot
+partition's start when there is one, GPT0 is graded on that, and the
+control (GPT answered unknown) fails exactly that check. **Grade on
+evidence only the right answer produces; a line two answers share tells
+them apart from neither.**

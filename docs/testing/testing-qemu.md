@@ -200,7 +200,8 @@ run it again. A boot that stalled on each of its last three runs
 stopped by the rig's own disk, and its checks are graded and fail. `make test` runs `drive-qemu.py --self-test`. The rigs using it:
 `test-usb-hub` (with its own run log, `scratch/usb-hub-runs.log`),
 `test-boot-partition`, `test-volume-bound`, `test-probe-ioerr`,
-`test-ext2-blocks` and `test-long-set`. The other rigs still grade a stall
+`test-ext2-blocks`, `test-long-set` and `test-valid-length` (built with it,
+2026-10-22). The other rigs still grade a stall
 as failed checks, but `Guest.aborts()`, which every rig calls, prints
 `QEMU's firmware never started the kernel` beside them.
 

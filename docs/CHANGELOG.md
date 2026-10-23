@@ -836,6 +836,21 @@ table will not read, since `mount -a` keeps a disk answering an I/O error.
 A disk whose sector 0 reads but carries no MBR signature is still dropped
 (the roadmap).
 
+**exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
+driver preallocated has ValidDataLength below DataLength, and the spec has
+the bytes between them read as zeros. fsd read them off the disk as the
+file's, filled a write's gap from DataLength, which left them in place, and
+wrote both lengths as one on every write, so a single append made the stale
+bytes the file's for every driver after. Now `read_entry` returns zeros past
+ValidDataLength and reads no cluster for them (`read_file` goes through it,
+one copy of the rule), `write_at` fills its gap from ValidDataLength and sets
+it to the larger of itself and the write's end, and `patch_stream_ext` takes
+both lengths as required parameters. A write more than `MAX_GAP_FILL` (1 MiB)
+past ValidDataLength is refused, inside a preallocation too. `make
+test-valid-length` plants four preallocated files and checks a copy, a write
+inside the preallocation, an append and a write inside the valid bytes; it
+fails with the read, the gap or the Stream's two lengths each as on main.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

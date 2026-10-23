@@ -129,6 +129,11 @@ const SLOTS_PER_SECTOR: usize = SECTOR_SIZE / ENTRY_SIZE;
 struct DirEntry {
     is_dir: bool,
     size: u64,
+    /// The Stream's ValidDataLength, at most `size`: the bytes past it read as
+    /// zeros, whatever their clusters hold (a file another driver preallocated).
+    /// A directory's is its size, kept so where the size changes
+    /// (`grow_extent`); the root's size and so its valid length are 0.
+    valid: u64,
     first_cluster: u32,
     contiguous: bool,
 }
@@ -747,6 +752,7 @@ impl Fs {
         DirEntry {
             is_dir: true,
             size: 0, // unknown; walk_dir stops at the end-of-directory marker
+            valid: 0,
             first_cluster: self.root_cluster,
             contiguous: false,
         }
@@ -792,6 +798,7 @@ impl Fs {
         let mut set_len = 0usize; // declared entries in the set (1 + secondaries)
         let mut set_is_dir = false;
         let mut set_size = 0u64;
+        let mut set_valid = 0u64;
         let mut set_cluster = 0u32;
         let mut set_contig = false;
         let mut name = [0u16; LONG_NAME_MAX];
@@ -837,6 +844,7 @@ impl Fs {
                             let attrs = u16::from_le_bytes([raw[4], raw[5]]);
                             set_is_dir = attrs & ATTR_DIRECTORY != 0;
                             set_size = 0;
+                            set_valid = 0;
                             set_cluster = 0;
                             set_contig = false;
                             name_cap = 0;
@@ -854,6 +862,10 @@ impl Fs {
                         ET_STREAM_EXT => {
                             set_contig = raw[1] & NO_FAT_CHAIN != 0;
                             name_cap = raw[3] as usize;
+                            set_valid = u64::from_le_bytes([
+                                raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
+                                raw[15],
+                            ]);
                             set_cluster =
                                 u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
                             set_size = u64::from_le_bytes([
@@ -897,6 +909,11 @@ impl Fs {
                         let entry = DirEntry {
                             is_dir: set_is_dir,
                             size: set_size,
+                            // Past the size is damage, read as the size (all
+                            // valid), as before the field was read. A
+                            // directory's is its size, as the spec has it,
+                            // whatever the disk says.
+                            valid: if set_is_dir { set_size } else { set_valid.min(set_size) },
                             first_cluster: if held { set_cluster } else { 0 },
                             contiguous: held && set_contig,
                         };
@@ -1099,39 +1116,18 @@ impl Fs {
     /// size (saturated to `u32`), same truncation-detection contract as
     /// `fat32::Fs::read_file`.
     pub fn read_file(&mut self, path: &str, buf: &mut [u8]) -> Result<u32, Error> {
-        let file = self.find(path)?;
-        if file.is_dir {
-            return Err(Error::NotAFile);
-        }
-        let real = saturate_u32(file.size);
-        if file.size == 0 || file.first_cluster == 0 {
-            return Ok(real);
-        }
-
-        let total = file.size as usize;
-        let mut cluster = file.first_cluster;
-        let mut written = 0usize;
-        'clusters: loop {
-            let lba = self.cluster_to_lba(cluster);
-            for s in 0..self.sectors_per_cluster {
-                if written >= total || written >= buf.len() {
-                    break 'clusters;
-                }
-                let mut sector = [0u8; SECTOR_SIZE];
-                self.disk.read_sector((lba + s) as u64, &mut sector)?;
-                let n = (total - written).min(buf.len() - written).min(SECTOR_SIZE);
-                buf[written..written + n].copy_from_slice(&sector[..n]);
-                written += n;
-            }
-            if written >= total || written >= buf.len() {
-                break;
-            }
-            match self.advance(cluster, file.contiguous)? {
-                Some(next) => cluster = next,
-                None => break,
-            }
-        }
-        Ok(real)
+        // `read_entry` from the start: one copy of the read and of its
+        // ValidDataLength rule, where this kept a loop of its own. The reply
+        // carries `buf` up to the size, and `read_entry` defines all of it,
+        // zeros where a short chain stopped, so no earlier reply's bytes go
+        // out (the reviews of 2026-10-22). The read cursor is a streaming
+        // reader's, so a whole-file read leaves it as it was.
+        let file = self.find_file(path)?;
+        let kept = self.read_cursor;
+        let read = self.read_entry(&file, 0, buf);
+        self.read_cursor = kept;
+        read?;
+        Ok(saturate_u32(file.size))
     }
 
     /// Reads up to `buf.len()` bytes from byte `offset`, returning how many were
@@ -1169,13 +1165,28 @@ impl Fs {
         Ok(file)
     }
 
-    /// [`read_at`](Self::read_at) of a file already found.
+    /// [`read_at`](Self::read_at) of a file already found. The bytes past its
+    /// ValidDataLength are zeros, read off no cluster: the spec's rule, which
+    /// until 2026-10-22 was not kept, so a file another driver preallocated
+    /// read the stale bytes its clusters held as its own.
     fn read_entry(&mut self, file: &DirEntry, offset: u64, buf: &mut [u8]) -> Result<u32, Error> {
         let total = file.size;
-        if offset >= total || buf.is_empty() || file.first_cluster == 0 {
+        if offset >= total || buf.is_empty() {
             return Ok(0);
         }
-        let want = ((total - offset) as usize).min(buf.len());
+        let whole = ((total - offset) as usize).min(buf.len());
+        let want = file.valid.saturating_sub(offset).min(whole as u64) as usize;
+        // All of `buf[..whole]` zeroed first, so it is defined however the
+        // read ends: zeros past the valid length, and zeros where a chain
+        // shorter than the size stopped, or a damaged entry names no cluster
+        // (the count returned says where).
+        buf[..whole].fill(0);
+        if file.first_cluster == 0 {
+            return Ok(0);
+        }
+        if want == 0 {
+            return Ok(whole as u32);
+        }
         let offset = offset as usize;
 
         let cluster_bytes = self.sectors_per_cluster as usize * SECTOR_SIZE;
@@ -1226,7 +1237,8 @@ impl Fs {
             cluster,
             cluster_pos,
         });
-        Ok(written as u32)
+        // A chain shorter than its valid bytes ends the read there, zeros or not.
+        Ok(if written == want { whole } else { written } as u32)
     }
 
     // ---- write infrastructure (Stage A) -------------------------------------
@@ -1472,26 +1484,27 @@ impl Fs {
         let at = *at;
         if x.clusters == 0 {
             let new = self.alloc_zeroed()?;
-            if let Err(err) = self.patch_stream_ext(at, new, cluster_bytes) {
+            if let Err(err) = self.patch_stream_ext(at, new, cluster_bytes, cluster_bytes) {
                 let _ = self.free_data(new, false, cluster_bytes);
                 return Err(err);
             }
             e.first_cluster = new;
             e.contiguous = false;
             e.size = cluster_bytes;
+            e.valid = cluster_bytes;
             *x = Extent { clusters: 1, tail: new, past_size: false };
             return Ok(());
         }
         if e.contiguous {
             let size = x.clusters * cluster_bytes;
             self.ensure_chained(e.first_cluster, true, size)?;
-            self.patch_stream_ext(at, e.first_cluster, size)?;
+            self.patch_stream_ext(at, e.first_cluster, size, size)?;
             e.contiguous = false;
         }
         let new = self.alloc_zeroed()?;
         self.write_fat_entry(x.tail, new)?;
         let size = (x.clusters + 1) * cluster_bytes;
-        if let Err(err) = self.patch_stream_ext(at, e.first_cluster, size) {
+        if let Err(err) = self.patch_stream_ext(at, e.first_cluster, size, size) {
             // Undone, or the chain would run past the size, and `room` would
             // refuse every later create in the directory until a fsck (the
             // medium review of 2026-10-19): one failed write, a locked
@@ -1503,6 +1516,7 @@ impl Fs {
         x.clusters += 1;
         x.tail = new;
         e.size = size;
+        e.valid = size;
         Ok(())
     }
 
@@ -1865,7 +1879,10 @@ impl Fs {
     }
 
     /// Update an existing entry set's stream extension to point at a new
-    /// first-cluster / data-length (FAT-chained), then recompute the
+    /// first cluster, ValidDataLength and DataLength (FAT-chained), both
+    /// lengths asked for: until 2026-10-22 one length set both, so a write to
+    /// a preallocated file made the stale bytes past its valid length the
+    /// file's, for every driver. Then recompute the
     /// `SetChecksum` over the whole set - the exFAT equivalent of
     /// `fat32::patch_entry_cluster_size`, plus the checksum the format requires.
     /// Rewrites the File + Stream entries (the two that changed; the name
@@ -1881,7 +1898,7 @@ impl Fs {
     /// share a sector, as they do unless the set starts in a sector's last
     /// slot: then two writes, and a crash between them leaves the checksum
     /// unmatched, which nothing short of a journal avoids.
-    fn patch_stream_ext(&mut self, set: SetAt, first_cluster: u32, data_len: u64) -> Result<(), Error> {
+    fn patch_stream_ext(&mut self, set: SetAt, first_cluster: u32, valid_len: u64, data_len: u64) -> Result<(), Error> {
         // File and Stream as they are, then the Stream changed.
         let mut cur = SlotCursor::new(set.dir_cluster, set.dir_contiguous);
         let mut head = [0u8; 2 * ENTRY_SIZE];
@@ -1904,7 +1921,7 @@ impl Fs {
             return Err(Error::Io(DiskError::Io));
         }
         head[se + 1] = SECONDARY_ALLOC_POSSIBLE; // FAT-chained now (NoFatChain clear)
-        head[se + 8..se + 16].copy_from_slice(&data_len.to_le_bytes()); // ValidDataLength
+        head[se + 8..se + 16].copy_from_slice(&valid_len.to_le_bytes()); // ValidDataLength
         head[se + 20..se + 24].copy_from_slice(&first_cluster.to_le_bytes());
         head[se + 24..se + 32].copy_from_slice(&data_len.to_le_bytes()); // DataLength
         // The checksum: File (but its own two bytes) and the new Stream, then
@@ -1991,7 +2008,7 @@ impl Fs {
         match plan {
             Plan::Replace(entry, at) => {
                 self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
-                self.patch_stream_ext(at, new_cluster, data.len() as u64)
+                self.patch_stream_ext(at, new_cluster, data.len() as u64, data.len() as u64)
             }
             Plan::Create(room) => {
                 let made = self.create_entry(&mut dir, room, name, false, new_cluster, data.len() as u64, false);
@@ -2008,9 +2025,10 @@ impl Fs {
     /// Write `data` at byte `offset`, extending the file as needed without
     /// rewriting the bytes before `offset` - the primitive behind streaming
     /// `cp`, `>>`, and `writeat`. Mirrors `fat32::write_at` (grow-only size, a
-    /// zero-filled gap past EOF bounded by `MAX_GAP_FILL`, a unified per-sector
-    /// pass), with allocation through the bitmap and a contiguous file first
-    /// converted to a FAT chain so it can be extended.
+    /// zero-filled gap bounded by `MAX_GAP_FILL`, a unified per-sector pass),
+    /// with allocation through the bitmap, a contiguous file first converted
+    /// to a FAT chain so it can be extended, and the gap starting at the
+    /// file's ValidDataLength, not its size.
     pub fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<(), Error> {
         if data.is_empty() {
             return Ok(());
@@ -2026,7 +2044,13 @@ impl Fs {
         }
 
         let old_size = entry.size;
-        if offset > old_size && offset - old_size > MAX_GAP_FILL {
+        // The gap is filled from the valid length, not the size: the bytes
+        // between them read as zeros, and a write past the valid length makes
+        // everything before it valid, so they are written as the zeros they
+        // read as. A file another driver preallocated far past its valid
+        // length is refused a write beyond the bound, as one past its size is.
+        let valid = entry.valid;
+        if offset > valid && offset - valid > MAX_GAP_FILL {
             return Err(Error::InvalidOffset);
         }
 
@@ -2039,7 +2063,7 @@ impl Fs {
             head_cluster = self.alloc_cluster()?;
         }
 
-        let write_start = old_size.min(offset);
+        let write_start = valid.min(offset);
         let write_end = offset + data.len() as u64;
         // The bytes the file's own clusters hold: a link past them (a crash
         // between a chain's extension and its size write, or another tool)
@@ -2082,7 +2106,11 @@ impl Fs {
 
             if in_off == 0 && n == SECTOR_SIZE {
                 self.disk.write_sector(sector_lba, &chunk)?;
-            } else if sector_start < old_size {
+            } else if sector_start < valid {
+                // Valid bytes in the sector outside the write: kept. A
+                // sector holding none is written whole, zeros after the
+                // write, and not read first; stale bytes left past the write
+                // in a sector read here lie past the new valid length.
                 self.write_partial_sector(sector_lba, in_off, &chunk[..n])?;
             } else {
                 let mut sector = [0u8; SECTOR_SIZE];
@@ -2101,7 +2129,7 @@ impl Fs {
             cluster_pos: cluster_pos as usize,
         });
         let new_size = old_size.max(write_end);
-        self.patch_stream_ext(at, head_cluster, new_size)
+        self.patch_stream_ext(at, head_cluster, valid.max(write_end), new_size)
     }
 
     /// Mark every entry of a set deleted by clearing its in-use bit (`0x85` ->

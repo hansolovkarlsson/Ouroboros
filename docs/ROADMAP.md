@@ -4386,24 +4386,38 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   volume over speed on a Linux-written stick. A narrower drop would need a
   cursor to know every cluster of its chain, and a cursor holds only its
   position. Not to be proposed again without that.*
-- **fsd reads an exFAT file to its DataLength, not its ValidDataLength.**
-  `walk_dir` takes a file's size from the Stream's DataLength, so a file
-  another driver preallocated (ValidDataLength below DataLength) reads the
-  bytes past its valid length, stale data the spec says reads as zeros.
-  Found with the rename's high review, 2026-10-21, which kept the field
-  through a rename.
+- **An exFAT file preallocated more than 1 MiB past its ValidDataLength
+  refuses every append.** A write fills zeros from ValidDataLength to its
+  offset, and the fill is bounded by `MAX_GAP_FILL` (1 MiB), so a camera's
+  or Windows's file with, say, DataLength 4 GiB and ValidDataLength 1 GiB
+  answers `InvalidOffset` to `>>` and to any `writeat` past valid + 1 MiB.
+  Only a whole-file write (`write_file`) gets past it. On main before
+  2026-10-22 the append went through and made the stale bytes the file's
+  for every driver. *Held 2026-10-22 by Hans (option A of the
+  ValidDataLength review): refuse, the file still reads right.* The ways
+  out, if it is wanted: a resumable fill, a piece a request, so no one
+  request outlasts the supervisor's wedge limit (B); or the bound for growth
+  past DataLength alone, the whole preallocation filled in one request,
+  gigabytes of writes that the supervisor may take for a wedged fsd (C).
+  Measured for C on 2026-10-22, by `test-valid-length`'s control with the
+  bound from the size: BIG's 2 MiB was filled in one request on QEMU and
+  the append went through, no wedge restart. So C holds at megabytes; the
+  open risk is gigabytes, unmeasured.
+- **The exFAT rigs take their host helpers from each other.** `Volume`,
+  `set_checksum` and `entry_set` come from executing `test-stale-cursor.py`
+  and `test-grow-dir.py` as modules, and `copy`, `root_end` and the fsck
+  pass rule are repeated in `test-long-set`, `test-grow-dir`,
+  `test-exfat-names` and `test-valid-length`, while `scripts/exfatimg.py`
+  says it is the one shared copy. A change to one rig's internals can break
+  another's import, and the fsck rule can drift between four copies. Move
+  them into `exfatimg.py` and have the rigs import it. From the high review
+  of `fix/exfat-valid-length`, 2026-10-22.
 - **exFAT's `rm` leaks a vendor allocation's clusters.** A vendor allocation
   entry (0xE1) names clusters of its own (its FirstCluster and DataLength),
   which `rm` and a replacing `mv` (for the set it replaces) never free, so
   they stay set in the bitmap with no set naming them. Freeing them the way
   the Stream's are, bounded by the volume, would end it. Read in the code,
   found with the rename's fix, 2026-10-21.
-- ~~**`/bin/ls` cuts a name past 82 bytes and runs it into the next.**~~
-  *Done 2026-10-22:* both line buffers hold a name of 255 bytes (`NAME_MAX`,
-  the longest a listing gives) whole, each line one write; the long
-  layout's 200 bytes cut one too.
-  `make test-exfat-names` requires `ls /` to list the 100-`?` name whole,
-  and fails with main's `ls`.
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
   rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
   `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume
