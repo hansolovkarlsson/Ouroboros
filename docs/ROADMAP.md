@@ -4399,6 +4399,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   request outlasts the supervisor's wedge limit (B); or the bound for growth
   past DataLength alone, the whole preallocation filled in one request,
   gigabytes of writes that the supervisor may take for a wedged fsd (C).
+  Measured for C on 2026-10-22, by `test-valid-length`'s control with the
+  bound from the size: BIG's 2 MiB was filled in one request on QEMU and
+  the append went through, no wedge restart. So C holds at megabytes; the
+  open risk is gigabytes, unmeasured.
 - **The exFAT rigs take their host helpers from each other.** `Volume`,
   `set_checksum` and `entry_set` come from executing `test-stale-cursor.py`
   and `test-grow-dir.py` as modules, and `copy`, `root_end` and the fsck
