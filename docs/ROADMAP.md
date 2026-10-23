@@ -4372,6 +4372,19 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   append and a write inside the valid bytes, and fails with each as on main.
   A write more than 1 MiB past ValidDataLength is refused, inside a
   preallocation too, the bound a write past the size has.
+- **An exFAT file preallocated more than 1 MiB past its ValidDataLength
+  refuses every append.** A write fills zeros from ValidDataLength to its
+  offset, and the fill is bounded by `MAX_GAP_FILL` (1 MiB), so a camera's
+  or Windows's file with, say, DataLength 4 GiB and ValidDataLength 1 GiB
+  answers `InvalidOffset` to `>>` and to any `writeat` past valid + 1 MiB.
+  Only a whole-file write (`write_file`) gets past it. On main before
+  2026-10-22 the append went through and made the stale bytes the file's
+  for every driver. *Held 2026-10-22 by Hans (option A of the
+  ValidDataLength review): refuse, the file still reads right.* The ways
+  out, if it is wanted: a resumable fill, a piece a request, so no one
+  request outlasts the supervisor's wedge limit (B); or the bound for growth
+  past DataLength alone, the whole preallocation filled in one request,
+  gigabytes of writes that the supervisor may take for a wedged fsd (C).
 - **exFAT's `rm` leaks a vendor allocation's clusters.** A vendor allocation
   entry (0xE1) names clusters of its own (its FirstCluster and DataLength),
   which `rm` and a replacing `mv` (for the set it replaces) never free, so
