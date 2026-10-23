@@ -307,7 +307,7 @@ def checks_of(name):
     if name == "SECTOR0":
         checks += [
             ("the kernel held the disk, sector 0 unreadable twice",
-             "virtio-blk read of sector 0 failed" in boot_log
+             "virtio-blk: its first sectors failed twice - the boot-disk check answers" in boot_log
              and "reading its partition table failed twice" in boot_log
              and "virtio-blk is not the boot disk - held" in boot_log),
             ("and installed it as the fallback, the stick refused",
@@ -318,7 +318,7 @@ def checks_of(name):
         # Its protective MBR will not read, its GPT headers do: the check
         # answers from the headers, and the copy is the boot disk.
         checks += [
-            ("sector 0 unreadable", "virtio-blk read of sector 0 failed" in boot_log),
+            ("sector 0 unreadable", "virtio-blk: its first sectors failed twice - the boot-disk check answers" in boot_log),
             # Only a disk the boot-disk check matched is installed with a
             # start, which the kernel's line names: the boot partition's.
             ("the kernel took the disk for the boot disk, from its GPT headers, and installed it first",
