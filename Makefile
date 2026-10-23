@@ -2573,16 +2573,22 @@ test-mount-gate: image $(USBSTICK_IMG)
 	python3 scripts/test-mount-gate.py
 
 # A read error inside a partition's probe is an I/O error, not "no
-# filesystem" (scripts/test-probe-ioerr.py): five boots from esp.img on NVMe,
+# filesystem" (scripts/test-probe-ioerr.py): seven boots from esp.img on NVMe
+# (espgpt.img in one),
 # on virtio a copy of espexfat.img, espext2.img or espgpt.img with one sector
 # failing every read (QEMU's blkdebug), usbstick.img on USB; `mount -a` must
 # answer the I/O error with no stick installed (also with the GPT header
-# failing, the table itself unreadable), `format ext2` must leave every
+# failing, the table itself unreadable, and with sector 0 failing, a
+# stick beside it, where the kernel must hold the disk, refuse the stick and
+# install the disk as the fallback; and, booted from espgpt.img with a copy
+# of it on virtio, its protective MBR failing, where the kernel must take the
+# copy for the boot disk from its GPT headers), `format ext2` must leave every
 # partition as it was (also with the ESP beside the failing exFAT), `mount 0`
 # must say I/O error, and an ext2 whose first sector fails must still mount.
-# About four minutes; run it whenever fsd's probe, mount, format, mount N,
-# partition discovery or mount -a's rescan changes.
-test-probe-ioerr: image image-exfat image-gpt $(USBSTICK_IMG)
+# About two minutes (122 s on 2026-10-22); run it whenever fsd's probe,
+# mount, format, mount N, partition discovery, mount -a's rescan or the
+# kernel's init_storage changes.
+test-probe-ioerr: image image-exfat image-ext2 image-gpt $(USBSTICK_IMG)
 	python3 scripts/test-probe-ioerr.py
 
 # A volume claiming more than its partition is not mounted

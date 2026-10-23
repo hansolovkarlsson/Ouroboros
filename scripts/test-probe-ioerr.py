@@ -12,14 +12,16 @@ disk out of reach until a reboot, and `format` took the partition it could
 not read as empty and laid a new filesystem over it. Only a read error in the
 partition table was told apart (#324).
 
-Five boots, each on fresh copies. In each the firmware boots esp.img from
-NVMe, which the kernel cannot drive, so the virtio disk goes in as the
-fallback block device, and the boot partition is not known to fsd. That disk
-is a copy of build/espexfat.img (exFAT, then the ESP) or build/espext2.img
-(ext2, then the ESP), signed again (scripts/disksig.py) so it is not taken
-for the boot disk, attached through QEMU's blkdebug driver with every read of
-one sector failing with EIO. A USB stick, a copy of build/usbstick.img, is
-beside it.
+Seven boots, each on fresh copies. In each but GPT0 the firmware boots
+esp.img from NVMe, which the kernel cannot drive, so the virtio disk goes in
+as the fallback block device, and the boot partition is not known to fsd.
+The virtio disk is a copy of build/espexfat.img (exFAT, then the ESP),
+build/espext2.img (ext2, then the ESP) or build/espgpt.img, attached through
+QEMU's blkdebug driver with every read of one sector failing with EIO. An
+MBR copy is signed again (scripts/disksig.py) so it is not taken for the
+boot disk; a GPT copy keeps espgpt.img's GUIDs, so it is the boot disk when
+the firmware boots espgpt.img, as in GPT0. A USB stick, a copy of
+build/usbstick.img, is beside it.
 
 - MOUNT: the exFAT copy with the ESP's entry zeroed (one partition), its
   root directory's first sector failing (read by the exFAT probe's
@@ -43,11 +45,30 @@ beside it.
   so fsd's boot line and `mount -a` must answer as in MOUNT, and no stick be
   installed. The kernel reads sector 0 alone before it installs a disk, and
   takes one whose sector 1 will not read as not the boot disk (D6), so this
-  disk goes in as the fallback. A failing sector 0 cannot be the case: the
-  kernel drops such a disk and installs the stick itself (the roadmap).
+  disk goes in as the fallback.
   TABLE rests on parttable's rule that sector 1 unread is `Unreadable`, not
   a reason to read the backup header: if that rule changes, the disk would
   mount from its backup and TABLE must fail some other way.
+- SECTOR0 (since 2026-10-22): the exFAT copy whole, its MBR (sector 0)
+  failing. The boot partition is known (esp.img's, on NVMe), so the kernel
+  must hold the disk, unreadable twice, as not the boot disk (D6), refuse
+  the stick, which is not the boot disk either, and install the disk as the
+  fallback; fsd's boot line and `mount -a` must answer as in MOUNT, with no
+  stick installed. Until 2026-10-22 the kernel dropped such a disk and the
+  stick came up at `/`. With the boot partition unknown to the kernel the
+  disk goes in first, as any virtio disk then does; no rig boots that way
+  (QEMU's firmware always names the partition). Its "held" check reads the
+  kernel's lines alone; the fallback line, no stick, fsd's I/O error and the
+  disk's bytes are the observations.
+- GPT0 (since 2026-10-22): the firmware boots espgpt.img from NVMe, and the
+  virtio disk is a copy of it, so the boot disk, its protective MBR (sector
+  0) failing and its GPT headers readable. The boot-disk check answers a GPT
+  boot partition from the headers, never sector 0, so the kernel must take
+  the copy for the boot disk and install it first, not hold it; fsd, whose
+  table read needs sector 0, answers as in MOUNT. The review of the first
+  version found the kernel answering an unreadable sector 0 itself, as
+  "not the boot disk" whatever the table, which held this disk and put it
+  in only as the fallback.
 - EXT2: the ext2 copy with the ESP's entry zeroed, the partition's first
   sector failing: FAT32's and exFAT's probes read it, ext2's reads its
   superblock two sectors on. ext2 must mount, as it did before the change:
@@ -65,9 +86,14 @@ partition overwritten), with the probe stopping at its first arm's read
 error (EXT2: nothing mounts), with `format` going on past a candidate that
 would not read (BESIDE: the ESP formatted), with `mount N` answering
 "no filesystem" (BESIDE), and with an unreadable partition table read as
-one holding no partitions (TABLE: the stick installed and mounted). That the stick can be swapped in at all is
-test-mount-gate's check. About four minutes. Run it whenever fsd's probe,
-mount, format, `mount N` or `mount -a`'s rescan changes.
+one holding no partitions (TABLE: the stick installed and mounted), and
+with the kernel dropping a disk whose sector 0 will not read (SECTOR0: the
+stick installed and mounted), and with the kernel answering an unreadable
+sector 0 as not the boot disk itself (GPT0: the disk held, then the
+fallback). That the stick can be swapped in at all is
+test-mount-gate's check. About two minutes (122 s on 2026-10-22). Run it whenever fsd's probe,
+mount, format, `mount N`, `mount -a`'s rescan or the kernel's
+`init_storage` changes.
 """
 import hashlib
 import importlib.util
@@ -101,7 +127,12 @@ BOOTS = {
     "BESIDE": (EXFAT, True, "exfat-root", ["mount 0 /mnt/x", "unmount", "format ext2"]),
     "EXT2": (EXT2, False, "first", ["mount"]),
     "TABLE": (GPT, True, "gpt-header", ["mount -a", "mount"]),
+    "SECTOR0": (EXFAT, True, "sector0", ["mount -a", "mount"]),
+    "GPT0": (GPT, True, "sector0", ["mount -a", "mount"]),
 }
+# The image the firmware boots from NVMe, esp.img unless named: GPT0 boots
+# espgpt.img, so its virtio copy is the boot disk.
+NVME = {"GPT0": GPT}
 
 
 def partitions(image):
@@ -119,8 +150,8 @@ def partitions(image):
 
 def prepare(source, keep_esp, rule):
     """The virtio copy and the sector that fails: the exFAT root directory's
-    first (from the volume's boot sector), the GPT header (sector 1), or
-    partition 1's first."""
+    first (from the volume's boot sector), the GPT header (sector 1), the
+    MBR (sector 0), or partition 1's first."""
     shutil.copyfile(source, COPY)
     _, start, _ = partitions(COPY)[0]
     with open(COPY, "r+b") as fh:
@@ -143,14 +174,24 @@ def prepare(source, keep_esp, rule):
         with open(COPY, "rb") as fh:
             head = fh.read(34 * 512)
         failing = next((i for i in range(34) if head[i * 512:i * 512 + 8] == b"EFI PART"), -1)
+    elif rule == "sector0":
+        failing = 0
     else:
         failing = start
-    # A GPT disk takes no MBR signature, and needs none: the boot partition
-    # (esp.img's) is an MBR one, which no GPT disk matches.
-    if rule != "gpt-header":
+    # A GPT disk takes no MBR signature, and needs none: against esp.img's
+    # MBR boot partition no GPT disk matches, and GPT0's copy is meant to
+    # match espgpt.img's, its own GUIDs.
+    if partitions(COPY)[0][0] != 0xEE:
         subprocess.run([sys.executable, os.path.join(HERE, "disksig.py"), "set", COPY], check=True,
                        stdout=subprocess.DEVNULL)
     return failing
+
+
+def whole(image):
+    """The image's SHA-256, every byte, the table's sectors and the space
+    between partitions too."""
+    with open(image, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
 
 
 def digests(image):
@@ -176,13 +217,13 @@ def boot(name):
         failing = prepare(source, keep_esp, rule)
         start = partitions(COPY)[0][1]
         shutil.copyfile(STICK, STICK_COPY)
-        before = digests(COPY)
+        before = digests(COPY), whole(COPY)
         with open(BLKDEBUG, "w") as fh:
             fh.write(f'[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "{failing}"\n')
         extra = [
             # bootindex=0 pins the firmware to the NVMe disk, which it boots
             # and the kernel cannot drive (test-boot-partition's fallback case).
-            "-drive", f"file={ESP},format=raw,if=none,id=nvboot,snapshot=on",
+            "-drive", f"file={NVME.get(name, ESP)},format=raw,if=none,id=nvboot,snapshot=on",
             "-device", "nvme,serial=boot,drive=nvboot,bootindex=0",
             # The failing disk: every read of the one sector answers EIO.
             "-drive", f"file=blkdebug:{BLKDEBUG}:{COPY},format=raw,if=none,id=hd0,rerror=report",
@@ -191,14 +232,14 @@ def boot(name):
             "-drive", f"file={STICK_COPY},format=raw,if=none,id=usbstick",
             "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
         ]
-        guest = drive_qemu.Guest(COPY, extra_args=extra, virtio_disk=False, stamp_from=ESP,
+        guest = drive_qemu.Guest(COPY, extra_args=extra, virtio_disk=False, stamp_from=NVME.get(name, ESP),
                                  label=f"test-probe-ioerr[{name}]: ")
         driven = guest.run(steps)
         out = guest.transcript()
         faults = guest.aborts()
         guest.stop()
         guest = None
-        after = digests(COPY)
+        after = digests(COPY), whole(COPY)
     finally:
         if guest:
             guest.stop()
@@ -207,7 +248,7 @@ def boot(name):
                 os.remove(f)
     with open(os.path.join(BUILD, f"test-probe-ioerr-{name.lower()}.txt"), "w") as fh:
         fh.write(out)
-    return driven, out, faults, before == after, failing, start
+    return driven, out, faults, (before[0] == after[0], before == after), failing, start
 
 
 def outputs(out, commands):
@@ -231,14 +272,25 @@ def outputs(out, commands):
 
 def checks_of(name):
     commands = BOOTS[name][3]
-    driven, out, faults, untouched, failing, start = boot(name)
+    driven, out, faults, (untouched, untouched_whole), failing, start = boot(name)
     # A precondition: the table's reads are sectors 0 and 1 (MBR, GPT
     # header), so the error must land past them, except in TABLE, where it
     # is the GPT header's. The host's own check, graded even when the
     # firmware never started the kernel.
-    pre = [(f"{name}: the failing sector, {failing}, is past the table's (partition 1 at {start})",
-            failing >= start > 1) if name != "TABLE" else
-           (f"{name}: the failing sector, {failing}, is the GPT header's", failing == 1)]
+    # SECTOR0's sector is 0 by construction, so it has none. GPT0's is 0 too;
+    # its check is that the header it rests on, sector 1, is there to read.
+    if name == "SECTOR0":
+        pre = []
+    elif name == "GPT0":
+        with open(GPT, "rb") as fh:
+            fh.seek(512)
+            header = fh.read(8)
+        pre = [(f"{name}: sector 1 holds the GPT header, which the boot-disk check reads", header == b"EFI PART")]
+    elif name == "TABLE":
+        pre = [(f"{name}: the failing sector, {failing}, is the GPT header's", failing == 1)]
+    else:
+        pre = [(f"{name}: the failing sector, {failing}, is past the table's (partition 1 at {start})",
+                failing >= start > 1)]
     if drive_qemu.boot_stalled("test-probe-ioerr", name, out, faults):
         return pre, True
     o = outputs(out, commands)
@@ -249,9 +301,31 @@ def checks_of(name):
     # One write since 2026-10-20 (it was three, and another task's line
     # landed inside it), so the whole line, before the first command.
     io_at_boot = "fsd: mount failed (disk I/O error) - disk commands won't work\r\n" in boot_log
-    if name in ("MOUNT", "FORMAT", "TABLE"):
+    if name in ("MOUNT", "FORMAT", "TABLE", "SECTOR0", "GPT0"):
         checks.append(("fsd's boot mount failed with a disk I/O error", io_at_boot))
-    if name in ("MOUNT", "TABLE"):
+    if name == "SECTOR0":
+        checks += [
+            ("the kernel held the disk, sector 0 unreadable twice",
+             "virtio-blk read of sector 0 failed" in boot_log
+             and "reading its partition table failed twice" in boot_log
+             and "virtio-blk is not the boot disk - held" in boot_log),
+            ("and installed it as the fallback, the stick refused",
+             "virtio-blk installed as the fallback: the USB stick is not the boot disk either" in boot_log),
+            ("the disk as it was, every byte, its table too", untouched_whole),
+        ]
+    if name == "GPT0":
+        # Its protective MBR will not read, its GPT headers do: the check
+        # answers from the headers, and the copy is the boot disk.
+        checks += [
+            ("sector 0 unreadable", "virtio-blk read of sector 0 failed" in boot_log),
+            # Only a disk the boot-disk check matched is installed with a
+            # start, which the kernel's line names: the boot partition's.
+            ("the kernel took the disk for the boot disk, from its GPT headers, and installed it first",
+             "Ouroboros kernel: boot partition: 1 of GPT at LBA 2048" in boot_log
+             and "installed for the filesystem server, the boot disk (its boot partition at LBA 2048)" in boot_log),
+            ("the disk as it was, every byte, its table too", untouched_whole),
+        ]
+    if name in ("MOUNT", "TABLE", "SECTOR0", "GPT0"):
         checks += [
             (f"mount -a answered the I/O error, the disk not replaced (got {o[0]!r})",
              (o[0] or "").endswith("mount: the disk answered with an I/O error; it was not replaced by a USB stick")),
