@@ -2591,13 +2591,16 @@ test-mount-gate: image $(USBSTICK_IMG)
 test-probe-ioerr: image image-exfat image-ext2 image-gpt $(USBSTICK_IMG)
 	python3 scripts/test-probe-ioerr.py
 
-# A virtio disk with no MBR signature reaches fsd, below any USB stick
-# (scripts/test-blank-disk.py): four boots from esp.img on NVMe; a blank disk
-# alone on virtio must be held as blank, installed as the fallback, and
-# taken by `partition ext2`, `format ext2` and `mount -a`; a copy of esp.img
-# erased by `erase disk` must do the same on the next boot; and a blank disk
-# beside a stick that is not the boot disk must leave the stick installed.
-# About two minutes; run it whenever init_storage, install_boot_disk or
+# A blank virtio disk reaches fsd, below any USB stick
+# (scripts/test-blank-disk.py): seven boots from esp.img on NVMe (espgpt.img in
+# one, a superfloppy of esp.img in another); a blank disk (no table, no volume,
+# parttable::is_blank) alone must be held, installed as the fallback and taken
+# by `partition ext2`, `format ext2` and `mount -a`, also on the boot after
+# `erase disk`; beside a stick that is not the boot disk, with the boot
+# partition known and unknown, the stick must go in; a GPT boot disk with an
+# unsigned protective MBR must go in first, and an MBR with a damaged
+# signature be held as an ordinary disk. About four minutes; run it whenever
+# init_storage, install_boot_disk, parttable::is_blank, fsd's mount line or
 # `erase disk` changes.
 test-blank-disk: image image-gpt $(USBSTICK_IMG)
 	python3 scripts/test-blank-disk.py

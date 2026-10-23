@@ -56,8 +56,9 @@ build/usbstick.img, is beside it.
   fallback; fsd's boot line and `mount -a` must answer as in MOUNT, with no
   stick installed. Until 2026-10-22 the kernel dropped such a disk and the
   stick came up at `/`. With the boot partition unknown to the kernel the
-  disk goes in first, as any virtio disk then does; no rig boots that way
-  (QEMU's firmware always names the partition). Its "held" check reads the
+  disk goes in first, as any virtio disk then does; this rig does not boot
+  that way (a superfloppy ESP on NVMe does, test-blank-disk.py's UNKNOWN,
+  since 2026-10-23). Its "held" check reads the
   kernel's lines alone; the fallback line, no stick, fsd's I/O error and the
   disk's bytes are the observations.
 - GPT0 (since 2026-10-22): the firmware boots espgpt.img from NVMe, and the
