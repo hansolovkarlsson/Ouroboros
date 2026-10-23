@@ -4340,8 +4340,8 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   whose bit is in the bitmap's second sector, fails with the sector's
   offset dropped. `bitmap_alloc` still writes the whole block to set one
   bit; the high review of the branch, deferred.)
-- **The kernel drops a virtio disk whose sector 0 will not read, and
-  installs whatever USB stick is attached.** `init_storage` reads sector 0
+- ~~**The kernel drops a virtio disk whose sector 0 will not read, and
+  installs whatever USB stick is attached.**~~ `init_storage` reads sector 0
   twice and, when both fail, returns no device rather than holding it as
   not the boot disk, so `install_boot_disk` has nothing held and installs
   the stick, whatever it is: the swap #324 refuses in fsd's `mount -a`, made
@@ -4351,10 +4351,29 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   2026-10-22 when `test-probe-ioerr`'s first TABLE case failed sector 0 (the
   stick came up at `/`); TABLE fails the GPT header instead. Holding the
   disk, as D6 holds one whose table will not read, would end it, but the
-  rule for an unreadable disk is D6's, so it is a question for Hans. A
-  sector 0 without an MBR signature returns no device the same way (read in
-  the code, not run).
-- **On exFAT a freed cluster's FAT entry may still hold a link.** The spec
+  rule for an unreadable disk is D6's, so it is a question for Hans.
+  *Done 2026-10-22, Hans's choice of three (hold it, leave it, or install it
+  outright, which would reopen D6): the disk is held as one whose table will
+  not read is: with the boot partition known, held and installed only if no
+  other disk is the boot disk; unknown, installed first. The answer is
+  `is_boot_disk_retrying`'s, asked as of any disk: the first version wrote
+  its own, which held the disk with the boot partition unknown too, and a
+  GPT boot disk whose protective MBR alone failed (two high reviews).
+  GPT0 boots espgpt.img with such a copy: it must go in first.
+  `make test-probe-ioerr`'s SECTOR0 fails sector 0 with a stick beside it
+  that is not the boot disk: the disk goes in as the fallback, the stick
+  stays out and fsd answers its I/O error; it fails with the disk dropped
+  (the stick at `/`). The unknown case has no rig: QEMU's firmware always
+  names the partition. A stick hot-attached later stays out, as beside a
+  disk whose table will not read: `mount -a` keeps a disk answering an I/O
+  error (#324), and before the change it would have found no disk and taken
+  the stick.*
+- **A virtio disk whose sector 0 has no MBR signature is dropped.**
+  `init_storage` returns no device for it, so a blank disk never reaches fsd
+  and `format` cannot reach it. Whether it should is a question of its own,
+  kept apart from the unreadable disk above (2026-10-22). Read in the code,
+  not run.
+- ~~**On exFAT a freed cluster's FAT entry may still hold a link.**~~ The spec
   leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
   the link. An allocation over such an entry drops both cursors under the
   rule of 2026-10-18, so a copy within a stick last written on Linux costs
@@ -4362,7 +4381,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   A cost, never a stale cursor. Skipping the drop for an allocation (the
   bitmap says the cluster is free) was declined: on a damaged volume a
   bitmap-free cluster can be on a live chain, the max review's finding 1,
-  and the gain is speed on Linux-written sticks only.
+  and the gain is speed on Linux-written sticks only. *Closed 2026-10-22 by
+  Hans as an accepted cost, a deliberate hold: correctness on a damaged
+  volume over speed on a Linux-written stick. A narrower drop would need a
+  cursor to know every cluster of its chain, and a cursor holds only its
+  position. Not to be proposed again without that.*
 - **An exFAT file preallocated more than 1 MiB past its ValidDataLength
   refuses every append.** A write fills zeros from ValidDataLength to its
   offset, and the fill is bounded by `MAX_GAP_FILL` (1 MiB), so a camera's

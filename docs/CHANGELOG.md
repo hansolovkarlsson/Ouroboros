@@ -814,6 +814,28 @@ rule fails. A boot that stalls on each of its last three runs is graded,
 since a hang every run meets would otherwise stay INCONCLUSIVE for good. The
 other rigs are a roadmap item; meanwhile every rig's output names a stall.
 
+**A virtio disk whose sector 0 will not read is held, not dropped
+(2026-10-22).** `init_storage` read sector 0 twice and, when both failed,
+returned no device, so `install_boot_disk` installed whatever USB stick was
+attached, the swap fsd's `mount -a` refuses since #324, or no disk at all.
+Now it is answered as a disk whose partition table will not read is under
+D6: with the boot partition known, held as not the boot disk and installed
+only if no other disk is the boot disk; with it unknown, installed first, as
+any virtio disk then is. fsd then answers its I/O error. Hans chose this of
+three (hold it, leave it, or install it outright, which would reopen D6).
+The answer is the boot-disk check's own, asked as of any disk: its high
+review found a first version answering "not the boot disk" itself, which
+held a GPT boot disk whose protective MBR alone failed. `make
+test-probe-ioerr` adds SECTOR0: sector 0 failing, a stick that is not the
+boot disk beside it, the disk must go in as the fallback, the stick stay out
+and fsd answer the I/O error; fails with the disk dropped (the stick at
+`/`). And GPT0: booted from espgpt.img with a copy of it on virtio, its
+protective MBR failing, the copy must go in first as the boot disk; fails
+with the kernel's own answer. A stick attached later stays out too, as beside a disk whose
+table will not read, since `mount -a` keeps a disk answering an I/O error.
+A disk whose sector 0 reads but carries no MBR signature is still dropped
+(the roadmap).
+
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has
 the bytes between them read as zeros. fsd read them off the disk as the
