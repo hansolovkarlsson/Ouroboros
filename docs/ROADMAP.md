@@ -4363,15 +4363,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bitmap says the cluster is free) was declined: on a damaged volume a
   bitmap-free cluster can be on a live chain, the max review's finding 1,
   and the gain is speed on Linux-written sticks only.
-- ~~**fsd reads an exFAT file to its DataLength, not its ValidDataLength.**~~
-  *Done 2026-10-22:* reads return zeros past ValidDataLength, a write fills
-  its gap from it and sets it to the write's end, and the Stream's two
-  lengths are written apart (every write had raised ValidDataLength to
-  DataLength, making the stale bytes the file's for every driver). `make
-  test-valid-length` checks a copy, a write inside the preallocation, an
-  append and a write inside the valid bytes, and fails with each as on main.
-  A write more than 1 MiB past ValidDataLength is refused, inside a
-  preallocation too, the bound a write past the size has.
 - **An exFAT file preallocated more than 1 MiB past its ValidDataLength
   refuses every append.** A write fills zeros from ValidDataLength to its
   offset, and the fill is bounded by `MAX_GAP_FILL` (1 MiB), so a camera's
@@ -4385,18 +4376,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   request outlasts the supervisor's wedge limit (B); or the bound for growth
   past DataLength alone, the whole preallocation filled in one request,
   gigabytes of writes that the supervisor may take for a wedged fsd (C).
+- **The exFAT rigs take their host helpers from each other.** `Volume`,
+  `set_checksum` and `entry_set` come from executing `test-stale-cursor.py`
+  and `test-grow-dir.py` as modules, and `copy`, `root_end` and the fsck
+  pass rule are repeated in `test-long-set`, `test-grow-dir`,
+  `test-exfat-names` and `test-valid-length`, while `scripts/exfatimg.py`
+  says it is the one shared copy. A change to one rig's internals can break
+  another's import, and the fsck rule can drift between four copies. Move
+  them into `exfatimg.py` and have the rigs import it. From the high review
+  of `fix/exfat-valid-length`, 2026-10-22.
 - **exFAT's `rm` leaks a vendor allocation's clusters.** A vendor allocation
   entry (0xE1) names clusters of its own (its FirstCluster and DataLength),
   which `rm` and a replacing `mv` (for the set it replaces) never free, so
   they stay set in the bitmap with no set naming them. Freeing them the way
   the Stream's are, bounded by the volume, would end it. Read in the code,
   found with the rename's fix, 2026-10-21.
-- ~~**`/bin/ls` cuts a name past 82 bytes and runs it into the next.**~~
-  *Done 2026-10-22:* both line buffers hold a name of 255 bytes (`NAME_MAX`,
-  the longest a listing gives) whole, each line one write; the long
-  layout's 200 bytes cut one too.
-  `make test-exfat-names` requires `ls /` to list the 100-`?` name whole,
-  and fails with main's `ls`.
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
   rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
   `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume

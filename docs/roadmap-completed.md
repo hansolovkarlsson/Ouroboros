@@ -2802,3 +2802,30 @@ test-exfat-names`. The items as they stood, done notes included:
   plants the bad-cluster mark at every free entry of the ESP's second copy
   and requires each FAT sector the copy wrote to be copy 0's in both; it
   fails with each copy's own sector patched.
+
+## `ls`'s long names and exFAT's ValidDataLength, DONE (2026-10-22)
+
+Two items closed on 2026-10-22, the standup's in order: `/bin/ls`'s line
+buffers by #341, merged, and exFAT's ValidDataLength on
+`fix/exfat-valid-length`, not yet pushed when this was written. Each branch
+struck its item through in place with a *Done* note; the closeout
+moved them here. Each rig's control failed before the fix was trusted:
+`make test-exfat-names` with main's `ls`, and `make test-valid-length` with
+the read, the gap and the Stream's two lengths each as on main. The items
+as they stood, done notes included:
+
+- ~~**`/bin/ls` cuts a name past 82 bytes and runs it into the next.**~~
+  *Done 2026-10-22:* both line buffers hold a name of 255 bytes (`NAME_MAX`,
+  the longest a listing gives) whole, each line one write; the long
+  layout's 200 bytes cut one too.
+  `make test-exfat-names` requires `ls /` to list the 100-`?` name whole,
+  and fails with main's `ls`.
+- ~~**fsd reads an exFAT file to its DataLength, not its ValidDataLength.**~~
+  *Done 2026-10-22:* reads return zeros past ValidDataLength, a write fills
+  its gap from it and sets it to the write's end, and the Stream's two
+  lengths are written apart (every write had raised ValidDataLength to
+  DataLength, making the stale bytes the file's for every driver). `make
+  test-valid-length` checks a copy, a write inside the preallocation, an
+  append and a write inside the valid bytes, and fails with each as on main.
+  A write more than 1 MiB past ValidDataLength is refused, inside a
+  preallocation too, the bound a write past the size has.
