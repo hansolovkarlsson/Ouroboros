@@ -1120,9 +1120,10 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
 /// installs the device for the
 /// filesystem server (`syscall::install_block_device`), which mounts it;
 /// the kernel holds no filesystem itself. A disk whose sector 0 reads with
-/// no MBR boot signature (`0x55 0xAA` at bytes 510-511) is dropped; one
-/// whose sector 0 will not read is answered by the boot-disk check like any
-/// other (since 2026-10-22; dropped before). Not fatal if any step fails -
+/// no MBR boot signature (`0x55 0xAA` at bytes 510-511) is held as blank
+/// (since 2026-10-23; dropped before); one whose sector 0 will not read is
+/// answered by the boot-disk check like any other (since 2026-10-22;
+/// dropped before). Not fatal if any step fails -
 /// nothing else depends on storage existing, unlike `program` above; the
 /// shell just won't have working disk commands.
 ///
@@ -1138,8 +1139,8 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
 /// disk only when it is the one the system booted from, or when that is
 /// unknown (`bootdisk::is_boot_disk`). Any other virtio disk is handed back,
 /// held for [`install_boot_disk`], which installs it only if no USB stick
-/// is the boot disk either.
-fn init_storage() -> Option<virtio_blk::Device> {
+/// is the boot disk either, and a blank one only if no stick is attached.
+fn init_storage() -> Option<Held> {
     let mut device = match unsafe { virtio_blk::Device::discover() } {
         Ok(device) => device,
         Err(e) => {
@@ -1164,14 +1165,23 @@ fn init_storage() -> Option<virtio_blk::Device> {
     // the swap fsd's `mount -a` refuses. A disk whose sector 0 failed once
     // and then reads goes the same way unsigned or not: in as any disk, where
     // fsd finds no filesystem on a blank one.
+    //
+    // A disk whose sector 0 reads with no signature is blank, or holds
+    // nothing this system reads: no partition table and no volume boot
+    // sector, which both end in it, so it is not the boot disk whether or not
+    // the boot partition is known. Held, and below any stick (Hans,
+    // 2026-10-23): a stick goes in whatever it is, and the blank disk only
+    // when none is attached, where fsd finds no filesystem and `partition`
+    // and `format` reach it. Until 2026-10-23 it was dropped, so a disk
+    // `erase disk` had zeroed could not be prepared after a reboot.
     match unsafe { device.read_sector(0, &mut sector) } {
         Err(e) => console::println!("Ouroboros kernel: virtio-blk read of sector 0 failed ({e}) - the boot-disk check asks again"),
         Ok(()) if !parttable::has_boot_signature(&sector) => {
             let signature = (sector[511] as u16) << 8 | sector[510] as u16;
             console::println!(
-                "Ouroboros kernel: virtio-blk sector 0 has no MBR signature ({signature:#06x}) - dropped, a USB stick may go in instead"
+                "Ouroboros kernel: virtio-blk sector 0 has no MBR signature ({signature:#06x}) - held as blank, installed only if no USB stick is attached"
             );
-            return None;
+            return Some(Held { device, blank: true });
         }
         Ok(()) => {}
     }
@@ -1183,7 +1193,7 @@ fn init_storage() -> Option<virtio_blk::Device> {
     // Not the boot disk, or unreadable twice (D6: taken as not the boot disk).
     if matches!(matched, Some(bootdisk::Boot::No | bootdisk::Boot::Unreadable)) {
         console::println!("Ouroboros kernel: virtio-blk is not the boot disk - held, installed only if no other disk is");
-        return Some(device);
+        return Some(Held { device, blank: false });
     }
     let boot_start = bootdisk::start_if(matched);
 
@@ -1203,14 +1213,24 @@ fn init_storage() -> Option<virtio_blk::Device> {
     None
 }
 
+/// A virtio disk [`init_storage`] held back rather than installed: not the
+/// boot disk, or `blank`, its sector 0 without the boot signature.
+struct Held {
+    device: virtio_blk::Device,
+    blank: bool,
+}
+
 /// The boot-time USB step, after [`init_storage`]: the USB stick is installed
 /// when it is the boot disk, and otherwise only if no virtio disk was held
-/// back, which goes in instead as the fallback. With the boot partition
+/// back, which goes in instead as the fallback. A blank held disk ranks below
+/// any stick, so it holds none back. With the boot partition
 /// unknown both answer `None` and the order is the one before step 3:
 /// virtio, then USB. The `MOUNT` syscall's later rescan, which replaces the
 /// device with a stick attached late, installs whatever stick it finds but
 /// asks it the same question, so `BLOCK_BOOT_START` answers for it too.
-fn install_boot_disk(held: Option<virtio_blk::Device>) {
+fn install_boot_disk(held: Option<Held>) {
+    // Held back for the stick's answer: a non-boot stick gives way to it.
+    let holds_back = matches!(held, Some(Held { blank: false, .. }));
     let outcome = syscall::try_install_usb_block_device(|usb| {
         let capacity = usb.capacity_sectors();
         // SAFETY: the stick is initialised and not yet installed.
@@ -1223,12 +1243,12 @@ fn install_boot_disk(held: Option<virtio_blk::Device>) {
         // D6: a stick unreadable twice is installed as not the boot disk,
         // over a held virtio disk too, and the line above has said the read
         // failed. Only a stick that was read and does not match is refused.
-        match (held.is_some(), matched) {
+        match (holds_back, matched) {
             (true, Some(bootdisk::Boot::No)) => None,
             _ => Some(bootdisk::start_if(matched)),
         }
     });
-    let Some(device) = held else { return };
+    let Some(Held { device, blank }) = held else { return };
     // The held virtio disk is not the boot disk; it goes in only as the
     // fallback, the order from before step 3, and the line says why no other
     // disk did. Not when the stick's init failed: that stick may be the boot
@@ -1238,6 +1258,7 @@ fn install_boot_disk(held: Option<virtio_blk::Device>) {
     let why = match outcome {
         syscall::UsbInstall::Installed => return,
         syscall::UsbInstall::Refused => "the USB stick is not the boot disk either",
+        syscall::UsbInstall::Absent if blank => "blank, and no USB stick is attached",
         syscall::UsbInstall::Absent => "no USB stick is attached",
         syscall::UsbInstall::Failed => {
             console::println!(
