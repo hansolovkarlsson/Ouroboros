@@ -2803,16 +2803,19 @@ test-exfat-names`. The items as they stood, done notes included:
   and requires each FAT sector the copy wrote to be copy 0's in both; it
   fails with each copy's own sector patched.
 
-## `ls`'s long names and exFAT's ValidDataLength, DONE (2026-10-22)
+## `ls`'s long names, sector 0 held, exFAT's ValidDataLength, DONE (2026-10-22)
 
-Two items closed on 2026-10-22, the standup's in order: `/bin/ls`'s line
-buffers by #341, merged, and exFAT's ValidDataLength on
-`fix/exfat-valid-length`, not yet pushed when this was written. Each branch
-struck its item through in place with a *Done* note; the closeout
-moved them here. Each rig's control failed before the fix was trusted:
-`make test-exfat-names` with main's `ls`, and `make test-valid-length` with
-the read, the gap and the Stream's two lengths each as on main. The items
-as they stood, done notes included:
+Four items closed on 2026-10-22: `/bin/ls`'s line buffers by #341; a
+virtio disk whose sector 0 will not read, held as D6 holds an unreadable
+table, by #343 (Hans's choice of three); exFAT's freed-cluster link, closed
+by Hans as an accepted cost, recorded in #343; and exFAT's ValidDataLength
+by #344. Each branch struck its item through in place with a *Done* or
+*Closed* note; the closeout moved them here. Each rig's control failed
+before the fix was trusted: `make test-exfat-names` with main's `ls`,
+`make test-probe-ioerr`'s SECTOR0 and GPT0 with the disk dropped and with
+the kernel answering sector 0 itself, and `make test-valid-length` with the
+read, the gap, the Stream's two lengths and the gap bound each as on main.
+The items as they stood, done notes included:
 
 - ~~**`/bin/ls` cuts a name past 82 bytes and runs it into the next.**~~
   *Done 2026-10-22:* both line buffers hold a name of 255 bytes (`NAME_MAX`,
@@ -2829,3 +2832,44 @@ as they stood, done notes included:
   append and a write inside the valid bytes, and fails with each as on main.
   A write more than 1 MiB past ValidDataLength is refused, inside a
   preallocation too, the bound a write past the size has.
+- ~~**The kernel drops a virtio disk whose sector 0 will not read, and
+  installs whatever USB stick is attached.**~~ `init_storage` reads sector 0
+  twice and, when both fail, returns no device rather than holding it as
+  not the boot disk, so `install_boot_disk` has nothing held and installs
+  the stick, whatever it is: the swap #324 refuses in fsd's `mount -a`, made
+  at boot a layer below, with the failing disk out of reach until a reboot.
+  A disk unreadable at sector 1 is held (D6, "taken as not the boot disk"),
+  and so goes in as the fallback when the stick is not the boot disk. Seen
+  2026-10-22 when `test-probe-ioerr`'s first TABLE case failed sector 0 (the
+  stick came up at `/`); TABLE fails the GPT header instead. Holding the
+  disk, as D6 holds one whose table will not read, would end it, but the
+  rule for an unreadable disk is D6's, so it is a question for Hans.
+  *Done 2026-10-22, Hans's choice of three (hold it, leave it, or install it
+  outright, which would reopen D6): the disk is held as one whose table will
+  not read is: with the boot partition known, held and installed only if no
+  other disk is the boot disk; unknown, installed first. The answer is
+  `is_boot_disk_retrying`'s, asked as of any disk: the first version wrote
+  its own, which held the disk with the boot partition unknown too, and a
+  GPT boot disk whose protective MBR alone failed (two high reviews).
+  GPT0 boots espgpt.img with such a copy: it must go in first.
+  `make test-probe-ioerr`'s SECTOR0 fails sector 0 with a stick beside it
+  that is not the boot disk: the disk goes in as the fallback, the stick
+  stays out and fsd answers its I/O error; it fails with the disk dropped
+  (the stick at `/`). The unknown case has no rig: QEMU's firmware always
+  names the partition. A stick hot-attached later stays out, as beside a
+  disk whose table will not read: `mount -a` keeps a disk answering an I/O
+  error (#324), and before the change it would have found no disk and taken
+  the stick.*
+- ~~**On exFAT a freed cluster's FAT entry may still hold a link.**~~ The spec
+  leaves it undefined, fsd's own frees write 0, and Linux's driver leaves
+  the link. An allocation over such an entry drops both cursors under the
+  rule of 2026-10-18, so a copy within a stick last written on Linux costs
+  what it did before the rule (867 FAT sectors for the rig's copy, not 323).
+  A cost, never a stale cursor. Skipping the drop for an allocation (the
+  bitmap says the cluster is free) was declined: on a damaged volume a
+  bitmap-free cluster can be on a live chain, the max review's finding 1,
+  and the gain is speed on Linux-written sticks only. *Closed 2026-10-22 by
+  Hans as an accepted cost, a deliberate hold: correctness on a damaged
+  volume over speed on a Linux-written stick. A narrower drop would need a
+  cursor to know every cluster of its chain, and a cursor holds only its
+  position. Not to be proposed again without that.*
