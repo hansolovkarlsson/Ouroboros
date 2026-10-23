@@ -2873,3 +2873,38 @@ The items as they stood, done notes included:
   volume over speed on a Linux-written stick. A narrower drop would need a
   cursor to know every cluster of its chain, and a cursor holds only its
   position. Not to be proposed again without that.*
+
+## The blank virtio disk, DONE (2026-10-23)
+
+One item closed on 2026-10-23: a virtio disk with no MBR signature, dropped
+by `init_storage` since Phase 3c, held as blank and ranked below any USB
+stick, by #346 (Hans's choice of two). The branch struck its item through in
+place with a *Done* note; the closeout moved it here. `make test-blank-disk`'s
+four controls each failed before the fix was trusted: the drop restored, a
+blank disk holding a stick back, blank by the signature alone (the first
+version, which the max review found taking a GPT boot disk for blank), and no
+blank test at all. The review's finding 12, a disk that is signed but holds
+nothing fsd mounts, stays on the roadmap.
+
+- ~~**A virtio disk whose sector 0 has no MBR signature is dropped.**~~
+  `init_storage` returns no device for it, so a blank disk never reaches fsd
+  and `format` cannot reach it. Whether it should is a question of its own,
+  kept apart from the unreadable disk above (2026-10-22). Read in the code,
+  not run.
+  *Done 2026-10-23, Hans's choice of two: a blank disk (`parttable::is_blank`:
+  no "EFI PART" at LBA 1, and a sector 0 with no signature, no entry fsd
+  lists and no protective entry) is held as not the boot disk and ranked
+  below any USB stick, the boot disk or not, so it goes in only when no
+  stick does (none attached, or its init failed); the other was to hold it
+  as any disk not the boot disk, which refuses a stick that is not the boot
+  disk and brings the boot up with nothing mounted. A disk that is not blank
+  goes to the boot-disk check whatever its signature: the max review found
+  the first version, blank by the signature alone, taking a GPT boot disk
+  with an unsigned protective MBR for blank. fsd's boot line names
+  `partition` and `format` on a disk with no partition. `make
+  test-blank-disk`, seven boots, fails with the drop, with a blank disk
+  holding a stick back, with blank by the signature alone and with no blank
+  test. The boot partition unknown is reached by a superfloppy ESP on NVMe
+  (UNKNOWN). Not reached by a boot: a blank disk whose first read fails
+  (blkdebug's one failure goes to the firmware's read), and one beside a
+  stick whose init fails.*
