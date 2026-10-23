@@ -16,7 +16,7 @@ DataLength the whole cluster, ValidDataLength 7, `hello\\r\\n` then 0xEE to the
 cluster's end:
 
 - RD: `cp /RD /RDC`; RDC must be the cluster's size, `hello\\r\\n` then zeros,
-  and RD's set and cluster as planted;
+  its ValidDataLength its size, and RD's set and cluster as planted;
 - MID: `writeat /MID 100 x`, inside the preallocation; ValidDataLength must be
   101 and DataLength the cluster's, the bytes `hello\\r\\n`, zeros, `x`; then
   `cp /MID /MIDC`, which must read zeros past the `x` (the rest of its sector
@@ -29,7 +29,9 @@ cluster's end:
 fsck_exfat -n passes the image before the boot and after it; no fault lines.
 Fails with the read ignoring ValidDataLength (RDC and MIDC hold 0xEE), with
 the gap filled from DataLength (MID's and APP's 0xEE), with both lengths
-written as one (MID's, LOW's ValidDataLength the cluster's). A
+written as one (MID's, LOW's ValidDataLength the cluster's), with
+ValidDataLength not decoded (main's reads and writes) and with a new file's
+ValidDataLength short of its size (RDC's and MIDC's lengths). A
 boot QEMU's firmware never starts is INCONCLUSIVE (exit 100). About a minute.
 Run it whenever exFAT's read_entry, read_file, write_at, patch_stream_ext or
 walk_dir's Stream decoding changes.
@@ -202,10 +204,12 @@ def graded(start, sets, driven, out, faults):
         (f"RDC, RD's copy, is {size} bytes, hello\\r\\n then zeros ({rdc[2]} bytes, "
          f"{rdc[3].count(STALE)} of 0xEE)",
          rdc[2] == size and rdc[3] == HELLO + zeros(size - len(HELLO))),
+        (f"RDC's ValidDataLength is its size ({rdc[0]})", rdc[0] == rdc[2] == size),
         (f"MID: ValidDataLength 101, DataLength {size} ({mid[0]}, {mid[2]})", mid[0] == 101 and mid[2] == size),
         ("MID: hello\\r\\n, zeros to 100, then x", mid[3][:101] == mid_want),
         (f"MIDC, MID's copy, reads zeros past the x ({midc[3].count(STALE)} of 0xEE)",
          midc[2] == size and midc[3] == mid_want + zeros(size - 101)),
+        (f"MIDC's ValidDataLength is its size ({midc[0]})", midc[0] == midc[2] == size),
         (f"APP: both lengths {size + 4} ({app[0]}, {app[2]})", app[0] == app[2] == size + 4),
         (f"APP: hello\\r\\n, zeros, then hi\\r\\n ({app[3].count(STALE)} of 0xEE)",
          app[3] == HELLO + zeros(size - len(HELLO)) + b"hi\r\n"),

@@ -131,6 +131,8 @@ struct DirEntry {
     size: u64,
     /// The Stream's ValidDataLength, at most `size`: the bytes past it read as
     /// zeros, whatever their clusters hold (a file another driver preallocated).
+    /// A file's alone: a directory's is not kept (the root's is 0, a grown
+    /// directory's is not raised), and nothing reads it for one.
     valid: u64,
     first_cluster: u32,
     contiguous: bool,
@@ -1113,9 +1115,20 @@ impl Fs {
     /// `fat32::Fs::read_file`.
     pub fn read_file(&mut self, path: &str, buf: &mut [u8]) -> Result<u32, Error> {
         // `read_entry` from the start: one copy of the read and of its
-        // ValidDataLength rule, where this kept a loop of its own.
+        // ValidDataLength rule, where this kept a loop of its own. The read
+        // cursor is a streaming reader's, so a whole-file read leaves it as
+        // it was; and what a chain shorter than its size did not fill is
+        // zeroed, since the reply carries `buf` up to the size, and the
+        // buffer holds an earlier reply's bytes (the review of 2026-10-22).
         let file = self.find_file(path)?;
-        self.read_entry(&file, 0, buf)?;
+        let kept = self.read_cursor;
+        let read = self.read_entry(&file, 0, buf);
+        self.read_cursor = kept;
+        let filled = read? as usize;
+        let reach = (file.size.min(buf.len() as u64)) as usize;
+        if filled < reach {
+            buf[filled..reach].fill(0);
+        }
         Ok(saturate_u32(file.size))
     }
 
