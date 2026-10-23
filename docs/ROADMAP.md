@@ -2217,7 +2217,7 @@ The small open tails those arcs deliberately left:
 >       `test-usb-hub` goes through `boot_stalled` too, on its own log. Done.*
 > - [ ] **new** **The other QEMU rigs still grade a firmware stall as failed
 >       checks.** About forty rigs drive QEMU's firmware through
->       `drive-qemu.py`; six use `boot_stalled`. The rest can meet the same
+>       `drive-qemu.py`; eight use `boot_stalled` (`test-blank-disk` since 2026-10-23). The rest can meet the same
 >       stall (`test-long-set` did, on virtio). Each needs the call after its
 >       boot and `verdict` at its end, a few lines a rig, and a control that
 >       forces the stall. Taken a rig at a time, as each is next touched.
@@ -4340,11 +4340,41 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   whose bit is in the bitmap's second sector, fails with the sector's
   offset dropped. `bitmap_alloc` still writes the whole block to set one
   bit; the high review of the branch, deferred.)
-- **A virtio disk whose sector 0 has no MBR signature is dropped.**
+- ~~**A virtio disk whose sector 0 has no MBR signature is dropped.**~~
   `init_storage` returns no device for it, so a blank disk never reaches fsd
   and `format` cannot reach it. Whether it should is a question of its own,
   kept apart from the unreadable disk above (2026-10-22). Read in the code,
   not run.
+  *Done 2026-10-23, Hans's choice of two: a blank disk (`parttable::is_blank`:
+  no "EFI PART" at LBA 1, and a sector 0 with no signature, no entry fsd
+  lists and no protective entry) is held as not the boot disk and ranked
+  below any USB stick, the boot disk or not, so it goes in only when no
+  stick does (none attached, or its init failed); the other was to hold it
+  as any disk not the boot disk, which refuses a stick that is not the boot
+  disk and brings the boot up with nothing mounted. A disk that is not blank
+  goes to the boot-disk check whatever its signature: the max review found
+  the first version, blank by the signature alone, taking a GPT boot disk
+  with an unsigned protective MBR for blank. fsd's boot line names
+  `partition` and `format` on a disk with no partition. `make
+  test-blank-disk`, seven boots, fails with the drop, with a blank disk
+  holding a stick back, with blank by the signature alone and with no blank
+  test. The boot partition unknown is reached by a superfloppy ESP on NVMe
+  (UNKNOWN). Not reached by a boot: a blank disk whose first read fails
+  (blkdebug's one failure goes to the firmware's read), and one beside a
+  stick whose init fails.*
+- **A disk that is signed but holds nothing fsd mounts keeps a stick out at
+  boot, which `mount -a` then swaps in.** A disk `partition` wrote and the
+  machine rebooted before `format`, beside a USB stick that is not the boot
+  disk: the disk is held as not the boot disk, the stick refused, the disk
+  installed, and fsd mounts nothing; its boot mount does not rescan, so the
+  boot comes up with nothing mounted, and the first `mount -a` installs the
+  stick the boot refused. One rule for boot and `mount -a` would be to rank
+  a held disk by what fsd finds on it, or to have fsd's boot mount take
+  `mount_or_rescan`'s path when the boot partition is not on the disk,
+  which changes the boot on Parallels and the Pi. The blank disk's rank
+  (2026-10-23) settles the case with nothing on the disk at all. From the
+  max review of `fix/unsigned-disk-held`, finding 12; kept apart from that
+  branch by Hans.
 - **An exFAT file preallocated more than 1 MiB past its ValidDataLength
   refuses every append.** A write fills zeros from ValidDataLength to its
   offset, and the fill is bounded by `MAX_GAP_FILL` (1 MiB), so a camera's

@@ -56,8 +56,9 @@ build/usbstick.img, is beside it.
   fallback; fsd's boot line and `mount -a` must answer as in MOUNT, with no
   stick installed. Until 2026-10-22 the kernel dropped such a disk and the
   stick came up at `/`. With the boot partition unknown to the kernel the
-  disk goes in first, as any virtio disk then does; no rig boots that way
-  (QEMU's firmware always names the partition). Its "held" check reads the
+  disk goes in first, as any virtio disk then does; this rig does not boot
+  that way (a superfloppy ESP on NVMe does, test-blank-disk.py's UNKNOWN,
+  since 2026-10-23). Its "held" check reads the
   kernel's lines alone; the fallback line, no stick, fsd's I/O error and the
   disk's bytes are the observations.
 - GPT0 (since 2026-10-22): the firmware boots espgpt.img from NVMe, and the
@@ -306,7 +307,7 @@ def checks_of(name):
     if name == "SECTOR0":
         checks += [
             ("the kernel held the disk, sector 0 unreadable twice",
-             "virtio-blk read of sector 0 failed" in boot_log
+             "virtio-blk: its first sectors failed twice - the boot-disk check answers" in boot_log
              and "reading its partition table failed twice" in boot_log
              and "virtio-blk is not the boot disk - held" in boot_log),
             ("and installed it as the fallback, the stick refused",
@@ -317,7 +318,7 @@ def checks_of(name):
         # Its protective MBR will not read, its GPT headers do: the check
         # answers from the headers, and the copy is the boot disk.
         checks += [
-            ("sector 0 unreadable", "virtio-blk read of sector 0 failed" in boot_log),
+            ("sector 0 unreadable", "virtio-blk: its first sectors failed twice - the boot-disk check answers" in boot_log),
             # Only a disk the boot-disk check matched is installed with a
             # start, which the kernel's line names: the boot partition's.
             ("the kernel took the disk for the boot disk, from its GPT headers, and installed it first",

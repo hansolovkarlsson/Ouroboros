@@ -118,6 +118,25 @@ pub fn is_gpt(read: &mut ReadSector) -> Option<bool> {
     gpt_and_mbr(read).map(|(gpt, _)| gpt)
 }
 
+/// Whether the disk holds nothing a reader here, or a firmware, would take for
+/// a table or a volume: no "EFI PART" at LBA 1, and a sector 0 without the boot
+/// signature whose MBR entries [`discover`] would list none of (it reads them
+/// without the signature) and hold no protective entry (EDK2 reads a GPT by
+/// that entry alone, signature or not). Such a disk is not the boot disk
+/// whether or not the boot partition is known, and `fsd` finds no partition
+/// on it. A sector 0 whose signature alone is damaged is not blank: `fsd`
+/// mounts its entries. `None` when a read failed. The kernel's test for a
+/// blank disk, which ranks below any USB stick (2026-10-23; the max review of
+/// `fix/unsigned-disk-held` found the signature alone taking a GPT boot disk
+/// with an unsigned protective MBR for blank).
+pub fn is_blank(read: &mut ReadSector) -> Option<bool> {
+    let (gpt, mbr) = gpt_and_mbr(read)?;
+    let listed = (0..4)
+        .filter_map(|i| mbr_entry(&mbr, i))
+        .any(|e| e.kind == PROTECTIVE || (e.kind != 0 && e.start != 0));
+    Some(!gpt && !has_boot_signature(&mbr) && !listed)
+}
+
 /// [`is_gpt`]'s answer with the sector 0 it read, so [`discover`] reads it
 /// once (the review of #296).
 fn gpt_and_mbr(read: &mut ReadSector) -> Option<(bool, [u8; SECTOR])> {

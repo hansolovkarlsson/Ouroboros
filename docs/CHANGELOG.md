@@ -834,7 +834,38 @@ protective MBR failing, the copy must go in first as the boot disk; fails
 with the kernel's own answer. A stick attached later stays out too, as beside a disk whose
 table will not read, since `mount -a` keeps a disk answering an I/O error.
 A disk whose sector 0 reads but carries no MBR signature is still dropped
-(the roadmap).
+(the roadmap; held since 2026-10-23, below).
+
+**A blank virtio disk is held, below any USB stick (2026-10-23).**
+`init_storage` dropped a virtio disk whose sector 0 read without `0x55 0xAA`,
+a check from Phase 3c that proved bytes had come off the disk and became a
+drop later, so a blank disk never reached fsd, and a disk `erase disk` had
+zeroed was gone after a reboot, before `partition` could reach it. Now a
+blank disk, one holding no partition table and no volume
+(`parttable::is_blank`: no "EFI PART" at LBA 1, and a sector 0 with no
+signature, no entry fsd lists and no protective entry, which EDK2 reads
+unsigned), is held as not the boot disk and ranked below any stick, the boot
+disk or not: `install_boot_disk` asks the stick as if nothing were held. With
+no stick, or one whose init fails, it goes in as the fallback, the line
+saying why, and fsd's boot line names `partition` and `format`, which
+prepare it. A disk that is not blank goes to the boot-disk check as before,
+whatever its signature: the first version held a disk for its signature
+alone, which the max review found taking a GPT boot disk with an unsigned
+protective MBR, and an MBR whose signature alone is damaged, for blank.
+`is_blank` is asked again once when a read fails, as D6 asks the table.
+Hans's choice: holding a blank disk as any disk not the boot disk would
+refuse a stick that is not the boot disk and bring the boot up with nothing
+mounted, since fsd's boot mount does not rescan. `make test-blank-disk`,
+seven boots: a blank disk of 0xFF prepared; a copy of esp.img erased by
+`erase disk` and prepared on the next boot; a blank disk beside a stick that
+is not the boot disk, with the boot partition known and with it unknown (a
+superfloppy ESP on NVMe, whose path names no partition); a GPT boot disk with
+an unsigned protective MBR installed first; and an MBR with a damaged
+signature held as an ordinary disk. It fails with the drop (10 checks), with
+a blank disk holding the stick back (STICK), with blank by the signature
+alone (GPT-UNSIGNED, SIG-DAMAGED) and with no blank test (12 checks, UNKNOWN
+among them). Not reached by a boot: a blank disk whose first read fails, and
+one beside a stick whose init fails.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has

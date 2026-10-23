@@ -199,7 +199,7 @@ run it again. A boot that stalled on each of its last three runs
 (`PERSISTENT`) is taken for a hang every run meets, such as a firmware
 stopped by the rig's own disk, and its checks are graded and fail. `make test` runs `drive-qemu.py --self-test`. The rigs using it:
 `test-usb-hub` (with its own run log, `scratch/usb-hub-runs.log`),
-`test-boot-partition`, `test-volume-bound`, `test-probe-ioerr`,
+`test-boot-partition`, `test-volume-bound`, `test-probe-ioerr`, `test-blank-disk` (2026-10-23),
 `test-ext2-blocks`, `test-long-set` and `test-valid-length` (built with it,
 2026-10-22). The other rigs still grade a stall
 as failed checks, but `Guest.aborts()`, which every rig calls, prints
