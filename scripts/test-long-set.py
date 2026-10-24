@@ -15,7 +15,7 @@ slot followed the File. And until 2026-10-21 a rename built the new set
 afresh (File, Stream, name), dropping the File entry's attributes and times
 and every vendor entry. And until 2026-10-23 `rm`, `rmdir` and a replacing
 `mv` left the clusters a vendor allocation entry (0xE1) names set in the
-bitmap, with no set naming them. Four boots, each of a copy of
+bitmap, with no set naming them. Five boots, each of a copy of
 build/espexfat.img (exFAT root, partition 1):
 
 - LONG: the host gives the root a second cluster and plants /VEND, an empty
@@ -44,16 +44,27 @@ build/espexfat.img (exFAT root, partition 1):
   entry after a vendor entry (fsck_exfat's one complaint before the boot),
   `mv`'d to /S2, which must be File, Stream, the new name, the vendor entry,
   with fsck_exfat -n passing after;
-- VALLOC: four sets after the root's last, each with a vendor allocation
-  entry, on eight free clusters the host marks used: VA1 (7 bytes in a
-  contiguous cluster, its vendor's two contiguous), VA2 (empty, its vendor's
-  two FAT-chained, the last partly used), VA3 (empty, a vendor cluster) and
-  VD (an empty directory, its vendor cluster), fsck_exfat -n clean first.
-  `echo s > /SRC` (first, so its cluster is none the frees give back), `mv
-  -f /SRC /VA2`, `cat /VA2`, `rm /VA1`, `mv /VA3 /VA4`, `rmdir /VD`; after,
-  VA1's three clusters, VA2's vendor chain (bitmap and FAT) and VD's two
-  free, VA3's vendor cluster still used and VA4's set carrying its entry as
-  planted, fsck_exfat -n clean.
+- VALLOC: sets after the root's last on fifteen free clusters in a run the
+  host marks used, each run followed by a cluster that must stay used, and
+  fsck_exfat -n clean first: VA1 (7 bytes in a contiguous cluster, a 0xE1
+  naming two contiguous) removed by `rm`; VA2 (empty, a 0xE1 naming two
+  FAT-chained, the last partly used) replaced by `mv -f /SRC /VA2`, where
+  SRC holds 5 bytes and a vendor cluster of its own; VD (an empty
+  directory, a vendor cluster) removed by `rmdir`; VE2, its benign
+  secondary of the undefined type 0xE2 naming a cluster, removed; VE0, a
+  0xE0 (no AllocationPossible) whose bytes name W3's cluster, removed; VA3
+  renamed to VA4 and then to va4 by case alone through `mv -f`. After: no
+  command answered anything, `cat /VA2` prints SRC's bytes, the removed and
+  replaced sets' clusters free (VA2's chain in the FAT too), SRC's two and
+  VA3's vendor cluster still used with VA2's and va4's sets carrying their
+  entries, every witness still used, fsck_exfat -n clean;
+- VCROSS: damaged sets, which fsck_exfat flags before the boot: SRC2 and
+  DST2 sharing data and a vendor cluster, VA5 whose vendor run starts at its
+  own data and reaches W5's cluster, VBAD's FAT-chained 0xE1 outside the
+  heap, and VSYS's two on the allocation bitmap and the up-case table. `mv
+  -f /SRC2 /DST2`, `rm` of VA5, VBAD and VSYS: no command answers anything,
+  the shared clusters and W5's still used, VA5's data free, the bitmap's
+  and up-case table's clusters still used, fsck_exfat -n clean after.
 
 No fault lines in QEMU's trace. Fails with the sum capped at 19 entries (the
 checksum, and fsck: "Incorrect checksum for directory entry set. Delete?")
@@ -62,11 +73,19 @@ building its set afresh (main before 2026-10-21: the vendor entries, the
 attributes and the times gone) and with the vendor entries left where the
 old name ended (the set's shape, and fsck), with the Stream built afresh
 (ValidDataLength raised) and with only the name entries after the Stream
-dropped (STRAY's carried), and with no vendor allocation freed (main before
-2026-10-23: VA1's, VA2's and VD's, and fsck) or a rename freeing its own
-(VA3's, and fsck). About four minutes. Run it
-whenever exFAT's patch_stream_ext, set_checksum, walk_dir's set assembly,
-slot_at, mv, rm, rmdir, renamed_set or free_vendor_allocs changes.
+dropped (STRAY's carried). VALLOC and VCROSS fail with each of twelve
+mutants of the free (2026-10-23): no secondary freed, walk_dir not noting
+one, only 0xE1 freed (VE2), AllocationPossible not read (W3), a contiguous
+run one cluster long (witnesses), one bit cleared a bitmap sector (VA1),
+the Stream's first cluster freed again as a secondary's (W5), the survivor
+not consulted (SRC2's), the volume's own clusters freed (VSYS), a first
+cluster outside the heap taken (VBAD's `rm` an I/O error), a case-only
+`mv -f` freeing (va4's) and a replacing `mv` freeing its source (SRC's).
+Not graded by a boot: the order (the set deleted before its clusters are
+freed), which shows only on an error or a crash between the two. About two
+minutes. Run it whenever exFAT's patch_stream_ext, set_checksum, walk_dir's
+set assembly, slot_at, read_slots, mv, rm, rmdir, renamed_set, delete_set,
+free_data or is_system changes.
 """
 import importlib.util
 import os
@@ -513,6 +532,8 @@ def run_valloc():
     checks += [
         ("valloc: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         (f"valloc: VA1, VD, SRC, VE2 and VE0 gone from the root ({gone})", len(gone) == 5),
+        ("valloc: every mv, rm and rmdir answered nothing (no error)",
+         all(printed(out, k) == [] for k in cmds if k.split()[0] in ("mv", "rm", "rmdir"))),
         (f"valloc: `cat /VA2` prints SRC's src ({printed(out, 'cat /VA2')})", printed(out, "cat /VA2") == ["src"]),
         (f"valloc: rm /VA1 freed its data cluster and its vendor's two ({free(r, r + 1, r + 2)})",
          not any(free(r, r + 1, r + 2))),
@@ -587,6 +608,8 @@ def run_vcross():
     checks += [
         ("vcross: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         (f"vcross: SRC2, VA5, VBAD and VSYS gone from the root ({gone})", len(gone) == 4),
+        (f"vcross: every mv and rm answered nothing, VBAD's outside the heap too ({printed(out, 'rm /VBAD')})",
+         all(printed(out, k) == [] for k in cmds if k.split()[0] in ("mv", "rm"))),
         (f"vcross: `cat /DST2` prints two ({printed(out, 'cat /DST2')})", printed(out, "cat /DST2") == ["two"]),
         (f"vcross: the mv over DST2 kept the data and vendor cluster SRC2 shares with it ({vol.used(r)}, {vol.used(r + 1)})",
          vol.used(r) and vol.used(r + 1) and dst2 is not None and dst2.data[-32:] == sets["SRC2"][-32:]),
