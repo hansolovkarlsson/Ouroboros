@@ -211,20 +211,28 @@ fn run_has(first: u32, bytes: u64, cluster_bytes: u64, c: u32) -> bool {
     first >= 2 && c >= first && ((c - first) as u64) < bytes.div_ceil(cluster_bytes)
 }
 
+/// The FirstCluster and DataLength of the 32-byte entry `raw`, at the
+/// offsets a Stream, a benign secondary, the bitmap's and the up-case
+/// table's entries share: the one decode of them (`walk_dir`,
+/// [`allocation`], [`Fs::locate_tables`]; each decoded them itself until the
+/// third high review of 2026-10-24).
+fn extent(raw: &[u8]) -> (u32, u64) {
+    (
+        u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]),
+        u64::from_le_bytes([raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30], raw[31]]),
+    )
+}
+
 /// The allocation the 32-byte entry `raw` names when it is a benign
 /// secondary with AllocationPossible set, in use or deleted, and of a
-/// DataLength above 0 (none, as a Stream's: `walk_dir`). The one decode of
-/// its fields: FirstCluster and DataLength where a Stream has them.
+/// DataLength above 0 (none, as a Stream's: `walk_dir`). Its fields are
+/// decoded by [`extent`].
 fn allocation(raw: &[u8]) -> Option<Alloc> {
     if ((raw[0] | ET_IN_USE) & ET_BENIGN_SECONDARY) != ET_BENIGN_SECONDARY || raw[1] & SECONDARY_ALLOC_POSSIBLE == 0 {
         return None;
     }
-    let size = u64::from_le_bytes([raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30], raw[31]]);
-    (size > 0).then(|| Alloc {
-        first: u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]),
-        contiguous: raw[1] & NO_FAT_CHAIN != 0,
-        size,
-    })
+    let (first, size) = extent(raw);
+    (size > 0).then(|| Alloc { first, contiguous: raw[1] & NO_FAT_CHAIN != 0, size })
 }
 
 /// The largest directory the format allows (a directory's DataLength is at
@@ -610,11 +618,7 @@ impl Fs {
                     match raw[0] {
                         0x00 => return Ok(()), // end of directory - no bitmap
                         t @ (ET_ALLOC_BITMAP | ET_UPCASE) => {
-                            let first = u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
-                            let bytes = u64::from_le_bytes([
-                                raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30],
-                                raw[31],
-                            ]);
+                            let (first, bytes) = extent(raw);
                             if t == ET_ALLOC_BITMAP && !bitmap {
                                 bitmap = true;
                                 (self.bitmap_first_cluster, self.bitmap_bytes) = (first, bytes);
@@ -1049,12 +1053,7 @@ impl Fs {
                                 raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14],
                                 raw[15],
                             ]);
-                            set_cluster =
-                                u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
-                            set_size = u64::from_le_bytes([
-                                raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30],
-                                raw[31],
-                            ]);
+                            (set_cluster, set_size) = extent(raw);
                             secondaries_left = secondaries_left.saturating_sub(1);
                         }
                         ET_FILE_NAME => {
@@ -2119,7 +2118,10 @@ impl Fs {
     /// link is written, as [`free_data`](Self::free_data) frees none of one:
     /// `write_fat_entry` refused only the first cluster past the heap, after
     /// every link inside it was written, over the links of the files whose
-    /// clusters the run's size reached (the high review of 2026-10-24).
+    /// clusters the run's size reached (the high review of 2026-10-24). So is
+    /// one over the volume's own clusters ([`is_system`](Self::is_system)):
+    /// its links were written over the bitmap's, and `write_at` then wrote
+    /// the file's bytes into the bitmap (the third high review that day).
     fn ensure_chained(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
         if !contiguous || first < 2 {
             return Ok(());
@@ -2129,6 +2131,9 @@ impl Fs {
             return Err(Error::Io(DiskError::Io));
         }
         let n = n as u32;
+        if (first..first + n).any(|c| self.is_system(c)) {
+            return Err(Error::Io(DiskError::Io));
+        }
         for i in 0..n {
             let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
             self.write_fat_entry(first + i, value)?;
@@ -2282,8 +2287,18 @@ impl Fs {
                 // a crash between leaks the old chain (or, if the patch
                 // fails, the new one) and never leaves the set over clusters
                 // the allocator may hand out again. Until 2026-10-23 the old
-                // chain was freed first.
+                // chain was freed first. Not freed where the set's own
+                // vendor runs, which it keeps, overlap it (damage, as
+                // `free_runs` holds a removal's back from its Stream): it was,
+                // and the allocator handed the cluster to another file a
+                // later `rm` freed it under (the third high review of
+                // 2026-10-24). Read before the patch, as `runs_of` is.
+                let mut vendor = Runs::NONE;
+                self.add_secondaries(at, &entry, &mut vendor)?;
                 self.patch_stream_ext(at, new_cluster, data.len() as u64, data.len() as u64)?;
+                if self.holds(&vendor, Alloc::stream(&entry))? {
+                    return Ok(()); // a leak, the safe side
+                }
                 self.free_data(entry.first_cluster, entry.contiguous, entry.size)
             }
             Plan::Create(room) => {
@@ -2430,6 +2445,7 @@ impl Fs {
     /// Stream. Until the high review of 2026-10-24 they were read back
     /// afterwards, the shape checked last, so a set already deleted and its
     /// data freed was answered an I/O error with its vendor clusters left.
+    #[must_use = "the runs are the set's vendor allocations, left set in the bitmap if dropped"]
     fn unlink_set(&mut self, at: SetAt) -> Result<Runs, Error> {
         let mut runs = Runs::NONE;
         let mut shaped = true;
@@ -2579,6 +2595,14 @@ impl Fs {
         if self.in_heap(entry.first_cluster) {
             runs.add(Alloc::stream(entry));
         }
+        self.add_secondaries(at, entry, &mut runs)?;
+        Ok(runs)
+    }
+
+    /// Add to `runs` the allocations `entry`'s benign secondaries name, its
+    /// set at `at` ([`runs_of`](Self::runs_of), and `write_file`, whose set
+    /// keeps them): none read when the set has none.
+    fn add_secondaries(&mut self, at: SetAt, entry: &DirEntry, runs: &mut Runs) -> Result<(), Error> {
         if entry.allocs {
             self.read_slots(at, 2, |_, raw| {
                 if let Some(a) = allocation(raw) {
@@ -2587,7 +2611,7 @@ impl Fs {
                 if runs.more { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
             })?;
         }
-        Ok(runs)
+        Ok(())
     }
 
     /// Create an empty subdirectory. Fails if the name exists. An exFAT

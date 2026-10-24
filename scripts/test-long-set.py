@@ -772,13 +772,16 @@ def run_vcross():
 def run_vmeet():
     """A replacing `mv` whose destination's FAT-chained vendor run meets the
     source's chain: the run held for the survivor, though the survivor's
-    walk, cut at its size, stops short of the run's last cluster. A boot of
-    its own: VCROSS's root has no room for two more sets."""
+    walk, cut at its size, stops short of the run's last cluster. And two
+    writes to damaged sets: VW, whose vendor run lies on its own data, given
+    new data by a whole-file write (its old cluster kept for the run), and
+    VSYSW, a contiguous file on the bitmap's cluster, refused a `writeat`
+    with nothing written. A boot of its own: VCROSS's root has no room."""
     start = copy()
     vol = Volume(IMAGE, start)
-    r = free_run(vol, 5)
+    r = free_run(vol, 6)
     if r is None:
-        return [("vmeet: five free clusters in a run on the image", False)], []
+        return [("vmeet: six free clusters in a run on the image", False)], []
     c = vol.cluster
     sets = {
         # SRC FAT-chained r, r + 1, r + 2 but sized two clusters; DST on
@@ -788,27 +791,41 @@ def run_vmeet():
         # the meeting is found only by walking the run again for SRC's last.
         "SRC": plant_set("SRC", r, 2 * c, contiguous=False),
         "DST": plant_set("DST", r + 3, 4, [secondary(0xE1, r + 4, 3 * c, 0x01)]),
+        # VW on r + 5, its vendor run the same cluster.
+        "VW": plant_set("VW", r + 5, 7, [secondary(0xE1, r + 5, c, 0x03)]),
+        # VSYSW contiguous on the bitmap's first cluster.
+        "VSYSW": plant_set("VSYSW", vol.bitmap, 4),
     }
-    if not plant(vol, list(sets.values()), range(r, r + 5),
+    if not plant(vol, list(sets.values()), range(r, r + 6),
                  links=[(r, r + 1), (r + 1, r + 2), (r + 2, 0xFFFFFFFF), (r + 4, r + 1)],
-                 fills=[(r, b"src\r\n")]):
+                 fills=[(r, b"src\r\n"), (r + 5, b"hello\r\n")]):
         return [("vmeet: room for the planted sets in the root", False)], []
+    nb = -(-vol.count // 8 // c) or 1  # the bitmap's clusters
+    with open(IMAGE, "rb") as fh:
+        fh.seek(vol.fat + vol.bitmap * 4)
+        bitmap_fat = fh.read(4 * nb)
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
-    checks = [("vmeet: both planted sets read back, their clusters used",
+    checks = [("vmeet: the four planted sets read back, their clusters used",
                all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p for n, p in sets.items())
-               and all(vol.used(r + k) for k in range(5)))]
+               and all(vol.used(r + k) for k in range(6)))]
     if not checks[0][1]:
         return checks, []
-    cmds = ["mv -f /SRC /DST", "ls /"]
+    cmds = ["mv -f /SRC /DST", "write /VW new", "writeat /VSYSW 0 x", "rm /VSYSW", "ls /"]
     driven, out, faults = boot("vmeet", cmds)
     if drive_qemu.boot_stalled("test-long-set", "vmeet", out, faults):
         STALLED.append("vmeet")
         return checks, []
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
-    dst = exfatimg.find(root, "DST")
+    dst, vw = exfatimg.find(root, "DST"), exfatimg.find(root, "VW")
     used = [vol.used(r + k) for k in range(5)]
+    vw_first = struct.unpack_from("<I", vw.data, 52)[0] if vw else 0
+    vw_kept = vol.used(r + 5)
+    bitmap_byte = vol.data([vol.bitmap])[0]
+    with open(IMAGE, "rb") as fh:
+        fh.seek(vol.fat + vol.bitmap * 4)
+        bitmap_fat_after = fh.read(4 * nb)
     with open(IMAGE, "r+b") as fh:
         # The vendor run, held for SRC's chain it meets, leaves its own first
         # cluster leaked, and SRC's chain runs past its size: both damage
@@ -827,6 +844,14 @@ def run_vmeet():
          f"kept (r to r + 4: {used})",
          exfatimg.find(root, "SRC") is None and dst is not None and dst.data[40:64] == sets["SRC"][40:64]
          and used == [True, True, True, False, True]),
+        (f"vmeet: `write /VW new` gave VW a new cluster and kept its old one, which its vendor run names "
+         f"(VW at {vw_first}, r + 5 used {vw_kept}; {printed(out, 'write /VW new')})",
+         vw is not None and vw_first not in (0, r + 5) and vw_kept and printed(out, "write /VW new") == []),
+        (f"vmeet: `writeat /VSYSW 0 x` on the bitmap's cluster refused, its FAT entries and first byte as they "
+         f"were ({printed(out, 'writeat /VSYSW 0 x')}, {bitmap_fat.hex()} -> {bitmap_fat_after.hex()}, "
+         f"{bitmap_byte:#x}), and `rm /VSYSW` answered nothing ({printed(out, 'rm /VSYSW')})",
+         printed(out, "writeat /VSYSW 0 x") != [] and bitmap_fat_after == bitmap_fat and bitmap_byte != ord("x")
+         and printed(out, "rm /VSYSW") == [] and exfatimg.find(root, "VSYSW") is None),
         ("vmeet: fsck_exfat -n passes the image after the boot, the leak and the long chain mended", ok),
         ("vmeet: no fault lines", faults == 0),
     ]
