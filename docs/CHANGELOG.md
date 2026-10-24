@@ -872,15 +872,30 @@ allocation entry (0xE1), which a camera writes among a file's secondaries,
 names clusters of its own, laid out as a Stream's (FirstCluster, DataLength,
 NoFatChain). `rm`, `rmdir` and a replacing `mv` (for the set it replaces)
 deleted the set and left those clusters set in the bitmap with no set naming
-them, a leak fsck_exfat reports. `free_vendor_allocs` now reads the set before
-it goes and frees each one as a Stream's are, bounded by the volume; a
-rename carries them, as it has since 2026-10-21. `make test-long-set` gains
-VALLOC: VA1 (a contiguous data cluster and a vendor run of two) removed, VA2
-(a FAT-chained vendor chain) replaced by `mv -f`, VD (an empty directory with
-a vendor cluster) removed by `rmdir`, every one of those clusters free after,
-VA2's FAT entries zero, and VA3 renamed with its vendor cluster still used
-and its entry carried, fsck_exfat clean before and after. Fails with nothing
-freed (main: three checks and fsck) and with a rename freeing them too.
+them, a leak fsck_exfat reports. `delete_set` now takes what becomes of the
+set's clusters as a required argument (carried by a rename, or removed for
+good), so no path can delete a set and forget them. A removal deletes the
+set first and frees after, as the spec orders it, so an error or a crash
+between leaks rather than leaving a live set over free clusters: the Stream's
+clusters and those of every benign secondary with AllocationPossible set
+(0xE1, and any later type, as Linux frees them), read back from the deleted
+slots, skipping any the surviving set of a replacing `mv` also names. Every
+free now refuses a first cluster outside the heap and stops at the volume's
+own clusters (the allocation bitmap, the up-case table, located at mount,
+and the root's first), and a contiguous run clears its bits a bitmap sector
+at a time, not a cluster at a time. A first version freed before deleting,
+0xE1 alone and unbounded; the max review found the window and the bounds.
+`make test-long-set` gains two boots. VALLOC, on a volume fsck_exfat passes:
+a file and a directory removed, a file replaced by `mv -f` whose source
+carries its own vendor cluster, an undefined benign type 0xE2 removed, a
+0xE0 whose bytes name a cluster left alone, and renames (one by case alone,
+through `mv -f`) carrying theirs, with a used witness after every run.
+VCROSS, damaged sets: two sets sharing data and a vendor cluster, a vendor
+run from a file's own data into a witness, one outside the heap, and ones on
+the bitmap and up-case table; no command may answer an error. Each of
+twelve mutants of the free fails a check (the rig's docstring names them),
+and fsck_exfat is clean after both boots. Not graded by a boot: the order,
+which shows only on an error or a crash between the delete and the free.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has

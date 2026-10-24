@@ -2642,11 +2642,13 @@ test-ext2-blocks: image image-ext2
 # Stream must leave the SetChecksum over all 20 and fsck_exfat clean; and
 # since 2026-10-21 a rename of such a set, to a longer name and back, must
 # keep its File entry's attributes and times and its vendor entries; and
-# since 2026-10-23 rm, rmdir and a replacing mv must free the clusters a
-# vendor allocation entry (0xE1) names, which a rename keeps. Four boots,
-# about four minutes; run it whenever exFAT's patch_stream_ext, set_checksum,
-# walk_dir's set assembly, slot_at, mv, rm, rmdir, renamed_set or
-# free_vendor_allocs changes.
+# since 2026-10-23 rm, rmdir and a replacing mv must free the clusters every
+# allocating benign secondary (a vendor allocation, 0xE1) names, which a
+# rename keeps, and on damaged sets free none a surviving set or the volume
+# needs. Five boots, about two minutes; run it whenever exFAT's
+# patch_stream_ext, set_checksum, walk_dir's set assembly, slot_at,
+# read_slots, mv, rm, rmdir, renamed_set, delete_set, free_data or is_system
+# changes.
 test-long-set: image-exfat
 	python3 scripts/test-long-set.py
 

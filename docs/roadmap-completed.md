@@ -2774,7 +2774,8 @@ test-exfat-names`. The items as they stood, done notes included:
   were lost the same way and are kept too, and so is the Stream's
   ValidDataLength (the high review). `rm` still frees no vendor
   allocation's clusters, nor does a replacing rename for the set it
-  replaces: an item of its own, below. A rename deletes the set
+  replaces: an item of its own, below (freed since 2026-10-23, with
+  `rmdir`'s). A rename deletes the set
   and builds a new one of File, Stream and name, so vendor extension (0xE0)
   and vendor allocation (0xE1) entries a camera wrote are lost, and a vendor
   allocation's clusters leaked. Since 2026-10-19 a write keeps them (`make

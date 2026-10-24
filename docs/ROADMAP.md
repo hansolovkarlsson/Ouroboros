@@ -4385,13 +4385,19 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   they stay set in the bitmap with no set naming them. Freeing them the way
   the Stream's are, bounded by the volume, would end it. Read in the code,
   found with the rename's fix, 2026-10-21.
-  *Done 2026-10-23: `free_vendor_allocs` frees each 0xE1 entry's clusters
-  as a Stream's are, from `rm`, `rmdir` (which leaked them too) and a
-  replacing `mv`, reading the set before it is deleted; a rename carries
-  them. `make test-long-set`'s VALLOC: a removed file, a replaced one (its
-  vendor chain FAT-linked) and a removed directory leave every vendor
-  cluster free, a renamed file keeps its own, fsck_exfat clean. Fails with
-  nothing freed (three checks and fsck) and with a rename freeing them.*
+  *Done 2026-10-23: `delete_set` takes what becomes of a set's clusters as
+  a required argument, and a removal (`rm`, `rmdir`, which leaked them too,
+  and the set a replacing `mv` deletes) deletes the set and then frees the
+  Stream's and every allocating benign secondary's, read back from the
+  deleted slots, but for any the surviving set names; a rename carries
+  them. Frees refuse a first cluster outside the heap and stop at the
+  bitmap, the up-case table and the root's first cluster. A first version
+  freed 0xE1 alone, before the delete and unbounded; the max review found
+  it. `make test-long-set`'s VALLOC and VCROSS, failing with each of twelve
+  mutants of the free. The order itself, delete then free, is graded by no
+  boot: it shows only on an error or a crash between them. The root's later
+  clusters are not among the volume's own the free refuses: a damaged run
+  can reach them, as it can any live file's.*
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
   rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
   `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume
