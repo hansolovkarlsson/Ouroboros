@@ -4379,12 +4379,19 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   another's import, and the fsck rule can drift between four copies. Move
   them into `exfatimg.py` and have the rigs import it. From the high review
   of `fix/exfat-valid-length`, 2026-10-22.
-- **exFAT's `rm` leaks a vendor allocation's clusters.** A vendor allocation
+- ~~**exFAT's `rm` leaks a vendor allocation's clusters.**~~ A vendor allocation
   entry (0xE1) names clusters of its own (its FirstCluster and DataLength),
   which `rm` and a replacing `mv` (for the set it replaces) never free, so
   they stay set in the bitmap with no set naming them. Freeing them the way
   the Stream's are, bounded by the volume, would end it. Read in the code,
   found with the rename's fix, 2026-10-21.
+  *Done 2026-10-23: `free_vendor_allocs` frees each 0xE1 entry's clusters
+  as a Stream's are, from `rm`, `rmdir` (which leaked them too) and a
+  replacing `mv`, reading the set before it is deleted; a rename carries
+  them. `make test-long-set`'s VALLOC: a removed file, a replaced one (its
+  vendor chain FAT-linked) and a removed directory leave every vendor
+  cluster free, a renamed file keeps its own, fsck_exfat clean. Fails with
+  nothing freed (three checks and fsck) and with a rename freeing them.*
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
   rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
   `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume

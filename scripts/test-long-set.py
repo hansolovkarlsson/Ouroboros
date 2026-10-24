@@ -13,8 +13,10 @@ set. And `walk_dir` closed a set that was not contiguous, or whose first
 secondary was not the Stream, so the patch wrote Stream fields into whatever
 slot followed the File. And until 2026-10-21 a rename built the new set
 afresh (File, Stream, name), dropping the File entry's attributes and times
-and every vendor entry. Three boots, each of a copy of build/espexfat.img
-(exFAT root, partition 1):
+and every vendor entry. And until 2026-10-23 `rm`, `rmdir` and a replacing
+`mv` left the clusters a vendor allocation entry (0xE1) names set in the
+bitmap, with no set naming them. Four boots, each of a copy of
+build/espexfat.img (exFAT root, partition 1):
 
 - LONG: the host gives the root a second cluster and plants /VEND, an empty
   file whose set is 20 entries (File, Stream, one name, 17 Vendor Extension
@@ -41,7 +43,17 @@ and every vendor entry. Three boots, each of a copy of build/espexfat.img
   17 vendor entries as planted, the SetChecksum whole; and STRAY, its name
   entry after a vendor entry (fsck_exfat's one complaint before the boot),
   `mv`'d to /S2, which must be File, Stream, the new name, the vendor entry,
-  with fsck_exfat -n passing after.
+  with fsck_exfat -n passing after;
+- VALLOC: four sets after the root's last, each with a vendor allocation
+  entry, on eight free clusters the host marks used: VA1 (7 bytes in a
+  contiguous cluster, its vendor's two contiguous), VA2 (empty, its vendor's
+  two FAT-chained, the last partly used), VA3 (empty, a vendor cluster) and
+  VD (an empty directory, its vendor cluster), fsck_exfat -n clean first.
+  `echo s > /SRC` (first, so its cluster is none the frees give back), `mv
+  -f /SRC /VA2`, `cat /VA2`, `rm /VA1`, `mv /VA3 /VA4`, `rmdir /VD`; after,
+  VA1's three clusters, VA2's vendor chain (bitmap and FAT) and VD's two
+  free, VA3's vendor cluster still used and VA4's set carrying its entry as
+  planted, fsck_exfat -n clean.
 
 No fault lines in QEMU's trace. Fails with the sum capped at 19 entries (the
 checksum, and fsck: "Incorrect checksum for directory entry set. Delete?")
@@ -50,9 +62,11 @@ building its set afresh (main before 2026-10-21: the vendor entries, the
 attributes and the times gone) and with the vendor entries left where the
 old name ended (the set's shape, and fsck), with the Stream built afresh
 (ValidDataLength raised) and with only the name entries after the Stream
-dropped (STRAY's carried). About three minutes. Run it
+dropped (STRAY's carried), and with no vendor allocation freed (main before
+2026-10-23: VA1's, VA2's and VD's, and fsck) or a rename freeing its own
+(VA3's, and fsck). About four minutes. Run it
 whenever exFAT's patch_stream_ext, set_checksum, walk_dir's set assembly,
-slot_at, mv or renamed_set changes.
+slot_at, mv, rm, rmdir, renamed_set or free_vendor_allocs changes.
 """
 import importlib.util
 import os

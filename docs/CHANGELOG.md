@@ -714,7 +714,7 @@ entry (fsck_exfat's one complaint before the boot), renamed into the spec's
 shape, fsck clean after. Fails with main's rename, with the vendor entries
 left where the old name ended, with the Stream built afresh and with only
 the name entries after the Stream dropped. `rm` still leaks a vendor allocation's clusters
-(the roadmap).
+(the roadmap; freed since 2026-10-23, below).
 
 **ext2 frees and allocates none of its own metadata (2026-10-21).** Since
 #331 no ext2 block number reached past the volume, but one inside it naming
@@ -866,6 +866,21 @@ a blank disk holding the stick back (STICK), with blank by the signature
 alone (GPT-UNSIGNED, SIG-DAMAGED) and with no blank test (12 checks, UNKNOWN
 among them). Not reached by a boot: a blank disk whose first read fails, and
 one beside a stick whose init fails.
+
+**exFAT frees a vendor allocation with its set (2026-10-23).** A vendor
+allocation entry (0xE1), which a camera writes among a file's secondaries,
+names clusters of its own, laid out as a Stream's (FirstCluster, DataLength,
+NoFatChain). `rm`, `rmdir` and a replacing `mv` (for the set it replaces)
+deleted the set and left those clusters set in the bitmap with no set naming
+them, a leak fsck_exfat reports. `free_vendor_allocs` now reads the set before
+it goes and frees each one as a Stream's are, bounded by the volume; a
+rename carries them, as it has since 2026-10-21. `make test-long-set` gains
+VALLOC: VA1 (a contiguous data cluster and a vendor run of two) removed, VA2
+(a FAT-chained vendor chain) replaced by `mv -f`, VD (an empty directory with
+a vendor cluster) removed by `rmdir`, every one of those clusters free after,
+VA2's FAT entries zero, and VA3 renamed with its vendor cluster still used
+and its entry carried, fsck_exfat clean before and after. Fails with nothing
+freed (main: three checks and fsck) and with a rename freeing them too.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has
