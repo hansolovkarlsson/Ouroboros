@@ -892,10 +892,22 @@ carries its own vendor cluster, an undefined benign type 0xE2 removed, a
 through `mv -f`) carrying theirs, with a used witness after every run.
 VCROSS, damaged sets: two sets sharing data and a vendor cluster, a vendor
 run from a file's own data into a witness, one outside the heap, and ones on
-the bitmap and up-case table; no command may answer an error. Each of
-twelve mutants of the free fails a check (the rig's docstring names them),
-and fsck_exfat is clean after both boots. Not graded by a boot: the order,
-which shows only on an error or a crash between the delete and the free.
+the bitmap and up-case table; no command may answer an error. A further
+review the same day moved the rest of the rule into place: a whole-file
+write (`>`, an O_TRUNC open) now points the set at its new chain before it
+frees the old one; the bitmap's and up-case table's extents are held to the
+volume at mount (a damaged DataLength is taken as no table, and a bitmap so
+damaged leaves the volume read-only, a removal refused before its set goes);
+the allocator sets and passes over a clear bit of the volume's own clusters
+rather than handing out the bitmap; a secondary whose run overlaps the
+Stream's is left allocated; and a FAT entry outside the heap is never
+written. VCROSS gains a vendor run straddling a file's data, the bitmap's
+own bit cleared before an allocation, and a contiguous file sized past the
+heap written by `writeat`; VUPCASE and VBITMAP damage the two extents. Each
+of seventeen mutants of the free fails a check (the rig's docstring names
+them), and fsck_exfat is clean after every boot. Not graded by a boot: the
+order of a removal or a whole-file write, which shows only on an error or a
+crash between the set's write and the free.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has

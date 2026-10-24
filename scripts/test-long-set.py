@@ -15,7 +15,7 @@ slot followed the File. And until 2026-10-21 a rename built the new set
 afresh (File, Stream, name), dropping the File entry's attributes and times
 and every vendor entry. And until 2026-10-23 `rm`, `rmdir` and a replacing
 `mv` left the clusters a vendor allocation entry (0xE1) names set in the
-bitmap, with no set naming them. Five boots, each of a copy of
+bitmap, with no set naming them. Seven boots, each of a copy of
 build/espexfat.img (exFAT root, partition 1):
 
 - LONG: the host gives the root a second cluster and plants /VEND, an empty
@@ -61,10 +61,22 @@ build/espexfat.img (exFAT root, partition 1):
 - VCROSS: damaged sets, which fsck_exfat flags before the boot: SRC2 and
   DST2 sharing data and a vendor cluster, VA5 whose vendor run starts at its
   own data and reaches W5's cluster, VBAD's FAT-chained 0xE1 outside the
-  heap, and VSYS's two on the allocation bitmap and the up-case table. `mv
-  -f /SRC2 /DST2`, `rm` of VA5, VBAD and VSYS: no command answers anything,
-  the shared clusters and W5's still used, VA5's data free, the bitmap's
-  and up-case table's clusters still used, fsck_exfat -n clean after.
+  heap, VSYS's two on the allocation bitmap and the up-case table, VA6
+  whose vendor run starts a cluster before its data and ends a cluster
+  after (W6's and W7's), VHEAP, contiguous on the heap's last cluster and
+  sized two clusters past it, and the bitmap's own bit cleared. `echo new >
+  /NEW` (first), `mv -f /SRC2 /DST2`, `rm` of VA5, VBAD, VSYS and VA6,
+  `writeat /VHEAP 0 x`, `rm /VHEAP`: no `mv` or `rm` answers anything, the
+  writeat an error with the FAT's bytes past the heap unchanged, NEW not on
+  the bitmap's cluster and its bit set again, the shared clusters, W5's,
+  W6's and W7's still used, VA5's and VA6's data free, the bitmap's and
+  up-case table's clusters still used, fsck_exfat -n clean after;
+- VUPCASE and VBITMAP: the root's up-case entry claiming the whole heap, or
+  the bitmap's a sector longer than a bit a cluster, restored on the host
+  after the boot; `echo new > /NEWB` then `rm /VF` (a file of 7 bytes).
+  With no up-case table both work and VF's cluster is free; with no bitmap
+  both are refused (disk full, read-only) and VF and its cluster are kept.
+  fsck_exfat -n clean after each.
 
 No fault lines in QEMU's trace. Fails with the sum capped at 19 entries (the
 checksum, and fsck: "Incorrect checksum for directory entry set. Delete?")
@@ -73,19 +85,24 @@ building its set afresh (main before 2026-10-21: the vendor entries, the
 attributes and the times gone) and with the vendor entries left where the
 old name ended (the set's shape, and fsck), with the Stream built afresh
 (ValidDataLength raised) and with only the name entries after the Stream
-dropped (STRAY's carried). VALLOC and VCROSS fail with each of twelve
-mutants of the free (2026-10-23): no secondary freed, walk_dir not noting
+dropped (STRAY's carried). The four boots of 2026-10-23 fail with each of
+seventeen mutants of the free: no secondary freed, walk_dir not noting
 one, only 0xE1 freed (VE2), AllocationPossible not read (W3), a contiguous
 run one cluster long (witnesses), one bit cleared a bitmap sector (VA1),
-the Stream's first cluster freed again as a secondary's (W5), the survivor
-not consulted (SRC2's), the volume's own clusters freed (VSYS), a first
-cluster outside the heap taken (VBAD's `rm` an I/O error), a case-only
-`mv -f` freeing (va4's) and a replacing `mv` freeing its source (SRC's).
-Not graded by a boot: the order (the set deleted before its clusters are
-freed), which shows only on an error or a crash between the two. About two
-minutes. Run it whenever exFAT's patch_stream_ext, set_checksum, walk_dir's
+no overlap test (W5), the overlap test by first clusters alone (W6, W7),
+the survivor not consulted (SRC2's), the volume's own clusters freed
+(VSYS), a first cluster outside the heap taken (VBAD's `rm` an I/O error),
+a case-only `mv -f` freeing (va4's), a replacing `mv` freeing its source
+(SRC's), the allocator handing out the bitmap's cluster (NEW), the extents
+not checked (VUPCASE, VBITMAP), the removal not refused with no bitmap
+(VBITMAP's VF gone) and a FAT entry written past the heap (VHEAP). Not
+graded by a boot: the order of a removal (the set deleted, then its
+clusters freed) or of a whole-file write (the set repointed, then the old
+chain freed), which shows only on an error or a crash between the two.
+About three minutes. Run it whenever exFAT's patch_stream_ext, set_checksum, walk_dir's
 set assembly, slot_at, read_slots, mv, rm, rmdir, renamed_set, delete_set,
-free_data or is_system changes.
+free_data, is_system, check_extents, alloc_cluster or write_fat_entry
+changes.
 """
 import importlib.util
 import os
