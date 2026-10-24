@@ -2645,10 +2645,11 @@ test-ext2-blocks: image image-ext2
 # since 2026-10-23 rm, rmdir and a replacing mv must free the clusters every
 # allocating benign secondary (a vendor allocation, 0xE1) names, which a
 # rename keeps, and on damaged sets free none a surviving set or the volume
-# needs. Five boots, about two minutes; run it whenever exFAT's
+# needs, and a damaged bitmap or up-case table extent be taken as absent.
+# Seven boots, about three minutes; run it whenever exFAT's
 # patch_stream_ext, set_checksum, walk_dir's set assembly, slot_at,
-# read_slots, mv, rm, rmdir, renamed_set, delete_set, free_data or is_system
-# changes.
+# read_slots, mv, rm, rmdir, renamed_set, delete_set, free_data, is_system,
+# check_extents, alloc_cluster or write_fat_entry changes.
 test-long-set: image-exfat
 	python3 scripts/test-long-set.py
 
