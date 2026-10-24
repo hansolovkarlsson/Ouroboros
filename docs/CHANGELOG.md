@@ -903,11 +903,32 @@ rather than handing out the bitmap; a secondary whose run overlaps the
 Stream's is left allocated; and a FAT entry outside the heap is never
 written. VCROSS gains a vendor run straddling a file's data, the bitmap's
 own bit cleared before an allocation, and a contiguous file sized past the
-heap written by `writeat`; VUPCASE and VBITMAP damage the two extents. Each
-of seventeen mutants of the free fails a check (the rig's docstring names
-them), and fsck_exfat is clean after every boot. Not graded by a boot: the
-order of a removal or a whole-file write, which shows only on an error or a
-crash between the set's write and the free.
+heap written by `writeat`; VUPCASE and VBITMAP damage the two extents. A
+third review found the read-only volume half built: the refusal sat where a
+removal frees, so a replacing `mv` on a volume with no bitmap wrote its new
+set and then refused, leaving two sets over one file, and a truncation to
+nothing emptied the file and then refused, losing it. Now every exFAT
+operation that writes asks first whether the volume has a bitmap, and one
+with none is read-only before anything is written, creates and renames
+too. The same review kept a bitmap longer than a bit a cluster (the spec,
+Linux and exfat-fuse take one, where fsd had made such a volume read-only),
+dropped the bitmap where it and the up-case table overlap (it had kept the
+bitmap), bounded the mount's scan for the two at the heap's cluster count
+(a root whose chain looped hung the mount), freed none of a contiguous run
+that does not fit in the heap (a DataLength of a terabyte cleared every
+bit to the heap's end), and tested a replacing `mv`'s surviving set by
+overlapping runs, read once before the `mv` writes, not by first clusters
+read again for every allocation; the `mv` now deletes its source's set
+before the destination's, so two sets name the source's clusters no longer
+than one write. VCROSS gains a vendor run sharing the survivor's at a later
+cluster and a plant on the root's first cluster; VBITMAP refuses a
+truncation, a replacing and a plain `mv` and a `touch`, VUPCASE carries a
+longer bitmap, and VOVERLAP puts the up-case table on the bitmap. Each of
+twenty-four mutants of the free and of the read-only volume fails a check
+(the rig's docstring names them), and fsck_exfat is clean after every boot.
+Not graded by a boot: the order of a removal, a whole-file write or a
+replacing `mv`, which shows only on an error or a crash between the set's
+write and the free, and the bound on the mount's scan.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has

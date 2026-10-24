@@ -4400,7 +4400,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   (repoint, then free), held the bitmap's and up-case table's extents to the
   volume at mount, made the allocator pass over the volume's own clusters,
   left a secondary overlapping the Stream's run, and bounded
-  `write_fat_entry` by the heap; three of its findings are items below. The root's later
+  `write_fat_entry` by the heap; three of its findings are items below. The
+  resumed max review made a volume with no bitmap read-only before any
+  write (a replacing `mv` there had left two sets, and a truncation lost
+  its file), kept a longer bitmap and dropped one on the up-case table,
+  bounded the mount's scan of the root, freed none of a contiguous run
+  past the heap, and tested the surviving set by overlapping runs. The root's later
   clusters are not among the volume's own the free refuses: a damaged run
   can reach them, as it can any live file's.*
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
@@ -4414,15 +4419,17 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   sector at a time since the same day. Grouping a chain's consecutive
   clusters (fsd's first-fit allocator keeps them mostly so) into runs for
   `bitmap_clear_run`, and zeroing FAT entries a FAT sector at a time, would
-  end it; `bitmap_set` then has no caller left. The altitude review of
+  end it. The altitude review of
   `fix/exfat-vendor-alloc`, 2026-10-23, deferred by Hans.
 - **A failed exFAT `mv` leaves two sets over one file's clusters.** When a
   `mv` fails after `relink` wrote the new set (an I/O error deleting the old
   one, or in a replacing `mv` deleting or freeing the destination's), the
   source and the new set both name the source's clusters. A later `rm` of
-  either frees them under the other. A replacing `mv` passes its source as
-  `SetGoes::Removed`'s survivor, which covers a retry of that `mv`, and
-  nothing else. Deleting the set `relink` wrote (as a rename, freeing
+  either frees them under the other. A replacing `mv` reads its source's
+  runs before it writes and keeps them from the destination's free
+  (`SetGoes::Removed`'s `kept`), which covers a retry of that `mv`, and
+  nothing else; since the resumed review of the same day it deletes the
+  source's set before the destination's, so the window is one write. Deleting the set `relink` wrote (as a rename, freeing
   nothing) before returning the error, as `write_chain`, `mkdir` and
   `grow_extent` give back what they took, would end it, `insert_set`
   returning the slot it used; the undo can fail too, which leaves today's

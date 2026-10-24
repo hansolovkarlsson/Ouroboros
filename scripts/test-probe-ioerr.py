@@ -25,7 +25,7 @@ build/usbstick.img, is beside it.
 
 - MOUNT: the exFAT copy with the ESP's entry zeroed (one partition), its
   root directory's first sector failing (read by the exFAT probe's
-  `locate_bitmap`). fsd's boot line must say the mount failed with a disk I/O
+  `locate_tables`). fsd's boot line must say the mount failed with a disk I/O
   error; `mount -a` must answer that the disk gave an I/O error and was not
   replaced, with no `usb-msd block device installed` line; `mount` must say
   nothing is mounted.
