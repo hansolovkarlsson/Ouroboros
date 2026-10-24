@@ -200,16 +200,23 @@ def write_root(vol, d):
             fh.write(d[k * vol.cluster:(k + 1) * vol.cluster])
 
 
+def set_bit(fh, vol, k, used=True):
+    """Cluster `k`'s bit in the bitmap, set (`used`) or cleared, through the
+    open image `fh`."""
+    at = vol.heap + (vol.bitmap - 2) * vol.cluster + (k - 2) // 8
+    fh.seek(at)
+    b = fh.read(1)[0]
+    fh.seek(at)
+    fh.write(bytes([b | 1 << (k - 2) % 8 if used else b & ~(1 << (k - 2) % 8)]))
+
+
 def grow_root(vol):
     """Give the root a second cluster: a free one, zeroed, marked in the bitmap
     and linked after the root's last."""
     free = next(c for c in range(2, vol.count + 2) if not vol.used(c))
     last = vol.chain(vol.root)[-1]
     with open(IMAGE, "r+b") as fh:
-        fh.seek(vol.heap + (vol.bitmap - 2) * vol.cluster + (free - 2) // 8)
-        b = fh.read(1)[0]
-        fh.seek(-1, 1)
-        fh.write(bytes([b | 1 << (free - 2) % 8]))
+        set_bit(fh, vol, free)
         for c, value in ((last, free), (free, 0xFFFFFFFF)):
             fh.seek(vol.fat + c * 4)
             fh.write(struct.pack("<I", value))
@@ -358,10 +365,7 @@ def run_rename():
     d[end + len(s):end + len(s) + len(stray)] = stray
     write_root(vol, d)
     with open(IMAGE, "r+b") as fh:
-        fh.seek(vol.heap + (vol.bitmap - 2) * vol.cluster + (free - 2) // 8)
-        b = fh.read(1)[0]
-        fh.seek(-1, 1)
-        fh.write(bytes([b | 1 << (free - 2) % 8]))
+        set_bit(fh, vol, free)
         fh.seek(vol.heap + (free - 2) * vol.cluster)
         fh.write(b"hello\r\n" + b"\xEE" * (vol.cluster - 7))
     vol = Volume(IMAGE, start)
@@ -450,10 +454,11 @@ def plant_set(name, first=0, size=0, extra=(), is_dir=False, contiguous=True):
 
 
 def free_run(vol, n):
-    return next((c for c in range(2, vol.count + 2 - n) if not any(vol.used(c + k) for k in range(n))), None)
+    """The first of `n` free clusters in a run, the heap's last among them."""
+    return next((c for c in range(2, vol.count + 3 - n) if not any(vol.used(c + k) for k in range(n))), None)
 
 
-def plant(vol, start, sets, used, links=(), fills=()):
+def plant(vol, sets, used, links=(), fills=()):
     """Write `sets` after the root's last, mark the clusters `used` in the
     bitmap, write the FAT `links` (cluster, value) and the cluster `fills`
     (cluster, bytes, zero-padded). False when the root has no room."""
@@ -467,10 +472,7 @@ def plant(vol, start, sets, used, links=(), fills=()):
     c = vol.cluster
     with open(IMAGE, "r+b") as fh:
         for k in used:
-            fh.seek(vol.heap + (vol.bitmap - 2) * c + (k - 2) // 8)
-            b = fh.read(1)[0]
-            fh.seek(-1, 1)
-            fh.write(bytes([b | 1 << (k - 2) % 8]))
+            set_bit(fh, vol, k)
         for at, value in links:
             fh.seek(vol.fat + at * 4)
             fh.write(struct.pack("<I", value))
@@ -480,10 +482,10 @@ def plant(vol, start, sets, used, links=(), fills=()):
     return True
 
 
-def system_clusters(vol):
-    """The up-case table's first cluster, from the root's 0x82 entry."""
+def upcase_cluster(vol):
+    """The up-case table's first cluster, from the root's 0x82 entry, or None."""
     d = vol.data(vol.chain(vol.root))
-    return [struct.unpack_from("<I", d, i + 20)[0] for i in range(0, len(d), 32) if d[i] == 0x82][:1]
+    return next((struct.unpack_from("<I", d, i + 20)[0] for i in range(0, len(d), 32) if d[i] == 0x82), None)
 
 
 def printed(out, cmd):
@@ -515,8 +517,7 @@ def run_valloc():
         "W3": plant_set("W3", r + 14, c),                                        # witness
         "W2": plant_set("W2", r + 11, 2 * c),                                    # witness
     }
-    used = [k for k in range(r, r + 15)]
-    ok_room = plant(vol, start, list(sets.values()), used,
+    ok_room = plant(vol, list(sets.values()), range(r, r + 15),
                     links=[(r + 4, r + 5), (r + 5, 0xFFFFFFFF), (r + 7, 0xFFFFFFFF)],
                     fills=[(r, b"hello\r\n"), (r + 7, b""), (r + 9, b"src\r\n")])
     if not ok_room:
@@ -543,30 +544,32 @@ def run_valloc():
     root = vol.data(vol.chain(vol.root))
     gone = [n for n in ("VA1", "VD", "SRC", "VE2", "VE0") if exfatimg.find(root, n) is None]
     va2, va4 = exfatimg.find(root, "VA2"), exfatimg.find(root, "va4")
-    used = {k: vol.used(k) for k in range(r, r + 15)}
+    in_use = {k: vol.used(k) for k in range(r, r + 15)}
     ok, lines = fsck()
-    free = lambda *ks: [used[k] for k in ks]
+
+    def uses(*ks):
+        return [in_use[k] for k in ks]
     checks += [
         ("valloc: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         (f"valloc: VA1, VD, SRC, VE2 and VE0 gone from the root ({gone})", len(gone) == 5),
         ("valloc: every mv, rm and rmdir answered nothing (no error)",
          all(printed(out, k) == [] for k in cmds if k.split()[0] in ("mv", "rm", "rmdir"))),
         (f"valloc: `cat /VA2` prints SRC's src ({printed(out, 'cat /VA2')})", printed(out, "cat /VA2") == ["src"]),
-        (f"valloc: rm /VA1 freed its data cluster and its vendor's two ({free(r, r + 1, r + 2)})",
-         not any(free(r, r + 1, r + 2))),
+        (f"valloc: rm /VA1 freed its data cluster and its vendor's two ({uses(r, r + 1, r + 2)})",
+         not any(uses(r, r + 1, r + 2))),
         (f"valloc: the mv over /VA2 freed its old vendor chain, bitmap and FAT "
-         f"({free(r + 4, r + 5)}, {[vol.entry(k) for k in (r + 4, r + 5)]})",
-         not any(free(r + 4, r + 5)) and vol.entry(r + 4) == 0 and vol.entry(r + 5) == 0),
-        (f"valloc: ... and kept SRC's data and vendor cluster, VA2's set now naming both ({free(r + 9, r + 10)})",
-         all(free(r + 9, r + 10)) and va2 is not None and va2.data[-32:] == sets["SRC"][-32:]),
-        (f"valloc: rmdir /VD freed its cluster and its vendor's ({free(r + 7, r + 8)})", not any(free(r + 7, r + 8))),
-        (f"valloc: rm /VE2 freed what its undefined benign secondary names ({free(r + 13)})", not used[r + 13]),
+         f"({uses(r + 4, r + 5)}, {[vol.entry(k) for k in (r + 4, r + 5)]})",
+         not any(uses(r + 4, r + 5)) and vol.entry(r + 4) == 0 and vol.entry(r + 5) == 0),
+        (f"valloc: ... and kept SRC's data and vendor cluster, VA2's set now naming both ({uses(r + 9, r + 10)})",
+         all(uses(r + 9, r + 10)) and va2 is not None and va2.data[-32:] == sets["SRC"][-32:]),
+        (f"valloc: rmdir /VD freed its cluster and its vendor's ({uses(r + 7, r + 8)})", not any(uses(r + 7, r + 8))),
+        (f"valloc: rm /VE2 freed what its undefined benign secondary names ({uses(r + 13)})", not in_use[r + 13]),
         ("valloc: two renames, the second by case alone through mv -f, kept VA3's vendor cluster, "
          "va4's set carrying its entry as planted",
-         used[r + 6] and va4 is not None and va4.name == "va4" and va4.data[-32:] == sets["VA3"][-32:]),
+         in_use[r + 6] and va4 is not None and va4.name == "va4" and va4.data[-32:] == sets["VA3"][-32:]),
         (f"valloc: every witness cluster still used: W after VA1's run, W2, W3 under VE0's fields, "
-         f"SRC's after VD's ({free(r + 3, r + 11, r + 12, r + 14, r + 9)})",
-         all(free(r + 3, r + 11, r + 12, r + 14, r + 9))),
+         f"SRC's after VD's ({uses(r + 3, r + 11, r + 12, r + 14, r + 9)})",
+         all(uses(r + 3, r + 11, r + 12, r + 14, r + 9))),
         ("valloc: fsck_exfat -n passes the image after the boot", ok),
         ("valloc: no fault lines", faults == 0),
     ]
@@ -576,61 +579,60 @@ def run_valloc():
 
 
 def run_vcross():
-    """Damaged sets, which fsck_exfat flags before the boot: allocations two
-    sets share, one a set names twice, and ones naming no cluster of the
-    heap or the volume's own. Each removal must free only what no live set
-    or the volume needs, and leave the volume fsck clean."""
+    """Damaged sets, each removal of which must free only what no live set or
+    the volume needs, and leave the volume fsck clean: allocations two sets
+    share, a run reaching another's at a later cluster, ones naming no
+    cluster of the heap or the volume's own, and a run past the heap."""
     start = copy()
     vol = Volume(IMAGE, start)
-    r = free_run(vol, 7)
+    r = free_run(vol, 8)
     if r is None:
-        return [("vcross: seven free clusters in a run on the image", False)], []
+        return [("vcross: eight free clusters in a run on the image", False)], []
     last = vol.count + 1  # the heap's last cluster
-    if vol.used(last) or r + 7 > last:
+    if vol.used(last) or r + 8 > last:
         return [("vcross: the heap's last cluster free, after the run", False)], []
     c = vol.cluster
-    up = system_clusters(vol)
-    if not up:
+    up = upcase_cluster(vol)
+    if up is None:
         return [("vcross: the image's root names its up-case table", False)], []
-    up = up[0]
     E1 = 0xE1
     sets = {
-        # SRC2 and DST2 share data and a vendor cluster: a cross-link.
-        "SRC2": plant_set("SRC2", r, 5, [secondary(E1, r + 1, c, 0x03)]),
-        "DST2": plant_set("DST2", r, 5, [secondary(E1, r + 1, c, 0x03)]),
+        # SRC2 and DST2 share data, each its own size; SRC2's vendor run is
+        # two clusters, and DST2's vendor entry names the second, sharing
+        # SRC2's run at a cluster past its first.
+        "SRC2": plant_set("SRC2", r, 5, [secondary(E1, r + 1, 2 * c, 0x03)]),
+        "DST2": plant_set("DST2", r, 3, [secondary(E1, r + 2, c, 0x03)]),
         # VA5's vendor run starts at its own data and runs into W5's cluster.
-        "VA5": plant_set("VA5", r + 2, 7, [secondary(E1, r + 2, 2 * c, 0x03)]),
-        "W5": plant_set("W5", r + 3, c),
-        # Allocations outside the heap, and on the bitmap and up-case table.
+        "VA5": plant_set("VA5", r + 3, 7, [secondary(E1, r + 3, 2 * c, 0x03)]),
+        "W5": plant_set("W5", r + 4, c),
+        # Allocations outside the heap, and on the bitmap, the up-case table
+        # and the root's first cluster.
         "VBAD": plant_set("VBAD", extra=[secondary(E1, 0xFFFFFFF0, c, 0x01)]),
-        "VSYS": plant_set("VSYS", extra=[secondary(E1, vol.bitmap, c, 0x03), secondary(E1, up, c, 0x01)]),
+        "VSYS": plant_set("VSYS", extra=[secondary(E1, vol.bitmap, c, 0x03), secondary(E1, up, c, 0x01),
+                                         secondary(E1, vol.root, c, 0x01)]),
         # VA6's vendor run starts a cluster before its data and ends a
         # cluster after: W6's and W7's, the first clusters differing.
-        "W6": plant_set("W6", r + 4, c),
-        "VA6": plant_set("VA6", r + 5, 7, [secondary(E1, r + 4, 3 * c, 0x03)]),
-        "W7": plant_set("W7", r + 6, c),
+        "W6": plant_set("W6", r + 5, c),
+        "VA6": plant_set("VA6", r + 6, 7, [secondary(E1, r + 5, 3 * c, 0x03)]),
+        "W7": plant_set("W7", r + 7, c),
         # VHEAP: contiguous, on the heap's last cluster, sized three clusters,
         # two past the heap: a write chains it first (ensure_chained).
         "VHEAP": plant_set("VHEAP", last, 3 * c),
     }
-    if not plant(vol, start, list(sets.values()), list(range(r, r + 7)) + [last],
-                 fills=[(r, b"two\r\n"), (r + 2, b"hello\r\n"), (r + 5, b"hello\r\n")]):
+    if not plant(vol, list(sets.values()), list(range(r, r + 8)) + [last],
+                 fills=[(r, b"two\r\n"), (r + 3, b"hello\r\n"), (r + 6, b"hello\r\n")]):
         return [("vcross: room for the planted sets in the root", False)], []
-    # The bitmap's own bit cleared, as main's rm of a set naming it left it.
     with open(IMAGE, "r+b") as fh:
-        at = vol.heap + (vol.bitmap - 2) * c + (vol.bitmap - 2) // 8
-        fh.seek(at)
-        b = fh.read(1)[0]
-        fh.seek(at)
-        fh.write(bytes([b & ~(1 << (vol.bitmap - 2) % 8)]))
+        # The bitmap's own bit cleared, as main's rm of a set naming it left it.
+        set_bit(fh, vol, vol.bitmap, used=False)
         fh.seek(vol.fat + (last + 1) * 4)
         past = fh.read(8)  # the FAT's bytes for the two clusters past the heap
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
     checks = [("vcross: every planted set reads back, its clusters and the up-case table's used, the bitmap's clear",
                all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p for n, p in sets.items())
-               and all(vol.used(r + k) for k in range(7)) and vol.used(last) and not vol.used(vol.bitmap)
-               and vol.used(up))]
+               and all(vol.used(r + k) for k in range(8)) and vol.used(last) and not vol.used(vol.bitmap)
+               and vol.used(up) and sets["SRC2"] != sets["DST2"])]
     if not checks[0][1]:
         return checks, []
     cmds = ["echo new > /NEW", "mv -f /SRC2 /DST2", "cat /DST2", "rm /VA5", "rm /VBAD", "rm /VSYS", "rm /VA6",
@@ -644,9 +646,15 @@ def run_vcross():
     gone = [n for n in ("SRC2", "VA5", "VBAD", "VSYS", "VA6", "VHEAP") if exfatimg.find(root, n) is None]
     dst2, new = exfatimg.find(root, "DST2"), exfatimg.find(root, "NEW")
     new_first = struct.unpack_from("<I", new.data, 52)[0] if new else 0
-    with open(IMAGE, "rb") as fh:
+    heap_kept = vol.used(last)
+    with open(IMAGE, "r+b") as fh:
         fh.seek(vol.fat + (last + 1) * 4)
         past_after = fh.read(8)
+        # VHEAP's run, past the heap, is damage the free leaves whole: its
+        # one cluster in the heap leaked on purpose, given back here so
+        # fsck_exfat reads the rest of the volume.
+        set_bit(fh, vol, last, used=False)
+    vol = Volume(IMAGE, start)
     ok, lines = fsck()
     checks += [
         ("vcross: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
@@ -655,85 +663,118 @@ def run_vcross():
          all(printed(out, k) == [] for k in cmds if k.split()[0] in ("mv", "rm"))),
         (f"vcross: the allocation passed over the bitmap's clear bit, setting it (NEW at {new_first}, "
          f"the bitmap at {vol.bitmap})",
-         new is not None and new_first >= 2 and new_first != vol.bitmap and vol.used(vol.bitmap)
-         and printed(out, "cat /DST2") == ["two"]),
+         new is not None and new_first >= 2 and new_first != vol.bitmap and vol.used(vol.bitmap)),
         (f"vcross: rm /VA6 freed its data, not W6's or W7's, which its vendor run covers "
-         f"({vol.used(r + 4)}, {vol.used(r + 5)}, {vol.used(r + 6)})",
-         vol.used(r + 4) and not vol.used(r + 5) and vol.used(r + 6)),
+         f"({vol.used(r + 5)}, {vol.used(r + 6)}, {vol.used(r + 7)})",
+         vol.used(r + 5) and not vol.used(r + 6) and vol.used(r + 7)),
         (f"vcross: `writeat /VHEAP 0 x` answered an error and wrote no FAT entry past the heap "
          f"({printed(out, 'writeat /VHEAP 0 x')}, {past.hex()} -> {past_after.hex()})",
          printed(out, "writeat /VHEAP 0 x") != [] and past_after == past),
+        (f"vcross: rm /VHEAP left its cluster used, its run past the heap freeing none of it ({heap_kept})", heap_kept),
         (f"vcross: `cat /DST2` prints two ({printed(out, 'cat /DST2')})", printed(out, "cat /DST2") == ["two"]),
-        (f"vcross: the mv over DST2 kept the data and vendor cluster SRC2 shares with it ({vol.used(r)}, {vol.used(r + 1)})",
-         vol.used(r) and vol.used(r + 1) and dst2 is not None and dst2.data[-32:] == sets["SRC2"][-32:]),
-        (f"vcross: rm /VA5 freed its data, not W5's cluster its vendor run reaches ({vol.used(r + 2)}, {vol.used(r + 3)})",
-         not vol.used(r + 2) and vol.used(r + 3)),
-        (f"vcross: rm /VSYS left the bitmap's and the up-case table's clusters used ({vol.used(vol.bitmap)}, {vol.used(up)})",
-         vol.used(vol.bitmap) and vol.used(up)),
-        ("vcross: fsck_exfat -n passes the image after the boot", ok),
+        (f"vcross: the mv over DST2 kept the data and the vendor run SRC2 shares with it, the second cluster "
+         f"too ({vol.used(r)}, {vol.used(r + 1)}, {vol.used(r + 2)}), DST2's set SRC2's",
+         vol.used(r) and vol.used(r + 1) and vol.used(r + 2) and dst2 is not None
+         and dst2.data[33] == sets["SRC2"][33] and dst2.data[40:64] == sets["SRC2"][40:64]
+         and dst2.data[-32:] == sets["SRC2"][-32:]),
+        (f"vcross: rm /VA5 freed its data, not W5's cluster its vendor run reaches ({vol.used(r + 3)}, {vol.used(r + 4)})",
+         not vol.used(r + 3) and vol.used(r + 4)),
+        (f"vcross: rm /VSYS left the bitmap's, the up-case table's and the root's clusters used "
+         f"({vol.used(vol.bitmap)}, {vol.used(up)}, {vol.used(vol.root)})",
+         vol.used(vol.bitmap) and vol.used(up) and vol.used(vol.root)),
+        ("vcross: fsck_exfat -n passes the image after the boot, VHEAP's cluster given back", ok),
         ("vcross: no fault lines", faults == 0),
     ]
     notes = [f"vcross after: {ln}" for ln in lines] if not ok else []
     return checks, notes
 
 
-def run_extent(kind):
-    """The root's 0x82 (up-case table) or 0x81 (bitmap) entry with a damaged
-    DataLength, which fsd must take as absent, restored on the host after the
-    boot so fsck_exfat reads the volume as fsd left it."""
-    label = {0x82: "vupcase", 0x81: "vbitmap"}[kind]
+# The damaged extents of the last three boots: (the root's entry type, the
+# field's offset in it, its value from the good one) for each, and whether
+# the volume must still be writable.
+EXTENTS = {
+    # The up-case table claiming the whole heap, and the bitmap 512 bytes
+    # longer than a bit a cluster, inside its cluster (the spec allows it).
+    "vupcase": ([(0x82, 24, lambda good, vol: vol.count * vol.cluster),
+                 (0x81, 24, lambda good, vol: good + 512)], True),
+    # The bitmap a byte short of a bit a cluster.
+    "vbitmap": ([(0x81, 24, lambda good, vol: good - 1)], False),
+    # The up-case table moved onto the bitmap's cluster.
+    "voverlap": ([(0x82, 20, lambda good, vol: vol.bitmap)], False),
+}
+
+
+def run_extent(label):
+    """The root's 0x81 (bitmap) and 0x82 (up-case table) entries damaged as
+    EXTENTS says, restored on the host after the boot so fsck_exfat reads
+    the volume as fsd left it. A volume left writable must write and free;
+    one left with no bitmap must refuse every write, before it writes."""
+    damage, writable = EXTENTS[label]
     start = copy()
     vol = Volume(IMAGE, start)
-    r = free_run(vol, 1)
-    c = vol.cluster
+    r = free_run(vol, 2)
     d = bytearray(vol.data(vol.chain(vol.root)))
-    at = next((i for i in range(0, len(d), 32) if d[i] == kind), None)
-    if r is None or at is None:
-        return [(f"{label}: a free cluster and the root's {kind:#x} entry", False)], []
-    if not plant(vol, start, [plant_set("VF", r, 7)], [r], fills=[(r, b"hello\r\n")]):
-        return [(f"{label}: room for VF in the root", False)], []
-    good = d[at + 24:at + 32]
-    bad = struct.pack("<Q", vol.count * c if kind == 0x82 else struct.unpack("<Q", good)[0] + 512)
-    patch_entry(vol, at, bad)
+    places = [(next((i for i in range(0, len(d), 32) if d[i] == kind), None), field, value)
+              for kind, field, value in damage]
+    if r is None or any(at is None for at, _, _ in places):
+        return [(f"{label}: two free clusters and the root's bitmap and up-case entries", False)], []
+    width = {20: "<I", 24: "<Q"}
+    good = [d[at + field:at + field + struct.calcsize(width[field])] for at, field, _ in places]
+    if not plant(vol, [plant_set("VF", r, 7), plant_set("VG", r + 1, 4)], [r, r + 1],
+                 fills=[(r, b"hello\r\n"), (r + 1, b"vg\r\n")]):
+        return [(f"{label}: room for VF and VG in the root", False)], []
+    for (at, field, value), was in zip(places, good):
+        patch_root(vol, at + field, struct.pack(width[field], value(struct.unpack(width[field], was)[0], vol)))
     # NEWB first, so its cluster is not the one rm gives back.
-    cmds = ["echo new > /NEWB", "rm /VF", "ls /"]
+    cmds = (["echo new > /NEWB", "rm /VF", "ls /"] if writable else
+            ["echo new > /NEWB", "write /VF", "echo t > /VF", "mv -f /VG /VF", "mv /VG /VH", "touch /VT", "rm /VF", "ls /"])
     driven, out, faults = boot(label, cmds)
     if drive_qemu.boot_stalled("test-long-set", label, out, faults):
         STALLED.append(label)
         return [], []
-    patch_entry(vol, at, good)
+    for (at, field, _), was in zip(places, good):
+        patch_root(vol, at + field, was)
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
     vf, newb = exfatimg.find(root, "VF"), exfatimg.find(root, "NEWB")
     newb_size = struct.unpack_from("<Q", newb.data, 56)[0] if newb else 0
     ok, lines = fsck()
     checks = [(f"{label}: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out)]
-    if kind == 0x82:
-        checks += [(f"{label}: an up-case table claiming the heap is no table: rm /VF freed VF's cluster "
-                    f"({vol.used(r)}), and NEWB was written", vf is None and not vol.used(r) and newb_size == 5
-                    and printed(out, "rm /VF") == [])]
+    if writable:
+        checks += [(f"{label}: an up-case table claiming the heap is no table and a longer bitmap is one: "
+                    f"rm /VF freed VF's cluster ({vol.used(r)}), and NEWB was written ({newb_size} bytes)",
+                    vf is None and not vol.used(r) and newb_size == 5 and printed(out, "rm /VF") == [])]
     else:
-        checks += [(f"{label}: a bitmap a sector too long is no bitmap: rm /VF refused with VF and its cluster "
-                    f"kept ({printed(out, 'rm /VF')}, {vol.used(r)}), NEWB's write refused "
-                    f"({printed(out, 'echo new > /NEWB')}, {newb_size} bytes)",
-                    vf is not None and vol.used(r) and printed(out, "rm /VF") != []
-                    and printed(out, "echo new > /NEWB") != [] and newb_size == 0)]
-    checks += [(f"{label}: fsck_exfat -n passes the image after the boot, the entry restored", ok),
+        names = [st.name for st in exfatimg.sets(root)]
+        vf_bytes = vol.data([r])[:7]
+        refused = {k: printed(out, k) for k in cmds[:-1]}
+        checks += [
+            (f"{label}: with no bitmap every write is refused read-only ({refused})",
+             all(any("read-only" in ln for ln in v) for v in refused.values())),
+            (f"{label}: ... and nothing written: VF one set, its 7 bytes and cluster kept, VG as it was, "
+             f"no NEWB, VH or VT ({names.count('VF')} VF, {vf_bytes!r}, {vol.used(r)})",
+             names.count("VF") == 1 and vf is not None and struct.unpack_from("<Q", vf.data, 56)[0] == 7
+             and vf_bytes == b"hello\r\n" and vol.used(r) and vol.used(r + 1) and names.count("VG") == 1
+             and not {"NEWB", "VH", "VT"} & set(names)),
+        ]
+    checks += [(f"{label}: fsck_exfat -n passes the image after the boot, the entries restored", ok),
                (f"{label}: no fault lines", faults == 0)]
     return checks, [f"{label} after: {ln}" for ln in lines] if not ok else []
 
 
-def patch_entry(vol, at, length):
-    """The root's entry at byte `at`: its DataLength set to `length` (8 bytes)."""
-    d = bytearray(vol.data(vol.chain(vol.root)))
-    d[at + 24:at + 32] = length
-    write_root(vol, d)
+def patch_root(vol, at, data):
+    """`data` written at byte `at` of the root directory, straight to the
+    image: the root read through `vol` may be stale once the image changed."""
+    chain = vol.chain(vol.root)
+    with open(IMAGE, "r+b") as fh:
+        fh.seek(vol.heap + (chain[at // vol.cluster] - 2) * vol.cluster + at % vol.cluster)
+        fh.write(data)
 
 
 def main():
     checks, notes = [], []
     for run in (run_long, run_shape, run_rename, run_valloc, run_vcross,
-                lambda: run_extent(0x82), lambda: run_extent(0x81)):
+                *(lambda label=label: run_extent(label) for label in EXTENTS)):
         try:
             c, n = run()
         finally:
