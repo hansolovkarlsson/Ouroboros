@@ -4405,7 +4405,19 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   write (a replacing `mv` there had left two sets, and a truncation lost
   its file), kept a longer bitmap and dropped one on the up-case table,
   bounded the mount's scan of the root, freed none of a contiguous run
-  past the heap, and tested the surviving set by overlapping runs. The root's later
+  past the heap, and tested the surviving set by overlapping runs. The high
+  review of 2026-10-24 found the overlap test still took a FAT-chained
+  survivor by its first cluster (it walks chains now), `ensure_chained`
+  writing a run's links before the heap's edge refused it (refused first
+  now), a replacing `mv` that failed at the source's delete leaving two sets
+  of one name (the destination's set goes first now, its clusters freed
+  after both), the scan of the root bounded only by the heap (it stops at a
+  loop and at 256 MiB), a first bitmap entry naming cluster 0 passed over
+  for a second, the allocations read back after the delete, and an empty
+  Stream filling a place in `Runs`. A volume with no bitmap answers
+  read-only to a `touch` of an existing file and a `mkdir` of an existing
+  name, a choice the same review raised and kept: it says the true thing
+  about the volume. The root's later
   clusters are not among the volume's own the free refuses: a damaged run
   can reach them, as it can any live file's.*
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
@@ -4420,16 +4432,19 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   clusters (fsd's first-fit allocator keeps them mostly so) into runs for
   `bitmap_clear_run`, and zeroing FAT entries a FAT sector at a time, would
   end it. The altitude review of
-  `fix/exfat-vendor-alloc`, 2026-10-23, deferred by Hans.
+  `fix/exfat-vendor-alloc`, 2026-10-23, deferred by Hans; found again by the
+  high review of 2026-10-24.
 - **A failed exFAT `mv` leaves two sets over one file's clusters.** When a
   `mv` fails after `relink` wrote the new set (an I/O error deleting the old
   one, or in a replacing `mv` deleting or freeing the destination's), the
   source and the new set both name the source's clusters. A later `rm` of
   either frees them under the other. A replacing `mv` reads its source's
   runs before it writes and keeps them from the destination's free
-  (`SetGoes::Removed`'s `kept`), which covers a retry of that `mv`, and
-  nothing else; since the resumed review of the same day it deletes the
-  source's set before the destination's, so the window is one write. Deleting the set `relink` wrote (as a rename, freeing
+  (`free_runs`' `kept`), which covers a retry of that `mv`, and nothing
+  else. Since the high review of 2026-10-24 it deletes the destination's set
+  first, then the source's, and frees the destination's clusters after
+  both, so a failure leaves the source beside its new set, as a plain `mv`
+  that fails at its delete, never two sets of one name. Deleting the set `relink` wrote (as a rename, freeing
   nothing) before returning the error, as `write_chain`, `mkdir` and
   `grow_extent` give back what they took, would end it, `insert_set`
   returning the slot it used; the undo can fail too, which leaves today's

@@ -928,7 +928,25 @@ twenty-four mutants of the free and of the read-only volume fails a check
 (the rig's docstring names them), and fsck_exfat is clean after every boot.
 Not graded by a boot: the order of a removal, a whole-file write or a
 replacing `mv`, which shows only on an error or a crash between the set's
-write and the free, and the bound on the mount's scan.
+write and the free, and the bound on the mount's scan. A high review the
+next day found more. The overlap test still took a FAT-chained
+survivor by its first cluster, so a destination's run over a later cluster
+of the source's chain was freed under it; chains are walked now. Linking a
+contiguous file for a write wrote every link inside the heap before the
+heap's edge refused the rest, over the links of the files its damaged size
+reached; the run is refused first now. The replacing `mv` that deleted its
+source's set first left two sets of one name when that delete failed; the
+destination's set goes first again, and its clusters are freed only after
+both sets are gone. And the mount's scan for the bitmap stops where the
+root's chain loops and at the format's 256 MiB, where the heap's cluster
+count still allowed a quarter of a billion reads on a large stick. A first
+bitmap entry naming cluster 0 no longer hands the bitmap to a second entry
+after it (a volume of two FATs has one), a removal collects the
+allocations as it deletes the set, and an empty file's Stream no longer
+fills one of the eight places a surviving set's runs are held in. VCROSS
+gains a chained source under a destination's vendor run and an empty
+source with eight vendor runs, and checks VHEAP's own FAT entry; a ninth
+boot, VFIRST, damages the first bitmap entry with a good one after it.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has

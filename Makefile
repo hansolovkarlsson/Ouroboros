@@ -2646,11 +2646,12 @@ test-ext2-blocks: image image-ext2
 # allocating benign secondary (a vendor allocation, 0xE1) names, which a
 # rename keeps, and on damaged sets free none a surviving set or the volume
 # needs, and a damaged bitmap or up-case table extent be taken as absent,
-# a volume with no bitmap refusing every write before it writes. Eight boots,
-# about three and a half minutes; run it whenever exFAT's patch_stream_ext,
+# a volume with no bitmap refusing every write before it writes. Nine boots,
+# about four minutes; run it whenever exFAT's patch_stream_ext,
 # set_checksum, walk_dir's set assembly, slot_at, read_slots, mv, rm, rmdir,
-# renamed_set, delete_set, runs_of, free_data, is_system, writable,
-# check_extents, locate_tables, alloc_cluster or write_fat_entry changes.
+# renamed_set, delete_set, unlink_set, free_runs, overlaps, runs_of,
+# free_data, is_system, writable, check_extents, locate_tables,
+# ensure_chained, alloc_cluster or write_fat_entry changes.
 test-long-set: image-exfat
 	python3 scripts/test-long-set.py
 
