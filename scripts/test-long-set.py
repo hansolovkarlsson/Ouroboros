@@ -751,6 +751,70 @@ def run_vcross():
     return checks, notes
 
 
+def run_vmeet():
+    """A replacing `mv` whose destination's FAT-chained vendor run meets the
+    source's chain: the run held for the survivor, though the survivor's
+    walk, cut at its size, stops short of the run's last cluster. A boot of
+    its own: VCROSS's root has no room for two more sets."""
+    start = copy()
+    vol = Volume(IMAGE, start)
+    r = free_run(vol, 5)
+    if r is None:
+        return [("vmeet: five free clusters in a run on the image", False)], []
+    c = vol.cluster
+    sets = {
+        # SRC FAT-chained r, r + 1, r + 2 but sized two clusters; DST on
+        # r + 3, its vendor run FAT-chained r + 4, r + 1, r + 2, three
+        # clusters to its end of chain. The chains meet at r + 1, inside
+        # SRC's size, and SRC's walk stops before the run's last cluster, so
+        # the meeting is found only by walking the run again for SRC's last.
+        "SRC": plant_set("SRC", r, 2 * c, contiguous=False),
+        "DST": plant_set("DST", r + 3, 4, [secondary(0xE1, r + 4, 3 * c, 0x01)]),
+    }
+    if not plant(vol, list(sets.values()), range(r, r + 5),
+                 links=[(r, r + 1), (r + 1, r + 2), (r + 2, 0xFFFFFFFF), (r + 4, r + 1)],
+                 fills=[(r, b"src\r\n")]):
+        return [("vmeet: room for the planted sets in the root", False)], []
+    vol = Volume(IMAGE, start)
+    root = vol.data(vol.chain(vol.root))
+    checks = [("vmeet: both planted sets read back, their clusters used",
+               all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p for n, p in sets.items())
+               and all(vol.used(r + k) for k in range(5)))]
+    if not checks[0][1]:
+        return checks, []
+    cmds = ["mv -f /SRC /DST", "ls /"]
+    driven, out, faults = boot("vmeet", cmds)
+    if drive_qemu.boot_stalled("test-long-set", "vmeet", out, faults):
+        STALLED.append("vmeet")
+        return checks, []
+    vol = Volume(IMAGE, start)
+    root = vol.data(vol.chain(vol.root))
+    dst = exfatimg.find(root, "DST")
+    used = [vol.used(r + k) for k in range(5)]
+    with open(IMAGE, "r+b") as fh:
+        # The vendor run, held for SRC's chain it meets, leaves its own first
+        # cluster leaked, and SRC's chain runs past its size: both damage
+        # planted, mended here so fsck_exfat reads the rest of the volume.
+        for k, value in ((4, 0), (2, 0), (1, 0xFFFFFFFF)):
+            if k != 1:
+                set_bit(fh, vol, r + k, used=False)
+            fh.seek(vol.fat + (r + k) * 4)
+            fh.write(struct.pack("<I", value))
+    ok, lines = fsck()
+    checks += [
+        ("vmeet: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
+        (f"vmeet: `mv -f /SRC /DST` answered nothing ({printed(out, 'mv -f /SRC /DST')})",
+         printed(out, "mv -f /SRC /DST") == []),
+        (f"vmeet: SRC gone, DST's set SRC's, DST's cluster freed and SRC's chain and the vendor run meeting it "
+         f"kept (r to r + 4: {used})",
+         exfatimg.find(root, "SRC") is None and dst is not None and dst.data[40:64] == sets["SRC"][40:64]
+         and used == [True, True, True, False, True]),
+        ("vmeet: fsck_exfat -n passes the image after the boot, the leak and the long chain mended", ok),
+        ("vmeet: no fault lines", faults == 0),
+    ]
+    return checks, [f"vmeet after: {ln}" for ln in lines] if not ok else []
+
+
 # The damaged extents of the last four boots: (the root's entry type, the
 # field's offset in it, its value from the good one) for each, whether the
 # volume must still be writable, and whether a good copy of the bitmap's
@@ -767,7 +831,15 @@ EXTENTS = {
     # The bitmap's entry naming cluster 0, a good one after it: the first is
     # the bitmap, damaged, as a volume of two FATs has FAT 2's after it.
     "vfirst": ([(0x81, 20, lambda good, vol: 0)], False, True),
+    # No entry damaged: the boot sector's NumberOfFats made 2 (VBR below).
+    "vtwofat": ([], False, False),
 }
+
+# A boot sector byte changed for the boot and restored after it: (offset,
+# value). NumberOfFats 2 with ActiveFat 0, as a TexFAT volume may be: fsd
+# cannot tell which bitmap is live, so the volume is read-only. fsd does
+# not check the boot checksum, so it is left as it was.
+VBR = {"vtwofat": (110, 2)}
 
 
 def run_extent(label):
@@ -792,6 +864,14 @@ def run_extent(label):
         return [(f"{label}: room for VF and VG in the root", False)], []
     for (at, field, value), was in zip(places, good):
         patch_root(vol, at + field, struct.pack(width[field], value(struct.unpack(width[field], was)[0], vol)))
+    vbr_was = None
+    if label in VBR:
+        off, value = VBR[label]
+        with open(IMAGE, "r+b") as fh:
+            fh.seek(start * 512 + off)
+            vbr_was = fh.read(1)
+            fh.seek(start * 512 + off)
+            fh.write(bytes([value]))
     # NEWB first, so its cluster is not the one rm gives back.
     cmds = (["echo new > /NEWB", "rm /VF", "ls /"] if writable else
             ["echo new > /NEWB", "write /VF", "echo t > /VF", "mv -f /VG /VF", "mv /VG /VH", "touch /VT", "rm /VF", "ls /"])
@@ -801,6 +881,10 @@ def run_extent(label):
         return [], []
     for (at, field, _), was in zip(places, good):
         patch_root(vol, at + field, was)
+    if vbr_was is not None:
+        with open(IMAGE, "r+b") as fh:
+            fh.seek(start * 512 + VBR[label][0])
+            fh.write(vbr_was)
     if second:
         vol = Volume(IMAGE, start)
         d = vol.data(vol.chain(vol.root))
@@ -845,7 +929,7 @@ def patch_root(vol, at, data):
 
 def main():
     checks, notes = [], []
-    for run in (run_long, run_shape, run_rename, run_valloc, run_vcross,
+    for run in (run_long, run_shape, run_rename, run_valloc, run_vcross, run_vmeet,
                 *(lambda label=label: run_extent(label) for label in EXTENTS)):
         try:
             c, n = run()
