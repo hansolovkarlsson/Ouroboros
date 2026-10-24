@@ -75,7 +75,11 @@ const ET_ALLOC_BITMAP: u8 = 0x81; // the allocation bitmap (a system file in roo
 const ET_FILE: u8 = 0x85; // primary entry of a file/dir set
 const ET_STREAM_EXT: u8 = 0xc0; // first secondary: cluster/size/flags
 const ET_FILE_NAME: u8 = 0xc1; // secondary: 15 UTF-16 name chars
-const ET_VENDOR_ALLOC: u8 = 0xe1; // secondary: a vendor's clusters, laid out as the Stream's
+const ET_UPCASE: u8 = 0x82; // the up-case table (a system file in root)
+/// An entry-type byte's category and importance bits (`0x60`) plus its in-use
+/// bit: a benign secondary (vendor extension `0xE0`, vendor allocation
+/// `0xE1`, and any later one) has all three set while it is in use.
+const ET_BENIGN_SECONDARY: u8 = 0xe0;
 
 /// The "in use" bit on an entry-type byte. Clearing it marks the entry deleted
 /// (`0x85` -> `0x05`, `0xC0` -> `0x40`, `0xC1` -> `0x41`) - how a set is removed.
@@ -137,6 +141,47 @@ struct DirEntry {
     valid: u64,
     first_cluster: u32,
     contiguous: bool,
+    /// The set holds a benign secondary with AllocationPossible set (a
+    /// vendor allocation, 0xE1, as a camera writes): clusters of its own,
+    /// which [`Fs::delete_set`] frees with the set's.
+    allocs: bool,
+}
+
+/// What becomes of the clusters a set names when [`Fs::delete_set`] deletes
+/// it: every caller says, so no path deletes a set and forgets them.
+#[derive(Clone, Copy)]
+enum SetGoes {
+    /// A set written elsewhere carries them (a rename).
+    Renamed,
+    /// Gone for good (`rm`, `rmdir`, the set a replacing `mv` deletes):
+    /// freed, but for any the surviving set (a replacing `mv`'s source, at
+    /// its slots) also names, which a cross-linked volume can give two sets.
+    Removed { survivor: Option<(DirEntry, SetAt)> },
+}
+
+/// An allocation a benign secondary names, decoded by [`allocation`].
+#[derive(Clone, Copy)]
+struct Alloc {
+    first: u32,
+    contiguous: bool,
+    size: u64,
+}
+
+/// The allocation the 32-byte entry `raw` names when it is a benign
+/// secondary with AllocationPossible set, in use or deleted (a set
+/// [`Fs::delete_set`] has just cleared is read back this way), and of a
+/// DataLength above 0 (none, as a Stream's: `walk_dir`). The one decode of
+/// its fields: FirstCluster and DataLength where a Stream has them.
+fn allocation(raw: &[u8]) -> Option<Alloc> {
+    if ((raw[0] | ET_IN_USE) & ET_BENIGN_SECONDARY) != ET_BENIGN_SECONDARY || raw[1] & SECONDARY_ALLOC_POSSIBLE == 0 {
+        return None;
+    }
+    let size = u64::from_le_bytes([raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30], raw[31]]);
+    (size > 0).then(|| Alloc {
+        first: u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]),
+        contiguous: raw[1] & NO_FAT_CHAIN != 0,
+        size,
+    })
 }
 
 /// The most bytes a listed name takes: 255, as every other arm's names (ext2's
@@ -320,6 +365,11 @@ pub struct Fs {
     bitmap_first_cluster: u32,
     /// The allocation bitmap's size in bytes (`DataLength` of its `0x81` entry).
     bitmap_bytes: u64,
+    /// The up-case table's first cluster and size (its `0x82` entry), `0` if
+    /// not found: with the bitmap and the root's first cluster, the volume's
+    /// own clusters, which [`free_data`](Self::free_data) never frees.
+    upcase_first_cluster: u32,
+    upcase_bytes: u64,
     /// Where the last read's walk along a file's clusters ended, so the next
     /// read of the same file at or past it resumes there - `fat32::Fs`'s
     /// `read_cursor`, for the same reason. A file `fsd` writes is always
@@ -453,6 +503,8 @@ impl Fs {
             root_cluster,
             bitmap_first_cluster: 0,
             bitmap_bytes: 0,
+            upcase_first_cluster: 0,
+            upcase_bytes: 0,
             read_cursor: None,
             write_cursor: None,
             fat_cache: None,
@@ -467,9 +519,10 @@ impl Fs {
         Ok(fs)
     }
 
-    /// Find the allocation bitmap by scanning the root directory for its `0x81`
-    /// entry (which always precedes any file entry). Records its first cluster
-    /// and byte length; leaves them `0` if none is found.
+    /// Find the allocation bitmap and the up-case table by scanning the root
+    /// directory for their `0x81` and `0x82` entries. Records each one's first
+    /// cluster and byte length, until both are found or the directory ends;
+    /// leaves them `0` if one is not found.
     fn locate_bitmap(&mut self) -> Result<(), Error> {
         let mut cluster = self.root_cluster;
         loop {
@@ -480,14 +533,21 @@ impl Fs {
                 for raw in buf.chunks_exact(ENTRY_SIZE) {
                     match raw[0] {
                         0x00 => return Ok(()), // end of directory - no bitmap
-                        ET_ALLOC_BITMAP => {
-                            self.bitmap_first_cluster =
-                                u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
-                            self.bitmap_bytes = u64::from_le_bytes([
+                        t @ (ET_ALLOC_BITMAP | ET_UPCASE) => {
+                            let first = u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
+                            let bytes = u64::from_le_bytes([
                                 raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30],
                                 raw[31],
                             ]);
-                            return Ok(());
+                            // The first of each, as before for the bitmap.
+                            if t == ET_ALLOC_BITMAP && self.bitmap_first_cluster == 0 {
+                                (self.bitmap_first_cluster, self.bitmap_bytes) = (first, bytes);
+                            } else if t == ET_UPCASE && self.upcase_first_cluster == 0 {
+                                (self.upcase_first_cluster, self.upcase_bytes) = (first, bytes);
+                            }
+                            if self.bitmap_first_cluster != 0 && self.upcase_first_cluster != 0 {
+                                return Ok(());
+                            }
                         }
                         _ => {}
                     }
@@ -756,6 +816,7 @@ impl Fs {
             valid: 0,
             first_cluster: self.root_cluster,
             contiguous: false,
+            allocs: false,
         }
     }
 
@@ -802,6 +863,7 @@ impl Fs {
         let mut set_valid = 0u64;
         let mut set_cluster = 0u32;
         let mut set_contig = false;
+        let mut set_allocs = false;
         let mut name = [0u16; LONG_NAME_MAX];
         let mut name_cap = 0usize; // total chars the set declares (NameLength)
         let mut name_len = 0usize; // chars filled so far
@@ -848,6 +910,7 @@ impl Fs {
                             set_valid = 0;
                             set_cluster = 0;
                             set_contig = false;
+                            set_allocs = false;
                             name_cap = 0;
                             name_len = 0;
                             // No secondaries is no Stream: no set.
@@ -893,7 +956,9 @@ impl Fs {
                         _ => {
                             // A secondary we don't model (a vendor extension
                             // 0xE0, a vendor allocation 0xE1) - still counted
-                            // so the set closes.
+                            // so the set closes, and noted when it names
+                            // clusters, which go with the set.
+                            set_allocs |= allocation(raw).is_some();
                             secondaries_left = secondaries_left.saturating_sub(1);
                         }
                     }
@@ -917,6 +982,7 @@ impl Fs {
                             valid: if set_is_dir { set_size } else { set_valid.min(set_size) },
                             first_cluster: if held { set_cluster } else { 0 },
                             contiguous: held && set_contig,
+                            allocs: set_allocs,
                         };
                         if f(&entry, &name[..name_len], set_start, set_len) {
                             return Ok(());
@@ -1019,6 +1085,22 @@ impl Fs {
 
     fn in_heap(&self, cluster: u32) -> bool {
         cluster >= 2 && cluster - 2 < self.cluster_count
+    }
+
+    /// One of the volume's own clusters: the allocation bitmap's, the up-case
+    /// table's, or the root directory's first. No set names them, so an
+    /// allocation that reaches one is damage, and freeing it would let the
+    /// allocator hand out its own bitmap (the max review of 2026-10-23, after
+    /// ext2's `is_metadata`). The root's later clusters are not known here
+    /// without a walk of its chain; a damaged run can still reach them, as it
+    /// can any live file's.
+    fn is_system(&self, cluster: u32) -> bool {
+        let in_run = |first: u32, bytes: u64| {
+            first >= 2 && cluster >= first && ((cluster - first) as u64) < bytes.div_ceil(self.cluster_bytes())
+        };
+        cluster == self.root_cluster
+            || in_run(self.bitmap_first_cluster, self.bitmap_bytes)
+            || in_run(self.upcase_first_cluster, self.upcase_bytes)
     }
 
     /// Resolve an absolute, `/`-separated path to its entry set. Matching is
@@ -1358,34 +1440,34 @@ impl Fs {
         Err(Error::DiskFull)
     }
 
-    /// Free a data allocation (none for a first cluster below 2: an entry of
-    /// size 0 has none, `walk_dir` giving it no cluster): clear each
-    /// cluster's bitmap bit (and, for a
-    /// FAT-chained allocation, its FAT entry). Handles both a file we created
-    /// (FAT-chained) and a contiguous one another tool wrote (`NoFatChain`,
-    /// walked by count from `size`).
+    /// Free a data allocation (none for a first cluster outside the heap: an
+    /// entry of size 0 has none, `walk_dir` giving it no cluster, and a
+    /// damaged one names none of the volume's): clear each cluster's bitmap
+    /// bit (and, for a FAT-chained allocation, its FAT entry). Handles both a
+    /// file we created (FAT-chained) and a contiguous one another tool wrote
+    /// (`NoFatChain`, walked by count from `size`). Either stops at the heap's
+    /// end and at the volume's own clusters ([`is_system`](Self::is_system)):
+    /// what lies past is damage, left allocated, a leak a fsck finds.
     fn free_data(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
-        if first < 2 {
+        if !self.in_heap(first) {
             return Ok(());
         }
+        let n = size.div_ceil(self.cluster_bytes());
         if contiguous {
-            let cluster_bytes = self.cluster_bytes();
-            let n = size.div_ceil(cluster_bytes.max(1)) as u32;
-            for i in 0..n {
-                let c = first + i;
-                if !self.in_heap(c) {
-                    break;
-                }
-                self.bitmap_set(c, false)?;
+            let mut end = first;
+            while ((end - first) as u64) < n && self.in_heap(end) && !self.is_system(end) {
+                end += 1;
             }
+            self.bitmap_clear_run(first, end)
         } else {
             // To its size, at most: a link past it (a crash between a chain's
             // extension and its size write, or another tool) may name a
             // cluster since given to another file, and a loop has no end.
-            // What lies past the size stays allocated, a leak a fsck finds.
-            let n = size.div_ceil(self.cluster_bytes());
             let mut c = first;
             for i in 0..n {
+                if self.is_system(c) {
+                    break;
+                }
                 let next = self.next_cluster(c)?;
                 self.bitmap_set(c, false)?;
                 self.write_fat_entry(c, 0)?;
@@ -1394,6 +1476,33 @@ impl Fs {
                     _ => break,
                 }
             }
+            Ok(())
+        }
+    }
+
+    /// Clear the bitmap bits of clusters `first..end` (all in the heap), one
+    /// read and one write a bitmap sector, which holds 4,096 clusters' bits:
+    /// a cluster at a time, a contiguous run of thousands (a camera's file on
+    /// the Pi's stick, each sector a USB round trip) kept `rm` past the
+    /// supervisor's wedge limit, with the set still live over what it had
+    /// cleared (the max review of 2026-10-23).
+    fn bitmap_clear_run(&mut self, first: u32, end: u32) -> Result<(), Error> {
+        let sector_of = |c: u32| ((c - 2) / 8) as u64 / SECTOR_SIZE as u64;
+        let mut c = first;
+        while c < end {
+            let sector = sector_of(c);
+            let lba = self.bitmap_sector_lba(((c - 2) / 8) as u64)?;
+            let mut buf = [0u8; SECTOR_SIZE];
+            self.disk.read_sector(lba, &mut buf)?;
+            while c < end && sector_of(c) == sector {
+                let bit = c - 2;
+                if (bit / 8) as u64 >= self.bitmap_bytes {
+                    return Err(Error::Io(DiskError::Io)); // past the bitmap, as bitmap_set
+                }
+                buf[((bit / 8) as u64 % SECTOR_SIZE as u64) as usize] &= !(1u8 << (bit % 8));
+                c += 1;
+            }
+            self.disk.write_sector(lba, &buf)?;
         }
         Ok(())
     }
@@ -1662,6 +1771,28 @@ impl Fs {
             .map_err(|error| CreateFailed { error, written: true })
     }
 
+    /// The entries of the set at `at`, from its entry `from` on, each given
+    /// to `f` with its index in the set, until `f` answers false; returns the
+    /// index after the last one given (`at.len` when it gave them all). One
+    /// read a sector the set lies in. The one walk of a set's slots for a
+    /// reader ([`renamed_set`](Self::renamed_set), [`delete_set`](Self::delete_set)).
+    fn read_slots(&mut self, at: SetAt, from: usize, mut f: impl FnMut(usize, &[u8]) -> bool) -> Result<usize, Error> {
+        let mut cur = SlotCursor::new(at.dir_cluster, at.dir_contiguous);
+        let mut sec = [0u8; SECTOR_SIZE];
+        let mut sec_lba = None;
+        for i in from..at.len {
+            let (lba, off) = self.slot_at(&mut cur, at.slot + i)?.ok_or(Error::NotFound)?;
+            if sec_lba != Some(lba) {
+                self.disk.read_sector(lba, &mut sec)?;
+                sec_lba = Some(lba);
+            }
+            if !f(i, &sec[off..off + ENTRY_SIZE]) {
+                return Ok(i + 1);
+            }
+        }
+        Ok(at.len)
+    }
+
     /// The set a rename writes for `entry`, whose set lies at `at`, under
     /// `name`, into `buf`; returns its entry count. The File entry and every
     /// secondary past the name are the old set's, as the disk holds them:
@@ -1687,17 +1818,10 @@ impl Fs {
         if at.len < 2 || at.len > WHOLE_SET_ENTRIES {
             return Err(Error::Io(DiskError::Io));
         }
-        let mut cur = SlotCursor::new(at.dir_cluster, at.dir_contiguous);
-        let mut sec = [0u8; SECTOR_SIZE];
-        let mut sec_lba = None;
-        for i in 0..at.len {
-            let (lba, off) = self.slot_at(&mut cur, at.slot + i)?.ok_or(Error::NotFound)?;
-            if sec_lba != Some(lba) {
-                self.disk.read_sector(lba, &mut sec)?;
-                sec_lba = Some(lba);
-            }
-            buf[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE].copy_from_slice(&sec[off..off + ENTRY_SIZE]);
-        }
+        self.read_slots(at, 0, |i, raw| {
+            buf[i * ENTRY_SIZE..(i + 1) * ENTRY_SIZE].copy_from_slice(raw);
+            true
+        })?;
         // `walk_dir` closes a set only in the spec's shape: File, Stream, the
         // name, then any other secondaries. A check that the slots still hold
         // it, as in patch_stream_ext.
@@ -2133,15 +2257,89 @@ impl Fs {
         self.patch_stream_ext(at, head_cluster, valid.max(write_end), new_size)
     }
 
-    /// Mark every entry of a set deleted by clearing its in-use bit (`0x85` ->
-    /// `0x05`, `0xC0` -> `0x40`, `0xC1` -> `0x41`) - how exFAT removes a set (no
-    /// `0xE5` tombstone byte like FAT). One read-modify-write a sector.
-    fn delete_set(&mut self, at: SetAt) -> Result<(), Error> {
+    /// Mark every entry of `entry`'s set, at `at`, deleted by clearing its
+    /// in-use bit (`0x85` -> `0x05`, `0xC0` -> `0x40`, `0xC1` -> `0x41`) - how
+    /// exFAT removes a set (no `0xE5` tombstone byte like FAT), one
+    /// read-modify-write a sector; then, as `goes` says, leave its clusters
+    /// to the set that carries them or free them.
+    ///
+    /// Freed AFTER the set is deleted, as the spec orders a removal (the
+    /// entry, then the FAT and bitmap): an error or a crash between leaves
+    /// clusters no set names, a leak a fsck finds, never a live set over
+    /// clusters the allocator may hand out again. Freed are the Stream's (the
+    /// file's data, or a directory's extent) and every allocation a benign
+    /// secondary names (a vendor allocation, 0xE1), read back from the
+    /// deleted slots, which `rm`, `rmdir` and a replacing `mv` left set in the
+    /// bitmap until 2026-10-23. None the surviving set names is freed, and a
+    /// secondary's that is the Stream's own first cluster is freed once.
+    fn delete_set(&mut self, at: SetAt, entry: &DirEntry, goes: SetGoes) -> Result<(), Error> {
         self.rewrite_slots(at, || Error::NotFound, |sec, _, off, k| {
             for j in 0..k {
                 sec[off + j * ENTRY_SIZE] &= !ET_IN_USE;
             }
-        })
+        })?;
+        let SetGoes::Removed { survivor } = goes else {
+            return Ok(());
+        };
+        if !self.survivor_names(survivor, entry.first_cluster)? {
+            self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
+        }
+        if !entry.allocs {
+            return Ok(()); // no secondary names clusters: no second read
+        }
+        // The slots still hold the set this walk took them for, deleted:
+        // a File entry, then its Stream.
+        let mut shaped = true;
+        self.read_slots(at, 0, |i, raw| {
+            let deleted = (if i == 0 { ET_FILE } else { ET_STREAM_EXT }) & !ET_IN_USE;
+            shaped &= raw[0] == deleted;
+            i == 0
+        })?;
+        if !shaped {
+            return Err(Error::Io(DiskError::Io));
+        }
+        // A few at a time, so the buffer stays small whatever the set's count.
+        let mut from = 2;
+        while from < at.len {
+            let mut batch = [None; 8];
+            let mut n = 0;
+            from = self.read_slots(at, from, |_, raw| {
+                if let Some(a) = allocation(raw) {
+                    batch[n] = Some(a);
+                    n += 1;
+                }
+                n < batch.len()
+            })?;
+            for a in batch.into_iter().flatten() {
+                if a.first != entry.first_cluster && !self.survivor_names(survivor, a.first)? {
+                    self.free_data(a.first, a.contiguous, a.size)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the set surviving a replacing `mv` names an allocation whose
+    /// first cluster is `first`: its data's, or one a benign secondary of its
+    /// set (live, at its slots) names. A cross-linked volume, or a retry of an
+    /// `mv` that failed after writing its new set, gives two sets the same
+    /// clusters, and freeing them under the survivor would hand its data out
+    /// again.
+    fn survivor_names(&mut self, survivor: Option<(DirEntry, SetAt)>, first: u32) -> Result<bool, Error> {
+        let Some((kept, kept_at)) = survivor else {
+            return Ok(false);
+        };
+        if first < 2 || kept.first_cluster == first {
+            return Ok(first >= 2);
+        }
+        let mut named = false;
+        if kept.allocs {
+            self.read_slots(kept_at, 2, |_, raw| {
+                named |= allocation(raw).is_some_and(|a| a.first == first);
+                !named
+            })?;
+        }
+        Ok(named)
     }
 
     /// Create an empty subdirectory. Fails if the name exists. An exFAT
@@ -2165,8 +2363,9 @@ impl Fs {
         Ok(made?)
     }
 
-    /// Remove a file (rejects a directory with `NotAFile`). Frees its clusters
-    /// (bitmap + FAT) and its vendor allocations', then deletes its entry set.
+    /// Remove a file (rejects a directory with `NotAFile`): deletes its entry
+    /// set, then frees its clusters (bitmap + FAT) and its vendor
+    /// allocations' ([`delete_set`](Self::delete_set)).
     pub fn rm(&mut self, path: &str) -> Result<(), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
         let parent = self.find(parent_path)?;
@@ -2177,52 +2376,12 @@ impl Fs {
         if entry.is_dir {
             return Err(Error::NotAFile);
         }
-        self.free_vendor_allocs(at, entry.first_cluster)?;
-        self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
-        self.delete_set(at)
-    }
-
-    /// Free the clusters each vendor allocation entry (0xE1) of the set at
-    /// `at` names: an allocation of its own, FirstCluster, DataLength and
-    /// NoFatChain where a Stream has them, freed as a Stream's are
-    /// ([`free_data`](Self::free_data), bounded by the volume). For a set that
-    /// goes for good (`rm`, `rmdir`, the set a replacing `mv` deletes), read
-    /// before it is deleted; a rename carries them in the new set
-    /// ([`renamed_set`](Self::renamed_set)). Until 2026-10-23 nothing freed
-    /// them, and they stayed set in the bitmap with no set naming them. One
-    /// whose first cluster is `spare` is left: the file's own data, freed by
-    /// its caller or a replacing `mv`'s surviving file on a cross-linked
-    /// volume.
-    fn free_vendor_allocs(&mut self, at: SetAt, spare: u32) -> Result<(), Error> {
-        let mut cur = SlotCursor::new(at.dir_cluster, at.dir_contiguous);
-        let mut sec = [0u8; SECTOR_SIZE];
-        let mut sec_lba = None;
-        for i in 2..at.len {
-            let (lba, off) = self.slot_at(&mut cur, at.slot + i)?.ok_or(Error::NotFound)?;
-            if sec_lba != Some(lba) {
-                self.disk.read_sector(lba, &mut sec)?;
-                sec_lba = Some(lba);
-            }
-            let raw = &sec[off..off + ENTRY_SIZE];
-            if raw[0] != ET_VENDOR_ALLOC || raw[1] & SECONDARY_ALLOC_POSSIBLE == 0 {
-                continue;
-            }
-            let contiguous = raw[1] & NO_FAT_CHAIN != 0;
-            let first = u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
-            let size = u64::from_le_bytes([
-                raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30], raw[31],
-            ]);
-            // DataLength 0 is no allocation, as a Stream's (walk_dir).
-            if size > 0 && first != spare {
-                self.free_data(first, contiguous, size)?;
-            }
-        }
-        Ok(())
+        self.delete_set(at, &entry, SetGoes::Removed { survivor: None })
     }
 
     /// Remove an empty subdirectory (rejects a non-empty one, a file, and the
-    /// root). Frees its cluster(s) and its vendor allocations', then deletes
-    /// its entry set.
+    /// root): deletes its entry set, then frees its cluster(s) and its vendor
+    /// allocations' ([`delete_set`](Self::delete_set)).
     pub fn rmdir(&mut self, path: &str) -> Result<(), Error> {
         split_parent(path).ok_or(Error::CannotRemoveRoot)?;
         let dir = self.dir_at(path)?;
@@ -2243,12 +2402,9 @@ impl Fs {
         };
         // Its extent, which `room` found its size: none for size 0, whatever
         // cluster the entry names.
-        if extent.clusters > 0 {
-            let bytes = extent.clusters * self.cluster_bytes();
-            self.free_data(entry.first_cluster, entry.contiguous, bytes)?;
-        }
-        self.free_vendor_allocs(at, entry.first_cluster)?;
-        self.delete_set(at)
+        let mut gone = entry;
+        gone.size = extent.clusters * self.cluster_bytes();
+        self.delete_set(at, &gone, SetGoes::Removed { survivor: None })
     }
 
     /// Rename or move a file/directory. Re-points a new entry set at `src`'s
@@ -2315,27 +2471,21 @@ impl Fs {
             // fills a free run and moves nothing - so the recorded `dst_at`
             // still addresses the old set afterwards.
             self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
-            if !same_set {
-                // `dst`'s own, read before its set goes; `src`'s new set
-                // carries `src`'s.
-                self.free_vendor_allocs(dst_at, src_entry.first_cluster)?;
+            if same_set {
+                // A case-only rename: the new set carries this one's clusters.
+                return self.delete_set(dst_at, &dst_entry, SetGoes::Renamed);
             }
-            self.delete_set(dst_at)?;
-            if !same_set {
-                self.delete_set(src_at)?;
-                // Two guards: a case-only rename re-links the same set, and a
-                // cross-linked image can give two sets the same first cluster.
-                // Freeing then destroys the data the surviving name points at.
-                if dst_entry.first_cluster != src_entry.first_cluster {
-                    self.free_data(dst_entry.first_cluster, dst_entry.contiguous, dst_entry.size)?;
-                }
-            }
-            return Ok(());
+            // `dst`'s set goes for good, its clusters freed but for any `src`'s
+            // set names (still live at `src_at`: a cross-linked image), then
+            // `src`'s, which its new set carries.
+            let survivor = Some((src_entry, src_at));
+            self.delete_set(dst_at, &dst_entry, SetGoes::Removed { survivor })?;
+            return self.delete_set(src_at, &src_entry, SetGoes::Renamed);
         }
 
         // Link dst to the same clusters first, then unlink src.
         self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
-        self.delete_set(src_at)
+        self.delete_set(src_at, &src_entry, SetGoes::Renamed)
     }
 
     /// Write `src`'s set, at `src_at`, again under `name` in `dir`
