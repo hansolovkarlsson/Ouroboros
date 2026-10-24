@@ -14,7 +14,7 @@
 //! chain. Creating an
 //! entry ([`Fs::create_entry`]) builds a full set with both required checksums -
 //! the whole-set `SetChecksum` and the up-cased `NameHash`; deleting one
-//! ([`Fs::delete_set`]) clears each entry's in-use bit. Same corruption
+//! ([`Fs::unlink_set`]) clears each entry's in-use bit. Same corruption
 //! discipline as the FAT32 write arc: claim before use, write the new thing
 //! before freeing the old, validate names up front. Verified against a real
 //! driver end to end (macOS mounts + `fsck_exfat` passes; a copied binary reads
@@ -153,18 +153,18 @@ struct DirEntry {
 enum SetGoes {
     /// A set written elsewhere carries them (a rename).
     Renamed,
-    /// Gone for good (`rm`, `rmdir`, the set a replacing `mv` deletes), the
-    /// set `entry`: freed, but for any that overlap `kept`, the runs the
-    /// surviving set names (a replacing `mv`'s source), which a cross-linked
-    /// volume can give two sets.
-    Removed { entry: DirEntry, kept: Runs },
+    /// Gone for good (`rm`, `rmdir`): freed, but for any that overlap
+    /// `kept`, the runs a surviving set names ([`Fs::free_runs`]).
+    Removed { kept: Runs },
 }
 
-/// The allocations a set names ([`Fs::runs_of`]), read once: its Stream's
-/// and the first [`Runs::MAX`] its benign secondaries name. `more` when it
-/// names more than that, and then every run is taken to overlap one of them,
-/// so a removal beside such a set (none a camera writes) leaks rather than
-/// frees under it.
+/// Allocations a set names, read once: its Stream's when it names a cluster
+/// and the first [`Runs::MAX`] its benign secondaries name
+/// ([`Fs::runs_of`]), or the secondaries' alone ([`Fs::unlink_set`]). `more`
+/// when it names more than that. A surviving set's that is taken to overlap
+/// every run, so a removal beside it (none a camera writes) leaks rather
+/// than frees under it; a removed set's past the first are left allocated,
+/// a leak a fsck finds.
 #[derive(Clone, Copy)]
 struct Runs {
     runs: [Option<Alloc>; Runs::MAX],
@@ -193,11 +193,6 @@ struct Alloc {
     size: u64,
 }
 
-/// The allocation the 32-byte entry `raw` names when it is a benign
-/// secondary with AllocationPossible set, in use or deleted (a set
-/// [`Fs::delete_set`] has just cleared is read back this way), and of a
-/// DataLength above 0 (none, as a Stream's: `walk_dir`). The one decode of
-/// its fields: FirstCluster and DataLength where a Stream has them.
 impl Alloc {
     /// The data `entry`'s Stream names, as an allocation.
     fn stream(entry: &DirEntry) -> Alloc {
@@ -205,6 +200,10 @@ impl Alloc {
     }
 }
 
+/// The allocation the 32-byte entry `raw` names when it is a benign
+/// secondary with AllocationPossible set, in use or deleted, and of a
+/// DataLength above 0 (none, as a Stream's: `walk_dir`). The one decode of
+/// its fields: FirstCluster and DataLength where a Stream has them.
 fn allocation(raw: &[u8]) -> Option<Alloc> {
     if ((raw[0] | ET_IN_USE) & ET_BENIGN_SECONDARY) != ET_BENIGN_SECONDARY || raw[1] & SECONDARY_ALLOC_POSSIBLE == 0 {
         return None;
@@ -216,6 +215,11 @@ fn allocation(raw: &[u8]) -> Option<Alloc> {
         size,
     })
 }
+
+/// The largest directory the format allows (a directory's DataLength is at
+/// most 256 MiB in the spec's Stream Extension entry), which
+/// bounds [`Fs::locate_tables`]' scan of the root.
+const DIR_MAX_BYTES: u64 = 256 << 20;
 
 /// The most bytes a listed name takes: 255, as every other arm's names (ext2's
 /// are bytes, FAT32's rendered a byte a unit), so a name always fits one
@@ -556,13 +560,26 @@ impl Fs {
     /// Find the allocation bitmap and the up-case table by scanning the root
     /// directory for their `0x81` and `0x82` entries. Records each one's first
     /// cluster and byte length, until both are found or the directory ends;
-    /// leaves them `0` if one is not found. At most the heap's cluster count
-    /// of clusters: a root whose chain loops on itself ended no scan, and the
-    /// mount hung (the resumed max review of 2026-10-23); its tables are
-    /// then the ones found.
+    /// leaves them `0` if one is not found. The first entry of each is taken,
+    /// damaged or not: a first bitmap entry naming cluster 0 was passed over
+    /// for the one after it, on a volume of two FATs the second FAT's bitmap
+    /// (the high review of 2026-10-24); [`check_extents`](Self::check_extents)
+    /// drops a damaged one.
+    ///
+    /// A root whose chain loops on itself ended no scan, and the mount hung
+    /// (the resumed max review of 2026-10-23); bounding the scan by the
+    /// heap's cluster count still read a 128 GB stick's sectors a quarter of
+    /// a billion times (the high review). So the scan stops where the chain
+    /// comes back to a cluster it passed (Brent's test: a mark moved to the
+    /// walk at every power of two of steps, so a loop is met within twice
+    /// its length and lead-in), and at the largest directory the format
+    /// allows, [`DIR_MAX_BYTES`]; its tables are then the ones found.
     fn locate_tables(&mut self) -> Result<(), Error> {
+        let (mut bitmap, mut upcase) = (false, false);
+        let most = (DIR_MAX_BYTES / self.cluster_bytes()).min(self.cluster_count as u64);
         let mut cluster = self.root_cluster;
-        for _ in 0..self.cluster_count {
+        let (mut mark, mut power, mut steps) = (cluster, 1u64, 0u64);
+        for _ in 0..most {
             let lba = self.cluster_to_lba(cluster);
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
@@ -576,13 +593,14 @@ impl Fs {
                                 raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30],
                                 raw[31],
                             ]);
-                            // The first of each, as before for the bitmap.
-                            if t == ET_ALLOC_BITMAP && self.bitmap_first_cluster == 0 {
+                            if t == ET_ALLOC_BITMAP && !bitmap {
+                                bitmap = true;
                                 (self.bitmap_first_cluster, self.bitmap_bytes) = (first, bytes);
-                            } else if t == ET_UPCASE && self.upcase_first_cluster == 0 {
+                            } else if t == ET_UPCASE && !upcase {
+                                upcase = true;
                                 (self.upcase_first_cluster, self.upcase_bytes) = (first, bytes);
                             }
-                            if self.bitmap_first_cluster != 0 && self.upcase_first_cluster != 0 {
+                            if bitmap && upcase {
                                 return Ok(());
                             }
                         }
@@ -593,6 +611,13 @@ impl Fs {
             match self.next_cluster(cluster)? {
                 Some(next) => cluster = next,
                 None => return Ok(()),
+            }
+            if cluster == mark {
+                return Ok(()); // the chain loops
+            }
+            steps += 1;
+            if steps == power {
+                (mark, power, steps) = (cluster, power * 2, 0);
             }
         }
         Ok(())
@@ -1774,7 +1799,7 @@ impl Fs {
     /// The one copy of the arithmetic that splits a run at sector edges (a
     /// sector belongs to one cluster, so a run's slots in it are adjacent),
     /// for [`write_set_at`](Self::write_set_at) and
-    /// [`delete_set`](Self::delete_set). `missing` is the error for a slot past
+    /// [`unlink_set`](Self::unlink_set). `missing` is the error for a slot past
     /// the directory's clusters.
     fn rewrite_slots(
         &mut self,
@@ -1859,8 +1884,7 @@ impl Fs {
     /// to `f` with its index in the set, until `f` answers `Break`; returns
     /// the index after the last one given (`at.len` when it gave them all).
     /// One read a sector the set lies in. For a reader that wants the bytes
-    /// alone ([`renamed_set`](Self::renamed_set), [`delete_set`](Self::delete_set),
-    /// [`runs_of`](Self::runs_of)); `patch_stream_ext`, which writes back
+    /// alone ([`renamed_set`](Self::renamed_set), [`runs_of`](Self::runs_of)); `patch_stream_ext`, which writes back
     /// where it read, walks the slots itself.
     fn read_slots(
         &mut self,
@@ -2071,12 +2095,21 @@ impl Fs {
     /// one cluster such an entry named, whose FAT entry a tool leaves
     /// undefined, after a write following it as a link went into whatever
     /// cluster it named (the review of #316).
+    ///
+    /// A run that does not fit in the heap is damage, refused before any
+    /// link is written, as [`free_data`](Self::free_data) frees none of one:
+    /// `write_fat_entry` refused only the first cluster past the heap, after
+    /// every link inside it was written, over the links of the files whose
+    /// clusters the run's size reached (the high review of 2026-10-24).
     fn ensure_chained(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
         if !contiguous || first < 2 {
             return Ok(());
         }
-        let cluster_bytes = self.cluster_bytes();
-        let n = size.div_ceil(cluster_bytes) as u32;
+        let n = size.div_ceil(self.cluster_bytes());
+        if !self.in_heap(first) || (first - 2) as u64 + n > self.cluster_count as u64 {
+            return Err(Error::Io(DiskError::Io));
+        }
+        let n = n as u32;
         for i in 0..n {
             let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
             self.write_fat_entry(first + i, value)?;
@@ -2357,86 +2390,139 @@ impl Fs {
         self.patch_stream_ext(at, head_cluster, valid.max(write_end), new_size)
     }
 
+    /// Delete the set `entry`, at `at` ([`unlink_set`](Self::unlink_set)),
+    /// then, as `goes` says, leave its clusters to the set that carries them
+    /// or free them ([`free_runs`](Self::free_runs)). The caller has asked
+    /// [`writable`](Self::writable).
+    fn delete_set(&mut self, at: SetAt, entry: &DirEntry, goes: SetGoes) -> Result<(), Error> {
+        let secondaries = self.unlink_set(at)?;
+        match goes {
+            SetGoes::Renamed => Ok(()),
+            SetGoes::Removed { kept } => self.free_runs(Alloc::stream(entry), secondaries, &kept),
+        }
+    }
+
     /// Mark every entry of the set at `at` deleted by clearing its in-use
     /// bit (`0x85` -> `0x05`, `0xC0` -> `0x40`, `0xC1` -> `0x41`) - how exFAT
     /// removes a set (no `0xE5` tombstone byte like FAT), one
-    /// read-modify-write a sector; then, as `goes` says, leave its clusters
-    /// to the set that carries them or free them.
+    /// read-modify-write a sector - and return the allocations its benign
+    /// secondaries name (a vendor allocation, 0xE1), decoded from the bytes
+    /// as they are cleared: none when the slots are not a File entry and its
+    /// Stream. Until the high review of 2026-10-24 they were read back
+    /// afterwards, the shape checked last, so a set already deleted and its
+    /// data freed was answered an I/O error with its vendor clusters left.
+    fn unlink_set(&mut self, at: SetAt) -> Result<Runs, Error> {
+        let mut runs = Runs::NONE;
+        let mut shaped = true;
+        self.rewrite_slots(at, || Error::NotFound, |sec, i, off, k| {
+            for j in 0..k {
+                let raw = &mut sec[off + j * ENTRY_SIZE..off + (j + 1) * ENTRY_SIZE];
+                match i + j {
+                    0 => shaped &= raw[0] == ET_FILE,
+                    1 => shaped &= raw[0] == ET_STREAM_EXT,
+                    _ => {
+                        if let Some(a) = allocation(raw).filter(|_| shaped) {
+                            runs.add(a);
+                        }
+                    }
+                }
+                raw[0] &= !ET_IN_USE;
+            }
+        })?;
+        Ok(runs)
+    }
+
+    /// Free what a deleted set named: `stream`, its Stream's run (the file's
+    /// data, or a directory's extent), and `secondaries`, its benign
+    /// secondaries' ([`unlink_set`](Self::unlink_set)), which `rm`, `rmdir`
+    /// and a replacing `mv` left set in the bitmap until 2026-10-23.
     ///
     /// Freed AFTER the set is deleted, as the spec orders a removal (the
     /// entry, then the FAT and bitmap): an error or a crash between leaves
     /// clusters no set names, a leak a fsck finds, never a live set over
-    /// clusters the allocator may hand out again. Freed are the Stream's (the
-    /// file's data, or a directory's extent) and every allocation a benign
-    /// secondary names (a vendor allocation, 0xE1), read back from the
-    /// deleted slots, which `rm`, `rmdir` and a replacing `mv` left set in the
-    /// bitmap until 2026-10-23. None overlapping a run the surviving set names
-    /// is freed, nor a secondary's that overlaps the Stream's (damage: its run
-    /// past the Stream's may be another file's, and is left allocated, as a
-    /// free leaves what lies past the heap). The caller has asked
-    /// [`writable`](Self::writable).
-    fn delete_set(&mut self, at: SetAt, goes: SetGoes) -> Result<(), Error> {
-        self.rewrite_slots(at, || Error::NotFound, |sec, _, off, k| {
-            for j in 0..k {
-                sec[off + j * ENTRY_SIZE] &= !ET_IN_USE;
+    /// clusters the allocator may hand out again. None overlapping a run
+    /// `kept` names is freed, nor a secondary's that overlaps the Stream's
+    /// (damage: its run past the Stream's may be another file's, and is left
+    /// allocated, as a free leaves what lies past the heap). Every run is
+    /// judged before any is freed, while every chain is still linked.
+    fn free_runs(&mut self, stream: Alloc, secondaries: Runs, kept: &Runs) -> Result<(), Error> {
+        let free_stream = !self.holds(kept, stream)?;
+        let mut free = [false; Runs::MAX];
+        for (f, a) in free.iter_mut().zip(secondaries.runs) {
+            if let Some(a) = a {
+                *f = !self.overlaps(a, stream)? && !self.holds(kept, a)?;
             }
-        })?;
-        let SetGoes::Removed { entry, kept } = goes else {
-            return Ok(());
-        };
-        let stream = Alloc::stream(&entry);
-        if !self.holds(&kept, stream) {
+        }
+        if free_stream {
             self.free_data(stream.first, stream.contiguous, stream.size)?;
         }
-        if !entry.allocs {
-            return Ok(()); // no secondary names clusters: no second read
-        }
-        // The slots still hold the set this walk took them for, deleted:
-        // a File entry, then its Stream.
-        let mut shaped = true;
-        self.read_slots(at, 0, |i, raw| {
-            let deleted = (if i == 0 { ET_FILE } else { ET_STREAM_EXT }) & !ET_IN_USE;
-            shaped &= raw[0] == deleted;
-            if i == 0 { ControlFlow::Continue(()) } else { ControlFlow::Break(()) }
-        })?;
-        if !shaped {
-            return Err(Error::Io(DiskError::Io));
-        }
-        // A few at a time, so the buffer stays small whatever the set's count.
-        let mut from = 2;
-        while from < at.len {
-            let mut batch = [None; 8];
-            let mut n = 0;
-            from = self.read_slots(at, from, |_, raw| {
-                if let Some(a) = allocation(raw) {
-                    batch[n] = Some(a);
-                    n += 1;
-                }
-                if n < batch.len() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) }
-            })?;
-            for a in batch.into_iter().flatten() {
-                if !self.overlaps(a, stream) && !self.holds(&kept, a) {
-                    self.free_data(a.first, a.contiguous, a.size)?;
-                }
+        for (f, a) in free.into_iter().zip(secondaries.runs) {
+            if let (true, Some(a)) = (f, a) {
+                self.free_data(a.first, a.contiguous, a.size)?;
             }
         }
         Ok(())
     }
 
-    /// Whether two allocations overlap: one starts inside the other's run.
-    /// A FAT-chained run is known here only by its first cluster (a removed
-    /// Stream's chain is freed already, its links zero), so for one the test
-    /// is that its first cluster lies in the other's run or is the other's
-    /// first. One with no cluster of the heap overlaps nothing.
-    fn overlaps(&self, a: Alloc, b: Alloc) -> bool {
+    /// Whether two allocations share a cluster. A contiguous run is its
+    /// clusters by count; a FAT-chained one is walked, to its size
+    /// ([`any_cluster`](Self::any_cluster)). Two chains that meet go on as
+    /// one, since a cluster has one link, so they share a cluster exactly
+    /// when the one that ends first ends on a cluster of the other. A chain
+    /// was tested by its first cluster alone until the high review of
+    /// 2026-10-24: a run over a later cluster of a surviving chain was freed
+    /// under it. One with no cluster of the heap overlaps nothing.
+    fn overlaps(&mut self, a: Alloc, b: Alloc) -> Result<bool, Error> {
         if !self.in_heap(a.first) || !self.in_heap(b.first) {
-            return false;
+            return Ok(false);
         }
         let cb = self.cluster_bytes();
-        let within = |c: u32, r: Alloc| {
-            c == r.first || (r.contiguous && c > r.first && ((c - r.first) as u64) < r.size.div_ceil(cb))
-        };
-        within(a.first, b) || within(b.first, a)
+        let within = move |c: u32, r: Alloc| c >= r.first && ((c - r.first) as u64) < r.size.div_ceil(cb);
+        Ok(match (a.contiguous, b.contiguous) {
+            (true, true) => within(a.first, b) || within(b.first, a),
+            (true, false) => self.any_cluster(b, |c| within(c, a))?,
+            (false, true) => self.any_cluster(a, |c| within(c, b))?,
+            (false, false) => {
+                let (mut la, mut lb) = (a.first, b.first);
+                self.any_cluster(a, |c| {
+                    la = c;
+                    false
+                })?;
+                self.any_cluster(b, |c| {
+                    lb = c;
+                    false
+                })?;
+                self.any_cluster(a, |c| c == lb)? || self.any_cluster(b, |c| c == la)?
+            }
+        })
+    }
+
+    /// Whether `f` answers true for a cluster of the run `r`, in order: a
+    /// contiguous run's by count, a FAT-chained one's by its links, either
+    /// to its size and inside the heap, so a loop or a damaged size ends.
+    fn any_cluster(&mut self, r: Alloc, mut f: impl FnMut(u32) -> bool) -> Result<bool, Error> {
+        let n = r.size.div_ceil(self.cluster_bytes());
+        let mut c = r.first;
+        for i in 0..n {
+            if !self.in_heap(c) {
+                break;
+            }
+            if f(c) {
+                return Ok(true);
+            }
+            if i + 1 == n {
+                break;
+            }
+            if r.contiguous {
+                c += 1;
+            } else {
+                match self.next_cluster(c)? {
+                    Some(next) => c = next,
+                    None => break,
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Whether `a` overlaps a run of `kept`, the set surviving a replacing
@@ -2445,16 +2531,29 @@ impl Fs {
     /// them under the survivor would hand its data out again. By overlap,
     /// not by first cluster: a run sharing a later cluster with the
     /// survivor's was freed under it (the resumed max review of 2026-10-23).
-    fn holds(&self, kept: &Runs, a: Alloc) -> bool {
-        kept.more || kept.runs.iter().flatten().any(|&r| self.overlaps(a, r))
+    fn holds(&mut self, kept: &Runs, a: Alloc) -> Result<bool, Error> {
+        if kept.more {
+            return Ok(true);
+        }
+        for r in kept.runs.into_iter().flatten() {
+            if self.overlaps(a, r)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The runs `entry`'s set, at `at`, names ([`Runs`]): read once, before
     /// a replacing `mv` writes or deletes anything, where the set it deletes
-    /// asked the survivor's slots again for each of its allocations.
+    /// asked the survivor's slots again for each of its allocations. A Stream
+    /// naming no cluster (an empty file) takes no place: it took one of the
+    /// eight, and a set with eight vendor allocations then held every run
+    /// (the high review of 2026-10-24).
     fn runs_of(&mut self, at: SetAt, entry: &DirEntry) -> Result<Runs, Error> {
         let mut runs = Runs::NONE;
-        runs.add(Alloc::stream(entry));
+        if self.in_heap(entry.first_cluster) {
+            runs.add(Alloc::stream(entry));
+        }
         if entry.allocs {
             self.read_slots(at, 2, |_, raw| {
                 if let Some(a) = allocation(raw) {
@@ -2502,7 +2601,7 @@ impl Fs {
         if entry.is_dir {
             return Err(Error::NotAFile);
         }
-        self.delete_set(at, SetGoes::Removed { entry, kept: Runs::NONE })
+        self.delete_set(at, &entry, SetGoes::Removed { kept: Runs::NONE })
     }
 
     /// Remove an empty subdirectory (rejects a non-empty one, a file, and the
@@ -2527,7 +2626,7 @@ impl Fs {
         let Room::Sub(at, _) = self.room(&dir)? else {
             return Err(Error::CannotRemoveRoot);
         };
-        self.delete_set(at, SetGoes::Removed { entry, kept: Runs::NONE })
+        self.delete_set(at, &entry, SetGoes::Removed { kept: Runs::NONE })
     }
 
     /// Rename or move a file/directory. Re-points a new entry set at `src`'s
@@ -2599,19 +2698,24 @@ impl Fs {
             self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
             if same_set {
                 // A case-only rename: the new set carries this one's clusters.
-                return self.delete_set(dst_at, SetGoes::Renamed);
+                return self.delete_set(dst_at, &dst_entry, SetGoes::Renamed);
             }
-            // `src`'s set first, which its new set carries, so two sets name
-            // its clusters no longer than the one write; then `dst`'s for
-            // good, its clusters freed but for any overlapping what `src`'s
-            // set named (a cross-linked image).
-            self.delete_set(src_at, SetGoes::Renamed)?;
-            return self.delete_set(dst_at, SetGoes::Removed { entry: dst_entry, kept });
+            // `dst`'s old set first, so a failure from here on never leaves
+            // two sets of `dst`'s name, only `src`'s set beside its new one,
+            // as a plain `mv` that fails at its delete; then `src`'s; then
+            // the clusters `dst`'s named, but for any overlapping what
+            // `src`'s named (a cross-linked image), held until neither set
+            // is left to name them. `src`'s set went first from 2026-10-23,
+            // and a failure at it left two sets named `dst` (the high review
+            // of 2026-10-24).
+            let secondaries = self.unlink_set(dst_at)?;
+            self.delete_set(src_at, &src_entry, SetGoes::Renamed)?;
+            return self.free_runs(Alloc::stream(&dst_entry), secondaries, &kept);
         }
 
         // Link dst to the same clusters first, then unlink src.
         self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
-        self.delete_set(src_at, SetGoes::Renamed)
+        self.delete_set(src_at, &src_entry, SetGoes::Renamed)
     }
 
     /// Write `src`'s set, at `src_at`, again under `name` in `dir`
