@@ -75,6 +75,7 @@ const ET_ALLOC_BITMAP: u8 = 0x81; // the allocation bitmap (a system file in roo
 const ET_FILE: u8 = 0x85; // primary entry of a file/dir set
 const ET_STREAM_EXT: u8 = 0xc0; // first secondary: cluster/size/flags
 const ET_FILE_NAME: u8 = 0xc1; // secondary: 15 UTF-16 name chars
+const ET_VENDOR_ALLOC: u8 = 0xe1; // secondary: a vendor's clusters, laid out as the Stream's
 
 /// The "in use" bit on an entry-type byte. Clearing it marks the entry deleted
 /// (`0x85` -> `0x05`, `0xC0` -> `0x40`, `0xC1` -> `0x41`) - how a set is removed.
@@ -2165,7 +2166,7 @@ impl Fs {
     }
 
     /// Remove a file (rejects a directory with `NotAFile`). Frees its clusters
-    /// (bitmap + FAT), then deletes its entry set.
+    /// (bitmap + FAT) and its vendor allocations', then deletes its entry set.
     pub fn rm(&mut self, path: &str) -> Result<(), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;
         let parent = self.find(parent_path)?;
@@ -2176,12 +2177,52 @@ impl Fs {
         if entry.is_dir {
             return Err(Error::NotAFile);
         }
+        self.free_vendor_allocs(at, entry.first_cluster)?;
         self.free_data(entry.first_cluster, entry.contiguous, entry.size)?;
         self.delete_set(at)
     }
 
+    /// Free the clusters each vendor allocation entry (0xE1) of the set at
+    /// `at` names: an allocation of its own, FirstCluster, DataLength and
+    /// NoFatChain where a Stream has them, freed as a Stream's are
+    /// ([`free_data`](Self::free_data), bounded by the volume). For a set that
+    /// goes for good (`rm`, `rmdir`, the set a replacing `mv` deletes), read
+    /// before it is deleted; a rename carries them in the new set
+    /// ([`renamed_set`](Self::renamed_set)). Until 2026-10-23 nothing freed
+    /// them, and they stayed set in the bitmap with no set naming them. One
+    /// whose first cluster is `spare` is left: the file's own data, freed by
+    /// its caller or a replacing `mv`'s surviving file on a cross-linked
+    /// volume.
+    fn free_vendor_allocs(&mut self, at: SetAt, spare: u32) -> Result<(), Error> {
+        let mut cur = SlotCursor::new(at.dir_cluster, at.dir_contiguous);
+        let mut sec = [0u8; SECTOR_SIZE];
+        let mut sec_lba = None;
+        for i in 2..at.len {
+            let (lba, off) = self.slot_at(&mut cur, at.slot + i)?.ok_or(Error::NotFound)?;
+            if sec_lba != Some(lba) {
+                self.disk.read_sector(lba, &mut sec)?;
+                sec_lba = Some(lba);
+            }
+            let raw = &sec[off..off + ENTRY_SIZE];
+            if raw[0] != ET_VENDOR_ALLOC || raw[1] & SECONDARY_ALLOC_POSSIBLE == 0 {
+                continue;
+            }
+            let contiguous = raw[1] & NO_FAT_CHAIN != 0;
+            let first = u32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
+            let size = u64::from_le_bytes([
+                raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30], raw[31],
+            ]);
+            // DataLength 0 is no allocation, as a Stream's (walk_dir).
+            if size > 0 && first != spare {
+                self.free_data(first, contiguous, size)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Remove an empty subdirectory (rejects a non-empty one, a file, and the
-    /// root). Frees its cluster(s), then deletes its entry set.
+    /// root). Frees its cluster(s) and its vendor allocations', then deletes
+    /// its entry set.
     pub fn rmdir(&mut self, path: &str) -> Result<(), Error> {
         split_parent(path).ok_or(Error::CannotRemoveRoot)?;
         let dir = self.dir_at(path)?;
@@ -2206,6 +2247,7 @@ impl Fs {
             let bytes = extent.clusters * self.cluster_bytes();
             self.free_data(entry.first_cluster, entry.contiguous, bytes)?;
         }
+        self.free_vendor_allocs(at, entry.first_cluster)?;
         self.delete_set(at)
     }
 
@@ -2273,6 +2315,11 @@ impl Fs {
             // fills a free run and moves nothing - so the recorded `dst_at`
             // still addresses the old set afterwards.
             self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
+            if !same_set {
+                // `dst`'s own, read before its set goes; `src`'s new set
+                // carries `src`'s.
+                self.free_vendor_allocs(dst_at, src_entry.first_cluster)?;
+            }
             self.delete_set(dst_at)?;
             if !same_set {
                 self.delete_set(src_at)?;
