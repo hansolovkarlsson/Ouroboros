@@ -386,104 +386,149 @@ def run_rename():
     return checks, notes
 
 
-def with_valloc(s, first, size, contiguous):
-    """Set `s` with a Vendor Allocation entry (0xE1) after it, naming `size`
-    bytes from cluster `first`, contiguous (NoFatChain) or FAT-chained."""
+def secondary(kind, first, size, flags):
+    """A benign secondary of type `kind` (0xE1 a vendor allocation, 0xE2 one
+    the spec leaves undefined) naming `size` bytes from cluster `first`, its
+    GeneralSecondaryFlags `flags` (0x01 AllocationPossible, 0x02 NoFatChain)."""
     e = bytearray(32)
-    e[0], e[1] = 0xE1, 0x03 if contiguous else 0x01  # AllocationPossible (+ NoFatChain)
+    e[0], e[1] = kind, flags
     e[2:18] = GUID
     struct.pack_into("<I", e, 20, first)
     struct.pack_into("<Q", e, 24, size)
-    out = bytearray(s) + e
-    out[1] = len(out) // 32 - 1
-    struct.pack_into("<H", out, 2, set_checksum(out))
-    return bytes(out)
+    return bytes(e)
+
+
+def plant_set(name, first=0, size=0, extra=(), is_dir=False, contiguous=True):
+    """`name`'s set, its data `size` bytes from `first` (contiguous, or
+    FAT-chained for a directory fsd made), with the secondaries `extra` after
+    its name, sealed."""
+    s = bytearray(entry_set(name, first, size))
+    if size and contiguous:
+        s[33] = 0x03
+    if is_dir:
+        struct.pack_into("<H", s, 4, 0x10)
+    s += b"".join(extra)
+    s[1] = len(s) // 32 - 1
+    struct.pack_into("<H", s, 2, set_checksum(s))
+    return bytes(s)
+
+
+def free_run(vol, n):
+    return next((c for c in range(2, vol.count + 2 - n) if not any(vol.used(c + k) for k in range(n))), None)
+
+
+def plant(vol, start, sets, used, links=(), fills=()):
+    """Write `sets` after the root's last, mark the clusters `used` in the
+    bitmap, write the FAT `links` (cluster, value) and the cluster `fills`
+    (cluster, bytes, zero-padded). False when the root has no room."""
+    d = bytearray(vol.data(vol.chain(vol.root)))
+    end = root_end(d)
+    planted = b"".join(sets)
+    if end + len(planted) + 32 > len(d):
+        return False
+    d[end:end + len(planted)] = planted
+    write_root(vol, d)
+    c = vol.cluster
+    with open(IMAGE, "r+b") as fh:
+        for k in used:
+            fh.seek(vol.heap + (vol.bitmap - 2) * c + (k - 2) // 8)
+            b = fh.read(1)[0]
+            fh.seek(-1, 1)
+            fh.write(bytes([b | 1 << (k - 2) % 8]))
+        for at, value in links:
+            fh.seek(vol.fat + at * 4)
+            fh.write(struct.pack("<I", value))
+        for at, fill in fills:
+            fh.seek(vol.heap + (at - 2) * c)
+            fh.write(fill + bytes(c - len(fill)))
+    return True
+
+
+def system_clusters(vol):
+    """The up-case table's first cluster, from the root's 0x82 entry."""
+    d = vol.data(vol.chain(vol.root))
+    return [struct.unpack_from("<I", d, i + 20)[0] for i in range(0, len(d), 32) if d[i] == 0x82][:1]
+
+
+def printed(out, cmd):
+    """What `cmd` printed, the kernel's own lines left out."""
+    return [ln.strip() for ln in out.split("# " + cmd, 1)[-1].split("# ", 1)[0].splitlines()[1:]
+            if ln.strip() and not ln.startswith("Ouroboros kernel:")]
 
 
 def run_valloc():
-    """Vendor allocations (0xE1) freed with the set that names them, and only
-    then: VA1 removed, VA2 replaced by a `mv`, VD removed by `rmdir`, VA3
-    renamed (its allocation carried)."""
+    """Allocations a set's benign secondaries name, freed with the set and
+    only then, on a volume fsck_exfat passes. Fifteen clusters in a run, each
+    contiguous run followed by one that must stay used."""
     start = copy()
     vol = Volume(IMAGE, start)
-    d = bytearray(vol.data(vol.chain(vol.root)))
-    end = root_end(d)
-    run = next((c for c in range(2, vol.count + 2 - 8) if not any(vol.used(c + k) for k in range(8))), None)
-    if run is None:
-        return [("valloc: eight free clusters in a run on the image", False)], []
+    r = free_run(vol, 15)
+    if r is None:
+        return [("valloc: fifteen free clusters in a run on the image", False)], []
     c = vol.cluster
-    data, va, vb, ve, dirc, vg = run, run + 1, run + 3, run + 5, run + 6, run + 7
-    # VA1: 7 bytes in a contiguous cluster, its vendor's two clusters contiguous.
-    va1 = bytearray(entry_set("VA1", data, 7))
-    va1[33] = 0x03
-    struct.pack_into("<H", va1, 2, set_checksum(va1))
-    va1 = with_valloc(va1, va, 2 * c, True)
-    # VA2: empty, its vendor's two clusters FAT-chained, the last partly used.
-    va2 = with_valloc(entry_set("VA2"), vb, 2 * c - 100, False)
-    # VA3: empty, a vendor cluster of one byte.
-    va3 = with_valloc(entry_set("VA3"), ve, 1, True)
-    # VD: an empty directory, one cluster, FAT-chained, with a vendor cluster.
-    vd = bytearray(entry_set("VD", dirc, c))
-    struct.pack_into("<H", vd, 4, 0x10)
-    struct.pack_into("<H", vd, 2, set_checksum(vd))
-    vd = with_valloc(vd, vg, c, True)
-    planted = va1 + va2 + va3 + vd
-    if end + len(planted) + 32 > len(d):
+    E1, E2 = 0xE1, 0xE2
+    sets = {
+        "VA1": plant_set("VA1", r, 7, [secondary(E1, r + 1, 2 * c, 0x03)]),      # rm
+        "W": plant_set("W", r + 3, c),                                           # witness
+        "VA2": plant_set("VA2", extra=[secondary(E1, r + 4, 2 * c - 100, 0x01)]),  # replaced
+        "VA3": plant_set("VA3", extra=[secondary(E1, r + 6, 1, 0x03)]),          # renamed twice
+        "VD": plant_set("VD", r + 7, c, [secondary(E1, r + 8, c, 0x03)], is_dir=True, contiguous=False),
+        "SRC": plant_set("SRC", r + 9, 5, [secondary(E1, r + 10, c, 0x03)]),     # mv -f source
+        "VE2": plant_set("VE2", extra=[secondary(E2, r + 13, c, 0x03)]),         # undefined type
+        "VE0": plant_set("VE0", extra=[secondary(0xE0, r + 14, c, 0x00)]),       # no allocation
+        "W3": plant_set("W3", r + 14, c),                                        # witness
+        "W2": plant_set("W2", r + 11, 2 * c),                                    # witness
+    }
+    used = [k for k in range(r, r + 15)]
+    ok_room = plant(vol, start, list(sets.values()), used,
+                    links=[(r + 4, r + 5), (r + 5, 0xFFFFFFFF), (r + 7, 0xFFFFFFFF)],
+                    fills=[(r, b"hello\r\n"), (r + 7, b""), (r + 9, b"src\r\n")])
+    if not ok_room:
         return [("valloc: room for the planted sets in the root", False)], []
-    d[end:end + len(planted)] = planted
-    write_root(vol, d)
-    with open(IMAGE, "r+b") as fh:
-        for k in range(8):
-            fh.seek(vol.heap + (vol.bitmap - 2) * c + (run + k - 2) // 8)
-            b = fh.read(1)[0]
-            fh.seek(-1, 1)
-            fh.write(bytes([b | 1 << (run + k - 2) % 8]))
-        for at, value in ((vb, vb + 1), (vb + 1, 0xFFFFFFFF), (dirc, 0xFFFFFFFF)):
-            fh.seek(vol.fat + at * 4)
-            fh.write(struct.pack("<I", value))
-        for at, fill in ((data, b"hello\r\n"), (dirc, b"")):
-            fh.seek(vol.heap + (at - 2) * c)
-            fh.write(fill + bytes(c - len(fill)))
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
     ok, lines = fsck()
     checks = [
-        ("valloc: VA1, VA2, VA3 and VD read back as planted, all eight clusters used",
-         all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p
-             for n, p in (("VA1", va1), ("VA2", va2), ("VA3", va3), ("VD", vd)))
-         and all(vol.used(run + k) for k in range(8))),
+        ("valloc: every planted set reads back, all fifteen clusters used",
+         all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p for n, p in sets.items())
+         and all(vol.used(r + k) for k in range(15))),
         ("valloc: fsck_exfat -n passes the image before the boot", ok),
     ]
     notes = [f"valloc before: {ln}" for ln in lines] if not ok else []
     if not all(ok for _, ok in checks):
         return checks, notes
-    # SRC is made first, so its cluster is not one the later frees give back.
-    cmds = ["echo s > /SRC", "mv -f /SRC /VA2", "cat /VA2", "rm /VA1", "mv /VA3 /VA4", "rmdir /VD", "ls /"]
+    cmds = ["mv -f /SRC /VA2", "cat /VA2", "rm /VA1", "mv /VA3 /VA4", "mv -f /VA4 /va4",
+            "rmdir /VD", "rm /VE2", "rm /VE0", "ls /"]
     driven, out, faults = boot("valloc", cmds)
     if drive_qemu.boot_stalled("test-long-set", "valloc", out, faults):
         STALLED.append("valloc")
         return checks, notes
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
-    va4 = exfatimg.find(root, "VA4")
-    gone = [n for n in ("VA1", "VA3", "VD", "SRC") if exfatimg.find(root, n) is None]
-    used = {k: vol.used(k) for k in range(run, run + 8)}
+    gone = [n for n in ("VA1", "VD", "SRC", "VE2", "VE0") if exfatimg.find(root, n) is None]
+    va2, va4 = exfatimg.find(root, "VA2"), exfatimg.find(root, "va4")
+    used = {k: vol.used(k) for k in range(r, r + 15)}
     ok, lines = fsck()
+    free = lambda *ks: [used[k] for k in ks]
     checks += [
         ("valloc: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
-        (f"valloc: VA1, VA3, VD and SRC gone from the root ({gone})", len(gone) == 4),
-        ("valloc: `cat /VA2` prints SRC's s",
-         [ln.strip() for ln in out.split("# cat /VA2", 1)[-1].split("# ", 1)[0].splitlines()
-          if ln.strip() and not ln.startswith("Ouroboros kernel:")] == ["s"]),
-        (f"valloc: rm /VA1 freed its data cluster and its vendor's two ({[used[k] for k in (data, va, va + 1)]})",
-         not used[data] and not used[va] and not used[va + 1]),
-        (f"valloc: the mv over /VA2 freed its vendor's chain, bitmap and FAT "
-         f"({[used[k] for k in (vb, vb + 1)]}, {[vol.entry(k) for k in (vb, vb + 1)]})",
-         not used[vb] and not used[vb + 1] and vol.entry(vb) == 0 and vol.entry(vb + 1) == 0),
-        (f"valloc: rmdir /VD freed its cluster and its vendor's ({[used[k] for k in (dirc, vg)]})",
-         not used[dirc] and not used[vg]),
-        ("valloc: the rename kept VA3's vendor cluster, and VA4's set carries the entry as planted",
-         used[ve] and va4 is not None and va4.data[-32:] == va3[-32:]),
+        (f"valloc: VA1, VD, SRC, VE2 and VE0 gone from the root ({gone})", len(gone) == 5),
+        (f"valloc: `cat /VA2` prints SRC's src ({printed(out, 'cat /VA2')})", printed(out, "cat /VA2") == ["src"]),
+        (f"valloc: rm /VA1 freed its data cluster and its vendor's two ({free(r, r + 1, r + 2)})",
+         not any(free(r, r + 1, r + 2))),
+        (f"valloc: the mv over /VA2 freed its old vendor chain, bitmap and FAT "
+         f"({free(r + 4, r + 5)}, {[vol.entry(k) for k in (r + 4, r + 5)]})",
+         not any(free(r + 4, r + 5)) and vol.entry(r + 4) == 0 and vol.entry(r + 5) == 0),
+        (f"valloc: ... and kept SRC's data and vendor cluster, VA2's set now naming both ({free(r + 9, r + 10)})",
+         all(free(r + 9, r + 10)) and va2 is not None and va2.data[-32:] == sets["SRC"][-32:]),
+        (f"valloc: rmdir /VD freed its cluster and its vendor's ({free(r + 7, r + 8)})", not any(free(r + 7, r + 8))),
+        (f"valloc: rm /VE2 freed what its undefined benign secondary names ({free(r + 13)})", not used[r + 13]),
+        ("valloc: two renames, the second by case alone through mv -f, kept VA3's vendor cluster, "
+         "va4's set carrying its entry as planted",
+         used[r + 6] and va4 is not None and va4.name == "va4" and va4.data[-32:] == sets["VA3"][-32:]),
+        (f"valloc: every witness cluster still used: W after VA1's run, W2, W3 under VE0's fields, "
+         f"SRC's after VD's ({free(r + 3, r + 11, r + 12, r + 14, r + 9)})",
+         all(free(r + 3, r + 11, r + 12, r + 14, r + 9))),
         ("valloc: fsck_exfat -n passes the image after the boot", ok),
         ("valloc: no fault lines", faults == 0),
     ]
@@ -492,9 +537,73 @@ def run_valloc():
     return checks, notes
 
 
+def run_vcross():
+    """Damaged sets, which fsck_exfat flags before the boot: allocations two
+    sets share, one a set names twice, and ones naming no cluster of the
+    heap or the volume's own. Each removal must free only what no live set
+    or the volume needs, and leave the volume fsck clean."""
+    start = copy()
+    vol = Volume(IMAGE, start)
+    r = free_run(vol, 4)
+    if r is None:
+        return [("vcross: four free clusters in a run on the image", False)], []
+    c = vol.cluster
+    up = system_clusters(vol)
+    if not up:
+        return [("vcross: the image's root names its up-case table", False)], []
+    up = up[0]
+    E1 = 0xE1
+    sets = {
+        # SRC2 and DST2 share data and a vendor cluster: a cross-link.
+        "SRC2": plant_set("SRC2", r, 5, [secondary(E1, r + 1, c, 0x03)]),
+        "DST2": plant_set("DST2", r, 5, [secondary(E1, r + 1, c, 0x03)]),
+        # VA5's vendor run starts at its own data and runs into W5's cluster.
+        "VA5": plant_set("VA5", r + 2, 7, [secondary(E1, r + 2, 2 * c, 0x03)]),
+        "W5": plant_set("W5", r + 3, c),
+        # Allocations outside the heap, and on the bitmap and up-case table.
+        "VBAD": plant_set("VBAD", extra=[secondary(E1, 0xFFFFFFF0, c, 0x01)]),
+        "VSYS": plant_set("VSYS", extra=[secondary(E1, vol.bitmap, c, 0x03), secondary(E1, up, c, 0x01)]),
+    }
+    if not plant(vol, start, list(sets.values()), range(r, r + 4),
+                 fills=[(r, b"two\r\n"), (r + 2, b"hello\r\n")]):
+        return [("vcross: room for the planted sets in the root", False)], []
+    vol = Volume(IMAGE, start)
+    root = vol.data(vol.chain(vol.root))
+    checks = [("vcross: every planted set reads back, its four clusters, the bitmap's and the up-case table's used",
+               all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p for n, p in sets.items())
+               and all(vol.used(r + k) for k in range(4)) and vol.used(vol.bitmap) and vol.used(up))]
+    if not checks[0][1]:
+        return checks, []
+    cmds = ["mv -f /SRC2 /DST2", "cat /DST2", "rm /VA5", "rm /VBAD", "rm /VSYS", "ls /"]
+    driven, out, faults = boot("vcross", cmds)
+    if drive_qemu.boot_stalled("test-long-set", "vcross", out, faults):
+        STALLED.append("vcross")
+        return checks, []
+    vol = Volume(IMAGE, start)
+    root = vol.data(vol.chain(vol.root))
+    gone = [n for n in ("SRC2", "VA5", "VBAD", "VSYS") if exfatimg.find(root, n) is None]
+    dst2 = exfatimg.find(root, "DST2")
+    ok, lines = fsck()
+    checks += [
+        ("vcross: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
+        (f"vcross: SRC2, VA5, VBAD and VSYS gone from the root ({gone})", len(gone) == 4),
+        (f"vcross: `cat /DST2` prints two ({printed(out, 'cat /DST2')})", printed(out, "cat /DST2") == ["two"]),
+        (f"vcross: the mv over DST2 kept the data and vendor cluster SRC2 shares with it ({vol.used(r)}, {vol.used(r + 1)})",
+         vol.used(r) and vol.used(r + 1) and dst2 is not None and dst2.data[-32:] == sets["SRC2"][-32:]),
+        (f"vcross: rm /VA5 freed its data, not W5's cluster its vendor run reaches ({vol.used(r + 2)}, {vol.used(r + 3)})",
+         not vol.used(r + 2) and vol.used(r + 3)),
+        (f"vcross: rm /VSYS left the bitmap's and the up-case table's clusters used ({vol.used(vol.bitmap)}, {vol.used(up)})",
+         vol.used(vol.bitmap) and vol.used(up)),
+        ("vcross: fsck_exfat -n passes the image after the boot", ok),
+        ("vcross: no fault lines", faults == 0),
+    ]
+    notes = [f"vcross after: {ln}" for ln in lines] if not ok else []
+    return checks, notes
+
+
 def main():
     checks, notes = [], []
-    for run in (run_long, run_shape, run_rename, run_valloc):
+    for run in (run_long, run_shape, run_rename, run_valloc, run_vcross):
         try:
             c, n = run()
         finally:
