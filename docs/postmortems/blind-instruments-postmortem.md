@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-22. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-23. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2074,3 +2074,51 @@ partition's start when there is one, GPT0 is graded on that, and the
 control (GPT answered unknown) fails exactly that check. **Grade on
 evidence only the right answer produces; a line two answers share tells
 them apart from neither.**
+
+## Four more, from the blank disk (2026-10-23)
+
+One branch (#346) built `make test-blank-disk` with a control for each
+check, and a max review then read the rig against the code. Four instruments
+did not do what they seemed to; three were found by the review, one by the
+last run before the push.
+
+**A line printed before the act it names.** The checks "the kernel held the
+disk as blank" read the kernel's `held as blank` line, which `init_storage`
+printed before its `return`. The control for the old drop changed the return
+and kept the line, so those checks passed while the disk was dropped, and the
+control's recorded count (8) was not the count main's own code gives (11).
+The hold is graded now on what follows from it: the fallback line, the
+partition `format` wrote, the disk's bytes on the host. **A message printed
+on the way to an act is evidence that the code got that far, not that the
+act happened; grade the act's consequence.**
+
+**A wait that a different line satisfied.** STICK's "reached the login
+prompt" waited for `login:`, and on a stick with no `/etc/passwd` the line
+`login: no /etc/passwd - starting a root session` matches it, under the
+mutant too. Beside it, one clause could not fail (its text is printed only
+inside a line the next check already ruled out), and the premise that makes
+the stick "not the boot disk", two disks of one layout told apart only by
+their signatures, was never asserted. STICK now grades the disk mounted by
+its size, which differs from the blank disk's, and asserts both premises
+first. **A pattern is a claim about every line the system can print; the
+shortest pattern is the one most lines satisfy.**
+
+**A sentence about reachability, copied into a second rig.** "No rig boots
+that way (QEMU's firmware always names the partition)" was written into
+`test-probe-ioerr` on the 22nd and copied into `test-blank-disk` and three
+records on the 23rd. A superfloppy ESP on NVMe, esp.img's FAT32 with no
+table, boots, and its device path names no partition: the unknown boot
+partition, where holding a blank disk differs most, was reachable all along.
+UNKNOWN runs there now, and its control (no blank test) fails it. **A claim
+that a case cannot be reached decides that it will not be tested; it is the
+first claim to try to break.**
+
+**A rename that a grep did not cover.** The kernel's `read of sector 0
+failed` line became `its first sectors failed twice` when the first read
+moved into `is_blank`. Before the change I grepped the rigs for fsd's
+changed line and not for the kernel's, and `test-probe-ioerr`'s SECTOR0 and
+GPT0 failed on the final run with the behaviour they guard intact. The rule
+is 2026-10-11's (before changing what a command prints, grep the rigs for
+the lines they read); it was applied to one of the two lines the change
+renamed. **Every line a change rewords is a line some rig may read; grep for
+each, not for the one in mind.**
