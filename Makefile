@@ -2646,7 +2646,9 @@ test-ext2-blocks: image image-ext2
 # allocating benign secondary (a vendor allocation, 0xE1) names, which a
 # rename keeps, and on damaged sets free none a surviving set or the volume
 # needs, and a damaged bitmap or up-case table extent be taken as absent,
-# a volume with no bitmap refusing every write before it writes. Nine boots,
+# a volume with no bitmap refusing every write before it writes, and since
+# 2026-10-24 a vendor chain meeting the survivor's held and a volume of two
+# FATs read-only. Eleven boots,
 # about four minutes; run it whenever exFAT's patch_stream_ext,
 # set_checksum, walk_dir's set assembly, slot_at, read_slots, mv, rm, rmdir,
 # renamed_set, delete_set, unlink_set, free_runs, overlaps, runs_of,

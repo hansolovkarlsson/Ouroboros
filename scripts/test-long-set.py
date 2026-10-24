@@ -15,7 +15,7 @@ slot followed the File. And until 2026-10-21 a rename built the new set
 afresh (File, Stream, name), dropping the File entry's attributes and times
 and every vendor entry. And until 2026-10-23 `rm`, `rmdir` and a replacing
 `mv` left the clusters a vendor allocation entry (0xE1) names set in the
-bitmap, with no set naming them. Nine boots, each of a copy of
+bitmap, with no set naming them. Eleven boots, each of a copy of
 build/espexfat.img (exFAT root, partition 1):
 
 - LONG: the host gives the root a second cluster and plants /VEND, an empty
@@ -82,6 +82,14 @@ build/espexfat.img (exFAT root, partition 1):
   the host gives it back after the boot), DST3's cluster free and both of
   SRC3's used under DST3's set, DST4's cluster free and SRC4's eight used
   under DST4's set, fsck_exfat -n clean after;
+- VMEET: SRC FAT-chained over three clusters but sized two, DST on a
+  cluster of its own with a FAT-chained vendor run of three clusters whose
+  first is its own and whose last two are SRC's second and third: `mv -f
+  /SRC /DST` must free DST's cluster and keep SRC's chain and the whole
+  vendor run (its first cluster leaked, and SRC's third, past its size,
+  mended on the host after the boot), DST's set SRC's, fsck_exfat -n
+  clean after. SRC's walk stops at its size, before the run's last
+  cluster, so the meeting is found only by the second walk of the run;
 - VUPCASE, VBITMAP, VOVERLAP and VFIRST: the root's up-case and bitmap entries
   damaged, restored on the host after the boot, VF (7 bytes) and VG
   planted. VUPCASE: the up-case table claiming the whole heap (taken as
@@ -97,7 +105,10 @@ build/espexfat.img (exFAT root, partition 1):
   good copy of it planted after VG, as a volume of two FATs has FAT 2's
   bitmap entry after FAT 1's: the first is the bitmap, damaged, and the
   volume is read-only as in VBITMAP (the copy deleted on the host after
-  the boot). fsck_exfat -n clean after each.
+  the boot). VTWOFAT: no entry damaged, the boot sector's NumberOfFats
+  made 2 (ActiveFat 0; restored after the boot): fsd cannot tell which of
+  two bitmaps is live, so the volume is read-only as in VBITMAP. fsck_exfat
+  -n clean after each.
 
 No fault lines in QEMU's trace. Fails with the sum capped at 19 entries (the
 checksum, and fsck: "Incorrect checksum for directory entry set. Delete?")
@@ -129,13 +140,20 @@ write without the heap's bound (VHEAP's own FAT entry written), a chain
 tested against a contiguous run by its first cluster (SRC3's second
 cluster freed), an empty Stream given a place among the survivor's runs
 (DST4's cluster kept), and the scan for the bitmap taking the first entry
-naming a cluster above 0 (VFIRST writable, written). Not graded by a boot:
+naming a cluster above 0 (VFIRST writable, written). And with each of five
+mutants of the second high review that day: the second walk of a chain
+dropped, or taken on the wrong test (VMEET's SRC chain freed), a volume of
+two FATs left writable (VTWOFAT written), and a replacing `mv`'s source
+or a case-only `mv -f` freed as removed (VCROSS, VMEET and VALLOC). Not
+graded by a boot:
 the order of a removal (the set deleted, then its clusters freed), of a
 whole-file write (the set repointed, then the old chain freed) and of a
 replacing `mv` (the destination's set deleted, then the source's, then
 the destination's clusters freed), which show only on an error or a crash
-between them; two FAT-chained runs tested against each other (no boot
-plants two chains that meet); the shape test on the slots a removal
+between them, nor a replacing `mv` freeing the destination's clusters
+when its source's delete fails; a chain tested against another whose walk
+ends at its end of chain (the first walk alone answers, and VMEET's run
+ends past its source's size); the shape test on the slots a removal
 deletes; and the bound on the scan for the bitmap and up-case entries,
 which no boot gives a looped root.
 About four minutes. Run it whenever exFAT's patch_stream_ext,
@@ -815,7 +833,8 @@ def run_vmeet():
     return checks, [f"vmeet after: {ln}" for ln in lines] if not ok else []
 
 
-# The damaged extents of the last four boots: (the root's entry type, the
+# The damaged extents of the last five boots (VTWOFAT's none, its boot
+# sector changed instead): (the root's entry type, the
 # field's offset in it, its value from the good one) for each, whether the
 # volume must still be writable, and whether a good copy of the bitmap's
 # entry is planted after the damaged one.

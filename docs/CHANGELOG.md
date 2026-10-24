@@ -946,7 +946,15 @@ allocations as it deletes the set, and an empty file's Stream no longer
 fills one of the eight places a surviving set's runs are held in. VCROSS
 gains a chained source under a destination's vendor run and an empty
 source with eight vendor runs, and checks VHEAP's own FAT entry; a ninth
-boot, VFIRST, damages the first bitmap entry with a good one after it.
+boot, VFIRST, damages the first bitmap entry with a good one after it. A
+second high review the same day found the overlap test walking each of two
+chains twice, and now walks each once, walking one again only when the
+other stops short of its end of chain; a replacing `mv` whose source's
+delete failed returned before freeing the destination's clusters, which no
+set then named, and frees them now; and a volume of two FATs (TexFAT),
+whose live bitmap fsd cannot tell, mounts read-only. Two more boots grade
+them: VMEET, a destination's chained vendor run meeting the source's chain
+inside its size, and VTWOFAT, NumberOfFats 2.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has

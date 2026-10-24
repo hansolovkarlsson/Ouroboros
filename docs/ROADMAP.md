@@ -4417,7 +4417,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   Stream filling a place in `Runs`. A volume with no bitmap answers
   read-only to a `touch` of an existing file and a `mkdir` of an existing
   name, a choice the same review raised and kept: it says the true thing
-  about the volume. The root's later
+  about the volume. A second high review that day made the
+  overlap test walk each chain once, freed a replacing `mv`'s destination
+  clusters when its source's delete fails, and made a volume of two FATs
+  read-only (VMEET and VTWOFAT); its finding on `bitmap_clear_run`'s cost
+  joins the chained-free item below. The root's later
   clusters are not among the volume's own the free refuses: a damaged run
   can reach them, as it can any live file's.*
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
@@ -4433,7 +4437,19 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `bitmap_clear_run`, and zeroing FAT entries a FAT sector at a time, would
   end it. The altitude review of
   `fix/exfat-vendor-alloc`, 2026-10-23, deferred by Hans; found again by the
-  high review of 2026-10-24.
+  high review of 2026-10-24, and again by the second high review that day,
+  which adds that `bitmap_clear_run` itself bounds and divides for every
+  cluster (`bitmap_sector_lba`) where a sector's end, known after the
+  first, would do; deferred with this item, to be fixed with it.
+- **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
+  NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
+  are live. fsd reads the first FAT and takes the first bitmap entry, so on
+  a volume whose second pair is live it reads stale chains. Since the
+  second high review of 2026-10-24 such a volume mounts read-only (VTWOFAT
+  in `make test-long-set`), so nothing is allocated from the stale bitmap;
+  reading the active FAT, and the bitmap entry that goes with it, would let
+  it read right, and writing both pairs as the spec asks would make it
+  writable.
 - **A failed exFAT `mv` leaves two sets over one file's clusters.** When a
   `mv` fails after `relink` wrote the new set (an I/O error deleting the old
   one, or in a replacing `mv` deleting or freeing the destination's), the
@@ -4444,7 +4460,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   else. Since the high review of 2026-10-24 it deletes the destination's set
   first, then the source's, and frees the destination's clusters after
   both, so a failure leaves the source beside its new set, as a plain `mv`
-  that fails at its delete, never two sets of one name. Deleting the set `relink` wrote (as a rename, freeing
+  that fails at its delete, never two sets of one name. Since the second
+  high review the same day the destination's clusters are freed even when
+  the source's delete fails, as nothing else would free them. Deleting the set `relink` wrote (as a rename, freeing
   nothing) before returning the error, as `write_chain`, `mkdir` and
   `grow_extent` give back what they took, would end it, `insert_set`
   returning the slot it used; the undo can fail too, which leaves today's
