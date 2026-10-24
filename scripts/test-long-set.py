@@ -89,7 +89,12 @@ build/espexfat.img (exFAT root, partition 1):
   vendor run (its first cluster leaked, and SRC's third, past its size,
   mended on the host after the boot), DST's set SRC's, fsck_exfat -n
   clean after. SRC's walk stops at its size, before the run's last
-  cluster, so the meeting is found only by the second walk of the run;
+  cluster, so the meeting is found only by the second walk of the run.
+  In the same boot VW, whose vendor run lies on its own data cluster:
+  `write /VW new` must give it a new cluster and keep the old one; and
+  VSYSW, a contiguous file on the bitmap's cluster: `writeat /VSYSW 0 x`
+  must be refused with the bitmap's FAT entries and first byte unchanged,
+  and `rm /VSYSW` answer nothing;
 - VUPCASE, VBITMAP, VOVERLAP and VFIRST: the root's up-case and bitmap entries
   damaged, restored on the host after the boot, VF (7 bytes) and VG
   planted. VUPCASE: the up-case table claiming the whole heap (taken as
@@ -144,8 +149,11 @@ naming a cluster above 0 (VFIRST writable, written). And with each of five
 mutants of the second high review that day: the second walk of a chain
 dropped, or taken on the wrong test (VMEET's SRC chain freed), a volume of
 two FATs left writable (VTWOFAT written), and a replacing `mv`'s source
-or a case-only `mv -f` freed as removed (VCROSS, VMEET and VALLOC). Not
-graded by a boot:
+or a case-only `mv -f` freed as removed (VCROSS, VMEET and VALLOC). And
+with each of two of the third high review: a whole-file write freeing an
+old cluster its set's vendor run names (VW's), and a contiguous run linked
+over the volume's own clusters (VSYSW's `x` in the bitmap). Not graded by
+a boot:
 the order of a removal (the set deleted, then its clusters freed), of a
 whole-file write (the set repointed, then the old chain freed) and of a
 replacing `mv` (the destination's set deleted, then the source's, then

@@ -4421,7 +4421,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   overlap test walk each chain once, freed a replacing `mv`'s destination
   clusters when its source's delete fails, and made a volume of two FATs
   read-only (VMEET and VTWOFAT); its finding on `bitmap_clear_run`'s cost
-  joins the chained-free item below. The root's later
+  joins the chained-free item below. A third made a whole-file write keep
+  an old cluster its set's vendor run still names and `ensure_chained`
+  refuse a run over the volume's own clusters (VW and VSYSW, in VMEET's
+  boot), and put the opt-in read-only gate on the roadmap. The root's later
   clusters are not among the volume's own the free refuses: a damaged run
   can reach them, as it can any live file's.*
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
@@ -4440,7 +4443,24 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   high review of 2026-10-24, and again by the second high review that day,
   which adds that `bitmap_clear_run` itself bounds and divides for every
   cluster (`bitmap_sector_lba`) where a sector's end, known after the
-  first, would do; deferred with this item, to be fixed with it.
+  first, would do; deferred with this item, to be fixed with it. The third
+  high review that day found it once more, and adds that a replacing `mv`
+  now walks both chains in full before its free (the overlap test against
+  the source's runs, since 2026-10-24); those walks read the FAT through its
+  cache, about one sector a 128 clusters, so the free's three round trips a
+  cluster are the cost, and the walk could be shared with the free when
+  this item is done.
+- **exFAT's read-only gate is opt-in.** A volume with no bitmap, or with
+  two FATs, is read-only because each of the seven public writers (`touch`,
+  `write_file`, `write_at`, `mkdir`, `rm`, `rmdir`, `mv`) asks
+  `writable()` first. A new writer that forgets it writes to a volume whose
+  live bitmap fsd cannot tell, the hand-out of clusters another set holds
+  that the check exists to prevent: the opt-in shape
+  [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)
+  warns of. A token that `writable()` returns and that `alloc_cluster`,
+  `write_fat_entry`, `rewrite_slots` and `patch_stream_ext` require would
+  make the omission impossible to write. Nothing is broken today. From the
+  third high review of 2026-10-24, deferred.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on
@@ -4470,10 +4490,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - **exFAT bounds a cluster number where it frees, not where it reads it.**
   `free_data` refuses a first cluster outside the heap and stops at the
   volume's own clusters, `write_fat_entry` refuses one outside the heap, and
-  the allocator passes over the volume's own (all 2026-10-23); but a Stream
-  naming the bitmap's cluster is still written through by `write_at`
-  (`ensure_chained` links it and `write_partial_sector` writes into it), and
-  so is any cluster a damaged chain reaches. Refusing a first cluster
+  the allocator passes over the volume's own (all 2026-10-23), and since the
+  third high review of 2026-10-24 `ensure_chained` refuses a contiguous run
+  over them, so a contiguous Stream on the bitmap is no longer written
+  through (VSYSW in `make test-long-set`); but any cluster a damaged chain
+  reaches still is. Refusing a first cluster
   outside the heap or among the volume's own where `walk_dir` decodes a set
   (beside its rule that DataLength 0 is no allocation), and ending a walk in
   `next_cluster` and `advance` at a system cluster as they end it at the

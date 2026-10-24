@@ -954,7 +954,13 @@ delete failed returned before freeing the destination's clusters, which no
 set then named, and frees them now; and a volume of two FATs (TexFAT),
 whose live bitmap fsd cannot tell, mounts read-only. Two more boots grade
 them: VMEET, a destination's chained vendor run meeting the source's chain
-inside its size, and VTWOFAT, NumberOfFats 2.
+inside its size, and VTWOFAT, NumberOfFats 2. A third high review found a
+whole-file write (`write /F`) freeing its old data where the set's own
+vendor run still names it, so a later `rm` freed the cluster under the file
+given it in between; it keeps that cluster now. And a damaged contiguous
+file over the bitmap's cluster took a `writeat` into the bitmap itself;
+`ensure_chained` refuses a run over the volume's own clusters before it
+links any. VMEET's boot grades both.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has
