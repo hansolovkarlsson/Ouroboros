@@ -297,7 +297,7 @@ def mirrored(fs, sectors):
     return problems
 
 
-def boot(case, prepared, cmd, inspect=None, setup=()):
+def boot(name, prepared, cmd, inspect=None, setup=()):
     """One boot's answer (disktrace.boot's), or None for a firmware stall."""
     typed = list(setup) + [cmd]
     steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
@@ -312,44 +312,36 @@ def boot(case, prepared, cmd, inspect=None, setup=()):
                 problems.append(f"`{current}` said: {ln.rstrip()}")
         return problems
 
-    return disktrace.boot("test-write-walk", case, prepared, IMAGE, steps, inspect, said)
+    return disktrace.boot("test-write-walk", name, prepared, IMAGE, steps, inspect, said)
 
 
 def grade(tally, name, prepared, base_cmd, cmd, region, inspect, setup=()):
     """Boot the pair, each after the commands `setup`, then compare the
-    destination FAT's extra reads with the prediction `inspect` leaves in
-    `found` ({"want", "what"}), its problems the second boot's; print the
-    verdict and close the case in `tally`, unless a boot stalled and
-    neither failed (disktrace.settle)."""
+    destination FAT's extra reads with the prediction `inspect(copy,
+    problems, found)` leaves in `found` ({"want", "what"}), its problems the
+    second boot's; print the verdict and close the case in `tally`, unless a
+    boot stalled and neither failed (disktrace.settle)."""
     found = {}
-
-    def run_inspect(copy):
-        problems = []
-        inspect(copy, found, problems)
-        return problems
-
     base_boot = boot(f"{name}-base", prepared, base_cmd, setup=setup)
-    more_boot = boot(f"{name}-more", prepared, cmd, run_inspect, setup=setup)
+    more_boot = boot(f"{name}-more", prepared, cmd, functools.partial(inspect, found=found), setup=setup)
     problems = tally.settle([base_boot, more_boot])
     if problems is None:
         return
-    if not problems and "want" not in found:
-        problems.append("the copy's disk was not read")
-    delta = want = None
+    # With no problem, the second boot's inspect ran and left its prediction.
+    delta, want = None, found.get("want")
     if base_boot and more_boot:
         lo, hi = region
-        more_problems, per = disktrace.per_run(base_boot[2], more_boot[2], 1)
-        delta = sum(c for s, c in per.items() if lo <= s < hi)
-        want = found.get("want")
-        if not problems:
-            problems += more_problems
+        differ, per = disktrace.per_run(base_boot[2], more_boot[2], 1)
+        problems += differ
+        if per is not None:
+            delta = sum(c for s, c in per.items() if lo <= s < hi)
         if not problems and delta != want:
             problems.append(f"`{cmd}` reads {delta} FAT sectors, not {want}: one walk of each chain it "
                             "reads and writes, through the FAT cache, is the rule")
     verdict = "FAIL" if problems else "ok  "
-    shown = "?" if delta is None else delta
-    print(f"{verdict} {name}: `{cmd}` ({found.get('what', '?')}) reads {shown} sectors of the "
-          f"destination's FAT, {'?' if want is None else want} for one walk of each chain it reads and writes there")
+    print(f"{verdict} {name}: `{cmd}` ({found.get('what', '?')}) reads {'?' if delta is None else delta} "
+          f"sectors of the destination's FAT, {'?' if want is None else want} for one walk of each chain it "
+          "reads and writes there")
     for p in problems:
         print(f"     {p}")
     tally.close(problems)
@@ -372,7 +364,7 @@ def main() -> int:
         f32_root_len = len(f32.chain(f32.root))
         f32.fh.close()
 
-        def exfat_inspect(copy, found, problems, src_name=None):
+        def exfat_inspect(copy, problems, found, src_name=None):
             root, chain = spawn_reads.exfat_chain(copy, "CHAIN")
             _, bin_chain = spawn_reads.exfat_chain(copy, "bin")
             src = spawn_reads.exfat_chain(copy, src_name)[1] if src_name else None
@@ -405,7 +397,7 @@ def main() -> int:
                 found["want"] = exfat_reads(chain, g["spc"] * SECTOR, start, src)
                 found["what"] = f"{len(chain)} clusters across {len(sectors)} FAT sectors"
 
-        def fat32_inspect(copy, found, problems, src_name=None):
+        def fat32_inspect(copy, problems, found, src_name=None):
             fs = Fat32(copy)
             try:
                 root = fs.chain(fs.root)

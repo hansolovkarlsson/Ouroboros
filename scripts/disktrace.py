@@ -12,8 +12,8 @@ grades, and takes the difference per sector: the boots are deterministic, the
 same build reading the same sectors each time.
 
 Every boot goes through drive-qemu.py's classifier (`boot_stalled`) under
-the rig's name and a case name of its own, so each boot keeps its own stall
-history. `boot` answers None for a boot QEMU's firmware never started (after
+the rig's name and a name of its own, so each boot keeps its own stall
+history. A case is the boots a rig compares, two as a rule. `boot` answers None for a boot QEMU's firmware never started (after
 the classifier has said INCONCLUSIVE), and otherwise every problem the rig
 finds in that boot, on its disk or in its transcript, through the rig's
 `inspect` and `check`. `settle` turns the answers of a case's boots into its
@@ -33,7 +33,6 @@ import io
 import os
 import re
 import shutil
-import struct
 import sys
 import tempfile
 
@@ -47,26 +46,26 @@ READ = re.compile(rb"virtio_blk_handle_read .*?sector (\d+) nsectors (\d+)")
 WRITE = re.compile(rb"virtio_blk_handle_write .*?sector (\d+) nsectors (\d+)")
 
 
-def boot(rig, case, source, image, steps, inspect=None, check=None, writes=None):
+def boot(rig, name, source, image, steps, inspect=None, check=None, writes=None):
     """Boot a copy of `source` (the stale-image guard reads build/`image`),
     drive `steps`, and return the boot's answer, (problems, transcript lines,
     sectors read by sector number), or None when QEMU's firmware never
     started the kernel and the classifier did not grade the stall (a hang
     every run meets is graded, and then answers as a boot whose steps timed
-    out). The copy and its QEMU log are build/`rig`-`case`, and
-    `rig`:`case` is the boot's label in the stall log, so no two boots of a
-    rig may share a case.
+    out). `name` names this one boot within the rig: the copy and its QEMU
+    log are build/`rig`-`name`, and `rig`:`name` is the boot's label in the
+    stall log, which drive-qemu refuses to see twice in one run.
 
     Everything a rig grades in one boot is in its answer's problems, so that
-    `settle` sees it whatever the case's other boots did: `inspect(copy)`,
-    called after a boot whose steps all ran and before the copy is removed,
-    returns the problems it finds on the guest's disk (one it raises reading
-    the disk, a ValueError, IndexError or struct.error, is a problem too), and
-    `check(lines, count)` returns the problems in the boot's transcript and
-    reads. The boot is logged before either runs. When `writes` (a Counter)
-    is given, QEMU traces writes too and it is filled with the sectors
-    written, before `check` runs."""
-    tag = f"{rig}-{case}"
+    `settle` sees it whatever the case's other boots did: `inspect(copy,
+    problems)`, called after a boot whose steps all ran and before the copy
+    is removed, appends what it finds on the guest's disk (what it raises is
+    a problem too, beside what it appended first), and `check(lines, count)`
+    returns the problems in the boot's transcript and reads. The boot is
+    logged before either runs. When `writes` (a Counter) is given, QEMU
+    traces writes too and it is filled with the sectors written, before
+    `check` runs."""
+    tag = f"{rig}-{name}"
     copy = os.path.join(ROOT, "build", f"{tag}.img")
     log = os.path.join(ROOT, "build", f"{tag}.log")
     shutil.copyfile(source, copy)
@@ -85,21 +84,27 @@ def boot(rig, case, source, image, steps, inspect=None, check=None, writes=None)
         finally:
             guest.stop()
         faults = guest.aborts()
-        if drive_qemu.boot_stalled(rig, case, out, faults, qemu_log=log):
+        if drive_qemu.boot_stalled(rig, name, out, faults, qemu_log=log):
             return None
         if inspect and driven:
+            # SystemExit too: the rigs' image helpers refuse a host image
+            # that way, and on the guest's disk that is a finding.
             try:
-                problems += inspect(copy)
-            except (ValueError, IndexError, struct.error) as e:
-                problems.append(f"reading the guest's disk after the boot: {e}")
+                inspect(copy, problems)
+            except (Exception, SystemExit) as e:
+                problems.append(f"inspecting the guest's disk after the boot raised {type(e).__name__}: {e}")
     finally:
         os.remove(copy)
     if not driven:
         problems.append("a step timed out")
-    if faults:
+    if faults is None:
+        problems.append("no fault trace to read: QEMU left no -d log")
+    elif faults:
         problems.append("fault lines in QEMU's trace")
-    with open(log, "rb") as fh:
-        text = fh.read()
+    text = b""
+    if os.path.exists(log):
+        with open(log, "rb") as fh:
+            text = fh.read()
     count = collections.Counter()
     for sector, n in READ.findall(text):
         for s in range(int(n)):
@@ -117,11 +122,13 @@ def boot(rig, case, source, image, steps, inspect=None, check=None, writes=None)
 
 
 def settle(answers):
-    """The problems of a case from its boots' answers (`boot`'s, or None for
-    a stall): None when a boot stalled and no boot that ran has a problem
-    (the case is INCONCLUSIVE, which the classifier has already printed),
-    else every problem, with a note when a boot stalled, so a case with a
-    stall is never graded on what its boots compare."""
+    """The problems of a case, the boots a rig compares, from their answers
+    (`boot`'s, or None for a stall): None when a boot stalled and no boot
+    that ran has a problem (the case is INCONCLUSIVE, which the classifier
+    has already printed), else every problem, with a note when a boot
+    stalled, so a case with a stall is never graded on what its boots
+    compare."""
+    answers = list(answers)
     problems = [p for a in answers if a is not None for p in a[0]]
     stalls = sum(a is None for a in answers)
     if stalls and not problems:
@@ -132,49 +139,62 @@ def settle(answers):
     return problems
 
 
+class Case(list):
+    """A case's problems as `Tally.settle` hands them out: a list the rig
+    adds its comparison's problems to, and closes once."""
+
+
 class Tally:
     """A rig's cases, for drive_qemu.verdict: `settle` a case's answers,
-    then `close` it with every problem it has, its comparison's included,
-    unless settle answered None. The verdict counts the cases that failed
-    and the boots that stalled, and refuses a case settled and never closed,
-    so a rig cannot lose one by forgetting it."""
+    which hands back its problems as a Case (or None, INCONCLUSIVE), add the
+    comparison's problems to that Case, then `close` it. Only a Case settled
+    here closes, and only once; the verdict counts the cases that failed and
+    the boots that stalled, and refuses a case settled and never closed, so
+    a rig cannot lose one by forgetting it or close the wrong one."""
 
     def __init__(self, rig):
-        self.rig, self.failed, self.stalled, self.open = rig, 0, 0, 0
+        self.rig, self.failed, self.stalled, self.open = rig, 0, 0, []
 
     def settle(self, answers):
+        answers = list(answers)
         self.stalled += sum(a is None for a in answers)
         problems = settle(answers)
-        self.open += problems is not None
-        return problems
+        if problems is None:
+            return None
+        case = Case(problems)
+        self.open.append(case)
+        return case
 
-    def close(self, problems):
-        if not self.open:
-            raise RuntimeError(f"{self.rig}: a case closed that was not settled")
-        self.open -= 1
-        self.failed += bool(problems)
+    def close(self, case):
+        if not any(c is case for c in self.open):
+            raise RuntimeError(f"{self.rig}: closing what is not a case settled and still open: {case!r}")
+        self.open = [c for c in self.open if c is not case]
+        self.failed += bool(case)
 
     def verdict(self):
         if self.open:
-            raise RuntimeError(f"{self.rig}: {self.open} case(s) settled and never closed")
+            raise RuntimeError(f"{self.rig}: {len(self.open)} case(s) settled and never closed")
         return drive_qemu.verdict(self.rig, self.failed, self.stalled)
 
 
 def per_run(base, more, runs):
     """The sectors `runs` more of the graded work read, per run, from the
-    counts of two boots: (problems, {sector: reads a run}). A count that is
-    not a whole number a run means the boots differ by more than that work."""
+    counts of two boots: (problems, {sector: reads a run}), the counts None
+    when the boots cannot be compared. A count that is not a whole number a
+    run means the boots differ by more than that work."""
     diff = more - base
     if sum(base.values()) > sum(more.values()) or any(c % runs for c in diff.values()):
-        return ["the two boots differ by more than the work graded"], {}
+        return ["the two boots differ by more than the work graded"], None
     return [], {s: c // runs for s, c in diff.items()}
 
 
 def self_test():
     """`boot`, `settle` and `Tally` with a fake guest, on a scratch build/
-    and stall log. The fake holds the rig to its order as QEMU does: once it
-    is stopped its transcript ends with QEMU's own signal line, which hides
-    a stall from the classifier; and it can report fault lines."""
+    and stall log. The fake behaves as drive-qemu's Guest does where boot
+    depends on it: aborts() stops the guest, and once stopped the transcript
+    ends with QEMU's own signal line; it must be handed the copy, never the
+    source, with the trace flags asked for; its console's lines end CR LF;
+    its trace reads and writes two sectors a request."""
     global ROOT
     saved = ROOT, drive_qemu.Guest, drive_qemu.STALL_LOG, drive_qemu.STALL_DIR
     failed = 0
@@ -184,47 +204,55 @@ def self_test():
         print(f"{'ok  ' if ok else 'FAIL'} {name}")
         failed += not ok
 
-    trace = ("virtio_blk_handle_read vdev 0x0 sector 5 nsectors 1\n"
-             "virtio_blk_handle_write vdev 0x0 sector 9 nsectors 1\n")
-    kernel = "Ouroboros kernel: UEFI stage alive\n"
+    trace = ("virtio_blk_handle_read vdev 0x0 sector 5 nsectors 2\n"
+             "virtio_blk_handle_write vdev 0x0 sector 9 nsectors 2\n")
+    kernel = "Ouroboros kernel: UEFI stage alive"
     with tempfile.TemporaryDirectory() as tmp:
         ROOT = tmp
-        os.makedirs(os.path.join(tmp, "build"))
+        build = os.path.join(tmp, "build")
+        os.makedirs(build)
         drive_qemu.STALL_LOG = os.path.join(tmp, "runs.log")
         drive_qemu.STALL_DIR = os.path.join(tmp, "stalls")
         source = os.path.join(tmp, "source.img")
         with open(source, "wb") as fh:
             fh.write(b"disk")
-        plan = []
+        plan, given = [], []
 
         class Fake:
             """A boot as the next entry of `plan` says: "ran", "timed out",
-            "stalled", or "faulted" (ran, with a fault line in QEMU's trace),
-            or "stalled, faulted" (the stall's transcript, a fault line)."""
-            def __init__(self, copy, extra_args, intlog, label, stamp_from):
+            "stalled", "faulted" (ran, a fault line in QEMU's trace),
+            "stalled, faulted" (the stall's transcript, a fault line),
+            "silent" (ran, a trace with no reads) or "stalled, no log"
+            (the stall's transcript, and QEMU left no -d log)."""
+            def __init__(self, image, extra_args, intlog, label, stamp_from):
                 self.kind, self.stopped = plan.pop(0), False
-                with open(intlog, "w") as fh:
-                    fh.write(trace)
+                given.append((image, list(extra_args)))
+                if self.kind != "stalled, no log":
+                    with open(intlog, "w") as fh:
+                        fh.write("" if self.kind == "silent" else trace)
 
             def run(self, steps):
-                return self.kind in ("ran", "faulted")
+                return self.kind in ("ran", "faulted", "silent")
 
             def transcript(self):
-                out = drive_qemu.X64_STALLED if self.kind.startswith("stalled") else kernel
+                out = drive_qemu.X64_STALLED if self.kind.startswith("stalled") else kernel + "\r\n# "
                 return out + ("qemu-system-aarch64: terminating on signal 15 from pid 1\n" if self.stopped else "")
 
             def stop(self):
                 self.stopped = True
 
             def aborts(self):
+                self.stop()
+                if self.kind == "stalled, no log":
+                    return None
                 return int("faulted" in self.kind)
 
         drive_qemu.Guest = Fake
 
-        def run(kind, case, inspect=None, hook=None, writes=None):
+        def run(kind, name, inspect=None, hook=None, writes=None):
             plan.append(kind)
             with contextlib.redirect_stdout(io.StringIO()):
-                return boot("self", case, source, "image", [], inspect, hook, writes)
+                return boot("self", name, source, "image", [], inspect, hook, writes)
 
         def logged():
             with open(drive_qemu.STALL_LOG) as fh:
@@ -232,10 +260,10 @@ def self_test():
 
         seen = []
 
-        def inspect(copy):
+        def inspect(copy, problems):
             with open(copy, "rb") as fh:
-                seen.append(fh.read())
-            return ["inspected"]
+                seen.append((copy, fh.read(), logged()[-1]))
+            problems.append("inspected")
 
         try:
             check("a stall answers None", run("stalled", "a", inspect) is None)
@@ -248,41 +276,57 @@ def self_test():
             check("with its transcript and its QEMU log, gzipped, kept, each as it was",
                   len(kept) == 2 and kept == [kept[1][:-4] + ".log.gz", kept[1]] and kept[1].endswith(".txt")
                   and texts == [trace, drive_qemu.X64_STALLED])
-            check("and nothing of it inspected", seen == [])
+            check("and nothing of it inspected, its copy removed",
+                  seen == [] and not os.path.exists(os.path.join(build, "self-a.img")))
+            check("the guest is handed the copy, never the source, with the read trace",
+                  given[-1] == (os.path.join(build, "self-a.img"), ["-trace", "enable=virtio_blk_handle_read"]))
 
             hooked, written = [], collections.Counter()
 
             def hook(lines, count):
-                hooked.append((kernel.rstrip() in lines, dict(count), dict(written)))
+                hooked.append((kernel in lines, dict(count), dict(written)))
                 return ["checked"]
 
             ran = run("ran", "b", inspect, hook, written)
-            check("a boot that ran is answered with its trace counted",
-                  ran is not None and ran[2] == {5: 1} and kernel.rstrip() in ran[1])
+            check("a boot that ran is answered, every sector of a request counted",
+                  ran is not None and ran[2] == {5: 1, 6: 1})
             check("and logged as self:b booted", logged()[-1] == ["self:b", "booted"])
-            check("its copy inspected before it is removed", seen == [b"disk"]
-                  and not os.path.exists(os.path.join(tmp, "build", "self-b.img")))
-            check("its check given the transcript and the reads, the writes counted first",
-                  hooked == [(True, {5: 1}, {9: 1})])
+            check("with writes asked for, the guest is handed the write trace too",
+                  given[-1][1] == ["-trace", "enable=virtio_blk_handle_read", "-trace", "enable=virtio_blk_handle_write"])
+            check("its copy inspected after the boot is logged, and removed after",
+                  seen == [(os.path.join(build, "self-b.img"), b"disk", ["self:b", "booted"])]
+                  and not os.path.exists(os.path.join(build, "self-b.img")))
+            check("its check given the transcript's lines without CR, the reads, and the writes counted first",
+                  hooked == [(True, {5: 1, 6: 1}, {9: 1, 10: 1})])
             check("and what each found in its problems", ran is not None and ran[0] == ["inspected", "checked"])
 
-            timed_out = run("timed out", "c", inspect, lambda lines, count: [])
-            check("a boot whose steps timed out is not inspected, and says so",
-                  len(seen) == 1 and timed_out is not None and timed_out[0] == ["a step timed out"])
+            timed_out = run("timed out", "c", inspect, hook)
+            check("a boot whose steps timed out is not inspected, says so, and is checked",
+                  len(seen) == 1 and timed_out is not None and timed_out[0] == ["a step timed out", "checked"])
             faulted = run("faulted", "d")
             check("a fault line in QEMU's trace is a problem",
                   faulted is not None and faulted[0] == ["fault lines in QEMU's trace"])
             graded = run("stalled, faulted", "e")
             check("a stall's transcript with a fault line is no stall, and is graded",
                   graded is not None and "fault lines in QEMU's trace" in graded[0])
+            nolog = run("stalled, no log", "e2")
+            check("a stall's transcript with no fault trace to read is graded, saying so",
+                  nolog is not None and any("no fault trace" in p for p in nolog[0]))
+            silent = run("silent", "e3")
+            check("a trace with no reads is a problem: the observer sees nothing",
+                  silent is not None and any("observer sees nothing" in p for p in silent[0]))
 
-            def raises(copy):
-                raise IndexError("short sector")
-            raised = run("ran", "f", raises)
-            check("what an inspect raises reading the disk is a problem, the boot logged and its copy removed",
-                  raised is not None and any("short sector" in p for p in raised[0])
-                  and logged()[-1] == ["self:f", "booted"]
-                  and not os.path.exists(os.path.join(tmp, "build", "self-f.img")))
+            for exc in (IndexError("short sector"), SystemExit("not one partition")):
+                def raises(copy, problems, exc=exc):
+                    problems.append("found first")
+                    raise exc
+                name = f"f-{type(exc).__name__}"
+                raised = run("ran", name, raises)
+                check(f"an inspect raising {type(exc).__name__} keeps what it found first, the error a problem",
+                      raised is not None and raised[0][0] == "found first"
+                      and type(exc).__name__ in raised[0][1] and str(exc) in raised[0][1]
+                      and logged()[-1] == [f"self:{name}", "booted"]
+                      and not os.path.exists(os.path.join(build, f"self-{name}.img")))
 
             passed = run("ran", "g")
             for order in ([timed_out, None], [None, timed_out]):
@@ -293,31 +337,47 @@ def self_test():
             check("settle: a stall beside a passing boot, either side, is INCONCLUSIVE",
                   settle([passed, None]) is None and settle([None, passed]) is None)
             check("settle: two passing boots have no problems", settle([passed, passed]) == [])
+            check("settle: an iterator of answers is read whole", settle(iter([timed_out, passed])) == ["a step timed out", "checked"])
+
+            def verdict_of(tally):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    return tally.verdict()
+
+            def refused(fn):
+                try:
+                    fn()
+                except RuntimeError:
+                    return True
+                return False
 
             tally = Tally("self")
             tally.close(tally.settle([timed_out, None]))
-            tally.settle([None, passed])
+            tally.settle([None, None])
             tally.close(tally.settle([passed, passed]))
-            with contextlib.redirect_stdout(io.StringIO()):
-                code = tally.verdict()
-            check("Tally: a failed case fails the rig, counting the boots that stalled",
-                  code == 1 and (tally.failed, tally.stalled) == (1, 2))
+            check("Tally: a failed case fails the rig, counting every boot that stalled",
+                  verdict_of(tally) == 1 and (tally.failed, tally.stalled) == (1, 3))
             tally = Tally("self")
             tally.settle([None, passed])
-            with contextlib.redirect_stdout(io.StringIO()):
-                code = tally.verdict()
-            check("Tally: a stall alone is INCONCLUSIVE", code == drive_qemu.INCONCLUSIVE)
+            check("Tally: a stall alone is INCONCLUSIVE", verdict_of(tally) == drive_qemu.INCONCLUSIVE)
             tally = Tally("self")
             tally.settle([passed, passed])
-            try:
-                tally.verdict()
-                refused = False
-            except RuntimeError:
-                refused = True
-            check("Tally: a case settled and never closed is refused", refused)
+            check("Tally: a case settled and never closed is refused", refused(tally.verdict))
+            tally = Tally("self")
+            first, second = tally.settle([passed, passed]), tally.settle([timed_out, passed])
+            tally.close(first)
+            check("Tally: a case closed twice is refused", refused(lambda: tally.close(first)))
+            check("Tally: closing None, or a list it did not settle, is refused",
+                  refused(lambda: tally.close(None)) and refused(lambda: tally.close(["a step timed out"])))
+            tally.close(second)
+            check("Tally: the failed case still fails the rig", verdict_of(tally) == 1)
 
-            got = [run("stalled", "h") for _ in range(drive_qemu.PERSISTENT)]
-            check(f"a stall on each of the last {drive_qemu.PERSISTENT} runs of a case is graded",
+            got = [run("stalled", f"h{i}") for i in range(drive_qemu.PERSISTENT)]
+            check("each boot of a case keeps its own stall history", got == [None] * drive_qemu.PERSISTENT)
+            got = []
+            for _ in range(drive_qemu.PERSISTENT):
+                drive_qemu._classified.discard((os.path.abspath(drive_qemu.STALL_LOG), "self:h"))
+                got.append(run("stalled", "h"))
+            check(f"a stall on each of the last {drive_qemu.PERSISTENT} runs of a boot is graded",
                   got[:-1] == [None] * (drive_qemu.PERSISTENT - 1) and got[-1] is not None
                   and "a step timed out" in got[-1][0])
         finally:

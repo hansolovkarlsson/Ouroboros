@@ -214,13 +214,13 @@ class Guest:
                 )
         except OSError:
             return None
-        # Meant to name, in every rig's output, a boot the firmware never
-        # handed over. It cannot: the guest is stopped above, so the
-        # transcript's last line is QEMU's "terminating on signal 15", which
-        # no STALL_LINES pattern matches, and this never prints. A rig that
-        # grades stalls reads the transcript before it stops the guest
-        # (boot_stalled); the rest say nothing. docs/ROADMAP.md, "Guest.aborts()
-        # cannot name a firmware stall".
+        # Every rig reads the trace here, so every rig's output names a boot
+        # the firmware never handed over, whether or not the rig grades it
+        # INCONCLUSIVE (boot_stalled); one that does not then fails its
+        # checks with this line to say why. The guest is stopped by now, so
+        # the transcript ends with QEMU's own signal line, which
+        # firmware_stalled passes over (until 2026-10-25 it did not, and this
+        # line never printed).
         if firmware_stalled(self.transcript(), count):
             self.report("QEMU's firmware never started the kernel (drive-qemu.py's firmware_stalled)")
         return count
@@ -282,17 +282,23 @@ STALL_LOG = os.path.join(_ROOT, "scratch", "firmware-stall-runs.log")
 STALL_DIR = os.path.join(_ROOT, "scratch", "firmware-stalls")
 STALL_LINES = ("UsbBootExecCmd", "Image type X64 can't be loaded on AARCH64 UEFI system.")
 _ESCAPE = re.compile(r"\x1b\[[0-9;=?]*[A-Za-z]")
+# QEMU's own line when the rig stops it, written wherever the console's
+# cursor is (after a prompt, say): a transcript read after the stop ends
+# with it, and the stall's line is the one before.
+_QEMU_SIGNAL = re.compile(r"qemu-system-\S+: terminating on signal \d+.*")
 
 
 def firmware_stalled(out, aborts):
     """True only for a boot QEMU's firmware never handed over: the kernel
     printed nothing, the fault trace was read and is clean (`aborts` is 0,
     not None), and the transcript's last line, the firmware's screen clears
-    taken out, is one of STALL_LINES. Anything else, a kernel hanging before
-    its first line included, is for the checks to fail."""
+    taken out, and QEMU's own line when it is stopped, is one of STALL_LINES.
+    Anything else, a kernel hanging before its first line included, is for
+    the checks to fail."""
     if "Ouroboros kernel" in out or aborts != 0:
         return False
-    lines = [line for line in _ESCAPE.sub("", out).splitlines() if line.strip()]
+    text = _QEMU_SIGNAL.sub("", _ESCAPE.sub("", out))
+    lines = [line for line in text.splitlines() if line.strip()]
     return bool(lines) and any(stall in lines[-1] for stall in STALL_LINES)
 
 
@@ -309,6 +315,13 @@ def record_run(label, verdict, kept=None, log=None):
     return sum(1 for entry in mine if entry[3:4] == ["INCONCLUSIVE"]), len(mine)
 
 
+# The (log, label) pairs classified in this process. Two boots under one
+# label interleave their verdicts in the log, so the PERSISTENT rule never
+# sees a run of stalls; a label with a space is split by the log's reader.
+# Both are refused rather than left to a rig's care.
+_classified = set()
+
+
 def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None, qemu_log=None):
     """The verdict for one boot of `rig`: logs it, and for a stall keeps the
     transcript (a rerun overwrites the one in build/), prints the verdict with
@@ -320,9 +333,15 @@ def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None, qe
     STALL_LOG, STALL_DIR and `rig:boot`; test-usb-hub keeps its own. When
     `qemu_log` is given, a stall keeps it beside the transcript, gzipped, with
     .log.gz for .txt: the trace of what the firmware did, which a rerun
-    overwrites."""
+    overwrites. A label used twice in one run of a rig, or holding a space,
+    is refused (ValueError)."""
     log, kept_dir = log or STALL_LOG, kept_dir or STALL_DIR
     label = label or f"{rig}:{boot}"
+    if not label or any(c.isspace() for c in label):
+        raise ValueError(f"boot_stalled: the label {label!r} is empty or holds a space")
+    if (os.path.abspath(log), label) in _classified:
+        raise ValueError(f"boot_stalled: {label} classified twice in one run: every boot needs a label of its own")
+    _classified.add((os.path.abspath(log), label))
     if not firmware_stalled(out, aborts):
         record_run(label, "booted", log=log)
         return False
@@ -427,6 +446,14 @@ def self_test():
         ("the USB boot went on to start the kernel, which printed nothing", USB_STALLED + BDS_STARTED, 0, False),
         ("the firmware stopped partway through its head", FIRMWARE_HEAD.split("Tpm2GetCapabilityPcrs")[0], 0, False),
         ("an empty transcript", "", 0, False),
+        ("the X64 stall read after the stop, QEMU's line last",
+         X64_STALLED + "qemu-system-aarch64: terminating on signal 15 from pid 1 (<unknown process>)\n", 0, True),
+        ("the USB stall, QEMU's line on the stall's own line", USB_STALLED.rstrip("\n")
+         + "qemu-system-aarch64: terminating on signal 15 from pid 1\n", 0, True),
+        ("a kernel line, QEMU's line after a prompt",
+         "Ouroboros kernel: UEFI stage alive\n# qemu-system-aarch64: terminating on signal 15 from pid 1\n", 0, False),
+        ("no kernel, a different last line, then QEMU's",
+         USB_STALLED + "Synchronous Exception at 0x5C5480EC\nqemu-system-aarch64: terminating on signal 15\n", 0, False),
     ]
     failed = 0
     for name, out, aborts, want in cases:
@@ -439,6 +466,7 @@ def self_test():
     with tempfile.TemporaryDirectory() as tmp:
         log = os.path.join(tmp, "runs.log")
         def run(out):
+            _classified.discard((os.path.abspath(log), "self:test"))
             with contextlib.redirect_stdout(io.StringIO()):
                 return boot_stalled("self", "test", out, 0, log=log, kept_dir=tmp)
         got = [run(X64_STALLED) for _ in range(PERSISTENT - 1)] + [run(FIRMWARE_HEAD + BDS_STARTED)]
@@ -446,6 +474,17 @@ def self_test():
         want = [True] * (PERSISTENT - 1) + [False] + [True] * (PERSISTENT - 1) + [False, False]
         ok = got == want
         print(f"{'ok  ' if ok else 'FAIL'} a stall on each of the last {PERSISTENT} runs is graded, a boot between them resets the count")
+        failed += not ok
+        refused = []
+        for boot in ("test", "two words"):
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    boot_stalled("self", boot, X64_STALLED, 0, log=log, kept_dir=tmp)
+                refused.append(False)
+            except ValueError:
+                refused.append(True)
+        ok = refused == [True, True]
+        print(f"{'ok  ' if ok else 'FAIL'} a label classified twice in one run, or holding a space, is refused")
         failed += not ok
     return failed
 

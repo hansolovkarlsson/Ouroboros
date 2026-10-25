@@ -186,7 +186,7 @@ IMAGES = [
 UNDER_ONE_AN_ENTRY = {"ext2": WALK_FILES}
 
 
-def boot(case, prepared, image, warm, word, check, want, kinds):
+def boot(name, prepared, image, warm, word, check, want, kinds):
     """Boot a copy of `prepared`, log in, `echo warm` once, `echo word` RUNS
     times, then the check glob, then (with `kinds`) `ls /kinds`, which must
     mark exactly its directories. Returns the boot's answer (disktrace.boot's),
@@ -211,7 +211,7 @@ def boot(case, prepared, image, warm, word, check, want, kinds):
             problems.append(f"`ls /kinds` did not print {' '.join(KINDS)}: a kind is wrong")
         return problems
 
-    return disktrace.boot("test-listing-walk", case, prepared, image, steps, check=said)
+    return disktrace.boot("test-listing-walk", name, prepared, image, steps, check=said)
 
 
 def main() -> int:
@@ -234,15 +234,15 @@ def main() -> int:
         problems = tally.settle([base_boot, listed_boot])
         if problems is None:
             continue
-        shown = "? sectors (not compared)"
+        shown = "? sectors"
         if base_boot and listed_boot:
             differ, counts = disktrace.per_run(base_boot[2], listed_boot[2], RUNS)
+            problems += differ
+        if base_boot and listed_boot and counts is not None:
             per = list(counts.values())
             common = math.gcd(*per) if per else 0
             total = sum(per)
             shown = f"{total} sectors, over {len(per)} sectors, read a multiple of {common} times each"
-            if not problems:
-                problems += differ
             if not problems and common != 1:
                 problems.append(f"every sector is read a multiple of {common} times a listing: "
                                 "the walks are all alike, so no page's walk stopped at its end")

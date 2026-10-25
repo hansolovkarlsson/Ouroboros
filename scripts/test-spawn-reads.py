@@ -228,7 +228,7 @@ def chain_reads(chain, g):
     return reads
 
 
-def boot(case, prepared, image, program, runs=RUNS, setup=(), inspect=None):
+def boot(name, prepared, image, program, runs=RUNS, setup=(), inspect=None):
     """One boot's answer (disktrace.boot's), or None for a firmware stall."""
     steps = [("login:", "root"), ("assword", "root"), ("# ", "/SMALL w")]
     steps += [("# ", cmd) for cmd in setup]
@@ -238,7 +238,7 @@ def boot(case, prepared, image, program, runs=RUNS, setup=(), inspect=None):
         n = sum(1 for ln in lines if ln.strip() == "argv[1] = a")
         return [] if n >= runs else [f"`{program} a` printed argv[1] = a {n} times, not {runs}"]
 
-    return disktrace.boot("test-spawn-reads", case, prepared, image, steps, inspect, said)
+    return disktrace.boot("test-spawn-reads", name, prepared, image, steps, inspect, said)
 
 
 def main() -> int:
@@ -269,10 +269,10 @@ def main() -> int:
         delta = None
         if small_boot and big_boot:
             delta = (big_boot[2][root] - small_boot[2][root]) / RUNS
-        if not problems and delta != want:
-            problems.append(f"the root directory's first sector (LBA {root}) is read {delta:g} more "
-                            f"times a spawn of /BIG than of /SMALL, not {want}: one resolution "
-                            "a request is the rule")
+            if not problems and delta != want:
+                problems.append(f"the root directory's first sector (LBA {root}) is read {delta:g} more "
+                                f"times a spawn of /BIG than of /SMALL, not {want}: one resolution "
+                                "a request is the rule")
         verdict = "FAIL" if problems else "ok  "
         shown = "?" if delta is None else f"{delta:g}"
         print(f"{verdict} {name}: /BIG ({BIG} bytes) resolves {shown} more times than /SMALL "
@@ -291,33 +291,32 @@ def chain_walk(tally, prepared, image):
     setup = ["cp /HUGE /CHAIN", "/CHAIN w"]
     read = []
 
-    def inspect(copy):
+    def inspect(copy, problems):
         root, chain = exfat_chain(copy, "CHAIN")
-        read.append((root, chain))
         if not chain:
-            return ["/CHAIN, written by the guest's cp, is contiguous: no FAT chain to walk"]
-        if len(root) > 1:
-            return [f"the root directory spans {len(root)} clusters: a resolution may step "
-                    "along its chain, which the prediction does not count"]
-        if len({c * 4 // SECTOR for c in chain[:-1]}) < 2:
-            return ["/CHAIN's chain lies in one FAT sector: a walk from its start would cost "
-                    "no more reads, so the cursor could not be seen"]
-        return []
+            problems.append("/CHAIN, written by the guest's cp, is contiguous: no FAT chain to walk")
+        elif len(root) > 1:
+            problems.append(f"the root directory spans {len(root)} clusters: a resolution may step "
+                            "along its chain, which the prediction does not count")
+        elif len({c * 4 // SECTOR for c in chain[:-1]}) < 2:
+            problems.append("/CHAIN's chain lies in one FAT sector: a walk from its start would cost "
+                            "no more reads, so the cursor could not be seen")
+        else:
+            read.append(chain)
 
     base_boot = boot("exfat-chain-base", prepared, image, "/CHAIN", RUNS, setup, inspect)
     more_boot = boot("exfat-chain-more", prepared, image, "/CHAIN", 2 * RUNS, setup)
     problems = tally.settle([base_boot, more_boot])
     if problems is None:
         return
-    chain = read[0][1] if read else None
-    if not problems and not read:
-        problems.append("the first boot's disk was not read")
+    # With no problem, the first boot's inspect ran and kept the chain.
+    chain = read[0] if read else None
     delta = want = None
     if base_boot and more_boot:
-        more_problems, per = disktrace.per_run(base_boot[2], more_boot[2], RUNS)
-        delta = sum(c for s, c in per.items() if g["fat"] <= s < g["fat_end"])
-        if not problems:
-            problems += more_problems
+        differ, per = disktrace.per_run(base_boot[2], more_boot[2], RUNS)
+        problems += differ
+        if per is not None:
+            delta = sum(c for s, c in per.items() if g["fat"] <= s < g["fat_end"])
         if not problems:
             want = chain_reads(chain, g)
             if delta != want:
