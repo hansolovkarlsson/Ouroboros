@@ -68,8 +68,14 @@ FAT32 and 126 on exFAT (72 and 132 before the stop, measured without the
 warm-up listing, which adds FAT32 one read a run), and 74 for /walk on
 ext2 (3,698 when its walk read an inode an entry, and still without
 `filetype`). The boots are deterministic: the same build reads the same
-sectors each time. About six minutes; needs e2fsprogs (`brew install
-e2fsprogs`), as the ext2 image does.
+sectors each time.
+
+A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100,
+drive-qemu.py's classifier, through disktrace.py), and so is its image's pair,
+unless another of its boots ran and failed, which fails it.
+
+About six minutes; needs e2fsprogs (`brew install e2fsprogs`), as the ext2
+image does.
 """
 import math
 import os
@@ -180,11 +186,11 @@ IMAGES = [
 UNDER_ONE_AN_ENTRY = {"ext2": WALK_FILES}
 
 
-def boot(name, prepared, image, warm, word, check, want, kinds):
+def boot(case, prepared, image, warm, word, check, want, kinds):
     """Boot a copy of `prepared`, log in, `echo warm` once, `echo word` RUNS
     times, then the check glob, then (with `kinds`) `ls /kinds`, which must
     mark exactly its directories. Returns (problems, sectors read by sector
-    number). Both boots start with the same `warm`, a listing, so each
+    number), or None for a firmware stall. Both boots start with the same `warm`, a listing, so each
     measured run starts from the same state of fsd's caches (FAT32 keeps the
     last FAT sector it read across requests: without it the first run of
     each boot differed by one read, from whatever login left there)."""
@@ -192,7 +198,10 @@ def boot(name, prepared, image, warm, word, check, want, kinds):
     steps += [("# ", f"echo {word}")] * RUNS + [("# ", f"echo {check}")]
     steps += [("# ", "ls /kinds")] if kinds else []
     steps += [("# ", "")]
-    problems, lines, count = disktrace.boot(f"test-listing-walk-{name}", prepared, image, steps)
+    answer = disktrace.boot("test-listing-walk", case, prepared, image, steps)
+    if answer is None:
+        return None
+    problems, lines, count = answer
     wanted = RUNS + (word == warm)
     if lines.count(word) < wanted:
         problems.append(f"`echo {word}` printed it back {lines.count(word)} times, not {wanted}")
@@ -204,7 +213,7 @@ def boot(name, prepared, image, warm, word, check, want, kinds):
 
 
 def main() -> int:
-    failed = 0
+    outcomes = []
     for name, image, d, check, names, setup, kinds in IMAGES:
         source = os.path.join(ROOT, "build", image)
         prepared = os.path.join(ROOT, "build", f"test-listing-walk-{name}-prepared.img")
@@ -215,13 +224,19 @@ def main() -> int:
                 setup(prepared)
             want = names()
             src, warm = (prepared if setup else source), f"{d}/qqq*"
-            p0, base = boot(name, src, image, warm, f"{d}/qqqq", check, want, kinds)
-            p1, listed = boot(name, src, image, warm, f"{d}/qqq*", check, want, kinds)
+            base_boot = boot(f"{name}-base", src, image, warm, f"{d}/qqqq", check, want, kinds)
+            listed_boot = boot(f"{name}-listed", src, image, warm, f"{d}/qqq*", check, want, kinds)
         finally:
             if setup and os.path.exists(prepared):
                 os.remove(prepared)
-        differ, counts = disktrace.per_run(base, listed, RUNS)
-        problems = p0 + p1 + differ
+        problems = disktrace.settle([base_boot, listed_boot])
+        if problems is None:
+            outcomes.append(None)
+            continue
+        counts = {}
+        if not problems:
+            differ, counts = disktrace.per_run(base_boot[1], listed_boot[1], RUNS)
+            problems += differ
         per = list(counts.values())
         common = math.gcd(*per) if per else 0
         total = sum(per)
@@ -237,8 +252,8 @@ def main() -> int:
               f"over {len(per)} sectors, read a multiple of {common} times each")
         for p in problems:
             print(f"     {p}")
-        failed += bool(problems)
-    return 1 if failed else 0
+        outcomes.append(1 if problems else 0)
+    return disktrace.drive_qemu.verdict("test-listing-walk", outcomes.count(1), outcomes.count(None))
 
 
 if __name__ == "__main__":

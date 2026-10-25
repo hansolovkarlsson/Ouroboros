@@ -47,7 +47,8 @@ bypassing the cache 159 (a read a step), and a cache not refreshed by
 write_fat_entry stops /CHAIN running at all.
 
 A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100,
-drive-qemu.py's classifier, through disktrace.py), and its case is not graded.
+drive-qemu.py's classifier, through disktrace.py), and so is its case,
+unless another of its boots ran and failed, which fails it.
 
 About four minutes; needs e2fsprogs, as the ext2 image does.
 """
@@ -227,12 +228,15 @@ def chain_reads(chain, g):
     return reads
 
 
-def boot(name, prepared, image, program, runs=RUNS, setup=(), inspect=None):
+def boot(case, prepared, image, program, runs=RUNS, setup=(), inspect=None):
+    """One boot's (problems, sectors read), or None for a firmware stall."""
     steps = [("login:", "root"), ("assword", "root"), ("# ", "/SMALL w")]
     steps += [("# ", cmd) for cmd in setup]
     steps += [("# ", f"{program} a")] * runs + [("# ", "")]
-    problems, lines, count = disktrace.boot(f"test-spawn-reads-{name}", prepared, image, steps,
-                                            inspect, rig="test-spawn-reads")
+    answer = disktrace.boot("test-spawn-reads", case, prepared, image, steps, inspect)
+    if answer is None:
+        return None
+    problems, lines, count = answer
     said = sum(1 for ln in lines if ln.strip() == "argv[1] = a")
     if said < runs:
         problems.append(f"`{program} a` printed argv[1] = a {said} times, not {runs}")
@@ -244,7 +248,7 @@ def main() -> int:
         small = fh.read()
     files = {"SMALL": small, "BIG": small + bytes(BIG - len(small))}
     want = requests(BIG) - requests(len(small))
-    failed = stalled = 0
+    outcomes = []
     for name, image, ptype in IMAGES:
         prepared = os.path.join(ROOT, "build", f"test-spawn-reads-{name}-prepared.img")
         shutil.copyfile(os.path.join(ROOT, "build", image), prepared)
@@ -255,38 +259,36 @@ def main() -> int:
                 huge = {"HUGE": small + bytes(HUGE - len(small))} if ptype == 0x07 else {}
                 place_mounted(prepared, {**files, **huge})
                 root = root_fat32(prepared) if ptype == 0x0B else root_exfat(prepared)
-            try:
-                p0, base = boot(f"{name}-small", prepared, image, "/SMALL")
-                p1, more = boot(f"{name}-big", prepared, image, "/BIG")
-            except disktrace.Stalled:
-                p0 = None
+            small_boot = boot(f"{name}-small", prepared, image, "/SMALL")
+            big_boot = boot(f"{name}-big", prepared, image, "/BIG")
             if ptype == 0x07:
-                try:
-                    failed += chain_walk(prepared, image)
-                except disktrace.Stalled:
-                    stalled += 1
+                outcomes.append(chain_walk(prepared, image))
         finally:
             os.remove(prepared)
-        if p0 is None:
-            stalled += 1
+        problems = disktrace.settle([small_boot, big_boot])
+        if problems is None:
+            outcomes.append(None)
             continue
-        problems = p0 + p1
-        delta = (more[root] - base[root]) / RUNS
+        delta = None
+        if not problems:
+            delta = (big_boot[1][root] - small_boot[1][root]) / RUNS
         if not problems and delta != want:
             problems.append(f"the root directory's first sector (LBA {root}) is read {delta:g} more "
                             f"times a spawn of /BIG than of /SMALL, not {want}: one resolution "
                             "a request is the rule")
         verdict = "FAIL" if problems else "ok  "
-        print(f"{verdict} {name}: /BIG ({BIG} bytes) resolves {delta:g} more times than /SMALL "
+        shown = "?" if delta is None else f"{delta:g}"
+        print(f"{verdict} {name}: /BIG ({BIG} bytes) resolves {shown} more times than /SMALL "
               f"({len(small)}), {want} more requests; the root sector is LBA {root}")
         for p in problems:
             print(f"     {p}")
-        failed += bool(problems)
-    return disktrace.drive_qemu.verdict("test-spawn-reads", failed, stalled)
+        outcomes.append(1 if problems else 0)
+    return disktrace.drive_qemu.verdict("test-spawn-reads", outcomes.count(1), outcomes.count(None))
 
 
 def chain_walk(prepared, image):
-    """The two exFAT boots that grade the walk along a FAT chain; 1 on a failure."""
+    """The two exFAT boots that grade the walk along a FAT chain: 1 on a
+    failure, 0 on a pass, None when a boot stalled and neither failed."""
     g = exfat_layout(prepared)
     setup = ["cp /HUGE /CHAIN", "/CHAIN w"]
     read, read_problems = [], []
@@ -294,12 +296,15 @@ def chain_walk(prepared, image):
     def inspect(copy):
         try:
             read.append(exfat_chain(copy, "CHAIN"))
-        except ValueError as e:
+        except (ValueError, struct.error) as e:
             read_problems.append(str(e))
 
-    p0, base = boot("exfat-chain-base", prepared, image, "/CHAIN", RUNS, setup, inspect)
-    p1, more = boot("exfat-chain-more", prepared, image, "/CHAIN", 2 * RUNS, setup)
-    problems = p0 + p1 + read_problems
+    base_boot = boot("exfat-chain-base", prepared, image, "/CHAIN", RUNS, setup, inspect)
+    more_boot = boot("exfat-chain-more", prepared, image, "/CHAIN", 2 * RUNS, setup)
+    problems = disktrace.settle([base_boot, more_boot])
+    if problems is None:
+        return None
+    problems += read_problems
     root, chain = read[0] if read else (None, None)
     if not problems and not read:
         problems.append("the first boot's disk was not read")
@@ -314,7 +319,7 @@ def chain_walk(prepared, image):
     if problems:
         delta = want = None
     else:
-        more_problems, per = disktrace.per_run(base, more, RUNS)
+        more_problems, per = disktrace.per_run(base_boot[1], more_boot[1], RUNS)
         problems += more_problems
         delta = sum(c for s, c in per.items() if g["fat"] <= s < g["fat_end"])
         want = chain_reads(chain, g)

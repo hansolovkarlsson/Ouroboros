@@ -39,6 +39,7 @@ testable without a human at the keyboard.
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -304,7 +305,7 @@ def record_run(label, verdict, kept=None, log=None):
     return sum(1 for entry in mine if entry[3:4] == ["INCONCLUSIVE"]), len(mine)
 
 
-def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None):
+def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None, qemu_log=None):
     """The verdict for one boot of `rig`: logs it, and for a stall keeps the
     transcript (a rerun overwrites the one in build/), prints the verdict with
     this boot's rate, and answers True, the caller then grading none of the
@@ -312,7 +313,9 @@ def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None):
     PERSISTENT runs, this one included, is no random stall but a hang every
     run meets (a firmware stopped by the rig's own disk, say): it answers
     False, and the checks fail. `log`, `kept_dir` and `label` default to
-    STALL_LOG, STALL_DIR and `rig:boot`; test-usb-hub keeps its own."""
+    STALL_LOG, STALL_DIR and `rig:boot`; test-usb-hub keeps its own. When
+    `qemu_log` is given, a stall keeps it beside the transcript, with .log for
+    .txt: the trace of what the firmware did, which a rerun overwrites."""
     log, kept_dir = log or STALL_LOG, kept_dir or STALL_DIR
     label = label or f"{rig}:{boot}"
     if not firmware_stalled(out, aborts):
@@ -322,6 +325,8 @@ def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None):
     kept = os.path.join(kept_dir, f"{time.strftime('%Y%m%d-%H%M%S')}-{rig}-{boot}.txt")
     with open(kept, "w") as fh:
         fh.write(out)
+    if qemu_log and os.path.exists(qemu_log):
+        shutil.copyfile(qemu_log, kept[:-len(".txt")] + ".log")
     stalled, runs = record_run(label, "INCONCLUSIVE", kept, log=log)
     rate = (f"{stalled} of {runs} {label} boot(s) in {os.path.relpath(log, _ROOT)} stalled; "
             f"this one kept as {os.path.relpath(kept, _ROOT)}")

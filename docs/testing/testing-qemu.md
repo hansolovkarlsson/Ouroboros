@@ -201,9 +201,15 @@ stopped by the rig's own disk, and its checks are graded and fail. `make test` r
 `test-usb-hub` (with its own run log, `scratch/usb-hub-runs.log`),
 `test-boot-partition`, `test-volume-bound`, `test-probe-ioerr`, `test-blank-disk` (2026-10-23),
 `test-ext2-blocks`, `test-long-set` and `test-valid-length` (built with it,
-2026-10-22). The other rigs still grade a stall
-as failed checks, but `Guest.aborts()`, which every rig calls, prints
-`QEMU's firmware never started the kernel` beside them.
+2026-10-22), and since 2026-10-25 the four disk-trace rigs, `test-write-walk`,
+`test-spawn-reads`, `test-listing-walk` and `test-dir-scan`, through
+`disktrace.boot`, which requires a case name for every boot. A case whose
+boot stalled is INCONCLUSIVE only when none of its other boots ran and failed
+(`disktrace.settle`), and the stalled boot's QEMU log is kept beside its
+transcript; `make test` runs `disktrace.py --self-test`. The other rigs still
+grade a stall as failed checks. `Guest.aborts()` is meant to print `QEMU's
+firmware never started the kernel` beside them, but it reads the transcript
+after stopping QEMU, whose own last line then hides the stall (the roadmap).
 
 ## 2. Disk-format test images
 

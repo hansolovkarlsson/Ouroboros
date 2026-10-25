@@ -2810,6 +2810,10 @@ test:
 	@# it is checked on fixed transcripts here, where it runs in a second.
 	@echo "== the rigs' INCONCLUSIVE classifier"
 	@python3 scripts/drive-qemu.py --self-test || exit 1
+	@# The four disk-trace rigs reach it through disktrace.boot, a case at
+	@# a time: a failed boot beside a stalled one must fail its case, which a
+	@# real stall is too rare to show, so a fake guest drives it here.
+	@python3 scripts/disktrace.py --self-test || exit 1
 	@# The disk signature every image recipe writes (one-disk step 2): its
 	@# rules on synthetic images, so the check that an image carries one is
 	@# seen failing on an unsigned image, and the 0 rule and GPT refusal hold.

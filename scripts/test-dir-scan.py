@@ -31,7 +31,10 @@ more over the finished directory. Fails with the scan reading a sector a
 slot again (the main tree before 2026-10-19: 18,496 reads, 19.0 passes,
 against 4,152 and 4.3 after). It grades the directory's sectors only: the
 cursor's saving is chain walks, whose FAT lookups mostly hit fsd's one-sector
-FAT cache, which no disk counter sees, so it is not graded. Reports both numbers. About a
+FAT cache, which no disk counter sees, so it is not graded. Reports both numbers.
+A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100,
+drive-qemu.py's classifier, through disktrace.py), and so is its run,
+unless another of its boots ran and failed, which fails it. About a
 minute and a half. Run it whenever exFAT's find_free_run, slot_at,
 rewrite_slots, write_set_at, delete_set, grow_dir, walk_dir or room changes.
 """
@@ -93,11 +96,19 @@ def main():
         heap = vol.heap // 512
         found["sectors"] = {heap + (c - 2) * spc + k for c in clusters for k in range(spc)}
 
-    problems, lines1, count1 = disktrace.boot("test-dir-scan-1", SOURCE, "espexfat.img", steps(1))
+    one = disktrace.boot("test-dir-scan", "1", SOURCE, "espexfat.img", steps(1))
     written = collections.Counter()
-    more_problems, lines, count = disktrace.boot("test-dir-scan-100", SOURCE, "espexfat.img", steps(COUNT),
-                                                 inspect, writes=written)
-    problems += more_problems
+    hundred = disktrace.boot("test-dir-scan", str(COUNT), SOURCE, "espexfat.img", steps(COUNT),
+                             inspect, writes=written)
+    problems = disktrace.settle([one, hundred])
+    if problems is None:
+        return disktrace.drive_qemu.verdict("test-dir-scan", 0, 1)
+    if one is None or hundred is None:
+        for p in problems:
+            print("      " + p)
+        return disktrace.drive_qemu.verdict("test-dir-scan", 1, 1)
+    _, lines1, count1 = one
+    _, lines, count = hundred
     sectors = found.get("sectors", set())
     reads = sum(count[s] for s in sectors)
     writes = sum(written[s] for s in sectors)
@@ -120,8 +131,7 @@ def main():
         failed += not ok
     for p in problems:
         print("      " + p)
-    print(f"test-dir-scan: {'all checks passed' if failed == 0 else f'{failed} check(s) FAILED'}")
-    return 1 if failed else 0
+    return disktrace.drive_qemu.verdict("test-dir-scan", failed, 0)
 
 
 if __name__ == "__main__":

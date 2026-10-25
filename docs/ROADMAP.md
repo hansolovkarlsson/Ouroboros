@@ -2217,18 +2217,27 @@ The small open tails those arcs deliberately left:
 >       `test-usb-hub` goes through `boot_stalled` too, on its own log. Done.*
 > - [ ] **new** **The other QEMU rigs still grade a firmware stall as failed
 >       checks.** About forty rigs drive QEMU's firmware through
->       `drive-qemu.py`; ten use `boot_stalled` (`test-blank-disk` since 2026-10-23,
->       `test-write-walk` and `test-spawn-reads` since 2026-10-25, through
->       `disktrace.boot`'s `rig`, which `test-listing-walk` and `test-dir-scan`
->       can pass as well). The rest can meet the same
+>       `drive-qemu.py`; twelve use `boot_stalled` (`test-blank-disk` since 2026-10-23,
+>       and since 2026-10-25 the four disk-trace rigs through `disktrace.boot`,
+>       which requires a case for every boot). The rest can meet the same
 >       stall (`test-long-set` did, on virtio). Each needs the call after its
 >       boot and `verdict` at its end, a few lines a rig, and a control that
 >       forces the stall. Taken a rig at a time, as each is next touched.
->       Meanwhile `Guest.aborts()` names a stall in every rig's output, so
->       those FAILs say why. The high review of 2026-10-22 asked for the
+>       `Guest.aborts()` was to name a stall in every rig's output meanwhile,
+>       but cannot (the item below). The high review of 2026-10-22 asked for the
 >       verdict in `Guest` itself; a rig grades its own checks, so it must
 >       still skip them, and `run()` answering three ways would change every
 >       rig's `if g.run(...)` at once.
+> - [ ] **fix** **`Guest.aborts()` cannot name a firmware stall.** It
+>       stops QEMU and then asks `firmware_stalled` about the transcript,
+>       whose last line is by then QEMU's own `terminating on signal 15 from
+>       pid ...` (`build/test-call-interrupt.txt`, line 90 of 90, on
+>       2026-10-25), so the last-line test never matches and the note it
+>       prints for the rigs not on `boot_stalled` cannot appear. The rigs on
+>       it classify a transcript read before the stop, and are not affected.
+>       Either read the transcript before the stop, or have
+>       `firmware_stalled` pass over QEMU's signal line, with a self-test
+>       case for it. Found by the max review of #350.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the

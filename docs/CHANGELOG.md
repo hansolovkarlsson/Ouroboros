@@ -981,17 +981,22 @@ test-valid-length` plants four preallocated files and checks a copy, a write
 inside the preallocation, an append and a write inside the valid bytes; it
 fails with the read, the gap or the Stream's two lengths each as on main.
 
-**`test-write-walk` and `test-spawn-reads` take a firmware stall for
-INCONCLUSIVE (2026-10-25).** On 2026-10-24 each reported a boot QEMU's
-firmware never started as a FAIL, and each passed on a rerun. Both boot
-through `scripts/disktrace.py`, whose `boot` now takes `rig`: given it, the
-boot goes through `drive-qemu.py`'s `boot_stalled` and a stall raises
-`disktrace.Stalled` in place of the counts. The rig grades nothing of that
-case (a pair of boots, or one image's pair) and exits by `verdict`, 100 when
-a boot stalled and no check failed. A fake guest printing the firmware's
-stall drives both rigs' boot paths to INCONCLUSIVE and exit 100; one printing
-the kernel's first line is graded. `test-listing-walk` and `test-dir-scan`
-boot through the same function and can pass `rig` when next touched.
+**The four disk-trace rigs take a firmware stall for INCONCLUSIVE
+(2026-10-25).** On 2026-10-24 `test-write-walk` and `test-spawn-reads` each
+reported a boot QEMU's firmware never started as a FAIL, and each passed on a
+rerun. All four rigs that count disk reads (those two, `test-listing-walk`
+and `test-dir-scan`) boot through `scripts/disktrace.py`, whose `boot` now
+requires the rig and a case name for every boot. It sends each boot through
+`drive-qemu.py`'s `boot_stalled` under `rig:case`, so every boot keeps its
+own stall history, and answers None for a stall, keeping the boot's QEMU log
+beside its transcript. `disktrace.settle` turns a case's answers into its
+problems: a boot that ran and failed fails the case whatever its other boots
+did, and the case is INCONCLUSIVE only when a boot stalled and none failed.
+The first version, the same day, caught the stall around a whole pair, so a
+failed first boot was dropped when the second stalled (exit 100, "no check
+failed") and a hang every run meets took five runs to fail, not three; the
+max review of #350 found it. `make test` runs `disktrace.py --self-test`,
+which drives `boot` and `settle` with a fake guest.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

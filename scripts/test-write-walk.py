@@ -68,7 +68,8 @@ On the tree of 2026-10-21 the FAT32
 pairs read 134 and 774 FAT sectors.
 
 A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100,
-drive-qemu.py's classifier, through disktrace.py), and its pair is not graded.
+drive-qemu.py's classifier, through disktrace.py), and so is its pair,
+unless another of its boots ran and failed, which fails it.
 
 About two and a half minutes.
 """
@@ -296,12 +297,15 @@ def mirrored(fs, sectors):
     return problems
 
 
-def boot(tag, prepared, cmd, inspect=None, setup=()):
+def boot(case, prepared, cmd, inspect=None, setup=()):
+    """One boot's (problems, sectors read), or None for a firmware stall."""
     typed = list(setup) + [cmd]
     steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
     steps += [("# ", c) for c in typed] + [("# ", "")]
-    problems, lines, count = disktrace.boot(f"test-write-walk-{tag}", prepared, IMAGE, steps, inspect,
-                                            rig="test-write-walk")
+    answer = disktrace.boot("test-write-walk", case, prepared, IMAGE, steps, inspect)
+    if answer is None:
+        return None
+    problems, lines, count = answer
     # Each `cp:` line is charged to the command typed before it.
     current = None
     for ln in lines:
@@ -315,27 +319,28 @@ def grade(name, prepared, base_cmd, cmd, region, inspect, setup=()):
     """Boot the pair, each after the commands `setup`, then compare the
     destination FAT's extra reads with the prediction `inspect` leaves in
     `found` ({"want", "what"}) or the problems it found; print the verdict
-    and return 1 on a failure, 0 on a pass and None when a boot stalled."""
+    and return 1 on a failure, 0 on a pass and None when a boot stalled and
+    neither failed (disktrace.settle)."""
     found, inspect_problems = {}, []
 
     def run_inspect(copy):
         try:
             inspect(copy, found, inspect_problems)
-        except ValueError as e:
+        except (ValueError, struct.error) as e:
             inspect_problems.append(str(e))
 
-    try:
-        p0, base = boot(f"{name}-base", prepared, base_cmd, setup=setup)
-        p1, more = boot(f"{name}-more", prepared, cmd, run_inspect, setup=setup)
-    except disktrace.Stalled:
+    base_boot = boot(f"{name}-base", prepared, base_cmd, setup=setup)
+    more_boot = boot(f"{name}-more", prepared, cmd, run_inspect, setup=setup)
+    problems = disktrace.settle([base_boot, more_boot])
+    if problems is None:
         return None
-    problems = p0 + p1 + inspect_problems
+    problems += inspect_problems
     if not problems and "want" not in found:
         problems.append("the copy's disk was not read")
     delta = want = None
     if not problems:
         lo, hi = region
-        more_problems, per = disktrace.per_run(base, more, 1)
+        more_problems, per = disktrace.per_run(base_boot[1], more_boot[1], 1)
         problems += more_problems
         delta = sum(c for s, c in per.items() if lo <= s < hi)
         want = found["want"]
