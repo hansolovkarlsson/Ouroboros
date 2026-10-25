@@ -67,6 +67,9 @@ planted marks survived the boot), or the check could not fail. A free
 On the tree of 2026-10-21 the FAT32
 pairs read 134 and 774 FAT sectors.
 
+A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100,
+drive-qemu.py's classifier, through disktrace.py), and its pair is not graded.
+
 About two and a half minutes.
 """
 import functools
@@ -297,7 +300,8 @@ def boot(tag, prepared, cmd, inspect=None, setup=()):
     typed = list(setup) + [cmd]
     steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
     steps += [("# ", c) for c in typed] + [("# ", "")]
-    problems, lines, count = disktrace.boot(f"test-write-walk-{tag}", prepared, IMAGE, steps, inspect)
+    problems, lines, count = disktrace.boot(f"test-write-walk-{tag}", prepared, IMAGE, steps, inspect,
+                                            rig="test-write-walk")
     # Each `cp:` line is charged to the command typed before it.
     current = None
     for ln in lines:
@@ -311,7 +315,7 @@ def grade(name, prepared, base_cmd, cmd, region, inspect, setup=()):
     """Boot the pair, each after the commands `setup`, then compare the
     destination FAT's extra reads with the prediction `inspect` leaves in
     `found` ({"want", "what"}) or the problems it found; print the verdict
-    and return 1 on a failure."""
+    and return 1 on a failure, 0 on a pass and None when a boot stalled."""
     found, inspect_problems = {}, []
 
     def run_inspect(copy):
@@ -320,8 +324,11 @@ def grade(name, prepared, base_cmd, cmd, region, inspect, setup=()):
         except ValueError as e:
             inspect_problems.append(str(e))
 
-    p0, base = boot(f"{name}-base", prepared, base_cmd, setup=setup)
-    p1, more = boot(f"{name}-more", prepared, cmd, run_inspect, setup=setup)
+    try:
+        p0, base = boot(f"{name}-base", prepared, base_cmd, setup=setup)
+        p1, more = boot(f"{name}-more", prepared, cmd, run_inspect, setup=setup)
+    except disktrace.Stalled:
+        return None
     problems = p0 + p1 + inspect_problems
     if not problems and "want" not in found:
         problems.append("the copy's disk was not read")
@@ -348,7 +355,7 @@ def main() -> int:
     files = {"HUGE": data, "EMPTY": b""}
     prepared = os.path.join(ROOT, "build", "test-write-walk-prepared.img")
     shutil.copyfile(os.path.join(ROOT, "build", IMAGE), prepared)
-    failed = 0
+    outcomes = []
     try:
         spawn_reads.place_mounted(prepared, files, part=1)
         spawn_reads.place_mounted(prepared, files, part=2)
@@ -436,21 +443,21 @@ def main() -> int:
             finally:
                 fs.fh.close()
 
-        failed += grade("exfat", prepared, "cp /mnt/f/EMPTY /CEMPTY", "cp /mnt/f/HUGE /CHAIN",
-                        (g["fat"], g["fat_end"]), exfat_inspect)
-        failed += grade("fat32", prepared, "cp /EMPTY /mnt/f/CEMPTY", "cp /HUGE /mnt/f/C32",
-                        f32_region, fat32_inspect)
+        outcomes.append(grade("exfat", prepared, "cp /mnt/f/EMPTY /CEMPTY", "cp /mnt/f/HUGE /CHAIN",
+                        (g["fat"], g["fat_end"]), exfat_inspect))
+        outcomes.append(grade("fat32", prepared, "cp /EMPTY /mnt/f/CEMPTY", "cp /HUGE /mnt/f/C32",
+                        f32_region, fat32_inspect))
         # Within one volume. On exFAT the source is made FAT-chained by a copy
         # from the other first, in both boots of the pair (macOS wrote /HUGE
         # contiguous, which reads no FAT); every FAT32 file is chained.
-        failed += grade("exfat-same", prepared, "cp /EMPTY /CEMPTY", "cp /SRC /CHAIN",
+        outcomes.append(grade("exfat-same", prepared, "cp /EMPTY /CEMPTY", "cp /SRC /CHAIN",
                         (g["fat"], g["fat_end"]), functools.partial(exfat_inspect, src_name="SRC"),
-                        setup=["cp /mnt/f/HUGE /SRC"])
-        failed += grade("fat32-same", prepared, "cp /mnt/f/EMPTY /mnt/f/CEMPTY", "cp /mnt/f/HUGE /mnt/f/C32",
-                        f32_region, functools.partial(fat32_inspect, src_name="HUGE"))
+                        setup=["cp /mnt/f/HUGE /SRC"]))
+        outcomes.append(grade("fat32-same", prepared, "cp /mnt/f/EMPTY /mnt/f/CEMPTY", "cp /mnt/f/HUGE /mnt/f/C32",
+                        f32_region, functools.partial(fat32_inspect, src_name="HUGE")))
     finally:
         os.remove(prepared)
-    return 1 if failed else 0
+    return disktrace.drive_qemu.verdict("test-write-walk", outcomes.count(1), outcomes.count(None))
 
 
 if __name__ == "__main__":

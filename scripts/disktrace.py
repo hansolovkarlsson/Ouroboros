@@ -8,6 +8,11 @@ anything in the guest. A rig boots twice, the same steps but for the work it
 grades, and takes the difference per sector: the boots are deterministic, the
 same build reading the same sectors each time.
 
+A rig that passes `rig` has a boot QEMU's firmware never started taken for
+INCONCLUSIVE by drive-qemu.py's classifier (`boot_stalled`), which raises
+Stalled in place of the boot's counts: the rig grades nothing of that boot's
+case and answers drive_qemu.verdict.
+
 Not a program: loaded by path, as the rigs load drive-qemu.py.
 """
 import collections
@@ -26,7 +31,11 @@ READ = re.compile(rb"virtio_blk_handle_read .*?sector (\d+) nsectors (\d+)")
 WRITE = re.compile(rb"virtio_blk_handle_write .*?sector (\d+) nsectors (\d+)")
 
 
-def boot(tag, source, image, steps, inspect=None, writes=None):
+class Stalled(Exception):
+    """A boot QEMU's firmware never started; boot_stalled has said so."""
+
+
+def boot(tag, source, image, steps, inspect=None, writes=None, rig=None):
     """Boot a copy of `source` (the stale-image guard reads build/`image`),
     drive `steps`, and return (problems, transcript lines, sectors read by
     sector number). `tag` names the copy and its log under build/. When
@@ -34,7 +43,8 @@ def boot(tag, source, image, steps, inspect=None, writes=None):
     all ran, before the copy is removed, to read what the guest wrote; what
     it raises is the caller's. When `writes` (a Counter) is given, QEMU traces
     writes too and it is filled with the sectors written, as the reads are
-    returned."""
+    returned. When `rig` is given, a boot the firmware never started raises
+    Stalled, the boot logged under `rig` by the part of `tag` after it."""
     copy = os.path.join(ROOT, "build", f"{tag}.img")
     log = os.path.join(ROOT, "build", f"{tag}.log")
     shutil.copyfile(source, copy)
@@ -55,6 +65,8 @@ def boot(tag, source, image, steps, inspect=None, writes=None):
                 inspect(copy)
         finally:
             os.remove(copy)
+    if rig and drive_qemu.boot_stalled(rig, tag.removeprefix(f"{rig}-"), out, guest.aborts()):
+        raise Stalled(tag)
     problems = []
     if not driven:
         problems.append("a step timed out")

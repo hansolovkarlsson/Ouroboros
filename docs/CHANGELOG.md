@@ -981,6 +981,18 @@ test-valid-length` plants four preallocated files and checks a copy, a write
 inside the preallocation, an append and a write inside the valid bytes; it
 fails with the read, the gap or the Stream's two lengths each as on main.
 
+**`test-write-walk` and `test-spawn-reads` take a firmware stall for
+INCONCLUSIVE (2026-10-25).** On 2026-10-24 each reported a boot QEMU's
+firmware never started as a FAIL, and each passed on a rerun. Both boot
+through `scripts/disktrace.py`, whose `boot` now takes `rig`: given it, the
+boot goes through `drive-qemu.py`'s `boot_stalled` and a stall raises
+`disktrace.Stalled` in place of the counts. The rig grades nothing of that
+case (a pair of boots, or one image's pair) and exits by `verdict`, 100 when
+a boot stalled and no check failed. A fake guest printing the firmware's
+stall drives both rigs' boot paths to INCONCLUSIVE and exit 100; one printing
+the kernel's first line is graded. `test-listing-walk` and `test-dir-scan`
+boot through the same function and can pass `rig` when next touched.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

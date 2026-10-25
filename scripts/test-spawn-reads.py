@@ -46,6 +46,9 @@ more and the cursor could not be seen. Ignoring the cursor reads 1,436,
 bypassing the cache 159 (a read a step), and a cache not refreshed by
 write_fat_entry stops /CHAIN running at all.
 
+A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100,
+drive-qemu.py's classifier, through disktrace.py), and its case is not graded.
+
 About four minutes; needs e2fsprogs, as the ext2 image does.
 """
 import math
@@ -229,7 +232,7 @@ def boot(name, prepared, image, program, runs=RUNS, setup=(), inspect=None):
     steps += [("# ", cmd) for cmd in setup]
     steps += [("# ", f"{program} a")] * runs + [("# ", "")]
     problems, lines, count = disktrace.boot(f"test-spawn-reads-{name}", prepared, image, steps,
-                                            inspect)
+                                            inspect, rig="test-spawn-reads")
     said = sum(1 for ln in lines if ln.strip() == "argv[1] = a")
     if said < runs:
         problems.append(f"`{program} a` printed argv[1] = a {said} times, not {runs}")
@@ -241,7 +244,7 @@ def main() -> int:
         small = fh.read()
     files = {"SMALL": small, "BIG": small + bytes(BIG - len(small))}
     want = requests(BIG) - requests(len(small))
-    failed = 0
+    failed = stalled = 0
     for name, image, ptype in IMAGES:
         prepared = os.path.join(ROOT, "build", f"test-spawn-reads-{name}-prepared.img")
         shutil.copyfile(os.path.join(ROOT, "build", image), prepared)
@@ -252,12 +255,21 @@ def main() -> int:
                 huge = {"HUGE": small + bytes(HUGE - len(small))} if ptype == 0x07 else {}
                 place_mounted(prepared, {**files, **huge})
                 root = root_fat32(prepared) if ptype == 0x0B else root_exfat(prepared)
-            p0, base = boot(name, prepared, image, "/SMALL")
-            p1, more = boot(name, prepared, image, "/BIG")
+            try:
+                p0, base = boot(f"{name}-small", prepared, image, "/SMALL")
+                p1, more = boot(f"{name}-big", prepared, image, "/BIG")
+            except disktrace.Stalled:
+                p0 = None
             if ptype == 0x07:
-                failed += chain_walk(prepared, image)
+                try:
+                    failed += chain_walk(prepared, image)
+                except disktrace.Stalled:
+                    stalled += 1
         finally:
             os.remove(prepared)
+        if p0 is None:
+            stalled += 1
+            continue
         problems = p0 + p1
         delta = (more[root] - base[root]) / RUNS
         if not problems and delta != want:
@@ -270,7 +282,7 @@ def main() -> int:
         for p in problems:
             print(f"     {p}")
         failed += bool(problems)
-    return 1 if failed else 0
+    return disktrace.drive_qemu.verdict("test-spawn-reads", failed, stalled)
 
 
 def chain_walk(prepared, image):

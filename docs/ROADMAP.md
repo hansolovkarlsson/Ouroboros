@@ -2217,7 +2217,10 @@ The small open tails those arcs deliberately left:
 >       `test-usb-hub` goes through `boot_stalled` too, on its own log. Done.*
 > - [ ] **new** **The other QEMU rigs still grade a firmware stall as failed
 >       checks.** About forty rigs drive QEMU's firmware through
->       `drive-qemu.py`; eight use `boot_stalled` (`test-blank-disk` since 2026-10-23). The rest can meet the same
+>       `drive-qemu.py`; ten use `boot_stalled` (`test-blank-disk` since 2026-10-23,
+>       `test-write-walk` and `test-spawn-reads` since 2026-10-25, through
+>       `disktrace.boot`'s `rig`, which `test-listing-walk` and `test-dir-scan`
+>       can pass as well). The rest can meet the same
 >       stall (`test-long-set` did, on virtio). Each needs the call after its
 >       boot and `verdict` at its end, a few lines a rig, and a control that
 >       forces the stall. Taken a rig at a time, as each is next touched.
