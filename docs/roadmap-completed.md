@@ -2875,6 +2875,75 @@ The items as they stood, done notes included:
   cursor to know every cluster of its chain, and a cursor holds only its
   position. Not to be proposed again without that.*
 
+## exFAT's vendor allocations freed, DONE (2026-10-24)
+
+One item closed across 2026-10-23 and 2026-10-24: `rm`, `rmdir` and a
+replacing `mv` on exFAT now free the clusters a set's vendor allocation
+entries (0xE1) name, and a rename carries them, by #348. The first commit
+was small; seven review rounds (max, altitude, resumed max and four high)
+then hardened every path that frees or writes clusters on a damaged volume,
+and `make test-long-set` grew from five boots to eleven, each of
+thirty-nine mutants failing a check. The branch struck its item through in
+place with a *Done* note; the closeout moved it here. What the reviews
+deferred stays on the roadmap: the chained free a cluster at a time (found
+by four of them), the active FAT of a two-FAT volume, the opt-in read-only
+gate, one check where a cluster is written (the root's later clusters among
+what it would cover), and the undo of a failed `mv`.
+
+- ~~**exFAT's `rm` leaks a vendor allocation's clusters.**~~ A vendor allocation
+  entry (0xE1) names clusters of its own (its FirstCluster and DataLength),
+  which `rm` and a replacing `mv` (for the set it replaces) never free, so
+  they stay set in the bitmap with no set naming them. Freeing them the way
+  the Stream's are, bounded by the volume, would end it. Read in the code,
+  found with the rename's fix, 2026-10-21.
+  *Done 2026-10-23: `delete_set` takes what becomes of a set's clusters as
+  a required argument, and a removal (`rm`, `rmdir`, which leaked them too,
+  and the set a replacing `mv` deletes) deletes the set and then frees the
+  Stream's and every allocating benign secondary's, read back from the
+  deleted slots, but for any the surviving set names; a rename carries
+  them. Frees refuse a first cluster outside the heap and stop at the
+  bitmap, the up-case table and the root's first cluster. A first version
+  freed 0xE1 alone, before the delete and unbounded; the max review found
+  it. `make test-long-set`'s VALLOC and VCROSS, failing with each of twelve
+  mutants of the free. The order itself, delete then free, is graded by no
+  boot: it shows only on an error or a crash between them. The altitude
+  review the same day moved `write_file`'s replace to the same order
+  (repoint, then free), held the bitmap's and up-case table's extents to the
+  volume at mount, made the allocator pass over the volume's own clusters,
+  left a secondary overlapping the Stream's run, and bounded
+  `write_fat_entry` by the heap; three of its findings are items below. The
+  resumed max review made a volume with no bitmap read-only before any
+  write (a replacing `mv` there had left two sets, and a truncation lost
+  its file), kept a longer bitmap and dropped one on the up-case table,
+  bounded the mount's scan of the root, freed none of a contiguous run
+  past the heap, and tested the surviving set by overlapping runs. The high
+  review of 2026-10-24 found the overlap test still took a FAT-chained
+  survivor by its first cluster (it walks chains now), `ensure_chained`
+  writing a run's links before the heap's edge refused it (refused first
+  now), a replacing `mv` that failed at the source's delete leaving two sets
+  of one name (the destination's set goes first now, its clusters freed
+  after both), the scan of the root bounded only by the heap (it stops at a
+  loop and at 256 MiB), a first bitmap entry naming cluster 0 passed over
+  for a second, the allocations read back after the delete, and an empty
+  Stream filling a place in `Runs`. A volume with no bitmap answers
+  read-only to a `touch` of an existing file and a `mkdir` of an existing
+  name, a choice the same review raised and kept: it says the true thing
+  about the volume. A second high review that day made the
+  overlap test walk each chain once, freed a replacing `mv`'s destination
+  clusters when its source's delete fails, and made a volume of two FATs
+  read-only (VMEET and VTWOFAT); its finding on `bitmap_clear_run`'s cost
+  joins the chained-free item below. A third made a whole-file write keep
+  an old cluster its set's vendor run still names and `ensure_chained`
+  refuse a run over the volume's own clusters (VW and VSYSW, in VMEET's
+  boot), and put the opt-in read-only gate on the roadmap. A fourth made
+  `write_at` refuse a chained file on those clusters or linked into them
+  (VSYSC and VLINK) and a removal refuse slots not shaped as a set before
+  it clears any; it kept the write order of a whole-file write (an error
+  after the set names the new data is still reported, as `rm`'s and `mv`'s
+  are) and, as before, the read-only answers. The root's later
+  clusters are not among the volume's own the free refuses: a damaged run
+  can reach them, as it can any live file's.*
+
 ## The blank virtio disk, DONE (2026-10-23)
 
 One item closed on 2026-10-23: a virtio disk with no MBR signature, dropped
