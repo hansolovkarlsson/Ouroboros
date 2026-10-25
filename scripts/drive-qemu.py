@@ -37,6 +37,7 @@ See docs/testing/testing-qemu.md, and the memory note on QEMU stdin driving the 
 shell. The technique is what makes `cpu`, login, and permission behaviour
 testable without a human at the keyboard.
 """
+import gzip
 import os
 import re
 import shutil
@@ -213,10 +214,13 @@ class Guest:
                 )
         except OSError:
             return None
-        # Every rig reads the trace here, so every rig's output names a boot
-        # the firmware never handed over, whether or not the rig grades it
-        # INCONCLUSIVE (boot_stalled); one that does not then fails its
-        # checks with this line to say why.
+        # Meant to name, in every rig's output, a boot the firmware never
+        # handed over. It cannot: the guest is stopped above, so the
+        # transcript's last line is QEMU's "terminating on signal 15", which
+        # no STALL_LINES pattern matches, and this never prints. A rig that
+        # grades stalls reads the transcript before it stops the guest
+        # (boot_stalled); the rest say nothing. docs/ROADMAP.md, "Guest.aborts()
+        # cannot name a firmware stall".
         if firmware_stalled(self.transcript(), count):
             self.report("QEMU's firmware never started the kernel (drive-qemu.py's firmware_stalled)")
         return count
@@ -314,8 +318,9 @@ def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None, qe
     run meets (a firmware stopped by the rig's own disk, say): it answers
     False, and the checks fail. `log`, `kept_dir` and `label` default to
     STALL_LOG, STALL_DIR and `rig:boot`; test-usb-hub keeps its own. When
-    `qemu_log` is given, a stall keeps it beside the transcript, with .log for
-    .txt: the trace of what the firmware did, which a rerun overwrites."""
+    `qemu_log` is given, a stall keeps it beside the transcript, gzipped, with
+    .log.gz for .txt: the trace of what the firmware did, which a rerun
+    overwrites."""
     log, kept_dir = log or STALL_LOG, kept_dir or STALL_DIR
     label = label or f"{rig}:{boot}"
     if not firmware_stalled(out, aborts):
@@ -326,7 +331,10 @@ def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None, qe
     with open(kept, "w") as fh:
         fh.write(out)
     if qemu_log and os.path.exists(qemu_log):
-        shutil.copyfile(qemu_log, kept[:-len(".txt")] + ".log")
+        # Compressed: a disk-trace rig's log is megabytes of trace lines, and
+        # kept stalls are never cleaned up.
+        with open(qemu_log, "rb") as src, gzip.open(kept[:-len(".txt")] + ".log.gz", "wb") as dst:
+            shutil.copyfileobj(src, dst)
     stalled, runs = record_run(label, "INCONCLUSIVE", kept, log=log)
     rate = (f"{stalled} of {runs} {label} boot(s) in {os.path.relpath(log, _ROOT)} stalled; "
             f"this one kept as {os.path.relpath(kept, _ROOT)}")

@@ -298,61 +298,61 @@ def mirrored(fs, sectors):
 
 
 def boot(case, prepared, cmd, inspect=None, setup=()):
-    """One boot's (problems, sectors read), or None for a firmware stall."""
+    """One boot's answer (disktrace.boot's), or None for a firmware stall."""
     typed = list(setup) + [cmd]
     steps = [("login:", "root"), ("assword", "root"), ("# ", "mount 1 /mnt/f")]
     steps += [("# ", c) for c in typed] + [("# ", "")]
-    answer = disktrace.boot("test-write-walk", case, prepared, IMAGE, steps, inspect)
-    if answer is None:
-        return None
-    problems, lines, count = answer
-    # Each `cp:` line is charged to the command typed before it.
-    current = None
-    for ln in lines:
-        current = next((c for c in typed if ln.rstrip().endswith(c)), current)
-        if ln.startswith("cp:"):
-            problems.append(f"`{current}` said: {ln.rstrip()}")
-    return problems, count
+
+    def said(lines, count):
+        # Each `cp:` line is charged to the command typed before it.
+        problems, current = [], None
+        for ln in lines:
+            current = next((c for c in typed if ln.rstrip().endswith(c)), current)
+            if ln.startswith("cp:"):
+                problems.append(f"`{current}` said: {ln.rstrip()}")
+        return problems
+
+    return disktrace.boot("test-write-walk", case, prepared, IMAGE, steps, inspect, said)
 
 
-def grade(name, prepared, base_cmd, cmd, region, inspect, setup=()):
+def grade(tally, name, prepared, base_cmd, cmd, region, inspect, setup=()):
     """Boot the pair, each after the commands `setup`, then compare the
     destination FAT's extra reads with the prediction `inspect` leaves in
-    `found` ({"want", "what"}) or the problems it found; print the verdict
-    and return 1 on a failure, 0 on a pass and None when a boot stalled and
+    `found` ({"want", "what"}), its problems the second boot's; print the
+    verdict and close the case in `tally`, unless a boot stalled and
     neither failed (disktrace.settle)."""
-    found, inspect_problems = {}, []
+    found = {}
 
     def run_inspect(copy):
-        try:
-            inspect(copy, found, inspect_problems)
-        except (ValueError, struct.error) as e:
-            inspect_problems.append(str(e))
+        problems = []
+        inspect(copy, found, problems)
+        return problems
 
     base_boot = boot(f"{name}-base", prepared, base_cmd, setup=setup)
     more_boot = boot(f"{name}-more", prepared, cmd, run_inspect, setup=setup)
-    problems = disktrace.settle([base_boot, more_boot])
+    problems = tally.settle([base_boot, more_boot])
     if problems is None:
-        return None
-    problems += inspect_problems
+        return
     if not problems and "want" not in found:
         problems.append("the copy's disk was not read")
     delta = want = None
-    if not problems:
+    if base_boot and more_boot:
         lo, hi = region
-        more_problems, per = disktrace.per_run(base_boot[1], more_boot[1], 1)
-        problems += more_problems
+        more_problems, per = disktrace.per_run(base_boot[2], more_boot[2], 1)
         delta = sum(c for s, c in per.items() if lo <= s < hi)
-        want = found["want"]
+        want = found.get("want")
+        if not problems:
+            problems += more_problems
         if not problems and delta != want:
             problems.append(f"`{cmd}` reads {delta} FAT sectors, not {want}: one walk of each chain it "
                             "reads and writes, through the FAT cache, is the rule")
     verdict = "FAIL" if problems else "ok  "
-    print(f"{verdict} {name}: `{cmd}` ({found.get('what', '?')}) reads {delta} sectors of the "
-          f"destination's FAT, {want} for one walk of each chain it reads and writes there")
+    shown = "?" if delta is None else delta
+    print(f"{verdict} {name}: `{cmd}` ({found.get('what', '?')}) reads {shown} sectors of the "
+          f"destination's FAT, {'?' if want is None else want} for one walk of each chain it reads and writes there")
     for p in problems:
         print(f"     {p}")
-    return 1 if problems else 0
+    tally.close(problems)
 
 
 def main() -> int:
@@ -360,7 +360,7 @@ def main() -> int:
     files = {"HUGE": data, "EMPTY": b""}
     prepared = os.path.join(ROOT, "build", "test-write-walk-prepared.img")
     shutil.copyfile(os.path.join(ROOT, "build", IMAGE), prepared)
-    outcomes = []
+    tally = disktrace.Tally("test-write-walk")
     try:
         spawn_reads.place_mounted(prepared, files, part=1)
         spawn_reads.place_mounted(prepared, files, part=2)
@@ -448,21 +448,21 @@ def main() -> int:
             finally:
                 fs.fh.close()
 
-        outcomes.append(grade("exfat", prepared, "cp /mnt/f/EMPTY /CEMPTY", "cp /mnt/f/HUGE /CHAIN",
-                        (g["fat"], g["fat_end"]), exfat_inspect))
-        outcomes.append(grade("fat32", prepared, "cp /EMPTY /mnt/f/CEMPTY", "cp /HUGE /mnt/f/C32",
-                        f32_region, fat32_inspect))
+        grade(tally, "exfat", prepared, "cp /mnt/f/EMPTY /CEMPTY", "cp /mnt/f/HUGE /CHAIN",
+              (g["fat"], g["fat_end"]), exfat_inspect)
+        grade(tally, "fat32", prepared, "cp /EMPTY /mnt/f/CEMPTY", "cp /HUGE /mnt/f/C32",
+              f32_region, fat32_inspect)
         # Within one volume. On exFAT the source is made FAT-chained by a copy
         # from the other first, in both boots of the pair (macOS wrote /HUGE
         # contiguous, which reads no FAT); every FAT32 file is chained.
-        outcomes.append(grade("exfat-same", prepared, "cp /EMPTY /CEMPTY", "cp /SRC /CHAIN",
-                        (g["fat"], g["fat_end"]), functools.partial(exfat_inspect, src_name="SRC"),
-                        setup=["cp /mnt/f/HUGE /SRC"]))
-        outcomes.append(grade("fat32-same", prepared, "cp /mnt/f/EMPTY /mnt/f/CEMPTY", "cp /mnt/f/HUGE /mnt/f/C32",
-                        f32_region, functools.partial(fat32_inspect, src_name="HUGE")))
+        grade(tally, "exfat-same", prepared, "cp /EMPTY /CEMPTY", "cp /SRC /CHAIN",
+              (g["fat"], g["fat_end"]), functools.partial(exfat_inspect, src_name="SRC"),
+              setup=["cp /mnt/f/HUGE /SRC"])
+        grade(tally, "fat32-same", prepared, "cp /mnt/f/EMPTY /mnt/f/CEMPTY", "cp /mnt/f/HUGE /mnt/f/C32",
+              f32_region, functools.partial(fat32_inspect, src_name="HUGE"))
     finally:
         os.remove(prepared)
-    return disktrace.drive_qemu.verdict("test-write-walk", outcomes.count(1), outcomes.count(None))
+    return tally.verdict()
 
 
 if __name__ == "__main__":

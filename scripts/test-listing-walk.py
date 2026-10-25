@@ -189,31 +189,33 @@ UNDER_ONE_AN_ENTRY = {"ext2": WALK_FILES}
 def boot(case, prepared, image, warm, word, check, want, kinds):
     """Boot a copy of `prepared`, log in, `echo warm` once, `echo word` RUNS
     times, then the check glob, then (with `kinds`) `ls /kinds`, which must
-    mark exactly its directories. Returns (problems, sectors read by sector
-    number), or None for a firmware stall. Both boots start with the same `warm`, a listing, so each
-    measured run starts from the same state of fsd's caches (FAT32 keeps the
-    last FAT sector it read across requests: without it the first run of
-    each boot differed by one read, from whatever login left there)."""
+    mark exactly its directories. Returns the boot's answer (disktrace.boot's),
+    or None for a firmware stall. Both boots start with the same `warm`, a
+    listing, so each measured run starts from the same state of fsd's caches
+    (FAT32 keeps the last FAT sector it read across requests: without it the
+    first run of each boot differed by one read, from whatever login left
+    there)."""
     steps = [("login:", "root"), ("assword", "root"), ("# ", f"echo {warm}")]
     steps += [("# ", f"echo {word}")] * RUNS + [("# ", f"echo {check}")]
     steps += [("# ", "ls /kinds")] if kinds else []
     steps += [("# ", "")]
-    answer = disktrace.boot("test-listing-walk", case, prepared, image, steps)
-    if answer is None:
-        return None
-    problems, lines, count = answer
-    wanted = RUNS + (word == warm)
-    if lines.count(word) < wanted:
-        problems.append(f"`echo {word}` printed it back {lines.count(word)} times, not {wanted}")
-    if not any(sorted(line.split()) == want for line in lines):
-        problems.append(f"`echo {check}` did not print {' '.join(want)}: the listing failed")
-    if kinds and not any(sorted(line.split()) == sorted(KINDS) for line in lines):
-        problems.append(f"`ls /kinds` did not print {' '.join(KINDS)}: a kind is wrong")
-    return problems, count
+
+    def said(lines, count):
+        problems = []
+        wanted = RUNS + (word == warm)
+        if lines.count(word) < wanted:
+            problems.append(f"`echo {word}` printed it back {lines.count(word)} times, not {wanted}")
+        if not any(sorted(line.split()) == want for line in lines):
+            problems.append(f"`echo {check}` did not print {' '.join(want)}: the listing failed")
+        if kinds and not any(sorted(line.split()) == sorted(KINDS) for line in lines):
+            problems.append(f"`ls /kinds` did not print {' '.join(KINDS)}: a kind is wrong")
+        return problems
+
+    return disktrace.boot("test-listing-walk", case, prepared, image, steps, check=said)
 
 
 def main() -> int:
-    outcomes = []
+    tally = disktrace.Tally("test-listing-walk")
     for name, image, d, check, names, setup, kinds in IMAGES:
         source = os.path.join(ROOT, "build", image)
         prepared = os.path.join(ROOT, "build", f"test-listing-walk-{name}-prepared.img")
@@ -229,31 +231,31 @@ def main() -> int:
         finally:
             if setup and os.path.exists(prepared):
                 os.remove(prepared)
-        problems = disktrace.settle([base_boot, listed_boot])
+        problems = tally.settle([base_boot, listed_boot])
         if problems is None:
-            outcomes.append(None)
             continue
-        counts = {}
-        if not problems:
-            differ, counts = disktrace.per_run(base_boot[1], listed_boot[1], RUNS)
-            problems += differ
-        per = list(counts.values())
-        common = math.gcd(*per) if per else 0
-        total = sum(per)
-        if not problems and common != 1:
-            problems.append(f"every sector is read a multiple of {common} times a listing: "
-                            "the walks are all alike, so no page's walk stopped at its end")
-        entries = UNDER_ONE_AN_ENTRY.get(name)
-        if not problems and entries is not None and total >= entries:
-            problems.append(f"a listing of {entries} entries reads {total} sectors: "
-                            "at least one an entry, as an inode read for each would")
+        shown = "? sectors (not compared)"
+        if base_boot and listed_boot:
+            differ, counts = disktrace.per_run(base_boot[2], listed_boot[2], RUNS)
+            per = list(counts.values())
+            common = math.gcd(*per) if per else 0
+            total = sum(per)
+            shown = f"{total} sectors, over {len(per)} sectors, read a multiple of {common} times each"
+            if not problems:
+                problems += differ
+            if not problems and common != 1:
+                problems.append(f"every sector is read a multiple of {common} times a listing: "
+                                "the walks are all alike, so no page's walk stopped at its end")
+            entries = UNDER_ONE_AN_ENTRY.get(name)
+            if not problems and entries is not None and total >= entries:
+                problems.append(f"a listing of {entries} entries reads {total} sectors: "
+                                "at least one an entry, as an inode read for each would")
         verdict = "FAIL" if problems else "ok  "
-        print(f"{verdict} {name}: one listing of {d} reads {total} sectors, "
-              f"over {len(per)} sectors, read a multiple of {common} times each")
+        print(f"{verdict} {name}: one listing of {d} reads {shown}")
         for p in problems:
             print(f"     {p}")
-        outcomes.append(1 if problems else 0)
-    return disktrace.drive_qemu.verdict("test-listing-walk", outcomes.count(1), outcomes.count(None))
+        tally.close(problems)
+    return tally.verdict()
 
 
 if __name__ == "__main__":
