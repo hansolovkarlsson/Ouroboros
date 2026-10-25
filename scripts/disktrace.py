@@ -337,7 +337,8 @@ def self_test():
             check("settle: a stall beside a passing boot, either side, is INCONCLUSIVE",
                   settle([passed, None]) is None and settle([None, passed]) is None)
             check("settle: two passing boots have no problems", settle([passed, passed]) == [])
-            check("settle: an iterator of answers is read whole", settle(iter([timed_out, passed])) == ["a step timed out", "checked"])
+            check("settle: an iterator of answers is read whole",
+                  settle(iter([None, passed])) is None and len(settle(iter([None, timed_out])) or []) == 3)
 
             def verdict_of(tally):
                 with contextlib.redirect_stdout(io.StringIO()):
