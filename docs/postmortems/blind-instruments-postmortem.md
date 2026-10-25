@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-23. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-24. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2122,3 +2122,42 @@ is 2026-10-11's (before changing what a command prints, grep the rigs for
 the lines they read); it was applied to one of the two lines the change
 renamed. **Every line a change rewords is a line some rig may read; grep for
 each, not for the one in mind.**
+
+## Three more, from the exFAT frees (2026-10-24)
+
+One branch (#348) took exFAT's free of vendor allocations through seven
+review rounds, and each round's fixes were graded by mutants of
+`make test-long-set`. Three of those instruments passed what they were
+built to fail; each was caught because the mutant's result was read against
+what it should have done, not taken as a verdict.
+
+**A mutant that restored half of the old code.** The fix for the mount's
+scan took the first bitmap entry even when damaged, by a found-flag; the
+mutant meant to restore the old rule (take the first entry naming a cluster
+above 0) changed the test and kept the flags. With both, the scan stopped
+at the up-case entry before it reached the planted good copy, and VFIRST
+passed. With the old code restored whole, VFIRST failed as it should. **A
+mutant is a claim about which code it brings back; restore the old code
+whole, or check that the half you restored does what the old code did.**
+
+**A mutant that did not remove what it named.** `meets_system` was to
+answer false; the edit put `false &&` before the first of three terms
+joined by `||`, so it read `(false && a) || b || c` and still tested the
+bitmap's range, the one the plant was on. The rig passed, and the line
+looked like a check that could not fail. The 2026-09-06 rule (a mutation
+that fails to apply looks like a test that cannot fail) holds for one that
+applies and does nothing: **a mutant that compiles is not a mutant that
+removes the check; make it return outright, or read what the edited
+expression now computes.**
+
+**A plant whose damage wrote the value already there.** VSYSW, a contiguous
+file on the bitmap's cluster, was one cluster long. With `ensure_chained`'s
+check removed, linking the run wrote end of chain into the bitmap's FAT
+entry, which already held end of chain, and the first-cluster check added
+beside it the same day refused the write before any byte reached the
+bitmap. Both observers, the FAT entry and the bitmap's first byte, saw
+nothing, though the check was gone. VSYSW is two clusters long now, and the
+missing check shows as the entry changing (`ffffffff` to `03000000`). **A
+plant must be one where the act under test changes something the rig looks
+at; a write of the value already there, or an act a neighbouring check
+undoes, grades nothing.**
