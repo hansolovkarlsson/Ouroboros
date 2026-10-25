@@ -2649,7 +2649,8 @@ test-ext2-blocks: image image-ext2
 # a volume with no bitmap refusing every write before it writes, and since
 # 2026-10-24 a vendor chain meeting the survivor's held, a volume of two
 # FATs read-only, a whole-file write keeping an old cluster its set's vendor
-# run names and a write refused on the bitmap's cluster. Eleven boots,
+# run names and a write refused on the bitmap's cluster, contiguous, chained
+# or through a link. Eleven boots,
 # about four minutes; run it whenever exFAT's patch_stream_ext,
 # set_checksum, walk_dir's set assembly, slot_at, read_slots, mv, rm, rmdir,
 # renamed_set, delete_set, unlink_set, free_runs, overlaps, runs_of,

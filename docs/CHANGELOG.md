@@ -960,7 +960,11 @@ vendor run still names it, so a later `rm` freed the cluster under the file
 given it in between; it keeps that cluster now. And a damaged contiguous
 file over the bitmap's cluster took a `writeat` into the bitmap itself;
 `ensure_chained` refuses a run over the volume's own clusters before it
-links any. VMEET's boot grades both.
+links any. VMEET's boot grades both. A fourth found the same write open to
+a FAT-chained file on the bitmap's cluster, or one whose link leads there;
+`write_at` refuses both before writing, and a removal refuses slots that are
+not a File entry and its Stream before it clears any, where it deleted them
+anyway and freed the set it was asked for under whatever set they were.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has

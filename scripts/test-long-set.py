@@ -91,10 +91,15 @@ build/espexfat.img (exFAT root, partition 1):
   clean after. SRC's walk stops at its size, before the run's last
   cluster, so the meeting is found only by the second walk of the run.
   In the same boot VW, whose vendor run lies on its own data cluster:
-  `write /VW new` must give it a new cluster and keep the old one; and
-  VSYSW, a contiguous file on the bitmap's cluster: `writeat /VSYSW 0 x`
-  must be refused with the bitmap's FAT entries and first byte unchanged,
-  and `rm /VSYSW` answer nothing;
+  `write /VW new` must give it a new cluster and keep the old one;
+  VSYSW, a contiguous file of two clusters from the bitmap's: `writeat
+  /VSYSW 0 x` must be refused with the bitmap's FAT entry and first byte
+  unchanged (a run of one would leave its entry end of chain, as it was,
+  even when linked); and VSYSC, a FAT-chained file on the bitmap's
+  cluster, and VLINK, one on a cluster of its own linked into the bitmap's,
+  must each be refused a `writeat` with the bitmap's first byte
+  unchanged; `rm` of all three answers nothing and VLINK's own cluster is
+  freed;
 - VUPCASE, VBITMAP, VOVERLAP and VFIRST: the root's up-case and bitmap entries
   damaged, restored on the host after the boot, VF (7 bytes) and VG
   planted. VUPCASE: the up-case table claiming the whole heap (taken as
@@ -152,8 +157,11 @@ two FATs left writable (VTWOFAT written), and a replacing `mv`'s source
 or a case-only `mv -f` freed as removed (VCROSS, VMEET and VALLOC). And
 with each of two of the third high review: a whole-file write freeing an
 old cluster its set's vendor run names (VW's), and a contiguous run linked
-over the volume's own clusters (VSYSW's `x` in the bitmap). Not graded by
-a boot:
+over the volume's own clusters (VSYSW's `x` in the bitmap). And with each
+of four of the fourth: a chained file's first cluster not tested (VSYSC's
+`x` in the bitmap), a link not tested (VLINK's), a contiguous run not
+tested against the volume's own clusters (the bitmap's FAT entry linked)
+and the heap's fit not tested (VCROSS's VHEAP). Not graded by a boot:
 the order of a removal (the set deleted, then its clusters freed), of a
 whole-file write (the set repointed, then the old chain freed) and of a
 replacing `mv` (the destination's set deleted, then the source's, then
@@ -162,7 +170,7 @@ between them, nor a replacing `mv` freeing the destination's clusters
 when its source's delete fails; a chain tested against another whose walk
 ends at its end of chain (the first walk alone answers, and VMEET's run
 ends past its source's size); the shape test on the slots a removal
-deletes; and the bound on the scan for the bitmap and up-case entries,
+deletes, which now refuses before it clears any; and the bound on the scan for the bitmap and up-case entries,
 which no boot gives a looped root.
 About four minutes. Run it whenever exFAT's patch_stream_ext,
 set_checksum, walk_dir's set assembly, slot_at, read_slots, mv, rm, rmdir,

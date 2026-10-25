@@ -4424,7 +4424,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   joins the chained-free item below. A third made a whole-file write keep
   an old cluster its set's vendor run still names and `ensure_chained`
   refuse a run over the volume's own clusters (VW and VSYSW, in VMEET's
-  boot), and put the opt-in read-only gate on the roadmap. The root's later
+  boot), and put the opt-in read-only gate on the roadmap. A fourth made
+  `write_at` refuse a chained file on those clusters or linked into them
+  (VSYSC and VLINK) and a removal refuse slots not shaped as a set before
+  it clears any; it kept the write order of a whole-file write (an error
+  after the set names the new data is still reported, as `rm`'s and `mv`'s
+  are) and, as before, the read-only answers. The root's later
   clusters are not among the volume's own the free refuses: a damaged run
   can reach them, as it can any live file's.*
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
@@ -4493,8 +4498,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   the allocator passes over the volume's own (all 2026-10-23), and since the
   third high review of 2026-10-24 `ensure_chained` refuses a contiguous run
   over them, so a contiguous Stream on the bitmap is no longer written
-  through (VSYSW in `make test-long-set`); but any cluster a damaged chain
-  reaches still is. Refusing a first cluster
+  through (VSYSW in `make test-long-set`), and since the fourth that day
+  `write_at` refuses a chained file on one or a link to one (VSYSC,
+  VLINK); but a directory's set written through a damaged chain
+  (`write_set_at`) and a read still reach them, and the root's clusters
+  past its first are not among them at all, so a damaged run over them is
+  freed and handed out again. `locate_tables` walks the root's chain at
+  mount and keeps none of it; recording it there (bounded as the scan is)
+  would let `is_system` count it. Each review has added the check to one
+  more path: one check where a cluster is turned into a sector to write
+  (`cluster_to_lba`'s callers) would close them together. Refusing a first cluster
   outside the heap or among the volume's own where `walk_dir` decodes a set
   (beside its rule that DataLength 0 is no allocation), and ending a walk in
   `next_cluster` and `advance` at a system cluster as they end it at the
