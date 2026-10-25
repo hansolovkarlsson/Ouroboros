@@ -195,8 +195,9 @@ def self_test():
                   ran is not None and ran[0] == [] and ran[2] == {5: 1})
             check("and logged as self:b booted", logged()[-1] == ["self:b", "booted"])
             timed_out = run("timed out", "c")
-            check("settle: a failed boot beside a stall fails the case",
-                  bool(settle([timed_out, None])) and "a step timed out" in settle([timed_out, None]))
+            beside = settle([timed_out, None]) or []
+            check("settle: a failed boot beside a stall fails the case, saying a boot stalled",
+                  "a step timed out" in beside and any("stalled" in p for p in beside))
             check("settle: a stall beside a passing boot is INCONCLUSIVE", settle([ran, None]) is None)
             check("settle: two passing boots have no problems", settle([ran, ran]) == [])
             got = [run("stalled", "d") for _ in range(drive_qemu.PERSISTENT)]
