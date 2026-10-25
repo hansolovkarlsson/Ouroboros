@@ -783,13 +783,15 @@ def run_vmeet():
     walk, cut at its size, stops short of the run's last cluster. And two
     writes to damaged sets: VW, whose vendor run lies on its own data, given
     new data by a whole-file write (its old cluster kept for the run), and
-    VSYSW, a contiguous file on the bitmap's cluster, refused a `writeat`
-    with nothing written. A boot of its own: VCROSS's root has no room."""
+    VSYSW, a contiguous file on the bitmap's cluster, VSYSC, a FAT-chained
+    one, and VLINK, a FAT-chained file whose link leads into the bitmap,
+    each refused a `writeat` with nothing written. A boot of its own:
+    VCROSS's root has no room."""
     start = copy()
     vol = Volume(IMAGE, start)
-    r = free_run(vol, 6)
+    r = free_run(vol, 7)
     if r is None:
-        return [("vmeet: six free clusters in a run on the image", False)], []
+        return [("vmeet: seven free clusters in a run on the image", False)], []
     c = vol.cluster
     sets = {
         # SRC FAT-chained r, r + 1, r + 2 but sized two clusters; DST on
@@ -803,9 +805,13 @@ def run_vmeet():
         "VW": plant_set("VW", r + 5, 7, [secondary(0xE1, r + 5, c, 0x03)]),
         # VSYSW contiguous on the bitmap's first cluster.
         "VSYSW": plant_set("VSYSW", vol.bitmap, 4),
+        # VSYSC the same, FAT-chained; VLINK FAT-chained on r + 6, its link
+        # to the bitmap's first cluster, two clusters long.
+        "VSYSC": plant_set("VSYSC", vol.bitmap, 4, contiguous=False),
+        "VLINK": plant_set("VLINK", r + 6, 2 * c, contiguous=False),
     }
-    if not plant(vol, list(sets.values()), range(r, r + 6),
-                 links=[(r, r + 1), (r + 1, r + 2), (r + 2, 0xFFFFFFFF), (r + 4, r + 1)],
+    if not plant(vol, list(sets.values()), range(r, r + 7),
+                 links=[(r, r + 1), (r + 1, r + 2), (r + 2, 0xFFFFFFFF), (r + 4, r + 1), (r + 6, vol.bitmap)],
                  fills=[(r, b"src\r\n"), (r + 5, b"hello\r\n")]):
         return [("vmeet: room for the planted sets in the root", False)], []
     nb = -(-vol.count // 8 // c) or 1  # the bitmap's clusters
@@ -814,12 +820,13 @@ def run_vmeet():
         bitmap_fat = fh.read(4 * nb)
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
-    checks = [("vmeet: the four planted sets read back, their clusters used",
+    checks = [("vmeet: the six planted sets read back, their clusters used",
                all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p for n, p in sets.items())
-               and all(vol.used(r + k) for k in range(6)))]
+               and all(vol.used(r + k) for k in range(7)))]
     if not checks[0][1]:
         return checks, []
-    cmds = ["mv -f /SRC /DST", "write /VW new", "writeat /VSYSW 0 x", "rm /VSYSW", "ls /"]
+    cmds = ["mv -f /SRC /DST", "write /VW new", "writeat /VSYSW 0 x", "rm /VSYSW", "writeat /VSYSC 0 x",
+            "rm /VSYSC", f"writeat /VLINK {c} x", "rm /VLINK", "ls /"]
     driven, out, faults = boot("vmeet", cmds)
     if drive_qemu.boot_stalled("test-long-set", "vmeet", out, faults):
         STALLED.append("vmeet")
@@ -860,6 +867,14 @@ def run_vmeet():
          f"{bitmap_byte:#x}), and `rm /VSYSW` answered nothing ({printed(out, 'rm /VSYSW')})",
          printed(out, "writeat /VSYSW 0 x") != [] and bitmap_fat_after == bitmap_fat and bitmap_byte != ord("x")
          and printed(out, "rm /VSYSW") == [] and exfatimg.find(root, "VSYSW") is None),
+        (f"vmeet: the chained VSYSC on the bitmap's cluster and VLINK's link into it refused their writeat "
+         f"({printed(out, 'writeat /VSYSC 0 x')}, {printed(out, f'writeat /VLINK {c} x')}), the bitmap's first "
+         f"byte {bitmap_byte:#x}, both removed ({printed(out, 'rm /VSYSC')}, {printed(out, 'rm /VLINK')}), "
+         f"VLINK's own cluster freed ({vol.used(r + 6)})",
+         printed(out, "writeat /VSYSC 0 x") != [] and printed(out, f"writeat /VLINK {c} x") != []
+         and bitmap_byte != ord("x") and printed(out, "rm /VSYSC") == [] and printed(out, "rm /VLINK") == []
+         and exfatimg.find(root, "VSYSC") is None and exfatimg.find(root, "VLINK") is None
+         and not vol.used(r + 6)),
         ("vmeet: fsck_exfat -n passes the image after the boot, the leak and the long chain mended", ok),
         ("vmeet: no fault lines", faults == 0),
     ]
