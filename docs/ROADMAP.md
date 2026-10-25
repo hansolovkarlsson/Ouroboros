@@ -4379,12 +4379,143 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   another's import, and the fsck rule can drift between four copies. Move
   them into `exfatimg.py` and have the rigs import it. From the high review
   of `fix/exfat-valid-length`, 2026-10-22.
-- **exFAT's `rm` leaks a vendor allocation's clusters.** A vendor allocation
+- ~~**exFAT's `rm` leaks a vendor allocation's clusters.**~~ A vendor allocation
   entry (0xE1) names clusters of its own (its FirstCluster and DataLength),
   which `rm` and a replacing `mv` (for the set it replaces) never free, so
   they stay set in the bitmap with no set naming them. Freeing them the way
   the Stream's are, bounded by the volume, would end it. Read in the code,
   found with the rename's fix, 2026-10-21.
+  *Done 2026-10-23: `delete_set` takes what becomes of a set's clusters as
+  a required argument, and a removal (`rm`, `rmdir`, which leaked them too,
+  and the set a replacing `mv` deletes) deletes the set and then frees the
+  Stream's and every allocating benign secondary's, read back from the
+  deleted slots, but for any the surviving set names; a rename carries
+  them. Frees refuse a first cluster outside the heap and stop at the
+  bitmap, the up-case table and the root's first cluster. A first version
+  freed 0xE1 alone, before the delete and unbounded; the max review found
+  it. `make test-long-set`'s VALLOC and VCROSS, failing with each of twelve
+  mutants of the free. The order itself, delete then free, is graded by no
+  boot: it shows only on an error or a crash between them. The altitude
+  review the same day moved `write_file`'s replace to the same order
+  (repoint, then free), held the bitmap's and up-case table's extents to the
+  volume at mount, made the allocator pass over the volume's own clusters,
+  left a secondary overlapping the Stream's run, and bounded
+  `write_fat_entry` by the heap; three of its findings are items below. The
+  resumed max review made a volume with no bitmap read-only before any
+  write (a replacing `mv` there had left two sets, and a truncation lost
+  its file), kept a longer bitmap and dropped one on the up-case table,
+  bounded the mount's scan of the root, freed none of a contiguous run
+  past the heap, and tested the surviving set by overlapping runs. The high
+  review of 2026-10-24 found the overlap test still took a FAT-chained
+  survivor by its first cluster (it walks chains now), `ensure_chained`
+  writing a run's links before the heap's edge refused it (refused first
+  now), a replacing `mv` that failed at the source's delete leaving two sets
+  of one name (the destination's set goes first now, its clusters freed
+  after both), the scan of the root bounded only by the heap (it stops at a
+  loop and at 256 MiB), a first bitmap entry naming cluster 0 passed over
+  for a second, the allocations read back after the delete, and an empty
+  Stream filling a place in `Runs`. A volume with no bitmap answers
+  read-only to a `touch` of an existing file and a `mkdir` of an existing
+  name, a choice the same review raised and kept: it says the true thing
+  about the volume. A second high review that day made the
+  overlap test walk each chain once, freed a replacing `mv`'s destination
+  clusters when its source's delete fails, and made a volume of two FATs
+  read-only (VMEET and VTWOFAT); its finding on `bitmap_clear_run`'s cost
+  joins the chained-free item below. A third made a whole-file write keep
+  an old cluster its set's vendor run still names and `ensure_chained`
+  refuse a run over the volume's own clusters (VW and VSYSW, in VMEET's
+  boot), and put the opt-in read-only gate on the roadmap. A fourth made
+  `write_at` refuse a chained file on those clusters or linked into them
+  (VSYSC and VLINK) and a removal refuse slots not shaped as a set before
+  it clears any; it kept the write order of a whole-file write (an error
+  after the set names the new data is still reported, as `rm`'s and `mv`'s
+  are) and, as before, the read-only answers. The root's later
+  clusters are not among the volume's own the free refuses: a damaged run
+  can reach them, as it can any live file's.*
+- **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
+  chained walk reads and writes a bitmap sector and writes a FAT sector for
+  every cluster, three round trips a cluster on the Pi's USB stick, and every
+  file fsd writes is chained (a camera's file too, after its first append).
+  An `rm`, a replacing `mv` or a `>` truncation of a large file can then
+  pass the supervisor's wedge limit (WEDGE_TICKS, about 2.5 s) and fsd is
+  restarted mid-free; since 2026-10-23 the set is deleted first, so that
+  leaks rather than cross-links. A contiguous run clears its bits a bitmap
+  sector at a time since the same day. Grouping a chain's consecutive
+  clusters (fsd's first-fit allocator keeps them mostly so) into runs for
+  `bitmap_clear_run`, and zeroing FAT entries a FAT sector at a time, would
+  end it. The altitude review of
+  `fix/exfat-vendor-alloc`, 2026-10-23, deferred by Hans; found again by the
+  high review of 2026-10-24, and again by the second high review that day,
+  which adds that `bitmap_clear_run` itself bounds and divides for every
+  cluster (`bitmap_sector_lba`) where a sector's end, known after the
+  first, would do; deferred with this item, to be fixed with it. The third
+  high review that day found it once more, and adds that a replacing `mv`
+  now walks both chains in full before its free (the overlap test against
+  the source's runs, since 2026-10-24); those walks read the FAT through its
+  cache, about one sector a 128 clusters, so the free's three round trips a
+  cluster are the cost, and the walk could be shared with the free when
+  this item is done.
+- **exFAT's read-only gate is opt-in.** A volume with no bitmap, or with
+  two FATs, is read-only because each of the seven public writers (`touch`,
+  `write_file`, `write_at`, `mkdir`, `rm`, `rmdir`, `mv`) asks
+  `writable()` first. A new writer that forgets it writes to a volume whose
+  live bitmap fsd cannot tell, the hand-out of clusters another set holds
+  that the check exists to prevent: the opt-in shape
+  [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)
+  warns of. A token that `writable()` returns and that `alloc_cluster`,
+  `write_fat_entry`, `rewrite_slots` and `patch_stream_ext` require would
+  make the omission impossible to write. Nothing is broken today. From the
+  third high review of 2026-10-24, deferred.
+- **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
+  NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
+  are live. fsd reads the first FAT and takes the first bitmap entry, so on
+  a volume whose second pair is live it reads stale chains. Since the
+  second high review of 2026-10-24 such a volume mounts read-only (VTWOFAT
+  in `make test-long-set`), so nothing is allocated from the stale bitmap;
+  reading the active FAT, and the bitmap entry that goes with it, would let
+  it read right, and writing both pairs as the spec asks would make it
+  writable.
+- **A failed exFAT `mv` leaves two sets over one file's clusters.** When a
+  `mv` fails after `relink` wrote the new set (an I/O error deleting the old
+  one, or in a replacing `mv` deleting or freeing the destination's), the
+  source and the new set both name the source's clusters. A later `rm` of
+  either frees them under the other. A replacing `mv` reads its source's
+  runs before it writes and keeps them from the destination's free
+  (`free_runs`' `kept`), which covers a retry of that `mv`, and nothing
+  else. Since the high review of 2026-10-24 it deletes the destination's set
+  first, then the source's, and frees the destination's clusters after
+  both, so a failure leaves the source beside its new set, as a plain `mv`
+  that fails at its delete, never two sets of one name. Since the second
+  high review the same day the destination's clusters are freed even when
+  the source's delete fails, as nothing else would free them. Deleting the set `relink` wrote (as a rename, freeing
+  nothing) before returning the error, as `write_chain`, `mkdir` and
+  `grow_extent` give back what they took, would end it, `insert_set`
+  returning the slot it used; the undo can fail too, which leaves today's
+  state. The same review, deferred.
+- **exFAT bounds a cluster number where it frees, not where it reads it.**
+  `free_data` refuses a first cluster outside the heap and stops at the
+  volume's own clusters, `write_fat_entry` refuses one outside the heap, and
+  the allocator passes over the volume's own (all 2026-10-23), and since the
+  third high review of 2026-10-24 `ensure_chained` refuses a contiguous run
+  over them, so a contiguous Stream on the bitmap is no longer written
+  through (VSYSW in `make test-long-set`), and since the fourth that day
+  `write_at` refuses a chained file on one or a link to one (VSYSC,
+  VLINK); but a directory's set written through a damaged chain
+  (`write_set_at`) and a read still reach them, and the root's clusters
+  past its first are not among them at all, so a damaged run over them is
+  freed and handed out again. `locate_tables` walks the root's chain at
+  mount and keeps none of it; recording it there (bounded as the scan is)
+  would let `is_system` count it. Each review has added the check to one
+  more path: one check where a cluster is turned into a sector to write
+  (`cluster_to_lba`'s callers) would close them together. Refusing a first cluster
+  outside the heap or among the volume's own where `walk_dir` decodes a set
+  (beside its rule that DataLength 0 is no allocation), and ending a walk in
+  `next_cluster` and `advance` at a system cluster as they end it at the
+  heap's edge, would cover reads, writes and frees at once, and the free's
+  own checks would fall away. ext2's item "reads and writes through a
+  pointer naming metadata unchecked" is the same rule there, and so is
+  "a subdirectory naming the exFAT root's cluster is read as the root". The
+  same review, deferred.
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
   rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
   `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume

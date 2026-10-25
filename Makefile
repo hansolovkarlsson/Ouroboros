@@ -2613,8 +2613,8 @@ test-blank-disk: image image-gpt $(USBSTICK_IMG)
 # past the disk's end (also with the table claiming past it), a FAT32 whose
 # FAT size wraps u32, twenty-two volumes each breaking one layout rule (ext2's
 # group descriptors among them since 2026-10-21), and an
-# exFAT whose bitmap lies past its heap (a write refused, the next partition
-# unchanged). About eight minutes; run it whenever a filesystem's mount_at, fsd's probe or
+# exFAT whose bitmap lies past its heap (mounted read-only, a write refused,
+# the next partition unchanged). About eight minutes; run it whenever a filesystem's mount_at, fsd's probe or
 # volume_bound, or the table's sizes change.
 test-volume-bound: image image-exfat image-ext2
 	python3 scripts/test-volume-bound.py
@@ -2641,9 +2641,21 @@ test-ext2-blocks: image image-ext2
 # a 20-entry set (17 vendor extension entries); an append that patches its
 # Stream must leave the SetChecksum over all 20 and fsck_exfat clean; and
 # since 2026-10-21 a rename of such a set, to a longer name and back, must
-# keep its File entry's attributes and times and its vendor entries. Three
-# boots, about three minutes; run it whenever exFAT's patch_stream_ext,
-# set_checksum, walk_dir's set assembly, slot_at, mv or renamed_set changes.
+# keep its File entry's attributes and times and its vendor entries; and
+# since 2026-10-23 rm, rmdir and a replacing mv must free the clusters every
+# allocating benign secondary (a vendor allocation, 0xE1) names, which a
+# rename keeps, and on damaged sets free none a surviving set or the volume
+# needs, and a damaged bitmap or up-case table extent be taken as absent,
+# a volume with no bitmap refusing every write before it writes, and since
+# 2026-10-24 a vendor chain meeting the survivor's held, a volume of two
+# FATs read-only, a whole-file write keeping an old cluster its set's vendor
+# run names and a write refused on the bitmap's cluster, contiguous, chained
+# or through a link. Eleven boots,
+# about four minutes; run it whenever exFAT's patch_stream_ext,
+# set_checksum, walk_dir's set assembly, slot_at, read_slots, mv, rm, rmdir,
+# renamed_set, delete_set, unlink_set, free_runs, overlaps, runs_of,
+# free_data, is_system, writable, check_extents, locate_tables,
+# ensure_chained, alloc_cluster or write_fat_entry changes.
 test-long-set: image-exfat
 	python3 scripts/test-long-set.py
 

@@ -72,18 +72,19 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
 - BESIDE: the FAT32 cut short in a table entry of size 0, the next
   partition inside its volume (refused: the bound stops at the next
   partition), and the exFAT whole with its bitmap moved to the cluster past
-  its heap, the next partition's first sector: it mounts, a write to it must
-  answer an I/O error, and the partition after it must be as it was, every
-  byte (bitmap_sector_lba refuses a sector outside the bitmap's extent in
-  the heap).
+  its heap, the next partition's first sector: it mounts read-only (since
+  2026-10-23 check_extents takes a bitmap outside the heap as none), a
+  write to it must answer read-only, and the partition after it must be as
+  it was, every byte.
 
 No fault line in QEMU's trace. Fails with the partition's length not passed
 (PARTS's three mount, STALE and LONG answer an I/O error), with the length
 not cut to the disk (LONG), not cut at the next partition (BESIDE), with a
 size-0 entry refused (MIXED), without the 2^32 cut (MIXED's last mounts),
 with FAT32's sum in u32 (WRAP), with each shape rule removed (its SHAPES
-case mounts), and with the bitmap's sectors unbounded (BESIDE: the write
-lands on the next partition). Not reached: FAT32's sums made before the
+case mounts), with check_extents' heap rule out (BESIDE: the write answers
+an I/O error, refused by bitmap_sector_lba's bound alone), and with that
+bound out too (the write lands on the next partition). Not reached: FAT32's sums made before the
 bound overflow only in a build with overflow checks, exFAT's sector-size
 shift likewise, and ext2's first-block rule, which since the first-data rule
 can break only for a volume of one block (it guards the subtraction the
@@ -308,7 +309,7 @@ def build_beside(ext2, fat, exfat):
         ("the exFAT passes every mount rule", broken(bytes(bitmapped), ex_sectors) == set()),
         ("its bitmap's first sector is the next partition's first", ex_start + ex_sectors == wit_start),
     ]
-    return pre, [(1, "the FAT32 with no size", False), (2, "the exFAT with its bitmap past its heap", "write")]
+    return pre, [(1, "the FAT32 with no size", False), (2, "the exFAT with its bitmap past its heap, read-only", "write")]
 
 
 def digest(start, sectors):
@@ -545,7 +546,7 @@ def checks_of(name):
                 wrote = o[f"echo bitmap > /mnt/p{n}/NEW.TXT"] or ""
                 checks += [
                     (f"mount {n}, {what}, mounts (got {got!r})", got == ""),
-                    (f"a write to it is refused (got {wrote!r})", "error" in wrote),
+                    (f"a write to it is refused read-only (got {wrote!r})", "read-only" in wrote),
                     ("the partition after it as it was, every byte",
                      WITNESS.get("after") is not None and WITNESS.get("after") == WITNESS.get("before")),
                 ]

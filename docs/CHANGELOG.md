@@ -714,7 +714,7 @@ entry (fsck_exfat's one complaint before the boot), renamed into the spec's
 shape, fsck clean after. Fails with main's rename, with the vendor entries
 left where the old name ended, with the Stream built afresh and with only
 the name entries after the Stream dropped. `rm` still leaks a vendor allocation's clusters
-(the roadmap).
+(the roadmap; freed since 2026-10-23, below).
 
 **ext2 frees and allocates none of its own metadata (2026-10-21).** Since
 #331 no ext2 block number reached past the volume, but one inside it naming
@@ -866,6 +866,105 @@ a blank disk holding the stick back (STICK), with blank by the signature
 alone (GPT-UNSIGNED, SIG-DAMAGED) and with no blank test (12 checks, UNKNOWN
 among them). Not reached by a boot: a blank disk whose first read fails, and
 one beside a stick whose init fails.
+
+**exFAT frees a vendor allocation with its set (2026-10-23).** A vendor
+allocation entry (0xE1), which a camera writes among a file's secondaries,
+names clusters of its own, laid out as a Stream's (FirstCluster, DataLength,
+NoFatChain). `rm`, `rmdir` and a replacing `mv` (for the set it replaces)
+deleted the set and left those clusters set in the bitmap with no set naming
+them, a leak fsck_exfat reports. `delete_set` now takes what becomes of the
+set's clusters as a required argument (carried by a rename, or removed for
+good), so no path can delete a set and forget them. A removal deletes the
+set first and frees after, as the spec orders it, so an error or a crash
+between leaks rather than leaving a live set over free clusters: the Stream's
+clusters and those of every benign secondary with AllocationPossible set
+(0xE1, and any later type, as Linux frees them), read back from the deleted
+slots, skipping any the surviving set of a replacing `mv` also names. Every
+free now refuses a first cluster outside the heap and stops at the volume's
+own clusters (the allocation bitmap, the up-case table, located at mount,
+and the root's first), and a contiguous run clears its bits a bitmap sector
+at a time, not a cluster at a time. A first version freed before deleting,
+0xE1 alone and unbounded; the max review found the window and the bounds.
+`make test-long-set` gains two boots. VALLOC, on a volume fsck_exfat passes:
+a file and a directory removed, a file replaced by `mv -f` whose source
+carries its own vendor cluster, an undefined benign type 0xE2 removed, a
+0xE0 whose bytes name a cluster left alone, and renames (one by case alone,
+through `mv -f`) carrying theirs, with a used witness after every run.
+VCROSS, damaged sets: two sets sharing data and a vendor cluster, a vendor
+run from a file's own data into a witness, one outside the heap, and ones on
+the bitmap and up-case table; no command may answer an error. A further
+review the same day moved the rest of the rule into place: a whole-file
+write (`>`, an O_TRUNC open) now points the set at its new chain before it
+frees the old one; the bitmap's and up-case table's extents are held to the
+volume at mount (a damaged DataLength is taken as no table, and a bitmap so
+damaged leaves the volume read-only, a removal refused before its set goes);
+the allocator sets and passes over a clear bit of the volume's own clusters
+rather than handing out the bitmap; a secondary whose run overlaps the
+Stream's is left allocated; and a FAT entry outside the heap is never
+written. VCROSS gains a vendor run straddling a file's data, the bitmap's
+own bit cleared before an allocation, and a contiguous file sized past the
+heap written by `writeat`; VUPCASE and VBITMAP damage the two extents. A
+third review found the read-only volume half built: the refusal sat where a
+removal frees, so a replacing `mv` on a volume with no bitmap wrote its new
+set and then refused, leaving two sets over one file, and a truncation to
+nothing emptied the file and then refused, losing it. Now every exFAT
+operation that writes asks first whether the volume has a bitmap, and one
+with none is read-only before anything is written, creates and renames
+too. The same review kept a bitmap longer than a bit a cluster (the spec,
+Linux and exfat-fuse take one, where fsd had made such a volume read-only),
+dropped the bitmap where it and the up-case table overlap (it had kept the
+bitmap), bounded the mount's scan for the two at the heap's cluster count
+(a root whose chain looped hung the mount), freed none of a contiguous run
+that does not fit in the heap (a DataLength of a terabyte cleared every
+bit to the heap's end), and tested a replacing `mv`'s surviving set by
+overlapping runs, read once before the `mv` writes, not by first clusters
+read again for every allocation; the `mv` now deletes its source's set
+before the destination's, so two sets name the source's clusters no longer
+than one write. VCROSS gains a vendor run sharing the survivor's at a later
+cluster and a plant on the root's first cluster; VBITMAP refuses a
+truncation, a replacing and a plain `mv` and a `touch`, VUPCASE carries a
+longer bitmap, and VOVERLAP puts the up-case table on the bitmap. Each of
+twenty-four mutants of the free and of the read-only volume fails a check
+(the rig's docstring names them), and fsck_exfat is clean after every boot.
+Not graded by a boot: the order of a removal, a whole-file write or a
+replacing `mv`, which shows only on an error or a crash between the set's
+write and the free, and the bound on the mount's scan. A high review the
+next day found more. The overlap test still took a FAT-chained
+survivor by its first cluster, so a destination's run over a later cluster
+of the source's chain was freed under it; chains are walked now. Linking a
+contiguous file for a write wrote every link inside the heap before the
+heap's edge refused the rest, over the links of the files its damaged size
+reached; the run is refused first now. The replacing `mv` that deleted its
+source's set first left two sets of one name when that delete failed; the
+destination's set goes first again, and its clusters are freed only after
+both sets are gone. And the mount's scan for the bitmap stops where the
+root's chain loops and at the format's 256 MiB, where the heap's cluster
+count still allowed a quarter of a billion reads on a large stick. A first
+bitmap entry naming cluster 0 no longer hands the bitmap to a second entry
+after it (a volume of two FATs has one), a removal collects the
+allocations as it deletes the set, and an empty file's Stream no longer
+fills one of the eight places a surviving set's runs are held in. VCROSS
+gains a chained source under a destination's vendor run and an empty
+source with eight vendor runs, and checks VHEAP's own FAT entry; a ninth
+boot, VFIRST, damages the first bitmap entry with a good one after it. A
+second high review the same day found the overlap test walking each of two
+chains twice, and now walks each once, walking one again only when the
+other stops short of its end of chain; a replacing `mv` whose source's
+delete failed returned before freeing the destination's clusters, which no
+set then named, and frees them now; and a volume of two FATs (TexFAT),
+whose live bitmap fsd cannot tell, mounts read-only. Two more boots grade
+them: VMEET, a destination's chained vendor run meeting the source's chain
+inside its size, and VTWOFAT, NumberOfFats 2. A third high review found a
+whole-file write (`write /F`) freeing its old data where the set's own
+vendor run still names it, so a later `rm` freed the cluster under the file
+given it in between; it keeps that cluster now. And a damaged contiguous
+file over the bitmap's cluster took a `writeat` into the bitmap itself;
+`ensure_chained` refuses a run over the volume's own clusters before it
+links any. VMEET's boot grades both. A fourth found the same write open to
+a FAT-chained file on the bitmap's cluster, or one whose link leads there;
+`write_at` refuses both before writing, and a removal refuses slots that are
+not a File entry and its Stream before it clears any, where it deleted them
+anyway and freed the set it was asked for under whatever set they were.
 
 **exFAT keeps a file's ValidDataLength (2026-10-22).** A file another
 driver preallocated has ValidDataLength below DataLength, and the spec has
