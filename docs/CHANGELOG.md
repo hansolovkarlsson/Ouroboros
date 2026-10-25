@@ -813,6 +813,9 @@ self-test (`drive-qemu.py --self-test`), which each of five mutations of the
 rule fails. A boot that stalls on each of its last three runs is graded,
 since a hang every run meets would otherwise stay INCONCLUSIVE for good. The
 other rigs are a roadmap item; meanwhile every rig's output names a stall.
+(It did not until 2026-10-25: `Guest.aborts()` read the transcript after
+stopping QEMU, whose own last line hid the stall. See the entry of that
+day.)
 
 **A virtio disk whose sector 0 will not read is held, not dropped
 (2026-10-22).** `init_storage` read sector 0 twice and, when both failed,
@@ -991,7 +994,8 @@ requires the rig and a case name for every boot. It sends each boot through
 own stall history, and answers None for a stall, keeping the boot's QEMU log
 beside its transcript. `disktrace.settle` turns a case's answers into its
 problems: a boot that ran and failed fails the case whatever its other boots
-did, and the case is INCONCLUSIVE only when a boot stalled and none failed.
+did, and the case, the boots a rig compares, is INCONCLUSIVE only when a boot
+stalled and none failed.
 The first version, the same day, caught the stall around a whole pair, so a
 failed first boot was dropped when the second stalled (exit 100, "no check
 failed") and a hang every run meets took five runs to fail, not three; the
@@ -1007,7 +1011,18 @@ closed; a kept stall's QEMU log is gzipped. `make test` runs `disktrace.py
 --self-test`, which drives `boot`, `settle` and `Tally` with a fake guest that
 ends its transcript with QEMU's signal line once stopped, as QEMU does; each
 of its checks was failed by a mutant, and each rig's own case code was driven
-with a failed boot beside a stall, in either order, to exit 1.
+with a failed boot beside a stall, in either order, to exit 1. The third max
+review found no wrong verdict, and a self-test that could not see the order
+that brings the bug back: the fake's `aborts()` did not stop the guest, as
+the real one does. Its root was in the classifier: `firmware_stalled` took
+QEMU's own `terminating on signal 15` line for the transcript's last, so a
+transcript read after the stop never showed a stall, and `Guest.aborts()`
+had never named one. It passes over that line now, and `aborts()` names a
+stall in every rig's output. `boot_stalled` refuses a label used twice in a
+run or holding a space; `Tally.settle` hands back a case only `close` takes,
+once; an inspect's findings are kept when it raises. Of 37 mutants, the self-
+tests and a harness of each rig's case code fail 36; the last changes no
+verdict.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

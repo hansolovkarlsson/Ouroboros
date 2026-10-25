@@ -203,16 +203,17 @@ stopped by the rig's own disk, and its checks are graded and fail. `make test` r
 `test-ext2-blocks`, `test-long-set` and `test-valid-length` (built with it,
 2026-10-22), and since 2026-10-25 the four disk-trace rigs, `test-write-walk`,
 `test-spawn-reads`, `test-listing-walk` and `test-dir-scan`, through
-`disktrace.boot`, which requires a case name for every boot and folds what
-the rig's `inspect` (of the guest's disk) and `check` (of the transcript and
-reads) find into that boot's answer. A case whose boot stalled is
-INCONCLUSIVE only when none of its other boots ran and failed
+`disktrace.boot`, which requires a name of its own for every boot (a label
+used twice in one run, or holding a space, is refused) and folds what the
+rig's `inspect` (of the guest's disk) and `check` (of the transcript and
+reads) find into that boot's answer. A case, the boots a rig compares, is
+INCONCLUSIVE only when a boot stalled and none of its boots ran and failed
 (`disktrace.settle`, counted by `disktrace.Tally`), and the stalled boot's
 QEMU log is kept gzipped beside its transcript; `make test` runs
-`disktrace.py --self-test`. The other rigs still
-grade a stall as failed checks. `Guest.aborts()` is meant to print `QEMU's
-firmware never started the kernel` beside them, but it reads the transcript
-after stopping QEMU, whose own last line then hides the stall (the roadmap).
+`disktrace.py --self-test`. The other rigs still grade a stall as failed
+checks, and `Guest.aborts()` prints `QEMU's firmware never started the
+kernel` beside them (since 2026-10-25: `firmware_stalled` passes over QEMU's
+own `terminating on signal` line, which until then hid the stall).
 
 ## 2. Disk-format test images
 

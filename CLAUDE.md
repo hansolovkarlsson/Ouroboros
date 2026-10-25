@@ -628,7 +628,10 @@ multi-core plan's inventory, and since 2026-10-13 `disksig.py --self-test`,
 the disk signature every image recipe writes (one-disk step 2). Since
 2026-10-14 also `check-link-layout` (above), the layout DevTools's `ld`
 copies, and since 2026-10-15 `check-picolibc` (above), `libc.a` and the headers
-DevTools's `cc` reads, each pinned. The suite exists
+DevTools's `cc` reads, each pinned. The rigs' INCONCLUSIVE classifier is checked
+on fixed transcripts (`drive-qemu.py --self-test`, since 2026-10-22), and since
+2026-10-25 the disk-trace rigs' use of it with a fake guest (`disktrace.py
+--self-test`). The suite exists
 because such a crate can otherwise have
 **no build coverage at all**: it is a workspace member but not a
 default-member, so until something depends on it, `cargo build`, `make
