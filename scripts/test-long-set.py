@@ -803,9 +803,11 @@ def run_vmeet():
         "DST": plant_set("DST", r + 3, 4, [secondary(0xE1, r + 4, 3 * c, 0x01)]),
         # VW on r + 5, its vendor run the same cluster.
         "VW": plant_set("VW", r + 5, 7, [secondary(0xE1, r + 5, c, 0x03)]),
-        # VSYSW contiguous on the bitmap's first cluster.
-        "VSYSW": plant_set("VSYSW", vol.bitmap, 4),
-        # VSYSC the same, FAT-chained; VLINK FAT-chained on r + 6, its link
+        # VSYSW contiguous from the bitmap's first cluster, two clusters
+        # long: a run linked before its refusal writes the bitmap's own FAT
+        # entry, which a run of one leaves end of chain as it was.
+        "VSYSW": plant_set("VSYSW", vol.bitmap, 2 * c),
+        # VSYSC on the bitmap's cluster, FAT-chained, one cluster; VLINK FAT-chained on r + 6, its link
         # to the bitmap's first cluster, two clusters long.
         "VSYSC": plant_set("VSYSC", vol.bitmap, 4, contiguous=False),
         "VLINK": plant_set("VLINK", r + 6, 2 * c, contiguous=False),
