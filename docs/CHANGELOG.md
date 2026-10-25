@@ -995,8 +995,19 @@ did, and the case is INCONCLUSIVE only when a boot stalled and none failed.
 The first version, the same day, caught the stall around a whole pair, so a
 failed first boot was dropped when the second stalled (exit 100, "no check
 failed") and a hang every run meets took five runs to fail, not three; the
-max review of #350 found it. `make test` runs `disktrace.py --self-test`,
-which drives `boot` and `settle` with a fake guest.
+max review of #350 found it. The second max review found the same defect in
+three of the four rigs: problems a rig found after the boots (test-write-walk's
+inspect of the copy, test-spawn-reads' chain checks, test-dir-scan's read and
+write bounds) sat outside the boots' answers, so a stall beside them still
+made the case INCONCLUSIVE. Now `boot` takes the rig's `inspect(copy)` and
+`check(lines, count)` and folds what they return into the boot's answer, so
+nothing a rig grades in one boot can sit outside it; a `Tally` counts failed
+cases and stalled boots for the verdict and refuses a case settled and never
+closed; a kept stall's QEMU log is gzipped. `make test` runs `disktrace.py
+--self-test`, which drives `boot`, `settle` and `Tally` with a fake guest that
+ends its transcript with QEMU's signal line once stopped, as QEMU does; each
+of its checks was failed by a mutant, and each rig's own case code was driven
+with a failed boot beside a stall, in either order, to exit 1.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
