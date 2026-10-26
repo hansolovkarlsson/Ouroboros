@@ -4,9 +4,11 @@ rules that a rig mirrors, `cluster_end` above all, are stated once here.
 
     vol = fat32img.Fat32(fh, start)    # fh open on the image, start its LBA
 
-Geometry from the boot sector, FAT entries from the first copy (written to
-every copy by `set_entry`), chains, the short entries of a directory, and a
-file's bytes. Not a filesystem: nothing here allocates or makes a name.
+Geometry from the boot sector, FAT entries from the copy BPB_ExtFlags
+names live (copy 0 when the FATs are mirrored; `set_entry` writes every copy
+then, the live one alone when they are not, as fsd does since 2026-10-26),
+chains, the short entries of a directory, and a file's bytes. Not a
+filesystem: nothing here allocates or makes a name.
 """
 import struct
 
@@ -28,6 +30,10 @@ class Fat32:
         self.fat_end = self.fat + self.nfats * self.fatsz
         self.data = self.fat_end
         self.count = self.fatsz * SECTOR // 4
+        # BPB_ExtFlags: with bit 7 set only the copy in bits 0-3 is live.
+        ext = struct.unpack_from("<H", b, 40)[0]
+        self.mirrored = not ext & 0x80
+        self.live = 0 if self.mirrored else ext & 0x0F
         self.cluster_bytes = self.spc * SECTOR
         total = struct.unpack_from("<H", b, 19)[0] or struct.unpack_from("<I", b, 32)[0]
         # fsd's cluster_end (fat32.rs, mount_at): one past the last cluster,
@@ -48,33 +54,37 @@ class Fat32:
         """The sector holding cluster `c`'s entry in FAT copy `copy`."""
         return self.fat + copy * self.fatsz + c * 4 // SECTOR
 
-    def entry(self, c, copy=0):
-        """Cluster `c`'s entry, low 28 bits, from FAT copy `copy`."""
+    def entry(self, c, copy=None):
+        """Cluster `c`'s entry, low 28 bits, from FAT copy `copy` (the live
+        one by default)."""
+        copy = self.live if copy is None else copy
         if not 0 <= c < self.count:
             raise ValueError(f"cluster {c} is past the FAT")
         self.fh.seek((self.fat + copy * self.fatsz) * SECTOR + c * 4)
         return struct.unpack("<I", self.fh.read(4))[0] & 0x0FFFFFFF
 
     def set_entry(self, c, value):
-        """Write cluster `c`'s entry in every FAT copy, its top four bits
-        kept, as fsd's write_fat_entry does. `fh` must be open for writing."""
+        """Write cluster `c`'s entry in every FAT copy when mirrored, the live
+        one alone when not, its top four bits kept, as fsd's write_fat_entry
+        does. `fh` must be open for writing."""
         if not 0 <= c < self.count:
             raise ValueError(f"cluster {c} is past the FAT")
-        for copy in range(self.nfats):
+        for copy in (range(self.nfats) if self.mirrored else [self.live]):
             at = (self.fat + copy * self.fatsz) * SECTOR + c * 4
             self.fh.seek(at)
             old = struct.unpack("<I", self.fh.read(4))[0]
             self.fh.seek(at)
             self.fh.write(struct.pack("<I", (old & 0xF0000000) | (value & 0x0FFFFFFF)))
 
-    def chain(self, first):
-        """`first` and every cluster after it, as fsd walks it: a link outside
-        the volume's clusters, or an end of chain, ends it."""
+    def chain(self, first, copy=None):
+        """`first` and every cluster after it, as fsd walks it, through FAT
+        copy `copy` (the live one by default): a link outside the volume's
+        clusters, or an end of chain, ends it."""
         out = [first]
-        while self.in_heap(out[-1]) and self.in_heap(self.entry(out[-1])):
+        while self.in_heap(out[-1]) and self.in_heap(self.entry(out[-1], copy)):
             if len(out) == self.count:
                 raise ValueError(f"the FAT32 chain from cluster {first} is longer than the volume: a loop")
-            out.append(self.entry(out[-1]))
+            out.append(self.entry(out[-1], copy))
         return out
 
     def listing(self, first):

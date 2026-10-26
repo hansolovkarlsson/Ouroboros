@@ -158,7 +158,7 @@ def broken(vol, bound):
         if spc == 0 or total <= meta:
             return {"fat32-meta"}
         ef = u("<H", 40)
-        if ef & 0x80 and ef & 0x0F:
+        if ef & 0x80 and ef & 0x0F >= nf:
             return {"fat32-extflags"}
         if total > bound:
             out.add("length")

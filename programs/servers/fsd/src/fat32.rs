@@ -309,15 +309,14 @@ pub struct Fs {
     /// needed for writes ([`write_fat_entry`](Self::write_fat_entry)),
     /// which keep every copy in sync when the FATs are mirrored.
     num_fats: u32,
-    /// The copy every read takes, and whether a write goes to every copy
-    /// (`mirrored`) or to it alone: `BPB_ExtFlags`, read at mount. Mirrored
-    /// (bit 7 clear, what fsd's `format` and every image here write), copy 0
-    /// is read and every copy written; with mirroring off, only the copy
-    /// numbered in bits 0-3 is live. Until 2026-10-26 fsd read copy 0 and
-    /// wrote every copy whatever the flags said, and refused a volume whose
-    /// live copy was another.
-    live_fat: u32,
-    mirrored: bool,
+    /// Which FAT copies are live, by `BPB_ExtFlags`, read at mount: every
+    /// copy, kept in step (bit 7 clear, what fsd's `format` and every image
+    /// here write), or the one numbered in bits 0-3 alone. Until 2026-10-26
+    /// fsd read copy 0 and wrote every copy whatever the flags said, and
+    /// refused a volume whose live copy was another. One enum, not a copy
+    /// number and a flag, so a mirrored volume reading another copy than 0
+    /// cannot be written (the high review of 2026-10-26).
+    fats: FatCopies,
     /// One FAT copy's size, in sectors - needed to locate the *other*
     /// copies (`fat_start_lba + i * fat_size_32`) and to bound
     /// [`find_free_cluster`](Self::find_free_cluster)'s scan.
@@ -381,6 +380,25 @@ pub struct Fs {
     /// to cluster 2, so a cluster freed below it is still found. Without
     /// it every allocation rescanned the volume's used clusters from 2.
     next_free_hint: u32,
+}
+
+/// Which FAT copies a volume keeps live ([`Fs::fats`]).
+#[derive(Clone, Copy)]
+enum FatCopies {
+    /// Every copy, kept in step: copy 0 read, every copy written.
+    Mirrored,
+    /// The copy numbered alone: read and written, the others left as they are.
+    Single(u32),
+}
+
+impl FatCopies {
+    /// The copy every read takes.
+    fn read_copy(self) -> u32 {
+        match self {
+            FatCopies::Mirrored => 0,
+            FatCopies::Single(n) => n,
+        }
+    }
 }
 
 /// One sector of the live FAT copy, as cached by [`Fs::fat_cache`].
@@ -476,9 +494,8 @@ impl Fs {
         // read and every copy written. A live copy the volume does not have
         // is no volume to read.
         let ext_flags = u16::from_le_bytes([bpb[40], bpb[41]]);
-        let mirrored = ext_flags & 0x80 == 0;
-        let live_fat = if mirrored { 0 } else { (ext_flags & 0x0f) as u32 };
-        if live_fat >= num_fats {
+        let fats = if ext_flags & 0x80 == 0 { FatCopies::Mirrored } else { FatCopies::Single((ext_flags & 0x0f) as u32) };
+        if fats.read_copy() >= num_fats {
             crate::print("fsd: a FAT32 volume whose live FAT is past its FAT count is not mounted\r\n");
             return Err(Error::NotFat32);
         }
@@ -515,8 +532,7 @@ impl Fs {
             data_start_lba,
             root_cluster,
             num_fats,
-            live_fat,
-            mirrored,
+            fats,
             fat_size_32,
             cluster_end,
             read_cursor: None,
@@ -703,12 +719,18 @@ impl Fs {
         }
     }
 
-    /// The sector of the live FAT copy ([`live_fat`](Self::live_fat)) holding
-    /// `cluster`'s entry, and the entry's offset in it.
-    fn fat_place(&self, cluster: u32) -> (u32, usize) {
+    /// The sector of FAT copy `copy` holding `cluster`'s entry, and the
+    /// entry's offset in it.
+    fn fat_place_in(&self, copy: u32, cluster: u32) -> (u32, usize) {
         let byte = cluster * 4;
-        let lba = self.fat_start_lba + self.live_fat * self.fat_size_32 + byte / SECTOR_SIZE as u32;
+        let lba = self.fat_start_lba + copy * self.fat_size_32 + byte / SECTOR_SIZE as u32;
         (lba, (byte % SECTOR_SIZE as u32) as usize)
+    }
+
+    /// [`fat_place_in`](Self::fat_place_in) for the copy every read takes
+    /// ([`fats`](Self::fats)).
+    fn fat_place(&self, cluster: u32) -> (u32, usize) {
+        self.fat_place_in(self.fats.read_copy(), cluster)
     }
 
     /// The live FAT copy's sector at `lba`, through the one-sector cache
@@ -738,7 +760,7 @@ impl Fs {
     /// Writes one FAT entry: the live copy's sector, patched, is written to
     /// every copy of the FAT the volume has when the FATs are mirrored, so no
     /// other copy is read, and to the live copy alone when they are not
-    /// ([`live_fat`](Self::live_fat)). Mirrored, every read in fsd takes copy
+    /// ([`fats`](Self::fats)). Mirrored, every read in fsd takes copy
     /// 0, so copy 0 is the truth and the others are its mirror; a sector
     /// where a backup copy had come to differ becomes copy 0's whole, as
     /// Linux's and FreeBSD's drivers write it. Decided by Hans on 2026-10-21;
@@ -780,13 +802,13 @@ impl Fs {
         ]);
         let new = (existing & 0xf000_0000) | (value & 0x0fff_ffff);
         buf[offset..offset + 4].copy_from_slice(&new.to_le_bytes());
-        // The live copy first, and the cache kept in step with it; then, when
-        // mirrored, the others (the live copy is copy 0 then).
+        // The copy read first, and the cache kept in step with it; then, when
+        // mirrored, every other copy, each placed from its own number.
         self.disk.write_sector(lba as u64, &buf)?;
         self.fat_cache = Some(FatSector { lba, data: buf });
-        if self.mirrored {
+        if let FatCopies::Mirrored = self.fats {
             for i in 1..self.num_fats {
-                self.disk.write_sector((lba + i * self.fat_size_32) as u64, &buf)?;
+                self.disk.write_sector(self.fat_place_in(i, cluster).0 as u64, &buf)?;
             }
         }
         Ok(())

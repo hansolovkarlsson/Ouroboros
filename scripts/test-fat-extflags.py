@@ -13,10 +13,11 @@ reads the live copy and, with mirroring off, writes it alone; a live copy
 past BPB_NumFATs is still refused (test-volume-bound's SHAPES-D).
 
 One boot. The firmware boots build/esp.img from NVMe (which the kernel
-cannot drive), and virtio holds a disk the rig builds: espext2.img's ext2
-root, then esp.img's FAT32 (two FATs) with its ExtFlags made 0x0081
-(mirroring off, FAT 1 live) and /man/ls (1,182 bytes, three clusters) cut
-short in FAT 0 alone: its first cluster's entry there made end of chain, its
+cannot drive), and virtio holds a disk the rig builds: build/ext2part.img's
+ext2 root, then esp.img's FAT32 (two FATs) with its ExtFlags made 0x0081
+(mirroring off, FAT 1 live) and /man/ls (1,182 bytes, three clusters on
+2026-10-26; any page of two or more whose last line is not in its first
+cluster will do) cut short in FAT 0 alone: its first cluster's entry there made end of chain, its
 chain in FAT 1 whole. The flag is not set on the ESP the firmware boots:
 OVMF then finds no boot loader on it. Before the boot the host checks both.
 Then, after `mount 1 /mnt/p1`, `cat /mnt/p1/man/ls` must print the page
@@ -48,16 +49,9 @@ _spec.loader.exec_module(drive_qemu)
 
 IMAGE = os.path.join(ROOT, "build", "test-fat-extflags.img")
 ESP = os.path.join(ROOT, "build", "esp.img")
-EXT2 = os.path.join(ROOT, "build", "espext2.img")
+EXT2_PART = os.path.join(ROOT, "build", "ext2part.img")
 SECTOR = fat32img.SECTOR
 EOC = 0x0FFFFFFF
-
-
-def chain(vol, first, copy):
-    out = [first]
-    while vol.in_heap(out[-1]) and vol.in_heap(vol.entry(out[-1], copy)):
-        out.append(vol.entry(out[-1], copy))
-    return out
 
 
 def fat_bytes(fh, vol, copy):
@@ -73,23 +67,17 @@ def answer(out, cmd):
     return "\n".join(ln for ln in lines if not ln.startswith("Ouroboros kernel:")).strip()
 
 
-def partition(image, number):
-    """The bytes of MBR partition `number` (1-based) of `image`."""
-    with open(image, "rb") as fh:
-        e = [e for e in mbrdisk.entries(fh.read(SECTOR)) if e[0] == number][0]
-        fh.seek(e[2] * SECTOR)
-        return fh.read(e[3] * SECTOR)
-
-
 def run():
-    layout = mbrdisk.assemble(IMAGE, [(0x83, partition(EXT2, 1), False), (0x0B, partition(ESP, 1), False)])
+    layout = mbrdisk.assemble(IMAGE, [(0x83, mbrdisk.ext2_payload(EXT2_PART), False),
+                                      (0x0B, mbrdisk.esp_payload(ESP), False)])
     start = layout[1][0]
     with open(IMAGE, "r+b") as fh:
         vol = fat32img.Fat32(fh, start)
         man = next(c for _, n, c, _ in vol.listing(vol.root) if n == "MAN")
         _, _, first, size = next(e for e in vol.listing(man) if e[1] == "LS")
-        whole = chain(vol, first, 0)
+        whole = vol.chain(first)
         page = vol.read(whole, size).decode("ascii", "replace")
+        head = vol.read(whole[:1], vol.cluster_bytes).decode("ascii", "replace")
         # FAT 0 alone: the first cluster made the chain's end.
         fh.seek((vol.fat * SECTOR) + first * 4)
         fh.write(struct.pack("<I", EOC))
@@ -98,8 +86,13 @@ def run():
         vol = fat32img.Fat32(fh, start)
         fat0 = fat_bytes(fh, vol, 0)
         last = [ln for ln in page.splitlines() if ln.strip()][-1].strip()
-        checks = [(f"before: /man/ls is {len(whole)} clusters in FAT 1 and 1 in FAT 0, ExtFlags 0x0081",
-                   len(whole) == 3 and chain(vol, first, 1) == whole and chain(vol, first, 0) == [first])]
+        # The check below is a read through FAT 1 only if the page's last line
+        # is not in its first cluster, which a read through FAT 0 stops at; and
+        # the transcript is cut at the next prompt, so no "# " in the page.
+        checks = [(f"before: /man/ls is {len(whole)} clusters in FAT 1 and 1 in FAT 0, ExtFlags 0x0081, its "
+                   f"last line {last!r} past its first cluster and no prompt in it",
+                   len(whole) >= 2 and vol.chain(first, 1) == whole and vol.chain(first, 0) == [first]
+                   and last not in head and "# " not in page)]
     if not checks[0][1]:
         return checks, 0
 

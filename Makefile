@@ -2693,7 +2693,7 @@ test-exfat-names: image-exfat
 # `cat /man/ls` must print the whole page and a new file's write leave FAT 0
 # as it was. One boot, about a minute; run it whenever FAT32's reading of
 # BPB_ExtFlags, fat_place, fat_entry or write_fat_entry changes.
-test-fat-extflags: image image-ext2
+test-fat-extflags: image $(EXT2_PART)
 	python3 scripts/test-fat-extflags.py
 
 # Making files in an exFAT directory reads its sectors a few passes a file,
