@@ -33,6 +33,7 @@
 use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};
+use crate::utf16::{units_of, utf8_name, NAME_SHOWN_MAX};
 
 const SECTOR_SIZE: usize = 512;
 const DIR_ENTRY_SIZE: usize = 32;
@@ -151,15 +152,16 @@ pub struct DirEntry {
 
 impl DirEntry {
     pub fn name(&self) -> &str {
-        // Built either from ASCII short-name bytes or an LFN reconstructed to
-        // ASCII (non-ASCII chars replaced with '?'), so always valid UTF-8.
+        // Built either from ASCII short-name bytes or an LFN rendered by
+        // `utf16::utf8_name`, so always valid UTF-8.
         core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
     }
 
     /// Decode a short (8.3) directory entry. `long_name`, when `Some`, is the
-    /// reconstructed long filename from the preceding LFN entries (already
-    /// checksum-validated against this short entry by the caller) and is used
-    /// verbatim in place of the 8.3 name.
+    /// long filename from the preceding LFN entries (already
+    /// checksum-validated against this short entry by the caller), as a
+    /// listing shows it ([`utf8_name`]), and is used verbatim in place of the
+    /// 8.3 name.
     fn parse(raw: &[u8], long_name: Option<&[u8]>) -> Self {
         let attr = raw[11];
         let cluster_hi = u16::from_le_bytes([raw[20], raw[21]]) as u32;
@@ -264,18 +266,20 @@ fn lfn_checksum(short_name: &[u8]) -> u8 {
     sum
 }
 
-/// Extract the up-to-13 UTF-16LE characters from one LFN entry into `out` as
-/// ASCII bytes (non-ASCII -> '?'), stopping at the `0x0000` name terminator or
-/// `0xFFFF` padding. Returns how many were written. The 13 chars live at three
-/// non-contiguous field ranges within the 32-byte entry.
-fn lfn_chars(raw: &[u8], out: &mut [u8; 13]) -> usize {
+/// Extract the up-to-13 UTF-16LE code units from one LFN entry into `out`,
+/// stopping at the `0x0000` name terminator or `0xFFFF` padding. Returns how
+/// many were written. The 13 units live at three non-contiguous field ranges
+/// within the 32-byte entry. Units, not bytes: until 2026-10-26 each unit
+/// outside ASCII was read as `?`, so two names differing only there (`café`,
+/// `cafè`) were one name to every lookup, and the first answered for both.
+fn lfn_chars(raw: &[u8], out: &mut [u16; 13]) -> usize {
     let mut n = 0;
     for &p in &LFN_POS {
         let c = u16::from_le_bytes([raw[p], raw[p + 1]]);
         if c == 0x0000 || c == 0xffff {
             break;
         }
-        out[n] = if c < 0x80 { c as u8 } else { b'?' };
+        out[n] = c;
         n += 1;
     }
     n
@@ -909,8 +913,9 @@ impl Fs {
         // entry (they're stored, in reverse order, immediately before it).
         // `lfn_len == 0` means none pending. Reset by anything that breaks the
         // run (a free/volume/end entry, or after consuming a short entry).
-        let mut lfn_name = [0u8; LONG_NAME_MAX];
+        let mut lfn_name = [0u16; LONG_NAME_MAX];
         let mut lfn_len = 0usize;
+        let mut shown = [0u8; NAME_SHOWN_MAX];
         let mut lfn_sum = 0u8;
         loop {
             let lba = self.cluster_to_lba(cluster)?;
@@ -933,8 +938,16 @@ impl Fs {
                         // irrelevant. The terminator lives in the highest-seq
                         // entry, so `lfn_len` ends up the true length.
                         let seq = (raw[0] & 0x1f) as usize;
+                        // The entry flagged last starts a run (it is stored
+                        // first): what came before belongs to another, and
+                        // with the length the longest seen, an orphaned
+                        // entry's units ran on after the next name's (the
+                        // review of 2026-10-26).
+                        if raw[0] & LFN_LAST_MASK != 0 {
+                            lfn_len = 0;
+                        }
                         if seq >= 1 {
-                            let mut chars = [0u8; 13];
+                            let mut chars = [0u16; 13];
                             let n = lfn_chars(raw, &mut chars);
                             let base = (seq - 1) * 13;
                             let end = (base + n).min(LONG_NAME_MAX);
@@ -952,9 +965,18 @@ impl Fs {
                     }
                     // A short entry: use the pending long name only if it's
                     // present and its checksum matches this entry (guards
-                    // against orphaned LFN runs attaching to the wrong file).
+                    // against orphaned LFN runs attaching to the wrong file),
+                    // as a listing shows it: its UTF-8, or ASCII with `?` for
+                    // each unit outside it when it cannot be shown exactly
+                    // (exFAT's rule, `utf16::shown_exactly`). A lookup
+                    // compares that rendering ignoring ASCII case
+                    // ([`names_match`]). For a name shown exactly that
+                    // answers as exFAT's comparison of units does, equal UTF-8
+                    // being equal units; for one shown with `?`s it answers
+                    // to that spelling alone, where exFAT's `name_answers`
+                    // takes the name's own units too (the roadmap).
                     let long = if lfn_len > 0 && lfn_sum == lfn_checksum(&raw[0..11]) {
-                        Some(&lfn_name[..lfn_len])
+                        Some(utf8_name(&lfn_name[..lfn_len], &mut shown).as_bytes())
                     } else {
                         None
                     };
@@ -1979,10 +2001,13 @@ impl Fs {
         let short = self.generate_short_alias(name, dir_cluster)?;
         // Physical layout: the LFN entries (highest sequence first), then the
         // short entry last - built into one buffer, written as a contiguous
-        // run. `name.len() <= LONG_NAME_MAX` is guaranteed by
-        // `validate_create_name`, so `count <= MAX_LFN_ENTRIES + 1`.
+        // run. `name.len() <= LONG_NAME_MAX` bytes is guaranteed by
+        // `validate_create_name`, and a name has no more UTF-16 units than
+        // UTF-8 bytes, so the units fit and `count <= MAX_LFN_ENTRIES + 1`.
+        let mut buf = [0u16; LONG_NAME_MAX];
+        let units = units_of(name, &mut buf).unwrap_or(&[]);
         let mut entries = [0u8; (MAX_LFN_ENTRIES + 1) * DIR_ENTRY_SIZE];
-        let count = build_name_entries(name.as_bytes(), &short, attr, cluster, size, &mut entries);
+        let count = build_name_entries(units, &short, attr, cluster, size, &mut entries);
         self.write_entry_run(dir_cluster, &entries[..count * DIR_ENTRY_SIZE], count)
     }
 
@@ -2303,7 +2328,9 @@ fn is_dot_or_dotdot(name: &str) -> bool {
 }
 
 /// Whether directory entry name `entry` answers to `name` on FAT32: equal
-/// ignoring ASCII case. THE one statement of FAT32's rule: every lookup calls
+/// ignoring ASCII case. A long name is its listing's rendering
+/// ([`utf8_name`]), so a name outside ASCII answers to its own UTF-8 alone,
+/// and one a listing shows with `?`s to that spelling. THE one statement of FAT32's rule: every lookup calls
 /// it, and so does `NP_MV`'s guard against a move into the mover's own subtree
 /// (`vfs::Filesystem::names_match`), which let a case-only `mv` of a directory
 /// through while it compared bytes. exFAT has its own (`exfat::names_match`,
@@ -2449,11 +2476,13 @@ fn validate_create_name(name: &str) -> Result<(), Error> {
 /// Rejects the characters FAT reserves (`" * / : < > ? \ |`) and control
 /// bytes, anything longer than [`LONG_NAME_MAX`], the empty name, and a name
 /// made only of dots/spaces (which would sanitize to no usable short-alias
-/// base and isn't a meaningful filename). The read side is more permissive -
+/// base and isn't a meaningful filename), and U+FFFF, the unit an LFN entry
+/// pads with: written, it ended the name where it stood when read back, so
+/// `a` U+FFFF `b` answered as `a` (the review of 2026-10-26). The read side is more permissive -
 /// it renders whatever a foreign formatter wrote; this is only the gate on
 /// what *we* create.
 fn is_valid_lfn_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > LONG_NAME_MAX {
+    if name.is_empty() || name.len() > LONG_NAME_MAX || name.chars().any(|c| c == '\u{ffff}') {
         return false;
     }
     let mut all_dot_space = true;
@@ -2532,7 +2561,7 @@ fn compose_alias(base: &[u8], ext: &[u8], n: u32) -> [u8; 11] {
 /// with [`put_lfn_chars`] so the read side ([`lfn_chars`]) reconstructs the
 /// exact name.
 fn build_name_entries(
-    name: &[u8],
+    name: &[u16],
     short: &[u8; 11],
     attr: u8,
     cluster: u32,
@@ -2558,18 +2587,18 @@ fn build_name_entries(
     num_lfn + 1
 }
 
-/// Places up to 13 of `name`'s characters (starting at index `start`) into
+/// Places up to 13 of `name`'s UTF-16 units (starting at index `start`) into
 /// one LFN entry `e` as UTF-16LE, at the [`LFN_POS`] offsets. A `0x0000`
-/// terminator follows the last real character when it fits, and remaining
+/// terminator follows the last real unit when it fits, and remaining
 /// slots are `0xFFFF` padding - exactly what [`lfn_chars`] expects when
-/// reading back. Only the low byte of each character is written (ASCII), the
-/// high byte left `0`; the shell produces ASCII names.
-fn put_lfn_chars(e: &mut [u8], name: &[u8], start: usize) {
+/// reading back. Until 2026-10-26 this took the name's UTF-8 bytes and wrote
+/// each as a unit, so `café` went to disk as five units, `caf` and two for
+/// `é`'s bytes, and was found by no lookup of `café`.
+fn put_lfn_chars(e: &mut [u8], name: &[u16], start: usize) {
     for (k, &p) in LFN_POS.iter().enumerate() {
         let ci = start + k;
         if ci < name.len() {
-            e[p] = name[ci];
-            e[p + 1] = 0;
+            e[p..p + 2].copy_from_slice(&name[ci].to_le_bytes());
         } else if ci == name.len() {
             e[p] = 0x00; // null terminator
             e[p + 1] = 0x00;

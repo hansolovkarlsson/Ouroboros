@@ -4543,11 +4543,41 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `upcase` through it would end both. Found 2026-10-21 by a planted set
   hashed as fsd hashes; deferred by Hans the same day, the collision fixed
   alone.
-- **FAT32's long names outside ASCII collide.** `lfn_chars` renders each
+- ~~**FAT32's long names outside ASCII collide.**~~ `lfn_chars` renders each
   UTF-16 unit outside ASCII as `?`, as exFAT did until 2026-10-21, so two
   long names differing there are one name to every lookup, and the first
   entry answers for both. The exFAT fix's shape (the units kept, a listing in
   UTF-8) would end it. Read in the code, 2026-10-21.
+  *Done 2026-10-26: the walk keeps a long name's UTF-16 units and renders
+  them through `utf16::utf8_name`, exFAT's rendering moved to a module both
+  arms share, and a lookup compares that rendering ignoring ASCII case,
+  which answers as exFAT's comparison of units does for a name shown
+  exactly (one shown with `?`s, below, answers to that spelling alone). The write side was
+  broken too: `put_lfn_chars` wrote a name's UTF-8 bytes a unit each, so a
+  name fsd made outside ASCII was found by no lookup of it; it writes the
+  name's UTF-16 units now. `make test-fat32-names`, one boot, fails with
+  main's fat32.rs, with the read side alone reverted and with the write
+  side alone. Not done, as on exFAT: FAT32 folds case by ASCII alone, so
+  `CAFÉ` does not find `café` (Windows and Linux fold it). The high review
+  the same day added the refusal of U+FFFF in a name fsd makes and a run
+  of LFN entries started afresh at its last-flagged one, both graded by
+  the rig.*
+- **FAT32 reaches a name shown with `?`s by that spelling alone.** A long
+  name holding an unpaired surrogate or longer than 255 bytes of UTF-8 is
+  rendered ASCII with `?`s, and FAT32 looks names up by their rendering, so
+  such a name is not found by its own units, where exFAT's `name_answers`
+  takes those too; two such names differing only outside ASCII answer to
+  one spelling, the first, on both arms. Carrying the units to the lookup
+  (in `DirEntry`, or beside it in the walk's callback, nine call sites)
+  and moving `name_answers` to `utf16.rs` would make the arms answer alike.
+  Found by the high review of 2026-10-26.
+- **A FAT32 short name with bytes past ASCII is listed as nothing.** A
+  short-only entry holding OEM code-page bytes (0x80 and up, as DOS and
+  Windows write `CAFÉ.TXT` without a long name), or 0x05 standing for a
+  first byte 0xE5, is not UTF-8, so `DirEntry::name` answers an empty name
+  no lookup reaches. Rendering each such byte as `?`, as `utf8_name` renders
+  a unit outside ASCII, would list it and reach it by that spelling. Found
+  by the high review of 2026-10-26.
 - **fsd will not write to an exFAT directory an older fsd grew.** Until
   2026-10-18 fsd grew a directory without raising its DataLength, so such a
   directory's chain runs past its size, with sets there no driver reads.
