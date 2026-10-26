@@ -92,3 +92,18 @@ pub(crate) fn utf8_name<'a>(units: &[u16], out: &'a mut [u8; NAME_SHOWN_MAX]) ->
     // Valid by construction; `?` would show an encoder bug, not hide it.
     core::str::from_utf8(&out[..n]).unwrap_or("?")
 }
+
+/// `name`'s UTF-16 code units in `out`, or `None` past 255 of them: the one
+/// conversion of an asked or created name to units (exFAT's lookup and
+/// FAT32's create each had a copy of it until the review of 2026-10-26).
+pub(crate) fn units_of<'a>(name: &str, out: &'a mut [u16; 255]) -> Option<&'a [u16]> {
+    let mut n = 0usize;
+    for u in name.encode_utf16() {
+        if n == out.len() {
+            return None;
+        }
+        out[n] = u;
+        n += 1;
+    }
+    Some(&out[..n])
+}

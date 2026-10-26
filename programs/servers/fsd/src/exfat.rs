@@ -65,7 +65,7 @@ use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};
 use crate::fat32::{split_parent, Error};
-use crate::utf16::{shown_exactly, utf8_name, NAME_SHOWN_MAX};
+use crate::utf16::{shown_exactly, units_of, utf8_name, NAME_SHOWN_MAX};
 
 const SECTOR_SIZE: usize = 512;
 const ENTRY_SIZE: usize = 32;
@@ -2104,16 +2104,10 @@ impl Fs {
     /// which shares [`upcase`] with the NameHash fsd writes. A name longer
     /// than any set's is in no directory.
     fn entry_in(&mut self, dir: &DirEntry, name: &str) -> Result<Option<(DirEntry, SetAt)>, Error> {
-        let mut asked = [0u16; LONG_NAME_MAX];
-        let mut n = 0usize;
-        for u in name.encode_utf16() {
-            if n == LONG_NAME_MAX {
-                return Ok(None);
-            }
-            asked[n] = u;
-            n += 1;
-        }
-        let asked = &asked[..n];
+        let mut buf = [0u16; LONG_NAME_MAX];
+        let Some(asked) = units_of(name, &mut buf) else {
+            return Ok(None);
+        };
         let mut found = None;
         self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry, units, slot, len| {
             if name_answers(units, asked) {

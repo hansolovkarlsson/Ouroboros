@@ -78,6 +78,8 @@ ASTRAL = "caf\U0001F600"
 OVERLONG = "中" * 100  # 300 bytes of UTF-8, past the 255 a listing shows
 LONE = "lone\ud800"  # an unpaired surrogate
 MADE = "new\U0001F601"  # a pair, made by the guest
+PADDED = "a\uffffb"  # U+FFFF, the unit an LFN entry pads with: refused
+ORPHAN = "OrphanedNames"  # 13 units: one LFN entry, after an orphaned one
 FILES = [(ACUTE, b"acute\r\n"), (GRAVE, b"grave\r\n"), (ASTRAL, b"astral\r\n"),
          (OVERLONG, b"long\r\n"), (LONE, b"lone\r\n")]
 SHOWN = {OVERLONG: "?" * 100, LONE: "lone?"}  # as a listing shows them
@@ -181,9 +183,15 @@ def plant():
         start = mbrdisk.entries(fh.read(512))[0][2]
     with open(IMAGE, "r+b") as fh:
         vol = fat32img.Fat32(fh, start)
-        free = [c for c in range(2, vol.cluster_end) if vol.entry(c) == 0][:len(FILES)]
+        free = [c for c in range(2, vol.cluster_end) if vol.entry(c) == 0][:len(FILES) + 1]
         planted = b"".join(name_entries(n, f"FNAME~{k + 1}".encode().ljust(8) + b"TXT", c, len(data))
                            for k, ((n, data), c) in enumerate(zip(FILES, free)))
+        # An LFN entry flagged last of a run of two, its checksum another
+        # name's, left deleted until the host's first fsck (`orphan`), then
+        # ORPHAN's own run of one: the run must start afresh at its entry.
+        stray = bytearray(name_entries("Z" * 26, b"STRAY   TXT", 0, 0)[:32])
+        stray[0] = 0xE5
+        planted += bytes(stray) + name_entries(ORPHAN, b"ORPHAN~1TXT", free[-1], 8)
         # The image's root is a cluster or two: zeroed free clusters are
         # linked after its last until the names fit, as a driver grows it.
         while True:
@@ -203,11 +211,28 @@ def plant():
         for k, c in enumerate(chain):
             fh.seek(vol.lba(c) * fat32img.SECTOR)
             fh.write(d[k * vol.cluster_bytes:(k + 1) * vol.cluster_bytes])
-        for (_, data), c in zip(FILES, free):
+        for (_, data), c in zip(FILES + [(ORPHAN, b"orphan\r\n")], free):
             vol.set_entry(c, 0x0FFFFFFF)
             fh.seek(vol.lba(c) * fat32img.SECTOR)
             fh.write(data + bytes(vol.cluster_bytes - len(data)))
     return start, dict(zip((n for n, _ in FILES), free))
+
+
+def orphan(start, live):
+    """The stray LFN entry before ORPHAN's run made live (`live`), flagged
+    the last of two, or deleted again for fsck_msdos."""
+    with open(IMAGE, "r+b") as fh:
+        vol = fat32img.Fat32(fh, start)
+        for c in vol.chain(vol.root):
+            base = vol.lba(c) * fat32img.SECTOR
+            fh.seek(base)
+            d = fh.read(vol.cluster_bytes)
+            for j in range(0, len(d), 32):
+                if d[j] in (0x42, 0xE5) and d[j + 11] == 0x0F and d[j + 13] == checksum(b"STRAY   TXT"):
+                    fh.seek(base + j)
+                    fh.write(bytes([0x42 if live else 0xE5]))
+                    return True
+    return False
 
 
 def fsck():
@@ -245,13 +270,14 @@ def run():
     ]
     notes = [f"before: {ln}" for ln in lines] if not ok else []
     if not all(c for _, c in checks):
-        return checks, notes
+        return checks, notes, 0
+    checks.append(("before: the stray LFN entry made live before ORPHAN's run", orphan(start, True)))
 
     upper_astral = "CAF\U0001F600"
     cmds = ["ls /", "echo /*", f"cat /{GRAVE}", f"cat /{upper_astral}", f"echo new > /{UMLAUT}",
             f"cat /{UMLAUT}", f"cat /{ACUTE}", f"rm /{UMLAUT}", f"mv /{GRAVE} /grave",
             f"cat /{SHOWN[OVERLONG]}", f"cat /{SHOWN[LONE]}", f"touch /{SHOWN[LONE]}",
-            f"cp /grave /{MADE}", f"cat /{MADE}", "ls /"]
+            f"cp /grave /{MADE}", f"cat /{MADE}", f"touch /{PADDED}", f"cat /{ORPHAN}", "ls /"]
     steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in cmds] + [("# ", "")]
     guest = drive_qemu.Guest(IMAGE, label="test-fat32-names: ")
     try:
@@ -263,7 +289,8 @@ def run():
     with open(os.path.join(ROOT, "build", "test-fat32-names.txt"), "w") as fh:
         fh.write(out)
     if drive_qemu.boot_stalled("test-fat32-names", "boot", out, faults):
-        return checks, notes + ["the boot stalled in the firmware"]
+        return checks, notes, 1
+    orphan(start, False)
 
     listing = (answer(out, "ls /") or "").split()
     last = (answer(out, "ls /", last=True) or "").split()
@@ -306,17 +333,22 @@ def run():
         (f"no long name {GRAVE} or {UMLAUT} is left", find(entries, GRAVE) is None and find(entries, UMLAUT) is None),
         (f"the copy's long name on disk is {MADE!r} in five UTF-16 units ({made[4] if made else None})",
          made is not None and made[4] == units(MADE)),
+        (f"touch of a name holding U+FFFF refused ({answer(out, f'touch /{PADDED}')!r}), and no file a or a+b",
+         bool(answer(out, f"touch /{PADDED}")) and "a" not in last and not any(e[0] and e[0].startswith("a") for e in entries)),
+        (f"after an orphaned LFN entry, {ORPHAN} listed whole and cat of it orphan "
+         f"({[n for n in last if n.startswith('Orphan')]}, {answer(out, f'cat /{ORPHAN}')!r})",
+         ORPHAN in last and answer(out, f"cat /{ORPHAN}") == "orphan"),
         (f"touch /{SHOWN[LONE]} made no second file (one long name lone with a lone surrogate)",
          sum(1 for e in entries if e[0] == "lone�") == 1),
         ("fsck_msdos -n passes after", ok),
         (f"no fault lines in QEMU's trace ({faults})", faults == 0),
     ]
-    return checks, notes
+    return checks, notes, 0
 
 
 def main():
     try:
-        checks, notes = run()
+        checks, notes, stalled = run()
     finally:
         if os.path.exists(IMAGE) and not os.environ.get("KEEP"):
             os.remove(IMAGE)
@@ -326,8 +358,7 @@ def main():
         failed += not ok
     for n in notes:
         print("      " + n)
-    print(f"test-fat32-names: {'all checks passed' if failed == 0 else f'{failed} check(s) FAILED'}")
-    return 1 if failed else 0
+    return drive_qemu.verdict("test-fat32-names", failed, stalled)
 
 
 if __name__ == "__main__":

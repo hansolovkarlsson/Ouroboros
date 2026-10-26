@@ -33,7 +33,7 @@
 use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};
-use crate::utf16::{utf8_name, NAME_SHOWN_MAX};
+use crate::utf16::{units_of, utf8_name, NAME_SHOWN_MAX};
 
 const SECTOR_SIZE: usize = 512;
 const DIR_ENTRY_SIZE: usize = 32;
@@ -897,6 +897,14 @@ impl Fs {
                         // irrelevant. The terminator lives in the highest-seq
                         // entry, so `lfn_len` ends up the true length.
                         let seq = (raw[0] & 0x1f) as usize;
+                        // The entry flagged last starts a run (it is stored
+                        // first): what came before belongs to another, and
+                        // with the length the longest seen, an orphaned
+                        // entry's units ran on after the next name's (the
+                        // review of 2026-10-26).
+                        if raw[0] & LFN_LAST_MASK != 0 {
+                            lfn_len = 0;
+                        }
                         if seq >= 1 {
                             let mut chars = [0u16; 13];
                             let n = lfn_chars(raw, &mut chars);
@@ -921,8 +929,11 @@ impl Fs {
                     // each unit outside it when it cannot be shown exactly
                     // (exFAT's rule, `utf16::shown_exactly`). A lookup
                     // compares that rendering ignoring ASCII case
-                    // ([`names_match`]), which answers as exFAT's comparison
-                    // of units does: equal UTF-8 is equal units.
+                    // ([`names_match`]). For a name shown exactly that
+                    // answers as exFAT's comparison of units does, equal UTF-8
+                    // being equal units; for one shown with `?`s it answers
+                    // to that spelling alone, where exFAT's `name_answers`
+                    // takes the name's own units too (the roadmap).
                     let long = if lfn_len > 0 && lfn_sum == lfn_checksum(&raw[0..11]) {
                         Some(utf8_name(&lfn_name[..lfn_len], &mut shown).as_bytes())
                     } else {
@@ -1951,18 +1962,11 @@ impl Fs {
         // short entry last - built into one buffer, written as a contiguous
         // run. `name.len() <= LONG_NAME_MAX` bytes is guaranteed by
         // `validate_create_name`, and a name has no more UTF-16 units than
-        // UTF-8 bytes, so `count <= MAX_LFN_ENTRIES + 1`.
-        let mut units = [0u16; LONG_NAME_MAX];
-        let mut n = 0;
-        for u in name.encode_utf16() {
-            if n == LONG_NAME_MAX {
-                return Err(Error::InvalidName);
-            }
-            units[n] = u;
-            n += 1;
-        }
+        // UTF-8 bytes, so the units fit and `count <= MAX_LFN_ENTRIES + 1`.
+        let mut buf = [0u16; LONG_NAME_MAX];
+        let units = units_of(name, &mut buf).unwrap_or(&[]);
         let mut entries = [0u8; (MAX_LFN_ENTRIES + 1) * DIR_ENTRY_SIZE];
-        let count = build_name_entries(&units[..n], &short, attr, cluster, size, &mut entries);
+        let count = build_name_entries(units, &short, attr, cluster, size, &mut entries);
         self.write_entry_run(dir_cluster, &entries[..count * DIR_ENTRY_SIZE], count)
     }
 
@@ -2431,11 +2435,13 @@ fn validate_create_name(name: &str) -> Result<(), Error> {
 /// Rejects the characters FAT reserves (`" * / : < > ? \ |`) and control
 /// bytes, anything longer than [`LONG_NAME_MAX`], the empty name, and a name
 /// made only of dots/spaces (which would sanitize to no usable short-alias
-/// base and isn't a meaningful filename). The read side is more permissive -
+/// base and isn't a meaningful filename), and U+FFFF, the unit an LFN entry
+/// pads with: written, it ended the name where it stood when read back, so
+/// `a` U+FFFF `b` answered as `a` (the review of 2026-10-26). The read side is more permissive -
 /// it renders whatever a foreign formatter wrote; this is only the gate on
 /// what *we* create.
 fn is_valid_lfn_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > LONG_NAME_MAX {
+    if name.is_empty() || name.len() > LONG_NAME_MAX || name.chars().any(|c| c == '\u{ffff}') {
         return false;
     }
     let mut all_dot_space = true;
