@@ -2273,7 +2273,9 @@ The small open tails those arcs deliberately left:
 >       the other five is near a sleep. Leave it out of the counts, and
 >       check `pmset -g log` before reading one in. Another on 2026-10-26,
 >       `test-dir-scan`, exFAT and traced again, with no sleep near it
->       (`pmset -g log`); the rerun passed.
+>       (`pmset -g log`); the rerun passed. And a second that day,
+>       `test-write-walk:exfat-base`, exFAT and traced, no sleep near it;
+>       the rerun passed.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
@@ -4426,7 +4428,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   says it is the one shared copy. A change to one rig's internals can break
   another's import, and the fsck rule can drift between four copies. Move
   them into `exfatimg.py` and have the rigs import it. From the high review
-  of `fix/exfat-valid-length`, 2026-10-22.
+  of `fix/exfat-valid-length`, 2026-10-22. Its `Volume` reads FAT32 too, from
+  FAT 0 alone, where `scripts/fat32img.py` follows BPB_ExtFlags to the live
+  copy since 2026-10-26: harmless while no image it reads has mirroring
+  off, and the FAT32 half belongs on `fat32img` (the medium review that
+  day).
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
   chained walk reads and writes a bitmap sector and writes a FAT sector for
   every cluster, three round trips a cluster on the Pi's USB stick, and every
@@ -4628,7 +4634,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   ulib's message table and the C and Python peers that
   `check-wire-constants.py` holds to it, and `test-grow-dir`, which matches
   "I/O error". Found by the high review of the grow_dir fix, 2026-10-19.
-- **FAT32 does not honour `BPB_ExtFlags`.** Bytes 40 to 41 of a FAT32 boot
+- ~~**FAT32 does not honour `BPB_ExtFlags`.**~~ Bytes 40 to 41 of a FAT32 boot
   sector say whether the FATs are mirrored: with bit 7 clear (what fsd's own
   `format` writes, and what every image here has) every copy is kept in
   step; with it set, mirroring is off and only the copy numbered in bits 0
@@ -4643,6 +4649,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   live copy's number at mount (refusing one at or past `BPB_NumFATs`) and,
   with bit 7 set, read and write that copy alone, so such a volume mounts.
   Found with the FAT mirror decision, 2026-10-21.
+  *Done 2026-10-26: `mount_at` reads the live copy from ExtFlags (copy 0
+  when mirrored) and refuses one at or past `BPB_NumFATs`; every FAT read
+  takes the live copy (`fat_place`), and a write goes to it and, when
+  mirrored, to the others. `make test-fat-extflags`, one boot of a FAT32
+  with FAT 1 live and a file cut short in FAT 0 alone, fails with the flags
+  ignored, with copy 0 read and with every copy written; `make
+  test-volume-bound`'s SHAPES-D refuses a live copy the volume does not
+  have (0x0082) where it refused 0x0081. The flag cannot be tried on the
+  ESP the firmware boots: OVMF then finds no boot loader there.*
 - **FAT32 writes every FAT update straight through.** Each entry written
   is one sector write per copy, though consecutive updates almost always
   land in the same sector: a 640 KiB `cp` onto the ESP allocates 1,280

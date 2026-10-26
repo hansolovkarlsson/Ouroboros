@@ -1100,6 +1100,34 @@ short. And a run of LFN entries was not restarted at its first entry, so an
 orphaned entry's units could run on after the next name. The rig now reports
 a firmware stall as INCONCLUSIVE rather than as a pass. The two names now
 share one conversion to UTF-16 (`utf16::units_of`).
+**FAT32 honours `BPB_ExtFlags` (2026-10-26).** A FAT32 volume's boot sector
+says whether its FATs are mirrored. When they are not, only the copy it
+names is live. fsd read copy 0 and wrote every copy whatever the flags said,
+so since 2026-10-21 it refused a volume whose live copy was another. Now the
+mount reads the live copy (copy 0 when mirrored) and refuses one the volume
+does not have. Every FAT read takes the live copy, and a write goes to it
+and, only when mirrored, to the other copies. `make test-fat-extflags` boots
+`esp.img` from NVMe with a built disk on virtio: an ext2 root, then a FAT32
+with FAT 1 live and a file whose chain is cut short in FAT 0 alone. The file
+must read whole and a write must leave FAT 0 untouched. The rig fails with
+the flags ignored, with copy 0 read and with every copy written.
+`test-volume-bound`'s SHAPES-D now refuses a live copy past the FAT count.
+The flag can't be tested on the ESP the firmware boots, since OVMF then
+finds no boot loader there.
+The high review the same day made the state one enum (`FatCopies`:
+`Mirrored` or `Single(n)`), so a mirrored volume reading a copy other than 0
+can't be written; the mirror loop places each copy from its own number. It
+also caught two host copies of the rule that had gone stale.
+`test-volume-bound`'s model of the mount still refused any live copy but 0.
+The shared reader `scripts/fat32img.py` read and wrote FAT 0 whatever the
+flags said; it now takes the live copy, and `set_entry` writes as fsd does.
+The rig now uses the shared helpers, and checks that the page's last line
+lies past its first cluster rather than assuming exactly three clusters.
+A medium review added a volume with mirroring off and FAT 0 live (`0x0080`)
+to the same boot. That is the one existing behaviour the fix changes: such
+a volume used to have every copy written, and now only FAT 0 is. A write to
+it must leave FAT 1 untouched; the check fails with `0x0080` taken as
+mirrored. The planted flags now go into the backup boot sector too.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
