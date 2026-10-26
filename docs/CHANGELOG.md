@@ -1102,6 +1102,11 @@ The shared reader `scripts/fat32img.py` read and wrote FAT 0 whatever the
 flags said; it now takes the live copy, and `set_entry` writes as fsd does.
 The rig now uses the shared helpers, and checks that the page's last line
 lies past its first cluster rather than assuming exactly three clusters.
+A medium review added a volume with mirroring off and FAT 0 live (`0x0080`)
+to the same boot. That is the one existing behaviour the fix changes: such
+a volume used to have every copy written, and now only FAT 0 is. A write to
+it must leave FAT 1 untouched; the check fails with `0x0080` taken as
+mirrored. The planted flags now go into the backup boot sector too.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
