@@ -217,7 +217,7 @@ ends at its end of chain (the first walk alone answers, and VMEET's run
 ends past its source's size); the shape test on the slots a removal
 deletes, which now refuses before it clears any; and the bound on the scan for the bitmap and up-case entries,
 which no boot gives a looped root.
-About five minutes. Run it whenever exFAT's patch_stream_ext,
+About six minutes. Run it whenever fsd's mount lines or exFAT's patch_stream_ext,
 set_checksum, walk_dir's set assembly, slot_at, read_slots, mv, rm, rmdir,
 renamed_set, delete_set, unlink_set, free_runs, overlaps, runs_of,
 free_data, is_system, sector_of, record_root, writable, check_extents,

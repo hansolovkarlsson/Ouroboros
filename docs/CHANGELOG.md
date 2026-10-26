@@ -1129,6 +1129,22 @@ a volume used to have every copy written, and now only FAT 0 is. A write to
 it must leave FAT 1 untouched; the check fails with `0x0080` taken as
 mirrored. The planted flags now go into the backup boot sector too.
 
+**exFAT says why it mounted a volume read-only.** A volume with no bitmap,
+a damaged one, more than one FAT, or a root whose chain the mount could
+not record (more than 64 runs of clusters, a loop, past 256 MiB) mounts
+read-only, and until now said nothing about it: the first word was a
+write's refusal. A healthy stick whose root had grown in more than 64
+interleaved steps was the case that mattered. `mount_at` now keeps the
+first reason, the cause before what it explains (a second FAT's bitmap
+entry reads as a damaged first one), and fsd prints it on the boot mount
+line and on `mount N`: `fsd: mounted read-only: its root directory is in
+more than 64 runs of clusters`. Dropping the bitmap stays the one thing
+that makes the volume read-only, so the write gate is unchanged. In
+`test-long-set`, the four read-only boots must each give their reason,
+the two writable ones none, and a new boot, VRUNS, plants a root of 65
+runs on the host. The checks fail with the line not printed and with
+`ROOT_RUNS` raised to 65.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

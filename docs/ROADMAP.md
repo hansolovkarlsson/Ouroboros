@@ -4619,13 +4619,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   by the same test), so its writes pass the root's rule: the holder given by
   the caller, which knows the synthetic root entry, would close it there
   too (the high review that day).
-- **exFAT says nothing when it mounts a volume read-only.** No bitmap, a
+- ~~**exFAT says nothing when it mounts a volume read-only.**~~ No bitmap, a
   damaged one, two FATs, and since 2026-10-26 a root whose chain the record
   cannot hold (more than 64 runs, a loop, past 256 MiB) each leave the
   volume read-only with no line saying why, so a healthy stick whose root
   grew in more than 64 interleaved steps refuses every write unexplained.
   A reason kept in `Fs` and printed by fsd's mount line would say it.
-  Found by the high review of 2026-10-26.
+  Found by the high review of 2026-10-26. *Done 2026-10-26*
+  (`fix/exfat-read-only-reason`): `mount_at` keeps the first reason and
+  fsd prints `fsd: mounted read-only: ` and it on the boot mount line and
+  on `mount N`; `make test-long-set` checks it in every read-only boot, and
+  VRUNS plants a root of 65 runs. A looped root is still graded by no
+  boot.
 - **A damaged exFAT directory answers "device I/O error".** A create in a
   directory whose chain is not its size, a cluster outside the heap and a
   looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a
