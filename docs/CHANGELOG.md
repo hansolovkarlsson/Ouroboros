@@ -1079,6 +1079,21 @@ cluster would extend the last run; it now refuses only when the record
 cannot take the cluster. Third, a failed link of the root's new cluster
 leaked it; the cluster is now given back.
 
+**FAT32 honours `BPB_ExtFlags` (2026-10-26).** A FAT32 volume's boot sector
+says whether its FATs are mirrored. When they are not, only the copy it
+names is live. fsd read copy 0 and wrote every copy whatever the flags said,
+so since 2026-10-21 it refused a volume whose live copy was another. Now the
+mount reads the live copy (copy 0 when mirrored) and refuses one the volume
+does not have. Every FAT read takes the live copy, and a write goes to it
+and, only when mirrored, to the other copies. `make test-fat-extflags` boots
+`esp.img` from NVMe with a built disk on virtio: an ext2 root, then a FAT32
+with FAT 1 live and a file whose chain is cut short in FAT 0 alone. The file
+must read whole and a write must leave FAT 0 untouched. The rig fails with
+the flags ignored, with copy 0 read and with every copy written.
+`test-volume-bound`'s SHAPES-D now refuses a live copy past the FAT count.
+The flag can't be tested on the ESP the firmware boots, since OVMF then
+finds no boot loader there.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
