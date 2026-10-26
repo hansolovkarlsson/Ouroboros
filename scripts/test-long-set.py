@@ -939,7 +939,8 @@ def run_vroot():
     vol = Volume(IMAGE, start)
     fill_deleted(vol)
     r2 = vol.chain(vol.root)[1]
-    d = free_run(vol, 1)
+    d = free_run(vol, 2)
+    e = d + 1
     c = vol.cluster
     nb = -(-vol.count // 8 // c) or 1  # the bitmap's clusters
     lb = vol.bitmap + nb - 1  # its last, whose FAT entry ends a chain
@@ -951,26 +952,36 @@ def run_vroot():
         "SD": plant_set("SD", d, 2 * c, is_dir=True, contiguous=False),
         # RR FAT-chained on the bitmap's last cluster, 4 bytes.
         "RR": plant_set("RR", lb, 4, contiguous=False),
+        # LX FAT-chained on a cluster of its own linked to the bitmap's last,
+        # and HX on the bitmap's last, each whole: a write at its end writes
+        # none of its sectors, and extends the chain from the bitmap's FAT
+        # entry unless the link (`file_step`) or the first cluster
+        # (`write_at`) is refused.
+        "LX": plant_set("LX", e, 2 * c, contiguous=False),
+        "HX": plant_set("HX", lb, c, contiguous=False),
     }
     root = vol.data(vol.chain(vol.root))
     free = (len(root) - root_end(root) - sum(len(x) for x in sets.values())) // 32
     # Two slots left: a create needs three, so `touch /GROWN` grows the root.
-    if free < 6 or not plant(vol, [*sets.values(), filler(free - 2, "F")], [d],
-                             links=[(d, lb)], fills=[(d, filler(c // 32, "D"))]):
+    if free < 6 or not plant(vol, [*sets.values(), filler(free - 2, "F")], [d, e],
+                             links=[(d, lb), (e, lb)], fills=[(d, filler(c // 32, "D"))]):
         return [("vroot: room for the planted sets in the root", False)], []
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
     bitmap = vol.data(range(vol.bitmap, vol.bitmap + nb))
+    lb_fat = vol.entry(lb)
     r2_head = vol.data([r2])[:512]
     runs = [i for i in range(0, root_end(root) - 64, 32) if all(root[i + 32 * j] & 0x80 == 0 for j in range(3))]
     checks = [("vroot: the planted sets read back, the root two clusters with two slots free and no run of three "
                f"deleted ones ({runs})",
                all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p for n, p in sets.items())
-               and root_end(root) == len(root) - 64 and not runs and vol.used(d) and vol.entry(d) == lb)]
+               and root_end(root) == len(root) - 64 and not runs and all(vol.used(k) and vol.entry(k) == lb
+                                                                        for k in (d, e)))]
     if not checks[0][1]:
         return checks, []
     # `rm /RX` last: the three slots it frees would take a create.
-    cmds = ["writeat /RX 0 x", "touch /SD/N", "ls /SD", "cat /RR", "touch /GROWN", "touch /AFTER", "rm /RX"]
+    cmds = ["writeat /RX 0 x", "touch /SD/N", "ls /SD", "cat /RR", f"writeat /LX {2 * c} x", f"writeat /HX {c} x",
+            "touch /GROWN", "touch /AFTER", "rm /RX"]
     driven, out, faults = boot("vroot", cmds)
     if drive_qemu.boot_stalled("test-long-set", "vroot", out, faults):
         STALLED.append("vroot")
@@ -998,19 +1009,25 @@ def run_vroot():
          f"both in it ({printed(out, 'touch /GROWN')}, {printed(out, 'touch /AFTER')}, {len(chain)} clusters)",
          printed(out, "touch /GROWN") == [] and printed(out, "touch /AFTER") == [] and len(chain) == 3
          and exfatimg.find(root, "GROWN") is not None and exfatimg.find(root, "AFTER") is not None),
+        (f"vroot: `writeat /LX {2 * c} x` and `writeat /HX {c} x` refused, the bitmap's last cluster's FAT entry "
+         f"as it was ({printed(out, f'writeat /LX {2 * c} x')}, {printed(out, f'writeat /HX {c} x')}, "
+         f"{lb_fat:#x} -> {vol.entry(lb):#x})",
+         printed(out, f"writeat /LX {2 * c} x") != [] and printed(out, f"writeat /HX {c} x") != []
+         and vol.entry(lb) == lb_fat),
         ("vroot: the bitmap every byte as it was but the root's new cluster's bit", bytes(want) == bitmap_after),
         ("vroot: no fault lines", faults == 0),
     ]
     # SD and RR are damage planted: deleted here, SD's cluster given back,
     # so fsck_exfat reads the rest of the volume.
-    delete_set(vol, "SD")
-    delete_set(vol, "RR")
+    for name in ("SD", "RR", "LX", "HX"):
+        delete_set(vol, name)
     with open(IMAGE, "r+b") as fh:
-        set_bit(fh, vol, d, used=False)
-        fh.seek(vol.fat + d * 4)
-        fh.write(struct.pack("<I", 0))
+        for k in (d, e):
+            set_bit(fh, vol, k, used=False)
+            fh.seek(vol.fat + k * 4)
+            fh.write(struct.pack("<I", 0))
     ok, lines = fsck()
-    checks.append(("vroot: fsck_exfat -n passes the image after the boot, SD and RR removed", ok))
+    checks.append(("vroot: fsck_exfat -n passes the image after the boot, SD, RR, LX and HX removed", ok))
     return checks, [f"vroot after: {ln}" for ln in lines] if not ok else []
 
 
