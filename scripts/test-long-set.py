@@ -15,7 +15,7 @@ slot followed the File. And until 2026-10-21 a rename built the new set
 afresh (File, Stream, name), dropping the File entry's attributes and times
 and every vendor entry. And until 2026-10-23 `rm`, `rmdir` and a replacing
 `mv` left the clusters a vendor allocation entry (0xE1) names set in the
-bitmap, with no set naming them. Thirteen boots, each of a copy of
+bitmap, with no set naming them. Fourteen boots, each of a copy of
 build/espexfat.img (exFAT root, partition 1):
 
 - LONG: the host gives the root a second cluster and plants /VEND, an empty
@@ -139,7 +139,18 @@ build/espexfat.img (exFAT root, partition 1):
   the root given a second cluster and the bitmap's entry moved to its start
   (the first cluster's slots after the last set deleted ones): the volume
   mounts writable, and `echo new > /NEWB` and `rm /VF` work. fsck_exfat
-  -n clean after each.
+  -n clean after each. Since 2026-10-26 too fsd's mount line must say why
+  a volume is read-only (`fsd: mounted read-only: ` and the reason: the
+  bitmap's entry damaged in VBITMAP and VFIRST, the bitmap and up-case
+  table overlapping in VOVERLAP, more than one FAT in VTWOFAT), and must
+  say nothing of it in VUPCASE and VLATER;
+- VRUNS (since 2026-10-26): the root grown on the host to 65 runs of
+  clusters, a free cluster between each and the next, as a root grows on a
+  volume where files are made between its growths, fsck_exfat -n clean
+  first: one more than fsd records (ROOT_RUNS), so the volume is
+  read-only, the mount line must say `its root directory is in more than
+  64 runs of clusters` and `echo new > /NEWB` answer read-only with no
+  NEWB on the disk.
 
 No fault lines in QEMU's trace. Fails with the sum capped at 19 entries (the
 checksum, and fsck: "Incorrect checksum for directory entry set. Delete?")
@@ -190,9 +201,10 @@ the bitmap), the root's new cluster not recorded at its growth (GROWN
 refused), and `file_step`'s or `write_at`'s link check removed (the
 bitmap's FAT entry linked); and with the table scan recording each extent
 as it finds it, before `check_extents` (VLATER's mount an I/O error, found
-by the high review that day). Not graded by a boot: `sector_of`'s rule for the
+by the high review that day). And with the reason line not printed (every
+read-only boot), and with ROOT_RUNS raised to 65 (VRUNS writable). Not graded by a boot: `sector_of`'s rule for the
 root (a damaged root chain into the bitmap), the tables held off the root's
-later clusters at mount, a root not recorded whole made read-only, a
+later clusters at mount, a root whose chain loops made read-only, a
 growth refused when the record cannot take its cluster, and that cluster
 given back then or when the root's link fails;
 the order of a removal (the set deleted, then its clusters freed), of a
@@ -1099,6 +1111,15 @@ EXTENTS = {
 # so the scan reaches it (the high review of 2026-10-26: the mount failed).
 LATE = {"vlater"}
 
+# What fsd's mount line must give as the reason a read-only boot of
+# EXTENTS is read-only (`fsd: mounted read-only: ...`, since 2026-10-26).
+REASONS = {
+    "vbitmap": "its allocation bitmap's entry is damaged",
+    "voverlap": "its allocation bitmap and up-case table overlap",
+    "vfirst": "its allocation bitmap's entry is damaged",
+    "vtwofat": "it has more than one FAT",
+}
+
 # A boot sector byte changed for the boot and restored after it: (offset,
 # value). NumberOfFats 2 with ActiveFat 0, as a TexFAT volume may be: fsd
 # cannot tell which bitmap is live, so the volume is read-only. fsd does
@@ -1174,7 +1195,13 @@ def run_extent(label):
     vf, newb = exfatimg.find(root, "VF"), exfatimg.find(root, "NEWB")
     newb_size = struct.unpack_from("<Q", newb.data, 56)[0] if newb else 0
     ok, lines = fsck()
+    said = [ln.strip() for ln in out.splitlines() if "fsd: mounted read-only" in ln]
     checks = [(f"{label}: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out)]
+    if writable:
+        checks.append((f"{label}: no read-only line at the mount ({said})", not said))
+    else:
+        checks.append((f"{label}: the mount line says why it is read-only, {REASONS[label]!r} ({said})",
+                       len(said) == 1 and said[0].startswith("fsd: mounted read-only: " + REASONS[label])))
     if writable:
         checks += [(f"{label}: an up-case table claiming the heap is no table and a longer bitmap is one: "
                     f"rm /VF freed VF's cluster ({vol.used(r)}), and NEWB was written ({newb_size} bytes)",
@@ -1197,6 +1224,67 @@ def run_extent(label):
     return checks, [f"{label} after: {ln}" for ln in lines] if not ok else []
 
 
+def run_vruns():
+    """The root grown on the host to 65 runs of clusters, a free cluster
+    left between each and the next, as a root grows on a volume where files
+    are made between its growths: past ROOT_RUNS (64), so not recorded
+    whole. The volume is read-only, and the mount line must say why."""
+    start = copy()
+    vol = Volume(IMAGE, start)
+    chain = vol.chain(vol.root)
+    last, added = chain[-1], []
+    with open(IMAGE, "r+b") as fh:
+        c = max(chain) + 2
+        while len(runs_of(chain + added)) < 65 and c < vol.count + 2:
+            if not vol.used(c) and c - 1 not in chain + added:
+                set_bit(fh, vol, c)
+                for k, value in ((last, c), (c, 0xFFFFFFFF)):
+                    fh.seek(vol.fat + k * 4)
+                    fh.write(struct.pack("<I", value))
+                fh.seek(vol.heap + (c - 2) * vol.cluster)
+                fh.write(bytes(vol.cluster))
+                last = c
+                added.append(c)
+                c += 2
+            else:
+                c += 1
+    vol = Volume(IMAGE, start)
+    chain = vol.chain(vol.root)
+    ok, lines = fsck()
+    checks = [(f"vruns: the root is {len(runs_of(chain))} runs of clusters, 65 wanted, and fsck_exfat -n "
+               f"passes the image before the boot", len(runs_of(chain)) == 65 and ok)]
+    if not checks[0][1]:
+        return checks, [f"vruns before: {ln}" for ln in lines]
+    driven, out, faults = boot("vruns", ["echo new > /NEWB", "ls /"])
+    if drive_qemu.boot_stalled("test-long-set", "vruns", out, faults):
+        STALLED.append("vruns")
+        return [], []
+    said = [ln.strip() for ln in out.splitlines() if "fsd: mounted read-only" in ln]
+    vol = Volume(IMAGE, start)
+    root = vol.data(vol.chain(vol.root))
+    checks += [
+        (f"vruns: driven to the end, fsd mounted exFAT and its mount line says the root is in more than "
+         f"64 runs ({said})", driven and "fsd: exFAT mounted" in out and len(said) == 1
+         and said[0] == "fsd: mounted read-only: its root directory is in more than 64 runs of clusters"),
+        (f"vruns: echo new > /NEWB refused read-only ({printed(out, 'echo new > /NEWB')}), no NEWB on the disk",
+         any("read-only" in ln for ln in printed(out, "echo new > /NEWB")) and exfatimg.find(root, "NEWB") is None),
+        ("vruns: no fault lines", faults == 0),
+    ]
+    return checks, []
+
+
+def runs_of(chain):
+    """The runs of consecutive clusters `chain` is made of, as fsd records
+    the root's: (first, count) each."""
+    runs = []
+    for c in chain:
+        if runs and runs[-1][0] + runs[-1][1] == c:
+            runs[-1][1] += 1
+        else:
+            runs.append([c, 1])
+    return runs
+
+
 def patch_root(vol, at, data):
     """`data` written at byte `at` of the root directory, straight to the
     image: the root read through `vol` may be stale once the image changed."""
@@ -1208,7 +1296,7 @@ def patch_root(vol, at, data):
 
 def main():
     checks, notes = [], []
-    for run in (run_long, run_shape, run_rename, run_valloc, run_vcross, run_vmeet, run_vroot,
+    for run in (run_long, run_shape, run_rename, run_valloc, run_vcross, run_vmeet, run_vroot, run_vruns,
                 *(lambda label=label: run_extent(label) for label in EXTENTS)):
         try:
             c, n = run()

@@ -216,6 +216,16 @@ impl Filesystem {
         }
     }
 
+    /// Why this filesystem was mounted read-only, for fsd's mount lines:
+    /// exFAT's reason ([`exfat::Fs::read_only`]); `None` for every other arm,
+    /// which mounts writable or not at all.
+    pub fn read_only(&self) -> Option<&'static str> {
+        match self {
+            Filesystem::ExFat(fs) => fs.read_only(),
+            _ => None,
+        }
+    }
+
     /// Whether this filesystem lives on a disk partition (every arm but the
     /// synthetic `/proc`), so that `partition_lba` names a real place.
     pub fn is_disk(&self) -> bool {
