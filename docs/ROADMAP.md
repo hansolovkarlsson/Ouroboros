@@ -4485,7 +4485,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `grow_extent` give back what they took, would end it, `insert_set`
   returning the slot it used; the undo can fail too, which leaves today's
   state. The same review, deferred.
-- **exFAT bounds a cluster number where it frees, not where it reads it.**
+- ~~**exFAT bounds a cluster number where it frees, not where it reads it.**~~
   `free_data` refuses a first cluster outside the heap and stops at the
   volume's own clusters, `write_fat_entry` refuses one outside the heap, and
   the allocator passes over the volume's own (all 2026-10-23), and since the
@@ -4509,6 +4509,20 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   pointer naming metadata unchecked" is the same rule there, and so is
   "a subdirectory naming the exFAT root's cluster is read as the root". The
   same review, deferred.
+  *Done 2026-10-26: every read and write of a cluster's sectors goes
+  through `sector_of`, which holds the cluster to what it is read or
+  written for (the root's slots, the bitmap, anything else), and
+  `cluster_to_lba` is gone; the mount records the root's chain as runs
+  (`record_root`, 64 at most, read-only past that, a loop or 256 MiB) and
+  the root's growth extends it, so `is_system` counts every root cluster.
+  The link checks stay (`file_step`, `ensure_chained`, `write_at`'s first
+  cluster): a write from a file's end passes clusters whose sectors it
+  never asks for, and links from the last one's FAT entry. VROOT in `make
+  test-long-set`, failed by five mutants. Not taken: refusing in
+  `walk_dir`'s decode and ending a walk at a system cluster in
+  `next_cluster` and `advance`, so the free keeps its own checks. Still
+  open: the subdirectory read as the root (`extent_rule`'s test by first
+  cluster, its own item below) and ext2's pointer naming metadata.*
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
   rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
   `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume

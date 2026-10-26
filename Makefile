@@ -2650,12 +2650,16 @@ test-ext2-blocks: image image-ext2
 # 2026-10-24 a vendor chain meeting the survivor's held, a volume of two
 # FATs read-only, a whole-file write keeping an old cluster its set's vendor
 # run names and a write refused on the bitmap's cluster, contiguous, chained
-# or through a link. Eleven boots,
-# about four minutes; run it whenever exFAT's patch_stream_ext,
+# or through a link, and since 2026-10-26 (VROOT) the root's later clusters
+# among the volume's own, a read or write through a damaged chain into the
+# bitmap refused where the cluster becomes a sector (sector_of), and the
+# root's growth recorded. Twelve boots,
+# about five minutes; run it whenever exFAT's patch_stream_ext,
 # set_checksum, walk_dir's set assembly, slot_at, read_slots, mv, rm, rmdir,
 # renamed_set, delete_set, unlink_set, free_runs, overlaps, runs_of,
-# free_data, is_system, writable, check_extents, locate_tables,
-# ensure_chained, alloc_cluster or write_fat_entry changes.
+# free_data, is_system, sector_of, record_root, writable, check_extents,
+# locate_tables, ensure_chained, file_step, grow_extent, alloc_cluster or
+# write_fat_entry changes.
 test-long-set: image-exfat
 	python3 scripts/test-long-set.py
 

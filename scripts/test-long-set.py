@@ -15,7 +15,7 @@ slot followed the File. And until 2026-10-21 a rename built the new set
 afresh (File, Stream, name), dropping the File entry's attributes and times
 and every vendor entry. And until 2026-10-23 `rm`, `rmdir` and a replacing
 `mv` left the clusters a vendor allocation entry (0xE1) names set in the
-bitmap, with no set naming them. Eleven boots, each of a copy of
+bitmap, with no set naming them. Twelve boots, each of a copy of
 build/espexfat.img (exFAT root, partition 1):
 
 - LONG: the host gives the root a second cluster and plants /VEND, an empty
@@ -100,6 +100,23 @@ build/espexfat.img (exFAT root, partition 1):
   must each be refused a `writeat` with the bitmap's first byte
   unchanged; `rm` of all three answers nothing and VLINK's own cluster is
   freed;
+- VROOT (since 2026-10-26): the root given a second cluster, its runs of
+  deleted slots filled with empty files' sets and the rest filled to its last
+  two slots, so a create grows it. RX contiguous on the root's second
+  cluster; SD a FAT-chained directory of two clusters, its own (every slot
+  in use) linked to the bitmap's last; RR FAT-chained on the bitmap's last;
+  LX FAT-chained on a cluster of its own linked to the bitmap's last and HX
+  on it, each a whole number of clusters. `writeat /RX 0 x` refused with the
+  root's second cluster's first sector as it was; `touch /SD/N`, `ls /SD`
+  and `cat /RR` each an I/O error (a write and a read through a damaged
+  chain, and a read of a damaged first cluster, refused where the cluster
+  becomes a sector); `writeat` at LX's and HX's ends refused with the
+  bitmap's last FAT entry as it was (a write there writes none of the file's
+  sectors and extends from that entry, so only the link checks stop it);
+  `touch /GROWN` and `touch /AFTER` grow the root to three clusters and are
+  found in it; `rm /RX`, last, answers nothing and leaves the root's cluster
+  used; the bitmap every byte as it was but the root's new cluster's bit;
+  fsck_exfat -n clean after SD, RR, LX and HX are removed on the host;
 - VUPCASE, VBITMAP, VOVERLAP and VFIRST: the root's up-case and bitmap entries
   damaged, restored on the host after the boot, VF (7 bytes) and VG
   planted. VUPCASE: the up-case table claiming the whole heap (taken as
@@ -161,7 +178,16 @@ over the volume's own clusters (VSYSW's `x` in the bitmap). And with each
 of four of the fourth: a chained file's first cluster not tested (VSYSC's
 `x` in the bitmap), a link not tested (VLINK's), a contiguous run not
 tested against the volume's own clusters (the bitmap's FAT entry linked)
-and the heap's fit not tested (VCROSS's VHEAP). Not graded by a boot:
+and the heap's fit not tested (VCROSS's VHEAP). And with each of five of
+2026-10-26 (VROOT): the root's record not consulted, only its first cluster
+(RX's cluster freed, the creates after the growth refused), `sector_of`
+passing every cluster for a file or subdirectory (the set and the reads in
+the bitmap), the root's new cluster not recorded at its growth (GROWN
+refused), and `file_step`'s or `write_at`'s link check removed (the
+bitmap's FAT entry linked). Not graded by a boot: `sector_of`'s rule for the
+root (a damaged root chain into the bitmap), the tables held off the root's
+later clusters at mount, a root not recorded whole made read-only, and a
+growth refused when the record is full;
 the order of a removal (the set deleted, then its clusters freed), of a
 whole-file write (the set repointed, then the old chain freed) and of a
 replacing `mv` (the destination's set deleted, then the source's, then
@@ -172,11 +198,12 @@ ends at its end of chain (the first walk alone answers, and VMEET's run
 ends past its source's size); the shape test on the slots a removal
 deletes, which now refuses before it clears any; and the bound on the scan for the bitmap and up-case entries,
 which no boot gives a looped root.
-About four minutes. Run it whenever exFAT's patch_stream_ext,
+About five minutes. Run it whenever exFAT's patch_stream_ext,
 set_checksum, walk_dir's set assembly, slot_at, read_slots, mv, rm, rmdir,
 renamed_set, delete_set, unlink_set, free_runs, overlaps, runs_of,
-free_data, is_system, writable, check_extents, locate_tables,
-ensure_chained, alloc_cluster or write_fat_entry changes.
+free_data, is_system, sector_of, record_root, writable, check_extents,
+locate_tables, ensure_chained, file_step, grow_extent, alloc_cluster or
+write_fat_entry changes.
 """
 import importlib.util
 import os
