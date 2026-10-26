@@ -22,7 +22,7 @@ cannot drive), and virtio holds a copy of build/espexfat.img through QEMU's
 blkdebug with every write of two sectors of the exFAT root, X and Y (X + 2),
 failing EIO (test-probe-ioerr's shape, for writes alone: `iotype =
 "write"`, or a read of them fails too once any write has been made). The
-host plants on the root, after its last set: U, W and W2, each a file on
+host gives the root a second cluster and plants on it, after its last set: U, W and W2, each a file on
 a cluster of its own; at least 16 deleted slots, where the boot's new sets
 go; S2's File entry in the last slot before X, its Stream and name at X's
 start; S whole in X; deleted slots to the last slot before Y, V's File
@@ -45,7 +45,8 @@ After the boot, on the host, with the orphaned Stream and name entries at
 X and Y (S2's and V's, still in use) cleared first: two sets named S on S's
 and W2's clusters, T2 on S2's, U on its own, V on W's, none named T, s, S2,
 W or W2; V's old cluster free and every other planted one used; fsck_exfat
--n clean but for its complaint of the two sets of one name. No fault lines;
+-n clean but for its one complaint, `Directory / contains a duplicate
+name (S).` No fault lines;
 a boot QEMU's firmware never starts is INCONCLUSIVE (exit 100). Fails with
 the undo removed (T and U left on S's cluster), with the undo made whatever
 the source's File entry reads (T2 lost), with the destination deleted
@@ -117,7 +118,21 @@ def plant():
     with open(IMAGE, "rb") as fh:
         start = [p for p in mbrdisk.entries(fh.read(SECTOR)) if p[1] == 0x07][0][2]
     vol = Volume(IMAGE, start)
-    free = [c for c in range(2, vol.count + 2) if not vol.used(c)][:len(FILES)]
+    free = [c for c in range(2, vol.count + 2) if not vol.used(c)][:len(FILES) + 1]
+    # The root given a second cluster, zeroed, so the plants fit.
+    grown, free = free[0], free[1:]
+    with open(IMAGE, "r+b") as fh:
+        for k, value in ((vol.chain(vol.root)[-1], grown), (grown, 0xFFFFFFFF)):
+            fh.seek(vol.fat + k * 4)
+            fh.write(struct.pack("<I", value))
+        fh.seek(vol.heap + (grown - 2) * vol.cluster)
+        fh.write(bytes(vol.cluster))
+        bit = vol.heap + (vol.bitmap - 2) * vol.cluster + (grown - 2) // 8
+        fh.seek(bit)
+        byte = fh.read(1)[0]
+        fh.seek(bit)
+        fh.write(bytes([byte | 1 << (grown - 2) % 8]))
+    vol = Volume(IMAGE, start)
     clusters = dict(zip(FILES, free))
     chain = vol.chain(vol.root)
     d = bytearray(vol.data(chain))
@@ -247,9 +262,10 @@ def run():
     first = {s.name: struct.unpack_from("<I", s.data, 52)[0] for s in sets}
     rc, lines = fsck()
     # Two sets of one name, as the last mv leaves them, are fsck's one
-    # complaint (macOS's words, printed with the name).
-    rest = [ln for ln in exfatimg.complaints(lines) if "S" not in ln]
-    ok = "** Checking file system hierarchy." in lines and not rest and not exfatimg.unexpected(lines)
+    # complaint, and must be it.
+    rest = [ln for ln in exfatimg.complaints(lines) if ln.strip() != "Directory / contains a duplicate name (S)."]
+    ok = ("** Checking file system hierarchy." in lines and not rest and not exfatimg.unexpected(lines)
+          and len(exfatimg.complaints(lines)) == 1)
     notes += [f"after: {ln}" for ln in lines]
     listing = (answer(out, "ls /") or "").split()
     said = {c: answer(out, c) for c in FAILS}
