@@ -152,8 +152,9 @@ pub struct DirEntry {
 
 impl DirEntry {
     pub fn name(&self) -> &str {
-        // Built either from ASCII short-name bytes or an LFN rendered by
-        // `utf16::utf8_name`, so always valid UTF-8.
+        // Built either from short-name bytes, each past ASCII as `?`
+        // ([`short_byte`]), or an LFN rendered by `utf16::utf8_name`, so
+        // always valid UTF-8.
         core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
     }
 
@@ -186,10 +187,13 @@ impl DirEntry {
             let lower_base = raw[12] & SHORT_LOWER_BASE != 0;
             let lower_ext = raw[12] & SHORT_LOWER_EXT != 0;
             let mut len = 0usize;
-            for &b in &raw[0..8] {
+            for (i, &b) in raw[0..8].iter().enumerate() {
                 if b == b' ' {
                     break;
                 }
+                // 0x05 first stands for a first byte 0xE5, which marks a
+                // deleted entry on disk.
+                let b = short_byte(if i == 0 && b == 0x05 { 0xE5 } else { b });
                 name[len] = if lower_base { b.to_ascii_lowercase() } else { b };
                 len += 1;
             }
@@ -198,6 +202,7 @@ impl DirEntry {
                 name[len] = b'.';
                 len += 1;
                 for (i, &b) in raw[8..8 + ext_len].iter().enumerate() {
+                    let b = short_byte(b);
                     name[len + i] = if lower_ext { b.to_ascii_lowercase() } else { b };
                 }
                 len += ext_len;
@@ -227,6 +232,17 @@ impl DirEntry {
             mtime_time: 0,
         }
     }
+}
+
+/// A short name's byte as a listing shows it: ASCII as it is, and a byte past
+/// it (an OEM code-page byte, as DOS and Windows write `CAFÉ.TXT` with no
+/// long name) as `?`, as [`utf8_name`] renders a unit it cannot show, so the
+/// name is listed and a lookup reaches it by that spelling. The code page is
+/// not known, so the byte cannot be read as a character. Until 2026-10-26
+/// such a name was not UTF-8 and answered as an empty name no lookup reached
+/// (the high review that day).
+fn short_byte(b: u8) -> u8 {
+    if b.is_ascii() { b } else { b'?' }
 }
 
 /// Decode the FAT packed "write date"/"write time" fields into a calendar, or
