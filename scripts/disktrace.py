@@ -185,15 +185,19 @@ class Tally:
         return drive_qemu.verdict(self.rig, self.failed, self.stalled)
 
 
-def per_run(base, more, runs):
+def per_run(base, more, runs, region=None):
     """The sectors `runs` more of the graded work read, per run, from the
     counts of two boots: (problems, {sector: reads a run}), the counts None
-    when the boots cannot be compared. A sector the graded boot read fewer
-    times than the base, or a count that is not a whole number a run, means
-    the boots differ by more than that work (Counter subtraction alone would
-    drop the first as 0)."""
+    when the boots cannot be compared. A sector in `region` (lo, hi), the
+    sectors the rig grades, or anywhere when it is None, that the graded
+    boot read fewer times than the base, or a count that is not a whole
+    number a run, means the boots differ by more than that work: Counter
+    subtraction alone would drop the first as 0. Outside the region a
+    sector read fewer times is no matter (test-write-walk's FAT32 pair reads
+    one exFAT sector 14 times in its base boot and 12 in the graded one)."""
+    lo, hi = region or (0, float("inf"))
     diff = more - base
-    if any(base[s] > more[s] for s in base) or any(c % runs for c in diff.values()):
+    if any(base[s] > more[s] for s in base if lo <= s < hi) or any(c % runs for c in diff.values()):
         return ["the two boots differ by more than the work graded"], None
     return [], {s: c // runs for s, c in diff.items()}
 
@@ -416,6 +420,10 @@ def self_test():
                   per_run(collections.Counter({1: 1}), collections.Counter({1: 3, 2: 2}), 2) == ([], {1: 1, 2: 1}))
             check("per_run: a sector the graded boot read fewer times cannot be compared",
                   per_run(collections.Counter({1: 3, 2: 1}), collections.Counter({1: 1, 2: 5}), 2)[1] is None)
+            check("per_run: in the region graded, and only there",
+                  per_run(collections.Counter({1: 3, 2: 1}), collections.Counter({1: 1, 2: 5}), 2, (0, 2))[1] is None
+                  and per_run(collections.Counter({1: 3, 2: 1}), collections.Counter({1: 1, 2: 5}), 2, (2, 3))
+                  == ([], {2: 2}))
             check("per_run: nor a count that is not a whole number a run",
                   per_run(collections.Counter(), collections.Counter({1: 3}), 2)[1] is None)
 

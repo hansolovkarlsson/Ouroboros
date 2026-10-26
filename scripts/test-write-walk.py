@@ -331,7 +331,7 @@ def grade(tally, name, prepared, base_cmd, cmd, region, inspect, setup=()):
     delta, want = None, found.get("want")
     if base_boot and more_boot:
         lo, hi = region
-        differ, per = disktrace.per_run(base_boot[2], more_boot[2], 1)
+        differ, per = disktrace.per_run(base_boot[2], more_boot[2], 1, region)
         problems += differ
         if per is not None:
             delta = sum(c for s, c in per.items() if lo <= s < hi)

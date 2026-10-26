@@ -313,7 +313,7 @@ def chain_walk(tally, prepared, image):
     chain = read[0] if read else None
     delta = want = None
     if base_boot and more_boot:
-        differ, per = disktrace.per_run(base_boot[2], more_boot[2], RUNS)
+        differ, per = disktrace.per_run(base_boot[2], more_boot[2], RUNS, (g["fat"], g["fat_end"]))
         problems += differ
         if per is not None:
             delta = sum(c for s, c in per.items() if g["fat"] <= s < g["fat_end"])
