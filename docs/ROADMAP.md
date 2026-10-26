@@ -4518,7 +4518,8 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   The link checks stay (`file_step`, `ensure_chained`, `write_at`'s first
   cluster): a write from a file's end passes clusters whose sectors it
   never asks for, and links from the last one's FAT entry. VROOT in `make
-  test-long-set`, failed by five mutants. Not taken: refusing in
+  test-long-set`, failed by five mutants, and VLATER for the scan's order
+  (the high review). Not taken: refusing in
   `walk_dir`'s decode and ending a walk at a system cluster in
   `next_cluster` and `advance`, so the free keeps its own checks. Still
   open: the subdirectory read as the root (`extent_rule`'s test by first
@@ -4575,7 +4576,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   in it writes into the root, grows the root's chain, and records the root's
   length as the subdirectory's size. It needs a cross-linked volume. A set
   other than the root's naming the root cluster could be refused instead.
-  Found by the medium reviews of 2026-10-19.
+  Found by the medium reviews of 2026-10-19. Since 2026-10-26 `sector_of`
+  takes such a directory's slots for the root's (`slot_at` tells the root
+  by the same test), so its writes pass the root's rule: the holder given by
+  the caller, which knows the synthetic root entry, would close it there
+  too (the high review that day).
+- **exFAT says nothing when it mounts a volume read-only.** No bitmap, a
+  damaged one, two FATs, and since 2026-10-26 a root whose chain the record
+  cannot hold (more than 64 runs, a loop, past 256 MiB) each leave the
+  volume read-only with no line saying why, so a healthy stick whose root
+  grew in more than 64 interleaved steps refuses every write unexplained.
+  A reason kept in `Fs` and printed by fsd's mount line would say it.
+  Found by the high review of 2026-10-26.
 - **A damaged exFAT directory answers "device I/O error".** A create in a
   directory whose chain is not its size, a cluster outside the heap and a
   looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a

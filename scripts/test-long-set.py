@@ -15,7 +15,7 @@ slot followed the File. And until 2026-10-21 a rename built the new set
 afresh (File, Stream, name), dropping the File entry's attributes and times
 and every vendor entry. And until 2026-10-23 `rm`, `rmdir` and a replacing
 `mv` left the clusters a vendor allocation entry (0xE1) names set in the
-bitmap, with no set naming them. Twelve boots, each of a copy of
+bitmap, with no set naming them. Thirteen boots, each of a copy of
 build/espexfat.img (exFAT root, partition 1):
 
 - LONG: the host gives the root a second cluster and plants /VEND, an empty
@@ -134,7 +134,11 @@ build/espexfat.img (exFAT root, partition 1):
   volume is read-only as in VBITMAP (the copy deleted on the host after
   the boot). VTWOFAT: no entry damaged, the boot sector's NumberOfFats
   made 2 (ActiveFat 0; restored after the boot): fsd cannot tell which of
-  two bitmaps is live, so the volume is read-only as in VBITMAP. fsck_exfat
+  two bitmaps is live, so the volume is read-only as in VBITMAP. VLATER
+  (since 2026-10-26): the up-case table claiming the heap, as in VUPCASE,
+  the root given a second cluster and the bitmap's entry moved to its start
+  (the first cluster's slots after the last set deleted ones): the volume
+  mounts writable, and `echo new > /NEWB` and `rm /VF` work. fsck_exfat
   -n clean after each.
 
 No fault lines in QEMU's trace. Fails with the sum capped at 19 entries (the
@@ -184,10 +188,13 @@ and the heap's fit not tested (VCROSS's VHEAP). And with each of five of
 passing every cluster for a file or subdirectory (the set and the reads in
 the bitmap), the root's new cluster not recorded at its growth (GROWN
 refused), and `file_step`'s or `write_at`'s link check removed (the
-bitmap's FAT entry linked). Not graded by a boot: `sector_of`'s rule for the
+bitmap's FAT entry linked); and with the table scan recording each extent
+as it finds it, before `check_extents` (VLATER's mount an I/O error, found
+by the high review that day). Not graded by a boot: `sector_of`'s rule for the
 root (a damaged root chain into the bitmap), the tables held off the root's
-later clusters at mount, a root not recorded whole made read-only, and a
-growth refused when the record is full;
+later clusters at mount, a root not recorded whole made read-only, a
+growth refused when the record cannot take its cluster, and that cluster
+given back then or when the root's link fails;
 the order of a removal (the set deleted, then its clusters freed), of a
 whole-file write (the set repointed, then the old chain freed) and of a
 replacing `mv` (the destination's set deleted, then the source's, then

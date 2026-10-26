@@ -2653,7 +2653,8 @@ test-ext2-blocks: image image-ext2
 # or through a link, and since 2026-10-26 (VROOT) the root's later clusters
 # among the volume's own, a read or write through a damaged chain into the
 # bitmap refused where the cluster becomes a sector (sector_of), and the
-# root's growth recorded. Twelve boots,
+# root's growth recorded, and (VLATER) a mount whose bitmap entry lies in
+# the root's second cluster beside a damaged up-case entry. Thirteen boots,
 # about five minutes; run it whenever exFAT's patch_stream_ext,
 # set_checksum, walk_dir's set assembly, slot_at, read_slots, mv, rm, rmdir,
 # renamed_set, delete_set, unlink_set, free_runs, overlaps, runs_of,

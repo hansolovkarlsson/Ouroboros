@@ -1068,7 +1068,16 @@ clusters, and a table on any of them is dropped. A root that loops, runs past
 cluster, a subdirectory and two files linked into the bitmap, and a root
 grown by two creates. It fails with the root's record ignored, with
 `sector_of` passing every file cluster, with the growth unrecorded, and with
-either link check removed.
+either link check removed. The high review the same day found three more
+defects. First, the table scan recorded each extent as it found it, so an
+up-case entry claiming the heap made `sector_of` refuse the root's next
+cluster and the mount failed where it had mounted. The scan now records
+both extents after it ends, and a thirteenth boot, VLATER, puts the bitmap's
+entry in the root's second cluster and fails with the old order. Second, a
+full record refused the root's growth before allocating, even when the new
+cluster would extend the last run; it now refuses only when the record
+cannot take the cluster. Third, a failed link of the root's new cluster
+leaked it; the cluster is now given back.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
