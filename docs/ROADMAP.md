@@ -4571,13 +4571,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   (in `DirEntry`, or beside it in the walk's callback, nine call sites)
   and moving `name_answers` to `utf16.rs` would make the arms answer alike.
   Found by the high review of 2026-10-26.
-- **A FAT32 short name with bytes past ASCII is listed as nothing.** A
+- ~~**A FAT32 short name with bytes past ASCII is listed as nothing.**~~ A
   short-only entry holding OEM code-page bytes (0x80 and up, as DOS and
   Windows write `CAFÉ.TXT` without a long name), or 0x05 standing for a
   first byte 0xE5, is not UTF-8, so `DirEntry::name` answers an empty name
   no lookup reaches. Rendering each such byte as `?`, as `utf8_name` renders
   a unit outside ASCII, would list it and reach it by that spelling. Found
-  by the high review of 2026-10-26.
+  by the high review of 2026-10-26. *Done 2026-10-26*
+  (`fix/fat32-oem-short-names`): `DirEntry::parse` renders each such byte
+  as `?` (`short_byte`); `make test-fat32-names` plants both shapes.
 - **fsd will not write to an exFAT directory an older fsd grew.** Until
   2026-10-18 fsd grew a directory without raising its DataLength, so such a
   directory's chain runs past its size, with sets there no driver reads.
