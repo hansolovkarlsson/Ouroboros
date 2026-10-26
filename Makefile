@@ -2711,11 +2711,13 @@ test-fat-extflags: image $(EXT2_PART)
 
 # A failed exFAT `mv` gives back the set it wrote (scripts/test-mv-undo.py),
 # since 2026-10-26: esp.img booted from NVMe, on virtio a copy of
-# espexfat.img through blkdebug with every write of one root sector failing;
-# `mv`s whose source's delete fails there must leave the source alone, and
-# one whose source's File entry was cleared first must keep the new name.
-# One boot, about a minute; run it whenever exFAT's mv, relink, unrelink,
-# insert_set, unlink_set or delete_set changes.
+# espexfat.img through blkdebug with every write of two root sectors failing;
+# `mv`s whose source's delete fails there must leave both files as they
+# were, one whose source's File entry was cleared first must keep the new
+# name, and one whose destination's delete fails must free its run or leave
+# two files of one name. One boot, about a minute; run it whenever exFAT's
+# mv, move_set, relink, file_in_use, clear_slots, insert_set, unlink_set or
+# delete_set changes.
 test-mv-undo: image image-exfat
 	python3 scripts/test-mv-undo.py
 
