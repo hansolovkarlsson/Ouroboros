@@ -4537,11 +4537,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `upcase` through it would end both. Found 2026-10-21 by a planted set
   hashed as fsd hashes; deferred by Hans the same day, the collision fixed
   alone.
-- **FAT32's long names outside ASCII collide.** `lfn_chars` renders each
+- ~~**FAT32's long names outside ASCII collide.**~~ `lfn_chars` renders each
   UTF-16 unit outside ASCII as `?`, as exFAT did until 2026-10-21, so two
   long names differing there are one name to every lookup, and the first
   entry answers for both. The exFAT fix's shape (the units kept, a listing in
   UTF-8) would end it. Read in the code, 2026-10-21.
+  *Done 2026-10-26: the walk keeps a long name's UTF-16 units and renders
+  them through `utf16::utf8_name`, exFAT's rendering moved to a module both
+  arms share, and a lookup compares that rendering ignoring ASCII case,
+  which answers as exFAT's comparison of units does. The write side was
+  broken too: `put_lfn_chars` wrote a name's UTF-8 bytes a unit each, so a
+  name fsd made outside ASCII was found by no lookup of it; it writes the
+  name's UTF-16 units now. `make test-fat32-names`, one boot, fails with
+  main's fat32.rs, with the read side alone reverted and with the write
+  side alone. Not done, as on exFAT: FAT32 folds case by ASCII alone, so
+  `CAFÉ` does not find `café` (Windows and Linux fold it).*
 - **fsd will not write to an exFAT directory an older fsd grew.** Until
   2026-10-18 fsd grew a directory without raising its DataLength, so such a
   directory's chain runs past its size, with sets there no driver reads.
