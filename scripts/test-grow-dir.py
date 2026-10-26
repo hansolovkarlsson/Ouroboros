@@ -94,10 +94,8 @@ def load(name, file):
 
 
 drive_qemu = load("drive_qemu", "drive-qemu.py")
-stale_cursor = load("test_stale_cursor", "test-stale-cursor.py")
 # The host's reader of a FAT32 or exFAT partition (chains, listings, the bitmap).
-Volume = stale_cursor.Volume
-set_checksum = stale_cursor.set_checksum
+Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfatimg.entry_set
 
 BUILD = os.path.join(ROOT, "build")
 IMAGE = os.path.join(BUILD, "test-grow-dir.img")
@@ -157,28 +155,6 @@ def mac_dirs():
     finally:
         if subprocess.run(["hdiutil", "detach", dev], capture_output=True).returncode != 0:
             sys.exit(f"test-grow-dir: hdiutil detach {dev} failed")
-
-
-def entry_set(name, first=0, size=0):
-    """A file's entry set, FAT-chained, as fsd's build_entry_set makes it."""
-    n = name.encode("utf-16le")
-    k = -(-len(name) // 15)
-    s = bytearray(32 * (2 + k))
-    s[0], s[1] = 0x85, 1 + k
-    s[32], s[33], s[35] = 0xC0, 0x01, len(name)
-    h = 0
-    for b in name.upper().encode("utf-16le"):
-        h = (((h << 15) | (h >> 1)) + b) & 0xFFFF
-    struct.pack_into("<H", s, 36, h)
-    struct.pack_into("<Q", s, 40, size)  # ValidDataLength
-    struct.pack_into("<I", s, 52, first)
-    struct.pack_into("<Q", s, 56, size)  # DataLength
-    for e in range(k):
-        chunk = n[30 * e:30 * e + 30]
-        s[64 + 32 * e] = 0xC1
-        s[64 + 32 * e + 2:64 + 32 * e + 2 + len(chunk)] = chunk
-    struct.pack_into("<H", s, 2, set_checksum(s))
-    return bytes(s)
 
 
 def man_cluster(vol):

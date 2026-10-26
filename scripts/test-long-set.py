@@ -214,7 +214,6 @@ write_fat_entry changes.
 """
 import importlib.util
 import os
-import shutil
 import struct
 import sys
 
@@ -222,7 +221,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import exfatimg  # noqa: E402
-import mbrdisk  # noqa: E402
 
 
 # The boots QEMU's firmware never handed to the kernel (drive_qemu.boot_stalled).
@@ -236,9 +234,7 @@ def load(name, file):
 
 
 drive_qemu = load("drive_qemu", "drive-qemu.py")
-stale_cursor = load("test_stale_cursor", "test-stale-cursor.py")
-grow_dir = load("test_grow_dir", "test-grow-dir.py")
-Volume, set_checksum, entry_set = stale_cursor.Volume, stale_cursor.set_checksum, grow_dir.entry_set
+Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfatimg.entry_set
 
 IMAGE = os.path.join(ROOT, "build", "test-long-set.img")
 VENDOR = 17
@@ -288,17 +284,10 @@ def shaped(name, between, counted):
 
 
 def copy():
-    shutil.copyfile(os.path.join(ROOT, "build", "espexfat.img"), IMAGE)
-    with open(IMAGE, "rb") as fh:
-        parts = mbrdisk.entries(fh.read(512))
-    return [p for p in parts if p[1] == 0x07][0][2]
+    return exfatimg.copy_exfat(IMAGE)
 
 
-def root_end(d):
-    i = 0
-    while i < len(d) and d[i]:
-        i += 32
-    return i
+root_end = exfatimg.root_end
 
 
 def write_root(vol, d):
@@ -333,11 +322,7 @@ def grow_root(vol):
 
 
 def fsck():
-    with exfatimg.attached(IMAGE) as dev:
-        rc, lines = exfatimg.fsck(dev + "s1", "fsck_exfat")
-    ok = (rc == 0 and "** Checking file system hierarchy." in lines
-          and not exfatimg.complaints(lines) and not exfatimg.unexpected(lines))
-    return ok, lines
+    return exfatimg.fsck_clean(IMAGE)
 
 
 def boot(label, commands):

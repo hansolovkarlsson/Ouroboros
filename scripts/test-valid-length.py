@@ -45,7 +45,6 @@ walk_dir's Stream decoding changes.
 """
 import importlib.util
 import os
-import shutil
 import struct
 import sys
 
@@ -53,7 +52,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import exfatimg  # noqa: E402
-import mbrdisk  # noqa: E402
 
 
 def load(name, file):
@@ -64,9 +62,7 @@ def load(name, file):
 
 
 drive_qemu = load("drive_qemu", "drive-qemu.py")
-stale_cursor = load("test_stale_cursor", "test-stale-cursor.py")
-grow_dir = load("test_grow_dir", "test-grow-dir.py")
-Volume, set_checksum, entry_set = stale_cursor.Volume, stale_cursor.set_checksum, grow_dir.entry_set
+Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfatimg.entry_set
 
 IMAGE = os.path.join(ROOT, "build", "test-valid-length.img")
 HELLO = b"hello\r\n"
@@ -78,17 +74,10 @@ BIG_BYTES = 2 << 20
 
 
 def copy():
-    shutil.copyfile(os.path.join(ROOT, "build", "espexfat.img"), IMAGE)
-    with open(IMAGE, "rb") as fh:
-        parts = mbrdisk.entries(fh.read(512))
-    return [p for p in parts if p[1] == 0x07][0][2]
+    return exfatimg.copy_exfat(IMAGE)
 
 
-def root_end(d):
-    i = 0
-    while i < len(d) and d[i]:
-        i += 32
-    return i
+root_end = exfatimg.root_end
 
 
 def span(vol, name):
@@ -181,10 +170,7 @@ def stream(vol, root, name):
 
 
 def fsck(when):
-    with exfatimg.attached(IMAGE) as dev:
-        rc, lines = exfatimg.fsck(dev + "s1", "fsck_exfat")
-    ok = (rc == 0 and "** Checking file system hierarchy." in lines
-          and not exfatimg.complaints(lines) and not exfatimg.unexpected(lines))
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     return ok, [] if ok else [f"{when}: {ln}" for ln in lines]
 
 

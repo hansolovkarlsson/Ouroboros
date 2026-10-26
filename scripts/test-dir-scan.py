@@ -58,7 +58,6 @@ def load(name, file):
 
 
 disktrace = load("disktrace", "disktrace.py")
-stale_cursor = load("test_stale_cursor", "test-stale-cursor.py")
 
 SOURCE = os.path.join(ROOT, "build", "espexfat.img")
 COUNT = 100
@@ -87,7 +86,7 @@ def main():
     found = {}
 
     def inspect(copy, problems):
-        vol = stale_cursor.Volume(copy, start)
+        vol = exfatimg.Volume(copy, start)
         root = vol.data(vol.chain(vol.root))
         d = exfatimg.find(root, "D")
         if d is None:
