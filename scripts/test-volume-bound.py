@@ -566,7 +566,9 @@ def main():
     for f in (ESP, EXFAT, EXT2):
         if not os.path.exists(f):
             sys.exit(f"{f} not found - run `make test-volume-bound`, which builds it")
-    only = sys.argv[1:] or BOOTS
+    # Each boot once, in the order named: a boot's label in the stall log
+    # is its name, and drive-qemu refuses one label twice in a run.
+    only = list(dict.fromkeys(sys.argv[1:])) or BOOTS
     checks = []
     stalled = 0
     for name in only:

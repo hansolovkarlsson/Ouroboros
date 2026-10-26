@@ -2217,15 +2217,77 @@ The small open tails those arcs deliberately left:
 >       `test-usb-hub` goes through `boot_stalled` too, on its own log. Done.*
 > - [ ] **new** **The other QEMU rigs still grade a firmware stall as failed
 >       checks.** About forty rigs drive QEMU's firmware through
->       `drive-qemu.py`; eight use `boot_stalled` (`test-blank-disk` since 2026-10-23). The rest can meet the same
+>       `drive-qemu.py`; twelve use `boot_stalled` (`test-blank-disk` since 2026-10-23,
+>       and since 2026-10-25 the four disk-trace rigs through `disktrace.boot`,
+>       which requires a name for every boot). The rest can meet the same
 >       stall (`test-long-set` did, on virtio). Each needs the call after its
 >       boot and `verdict` at its end, a few lines a rig, and a control that
 >       forces the stall. Taken a rig at a time, as each is next touched.
->       Meanwhile `Guest.aborts()` names a stall in every rig's output, so
->       those FAILs say why. The high review of 2026-10-22 asked for the
+>       `Guest.aborts()` names a stall in every rig's output meanwhile
+>       (since 2026-10-25, the item below). The high review of 2026-10-22 asked for the
 >       verdict in `Guest` itself; a rig grades its own checks, so it must
 >       still skip them, and `run()` answering three ways would change every
 >       rig's `if g.run(...)` at once.
+> - [x] **fix** **`Guest.aborts()` cannot name a firmware stall.** It
+>       stops QEMU and then asks `firmware_stalled` about the transcript,
+>       whose last line is by then QEMU's own `terminating on signal 15 from
+>       pid ...` (`build/test-call-interrupt.txt`, line 90 of 90, on
+>       2026-10-25), so the last-line test never matches and the note it
+>       prints for the rigs not on `boot_stalled` cannot appear. The rigs on
+>       it classify a transcript read before the stop, and are not affected.
+>       Either read the transcript before the stop, or have
+>       `firmware_stalled` pass over QEMU's signal line, with a self-test
+>       case for it. Found by the max review of #350.
+>       *Done 2026-10-25 on #350: `firmware_stalled` strips QEMU's signal
+>       line wherever it lands (after a prompt, in the capture above), with
+>       self-test cases of each stall read after the stop; taking the strip
+>       out fails them (the X64 case alone until the fourth max review added
+>       the USB one). Read before or after the stop, a stall now classifies
+>       the same.*
+> - [ ] **new** **The rigs left to move onto `boot_stalled` will each
+>       rebuild the stall accounting.** About 28 rigs remain, several
+>       booting more than once (`test-bootstick`, `test-include`,
+>       `test-mv-into`, `test-held-keys`), and the rule for a case of boots,
+>       a failed boot fails it whatever the others did, took #350 three max
+>       reviews to get right in `disktrace.py`. Its generic half (boot,
+>       classify, keep the QEMU log, `settle`, `Tally`) should move to
+>       `drive-qemu.py`, leaving `disktrace.py` the trace counting, before
+>       the next multi-boot rig moves. Meanwhile the eight older callers
+>       pass no `qemu_log` and build `Guest` with no `intlog`, so a stall's
+>       firmware trace is lost to the next boot's `build/qemu-int.log`
+>       (`test-long-set` stalled on 2026-10-24 with none kept). And the
+>       disk-trace rigs' per-boot logs in `build/` are never removed, 26 of
+>       them (55.7 MB) after a full run, beside 7 under the names before
+>       #350 that only `make clean` clears. Found by the third max review of
+>       #350. The fourth added four for the same move: each rig's case code
+>       is the same five steps by hand (settle, compare if every boot ran,
+>       print, close), which one `Tally` call taking the comparison would
+>       replace; nothing in `make test` runs the real `Guest.aborts()` or
+>       `stop()` (a stub `qemu-system-aarch64` on PATH, printing a canned
+>       console and QEMU's signal line on SIGTERM, would); a rerun after
+>       INCONCLUSIVE reboots every case, where `test-volume-bound` takes
+>       boot names on its command line and the disk-trace rigs could too;
+>       and a QEMU killed from another shell during the firmware is now
+>       taken for a stall, since the signal line is passed over whoever
+>       sent it (low: nothing does that).
+> - [ ] **new** **The firmware stall may follow the exFAT image, or the disk trace.** The
+>       four stalls `scratch/firmware-stall-runs.log` holds (since
+>       2026-10-22) were all boots of a copy of `espexfat.img`: 4 of 508
+>       exFAT boots, 0 of 420 others. Three were the disk-trace rigs', 3 of
+>       their 72 exFAT boots, against 1 of 436 for `test-long-set` and
+>       `test-valid-length`, which boot the same image without QEMU's
+>       virtio-blk trace; so the image, the trace, or both. A loop of boots
+>       of `espexfat.img` against `esp.img`, with and without
+>       `-trace enable=virtio_blk_handle_read`, would say which, a lead on
+>       the stall's cause. Seen by the fourth max review of #350 (3 of 110
+>       against 1 of 818), split by image when it was recorded. A fifth
+>       the same evening, `test-write-walk:fat32-same-more`, exFAT and
+>       traced again. A sixth, `test-listing-walk:fat32-base` at 20:17:19,
+>       is no stall: the host had slept from 20:02:04 to 20:17:18 (`pmset
+>       -g log`, on a flat battery), and a QEMU suspended in the firmware
+>       and woken past the 90 s step timeout reads exactly as one. None of
+>       the other five is near a sleep. Leave it out of the counts, and
+>       check `pmset -g log` before reading one in.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the

@@ -31,7 +31,10 @@ more over the finished directory. Fails with the scan reading a sector a
 slot again (the main tree before 2026-10-19: 18,496 reads, 19.0 passes,
 against 4,152 and 4.3 after). It grades the directory's sectors only: the
 cursor's saving is chain walks, whose FAT lookups mostly hit fsd's one-sector
-FAT cache, which no disk counter sees, so it is not graded. Reports both numbers. About a
+FAT cache, which no disk counter sees, so it is not graded. Reports both numbers.
+A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100,
+drive-qemu.py's classifier, through disktrace.py), and so is its run,
+unless another of its boots ran and failed, which fails it. About a
 minute and a half. Run it whenever exFAT's find_free_run, slot_at,
 rewrite_slots, write_set_at, delete_set, grow_dir, walk_dir or room changes.
 """
@@ -74,16 +77,21 @@ def steps(n):
             (r"dirprobe: (ok|FAIL)\r?\n", "")]
 
 
+def said_ok(lines, count):
+    return [] if any("dirprobe: ok" in ln for ln in lines) else ["dirprobe did not say ok"]
+
+
 def main():
     with open(SOURCE, "rb") as fh:
         start = [p for p in mbrdisk.entries(fh.read(512)) if p[1] == 0x07][0][2]
     found = {}
 
-    def inspect(copy):
+    def inspect(copy, problems):
         vol = stale_cursor.Volume(copy, start)
         root = vol.data(vol.chain(vol.root))
         d = exfatimg.find(root, "D")
         if d is None:
+            problems.append("/D not found on the disk after the boot")
             return
         first = int.from_bytes(d.data[52:56], "little")
         size = int.from_bytes(d.data[56:64], "little")
@@ -92,36 +100,44 @@ def main():
         spc = vol.cluster // 512
         heap = vol.heap // 512
         found["sectors"] = {heap + (c - 2) * spc + k for c in clusters for k in range(spc)}
+        if not found["sectors"]:
+            problems.append("/D holds no sectors on the disk after the boot")
 
-    problems, lines1, count1 = disktrace.boot("test-dir-scan-1", SOURCE, "espexfat.img", steps(1))
     written = collections.Counter()
-    more_problems, lines, count = disktrace.boot("test-dir-scan-100", SOURCE, "espexfat.img", steps(COUNT),
-                                                 inspect, writes=written)
-    problems += more_problems
-    sectors = found.get("sectors", set())
-    reads = sum(count[s] for s in sectors)
-    writes = sum(written[s] for s in sectors)
-    more = sum(count.values()) - sum(count1.values())
     w = sum(-(-(i * SET) // SLOTS_PER_SECTOR) or 1 for i in range(COUNT))
-    checks = [
-        ("both boots driven, no fault lines", not problems),
-        ("dirprobe ok in both", any("dirprobe: ok" in ln for ln in lines1) and any("dirprobe: ok" in ln for ln in lines)),
-        (f"/D found on the disk after the boot, {len(sectors)} sectors", bool(sectors)),
-        (f"/D's sectors read {reads} times, at most {PASSES} x W = {PASSES * w} (W = {w}, {reads / w:.1f} passes)",
-         bool(sectors) and 0 < reads <= PASSES * w),
-        (f"/D's sectors written {writes} times, at most {WRITES_PER_FILE} a file ({COUNT * WRITES_PER_FILE:g}; "
-         f"{writes / COUNT:.2f} a file)",
-         bool(sectors) and 0 < writes <= COUNT * WRITES_PER_FILE),
-    ]
-    print(f"      the {COUNT}-file boot read {more} more sectors in all than the 1-file boot")
-    failed = 0
-    for label, ok in checks:
-        print(("PASS  " if ok else "FAIL  ") + label)
-        failed += not ok
-    for p in problems:
-        print("      " + p)
-    print(f"test-dir-scan: {'all checks passed' if failed == 0 else f'{failed} check(s) FAILED'}")
-    return 1 if failed else 0
+
+    def bounded(lines, count):
+        """The 100-file boot's own grade: /D's reads and writes, against W."""
+        problems = said_ok(lines, count)
+        sectors = found.get("sectors")
+        if not sectors:
+            return problems
+        reads = sum(count[s] for s in sectors)
+        writes = sum(written[s] for s in sectors)
+        print(f"     /D: {len(sectors)} sectors, read {reads} times ({reads / w:.1f} passes of W = {w}), "
+              f"written {writes} times ({writes / COUNT:.2f} a file)")
+        if not 0 < reads <= PASSES * w:
+            problems.append(f"/D's sectors read {reads} times, not at most {PASSES} x W = {PASSES * w}")
+        if not 0 < writes <= COUNT * WRITES_PER_FILE:
+            problems.append(f"/D's sectors written {writes} times, not at most {WRITES_PER_FILE} a file "
+                            f"({COUNT * WRITES_PER_FILE:g})")
+        return problems
+
+    tally = disktrace.Tally("test-dir-scan")
+    one = disktrace.boot("test-dir-scan", "1", SOURCE, "espexfat.img", steps(1), check=said_ok)
+    hundred = disktrace.boot("test-dir-scan", str(COUNT), SOURCE, "espexfat.img", steps(COUNT),
+                             inspect, bounded, writes=written)
+    problems = tally.settle([one, hundred])
+    if problems is not None:
+        if one and hundred:
+            more = sum(hundred[2].values()) - sum(one[2].values())
+            print(f"     the {COUNT}-file boot read {more} more sectors in all than the 1-file boot")
+        print(("FAIL" if problems else "ok  ") + f" {COUNT} files made in /D: its sectors read at most "
+              f"{PASSES} passes of the directory a create and written at most {WRITES_PER_FILE} times a file")
+        for p in problems:
+            print("     " + p)
+        tally.close(problems)
+    return tally.verdict()
 
 
 if __name__ == "__main__":

@@ -68,8 +68,14 @@ FAT32 and 126 on exFAT (72 and 132 before the stop, measured without the
 warm-up listing, which adds FAT32 one read a run), and 74 for /walk on
 ext2 (3,698 when its walk read an inode an entry, and still without
 `filetype`). The boots are deterministic: the same build reads the same
-sectors each time. About six minutes; needs e2fsprogs (`brew install
-e2fsprogs`), as the ext2 image does.
+sectors each time.
+
+A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100,
+drive-qemu.py's classifier, through disktrace.py), and so is its image's pair,
+unless another of its boots ran and failed, which fails it.
+
+About six minutes; needs e2fsprogs (`brew install e2fsprogs`), as the ext2
+image does.
 """
 import math
 import os
@@ -183,28 +189,33 @@ UNDER_ONE_AN_ENTRY = {"ext2": WALK_FILES}
 def boot(name, prepared, image, warm, word, check, want, kinds):
     """Boot a copy of `prepared`, log in, `echo warm` once, `echo word` RUNS
     times, then the check glob, then (with `kinds`) `ls /kinds`, which must
-    mark exactly its directories. Returns (problems, sectors read by sector
-    number). Both boots start with the same `warm`, a listing, so each
-    measured run starts from the same state of fsd's caches (FAT32 keeps the
-    last FAT sector it read across requests: without it the first run of
-    each boot differed by one read, from whatever login left there)."""
+    mark exactly its directories. Returns the boot's answer (disktrace.boot's),
+    or None for a firmware stall. Both boots start with the same `warm`, a
+    listing, so each measured run starts from the same state of fsd's caches
+    (FAT32 keeps the last FAT sector it read across requests: without it the
+    first run of each boot differed by one read, from whatever login left
+    there)."""
     steps = [("login:", "root"), ("assword", "root"), ("# ", f"echo {warm}")]
     steps += [("# ", f"echo {word}")] * RUNS + [("# ", f"echo {check}")]
     steps += [("# ", "ls /kinds")] if kinds else []
     steps += [("# ", "")]
-    problems, lines, count = disktrace.boot(f"test-listing-walk-{name}", prepared, image, steps)
-    wanted = RUNS + (word == warm)
-    if lines.count(word) < wanted:
-        problems.append(f"`echo {word}` printed it back {lines.count(word)} times, not {wanted}")
-    if not any(sorted(line.split()) == want for line in lines):
-        problems.append(f"`echo {check}` did not print {' '.join(want)}: the listing failed")
-    if kinds and not any(sorted(line.split()) == sorted(KINDS) for line in lines):
-        problems.append(f"`ls /kinds` did not print {' '.join(KINDS)}: a kind is wrong")
-    return problems, count
+
+    def said(lines, count):
+        problems = []
+        wanted = RUNS + (word == warm)
+        if lines.count(word) < wanted:
+            problems.append(f"`echo {word}` printed it back {lines.count(word)} times, not {wanted}")
+        if not any(sorted(line.split()) == want for line in lines):
+            problems.append(f"`echo {check}` did not print {' '.join(want)}: the listing failed")
+        if kinds and not any(sorted(line.split()) == sorted(KINDS) for line in lines):
+            problems.append(f"`ls /kinds` did not print {' '.join(KINDS)}: a kind is wrong")
+        return problems
+
+    return disktrace.boot("test-listing-walk", name, prepared, image, steps, check=said)
 
 
 def main() -> int:
-    failed = 0
+    tally = disktrace.Tally("test-listing-walk")
     for name, image, d, check, names, setup, kinds in IMAGES:
         source = os.path.join(ROOT, "build", image)
         prepared = os.path.join(ROOT, "build", f"test-listing-walk-{name}-prepared.img")
@@ -215,30 +226,36 @@ def main() -> int:
                 setup(prepared)
             want = names()
             src, warm = (prepared if setup else source), f"{d}/qqq*"
-            p0, base = boot(name, src, image, warm, f"{d}/qqqq", check, want, kinds)
-            p1, listed = boot(name, src, image, warm, f"{d}/qqq*", check, want, kinds)
+            base_boot = boot(f"{name}-base", src, image, warm, f"{d}/qqqq", check, want, kinds)
+            listed_boot = boot(f"{name}-listed", src, image, warm, f"{d}/qqq*", check, want, kinds)
         finally:
             if setup and os.path.exists(prepared):
                 os.remove(prepared)
-        differ, counts = disktrace.per_run(base, listed, RUNS)
-        problems = p0 + p1 + differ
-        per = list(counts.values())
-        common = math.gcd(*per) if per else 0
-        total = sum(per)
-        if not problems and common != 1:
-            problems.append(f"every sector is read a multiple of {common} times a listing: "
-                            "the walks are all alike, so no page's walk stopped at its end")
-        entries = UNDER_ONE_AN_ENTRY.get(name)
-        if not problems and entries is not None and total >= entries:
-            problems.append(f"a listing of {entries} entries reads {total} sectors: "
-                            "at least one an entry, as an inode read for each would")
+        problems = tally.settle([base_boot, listed_boot])
+        if problems is None:
+            continue
+        shown, counts = "? sectors", None
+        if base_boot and listed_boot:
+            differ, counts = disktrace.per_run(base_boot[2], listed_boot[2], RUNS)
+            problems += differ
+        if counts is not None:
+            per = list(counts.values())
+            common = math.gcd(*per) if per else 0
+            total = sum(per)
+            shown = f"{total} sectors, over {len(per)} sectors, read a multiple of {common} times each"
+            if not problems and common != 1:
+                problems.append(f"every sector is read a multiple of {common} times a listing: "
+                                "the walks are all alike, so no page's walk stopped at its end")
+            entries = UNDER_ONE_AN_ENTRY.get(name)
+            if not problems and entries is not None and total >= entries:
+                problems.append(f"a listing of {entries} entries reads {total} sectors: "
+                                "at least one an entry, as an inode read for each would")
         verdict = "FAIL" if problems else "ok  "
-        print(f"{verdict} {name}: one listing of {d} reads {total} sectors, "
-              f"over {len(per)} sectors, read a multiple of {common} times each")
+        print(f"{verdict} {name}: one listing of {d} reads {shown}")
         for p in problems:
             print(f"     {p}")
-        failed += bool(problems)
-    return 1 if failed else 0
+        tally.close(problems)
+    return tally.verdict()
 
 
 if __name__ == "__main__":

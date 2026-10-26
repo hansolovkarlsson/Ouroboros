@@ -46,6 +46,10 @@ more and the cursor could not be seen. Ignoring the cursor reads 1,436,
 bypassing the cache 159 (a read a step), and a cache not refreshed by
 write_fat_entry stops /CHAIN running at all.
 
+A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100,
+drive-qemu.py's classifier, through disktrace.py), and so is its case,
+unless another of its boots ran and failed, which fails it.
+
 About four minutes; needs e2fsprogs, as the ext2 image does.
 """
 import math
@@ -225,15 +229,16 @@ def chain_reads(chain, g):
 
 
 def boot(name, prepared, image, program, runs=RUNS, setup=(), inspect=None):
+    """One boot's answer (disktrace.boot's), or None for a firmware stall."""
     steps = [("login:", "root"), ("assword", "root"), ("# ", "/SMALL w")]
     steps += [("# ", cmd) for cmd in setup]
     steps += [("# ", f"{program} a")] * runs + [("# ", "")]
-    problems, lines, count = disktrace.boot(f"test-spawn-reads-{name}", prepared, image, steps,
-                                            inspect)
-    said = sum(1 for ln in lines if ln.strip() == "argv[1] = a")
-    if said < runs:
-        problems.append(f"`{program} a` printed argv[1] = a {said} times, not {runs}")
-    return problems, count
+
+    def said(lines, count):
+        n = sum(1 for ln in lines if ln.strip() == "argv[1] = a")
+        return [] if n >= runs else [f"`{program} a` printed argv[1] = a {n} times, not {runs}"]
+
+    return disktrace.boot("test-spawn-reads", name, prepared, image, steps, inspect, said)
 
 
 def main() -> int:
@@ -241,7 +246,7 @@ def main() -> int:
         small = fh.read()
     files = {"SMALL": small, "BIG": small + bytes(BIG - len(small))}
     want = requests(BIG) - requests(len(small))
-    failed = 0
+    tally = disktrace.Tally("test-spawn-reads")
     for name, image, ptype in IMAGES:
         prepared = os.path.join(ROOT, "build", f"test-spawn-reads-{name}-prepared.img")
         shutil.copyfile(os.path.join(ROOT, "build", image), prepared)
@@ -252,70 +257,81 @@ def main() -> int:
                 huge = {"HUGE": small + bytes(HUGE - len(small))} if ptype == 0x07 else {}
                 place_mounted(prepared, {**files, **huge})
                 root = root_fat32(prepared) if ptype == 0x0B else root_exfat(prepared)
-            p0, base = boot(name, prepared, image, "/SMALL")
-            p1, more = boot(name, prepared, image, "/BIG")
+            small_boot = boot(f"{name}-small", prepared, image, "/SMALL")
+            big_boot = boot(f"{name}-big", prepared, image, "/BIG")
             if ptype == 0x07:
-                failed += chain_walk(prepared, image)
+                chain_walk(tally, prepared, image)
         finally:
             os.remove(prepared)
-        problems = p0 + p1
-        delta = (more[root] - base[root]) / RUNS
-        if not problems and delta != want:
-            problems.append(f"the root directory's first sector (LBA {root}) is read {delta:g} more "
-                            f"times a spawn of /BIG than of /SMALL, not {want}: one resolution "
-                            "a request is the rule")
+        problems = tally.settle([small_boot, big_boot])
+        if problems is None:
+            continue
+        delta = None
+        if small_boot and big_boot:
+            delta = (big_boot[2][root] - small_boot[2][root]) / RUNS
+            if not problems and delta != want:
+                problems.append(f"the root directory's first sector (LBA {root}) is read {delta:g} more "
+                                f"times a spawn of /BIG than of /SMALL, not {want}: one resolution "
+                                "a request is the rule")
         verdict = "FAIL" if problems else "ok  "
-        print(f"{verdict} {name}: /BIG ({BIG} bytes) resolves {delta:g} more times than /SMALL "
+        shown = "?" if delta is None else f"{delta:g}"
+        print(f"{verdict} {name}: /BIG ({BIG} bytes) resolves {shown} more times than /SMALL "
               f"({len(small)}), {want} more requests; the root sector is LBA {root}")
         for p in problems:
             print(f"     {p}")
-        failed += bool(problems)
-    return 1 if failed else 0
+        tally.close(problems)
+    return tally.verdict()
 
 
-def chain_walk(prepared, image):
-    """The two exFAT boots that grade the walk along a FAT chain; 1 on a failure."""
+def chain_walk(tally, prepared, image):
+    """The two exFAT boots that grade the walk along a FAT chain, a case
+    in `tally`. The first boot's inspect reads /CHAIN's chain off its disk,
+    and what makes the chain unfit to grade is that boot's problem."""
     g = exfat_layout(prepared)
     setup = ["cp /HUGE /CHAIN", "/CHAIN w"]
-    read, read_problems = [], []
+    read = []
 
-    def inspect(copy):
-        try:
-            read.append(exfat_chain(copy, "CHAIN"))
-        except ValueError as e:
-            read_problems.append(str(e))
+    def inspect(copy, problems):
+        root, chain = exfat_chain(copy, "CHAIN")
+        if not chain:
+            problems.append("/CHAIN, written by the guest's cp, is contiguous: no FAT chain to walk")
+        elif len(root) > 1:
+            problems.append(f"the root directory spans {len(root)} clusters: a resolution may step "
+                            "along its chain, which the prediction does not count")
+        elif len({c * 4 // SECTOR for c in chain[:-1]}) < 2:
+            problems.append("/CHAIN's chain lies in one FAT sector: a walk from its start would cost "
+                            "no more reads, so the cursor could not be seen")
+        else:
+            read.append(chain)
 
-    p0, base = boot("exfat-chain-base", prepared, image, "/CHAIN", RUNS, setup, inspect)
-    p1, more = boot("exfat-chain-more", prepared, image, "/CHAIN", 2 * RUNS, setup)
-    problems = p0 + p1 + read_problems
-    root, chain = read[0] if read else (None, None)
-    if not problems and not read:
-        problems.append("the first boot's disk was not read")
-    elif not problems and not chain:
-        problems.append("/CHAIN, written by the guest's cp, is contiguous: no FAT chain to walk")
-    elif not problems and len(root) > 1:
-        problems.append(f"the root directory spans {len(root)} clusters: a resolution may step "
-                        "along its chain, which the prediction does not count")
-    elif not problems and len({c * 4 // SECTOR for c in chain[:-1]}) < 2:
-        problems.append(f"/CHAIN's chain lies in one FAT sector: a walk from its start would cost "
-                        "no more reads, so the cursor could not be seen")
-    if problems:
-        delta = want = None
-    else:
-        more_problems, per = disktrace.per_run(base, more, RUNS)
-        problems += more_problems
-        delta = sum(c for s, c in per.items() if g["fat"] <= s < g["fat_end"])
-        want = chain_reads(chain, g)
-        if not problems and delta != want:
-            problems.append(f"a spawn of /CHAIN reads {delta} FAT sectors, not {want}: one walk of "
-                            "its chain a spawn, through the FAT sector cache, is the rule")
+    base_boot = boot("exfat-chain-base", prepared, image, "/CHAIN", RUNS, setup, inspect)
+    more_boot = boot("exfat-chain-more", prepared, image, "/CHAIN", 2 * RUNS, setup)
+    problems = tally.settle([base_boot, more_boot])
+    if problems is None:
+        return
+    # With no problem, the first boot's inspect ran and kept the chain.
+    chain = read[0] if read else None
+    delta = want = None
+    if base_boot and more_boot:
+        differ, per = disktrace.per_run(base_boot[2], more_boot[2], RUNS, (g["fat"], g["fat_end"]))
+        problems += differ
+        if per is not None:
+            delta = sum(per.values())
+        if not problems:
+            if chain is None:
+                raise RuntimeError("a bug in this rig: the first boot ran with no problem, "
+                                   "and its inspect kept no chain")
+            want = chain_reads(chain, g)
+            if delta != want:
+                problems.append(f"a spawn of /CHAIN reads {delta} FAT sectors, not {want}: one walk of "
+                                "its chain a spawn, through the FAT sector cache, is the rule")
     verdict = "FAIL" if problems else "ok  "
     print(f"{verdict} exfat: /CHAIN ({HUGE} bytes, written by the guest's cp, "
-          f"{len(chain) if chain else '?'} clusters FAT-chained) reads {delta} FAT sectors a spawn, "
-          f"{want} for one walk of its chain")
+          f"{len(chain) if chain else '?'} clusters FAT-chained) reads {'?' if delta is None else delta} "
+          f"FAT sectors a spawn, {'?' if want is None else want} for one walk of its chain")
     for p in problems:
         print(f"     {p}")
-    return 1 if problems else 0
+    tally.close(problems)
 
 
 if __name__ == "__main__":
