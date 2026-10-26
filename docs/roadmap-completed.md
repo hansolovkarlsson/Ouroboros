@@ -2978,3 +2978,32 @@ nothing fsd mounts, stays on the roadmap.
   (UNKNOWN). Not reached by a boot: a blank disk whose first read fails
   (blkdebug's one failure goes to the firmware's read), and one beside a
   stick whose init fails.*
+
+## The disk-trace rigs on `boot_stalled`, and `aborts()` naming a stall, DONE (2026-10-25)
+
+One item closed on 2026-10-25, by #350. The standup's fix that opened the
+branch, `test-write-walk` and `test-spawn-reads` taking a firmware stall for
+INCONCLUSIVE, was never a roadmap item; it grew into all four disk-trace rigs
+on `disktrace.boot` with one rule for a case of boots, recorded in
+`CHANGELOG.md` and the journal. The third max review found the item below
+and the branch closed it in place with a *Done* note; the closeout moved it
+here. What the reviews deferred stays on the roadmap: the generic half of
+`disktrace.py` moved into `drive-qemu.py`, a stub QEMU, rerunning a case by
+name, and whether the stall follows the exFAT image or the disk trace.
+
+- ~~**`Guest.aborts()` cannot name a firmware stall.**~~ It
+  stops QEMU and then asks `firmware_stalled` about the transcript,
+  whose last line is by then QEMU's own `terminating on signal 15 from
+  pid ...` (`build/test-call-interrupt.txt`, line 90 of 90, on
+  2026-10-25), so the last-line test never matches and the note it
+  prints for the rigs not on `boot_stalled` cannot appear. The rigs on
+  it classify a transcript read before the stop, and are not affected.
+  Either read the transcript before the stop, or have
+  `firmware_stalled` pass over QEMU's signal line, with a self-test
+  case for it. Found by the max review of #350.
+  *Done 2026-10-25 on #350: `firmware_stalled` strips QEMU's signal
+  line wherever it lands (after a prompt, in the capture above), with
+  self-test cases of each stall read after the stop; taking the strip
+  out fails them (the X64 case alone until the fourth max review added
+  the USB one). Read before or after the stop, a stall now classifies
+  the same.*
