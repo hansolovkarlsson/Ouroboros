@@ -2282,7 +2282,12 @@ The small open tails those arcs deliberately left:
 >       the stall's cause. Seen by the fourth max review of #350 (3 of 110
 >       against 1 of 818), split by image when it was recorded. A fifth
 >       the same evening, `test-write-walk:fat32-same-more`, exFAT and
->       traced again.
+>       traced again. A sixth, `test-listing-walk:fat32-base` at 20:17:19,
+>       is no stall: the host had slept from 20:02:04 to 20:17:18 (`pmset
+>       -g log`, on a flat battery), and a QEMU suspended in the firmware
+>       and woken past the 90 s step timeout reads exactly as one. None of
+>       the other five is near a sleep. Leave it out of the counts, and
+>       check `pmset -g log` before reading one in.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
