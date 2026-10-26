@@ -683,20 +683,26 @@ impl Fs {
 
     /// Add `cluster` to the root's record, after the last: the last run made
     /// longer when it follows it, else a new run. False when there is no
-    /// room for one.
+    /// room for one ([`root_takes`](Self::root_takes)).
     fn root_push(&mut self, cluster: u32) -> bool {
-        if let Some(last) = self.root_runs[..self.root_len].last_mut() {
-            if last.0 as u64 + last.1 as u64 == cluster as u64 {
-                last.1 += 1;
-                return true;
-            }
-        }
-        if self.root_len == ROOT_RUNS {
+        if !self.root_takes(cluster) {
             return false;
         }
-        self.root_runs[self.root_len] = (cluster, 1);
-        self.root_len += 1;
+        match self.root_runs[..self.root_len].last_mut() {
+            Some(last) if last.0 as u64 + last.1 as u64 == cluster as u64 => last.1 += 1,
+            _ => {
+                self.root_runs[self.root_len] = (cluster, 1);
+                self.root_len += 1;
+            }
+        }
         true
+    }
+
+    /// Whether the root's record can take `cluster` after its last: it
+    /// follows the last run, or there is room for a run.
+    fn root_takes(&self, cluster: u32) -> bool {
+        self.root_len < ROOT_RUNS
+            || self.root_runs[..self.root_len].last().is_some_and(|l| l.0 as u64 + l.1 as u64 == cluster as u64)
     }
 
     /// Whether `cluster` is among the root's recorded clusters.
@@ -719,8 +725,23 @@ impl Fs {
     /// (the high review of 2026-10-24); [`check_extents`](Self::check_extents)
     /// drops a damaged one. Which of a two-FAT volume's is live is not read
     /// here: such a volume is read-only ([`mount_at`](Self::mount_at)).
+    ///
+    /// The extents are kept here and recorded once the scan ends: recorded
+    /// as found, an unchecked up-case entry claiming the heap made
+    /// `sector_of` refuse the root's next cluster, and the mount failed
+    /// where `check_extents` would have dropped the entry (the high review
+    /// of 2026-10-26).
     fn locate_tables(&mut self) -> Result<(), Error> {
-        let (mut bitmap, mut upcase) = (false, false);
+        let (mut bitmap, mut upcase) = (None, None);
+        self.scan_tables(&mut bitmap, &mut upcase)?;
+        (self.bitmap_first_cluster, self.bitmap_bytes) = bitmap.unwrap_or((0, 0));
+        (self.upcase_first_cluster, self.upcase_bytes) = upcase.unwrap_or((0, 0));
+        Ok(())
+    }
+
+    /// [`locate_tables`](Self::locate_tables)' scan, the first of each entry
+    /// left in `bitmap` and `upcase`.
+    fn scan_tables(&mut self, bitmap: &mut Option<(u32, u64)>, upcase: &mut Option<(u32, u64)>) -> Result<(), Error> {
         for r in 0..self.root_len {
             let (first, n) = self.root_runs[r];
             for cluster in first..first + n {
@@ -732,15 +753,9 @@ impl Fs {
                         match raw[0] {
                             0x00 => return Ok(()), // end of directory - no bitmap
                             t @ (ET_ALLOC_BITMAP | ET_UPCASE) => {
-                                let (first, bytes) = extent(raw);
-                                if t == ET_ALLOC_BITMAP && !bitmap {
-                                    bitmap = true;
-                                    (self.bitmap_first_cluster, self.bitmap_bytes) = (first, bytes);
-                                } else if t == ET_UPCASE && !upcase {
-                                    upcase = true;
-                                    (self.upcase_first_cluster, self.upcase_bytes) = (first, bytes);
-                                }
-                                if bitmap && upcase {
+                                let found = if t == ET_ALLOC_BITMAP { &mut *bitmap } else { &mut *upcase };
+                                found.get_or_insert(extent(raw));
+                                if bitmap.is_some() && upcase.is_some() {
                                     return Ok(());
                                 }
                             }
@@ -1866,14 +1881,18 @@ impl Fs {
         let cluster_bytes = self.cluster_bytes();
         let Room::Sub(at, x) = room else {
             // The new cluster joins the root's record, or no write could
-            // reach it (`sector_of`); refused while the record has no room
-            // for a run, before anything is taken.
-            if self.root_len == ROOT_RUNS {
-                return Err(Error::DiskFull);
-            }
+            // reach it (`sector_of`): refused when the record has no room
+            // for it, and given back then or when its link fails, as the
+            // subdirectory's below is (until the high review of 2026-10-26
+            // a failed link leaked it, and a full record refused before the
+            // allocation, though a cluster after the last run needs none).
             let root = self.dir_extent(e.first_cluster, false, 0)?;
             let new = self.alloc_zeroed()?;
-            self.write_fat_entry(root.tail, new)?;
+            let linked = if self.root_takes(new) { self.write_fat_entry(root.tail, new) } else { Err(Error::DiskFull) };
+            if let Err(err) = linked {
+                let _ = self.free_data(new, false, cluster_bytes);
+                return Err(err);
+            }
             self.root_push(new);
             return Ok(());
         };

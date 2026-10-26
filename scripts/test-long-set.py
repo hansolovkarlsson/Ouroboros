@@ -919,13 +919,16 @@ def run_vmeet():
 
 
 def filler(n, prefix):
-    """Empty files' sets filling exactly `n` slots: names of three slots
-    (`prefix` and three digits) and of four (sixteen characters, two name
-    entries), `n % 3` of the second."""
-    a = n % 3
-    b = (n - 4 * a) // 3
-    return b"".join([entry_set(f"{prefix}{k:03d}") for k in range(b)]
-                    + [entry_set(f"{prefix}LongFiller{k:03d}xx") for k in range(a)])
+    """Empty files' sets filling exactly `n` slots (at least 3): names of
+    three slots (`prefix` and three digits), and one of four (sixteen
+    characters, two name entries) or five (thirty-one, three) for the
+    remainder. Four-slot names alone gave 4 or 8 slots for 1, 2 or 5 (the
+    high review of 2026-10-26)."""
+    if n < 3:
+        raise ValueError(f"filler: {n} slots hold no set")
+    tail = {0: [], 1: [entry_set(f"{prefix}LongFiller000xx")], 2: [entry_set(f"{prefix}{'L' * 27}000")]}[n % 3]
+    b = (n - sum(len(t) for t in tail) // 32) // 3
+    return b"".join([entry_set(f"{prefix}{k:03d}") for k in range(b)] + tail)
 
 
 def fill_deleted(vol):
@@ -990,7 +993,7 @@ def run_vroot():
     root = vol.data(vol.chain(vol.root))
     free = (len(root) - root_end(root) - sum(len(x) for x in sets.values())) // 32
     # Two slots left: a create needs three, so `touch /GROWN` grows the root.
-    if free < 6 or not plant(vol, [*sets.values(), filler(free - 2, "F")], [d, e],
+    if free < 5 or not plant(vol, [*sets.values(), filler(free - 2, "F")], [d, e],
                              links=[(d, lb), (e, lb)], fills=[(d, filler(c // 32, "D"))]):
         return [("vroot: room for the planted sets in the root", False)], []
     vol = Volume(IMAGE, start)
@@ -1077,7 +1080,17 @@ EXTENTS = {
     "vfirst": ([(0x81, 20, lambda good, vol: 0)], False, True),
     # No entry damaged: the boot sector's NumberOfFats made 2 (VBR below).
     "vtwofat": ([], False, False),
+    # The up-case table claiming the whole heap, as in VUPCASE, and the
+    # bitmap's entry at the start of the root's second cluster (LATE): the
+    # scan reads that cluster with the damaged table found, and must not
+    # take it for the table's before `check_extents` drops it.
+    "vlater": ([(0x82, 24, lambda good, vol: vol.count * vol.cluster)], True, False),
 }
+
+# The boots whose root is given a second cluster and its bitmap entry moved
+# to its start, the first cluster's slots after the last set deleted ones,
+# so the scan reaches it (the high review of 2026-10-26: the mount failed).
+LATE = {"vlater"}
 
 # A boot sector byte changed for the boot and restored after it: (offset,
 # value). NumberOfFats 2 with ActiveFat 0, as a TexFAT volume may be: fsd
@@ -1094,6 +1107,9 @@ def run_extent(label):
     damage, writable, second = EXTENTS[label]
     start = copy()
     vol = Volume(IMAGE, start)
+    if label in LATE:
+        grow_root(vol)
+        vol = Volume(IMAGE, start)
     r = free_run(vol, 2)
     d = bytearray(vol.data(vol.chain(vol.root)))
     places = [(next((i for i in range(0, len(d), 32) if d[i] == kind), None), field, value)
@@ -1108,6 +1124,18 @@ def run_extent(label):
         return [(f"{label}: room for VF and VG in the root", False)], []
     for (at, field, value), was in zip(places, good):
         patch_root(vol, at + field, struct.pack(width[field], value(struct.unpack(width[field], was)[0], vol)))
+    if label in LATE:
+        d = bytearray(vol.data(vol.chain(vol.root)))
+        at = next(i for i in range(0, len(d), 32) if d[i] == 0x81)
+        entry, c = bytes(d[at:at + 32]), vol.cluster
+        d[at] = 0x01  # deleted
+        for i in range(root_end(d), c, 32):
+            d[i:i + 32] = DELETED
+        d[c:c + 32] = entry
+        write_root(vol, d)
+        moved = vol.data(vol.chain(vol.root))
+        if not (moved[c] == 0x81 and root_end(moved) == c + 32 and 0x81 not in moved[0:c:32]):
+            return [(f"{label}: the bitmap's entry moved to the root's second cluster, none before it", False)], []
     vbr_was = None
     if label in VBR:
         off, value = VBR[label]
