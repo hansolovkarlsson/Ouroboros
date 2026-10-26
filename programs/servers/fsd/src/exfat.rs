@@ -393,7 +393,7 @@ pub struct Fs {
     /// [`ROOT_RUNS`]) the volume is read-only, and the root is read wherever
     /// its chain goes but the bitmap and up-case table.
     root_whole: bool,
-    /// Why the volume is read-only, `None` while it is writable: said on
+    /// Why the bitmap was dropped at mount, when a check dropped it: said on
     /// fsd's mount line ([`read_only`](Self::read_only)). Until 2026-10-26 a
     /// volume was made read-only with no word, so a healthy stick whose root
     /// had grown in more than [`ROOT_RUNS`] steps refused every write
@@ -568,8 +568,7 @@ impl Fs {
         let why = (vbr[110] != 1)
             .then_some("it has more than one FAT (TexFAT), and which is live is not read")
             .or(root)
-            .or(extents)
-            .or((fs.bitmap_first_cluster == 0).then_some("its root directory has no allocation bitmap entry"));
+            .or(extents);
         if why.is_some() {
             (fs.bitmap_first_cluster, fs.bitmap_bytes) = (0, 0);
             fs.read_only = why;
@@ -740,9 +739,15 @@ impl Fs {
     }
 
     /// Why the volume is read-only, `None` while it is writable: for fsd's
-    /// mount line.
+    /// mount line. Read off the dropped bitmap, the one thing that makes the
+    /// volume read-only ([`writable`](Self::writable)), so a bitmap dropped
+    /// with no reason recorded still answers one: none in the root, or one
+    /// naming cluster 0 (the high review of #355).
     pub fn read_only(&self) -> Option<&'static str> {
-        self.read_only
+        if self.bitmap_first_cluster != 0 {
+            return None;
+        }
+        Some(self.read_only.unwrap_or("its root directory names no allocation bitmap"))
     }
 
     /// The volume's first sector - for `mount`-info reporting only.

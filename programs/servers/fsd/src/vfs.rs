@@ -218,7 +218,9 @@ impl Filesystem {
 
     /// Why this filesystem was mounted read-only, for fsd's mount lines:
     /// exFAT's reason ([`exfat::Fs::read_only`]); `None` for every other arm,
-    /// which mounts writable or not at all.
+    /// which mounts writable or not at all. Not fsd's own read-only root, the
+    /// ESP taken when the root did not mount (D5, `ROOT_READ_ONLY`), which
+    /// the boot line says itself.
     pub fn read_only(&self) -> Option<&'static str> {
         match self {
             Filesystem::ExFat(fs) => fs.read_only(),

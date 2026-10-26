@@ -202,7 +202,8 @@ refused), and `file_step`'s or `write_at`'s link check removed (the
 bitmap's FAT entry linked); and with the table scan recording each extent
 as it finds it, before `check_extents` (VLATER's mount an I/O error, found
 by the high review that day). And with the reason line not printed (every
-read-only boot), and with ROOT_RUNS raised to 65 (VRUNS writable). Not graded by a boot: `sector_of`'s rule for the
+read-only boot), and with ROOT_RUNS raised to 65, its
+const assert with it (VRUNS writable). Not graded by a boot: `sector_of`'s rule for the
 root (a damaged root chain into the bitmap), the tables held off the root's
 later clusters at mount, a root whose chain loops made read-only, a
 growth refused when the record cannot take its cluster, and that cluster
@@ -330,11 +331,14 @@ def set_bit(fh, vol, k, used=True):
     fh.write(bytes([b | 1 << (k - 2) % 8 if used else b & ~(1 << (k - 2) % 8)]))
 
 
-def grow_root(vol):
-    """Give the root a second cluster: a free one, zeroed, marked in the bitmap
-    and linked after the root's last."""
-    free = next(c for c in range(2, vol.count + 2) if not vol.used(c))
-    last = vol.chain(vol.root)[-1]
+def grow_root(vol, free=None, last=None):
+    """Give the root another cluster: `free` (the first free one by default),
+    zeroed, marked in the bitmap and linked after `last` (the root's last by
+    default, read through `vol`, which a caller growing it again passes)."""
+    if free is None:
+        free = next(c for c in range(2, vol.count + 2) if not vol.used(c))
+    if last is None:
+        last = vol.chain(vol.root)[-1]
     with open(IMAGE, "r+b") as fh:
         set_bit(fh, vol, free)
         for c, value in ((last, free), (free, 0xFFFFFFFF)):
@@ -1232,22 +1236,15 @@ def run_vruns():
     start = copy()
     vol = Volume(IMAGE, start)
     chain = vol.chain(vol.root)
-    last, added = chain[-1], []
-    with open(IMAGE, "r+b") as fh:
-        c = max(chain) + 2
-        while len(runs_of(chain + added)) < 65 and c < vol.count + 2:
-            if not vol.used(c) and c - 1 not in chain + added:
-                set_bit(fh, vol, c)
-                for k, value in ((last, c), (c, 0xFFFFFFFF)):
-                    fh.seek(vol.fat + k * 4)
-                    fh.write(struct.pack("<I", value))
-                fh.seek(vol.heap + (c - 2) * vol.cluster)
-                fh.write(bytes(vol.cluster))
-                last = c
-                added.append(c)
-                c += 2
-            else:
-                c += 1
+    # Each cluster added is a run of its own: past the root's last cluster
+    # and a cluster after the one before it.
+    runs, last, c = len(runs_of(chain)), chain[-1], max(chain) + 2
+    while runs < 65 and c < vol.count + 2:
+        if vol.used(c) or c == last + 1:
+            c += 1
+            continue
+        grow_root(vol, c, last)
+        runs, last, c = runs + 1, c, c + 2
     vol = Volume(IMAGE, start)
     chain = vol.chain(vol.root)
     ok, lines = fsck()

@@ -4631,6 +4631,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   on `mount N`; `make test-long-set` checks it in every read-only boot, and
   VRUNS plants a root of 65 runs. A looped root is still graded by no
   boot.
+- **The read-only reason reaches the console alone.** fsd prints `fsd:
+  mounted read-only: ...` on the machine's console, so a `cpu` session
+  through netd, or a shell on another console, that runs `mount N` sees
+  only the tree id, and a `mount N` of a partition already a tree prints
+  nothing. Once the boot line has scrolled away no command says why the
+  root refuses writes. Carrying the reason in `FSOP_MOUNT_INFO`'s reply
+  (the `mount` builtin) would let any client print it; it crosses
+  `syscall-abi`, ulib and the C and Python peers. Found by the high
+  review of #355, 2026-10-26.
 - **A damaged exFAT directory answers "device I/O error".** A create in a
   directory whose chain is not its size, a cluster outside the heap and a
   looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a

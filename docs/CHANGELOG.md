@@ -1143,7 +1143,13 @@ that makes the volume read-only, so the write gate is unchanged. In
 `test-long-set`, the four read-only boots must each give their reason,
 the two writable ones none, and a new boot, VRUNS, plants a root of 65
 runs on the host. The checks fail with the line not printed and with
-`ROOT_RUNS` raised to 65.
+`ROOT_RUNS` raised to 65 (its const assert with it). A high review of the
+change found that `test-volume-bound`'s BESIDE boot required `mount 2` on
+its read-only exFAT to print nothing, so it now requires the reason. The
+reason is now read off the dropped bitmap, so a bitmap dropped with no
+reason recorded still gives one ("names no allocation bitmap"). The
+review also found that the reason reaches the console alone, so a `cpu`
+session or another shell that runs `mount N` never sees it (roadmap).
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

@@ -196,8 +196,6 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
         Err(e) => {
             // One write, as the line above, so no other task's line lands
             // inside it (accountd's did, in `make test-probe-ioerr`).
-            let mut line = [0u8; 160];
-            let mut len = 0;
             // A disk with no partition at all, a blank one the kernel installed
             // since 2026-10-23 among them, is said with what prepares it:
             // "disk commands won't work" and `mount -a`'s question about a
@@ -210,12 +208,7 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             } else {
                 ") - disk commands won't work\r\n"
             };
-            for part in ["fsd: mount failed (", error_name(&e), tail] {
-                let take = part.len().min(line.len() - len);
-                line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
-                len += take;
-            }
-            con_write(&line[..len]);
+            con_write_parts(&["fsd: mount failed (", error_name(&e), tail]);
             match e {
                 fat32::Error::Io(_) => syscall_abi::FS_ERR_IO,
                 _ => syscall_abi::NO_FS,
