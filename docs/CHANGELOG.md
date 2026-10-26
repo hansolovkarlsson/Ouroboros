@@ -1027,7 +1027,9 @@ verdict. The fourth max review found one regression: `test-volume-bound`'s
 `NAME...` command line crashed on a name given twice, after both boots, on
 the refusal of a reused label; the rig now runs each named boot once.
 `per_run` refuses a sector the graded boot read fewer times, which Counter
-subtraction had dropped as 0 (no measured pair has one); an inspect's error
+subtraction had dropped as 0, among the sectors the rig grades (the whole
+disk at first, which failed test-write-walk's FAT32 pair on an exFAT
+sector read 14 times in its base boot and 12 in the graded one); an inspect's error
 is a finding only when it is SystemExit or an error reading the image, and a
 bug in a rig propagates with its traceback; the free `settle` is private,
 `Tally.settle` the way in; an empty label is refused. The self-tests now see

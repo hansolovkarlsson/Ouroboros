@@ -2280,7 +2280,9 @@ The small open tails those arcs deliberately left:
 >       of `espexfat.img` against `esp.img`, with and without
 >       `-trace enable=virtio_blk_handle_read`, would say which, a lead on
 >       the stall's cause. Seen by the fourth max review of #350 (3 of 110
->       against 1 of 818), split by image when it was recorded.
+>       against 1 of 818), split by image when it was recorded. A fifth
+>       the same evening, `test-write-walk:fat32-same-more`, exFAT and
+>       traced again.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
