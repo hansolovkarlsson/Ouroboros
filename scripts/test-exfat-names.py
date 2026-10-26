@@ -143,10 +143,6 @@ def plant():
     return start, dict(zip((n for n, _ in FILES), free))
 
 
-def fsck():
-    return exfatimg.fsck_clean(IMAGE)
-
-
 def answer(out, cmd, last=False):
     """What the guest printed for `cmd` (its first run, or its `last`): the
     text after its echoed line, up to the next prompt, without the kernel's
@@ -163,7 +159,7 @@ def run():
     start, clusters = plant()
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks = [
         ("before: the three sets read back by their exact names, each on its own planted cluster",
          all(find(root, n) is not None and first_cluster(find(root, n)) == clusters[n] for n, _ in FILES)),
@@ -194,7 +190,7 @@ def run():
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
     grave, acute = find(root, "grave"), find(root, ACUTE)
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     if not ok:
         notes += [f"after: {ln}" for ln in lines]
     checks += [

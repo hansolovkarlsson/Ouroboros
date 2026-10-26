@@ -47,7 +47,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import exfatimg  # noqa: E402
-import mbrdisk  # noqa: E402
 
 
 def load(name, file):
@@ -81,8 +80,7 @@ def said_ok(lines, count):
 
 
 def main():
-    with open(SOURCE, "rb") as fh:
-        start = [p for p in mbrdisk.entries(fh.read(512)) if p[1] == 0x07][0][2]
+    start = exfatimg.exfat_start(SOURCE)
     found = {}
 
     def inspect(copy, problems):

@@ -99,13 +99,18 @@ def unexpected(lines):
     return [ln for ln in lines if not (ln.startswith(("** ", "   ")) or ln.endswith("? NO"))]
 
 
-def copy_exfat(image):
-    """build/espexfat.img copied to `image`; answers its exFAT partition's
-    first sector (type 0x07)."""
-    shutil.copyfile(os.path.join(BUILD, "espexfat.img"), image)
+def exfat_start(image):
+    """The first sector of `image`'s exFAT partition (MBR type 0x07)."""
     with open(image, "rb") as fh:
         parts = mbrdisk.entries(fh.read(512))
     return [p for p in parts if p[1] == 0x07][0][2]
+
+
+def copy_exfat(image):
+    """build/espexfat.img copied to `image`; answers its exFAT partition's
+    first sector."""
+    shutil.copyfile(os.path.join(BUILD, "espexfat.img"), image)
+    return exfat_start(image)
 
 
 def root_end(d):
@@ -159,9 +164,11 @@ def entry_set(name, first=0, size=0):
 
 class Volume:
     """A FAT32 or exFAT partition of a disk image as the host reads it: the
-    cluster size, chains, and paths of live entries. A FAT32 partition's FAT
-    entries are fat32img's (the live copy, by BPB_ExtFlags); an exFAT one's
-    from its one FAT."""
+    cluster size, chains, and paths of live entries. On FAT32 the FAT is
+    fat32img's: its entries, its chain rule and `fat`, the byte offset a rig
+    writes an entry at, all the live copy's (by BPB_ExtFlags). On exFAT
+    `fat` is the first FAT, which fsd reads (a volume of two is read-only
+    there)."""
 
     def __init__(self, image, start_lba):
         self.fh = open(image, "rb")
@@ -183,8 +190,8 @@ class Volume:
             self.count = fatsz * sector // 4
             self.cluster = b[13] * sector
             self.end = 0x0FFFFFF8
-        self.fat = base + fat * sector
         self.fat32 = None if self.exfat else fat32img.Fat32(self.fh, start_lba)
+        self.fat = base + fat * sector if self.exfat else (self.fat32.fat + self.fat32.live * self.fat32.fatsz) * 512
         self.heap = base + heap * sector
         if self.exfat:
             # The allocation bitmap's first cluster, from the root's 0x81 entry
@@ -211,6 +218,8 @@ class Volume:
         return struct.unpack("<I", self.fh.read(4))[0]
 
     def chain(self, first):
+        if self.fat32:
+            return self.fat32.chain(first)
         out = [first]
         while 2 <= self.entry(out[-1]) < self.end:
             if len(out) > self.count:

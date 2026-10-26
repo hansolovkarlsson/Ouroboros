@@ -73,13 +73,6 @@ FILES = ("RD", "MID", "APP", "LOW", "BIG")
 BIG_BYTES = 2 << 20
 
 
-def copy():
-    return exfatimg.copy_exfat(IMAGE)
-
-
-root_end = exfatimg.root_end
-
-
 def span(vol, name):
     """The clusters `name` is planted with: one, BIG's 2 MiB."""
     return BIG_BYTES // vol.cluster if name == "BIG" else 1
@@ -118,11 +111,11 @@ def free_runs(vol, names):
 def plant():
     """The five files in the root, each set read back. Returns (start, the
     planted sets by name, the checks)."""
-    start = copy()
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     chain = vol.chain(vol.root)
     d = bytearray(vol.data(chain))
-    end = root_end(d)
+    end = exfatimg.root_end(d)
     first = free_runs(vol, FILES)
     if first is None:
         return start, {}, [("plant: a free run for each file", False)]

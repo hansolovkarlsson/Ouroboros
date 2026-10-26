@@ -283,13 +283,6 @@ def shaped(name, between, counted):
     return bytes(out)
 
 
-def copy():
-    return exfatimg.copy_exfat(IMAGE)
-
-
-root_end = exfatimg.root_end
-
-
 def write_root(vol, d):
     with open(IMAGE, "r+b") as fh:
         for k, c in enumerate(vol.chain(vol.root)):
@@ -321,10 +314,6 @@ def grow_root(vol):
         fh.write(bytes(vol.cluster))
 
 
-def fsck():
-    return exfatimg.fsck_clean(IMAGE)
-
-
 def boot(label, commands):
     steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in commands] + [("# ", "")]
     guest = drive_qemu.Guest(IMAGE, label=f"test-long-set {label}: ")
@@ -341,21 +330,21 @@ def boot(label, commands):
 
 def run_long():
     checks, notes = [], []
-    start = copy()
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     if len(vol.chain(vol.root)) != 1:
         return [("long: the image's root is one cluster, as the rig assumes", False)], notes
     grow_root(vol)
     vol = Volume(IMAGE, start)
     d = bytearray(vol.data(vol.chain(vol.root)))
-    end, at = root_end(d), vol.cluster - 32  # the first cluster's last slot
+    end, at = exfatimg.root_end(d), vol.cluster - 32  # the first cluster's last slot
     s = long_set()
     d[end:at] = DELETED * ((at - end) // 32)
     d[at:at + len(s)] = s
     write_root(vol, d)
     vol = Volume(IMAGE, start)
     hit = exfatimg.find(vol.data(vol.chain(vol.root)), "VEND")
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks += [
         ("long: /VEND's set reads back, 20 entries from the first cluster's last slot, its checksum whole",
          hit is not None and hit.offset == at and hit.count == 20 and hit.data == s
@@ -375,7 +364,7 @@ def run_long():
     got = hit.data if hit else b""
     first, size = (struct.unpack_from("<I", got, 52)[0], struct.unpack_from("<Q", got, 56)[0]) if hit else (0, 0)
     data = vol.data(vol.chain(first))[:size] if first >= 2 else b""
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks += [
         ("long: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         ("long: /VEND's set still 20 entries in place, File, Stream, a name, 17 vendor entries",
@@ -396,10 +385,10 @@ def run_long():
 
 
 def run_shape():
-    start = copy()
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     d = bytearray(vol.data(vol.chain(vol.root)))
-    end = root_end(d)
+    end = exfatimg.root_end(d)
     label = bytes([0x83]) + bytes(31)  # a volume label primary, empty
     gappy = shaped("GAPPY", (1, DELETED), False)  # File, deleted, Stream, name
     prim = shaped("PRIM", (2, label), True)       # File, Stream, label, name
@@ -428,10 +417,10 @@ def run_shape():
 def run_rename():
     """/VEND's 20-entry set, its File entry stamped, renamed to a name of two
     entries and back to one: the vendor entries move right and then left."""
-    start = copy()
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     d = bytearray(vol.data(vol.chain(vol.root)))
-    end = root_end(d)
+    end = exfatimg.root_end(d)
     # /VEND holds a cluster of its own, contiguous (NoFatChain), its
     # ValidDataLength 7 within a DataLength of the whole cluster, junk past
     # the 7 bytes: a rename must keep all four.
@@ -489,7 +478,7 @@ def run_rename():
     got = hit.data if hit else b""
     s2 = exfatimg.find(root, "S2")
     s2_types = [s2.data[k] for k in range(0, len(s2.data), 32)] if s2 else []
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks += [
         ("rename: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         (f"rename: ls / lists {LONG_NAME} and not VEND, then V2 and neither ({listings})",
@@ -556,7 +545,7 @@ def plant(vol, sets, used, links=(), fills=()):
     bitmap, write the FAT `links` (cluster, value) and the cluster `fills`
     (cluster, bytes, zero-padded). False when the root has no room."""
     d = bytearray(vol.data(vol.chain(vol.root)))
-    end = root_end(d)
+    end = exfatimg.root_end(d)
     planted = b"".join(sets)
     if end + len(planted) + 32 > len(d):
         return False
@@ -591,7 +580,7 @@ def run_valloc():
     """Allocations a set's benign secondaries name, freed with the set and
     only then, on a volume fsck_exfat passes. Fifteen clusters in a run, each
     contiguous run followed by one that must stay used."""
-    start = copy()
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     r = free_run(vol, 15)
     if r is None:
@@ -617,7 +606,7 @@ def run_valloc():
         return [("valloc: room for the planted sets in the root", False)], []
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks = [
         ("valloc: every planted set reads back, all fifteen clusters used",
          all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p for n, p in sets.items())
@@ -638,7 +627,7 @@ def run_valloc():
     gone = [n for n in ("VA1", "VD", "SRC", "VE2", "VE0") if exfatimg.find(root, n) is None]
     va2, va4 = exfatimg.find(root, "VA2"), exfatimg.find(root, "va4")
     in_use = {k: vol.used(k) for k in range(r, r + 15)}
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
 
     def uses(*ks):
         return [in_use[k] for k in ks]
@@ -678,7 +667,7 @@ def run_vcross():
     cluster of the heap or the volume's own, a run past the heap, a run over
     a later cluster of a surviving chain, and an empty survivor with eight
     vendor runs."""
-    start = copy()
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     r = free_run(vol, 20)
     if r is None:
@@ -762,7 +751,7 @@ def run_vcross():
         # fsck_exfat reads the rest of the volume.
         set_bit(fh, vol, last, used=False)
     vol = Volume(IMAGE, start)
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks += [
         ("vcross: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         (f"vcross: SRC2, VA5, VBAD, VSYS, VA6, VHEAP, SRC3 and SRC4 gone from the root ({gone})", len(gone) == 8),
@@ -814,7 +803,7 @@ def run_vmeet():
     one, and VLINK, a FAT-chained file whose link leads into the bitmap,
     each refused a `writeat` with nothing written. A boot of its own:
     VCROSS's root has no room."""
-    start = copy()
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     r = free_run(vol, 7)
     if r is None:
@@ -879,7 +868,7 @@ def run_vmeet():
                 set_bit(fh, vol, r + k, used=False)
             fh.seek(vol.fat + (r + k) * 4)
             fh.write(struct.pack("<I", value))
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks += [
         ("vmeet: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         (f"vmeet: `mv -f /SRC /DST` answered nothing ({printed(out, 'mv -f /SRC /DST')})",
@@ -928,7 +917,7 @@ def fill_deleted(vol):
     sets of three slots, so no create fits in one: the image's root has 34
     such slots, which took the creates meant to grow it."""
     d = bytearray(vol.data(vol.chain(vol.root)))
-    end, i, k = root_end(d), 0, 0
+    end, i, k = exfatimg.root_end(d), 0, 0
     while i < end:
         n = 0
         while i + 32 * n < end and d[i + 32 * n] & 0x80 == 0:
@@ -953,7 +942,7 @@ def run_vroot():
     reaching one of the volume's own clusters through a damaged set or chain,
     refused where the cluster becomes a sector (`sector_of`, since
     2026-10-26). A boot of its own: the root is filled to its last two slots."""
-    start = copy()
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     if len(vol.chain(vol.root)) != 1:
         return [("vroot: the image's root is one cluster, as the rig assumes", False)], []
@@ -983,7 +972,7 @@ def run_vroot():
         "HX": plant_set("HX", lb, c, contiguous=False),
     }
     root = vol.data(vol.chain(vol.root))
-    free = (len(root) - root_end(root) - sum(len(x) for x in sets.values())) // 32
+    free = (len(root) - exfatimg.root_end(root) - sum(len(x) for x in sets.values())) // 32
     # Two slots left: a create needs three, so `touch /GROWN` grows the root.
     if free < 5 or not plant(vol, [*sets.values(), filler(free - 2, "F")], [d, e],
                              links=[(d, lb), (e, lb)], fills=[(d, filler(c // 32, "D"))]):
@@ -993,11 +982,11 @@ def run_vroot():
     bitmap = vol.data(range(vol.bitmap, vol.bitmap + nb))
     lb_fat = vol.entry(lb)
     r2_head = vol.data([r2])[:512]
-    runs = [i for i in range(0, root_end(root) - 64, 32) if all(root[i + 32 * j] & 0x80 == 0 for j in range(3))]
+    runs = [i for i in range(0, exfatimg.root_end(root) - 64, 32) if all(root[i + 32 * j] & 0x80 == 0 for j in range(3))]
     checks = [("vroot: the planted sets read back, the root two clusters with two slots free and no run of three "
                f"deleted ones ({runs})",
                all(exfatimg.find(root, n) is not None and exfatimg.find(root, n).data == p for n, p in sets.items())
-               and root_end(root) == len(root) - 64 and not runs and all(vol.used(k) and vol.entry(k) == lb
+               and exfatimg.root_end(root) == len(root) - 64 and not runs and all(vol.used(k) and vol.entry(k) == lb
                                                                         for k in (d, e)))]
     if not checks[0][1]:
         return checks, []
@@ -1048,7 +1037,7 @@ def run_vroot():
             set_bit(fh, vol, k, used=False)
             fh.seek(vol.fat + k * 4)
             fh.write(struct.pack("<I", 0))
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks.append(("vroot: fsck_exfat -n passes the image after the boot, SD, RR, LX and HX removed", ok))
     return checks, [f"vroot after: {ln}" for ln in lines] if not ok else []
 
@@ -1097,7 +1086,7 @@ def run_extent(label):
     the volume as fsd left it. A volume left writable must write and free;
     one left with no bitmap must refuse every write, before it writes."""
     damage, writable, second = EXTENTS[label]
-    start = copy()
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     if label in LATE:
         grow_root(vol)
@@ -1121,12 +1110,12 @@ def run_extent(label):
         at = next(i for i in range(0, len(d), 32) if d[i] == 0x81)
         entry, c = bytes(d[at:at + 32]), vol.cluster
         d[at] = 0x01  # deleted
-        for i in range(root_end(d), c, 32):
+        for i in range(exfatimg.root_end(d), c, 32):
             d[i:i + 32] = DELETED
         d[c:c + 32] = entry
         write_root(vol, d)
         moved = vol.data(vol.chain(vol.root))
-        if not (moved[c] == 0x81 and root_end(moved) == c + 32 and 0x81 not in moved[0:c:32]):
+        if not (moved[c] == 0x81 and exfatimg.root_end(moved) == c + 32 and 0x81 not in moved[0:c:32]):
             return [(f"{label}: the bitmap's entry moved to the root's second cluster, none before it", False)], []
     vbr_was = None
     if label in VBR:
@@ -1158,7 +1147,7 @@ def run_extent(label):
     root = vol.data(vol.chain(vol.root))
     vf, newb = exfatimg.find(root, "VF"), exfatimg.find(root, "NEWB")
     newb_size = struct.unpack_from("<Q", newb.data, 56)[0] if newb else 0
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks = [(f"{label}: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out)]
     if writable:
         checks += [(f"{label}: an up-case table claiming the heap is no table and a longer bitmap is one: "

@@ -4438,6 +4438,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   another as a module; `Volume`'s FAT32 entries come from `fat32img` (the
   live copy). `test-grow-dir`'s fsck rule stays its own, as it expects one
   planted complaint. `test-mv-undo` joins when its PR lands.
+- **Three exFAT rig helpers still walk sets by hand.** `test-grow-dir`'s
+  `exfat_dir` and `plant`, and `test-stale-cursor`'s `plant_empty`, read
+  entry sets with their own loops rather than `exfatimg.sets`/`find`.
+  They have no bound on a set cut off at the end of the bytes (an
+  IndexError) and cut a name by `NameLength` characters rather than its
+  UTF-16 units, so a surrogate pair is mis-cut. And `exfatimg.Volume`'s
+  FAT32 `listing` and `data` repeat `fat32img`'s (its entries, chain and
+  `fat` are `fat32img`'s since 2026-10-26). Move each onto the shared
+  copy. From the high review of `chore/exfat-rig-helpers`, 2026-10-26.
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
   chained walk reads and writes a bitmap sector and writes a FAT sector for
   every cluster, three round trips a cluster on the Pi's USB stick, and every
