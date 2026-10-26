@@ -2273,7 +2273,9 @@ The small open tails those arcs deliberately left:
 >       the other five is near a sleep. Leave it out of the counts, and
 >       check `pmset -g log` before reading one in. Another on 2026-10-26,
 >       `test-dir-scan`, exFAT and traced again, with no sleep near it
->       (`pmset -g log`); the rerun passed.
+>       (`pmset -g log`); the rerun passed. And a second that day,
+>       `test-write-walk:exfat-base`, exFAT and traced, no sleep near it;
+>       the rerun passed.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the

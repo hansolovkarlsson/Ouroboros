@@ -1093,6 +1093,15 @@ the flags ignored, with copy 0 read and with every copy written.
 `test-volume-bound`'s SHAPES-D now refuses a live copy past the FAT count.
 The flag can't be tested on the ESP the firmware boots, since OVMF then
 finds no boot loader there.
+The high review the same day made the state one enum (`FatCopies`:
+`Mirrored` or `Single(n)`), so a mirrored volume reading a copy other than 0
+can't be written; the mirror loop places each copy from its own number. It
+also caught two host copies of the rule that had gone stale.
+`test-volume-bound`'s model of the mount still refused any live copy but 0.
+The shared reader `scripts/fat32img.py` read and wrote FAT 0 whatever the
+flags said; it now takes the live copy, and `set_entry` writes as fsd does.
+The rig now uses the shared helpers, and checks that the page's last line
+lies past its first cluster rather than assuming exactly three clusters.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
