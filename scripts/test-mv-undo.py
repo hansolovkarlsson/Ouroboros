@@ -24,7 +24,7 @@ reads back and fsck_exfat -n passes. Then, logged in:
 
 - `mv /S2 /T2`: the delete clears S2's File entry and fails at X, so S2 is
   gone and T2, the set relink wrote, must stay: `cat /T2` prints `s2`;
-- `mv /S /T`, `mv /S /s` (a case-only rename) and `mv -f /S /U` (a
+- `mv /S /T`, `mv -f /S /s` (a case-only rename) and `mv -f /S /U` (a
   replacing one, U's set deleted before S's delete fails): each answers an
   error and leaves S whole, with no T, no `s` and, for the last, no U;
 - `ls /` lists S and T2 and none of S2, T, s or U, and `cat /S` prints
@@ -74,7 +74,7 @@ BLKDEBUG = os.path.join(BUILD, "test-mv-undo.blkdebug")
 SLOT, SECTOR = 32, 512
 DELETED = bytes([0x05]) + bytes(31)  # a deleted File entry: in-use bit clear
 FILES = {"U": b"u\r\n", "S2": b"s2\r\n", "S": b"src\r\n"}
-CMDS = ["mv /S2 /T2", "cat /T2", "mv /S /T", "mv /S /s", "mv -f /S /U", "ls /", "cat /S"]
+CMDS = ["mv /S2 /T2", "cat /T2", "mv /S /T", "mv -f /S /s", "mv -f /S /U", "ls /", "cat /S"]
 
 
 def contiguous_set(name, cluster, size):
@@ -183,15 +183,15 @@ def run():
                         + hit.offset % vol.cluster) // SECTOR
 
     checks = [(f"before: U, S2 and S read back once each, S whole in sector X ({failing}), S2's File "
-               "entry in the sector before it and U before that, and fsck_exfat -n passes",
+               "entry in the sector before it and U before X, and fsck_exfat -n passes",
                all(names.count(n) == 1 for n in FILES) and ok and sector_of("S") == failing
-               and sector_of("S2") == failing - 1 and sector_of("U") < failing - 1)]
+               and sector_of("S2") == failing - 1 and sector_of("U") < failing)]
     notes = [f"before: {ln}" for ln in lines] if not ok else []
     if not checks[0][1]:
         return checks, notes, 0
 
     with open(BLKDEBUG, "w") as fh:
-        fh.write(f'[inject-error]\nevent = "write_aio"\nerrno = "5"\nsector = "{failing}"\n')
+        fh.write(f'[inject-error]\nevent = "write_aio"\niotype = "write"\nerrno = "5"\nsector = "{failing}"\n')
     steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in CMDS] + [("# ", "")]
     extra = [
         # bootindex=0 pins the firmware to the NVMe disk, which it boots and
@@ -225,12 +225,12 @@ def run():
     if not ok:
         notes += [f"after: {ln}" for ln in lines]
     listing = (answer(out, "ls /") or "").split()
-    said = {c: answer(out, c) for c in ("mv /S /T", "mv /S /s", "mv -f /S /U")}
+    said = {c: answer(out, c) for c in ("mv /S /T", "mv -f /S /s", "mv -f /S /U")}
     checks += [
         ("driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         (f"mv /S2 /T2, S2's File entry cleared before X failed, kept T2: cat /T2 printed s2 "
          f"({answer(out, 'cat /T2')!r})", answer(out, "cat /T2") == "s2"),
-        (f"mv /S /T, /S /s and -f /S /U each answered an error ({said})", all(said.values())),
+        (f"mv /S /T, -f /S /s and -f /S /U each answered an error ({said})", all(said.values())),
         (f"ls / lists S and T2, and none of S2, T, s or U ({[n for n in listing if n in ('S', 'T2', 'S2', 'T', 's', 'U')]})",
          "S" in listing and "T2" in listing and not {"S2", "T", "s", "U"} & set(listing)),
         (f"cat /S printed src ({answer(out, 'cat /S')!r})", answer(out, "cat /S") == "src"),
