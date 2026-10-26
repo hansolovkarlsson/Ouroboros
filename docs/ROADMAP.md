@@ -2224,26 +2224,10 @@ The small open tails those arcs deliberately left:
 >       boot and `verdict` at its end, a few lines a rig, and a control that
 >       forces the stall. Taken a rig at a time, as each is next touched.
 >       `Guest.aborts()` names a stall in every rig's output meanwhile
->       (since 2026-10-25, the item below). The high review of 2026-10-22 asked for the
+>       (since 2026-10-25, #350; the item is in `roadmap-completed.md`). The high review of 2026-10-22 asked for the
 >       verdict in `Guest` itself; a rig grades its own checks, so it must
 >       still skip them, and `run()` answering three ways would change every
 >       rig's `if g.run(...)` at once.
-> - [x] **fix** **`Guest.aborts()` cannot name a firmware stall.** It
->       stops QEMU and then asks `firmware_stalled` about the transcript,
->       whose last line is by then QEMU's own `terminating on signal 15 from
->       pid ...` (`build/test-call-interrupt.txt`, line 90 of 90, on
->       2026-10-25), so the last-line test never matches and the note it
->       prints for the rigs not on `boot_stalled` cannot appear. The rigs on
->       it classify a transcript read before the stop, and are not affected.
->       Either read the transcript before the stop, or have
->       `firmware_stalled` pass over QEMU's signal line, with a self-test
->       case for it. Found by the max review of #350.
->       *Done 2026-10-25 on #350: `firmware_stalled` strips QEMU's signal
->       line wherever it lands (after a prompt, in the capture above), with
->       self-test cases of each stall read after the stop; taking the strip
->       out fails them (the X64 case alone until the fourth max review added
->       the USB one). Read before or after the stop, a stall now classifies
->       the same.*
 > - [ ] **new** **The rigs left to move onto `boot_stalled` will each
 >       rebuild the stall accounting.** About 28 rigs remain, several
 >       booting more than once (`test-bootstick`, `test-include`,

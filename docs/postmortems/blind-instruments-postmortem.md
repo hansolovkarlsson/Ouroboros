@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-24. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-25. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2161,3 +2161,54 @@ missing check shows as the entry changing (`ffffffff` to `03000000`). **A
 plant must be one where the act under test changes something the rig looks
 at; a write of the value already there, or an act a neighbouring check
 undoes, grades nothing.**
+
+## Four more, from the disk-trace stalls (2026-10-25)
+
+One branch (#350) moved the four disk-trace rigs onto `boot_stalled` and
+went through five review rounds. Four of the instruments it touched had been
+reporting something they could not see.
+
+**A classifier that could not see a stall after the stop.**
+`firmware_stalled` judged a transcript by its last line, and
+`Guest.aborts()` asked it only after stopping QEMU, by which time the last
+line was QEMU's own `terminating on signal 15 from pid ...`. The note
+`aborts()` prints to name a stall, for every rig not on `boot_stalled`, had
+never once been able to print, from the day it was written (2026-10-22).
+Nothing showed it because the rigs on `boot_stalled` read their transcript
+before the stop, and the classifier's self-test fed it transcripts nobody
+had stopped. **A classifier is a check on its input as the caller actually
+hands it over; a fixture taken before the step that changes the input
+grades a different question.**
+
+**A fake that did not do what the real thing does.** `disktrace.py
+--self-test` drove `boot` with a fake guest whose `aborts()` left the guest
+running, where the real one stops it. So the self-test could not see the
+order that brings the bug back (reading the transcript after the stop), and
+that order was the one that hid the classifier's blindness above. The fake
+now stops, ends its transcript with QEMU's signal line once stopped, ends
+its lines CR LF and reads two sectors a request, as QEMU's guest does.
+**A fake is an observer of the code under test and a claim about the thing
+it replaces; write it from the real thing's behaviour, read off a real run,
+not from what the caller is believed to need.**
+
+**Arithmetic that discarded the evidence against it.** `per_run` took the
+graded boot's per-sector reads minus the base boot's with `Counter`
+subtraction, which drops any count that goes negative. A sector the graded
+boot read fewer times than the base, the one sign the two boots did not do
+the same work outside the graded act, vanished from the difference before
+any check looked. The fix refuses that case, and only inside the region a
+rig grades: on the whole disk the refusal failed `test-write-walk`'s FAT32
+pair on an exFAT sector read 14 times and then 12, nowhere near the FAT.
+**An operation that floors, clamps or drops is a filter on the evidence;
+know what it removes before it stands between two measurements.**
+
+**A sleep that reads as a stall.** On battery at 3%, the host slept twice
+during the last rerun (`pmset -g log`: 19:49 to 19:59, 20:02 to 20:17). A
+QEMU suspended in the firmware and woken past the 90 s step timeout leaves
+the transcript of a firmware stall, and `boot_stalled` logged one a second
+after the wake, into the same run log that was being read as evidence that
+the stall follows the exFAT image. The 2026-09-20 rule (a check that can
+turn red for a cause outside its subject is as broken as one that cannot)
+holds for a rate as much as a verdict. **A count of events is only as clean
+as the events it admits: before reading an entry in, rule out the causes
+the instrument cannot tell apart, here the host's own sleep.**
