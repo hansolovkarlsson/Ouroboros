@@ -199,11 +199,15 @@ class Guest:
           which reads identically to "I checked and it was clean" if both are 0 -
           and that is the single signal a two-node run has.
 
-        It STOPS the guest first. QEMU buffers the trace, so a count read while
-        it runs can miss the last faults, and every rig used to choose its own
-        order (several read it before stopping). Stopping here makes the early
-        read impossible to write (the third review of #226); `stop()` is
-        idempotent and `transcript()` still works after it.
+        It STOPS the guest first, so the count is of a boot that has ended:
+        read while QEMU runs, it could miss a fault the guest has yet to take,
+        and every rig used to choose its own order (several read it before
+        stopping). Stopping here makes the early read impossible to write (the
+        third review of #226); `stop()` is idempotent and `transcript()` still
+        works after it. QEMU itself writes the log a line at a time (11.1.2,
+        checked 2026-10-25: the file ends on a whole line whenever it is read
+        mid-boot, and SIGKILL loses nothing of it), though this docstring said
+        it buffered until then.
         """
         self.stop()
         try:
@@ -226,11 +230,12 @@ class Guest:
         return count
 
     def stop(self):
-        """Shut QEMU down, gracefully first: on SIGTERM it exits through its
-        own shutdown, which flushes the -d int log, where SIGKILL (all this
-        did until 2026-10-06) drops whatever the log still had buffered, a
-        fault in the last command among it. Killed only if it does not go
-        within five seconds. Safe to call more than once."""
+        """Shut QEMU down, gracefully first (SIGTERM, all this did until
+        2026-10-06 being SIGKILL); killed only if it does not go within five
+        seconds. Safe to call more than once. The reason given in 2026-10-06,
+        that SIGKILL drops what the -d int log still had buffered, does not
+        hold for QEMU 11.1.2, which writes the log a line at a time (see
+        `aborts`)."""
         if self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -336,7 +341,8 @@ def boot_stalled(rig, boot, out, aborts, log=None, kept_dir=None, label=None, qe
     overwrites. A label used twice in one run of a rig, or holding a space,
     is refused (ValueError)."""
     log, kept_dir = log or STALL_LOG, kept_dir or STALL_DIR
-    label = label or f"{rig}:{boot}"
+    if label is None:
+        label = f"{rig}:{boot}"
     if not label or any(c.isspace() for c in label):
         raise ValueError(f"boot_stalled: the label {label!r} is empty or holds a space")
     if (os.path.abspath(log), label) in _classified:
@@ -448,6 +454,8 @@ def self_test():
         ("an empty transcript", "", 0, False),
         ("the X64 stall read after the stop, QEMU's line last",
          X64_STALLED + "qemu-system-aarch64: terminating on signal 15 from pid 1 (<unknown process>)\n", 0, True),
+        ("the USB stall read after the stop, QEMU's line last",
+         USB_STALLED + "qemu-system-aarch64: terminating on signal 15 from pid 1\n", 0, True),
         ("the USB stall, QEMU's line on the stall's own line", USB_STALLED.rstrip("\n")
          + "qemu-system-aarch64: terminating on signal 15 from pid 1\n", 0, True),
         ("a kernel line, QEMU's line after a prompt",
@@ -476,15 +484,15 @@ def self_test():
         print(f"{'ok  ' if ok else 'FAIL'} a stall on each of the last {PERSISTENT} runs is graded, a boot between them resets the count")
         failed += not ok
         refused = []
-        for boot in ("test", "two words"):
+        for boot, label in (("test", None), ("two words", None), ("other", "")):
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
-                    boot_stalled("self", boot, X64_STALLED, 0, log=log, kept_dir=tmp)
+                    boot_stalled("self", boot, X64_STALLED, 0, log=log, kept_dir=tmp, label=label)
                 refused.append(False)
             except ValueError:
                 refused.append(True)
-        ok = refused == [True, True]
-        print(f"{'ok  ' if ok else 'FAIL'} a label classified twice in one run, or holding a space, is refused")
+        ok = refused == [True, True, True]
+        print(f"{'ok  ' if ok else 'FAIL'} a label classified twice in one run, holding a space, or empty, is refused")
         failed += not ok
     return failed
 
@@ -575,7 +583,7 @@ def main() -> int:
         time.sleep(LINGER)
         transcript = g.transcript()
     finally:
-        # BEFORE reading the trace (QEMU buffers it) and before printing, which
+        # BEFORE reading the trace (the boot over) and before printing, which
         # can raise BrokenPipeError under `| head` and would otherwise leak a
         # live QEMU still holding the image's write lock.
         g.stop()

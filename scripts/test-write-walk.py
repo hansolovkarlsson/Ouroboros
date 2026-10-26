@@ -320,7 +320,7 @@ def grade(tally, name, prepared, base_cmd, cmd, region, inspect, setup=()):
     destination FAT's extra reads with the prediction `inspect(copy,
     problems, found)` leaves in `found` ({"want", "what"}), its problems the
     second boot's; print the verdict and close the case in `tally`, unless a
-    boot stalled and neither failed (disktrace.settle)."""
+    boot stalled and neither failed (disktrace's Tally.settle)."""
     found = {}
     base_boot = boot(f"{name}-base", prepared, base_cmd, setup=setup)
     more_boot = boot(f"{name}-more", prepared, cmd, functools.partial(inspect, found=found), setup=setup)
@@ -335,6 +335,8 @@ def grade(tally, name, prepared, base_cmd, cmd, region, inspect, setup=()):
         problems += differ
         if per is not None:
             delta = sum(c for s, c in per.items() if lo <= s < hi)
+        # A bug in this rig, not in fsd, if it does not hold.
+        assert problems or want is not None, "the second boot ran with no problem, and its inspect left no prediction"
         if not problems and delta != want:
             problems.append(f"`{cmd}` reads {delta} FAT sectors, not {want}: one walk of each chain it "
                             "reads and writes, through the FAT cache, is the rule")

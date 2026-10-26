@@ -318,6 +318,8 @@ def chain_walk(tally, prepared, image):
         if per is not None:
             delta = sum(c for s, c in per.items() if g["fat"] <= s < g["fat_end"])
         if not problems:
+            # A bug in this rig, not in fsd, if it does not hold.
+            assert chain is not None, "the first boot ran with no problem, and its inspect kept no chain"
             want = chain_reads(chain, g)
             if delta != want:
                 problems.append(f"a spawn of /CHAIN reads {delta} FAT sectors, not {want}: one walk of "
