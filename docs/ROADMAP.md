@@ -2271,7 +2271,9 @@ The small open tails those arcs deliberately left:
 >       -g log`, on a flat battery), and a QEMU suspended in the firmware
 >       and woken past the 90 s step timeout reads exactly as one. None of
 >       the other five is near a sleep. Leave it out of the counts, and
->       check `pmset -g log` before reading one in.
+>       check `pmset -g log` before reading one in. Another on 2026-10-26,
+>       `test-dir-scan`, exFAT and traced again, with no sleep near it
+>       (`pmset -g log`); the rerun passed.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the
@@ -4485,7 +4487,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `grow_extent` give back what they took, would end it, `insert_set`
   returning the slot it used; the undo can fail too, which leaves today's
   state. The same review, deferred.
-- **exFAT bounds a cluster number where it frees, not where it reads it.**
+- ~~**exFAT bounds a cluster number where it frees, not where it reads it.**~~
   `free_data` refuses a first cluster outside the heap and stops at the
   volume's own clusters, `write_fat_entry` refuses one outside the heap, and
   the allocator passes over the volume's own (all 2026-10-23), and since the
@@ -4509,6 +4511,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   pointer naming metadata unchecked" is the same rule there, and so is
   "a subdirectory naming the exFAT root's cluster is read as the root". The
   same review, deferred.
+  *Done 2026-10-26: every read and write of a cluster's sectors goes
+  through `sector_of`, which holds the cluster to what it is read or
+  written for (the root's slots, the bitmap, anything else), and
+  `cluster_to_lba` is gone; the mount records the root's chain as runs
+  (`record_root`, 64 at most, read-only past that, a loop or 256 MiB) and
+  the root's growth extends it, so `is_system` counts every root cluster.
+  The link checks stay (`file_step`, `ensure_chained`, `write_at`'s first
+  cluster): a write from a file's end passes clusters whose sectors it
+  never asks for, and links from the last one's FAT entry. VROOT in `make
+  test-long-set`, failed by five mutants, and VLATER for the scan's order
+  (the high review). Not taken: refusing in
+  `walk_dir`'s decode and ending a walk at a system cluster in
+  `next_cluster` and `advance`, so the free keeps its own checks. Still
+  open: the subdirectory read as the root (`extent_rule`'s test by first
+  cluster, its own item below) and ext2's pointer naming metadata.*
 - **A name fsd makes on exFAT outside ASCII carries a NameHash fsck_exfat
   rejects.** `upcase` folds ASCII alone, so the NameHash fsd writes for
   `cafë` hashes `ë` where the volume's up-case table (macOS's, every volume
@@ -4561,7 +4578,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   in it writes into the root, grows the root's chain, and records the root's
   length as the subdirectory's size. It needs a cross-linked volume. A set
   other than the root's naming the root cluster could be refused instead.
-  Found by the medium reviews of 2026-10-19.
+  Found by the medium reviews of 2026-10-19. Since 2026-10-26 `sector_of`
+  takes such a directory's slots for the root's (`slot_at` tells the root
+  by the same test), so its writes pass the root's rule: the holder given by
+  the caller, which knows the synthetic root entry, would close it there
+  too (the high review that day).
+- **exFAT says nothing when it mounts a volume read-only.** No bitmap, a
+  damaged one, two FATs, and since 2026-10-26 a root whose chain the record
+  cannot hold (more than 64 runs, a loop, past 256 MiB) each leave the
+  volume read-only with no line saying why, so a healthy stick whose root
+  grew in more than 64 interleaved steps refuses every write unexplained.
+  A reason kept in `Fs` and printed by fsd's mount line would say it.
+  Found by the high review of 2026-10-26.
 - **A damaged exFAT directory answers "device I/O error".** A create in a
   directory whose chain is not its size, a cluster outside the heap and a
   looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a

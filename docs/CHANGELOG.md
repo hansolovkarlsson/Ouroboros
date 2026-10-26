@@ -1041,6 +1041,44 @@ round, all failed. `aborts()` no longer says QEMU buffers its `-d` log:
 QEMU 11.1.2 writes it a line at a time (checked by reading it mid-boot and
 after a SIGKILL).
 
+**exFAT checks a cluster where it becomes a sector, and knows the root's
+whole chain (2026-10-26).** Every read and write of a cluster's sectors now
+goes through one function, `sector_of`, which says what the sectors are for:
+the root's slots, the bitmap, or anything else (a file's bytes, a
+subdirectory's slots). A file or subdirectory may not reach the volume's own
+clusters, the root may reach only its own chain, and the bitmap only itself.
+Each review of the 23rd and 24th had found one more path reaching the bitmap
+through a damaged set or link and added the check there. A create in a
+subdirectory whose chain was linked into the bitmap still wrote its set into
+the bitmap, and a read of such a file still returned the bitmap's bytes. Both
+are refused now. `cluster_to_lba` is gone, so no unchecked conversion is left
+to call. The checks on a link stay where they were (`file_step`,
+`ensure_chained`, `write_at`'s first cluster): a write that starts at a
+file's end writes none of its sectors and extends the chain from its last
+cluster's FAT entry, so with either check removed the bitmap's FAT entry was
+linked to a new cluster.
+The mount now records the root's chain as runs of consecutive clusters
+(`record_root`, at most 64 runs), and the record grows with the root. Until
+now only the root's first cluster counted among the volume's own, so a
+damaged file over a later one was written into it, and its `rm` freed it for
+the allocator. The scan for the bitmap and up-case entries reads the recorded
+clusters, and a table on any of them is dropped. A root that loops, runs past
+256 MiB or needs more runs than the record holds makes the volume read-only.
+`make test-long-set` gains a twelfth boot, VROOT: a file on the root's second
+cluster, a subdirectory and two files linked into the bitmap, and a root
+grown by two creates. It fails with the root's record ignored, with
+`sector_of` passing every file cluster, with the growth unrecorded, and with
+either link check removed. The high review the same day found three more
+defects. First, the table scan recorded each extent as it found it, so an
+up-case entry claiming the heap made `sector_of` refuse the root's next
+cluster and the mount failed where it had mounted. The scan now records
+both extents after it ends, and a thirteenth boot, VLATER, puts the bitmap's
+entry in the root's second cluster and fails with the old order. Second, a
+full record refused the root's growth before allocating, even when the new
+cluster would extend the last run; it now refuses only when the record
+cannot take the cluster. Third, a failed link of the root's new cluster
+leaked it; the cluster is now given back.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
