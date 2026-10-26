@@ -4428,7 +4428,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   says it is the one shared copy. A change to one rig's internals can break
   another's import, and the fsck rule can drift between four copies. Move
   them into `exfatimg.py` and have the rigs import it. From the high review
-  of `fix/exfat-valid-length`, 2026-10-22.
+  of `fix/exfat-valid-length`, 2026-10-22. Its `Volume` reads FAT32 too, from
+  FAT 0 alone, where `scripts/fat32img.py` follows BPB_ExtFlags to the live
+  copy since 2026-10-26: harmless while no image it reads has mirroring
+  off, and the FAT32 half belongs on `fat32img` (the medium review that
+  day).
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
   chained walk reads and writes a bitmap sector and writes a FAT sector for
   every cluster, three round trips a cluster on the Pi's USB stick, and every

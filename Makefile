@@ -2688,10 +2688,11 @@ test-exfat-names: image-exfat
 	python3 scripts/test-exfat-names.py
 
 # FAT32 with mirroring off reads and writes its live FAT alone
-# (scripts/test-fat-extflags.py), since 2026-10-26: a copy of esp.img with
-# BPB_ExtFlags 0x0081 (FAT 1 live) and /man/ls cut short in FAT 0 alone;
-# `cat /man/ls` must print the whole page and a new file's write leave FAT 0
-# as it was. One boot, about a minute; run it whenever FAT32's reading of
+# (scripts/test-fat-extflags.py), since 2026-10-26: esp.img booted from NVMe,
+# and on virtio the ext2 root (build/ext2part.img) then esp.img's FAT32 with
+# BPB_ExtFlags 0x0081 (FAT 1 live) and /man/ls cut short in FAT 0 alone, and
+# again with 0x0080 (FAT 0 live); `cat` of the page must print it whole, and
+# a new file's write leave the other copy as it was on each. One boot, about a minute; run it whenever FAT32's reading of
 # BPB_ExtFlags, fat_place, fat_entry or write_fat_entry changes.
 test-fat-extflags: image $(EXT2_PART)
 	python3 scripts/test-fat-extflags.py

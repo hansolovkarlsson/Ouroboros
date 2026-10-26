@@ -305,9 +305,11 @@ pub struct Fs {
     fat_start_lba: u32,
     data_start_lba: u32,
     root_cluster: u32,
-    /// How many copies of the FAT the volume has (almost always 2) - only
-    /// needed for writes ([`write_fat_entry`](Self::write_fat_entry)),
-    /// which keep every copy in sync when the FATs are mirrored.
+    /// How many copies of the FAT the volume has (almost always 2): the
+    /// copies a mirrored write keeps in step
+    /// ([`write_fat_entry`](Self::write_fat_entry)), and the bound `mount_at`
+    /// holds the live copy below, which keeps
+    /// [`fat_place_in`](Self::fat_place_in) inside the FATs.
     num_fats: u32,
     /// Which FAT copies are live, by `BPB_ExtFlags`, read at mount: every
     /// copy, kept in step (bit 7 clear, what fsd's `format` and every image
@@ -490,7 +492,7 @@ impl Fs {
         }
         // BPB_ExtFlags: with bit 7 set the FATs are not mirrored and only the
         // copy numbered in bits 0-3 is live, which every read then takes and
-        // every write goes to alone (`live_fat`); with it clear, copy 0 is
+        // every write goes to alone (`FatCopies::Single`); with it clear, copy 0 is
         // read and every copy written. A live copy the volume does not have
         // is no volume to read.
         let ext_flags = u16::from_le_bytes([bpb[40], bpb[41]]);
