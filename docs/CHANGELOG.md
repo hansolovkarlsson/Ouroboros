@@ -1129,6 +1129,18 @@ a volume used to have every copy written, and now only FAT 0 is. A write to
 it must leave FAT 1 untouched; the check fails with `0x0080` taken as
 mirrored. The planted flags now go into the backup boot sector too.
 
+**The exFAT rigs' host helpers live in `exfatimg.py` alone.** `Volume`,
+`set_checksum` and `entry_set` lived in `test-stale-cursor` and
+`test-grow-dir`, and four other rigs ran those two as modules to take them,
+so a change to one rig's internals could break another's import. The image
+copy, `root_end` and the fsck pass rule were repeated in four rigs. All of
+them now live in `exfatimg.py` (`copy_exfat`, `root_end` and `fsck_clean`
+are new names), and the rigs import that. `Volume` reads FAT32 too, from
+FAT 0 alone; it now takes its FAT32 entries from `fat32img`, which follows
+`BPB_ExtFlags` to the live copy. The moved `Volume` reads both of
+`espexfat.img`'s partitions the same as the old one (listings, chains and
+allocation), and the six rigs that use it pass.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
