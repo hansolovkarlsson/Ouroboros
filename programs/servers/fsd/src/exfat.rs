@@ -65,6 +65,7 @@ use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};
 use crate::fat32::{split_parent, Error};
+use crate::utf16::{shown_exactly, units_of, utf8_name, NAME_SHOWN_MAX};
 
 const SECTOR_SIZE: usize = 512;
 const ENTRY_SIZE: usize = 32;
@@ -272,94 +273,6 @@ enum Holder {
 /// cluster; a run starting below cluster 2, or of none, shares nothing.
 fn runs_meet(a: u32, n: u64, b: u32, m: u64) -> bool {
     a >= 2 && b >= 2 && n > 0 && m > 0 && (a as u64) < b as u64 + m && (b as u64) < a as u64 + n
-}
-
-/// The most bytes a listed name takes: 255, as every other arm's names (ext2's
-/// are bytes, FAT32's rendered a byte a unit), so a name always fits one
-/// `NP_READDIR` page (512 bytes) and a path a lookup takes. A name whose UTF-8
-/// is longer is listed ASCII (see [`shown_exactly`]).
-const NAME_SHOWN_MAX: usize = LONG_NAME_MAX;
-
-/// The code point at `units[i]` and the units it takes, or `None` for an
-/// unpaired surrogate.
-fn code_point(units: &[u16], i: usize) -> Option<(u32, usize)> {
-    let u = units[i] as u32;
-    match u {
-        0xd800..=0xdbff if i + 1 < units.len() && (0xdc00..=0xdfff).contains(&(units[i + 1] as u32)) => {
-            Some((0x10000 + ((u - 0xd800) << 10) + (units[i + 1] as u32 - 0xdc00), 2))
-        }
-        0xd800..=0xdfff => None,
-        _ => Some((u, 1)),
-    }
-}
-
-/// Whether a listing shows `units` as their UTF-8: they hold no unpaired
-/// surrogate and that UTF-8 is at most [`NAME_SHOWN_MAX`] bytes. A name that is
-/// not is shown ASCII, `?` for each unit outside it, and a lookup's `?` stands
-/// for such a unit ([`name_answers`]), so the name is still reached by what
-/// is listed. A create cannot make that name, since `?` is not allowed in
-/// one, so it is never listed twice; two such names that differ only outside
-/// ASCII answer to one spelling, the first (the roadmap). Linux lists both
-/// in full; a page here is 512 bytes.
-fn shown_exactly(units: &[u16]) -> bool {
-    let mut bytes = 0usize;
-    let mut i = 0usize;
-    while i < units.len() {
-        let Some((c, n)) = code_point(units, i) else {
-            return false;
-        };
-        bytes += match c {
-            0..=0x7f => 1,
-            0x80..=0x7ff => 2,
-            0x800..=0xffff => 3,
-            _ => 4,
-        };
-        i += n;
-    }
-    bytes <= NAME_SHOWN_MAX
-}
-
-/// A name's UTF-16 `units` as a listing shows them, in `out`: their UTF-8 when
-/// [`shown_exactly`], otherwise ASCII with `?` for each unit outside it, at
-/// most [`NAME_SHOWN_MAX`] bytes either way. Encoded by hand, without
-/// `char::encode_utf8`, whose panic formats (the PIE link's trap).
-fn utf8_name<'a>(units: &[u16], out: &'a mut [u8; NAME_SHOWN_MAX]) -> &'a str {
-    let mut n = 0usize;
-    if !shown_exactly(units) {
-        for &u in units {
-            out[n] = if u < 0x80 { u as u8 } else { b'?' };
-            n += 1;
-        }
-        return core::str::from_utf8(&out[..n]).unwrap_or("?");
-    }
-    let mut i = 0usize;
-    while i < units.len() {
-        let Some((c, used)) = code_point(units, i) else {
-            break; // not reached: shown_exactly found none unpaired
-        };
-        i += used;
-        if c < 0x80 {
-            out[n] = c as u8;
-            n += 1;
-        } else if c < 0x800 {
-            out[n] = 0xc0 | (c >> 6) as u8;
-            out[n + 1] = 0x80 | (c & 0x3f) as u8;
-            n += 2;
-        } else if c < 0x10000 {
-            out[n] = 0xe0 | (c >> 12) as u8;
-            out[n + 1] = 0x80 | ((c >> 6) & 0x3f) as u8;
-            out[n + 2] = 0x80 | (c & 0x3f) as u8;
-            n += 3;
-        } else {
-            out[n] = 0xf0 | (c >> 18) as u8;
-            out[n + 1] = 0x80 | ((c >> 12) & 0x3f) as u8;
-            out[n + 2] = 0x80 | ((c >> 6) & 0x3f) as u8;
-            out[n + 3] = 0x80 | (c & 0x3f) as u8;
-            n += 4;
-        }
-    }
-    // Valid by construction; `?` would show an encoder bug, not hide it.
-    core::str::from_utf8(&out[..n]).unwrap_or("?")
 }
 
 /// Where an entry set lies: the directory holding it, its primary slot and
@@ -2191,16 +2104,10 @@ impl Fs {
     /// which shares [`upcase`] with the NameHash fsd writes. A name longer
     /// than any set's is in no directory.
     fn entry_in(&mut self, dir: &DirEntry, name: &str) -> Result<Option<(DirEntry, SetAt)>, Error> {
-        let mut asked = [0u16; LONG_NAME_MAX];
-        let mut n = 0usize;
-        for u in name.encode_utf16() {
-            if n == LONG_NAME_MAX {
-                return Ok(None);
-            }
-            asked[n] = u;
-            n += 1;
-        }
-        let asked = &asked[..n];
+        let mut buf = [0u16; LONG_NAME_MAX];
+        let Some(asked) = units_of(name, &mut buf) else {
+            return Ok(None);
+        };
         let mut found = None;
         self.walk_dir(dir.first_cluster, dir.contiguous, dir.size, |entry, units, slot, len| {
             if name_answers(units, asked) {

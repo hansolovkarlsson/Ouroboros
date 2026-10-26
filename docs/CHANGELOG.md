@@ -1079,6 +1079,28 @@ cluster would extend the last run; it now refuses only when the record
 cannot take the cluster. Third, a failed link of the root's new cluster
 leaked it; the cluster is now given back.
 
+**FAT32 long names outside ASCII are names of their own (2026-10-26).** fsd
+read each long name (LFN) as ASCII, with `?` for every UTF-16 unit outside
+it, and looked names up by that, so `café` and `cafè` were both `caf?` and
+the first answered for both. exFAT had the same collision until 2026-10-21.
+The write side was broken too: `put_lfn_chars` wrote a name's UTF-8 bytes as
+one unit each, so a name fsd made outside ASCII went to disk as other
+characters and no lookup of it found it. Now the walk keeps the units and
+renders them as exFAT does: UTF-8, or ASCII with `?`s for a name holding an
+unpaired surrogate or longer than 255 bytes of UTF-8. A lookup compares that
+rendering ignoring ASCII case, and a create writes the name's UTF-16 units.
+exFAT's rendering moved to `utf16.rs`, which both arms use. `make
+test-fat32-names` plants five such names on a copy of `esp.img` and boots it
+once. It fails with main's `fat32.rs`, with the read side alone reverted and
+with the write side alone reverted. Case outside ASCII is still not folded
+on either arm (`CAFÉ` does not find `café`). The high review the same day
+found two more defects, both now fixed and graded by the rig. A name holding
+U+FFFF was written with that unit, which is LFN padding, so it read back cut
+short. And a run of LFN entries was not restarted at its first entry, so an
+orphaned entry's units could run on after the next name. The rig now reports
+a firmware stall as INCONCLUSIVE rather than as a pass. The two names now
+share one conversion to UTF-16 (`utf16::units_of`).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

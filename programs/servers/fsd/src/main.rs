@@ -36,6 +36,7 @@ mod ext2;
 mod fat32;
 mod partition;
 mod proc;
+mod utf16;
 mod vfs;
 
 use core::arch::asm;
