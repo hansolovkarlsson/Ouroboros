@@ -36,15 +36,25 @@ UTF-8 on the serial line:
 - `cat` of the overlong name's and `lone?`'s listings print their bytes,
   and `touch /lone?` makes no second file;
 - `cp /grave` to a name with a pair (U+1F601) makes it, and `cat` of it
-  prints `grave`.
+  prints `grave`;
+- `touch` of `a` U+FFFF `b` is refused (U+FFFF is the unit an LFN entry pads
+  with, so written it ended the name there, which then answered as `a`);
+- `cat /OrphanedNames` prints `orphan`, and `ls /` lists it whole: the host
+  plants, after its first fsck, a stray LFN entry flagged the last of a run
+  of two, another name's checksum, just before that name's own run of one,
+  and deletes it again before the last fsck (a run starts afresh at its
+  last-flagged entry, or the stray's units ran on after the name's).
 
 After the boot, on the host: `grave` names `cafè`'s cluster, `café`'s entry
 and bytes are as planted, no long name `cafè` or `cafë` is left, the copy's
 long name is exactly `new` + U+1F601 in five UTF-16 units (the write side),
 one long name `lone` + a lone surrogate, and fsck_msdos -n passes. No fault
-lines. Fails with main's fat32.rs before 2026-10-26 (no UTF-8 name found,
-the listing `caf?`, the copy's name written as its UTF-8 bytes) and with
-the read side alone fixed (the copy found by no lookup). About a minute.
+lines; a boot QEMU's firmware never starts is INCONCLUSIVE (exit 100).
+Fails with main's fat32.rs before 2026-10-26 (no UTF-8 name found, the
+listing `caf?`, the copy's name written as its UTF-8 bytes), with the read
+side alone reverted, with the write side alone (the copy found by no
+lookup), with U+FFFF let through and with the run not reset at its
+last-flagged entry (the high review of 2026-10-26). About a minute.
 Run it whenever FAT32's lfn_chars, put_lfn_chars, build_name_entries,
 walk_dir's long-name assembly, insert_named_entry or names_match changes,
 or utf16.rs does.

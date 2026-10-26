@@ -2692,8 +2692,9 @@ test-exfat-names: image-exfat
 # host plants cafe with an acute and with a grave accent, a name with a
 # surrogate pair, one of 300 bytes of UTF-8 and one with an unpaired
 # surrogate, as LFN runs; typed as UTF-8, each is listed and read as its own,
-# the last two by their `?` renderings, and a name fsd makes outside ASCII is
-# written as its UTF-16 units. One boot, about a minute; run it whenever
+# the last two by their `?` renderings, a name fsd makes outside ASCII is
+# written as its UTF-16 units, U+FFFF is refused in one, and an orphaned LFN
+# entry does not run on into the next name. One boot, about a minute; run it whenever
 # FAT32's lfn_chars, put_lfn_chars, build_name_entries, walk_dir's long-name
 # assembly, insert_named_entry or names_match changes, or utf16.rs does.
 test-fat32-names: image

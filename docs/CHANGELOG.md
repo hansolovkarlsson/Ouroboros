@@ -1093,7 +1093,13 @@ exFAT's rendering moved to `utf16.rs`, which both arms use. `make
 test-fat32-names` plants five such names on a copy of `esp.img` and boots it
 once. It fails with main's `fat32.rs`, with the read side alone reverted and
 with the write side alone reverted. Case outside ASCII is still not folded
-on either arm (`CAFÉ` does not find `café`).
+on either arm (`CAFÉ` does not find `café`). The high review the same day
+found two more defects, both now fixed and graded by the rig. A name holding
+U+FFFF was written with that unit, which is LFN padding, so it read back cut
+short. And a run of LFN entries was not restarted at its first entry, so an
+orphaned entry's units could run on after the next name. The rig now reports
+a firmware stall as INCONCLUSIVE rather than as a pass. The two names now
+share one conversion to UTF-16 (`utf16::units_of`).
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
