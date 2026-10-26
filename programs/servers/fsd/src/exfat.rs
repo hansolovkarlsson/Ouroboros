@@ -251,6 +251,29 @@ fn allocation(raw: &[u8]) -> Option<Alloc> {
 /// bounds [`Fs::locate_tables`]' scan of the root.
 const DIR_MAX_BYTES: u64 = 256 << 20;
 
+/// The most runs of consecutive clusters [`Fs::root_runs`] records the
+/// root's chain in. A root grows a cluster at a time, each a new run when
+/// something was allocated since, so a root of 4 KiB clusters holding some
+/// 2,500 files in as many runs as it has clusters fits; one in more is not
+/// recorded whole, and the volume is read-only ([`Fs::record_root`]).
+const ROOT_RUNS: usize = 64;
+
+/// What a cluster's sectors are read or written for, which [`Fs::sector_of`]
+/// holds the cluster to: the root directory's slots, the allocation bitmap,
+/// or anything else (a file's bytes, a subdirectory's slots).
+#[derive(Clone, Copy)]
+enum Holder {
+    Root,
+    Bitmap,
+    Data,
+}
+
+/// Whether the runs of `n` clusters from `a` and of `m` from `b` share a
+/// cluster; a run starting below cluster 2, or of none, shares nothing.
+fn runs_meet(a: u32, n: u64, b: u32, m: u64) -> bool {
+    a >= 2 && b >= 2 && n > 0 && m > 0 && (a as u64) < b as u64 + m && (b as u64) < a as u64 + n
+}
+
 /// The most bytes a listed name takes: 255, as every other arm's names (ext2's
 /// are bytes, FAT32's rendered a byte a unit), so a name always fits one
 /// `NP_READDIR` page (512 bytes) and a path a lookup takes. A name whose UTF-8
@@ -437,6 +460,20 @@ pub struct Fs {
     /// own clusters, which [`free_data`](Self::free_data) never frees.
     upcase_first_cluster: u32,
     upcase_bytes: u64,
+    /// The root directory's chain as runs of consecutive clusters (first,
+    /// count), the first `root_len` of them: recorded at mount
+    /// ([`record_root`](Self::record_root)) and extended where the root grows
+    /// ([`grow_extent`](Self::grow_extent)). With the bitmap and the up-case
+    /// table, the volume's own clusters ([`is_system`](Self::is_system)).
+    /// Until 2026-10-26 only the root's first cluster was known, so a damaged
+    /// run over a later one was freed and handed out again, and written.
+    root_runs: [(u32, u32); ROOT_RUNS],
+    root_len: usize,
+    /// Whether `root_runs` holds the root's whole chain. When it does not (a
+    /// loop, a chain past [`DIR_MAX_BYTES`], or more runs than
+    /// [`ROOT_RUNS`]) the volume is read-only, and the root is read wherever
+    /// its chain goes but the bitmap and up-case table.
+    root_whole: bool,
     /// Where the last read's walk along a file's clusters ended, so the next
     /// read of the same file at or past it resumes there - `fat32::Fs`'s
     /// `read_cursor`, for the same reason. A file `fsd` writes is always
@@ -572,6 +609,9 @@ impl Fs {
             bitmap_bytes: 0,
             upcase_first_cluster: 0,
             upcase_bytes: 0,
+            root_runs: [(0, 0); ROOT_RUNS],
+            root_len: 0,
+            root_whole: false,
             read_cursor: None,
             write_cursor: None,
             fat_cache: None,
@@ -580,10 +620,19 @@ impl Fs {
         if !fs.in_heap(fs.root_cluster) {
             return Err(Error::NotExFat);
         }
+        // The root's clusters first: the table scan reads them through
+        // `sector_of`, and `check_extents` holds the tables off them.
+        fs.root_whole = fs.record_root()?;
         // Best-effort: reads don't need the bitmap, so a volume without one
         // (malformed) still mounts read-only ([`writable`](Self::writable)).
         fs.locate_tables()?;
         fs.check_extents();
+        // A root not recorded whole leaves clusters of its own that no check
+        // knows, which an allocation could take and a write reach: read-only,
+        // as a volume with no bitmap is.
+        if !fs.root_whole {
+            (fs.bitmap_first_cluster, fs.bitmap_bytes) = (0, 0);
+        }
         // A volume of two FATs (TexFAT) keeps two bitmaps too, and
         // VolumeFlags' ActiveFat names the live pair; fsd reads the first
         // FAT and the first bitmap entry, which may be the stale pair, and
@@ -597,8 +646,72 @@ impl Fs {
         Ok(fs)
     }
 
+    /// Record the root's chain in [`root_runs`](Self::root_runs), answering
+    /// whether it is all there. A walk of FAT entries alone, through the FAT
+    /// cache, so a root of a few clusters costs a FAT sector read.
+    ///
+    /// A root whose chain loops on itself ended no walk, and the mount hung
+    /// (the resumed max review of 2026-10-23); bounding the walk by the
+    /// heap's cluster count still read a 128 GB stick's sectors a quarter of
+    /// a billion times (the high review). So the walk stops where the chain
+    /// comes back to a cluster it passed (Brent's test: a mark moved to the
+    /// walk at every power of two of steps, so a loop is met within twice
+    /// its length and lead-in), and at the largest directory the format
+    /// allows, [`DIR_MAX_BYTES`]; the root is then not whole.
+    fn record_root(&mut self) -> Result<bool, Error> {
+        let most = (DIR_MAX_BYTES / self.cluster_bytes()).min(self.cluster_count as u64);
+        let mut cluster = self.root_cluster;
+        let (mut mark, mut power, mut steps) = (cluster, 1u64, 0u64);
+        for _ in 0..most {
+            if !self.root_push(cluster) {
+                return Ok(false);
+            }
+            match self.next_cluster(cluster)? {
+                Some(next) => cluster = next,
+                None => return Ok(true),
+            }
+            if cluster == mark {
+                return Ok(false); // the chain loops
+            }
+            steps += 1;
+            if steps == power {
+                (mark, power, steps) = (cluster, power * 2, 0);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Add `cluster` to the root's record, after the last: the last run made
+    /// longer when it follows it, else a new run. False when there is no
+    /// room for one.
+    fn root_push(&mut self, cluster: u32) -> bool {
+        if let Some(last) = self.root_runs[..self.root_len].last_mut() {
+            if last.0 as u64 + last.1 as u64 == cluster as u64 {
+                last.1 += 1;
+                return true;
+            }
+        }
+        if self.root_len == ROOT_RUNS {
+            return false;
+        }
+        self.root_runs[self.root_len] = (cluster, 1);
+        self.root_len += 1;
+        true
+    }
+
+    /// Whether `cluster` is among the root's recorded clusters.
+    fn in_root(&self, cluster: u32) -> bool {
+        self.root_runs[..self.root_len].iter().any(|&(f, n)| cluster >= f && cluster - f < n)
+    }
+
+    /// Whether the run of `n` clusters from `first` meets the root's.
+    fn meets_root(&self, first: u32, n: u64) -> bool {
+        self.root_runs[..self.root_len].iter().any(|&(f, m)| runs_meet(first, n, f, m as u64))
+    }
+
     /// Find the allocation bitmap and the up-case table by scanning the root
-    /// directory for their `0x81` and `0x82` entries. Records each one's first
+    /// directory for their `0x81` and `0x82` entries, over the clusters
+    /// [`record_root`](Self::record_root) recorded. Records each one's first
     /// cluster and byte length, until both are found or the directory ends;
     /// leaves them `0` if one is not found. The first entry of each is taken,
     /// damaged or not: a first bitmap entry naming cluster 0 was passed over
@@ -606,55 +719,35 @@ impl Fs {
     /// (the high review of 2026-10-24); [`check_extents`](Self::check_extents)
     /// drops a damaged one. Which of a two-FAT volume's is live is not read
     /// here: such a volume is read-only ([`mount_at`](Self::mount_at)).
-    ///
-    /// A root whose chain loops on itself ended no scan, and the mount hung
-    /// (the resumed max review of 2026-10-23); bounding the scan by the
-    /// heap's cluster count still read a 128 GB stick's sectors a quarter of
-    /// a billion times (the high review). So the scan stops where the chain
-    /// comes back to a cluster it passed (Brent's test: a mark moved to the
-    /// walk at every power of two of steps, so a loop is met within twice
-    /// its length and lead-in), and at the largest directory the format
-    /// allows, [`DIR_MAX_BYTES`]; its tables are then the ones found.
     fn locate_tables(&mut self) -> Result<(), Error> {
         let (mut bitmap, mut upcase) = (false, false);
-        let most = (DIR_MAX_BYTES / self.cluster_bytes()).min(self.cluster_count as u64);
-        let mut cluster = self.root_cluster;
-        let (mut mark, mut power, mut steps) = (cluster, 1u64, 0u64);
-        for _ in 0..most {
-            let lba = self.cluster_to_lba(cluster);
-            for s in 0..self.sectors_per_cluster {
-                let mut buf = [0u8; SECTOR_SIZE];
-                self.disk.read_sector((lba + s) as u64, &mut buf)?;
-                for raw in buf.chunks_exact(ENTRY_SIZE) {
-                    match raw[0] {
-                        0x00 => return Ok(()), // end of directory - no bitmap
-                        t @ (ET_ALLOC_BITMAP | ET_UPCASE) => {
-                            let (first, bytes) = extent(raw);
-                            if t == ET_ALLOC_BITMAP && !bitmap {
-                                bitmap = true;
-                                (self.bitmap_first_cluster, self.bitmap_bytes) = (first, bytes);
-                            } else if t == ET_UPCASE && !upcase {
-                                upcase = true;
-                                (self.upcase_first_cluster, self.upcase_bytes) = (first, bytes);
+        for r in 0..self.root_len {
+            let (first, n) = self.root_runs[r];
+            for cluster in first..first + n {
+                let lba = self.sector_of(cluster, Holder::Root)?;
+                for s in 0..self.sectors_per_cluster {
+                    let mut buf = [0u8; SECTOR_SIZE];
+                    self.disk.read_sector((lba + s) as u64, &mut buf)?;
+                    for raw in buf.chunks_exact(ENTRY_SIZE) {
+                        match raw[0] {
+                            0x00 => return Ok(()), // end of directory - no bitmap
+                            t @ (ET_ALLOC_BITMAP | ET_UPCASE) => {
+                                let (first, bytes) = extent(raw);
+                                if t == ET_ALLOC_BITMAP && !bitmap {
+                                    bitmap = true;
+                                    (self.bitmap_first_cluster, self.bitmap_bytes) = (first, bytes);
+                                } else if t == ET_UPCASE && !upcase {
+                                    upcase = true;
+                                    (self.upcase_first_cluster, self.upcase_bytes) = (first, bytes);
+                                }
+                                if bitmap && upcase {
+                                    return Ok(());
+                                }
                             }
-                            if bitmap && upcase {
-                                return Ok(());
-                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-            }
-            match self.next_cluster(cluster)? {
-                Some(next) => cluster = next,
-                None => return Ok(()),
-            }
-            if cluster == mark {
-                return Ok(()); // the chain loops
-            }
-            steps += 1;
-            if steps == power {
-                (mark, power, steps) = (cluster, power * 2, 0);
             }
         }
         Ok(())
@@ -664,7 +757,8 @@ impl Fs {
     /// entries give them, to the volume: each a run inside the heap, the
     /// bitmap at least a bit a cluster (`ceil(ClusterCount / 8)` bytes; the
     /// spec, Linux and exfat-fuse take a longer one), the up-case table at
-    /// most 65,536 two-byte entries, neither on the root's first cluster.
+    /// most 65,536 two-byte entries, neither on a cluster of the root's
+    /// recorded chain (its first alone until 2026-10-26).
     /// One that is not is taken as absent: a bitmap so is no bitmap (the
     /// volume is read-only, [`writable`](Self::writable)), an up-case table
     /// so is one [`is_system`](Self::is_system) does not count. Two on each
@@ -676,13 +770,13 @@ impl Fs {
         let (cb, count) = (self.cluster_bytes(), self.cluster_count);
         let fits = |first: u32, bytes: u64| bytes > 0 && run_fits(first, bytes, cb, count);
         let covers = |first: u32, bytes: u64, c: u32| run_has(first, bytes, cb, c);
-        let root = self.root_cluster;
+        let on_root = |fs: &Self, first: u32, bytes: u64| fs.meets_root(first, bytes.div_ceil(cb));
         let (bf, bb) = (self.bitmap_first_cluster, self.bitmap_bytes);
-        if bb < self.cluster_count.div_ceil(8) as u64 || !fits(bf, bb) || covers(bf, bb, root) {
+        if bb < self.cluster_count.div_ceil(8) as u64 || !fits(bf, bb) || on_root(self, bf, bb) {
             (self.bitmap_first_cluster, self.bitmap_bytes) = (0, 0);
         }
         let (uf, ub) = (self.upcase_first_cluster, self.upcase_bytes);
-        if ub > 2 * 65_536 || !fits(uf, ub) || covers(uf, ub, root) {
+        if ub > 2 * 65_536 || !fits(uf, ub) || on_root(self, uf, ub) {
             (self.upcase_first_cluster, self.upcase_bytes) = (0, 0);
         }
         let ((bf, bb), (uf, ub)) = ((self.bitmap_first_cluster, self.bitmap_bytes), (self.upcase_first_cluster, self.upcase_bytes));
@@ -872,8 +966,33 @@ impl Fs {
         Ok(())
     }
 
-    fn cluster_to_lba(&self, cluster: u32) -> u32 {
-        self.cluster_heap_lba + (cluster - 2) * self.sectors_per_cluster
+    /// The first sector of `cluster`, read or written for `holder`: the one
+    /// place a cluster becomes a sector, so the one check of it. Refused, an
+    /// I/O error, outside the heap; for the bitmap, anywhere but the bitmap;
+    /// for the root, on the bitmap or the up-case table, or off the root's
+    /// recorded chain when it is whole; for anything else, on any of the
+    /// volume's own clusters ([`is_system`](Self::is_system)).
+    ///
+    /// Each review of 2026-10-23 and 2026-10-24 found one more path reaching
+    /// the volume's own clusters through a damaged set or link and added the
+    /// check there (a contiguous run, a chained file's first cluster, a
+    /// link); a directory's set written through a damaged chain
+    /// (`write_set_at`) and a read still reached the bitmap until
+    /// 2026-10-26, when the check came here. The checks on a link
+    /// (`file_step`, `ensure_chained`, `write_at`'s first cluster) stay: a
+    /// walk passes clusters whose sectors it never asks for, and extends a
+    /// chain from the last one's FAT entry.
+    fn sector_of(&self, cluster: u32, holder: Holder) -> Result<u32, Error> {
+        let ok = self.in_heap(cluster)
+            && match holder {
+                Holder::Bitmap => self.is_bitmap(cluster),
+                Holder::Root => !self.is_table(cluster) && (self.in_root(cluster) || !self.root_whole),
+                Holder::Data => !self.is_system(cluster),
+            };
+        if !ok {
+            return Err(Error::Io(DiskError::Io));
+        }
+        Ok(self.cluster_heap_lba + (cluster - 2) * self.sectors_per_cluster)
     }
 
     /// The next cluster in a FAT chain, or `None` at the end. exFAT FAT entries
@@ -999,8 +1118,9 @@ impl Fs {
         let mut name_cap = 0usize; // total chars the set declares (NameLength)
         let mut name_len = 0usize; // chars filled so far
 
+        let holder = if rule.root { Holder::Root } else { Holder::Data };
         loop {
-            let lba = self.cluster_to_lba(cluster);
+            let lba = self.sector_of(cluster, holder)?;
             for s in 0..self.sectors_per_cluster {
                 let mut buf = [0u8; SECTOR_SIZE];
                 self.disk.read_sector((lba + s) as u64, &mut buf)?;
@@ -1228,30 +1348,34 @@ impl Fs {
     }
 
     /// One of the volume's own clusters: the allocation bitmap's, the up-case
-    /// table's, or the root directory's first. No set names them, so an
-    /// allocation that reaches one is damage, and freeing it would let the
-    /// allocator hand out its own bitmap (the max review of 2026-10-23, after
-    /// ext2's `is_metadata`). The root's later clusters are not known here
-    /// without a walk of its chain; a damaged run can still reach them, as it
-    /// can any live file's.
+    /// table's, or the root directory's ([`root_runs`](Self::root_runs)). No
+    /// set names them, so an allocation that reaches one is damage, and
+    /// freeing it would let the allocator hand out its own bitmap (the max
+    /// review of 2026-10-23, after ext2's `is_metadata`). Until 2026-10-26
+    /// the root's first cluster alone was known.
     fn is_system(&self, cluster: u32) -> bool {
-        let in_run = |first: u32, bytes: u64| run_has(first, bytes, self.cluster_bytes(), cluster);
-        cluster == self.root_cluster
-            || in_run(self.bitmap_first_cluster, self.bitmap_bytes)
-            || in_run(self.upcase_first_cluster, self.upcase_bytes)
+        self.in_root(cluster) || self.is_table(cluster)
+    }
+
+    /// One of the bitmap's or the up-case table's clusters.
+    fn is_table(&self, cluster: u32) -> bool {
+        self.is_bitmap(cluster) || run_has(self.upcase_first_cluster, self.upcase_bytes, self.cluster_bytes(), cluster)
+    }
+
+    /// One of the bitmap's clusters.
+    fn is_bitmap(&self, cluster: u32) -> bool {
+        run_has(self.bitmap_first_cluster, self.bitmap_bytes, self.cluster_bytes(), cluster)
     }
 
     /// Whether the contiguous run of `n` clusters from `first` holds one of
     /// the volume's own ([`is_system`](Self::is_system)), tested against
-    /// their three runs at once, where it asked `is_system` a cluster at a
-    /// time (the fourth high review of 2026-10-24).
+    /// their runs at once, where it asked `is_system` a cluster at a time
+    /// (the fourth high review of 2026-10-24).
     fn meets_system(&self, first: u32, n: u64) -> bool {
         let cb = self.cluster_bytes();
-        let meets =
-            |f: u32, m: u64| f >= 2 && m > 0 && (first as u64) < f as u64 + m && (f as u64) < first as u64 + n;
-        meets(self.root_cluster, 1)
-            || meets(self.bitmap_first_cluster, self.bitmap_bytes.div_ceil(cb))
-            || meets(self.upcase_first_cluster, self.upcase_bytes.div_ceil(cb))
+        self.meets_root(first, n)
+            || runs_meet(first, n, self.bitmap_first_cluster, self.bitmap_bytes.div_ceil(cb))
+            || runs_meet(first, n, self.upcase_first_cluster, self.upcase_bytes.div_ceil(cb))
     }
 
     /// Resolve an absolute, `/`-separated path to its entry set. Matching is
@@ -1438,7 +1562,7 @@ impl Fs {
 
         let mut written = 0usize;
         'clusters: loop {
-            let lba = self.cluster_to_lba(cluster);
+            let lba = self.sector_of(cluster, Holder::Data)?;
             for s in 0..self.sectors_per_cluster {
                 if written >= want {
                     break 'clusters;
@@ -1521,7 +1645,7 @@ impl Fs {
     /// Zeroes every sector of a cluster - a fresh directory cluster must read
     /// back as all-`0x00` so its first slot is the end-of-directory marker.
     fn zero_cluster(&mut self, cluster: u32) -> Result<(), Error> {
-        let lba = self.cluster_to_lba(cluster);
+        let lba = self.sector_of(cluster, Holder::Data)?;
         let zero = [0u8; SECTOR_SIZE];
         for s in 0..self.sectors_per_cluster {
             self.disk.write_sector((lba + s) as u64, &zero)?;
@@ -1537,13 +1661,15 @@ impl Fs {
     /// so a damaged entry (or none: a first cluster of 0, which the free
     /// path once took to sector `heap - 2 clusters`) cannot reach past the
     /// heap (the second review of #330; FAT32's `cluster_to_lba` the same).
+    /// The heap's bound is [`sector_of`](Self::sector_of)'s.
     fn bitmap_sector_lba(&self, byte_index: u64) -> Result<u64, Error> {
-        let cluster_bytes = self.sectors_per_cluster as u64 * SECTOR_SIZE as u64;
+        let cluster_bytes = self.cluster_bytes();
         let cluster = self.bitmap_first_cluster as u64 + byte_index / cluster_bytes;
-        if byte_index >= self.bitmap_bytes || !self.in_heap(self.bitmap_first_cluster) || cluster > u32::MAX as u64 || !self.in_heap(cluster as u32) {
+        if byte_index >= self.bitmap_bytes || cluster > u32::MAX as u64 {
             return Err(Error::Io(DiskError::Io));
         }
-        Ok(self.cluster_to_lba(self.bitmap_first_cluster) as u64 + byte_index / SECTOR_SIZE as u64)
+        let lba = self.sector_of(cluster as u32, Holder::Bitmap)?;
+        Ok(lba as u64 + (byte_index % cluster_bytes) / SECTOR_SIZE as u64)
     }
 
     /// Allocate one cluster: find a free bit in the allocation bitmap, set it,
@@ -1694,7 +1820,10 @@ impl Fs {
             }
         }
         let local = slot - cur.base;
-        let lba = self.cluster_to_lba(cur.cluster) as u64 + (local / SLOTS_PER_SECTOR) as u64;
+        // The root's slots are the root's, by `extent_rule`'s test of a
+        // directory for the root.
+        let holder = if cur.first == self.root_cluster && !cur.contiguous { Holder::Root } else { Holder::Data };
+        let lba = self.sector_of(cur.cluster, holder)? as u64 + (local / SLOTS_PER_SECTOR) as u64;
         Ok(Some((lba, (local % SLOTS_PER_SECTOR) * ENTRY_SIZE)))
     }
 
@@ -1736,9 +1865,17 @@ impl Fs {
     fn grow_extent(&mut self, e: &mut DirEntry, room: &mut Room) -> Result<(), Error> {
         let cluster_bytes = self.cluster_bytes();
         let Room::Sub(at, x) = room else {
+            // The new cluster joins the root's record, or no write could
+            // reach it (`sector_of`); refused while the record has no room
+            // for a run, before anything is taken.
+            if self.root_len == ROOT_RUNS {
+                return Err(Error::DiskFull);
+            }
             let root = self.dir_extent(e.first_cluster, false, 0)?;
             let new = self.alloc_zeroed()?;
-            return self.write_fat_entry(root.tail, new);
+            self.write_fat_entry(root.tail, new)?;
+            self.root_push(new);
+            return Ok(());
         };
         let at = *at;
         if x.clusters == 0 {
@@ -2090,7 +2227,7 @@ impl Fs {
             } else {
                 self.write_fat_entry(prev, cluster)?;
             }
-            let lba = self.cluster_to_lba(cluster);
+            let lba = self.sector_of(cluster, Holder::Data)?;
             for s in 0..self.sectors_per_cluster {
                 let mut sector = [0u8; SECTOR_SIZE];
                 let start = written;
@@ -2110,7 +2247,10 @@ impl Fs {
     /// chain while that is still the file's own (`owned`), else one appended.
     /// A link to one of the volume's own clusters is damage, refused before
     /// the write reaches it: it wrote the file's bytes into the bitmap (the
-    /// fourth high review of 2026-10-24).
+    /// fourth high review of 2026-10-24). [`sector_of`](Self::sector_of)
+    /// would refuse the sector, but a walk passes a cluster it does not
+    /// write, and the step after it would link a new cluster from the
+    /// bitmap's FAT entry.
     fn file_step(&mut self, cluster: u32, owned: bool) -> Result<u32, Error> {
         match self.next_cluster(cluster)? {
             Some(next) if owned && self.is_system(next) => Err(Error::Io(DiskError::Io)),
@@ -2373,7 +2513,9 @@ impl Fs {
         // refused before anything is written, as `ensure_chained` refuses a
         // contiguous run over one and `file_step` a link to one: a chained
         // file on the bitmap's cluster took the write into it (the fourth
-        // high review of 2026-10-24).
+        // high review of 2026-10-24). `sector_of` refuses its sectors too,
+        // but a write starting at its end writes none of them, and links a
+        // new cluster from its FAT entry.
         if self.is_system(entry.first_cluster) {
             return Err(Error::Io(DiskError::Io));
         }
@@ -2411,7 +2553,7 @@ impl Fs {
                 cluster_pos += cluster_bytes;
             }
             let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
-            let sector_lba = self.cluster_to_lba(cluster) as u64 + sector_in_cluster;
+            let sector_lba = self.sector_of(cluster, Holder::Data)? as u64 + sector_in_cluster;
             let sector_start = cluster_pos + sector_in_cluster * SECTOR_SIZE as u64;
             let in_off = (pos - sector_start) as usize;
             let n = ((SECTOR_SIZE - in_off) as u64).min(write_end - pos) as usize;
