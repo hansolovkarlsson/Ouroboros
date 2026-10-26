@@ -989,10 +989,10 @@ fails with the read, the gap or the Stream's two lengths each as on main.
 reported a boot QEMU's firmware never started as a FAIL, and each passed on a
 rerun. All four rigs that count disk reads (those two, `test-listing-walk`
 and `test-dir-scan`) boot through `scripts/disktrace.py`, whose `boot` now
-requires the rig and a case name for every boot. It sends each boot through
-`drive-qemu.py`'s `boot_stalled` under `rig:case`, so every boot keeps its
-own stall history, and answers None for a stall, keeping the boot's QEMU log
-beside its transcript. `disktrace.settle` turns a case's answers into its
+requires the rig and a name of its own for every boot. It sends each boot
+through `drive-qemu.py`'s `boot_stalled` under `rig:name`, so every boot keeps
+its own stall history, and answers None for a stall, keeping the boot's QEMU
+log beside its transcript. `Tally.settle` turns a case's answers into its
 problems: a boot that ran and failed fails the case whatever its other boots
 did, and the case, the boots a rig compares, is INCONCLUSIVE only when a boot
 stalled and none failed.
@@ -1003,12 +1003,13 @@ max review of #350 found it. The second max review found the same defect in
 three of the four rigs: problems a rig found after the boots (test-write-walk's
 inspect of the copy, test-spawn-reads' chain checks, test-dir-scan's read and
 write bounds) sat outside the boots' answers, so a stall beside them still
-made the case INCONCLUSIVE. Now `boot` takes the rig's `inspect(copy)` and
-`check(lines, count)` and folds what they return into the boot's answer, so
+made the case INCONCLUSIVE. Now `boot` takes the rig's `inspect(copy,
+problems)`, which appends to the boot's problems, and `check(lines, count)`,
+whose return it adds, so
 nothing a rig grades in one boot can sit outside it; a `Tally` counts failed
 cases and stalled boots for the verdict and refuses a case settled and never
 closed; a kept stall's QEMU log is gzipped. `make test` runs `disktrace.py
---self-test`, which drives `boot`, `settle` and `Tally` with a fake guest that
+--self-test`, which drives `boot`, `Tally` and `per_run` with a fake guest that
 ends its transcript with QEMU's signal line once stopped, as QEMU does; each
 of its checks was failed by a mutant, and each rig's own case code was driven
 with a failed boot beside a stall, in either order, to exit 1. The third max
@@ -1022,7 +1023,19 @@ stall in every rig's output. `boot_stalled` refuses a label used twice in a
 run or holding a space; `Tally.settle` hands back a case only `close` takes,
 once; an inspect's findings are kept when it raises. Of 37 mutants, the self-
 tests and a harness of each rig's case code fail 36; the last changes no
-verdict.
+verdict. The fourth max review found one regression: `test-volume-bound`'s
+`NAME...` command line crashed on a name given twice, after both boots, on
+the refusal of a reused label; the rig now runs each named boot once.
+`per_run` refuses a sector the graded boot read fewer times, which Counter
+subtraction had dropped as 0 (no measured pair has one); an inspect's error
+is a finding only when it is SystemExit or an error reading the image, and a
+bug in a rig propagates with its traceback; the free `settle` is private,
+`Tally.settle` the way in; an empty label is refused. The self-tests now see
+a copy that shares the source's file, an iterator or an equal case given to
+the Tally, and the USB stall with QEMU's line after it; 24 mutants of that
+round, all failed. `aborts()` no longer says QEMU buffers its `-d` log:
+QEMU 11.1.2 writes it a line at a time (checked by reading it mid-boot and
+after a SIGKILL).
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

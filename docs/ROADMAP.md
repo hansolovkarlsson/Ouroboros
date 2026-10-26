@@ -2240,8 +2240,10 @@ The small open tails those arcs deliberately left:
 >       case for it. Found by the max review of #350.
 >       *Done 2026-10-25 on #350: `firmware_stalled` strips QEMU's signal
 >       line wherever it lands (after a prompt, in the capture above), with
->       four self-test cases; taking the strip out fails them. Read before
->       or after the stop, a stall now classifies the same.*
+>       self-test cases of each stall read after the stop; taking the strip
+>       out fails them (the X64 case alone until the fourth max review added
+>       the USB one). Read before or after the stop, a stall now classifies
+>       the same.*
 > - [ ] **new** **The rigs left to move onto `boot_stalled` will each
 >       rebuild the stall accounting.** About 28 rigs remain, several
 >       booting more than once (`test-bootstick`, `test-include`,
@@ -2257,7 +2259,28 @@ The small open tails those arcs deliberately left:
 >       disk-trace rigs' per-boot logs in `build/` are never removed, 26 of
 >       them (55.7 MB) after a full run, beside 7 under the names before
 >       #350 that only `make clean` clears. Found by the third max review of
->       #350.
+>       #350. The fourth added four for the same move: each rig's case code
+>       is the same five steps by hand (settle, compare if every boot ran,
+>       print, close), which one `Tally` call taking the comparison would
+>       replace; nothing in `make test` runs the real `Guest.aborts()` or
+>       `stop()` (a stub `qemu-system-aarch64` on PATH, printing a canned
+>       console and QEMU's signal line on SIGTERM, would); a rerun after
+>       INCONCLUSIVE reboots every case, where `test-volume-bound` takes
+>       boot names on its command line and the disk-trace rigs could too;
+>       and a QEMU killed from another shell during the firmware is now
+>       taken for a stall, since the signal line is passed over whoever
+>       sent it (low: nothing does that).
+> - [ ] **new** **The firmware stall may follow the exFAT image, or the disk trace.** The
+>       four stalls `scratch/firmware-stall-runs.log` holds (since
+>       2026-10-22) were all boots of a copy of `espexfat.img`: 4 of 508
+>       exFAT boots, 0 of 420 others. Three were the disk-trace rigs', 3 of
+>       their 72 exFAT boots, against 1 of 436 for `test-long-set` and
+>       `test-valid-length`, which boot the same image without QEMU's
+>       virtio-blk trace; so the image, the trace, or both. A loop of boots
+>       of `espexfat.img` against `esp.img`, with and without
+>       `-trace enable=virtio_blk_handle_read`, would say which, a lead on
+>       the stall's cause. Seen by the fourth max review of #350 (3 of 110
+>       against 1 of 818), split by image when it was recorded.
 > - [x] **fix** **Nothing stops a plain `write32` to a register with RsvdP
 >       bits.** USBCMD, CONFIG, CRCR, ERSTSZ and ERSTBA go through
 >       `write32_rsvdp`/`write64_rsvdp` today, by convention. Make the

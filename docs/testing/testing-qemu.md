@@ -203,12 +203,13 @@ stopped by the rig's own disk, and its checks are graded and fail. `make test` r
 `test-ext2-blocks`, `test-long-set` and `test-valid-length` (built with it,
 2026-10-22), and since 2026-10-25 the four disk-trace rigs, `test-write-walk`,
 `test-spawn-reads`, `test-listing-walk` and `test-dir-scan`, through
-`disktrace.boot`, which requires a name of its own for every boot (a label
-used twice in one run, or holding a space, is refused) and folds what the
-rig's `inspect` (of the guest's disk) and `check` (of the transcript and
-reads) find into that boot's answer. A case, the boots a rig compares, is
-INCONCLUSIVE only when a boot stalled and none of its boots ran and failed
-(`disktrace.settle`, counted by `disktrace.Tally`), and the stalled boot's
+`disktrace.boot`, which requires a name of its own for every boot
+(`boot_stalled` refuses a label used twice in one run, empty, or holding a
+space) and folds what the rig's `inspect` (of the guest's disk) and `check`
+(of the transcript and reads) find into that boot's answer. A case, the
+boots a rig compares, is INCONCLUSIVE only when a boot stalled and none of
+its boots ran and failed (`disktrace.Tally.settle`, which counts the stalls
+for the verdict), and the stalled boot's
 QEMU log is kept gzipped beside its transcript; `make test` runs
 `disktrace.py --self-test`. The other rigs still grade a stall as failed
 checks, and `Guest.aborts()` prints `QEMU's firmware never started the
