@@ -234,11 +234,11 @@ def main() -> int:
         problems = tally.settle([base_boot, listed_boot])
         if problems is None:
             continue
-        shown = "? sectors"
+        shown, counts = "? sectors", None
         if base_boot and listed_boot:
             differ, counts = disktrace.per_run(base_boot[2], listed_boot[2], RUNS)
             problems += differ
-        if base_boot and listed_boot and counts is not None:
+        if counts is not None:
             per = list(counts.values())
             common = math.gcd(*per) if per else 0
             total = sum(per)

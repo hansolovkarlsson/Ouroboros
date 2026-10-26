@@ -62,8 +62,8 @@ def boot(rig, name, source, image, steps, inspect=None, check=None, writes=None)
     `Tally.settle` sees it whatever the case's other boots did: `inspect(copy,
     problems)`, called after a boot whose steps all ran and before the copy
     is removed, appends what it finds on the guest's disk (a SystemExit, or
-    an error reading the image, ValueError, IndexError (a short read
-    indexed), OSError or struct.error, is a
+    an error a damaged disk can make a parser raise, ArithmeticError,
+    LookupError, ValueError, OSError, struct.error or RecursionError, is a
     problem too, beside what it appended first; any other exception is a
     bug in the rig and propagates), and `check(lines, count)`
     returns the problems in the boot's transcript and reads. The boot is
@@ -97,7 +97,8 @@ def boot(rig, name, source, image, steps, inspect=None, check=None, writes=None)
             # the rig's own model (a TypeError, say) keeps its traceback.
             try:
                 inspect(copy, problems)
-            except (ValueError, IndexError, OSError, struct.error, SystemExit) as e:
+            except (ArithmeticError, LookupError, ValueError, OSError, struct.error, RecursionError,
+                    SystemExit) as e:
                 kind = type(e).__qualname__ if type(e).__module__ == "builtins" else f"{type(e).__module__}.{type(e).__qualname__}"
                 problems.append(f"inspecting the guest's disk after the boot raised {kind}: {e}")
     finally:
@@ -186,17 +187,17 @@ class Tally:
 
 
 def per_run(base, more, runs, region=None):
-    """The sectors `runs` more of the graded work read, per run, from the
-    counts of two boots: (problems, {sector: reads a run}), the counts None
-    when the boots cannot be compared. A sector in `region` (lo, hi), the
-    sectors the rig grades, or anywhere when it is None, that the graded
-    boot read fewer times than the base, or a count that is not a whole
-    number a run, means the boots differ by more than that work: Counter
-    subtraction alone would drop the first as 0. Outside the region a
-    sector read fewer times is no matter (test-write-walk's FAT32 pair reads
-    one exFAT sector 14 times in its base boot and 12 in the graded one)."""
+    """The sectors of `region` (lo, hi), the sectors the rig grades, or of
+    the whole disk when it is None, that `runs` more of the graded work
+    read, per run, from the counts of two boots: (problems, {sector: reads
+    a run}), the counts None when the boots cannot be compared. A sector of
+    the region the graded boot read fewer times than the base, or one whose
+    count is not a whole number a run, means the boots differ by more than
+    that work: Counter subtraction alone would drop the first as 0. Outside
+    the region neither is any matter (test-write-walk's FAT32 pair reads one
+    exFAT sector 14 times in its base boot and 12 in the graded one)."""
     lo, hi = region or (0, float("inf"))
-    diff = more - base
+    diff = {s: c for s, c in (more - base).items() if lo <= s < hi}
     if any(base[s] > more[s] for s in base if lo <= s < hi) or any(c % runs for c in diff.values()):
         return ["the two boots differ by more than the work graded"], None
     return [], {s: c // runs for s, c in diff.items()}
@@ -340,7 +341,8 @@ def self_test():
             check("a trace with no reads is a problem: the observer sees nothing",
                   silent is not None and any("observer sees nothing" in p for p in silent[0]))
 
-            for exc in (struct.error("unpack requires a buffer of 4 bytes"), SystemExit("not one partition")):
+            for exc in (struct.error("unpack requires a buffer of 4 bytes"), SystemExit("not one partition"),
+                        ZeroDivisionError("a cluster of 0 bytes"), KeyError("D")):
                 def raises(copy, problems, exc=exc):
                     problems.append("found first")
                     raise exc
@@ -420,9 +422,9 @@ def self_test():
                   per_run(collections.Counter({1: 1}), collections.Counter({1: 3, 2: 2}), 2) == ([], {1: 1, 2: 1}))
             check("per_run: a sector the graded boot read fewer times cannot be compared",
                   per_run(collections.Counter({1: 3, 2: 1}), collections.Counter({1: 1, 2: 5}), 2)[1] is None)
-            check("per_run: in the region graded, and only there",
+            check("per_run: in the region graded, and only there, its sectors alone answered",
                   per_run(collections.Counter({1: 3, 2: 1}), collections.Counter({1: 1, 2: 5}), 2, (0, 2))[1] is None
-                  and per_run(collections.Counter({1: 3, 2: 1}), collections.Counter({1: 1, 2: 5}), 2, (2, 3))
+                  and per_run(collections.Counter({1: 3, 2: 1, 4: 1}), collections.Counter({1: 1, 2: 5, 4: 2}), 2, (2, 3))
                   == ([], {2: 2}))
             check("per_run: nor a count that is not a whole number a run",
                   per_run(collections.Counter(), collections.Counter({1: 3}), 2)[1] is None)

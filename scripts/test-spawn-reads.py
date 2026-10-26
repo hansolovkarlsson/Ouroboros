@@ -316,10 +316,11 @@ def chain_walk(tally, prepared, image):
         differ, per = disktrace.per_run(base_boot[2], more_boot[2], RUNS, (g["fat"], g["fat_end"]))
         problems += differ
         if per is not None:
-            delta = sum(c for s, c in per.items() if g["fat"] <= s < g["fat_end"])
+            delta = sum(per.values())
         if not problems:
-            # A bug in this rig, not in fsd, if it does not hold.
-            assert chain is not None, "the first boot ran with no problem, and its inspect kept no chain"
+            if chain is None:
+                raise RuntimeError("a bug in this rig: the first boot ran with no problem, "
+                                   "and its inspect kept no chain")
             want = chain_reads(chain, g)
             if delta != want:
                 problems.append(f"a spawn of /CHAIN reads {delta} FAT sectors, not {want}: one walk of "

@@ -330,13 +330,13 @@ def grade(tally, name, prepared, base_cmd, cmd, region, inspect, setup=()):
     # With no problem, the second boot's inspect ran and left its prediction.
     delta, want = None, found.get("want")
     if base_boot and more_boot:
-        lo, hi = region
         differ, per = disktrace.per_run(base_boot[2], more_boot[2], 1, region)
         problems += differ
         if per is not None:
-            delta = sum(c for s, c in per.items() if lo <= s < hi)
-        # A bug in this rig, not in fsd, if it does not hold.
-        assert problems or want is not None, "the second boot ran with no problem, and its inspect left no prediction"
+            delta = sum(per.values())
+        if not problems and want is None:
+            raise RuntimeError("a bug in this rig: the second boot ran with no problem, "
+                               "and its inspect left no prediction")
         if not problems and delta != want:
             problems.append(f"`{cmd}` reads {delta} FAT sectors, not {want}: one walk of each chain it "
                             "reads and writes, through the FAT cache, is the rule")
