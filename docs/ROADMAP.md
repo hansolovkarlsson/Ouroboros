@@ -4476,7 +4476,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   reading the active FAT, and the bitmap entry that goes with it, would let
   it read right, and writing both pairs as the spec asks would make it
   writable.
-- **A failed exFAT `mv` leaves two sets over one file's clusters.** When a
+- ~~**A failed exFAT `mv` leaves two sets over one file's clusters.**~~ When a
   `mv` fails after `relink` wrote the new set (an I/O error deleting the old
   one, or in a replacing `mv` deleting or freeing the destination's), the
   source and the new set both name the source's clusters. A later `rm` of
@@ -4492,7 +4492,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   nothing) before returning the error, as `write_chain`, `mkdir` and
   `grow_extent` give back what they took, would end it, `insert_set`
   returning the slot it used; the undo can fail too, which leaves today's
-  state. The same review, deferred.
+  state. The same review, deferred. *Done 2026-10-26*
+  (`fix/exfat-mv-undo`): `unrelink` deletes the new set while the source's
+  File entry still reads in use; `make test-mv-undo` fails a root sector's
+  writes by blkdebug. A failed undo, and a source that does not read after
+  the failure, still leave both sets.
 - ~~**exFAT bounds a cluster number where it frees, not where it reads it.**~~
   `free_data` refuses a first cluster outside the heap and stops at the
   volume's own clusters, `write_fat_entry` refuses one outside the heap, and

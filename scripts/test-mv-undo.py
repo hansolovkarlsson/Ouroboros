@@ -34,9 +34,11 @@ After the boot, on the host, with S2's orphaned Stream and name entries
 (still in use at X) cleared first: one set named S, on its cluster and
 used; one named T2 on S2's cluster; none named T, s, S2 or U; U's cluster
 free; fsck_exfat -n clean. No fault lines; a boot QEMU's firmware never
-starts is INCONCLUSIVE (exit 100). Fails with the undo removed (T, s and a
-second U beside S, and fsck's cross-link) and with the undo made whatever
-the source's File entry reads (T2 deleted with S2: the file lost). Not
+starts is INCONCLUSIVE (exit 100). Fails with the undo removed (T and a
+U on S's cluster left beside S, `mv -f /S /U` answering no error, fsck
+failing) and with the undo made whatever the source's File entry reads (T2
+deleted with S2: the file lost). Blkdebug's rule names `iotype = "write"`:
+without it a read of X fails too, once any write has been made. Not
 graded by a boot: an undo that fails itself, and a source whose File entry
 does not read after the failure, which both leave the two sets as before.
 About a minute. Run it whenever exFAT's mv, relink, unrelink, insert_set,

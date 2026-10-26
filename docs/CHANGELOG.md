@@ -1129,6 +1129,22 @@ a volume used to have every copy written, and now only FAT 0 is. A write to
 it must leave FAT 1 untouched; the check fails with `0x0080` taken as
 mirrored. The planted flags now go into the backup boot sector too.
 
+**A failed exFAT `mv` no longer leaves two sets over one file.** A `mv`
+writes the source's set again under the new name, then deletes the old one;
+a replacing `mv` deletes the destination's set between. When either delete
+failed, the new set stayed beside the source's, both naming the source's
+clusters, so a later `rm` of either freed them under the other. `relink`
+now answers where it wrote, and on a failure `unrelink` deletes the new set,
+as a rename deletes, freeing nothing. It does so only while the source's
+File entry still reads in use. A delete clears a set's slots a sector at a
+time, File entry first, so an in-use File entry means nothing of the source
+was touched. A cleared one means the source is gone and the new set is the
+file's, so it is kept. A failed replacing `mv` still loses the destination
+when its set was already deleted, as before. A new rig, `make
+test-mv-undo`, fails every write of one root sector through QEMU's
+blkdebug. Its checks fail with the undo removed (two sets on S's cluster)
+and with the liveness test dropped (a moved file lost).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
