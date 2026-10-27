@@ -364,17 +364,22 @@ enum Room {
 /// The disk as a mounted volume reaches it: a read goes through, a write
 /// only once the mount has found the volume writable. In a module of its own
 /// so its fields are out of reach of the rest of this file: `Fs` holds the
-/// disk only through this, so no writer can reach the disk around the gate,
-/// one written later included. [`Fs::writable`] is the early check each
-/// public writer makes; this is the one that cannot be left out. Until
-/// 2026-10-27 the early check was the only one (the third high review of
-/// 2026-10-24: a writer that forgot it would have written to a volume whose
-/// live bitmap fsd cannot tell).
+/// disk only through this, so a writer that writes through `self.disk`, one
+/// written later included, is refused on a read-only volume whether or not
+/// it asked [`Fs::writable`], the early check each public writer makes.
+/// Until 2026-10-27 that early check was the only one (the third high
+/// review of 2026-10-24: a writer that forgot it would have written to a
+/// volume whose live bitmap fsd cannot tell). What this does not close: a
+/// `Disk` of its own, which any code in fsd can still name and write
+/// through (`disk::Disk` is a unit struct); that is a roadmap item.
 ///
-/// Writability is settled at the end of [`Fs::mount_at`] and never changes,
-/// so a writer refused here is refused at its first write, before anything
-/// reaches the disk; no writer changes fsd's state before its first write
-/// but to drop a cursor, which costs a walk and nothing else.
+/// Writability is settled once, at the end of [`Fs::mount_at`], and a
+/// later [`settle`](Gated::settle) changes nothing, so a writer refused here
+/// is refused at its first write, before anything reaches the disk; no
+/// writer changes fsd's state before its first write but to drop a cursor,
+/// which costs a walk and nothing else. It is the one answer to whether the
+/// volume is writable: [`Fs::writable`], [`Fs::read_only`] and the
+/// allocator all ask it.
 mod gate {
     use super::{Error, SECTOR_SIZE};
     use crate::disk::{Disk, DiskError};
@@ -382,17 +387,22 @@ mod gate {
     pub(super) struct Gated {
         disk: Disk,
         writable: bool,
+        settled: bool,
     }
 
     impl Gated {
-        /// Shut: a mount reads its volume and writes nothing.
+        /// Shut and unsettled: a mount reads its volume and writes nothing.
         pub(super) fn shut(disk: Disk) -> Self {
-            Gated { disk, writable: false }
+            Gated { disk, writable: false, settled: false }
         }
 
-        /// Opened once, at the end of a mount that found the volume writable.
-        pub(super) fn open(&mut self) {
-            self.writable = true;
+        /// Whether the volume is writable, decided once by the mount, at its
+        /// end: every later call is ignored, so nothing after the mount can
+        /// open the gate, or shut it under a writer midway.
+        pub(super) fn settle(&mut self, writable: bool) {
+            if !self.settled {
+                (self.writable, self.settled) = (writable, true);
+            }
         }
 
         pub(super) fn is_open(&self) -> bool {
@@ -635,10 +645,8 @@ impl Fs {
             fs.read_only = why;
         }
         // The one place the volume becomes writable: a bitmap the checks
-        // above kept, which `read_only` and `writable` answer by.
-        if fs.bitmap_first_cluster != 0 {
-            fs.disk.open();
-        }
+        // above kept. Everything after asks the gate, not the bitmap.
+        fs.disk.settle(fs.bitmap_first_cluster != 0);
         Ok(fs)
     }
 
@@ -805,12 +813,12 @@ impl Fs {
     }
 
     /// Why the volume is read-only, `None` while it is writable: for fsd's
-    /// mount line. Read off the dropped bitmap, the one thing that makes the
-    /// volume read-only ([`writable`](Self::writable)), so a bitmap dropped
-    /// with no reason recorded still answers one: none in the root, or one
-    /// naming cluster 0 (the high review of #355).
+    /// mount line. Read off the disk gate, the one answer to whether the
+    /// volume is writable ([`gate`]), so a volume shut with no reason
+    /// recorded still answers one: none in the root, or one naming cluster 0
+    /// (the high review of #355).
     pub fn read_only(&self) -> Option<&'static str> {
-        if self.bitmap_first_cluster != 0 {
+        if self.disk.is_open() {
             return None;
         }
         Some(self.read_only.unwrap_or("its root directory names no allocation bitmap"))
@@ -1709,14 +1717,17 @@ impl Fs {
 
     /// Allocate one cluster: find a free bit in the allocation bitmap, set it,
     /// mark the cluster end-of-chain in the FAT, and return it. `DiskFull` if
-    /// the bitmap is full or wasn't located at mount. A clear bit of one of
+    /// the bitmap is full; `ReadOnly` on a read-only volume ([`gate`]), whose
+    /// bitmap was not located or was dropped at mount (`DiskFull` until
+    /// 2026-10-27, which a writer that forgot [`writable`](Self::writable)
+    /// would have answered for a volume with room). A clear bit of one of
     /// the volume's own clusters ([`is_system`](Self::is_system): damage,
     /// another driver's or an older fsd's free) is set as it is passed over,
     /// never handed out, so file bytes never land on the bitmap itself:
     /// ext2's allocator passes over its metadata the same way.
     fn alloc_cluster(&mut self) -> Result<u32, Error> {
-        if self.bitmap_first_cluster == 0 {
-            return Err(Error::DiskFull);
+        if !self.disk.is_open() {
+            return Err(Error::ReadOnly);
         }
         let nbytes = self.cluster_count.div_ceil(8) as u64;
         let mut byte_index = 0u64;

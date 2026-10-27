@@ -4474,13 +4474,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
 - ~~**exFAT's read-only gate is opt-in.**~~ **Done 2026-10-27, by a gate at
   the disk rather than a token:** `Fs` holds its disk through
   `gate::Gated`, in a module of its own, whose `write_sector` refuses until
-  `mount_at` has found the volume writable, so no exFAT writer can reach the
-  disk around it. A token threaded through the 35 functions that write
-  would still have let a new one call `self.disk.write_sector` directly.
-  `writable()` stays as the early check. With all seven early checks
-  removed, `test-long-set`'s and `test-volume-bound`'s read-only boots
-  pass, the gate refusing each write; with the gate's check removed too,
-  14 checks fail. Originally: A volume with no bitmap, or with
+  `mount_at` has settled the volume writable, once, so no exFAT writer
+  reaches the disk through `self.disk` around it. A token threaded through
+  the 35 functions that write would still have let a new one call
+  `self.disk.write_sector` directly. `writable()` stays as the early check;
+  it, `read_only()` and the allocator all ask the gate. With all seven
+  early checks removed, `test-long-set`'s and `test-volume-bound`'s
+  read-only boots pass, the gate refusing each write; with the gate's check
+  removed too, 14 checks fail. A `Disk` of its own is still spellable
+  anywhere in fsd (next item). Originally: A volume with no bitmap, or with
   two FATs, is read-only because each of the seven public writers (`touch`,
   `write_file`, `write_at`, `mkdir`, `rm`, `rmdir`, `mv`) asks
   `writable()` first. A new writer that forgets it writes to a volume whose
@@ -4491,6 +4493,24 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `write_fat_entry`, `rewrite_slots` and `patch_stream_ext` require would
   make the omission impossible to write. Nothing is broken today. From the
   third high review of 2026-10-24, deferred.
+- **Any code in fsd can write the disk through a `Disk` of its own.**
+  `disk::Disk` is a unit struct, and `main.rs` names one in twenty
+  places (`disk::Disk.write_sector`, `erase`'s zeroing among them). So
+  exFAT's disk gate holds for every write through `Fs`'s own disk, but a
+  writer in `exfat.rs` that wrote `Disk.write_sector(..)` would pass it, as
+  would one in any arm. Making `Disk` unnameable outside `disk.rs` (one
+  value made at fsd's start and passed down, a private field) would close
+  it. From the high review of #361, 2026-10-27.
+- **The read-only verb gate covers tree 0's fallback alone.** `main.rs`'s
+  `refused_read_only` refuses every verb that changes the disk, by a
+  default-deny list (`mutates`), but only on tree 0 mounted read-only by
+  decision D5. A volume an arm mounts read-only (exFAT's, for now) is
+  refused inside the arm, at its disk gate. Asking `fs.read_only()` there
+  for every tree would refuse every mutating verb on any read-only volume
+  of any arm before it reaches the arm, with the arm's gate as the second
+  line. `partition`, `format` and `erase` are FSOP_* verbs, not NP_*, so
+  the deliberate hold that they stay available is not touched. From the
+  high review of #361, 2026-10-27.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on
