@@ -22,25 +22,40 @@ pub enum DiskError {
     Io,
 }
 
-/// Zero-sized handle - all real state (the device, its rings/buffers)
-/// lives in the kernel. Exists as a struct so `fat32::Fs` can hold and
-/// call it exactly the way it held the old `BlockDevice`.
 /// Whether this server has rewritten the partition table this boot
-/// ([`Disk::table_rewritten`]). fsd is one task, so an atomic is only the
+/// ([`Device::table_rewritten`]). fsd is one task, so an atomic is only the
 /// spelling of a mutable static, not a concurrency claim.
 static TABLE_REWRITTEN: AtomicBool = AtomicBool::new(false);
 
-pub struct Disk;
+/// Whether the [`Device`] has been claimed ([`Device::claim`]).
+static CLAIMED: AtomicBool = AtomicBool::new(false);
 
-impl Disk {
+/// The block device, held once: fsd's `main` claims it at its start and
+/// lends a [`Disk`] from it to each volume it mounts and to `erase`,
+/// `partition` and `format`. The filesystem arms never see it, so an arm
+/// writes only through the `Disk` it was handed, which on exFAT is behind
+/// its disk gate. Since 2026-10-27; until then `Disk` was a unit struct any
+/// code in fsd could name and write through (the high review of #361).
+pub struct Device(());
+
+impl Device {
+    /// The device, to the first caller alone: fsd's `main`. A later claim,
+    /// one an arm might write to reach the disk around its own handle,
+    /// answers `None`, so it cannot be made to work by accident.
+    pub fn claim() -> Option<Device> {
+        (!CLAIMED.swap(true, Ordering::Relaxed)).then_some(Device(()))
+    }
+
+    /// A handle for one volume or one disk tool.
+    pub fn disk(&self) -> Disk {
+        Disk(())
+    }
+
     /// The device's capacity in sectors, or `NoDevice` - the probe the
     /// server's auto-mount uses to decide whether mounting is worth
     /// attempting at all.
     pub fn capacity_sectors(&self) -> Result<u64, DiskError> {
-        match syscall4(syscall_abi::BLOCK_INFO, 0, 0, 0, 0) {
-            code if code >= syscall_abi::FS_ERR_MIN => Err(DiskError::NoDevice),
-            capacity => Ok(capacity),
-        }
+        capacity_sectors()
     }
 
     /// Mark the partition table as rewritten by this server (`erase`,
@@ -75,6 +90,28 @@ impl Disk {
             code if code >= syscall_abi::FS_ERR_MIN => None,
             start => Some(start),
         }
+    }
+}
+
+fn capacity_sectors() -> Result<u64, DiskError> {
+    match syscall4(syscall_abi::BLOCK_INFO, 0, 0, 0, 0) {
+        code if code >= syscall_abi::FS_ERR_MIN => Err(DiskError::NoDevice),
+        capacity => Ok(capacity),
+    }
+}
+
+/// A handle on the device for one holder - all real state (the device, its
+/// rings/buffers) lives in the kernel. Exists as a struct so `fat32::Fs` can
+/// hold and call it exactly the way it held the old `BlockDevice`. Its field
+/// is private and it is not `Clone`: the one way to get one is
+/// [`Device::disk`], so code holding a `Disk` and no `Device`, every
+/// filesystem arm, cannot make another.
+pub struct Disk(());
+
+impl Disk {
+    /// The device's capacity in sectors, as [`Device::capacity_sectors`].
+    pub fn capacity_sectors(&self) -> Result<u64, DiskError> {
+        capacity_sectors()
     }
 
     pub fn read_sector(&mut self, sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), DiskError> {

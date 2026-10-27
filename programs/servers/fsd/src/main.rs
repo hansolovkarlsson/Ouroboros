@@ -59,10 +59,16 @@ fn main() -> ! {
     // The open-file (fid) table - see the fid verbs. Lives here in main's frame
     // like `mounts` (fsd keeps no static state).
     let mut fids = [Fid::empty(); MAX_FIDS];
+    // The block device, claimed here and nowhere else: every volume and disk
+    // tool gets its handle from it, so no filesystem arm can make a disk
+    // handle of its own (disk.rs's `Device`). The first claim cannot fail.
+    let Some(device) = disk::Device::claim() else {
+        unreachable!("fsd's main claims the block device first");
+    };
     // Auto-mount if the kernel already holds a device (QEMU's boot-time
     // virtio path; on Parallels the device arrives later, via the
     // `mount` command -> MOUNT syscall -> FSOP_MOUNT request).
-    try_mount(&mut mounts);
+    try_mount(&device, &mut mounts);
     // The synthetic /proc filesystem (cluster Phase 3) always exists, at the
     // reserved PROC_TREE index - no disk, so it's just constructed here. The
     // shell's `mount -p` binds /proc to it; netd's export routes /proc paths to
@@ -91,7 +97,7 @@ fn main() -> ! {
         // else can receive: the reply and every SAFECOPY name it.
         let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
-        let reply_len = handle(&mut mounts, &mut fids, sender, call, &req[..len], &mut reply);
+        let reply_len = handle(&device, &mut mounts, &mut fids, sender, call, &req[..len], &mut reply);
         // Delivered only while the caller is still in the call: an answer to
         // a call that is over (cut short, or its caller dead and the slot
         // refilled) goes nowhere, REPLY_STALE, and a fid it carried is freed.
@@ -153,14 +159,14 @@ fn mutates(verb: u64, p: &[u64; 4]) -> bool {
 /// [`MOUNT_ALREADY`]: syscall_abi::MOUNT_ALREADY
 /// [`FS_ERR_IO`]: syscall_abi::FS_ERR_IO
 /// [`NO_FS`]: syscall_abi::NO_FS
-fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
+fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     if mounts[0].is_some() {
         return syscall_abi::MOUNT_ALREADY;
     }
-    if disk::Disk.capacity_sectors().is_err() {
+    if device.capacity_sectors().is_err() {
         return syscall_abi::NO_FS;
     }
-    match vfs::Filesystem::mount(disk::Disk) {
+    match vfs::Filesystem::mount(device) {
         Ok((mounted, ..)) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
         Ok((mounted, fallback, unread)) => {
             // One write ([`con_write_parts`]), the read-only reason in it.
@@ -202,7 +208,7 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             // stick both point away from `partition` (the max review).
             let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
             let empty = matches!(e, fat32::Error::NoFat32Partition)
-                && matches!(partition::discover(&mut disk::Disk, &mut parts), Ok(0));
+                && matches!(partition::discover(&mut device.disk(), &mut parts), Ok(0));
             let tail = if empty {
                 ") - the disk has no partition: `partition` then `format` prepare it\r\n"
             } else {
@@ -235,15 +241,15 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
 /// `MOUNT_NO_DEVICE` when the rescan found no stick, or the kernel's own
 /// refusal of the rescan as it came (`BLOCK_ERR_DENIED`: this task without
 /// `CAP_BLOCK`, a policy fault the shell names).
-fn mount_or_rescan(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
-    let first = try_mount(mounts);
+fn mount_or_rescan(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
+    let first = try_mount(device, mounts);
     if first != syscall_abi::NO_FS || mounts.iter().flatten().any(|m| m.is_disk()) {
         return first;
     }
     match syscall4(syscall_abi::MOUNT, 1, 0, 0, 0) {
         0 => {
-            disk::Disk.device_replaced();
-            try_mount(mounts)
+            device.device_replaced();
+            try_mount(device, mounts)
         }
         other => other,
     }
@@ -270,8 +276,8 @@ fn tree_of(mounts: &[Option<vfs::Filesystem>; MAX_MOUNTS], candidate: &vfs::File
 /// partition table and any filesystem metadata near the start, so a
 /// subsequent partition/format starts clean. Returns `0`,
 /// [`MOUNT_NO_DEVICE`] (no block device), or [`FS_ERR_IO`].
-fn erase_disk(sectors: u64) -> u64 {
-    let Ok(capacity) = disk::Disk.capacity_sectors() else {
+fn erase_disk(device: &disk::Device, sectors: u64) -> u64 {
+    let Ok(capacity) = device.capacity_sectors() else {
         return syscall_abi::MOUNT_NO_DEVICE;
     };
     let want = if sectors == 0 {
@@ -280,11 +286,12 @@ fn erase_disk(sectors: u64) -> u64 {
         sectors
     };
     let count = want.min(capacity);
-    disk::Disk.table_rewritten();
+    device.table_rewritten();
+    let mut disk = device.disk();
     let zero = [0u8; 512];
     let mut lba = 0u64;
     while lba < count {
-        if disk::Disk.write_sector(lba, &zero).is_err() {
+        if disk.write_sector(lba, &zero).is_err() {
             return syscall_abi::FS_ERR_IO;
         }
         lba += 1;
@@ -298,8 +305,8 @@ fn erase_disk(sectors: u64) -> u64 {
 /// partition's contents are left for a later format. Returns `0`,
 /// [`MOUNT_NO_DEVICE`], [`FS_ERR_DISK_FULL`] (disk smaller than the 1 MiB
 /// alignment start), or [`FS_ERR_IO`].
-fn partition_disk(type_byte: u8) -> u64 {
-    let Ok(capacity) = disk::Disk.capacity_sectors() else {
+fn partition_disk(device: &disk::Device, type_byte: u8) -> u64 {
+    let Ok(capacity) = device.capacity_sectors() else {
         return syscall_abi::MOUNT_NO_DEVICE;
     };
     let start = syscall_abi::PARTITION_START_LBA;
@@ -309,7 +316,7 @@ fn partition_disk(type_byte: u8) -> u64 {
     // MBR partitioning is a 32-bit LBA scheme; a partition past 2 TiB
     // can't be expressed here (that's what GPT, a later step, is for).
     let part_sectors = (capacity - start).min(u32::MAX as u64) as u32;
-    disk::Disk.table_rewritten();
+    device.table_rewritten();
     let ptype = if type_byte == 0 { 0x0C } else { type_byte };
 
     let mut mbr = [0u8; 512];
@@ -335,7 +342,7 @@ fn partition_disk(type_byte: u8) -> u64 {
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
 
-    if disk::Disk.write_sector(0, &mbr).is_err() {
+    if device.disk().write_sector(0, &mbr).is_err() {
         return syscall_abi::FS_ERR_IO;
     }
     0
@@ -354,19 +361,19 @@ fn partition_disk(type_byte: u8) -> u64 {
 /// shown to be empty, and neither it nor a later candidate is formatted on
 /// that word (the review of #329: the next candidate, an ESP among them when
 /// the boot partition is not known, was formatted in its place).
-fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
+fn find_partition(device: &disk::Device) -> Result<Option<(u32, u32)>, fat32::Error> {
     // A GPT disk, by the test `mount` reads it with: this formatter writes
     // MBR partitions only, and on a GPT disk it would lay the filesystem from
     // LBA 1 over the GPT and every partition in it, the ESP included (the
     // medium review of #288). Refused.
-    if partition::is_gpt(&mut disk::Disk)? {
+    if partition::is_gpt(&mut device.disk())? {
         return Ok(None);
     }
     // The partitions `mount` sees, from the one parser it uses, so `format`
     // never picks an entry `mount` would not list (one starting at LBA 0,
     // the MBR itself), each with its size.
     let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
-    let count = partition::discover(&mut disk::Disk, &mut parts)?;
+    let count = partition::discover(&mut device.disk(), &mut parts)?;
     // The root by `vfs::mount`'s rule, so `format` writes over what `/`
     // showed: among the candidates beside the one the system booted from
     // (a partition typed as a root, else every other one), the first holding
@@ -378,10 +385,10 @@ fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
     // (the third review of #288 found the probe reaching it), and a damaged
     // typed root is formatted, not a data partition or an ESP beside it,
     // whether or not the boot partition is known (the review of #295).
-    let boot = disk::Disk.boot_partition_start();
-    let roots = vfs::root_order(&parts, count, boot, disk::Disk.capacity_sectors().ok());
+    let boot = device.boot_partition_start();
+    let roots = vfs::root_order(&parts, count, boot, device.capacity_sectors().ok());
     let candidates = roots.format_targets();
-    let probed = vfs::Filesystem::first_mounting(candidates);
+    let probed = vfs::Filesystem::first_mounting(device, candidates);
     if let Some(e) = probed.failed {
         return Err(e);
     }
@@ -405,19 +412,19 @@ fn find_partition() -> Result<Option<(u32, u32)>, fat32::Error> {
 /// [`FS_ERR_NOT_FOUND`] (no partition - run `partition` first),
 /// [`FS_ERR_DISK_FULL`] (partition too small), or [`FS_ERR_IO`] (also when
 /// the partition table or the probe would not read).
-fn format_disk(fstype: u64) -> u64 {
-    if disk::Disk.capacity_sectors().is_err() {
+fn format_disk(device: &disk::Device, fstype: u64) -> u64 {
+    if device.capacity_sectors().is_err() {
         return syscall_abi::MOUNT_NO_DEVICE;
     }
-    let (start, sectors) = match find_partition() {
+    let (start, sectors) = match find_partition(device) {
         Ok(Some(found)) => found,
         Ok(None) => return syscall_abi::FS_ERR_NOT_FOUND,
         Err(_) => return syscall_abi::FS_ERR_IO,
     };
     let result = match fstype {
-        syscall_abi::FMT_FAT32 => fat32::Fs::format(disk::Disk, start, sectors),
-        syscall_abi::FMT_EXFAT => exfat::Fs::format(disk::Disk, start, sectors),
-        syscall_abi::FMT_EXT2 => ext2::Fs::format(disk::Disk, start, sectors),
+        syscall_abi::FMT_FAT32 => fat32::Fs::format(device.disk(), start, sectors),
+        syscall_abi::FMT_EXFAT => exfat::Fs::format(device.disk(), start, sectors),
+        syscall_abi::FMT_EXT2 => ext2::Fs::format(device.disk(), start, sectors),
         _ => return syscall_abi::FS_ERROR,
     };
     match result {
@@ -527,7 +534,7 @@ impl Fid {
 /// ops (`NP_READ`/`NP_WRITE`/`NP_WRITE_AT`) to `SAFECOPY` against the client's
 /// grant (they move their data directly between task regions rather than inline
 /// in the reply).
-fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, call: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, call: u64, req: &[u8], reply: &mut [u8]) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -569,7 +576,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         }
         // The auto-mount at tree 0 (the default the shell's `mount -a`
         // triggers); `try_mount` answers MOUNT_ALREADY when tree 0 is full.
-        return status_reply(reply, mount_or_rescan(mounts));
+        return status_reply(reply, mount_or_rescan(device, mounts));
     }
 
     if op == syscall_abi::FSOP_MOUNT_AT {
@@ -593,7 +600,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
             return status_reply(reply, syscall_abi::NO_FS);
         }
         let index = p[0] as usize;
-        let fs = match vfs::Filesystem::mount_partition(disk::Disk, index) {
+        let fs = match vfs::Filesystem::mount_partition(device, index) {
             Ok(fs) => fs,
             // A partition that would not read is a failing disk, not "no
             // filesystem" (the review of #329).
@@ -629,7 +636,7 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         if models_modes_or_unknown(mounted) == Some(true) {
             flags |= syscall_abi::MOUNT_FLAG_ENFORCES_MODES;
         }
-        let capacity = disk::Disk.capacity_sectors().unwrap_or(0);
+        let capacity = device.capacity_sectors().unwrap_or(0);
         let name = mounted.name().as_bytes();
         reply[0..8].copy_from_slice(&0u64.to_le_bytes());
         reply[8..16].copy_from_slice(&part_lba.to_le_bytes());
@@ -685,9 +692,9 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
             return status_reply(reply, syscall_abi::MOUNT_ALREADY);
         }
         let status = match op {
-            syscall_abi::FSOP_ERASE => erase_disk(p[0]),
-            syscall_abi::FSOP_PARTITION => partition_disk(p[0] as u8),
-            _ => format_disk(p[0]),
+            syscall_abi::FSOP_ERASE => erase_disk(device, p[0]),
+            syscall_abi::FSOP_PARTITION => partition_disk(device, p[0] as u8),
+            _ => format_disk(device, p[0]),
         };
         status_reply(reply, status)
     } else {
