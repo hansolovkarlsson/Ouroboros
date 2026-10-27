@@ -163,10 +163,8 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     match vfs::Filesystem::mount(disk::Disk) {
         Ok((mounted, ..)) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
         Ok((mounted, fallback, unread)) => {
-            // One write, so no other task's line lands inside it: three
-            // pieces let accountd's ready line split "fsd: FAT32 mounted" on a
-            // boot `make test-boot-partition` read (the review of #288). When
-            // the disk has a partition beside the boot one, the root on one
+            // One write ([`con_write_parts`]), the read-only reason in it.
+            // When the disk has a partition beside the boot one, the root on one
             // disk (one-disk step 4), and it did not mount, the line says so
             // first rather than run on the ESP's tree without a word.
             // D5: the fallback is read-only, so nothing is written to the ESP.
@@ -190,24 +188,14 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             // A partition tried before it would not read: said, since what
             // it held is not known (a failing disk, not an empty partition).
             let unread = if unread { "fsd: a partition before it would not read (disk I/O error)\r\n" } else { "" };
-            let mut line = [0u8; 224];
-            let mut len = 0;
-            for part in [unread, fallback, "fsd: ", mounted.name(), " mounted, disk commands available\r\n"] {
-                // Bounded, so a longer name or message is cut, never a panic
-                // in the storage server (the third review of #288).
-                let take = part.len().min(line.len() - len);
-                line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
-                len += take;
-            }
-            con_write(&line[..len]);
+            let (ro, why, end) = read_only_line(&mounted);
+            con_write_parts(&[unread, fallback, "fsd: ", mounted.name(), " mounted, disk commands available\r\n", ro, why, end]);
             mounts[0] = Some(mounted);
             0
         }
         Err(e) => {
             // One write, as the line above, so no other task's line lands
             // inside it (accountd's did, in `make test-probe-ioerr`).
-            let mut line = [0u8; 160];
-            let mut len = 0;
             // A disk with no partition at all, a blank one the kernel installed
             // since 2026-10-23 among them, is said with what prepares it:
             // "disk commands won't work" and `mount -a`'s question about a
@@ -220,12 +208,7 @@ fn try_mount(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
             } else {
                 ") - disk commands won't work\r\n"
             };
-            for part in ["fsd: mount failed (", error_name(&e), tail] {
-                let take = part.len().min(line.len() - len);
-                line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
-                len += take;
-            }
-            con_write(&line[..len]);
+            con_write_parts(&["fsd: mount failed (", error_name(&e), tail]);
             match e {
                 fat32::Error::Io(_) => syscall_abi::FS_ERR_IO,
                 _ => syscall_abi::NO_FS,
@@ -623,6 +606,12 @@ fn handle(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; M
         let Some(tree) = (1..MAX_MOUNTS).find(|&t| mounts[t].is_none()) else {
             return status_reply(reply, syscall_abi::MOUNT_ALREADY); // no free slot
         };
+        // `mount N` prints nothing when it mounts; a read-only one says why,
+        // or its first write's refusal would be the first word of it.
+        if fs.read_only().is_some() {
+            let (ro, why, end) = read_only_line(&fs);
+            con_write_parts(&[ro, why, end]);
+        }
         mounts[tree] = Some(fs);
         status_reply(reply, tree as u64)
     } else if op == syscall_abi::FSOP_MOUNT_INFO {
@@ -1849,6 +1838,33 @@ fn read_u64(buf: &[u8], offset: usize) -> u64 {
 
 fn print(s: &str) {
     con_write(s.as_bytes());
+}
+
+/// The line saying why `fs` was mounted read-only, in three pieces for
+/// [`con_write_parts`]; empty pieces when it is writable. Until 2026-10-26
+/// exFAT made a volume read-only with no word (the high review that day).
+fn read_only_line(fs: &vfs::Filesystem) -> (&'static str, &'static str, &'static str) {
+    match fs.read_only() {
+        Some(why) => ("fsd: mounted read-only: ", why, "\r\n"),
+        None => ("", "", ""),
+    }
+}
+
+/// `parts` joined and written in one write, so no other task's line lands
+/// inside them: three pieces let accountd's ready line split "fsd: FAT32
+/// mounted" on a boot `make test-boot-partition` read (the review of #288).
+/// Bounded, so a longer name or message is cut, never a panic in the
+/// storage server (the third review of #288); 320 bytes stays under one
+/// console message, [`FS_DATA_MAX`](syscall_abi::FS_DATA_MAX).
+fn con_write_parts(parts: &[&str]) {
+    let mut line = [0u8; 320];
+    let mut len = 0;
+    for part in parts {
+        let take = part.len().min(line.len() - len);
+        line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
+        len += take;
+    }
+    con_write(&line[..len]);
 }
 
 /// Route output through the console server (task `CON_TASK`) as a batched

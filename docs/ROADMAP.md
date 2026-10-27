@@ -4437,7 +4437,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   are in `exfatimg.py`, which every exFAT rig imports, and none runs
   another as a module; `Volume`'s FAT32 entries come from `fat32img` (the
   live copy). `test-grow-dir`'s fsck rule stays its own, as it expects one
-  planted complaint. `test-mv-undo` joins when its PR lands.
+  planted complaint. `test-mv-undo` joined when its PR landed.
 - **Three exFAT rig helpers still walk sets by hand.** `test-grow-dir`'s
   `exfat_dir` and `plant`, and `test-stale-cursor`'s `plant_empty`, read
   entry sets with their own loops rather than `exfatimg.sets`/`find`.
@@ -4490,7 +4490,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   reading the active FAT, and the bitmap entry that goes with it, would let
   it read right, and writing both pairs as the spec asks would make it
   writable.
-- **A failed exFAT `mv` leaves two sets over one file's clusters.** When a
+- ~~**A failed exFAT `mv` leaves two sets over one file's clusters.**~~ When a
   `mv` fails after `relink` wrote the new set (an I/O error deleting the old
   one, or in a replacing `mv` deleting or freeing the destination's), the
   source and the new set both name the source's clusters. A later `rm` of
@@ -4506,7 +4506,22 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   nothing) before returning the error, as `write_chain`, `mkdir` and
   `grow_extent` give back what they took, would end it, `insert_set`
   returning the slot it used; the undo can fail too, which leaves today's
-  state. The same review, deferred.
+  state. The same review, deferred. *Done 2026-10-26*
+  (`fix/exfat-mv-undo`): a failure at either delete is rolled back, the
+  deleted sets put back (their in-use bits set again) and the new set
+  cleared, so both files are as they were (option 3 of three, Hans's
+  choice after the high review of #357); `make test-mv-undo` fails two root
+  sectors' writes by blkdebug. What is left is the next item.
+- **A failed exFAT `mv` whose rollback fails can leave two sets.** When the
+  rollback's own writes fail too, or a set does not read after the
+  failure, fsd keeps the move where it can (a source that cannot be put
+  back: the new set is the file's; a destination: its clusters left
+  allocated, a leak, since its entries past the File entry may still name
+  them) and otherwise leaves the new set beside the source's over one
+  file's clusters, or two files of one name, with fsd's one line on the
+  console (`roll_back`, since the second high review of #357). No boot reaches these paths: a failing sector that turns
+  bad between two writes would. Ending them for good would take a journal.
+  From the high review of #357, 2026-10-26.
 - ~~**exFAT bounds a cluster number where it frees, not where it reads it.**~~
   `free_data` refuses a first cluster outside the heap and stops at the
   volume's own clusters, `write_fat_entry` refuses one outside the heap, and
@@ -4585,13 +4600,31 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   (in `DirEntry`, or beside it in the walk's callback, nine call sites)
   and moving `name_answers` to `utf16.rs` would make the arms answer alike.
   Found by the high review of 2026-10-26.
-- **A FAT32 short name with bytes past ASCII is listed as nothing.** A
+- ~~**A FAT32 short name with bytes past ASCII is listed as nothing.**~~ A
   short-only entry holding OEM code-page bytes (0x80 and up, as DOS and
   Windows write `CAFÉ.TXT` without a long name), or 0x05 standing for a
   first byte 0xE5, is not UTF-8, so `DirEntry::name` answers an empty name
   no lookup reaches. Rendering each such byte as `?`, as `utf8_name` renders
   a unit outside ASCII, would list it and reach it by that spelling. Found
-  by the high review of 2026-10-26.
+  by the high review of 2026-10-26. *Done 2026-10-26*
+  (`fix/fat32-oem-short-names`): `DirEntry::parse` renders each such byte
+  as `?` (`short_byte`); `make test-fat32-names` plants both shapes. Since
+  its review a control byte and `/` are `?` too, by one rule in
+  `utf16::shown_char` that `utf8_name`'s fallback shares.
+- **Two FAT32 short names differing only in a byte shown as `?` answer as
+  the first.** `CAF` 0xC9 `.TXT` and `CAF` 0xD4 `.TXT`, both written by DOS
+  with no long name, list as `CAF?.TXT`, and every lookup takes the first:
+  the second cannot be read, removed or renamed while the first is there,
+  and `cat /CAF?.TXT` prints the first twice (the glob gives the name
+  twice). The long-name item above has the same shape; the fix is the same,
+  the raw bytes carried to the lookup. From the review of #356, 2026-10-26.
+- **ext2 lists a name that is not UTF-8 as an empty one.** `DirEntry::name`
+  and `list_dir` end in `from_utf8(..).unwrap_or("")`, so a file Linux named
+  in Latin-1 (`caf` 0xE9 `.txt`) is listed empty and no `cat`, `rm` or `mv`
+  reaches it: FAT32's short-name case before #356. ext2 looks names up by
+  their bytes, so rendering them with `?` (`utf16::shown_char`) also needs
+  the lookup to take the rendering, or the bytes carried to it. From the
+  review of #356, 2026-10-26.
 - **fsd will not write to an exFAT directory an older fsd grew.** Until
   2026-10-18 fsd grew a directory without raising its DataLength, so such a
   directory's chain runs past its size, with sets there no driver reads.
@@ -4633,13 +4666,27 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   by the same test), so its writes pass the root's rule: the holder given by
   the caller, which knows the synthetic root entry, would close it there
   too (the high review that day).
-- **exFAT says nothing when it mounts a volume read-only.** No bitmap, a
+- ~~**exFAT says nothing when it mounts a volume read-only.**~~ No bitmap, a
   damaged one, two FATs, and since 2026-10-26 a root whose chain the record
   cannot hold (more than 64 runs, a loop, past 256 MiB) each leave the
   volume read-only with no line saying why, so a healthy stick whose root
   grew in more than 64 interleaved steps refuses every write unexplained.
   A reason kept in `Fs` and printed by fsd's mount line would say it.
-  Found by the high review of 2026-10-26.
+  Found by the high review of 2026-10-26. *Done 2026-10-26*
+  (`fix/exfat-read-only-reason`): `mount_at` keeps the first reason and
+  fsd prints `fsd: mounted read-only: ` and it on the boot mount line and
+  on `mount N`; `make test-long-set` checks it in every read-only boot, and
+  VRUNS plants a root of 65 runs. A looped root is still graded by no
+  boot.
+- **The read-only reason reaches the console alone.** fsd prints `fsd:
+  mounted read-only: ...` on the machine's console, so a `cpu` session
+  through netd, or a shell on another console, that runs `mount N` sees
+  only the tree id, and a `mount N` of a partition already a tree prints
+  nothing. Once the boot line has scrolled away no command says why the
+  root refuses writes. Carrying the reason in `FSOP_MOUNT_INFO`'s reply
+  (the `mount` builtin) would let any client print it; it crosses
+  `syscall-abi`, ulib and the C and Python peers. Found by the high
+  review of #355, 2026-10-26.
 - **A damaged exFAT directory answers "device I/O error".** A create in a
   directory whose chain is not its size, a cluster outside the heap and a
   looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a

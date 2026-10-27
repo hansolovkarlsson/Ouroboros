@@ -1129,6 +1129,76 @@ a volume used to have every copy written, and now only FAT 0 is. A write to
 it must leave FAT 1 untouched; the check fails with `0x0080` taken as
 mirrored. The planted flags now go into the backup boot sector too.
 
+**A FAT32 short name with bytes past ASCII is listed, as `?`s.** A short
+entry with no long name may hold OEM code-page bytes (DOS and Windows write
+`CAFÉ.TXT` that way), or 0x05 standing for a first byte 0xE5. Such a name is
+not UTF-8, so fsd listed it as an empty name that no lookup reached. Each
+such byte now renders as `?`, as `utf8_name` renders a UTF-16 unit it cannot
+show, so `ls` lists `CAF?.TXT` and `cat /CAF?.TXT` reaches it. The code page
+is not known, so the byte cannot be read as a character, and two names that
+differ only in such a byte answer as the first, as exFAT's `?` renderings
+do. `test-fat32-names` plants both shapes; the checks fail with the bytes
+copied as they are. The review of the change found that a control byte or
+`/` in a short name was still copied as it was: an ESC reached the console
+as the start of an escape sequence, and a `/` split the name as a path, so
+no lookup reached it. Both are now `?` too. The rule is one function,
+`utf16::shown_char` (printable ASCII but `/` as itself, anything else `?`),
+which `utf8_name`'s fallback for long names shares. The rig plants an
+entry with each, after its first fsck (no fsck passes them), and `rm`
+must reach both by their `?` spellings. That check fails with every ASCII
+byte let through. An ext2 name that is not UTF-8 is still listed empty
+(roadmap).
+
+**exFAT says why it mounted a volume read-only.** A volume with no bitmap,
+a damaged one, more than one FAT, or a root whose chain the mount could
+not record (more than 64 runs of clusters, a loop, past 256 MiB) mounts
+read-only, and until now said nothing about it: the first word was a
+write's refusal. A healthy stick whose root had grown in more than 64
+interleaved steps was the case that mattered. `mount_at` now keeps the
+first reason, the cause before what it explains (a second FAT's bitmap
+entry reads as a damaged first one), and fsd prints it on the boot mount
+line and on `mount N`: `fsd: mounted read-only: its root directory is in
+more than 64 runs of clusters`. Dropping the bitmap stays the one thing
+that makes the volume read-only, so the write gate is unchanged. In
+`test-long-set`, the four read-only boots must each give their reason,
+the two writable ones none, and a new boot, VRUNS, plants a root of 65
+runs on the host. The checks fail with the line not printed and with
+`ROOT_RUNS` raised to 65 (its const assert with it). A high review of the
+change found that `test-volume-bound`'s BESIDE boot required `mount 2` on
+its read-only exFAT to print nothing, so it now requires the reason. The
+reason is now read off the dropped bitmap, so a bitmap dropped with no
+reason recorded still gives one ("names no allocation bitmap"). The
+review also found that the reason reaches the console alone, so a `cpu`
+session or another shell that runs `mount N` never sees it (roadmap).
+
+**A failed exFAT `mv` is rolled back.** A `mv` writes the source's set
+again under the new name, then deletes the old one; a replacing `mv`
+deletes the destination's set too. When a delete failed, the new set stayed
+beside the source's, both naming the source's clusters, so a later `rm` of
+either freed them under the other. A delete only clears each slot's in-use
+bit, and a replacing `mv` frees the destination's clusters only once both
+sets are gone. So a failure can be rolled back exactly: `put_back` sets the
+bits of a partly deleted set again, and the new set is cleared. A failed
+`mv` or `mv -f` now leaves both files as they were, as POSIX `rename`
+does. Every arm of `mv` goes through one `move_set`, and a replacing `mv`
+now deletes the source's set before the destination's. The first version
+of this fix only gave the new set back, and kept the old order with the
+destination deleted first. Its high review found that a failed `mv -f` then
+destroyed its destination. Option 3 of the three weighed that day (Hans's
+choice) made it a full rollback. relink's own half-written set is cleared
+too, the slots having been free. Since a second high review a create
+whose half-written set clears also frees what it allocated (it leaked),
+and the rollback is one `roll_back` with one console line. A destination
+that cannot be put back keeps its clusters allocated: the entries after
+its File entry may still name them, so freeing them was the hazard the fix
+removes. Only a rollback whose own writes fail is left. It then keeps the
+move, or leaves both sets, and prints `fsd: a failed mv could not be
+rolled back - a fsck repairs it`. A new rig, `make test-mv-undo`, fails every write of two root
+sectors through QEMU's blkdebug. Six `mv`s must each fail and leave all six
+files as they were, with fsck clean. The rig fails with the undo removed,
+with a source or a destination not put back, with the destination's failure
+not rolled back, and with the destination deleted first.
+
 **The exFAT rigs' host helpers live in `exfatimg.py` alone.** `Volume`,
 `set_checksum` and `entry_set` lived in `test-stale-cursor` and
 `test-grow-dir`, and four other rigs ran those two as modules to take them,

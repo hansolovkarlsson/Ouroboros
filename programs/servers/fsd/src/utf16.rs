@@ -50,15 +50,29 @@ pub(crate) fn shown_exactly(units: &[u16]) -> bool {
     bytes <= NAME_SHOWN_MAX
 }
 
+/// One character of a name that cannot be shown as it is, as a listing shows
+/// it: printable ASCII as itself, and `?` for anything else, a control byte or
+/// `/` among them (one would reach the console as a control sequence, the
+/// other split the name as a path, so no lookup reached it). The one rule
+/// for [`utf8_name`]'s fallback and FAT32's short-name bytes (the review of
+/// #356).
+pub(crate) fn shown_char(c: u32) -> u8 {
+    match c {
+        0x20..=0x7e if c != b'/' as u32 => c as u8,
+        _ => b'?',
+    }
+}
+
 /// A name's UTF-16 `units` as a listing shows them, in `out`: their UTF-8 when
-/// [`shown_exactly`], otherwise ASCII with `?` for each unit outside it, at
+/// [`shown_exactly`], otherwise ASCII with `?` for each unit outside it
+/// ([`shown_char`]), at
 /// most [`NAME_SHOWN_MAX`] bytes either way. Encoded by hand, without
 /// `char::encode_utf8`, whose panic formats (the PIE link's trap).
 pub(crate) fn utf8_name<'a>(units: &[u16], out: &'a mut [u8; NAME_SHOWN_MAX]) -> &'a str {
     let mut n = 0usize;
     if !shown_exactly(units) {
         for &u in units {
-            out[n] = if u < 0x80 { u as u8 } else { b'?' };
+            out[n] = shown_char(u as u32);
             n += 1;
         }
         return core::str::from_utf8(&out[..n]).unwrap_or("?");
