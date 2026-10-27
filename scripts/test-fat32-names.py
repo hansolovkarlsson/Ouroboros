@@ -333,12 +333,13 @@ def run():
     checks.append(("before: the short entries holding `/` and ESC planted after the fsck", plant_bad(start)))
 
     upper_astral = "CAF\U0001F600"
-    cmds = ["ls /", "echo /*", f"cat /{GRAVE}", f"cat /{upper_astral}", f"echo new > /{UMLAUT}",
+    # The `/` and ESC names removed straight after the first listing, which
+    # must show them: `echo /*` past it takes at most 15 names.
+    cmds = ["ls /", *(f"rm /{shown}" for _, shown in BAD_SHORTS), "echo /*", f"cat /{GRAVE}", f"cat /{upper_astral}", f"echo new > /{UMLAUT}",
             f"cat /{UMLAUT}", f"cat /{ACUTE}", f"rm /{UMLAUT}", f"mv /{GRAVE} /grave",
             f"cat /{SHOWN[OVERLONG]}", f"cat /{SHOWN[LONE]}", f"touch /{SHOWN[LONE]}",
             f"cp /grave /{MADE}", f"cat /{MADE}", f"touch /{PADDED}", f"cat /{ORPHAN}",
-            *(f"cat /{shown}" for _, _, shown in SHORTS), "ls /",
-            *(f"rm /{shown}" for _, shown in BAD_SHORTS), "ls /"]
+            *(f"cat /{shown}" for _, _, shown in SHORTS), "ls /"]
     steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in cmds] + [("# ", "")]
     guest = drive_qemu.Guest(IMAGE, label="test-fat32-names: ")
     try:
@@ -355,9 +356,6 @@ def run():
 
     listing = (answer(out, "ls /") or "").split()
     last = (answer(out, "ls /", last=True) or "").split()
-    # The listing before the rms: the second to last `ls /`.
-    marker = "# ls /\r"
-    before_rm = out.split(marker)[-2].split("# ", 1)[0].split() if out.count(marker) >= 3 else []
     entries, _ = entries_of(start)
     grave, acute, made = by_short(entries, "grave"), find(entries, ACUTE), find(entries, MADE)
     with open(IMAGE, "rb") as fh:
@@ -410,8 +408,8 @@ def run():
           for short, data, shown in SHORTS),
         (f"the short entries holding `/` and ESC listed as {[sh for _, sh in BAD_SHORTS]}, each rm by that "
          f"spelling answering nothing, and gone after ({[answer(out, f'rm /{sh}') for _, sh in BAD_SHORTS]})",
-         all(sh in before_rm and sh not in last and answer(out, f"rm /{sh}") == "" for _, sh in BAD_SHORTS)
-         and "\x1b" not in "".join(before_rm)),
+         all(sh in listing and sh not in last and answer(out, f"rm /{sh}") == "" for _, sh in BAD_SHORTS)
+         and "\x1b" not in "".join(listing)),
         ("fsck_msdos -n passes after", ok),
         (f"no fault lines in QEMU's trace ({faults})", faults == 0),
     ]
