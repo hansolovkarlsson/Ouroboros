@@ -438,8 +438,11 @@ pub struct Fs {
     /// First cluster of the root directory.
     root_cluster: u32,
     /// First cluster of the allocation bitmap (the free-cluster map), located at
-    /// mount from the root's `0x81` entry - `0` if not found (then writes that
-    /// need allocation fail with `DiskFull`). The bitmap is assumed *contiguous*
+    /// mount from the root's `0x81` entry - `0` if not found or dropped (then
+    /// the volume is read-only, [`gate`], and every write fails with
+    /// `ReadOnly`; an allocation failed with `DiskFull` until 2026-10-27).
+    /// Read once after the mount's checks, to settle the gate; nothing after
+    /// asks it whether the volume is writable. The bitmap is assumed *contiguous*
     /// (the near-universal case, and what `newfs_exfat` produces); a fragmented
     /// bitmap would need FAT-chain addressing here (a known limitation).
     bitmap_first_cluster: u32,
