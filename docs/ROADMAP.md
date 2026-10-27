@@ -4420,7 +4420,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bound from the size: BIG's 2 MiB was filled in one request on QEMU and
   the append went through, no wedge restart. So C holds at megabytes; the
   open risk is gigabytes, unmeasured.
-- **Three exFAT rig helpers still walk sets by hand.** `test-grow-dir`'s
+- ~~**Three exFAT rig helpers still walk sets by hand.**~~ **Done
+  2026-10-27:** all three walk with `exfatimg.sets`/`find`, and read and
+  rewrite a set's Stream entry through two new helpers, `exfatimg.extent`
+  and `exfatimg.restream` (which reseals the set); `exfatimg.Volume`'s
+  `listing` is `sets` on exFAT and `fat32img`'s `listing` on FAT32, and its
+  `data` on FAT32 is `fat32img`'s `read`. Checked on the host against the
+  old `Volume`: the same listing for 748 entries across `espexfat.img` and
+  `esp.img`, and the same bytes for 2,141 FAT32 chains. `test-grow-dir`'s
+  `fat32_names`, which reads directory bytes rather than a volume, stays.
+  Originally: `test-grow-dir`'s
   `exfat_dir` and `plant`, and `test-stale-cursor`'s `plant_empty`, read
   entry sets with their own loops rather than `exfatimg.sets`/`find`.
   They have no bound on a set cut off at the end of the bytes (an

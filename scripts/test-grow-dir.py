@@ -95,7 +95,7 @@ def load(name, file):
 
 drive_qemu = load("drive_qemu", "drive-qemu.py")
 # The host's reader of a FAT32 or exFAT partition (chains, listings, the bitmap).
-Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfatimg.entry_set
+Volume, entry_set = exfatimg.Volume, exfatimg.entry_set
 
 BUILD = os.path.join(ROOT, "build")
 IMAGE = os.path.join(BUILD, "test-grow-dir.img")
@@ -173,19 +173,10 @@ def plant():
     vol = Volume(PART, 0)
     root = vol.chain(vol.root)
     d = bytearray(vol.data(root))
-    sets = {}
-    i = 0
-    while i < len(d) and d[i]:
-        count = d[i + 1] + 1 if d[i] == 0x85 else 1
-        if d[i] == 0x85:
-            stream = d[i + 32:i + 64]
-            got = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-            sets[got.decode("utf-16le")[:stream[3]]] = (i, count)
-        i += 32 * count
+    sets = {s.name: s for s in exfatimg.sets(d)}
     for name in MADE:
-        at = sets.get(name, (0, 0))[0]
-        stream = d[at + 32:at + 64]
-        if name not in sets or not stream[1] & 0x02 or struct.unpack_from("<Q", stream, 24)[0] != vol.cluster:
+        made = exfatimg.extent(sets[name]) if name in sets else None
+        if not made or made.chained or made.size != vol.cluster:
             sys.exit(f"test-grow-dir: macOS did not make {name} one NoFatChain cluster")
     with open(PART, "r+b") as fh:
         def bitmap(c, on):
@@ -199,14 +190,12 @@ def plant():
             fh.write(struct.pack("<I", value))
 
         def stream(name, flags, first, size):
-            at, count = sets[name]
-            d[at + 33] = flags
-            struct.pack_into("<Q", d, at + 32 + 8, size)   # ValidDataLength
-            struct.pack_into("<I", d, at + 32 + 20, first)
-            struct.pack_into("<Q", d, at + 32 + 24, size)  # DataLength
-            struct.pack_into("<H", d, at + 2, set_checksum(d[at:at + 32 * count]))
+            exfatimg.restream(d, sets[name], flags, first, size)
 
-        old = struct.unpack_from("<I", d, sets["OLD"][0] + 32 + 20)[0]
+        def first_of(name):
+            return exfatimg.extent(sets[name]).first
+
+        old = first_of("OLD")
         free = [c for c in range(2, vol.count + 2) if not vol.used(c)]
         second, data = free[0], dict(zip(HIDDEN, free[1:]))
         for c in [second, *data.values()]:
@@ -226,26 +215,26 @@ def plant():
             fh.write(piece)
         stream("OLD", 0x01, old, vol.cluster)
 
-        zero = struct.unpack_from("<I", d, sets["ZERO"][0] + 32 + 20)[0]
+        zero = first_of("ZERO")
         bitmap(zero, False)
         stream("ZERO", 0x01, 0, 0)
 
-        named = struct.unpack_from("<I", d, sets["NAMED"][0] + 32 + 20)[0]
+        named = first_of("NAMED")
         bitmap(named, False)
         stream("NAMED", 0x03, named, 0)
 
-        rmz = struct.unpack_from("<I", d, sets["RMZ"][0] + 32 + 20)[0]
+        rmz = first_of("RMZ")
         bitmap(rmz, False)
         stream("RMZ", 0x01, man_cluster(vol), 0)
         stream("Z0FILE", 0x01, man_cluster(vol), 0)
         stream("Z0APP", 0x01, man_cluster(vol), 0)
 
         # LONGF FAT-chained, one byte, its cluster linked on to /man's.
-        longf = struct.unpack_from("<I", d, sets["LONGF"][0] + 32 + 20)[0]
+        longf = first_of("LONGF")
         stream("LONGF", 0x01, longf, 1)
         fat(longf, man_cluster(vol))
         # LONGA the same, its one cluster full.
-        longa = struct.unpack_from("<I", d, sets["LONGA"][0] + 32 + 20)[0]
+        longa = first_of("LONGA")
         stream("LONGA", 0x01, longa, vol.cluster)
         fat(longa, man_cluster(vol))
 
@@ -274,36 +263,15 @@ def plant():
 def exfat_dir(vol, name):
     """The root's entry `name` on exFAT: (first cluster, DataLength,
     ValidDataLength, chained), or None."""
-    d = vol.data(vol.chain(vol.root))
-    i = 0
-    while i < len(d) and d[i]:
-        count = d[i + 1] + 1 if d[i] == 0x85 else 1
-        if d[i] == 0x85:
-            stream = d[i + 32:i + 64]
-            got = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-            if got.decode("utf-16le")[:stream[3]].upper() == name.upper():
-                return (struct.unpack_from("<I", stream, 20)[0], struct.unpack_from("<Q", stream, 24)[0],
-                        struct.unpack_from("<Q", stream, 8)[0], not stream[1] & 0x02)
-        i += 32 * count
-    return None
+    found = exfatimg.find(vol.data(vol.chain(vol.root)), name)
+    return exfatimg.extent(found) if found else None
 
 
 def exfat_names(d):
     """Every live file name in the entry sets of directory bytes `d`, in
     order, a name twice if two sets carry it; a set cut off by the end of
     `d` is not read."""
-    out = []
-    i = 0
-    while i + 32 <= len(d) and d[i]:
-        count = d[i + 1] + 1 if d[i] == 0x85 else 1
-        if i + 32 * count > len(d):
-            break
-        if d[i] == 0x85:
-            stream = d[i + 32:i + 64]
-            got = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-            out.append(got.decode("utf-16le")[:stream[3]])
-        i += 32 * count
-    return out
+    return [s.name for s in exfatimg.sets(d)]
 
 
 def fat32_names(d):

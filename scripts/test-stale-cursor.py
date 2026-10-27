@@ -72,7 +72,7 @@ sys.path.insert(0, HERE)
 import exfatimg  # noqa: E402
 import mbrdisk  # noqa: E402
 
-Volume, set_checksum = exfatimg.Volume, exfatimg.set_checksum
+Volume = exfatimg.Volume
 
 _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
 drive_qemu = importlib.util.module_from_spec(_spec)
@@ -154,37 +154,24 @@ def plant_empty():
     then followed that entry into Q until 2026-10-18, when ensure_chained came
     to end the cluster first, and since 2026-10-19 the entry holds no cluster
     at all; the guest's writeats make that write."""
+    vol = Volume(SMALL, 0)
+    root = vol.chain(vol.root)
+    d = bytearray(vol.data(root))
+    found = {s.name: s for s in exfatimg.sets(d)}
+    if set(found) < {"P", "Q"}:
+        sys.exit(f"test-stale-cursor: macOS did not leave P and Q in the small exFAT's root: {sorted(found)}")
+    firsts = {}
+    for name in ("P", "Q"):
+        e = exfatimg.extent(found[name])
+        if e.chained:
+            sys.exit(f"test-stale-cursor: macOS wrote {name} FAT-chained, not NoFatChain: nothing to plant")
+        firsts[name] = e.first
+    exfatimg.restream(d, found["P"], size=0)
     with open(SMALL, "r+b") as fh:
-        b = fh.read(512)
-        sector = 1 << b[108]
-        fat, _, heap, _, root = struct.unpack_from("<IIIII", b, 80)
-        cluster = sector << b[109]
-        fh.seek(heap * sector + (root - 2) * cluster)
-        d = bytearray(fh.read(cluster))
-        found = {}
-        i = 0
-        while i < len(d) and d[i]:
-            count = d[i + 1] + 1 if d[i] == 0x85 else 1
-            if d[i] == 0x85:
-                stream = d[i + 32:i + 64]
-                name = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-                found[name.decode("utf-16le")[:stream[3]]] = (i, count)
-            i += 32 * count
-        if set(found) < {"P", "Q"}:
-            sys.exit(f"test-stale-cursor: macOS did not leave P and Q in the small exFAT's root: {sorted(found)}")
-        firsts = {}
-        for name, (at, _) in found.items():
-            stream = d[at + 32:at + 64]
-            if name in ("P", "Q") and not stream[1] & 0x02:
-                sys.exit(f"test-stale-cursor: macOS wrote {name} FAT-chained, not NoFatChain: nothing to plant")
-            firsts[name] = struct.unpack_from("<I", stream, 20)[0]
-        at, count = found["P"]
-        struct.pack_into("<Q", d, at + 32 + 8, 0)   # ValidDataLength
-        struct.pack_into("<Q", d, at + 32 + 24, 0)  # DataLength
-        struct.pack_into("<H", d, at + 2, set_checksum(d[at:at + 32 * count]))
-        fh.seek(heap * sector + (root - 2) * cluster)
-        fh.write(d)
-        fh.seek(fat * sector + firsts["P"] * 4)
+        for k, c in enumerate(root):
+            fh.seek(vol.heap + (c - 2) * vol.cluster)
+            fh.write(d[k * vol.cluster:(k + 1) * vol.cluster])
+        fh.seek(vol.fat + firsts["P"] * 4)
         fh.write(struct.pack("<I", firsts["Q"]))
 
 

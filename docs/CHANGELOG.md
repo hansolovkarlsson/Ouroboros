@@ -1216,6 +1216,17 @@ reads both of `espexfat.img`'s partitions the same as the old one
 pass. Three hand-rolled exFAT set walkers and `Volume`'s own FAT32
 listing remain (roadmap).
 
+**No exFAT rig walks entry sets by hand (2026-10-27).** `test-grow-dir`'s
+`plant` and `exfat_dir` and `test-stale-cursor`'s `plant_empty` had loops of
+their own, with no bound on a set cut off at the end of the bytes and a
+name cut at `NameLength` characters rather than UTF-16 units. They now use
+`exfatimg.sets` and `find`, and two new helpers: `extent`, which reads a
+set's Stream entry, and `restream`, which rewrites it and reseals the set.
+`Volume.listing` is `sets` on exFAT and `fat32img`'s listing on FAT32, and
+`Volume.data` on FAT32 is `fat32img`'s read. On the host the new `Volume`
+gives the same listings as the old for 748 entries of `espexfat.img` and
+`esp.img`, and the same bytes for 2,141 FAT32 chains.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
