@@ -58,7 +58,6 @@ delete_set changes.
 """
 import importlib.util
 import os
-import shutil
 import struct
 import sys
 
@@ -66,7 +65,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import exfatimg  # noqa: E402
-import mbrdisk  # noqa: E402
 
 
 def load(name, file):
@@ -77,9 +75,7 @@ def load(name, file):
 
 
 drive_qemu = load("drive_qemu", "drive-qemu.py")
-stale_cursor = load("test_stale_cursor", "test-stale-cursor.py")
-Volume, set_checksum = stale_cursor.Volume, stale_cursor.set_checksum
-entry_set = load("test_grow_dir", "test-grow-dir.py").entry_set
+Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfatimg.entry_set
 
 BUILD = os.path.join(ROOT, "build")
 ESP = os.path.join(BUILD, "esp.img")
@@ -101,19 +97,10 @@ def contiguous_set(name, cluster, size):
     return bytes(s)
 
 
-def root_end(d):
-    i = 0
-    while i < len(d) and d[i]:
-        i += SLOT
-    return i
-
-
 def plant():
     """The copy, planted: (partition start, {name: cluster}, [X, Y] as
     absolute sectors), or a reason the root had no room."""
-    shutil.copyfile(os.path.join(BUILD, "espexfat.img"), IMAGE)
-    with open(IMAGE, "rb") as fh:
-        start = [p for p in mbrdisk.entries(fh.read(SECTOR)) if p[1] == 0x07][0][2]
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     free = [c for c in range(2, vol.count + 2) if not vol.used(c)][:len(FILES) + 1]
     # The root given a second cluster, zeroed, so the plants fit.
@@ -133,7 +120,7 @@ def plant():
     clusters = dict(zip(FILES, free))
     chain = vol.chain(vol.root)
     d = bytearray(vol.data(chain))
-    at = root_end(d)
+    at = exfatimg.root_end(d)
     for name in ("U", "W", "W2"):
         d[at:at + 3 * SLOT] = contiguous_set(name, clusters[name], len(FILES[name]))
         at += 3 * SLOT
@@ -168,11 +155,6 @@ def root_sets(start):
     return vol, vol.data(vol.chain(vol.root))
 
 
-def fsck():
-    with exfatimg.attached(IMAGE) as dev:
-        return exfatimg.fsck(dev + "s1", "fsck_exfat")
-
-
 def answer(out, cmd, last=False):
     marker = "# " + cmd + "\r"
     if marker not in out:
@@ -189,9 +171,7 @@ def run():
     start, clusters, failing = placed
     vol, d = root_sets(start)
     names = [s.name for s in exfatimg.sets(d)]
-    rc, lines = fsck()
-    ok = (rc == 0 and "** Checking file system hierarchy." in lines
-          and not exfatimg.complaints(lines) and not exfatimg.unexpected(lines))
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     chain = vol.chain(vol.root)
 
     def sector_of(name):
@@ -240,9 +220,7 @@ def run():
     sets = list(exfatimg.sets(d))
     names = [s.name for s in sets]
     first = {s.name: struct.unpack_from("<I", s.data, 52)[0] for s in sets}
-    rc, lines = fsck()
-    ok = (rc == 0 and "** Checking file system hierarchy." in lines
-          and not exfatimg.complaints(lines) and not exfatimg.unexpected(lines))
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     listing = (answer(out, "ls /") or "").split()
     said = {c: answer(out, c) for c in FAILS}
     cats = {n: answer(out, f"cat /{n}") for n in CATS}

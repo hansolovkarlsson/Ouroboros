@@ -69,7 +69,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import exfatimg  # noqa: E402
 import mbrdisk  # noqa: E402
+
+Volume, set_checksum = exfatimg.Volume, exfatimg.set_checksum
 
 _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
 drive_qemu = importlib.util.module_from_spec(_spec)
@@ -144,15 +147,6 @@ def place_pq(dev):
     return None
 
 
-def set_checksum(entries):
-    """An exFAT entry set's SetChecksum: every byte but the primary's 2 and 3."""
-    total = 0
-    for i, b in enumerate(entries):
-        if i not in (2, 3):
-            total = (((total << 15) | (total >> 1)) + b) & 0xFFFF
-    return total
-
-
 def plant_empty():
     """P made a NoFatChain entry of size 0 that still names its cluster, whose
     FAT entry is set to Q's cluster: the case the spec forbids (DataLength > 0
@@ -192,111 +186,6 @@ def plant_empty():
         fh.write(d)
         fh.seek(fat * sector + firsts["P"] * 4)
         fh.write(struct.pack("<I", firsts["Q"]))
-
-
-class Volume:
-    """A FAT32 or exFAT partition of a disk image as the host reads it: the
-    cluster size, chains from the first FAT, and paths of live entries."""
-
-    def __init__(self, image, start_lba):
-        self.fh = open(image, "rb")
-        base = start_lba * 512
-        self.fh.seek(base)
-        b = self.fh.read(512)
-        self.exfat = b[3:11] == b"EXFAT   "
-        if self.exfat:
-            sector = 1 << b[108]
-            fat, _, heap, self.count, self.root = struct.unpack_from("<IIIII", b, 80)
-            self.cluster = sector << b[109]
-            self.end = 0xFFFFFFF7
-        else:
-            sector = struct.unpack_from("<H", b, 11)[0]
-            reserved, nfats = struct.unpack_from("<H", b, 14)[0], b[16]
-            fatsz = struct.unpack_from("<I", b, 36)[0]
-            self.root = struct.unpack_from("<I", b, 44)[0]
-            fat, heap = reserved, reserved + nfats * fatsz
-            self.count = fatsz * sector // 4
-            self.cluster = b[13] * sector
-            self.end = 0x0FFFFFF8
-        self.fat = base + fat * sector
-        self.heap = base + heap * sector
-        if self.exfat:
-            # The allocation bitmap's first cluster, from the root's 0x81 entry
-            # (assumed contiguous, as fsd's exfat.rs assumes it).
-            d = self.data(self.chain(self.root))
-            hits = [struct.unpack_from("<I", d, i + 20)[0] for i in range(0, len(d), 32) if d[i] == 0x81]
-            if not hits:
-                raise ValueError("no allocation bitmap in the exFAT root")
-            self.bitmap = hits[0]
-
-    def used(self, c):
-        """Whether cluster `c` is allocated: its FAT entry on FAT32, its
-        allocation bitmap bit on exFAT (a contiguous file leaves its FAT
-        entries 0)."""
-        if not self.exfat:
-            return self.entry(c) != 0
-        self.fh.seek(self.heap + (self.bitmap - 2) * self.cluster + (c - 2) // 8)
-        return bool(self.fh.read(1)[0] >> ((c - 2) % 8) & 1)
-
-    def entry(self, c):
-        self.fh.seek(self.fat + c * 4)
-        v = struct.unpack("<I", self.fh.read(4))[0]
-        return v if self.exfat else v & 0x0FFFFFFF
-
-    def chain(self, first):
-        out = [first]
-        while 2 <= self.entry(out[-1]) < self.end:
-            if len(out) > self.count:
-                raise ValueError(f"the chain from cluster {first} is longer than the volume: a loop")
-            out.append(self.entry(out[-1]))
-        return out
-
-    def data(self, chain):
-        out = b""
-        for c in chain:
-            self.fh.seek(self.heap + (c - 2) * self.cluster)
-            out += self.fh.read(self.cluster)
-        return out
-
-    def listing(self, first, chained=True):
-        """{name: (first cluster, size, chained)} of the live entries of a directory."""
-        d = self.data(self.chain(first) if chained else [first])
-        out = {}
-        if not self.exfat:
-            for j in range(0, len(d), 32):
-                e = d[j:j + 32]
-                if e[0] == 0:
-                    break
-                if e[0] != 0xE5 and e[11] != 0x0F:
-                    base, ext = e[:8].decode("latin1").rstrip(), e[8:11].decode("latin1").rstrip()
-                    out[base + ("." + ext if ext else "")] = (
-                        (struct.unpack_from("<H", e, 20)[0] << 16) | struct.unpack_from("<H", e, 26)[0],
-                        struct.unpack_from("<I", e, 28)[0], True)
-            return out
-        i = 0
-        while i < len(d) and d[i]:
-            count = d[i + 1] + 1 if d[i] == 0x85 else 1
-            if d[i] == 0x85:
-                stream = d[i + 32:i + 64]
-                name = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-                out[name.decode("utf-16le")[:stream[3]]] = (
-                    struct.unpack_from("<I", stream, 20)[0], struct.unpack_from("<Q", stream, 24)[0],
-                    not stream[1] & 0x02)
-            i += 32 * count
-        return out
-
-    def file_chain(self, path):
-        """`path`'s chain, its parts matched without case. Raises ValueError for
-        a missing part or a contiguous file (fsd writes every file chained)."""
-        first, chained = self.root, True
-        for part in path.strip("/").split("/"):
-            names = {k.upper(): v for k, v in self.listing(first, chained).items()}
-            if part.upper() not in names:
-                raise ValueError(f"no {path} on the disk")
-            first, _, chained = names[part.upper()]
-        if not chained:
-            raise ValueError(f"{path} is contiguous: fsd writes every file FAT-chained")
-        return self.chain(first)
 
 
 def layout(vol, d, seq, sub, k):

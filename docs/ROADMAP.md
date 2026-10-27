@@ -4420,7 +4420,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bound from the size: BIG's 2 MiB was filled in one request on QEMU and
   the append went through, no wedge restart. So C holds at megabytes; the
   open risk is gigabytes, unmeasured.
-- **The exFAT rigs take their host helpers from each other.** `Volume`,
+- ~~**The exFAT rigs take their host helpers from each other.**~~ `Volume`,
   `set_checksum` and `entry_set` come from executing `test-stale-cursor.py`
   and `test-grow-dir.py` as modules, and `copy`, `root_end` and the fsck
   pass rule are repeated in `test-long-set`, `test-grow-dir`,
@@ -4432,7 +4432,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   FAT 0 alone, where `scripts/fat32img.py` follows BPB_ExtFlags to the live
   copy since 2026-10-26: harmless while no image it reads has mirroring
   off, and the FAT32 half belongs on `fat32img` (the medium review that
-  day).
+  day). *Done 2026-10-26* (`chore/exfat-rig-helpers`): `Volume`,
+  `set_checksum`, `entry_set`, `copy_exfat`, `root_end` and `fsck_clean`
+  are in `exfatimg.py`, which every exFAT rig imports, and none runs
+  another as a module; `Volume`'s FAT32 entries come from `fat32img` (the
+  live copy). `test-grow-dir`'s fsck rule stays its own, as it expects one
+  planted complaint. `test-mv-undo` joined when its PR landed.
+- **Three exFAT rig helpers still walk sets by hand.** `test-grow-dir`'s
+  `exfat_dir` and `plant`, and `test-stale-cursor`'s `plant_empty`, read
+  entry sets with their own loops rather than `exfatimg.sets`/`find`.
+  They have no bound on a set cut off at the end of the bytes (an
+  IndexError) and cut a name by `NameLength` characters rather than its
+  UTF-16 units, so a surrogate pair is mis-cut. And `exfatimg.Volume`'s
+  FAT32 `listing` and `data` repeat `fat32img`'s (its entries, chain and
+  `fat` are `fat32img`'s since 2026-10-26). Move each onto the shared
+  copy. From the high review of `chore/exfat-rig-helpers`, 2026-10-26.
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
   chained walk reads and writes a bitmap sector and writes a FAT sector for
   every cluster, three round trips a cluster on the Pi's USB stick, and every

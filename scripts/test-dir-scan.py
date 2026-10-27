@@ -47,7 +47,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import exfatimg  # noqa: E402
-import mbrdisk  # noqa: E402
 
 
 def load(name, file):
@@ -58,7 +57,6 @@ def load(name, file):
 
 
 disktrace = load("disktrace", "disktrace.py")
-stale_cursor = load("test_stale_cursor", "test-stale-cursor.py")
 
 SOURCE = os.path.join(ROOT, "build", "espexfat.img")
 COUNT = 100
@@ -82,12 +80,11 @@ def said_ok(lines, count):
 
 
 def main():
-    with open(SOURCE, "rb") as fh:
-        start = [p for p in mbrdisk.entries(fh.read(512)) if p[1] == 0x07][0][2]
+    start = exfatimg.exfat_start(SOURCE)
     found = {}
 
     def inspect(copy, problems):
-        vol = stale_cursor.Volume(copy, start)
+        vol = exfatimg.Volume(copy, start)
         root = vol.data(vol.chain(vol.root))
         d = exfatimg.find(root, "D")
         if d is None:

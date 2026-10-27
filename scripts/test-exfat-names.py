@@ -49,7 +49,6 @@ units_match, names_match, utf8_name or list_dir changes.
 """
 import importlib.util
 import os
-import shutil
 import struct
 import sys
 
@@ -57,7 +56,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import exfatimg  # noqa: E402
-import mbrdisk  # noqa: E402
 
 
 def load(name, file):
@@ -68,8 +66,7 @@ def load(name, file):
 
 
 drive_qemu = load("drive_qemu", "drive-qemu.py")
-stale_cursor = load("test_stale_cursor", "test-stale-cursor.py")
-Volume, set_checksum = stale_cursor.Volume, stale_cursor.set_checksum
+Volume, set_checksum = exfatimg.Volume, exfatimg.set_checksum
 
 IMAGE = os.path.join(ROOT, "build", "test-exfat-names.img")
 ACUTE, GRAVE, UMLAUT = "café", "cafè", "cafë"
@@ -120,9 +117,7 @@ def first_cluster(s):
 
 
 def plant():
-    shutil.copyfile(os.path.join(ROOT, "build", "espexfat.img"), IMAGE)
-    with open(IMAGE, "rb") as fh:
-        start = [p for p in mbrdisk.entries(fh.read(512)) if p[1] == 0x07][0][2]
+    start = exfatimg.copy_exfat(IMAGE)
     vol = Volume(IMAGE, start)
     chain = vol.chain(vol.root)
     d = bytearray(vol.data(chain))
@@ -148,14 +143,6 @@ def plant():
     return start, dict(zip((n for n, _ in FILES), free))
 
 
-def fsck():
-    with exfatimg.attached(IMAGE) as dev:
-        rc, lines = exfatimg.fsck(dev + "s1", "fsck_exfat")
-    ok = (rc == 0 and "** Checking file system hierarchy." in lines
-          and not exfatimg.complaints(lines) and not exfatimg.unexpected(lines))
-    return ok, lines
-
-
 def answer(out, cmd, last=False):
     """What the guest printed for `cmd` (its first run, or its `last`): the
     text after its echoed line, up to the next prompt, without the kernel's
@@ -172,7 +159,7 @@ def run():
     start, clusters = plant()
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     checks = [
         ("before: the three sets read back by their exact names, each on its own planted cluster",
          all(find(root, n) is not None and first_cluster(find(root, n)) == clusters[n] for n, _ in FILES)),
@@ -203,7 +190,7 @@ def run():
     vol = Volume(IMAGE, start)
     root = vol.data(vol.chain(vol.root))
     grave, acute = find(root, "grave"), find(root, ACUTE)
-    ok, lines = fsck()
+    ok, lines = exfatimg.fsck_clean(IMAGE)
     if not ok:
         notes += [f"after: {ln}" for ln in lines]
     checks += [

@@ -1199,6 +1199,23 @@ files as they were, with fsck clean. The rig fails with the undo removed,
 with a source or a destination not put back, with the destination's failure
 not rolled back, and with the destination deleted first.
 
+**The exFAT rigs' host helpers live in `exfatimg.py` alone.** `Volume`,
+`set_checksum` and `entry_set` lived in `test-stale-cursor` and
+`test-grow-dir`, and four other rigs ran those two as modules to take them,
+so a change to one rig's internals could break another's import. The image
+copy, `root_end` and the fsck pass rule were repeated in four rigs. All of
+them now live in `exfatimg.py` (`copy_exfat`, `root_end` and `fsck_clean`
+are new names, beside `exfat_start`), and the rigs import that. `Volume`
+reads FAT32 too, and used to read FAT 0 alone whatever `BPB_ExtFlags`
+said. On FAT32 its entries, its chain rule and `fat` (the offset a rig
+writes an entry at) are now `fat32img`'s, the live copy. A high review
+found the first version took only the entries from `fat32img`, leaving
+`fat` on FAT 0 and the chain on a rule of its own. The moved `Volume`
+reads both of `espexfat.img`'s partitions the same as the old one
+(listings, chains, allocation and `fat`), and the six rigs that use it
+pass. Three hand-rolled exFAT set walkers and `Volume`'s own FAT32
+listing remain (roadmap).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
