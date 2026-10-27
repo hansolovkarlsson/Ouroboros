@@ -4481,8 +4481,8 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   it, `read_only()` and the allocator all ask the gate. With all seven
   early checks removed, `test-long-set`'s and `test-volume-bound`'s
   read-only boots pass, the gate refusing each write; with the gate's two
-  checks removed too (its write check and the allocator's), 14 checks fail. A `Disk` of its own is still spellable
-  anywhere in fsd (next item). Originally: A volume with no bitmap, or with
+  checks removed too (its write check and the allocator's), 14 checks fail. A `Disk` of its own was still spellable
+  anywhere in fsd until later the same day (next item). Originally: A volume with no bitmap, or with
   two FATs, is read-only because each of the seven public writers (`touch`,
   `write_file`, `write_at`, `mkdir`, `rm`, `rmdir`, `mv`) asks
   `writable()` first. A new writer that forgets it writes to a volume whose
@@ -4493,8 +4493,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `write_fat_entry`, `rewrite_slots` and `patch_stream_ext` require would
   make the omission impossible to write. Nothing is broken today. From the
   third high review of 2026-10-24, deferred.
-- **Any code in fsd can write the disk through a `Disk` of its own.**
-  `disk::Disk` is a unit struct, and `main.rs` names one in twenty
+- ~~**Any code in fsd can write the disk through a `Disk` of its own.**~~
+  **Done 2026-10-27:** `Disk` has a private field and is not `Clone`, and
+  the one way to make one is `disk::Device::disk`. fsd's `main` claims the
+  one `Device` at its start (`Device::claim`, which answers `None` to any
+  later caller) and passes it by reference to the mounts and to `erase`,
+  `partition` and `format`; the filesystem arms are handed a `Disk` and never
+  see the `Device`. `Disk(())`, `Device(())` and the old `Disk` written in
+  `exfat.rs` each fail to compile. Originally: `disk::Disk` is a unit struct, and `main.rs` names one in twenty
   places (`disk::Disk.write_sector`, `erase`'s zeroing among them). So
   exFAT's disk gate holds for every write through `Fs`'s own disk, but a
   writer in `exfat.rs` that wrote `Disk.write_sector(..)` would pass it, as
