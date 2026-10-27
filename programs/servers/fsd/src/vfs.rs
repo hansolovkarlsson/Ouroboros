@@ -114,7 +114,7 @@ impl Filesystem {
         let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
         let count = partition::discover(&mut device.disk(), &mut parts)?;
         let boot = device.boot_partition_start();
-        let roots = root_order(&parts, count, boot, device.capacity_sectors().ok());
+        let roots = root_order(&parts, count, boot, device.disk().capacity_sectors().ok());
         let probed = Self::first_mounting(device, &roots.order[..roots.len]);
         let Some((i, fs)) = probed.found else {
             return Err(probed.failed.unwrap_or(Error::NoFat32Partition));
@@ -202,7 +202,7 @@ impl Filesystem {
         let Ok(lba32) = u32::try_from(parts[index].start) else {
             return Err(Error::NoFat32Partition);
         };
-        let bound = volume_bound(&parts[index], &parts[..count], device.capacity_sectors().ok());
+        let bound = volume_bound(&parts[index], &parts[..count], device.disk().capacity_sectors().ok());
         Self::probe(device, lba32, bound)?.ok_or(Error::NoFat32Partition)
     }
 

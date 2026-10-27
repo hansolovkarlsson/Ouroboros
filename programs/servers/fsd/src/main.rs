@@ -12,10 +12,12 @@
 //! `pong/`/`hello/`/`shell/`: `aarch64-unknown-none`, release-only,
 //! shared linker script, constants from `syscall-abi`.
 //!
-//! **No static mutable state** (the linker asserts `.data`/`.bss`
-//! empty, same as every userland program here) - the mounted `Fs`
-//! lives in `main`'s own stack frame, which works because this server
-//! is one infinite loop that never returns.
+//! **Its tables live in `main`'s own stack frame** - the mounted `Fs`
+//! instances and the fid table, which works because this server is one
+//! infinite loop that never returns. A few flags are statics (atomics, only
+//! the spelling of a mutable static in a task of one thread):
+//! `ROOT_READ_ONLY` here, `disk.rs`'s `CLAIMED`. The linker no longer
+//! asserts `.data`/`.bss` empty (programs/linker.ld says why).
 //!
 //! **v2 protocol - fully self-contained, no client pointers.** The
 //! original protocol passed raw pointers into the caller's memory,
@@ -57,13 +59,18 @@ fn main() -> ! {
     // the array of `None`s with a const block rather than `[None; N]`.
     let mut mounts: [Option<vfs::Filesystem>; MAX_MOUNTS] = [const { None }; MAX_MOUNTS];
     // The open-file (fid) table - see the fid verbs. Lives here in main's frame
-    // like `mounts` (fsd keeps no static state).
+    // like `mounts`.
     let mut fids = [Fid::empty(); MAX_FIDS];
     // The block device, claimed here and nowhere else: every volume and disk
     // tool gets its handle from it, so no filesystem arm can make a disk
-    // handle of its own (disk.rs's `Device`). The first claim cannot fail.
+    // handle of its own (disk.rs's `Device`). Nothing runs before this line
+    // to claim it first; if something ever did, fsd says so and parks rather
+    // than panic, which the supervisor would restart into the same panic.
     let Some(device) = disk::Device::claim() else {
-        unreachable!("fsd's main claims the block device first");
+        print("fsd: the block device was claimed before main - not serving\r\n");
+        loop {
+            core::hint::spin_loop();
+        }
     };
     // Auto-mount if the kernel already holds a device (QEMU's boot-time
     // virtio path; on Parallels the device arrives later, via the
@@ -163,7 +170,7 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_M
     if mounts[0].is_some() {
         return syscall_abi::MOUNT_ALREADY;
     }
-    if device.capacity_sectors().is_err() {
+    if device.disk().capacity_sectors().is_err() {
         return syscall_abi::NO_FS;
     }
     match vfs::Filesystem::mount(device) {
@@ -277,7 +284,7 @@ fn tree_of(mounts: &[Option<vfs::Filesystem>; MAX_MOUNTS], candidate: &vfs::File
 /// subsequent partition/format starts clean. Returns `0`,
 /// [`MOUNT_NO_DEVICE`] (no block device), or [`FS_ERR_IO`].
 fn erase_disk(device: &disk::Device, sectors: u64) -> u64 {
-    let Ok(capacity) = device.capacity_sectors() else {
+    let Ok(capacity) = device.disk().capacity_sectors() else {
         return syscall_abi::MOUNT_NO_DEVICE;
     };
     let want = if sectors == 0 {
@@ -306,7 +313,7 @@ fn erase_disk(device: &disk::Device, sectors: u64) -> u64 {
 /// [`MOUNT_NO_DEVICE`], [`FS_ERR_DISK_FULL`] (disk smaller than the 1 MiB
 /// alignment start), or [`FS_ERR_IO`].
 fn partition_disk(device: &disk::Device, type_byte: u8) -> u64 {
-    let Ok(capacity) = device.capacity_sectors() else {
+    let Ok(capacity) = device.disk().capacity_sectors() else {
         return syscall_abi::MOUNT_NO_DEVICE;
     };
     let start = syscall_abi::PARTITION_START_LBA;
@@ -386,7 +393,7 @@ fn find_partition(device: &disk::Device) -> Result<Option<(u32, u32)>, fat32::Er
     // typed root is formatted, not a data partition or an ESP beside it,
     // whether or not the boot partition is known (the review of #295).
     let boot = device.boot_partition_start();
-    let roots = vfs::root_order(&parts, count, boot, device.capacity_sectors().ok());
+    let roots = vfs::root_order(&parts, count, boot, device.disk().capacity_sectors().ok());
     let candidates = roots.format_targets();
     let probed = vfs::Filesystem::first_mounting(device, candidates);
     if let Some(e) = probed.failed {
@@ -413,7 +420,7 @@ fn find_partition(device: &disk::Device) -> Result<Option<(u32, u32)>, fat32::Er
 /// [`FS_ERR_DISK_FULL`] (partition too small), or [`FS_ERR_IO`] (also when
 /// the partition table or the probe would not read).
 fn format_disk(device: &disk::Device, fstype: u64) -> u64 {
-    if device.capacity_sectors().is_err() {
+    if device.disk().capacity_sectors().is_err() {
         return syscall_abi::MOUNT_NO_DEVICE;
     }
     let (start, sectors) = match find_partition(device) {
@@ -448,7 +455,7 @@ const MAX_MOUNTS: usize = ninep_abi::NS_PROC_TREE as usize + 1;
 
 // --- fids: server-side open-file handles (see ninep-abi's NP_OPEN..NP_CLUNK) -
 /// How many files can be open at once, across all clients. Small and fixed - the
-/// table lives on `main`'s stack frame (fsd keeps no static state), and fsd's
+/// table lives on `main`'s stack frame, and fsd's
 /// stack is guard-page-bounded, so this stays modest. If it fills, `NP_OPEN`
 /// first reaps fids whose owner is gone (`reap_dead_fids`), then fails. The
 /// value is `ninep-abi`'s since 2026-09-12: it is a budget the export's
@@ -636,7 +643,7 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUN
         if models_modes_or_unknown(mounted) == Some(true) {
             flags |= syscall_abi::MOUNT_FLAG_ENFORCES_MODES;
         }
-        let capacity = device.capacity_sectors().unwrap_or(0);
+        let capacity = device.disk().capacity_sectors().unwrap_or(0);
         let name = mounted.name().as_bytes();
         reply[0..8].copy_from_slice(&0u64.to_le_bytes());
         reply[8..16].copy_from_slice(&part_lba.to_le_bytes());
@@ -1910,6 +1917,12 @@ fn con_write(bytes: &[u8]) {
 
 #[inline(always)]
 pub(crate) fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
+    // The disk is reached through disk.rs alone (its own `svc`), so a file
+    // that writes `BLOCK_WRITE` here, around its `Disk` and exFAT's gate, is
+    // refused as the kernel would refuse another task.
+    if disk::is_block_call(number) {
+        return syscall_abi::BLOCK_ERR_DENIED;
+    }
     let ret: u64;
     unsafe {
         asm!(
@@ -1931,6 +1944,10 @@ pub(crate) fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) 
 /// the syscall-abi doc on `SAFECOPY`).
 #[inline(always)]
 pub(crate) fn syscall5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    // As syscall4: no BLOCK_* call but disk.rs's.
+    if disk::is_block_call(number) {
+        return syscall_abi::BLOCK_ERR_DENIED;
+    }
     let ret: u64;
     unsafe {
         asm!(

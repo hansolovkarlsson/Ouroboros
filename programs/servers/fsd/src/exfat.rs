@@ -369,10 +369,12 @@ enum Room {
 /// it asked [`Fs::writable`], the early check each public writer makes.
 /// Until 2026-10-27 that early check was the only one (the third high
 /// review of 2026-10-24: a writer that forgot it would have written to a
-/// volume whose live bitmap fsd cannot tell). Nor can a writer go around
-/// it with a `Disk` of its own: since 2026-10-27 a `Disk` is made only by
-/// [`Device::disk`](crate::disk::Device::disk), and this file never holds the
-/// `Device` (until then `Disk` was a unit struct any code in fsd could name).
+/// volume whose live bitmap fsd cannot tell). Since 2026-10-27 a writer here
+/// cannot go around it through fsd's own calls either: a `Disk` is made only
+/// by [`Device::disk`](crate::disk::Device::disk), which this file never
+/// holds, and the crate's `syscall4` and `syscall5` refuse the `BLOCK_*`
+/// calls, which `disk.rs` makes through an `svc` of its own. An `svc`
+/// written out by hand in `asm!` here would still pass; nothing stops that.
 ///
 /// Writability is settled once, at the end of [`Fs::mount_at`], and a
 /// later [`settle`](Gated::settle) changes nothing, so a writer refused here
