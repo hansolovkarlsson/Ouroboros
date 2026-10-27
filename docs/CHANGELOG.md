@@ -1171,6 +1171,34 @@ reason recorded still gives one ("names no allocation bitmap"). The
 review also found that the reason reaches the console alone, so a `cpu`
 session or another shell that runs `mount N` never sees it (roadmap).
 
+**A failed exFAT `mv` is rolled back.** A `mv` writes the source's set
+again under the new name, then deletes the old one; a replacing `mv`
+deletes the destination's set too. When a delete failed, the new set stayed
+beside the source's, both naming the source's clusters, so a later `rm` of
+either freed them under the other. A delete only clears each slot's in-use
+bit, and a replacing `mv` frees the destination's clusters only once both
+sets are gone. So a failure can be rolled back exactly: `put_back` sets the
+bits of a partly deleted set again, and the new set is cleared. A failed
+`mv` or `mv -f` now leaves both files as they were, as POSIX `rename`
+does. Every arm of `mv` goes through one `move_set`, and a replacing `mv`
+now deletes the source's set before the destination's. The first version
+of this fix only gave the new set back, and kept the old order with the
+destination deleted first. Its high review found that a failed `mv -f` then
+destroyed its destination. Option 3 of the three weighed that day (Hans's
+choice) made it a full rollback. relink's own half-written set is cleared
+too, the slots having been free. Since a second high review a create
+whose half-written set clears also frees what it allocated (it leaked),
+and the rollback is one `roll_back` with one console line. A destination
+that cannot be put back keeps its clusters allocated: the entries after
+its File entry may still name them, so freeing them was the hazard the fix
+removes. Only a rollback whose own writes fail is left. It then keeps the
+move, or leaves both sets, and prints `fsd: a failed mv could not be
+rolled back - a fsck repairs it`. A new rig, `make test-mv-undo`, fails every write of two root
+sectors through QEMU's blkdebug. Six `mv`s must each fail and leave all six
+files as they were, with fsck clean. The rig fails with the undo removed,
+with a source or a destination not put back, with the destination's failure
+not rolled back, and with the destination deleted first.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

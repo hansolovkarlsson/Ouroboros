@@ -4476,7 +4476,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   reading the active FAT, and the bitmap entry that goes with it, would let
   it read right, and writing both pairs as the spec asks would make it
   writable.
-- **A failed exFAT `mv` leaves two sets over one file's clusters.** When a
+- ~~**A failed exFAT `mv` leaves two sets over one file's clusters.**~~ When a
   `mv` fails after `relink` wrote the new set (an I/O error deleting the old
   one, or in a replacing `mv` deleting or freeing the destination's), the
   source and the new set both name the source's clusters. A later `rm` of
@@ -4492,7 +4492,22 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   nothing) before returning the error, as `write_chain`, `mkdir` and
   `grow_extent` give back what they took, would end it, `insert_set`
   returning the slot it used; the undo can fail too, which leaves today's
-  state. The same review, deferred.
+  state. The same review, deferred. *Done 2026-10-26*
+  (`fix/exfat-mv-undo`): a failure at either delete is rolled back, the
+  deleted sets put back (their in-use bits set again) and the new set
+  cleared, so both files are as they were (option 3 of three, Hans's
+  choice after the high review of #357); `make test-mv-undo` fails two root
+  sectors' writes by blkdebug. What is left is the next item.
+- **A failed exFAT `mv` whose rollback fails can leave two sets.** When the
+  rollback's own writes fail too, or a set does not read after the
+  failure, fsd keeps the move where it can (a source that cannot be put
+  back: the new set is the file's; a destination: its clusters left
+  allocated, a leak, since its entries past the File entry may still name
+  them) and otherwise leaves the new set beside the source's over one
+  file's clusters, or two files of one name, with fsd's one line on the
+  console (`roll_back`, since the second high review of #357). No boot reaches these paths: a failing sector that turns
+  bad between two writes would. Ending them for good would take a journal.
+  From the high review of #357, 2026-10-26.
 - ~~**exFAT bounds a cluster number where it frees, not where it reads it.**~~
   `free_data` refuses a first cluster outside the heap and stops at the
   volume's own clusters, `write_fat_entry` refuses one outside the heap, and

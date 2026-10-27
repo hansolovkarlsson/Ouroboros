@@ -256,6 +256,16 @@ const DIR_MAX_BYTES: u64 = 256 << 20;
 /// [`DIR_MAX_BYTES`] ([`Fs::record_root`]), which one walk cannot tell apart.
 const ROOT_LOOPS: &str = "its root directory's chain loops or is longer than exFAT allows";
 
+/// fsd's console line when a failed `mv` could not be rolled back
+/// ([`Fs::roll_back`]): two sets left over one file's clusters or of one
+/// name, or a set's entries left in use with its File entry gone, which a
+/// fsck repairs.
+const NOT_ROLLED_BACK: &str = "fsd: a failed mv could not be rolled back - a fsck repairs it\r\n";
+
+/// fsd's console line when a create's half-written set could not be cleared
+/// ([`Fs::insert_set`]).
+const SET_LEFT: &str = "fsd: a failed create left part of an entry set - a fsck repairs it\r\n";
+
 /// The most runs of consecutive clusters [`Fs::root_runs`] records the
 /// root's chain in. A root grows a cluster at a time, each a new run when
 /// something was allocated since, so a root of 4 KiB clusters holding some
@@ -2013,17 +2023,42 @@ impl Fs {
         let entries = build_entry_set(name, is_dir, first_cluster, data_len, data_contiguous, &mut set)
             .ok_or(Error::InvalidName)
             .map_err(unwritten)?;
-        self.insert_set(dir, room, &set[..entries * ENTRY_SIZE])
+        self.insert_set(dir, room, &set[..entries * ENTRY_SIZE]).map(|_| ())
     }
 
     /// Insert a built entry set into a directory: [`create_entry`](Self::create_entry)'s tail,
     /// and a rename's, whose set is [`renamed_set`](Self::renamed_set).
-    fn insert_set(&mut self, dir: &mut Dir, mut room: Room, set: &[u8]) -> Result<(), CreateFailed> {
+    /// Answers where it wrote the set, for a rename to give back
+    /// ([`move_set`](Self::move_set)).
+    fn insert_set(&mut self, dir: &mut Dir, mut room: Room, set: &[u8]) -> Result<SetAt, CreateFailed> {
         let start = self
             .find_free_run(&mut dir.entry, &mut room, set.len() / ENTRY_SIZE)
             .map_err(|error| CreateFailed { error, written: false })?;
-        self.write_set_at(dir.entry.first_cluster, dir.entry.contiguous, start, set)
-            .map_err(|error| CreateFailed { error, written: true })
+        // The directory as the run was found in it, which a growth may have
+        // given a FAT chain: the slots address the same clusters either way.
+        let at = SetAt {
+            dir_cluster: dir.entry.first_cluster,
+            dir_contiguous: dir.entry.contiguous,
+            slot: start,
+            len: set.len() / ENTRY_SIZE,
+        };
+        if let Err(error) = self.write_set_at(at.dir_cluster, at.dir_contiguous, start, set) {
+            // What reached the disk given back: the run was free slots, so
+            // clearing every one leaves no set, where a half-written one
+            // named the clusters a rename shares with its source (the high
+            // review of #357). Given back when its File entry reads clear
+            // (a sector the write never reached fails the clear too, and
+            // was free): then nothing names what the caller allocated, and
+            // it may give that back (`written` false; true until the second
+            // high review of #357, a leak at every such create).
+            let _partly = self.set_in_use(at, false);
+            let written = self.file_in_use(at) != Some(false);
+            if written {
+                crate::print(SET_LEFT);
+            }
+            return Err(CreateFailed { error, written });
+        }
+        Ok(at)
     }
 
     /// The entries of the set at `at`, from its entry `from` on, each given
@@ -2879,54 +2914,167 @@ impl Fs {
             if src_entry.is_dir || dst_entry.is_dir {
                 return Err(Error::AlreadyExists);
             }
-            if same_set {
-                // A case-only rename: the new set carries this one's clusters.
-                self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
-                return self.delete_set(dst_at, &dst_entry, SetGoes::Renamed);
+            if !same_set {
+                // What `src`'s set names, read before anything is written; not
+                // for a case-only rename, which frees nothing (read there
+                // until the second high review of 2026-10-24).
+                let kept = self.runs_of(src_at, &src_entry)?;
+                // CREATE BEFORE DELETING: a failing `relink` (a directory
+                // that cannot be extended, an allocation failure) leaves `dst`
+                // as it was. Then `src`'s set, then `dst`'s, then the
+                // clusters `dst`'s named, but for any overlapping what `src`'s
+                // named (a cross-linked image). A delete clears in-use bits
+                // and frees nothing, and the clusters are freed only once
+                // both sets are gone, so a failure at either delete is rolled
+                // back ([`put_back`](Self::put_back) the sets deleted, the
+                // new one cleared): a failed `mv -f` leaves both files as they
+                // were, as POSIX `rename` does. `dst`'s set went first from
+                // the high review of 2026-10-24, so that a failure never left
+                // two sets of `dst`'s name; with the new set given back that
+                // order destroyed the destination when `src`'s delete failed
+                // (the high review of #357), and with the rollback neither
+                // order leaves two. Slot indices are stable across a create
+                // (`insert_set` fills a free run and moves nothing), so
+                // `dst_at` still addresses `dst`'s set.
+                let (new_at, moved) = self.move_set(&mut dst_dir, src_at, &src_entry, dst_name)?;
+                let secondaries = match self.unlink_set(dst_at) {
+                    Ok(secondaries) => secondaries,
+                    Err(e) => {
+                        let e = moved.unwrap_or(e);
+                        match self.put_back(dst_at) {
+                            // `dst` is back: so must `src` be, and the new set go.
+                            Some(true) => {
+                                let _said = self.roll_back(src_at, new_at);
+                            }
+                            // `dst` cannot be put back: the move stands, and
+                            // `dst`'s clusters are left allocated, since its
+                            // entries past the File entry may still be in use
+                            // and name them (freed here until the second high
+                            // review of #357): a leak a fsck finds.
+                            _ => crate::print(NOT_ROLLED_BACK),
+                        }
+                        return Err(e);
+                    }
+                };
+                let freed = self.free_runs(Alloc::stream(&dst_entry), secondaries, &kept);
+                return moved.map_or(freed, Err);
             }
-            // What `src`'s set names, read before anything is written; not
-            // for a case-only rename, which frees nothing (read there until
-            // the second high review of 2026-10-24).
-            let kept = self.runs_of(src_at, &src_entry)?;
-            // CREATE BEFORE DELETING, like the non-replacing path below.
-            // Deleting the destination first survives a crash no worse, and is
-            // wrong against an ordinary error: a failing `relink` (a
-            // directory that cannot be extended, an allocation failure) would
-            // return Err having already destroyed `dst` while `src` is still
-            // there. Slot indices are stable across a create - `insert_set`
-            // fills a free run and moves nothing - so the recorded `dst_at`
-            // still addresses the old set afterwards.
-            self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
-            // `dst`'s old set first, so a failure from here on never leaves
-            // two sets of `dst`'s name, only `src`'s set beside its new one,
-            // as a plain `mv` that fails at its delete; then `src`'s; then
-            // the clusters `dst`'s named, but for any overlapping what
-            // `src`'s named (a cross-linked image), held until neither set
-            // is left to name them. `src`'s set went first from 2026-10-23,
-            // and a failure at it left two sets named `dst` (the high review
-            // of 2026-10-24). Freed even when `src`'s delete fails: `dst`'s
-            // set is gone, so nothing else would free them, and `kept` holds
-            // what `src`'s set, deleted or not, names (returned early, a leak,
-            // until the second high review of 2026-10-24).
-            let secondaries = self.unlink_set(dst_at)?;
-            let src_gone = self.delete_set(src_at, &src_entry, SetGoes::Renamed);
-            let freed = self.free_runs(Alloc::stream(&dst_entry), secondaries, &kept);
-            return src_gone.and(freed);
+            // A case-only rename: the new set carries this one's clusters,
+            // and `dst_at` is `src_at`, deleted below as a plain rename's.
         }
 
         // Link dst to the same clusters first, then unlink src.
-        self.relink(&mut dst_dir, src_at, &src_entry, dst_name)?;
-        self.delete_set(src_at, &src_entry, SetGoes::Renamed)
+        self.move_set(&mut dst_dir, src_at, &src_entry, dst_name)?.1.map_or(Ok(()), Err)
+    }
+
+    /// Write `src`'s set, at `src_at`, again under `name` in `dir`
+    /// ([`relink`](Self::relink)), then delete the old one: every arm of
+    /// `mv`, so none can leave out the undo. Answers `Err` when the move did
+    /// not take: `relink` failed, or `src`'s delete failed and was rolled
+    /// back, `src`'s set put back ([`put_back`](Self::put_back)) and the new
+    /// one cleared (freeing nothing: `src`'s set names the same clusters).
+    /// Otherwise where the new set lies, with `None` when the move took and
+    /// `Some(e)` when `src`'s delete failed and its set could not be put
+    /// back: `src` is gone and the new set is the file's, the error for the
+    /// caller to return once it has finished. Until 2026-10-26 a failure
+    /// left both sets, and a later `rm` of either freed the clusters under
+    /// the other (the high review of 2026-10-24). A rollback whose own
+    /// writes fail leaves both sets, with a line saying so.
+    fn move_set(
+        &mut self,
+        dir: &mut Dir,
+        src_at: SetAt,
+        src_entry: &DirEntry,
+        name: &str,
+    ) -> Result<(SetAt, Option<Error>), Error> {
+        let new_at = self.relink(dir, src_at, src_entry, name)?;
+        let Err(e) = self.delete_set(src_at, src_entry, SetGoes::Renamed) else {
+            return Ok((new_at, None));
+        };
+        match self.roll_back(src_at, new_at) {
+            Some(false) => Ok((new_at, Some(e))),
+            _ => Err(e),
+        }
+    }
+
+    /// Roll a failed rename back: `src`'s set, at `src_at`, put back
+    /// ([`put_back`](Self::put_back)) and the new one, at `new_at`, cleared,
+    /// freeing nothing. `Some(true)` when both are done, the files as they
+    /// were; `Some(false)` when `src`'s set cannot be put back, the new set
+    /// kept as the file's; `None` when a set does not read or the new one
+    /// will not clear, both left. Each but the first prints
+    /// [`NOT_ROLLED_BACK`]. The one copy for both of `mv`'s failures (two
+    /// until the second high review of #357, with different lines).
+    fn roll_back(&mut self, src_at: SetAt, new_at: SetAt) -> Option<bool> {
+        let back = match self.put_back(src_at) {
+            Some(true) => {
+                let _partly = self.set_in_use(new_at, false);
+                (self.file_in_use(new_at) == Some(false)).then_some(true)
+            }
+            other => other,
+        };
+        if back != Some(true) {
+            crate::print(NOT_ROLLED_BACK);
+        }
+        back
+    }
+
+    /// Put the set at `at` back in use after a delete of it failed part-way,
+    /// and answer whether its File entry now reads in use (`None` when it
+    /// does not read). A delete ([`unlink_set`](Self::unlink_set)) clears
+    /// each slot's in-use bit and nothing else, so setting them again
+    /// restores the set exactly; its clusters, freed only after both of a
+    /// rename's deletes, are still allocated. A File entry that already
+    /// reads in use was not touched (the delete clears it first) and is
+    /// left alone.
+    fn put_back(&mut self, at: SetAt) -> Option<bool> {
+        if self.file_in_use(at)? {
+            return Some(true);
+        }
+        // A sector the failed delete never reached fails here too; its slots
+        // are still in use, and the File entry's sector, written first, is
+        // what the answer reads.
+        let _partly = self.set_in_use(at, true);
+        self.file_in_use(at)
+    }
+
+    /// Whether the set at `at` still has its File entry in use, `None` when
+    /// it does not read. A delete ([`unlink_set`](Self::unlink_set)) clears
+    /// a set's slots a sector at a time in order, the File entry's first, so
+    /// one whose File entry reads in use was not touched.
+    fn file_in_use(&mut self, at: SetAt) -> Option<bool> {
+        let mut there = false;
+        self.read_slots(at, 0, |_, raw| {
+            there = raw[0] == ET_FILE;
+            ControlFlow::Break(())
+        })
+        .ok()?;
+        Some(there)
+    }
+
+    /// Set (`on`) or clear the in-use bit of every slot of the run at `at`,
+    /// one read-modify-write a sector, stopping at the first that fails: a
+    /// set put back after a failed delete ([`put_back`](Self::put_back)), or
+    /// one this call's caller wrote into free slots given back (a slot the
+    /// write never reached was free, and clearing it changes nothing).
+    fn set_in_use(&mut self, at: SetAt, on: bool) -> Result<(), Error> {
+        self.rewrite_slots(at, || Error::NotFound, |sec, _, off, k| {
+            for j in 0..k {
+                let kind = &mut sec[off + j * ENTRY_SIZE];
+                *kind = if on { *kind | ET_IN_USE } else { *kind & !ET_IN_USE };
+            }
+        })
     }
 
     /// Write `src`'s set, at `src_at`, again under `name` in `dir`
     /// ([`renamed_set`](Self::renamed_set), then
-    /// [`insert_set`](Self::insert_set)): the step both of `mv`'s arms take
-    /// before deleting a set. Its one whole-set buffer is here, not in each
+    /// [`insert_set`](Self::insert_set)): the step [`move_set`](Self::move_set)
+    /// takes before deleting a set. Its one whole-set buffer is here, not in each
     /// arm, so a debug build's frame holds one. Slot indices are stable
     /// across it: `insert_set` fills a free run and moves nothing, so a set
     /// found before it is still where it was.
-    fn relink(&mut self, dir: &mut Dir, src_at: SetAt, src_entry: &DirEntry, name: &str) -> Result<(), Error> {
+    /// Answers where the new set lies.
+    fn relink(&mut self, dir: &mut Dir, src_at: SetAt, src_entry: &DirEntry, name: &str) -> Result<SetAt, Error> {
         let mut set = [0u8; WHOLE_SET_ENTRIES * ENTRY_SIZE];
         let entries = self.renamed_set(src_at, src_entry, name, &mut set)?;
         let room = self.room(dir)?;
