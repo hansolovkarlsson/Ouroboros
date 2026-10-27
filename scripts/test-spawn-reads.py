@@ -66,6 +66,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import bootstick  # noqa: E402  (its e2fsprogs lookup, `tool`)
 import disktrace  # noqa: E402
+import exfatimg  # noqa: E402  (its set walker, `sets` and `extent`)
 import mbrdisk  # noqa: E402  (its MBR reader, `entries`)
 
 SECTOR = 512
@@ -200,16 +201,10 @@ def exfat_chain(image, name):
         for c in root:
             fh.seek((g["heap"] + (c - 2) * g["spc"]) * SECTOR)
             data += fh.read(g["spc"] * SECTOR)
-        i = 0
-        while i < len(data) and data[i]:
-            count = data[i + 1] + 1 if data[i] == 0x85 else 1
-            if data[i] == 0x85:
-                stream = data[i + 32:i + 64]
-                names = b"".join(data[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-                if names.decode("utf-16le")[:stream[3]] == name:
-                    first = struct.unpack_from("<I", stream, 20)[0]
-                    return root, None if stream[1] & 0x02 else chain(first)
-            i += 32 * count
+        s = exfatimg.find(data, name)
+        if s is not None:
+            e = exfatimg.extent(s)
+            return root, chain(e.first) if e.chained else None
     raise ValueError(f"no {name} in the exFAT root of the boot's disk")
 
 

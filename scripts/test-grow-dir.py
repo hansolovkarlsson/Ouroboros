@@ -83,6 +83,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import exfatimg  # noqa: E402
+import fat32img  # noqa: E402
 import mbrdisk  # noqa: E402
 
 
@@ -95,7 +96,7 @@ def load(name, file):
 
 drive_qemu = load("drive_qemu", "drive-qemu.py")
 # The host's reader of a FAT32 or exFAT partition (chains, listings, the bitmap).
-Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfatimg.entry_set
+Volume, entry_set = exfatimg.Volume, exfatimg.entry_set
 
 BUILD = os.path.join(ROOT, "build")
 IMAGE = os.path.join(BUILD, "test-grow-dir.img")
@@ -173,19 +174,11 @@ def plant():
     vol = Volume(PART, 0)
     root = vol.chain(vol.root)
     d = bytearray(vol.data(root))
-    sets = {}
-    i = 0
-    while i < len(d) and d[i]:
-        count = d[i + 1] + 1 if d[i] == 0x85 else 1
-        if d[i] == 0x85:
-            stream = d[i + 32:i + 64]
-            got = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-            sets[got.decode("utf-16le")[:stream[3]]] = (i, count)
-        i += 32 * count
+    sets = {s.name: s for s in exfatimg.sets(d)}
+    man = man_cluster(vol)
     for name in MADE:
-        at = sets.get(name, (0, 0))[0]
-        stream = d[at + 32:at + 64]
-        if name not in sets or not stream[1] & 0x02 or struct.unpack_from("<Q", stream, 24)[0] != vol.cluster:
+        made = exfatimg.extent(sets[name]) if name in sets else None
+        if not made or made.chained or made.size != vol.cluster:
             sys.exit(f"test-grow-dir: macOS did not make {name} one NoFatChain cluster")
     with open(PART, "r+b") as fh:
         def bitmap(c, on):
@@ -199,14 +192,12 @@ def plant():
             fh.write(struct.pack("<I", value))
 
         def stream(name, flags, first, size):
-            at, count = sets[name]
-            d[at + 33] = flags
-            struct.pack_into("<Q", d, at + 32 + 8, size)   # ValidDataLength
-            struct.pack_into("<I", d, at + 32 + 20, first)
-            struct.pack_into("<Q", d, at + 32 + 24, size)  # DataLength
-            struct.pack_into("<H", d, at + 2, set_checksum(d[at:at + 32 * count]))
+            sets[name] = exfatimg.restream(d, sets[name], flags, first, size)
 
-        old = struct.unpack_from("<I", d, sets["OLD"][0] + 32 + 20)[0]
+        def first_of(name):
+            return exfatimg.extent(sets[name]).first
+
+        old = first_of("OLD")
         free = [c for c in range(2, vol.count + 2) if not vol.used(c)]
         second, data = free[0], dict(zip(HIDDEN, free[1:]))
         for c in [second, *data.values()]:
@@ -226,32 +217,33 @@ def plant():
             fh.write(piece)
         stream("OLD", 0x01, old, vol.cluster)
 
-        zero = struct.unpack_from("<I", d, sets["ZERO"][0] + 32 + 20)[0]
+        zero = first_of("ZERO")
         bitmap(zero, False)
         stream("ZERO", 0x01, 0, 0)
 
-        named = struct.unpack_from("<I", d, sets["NAMED"][0] + 32 + 20)[0]
+        named = first_of("NAMED")
         bitmap(named, False)
         stream("NAMED", 0x03, named, 0)
 
-        rmz = struct.unpack_from("<I", d, sets["RMZ"][0] + 32 + 20)[0]
+        rmz = first_of("RMZ")
         bitmap(rmz, False)
-        stream("RMZ", 0x01, man_cluster(vol), 0)
-        stream("Z0FILE", 0x01, man_cluster(vol), 0)
-        stream("Z0APP", 0x01, man_cluster(vol), 0)
+        stream("RMZ", 0x01, man, 0)
+        stream("Z0FILE", 0x01, man, 0)
+        stream("Z0APP", 0x01, man, 0)
 
         # LONGF FAT-chained, one byte, its cluster linked on to /man's.
-        longf = struct.unpack_from("<I", d, sets["LONGF"][0] + 32 + 20)[0]
+        longf = first_of("LONGF")
         stream("LONGF", 0x01, longf, 1)
-        fat(longf, man_cluster(vol))
+        fat(longf, man)
         # LONGA the same, its one cluster full.
-        longa = struct.unpack_from("<I", d, sets["LONGA"][0] + 32 + 20)[0]
+        longa = first_of("LONGA")
         stream("LONGA", 0x01, longa, vol.cluster)
-        fat(longa, man_cluster(vol))
+        fat(longa, man)
 
         for k, c in enumerate(root):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
             fh.write(d[k * vol.cluster:(k + 1) * vol.cluster])
+    vol.close()
     vol = Volume(PART, 0)
     if exfat_dir(vol, "ZERO")[:2] != (0, 0):
         sys.exit(f"test-grow-dir: ZERO is not a directory of size 0 with no cluster: {exfat_dir(vol, 'ZERO')}")
@@ -259,64 +251,38 @@ def plant():
         sys.exit("test-grow-dir: NAMED is not a NoFatChain directory of size 0 naming a free cluster")
     first, size, _, _ = exfat_dir(vol, "OLD")
     longf = exfat_dir(vol, "LONGF")
-    if not (longf and longf[1:] == (1, 1, True) and vol.chain(longf[0])[:2] == [longf[0], man_cluster(vol)]):
+    if not (longf and longf[1:] == (1, 1, True) and vol.chain(longf[0])[:2] == [longf[0], man]):
         sys.exit(f"test-grow-dir: LONGF is not a one-byte chained file linked on to /man's cluster: {longf}")
     longa = exfat_dir(vol, "LONGA")
     if not (longa and longa[1:] == (vol.cluster, vol.cluster, True)
-            and vol.chain(longa[0])[:2] == [longa[0], man_cluster(vol)]):
+            and vol.chain(longa[0])[:2] == [longa[0], man]):
         sys.exit(f"test-grow-dir: LONGA is not a one-cluster chained file linked on to /man's cluster: {longa}")
     for name in ("RMZ", "Z0FILE", "Z0APP"):
-        if exfat_dir(vol, name) != (man_cluster(vol), 0, 0, True):
+        if exfat_dir(vol, name) != (man, 0, 0, True):
             sys.exit(f"test-grow-dir: {name} is not a FAT-chained entry of size 0 naming /man's cluster")
-    return exfat_names(vol.data([first])[:size]), set(data.values())
+    seen = exfat_names(vol.data([first])[:size])
+    vol.close()
+    return seen, set(data.values())
 
 
 def exfat_dir(vol, name):
     """The root's entry `name` on exFAT: (first cluster, DataLength,
     ValidDataLength, chained), or None."""
-    d = vol.data(vol.chain(vol.root))
-    i = 0
-    while i < len(d) and d[i]:
-        count = d[i + 1] + 1 if d[i] == 0x85 else 1
-        if d[i] == 0x85:
-            stream = d[i + 32:i + 64]
-            got = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-            if got.decode("utf-16le")[:stream[3]].upper() == name.upper():
-                return (struct.unpack_from("<I", stream, 20)[0], struct.unpack_from("<Q", stream, 24)[0],
-                        struct.unpack_from("<Q", stream, 8)[0], not stream[1] & 0x02)
-        i += 32 * count
-    return None
+    found = exfatimg.find(vol.data(vol.chain(vol.root)), name)
+    return exfatimg.extent(found) if found else None
 
 
 def exfat_names(d):
     """Every live file name in the entry sets of directory bytes `d`, in
     order, a name twice if two sets carry it; a set cut off by the end of
     `d` is not read."""
-    out = []
-    i = 0
-    while i + 32 <= len(d) and d[i]:
-        count = d[i + 1] + 1 if d[i] == 0x85 else 1
-        if i + 32 * count > len(d):
-            break
-        if d[i] == 0x85:
-            stream = d[i + 32:i + 64]
-            got = b"".join(d[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-            out.append(got.decode("utf-16le")[:stream[3]])
-        i += 32 * count
-    return out
+    return [s.name for s in exfatimg.sets(d)]
 
 
-def fat32_names(d):
-    """Every live short name in FAT32 directory bytes `d`, `.` and `..` left out."""
-    out = []
-    for j in range(0, len(d), 32):
-        e = d[j:j + 32]
-        if e[0] == 0:
-            break
-        if e[0] != 0xE5 and e[11] != 0x0F and e[0] != ord("."):
-            base, ext = e[:8].decode("latin1").rstrip(), e[8:11].decode("latin1").rstrip()
-            out.append(base + ("." + ext if ext else ""))
-    return out
+def fat32_names(vol, first):
+    """Every live short name of the FAT32 directory at `first`, in order, a
+    name twice if two entries carry it, `.` and `..` left out."""
+    return [fat32img.dotted(n) for _, n, _, _ in vol.fat32.listing(first) if not n.startswith(".")]
 
 
 def names_check(where, names, count=COUNT):
@@ -444,13 +410,13 @@ def disk_checks(parts, snap, old):
     checks.append(("exfat: nothing before the cluster heap changed but the FAT entries of clusters",
                    before_heap(exf, parts[0][0]) == head))
 
-    names = {k.upper(): v for k, v in esp.listing(esp.root).items()}
-    if "GROW" not in names:
+    names = {exfatimg.fold(k): v for k, v in esp.listing(esp.root).items()}
+    if "grow" not in names:
         return checks + [("fat32 /mnt/f: /GROW is on the disk", False)]
-    chain = esp.chain(names["GROW"][0])
+    chain = esp.chain(names["grow"][0])
     print(f"     fat32 /mnt/f: /GROW: chain of {len(chain)} clusters")
     checks.append((f"fat32 /mnt/f: /GROW grew past its first cluster ({COUNT} files)", len(chain) >= 3))
-    checks.append(names_check("fat32 /mnt/f", fat32_names(esp.data(chain))))
+    checks.append(names_check("fat32 /mnt/f", fat32_names(esp, chain[0])))
     return checks
 
 

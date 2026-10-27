@@ -154,11 +154,9 @@ def stream(vol, root, name):
     hit = exfatimg.find(root, name)
     if hit is None:
         return None
-    s = hit.data
-    valid, first, size = struct.unpack_from("<Q", s, 40)[0], struct.unpack_from("<I", s, 52)[0], struct.unpack_from("<Q", s, 56)[0]
-    contiguous = s[33] & 0x02
+    first, size, valid, chained = exfatimg.extent(hit)
     n = -(-size // vol.cluster)
-    clusters = list(range(first, first + n)) if contiguous else vol.chain(first)
+    clusters = vol.chain(first) if chained else list(range(first, first + n))
     return valid, first, size, vol.data(clusters)[:size] if first >= 2 else b""
 
 

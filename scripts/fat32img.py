@@ -18,6 +18,13 @@ EOC_MIN = 0x0FFFFFF8
 BAD_CLUSTER = 0x0FFFFFF7
 
 
+def dotted(name):
+    """A short name as `listing` gives it (the 11 bytes, trailing blanks
+    cut) written BASE.EXT, or BASE when it has no extension."""
+    base, ext = name[:8].rstrip(), name[8:].rstrip()
+    return base + ("." + ext if ext else "")
+
+
 class Fat32:
     def __init__(self, fh, start):
         self.fh, self.start = fh, start

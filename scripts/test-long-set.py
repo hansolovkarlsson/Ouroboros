@@ -378,7 +378,7 @@ def run_long():
     vol = Volume(IMAGE, start)
     hit = exfatimg.find(vol.data(vol.chain(vol.root)), "VEND")
     got = hit.data if hit else b""
-    first, size = (struct.unpack_from("<I", got, 52)[0], struct.unpack_from("<Q", got, 56)[0]) if hit else (0, 0)
+    first, size = exfatimg.extent(hit)[:2] if hit else (0, 0)
     data = vol.data(vol.chain(first))[:size] if first >= 2 else b""
     ok, lines = exfatimg.fsck_clean(IMAGE)
     checks += [
