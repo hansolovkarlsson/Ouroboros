@@ -84,6 +84,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import disktrace  # noqa: E402
+import exfatimg  # noqa: E402
 import fat32img  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("spawn_reads", os.path.join(HERE, "test-spawn-reads.py"))
@@ -222,16 +223,7 @@ def exfat_entries(image, chain):
     g = spawn_reads.exfat_layout(image)
     cluster_bytes = g["spc"] * SECTOR
     data = exfat_read(image, chain, len(chain) * cluster_bytes)
-    out, i = [], 0
-    while i < len(data) and data[i]:
-        count = data[i + 1] + 1 if data[i] == 0x85 else 1
-        if data[i] == 0x85:
-            stream = data[i + 32:i + 64]
-            names = b"".join(data[i + 32 * k + 2:i + 32 * k + 32] for k in range(2, count))
-            out.append((i // cluster_bytes, names.decode("utf-16le")[:stream[3]],
-                        struct.unpack_from("<Q", stream, 24)[0]))
-        i += 32 * count
-    return out
+    return [(s.offset // cluster_bytes, s.name, exfatimg.extent(s).size) for s in exfatimg.sets(data)]
 
 
 def plant_backup(image):

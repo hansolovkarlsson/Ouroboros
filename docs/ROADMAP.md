@@ -4421,15 +4421,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   the append went through, no wedge restart. So C holds at megabytes; the
   open risk is gigabytes, unmeasured.
 - ~~**Three exFAT rig helpers still walk sets by hand.**~~ **Done
-  2026-10-27:** all three walk with `exfatimg.sets`/`find`, and read and
-  rewrite a set's Stream entry through two new helpers, `exfatimg.extent`
-  and `exfatimg.restream` (which reseals the set); `exfatimg.Volume`'s
-  `listing` is `sets` on exFAT and `fat32img`'s `listing` on FAT32, and its
-  `data` on FAT32 is `fat32img`'s `read`. Checked on the host against the
-  old `Volume`: the same listing for 748 entries across `espexfat.img` and
-  `esp.img`, and the same bytes for 2,141 FAT32 chains. `test-grow-dir`'s
-  `fat32_names`, which reads directory bytes rather than a volume, stays.
-  Originally: `test-grow-dir`'s
+  2026-10-27:** all three walk with `exfatimg.sets`/`find`, and so do two
+  more the review found (`test-spawn-reads`'s lookup, `test-write-walk`'s
+  `exfat_entries`). A set's Stream entry is read and rewritten through two
+  new helpers, `exfatimg.extent` and `exfatimg.restream`, which also replace
+  the hand decoding in `test-valid-length` and `test-long-set`.
+  `exfatimg.Volume`'s `listing` is `sets` on exFAT and `fat32img`'s
+  `listing` on FAT32, its `data` on FAT32 is `fat32img`'s `read`, and
+  `test-grow-dir`'s `fat32_names` reads through `fat32img` too. `sets` now
+  steps over a File entry with no secondaries instead of stopping there.
+  Checked on the host against the old `Volume`: the same listing for 748
+  entries across `espexfat.img` and `esp.img`, and the same bytes for 2,141
+  FAT32 chains. Originally: `test-grow-dir`'s
   `exfat_dir` and `plant`, and `test-stale-cursor`'s `plant_empty`, read
   entry sets with their own loops rather than `exfatimg.sets`/`find`.
   They have no bound on a set cut off at the end of the bytes (an
@@ -4438,6 +4441,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   FAT32 `listing` and `data` repeat `fat32img`'s (its entries, chain and
   `fat` are `fat32img`'s since 2026-10-26). Move each onto the shared
   copy. From the high review of `chore/exfat-rig-helpers`, 2026-10-26.
+- **Two rigs still load `test-spawn-reads.py` as a module.**
+  `test-write-walk` and `test-fat-link` run it through `importlib` to take
+  `partition`, `exfat_layout`, `exfat_chain` and `place_mounted` (the
+  latter alone for `test-fat-link`), so a change to that rig's internals
+  can break their imports, the trap #358 closed for the exFAT rigs. Move
+  what they take into `exfatimg.py` or a shared host module. Found while
+  closing the item above, 2026-10-27.
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
   chained walk reads and writes a bitmap sector and writes a FAT sector for
   every cluster, three round trips a cluster on the Pi's USB stick, and every

@@ -10,7 +10,7 @@ rule were repeated in four (the high review of 2026-10-22).
     for s in exfatimg.sets(dir_bytes): ...       # every File set, in order
     hit = exfatimg.find(dir_bytes, "VEND")       # by name, case folded as fsd does
     first, size, valid, chained = exfatimg.extent(hit)   # its Stream entry
-    exfatimg.restream(d, hit, first=0, size=0)   # the Stream rewritten in d, the set resealed
+    hit = exfatimg.restream(d, hit, first=0, size=0)   # the Stream rewritten in d, the set resealed
     s = exfatimg.entry_set("NAME", first, size)  # a set as fsd builds it, sealed
     ok, lines = exfatimg.fsck_clean(image)       # fsck_exfat -n, nothing to repair
     with exfatimg.attached(image) as dev: rc, lines = exfatimg.fsck(dev + "s1", "fsck_exfat")
@@ -39,15 +39,17 @@ def sets(d):
     """Every File set in directory bytes `d` up to its first 0x00 slot, as
     (byte offset, entry count, name, the set's bytes), counted by the File's
     SecondaryCount. A set cut off by the end of `d` is not yielded: the walk
-    stops there, no IndexError."""
+    stops there, no IndexError. A File entry with no secondaries is not a
+    set and is stepped over, as any entry outside a set is, so the sets
+    after it are still yielded."""
     i = 0
     while i + ENTRY <= len(d) and d[i]:
-        if d[i] != FILE:
+        if d[i] != FILE or d[i + 1] == 0:
             i += ENTRY
             continue
         count = d[i + 1] + 1
         end = i + ENTRY * count
-        if count < 2 or end > len(d):
+        if end > len(d):
             return
         s = d[i:end]
         name = ""
@@ -61,19 +63,28 @@ def sets(d):
         i = end
 
 
+def fold(name):
+    """`name` with A to Z made lower case and nothing else, as fsd's lookups
+    fold it: `É` and `é` stay two names."""
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in name)
+
+
 def find(d, name):
     """The set named `name` in `d`, matched ignoring ASCII case as fsd's
     lookups do, or None."""
     for s in sets(d):
-        if s.name.lower() == name.lower():
+        if fold(s.name) == fold(name):
             return s
     return None
 
 
 def extent(s):
     """Set `s`'s Stream entry: its first cluster, DataLength, ValidDataLength
-    and whether it is FAT-chained (NoFatChain clear)."""
+    and whether it is FAT-chained (NoFatChain clear). Raises ValueError for a
+    set whose second entry is not a Stream, which has none of these."""
     st = s.data[ENTRY:2 * ENTRY]
+    if st[0] != STREAM:
+        raise ValueError(f"the set at byte {s.offset} has no Stream entry (entry type {st[0]:#x})")
     return Extent(struct.unpack_from("<I", st, 20)[0], struct.unpack_from("<Q", st, 24)[0],
                   struct.unpack_from("<Q", st, 8)[0], not st[1] & 0x02)
 
@@ -82,7 +93,8 @@ def restream(d, s, flags=None, first=None, size=None):
     """Set `s`'s Stream entry rewritten in directory bytes `d` (a bytearray):
     its GeneralSecondaryFlags, first cluster, and both lengths `size`, each
     left as it is when None; the SetChecksum resealed over the set as it now
-    stands in `d`."""
+    stands in `d`. Answers the set as rewritten: `s` is a copy taken before,
+    and `extent(s)` still reads the old values."""
     at = s.offset + ENTRY
     if flags is not None:
         d[at + 1] = flags
@@ -92,6 +104,7 @@ def restream(d, s, flags=None, first=None, size=None):
         struct.pack_into("<Q", d, at + 8, size)   # ValidDataLength
         struct.pack_into("<Q", d, at + 24, size)  # DataLength
     struct.pack_into("<H", d, s.offset + 2, set_checksum(d[s.offset:s.offset + ENTRY * s.count]))
+    return s._replace(data=bytes(d[s.offset:s.offset + ENTRY * s.count]))
 
 
 @contextlib.contextmanager
@@ -210,6 +223,10 @@ class Volume:
             self.end = 0xFFFFFFF7
         else:
             sector = struct.unpack_from("<H", b, 11)[0]
+            if sector != fat32img.SECTOR:
+                # fat32img, which reads this volume's FAT and data, counts in
+                # 512-byte sectors; `heap` and `cluster` here would not.
+                raise ValueError(f"a FAT32 volume of {sector}-byte sectors: fat32img reads 512 alone")
             reserved, nfats = struct.unpack_from("<H", b, 14)[0], b[16]
             fatsz = struct.unpack_from("<I", b, 36)[0]
             self.root = struct.unpack_from("<I", b, 44)[0]
@@ -268,11 +285,13 @@ class Volume:
         if not self.exfat:
             out = {}
             for _, name, c, size in self.fat32.listing(first):
-                base, ext = name[:8].rstrip(), name[8:].rstrip()
-                out[base + ("." + ext if ext else "")] = (c, size, True)
+                out[fat32img.dotted(name)] = (c, size, True)
             return out
         d = self.data(self.chain(first) if chained else [first])
         return {s.name: (e.first, e.size, e.chained) for s in sets(d) for e in [extent(s)]}
+
+    def close(self):
+        self.fh.close()
 
     def file_chain(self, path):
         """`path`'s chain, its parts matched without case. Raises ValueError for

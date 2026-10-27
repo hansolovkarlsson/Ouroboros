@@ -1216,16 +1216,26 @@ reads both of `espexfat.img`'s partitions the same as the old one
 pass. Three hand-rolled exFAT set walkers and `Volume`'s own FAT32
 listing remain (roadmap).
 
-**No exFAT rig walks entry sets by hand (2026-10-27).** `test-grow-dir`'s
-`plant` and `exfat_dir` and `test-stale-cursor`'s `plant_empty` had loops of
-their own, with no bound on a set cut off at the end of the bytes and a
-name cut at `NameLength` characters rather than UTF-16 units. They now use
-`exfatimg.sets` and `find`, and two new helpers: `extent`, which reads a
-set's Stream entry, and `restream`, which rewrites it and reseals the set.
-`Volume.listing` is `sets` on exFAT and `fat32img`'s listing on FAT32, and
-`Volume.data` on FAT32 is `fat32img`'s read. On the host the new `Volume`
-gives the same listings as the old for 748 entries of `espexfat.img` and
-`esp.img`, and the same bytes for 2,141 FAT32 chains.
+**No exFAT rig walks entry sets by hand (2026-10-27).** Five rigs had set
+loops of their own: `test-grow-dir`'s `plant` and `exfat_dir`,
+`test-stale-cursor`'s `plant_empty`, `test-spawn-reads`'s lookup and
+`test-write-walk`'s `exfat_entries`. They had no bound on a set cut off at
+the end of the bytes, and cut a name at `NameLength` characters rather than
+UTF-16 units. They now use `exfatimg.sets` and `find`. Two new helpers read
+and write a set's Stream entry: `extent`, which also replaces the hand
+decoding in `test-valid-length` and `test-long-set`, and `restream`, which
+rewrites the Stream, reseals the set and answers the set as rewritten.
+`Volume.listing` is `sets` on exFAT and `fat32img`'s listing on FAT32,
+`Volume.data` on FAT32 is `fat32img`'s read, and `test-grow-dir`'s FAT32
+names come from `fat32img` too (`dotted`, the one BASE.EXT rule). A high
+review of the first version found the shared walker weaker than the loops
+it replaced: `sets` stopped at a File entry with no secondaries, where they
+stepped over it, so a damaged entry hid every set after it. It steps over
+one now. `extent` refuses a set with no Stream, `find` folds A to Z alone
+as fsd does (it folded all of Unicode), and `Volume` refuses a FAT32 volume
+of sectors other than 512 bytes, which `fat32img` cannot read. On the host
+the new `Volume` gives the same listings as the old for 748 entries of
+`espexfat.img` and `esp.img`, and the same bytes for 2,141 FAT32 chains.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

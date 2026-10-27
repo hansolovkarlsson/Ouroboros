@@ -158,7 +158,7 @@ def plant_empty():
     root = vol.chain(vol.root)
     d = bytearray(vol.data(root))
     found = {s.name: s for s in exfatimg.sets(d)}
-    if set(found) < {"P", "Q"}:
+    if not {"P", "Q"} <= set(found):
         sys.exit(f"test-stale-cursor: macOS did not leave P and Q in the small exFAT's root: {sorted(found)}")
     firsts = {}
     for name in ("P", "Q"):
@@ -167,6 +167,7 @@ def plant_empty():
             sys.exit(f"test-stale-cursor: macOS wrote {name} FAT-chained, not NoFatChain: nothing to plant")
         firsts[name] = e.first
     exfatimg.restream(d, found["P"], size=0)
+    vol.close()
     with open(SMALL, "r+b") as fh:
         for k, c in enumerate(root):
             fh.seek(vol.heap + (c - 2) * vol.cluster)

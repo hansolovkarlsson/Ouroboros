@@ -83,6 +83,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import exfatimg  # noqa: E402
+import fat32img  # noqa: E402
 import mbrdisk  # noqa: E402
 
 
@@ -174,6 +175,7 @@ def plant():
     root = vol.chain(vol.root)
     d = bytearray(vol.data(root))
     sets = {s.name: s for s in exfatimg.sets(d)}
+    man = man_cluster(vol)
     for name in MADE:
         made = exfatimg.extent(sets[name]) if name in sets else None
         if not made or made.chained or made.size != vol.cluster:
@@ -190,7 +192,7 @@ def plant():
             fh.write(struct.pack("<I", value))
 
         def stream(name, flags, first, size):
-            exfatimg.restream(d, sets[name], flags, first, size)
+            sets[name] = exfatimg.restream(d, sets[name], flags, first, size)
 
         def first_of(name):
             return exfatimg.extent(sets[name]).first
@@ -225,22 +227,23 @@ def plant():
 
         rmz = first_of("RMZ")
         bitmap(rmz, False)
-        stream("RMZ", 0x01, man_cluster(vol), 0)
-        stream("Z0FILE", 0x01, man_cluster(vol), 0)
-        stream("Z0APP", 0x01, man_cluster(vol), 0)
+        stream("RMZ", 0x01, man, 0)
+        stream("Z0FILE", 0x01, man, 0)
+        stream("Z0APP", 0x01, man, 0)
 
         # LONGF FAT-chained, one byte, its cluster linked on to /man's.
         longf = first_of("LONGF")
         stream("LONGF", 0x01, longf, 1)
-        fat(longf, man_cluster(vol))
+        fat(longf, man)
         # LONGA the same, its one cluster full.
         longa = first_of("LONGA")
         stream("LONGA", 0x01, longa, vol.cluster)
-        fat(longa, man_cluster(vol))
+        fat(longa, man)
 
         for k, c in enumerate(root):
             fh.seek(vol.heap + (c - 2) * vol.cluster)
             fh.write(d[k * vol.cluster:(k + 1) * vol.cluster])
+    vol.close()
     vol = Volume(PART, 0)
     if exfat_dir(vol, "ZERO")[:2] != (0, 0):
         sys.exit(f"test-grow-dir: ZERO is not a directory of size 0 with no cluster: {exfat_dir(vol, 'ZERO')}")
@@ -248,16 +251,18 @@ def plant():
         sys.exit("test-grow-dir: NAMED is not a NoFatChain directory of size 0 naming a free cluster")
     first, size, _, _ = exfat_dir(vol, "OLD")
     longf = exfat_dir(vol, "LONGF")
-    if not (longf and longf[1:] == (1, 1, True) and vol.chain(longf[0])[:2] == [longf[0], man_cluster(vol)]):
+    if not (longf and longf[1:] == (1, 1, True) and vol.chain(longf[0])[:2] == [longf[0], man]):
         sys.exit(f"test-grow-dir: LONGF is not a one-byte chained file linked on to /man's cluster: {longf}")
     longa = exfat_dir(vol, "LONGA")
     if not (longa and longa[1:] == (vol.cluster, vol.cluster, True)
-            and vol.chain(longa[0])[:2] == [longa[0], man_cluster(vol)]):
+            and vol.chain(longa[0])[:2] == [longa[0], man]):
         sys.exit(f"test-grow-dir: LONGA is not a one-cluster chained file linked on to /man's cluster: {longa}")
     for name in ("RMZ", "Z0FILE", "Z0APP"):
-        if exfat_dir(vol, name) != (man_cluster(vol), 0, 0, True):
+        if exfat_dir(vol, name) != (man, 0, 0, True):
             sys.exit(f"test-grow-dir: {name} is not a FAT-chained entry of size 0 naming /man's cluster")
-    return exfat_names(vol.data([first])[:size]), set(data.values())
+    seen = exfat_names(vol.data([first])[:size])
+    vol.close()
+    return seen, set(data.values())
 
 
 def exfat_dir(vol, name):
@@ -274,17 +279,10 @@ def exfat_names(d):
     return [s.name for s in exfatimg.sets(d)]
 
 
-def fat32_names(d):
-    """Every live short name in FAT32 directory bytes `d`, `.` and `..` left out."""
-    out = []
-    for j in range(0, len(d), 32):
-        e = d[j:j + 32]
-        if e[0] == 0:
-            break
-        if e[0] != 0xE5 and e[11] != 0x0F and e[0] != ord("."):
-            base, ext = e[:8].decode("latin1").rstrip(), e[8:11].decode("latin1").rstrip()
-            out.append(base + ("." + ext if ext else ""))
-    return out
+def fat32_names(vol, first):
+    """Every live short name of the FAT32 directory at `first`, in order, a
+    name twice if two entries carry it, `.` and `..` left out."""
+    return [fat32img.dotted(n) for _, n, _, _ in vol.fat32.listing(first) if not n.startswith(".")]
 
 
 def names_check(where, names, count=COUNT):
@@ -418,7 +416,7 @@ def disk_checks(parts, snap, old):
     chain = esp.chain(names["GROW"][0])
     print(f"     fat32 /mnt/f: /GROW: chain of {len(chain)} clusters")
     checks.append((f"fat32 /mnt/f: /GROW grew past its first cluster ({COUNT} files)", len(chain) >= 3))
-    checks.append(names_check("fat32 /mnt/f", fat32_names(esp.data(chain))))
+    checks.append(names_check("fat32 /mnt/f", fat32_names(esp, chain[0])))
     return checks
 
 
