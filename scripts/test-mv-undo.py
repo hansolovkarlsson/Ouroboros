@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A failed exFAT `mv` gives back the set it wrote, never two over one file.
+"""A failed exFAT `mv` is rolled back: both files as they were, never two sets.
 
     python3 scripts/test-mv-undo.py     (or `make test-mv-undo`, which builds the images)
 
@@ -8,54 +8,52 @@ and then deletes the old one; a replacing `mv` deletes the destination's
 set too. Until 2026-10-26 a failure at a delete returned the error with
 the new set left on the disk beside the source's, both naming the source's
 clusters, so a later `rm` of either freed them under the other (the high
-review of 2026-10-24). Now `move_set` clears the new set while the source's
-File entry still reads in use; a source whose File entry was cleared before
-the failure is gone, and the new set is kept as the file's. A replacing
-`mv` deletes the source's set before the destination's (the high review of
-#357: the other order, with the undo, destroyed the destination when the
-source's delete failed), and when the destination's delete fails it frees
-the destination's run if its File entry was cleared, or leaves it beside
-the new set of its name, saying so.
+review of 2026-10-24). A delete clears each slot's in-use bit and nothing
+else, and the clusters are freed only once both sets are gone, so fsd now
+rolls a failure back: the sets deleted put back (`put_back`, the bits set
+again) and the new set cleared (`move_set`), and a failed `mv -f` leaves
+both files as they were, as POSIX `rename` does. (A first version gave the
+new set back alone, which with the destination deleted first destroyed the
+destination: the high review of #357.)
 
 One boot. The firmware boots build/esp.img from NVMe (which the kernel
 cannot drive), and virtio holds a copy of build/espexfat.img through QEMU's
 blkdebug with every write of two sectors of the exFAT root, X and Y (X + 2),
 failing EIO (test-probe-ioerr's shape, for writes alone: `iotype =
 "write"`, or a read of them fails too once any write has been made). The
-host gives the root a second cluster and plants on it, after its last set: U, W and W2, each a file on
-a cluster of its own; at least 16 deleted slots, where the boot's new sets
-go; S2's File entry in the last slot before X, its Stream and name at X's
-start; S whole in X; deleted slots to the last slot before Y, V's File
-entry there and its Stream and name at Y's start. Before the boot each
-reads back where it was meant to and fsck_exfat -n passes. Then, logged in:
+host gives the root a second cluster and plants on it, after its last set:
+U, W and W2, each a file on a cluster of its own; at least 16 deleted
+slots, where the boot's new sets go; S2's File entry in the last slot
+before X, its Stream and name at X's start; S whole in X; deleted slots to
+the last slot before Y, V's File entry there and its Stream and name at Y's
+start. Before the boot each reads back where it was meant to and fsck_exfat
+-n passes. Then, logged in, each `mv` must answer an I/O error and leave
+every file as it was:
 
-- `mv /S2 /T2`: the delete clears S2's File entry and fails at X, so S2 is
-  gone and T2, the set relink wrote, must stay: `cat /T2` prints `s2`;
-- `mv /S /T`, `mv -f /S /s` (case-only) and `mv -f /S /U` (replacing) each
-  answer an I/O error and leave S and U whole (`cat /U` prints `u`);
+- `mv /S2 /T2`: S2's delete clears its File entry and fails at X, so S2 is
+  put back and T2 cleared (`cat /S2` prints `s2`);
+- `mv /S /T`, `mv -f /S /s` (case-only) and `mv -f /S /U` (replacing): S's
+  delete fails at X untouched, the new set cleared (`cat /U` prints `u`);
 - `mv -f /W /V`: W's delete works, V's clears its File entry and fails at
-  Y, so V must name W's bytes (`cat /V` prints `w`) and V's old cluster be
-  freed;
-- `mv -f /W2 /S`: W2's delete works, S's fails at X with S untouched, so
-  two files are named S, on S's cluster and W2's, and fsd says
-  `fsd: a failed mv -f left two files of one name`;
-- `ls /` lists S, T2, U and V and none of S2, T, s, W or W2.
+  Y, so V and W are put back and the new V cleared (`cat /V` prints `v`,
+  `cat /W` `w`);
+- `mv -f /W2 /S`: W2's delete works, S's fails at X untouched, so W2 is put
+  back and the new S cleared (`cat /W2` prints `w2`, `cat /S` `src`);
+- `ls /` lists the six and none of T, T2 or s, and fsd prints no line that
+  a rollback failed.
 
-After the boot, on the host, with the orphaned Stream and name entries at
-X and Y (S2's and V's, still in use) cleared first: two sets named S on S's
-and W2's clusters, T2 on S2's, U on its own, V on W's, none named T, s, S2,
-W or W2; V's old cluster free and every other planted one used; fsck_exfat
--n clean but for its one complaint, `Directory / contains a duplicate
-name (S).` No fault lines;
-a boot QEMU's firmware never starts is INCONCLUSIVE (exit 100). Fails with
-the undo removed (T and U left on S's cluster), with the undo made whatever
-the source's File entry reads (T2 lost), with the destination deleted
-before the source (U lost), and with the destination's run not freed when
-its File entry was cleared (V's old cluster leaked). Not graded by a boot:
-a give-back that fails, a source whose File entry does not read after the
-failure, which both leave two sets with a line, and relink's own partial
-write cleared (insert_set). About a minute. Run it whenever exFAT's mv,
-move_set, relink, file_in_use, clear_slots, insert_set, unlink_set or
+After the boot, on the host: each of the six once, on its own cluster,
+every one used, none named T, T2 or s, and fsck_exfat -n clean (S2's and
+V's sets whole: their entries at X and Y were never cleared). No fault
+lines; a boot QEMU's firmware never starts is INCONCLUSIVE (exit 100).
+Fails with the undo removed (T and U left on S's cluster), with a source
+not put back (T2 kept, S2 gone), with the destination's failure not rolled
+back (two files named S), with a destination not put back (V's bytes W's),
+and with the destination deleted before the source (U lost). Not graded
+by a boot: a rollback whose own writes fail, which completes the move or
+leaves two sets with a line, and relink's own partial write cleared
+(insert_set). About a minute. Run it whenever exFAT's mv, move_set,
+put_back, relink, file_in_use, clear_slots, insert_set, unlink_set or
 delete_set changes.
 """
 import importlib.util
@@ -90,10 +88,9 @@ BLKDEBUG = os.path.join(BUILD, "test-mv-undo.blkdebug")
 SLOT, SECTOR = 32, 512
 DELETED = bytes([0x05]) + bytes(31)  # a deleted File entry: in-use bit clear
 FILES = {"U": b"u\r\n", "W": b"w\r\n", "W2": b"w2\r\n", "S2": b"s2\r\n", "S": b"src\r\n", "V": b"v\r\n"}
-TWO = "fsd: a failed mv -f left two files of one name"
-FAILS = ["mv /S /T", "mv -f /S /s", "mv -f /S /U", "mv -f /W /V", "mv -f /W2 /S"]
-CMDS = ["mv /S2 /T2", "cat /T2", "mv /S /T", "mv -f /S /s", "mv -f /S /U", "cat /U",
-        "mv -f /W /V", "cat /V", "cat /S", "mv -f /W2 /S", "ls /"]
+FAILS = ["mv /S2 /T2", "mv /S /T", "mv -f /S /s", "mv -f /S /U", "mv -f /W /V", "mv -f /W2 /S"]
+CATS = ["S2", "U", "V", "W", "W2", "S"]  # each read after every mv has run
+CMDS = FAILS + [f"cat /{n}" for n in CATS] + ["ls /"]
 
 
 def contiguous_set(name, cluster, size):
@@ -185,21 +182,6 @@ def answer(out, cmd, last=False):
     return "\n".join(ln for ln in lines if not ln.startswith("Ouroboros kernel:")).strip()
 
 
-def clear_orphans(failing):
-    """The Stream and name entries left in use at X and Y (S2's and V's)
-    when their sets' deletes failed there, cleared, so fsck reads the volume
-    as fsd meant to leave it."""
-    with open(IMAGE, "r+b") as fh:
-        for sector in failing:
-            fh.seek(sector * SECTOR)
-            sec = bytearray(fh.read(SECTOR))
-            for i in range(0, 2 * SLOT, SLOT):
-                if sec[i] in (0xC0, 0xC1):
-                    sec[i] &= 0x7F
-            fh.seek(sector * SECTOR)
-            fh.write(sec)
-
-
 def run():
     placed, why = plant()
     if not placed:
@@ -254,48 +236,35 @@ def run():
     if drive_qemu.boot_stalled("test-mv-undo", "boot", out, faults):
         return checks, notes, 1
 
-    clear_orphans(failing)
     vol, d = root_sets(start)
     sets = list(exfatimg.sets(d))
     names = [s.name for s in sets]
-    firsts = sorted(struct.unpack_from("<I", s.data, 52)[0] for s in sets if s.name == "S")
     first = {s.name: struct.unpack_from("<I", s.data, 52)[0] for s in sets}
     rc, lines = fsck()
-    # Two sets of one name, as the last mv leaves them, are fsck's one
-    # complaint, and must be it.
-    rest = [ln for ln in exfatimg.complaints(lines) if ln.strip() != "Directory / contains a duplicate name (S)."]
-    ok = ("** Checking file system hierarchy." in lines and not rest and not exfatimg.unexpected(lines)
-          and len(exfatimg.complaints(lines)) == 1)
-    notes += [f"after: {ln}" for ln in lines]
+    ok = (rc == 0 and "** Checking file system hierarchy." in lines
+          and not exfatimg.complaints(lines) and not exfatimg.unexpected(lines))
     listing = (answer(out, "ls /") or "").split()
     said = {c: answer(out, c) for c in FAILS}
+    cats = {n: answer(out, f"cat /{n}") for n in CATS}
     used = {n: vol.used(c) for n, c in clusters.items()}
     checks += [
         ("driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
-        (f"mv /S2 /T2, S2's File entry cleared before X failed, kept T2: cat /T2 printed s2 "
-         f"({answer(out, 'cat /T2')!r})", answer(out, "cat /T2") == "s2"),
-        (f"each failing mv answered an I/O error ({said})", all("I/O error" in (v or "") for v in said.values())),
-        (f"mv -f /S /U failing at S's delete left U whole: cat /U printed u ({answer(out, 'cat /U')!r})",
-         answer(out, "cat /U") == "u"),
-        (f"mv -f /W /V failing at V's delete, its File entry cleared: cat /V printed w ({answer(out, 'cat /V')!r})",
-         answer(out, "cat /V") == "w"),
-        (f"cat /S printed src ({answer(out, 'cat /S')!r})", answer(out, "cat /S") == "src"),
-        (f"mv -f /W2 /S failing at S's delete, S untouched: fsd said so ({TWO!r} in the transcript)", TWO in out),
-        ("no line that a give-back failed", "left two entries on one file's clusters" not in out),
-        (f"ls / lists S, T2, U and V, none of S2, T, s, W or W2 ({listing})",
-         {"S", "T2", "U", "V"} <= set(listing) and not {"S2", "T", "s", "W", "W2"} & set(listing)),
-        (f"on the disk two sets S on S's and W2's clusters, T2 on S2's, U on its own, V on W's, none named T, s, "
-         f"S2, W or W2 ({names})",
-         names.count("S") == 2 and firsts == sorted([clusters["S"], clusters["W2"]])
-         and first.get("T2") == clusters["S2"] and first.get("U") == clusters["U"] and first.get("V") == clusters["W"]
-         and names.count("T2") == names.count("U") == names.count("V") == 1
-         and not {"T", "s", "S2", "W", "W2"} & set(names)),
-        (f"V's old cluster free, every other planted one used ({used})",
-         not used["V"] and all(v for n, v in used.items() if n != "V")),
-        (f"fsck_exfat -n finds nothing to repair but the two sets of one name ({rest})", ok),
+        (f"each mv answered an I/O error ({said})", all("I/O error" in (v or "") for v in said.values())),
+        (f"cat of each printed its own bytes ({cats})",
+         all(cats[n] == FILES[n].decode().strip() for n in CATS)),
+        ("fsd printed no line that a rollback failed", "fsd: a failed mv" not in out),
+        (f"ls / lists the six and none of T, T2 or s ({listing})",
+         set(FILES) <= set(listing) and not {"T", "T2", "s"} & set(listing)),
+        (f"on the disk each of the six once on its own cluster, none named T, T2 or s ({names})",
+         all(names.count(n) == 1 and first.get(n) == clusters[n] for n in FILES)
+         and not {"T", "T2", "s"} & set(names)),
+        (f"every planted cluster used ({used})", all(used.values())),
+        ("fsck_exfat -n passes after", ok),
         (f"no fault lines in QEMU's trace ({faults})", faults == 0),
     ]
-    return checks, notes if not checks[-2][1] else [], 0
+    if not ok:
+        notes += [f"after: {ln}" for ln in lines]
+    return checks, notes, 0
 
 
 def main():
