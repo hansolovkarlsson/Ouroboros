@@ -1244,6 +1244,26 @@ damaged disk into a failed check. On the host the new `Volume` gives the
 same listings as the old for 748 entries of `espexfat.img` and `esp.img`,
 and the same bytes for 2,141 FAT32 chains, rerun after each review.
 
+**exFAT's disk refuses a write to a read-only volume (2026-10-27).** A
+volume with no usable bitmap, two FATs or a root fsd cannot record whole is
+read-only, and until now that rested on each of the seven public writers
+asking `writable()` first. A writer that forgot would have written to a
+volume whose live bitmap fsd cannot tell. `Fs` now holds its disk through
+`gate::Gated`, in a module of its own, whose `write_sector` refuses until
+the end of `mount_at` has settled the volume writable. It is settled once,
+and a later call changes nothing. `writable()`, `read_only()` and the
+allocator all ask the gate, so the allocator answers read-only where it
+answered "disk full". No writer changes fsd's state before its first write
+except to drop a cursor, so a forgotten check is refused at the first write
+through `Fs`'s disk with nothing changed. A `Disk` of fsd's own is still
+nameable anywhere and passes the gate (roadmap). With every early check
+removed, the read-only boots of `make test-long-set` and `make
+test-volume-bound` still pass; with the gate's two checks removed as well
+(its write check and the allocator's), 14 checks fail, a `touch` and a `mv -f` written to read-only volumes. A high
+review found the first version's claims went past `Fs`'s own disk, the
+allocator answering "disk full" for a read-only volume, writability kept
+in three places, and a gate any function could open.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
