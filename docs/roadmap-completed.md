@@ -3007,3 +3007,158 @@ name, and whether the stall follows the exFAT image or the disk trace.
   out fails them (the X64 case alone until the fourth max review added
   the USB one). Read before or after the stop, a stall now classifies
   the same.*
+
+## exFAT's cluster check, FAT32's names and live FAT, exFAT's read-only reason and `mv` rollback, DONE (2026-10-26)
+
+Seven items closed on 2026-10-26, by #352 to #358, each struck on its
+branch with a *Done* note and moved here by the closeout. What the reviews
+deferred stays on the roadmap: two FAT32 short names one `?` spelling
+answers, ext2's names that are not UTF-8, the read-only reason on the
+console alone, the three rig helpers that walk sets by hand, and a failed
+`mv` whose rollback fails too.
+
+- ~~**exFAT bounds a cluster number where it frees, not where it reads it.**~~
+  `free_data` refuses a first cluster outside the heap and stops at the
+  volume's own clusters, `write_fat_entry` refuses one outside the heap, and
+  the allocator passes over the volume's own (all 2026-10-23), and since the
+  third high review of 2026-10-24 `ensure_chained` refuses a contiguous run
+  over them, so a contiguous Stream on the bitmap is no longer written
+  through (VSYSW in `make test-long-set`), and since the fourth that day
+  `write_at` refuses a chained file on one or a link to one (VSYSC,
+  VLINK); but a directory's set written through a damaged chain
+  (`write_set_at`) and a read still reach them, and the root's clusters
+  past its first are not among them at all, so a damaged run over them is
+  freed and handed out again. `locate_tables` walks the root's chain at
+  mount and keeps none of it; recording it there (bounded as the scan is)
+  would let `is_system` count it. Each review has added the check to one
+  more path: one check where a cluster is turned into a sector to write
+  (`cluster_to_lba`'s callers) would close them together. Refusing a first cluster
+  outside the heap or among the volume's own where `walk_dir` decodes a set
+  (beside its rule that DataLength 0 is no allocation), and ending a walk in
+  `next_cluster` and `advance` at a system cluster as they end it at the
+  heap's edge, would cover reads, writes and frees at once, and the free's
+  own checks would fall away. ext2's item "reads and writes through a
+  pointer naming metadata unchecked" is the same rule there, and so is
+  "a subdirectory naming the exFAT root's cluster is read as the root". The
+  same review, deferred.
+  *Done 2026-10-26: every read and write of a cluster's sectors goes
+  through `sector_of`, which holds the cluster to what it is read or
+  written for (the root's slots, the bitmap, anything else), and
+  `cluster_to_lba` is gone; the mount records the root's chain as runs
+  (`record_root`, 64 at most, read-only past that, a loop or 256 MiB) and
+  the root's growth extends it, so `is_system` counts every root cluster.
+  The link checks stay (`file_step`, `ensure_chained`, `write_at`'s first
+  cluster): a write from a file's end passes clusters whose sectors it
+  never asks for, and links from the last one's FAT entry. VROOT in `make
+  test-long-set`, failed by five mutants, and VLATER for the scan's order
+  (the high review). Not taken: refusing in
+  `walk_dir`'s decode and ending a walk at a system cluster in
+  `next_cluster` and `advance`, so the free keeps its own checks. Still
+  open: the subdirectory read as the root (`extent_rule`'s test by first
+  cluster, its own item below) and ext2's pointer naming metadata.*
+- ~~**FAT32's long names outside ASCII collide.**~~ `lfn_chars` renders each
+  UTF-16 unit outside ASCII as `?`, as exFAT did until 2026-10-21, so two
+  long names differing there are one name to every lookup, and the first
+  entry answers for both. The exFAT fix's shape (the units kept, a listing in
+  UTF-8) would end it. Read in the code, 2026-10-21.
+  *Done 2026-10-26: the walk keeps a long name's UTF-16 units and renders
+  them through `utf16::utf8_name`, exFAT's rendering moved to a module both
+  arms share, and a lookup compares that rendering ignoring ASCII case,
+  which answers as exFAT's comparison of units does for a name shown
+  exactly (one shown with `?`s, below, answers to that spelling alone). The write side was
+  broken too: `put_lfn_chars` wrote a name's UTF-8 bytes a unit each, so a
+  name fsd made outside ASCII was found by no lookup of it; it writes the
+  name's UTF-16 units now. `make test-fat32-names`, one boot, fails with
+  main's fat32.rs, with the read side alone reverted and with the write
+  side alone. Not done, as on exFAT: FAT32 folds case by ASCII alone, so
+  `CAFÉ` does not find `café` (Windows and Linux fold it). The high review
+  the same day added the refusal of U+FFFF in a name fsd makes and a run
+  of LFN entries started afresh at its last-flagged one, both graded by
+  the rig.*
+- ~~**FAT32 does not honour `BPB_ExtFlags`.**~~ Bytes 40 to 41 of a FAT32 boot
+  sector say whether the FATs are mirrored: with bit 7 clear (what fsd's own
+  `format` writes, and what every image here has) every copy is kept in
+  step; with it set, mirroring is off and only the copy numbered in bits 0
+  to 3 is live. Every read in fsd takes copy 0 and every write puts copy
+  0's sector in all copies, so on a volume made elsewhere with mirroring
+  off and another copy live, fsd would read a stale FAT and overwrite the
+  live one's sectors with it, 128 entries a write. Since 2026-10-21
+  `mount_at` refuses such a volume with a line saying so (the high review
+  of the FAT mirror, Hans's choice; `make test-volume-bound`'s SHAPES-D,
+  ExtFlags 0x0081); with mirroring off and copy 0 live it mounts, writing
+  the other copies too, which nothing reads. Honouring it would read the
+  live copy's number at mount (refusing one at or past `BPB_NumFATs`) and,
+  with bit 7 set, read and write that copy alone, so such a volume mounts.
+  Found with the FAT mirror decision, 2026-10-21.
+  *Done 2026-10-26: `mount_at` reads the live copy from ExtFlags (copy 0
+  when mirrored) and refuses one at or past `BPB_NumFATs`; every FAT read
+  takes the live copy (`fat_place`), and a write goes to it and, when
+  mirrored, to the others. `make test-fat-extflags`, one boot of a FAT32
+  with FAT 1 live and a file cut short in FAT 0 alone, fails with the flags
+  ignored, with copy 0 read and with every copy written; `make
+  test-volume-bound`'s SHAPES-D refuses a live copy the volume does not
+  have (0x0082) where it refused 0x0081. The flag cannot be tried on the
+  ESP the firmware boots: OVMF then finds no boot loader there.*
+- ~~**exFAT says nothing when it mounts a volume read-only.**~~ No bitmap, a
+  damaged one, two FATs, and since 2026-10-26 a root whose chain the record
+  cannot hold (more than 64 runs, a loop, past 256 MiB) each leave the
+  volume read-only with no line saying why, so a healthy stick whose root
+  grew in more than 64 interleaved steps refuses every write unexplained.
+  A reason kept in `Fs` and printed by fsd's mount line would say it.
+  Found by the high review of 2026-10-26. *Done 2026-10-26*
+  (`fix/exfat-read-only-reason`): `mount_at` keeps the first reason and
+  fsd prints `fsd: mounted read-only: ` and it on the boot mount line and
+  on `mount N`; `make test-long-set` checks it in every read-only boot, and
+  VRUNS plants a root of 65 runs. A looped root is still graded by no
+  boot.
+- ~~**A FAT32 short name with bytes past ASCII is listed as nothing.**~~ A
+  short-only entry holding OEM code-page bytes (0x80 and up, as DOS and
+  Windows write `CAFÉ.TXT` without a long name), or 0x05 standing for a
+  first byte 0xE5, is not UTF-8, so `DirEntry::name` answers an empty name
+  no lookup reaches. Rendering each such byte as `?`, as `utf8_name` renders
+  a unit outside ASCII, would list it and reach it by that spelling. Found
+  by the high review of 2026-10-26. *Done 2026-10-26*
+  (`fix/fat32-oem-short-names`): `DirEntry::parse` renders each such byte
+  as `?` (`short_byte`); `make test-fat32-names` plants both shapes. Since
+  its review a control byte and `/` are `?` too, by one rule in
+  `utf16::shown_char` that `utf8_name`'s fallback shares.
+- ~~**A failed exFAT `mv` leaves two sets over one file's clusters.**~~ When a
+  `mv` fails after `relink` wrote the new set (an I/O error deleting the old
+  one, or in a replacing `mv` deleting or freeing the destination's), the
+  source and the new set both name the source's clusters. A later `rm` of
+  either frees them under the other. A replacing `mv` reads its source's
+  runs before it writes and keeps them from the destination's free
+  (`free_runs`' `kept`), which covers a retry of that `mv`, and nothing
+  else. Since the high review of 2026-10-24 it deletes the destination's set
+  first, then the source's, and frees the destination's clusters after
+  both, so a failure leaves the source beside its new set, as a plain `mv`
+  that fails at its delete, never two sets of one name. Since the second
+  high review the same day the destination's clusters are freed even when
+  the source's delete fails, as nothing else would free them. Deleting the set `relink` wrote (as a rename, freeing
+  nothing) before returning the error, as `write_chain`, `mkdir` and
+  `grow_extent` give back what they took, would end it, `insert_set`
+  returning the slot it used; the undo can fail too, which leaves today's
+  state. The same review, deferred. *Done 2026-10-26*
+  (`fix/exfat-mv-undo`): a failure at either delete is rolled back, the
+  deleted sets put back (their in-use bits set again) and the new set
+  cleared, so both files are as they were (option 3 of three, Hans's
+  choice after the high review of #357); `make test-mv-undo` fails two root
+  sectors' writes by blkdebug. What is left is the next item.
+- ~~**The exFAT rigs take their host helpers from each other.**~~ `Volume`,
+  `set_checksum` and `entry_set` come from executing `test-stale-cursor.py`
+  and `test-grow-dir.py` as modules, and `copy`, `root_end` and the fsck
+  pass rule are repeated in `test-long-set`, `test-grow-dir`,
+  `test-exfat-names` and `test-valid-length`, while `scripts/exfatimg.py`
+  says it is the one shared copy. A change to one rig's internals can break
+  another's import, and the fsck rule can drift between four copies. Move
+  them into `exfatimg.py` and have the rigs import it. From the high review
+  of `fix/exfat-valid-length`, 2026-10-22. Its `Volume` reads FAT32 too, from
+  FAT 0 alone, where `scripts/fat32img.py` follows BPB_ExtFlags to the live
+  copy since 2026-10-26: harmless while no image it reads has mirroring
+  off, and the FAT32 half belongs on `fat32img` (the medium review that
+  day). *Done 2026-10-26* (`chore/exfat-rig-helpers`): `Volume`,
+  `set_checksum`, `entry_set`, `copy_exfat`, `root_end` and `fsck_clean`
+  are in `exfatimg.py`, which every exFAT rig imports, and none runs
+  another as a module; `Volume`'s FAT32 entries come from `fat32img` (the
+  live copy). `test-grow-dir`'s fsck rule stays its own, as it expects one
+  planted complaint. `test-mv-undo` joined when its PR landed.

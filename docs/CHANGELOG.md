@@ -1129,7 +1129,7 @@ a volume used to have every copy written, and now only FAT 0 is. A write to
 it must leave FAT 1 untouched; the check fails with `0x0080` taken as
 mirrored. The planted flags now go into the backup boot sector too.
 
-**A FAT32 short name with bytes past ASCII is listed, as `?`s.** A short
+**A FAT32 short name with bytes past ASCII is listed, as `?`s (2026-10-26).** A short
 entry with no long name may hold OEM code-page bytes (DOS and Windows write
 `CAFÉ.TXT` that way), or 0x05 standing for a first byte 0xE5. Such a name is
 not UTF-8, so fsd listed it as an empty name that no lookup reached. Each
@@ -1149,7 +1149,7 @@ must reach both by their `?` spellings. That check fails with every ASCII
 byte let through. An ext2 name that is not UTF-8 is still listed empty
 (roadmap).
 
-**exFAT says why it mounted a volume read-only.** A volume with no bitmap,
+**exFAT says why it mounted a volume read-only (2026-10-26).** A volume with no bitmap,
 a damaged one, more than one FAT, or a root whose chain the mount could
 not record (more than 64 runs of clusters, a loop, past 256 MiB) mounts
 read-only, and until now said nothing about it: the first word was a
@@ -1171,7 +1171,7 @@ reason recorded still gives one ("names no allocation bitmap"). The
 review also found that the reason reaches the console alone, so a `cpu`
 session or another shell that runs `mount N` never sees it (roadmap).
 
-**A failed exFAT `mv` is rolled back.** A `mv` writes the source's set
+**A failed exFAT `mv` is rolled back (2026-10-26).** A `mv` writes the source's set
 again under the new name, then deletes the old one; a replacing `mv`
 deletes the destination's set too. When a delete failed, the new set stayed
 beside the source's, both naming the source's clusters, so a later `rm` of
@@ -1199,7 +1199,7 @@ files as they were, with fsck clean. The rig fails with the undo removed,
 with a source or a destination not put back, with the destination's failure
 not rolled back, and with the destination deleted first.
 
-**The exFAT rigs' host helpers live in `exfatimg.py` alone.** `Volume`,
+**The exFAT rigs' host helpers live in `exfatimg.py` alone (2026-10-26).** `Volume`,
 `set_checksum` and `entry_set` lived in `test-stale-cursor` and
 `test-grow-dir`, and four other rigs ran those two as modules to take them,
 so a change to one rig's internals could break another's import. The image
