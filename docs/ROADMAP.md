@@ -4480,8 +4480,8 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `self.disk.write_sector` directly. `writable()` stays as the early check;
   it, `read_only()` and the allocator all ask the gate. With all seven
   early checks removed, `test-long-set`'s and `test-volume-bound`'s
-  read-only boots pass, the gate refusing each write; with the gate's check
-  removed too, 14 checks fail. A `Disk` of its own is still spellable
+  read-only boots pass, the gate refusing each write; with the gate's two
+  checks removed too (its write check and the allocator's), 14 checks fail. A `Disk` of its own is still spellable
   anywhere in fsd (next item). Originally: A volume with no bitmap, or with
   two FATs, is read-only because each of the seven public writers (`touch`,
   `write_file`, `write_at`, `mkdir`, `rm`, `rmdir`, `mv`) asks

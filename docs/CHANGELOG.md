@@ -1258,8 +1258,8 @@ except to drop a cursor, so a forgotten check is refused at the first write
 through `Fs`'s disk with nothing changed. A `Disk` of fsd's own is still
 nameable anywhere and passes the gate (roadmap). With every early check
 removed, the read-only boots of `make test-long-set` and `make
-test-volume-bound` still pass; with the gate's check removed as well, 14
-checks fail, a `touch` and a `mv -f` written to read-only volumes. A high
+test-volume-bound` still pass; with the gate's two checks removed as well
+(its write check and the allocator's), 14 checks fail, a `touch` and a `mv -f` written to read-only volumes. A high
 review found the first version's claims went past `Fs`'s own disk, the
 allocator answering "disk full" for a read-only volume, writability kept
 in three places, and a gate any function could open.
