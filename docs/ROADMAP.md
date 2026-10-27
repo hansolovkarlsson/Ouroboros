@@ -4500,11 +4500,12 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   sectors' writes by blkdebug. What is left is the next item.
 - **A failed exFAT `mv` whose rollback fails can leave two sets.** When the
   rollback's own writes fail too, or a set does not read after the
-  failure, fsd completes the move where it can (a source that cannot be put
-  back: the new set is the file's; a destination: its run freed, its
-  vendor allocations leaked) and otherwise leaves the new set beside the
-  source's over one file's clusters, or two files of one name, with a line
-  on the console. No boot reaches these paths: a failing sector that turns
+  failure, fsd keeps the move where it can (a source that cannot be put
+  back: the new set is the file's; a destination: its clusters left
+  allocated, a leak, since its entries past the File entry may still name
+  them) and otherwise leaves the new set beside the source's over one
+  file's clusters, or two files of one name, with fsd's one line on the
+  console (`roll_back`, since the second high review of #357). No boot reaches these paths: a failing sector that turns
   bad between two writes would. Ending them for good would take a journal.
   From the high review of #357, 2026-10-26.
 - ~~**exFAT bounds a cluster number where it frees, not where it reads it.**~~

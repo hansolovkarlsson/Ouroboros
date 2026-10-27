@@ -1144,9 +1144,14 @@ of this fix only gave the new set back, and kept the old order with the
 destination deleted first. Its high review found that a failed `mv -f` then
 destroyed its destination. Option 3 of the three weighed that day (Hans's
 choice) made it a full rollback. relink's own half-written set is cleared
-too, the slots having been free. Only a rollback whose own writes fail is
-left. It then completes the move, or leaves two sets and prints a line on
-the console. A new rig, `make test-mv-undo`, fails every write of two root
+too, the slots having been free. Since a second high review a create
+whose half-written set clears also frees what it allocated (it leaked),
+and the rollback is one `roll_back` with one console line. A destination
+that cannot be put back keeps its clusters allocated: the entries after
+its File entry may still name them, so freeing them was the hazard the fix
+removes. Only a rollback whose own writes fail is left. It then keeps the
+move, or leaves both sets, and prints `fsd: a failed mv could not be
+rolled back - a fsck repairs it`. A new rig, `make test-mv-undo`, fails every write of two root
 sectors through QEMU's blkdebug. Six `mv`s must each fail and leave all six
 files as they were, with fsck clean. The rig fails with the undo removed,
 with a source or a destination not put back, with the destination's failure
