@@ -44,7 +44,11 @@ UTF-8 on the serial line:
   `CAFÉ.TXT`) and 0x05 + `ABC.TXT` (0x05 standing for a first byte 0xE5),
   which `ls /` must list as `CAF?.TXT` and `?ABC.TXT` (a short-name byte
   past ASCII as `?`, as `utf8_name` renders a unit) and `cat` of each by
-  that spelling print its bytes;
+  that spelling print its bytes; and since the review of #356 two more,
+  planted after the first fsck (none passes them), `A/B.TXT` and `E` ESC
+  `C.TXT`, which `ls /` must list as `A?B.TXT` and `E?C.TXT` (a `/` split
+  the name as a path, an ESC reached the console) and `rm` of each by that
+  spelling remove;
 - `cat /OrphanedNames` prints `orphan`, and `ls /` lists it whole: the host
   plants, after its first fsck, a stray LFN entry flagged the last of a run
   of two, another name's checksum, just before that name's own run of one,
@@ -62,7 +66,8 @@ side alone reverted, with the write side alone (the copy found by no
 lookup), with U+FFFF let through and with the run not reset at its
 last-flagged entry (the high review of 2026-10-26), and with a short name's
 bytes past ASCII copied as they are (both short names listed empty and
-found by no lookup). About a minute.
+found by no lookup), and with `shown_char` passing every ASCII byte (the
+`/` and ESC names listed raw, and `rm` of `A?B.TXT` finding nothing). About a minute.
 Run it whenever FAT32's DirEntry::parse, lfn_chars, put_lfn_chars, build_name_entries,
 walk_dir's long-name assembly, insert_named_entry or names_match changes,
 or utf16.rs does.
@@ -106,6 +111,11 @@ SHOWN = {OVERLONG: "?" * 100, LONE: "lone?"}  # as a listing shows them
 # 0x05 first, standing for a first byte 0xE5 (which marks a deleted entry).
 # (11-byte short name, its bytes, as a listing shows it.)
 SHORTS = [(b"CAF\xc9    TXT", b"oem\r\n", "CAF?.TXT"), (b"\x05ABC    TXT", b"e5\r\n", "?ABC.TXT")]
+# Short entries no fsck passes, planted after the first fsck and removed by
+# the guest: a `/` (which split the name as a path) and an ESC (which reached
+# the console as a control sequence), each listed as `?` since the review of
+# #356. (11-byte short name, as a listing shows it.)
+BAD_SHORTS = [(b"A/B     TXT", "A?B.TXT"), (b"E\x1bC     TXT", "E?C.TXT")]
 LFN_POS = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
 
 
@@ -260,6 +270,26 @@ def orphan(start, live):
     return False
 
 
+def plant_bad(start):
+    """BAD_SHORTS, empty files with no cluster, written after the root's last
+    entry."""
+    with open(IMAGE, "r+b") as fh:
+        vol = fat32img.Fat32(fh, start)
+        chain = vol.chain(vol.root)
+        d = bytearray(vol.read(chain, len(chain) * vol.cluster_bytes))
+        end = 0
+        while end < len(d) and d[end]:
+            end += 32
+        if end + 32 * (len(BAD_SHORTS) + 1) > len(d):
+            return False
+        for k, (short, _) in enumerate(BAD_SHORTS):
+            d[end + 32 * k:end + 32 * (k + 1)] = name_entries("", short, 0, 0)
+        for k, c in enumerate(chain):
+            fh.seek(vol.lba(c) * fat32img.SECTOR)
+            fh.write(d[k * vol.cluster_bytes:(k + 1) * vol.cluster_bytes])
+    return True
+
+
 def fsck():
     with exfatimg.attached(IMAGE) as dev:
         rc, lines = exfatimg.fsck(dev + "s1", "fsck_msdos")
@@ -300,13 +330,15 @@ def run():
     if not all(c for _, c in checks):
         return checks, notes, 0
     checks.append(("before: the stray LFN entry made live before ORPHAN's run", orphan(start, True)))
+    checks.append(("before: the short entries holding `/` and ESC planted after the fsck", plant_bad(start)))
 
     upper_astral = "CAF\U0001F600"
     cmds = ["ls /", "echo /*", f"cat /{GRAVE}", f"cat /{upper_astral}", f"echo new > /{UMLAUT}",
             f"cat /{UMLAUT}", f"cat /{ACUTE}", f"rm /{UMLAUT}", f"mv /{GRAVE} /grave",
             f"cat /{SHOWN[OVERLONG]}", f"cat /{SHOWN[LONE]}", f"touch /{SHOWN[LONE]}",
             f"cp /grave /{MADE}", f"cat /{MADE}", f"touch /{PADDED}", f"cat /{ORPHAN}",
-            *(f"cat /{shown}" for _, _, shown in SHORTS), "ls /"]
+            *(f"cat /{shown}" for _, _, shown in SHORTS), "ls /",
+            *(f"rm /{shown}" for _, shown in BAD_SHORTS), "ls /"]
     steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in cmds] + [("# ", "")]
     guest = drive_qemu.Guest(IMAGE, label="test-fat32-names: ")
     try:
@@ -323,6 +355,9 @@ def run():
 
     listing = (answer(out, "ls /") or "").split()
     last = (answer(out, "ls /", last=True) or "").split()
+    # The listing before the rms: the second to last `ls /`.
+    marker = "# ls /\r"
+    before_rm = out.split(marker)[-2].split("# ", 1)[0].split() if out.count(marker) >= 3 else []
     entries, _ = entries_of(start)
     grave, acute, made = by_short(entries, "grave"), find(entries, ACUTE), find(entries, MADE)
     with open(IMAGE, "rb") as fh:
@@ -373,6 +408,10 @@ def run():
            f"({answer(out, f'cat /{shown}')!r})",
            shown in listing and shown in last and answer(out, f"cat /{shown}") == data.strip().decode())
           for short, data, shown in SHORTS),
+        (f"the short entries holding `/` and ESC listed as {[sh for _, sh in BAD_SHORTS]}, each rm by that "
+         f"spelling answering nothing, and gone after ({[answer(out, f'rm /{sh}') for _, sh in BAD_SHORTS]})",
+         all(sh in before_rm and sh not in last and answer(out, f"rm /{sh}") == "" for _, sh in BAD_SHORTS)
+         and "\x1b" not in "".join(before_rm)),
         ("fsck_msdos -n passes after", ok),
         (f"no fault lines in QEMU's trace ({faults})", faults == 0),
     ]

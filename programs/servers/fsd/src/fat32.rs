@@ -33,7 +33,7 @@
 use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};
-use crate::utf16::{units_of, utf8_name, NAME_SHOWN_MAX};
+use crate::utf16::{shown_char, units_of, utf8_name, NAME_SHOWN_MAX};
 
 const SECTOR_SIZE: usize = 512;
 const DIR_ENTRY_SIZE: usize = 32;
@@ -154,8 +154,9 @@ impl DirEntry {
     pub fn name(&self) -> &str {
         // Built either from short-name bytes, each past ASCII as `?`
         // ([`short_byte`]), or an LFN rendered by `utf16::utf8_name`, so
-        // always valid UTF-8.
-        core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
+        // always valid UTF-8; `?` if it ever is not, a name that shows the
+        // break where an empty one hid this one (the review of #356).
+        core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("?")
     }
 
     /// Decode a short (8.3) directory entry. `long_name`, when `Some`, is the
@@ -234,15 +235,16 @@ impl DirEntry {
     }
 }
 
-/// A short name's byte as a listing shows it: ASCII as it is, and a byte past
-/// it (an OEM code-page byte, as DOS and Windows write `CAFÉ.TXT` with no
-/// long name) as `?`, as [`utf8_name`] renders a unit it cannot show, so the
-/// name is listed and a lookup reaches it by that spelling. The code page is
-/// not known, so the byte cannot be read as a character. Until 2026-10-26
-/// such a name was not UTF-8 and answered as an empty name no lookup reached
-/// (the high review that day).
+/// A short name's byte as a listing shows it ([`shown_char`]): printable
+/// ASCII as it is, and anything else as `?`, an OEM code-page byte (DOS and
+/// Windows write `CAFÉ.TXT` with no long name) among them, so the name is
+/// listed and a lookup reaches it by that spelling. The code page is not
+/// known, so the byte cannot be read as a character. Until 2026-10-26 such
+/// a name was not UTF-8 and answered as an empty name no lookup reached (the
+/// high review that day), and a control byte or `/` was copied as it was
+/// (the review of #356).
 fn short_byte(b: u8) -> u8 {
-    if b.is_ascii() { b } else { b'?' }
+    shown_char(b as u32)
 }
 
 /// Decode the FAT packed "write date"/"write time" fields into a calendar, or
