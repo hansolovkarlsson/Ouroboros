@@ -74,8 +74,9 @@ filesystem, or for a volume that is whole, `ls` of it must list it.
   partition inside its volume (refused: the bound stops at the next
   partition), and the exFAT whole with its bitmap moved to the cluster past
   its heap, the next partition's first sector: it mounts read-only (since
-  2026-10-23 check_extents takes a bitmap outside the heap as none), a
-  write to it must answer read-only, and the partition after it must be as
+  2026-10-23 check_extents takes a bitmap outside the heap as none), with
+  fsd's line saying why (`fsd: mounted read-only: its allocation bitmap's
+  entry is damaged`, since 2026-10-26), a write to it must answer read-only, and the partition after it must be as
   it was, every byte.
 
 No fault line in QEMU's trace. Fails with the partition's length not passed
@@ -547,7 +548,9 @@ def checks_of(name):
             if whole == "write":
                 wrote = o[f"echo bitmap > /mnt/p{n}/NEW.TXT"] or ""
                 checks += [
-                    (f"mount {n}, {what}, mounts (got {got!r})", got == ""),
+                    # Read-only, and since 2026-10-26 fsd says why.
+                    (f"mount {n}, {what}, mounts read-only and says why (got {got!r})",
+                     got == "fsd: mounted read-only: its allocation bitmap's entry is damaged"),
                     (f"a write to it is refused read-only (got {wrote!r})", "read-only" in wrote),
                     ("the partition after it as it was, every byte",
                      WITNESS.get("after") is not None and WITNESS.get("after") == WITNESS.get("before")),

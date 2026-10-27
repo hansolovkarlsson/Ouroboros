@@ -252,6 +252,10 @@ fn allocation(raw: &[u8]) -> Option<Alloc> {
 /// bounds [`Fs::locate_tables`]' scan of the root.
 const DIR_MAX_BYTES: u64 = 256 << 20;
 
+/// The mount line's reason for a root whose chain loops or runs past
+/// [`DIR_MAX_BYTES`] ([`Fs::record_root`]), which one walk cannot tell apart.
+const ROOT_LOOPS: &str = "its root directory's chain loops or is longer than exFAT allows";
+
 /// fsd's console line when a failed `mv` could not be rolled back
 /// ([`Fs::roll_back`]): two sets left over one file's clusters or of one
 /// name, or a set's entries left in use with its File entry gone, which a
@@ -268,6 +272,8 @@ const SET_LEFT: &str = "fsd: a failed create left part of an entry set - a fsck 
 /// 2,500 files in as many runs as it has clusters fits; one in more is not
 /// recorded whole, and the volume is read-only ([`Fs::record_root`]).
 const ROOT_RUNS: usize = 64;
+// `record_root`'s reason for the mount line names the number.
+const _: () = assert!(ROOT_RUNS == 64);
 
 /// What a cluster's sectors are read or written for, which [`Fs::sector_of`]
 /// holds the cluster to: the root directory's slots, the allocation bitmap,
@@ -397,6 +403,12 @@ pub struct Fs {
     /// [`ROOT_RUNS`]) the volume is read-only, and the root is read wherever
     /// its chain goes but the bitmap and up-case table.
     root_whole: bool,
+    /// Why the bitmap was dropped at mount, when a check dropped it: said on
+    /// fsd's mount line ([`read_only`](Self::read_only)). Until 2026-10-26 a
+    /// volume was made read-only with no word, so a healthy stick whose root
+    /// had grown in more than [`ROOT_RUNS`] steps refused every write
+    /// unexplained (the high review that day).
+    read_only: Option<&'static str>,
     /// Where the last read's walk along a file's clusters ended, so the next
     /// read of the same file at or past it resumes there - `fat32::Fs`'s
     /// `read_cursor`, for the same reason. A file `fsd` writes is always
@@ -535,6 +547,7 @@ impl Fs {
             root_runs: [(0, 0); ROOT_RUNS],
             root_len: 0,
             root_whole: false,
+            read_only: None,
             read_cursor: None,
             write_cursor: None,
             fat_cache: None,
@@ -545,26 +558,30 @@ impl Fs {
         }
         // The root's clusters first: the table scan reads them through
         // `sector_of`, and `check_extents` holds the tables off them.
-        fs.root_whole = fs.record_root()?;
+        let root = fs.record_root()?;
+        fs.root_whole = root.is_none();
         // Best-effort: reads don't need the bitmap, so a volume without one
         // (malformed) still mounts read-only ([`writable`](Self::writable)).
         fs.locate_tables()?;
-        fs.check_extents();
-        // A root not recorded whole leaves clusters of its own that no check
-        // knows, which an allocation could take and a write reach: read-only,
-        // as a volume with no bitmap is.
-        if !fs.root_whole {
-            (fs.bitmap_first_cluster, fs.bitmap_bytes) = (0, 0);
-        }
+        let extents = fs.check_extents();
         // A volume of two FATs (TexFAT) keeps two bitmaps too, and
         // VolumeFlags' ActiveFat names the live pair; fsd reads the first
         // FAT and the first bitmap entry, which may be the stale pair, and
         // writing there would hand out clusters the live bitmap holds (the
-        // high review of 2026-10-24). So it is read-only, as one with no
-        // bitmap is ([`writable`](Self::writable)); reading the active FAT
-        // is a roadmap item.
-        if vbr[110] != 1 {
+        // high review of 2026-10-24); reading the active FAT is a roadmap
+        // item. A root not recorded whole leaves clusters of its own that no
+        // check knows, which an allocation could take and a write reach.
+        // Either is read-only, as a volume with no bitmap is
+        // ([`writable`](Self::writable)): the bitmap dropped, and the first
+        // reason kept for the mount line, the cause before what it explains
+        // (a second FAT's bitmap entry is a damaged first one, VFIRST).
+        let why = (vbr[110] != 1)
+            .then_some("it has more than one FAT (TexFAT), and which is live is not read")
+            .or(root)
+            .or(extents);
+        if why.is_some() {
             (fs.bitmap_first_cluster, fs.bitmap_bytes) = (0, 0);
+            fs.read_only = why;
         }
         Ok(fs)
     }
@@ -580,28 +597,30 @@ impl Fs {
     /// comes back to a cluster it passed (Brent's test: a mark moved to the
     /// walk at every power of two of steps, so a loop is met within twice
     /// its length and lead-in), and at the largest directory the format
-    /// allows, [`DIR_MAX_BYTES`]; the root is then not whole.
-    fn record_root(&mut self) -> Result<bool, Error> {
+    /// allows, [`DIR_MAX_BYTES`]; the root is then not whole. Answers `None`
+    /// when the record holds the whole chain, else why it does not, for the
+    /// mount line.
+    fn record_root(&mut self) -> Result<Option<&'static str>, Error> {
         let most = (DIR_MAX_BYTES / self.cluster_bytes()).min(self.cluster_count as u64);
         let mut cluster = self.root_cluster;
         let (mut mark, mut power, mut steps) = (cluster, 1u64, 0u64);
         for _ in 0..most {
             if !self.root_push(cluster) {
-                return Ok(false);
+                return Ok(Some("its root directory is in more than 64 runs of clusters"));
             }
             match self.next_cluster(cluster)? {
                 Some(next) => cluster = next,
-                None => return Ok(true),
+                None => return Ok(None),
             }
             if cluster == mark {
-                return Ok(false); // the chain loops
+                return Ok(Some(ROOT_LOOPS));
             }
             steps += 1;
             if steps == power {
                 (mark, power, steps) = (cluster, power * 2, 0);
             }
         }
-        Ok(false)
+        Ok(Some(ROOT_LOOPS))
     }
 
     /// Add `cluster` to the root's record, after the last: the last run made
@@ -703,15 +722,19 @@ impl Fs {
     /// other are damage, and which one is cannot be told: the bitmap goes,
     /// so nothing is allocated or freed on either. Without this a damaged
     /// DataLength made every cluster past it the volume's own, and every
-    /// removal freed nothing (the max review of 2026-10-23).
-    fn check_extents(&mut self) {
+    /// removal freed nothing (the max review of 2026-10-23). Answers why the
+    /// bitmap was dropped, for the mount line; `None` when it was kept or
+    /// there was none to drop.
+    fn check_extents(&mut self) -> Option<&'static str> {
         let (cb, count) = (self.cluster_bytes(), self.cluster_count);
         let fits = |first: u32, bytes: u64| bytes > 0 && run_fits(first, bytes, cb, count);
         let covers = |first: u32, bytes: u64, c: u32| run_has(first, bytes, cb, c);
         let on_root = |fs: &Self, first: u32, bytes: u64| fs.meets_root(first, bytes.div_ceil(cb));
         let (bf, bb) = (self.bitmap_first_cluster, self.bitmap_bytes);
-        if bb < self.cluster_count.div_ceil(8) as u64 || !fits(bf, bb) || on_root(self, bf, bb) {
+        let mut why = None;
+        if (bf, bb) != (0, 0) && (bb < self.cluster_count.div_ceil(8) as u64 || !fits(bf, bb) || on_root(self, bf, bb)) {
             (self.bitmap_first_cluster, self.bitmap_bytes) = (0, 0);
+            why = Some("its allocation bitmap's entry is damaged");
         }
         let (uf, ub) = (self.upcase_first_cluster, self.upcase_bytes);
         if ub > 2 * 65_536 || !fits(uf, ub) || on_root(self, uf, ub) {
@@ -720,7 +743,21 @@ impl Fs {
         let ((bf, bb), (uf, ub)) = ((self.bitmap_first_cluster, self.bitmap_bytes), (self.upcase_first_cluster, self.upcase_bytes));
         if bb > 0 && ub > 0 && (covers(bf, bb, uf) || covers(uf, ub, bf)) {
             (self.bitmap_first_cluster, self.bitmap_bytes) = (0, 0);
+            why = Some("its allocation bitmap and up-case table overlap");
         }
+        why
+    }
+
+    /// Why the volume is read-only, `None` while it is writable: for fsd's
+    /// mount line. Read off the dropped bitmap, the one thing that makes the
+    /// volume read-only ([`writable`](Self::writable)), so a bitmap dropped
+    /// with no reason recorded still answers one: none in the root, or one
+    /// naming cluster 0 (the high review of #355).
+    pub fn read_only(&self) -> Option<&'static str> {
+        if self.bitmap_first_cluster != 0 {
+            return None;
+        }
+        Some(self.read_only.unwrap_or("its root directory names no allocation bitmap"))
     }
 
     /// The volume's first sector - for `mount`-info reporting only.
