@@ -4579,7 +4579,23 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   a unit outside ASCII, would list it and reach it by that spelling. Found
   by the high review of 2026-10-26. *Done 2026-10-26*
   (`fix/fat32-oem-short-names`): `DirEntry::parse` renders each such byte
-  as `?` (`short_byte`); `make test-fat32-names` plants both shapes.
+  as `?` (`short_byte`); `make test-fat32-names` plants both shapes. Since
+  its review a control byte and `/` are `?` too, by one rule in
+  `utf16::shown_char` that `utf8_name`'s fallback shares.
+- **Two FAT32 short names differing only in a byte shown as `?` answer as
+  the first.** `CAF` 0xC9 `.TXT` and `CAF` 0xD4 `.TXT`, both written by DOS
+  with no long name, list as `CAF?.TXT`, and every lookup takes the first:
+  the second cannot be read, removed or renamed while the first is there,
+  and `cat /CAF?.TXT` prints the first twice (the glob gives the name
+  twice). The long-name item above has the same shape; the fix is the same,
+  the raw bytes carried to the lookup. From the review of #356, 2026-10-26.
+- **ext2 lists a name that is not UTF-8 as an empty one.** `DirEntry::name`
+  and `list_dir` end in `from_utf8(..).unwrap_or("")`, so a file Linux named
+  in Latin-1 (`caf` 0xE9 `.txt`) is listed empty and no `cat`, `rm` or `mv`
+  reaches it: FAT32's short-name case before #356. ext2 looks names up by
+  their bytes, so rendering them with `?` (`utf16::shown_char`) also needs
+  the lookup to take the rendering, or the bytes carried to it. From the
+  review of #356, 2026-10-26.
 - **fsd will not write to an exFAT directory an older fsd grew.** Until
   2026-10-18 fsd grew a directory without raising its DataLength, so such a
   directory's chain runs past its size, with sets there no driver reads.
