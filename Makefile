@@ -2715,7 +2715,7 @@ test-fat-extflags: image $(EXT2_PART)
 # every `mv` whose delete fails there, source or destination, untouched or
 # its File entry cleared, must be rolled back, both files as they were. One
 # boot, about a minute; run it whenever exFAT's mv, move_set, put_back,
-# relink, file_in_use, clear_slots, insert_set, unlink_set or delete_set
+# roll_back, relink, file_in_use, set_in_use, insert_set, unlink_set or delete_set
 # changes.
 test-mv-undo: image image-exfat
 	python3 scripts/test-mv-undo.py

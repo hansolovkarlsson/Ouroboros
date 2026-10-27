@@ -53,7 +53,7 @@ and with the destination deleted before the source (U lost). Not graded
 by a boot: a rollback whose own writes fail, which completes the move or
 leaves two sets with a line, and relink's own partial write cleared
 (insert_set). About a minute. Run it whenever exFAT's mv, move_set,
-put_back, relink, file_in_use, clear_slots, insert_set, unlink_set or
+roll_back, put_back, relink, file_in_use, set_in_use, insert_set, unlink_set or
 delete_set changes.
 """
 import importlib.util

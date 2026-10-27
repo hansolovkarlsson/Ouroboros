@@ -252,13 +252,15 @@ fn allocation(raw: &[u8]) -> Option<Alloc> {
 /// bounds [`Fs::locate_tables`]' scan of the root.
 const DIR_MAX_BYTES: u64 = 256 << 20;
 
-/// fsd's console line when a failed `mv` could not be rolled back and left
-/// two sets over one file's clusters ([`Fs::move_set`]).
-const TWO_SETS: &str = "fsd: a failed mv left two entries on one file's clusters - a fsck repairs it\r\n";
+/// fsd's console line when a failed `mv` could not be rolled back
+/// ([`Fs::roll_back`]): two sets left over one file's clusters or of one
+/// name, or a set's entries left in use with its File entry gone, which a
+/// fsck repairs.
+const NOT_ROLLED_BACK: &str = "fsd: a failed mv could not be rolled back - a fsck repairs it\r\n";
 
-/// fsd's console line when a failed `mv -f` could not be rolled back and left
-/// two files of one name, each on clusters of its own.
-const TWO_NAMES: &str = "fsd: a failed mv -f left two files of one name\r\n";
+/// fsd's console line when a create's half-written set could not be cleared
+/// ([`Fs::insert_set`]).
+const SET_LEFT: &str = "fsd: a failed create left part of an entry set - a fsck repairs it\r\n";
 
 /// The most runs of consecutive clusters [`Fs::root_runs`] records the
 /// root's chain in. A root grows a cluster at a time, each a new run when
@@ -2005,12 +2007,19 @@ impl Fs {
         };
         if let Err(error) = self.write_set_at(at.dir_cluster, at.dir_contiguous, start, set) {
             // What reached the disk given back: the run was free slots, so
-            // clearing every one leaves a set that names nothing, where a
-            // half-written one named the clusters a rename shares with its
-            // source (the high review of #357). Still `written`: the clear
-            // may not have reached every sector either.
-            let _cleared = self.clear_slots(at);
-            return Err(CreateFailed { error, written: true });
+            // clearing every one leaves no set, where a half-written one
+            // named the clusters a rename shares with its source (the high
+            // review of #357). Given back when its File entry reads clear
+            // (a sector the write never reached fails the clear too, and
+            // was free): then nothing names what the caller allocated, and
+            // it may give that back (`written` false; true until the second
+            // high review of #357, a leak at every such create).
+            let _partly = self.set_in_use(at, false);
+            let written = self.file_in_use(at) != Some(false);
+            if written {
+                crate::print(SET_LEFT);
+            }
+            return Err(CreateFailed { error, written });
         }
         Ok(at)
     }
@@ -2897,18 +2906,15 @@ impl Fs {
                         let e = moved.unwrap_or(e);
                         match self.put_back(dst_at) {
                             // `dst` is back: so must `src` be, and the new set go.
-                            Some(true) => match self.put_back(src_at) {
-                                Some(true) if self.clear_slots(new_at).is_ok() => {}
-                                Some(false) => crate::print(TWO_NAMES),
-                                _ => crate::print(TWO_SETS),
-                            },
-                            // `dst` is gone and cannot be put back: the move goes
-                            // on, its run freed (its vendor runs, which the failed
-                            // delete did not return, leak).
-                            Some(false) => {
-                                let _leaked = self.free_runs(Alloc::stream(&dst_entry), Runs::NONE, &kept);
+                            Some(true) => {
+                                let _said = self.roll_back(src_at, new_at);
                             }
-                            None => crate::print(TWO_NAMES),
+                            // `dst` cannot be put back: the move stands, and
+                            // `dst`'s clusters are left allocated, since its
+                            // entries past the File entry may still be in use
+                            // and name them (freed here until the second high
+                            // review of #357): a leak a fsck finds.
+                            _ => crate::print(NOT_ROLLED_BACK),
                         }
                         return Err(e);
                     }
@@ -2948,14 +2954,32 @@ impl Fs {
         let Err(e) = self.delete_set(src_at, src_entry, SetGoes::Renamed) else {
             return Ok((new_at, None));
         };
-        match self.put_back(src_at) {
-            Some(true) if self.clear_slots(new_at).is_ok() => Err(e),
+        match self.roll_back(src_at, new_at) {
             Some(false) => Ok((new_at, Some(e))),
-            _ => {
-                crate::print(TWO_SETS);
-                Err(e)
-            }
+            _ => Err(e),
         }
+    }
+
+    /// Roll a failed rename back: `src`'s set, at `src_at`, put back
+    /// ([`put_back`](Self::put_back)) and the new one, at `new_at`, cleared,
+    /// freeing nothing. `Some(true)` when both are done, the files as they
+    /// were; `Some(false)` when `src`'s set cannot be put back, the new set
+    /// kept as the file's; `None` when a set does not read or the new one
+    /// will not clear, both left. Each but the first prints
+    /// [`NOT_ROLLED_BACK`]. The one copy for both of `mv`'s failures (two
+    /// until the second high review of #357, with different lines).
+    fn roll_back(&mut self, src_at: SetAt, new_at: SetAt) -> Option<bool> {
+        let back = match self.put_back(src_at) {
+            Some(true) => {
+                let _partly = self.set_in_use(new_at, false);
+                (self.file_in_use(new_at) == Some(false)).then_some(true)
+            }
+            other => other,
+        };
+        if back != Some(true) {
+            crate::print(NOT_ROLLED_BACK);
+        }
+        back
     }
 
     /// Put the set at `at` back in use after a delete of it failed part-way,
@@ -2973,11 +2997,7 @@ impl Fs {
         // A sector the failed delete never reached fails here too; its slots
         // are still in use, and the File entry's sector, written first, is
         // what the answer reads.
-        let _partly = self.rewrite_slots(at, || Error::NotFound, |sec, _, off, k| {
-            for j in 0..k {
-                sec[off + j * ENTRY_SIZE] |= ET_IN_USE;
-            }
-        });
+        let _partly = self.set_in_use(at, true);
         self.file_in_use(at)
     }
 
@@ -2995,13 +3015,16 @@ impl Fs {
         Some(there)
     }
 
-    /// Clear the in-use bit of every slot of the run at `at`: a set this
-    /// call's caller wrote there into free slots, given back. A slot the
-    /// write never reached was free, and clearing it changes nothing.
-    fn clear_slots(&mut self, at: SetAt) -> Result<(), Error> {
+    /// Set (`on`) or clear the in-use bit of every slot of the run at `at`,
+    /// one read-modify-write a sector, stopping at the first that fails: a
+    /// set put back after a failed delete ([`put_back`](Self::put_back)), or
+    /// one this call's caller wrote into free slots given back (a slot the
+    /// write never reached was free, and clearing it changes nothing).
+    fn set_in_use(&mut self, at: SetAt, on: bool) -> Result<(), Error> {
         self.rewrite_slots(at, || Error::NotFound, |sec, _, off, k| {
             for j in 0..k {
-                sec[off + j * ENTRY_SIZE] &= !ET_IN_USE;
+                let kind = &mut sec[off + j * ENTRY_SIZE];
+                *kind = if on { *kind | ET_IN_USE } else { *kind & !ET_IN_USE };
             }
         })
     }
