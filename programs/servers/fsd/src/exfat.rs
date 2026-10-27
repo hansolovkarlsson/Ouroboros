@@ -361,8 +361,59 @@ enum Room {
     Sub(SetAt, Extent),
 }
 
+/// The disk as a mounted volume reaches it: a read goes through, a write
+/// only once the mount has found the volume writable. In a module of its own
+/// so its fields are out of reach of the rest of this file: `Fs` holds the
+/// disk only through this, so no writer can reach the disk around the gate,
+/// one written later included. [`Fs::writable`] is the early check each
+/// public writer makes; this is the one that cannot be left out. Until
+/// 2026-10-27 the early check was the only one (the third high review of
+/// 2026-10-24: a writer that forgot it would have written to a volume whose
+/// live bitmap fsd cannot tell).
+///
+/// Writability is settled at the end of [`Fs::mount_at`] and never changes,
+/// so a writer refused here is refused at its first write, before anything
+/// reaches the disk; no writer changes fsd's state before its first write
+/// but to drop a cursor, which costs a walk and nothing else.
+mod gate {
+    use super::{Error, SECTOR_SIZE};
+    use crate::disk::{Disk, DiskError};
+
+    pub(super) struct Gated {
+        disk: Disk,
+        writable: bool,
+    }
+
+    impl Gated {
+        /// Shut: a mount reads its volume and writes nothing.
+        pub(super) fn shut(disk: Disk) -> Self {
+            Gated { disk, writable: false }
+        }
+
+        /// Opened once, at the end of a mount that found the volume writable.
+        pub(super) fn open(&mut self) {
+            self.writable = true;
+        }
+
+        pub(super) fn is_open(&self) -> bool {
+            self.writable
+        }
+
+        pub(super) fn read_sector(&mut self, sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), DiskError> {
+            self.disk.read_sector(sector, buf)
+        }
+
+        pub(super) fn write_sector(&mut self, sector: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), Error> {
+            if !self.writable {
+                return Err(Error::ReadOnly);
+            }
+            Ok(self.disk.write_sector(sector, buf)?)
+        }
+    }
+}
+
 pub struct Fs {
-    disk: Disk,
+    disk: gate::Gated,
     /// The volume's first sector (the VBR) - kept so `mount`-info can report
     /// where this filesystem lives on the disk (disk-tools milestone 1).
     partition_lba: u32,
@@ -533,7 +584,7 @@ impl Fs {
         }
 
         let mut fs = Fs {
-            disk,
+            disk: gate::Gated::shut(disk),
             partition_lba,
             sectors_per_cluster: 1u32 << sectors_per_cluster_shift,
             fat_lba: partition_lba + fat_offset,
@@ -582,6 +633,11 @@ impl Fs {
         if why.is_some() {
             (fs.bitmap_first_cluster, fs.bitmap_bytes) = (0, 0);
             fs.read_only = why;
+        }
+        // The one place the volume becomes writable: a bitmap the checks
+        // above kept, which `read_only` and `writable` answer by.
+        if fs.bitmap_first_cluster != 0 {
+            fs.disk.open();
         }
         Ok(fs)
     }
@@ -1315,8 +1371,12 @@ impl Fs {
     /// first and left two, and a truncation had emptied the file first and
     /// lost it (the resumed max review of 2026-10-23); and a create or
     /// non-replacing `mv`, which takes no cluster, wrote.
+    ///
+    /// The disk refuses a write to such a volume too ([`gate`]), so a writer
+    /// that leaves this out is refused at its first write; asking here first
+    /// refuses it before it reads anything.
     fn writable(&self) -> Result<(), Error> {
-        if self.bitmap_first_cluster == 0 {
+        if !self.disk.is_open() {
             return Err(Error::ReadOnly);
         }
         Ok(())
