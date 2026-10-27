@@ -201,10 +201,10 @@ def exfat_chain(image, name):
         for c in root:
             fh.seek((g["heap"] + (c - 2) * g["spc"]) * SECTOR)
             data += fh.read(g["spc"] * SECTOR)
-        for s in exfatimg.sets(data):
-            if s.name == name:
-                e = exfatimg.extent(s)
-                return root, chain(e.first) if e.chained else None
+        s = exfatimg.find(data, name)
+        if s is not None:
+            e = exfatimg.extent(s)
+            return root, chain(e.first) if e.chained else None
     raise ValueError(f"no {name} in the exFAT root of the boot's disk")
 
 

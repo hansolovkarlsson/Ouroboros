@@ -181,14 +181,17 @@ def set_checksum(entries):
 
 
 def entry_set(name, first=0, size=0):
-    """A file's entry set, FAT-chained, as fsd's build_entry_set makes it."""
+    """A file's entry set, FAT-chained, as fsd's build_entry_set makes it:
+    NameLength in UTF-16 units, and the NameHash over the name with a to z
+    made upper case and nothing else, as fsd folds it."""
     n = name.encode("utf-16le")
-    k = -(-len(name) // 15)
+    units = len(n) // 2
+    k = -(-units // 15)
     s = bytearray(32 * (2 + k))
     s[0], s[1] = 0x85, 1 + k
-    s[32], s[33], s[35] = 0xC0, 0x01, len(name)
+    s[32], s[33], s[35] = 0xC0, 0x01, units
     h = 0
-    for b in name.upper().encode("utf-16le"):
+    for b in "".join(chr(ord(c) - 32) if "a" <= c <= "z" else c for c in name).encode("utf-16le"):
         h = (((h << 15) | (h >> 1)) + b) & 0xFFFF
     struct.pack_into("<H", s, 36, h)
     struct.pack_into("<Q", s, 40, size)  # ValidDataLength
@@ -212,6 +215,13 @@ class Volume:
 
     def __init__(self, image, start_lba):
         self.fh = open(image, "rb")
+        try:
+            self._read_geometry(start_lba)
+        except BaseException:
+            self.fh.close()
+            raise
+
+    def _read_geometry(self, start_lba):
         base = start_lba * 512
         self.fh.seek(base)
         b = self.fh.read(512)
@@ -293,15 +303,21 @@ class Volume:
     def close(self):
         self.fh.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     def file_chain(self, path):
         """`path`'s chain, its parts matched without case. Raises ValueError for
         a missing part or a contiguous file (fsd writes every file chained)."""
         first, chained = self.root, True
         for part in path.strip("/").split("/"):
-            names = {k.upper(): v for k, v in self.listing(first, chained).items()}
-            if part.upper() not in names:
+            names = {fold(k): v for k, v in self.listing(first, chained).items()}
+            if fold(part) not in names:
                 raise ValueError(f"no {path} on the disk")
-            first, _, chained = names[part.upper()]
+            first, _, chained = names[fold(part)]
         if not chained:
             raise ValueError(f"{path} is contiguous: fsd writes every file FAT-chained")
         return self.chain(first)

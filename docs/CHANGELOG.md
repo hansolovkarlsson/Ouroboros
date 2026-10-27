@@ -1233,9 +1233,16 @@ it replaced: `sets` stopped at a File entry with no secondaries, where they
 stepped over it, so a damaged entry hid every set after it. It steps over
 one now. `extent` refuses a set with no Stream, `find` folds A to Z alone
 as fsd does (it folded all of Unicode), and `Volume` refuses a FAT32 volume
-of sectors other than 512 bytes, which `fat32img` cannot read. On the host
-the new `Volume` gives the same listings as the old for 748 entries of
-`espexfat.img` and `esp.img`, and the same bytes for 2,141 FAT32 chains.
+of sectors other than 512 bytes, which `fat32img` cannot read. A second
+review, of that fix, found the same fold missing in `Volume.file_chain`,
+`test-write-walk` and `test-grow-dir` (all three now use `exfatimg.fold`),
+`entry_set` counting a name in characters and hashing it with every case
+folded (NameLength is in UTF-16 units now, and the hash folds a to z alone,
+byte for byte the same sets for the ASCII names the rigs plant), and
+`test-stale-cursor` reading the listing outside the guard that turns a
+damaged disk into a failed check. On the host the new `Volume` gives the
+same listings as the old for 748 entries of `espexfat.img` and `esp.img`,
+and the same bytes for 2,141 FAT32 chains, rerun after each review.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

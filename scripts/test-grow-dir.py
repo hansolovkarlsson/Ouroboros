@@ -410,10 +410,10 @@ def disk_checks(parts, snap, old):
     checks.append(("exfat: nothing before the cluster heap changed but the FAT entries of clusters",
                    before_heap(exf, parts[0][0]) == head))
 
-    names = {k.upper(): v for k, v in esp.listing(esp.root).items()}
-    if "GROW" not in names:
+    names = {exfatimg.fold(k): v for k, v in esp.listing(esp.root).items()}
+    if "grow" not in names:
         return checks + [("fat32 /mnt/f: /GROW is on the disk", False)]
-    chain = esp.chain(names["GROW"][0])
+    chain = esp.chain(names["grow"][0])
     print(f"     fat32 /mnt/f: /GROW: chain of {len(chain)} clusters")
     checks.append((f"fat32 /mnt/f: /GROW grew past its first cluster ({COUNT} files)", len(chain) >= 3))
     checks.append(names_check("fat32 /mnt/f", fat32_names(esp, chain[0])))

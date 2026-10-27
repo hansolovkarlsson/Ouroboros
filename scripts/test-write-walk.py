@@ -367,7 +367,7 @@ def main() -> int:
                                 "and the model reads where the cache starts off /bin's chain")
                 return
             sectors = {c * 4 // SECTOR for c in chain}
-            cp = [i for i, n, _ in exfat_entries(copy, bin_chain) if n.upper() == "CP"]
+            cp = [i for i, n, _ in exfat_entries(copy, bin_chain) if exfatimg.fold(n) == "cp"]
             size = [n_len for _, n, n_len in exfat_entries(copy, root) if n == "CHAIN"]
             cluster_bytes = g["spc"] * SECTOR
             if len(root) > 1:

@@ -166,7 +166,7 @@ def plant_empty():
         if e.chained:
             sys.exit(f"test-stale-cursor: macOS wrote {name} FAT-chained, not NoFatChain: nothing to plant")
         firsts[name] = e.first
-    exfatimg.restream(d, found["P"], size=0)
+    found["P"] = exfatimg.restream(d, found["P"], size=0)
     vol.close()
     with open(SMALL, "r+b") as fh:
         for k, c in enumerate(root):
@@ -261,14 +261,14 @@ def empty_entry(vol):
     """The checks of the planted entry on the small exFAT after the guest's
     writeats: Q's bytes as macOS wrote them, and P its own bytes on a chain of
     its own (the cluster it named, ended, then one allocated)."""
-    names = vol.listing(vol.root)
-    pf, psize, pchained = names.get("P", (0, 0, False))
-    qf, _, _ = names.get("Q", (0, 0, False))
     end = max(o + len(t) for o, t in P_WRITES)
     want = bytearray(end)
     for o, t in P_WRITES:
         want[o:o + len(t)] = t.encode()
     try:
+        names = vol.listing(vol.root)
+        pf, psize, pchained = names.get("P", (0, 0, False))
+        qf, _, _ = names.get("Q", (0, 0, False))
         chain = vol.chain(pf) if pchained else [pf]
         q = vol.data([qf])[:len(Q_BYTES)]
         p = vol.data(chain)[:end]
