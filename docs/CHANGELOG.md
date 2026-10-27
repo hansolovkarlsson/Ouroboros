@@ -1129,6 +1129,26 @@ a volume used to have every copy written, and now only FAT 0 is. A write to
 it must leave FAT 1 untouched; the check fails with `0x0080` taken as
 mirrored. The planted flags now go into the backup boot sector too.
 
+**A FAT32 short name with bytes past ASCII is listed, as `?`s.** A short
+entry with no long name may hold OEM code-page bytes (DOS and Windows write
+`CAFÉ.TXT` that way), or 0x05 standing for a first byte 0xE5. Such a name is
+not UTF-8, so fsd listed it as an empty name that no lookup reached. Each
+such byte now renders as `?`, as `utf8_name` renders a UTF-16 unit it cannot
+show, so `ls` lists `CAF?.TXT` and `cat /CAF?.TXT` reaches it. The code page
+is not known, so the byte cannot be read as a character, and two names that
+differ only in such a byte answer as the first, as exFAT's `?` renderings
+do. `test-fat32-names` plants both shapes; the checks fail with the bytes
+copied as they are. The review of the change found that a control byte or
+`/` in a short name was still copied as it was: an ESC reached the console
+as the start of an escape sequence, and a `/` split the name as a path, so
+no lookup reached it. Both are now `?` too. The rule is one function,
+`utf16::shown_char` (printable ASCII but `/` as itself, anything else `?`),
+which `utf8_name`'s fallback for long names shares. The rig plants an
+entry with each, after its first fsck (no fsck passes them), and `rm`
+must reach both by their `?` spellings. That check fails with every ASCII
+byte let through. An ext2 name that is not UTF-8 is still listed empty
+(roadmap).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
