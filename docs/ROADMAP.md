@@ -4637,13 +4637,27 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   by the same test), so its writes pass the root's rule: the holder given by
   the caller, which knows the synthetic root entry, would close it there
   too (the high review that day).
-- **exFAT says nothing when it mounts a volume read-only.** No bitmap, a
+- ~~**exFAT says nothing when it mounts a volume read-only.**~~ No bitmap, a
   damaged one, two FATs, and since 2026-10-26 a root whose chain the record
   cannot hold (more than 64 runs, a loop, past 256 MiB) each leave the
   volume read-only with no line saying why, so a healthy stick whose root
   grew in more than 64 interleaved steps refuses every write unexplained.
   A reason kept in `Fs` and printed by fsd's mount line would say it.
-  Found by the high review of 2026-10-26.
+  Found by the high review of 2026-10-26. *Done 2026-10-26*
+  (`fix/exfat-read-only-reason`): `mount_at` keeps the first reason and
+  fsd prints `fsd: mounted read-only: ` and it on the boot mount line and
+  on `mount N`; `make test-long-set` checks it in every read-only boot, and
+  VRUNS plants a root of 65 runs. A looped root is still graded by no
+  boot.
+- **The read-only reason reaches the console alone.** fsd prints `fsd:
+  mounted read-only: ...` on the machine's console, so a `cpu` session
+  through netd, or a shell on another console, that runs `mount N` sees
+  only the tree id, and a `mount N` of a partition already a tree prints
+  nothing. Once the boot line has scrolled away no command says why the
+  root refuses writes. Carrying the reason in `FSOP_MOUNT_INFO`'s reply
+  (the `mount` builtin) would let any client print it; it crosses
+  `syscall-abi`, ulib and the C and Python peers. Found by the high
+  review of #355, 2026-10-26.
 - **A damaged exFAT directory answers "device I/O error".** A create in a
   directory whose chain is not its size, a cluster outside the heap and a
   looped chain are all `Error::Io(DiskError::Io)`, which a user reads as a

@@ -1149,6 +1149,28 @@ must reach both by their `?` spellings. That check fails with every ASCII
 byte let through. An ext2 name that is not UTF-8 is still listed empty
 (roadmap).
 
+**exFAT says why it mounted a volume read-only.** A volume with no bitmap,
+a damaged one, more than one FAT, or a root whose chain the mount could
+not record (more than 64 runs of clusters, a loop, past 256 MiB) mounts
+read-only, and until now said nothing about it: the first word was a
+write's refusal. A healthy stick whose root had grown in more than 64
+interleaved steps was the case that mattered. `mount_at` now keeps the
+first reason, the cause before what it explains (a second FAT's bitmap
+entry reads as a damaged first one), and fsd prints it on the boot mount
+line and on `mount N`: `fsd: mounted read-only: its root directory is in
+more than 64 runs of clusters`. Dropping the bitmap stays the one thing
+that makes the volume read-only, so the write gate is unchanged. In
+`test-long-set`, the four read-only boots must each give their reason,
+the two writable ones none, and a new boot, VRUNS, plants a root of 65
+runs on the host. The checks fail with the line not printed and with
+`ROOT_RUNS` raised to 65 (its const assert with it). A high review of the
+change found that `test-volume-bound`'s BESIDE boot required `mount 2` on
+its read-only exFAT to print nothing, so it now requires the reason. The
+reason is now read off the dropped bitmap, so a bitmap dropped with no
+reason recorded still gives one ("names no allocation bitmap"). The
+review also found that the reason reaches the console alone, so a `cpu`
+session or another shell that runs `mount N` never sees it (roadmap).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
