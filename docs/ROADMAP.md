@@ -4471,7 +4471,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   cache, about one sector a 128 clusters, so the free's three round trips a
   cluster are the cost, and the walk could be shared with the free when
   this item is done.
-- **exFAT's read-only gate is opt-in.** A volume with no bitmap, or with
+- ~~**exFAT's read-only gate is opt-in.**~~ **Done 2026-10-27, by a gate at
+  the disk rather than a token:** `Fs` holds its disk through
+  `gate::Gated`, in a module of its own, whose `write_sector` refuses until
+  `mount_at` has found the volume writable, so no exFAT writer can reach the
+  disk around it. A token threaded through the 35 functions that write
+  would still have let a new one call `self.disk.write_sector` directly.
+  `writable()` stays as the early check. With all seven early checks
+  removed, `test-long-set`'s and `test-volume-bound`'s read-only boots
+  pass, the gate refusing each write; with the gate's check removed too,
+  14 checks fail. Originally: A volume with no bitmap, or with
   two FATs, is read-only because each of the seven public writers (`touch`,
   `write_file`, `write_at`, `mkdir`, `rm`, `rmdir`, `mv`) asks
   `writable()` first. A new writer that forgets it writes to a volume whose
