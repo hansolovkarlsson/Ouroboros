@@ -48,7 +48,7 @@ V's sets whole: their entries at X and Y were never cleared). No fault
 lines; a boot QEMU's firmware never starts is INCONCLUSIVE (exit 100).
 Fails with the undo removed (T and U left on S's cluster), with a source
 not put back (T2 kept, S2 gone), with the destination's failure not rolled
-back (two files named S), with a destination not put back (V's bytes W's),
+back (V holding W's bytes, W and W2 gone), with a destination not put back (V's bytes W's),
 and with the destination deleted before the source (U lost). Not graded
 by a boot: a rollback whose own writes fail, which completes the move or
 leaves two sets with a line, and relink's own partial write cleared

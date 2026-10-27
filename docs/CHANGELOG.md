@@ -1129,32 +1129,28 @@ a volume used to have every copy written, and now only FAT 0 is. A write to
 it must leave FAT 1 untouched; the check fails with `0x0080` taken as
 mirrored. The planted flags now go into the backup boot sector too.
 
-**A failed exFAT `mv` no longer leaves two sets over one file.** A `mv`
-writes the source's set again under the new name, then deletes the old one;
-a replacing `mv` deletes the destination's set between. When either delete
-failed, the new set stayed beside the source's, both naming the source's
-clusters, so a later `rm` of either freed them under the other. Every arm
-of `mv` now goes through one `move_set`: write the new set, delete the
-source's, and on a failure clear the new set (freeing nothing) while the
-source's File entry still reads in use. A delete clears a set's slots a
-sector at a time, File entry first, so an in-use File entry means nothing
-of the source was touched; a cleared one means the source is gone and the
-new set is the file's, so it is kept. A replacing `mv` now deletes the
-source's set before the destination's. The first version kept the old
-order, destination first, and its high review found that a failure at the
-source's delete then gave the new set back with the destination already
-deleted and freed: the failed `mv -f` destroyed its destination. Now that
-failure leaves both files as they were. When the destination's own delete
-fails, its run is freed if its File entry was cleared (the first version
-leaked it), and otherwise it is left beside the new set of its name: two
-files of one name on clusters of their own, which fsd says on the console
-and `fsck_exfat` reports as a duplicate name, nothing shared and nothing
-lost. relink's own half-written set is cleared too, the slots having been
-free. A give-back that cannot be done also prints a line. A new rig, `make
-test-mv-undo`, fails every write of two root sectors through QEMU's
-blkdebug. Its checks fail with the undo removed, with the liveness test
-dropped (a moved file lost), with the destination deleted first (U lost)
-and with the cleared destination's run not freed.
+**A failed exFAT `mv` is rolled back.** A `mv` writes the source's set
+again under the new name, then deletes the old one; a replacing `mv`
+deletes the destination's set too. When a delete failed, the new set stayed
+beside the source's, both naming the source's clusters, so a later `rm` of
+either freed them under the other. A delete only clears each slot's in-use
+bit, and a replacing `mv` frees the destination's clusters only once both
+sets are gone. So a failure can be rolled back exactly: `put_back` sets the
+bits of a partly deleted set again, and the new set is cleared. A failed
+`mv` or `mv -f` now leaves both files as they were, as POSIX `rename`
+does. Every arm of `mv` goes through one `move_set`, and a replacing `mv`
+now deletes the source's set before the destination's. The first version
+of this fix only gave the new set back, and kept the old order with the
+destination deleted first. Its high review found that a failed `mv -f` then
+destroyed its destination. Option 3 of the three weighed that day (Hans's
+choice) made it a full rollback. relink's own half-written set is cleared
+too, the slots having been free. Only a rollback whose own writes fail is
+left. It then completes the move, or leaves two sets and prints a line on
+the console. A new rig, `make test-mv-undo`, fails every write of two root
+sectors through QEMU's blkdebug. Six `mv`s must each fail and leave all six
+files as they were, with fsck clean. The rig fails with the undo removed,
+with a source or a destination not put back, with the destination's failure
+not rolled back, and with the destination deleted first.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

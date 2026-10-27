@@ -4493,22 +4493,20 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `grow_extent` give back what they took, would end it, `insert_set`
   returning the slot it used; the undo can fail too, which leaves today's
   state. The same review, deferred. *Done 2026-10-26*
-  (`fix/exfat-mv-undo`): `move_set` clears the new set while the source's
-  File entry still reads in use, and a replacing `mv` deletes the source's
-  set before the destination's; `make test-mv-undo` fails two root sectors'
-  writes by blkdebug. What is left is the next item.
-- **A failed exFAT `mv` can still leave two sets.** Three paths, each with
-  fsd's console line and none graded by a boot: a give-back that fails, or
-  a source whose File entry does not read after the failure, leave the new
-  set and the source's over one file's clusters (a later `rm` of either
-  frees them under the other); and a replacing `mv` whose destination's
-  delete fails with the destination untouched leaves two files of one name
-  on clusters of their own, which `fsck_exfat` reports as a duplicate.
-  And a destination whose delete cleared its File entry leaks its vendor
-  allocations, which the failed delete did not return. Ending them for
-  good would take a rename that rewrites a set in place (a same-directory
-  rename whose new set fits the old set's slots), or a journal. From the
-  high review of #357, 2026-10-26.
+  (`fix/exfat-mv-undo`): a failure at either delete is rolled back, the
+  deleted sets put back (their in-use bits set again) and the new set
+  cleared, so both files are as they were (option 3 of three, Hans's
+  choice after the high review of #357); `make test-mv-undo` fails two root
+  sectors' writes by blkdebug. What is left is the next item.
+- **A failed exFAT `mv` whose rollback fails can leave two sets.** When the
+  rollback's own writes fail too, or a set does not read after the
+  failure, fsd completes the move where it can (a source that cannot be put
+  back: the new set is the file's; a destination: its run freed, its
+  vendor allocations leaked) and otherwise leaves the new set beside the
+  source's over one file's clusters, or two files of one name, with a line
+  on the console. No boot reaches these paths: a failing sector that turns
+  bad between two writes would. Ending them for good would take a journal.
+  From the high review of #357, 2026-10-26.
 - ~~**exFAT bounds a cluster number where it frees, not where it reads it.**~~
   `free_data` refuses a first cluster outside the heap and stops at the
   volume's own clusters, `write_fat_entry` refuses one outside the heap, and
