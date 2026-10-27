@@ -809,3 +809,37 @@ ONEB for the first, STRAY and the Stream fields for the second, and the
 overlong and lone-surrogate names for the third. Each round's findings were
 taken or declined with reasons, and no second round was run on any of the
 three, so whether those repairs carry defects of their own is not known.
+
+## Seven branches, a repair that destroyed what it guarded, and its rig agreeing (2026-10-26)
+
+Seven branches, #352 to #358, each with at least one review, and each
+review found something. Most of it was the usual: an edge the first version
+missed (U+FFFF ending a FAT32 name, control bytes in a short name, a table
+scan recording an extent too early). Two were worse, and worth keeping.
+
+**#357, a repair whose rig checked the damage as correct.** The bug was a
+failed exFAT `mv` leaving two sets over one file's clusters. The first fix
+gave the new set back when a delete failed, and kept the replacing `mv`'s
+order, destination first, which an earlier review had chosen so a failure
+never left two files of one name. The two decisions were each sound and
+together destroyed data: a failed `mv -f` deleted the destination, freed its
+clusters, then gave back the only set left under its name. The rig was
+written after the code and asserted what the code did, "no U, U's cluster
+freed", and the CHANGELOG called it "as before" when before the name had
+survived. Every mutant failed that rig, so the check could fail; it failed
+for the wrong things. **A check written after the code inherits the code's
+idea of right; write the outcome the user is owed first (here POSIX
+`rename`'s: both files as they were) and grade against that.** The fix
+became a full rollback, chosen by Hans from three options, and its own
+second review found the paths where the rollback fails freeing clusters
+under entries that might still name them: the repair's repair, again.
+
+**#355, a changed output line and the rig that read it.** A new console
+line on `mount N` was checked by the rig the branch extended, and broke
+`test-volume-bound`, which required that command to print nothing; the
+branch never ran it. A change to anything a rig reads, a line, a code, a
+count, owes a grep of the rigs for it, not only a run of the rig at hand.
+
+Each fix and each review finding has a rig case or a mutant behind it,
+recorded in the CHANGELOG. #354 and #357 had two rounds, the others one, so whether
+their repairs carry defects of their own is, as before, not known.
