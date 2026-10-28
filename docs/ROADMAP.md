@@ -4501,20 +4501,32 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `partition` and `format`; the filesystem arms are handed a `Disk` and never
   see the `Device`. Every `BLOCK_*` call and the `MOUNT` rescan go through
   `disk.rs`'s private `svc`; the crate's `syscall4` and `syscall5` take their
-  number as a constant and do not compile with one of those. `make
-  check-disk-handle`, in `make test`, builds a copy of fsd with ten spellings
-  an arm might write in `exfat.rs` (a `Disk` or a `Device` made by hand or
-  cloned, a `Disk` from `new` or `Default`, the private `svc`, and
-  `BLOCK_WRITE`, `MOUNT` or `BLOCK_READ` through the wrappers) and requires
-  each to fail. An `svc` written out in another file's `asm!` would still
-  reach the disk, and a `Device::claim` answering a second caller is seen by
-  no check. Originally: `disk::Disk` is a unit struct, and `main.rs` names one in twenty
+  number as a constant and do not compile with one of those. The filesystem
+  modules forbid `unsafe` code, so none can write an `svc` of its own or make
+  a `Disk` from nothing. `make check-disk-handle`, in `make test`, builds a
+  copy of fsd with each spelling an arm might write (a `Disk` or a `Device`
+  made by hand or cloned, a `Disk` from `new`, `Default` or `zeroed` in each
+  module, the private `svc`, an `svc` of its own, and every `BLOCK_*` call
+  syscall-abi defines and `MOUNT` through the wrappers) and requires each to
+  fail. A `Device::claim` answering a second caller is seen by no check.
+  Originally: `disk::Disk` is a unit struct, and `main.rs` names one in twenty
   places (`disk::Disk.write_sector`, `erase`'s zeroing among them). So
   exFAT's disk gate holds for every write through `Fs`'s own disk, but a
   writer in `exfat.rs` that wrote `Disk.write_sector(..)` would pass it, as
   would one in any arm. Making `Disk` unnameable outside `disk.rs` (one
   value made at fsd's start and passed down, a private field) would close
   it. From the high review of #361, 2026-10-27.
+- **The kernel's boot partition outlives fsd's own table rewrite.** After
+  `erase` or `partition`, `Device::table_rewritten` makes fsd stop trusting
+  `BLOCK_BOOT_START`, whose answer was read from the old table at boot. That
+  flag is fsd's memory: when the supervisor restarts fsd from its image, the
+  new `Device` starts with it clear, and `mount` and `format` again pass over
+  or order by a partition start that may no longer exist. The static it was
+  until 2026-10-27 reset the same way. The kernel holds the answer, so the
+  fix is there: forget the boot start at fsd's first table write (fsd telling
+  it, or the kernel seeing a write to sector 0 or the GPT), or answer
+  `BLOCK_BOOT_START` from the table as it is now. From the medium review of
+  #362, 2026-10-27.
 - **The read-only verb gate covers tree 0's fallback alone.** `main.rs`'s
   `refused_read_only` refuses every verb that changes the disk, by a
   default-deny list (`mutates`), but only on tree 0 mounted read-only by

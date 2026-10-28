@@ -1278,20 +1278,29 @@ device under every `Disk` (now `Device::replace`), goes through `disk.rs`'s
 own private `svc`. The crate's `syscall4` and `syscall5` take their number
 as a constant and assert in a `const` block that it is none of those, so an
 arm cannot reach the disk through fsd's syscall wrappers either: such a call
-does not compile. `make check-disk-handle`, run by `make test`, builds a copy
-of fsd with ten spellings written in `exfat.rs` (a `Disk` or a `Device` made
-by hand or cloned, a `Disk` from `new` or `Default`, the private `svc`, and
-`BLOCK_WRITE`, `MOUNT` or `BLOCK_READ` through the wrappers) and requires
-each to fail. It fails itself with `Disk` given a constructor and `Default`
-and `Device` `Clone`, with the asserts removed, and with `MOUNT` dropped
-from the list. It builds rather than checks: the assert is evaluated only
-when the wrapper is instantiated. An `svc` written out in another file's
-`asm!` is not stopped, and a `Device::claim` answering a second caller is
-seen by no check. A high review found the first version left the `BLOCK_*`
+does not compile. `Device::replace` refuses the rescan itself while a disk
+filesystem is mounted, where its caller used to be the only check. The seven
+filesystem modules forbid `unsafe` code, which none of them used, so none can
+write an `svc` of its own or make a `Disk` from nothing (`zeroed`). `make
+check-disk-handle`, run by `make test`, builds a copy of fsd with 21
+spellings an arm might write (a `Disk` or a `Device` made by hand or cloned,
+a `Disk` from `new`, `Default`, or `zeroed` in each module, the private `svc`,
+an `svc` of its own, and `MOUNT` and every `BLOCK_*` call syscall-abi
+defines, read from it, through the wrappers) and requires each to fail. It
+fails itself with `Disk` given a constructor and `Default` and `Device`
+`Clone`, with the asserts removed, with `MOUNT` dropped from the list, with
+a `BLOCK_*` call added to syscall-abi alone, and with one module's `forbid`
+lifted. It builds rather than checks: the assert is evaluated only when the
+wrapper is instantiated. A `Device::claim` answering a second caller is seen
+by no check. A high review found the first version left the `BLOCK_*`
 calls open through `syscall4`, its compile controls run once by hand, and
 fsd's docs saying it keeps no static state; a medium review of the fixes
 found the refusal a run-time one no check saw, `MOUNT` left open, and the
-constructors and `Device`'s clone untested. Behaviour is unchanged: `make
+constructors and `Device`'s clone untested; a second medium review found the
+list of calls kept by hand, `unsafe` open to every module, and the
+rescan's precondition left to its caller. It also found that the
+table-rewritten flag resets on a restart of fsd while the kernel keeps its
+answer, older than this change (roadmap). Behaviour is unchanged: `make
 test-blank-disk`, `test-mount-gate`, `test-probe-ioerr`, `test-unmount`,
 `test-boot-partition`, `test-volume-bound` and `test-long-set` pass.
 
