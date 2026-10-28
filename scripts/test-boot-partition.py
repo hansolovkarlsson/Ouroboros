@@ -50,8 +50,8 @@ and three on copies this script makes, each disk with a signature of its own
 finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock,
 `fsd` must say it fell back to the ESP read-only and refuse root's `touch`
 there (decision D5), open /etc/passwd with O_RDONLY|O_CREAT and read it while
-refusing a missing file EROFS at the open and one in a missing directory
-ENOENT (/bin/CCREAT, since 2026-10-28),
+refusing a missing file EROFS at the open, one in a missing directory
+ENOENT and one under a file ENOTDIR (/bin/CCREAT, since 2026-10-28),
 and `format` must then take the damaged root, never the ESP; gpt-format runs `format` on a
 copy of espgpt.img, which must be refused.
 
@@ -281,12 +281,13 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         # the ESP, mounted read-only (decision D5).
         # And O_RDONLY|O_CREAT (/bin/CCREAT, since 2026-10-28): an existing
         # file opens and reads, a missing one is EROFS at the open, not made,
-        # and one in a missing directory is ENOENT (2), as on a writable tree.
+        # one in a missing directory is ENOENT (2), as on a writable tree, and
+        # one under a file ENOTDIR (20).
         # FAT32 has no read-only gate of its own, so fsd's verb gate
         # (`refused_read_only`) is the only line here.
         steps = [("login:", "root"), ("assword", "root"), ("# ", "touch /rotest"),
                  ("# ", "ccreat /etc/passwd"), ("# ", "ccreat /rocreat"),
-                 ("# ", "ccreat /nodir/x"), ("# ", "unmount"),
+                 ("# ", "ccreat /nodir/x"), ("# ", "ccreat /etc/passwd/x"), ("# ", "unmount"),
                  ("# ", "format ext2"), ("# ", "mount -a"), ("# ", "mount 0 /esp"), ("# ", "cd /esp/EFI"),
                  ("# ", "cd /"), ("# ", "")]
     if label == "gpt-format":
@@ -407,6 +408,8 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
              and bool(re.search(r"ccreat /rocreat\r?\n[^#]*ccreat: /rocreat open errno 30\b", before))),
             (f"{label}: O_RDONLY|O_CREAT in a missing directory on the fallback is ENOENT (2), not EROFS",
              bool(re.search(r"ccreat /nodir/x\r?\n[^#]*ccreat: /nodir/x open errno 2\b", before))),
+            (f"{label}: O_RDONLY|O_CREAT under a file on the fallback is ENOTDIR (20), not EROFS",
+             bool(re.search(r"ccreat /etc/passwd/x\r?\n[^#]*ccreat: /etc/passwd/x open errno 20\b", before))),
             (f"{label}: `format ext2` takes the damaged root, and `mount -a` mounts it",
              "ext2 mounted" in after and "no partition beside" not in after),
             (f"{label}: the ESP is whole after the format (`cd /esp/EFI` silent)",

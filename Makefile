@@ -851,9 +851,12 @@ cerrno-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/cerrno.elf $(PICO_PORT) $(BUILD_DIR)/pico/cerrno.o $(PICO_LIBC) $(NSRESOLVE_A)
 	"$(OBJCOPY)" --strip-all $(BUILD_DIR)/cerrno.elf $(CERRNO_BIN)
 
-# An open with O_RDONLY|O_CREAT, then a read: on a read-only volume an
-# existing file opens and a missing one is EROFS (fsd's `mutates`, the high
-# review of #364). Driven by scripts/test-long-set.py. Runs as /bin/CCREAT.
+# An open with O_RDONLY|O_CREAT, then a read, or a write with -w: on a
+# read-only volume an existing file opens and a missing one is EROFS, and an
+# fd so opened is read-only (fsd's refused_read_only, check_access and the
+# fid's write check, by ninep_abi::open_changes; the reviews of #364). Driven
+# by scripts/test-long-set.py, scripts/test-boot-partition.py and
+# scripts/test-cerrno.py. Runs as /bin/CCREAT.
 ccreat-bin: $(NSRESOLVE_A) $(PICO_PORT)
 	$(CC) $(CFLAGS_OS) $(PICO_INC) -c libc/ccreat.c -o $(BUILD_DIR)/pico/ccreat.o
 	"$(LD_LLD)" $(LDFLAGS_RUSTSHIM) -o $(BUILD_DIR)/ccreat.elf $(PICO_PORT) $(BUILD_DIR)/pico/ccreat.o $(PICO_LIBC) $(NSRESOLVE_A)

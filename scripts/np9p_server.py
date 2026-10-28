@@ -609,7 +609,8 @@ def serve_np(body, name, sealed):
         # exists; a missing directory is not found, as on a writable tree (the
         # second medium review of #364).
         exists = fpath in FILES or fpath in DIRS
-        parent = fpath.rsplit(b"/", 1)[0] or b"/"
+        # fsd's parent_of: everything before the last `/`, the root for none.
+        parent = fpath.rsplit(b"/", 1)[0] if b"/" in fpath[1:] else b"/"
         if flags & (OPEN_WRITE | OPEN_TRUNC) or (flags & OPEN_CREATE and not exists):
             if not flags & (OPEN_WRITE | OPEN_TRUNC) and parent not in DIRS:
                 return sealed(FS_ERR_NOT_FOUND)
@@ -739,6 +740,8 @@ SELF_TEST_VERBS = [
     ("NP_OPEN(rc)",   NP_BASE + 15, "served",       (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/HELLO.TXT"),
     ("NP_OPEN(rc new)", NP_BASE + 15, "read-only",  (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/NOPE.TXT"),
     ("NP_OPEN(rc nodir)", NP_BASE + 15, "not-found", (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/NODIR/X.TXT"),
+    # No `/` at all: the parent is the root, as fsd's parent_of has it.
+    ("NP_OPEN(rc bare)", NP_BASE + 15, "read-only",  (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"NEW.TXT"),
     ("NP_OPEN(c)",    NP_BASE + 15, "generic-error", (OPEN_CREATE, "PLEN", 0), b"/HELLO.TXT"),
     ("NP_OPEN(dir)",  NP_BASE + 15, "not-a-file",   (OPEN_READ, "PLEN", 0), b"/SUB"),
     ("NP_OPEN(gone)", NP_BASE + 15, "not-found",    (OPEN_READ, "PLEN", 0), b"/NOPE.TXT"),
