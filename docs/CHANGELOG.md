@@ -1269,12 +1269,21 @@ in three places, and a gate any function could open.
 through one, around exFAT's gate among other things. A `Disk` now has a
 private field and is not `Clone`, and it is made only by
 `disk::Device::disk`. fsd's `main` claims the one `Device` at its start
-(a later `Device::claim` answers `None`) and lends a `Disk` from it to each
-mount and to `erase`, `partition` and `format`; the capacity, the boot
-partition and the table-rewritten flag moved onto `Device`. `vfs`'s
-`mount`, `first_mounting`, `probe` and `mount_partition` take `&Device`.
-A `Disk(())`, a `Device(())` and the old unit-struct spelling written in
-`exfat.rs` each fail to compile. Behaviour is unchanged: `make
+(a later `Device::claim` answers `None`, and `main` then says so and parks)
+and lends a `Disk` from it to each mount and to `erase`, `partition` and
+`format`. The table-rewritten flag is a field of `Device`, no longer a
+static. `vfs`'s `mount`, `first_mounting`, `probe` and `mount_partition` take
+`&Device`. Every `BLOCK_*` call goes through `disk.rs`'s own private `svc`,
+and the crate's `syscall4` and `syscall5` refuse those numbers, so an arm
+cannot reach the disk through fsd's syscall wrappers either. `make
+check-disk-handle`, run by `make test`, builds a copy of fsd with a `Disk`
+made by hand, one cloned, a `Device` made by hand and the private `svc`
+called, each written in `exfat.rs`, and requires each to fail; it fails
+itself with `Disk` given `#[derive(Clone)]` and a public field. An `svc`
+written out in another file's `asm!` is not stopped, and `syscall4`'s
+refusal is seen by no check. A high review found the first version left
+the `BLOCK_*` calls open through `syscall4`, its compile controls run once by
+hand, and fsd's docs saying it keeps no static state. Behaviour is unchanged: `make
 test-blank-disk`, `test-mount-gate`, `test-probe-ioerr`, `test-unmount`,
 `test-boot-partition`, `test-volume-bound` and `test-long-set` pass.
 
