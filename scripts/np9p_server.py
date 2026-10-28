@@ -605,12 +605,22 @@ def serve_np(body, name, sealed):
         # changes the file, creating only when it is missing, so O_RDONLY|O_CREAT
         # of a file here opens it, as on fsd's read-only trees (the medium review
         # of #364: this peer refused every create, and diverged).
+        # A create of a missing file is refused only where its directory
+        # exists; a missing directory is not found, as on a writable tree (the
+        # second medium review of #364).
         exists = fpath in FILES or fpath in DIRS
+        parent = fpath.rsplit(b"/", 1)[0] or b"/"
         if flags & (OPEN_WRITE | OPEN_TRUNC) or (flags & OPEN_CREATE and not exists):
+            if not flags & (OPEN_WRITE | OPEN_TRUNC) and parent not in DIRS:
+                return sealed(FS_ERR_NOT_FOUND)
             # Refused on POLICY, like the mutating verbs - not "no such verb".
             print(f"  [read-only: refusing NP_OPEN flags=0x{flags:x} "
                   f"path={fpath!r}]", flush=True)
             return sealed(FS_ERR_READ_ONLY)
+        # An open asks to read or to write (POSIX's access mode), as fsd's
+        # NP_OPEN requires since the same review: OPEN_CREATE alone is refused.
+        if not flags & (OPEN_READ | OPEN_WRITE):
+            return sealed(FS_ERROR)
         if fpath in DIRS:
             return sealed(FS_ERR_NOT_A_FILE)
         if fpath not in FILES:
@@ -728,6 +738,8 @@ SELF_TEST_VERBS = [
     # O_RDONLY|O_CREAT: an existing file opens, a missing one would be made.
     ("NP_OPEN(rc)",   NP_BASE + 15, "served",       (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/HELLO.TXT"),
     ("NP_OPEN(rc new)", NP_BASE + 15, "read-only",  (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/NOPE.TXT"),
+    ("NP_OPEN(rc nodir)", NP_BASE + 15, "not-found", (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/NODIR/X.TXT"),
+    ("NP_OPEN(c)",    NP_BASE + 15, "generic-error", (OPEN_CREATE, "PLEN", 0), b"/HELLO.TXT"),
     ("NP_OPEN(dir)",  NP_BASE + 15, "not-a-file",   (OPEN_READ, "PLEN", 0), b"/SUB"),
     ("NP_OPEN(gone)", NP_BASE + 15, "not-found",    (OPEN_READ, "PLEN", 0), b"/NOPE.TXT"),
     # a0 = a FID, and no path at all.
