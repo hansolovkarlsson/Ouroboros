@@ -4463,8 +4463,8 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   #362, 2026-10-27.
 - ~~**The read-only verb gate covers tree 0's fallback alone.**~~ **Done
   2026-10-28:** `refused_read_only` takes the mounted filesystem and refuses
-  on any tree whose `read_only()` answers (CHANGELOG). Left open: exFAT's
-  disk gate, the second line, is reached by no boot since. `main.rs`'s
+  on any tree whose `read_only()` answers (CHANGELOG). What it left open is
+  the two items below. `main.rs`'s
   `refused_read_only` refuses every verb that changes the disk, by a
   default-deny list (`mutates`), but only on tree 0 mounted read-only by
   decision D5. A volume an arm mounts read-only (exFAT's, for now) is
@@ -4474,6 +4474,24 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   line. `partition`, `format` and `erase` are FSOP_* verbs, not NP_*, so
   the deliberate hold that they stay available is not touched. From the
   high review of #361, 2026-10-27.
+- **exFAT's disk gate is graded by no boot.** Since 2026-10-28 fsd's verb
+  gate refuses every change to a read-only tree before the arm, so the
+  read-only boots of `make test-long-set` and `test-volume-bound` pass with
+  `gate::Gated`'s write check and the allocator's removed (measured that
+  day): the second line still stands, and nothing would see it fall. To
+  grade it again, a path past the verb gate is needed: a boot flag or a
+  build of fsd that skips `refused_read_only` for the rig, or a host test of
+  `exfat.rs` against an image file, which fsd's `no_std` arms do not have
+  yet. The counts that graded it alone, before the verb gate, are in the
+  CHANGELOG entry of 2026-10-27 (14 checks). From the high review of #364.
+- **Read-only has two sources in fsd.** `tree_read_only` asks
+  `ROOT_READ_ONLY`, a static for tree 0 as D5's fallback, stored and cleared
+  by hand on each path that changes tree 0 (`try_mount`, `FSOP_UNMOUNT`),
+  and the arm's `read_only()`. Making D5's read-only a property of the
+  mount (kept with the mount slot, or in a `vfs` wrapper with its reason)
+  would leave the gate one thing to ask and let the boot line read the
+  reason the same way `read_only_line` does. A refactor of the mount
+  paths, so not done in #364. From its high review.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on

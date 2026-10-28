@@ -1325,7 +1325,16 @@ and `erase` are FSOP_* verbs and are not touched. `make test-long-set` and
 every early `writable()` check removed; with the verb gate's new arm removed
 as well, 11 checks fail, each refused write answered as a disk I/O error
 and written. Since then no boot reaches exFAT's disk gate, the second line:
-it is graded by no check. From the high review of #361.
+it is graded by no check (roadmap). From the high review of #361. Its own
+high review found the gate refusing an existing file opened with
+`O_RDONLY|O_CREAT`, which POSIX answers EROFS only when the file would be
+made (on tree 0's fallback since the gate was written): `OPEN_CREATE` alone
+now passes the gate, and `NP_OPEN` asks `tree_read_only` before it creates.
+`/proc` now answers `read_only()`, so the gate covers it too, and the verb
+is asked before the tree's state. `/bin/CCREAT` (`libc/ccreat.c`) opens a
+path that way; `make test-long-set`'s read-only boots and
+`test-boot-partition`'s disk-badroot run it on an existing file and a
+missing one.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
