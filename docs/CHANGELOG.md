@@ -1359,7 +1359,15 @@ search; the gate runs after `check_access`, root still refused; a create in
 a missing directory answers ENOENT, as on a writable tree; a malformed path
 FS_ERROR; and an open that asks neither to read nor to write is refused
 for every caller before anything acts. `O_EXCL`, which libc drops, and a
-directory opened as a fid are on the roadmap.
+directory opened as a fid are on the roadmap. A third medium review found
+that last refusal, made in the handler, answering FS_ERROR for an existing
+name and `check_access`'s FS_ERR_PERM for a missing one, the same leak by
+another door: it is made first in `handle_ninep` now, with the malformed
+path, the same answer for every caller and tree. `Found` carries the path,
+parsed once; the gate answers ENOTDIR when the parent is a file; the host
+peer takes the root as the parent of a path with no `/`, as `parent_of`
+does; and `test-cerrno` waits for each `ccreat` line and reads
+`/etc/passwd`'s size off the image.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
