@@ -4499,13 +4499,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   one `Device` at its start (`Device::claim`, which answers `None` to any
   later caller) and passes it by reference to the mounts and to `erase`,
   `partition` and `format`; the filesystem arms are handed a `Disk` and never
-  see the `Device`. Every `BLOCK_*` call goes through `disk.rs`'s private
-  `svc`, and the crate's `syscall4` and `syscall5` refuse those numbers.
-  `make check-disk-handle`, in `make test`, requires a `Disk` made by hand, a
-  `Disk` cloned, a `Device` made by hand and the private `svc` called, each
-  written in `exfat.rs`, to fail to compile. An `svc` written out in another
-  file's `asm!` would still reach the disk, and `syscall4`'s refusal is seen
-  by no check. Originally: `disk::Disk` is a unit struct, and `main.rs` names one in twenty
+  see the `Device`. Every `BLOCK_*` call and the `MOUNT` rescan go through
+  `disk.rs`'s private `svc`; the crate's `syscall4` and `syscall5` take their
+  number as a constant and do not compile with one of those. `make
+  check-disk-handle`, in `make test`, builds a copy of fsd with ten spellings
+  an arm might write in `exfat.rs` (a `Disk` or a `Device` made by hand or
+  cloned, a `Disk` from `new` or `Default`, the private `svc`, and
+  `BLOCK_WRITE`, `MOUNT` or `BLOCK_READ` through the wrappers) and requires
+  each to fail. An `svc` written out in another file's `asm!` would still
+  reach the disk, and a `Device::claim` answering a second caller is seen by
+  no check. Originally: `disk::Disk` is a unit struct, and `main.rs` names one in twenty
   places (`disk::Disk.write_sector`, `erase`'s zeroing among them). So
   exFAT's disk gate holds for every write through `Fs`'s own disk, but a
   writer in `exfat.rs` that wrote `Disk.write_sector(..)` would pass it, as

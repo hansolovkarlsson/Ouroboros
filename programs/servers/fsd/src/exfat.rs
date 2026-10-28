@@ -372,8 +372,9 @@ enum Room {
 /// volume whose live bitmap fsd cannot tell). Since 2026-10-27 a writer here
 /// cannot go around it through fsd's own calls either: a `Disk` is made only
 /// by [`Device::disk`](crate::disk::Device::disk), which this file never
-/// holds, and the crate's `syscall4` and `syscall5` refuse the `BLOCK_*`
-/// calls, which `disk.rs` makes through an `svc` of its own. An `svc`
+/// holds, and the crate's `syscall4` and `syscall5` do not compile with a
+/// `BLOCK_*` or `MOUNT` number, which `disk.rs` calls through an `svc` of its
+/// own. An `svc`
 /// written out by hand in `asm!` here would still pass; nothing stops that.
 ///
 /// Writability is settled once, at the end of [`Fs::mount_at`], and a
