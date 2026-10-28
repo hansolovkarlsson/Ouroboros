@@ -130,8 +130,9 @@ build/espexfat.img (exFAT root, partition 1):
   read-only, with VF one set of its 7 bytes on its cluster, VG as it was
   and no NEWB, VH or VT; and (since 2026-10-28, /bin/CCREAT) an open of VG
   with O_RDONLY|O_CREAT must read its 4 bytes while one of a missing VC is
-  EROFS with no VC made, as POSIX asks of O_CREAT on a read-only volume
-  (fsd's `mutates`), in every read-only boot below. VFIRST: the bitmap's entry naming cluster 0, and a
+  EROFS at the open with no VC made, as POSIX asks of O_CREAT on a
+  read-only volume (fsd's `refused_read_only`), in every read-only boot
+  below (VRUNS opens /etc/passwd, having no VG). VFIRST: the bitmap's entry naming cluster 0, and a
   good copy of it planted after VG, as a volume of two FATs has FAT 2's
   bitmap entry after FAT 1's: the first is the bitmap, damaged, and the
   volume is read-only as in VBITMAP (the copy deleted on the host after
@@ -230,6 +231,7 @@ write_fat_entry changes.
 """
 import importlib.util
 import os
+import re
 import struct
 import sys
 
@@ -1158,7 +1160,8 @@ def run_extent(label):
     cmds = (["echo new > /NEWB", "rm /VF", "ls /"] if writable else
             ["echo new > /NEWB", "write /VF", "echo t > /VF", "mv -f /VG /VF", "mv /VG /VH", "touch /VT", "rm /VF", "ls /"])
     # O_RDONLY|O_CREAT on a read-only volume: an existing file opens and
-    # reads, a missing one is EROFS (fsd's `mutates`, the high review of #364).
+    # reads, a missing one is EROFS at the open (fsd's `refused_read_only`,
+    # the high and medium reviews of #364).
     creat = [] if writable else ["ccreat /VG", "ccreat /VC"]
     driven, out, faults = boot(label, cmds[:-1] + creat + cmds[-1:])
     if drive_qemu.boot_stalled("test-long-set", label, out, faults):
@@ -1206,7 +1209,7 @@ def run_extent(label):
             (f"{label}: O_RDONLY|O_CREAT opens an existing file and reads it, and is EROFS ({EROFS}) "
              f"for a missing one, with no VC made ({printed(out, 'ccreat /VG')}, {printed(out, 'ccreat /VC')})",
              printed(out, "ccreat /VG") == ["ccreat: /VG read 4"]
-             and printed(out, "ccreat /VC") == [f"ccreat: /VC errno {EROFS}"] and "VC" not in names),
+             and printed(out, "ccreat /VC") == [f"ccreat: /VC open errno {EROFS}"] and "VC" not in names),
         ]
     checks += [(f"{label}: fsck_exfat -n passes the image after the boot, the entries restored", ok),
                (f"{label}: no fault lines", faults == 0)]
@@ -1237,7 +1240,7 @@ def run_vruns():
                f"passes the image before the boot", len(runs_of(chain)) == 65 and ok)]
     if not checks[0][1]:
         return checks, [f"vruns before: {ln}" for ln in lines]
-    driven, out, faults = boot("vruns", ["echo new > /NEWB", "ls /"])
+    driven, out, faults = boot("vruns", ["echo new > /NEWB", "ccreat /etc/passwd", "ccreat /VC", "ls /"])
     if drive_qemu.boot_stalled("test-long-set", "vruns", out, faults):
         STALLED.append("vruns")
         return [], []
@@ -1250,6 +1253,11 @@ def run_vruns():
          and said[0] == "fsd: mounted read-only: its root directory is in more than 64 runs of clusters"),
         (f"vruns: echo new > /NEWB refused read-only ({printed(out, 'echo new > /NEWB')}), no NEWB on the disk",
          any("read-only" in ln for ln in printed(out, "echo new > /NEWB")) and exfatimg.find(root, "NEWB") is None),
+        (f"vruns: O_RDONLY|O_CREAT opens /etc/passwd and reads it, and is EROFS ({EROFS}) at the open for a "
+         f"missing VC, none made ({printed(out, 'ccreat /etc/passwd')}, {printed(out, 'ccreat /VC')})",
+         len(printed(out, "ccreat /etc/passwd")) == 1
+         and re.fullmatch(r"ccreat: /etc/passwd read [1-9][0-9]*", printed(out, "ccreat /etc/passwd")[0]) is not None
+         and printed(out, "ccreat /VC") == [f"ccreat: /VC open errno {EROFS}"] and exfatimg.find(root, "VC") is None),
         ("vruns: no fault lines", faults == 0),
     ]
     return checks, []

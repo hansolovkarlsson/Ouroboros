@@ -136,29 +136,27 @@ fn tree_read_only(tree: usize, fs: &vfs::Filesystem) -> bool {
     (tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed)) || fs.read_only().is_some()
 }
 
-/// Whether `verb` on `tree`, mounted as `fs`, is refused because that tree is
-/// read-only ([`tree_read_only`]): the one spelling of the gate, for
-/// `handle_ninep` and the fid path alike (the second high review of #291
-/// found the predicate written out twice). A change is refused here before
-/// it reaches the arm, whose own refusal (exFAT's disk gate, `proc.rs`'s
-/// `ReadOnly`) stays as the second line. The verb is asked first, so a read
-/// pays nothing for the tree's state.
-fn refused_read_only(tree: usize, fs: &vfs::Filesystem, verb: u64, p: &[u64; 4]) -> bool {
-    mutates(verb, p) && tree_read_only(tree, fs)
-}
-
-/// Whether `verb` (with its params `p`) may change what is on the disk: the
-/// verbs [`handle_ninep`] and the fid path refuse on a read-only tree.
+/// The status `verb` on `tree`, mounted as `fs`, is refused with because that
+/// tree is read-only ([`tree_read_only`]), or `None` when it goes on: the one
+/// spelling of the gate, for `handle_ninep` and the fid path alike (the second
+/// high review of #291 found the predicate written out twice). A change is
+/// refused here before it reaches the arm, whose own refusal (exFAT's disk
+/// gate, `proc.rs`'s `ReadOnly`) stays as the second line.
+///
 /// DEFAULT-DENY: the verbs that only read are listed, and every other verb,
 /// one added later included, counts as a change, so a new verb cannot reach a
 /// read-only tree unrefused for want of an arm here (the review of #291, the
-/// unspellable-postmortem's rule). An `NP_OPEN` changes the disk when it opens
-/// for writing or truncating. An open with `OPEN_CREATE` alone changes it only
-/// when the file is missing, which the verb cannot tell: POSIX gives EROFS for
-/// `O_CREAT` only "if the file does not exist", so an existing file opens and
-/// reads. `handle_ninep`'s `NP_OPEN` asks [`tree_read_only`] itself before it
-/// creates (the high review of #364).
-fn mutates(verb: u64, p: &[u64; 4]) -> bool {
+/// unspellable-postmortem's rule). The verb is asked first, so a read pays
+/// nothing for the tree's state. An `NP_OPEN` is a change by
+/// [`ninep_abi::open_changes`], which needs to know whether the file exists
+/// when the open would create it, so the gate asks the volume itself (the
+/// medium review of #364: the create was refused by a second check in
+/// `NP_OPEN`, after the fid table's). A missing file answers EROFS; a stat that
+/// fails otherwise answers its own error (an I/O error is not "read-only").
+/// `payload` is the request's path bytes, empty on the fid path, where no
+/// `NP_OPEN` comes.
+fn refused_read_only(tree: usize, fs: &mut vfs::Filesystem, verb: u64, p: &[u64; 4], payload: &[u8]) -> Option<u64> {
+    const READ_ONLY: Option<u64> = Some(syscall_abi::FS_ERR_READ_ONLY);
     match verb {
         ninep_abi::NP_READDIR
         | ninep_abi::NP_READ_FILE
@@ -167,9 +165,29 @@ fn mutates(verb: u64, p: &[u64; 4]) -> bool {
         | ninep_abi::NP_STAT
         | ninep_abi::NP_PREAD
         | ninep_abi::NP_FSTAT
-        | ninep_abi::NP_CLUNK => false,
-        ninep_abi::NP_OPEN => p[0] & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_TRUNC) != 0,
-        _ => true,
+        | ninep_abi::NP_CLUNK => None,
+        _ if !tree_read_only(tree, fs) => None,
+        ninep_abi::NP_OPEN => {
+            let flags = p[0];
+            if !ninep_abi::open_changes(flags, false) {
+                return None; // changes nothing, missing or not
+            }
+            if ninep_abi::open_changes(flags, true) {
+                return READ_ONLY; // changes the file even where it exists
+            }
+            // Creates, and only when the file is missing.
+            let Some(path) = path_from(payload, 0, p[1]) else {
+                return READ_ONLY;
+            };
+            match fs.stat(path) {
+                Ok(_) => None,
+                Err(e) => match error_code(&e) {
+                    syscall_abi::FS_ERR_NOT_FOUND => READ_ONLY,
+                    code => Some(code),
+                },
+            }
+        }
+        _ => READ_ONLY,
     }
 }
 
@@ -768,8 +786,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // A read-only tree (D5's fallback, or a volume its arm mounted read-only)
     // refuses every change, root's included, so this comes before
     // `check_access`, whose first rule lets root through.
-    if refused_read_only(tree, fs, verb, &p) {
-        return status_reply(reply, syscall_abi::FS_ERR_READ_ONLY);
+    if let Some(status) = refused_read_only(tree, fs, verb, &p, payload) {
+        return status_reply(reply, status);
     }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
     // uid/gid against the target's owner+mode before running the op. ext2-only
@@ -1070,12 +1088,6 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 }
             } else if flags & ninep_abi::OPEN_CREATE != 0 {
                 if fs.stat(path).is_err() {
-                    // The gate let `OPEN_CREATE` alone through ([`mutates`]):
-                    // a missing file on a read-only tree is refused here,
-                    // before the arm, where an existing one opened above.
-                    if tree_read_only(tree, fs) {
-                        return status_reply(reply, syscall_abi::FS_ERR_READ_ONLY);
-                    }
                     if let Err(e) = fs.touch(path) {
                         return status_reply(reply, error_code(&e));
                     }
@@ -1224,7 +1236,10 @@ fn handle_fid_op(
     let flags = fids[idx].flags;
     let allowed = match verb {
         ninep_abi::NP_PREAD => flags & ninep_abi::OPEN_READ != 0,
-        ninep_abi::NP_PWRITE => ninep_abi::open_writes(flags),
+        // `OPEN_WRITE` alone: an open that created or truncated without it
+        // (`O_RDONLY|O_CREAT`, `O_RDONLY|O_TRUNC`) holds a read-only fd, and
+        // POSIX answers its write EBADF (the medium review of #364).
+        ninep_abi::NP_PWRITE => flags & ninep_abi::OPEN_WRITE != 0,
         _ => true, // NP_FSTAT: metadata, like NP_STAT
     };
     if !allowed {
@@ -1240,8 +1255,8 @@ fn handle_fid_op(
     let Some(fs) = mounts[tree].as_mut() else {
         return status_reply(reply, syscall_abi::NO_FS);
     };
-    if refused_read_only(tree, fs, verb, p) {
-        return status_reply(reply, syscall_abi::FS_ERR_READ_ONLY);
+    if let Some(status) = refused_read_only(tree, fs, verb, p, &[]) {
+        return status_reply(reply, status);
     }
     let Some(path) = fids[idx].path_str() else {
         return status_reply(reply, syscall_abi::FS_ERROR);
@@ -1692,8 +1707,11 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
                 // OPEN_TRUNC is a WRITE: the handler acts on it by truncating
                 // the file, so leaving it out of this mask let
                 // `open(path, O_RDONLY | O_TRUNC)` destroy a root-owned file
-                // with only read permission.
-                let wants_write = ninep_abi::open_writes(flags);
+                // with only read permission. OPEN_CREATE is one only when the
+                // file is missing, so `O_RDONLY|O_CREAT` of a file the caller
+                // may read opens it (the medium review of #364).
+                let exists = fs.stat(path).is_ok();
+                let wants_write = ninep_abi::open_changes(flags, exists);
                 let wants_read = flags & ninep_abi::OPEN_READ != 0;
                 // DEFAULT-DENY on a flag word that asks for nothing recognisable:
                 // `flags == 0` satisfied neither branch and fell through to
@@ -1705,7 +1723,7 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
                     return false;
                 }
                 if wants_write {
-                    let ok = if fs.stat(path).is_ok() {
+                    let ok = if exists {
                         path_allows(fs, path, &who, PERM_W)
                     } else {
                         path_allows(fs, parent_of(path), &who, PERM_WX)

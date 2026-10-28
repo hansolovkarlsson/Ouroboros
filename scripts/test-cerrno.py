@@ -18,7 +18,13 @@ binding and a path below it, and a /net path (ENOSYS, not answered yet), after
   get EACCES opening /etc/shadow (mode 0600) and yet stat it, as POSIX's stat
   needs no read permission, and stat must give the mode and owner debugfs
   reads off the image for two files (KNOWN_PATHS below): ext2 is the one image
-  whose modes fsd enforces.
+  whose modes fsd enforces. Then, as `user` (/bin/CCREAT, since the medium
+  review of #364): /etc/passwd (0644, not `user`'s) opened O_RDONLY|O_CREAT
+  must read, since O_CREAT of an existing file asks for no write permission,
+  a write through such an fd must be EBADF, since the fd is read-only, and a
+  missing /etc/newf must be EACCES at the open, since creating it needs `w`
+  on /etc (fsd's `check_access` and the fid's write check, with
+  ninep_abi::open_changes).
 
 Graded on cerrno's own summary line (`cerrno: N checks, 0 failed`, matched
 whole, with N exactly ROOT_CHECKS below: fewer is a run cut short, and more
@@ -54,6 +60,14 @@ KNOWN_PATHS = ["/etc/shadow", "/Users/user/PRIVATE.TXT"]
 EXT2_PART = os.path.join(ROOT, "build", "ext2part.img")
 # As `user`: open refused, stat allowed, then one check per known file.
 USER_CHECKS = 2 + len(KNOWN_PATHS)
+# As `user`, O_RDONLY|O_CREAT (/bin/CCREAT): each command and the one line it
+# must print. /etc/passwd is 67 bytes, so one read of up to 64 gives 64.
+EBADF, EACCES = 9, 13  # picolibc's sys/errno.h
+CREAT_LINES = [
+    ("ccreat /etc/passwd", "ccreat: /etc/passwd read 64"),
+    ("ccreat -w /etc/passwd", f"ccreat: /etc/passwd write errno {EBADF}"),
+    ("ccreat /etc/newf", f"ccreat: /etc/newf open errno {EACCES}"),
+]
 
 
 def debugfs_tool():
@@ -121,8 +135,8 @@ def main() -> int:
     d, out, f = boot("ext2", "espext2.img", root_steps + [
         (SUMMARY, "exit"),
         ("login:", "user"), ("assword", "user"), (r"\$ ", f"cerrno /etc/shadow {' '.join(known)}"),
-        (SUMMARY, ""),
-    ])
+        (SUMMARY, CREAT_LINES[0][0]),
+    ] + [(r"\$ ", cmd) for cmd, _ in CREAT_LINES[1:]] + [(r"ccreat: /etc/newf [^\n]*\n", "")])
     got = summaries(out)
     checks += [
         ("ext2: driven to the end", d),
@@ -131,6 +145,10 @@ def main() -> int:
          got[1:2] == [(USER_CHECKS, 0)]),
         ("ext2: no fault lines", f == 0),
     ]
+    tail = out.split("cerrno /etc/shadow", 1)[-1]
+    for cmd, line in CREAT_LINES:
+        got_line = re.findall(r"\$ " + re.escape(cmd) + r"\r?\n(.*?)\r?$", tail, re.M)
+        checks.append((f"ext2: user, `{cmd}` prints `{line}` ({got_line})", got_line == [line]))
     for name, text in (("fat32", fat32), ("ext2", out)):
         for line in re.findall(r"^cerrno: (?:ok|FAIL).*$", text, re.M):
             print(f"     {name}: {line.rstrip()}")

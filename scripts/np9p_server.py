@@ -27,8 +27,8 @@ arm, same handling), NP_READ_FILE; and since 2026-09-05 the READ-CAPABLE FID
 verbs NP_OPEN / NP_PREAD / NP_FSTAT / NP_CLUNK, so a C program's open/read/fstat
 works over a remote mount pointed at this peer. A known verb refused on policy
 gets FS_ERR_READ_ONLY (the mutating verbs, plus NP_PWRITE and an NP_OPEN asking
-for write/create/truncate - this export is read-only); anything else gets
-FS_ERR_NO_SUCH_VERB.
+for write or truncate, or to create a missing file - this export is
+read-only); anything else gets FS_ERR_NO_SUCH_VERB.
 
 **netd's export serves NP_OPEN / NP_FSTAT / NP_CLUNK since step 5 and NP_PREAD
 since step 6 (both 2026-09-12), on a session only, and NOT YET NP_PWRITE**
@@ -601,7 +601,12 @@ def serve_np(body, name, sealed):
     if verb == NP_BASE + 15:
         flags, plen = a0, a1
         fpath = body[HDR:HDR + plen]
-        if flags & (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC):
+        # fsd's rule (ninep_abi::open_changes): writing or truncating always
+        # changes the file, creating only when it is missing, so O_RDONLY|O_CREAT
+        # of a file here opens it, as on fsd's read-only trees (the medium review
+        # of #364: this peer refused every create, and diverged).
+        exists = fpath in FILES or fpath in DIRS
+        if flags & (OPEN_WRITE | OPEN_TRUNC) or (flags & OPEN_CREATE and not exists):
             # Refused on POLICY, like the mutating verbs - not "no such verb".
             print(f"  [read-only: refusing NP_OPEN flags=0x{flags:x} "
                   f"path={fpath!r}]", flush=True)
@@ -720,6 +725,9 @@ SELF_TEST_VERBS = [
     # a0 = FLAGS here, not the path length.
     ("NP_OPEN(r)",    NP_BASE + 15, "served",       (OPEN_READ, "PLEN", 0), b"/HELLO.TXT"),
     ("NP_OPEN(w)",    NP_BASE + 15, "read-only",    (OPEN_WRITE, "PLEN", 0), b"/HELLO.TXT"),
+    # O_RDONLY|O_CREAT: an existing file opens, a missing one would be made.
+    ("NP_OPEN(rc)",   NP_BASE + 15, "served",       (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/HELLO.TXT"),
+    ("NP_OPEN(rc new)", NP_BASE + 15, "read-only",  (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/NOPE.TXT"),
     ("NP_OPEN(dir)",  NP_BASE + 15, "not-a-file",   (OPEN_READ, "PLEN", 0), b"/SUB"),
     ("NP_OPEN(gone)", NP_BASE + 15, "not-found",    (OPEN_READ, "PLEN", 0), b"/NOPE.TXT"),
     # a0 = a FID, and no path at all.

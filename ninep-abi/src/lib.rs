@@ -345,13 +345,19 @@ pub const OPEN_CREATE: u64 = 4;
 /// [`NP_OPEN`] flag: truncate the file to empty on open.
 pub const OPEN_TRUNC: u64 = 8;
 
-/// Whether an [`NP_OPEN`] with `flags` changes the file, and so needs write
-/// access: writing, creating or truncating ([`OPEN_TRUNC`] destroys the
-/// contents). The one spelling of the mask, for `fsd`'s permission check, its
-/// fid write check and its read-only refusal, which had three copies (the
-/// review of #291; OPEN_TRUNC was once missing from one of them).
-pub const fn open_writes(flags: u64) -> bool {
-    flags & (OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC) != 0
+/// Whether an [`NP_OPEN`] with `flags` changes the disk, and so needs write
+/// access and is refused on a read-only tree: writing or truncating
+/// ([`OPEN_TRUNC`] destroys the contents) always, and creating only when the
+/// file does not `exist`. POSIX gives EROFS for `O_CREAT` only "if the file
+/// does not exist", so `O_RDONLY|O_CREAT` of an existing file is a read.
+/// `exists` is a required parameter so no caller can decide a create without
+/// asking (the medium review of #364, where the read-only gate and the
+/// permission check had come to spell the rule two ways). The one spelling,
+/// for `fsd`'s read-only gate and its permission check, which had three
+/// copies of the mask before (the review of #291; OPEN_TRUNC was once missing
+/// from one of them). A fid's write is not this: it needs [`OPEN_WRITE`].
+pub const fn open_changes(flags: u64, exists: bool) -> bool {
+    flags & (OPEN_WRITE | OPEN_TRUNC) != 0 || (flags & OPEN_CREATE != 0 && !exists)
 }
 
 /// How many fids `fsd` holds open at once, across every client: every local C
@@ -1371,13 +1377,20 @@ mod tests {
     }
 
     #[test]
-    fn open_writes_is_every_flag_that_changes_the_file() {
-        assert!(!open_writes(OPEN_READ));
-        assert!(!open_writes(0));
-        for flag in [OPEN_WRITE, OPEN_CREATE, OPEN_TRUNC] {
-            assert!(open_writes(flag));
-            assert!(open_writes(flag | OPEN_READ));
+    fn open_changes_creates_only_a_missing_file() {
+        for exists in [true, false] {
+            assert!(!open_changes(OPEN_READ, exists));
+            assert!(!open_changes(0, exists));
+            for flag in [OPEN_WRITE, OPEN_TRUNC] {
+                assert!(open_changes(flag, exists));
+                assert!(open_changes(flag | OPEN_READ, exists));
+                assert!(open_changes(flag | OPEN_CREATE, exists));
+            }
         }
+        assert!(open_changes(OPEN_CREATE, false));
+        assert!(open_changes(OPEN_CREATE | OPEN_READ, false));
+        assert!(!open_changes(OPEN_CREATE, true));
+        assert!(!open_changes(OPEN_CREATE | OPEN_READ, true));
     }
 
     #[test]

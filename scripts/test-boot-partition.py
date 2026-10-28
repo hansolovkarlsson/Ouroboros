@@ -50,8 +50,8 @@ and three on copies this script makes, each disk with a signature of its own
 finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock,
 `fsd` must say it fell back to the ESP read-only and refuse root's `touch`
 there (decision D5), open /etc/passwd with O_RDONLY|O_CREAT and read it while
-refusing a missing file EROFS (/bin/CCREAT, since 2026-10-28), and `format` must then take the damaged root, never
-the ESP; gpt-format runs `format` on a
+refusing a missing file EROFS at the open (/bin/CCREAT, since 2026-10-28),
+and `format` must then take the damaged root, never the ESP; gpt-format runs `format` on a
 copy of espgpt.img, which must be refused.
 
 and four of build/disk-data.img, which this script builds: the ESP, an
@@ -279,8 +279,9 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         # First, as root, a write to the fallback `/` must be refused: it is
         # the ESP, mounted read-only (decision D5).
         # And O_RDONLY|O_CREAT (/bin/CCREAT, since 2026-10-28): an existing
-        # file opens and reads, a missing one is EROFS, not made. FAT32 has no
-        # read-only gate of its own, so fsd's NP_OPEN is the only line here.
+        # file opens and reads, a missing one is EROFS at the open, not made.
+        # FAT32 has no read-only gate of its own, so fsd's verb gate
+        # (`refused_read_only`) is the only line here.
         steps = [("login:", "root"), ("assword", "root"), ("# ", "touch /rotest"),
                  ("# ", "ccreat /etc/passwd"), ("# ", "ccreat /rocreat"), ("# ", "unmount"),
                  ("# ", "format ext2"), ("# ", "mount -a"), ("# ", "mount 0 /esp"), ("# ", "cd /esp/EFI"),
@@ -400,7 +401,7 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             (f"{label}: O_RDONLY|O_CREAT on the fallback opens /etc/passwd and reads it, and is EROFS (30) "
              f"for a missing /rocreat, not made",
              bool(re.search(r"ccreat /etc/passwd\r?\n[^#]*ccreat: /etc/passwd read [1-9]", before))
-             and bool(re.search(r"ccreat /rocreat\r?\n[^#]*ccreat: /rocreat errno 30\b", before))),
+             and bool(re.search(r"ccreat /rocreat\r?\n[^#]*ccreat: /rocreat open errno 30\b", before))),
             (f"{label}: `format ext2` takes the damaged root, and `mount -a` mounts it",
              "ext2 mounted" in after and "no partition beside" not in after),
             (f"{label}: the ESP is whole after the format (`cd /esp/EFI` silent)",
