@@ -128,17 +128,23 @@ fn main() -> ! {
 /// task, so an atomic is only the spelling of a mutable static.
 static ROOT_READ_ONLY: AtomicBool = AtomicBool::new(false);
 
+/// Whether `tree`, mounted as `fs`, is read-only: tree 0 as D5's fallback, or
+/// any tree whose arm answers [`vfs::Filesystem::read_only`] (exFAT's
+/// read-only volume, `/proc`). `fs` is a required parameter so no caller can
+/// ask without the volume (the high review of #361).
+fn tree_read_only(tree: usize, fs: &vfs::Filesystem) -> bool {
+    (tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed)) || fs.read_only().is_some()
+}
+
 /// Whether `verb` on `tree`, mounted as `fs`, is refused because that tree is
-/// read-only: the one spelling of the gate, for `handle_ninep` and the fid
-/// path alike (the second high review of #291 found the predicate written out
-/// twice). Read-only is tree 0 as D5's fallback, or any tree whose arm
-/// mounted it read-only ([`vfs::Filesystem::read_only`], exFAT's for now),
-/// so a change is refused here before it reaches the arm, whose own disk
-/// gate stays as the second line (the high review of #361). `fs` is a
-/// required parameter so a caller cannot ask the gate without the volume.
+/// read-only ([`tree_read_only`]): the one spelling of the gate, for
+/// `handle_ninep` and the fid path alike (the second high review of #291
+/// found the predicate written out twice). A change is refused here before
+/// it reaches the arm, whose own refusal (exFAT's disk gate, `proc.rs`'s
+/// `ReadOnly`) stays as the second line. The verb is asked first, so a read
+/// pays nothing for the tree's state.
 fn refused_read_only(tree: usize, fs: &vfs::Filesystem, verb: u64, p: &[u64; 4]) -> bool {
-    let read_only = (tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed)) || fs.read_only().is_some();
-    read_only && mutates(verb, p)
+    mutates(verb, p) && tree_read_only(tree, fs)
 }
 
 /// Whether `verb` (with its params `p`) may change what is on the disk: the
@@ -147,7 +153,11 @@ fn refused_read_only(tree: usize, fs: &vfs::Filesystem, verb: u64, p: &[u64; 4])
 /// one added later included, counts as a change, so a new verb cannot reach a
 /// read-only tree unrefused for want of an arm here (the review of #291, the
 /// unspellable-postmortem's rule). An `NP_OPEN` changes the disk when it opens
-/// for writing, creating or truncating ([`ninep_abi::open_writes`]).
+/// for writing or truncating. An open with `OPEN_CREATE` alone changes it only
+/// when the file is missing, which the verb cannot tell: POSIX gives EROFS for
+/// `O_CREAT` only "if the file does not exist", so an existing file opens and
+/// reads. `handle_ninep`'s `NP_OPEN` asks [`tree_read_only`] itself before it
+/// creates (the high review of #364).
 fn mutates(verb: u64, p: &[u64; 4]) -> bool {
     match verb {
         ninep_abi::NP_READDIR
@@ -158,7 +168,7 @@ fn mutates(verb: u64, p: &[u64; 4]) -> bool {
         | ninep_abi::NP_PREAD
         | ninep_abi::NP_FSTAT
         | ninep_abi::NP_CLUNK => false,
-        ninep_abi::NP_OPEN => ninep_abi::open_writes(p[0]),
+        ninep_abi::NP_OPEN => p[0] & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_TRUNC) != 0,
         _ => true,
     }
 }
@@ -1060,6 +1070,12 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 }
             } else if flags & ninep_abi::OPEN_CREATE != 0 {
                 if fs.stat(path).is_err() {
+                    // The gate let `OPEN_CREATE` alone through ([`mutates`]):
+                    // a missing file on a read-only tree is refused here,
+                    // before the arm, where an existing one opened above.
+                    if tree_read_only(tree, fs) {
+                        return status_reply(reply, syscall_abi::FS_ERR_READ_ONLY);
+                    }
                     if let Err(e) = fs.touch(path) {
                         return status_reply(reply, error_code(&e));
                     }
@@ -1215,10 +1231,12 @@ fn handle_fid_op(
         return status_reply(reply, syscall_abi::FS_ERR_PERM);
     }
     let tree = fids[idx].tree;
-    // The read-only tree's gate for the fid path too, so the refusal of a
-    // write-open is not the only thing between a fid and the ESP: today a
-    // write fid cannot outlive the unmount before the fallback, but nothing
-    // here should depend on that staying true (the review of #291).
+    // The read-only gate for the fid path too, on every tree (D5's ESP, an
+    // arm's read-only volume, `/proc`), so the refusal of a write-open is not
+    // the only thing between a fid and a read-only volume: today a write fid
+    // cannot outlive the unmount before the fallback, but nothing here should
+    // depend on that staying true (the review of #291). The mount is looked
+    // up first because the gate asks it.
     let Some(fs) = mounts[tree].as_mut() else {
         return status_reply(reply, syscall_abi::NO_FS);
     };

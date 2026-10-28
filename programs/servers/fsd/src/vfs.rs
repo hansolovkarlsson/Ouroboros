@@ -221,15 +221,20 @@ impl Filesystem {
         }
     }
 
-    /// Why this filesystem was mounted read-only, for fsd's mount lines:
-    /// exFAT's reason ([`exfat::Fs::read_only`]); `None` for every other arm,
-    /// which mounts writable or not at all. Not fsd's own read-only root, the
-    /// ESP taken when the root did not mount (D5, `ROOT_READ_ONLY`), which
-    /// the boot line says itself.
+    /// Why this filesystem is read-only, `None` while it is writable: exFAT's
+    /// reason ([`exfat::Fs::read_only`]), and `/proc`, which no verb writes;
+    /// `None` for FAT32 and ext2, which mount writable or not at all. **fsd's
+    /// read-only gate (`refused_read_only` in `main.rs`) refuses every change
+    /// on a tree for which this answers**, so it is a security answer, not
+    /// only the mount line's text: an arm answering `None` here opens its
+    /// volume to every write verb, its own refusal the only line left. Not
+    /// fsd's own read-only root, the ESP taken when the root did not mount
+    /// (D5, `ROOT_READ_ONLY`), which the gate and the boot line ask apart.
     pub fn read_only(&self) -> Option<&'static str> {
         match self {
             Filesystem::ExFat(fs) => fs.read_only(),
-            _ => None,
+            Filesystem::Proc(_) => Some("it is generated as it is read"),
+            Filesystem::Fat32(_) | Filesystem::Ext2(_) => None,
         }
     }
 
