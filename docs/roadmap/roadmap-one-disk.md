@@ -407,7 +407,8 @@ added later is refused on a read-only tree until it is listed as reading
 (no verb today is unlisted, so no rig can show that). The fid path checks
 the read-only tree too, through one gate (`refused_read_only`), and the
 open-for-write mask is one function, `ninep_abi::open_writes`, where `fsd`
-had three copies. Kept: the flag is a
+had three copies (since 2026-10-28 `ninep_abi::open_changes`, which takes
+whether the file exists, `mutates` folded into the gate). Kept: the flag is a
 static for tree 0 rather than a property of the mount, and `FSOP_MOUNT_INFO`
 does not report it; only tree 0 can be the fallback, and the two places
 that can change it clear or set it.

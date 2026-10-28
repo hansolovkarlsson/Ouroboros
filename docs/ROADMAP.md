@@ -4461,7 +4461,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   it, or the kernel seeing a write to sector 0 or the GPT), or answer
   `BLOCK_BOOT_START` from the table as it is now. From the medium review of
   #362, 2026-10-27.
-- **The read-only verb gate covers tree 0's fallback alone.** `main.rs`'s
+- ~~**The read-only verb gate covers tree 0's fallback alone.**~~ **Done
+  2026-10-28:** `refused_read_only` takes the mounted filesystem and refuses
+  on any tree whose `read_only()` answers (CHANGELOG). What it left open is
+  the two items below. `main.rs`'s
   `refused_read_only` refuses every verb that changes the disk, by a
   default-deny list (`mutates`), but only on tree 0 mounted read-only by
   decision D5. A volume an arm mounts read-only (exFAT's, for now) is
@@ -4471,6 +4474,39 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   line. `partition`, `format` and `erase` are FSOP_* verbs, not NP_*, so
   the deliberate hold that they stay available is not touched. From the
   high review of #361, 2026-10-27.
+- **exFAT's disk gate is graded by no boot.** Since 2026-10-28 fsd's verb
+  gate refuses every change to a read-only tree before the arm, so the
+  read-only boots of `make test-long-set` and `test-volume-bound` pass with
+  `gate::Gated`'s write check and the allocator's removed (measured that
+  day): the second line still stands, and nothing would see it fall. To
+  grade it again, a path past the verb gate is needed: a boot flag or a
+  build of fsd that skips `refused_read_only` for the rig, or a host test of
+  `exfat.rs` against an image file, which fsd's `no_std` arms do not have
+  yet. The counts that graded it alone, before the verb gate, are in the
+  CHANGELOG entry of 2026-10-27 (14 checks). From the high review of #364.
+- **Read-only has two sources in fsd.** `tree_read_only` asks
+  `ROOT_READ_ONLY`, a static for tree 0 as D5's fallback, stored and cleared
+  by hand on each path that changes tree 0 (`try_mount`, `FSOP_UNMOUNT`),
+  and the arm's `read_only()`. Making D5's read-only a property of the
+  mount (kept with the mount slot, or in a `vfs` wrapper with its reason)
+  would leave the gate one thing to ask and let the boot line read the
+  reason the same way `read_only_line` does. A refactor of the mount
+  paths, so not done in #364. From its high review.
+- **`O_EXCL` is dropped by libc.** `open()` in `libc/src/file.c` maps
+  `O_CREAT` and `O_TRUNC` but not `O_EXCL`, and the wire has no flag for
+  it, so `O_CREAT|O_EXCL` of an existing file opens it on every tree where
+  POSIX answers EEXIST: the lockfile idiom believes it made the lock. Since
+  #364 the same holds on a read-only tree, where it answered EROFS before.
+  Needs an `OPEN_EXCL` in ninep-abi, `libc/include/sys.h` and both Python
+  peers (`check-wire-constants.py` holds them together), fsd refusing an
+  existing file with it before anything acts, and a `ccreat`-style check.
+  From the second medium review of #364.
+- **fsd opens a directory as a fid; the host peer refuses it.** An
+  `NP_OPEN` of a directory, with or without `OPEN_CREATE`, gets a fid from
+  fsd, where `np9p_server.py` answers FS_ERR_NOT_A_FILE (its
+  `NP_OPEN(dir)` self-test row pins the peer's side). Older than #364;
+  one of the two should change, and the other follow. From the second
+  medium review of #364.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on

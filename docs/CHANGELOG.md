@@ -1312,6 +1312,63 @@ answer, older than this change (roadmap). Behaviour is unchanged: `make
 test-blank-disk`, `test-mount-gate`, `test-probe-ioerr`, `test-unmount`,
 `test-boot-partition`, `test-volume-bound` and `test-long-set` pass.
 
+**fsd's read-only gate asks every tree (2026-10-28).** `refused_read_only`,
+which refuses every verb that may change the disk (`mutates`, default-deny),
+refused only on tree 0 mounted read-only as D5's fallback. A volume an arm
+mounted read-only, exFAT's, was refused only inside the arm, at its disk
+gate. The gate now takes the mounted filesystem as a required parameter and
+refuses on any tree whose `read_only()` answers, before `check_access` and
+before the arm; on the fid path the mount is looked up first so the gate can
+ask it. exFAT's disk gate stays as the second line. `partition`, `format`
+and `erase` are FSOP_* verbs and are not touched. `make test-long-set` and
+`test-volume-bound BESIDE` pass, and pass again with exFAT's disk gate and
+every early `writable()` check removed; with the verb gate's new arm removed
+as well, 11 checks fail, each refused write answered as a disk I/O error
+and written. Since then no boot reaches exFAT's disk gate, the second line:
+it is graded by no check (roadmap). From the high review of #361. Its own
+high review found the gate refusing an existing file opened with
+`O_RDONLY|O_CREAT`, which POSIX answers EROFS only when the file would be
+made (on tree 0's fallback since the gate was written): `OPEN_CREATE` alone
+now passes the gate, and `NP_OPEN` asks `tree_read_only` before it creates.
+`/proc` now answers `read_only()`, so the gate covers it too, and the verb
+is asked before the tree's state. `/bin/CCREAT` (`libc/ccreat.c`) opens a
+path that way; `make test-long-set`'s read-only boots and
+`test-boot-partition`'s disk-badroot run it on an existing file and a
+missing one. The medium review of #364 found the rule spelled two ways: the
+create refused by a second check inside `NP_OPEN`, after the fid table's
+checks, an I/O error answered as EROFS, and `check_access`, the fid's write
+check and the host peer still taking `O_CREAT` as a write. The rule is one
+function now, `ninep_abi::open_changes(flags, exists)` (writing or
+truncating always, creating only a missing file; `exists` required), in
+place of `open_writes`. The gate (`mutates` folded into it) stats the path
+when the open would only create, answers EROFS for a missing file and the
+stat's own error otherwise; `check_access` asks for `w` only by that rule,
+so an ordinary user opens a file it may read with `O_RDONLY|O_CREAT`; a fid
+writes only if it was opened with `OPEN_WRITE`, which that open makes
+load-bearing; and `np9p_server.py` answers the same, with a row in its
+`--self-test`. `ccreat` names the call that failed and gained `-w`, VRUNS
+runs it too, and `test-cerrno`'s `user` boot checks that `/etc/passwd`
+reads, that a write through the fd is EBADF and that a missing `/etc/newf`
+is EACCES. A second medium review found the existence asked by a stat in
+each of the three places, a failed one counted as missing, and the gate
+answering a missing name before `check_access`, so a caller who could not
+search a directory heard which names were in it. An `NP_OPEN` now makes one
+stat (`Found`), read by `check_access`, the gate and the handler, and a
+failure other than not-found answers its own status after the ancestor
+search; the gate runs after `check_access`, root still refused; a create in
+a missing directory answers ENOENT, as on a writable tree; a malformed path
+FS_ERROR; and an open that asks neither to read nor to write is refused
+for every caller before anything acts. `O_EXCL`, which libc drops, and a
+directory opened as a fid are on the roadmap. A third medium review found
+that last refusal, made in the handler, answering FS_ERROR for an existing
+name and `check_access`'s FS_ERR_PERM for a missing one, the same leak by
+another door: it is made first in `handle_ninep` now, with the malformed
+path, the same answer for every caller and tree. `Found` carries the path,
+parsed once; the gate answers ENOTDIR when the parent is a file; the host
+peer takes the root as the parent of a path with no `/`, as `parent_of`
+does; and `test-cerrno` waits for each `ccreat` line and reads
+`/etc/passwd`'s size off the image.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
