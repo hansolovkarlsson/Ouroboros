@@ -3162,3 +3162,79 @@ console alone, the three rig helpers that walk sets by hand, and a failed
   another as a module; `Volume`'s FAT32 entries come from `fat32img` (the
   live copy). `test-grow-dir`'s fsck rule stays its own, as it expects one
   planted complaint. `test-mv-undo` joined when its PR landed.
+
+## The exFAT rigs' set walker, exFAT's disk gate, a `Disk` no arm can make, DONE (2026-10-27)
+
+Three items closed on 2026-10-27, by #360 to #362, each struck on its
+branch with a *Done* note and moved here by the closeout. What the reviews
+deferred stays on the roadmap: two rigs that still load
+`test-spawn-reads.py` as a module, the read-only verb gate on tree 0's
+fallback alone, and the kernel's boot partition outliving fsd's own table
+rewrite across an fsd restart.
+
+- ~~**Three exFAT rig helpers still walk sets by hand.**~~ **Done
+  2026-10-27:** all three walk with `exfatimg.sets`/`find`, and so do two
+  more the review found (`test-spawn-reads`'s lookup, `test-write-walk`'s
+  `exfat_entries`). A set's Stream entry is read and rewritten through two
+  new helpers, `exfatimg.extent` and `exfatimg.restream`, which also replace
+  the hand decoding in `test-valid-length` and `test-long-set`.
+  `exfatimg.Volume`'s `listing` is `sets` on exFAT and `fat32img`'s
+  `listing` on FAT32, its `data` on FAT32 is `fat32img`'s `read`, and
+  `test-grow-dir`'s `fat32_names` reads through `fat32img` too. `sets` now
+  steps over a File entry with no secondaries instead of stopping there.
+  Checked on the host against the old `Volume`: the same listing for 748
+  entries across `espexfat.img` and `esp.img`, and the same bytes for 2,141
+  FAT32 chains. Originally: `test-grow-dir`'s
+  `exfat_dir` and `plant`, and `test-stale-cursor`'s `plant_empty`, read
+  entry sets with their own loops rather than `exfatimg.sets`/`find`.
+  They have no bound on a set cut off at the end of the bytes (an
+  IndexError) and cut a name by `NameLength` characters rather than its
+  UTF-16 units, so a surrogate pair is mis-cut. And `exfatimg.Volume`'s
+  FAT32 `listing` and `data` repeat `fat32img`'s (its entries, chain and
+  `fat` are `fat32img`'s since 2026-10-26). Move each onto the shared
+  copy. From the high review of `chore/exfat-rig-helpers`, 2026-10-26.
+- ~~**exFAT's read-only gate is opt-in.**~~ **Done 2026-10-27, by a gate at
+  the disk rather than a token:** `Fs` holds its disk through
+  `gate::Gated`, in a module of its own, whose `write_sector` refuses until
+  `mount_at` has settled the volume writable, once, so no exFAT writer
+  reaches the disk through `self.disk` around it. A token threaded through
+  the 35 functions that write would still have let a new one call
+  `self.disk.write_sector` directly. `writable()` stays as the early check;
+  it, `read_only()` and the allocator all ask the gate. With all seven
+  early checks removed, `test-long-set`'s and `test-volume-bound`'s
+  read-only boots pass, the gate refusing each write; with the gate's two
+  checks removed too (its write check and the allocator's), 14 checks fail. A `Disk` of its own was still spellable
+  anywhere in fsd until later the same day (next item). Originally: A volume with no bitmap, or with
+  two FATs, is read-only because each of the seven public writers (`touch`,
+  `write_file`, `write_at`, `mkdir`, `rm`, `rmdir`, `mv`) asks
+  `writable()` first. A new writer that forgets it writes to a volume whose
+  live bitmap fsd cannot tell, the hand-out of clusters another set holds
+  that the check exists to prevent: the opt-in shape
+  [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)
+  warns of. A token that `writable()` returns and that `alloc_cluster`,
+  `write_fat_entry`, `rewrite_slots` and `patch_stream_ext` require would
+  make the omission impossible to write. Nothing is broken today. From the
+  third high review of 2026-10-24, deferred.
+- ~~**Any code in fsd can write the disk through a `Disk` of its own.**~~
+  **Done 2026-10-27:** `Disk` has a private field and is not `Clone`, and
+  the one way to make one is `disk::Device::disk`. fsd's `main` claims the
+  one `Device` at its start (`Device::claim`, which answers `None` to any
+  later caller) and passes it by reference to the mounts and to `erase`,
+  `partition` and `format`; the filesystem arms are handed a `Disk` and never
+  see the `Device`. Every `BLOCK_*` call and the `MOUNT` rescan go through
+  `disk.rs`'s private `svc`; the crate's `syscall4` and `syscall5` take their
+  number as a constant and do not compile with one of those. The filesystem
+  modules forbid `unsafe` code, so none can write an `svc` of its own or make
+  a `Disk` from nothing. `make check-disk-handle`, in `make test`, builds a
+  copy of fsd with each spelling an arm might write (a `Disk` or a `Device`
+  made by hand or cloned, a `Disk` from `new`, `Default` or `zeroed` in each
+  module, the private `svc`, an `svc` of its own, and every `BLOCK_*` call
+  syscall-abi defines and `MOUNT` through the wrappers) and requires each to
+  fail. A `Device::claim` answering a second caller is seen by no check.
+  Originally: `disk::Disk` is a unit struct, and `main.rs` names one in twenty
+  places (`disk::Disk.write_sector`, `erase`'s zeroing among them). So
+  exFAT's disk gate holds for every write through `Fs`'s own disk, but a
+  writer in `exfat.rs` that wrote `Disk.write_sector(..)` would pass it, as
+  would one in any arm. Making `Disk` unnameable outside `disk.rs` (one
+  value made at fsd's start and passed down, a private field) would close
+  it. From the high review of #361, 2026-10-27.
