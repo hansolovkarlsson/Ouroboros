@@ -70,8 +70,11 @@ impl Device {
     /// `syscall4`, because a swap moves every `Disk`'s sectors to another
     /// device: `None`, and no rescan, while any disk filesystem in `mounts` is
     /// mounted, whose cached geometry would then describe the new disk. The
-    /// precondition is checked here so no caller can skip it.
-    pub fn replace(&self, mounts: &[Option<crate::vfs::Filesystem>]) -> Option<u64> {
+    /// precondition is checked here, against the mount table the caller
+    /// passes: the whole table by its type, so neither an empty slice nor
+    /// part of one can be handed in, though a table made up for the call
+    /// still could.
+    pub fn replace(&self, mounts: &[Option<crate::vfs::Filesystem>; crate::MAX_MOUNTS]) -> Option<u64> {
         if mounts.iter().flatten().any(|m| m.is_disk()) {
             return None;
         }
@@ -96,7 +99,7 @@ impl Device {
     /// `MOUNT` rescan): the old disk's [`table_rewritten`](Self::table_rewritten)
     /// verdict is not the new one's, so a stick the kernel matched as the boot
     /// disk answers its boot partition again.
-    pub fn device_replaced(&self) {
+    fn device_replaced(&self) {
         self.table_rewritten.set(false);
     }
 
