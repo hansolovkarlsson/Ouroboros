@@ -1312,6 +1312,21 @@ answer, older than this change (roadmap). Behaviour is unchanged: `make
 test-blank-disk`, `test-mount-gate`, `test-probe-ioerr`, `test-unmount`,
 `test-boot-partition`, `test-volume-bound` and `test-long-set` pass.
 
+**fsd's read-only gate asks every tree (2026-10-28).** `refused_read_only`,
+which refuses every verb that may change the disk (`mutates`, default-deny),
+refused only on tree 0 mounted read-only as D5's fallback. A volume an arm
+mounted read-only, exFAT's, was refused only inside the arm, at its disk
+gate. The gate now takes the mounted filesystem as a required parameter and
+refuses on any tree whose `read_only()` answers, before `check_access` and
+before the arm; on the fid path the mount is looked up first so the gate can
+ask it. exFAT's disk gate stays as the second line. `partition`, `format`
+and `erase` are FSOP_* verbs and are not touched. `make test-long-set` and
+`test-volume-bound BESIDE` pass, and pass again with exFAT's disk gate and
+every early `writable()` check removed; with the verb gate's new arm removed
+as well, 11 checks fail, each refused write answered as a disk I/O error
+and written. Since then no boot reaches exFAT's disk gate, the second line:
+it is graded by no check. From the high review of #361.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

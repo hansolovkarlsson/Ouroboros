@@ -4461,7 +4461,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   it, or the kernel seeing a write to sector 0 or the GPT), or answer
   `BLOCK_BOOT_START` from the table as it is now. From the medium review of
   #362, 2026-10-27.
-- **The read-only verb gate covers tree 0's fallback alone.** `main.rs`'s
+- ~~**The read-only verb gate covers tree 0's fallback alone.**~~ **Done
+  2026-10-28:** `refused_read_only` takes the mounted filesystem and refuses
+  on any tree whose `read_only()` answers (CHANGELOG). Left open: exFAT's
+  disk gate, the second line, is reached by no boot since. `main.rs`'s
   `refused_read_only` refuses every verb that changes the disk, by a
   default-deny list (`mutates`), but only on tree 0 mounted read-only by
   decision D5. A volume an arm mounts read-only (exFAT's, for now) is
