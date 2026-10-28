@@ -4461,19 +4461,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   it, or the kernel seeing a write to sector 0 or the GPT), or answer
   `BLOCK_BOOT_START` from the table as it is now. From the medium review of
   #362, 2026-10-27.
-- ~~**The read-only verb gate covers tree 0's fallback alone.**~~ **Done
-  2026-10-28:** `refused_read_only` takes the mounted filesystem and refuses
-  on any tree whose `read_only()` answers (CHANGELOG). What it left open is
-  the two items below. `main.rs`'s
-  `refused_read_only` refuses every verb that changes the disk, by a
-  default-deny list (`mutates`), but only on tree 0 mounted read-only by
-  decision D5. A volume an arm mounts read-only (exFAT's, for now) is
-  refused inside the arm, at its disk gate. Asking `fs.read_only()` there
-  for every tree would refuse every mutating verb on any read-only volume
-  of any arm before it reaches the arm, with the arm's gate as the second
-  line. `partition`, `format` and `erase` are FSOP_* verbs, not NP_*, so
-  the deliberate hold that they stay available is not touched. From the
-  high review of #361, 2026-10-27.
 - **exFAT's disk gate is graded by no boot.** Since 2026-10-28 fsd's verb
   gate refuses every change to a read-only tree before the arm, so the
   read-only boots of `make test-long-set` and `test-volume-bound` pass with

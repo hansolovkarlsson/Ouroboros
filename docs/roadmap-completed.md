@@ -3238,3 +3238,29 @@ rewrite across an fsd restart.
   would one in any arm. Making `Disk` unnameable outside `disk.rs` (one
   value made at fsd's start and passed down, a private field) would close
   it. From the high review of #361, 2026-10-27.
+
+## The read-only gate on every tree, and one rule for `O_CREAT`, DONE (2026-10-28)
+
+One item closed on 2026-10-28, by #364, struck on its branch with a *Done*
+note and moved here by the closeout. Its five review rounds (one high, three
+medium, one low) turned it into one rule for `O_CREAT` across fsd and the host
+peer, recorded in the CHANGELOG entry of the day. What they deferred stays on
+the roadmap: exFAT's disk gate, graded by no boot since; read-only's two
+sources in fsd; libc dropping `O_EXCL`; and fsd opening a directory as a fid
+where the host peer refuses it.
+
+- ~~**The read-only verb gate covers tree 0's fallback alone.**~~ **Done
+  2026-10-28:** `refused_read_only` takes the mounted filesystem and refuses
+  on any tree whose `read_only()` answers (CHANGELOG), and an
+  `NP_OPEN` with `O_CREAT` is a change only where the file is missing
+  (`ninep_abi::open_changes`, one stat an open, the gate after
+  `check_access`). Originally: `main.rs`'s
+  `refused_read_only` refuses every verb that changes the disk, by a
+  default-deny list (`mutates`), but only on tree 0 mounted read-only by
+  decision D5. A volume an arm mounts read-only (exFAT's, for now) is
+  refused inside the arm, at its disk gate. Asking `fs.read_only()` there
+  for every tree would refuse every mutating verb on any read-only volume
+  of any arm before it reaches the arm, with the arm's gate as the second
+  line. `partition`, `format` and `erase` are FSOP_* verbs, not NP_*, so
+  the deliberate hold that they stay available is not touched. From the
+  high review of #361, 2026-10-27.
