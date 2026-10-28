@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-25. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-28. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2212,3 +2212,50 @@ turn red for a cause outside its subject is as broken as one that cannot)
 holds for a rate as much as a verdict. **A count of events is only as clean
 as the events it admits: before reading an entry in, rule out the causes
 the instrument cannot tell apart, here the host's own sleep.**
+
+## Four more, from the read-only gate (2026-10-28)
+
+One branch (#364) put fsd's read-only gate on every tree and went through
+five review rounds over what `O_CREAT` changes. Each round was run against
+controls that removed one rule. Four of the observers around them reported
+something they could not see.
+
+**A control that could not fail, because another branch answers first.** The
+third round made the gate answer ENOTDIR when the "parent" of a missing file
+is a regular file, and `test-boot-partition`'s disk-badroot gained a check
+that `ccreat /etc/passwd/x` on the read-only fallback is errno 20. Control E
+removed the rule, and the check still passed: FAT32's stat of
+`/etc/passwd/x` answers "not a directory" itself, so the gate takes the
+branch for a failed stat and never reaches the one that was removed. The
+answer is right either way, and the rule is graded by no boot. **A check on
+an answer grades a branch only if no other branch can give that answer
+first; run the control before saying which branch the check covers.**
+
+**A review that read nothing and answered "(none)".** `/code-review low`,
+run with no target, reviews the working tree's diff, and the tree was clean
+after #364's push. It made two tool calls in 16 seconds and reported no
+findings, which reads the same as a clean review of the PR. The time and the
+tool count gave it away; run again as `/code-review low 364`, it read the
+diff and also found nothing, this time with something read. **An empty
+result is a claim about the input as much as the code: before reading "no
+findings" as a verdict, check what the reviewer was given.**
+
+**A run script that ran nothing and exited 0.** The fifth round's script was
+made from the fourth's by `sed 's/c4-/c5-/g'`, meant for the control logs'
+names. It also matched the `47c4-` inside the scratchpad's own path, so every
+rig and control wrote to a directory that does not exist. Each step failed
+at once, each control was applied to the tree and restored, and the script
+ended with exit 0 after a few seconds. The steps' own codes, 1 where the rigs
+answer 0, 2 or 100, showed it. **A substitution meant for a name matches
+every place its text occurs; and a batch runner's exit code is the code of
+its last line, not a verdict on its steps.**
+
+**A wait that earlier output had already satisfied.** `test-cerrno`'s new
+`user` steps typed each `ccreat` command on a `$ ` match. `drive_qemu`'s
+wait searches from the end of the last match plus a settle, so a prompt that
+arrived after the settle, printed before the previous command's output,
+satisfied the next wait, and the next command could be typed ahead and
+interleave with the line the check reads. The third medium review found it;
+no run was seen to misfire. Each step now waits for its own `ccreat:` line.
+**A wait is a check on the guest's state: a pattern that output from before
+the step can satisfy waits for nothing.**
