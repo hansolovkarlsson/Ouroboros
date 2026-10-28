@@ -5,6 +5,11 @@
 //! every unit outside ASCII, so `café` and `cafè` were one name there as
 //! they had been on exFAT until 2026-10-21.
 
+// No unsafe code: a disk handle conjured from nothing (`zeroed`, a
+// `transmute`) or an `svc` of its own would reach the disk around the
+// `Disk` this module was handed (disk.rs). `make check-disk-handle`.
+#![forbid(unsafe_code)]
+
 /// The most bytes a listed name takes: 255, as every other arm's names (ext2's
 /// are bytes), so a name always fits one `NP_READDIR` page (512 bytes) and a
 /// path a lookup takes. A name whose UTF-8 is longer is listed ASCII (see

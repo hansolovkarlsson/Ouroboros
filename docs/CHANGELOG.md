@@ -1264,6 +1264,54 @@ review found the first version's claims went past `Fs`'s own disk, the
 allocator answering "disk full" for a read-only volume, writability kept
 in three places, and a gate any function could open.
 
+**No filesystem arm can make a disk handle of its own (2026-10-27).**
+`disk::Disk` was a unit struct, so any code in fsd could write the disk
+through one, around exFAT's gate among other things. A `Disk` now has a
+private field and is not `Clone`, and it is made only by
+`disk::Device::disk`. fsd's `main` claims the one `Device` at its start
+(a later `Device::claim` answers `None`, and `main` then says so and parks)
+and lends a `Disk` from it to each mount and to `erase`, `partition` and
+`format`. The table-rewritten flag is a field of `Device`, no longer a
+static. `vfs`'s `mount`, `first_mounting`, `probe` and `mount_partition` take
+`&Device`. Every `BLOCK_*` call, and the `MOUNT` rescan that swaps the
+device under every `Disk` (now `Device::replace`), goes through `disk.rs`'s
+own private `svc`. The crate's `syscall4` and `syscall5` take their number
+as a constant and assert in a `const` block that it is none of those, so an
+arm cannot reach the disk through fsd's syscall wrappers either: such a call
+does not compile. `Device::replace` refuses the rescan itself while a disk
+filesystem is mounted, where its caller used to be the only check. The seven
+filesystem modules forbid `unsafe` code, which none of them used, so none can
+write an `svc` of its own or make a `Disk` from nothing (`zeroed`). `make
+check-disk-handle`, run by `make test`, builds a copy of fsd with each
+spelling an arm might write (a `Disk` or a `Device` made by hand or cloned,
+a `Disk` from `new`, `Default`, or `zeroed` in each module, the modules read
+from `src/`, the private `svc`, an `svc` of its own, and `MOUNT` and every
+`BLOCK_*` call syscall-abi defines, read from it, through the wrappers) and
+requires each to fail; two text checks add what no build sees, that only
+`Device::disk` returns a `Disk` and that no arm names `Device`.
+`Device::replace` takes the whole mount table by its type, and
+`device_replaced` is private to `disk.rs`. It
+fails itself with `Disk` given a constructor and `Default` and `Device`
+`Clone`, with the asserts removed, with `MOUNT` dropped from the list, with
+a `BLOCK_*` call added to syscall-abi alone, and with one module's `forbid`
+lifted, a new module lacking it, a second function returning a `Disk`, or
+an arm naming `Device`. It builds rather than checks: the assert is evaluated only when the
+wrapper is instantiated. A `Device::claim` answering a second caller is seen
+by no check. A high review found the first version left the `BLOCK_*`
+calls open through `syscall4`, its compile controls run once by hand, and
+fsd's docs saying it keeps no static state; a medium review of the fixes
+found the refusal a run-time one no check saw, `MOUNT` left open, and the
+constructors and `Device`'s clone untested; a second medium review found the
+list of calls kept by hand, `unsafe` open to every module, and the
+rescan's precondition left to its caller; a third, aimed at `main.rs` and
+the check, found the module list and the `Device` literal kept by hand, a
+new way to return a `Disk` unseen, the assert matched by rustc's layout, and
+`device_replaced` public. It also found that the
+table-rewritten flag resets on a restart of fsd while the kernel keeps its
+answer, older than this change (roadmap). Behaviour is unchanged: `make
+test-blank-disk`, `test-mount-gate`, `test-probe-ioerr`, `test-unmount`,
+`test-boot-partition`, `test-volume-bound` and `test-long-set` pass.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

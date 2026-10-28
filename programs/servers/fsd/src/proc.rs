@@ -36,6 +36,11 @@
 //! parsing is byte scanning (no `str` range-indexing / char-pattern splits, which
 //! pull in a core lookup table and an `R_AARCH64_ABS64` - see docs/processes.md).
 
+// No unsafe code: a disk handle conjured from nothing (`zeroed`, a
+// `transmute`) or an `svc` of its own would reach the disk around the
+// `Disk` this module was handed (disk.rs). `make check-disk-handle`.
+#![forbid(unsafe_code)]
+
 use core::ops::ControlFlow;
 
 use crate::fat32::Error;
@@ -91,7 +96,7 @@ impl Fs {
                 }
                 let mut i = 0u64;
                 loop {
-                    if crate::syscall4(syscall_abi::TASK_STATE, i, 0, 0, 0)
+                    if crate::syscall4::<{ syscall_abi::TASK_STATE }>(i, 0, 0, 0)
                         == syscall_abi::TASK_STATE_INVALID
                     {
                         break;
@@ -215,7 +220,7 @@ fn file_bytes(node: &Node, buf: &mut [u8; LINE_MAX]) -> usize {
 /// The state string for slot `n`, from the `TASK_STATE` syscall. `parse`
 /// refuses a slot past the scheduler's count, so this never sees one.
 fn state_bytes(n: u64) -> &'static [u8] {
-    match crate::syscall4(syscall_abi::TASK_STATE, n, 0, 0, 0) {
+    match crate::syscall4::<{ syscall_abi::TASK_STATE }>(n, 0, 0, 0) {
         syscall_abi::TASK_STATE_RUNNABLE => b"runnable\n",
         syscall_abi::TASK_STATE_BLOCKED => b"blocked\n",
         syscall_abi::TASK_STATE_ZOMBIE => b"zombie\n",
@@ -232,7 +237,7 @@ const LINE_MAX: usize = 21;
 /// `CORE_INFO_UP` (the boot core and every secondary that came up), as one
 /// decimal line. Asked on every read, so it is what the kernel says now.
 fn cpus_bytes(buf: &mut [u8; LINE_MAX]) -> usize {
-    decimal_line(crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_UP, 0, 0, 0), buf)
+    decimal_line(crate::syscall4::<{ syscall_abi::CORE_INFO }>(syscall_abi::CORE_INFO_UP, 0, 0, 0), buf)
 }
 
 /// `v` as a decimal line, `"4\n"`, into `buf`; the length written. The one
@@ -249,7 +254,7 @@ fn decimal_line(v: u64, buf: &mut [u8; LINE_MAX]) -> usize {
 /// `fsd` itself is on a core while it answers, so its own slot reads a core.
 fn core_bytes(n: u64, buf: &mut [u8; LINE_MAX]) -> usize {
     // `core_of` is the one spelling of the test, shared with the shell's `ps`.
-    match syscall_abi::core_of(crate::syscall4(syscall_abi::CORE_INFO, syscall_abi::CORE_INFO_TASK_CORE, n, 0, 0)) {
+    match syscall_abi::core_of(crate::syscall4::<{ syscall_abi::CORE_INFO }>(syscall_abi::CORE_INFO_TASK_CORE, n, 0, 0)) {
         Some(core) => decimal_line(core, buf),
         None => {
             buf[..5].copy_from_slice(b"none\n");
@@ -309,7 +314,7 @@ fn parse(path: &str) -> Node {
     // listing never offers it, and before 2026-10-11 `/99/state` read
     // "unused" and `/99/core` would have read "none", a plausible file for
     // a slot that does not exist (the third high review of #271).
-    if crate::syscall4(syscall_abi::TASK_STATE, n, 0, 0, 0) == syscall_abi::TASK_STATE_INVALID {
+    if crate::syscall4::<{ syscall_abi::TASK_STATE }>(n, 0, 0, 0) == syscall_abi::TASK_STATE_INVALID {
         return Node::NotFound;
     }
     if i >= b.len() {

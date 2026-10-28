@@ -13,9 +13,14 @@
 //! refactor: `main.rs` calls `Filesystem` exactly as it called `fat32::Fs`, and
 //! behaviour is byte-identical while FAT32 is the only format.
 
+// No unsafe code: a disk handle conjured from nothing (`zeroed`, a
+// `transmute`) or an `svc` of its own would reach the disk around the
+// `Disk` this module was handed (disk.rs). `make check-disk-handle`.
+#![forbid(unsafe_code)]
+
 use core::ops::ControlFlow;
 
-use crate::disk::Disk;
+use crate::disk::Device;
 use crate::exfat;
 use crate::ext2;
 use crate::fat32;
@@ -104,18 +109,18 @@ impl Filesystem {
     /// say: a disk failing a read is not a partition with nothing on it.
     ///
     /// The partition the system booted from, when the kernel knows it is on
-    /// this disk ([`Disk::boot_partition_start`]), is passed over while any
+    /// this disk ([`Device::boot_partition_start`]), is passed over while any
     /// other partition mounts: on one disk carrying the ESP and a root beside
     /// it, the root is `/`, whatever their order. A disk whose only
     /// filesystem is the boot partition mounts it as before (one-disk step 4,
     /// docs/roadmap/roadmap-one-disk.md). A partition typed as a root is
     /// tried before, and in place of, any untyped one ([`root_order`]).
-    pub fn mount(mut disk: Disk) -> Result<(Self, Option<Fallback>, bool), Error> {
+    pub fn mount(device: &Device) -> Result<(Self, Option<Fallback>, bool), Error> {
         let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
-        let count = partition::discover(&mut disk, &mut parts)?;
-        let boot = disk.boot_partition_start();
-        let roots = root_order(&parts, count, boot, disk.capacity_sectors().ok());
-        let probed = Self::first_mounting(&roots.order[..roots.len]);
+        let count = partition::discover(&mut device.disk(), &mut parts)?;
+        let boot = device.boot_partition_start();
+        let roots = root_order(&parts, count, boot, device.disk().capacity_sectors().ok());
+        let probed = Self::first_mounting(device, &roots.order[..roots.len]);
         let Some((i, fs)) = probed.found else {
             return Err(probed.failed.unwrap_or(Error::NoFat32Partition));
         };
@@ -138,13 +143,13 @@ impl Filesystem {
     /// read or over a later one that did. The one rule `mount` and `format`
     /// both pick by. A start LBA past 32 bits is not tried (the layout
     /// arithmetic is 32-bit; partitions past 2 TB aren't a concern here).
-    pub fn first_mounting(parts: &[Candidate]) -> Probed {
+    pub fn first_mounting(device: &Device, parts: &[Candidate]) -> Probed {
         let mut failed = None;
         for (i, c) in parts.iter().enumerate() {
             let Ok(lba32) = u32::try_from(c.part.start) else {
                 continue;
             };
-            match Self::probe(lba32, c.bound) {
+            match Self::probe(device, lba32, c.bound) {
                 Ok(Some(fs)) => return Probed { found: Some((i, fs)), failed },
                 Ok(None) => {}
                 Err(e) => failed = failed.or(Some(e)),
@@ -164,19 +169,19 @@ impl Filesystem {
     /// `sectors` is the most the volume may span ([`volume_bound`]): each arm
     /// refuses a volume claiming more, so no cluster or block it names lies
     /// past the partition, in the next one or past the disk.
-    pub fn probe(lba: u32, sectors: u64) -> Result<Option<Self>, Error> {
+    pub fn probe(device: &Device, lba: u32, sectors: u64) -> Result<Option<Self>, Error> {
         let mut failed = None;
-        match fat32::Fs::mount_at(Disk, lba, sectors) {
+        match fat32::Fs::mount_at(device.disk(), lba, sectors) {
             Ok(fs) => return Ok(Some(Filesystem::Fat32(fs))),
             Err(e @ Error::Io(_)) => failed = failed.or(Some(e)),
             Err(_) => {}
         }
-        match exfat::Fs::mount_at(Disk, lba, sectors) {
+        match exfat::Fs::mount_at(device.disk(), lba, sectors) {
             Ok(fs) => return Ok(Some(Filesystem::ExFat(fs))),
             Err(e @ Error::Io(_)) => failed = failed.or(Some(e)),
             Err(_) => {}
         }
-        match ext2::Fs::mount_at(Disk, lba, sectors) {
+        match ext2::Fs::mount_at(device.disk(), lba, sectors) {
             Ok(fs) => return Ok(Some(Filesystem::Ext2(fs))),
             Err(e @ Error::Io(_)) => failed = failed.or(Some(e)),
             Err(_) => {}
@@ -193,17 +198,17 @@ impl Filesystem {
     /// first. Returns
     /// [`Error::NoFat32Partition`] if `index` is out of range or the partition
     /// mounts as no known format, [`Error::Io`] if a read failed.
-    pub fn mount_partition(mut disk: Disk, index: usize) -> Result<Self, Error> {
+    pub fn mount_partition(device: &Device, index: usize) -> Result<Self, Error> {
         let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
-        let count = partition::discover(&mut disk, &mut parts)?;
+        let count = partition::discover(&mut device.disk(), &mut parts)?;
         if index >= count {
             return Err(Error::NoFat32Partition);
         }
         let Ok(lba32) = u32::try_from(parts[index].start) else {
             return Err(Error::NoFat32Partition);
         };
-        let bound = volume_bound(&parts[index], &parts[..count], disk.capacity_sectors().ok());
-        Self::probe(lba32, bound)?.ok_or(Error::NoFat32Partition)
+        let bound = volume_bound(&parts[index], &parts[..count], device.disk().capacity_sectors().ok());
+        Self::probe(device, lba32, bound)?.ok_or(Error::NoFat32Partition)
     }
 
     /// The mounted format's name, for the startup/mount log line.

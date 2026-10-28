@@ -46,6 +46,11 @@
 //! metadata it can't model - created entries get fixed 0644/0755 modes, and
 //! symlinks are reported but not followed. Root is always inode 2.
 
+// No unsafe code: a disk handle conjured from nothing (`zeroed`, a
+// `transmute`) or an `svc` of its own would reach the disk around the
+// `Disk` this module was handed (disk.rs). `make check-disk-handle`.
+#![forbid(unsafe_code)]
+
 use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};
