@@ -1349,7 +1349,17 @@ load-bearing; and `np9p_server.py` answers the same, with a row in its
 `--self-test`. `ccreat` names the call that failed and gained `-w`, VRUNS
 runs it too, and `test-cerrno`'s `user` boot checks that `/etc/passwd`
 reads, that a write through the fd is EBADF and that a missing `/etc/newf`
-is EACCES.
+is EACCES. A second medium review found the existence asked by a stat in
+each of the three places, a failed one counted as missing, and the gate
+answering a missing name before `check_access`, so a caller who could not
+search a directory heard which names were in it. An `NP_OPEN` now makes one
+stat (`Found`), read by `check_access`, the gate and the handler, and a
+failure other than not-found answers its own status after the ancestor
+search; the gate runs after `check_access`, root still refused; a create in
+a missing directory answers ENOENT, as on a writable tree; a malformed path
+FS_ERROR; and an open that asks neither to read nor to write is refused
+for every caller before anything acts. `O_EXCL`, which libc drops, and a
+directory opened as a fid are on the roadmap.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

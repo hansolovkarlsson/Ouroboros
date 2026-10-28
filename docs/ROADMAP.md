@@ -4492,6 +4492,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   would leave the gate one thing to ask and let the boot line read the
   reason the same way `read_only_line` does. A refactor of the mount
   paths, so not done in #364. From its high review.
+- **`O_EXCL` is dropped by libc.** `open()` in `libc/src/file.c` maps
+  `O_CREAT` and `O_TRUNC` but not `O_EXCL`, and the wire has no flag for
+  it, so `O_CREAT|O_EXCL` of an existing file opens it on every tree where
+  POSIX answers EEXIST: the lockfile idiom believes it made the lock. Since
+  #364 the same holds on a read-only tree, where it answered EROFS before.
+  Needs an `OPEN_EXCL` in ninep-abi, `libc/include/sys.h` and both Python
+  peers (`check-wire-constants.py` holds them together), fsd refusing an
+  existing file with it before anything acts, and a `ccreat`-style check.
+  From the second medium review of #364.
+- **fsd opens a directory as a fid; the host peer refuses it.** An
+  `NP_OPEN` of a directory, with or without `OPEN_CREATE`, gets a fid from
+  fsd, where `np9p_server.py` answers FS_ERR_NOT_A_FILE (its
+  `NP_OPEN(dir)` self-test row pins the peer's side). Older than #364;
+  one of the two should change, and the other follow. From the second
+  medium review of #364.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on
