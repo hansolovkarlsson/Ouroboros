@@ -5,11 +5,13 @@
 //! this task's slot (`syscall_abi::FSD_TASK`) - see `syscall.rs`'s
 //! `block_access_allowed`.
 //!
-//! Every `BLOCK_*` call fsd makes is made here, through [`block_svc`], a
-//! private `svc` of this file's own: the crate-wide `syscall4` refuses the
-//! `BLOCK_*` numbers, so the one way to the disk is a [`Disk`], and the one
-//! way to a `Disk` is the [`Device`] fsd's `main` holds. What this does not
-//! stop is an `svc` written out by hand in another file's `asm!`.
+//! Every `BLOCK_*` call fsd makes, and the `MOUNT` rescan that swaps the
+//! device, is made here, through [`block_svc`], a private `svc` of this
+//! file's own: the crate-wide `syscall4` and `syscall5` take their number as
+//! a constant and do not compile with one of these ([`is_device_call`]), so
+//! the one way to the disk is a [`Disk`], and the one way to a `Disk` is the
+//! [`Device`] fsd's `main` holds. What this does not stop is an `svc` written
+//! out by hand in another file's `asm!`.
 
 use core::arch::asm;
 use core::cell::Cell;
@@ -57,6 +59,20 @@ impl Device {
     /// A handle for one volume or one disk tool.
     pub fn disk(&self) -> Disk {
         Disk(())
+    }
+
+    /// Have the kernel rescan the USB ports and install a stick in this
+    /// device's place (`MOUNT`, replace set): `0`, or the kernel's code as it
+    /// came. On `0` the new device's boot partition is asked afresh
+    /// ([`device_replaced`](Self::device_replaced)). Here, not through
+    /// `syscall4`, because a swap moves every `Disk`'s sectors to another
+    /// device: the caller passes it only with no disk filesystem mounted.
+    pub fn replace(&self) -> u64 {
+        let code = block_svc(syscall_abi::MOUNT, 1, 0);
+        if code == 0 {
+            self.device_replaced();
+        }
+        code
     }
 
     /// Mark the partition table as rewritten by this server (`erase`,
@@ -132,17 +148,24 @@ impl Disk {
     }
 }
 
-/// Whether `number` is one of the `BLOCK_*` calls, which only [`block_svc`]
-/// makes: the crate-wide `syscall4` and `syscall5` refuse these.
-pub fn is_block_call(number: u64) -> bool {
+/// Whether `number` reaches the disk or swaps it: the `BLOCK_*` calls and
+/// `MOUNT`, which only [`block_svc`] makes. The crate-wide `syscall4` and
+/// `syscall5` assert it false of their constant number, so a call with one
+/// does not compile.
+pub const fn is_device_call(number: u64) -> bool {
     matches!(
         number,
-        syscall_abi::BLOCK_INFO | syscall_abi::BLOCK_READ | syscall_abi::BLOCK_WRITE | syscall_abi::BLOCK_BOOT_START
+        syscall_abi::BLOCK_INFO
+            | syscall_abi::BLOCK_READ
+            | syscall_abi::BLOCK_WRITE
+            | syscall_abi::BLOCK_BOOT_START
+            | syscall_abi::MOUNT
     )
 }
 
-/// A `BLOCK_*` call, number in x8, arguments in x0 and x1, the answer in x0.
+/// A `BLOCK_*` or `MOUNT` call, number in x8, arguments in x0 and x1, the answer in x0.
 /// Private: the one `svc` in fsd that the kernel answers with the disk.
+/// Not `const`-checked like `syscall4`: every caller is in this file.
 #[inline(always)]
 fn block_svc(number: u64, arg0: u64, arg1: u64) -> u64 {
     let ret: u64;

@@ -64,8 +64,9 @@ fn main() -> ! {
     // The block device, claimed here and nowhere else: every volume and disk
     // tool gets its handle from it, so no filesystem arm can make a disk
     // handle of its own (disk.rs's `Device`). Nothing runs before this line
-    // to claim it first; if something ever did, fsd says so and parks rather
-    // than panic, which the supervisor would restart into the same panic.
+    // to claim it first. If something ever did, fsd says so and spins, as it
+    // does after a broken receive below: the supervisor's wedge check restarts
+    // it from its image, where the claim is fresh, and the line says why.
     let Some(device) = disk::Device::claim() else {
         print("fsd: the block device was claimed before main - not serving\r\n");
         loop {
@@ -92,7 +93,7 @@ fn main() -> ! {
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     loop {
-        let packed = syscall4(syscall_abi::MSG_RECV, req.as_mut_ptr() as u64, req.len() as u64, 0, 0);
+        let packed = syscall4::<{ syscall_abi::MSG_RECV }>(req.as_mut_ptr() as u64, req.len() as u64, 0, 0);
         if packed >= syscall_abi::FS_ERR_MIN {
             // RECV_INTERRUPTED can't reach a non-keyboard-owner task,
             // and no other error is expected - park rather than spin
@@ -102,13 +103,13 @@ fn main() -> ! {
         let sender = packed >> 32;
         // The call this request opened, read once, here, before anything
         // else can receive: the reply and every SAFECOPY name it.
-        let call = syscall4(syscall_abi::SENDER_CALL, 0, 0, 0, 0);
+        let call = syscall4::<{ syscall_abi::SENDER_CALL }>(0, 0, 0, 0);
         let len = ((packed & 0xffff_ffff) as usize).min(req.len());
         let reply_len = handle(&device, &mut mounts, &mut fids, sender, call, &req[..len], &mut reply);
         // Delivered only while the caller is still in the call: an answer to
         // a call that is over (cut short, or its caller dead and the slot
         // refilled) goes nowhere, REPLY_STALE, and a fid it carried is freed.
-        let r = syscall4(syscall_abi::MSG_REPLY, call, reply.as_ptr() as u64, reply_len as u64, 0);
+        let r = syscall4::<{ syscall_abi::MSG_REPLY }>(call, reply.as_ptr() as u64, reply_len as u64, 0);
         if r == syscall_abi::REPLY_STALE {
             forget_unheard_fid(&mut fids, &req[..len], &reply[..reply_len]);
         }
@@ -253,11 +254,8 @@ fn mount_or_rescan(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>;
     if first != syscall_abi::NO_FS || mounts.iter().flatten().any(|m| m.is_disk()) {
         return first;
     }
-    match syscall4(syscall_abi::MOUNT, 1, 0, 0, 0) {
-        0 => {
-            device.device_replaced();
-            try_mount(device, mounts)
-        }
+    match device.replace() {
+        0 => try_mount(device, mounts),
         other => other,
     }
 }
@@ -566,7 +564,7 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUN
         // only this and derive the slot from it where a grant needs one, so a
         // slot can never be passed where an identity belongs. Read here rather
         // than beside `who`: the FSOP_* control ops below never need it.
-        let owner = syscall4(syscall_abi::SENDER_TASK, 0, 0, 0, 0);
+        let owner = syscall4::<{ syscall_abi::SENDER_TASK }>(0, 0, 0, 0);
         return handle_ninep(mounts, fids, owner, call, who, op, req, reply);
     }
     let p = [read_u64(req, 8), read_u64(req, 16), read_u64(req, 24), read_u64(req, 32)];
@@ -848,9 +846,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
             let mut at = 0u64;
             let read = fs.read_each(path, offset, want, &mut chunk, |piece| {
-                let r = syscall5(
-                    syscall_abi::SAFECOPY,
-                    call,
+                let r = syscall5::<{ syscall_abi::SAFECOPY }>(call,
                     at,
                     piece.as_ptr() as u64,
                     piece.len() as u64,
@@ -878,9 +874,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             }
             let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
             if data_len > 0 {
-                let r = syscall5(
-                    syscall_abi::SAFECOPY,
-                    call,
+                let r = syscall5::<{ syscall_abi::SAFECOPY }>(call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -906,9 +900,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             }
             let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
             if data_len > 0 {
-                let r = syscall5(
-                    syscall_abi::SAFECOPY,
-                    call,
+                let r = syscall5::<{ syscall_abi::SAFECOPY }>(call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -1149,7 +1141,7 @@ fn reap_dead_fids(fids: &mut [Fid; MAX_FIDS]) {
             continue;
         }
         let slot = syscall_abi::task_id_slot(f.owner);
-        if syscall4(syscall_abi::TASK_IDENTITY, slot, 0, 0, 0) != f.owner {
+        if syscall4::<{ syscall_abi::TASK_IDENTITY }>(slot, 0, 0, 0) != f.owner {
             f.used = false;
         }
     }
@@ -1248,9 +1240,7 @@ fn handle_fid_op(
             }
             let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
             if data_len > 0 {
-                let r = syscall5(
-                    syscall_abi::SAFECOPY,
-                    call,
+                let r = syscall5::<{ syscall_abi::SAFECOPY }>(call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -1413,14 +1403,12 @@ fn mode_allows(mode: u16, owner_uid: u32, owner_gid: u32, who: &Caller, need: u1
 /// `None` when the kernel has no captured credential to report, and every
 /// caller fails closed on it.
 fn caller_id() -> Option<Caller> {
-    let packed = syscall4(syscall_abi::SENDER_ID, 0, 0, 0, 0);
+    let packed = syscall4::<{ syscall_abi::SENDER_ID }>(0, 0, 0, 0);
     if packed == syscall_abi::GET_ID_ERR {
         return None;
     }
     let mut groups = [0u32; syscall_abi::MAX_SUPP_GROUPS];
-    let n = syscall4(
-        syscall_abi::SENDER_GROUPS,
-        groups.as_mut_ptr() as u64,
+    let n = syscall4::<{ syscall_abi::SENDER_GROUPS }>(groups.as_mut_ptr() as u64,
         groups.len() as u64,
         0,
         0,
@@ -1899,30 +1887,27 @@ fn con_write(bytes: &[u8]) {
         req[24..32].copy_from_slice(&(n as u64).to_le_bytes());
         req[payload_off..payload_off + n].copy_from_slice(&bytes[off..off + n]);
         let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-        let r = syscall4(
-            syscall_abi::MSG_CALL,
-            syscall_abi::CON_TASK,
+        let r = syscall4::<{ syscall_abi::MSG_CALL }>(syscall_abi::CON_TASK,
             req.as_ptr() as u64,
             (payload_off + n) as u64,
             reply.as_mut_ptr() as u64,
         );
         if r >= syscall_abi::FS_ERR_MIN {
             for &b in &bytes[off..off + n] {
-                syscall4(syscall_abi::PUTC, b as u64, 0, 0, 0);
+                syscall4::<{ syscall_abi::PUTC }>(b as u64, 0, 0, 0);
             }
         }
         off += n;
     }
 }
 
+/// A syscall, its number `N` a constant. The disk is reached through disk.rs
+/// alone (its own `svc`), so a `BLOCK_*` or `MOUNT` number here, a file
+/// writing to the disk around its `Disk` and exFAT's gate, does not compile
+/// ([`disk::is_device_call`]; `make check-disk-handle` writes one).
 #[inline(always)]
-pub(crate) fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
-    // The disk is reached through disk.rs alone (its own `svc`), so a file
-    // that writes `BLOCK_WRITE` here, around its `Disk` and exFAT's gate, is
-    // refused as the kernel would refuse another task.
-    if disk::is_block_call(number) {
-        return syscall_abi::BLOCK_ERR_DENIED;
-    }
+pub(crate) fn syscall4<const N: u64>(arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
+    const { assert!(!disk::is_device_call(N), "a BLOCK_* or MOUNT call is disk.rs's alone") };
     let ret: u64;
     unsafe {
         asm!(
@@ -1931,7 +1916,7 @@ pub(crate) fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) 
             in("x1") arg1,
             in("x2") arg2,
             in("x3") arg3,
-            in("x8") number,
+            in("x8") N,
             options(nostack),
         );
     }
@@ -1943,11 +1928,9 @@ pub(crate) fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) 
 /// saved frame, since the 4-argument dispatch signature is full (see
 /// the syscall-abi doc on `SAFECOPY`).
 #[inline(always)]
-pub(crate) fn syscall5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
-    // As syscall4: no BLOCK_* call but disk.rs's.
-    if disk::is_block_call(number) {
-        return syscall_abi::BLOCK_ERR_DENIED;
-    }
+pub(crate) fn syscall5<const N: u64>(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    // As syscall4: no device call but disk.rs's.
+    const { assert!(!disk::is_device_call(N), "a BLOCK_* or MOUNT call is disk.rs's alone") };
     let ret: u64;
     unsafe {
         asm!(
@@ -1957,7 +1940,7 @@ pub(crate) fn syscall5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64)
             in("x2") a2,
             in("x3") a3,
             in("x4") a4,
-            in("x8") number,
+            in("x8") N,
             options(nostack),
         );
     }
