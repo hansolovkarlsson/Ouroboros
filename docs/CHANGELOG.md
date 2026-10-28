@@ -1334,7 +1334,22 @@ now passes the gate, and `NP_OPEN` asks `tree_read_only` before it creates.
 is asked before the tree's state. `/bin/CCREAT` (`libc/ccreat.c`) opens a
 path that way; `make test-long-set`'s read-only boots and
 `test-boot-partition`'s disk-badroot run it on an existing file and a
-missing one.
+missing one. The medium review of #364 found the rule spelled two ways: the
+create refused by a second check inside `NP_OPEN`, after the fid table's
+checks, an I/O error answered as EROFS, and `check_access`, the fid's write
+check and the host peer still taking `O_CREAT` as a write. The rule is one
+function now, `ninep_abi::open_changes(flags, exists)` (writing or
+truncating always, creating only a missing file; `exists` required), in
+place of `open_writes`. The gate (`mutates` folded into it) stats the path
+when the open would only create, answers EROFS for a missing file and the
+stat's own error otherwise; `check_access` asks for `w` only by that rule,
+so an ordinary user opens a file it may read with `O_RDONLY|O_CREAT`; a fid
+writes only if it was opened with `OPEN_WRITE`, which that open makes
+load-bearing; and `np9p_server.py` answers the same, with a row in its
+`--self-test`. `ccreat` names the call that failed and gained `-w`, VRUNS
+runs it too, and `test-cerrno`'s `user` boot checks that `/etc/passwd`
+reads, that a write through the fd is EBADF and that a missing `/etc/newf`
+is EACCES.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
