@@ -10,8 +10,10 @@
 //! file's own: the crate-wide `syscall4` and `syscall5` take their number as
 //! a constant and do not compile with one of these ([`is_device_call`]), so
 //! the one way to the disk is a [`Disk`], and the one way to a `Disk` is the
-//! [`Device`] fsd's `main` holds. What this does not stop is an `svc` written
-//! out by hand in another file's `asm!`.
+//! [`Device`] fsd's `main` holds. The filesystem modules forbid `unsafe`
+//! code, so none of them can write an `svc` of its own in `asm!` or make a
+//! `Disk` from nothing (`zeroed`, `transmute`); `main.rs` and this file are
+//! the two that may.
 
 use core::arch::asm;
 use core::cell::Cell;
@@ -62,17 +64,22 @@ impl Device {
     }
 
     /// Have the kernel rescan the USB ports and install a stick in this
-    /// device's place (`MOUNT`, replace set): `0`, or the kernel's code as it
-    /// came. On `0` the new device's boot partition is asked afresh
+    /// device's place (`MOUNT`, replace set): `Some(0)`, or the kernel's code
+    /// as it came. On `0` the new device's boot partition is asked afresh
     /// ([`device_replaced`](Self::device_replaced)). Here, not through
     /// `syscall4`, because a swap moves every `Disk`'s sectors to another
-    /// device: the caller passes it only with no disk filesystem mounted.
-    pub fn replace(&self) -> u64 {
+    /// device: `None`, and no rescan, while any disk filesystem in `mounts` is
+    /// mounted, whose cached geometry would then describe the new disk. The
+    /// precondition is checked here so no caller can skip it.
+    pub fn replace(&self, mounts: &[Option<crate::vfs::Filesystem>]) -> Option<u64> {
+        if mounts.iter().flatten().any(|m| m.is_disk()) {
+            return None;
+        }
         let code = block_svc(syscall_abi::MOUNT, 1, 0);
         if code == 0 {
             self.device_replaced();
         }
-        code
+        Some(code)
     }
 
     /// Mark the partition table as rewritten by this server (`erase`,
@@ -115,9 +122,9 @@ impl Device {
 /// hold and call it exactly the way it held the old `BlockDevice`. Its field
 /// is private and it is not `Clone`: the one way to get one is
 /// [`Device::disk`], so code holding a `Disk` and no `Device`, every
-/// filesystem arm, cannot make another. `make test` builds fsd with one
-/// made by hand in `exfat.rs` and requires the build to fail
-/// (`scripts/check-disk-handle.py`).
+/// filesystem arm, cannot make another (nor conjure one with `unsafe`, which
+/// those modules forbid). `make test` builds fsd with each such spelling in
+/// `exfat.rs` and requires the build to fail (`scripts/check-disk-handle.py`).
 pub struct Disk(());
 
 impl Disk {

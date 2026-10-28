@@ -10,6 +10,11 @@
 //! each had a copy, which only QEMU boots reached. What is left here is the
 //! disk: `BLOCK_READ` as the crate's read-sector closure.
 
+// No unsafe code: a disk handle conjured from nothing (`zeroed`, a
+// `transmute`) or an `svc` of its own would reach the disk around the
+// `Disk` this module was handed (disk.rs). `make check-disk-handle`.
+#![forbid(unsafe_code)]
+
 use crate::disk::{Disk, DiskError, SECTOR_SIZE};
 
 pub use parttable::Partition;

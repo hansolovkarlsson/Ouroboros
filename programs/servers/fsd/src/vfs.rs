@@ -13,6 +13,11 @@
 //! refactor: `main.rs` calls `Filesystem` exactly as it called `fat32::Fs`, and
 //! behaviour is byte-identical while FAT32 is the only format.
 
+// No unsafe code: a disk handle conjured from nothing (`zeroed`, a
+// `transmute`) or an `svc` of its own would reach the disk around the
+// `Disk` this module was handed (disk.rs). `make check-disk-handle`.
+#![forbid(unsafe_code)]
+
 use core::ops::ControlFlow;
 
 use crate::disk::Device;

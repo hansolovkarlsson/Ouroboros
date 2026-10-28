@@ -30,6 +30,11 @@
 //! and `make run`'s vvfat disk is still FAT16 - so mounting fails there
 //! and every request answers `NO_FS`, same degradation as always.
 
+// No unsafe code: a disk handle conjured from nothing (`zeroed`, a
+// `transmute`) or an `svc` of its own would reach the disk around the
+// `Disk` this module was handed (disk.rs). `make check-disk-handle`.
+#![forbid(unsafe_code)]
+
 use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};

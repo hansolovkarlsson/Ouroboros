@@ -36,6 +36,11 @@
 //! parsing is byte scanning (no `str` range-indexing / char-pattern splits, which
 //! pull in a core lookup table and an `R_AARCH64_ABS64` - see docs/processes.md).
 
+// No unsafe code: a disk handle conjured from nothing (`zeroed`, a
+// `transmute`) or an `svc` of its own would reach the disk around the
+// `Disk` this module was handed (disk.rs). `make check-disk-handle`.
+#![forbid(unsafe_code)]
+
 use core::ops::ControlFlow;
 
 use crate::fat32::Error;

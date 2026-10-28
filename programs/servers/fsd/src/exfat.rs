@@ -61,6 +61,11 @@
 //!   too, so `CAFÉ` is not `café` here though the spec's table says it is
 //!   (the roadmap).
 
+// No unsafe code: a disk handle conjured from nothing (`zeroed`, a
+// `transmute`) or an `svc` of its own would reach the disk around the
+// `Disk` this module was handed (disk.rs). `make check-disk-handle`.
+#![forbid(unsafe_code)]
+
 use core::ops::ControlFlow;
 
 use crate::disk::{Disk, DiskError};
@@ -374,8 +379,8 @@ enum Room {
 /// by [`Device::disk`](crate::disk::Device::disk), which this file never
 /// holds, and the crate's `syscall4` and `syscall5` do not compile with a
 /// `BLOCK_*` or `MOUNT` number, which `disk.rs` calls through an `svc` of its
-/// own. An `svc`
-/// written out by hand in `asm!` here would still pass; nothing stops that.
+/// own. Nor through an `svc` or a `Disk` of this file's own making: the file
+/// forbids `unsafe` code, which either would need.
 ///
 /// Writability is settled once, at the end of [`Fs::mount_at`], and a
 /// later [`settle`](Gated::settle) changes nothing, so a writer refused here

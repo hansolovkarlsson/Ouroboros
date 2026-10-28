@@ -65,8 +65,9 @@ fn main() -> ! {
     // tool gets its handle from it, so no filesystem arm can make a disk
     // handle of its own (disk.rs's `Device`). Nothing runs before this line
     // to claim it first. If something ever did, fsd says so and spins, as it
-    // does after a broken receive below: the supervisor's wedge check restarts
-    // it from its image, where the claim is fresh, and the line says why.
+    // does after a broken receive below, and the supervisor's wedge check
+    // restarts it from its image. Whatever claimed first would claim first
+    // again, so that ends when the restarts run out: the line says why.
     let Some(device) = disk::Device::claim() else {
         print("fsd: the block device was claimed before main - not serving\r\n");
         loop {
@@ -251,12 +252,13 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_M
 /// `CAP_BLOCK`, a policy fault the shell names).
 fn mount_or_rescan(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
     let first = try_mount(device, mounts);
-    if first != syscall_abi::NO_FS || mounts.iter().flatten().any(|m| m.is_disk()) {
+    if first != syscall_abi::NO_FS {
         return first;
     }
-    match device.replace() {
-        0 => try_mount(device, mounts),
-        other => other,
+    match device.replace(mounts) {
+        Some(0) => try_mount(device, mounts),
+        Some(other) => other,
+        None => first,
     }
 }
 
@@ -846,7 +848,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             let mut chunk = [0u8; syscall_abi::SAFECOPY_MAX as usize];
             let mut at = 0u64;
             let read = fs.read_each(path, offset, want, &mut chunk, |piece| {
-                let r = syscall5::<{ syscall_abi::SAFECOPY }>(call,
+                let r = syscall5::<{ syscall_abi::SAFECOPY }>(
+                    call,
                     at,
                     piece.as_ptr() as u64,
                     piece.len() as u64,
@@ -874,7 +877,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             }
             let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
             if data_len > 0 {
-                let r = syscall5::<{ syscall_abi::SAFECOPY }>(call,
+                let r = syscall5::<{ syscall_abi::SAFECOPY }>(
+                    call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -900,7 +904,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             }
             let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
             if data_len > 0 {
-                let r = syscall5::<{ syscall_abi::SAFECOPY }>(call,
+                let r = syscall5::<{ syscall_abi::SAFECOPY }>(
+                    call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -1240,7 +1245,8 @@ fn handle_fid_op(
             }
             let mut databuf = [0u8; syscall_abi::SAFECOPY_MAX as usize];
             if data_len > 0 {
-                let r = syscall5::<{ syscall_abi::SAFECOPY }>(call,
+                let r = syscall5::<{ syscall_abi::SAFECOPY }>(
+                    call,
                     0,
                     databuf.as_mut_ptr() as u64,
                     data_len as u64,
@@ -1408,7 +1414,8 @@ fn caller_id() -> Option<Caller> {
         return None;
     }
     let mut groups = [0u32; syscall_abi::MAX_SUPP_GROUPS];
-    let n = syscall4::<{ syscall_abi::SENDER_GROUPS }>(groups.as_mut_ptr() as u64,
+    let n = syscall4::<{ syscall_abi::SENDER_GROUPS }>(
+        groups.as_mut_ptr() as u64,
         groups.len() as u64,
         0,
         0,
@@ -1887,7 +1894,8 @@ fn con_write(bytes: &[u8]) {
         req[24..32].copy_from_slice(&(n as u64).to_le_bytes());
         req[payload_off..payload_off + n].copy_from_slice(&bytes[off..off + n]);
         let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-        let r = syscall4::<{ syscall_abi::MSG_CALL }>(syscall_abi::CON_TASK,
+        let r = syscall4::<{ syscall_abi::MSG_CALL }>(
+            syscall_abi::CON_TASK,
             req.as_ptr() as u64,
             (payload_off + n) as u64,
             reply.as_mut_ptr() as u64,
@@ -1907,7 +1915,7 @@ fn con_write(bytes: &[u8]) {
 /// ([`disk::is_device_call`]; `make check-disk-handle` writes one).
 #[inline(always)]
 pub(crate) fn syscall4<const N: u64>(arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
-    const { assert!(!disk::is_device_call(N), "a BLOCK_* or MOUNT call is disk.rs's alone") };
+    const { assert!(!disk::is_device_call(N), "a device call is disk.rs's alone") };
     let ret: u64;
     unsafe {
         asm!(
@@ -1930,7 +1938,7 @@ pub(crate) fn syscall4<const N: u64>(arg0: u64, arg1: u64, arg2: u64, arg3: u64)
 #[inline(always)]
 pub(crate) fn syscall5<const N: u64>(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     // As syscall4: no device call but disk.rs's.
-    const { assert!(!disk::is_device_call(N), "a BLOCK_* or MOUNT call is disk.rs's alone") };
+    const { assert!(!disk::is_device_call(N), "a device call is disk.rs's alone") };
     let ret: u64;
     unsafe {
         asm!(
