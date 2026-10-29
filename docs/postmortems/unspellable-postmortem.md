@@ -6,7 +6,9 @@ five of them independent ways a remote request still reached `fsd` with root
 authority. The code is not what is worth recording. What is worth recording is
 that the five were not five mistakes: four of them were **one design decision**,
 and the decision's flaw was that it made the dangerous thing merely* un-grepped
-*rather than* unspellable*.*
+*rather than* unspellable*. A later section, 2026-10-28, records the
+same shape in fsd's `NP_OPEN`: a permission skip whose safety lived in
+another function.*
 
 ## What was being built
 
@@ -162,3 +164,37 @@ the *output* rather than the exit status caught a bug in the fix itself —
 gid as separate arguments and it had been handed the packed word `GET_ID`
 returns. The uid was right by luck: it is the low half. A test asserting only
 "the exploit is refused" would have passed with the gid wrong.
+
+## A skip that outlived its refusal (2026-10-28)
+
+Two months on, the same shape, smaller, in fsd's `NP_OPEN` (#367). POSIX
+answers `O_CREAT|O_EXCL` of an existing file with EEXIST, before the file's
+own mode. My first build spelled that as two things. Inside `check_access`,
+an exclusive open of an existing name skipped the file's mode and asked only
+the ancestor search. In `handle_ninep`, after `check_access`, a block
+answered EEXIST. Each half was right, and the pair was right. But the skip
+was a relaxation of a permission check, and its safety was a property of a
+different block that a reader of `check_access` could not see.
+
+The controls found it. Each removed one piece and ran the rig. With only the
+EEXIST block removed, `user` opened `/etc/shadow` `O_WRONLY|O_CREAT|O_EXCL`
+and wrote a byte to it. Nothing would have spelled that removal on purpose.
+But a later change to the order of `handle_ninep`'s answers, made by someone
+reading the 2026-10-28 lesson about moving refusals, could have spelled it
+by accident, and the compiler, the suite and the rigs would all have passed
+the build that did. The rigs passed the split version too; only the control
+saw the dependency.
+
+The repair made the relaxation and its reason one piece of code:
+`exists_answer`, called before an unchanged `check_access`, answering
+EEXIST to a caller who may stat the name and FS_ERR_PERM otherwise.
+Removing it now costs a lockfile its EEXIST and leaves the permission
+check whole, so the failure mode of losing it went from *escalation* to
+*refusal*, which is the same turn the 2026-08-31 rebuild made.
+
+8. **A relaxation travels with the refusal that justifies it.** A check
+   loosened because something else will answer first is a safety property
+   held in another function, which is the latch of this postmortem in
+   another shape. Put the loosening and the answer in one place, so
+   deleting the place deletes both, and run the control that removes the
+   answer alone: it is the one that shows whether they were separable.

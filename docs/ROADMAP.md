@@ -4479,29 +4479,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   would leave the gate one thing to ask and let the boot line read the
   reason the same way `read_only_line` does. A refactor of the mount
   paths, so not done in #364. From its high review.
-- ~~**`O_EXCL` is dropped by libc.** `open()` in `libc/src/file.c` maps
-  `O_CREAT` and `O_TRUNC` but not `O_EXCL`, and the wire has no flag for
-  it, so `O_CREAT|O_EXCL` of an existing file opens it on every tree where
-  POSIX answers EEXIST: the lockfile idiom believes it made the lock. Since
-  #364 the same holds on a read-only tree, where it answered EROFS before.
-  Needs an `OPEN_EXCL` in ninep-abi, `libc/include/sys.h` and both Python
-  peers (`check-wire-constants.py` holds them together), fsd refusing an
-  existing file with it before anything acts, and a `ccreat`-style check.
-  From the second medium review of #364.~~ **Fixed 2026-10-28**
-  (`fix/o-excl`): `OPEN_EXCL` (16) on the wire, sent by libc beside
-  `O_CREAT`; fsd answers EEXIST (`exists_answer`, before `check_access`)
-  to a caller who may search the ancestors, without asking the file's own
-  mode or the read-only gate; `ccreat -x` in `test-cerrno` and
-  `test-long-set`. Graded by no boot: the search check itself (no rig has
-  a user who may not search a directory holding a name it asks for with
-  `O_EXCL`), so `exists_answer` answering EEXIST to everyone passes every
-  check; and fsd's refusal of `OPEN_EXCL` without `OPEN_CREATE` and of a
-  flag outside `OPEN_FLAGS`, which libc never sends (the host peer's
-  self-test rows check the peer's copy only). A probe sending a raw
-  `NP_OPEN` would grade all three. From the high review of #367, which
-  also noted that a peer running an fsd from before the fix ignores
-  `OPEN_EXCL`: nothing here can reach that build. Of the two Python peers only `np9p_server.py` spells it:
-  `np9p_client.py` sends no create, so it has nothing to name.
+- **Three of fsd's `NP_OPEN` refusals are graded by no boot.** Since #367
+  (2026-10-28) fsd answers `O_CREAT|O_EXCL` of an existing name in
+  `exists_answer`, EEXIST only to a caller who may stat it (`check_access`'s
+  `NP_STAT` rule), and refuses `OPEN_EXCL` without `OPEN_CREATE` and any
+  flag outside `OPEN_FLAGS`. No rig has a user who may not search a
+  directory holding a name it opens with `O_EXCL`, so `exists_answer`
+  answering EEXIST to everyone passes every check, and libc never sends
+  the other two (the host peer's self-test rows check the peer's copy).
+  A probe sending a raw `NP_OPEN`, on ext2 as `user`, would grade all
+  three. From the high review of #367.
 - **fsd opens a directory as a fid; the host peer refuses it.** An
   `NP_OPEN` of a directory, with or without `OPEN_CREATE`, gets a fid from
   fsd, where `np9p_server.py` answers FS_ERR_NOT_A_FILE (its
