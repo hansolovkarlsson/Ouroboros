@@ -1408,9 +1408,14 @@ sends one raw `NP_OPEN` with any flag word and prints fsd's answer by name.
 it is mode 0600, as does a missing name beside it. `OPEN_EXCL` without
 `OPEN_CREATE` answers FS_ERROR for an existing and a missing file, and so
 do flags 32 and bit 63, where a plain read open of the same file opens.
-Controls: `exists_answer` answering EEXIST to everyone (1 check fails),
-`OPEN_EXCL` alone accepted (2: EEXIST and ENOENT), and unknown flags accepted
-(2: both opened). ulib's `np_call` is public for the probe.
+The probe makes its own `MSG_CALL`, so a call fsd never answers prints `no
+answer`, not the `FS_ERROR` ulib's `np_call` gives for one, and `ls -l` must
+show `hid` at `drw-------` before the refusal is read. Controls:
+`exists_answer` answering EEXIST to everyone (1 check fails), `OPEN_EXCL`
+alone accepted (2: EEXIST and ENOENT), unknown flags accepted (2: both
+opened), fsd panicking on `OPEN_EXCL` alone (2: `no answer`, the supervisor
+restarting it), and the rig's chmod made 700 (3, the listing among them).
+From the high review of #369.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
