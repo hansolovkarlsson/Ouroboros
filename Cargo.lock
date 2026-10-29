@@ -350,6 +350,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "openprobe"
+version = "0.1.0"
+dependencies = [
+ "ninep-abi",
+ "syscall-abi",
+ "ulib",
+]
+
+[[package]]
 name = "ouroboros-kernel"
 version = "0.23.0"
 dependencies = [
