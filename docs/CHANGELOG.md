@@ -1401,6 +1401,17 @@ bit outside ninep-abi's `OPEN_FLAGS`. It also found `exists_answer` copying
 `NP_STAT` on the same path. Those two refusals in fsd are graded by no
 boot either.
 
+**fsd's three `NP_OPEN` refusals are graded (2026-10-29).** `/bin/OPENPROBE`
+sends one raw `NP_OPEN` with any flag word and prints fsd's answer by name.
+`test-cerrno`'s ext2 boot drives it as `user`. `O_CREAT|O_EXCL` of
+`/Users/user/hid/f` answers EEXIST while `hid` is searchable and EACCES once
+it is mode 0600, as does a missing name beside it. `OPEN_EXCL` without
+`OPEN_CREATE` answers FS_ERROR for an existing and a missing file, and so
+do flags 32 and bit 63, where a plain read open of the same file opens.
+Controls: `exists_answer` answering EEXIST to everyone (1 check fails),
+`OPEN_EXCL` alone accepted (2: EEXIST and ENOENT), and unknown flags accepted
+(2: both opened). ulib's `np_call` is public for the probe.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

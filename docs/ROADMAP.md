@@ -4479,7 +4479,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   would leave the gate one thing to ask and let the boot line read the
   reason the same way `read_only_line` does. A refactor of the mount
   paths, so not done in #364. From its high review.
-- **Three of fsd's `NP_OPEN` refusals are graded by no boot.** Since #367
+- ~~**Three of fsd's `NP_OPEN` refusals are graded by no boot.** Since #367
   (2026-10-28) fsd answers `O_CREAT|O_EXCL` of an existing name in
   `exists_answer`, EEXIST only to a caller who may stat it (`check_access`'s
   `NP_STAT` rule), and refuses `OPEN_EXCL` without `OPEN_CREATE` and any
@@ -4488,7 +4488,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   answering EEXIST to everyone passes every check, and libc never sends
   the other two (the host peer's self-test rows check the peer's copy).
   A probe sending a raw `NP_OPEN`, on ext2 as `user`, would grade all
-  three. From the high review of #367.
+  three. From the high review of #367.~~ **Done 2026-10-29:**
+  `/bin/OPENPROBE` in `test-cerrno`'s ext2 boot as `user`; each of the three
+  refusals removed in turn fails its own checks.
 - **fsd opens a directory as a fid; the host peer refuses it.** An
   `NP_OPEN` of a directory, with or without `OPEN_CREATE`, gets a fid from
   fsd, where `np9p_server.py` answers FS_ERR_NOT_A_FILE (its
