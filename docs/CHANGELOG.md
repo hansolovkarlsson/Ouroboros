@@ -1425,7 +1425,18 @@ truncate open is still refused by `write_file`), the refusal after the gates
 as first built (`user`'s `/etc` write and truncate, and VRUNS), the refusal
 without the stat rule (`hid/d` after the chmod), and the peer's mask cut to
 create alone or put after its read-only refusal (its write and truncate
-rows). The roadmap also records Hans's
+rows). The second medium review made the mask one constant,
+`ninep_abi::OPEN_DIR_REFUSED`, host-tested to equal `open_changes` of a missing
+name over every flag combination, with `check-wire-constants.py` now reading
+`A | B` masks on both sides and comparing it and `OPEN_FLAGS` with the peer's
+(fails with the peer's cut to create alone, or to write and create, and
+ninep-abi's widened by `OPEN_EXCL`, which fails the host test too). fsd's
+`Found` holds one `Result<Kind, u64>` (missing, file or directory), so a
+directory cannot be written beside a missing name, and `NP_OPEN`'s doc says
+`OPEN_EXCL`'s EEXIST comes first, as on Linux. Of the four root opens only
+three grade the refusal: the truncate one guards `write_file`'s own refusal
+of a directory, and the truncate open only the refusal catches is `user`'s
+through `openprobe`. The roadmap also records Hans's
 decision to keep the size-0 exFAT entry's cluster as a leak.
 
 **fsd's three `NP_OPEN` refusals are graded (2026-10-29).** `/bin/OPENPROBE`
