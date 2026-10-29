@@ -425,6 +425,14 @@ int open(const char *path, int flags, ...) {
     }
     if (flags & O_CREAT) {
         oflags |= OPEN_CREATE;
+        /* O_EXCL only beside O_CREAT, where POSIX defines it; alone it is
+         * ignored, as Linux does, since fsd refuses OPEN_EXCL without
+         * OPEN_CREATE. Dropped until 2026-10-28, so O_CREAT|O_EXCL of an
+         * existing file opened it and a lockfile's maker believed it made
+         * the lock. */
+        if (flags & O_EXCL) {
+            oflags |= OPEN_EXCL;
+        }
     }
     if (flags & O_TRUNC) {
         oflags |= OPEN_TRUNC;

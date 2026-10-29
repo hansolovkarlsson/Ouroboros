@@ -828,6 +828,11 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             if p[0] & (ninep_abi::OPEN_READ | ninep_abi::OPEN_WRITE) == 0 {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             }
+            // `OPEN_EXCL` means something only beside `OPEN_CREATE`; alone
+            // it is a malformed request, refused here for the same reason.
+            if p[0] & (ninep_abi::OPEN_EXCL | ninep_abi::OPEN_CREATE) == ninep_abi::OPEN_EXCL {
+                return status_reply(reply, syscall_abi::FS_ERROR);
+            }
             Some(Found { path, file: found(fs, path) })
         }
         _ => None,
@@ -838,6 +843,16 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // root bypasses. See `check_access`.
     if !check_access(fs, who, verb, &p, payload, open) {
         return status_reply(reply, syscall_abi::FS_ERR_PERM);
+    }
+    // `O_CREAT|O_EXCL` of a name that exists: EEXIST, and nothing acts. After
+    // `check_access`, which asked only that the ancestors be searchable for
+    // it (the name's existence is what a search grants), and before the
+    // read-only gate, as POSIX gives EEXIST and not EROFS for an existing
+    // file. Until 2026-10-28 libc dropped `O_EXCL` and this open succeeded.
+    if let Some(Found { file: Ok(true), .. }) = open {
+        if p[0] & ninep_abi::OPEN_EXCL != 0 {
+            return status_reply(reply, syscall_abi::FS_ERR_ALREADY_EXISTS);
+        }
     }
     // A read-only tree (D5's fallback, or a volume its arm mounted read-only)
     // refuses every change, root's included: the gate has no rule for root.
@@ -1782,6 +1797,14 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
                     Ok(exists) => exists,
                     Err(_) => return ancestors_searchable(fs, path, &who),
                 };
+                // `O_CREAT|O_EXCL` of a name that exists opens nothing:
+                // `handle_ninep` answers EEXIST next, so only the search that
+                // tells a caller the name exists is asked, not the file's own
+                // mode (Linux's order: EEXIST for a file the caller may not
+                // read).
+                if exists && flags & ninep_abi::OPEN_EXCL != 0 {
+                    return ancestors_searchable(fs, path, &who);
+                }
                 let wants_write = ninep_abi::open_changes(flags, exists);
                 let wants_read = flags & ninep_abi::OPEN_READ != 0;
                 if wants_read && !path_allows(fs, path, &who, PERM_R) {

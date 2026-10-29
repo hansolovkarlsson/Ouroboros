@@ -131,8 +131,11 @@ build/espexfat.img (exFAT root, partition 1):
   and no NEWB, VH or VT; and (since 2026-10-28, /bin/CCREAT) an open of VG
   with O_RDONLY|O_CREAT must read its 4 bytes while one of a missing VC is
   EROFS at the open with no VC made, as POSIX asks of O_CREAT on a
-  read-only volume (fsd's `refused_read_only`), in every read-only boot
-  below (VRUNS opens /etc/passwd, having no VG). VFIRST: the bitmap's entry naming cluster 0, and a
+  read-only volume (fsd's `refused_read_only`), and (since the same day's
+  O_EXCL fix) one of VG with O_WRONLY|O_CREAT|O_EXCL must be EEXIST, not
+  EROFS, as POSIX asks of an existing file, while one of a missing VX is
+  EROFS with no VX made, in every read-only boot below (VRUNS opens
+  /etc/passwd, having no VG). VFIRST: the bitmap's entry naming cluster 0, and a
   good copy of it planted after VG, as a volume of two FATs has FAT 2's
   bitmap entry after FAT 1's: the first is the bitmap, damaged, and the
   volume is read-only as in VBITMAP (the copy deleted on the host after
@@ -1109,6 +1112,7 @@ REASONS = {
 # not check the boot checksum, so it is left as it was.
 VBR = {"vtwofat": (110, 2)}
 EROFS = 30  # picolibc's sys/errno.h, what libc's file.c gives FS_ERR_READ_ONLY
+EEXIST = 17  # the same, for FS_ERR_ALREADY_EXISTS
 
 
 def run_extent(label):
@@ -1162,7 +1166,9 @@ def run_extent(label):
     # O_RDONLY|O_CREAT on a read-only volume: an existing file opens and
     # reads, a missing one is EROFS at the open (fsd's `refused_read_only`,
     # the high and medium reviews of #364).
-    creat = [] if writable else ["ccreat /VG", "ccreat /VC"]
+    # O_CREAT|O_EXCL: EEXIST for VG before the read-only refusal, EROFS for
+    # a missing VX (the O_EXCL fix of 2026-10-28).
+    creat = [] if writable else ["ccreat /VG", "ccreat /VC", "ccreat -x /VG", "ccreat -x /VX"]
     driven, out, faults = boot(label, cmds[:-1] + creat + cmds[-1:])
     if drive_qemu.boot_stalled("test-long-set", label, out, faults):
         STALLED.append(label)
@@ -1210,6 +1216,10 @@ def run_extent(label):
              f"for a missing one, with no VC made ({printed(out, 'ccreat /VG')}, {printed(out, 'ccreat /VC')})",
              printed(out, "ccreat /VG") == ["ccreat: /VG read 4"]
              and printed(out, "ccreat /VC") == [f"ccreat: /VC open errno {EROFS}"] and "VC" not in names),
+            (f"{label}: O_WRONLY|O_CREAT|O_EXCL is EEXIST ({EEXIST}) for VG, not EROFS, and EROFS for a "
+             f"missing VX, none made ({printed(out, 'ccreat -x /VG')}, {printed(out, 'ccreat -x /VX')})",
+             printed(out, "ccreat -x /VG") == [f"ccreat: /VG open errno {EEXIST}"]
+             and printed(out, "ccreat -x /VX") == [f"ccreat: /VX open errno {EROFS}"] and "VX" not in names),
         ]
     checks += [(f"{label}: fsck_exfat -n passes the image after the boot, the entries restored", ok),
                (f"{label}: no fault lines", faults == 0)]
@@ -1240,7 +1250,8 @@ def run_vruns():
                f"passes the image before the boot", len(runs_of(chain)) == 65 and ok)]
     if not checks[0][1]:
         return checks, [f"vruns before: {ln}" for ln in lines]
-    driven, out, faults = boot("vruns", ["echo new > /NEWB", "ccreat /etc/passwd", "ccreat /VC", "ls /"])
+    driven, out, faults = boot("vruns", ["echo new > /NEWB", "ccreat /etc/passwd", "ccreat /VC",
+                                         "ccreat -x /etc/passwd", "ls /"])
     if drive_qemu.boot_stalled("test-long-set", "vruns", out, faults):
         STALLED.append("vruns")
         return [], []
@@ -1258,6 +1269,9 @@ def run_vruns():
          len(printed(out, "ccreat /etc/passwd")) == 1
          and re.fullmatch(r"ccreat: /etc/passwd read [1-9][0-9]*", printed(out, "ccreat /etc/passwd")[0]) is not None
          and printed(out, "ccreat /VC") == [f"ccreat: /VC open errno {EROFS}"] and exfatimg.find(root, "VC") is None),
+        (f"vruns: O_WRONLY|O_CREAT|O_EXCL of /etc/passwd is EEXIST ({EEXIST}), not EROFS "
+         f"({printed(out, 'ccreat -x /etc/passwd')})",
+         printed(out, "ccreat -x /etc/passwd") == [f"ccreat: /etc/passwd open errno {EEXIST}"]),
         ("vruns: no fault lines", faults == 0),
     ]
     return checks, []

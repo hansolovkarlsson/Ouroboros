@@ -24,7 +24,12 @@ binding and a path below it, and a /net path (ENOSYS, not answered yet), after
   a write through such an fd must be EBADF, since the fd is read-only, and a
   missing /etc/newf must be EACCES at the open, since creating it needs `w`
   on /etc (fsd's `check_access` and the fid's write check, with
-  ninep_abi::open_changes).
+  ninep_abi::open_changes). And O_WRONLY|O_CREAT|O_EXCL (`ccreat -x`, since
+  2026-10-28, when libc stopped dropping O_EXCL): a new /Users/user/LOCK is
+  made and a second open of it is EEXIST, as is one of /Users (a directory)
+  and of /etc/shadow, which `user` may not read (EEXIST comes before the
+  file's own permission, as in Linux), while a missing /etc/newx is EACCES.
+  The FAT32 boot, as root, makes /LOCK and is refused it the second time.
 
 Graded on cerrno's own summary line (`cerrno: N checks, 0 failed`, matched
 whole, with N exactly ROOT_CHECKS below: fewer is a run cut short, and more
@@ -63,7 +68,15 @@ USER_CHECKS = 2 + len(KNOWN_PATHS)
 # As `user`, O_RDONLY|O_CREAT (/bin/CCREAT): each command and the one line it
 # must print, `read` the bytes one read of up to 64 gives of /etc/passwd's
 # size on the image (creat_lines).
-EBADF, EACCES = 9, 13  # picolibc's sys/errno.h
+EBADF, EACCES, EEXIST = 9, 13, 17  # picolibc's sys/errno.h
+
+
+def excl_lines(lock):
+    """O_CREAT|O_EXCL of `lock`, missing: made, and then refused."""
+    return [
+        (f"ccreat -x {lock}", f"ccreat: {lock} made 1"),
+        (f"ccreat -x {lock}", f"ccreat: {lock} open errno {EEXIST}"),
+    ]
 
 
 def creat_lines(size):
@@ -71,7 +84,30 @@ def creat_lines(size):
         ("ccreat /etc/passwd", f"ccreat: /etc/passwd read {min(size, 64)}"),
         ("ccreat -w /etc/passwd", f"ccreat: /etc/passwd write errno {EBADF}"),
         ("ccreat /etc/newf", f"ccreat: /etc/newf open errno {EACCES}"),
+    ] + excl_lines("/Users/user/LOCK") + [
+        ("ccreat -x /Users", f"ccreat: /Users open errno {EEXIST}"),
+        ("ccreat -x /etc/shadow", f"ccreat: /etc/shadow open errno {EEXIST}"),
+        ("ccreat -x /etc/newx", f"ccreat: /etc/newx open errno {EACCES}"),
     ]
+
+
+def creat_steps(lines):
+    """Driver steps for `lines`: each command typed once the one before it
+    has printed its line."""
+    return ([(creat_wait(before), cmd) for (before, _), (cmd, _) in zip(lines, lines[1:])]
+            + [(creat_wait(lines[-1][0]), "")])
+
+
+def creat_checks(name, prompt, text, lines):
+    """One check per distinct command: the lines it printed, in order,
+    against the lines `lines` expects of it (a command typed twice, as the
+    lock is, prints twice)."""
+    checks = []
+    for cmd in dict.fromkeys(cmd for cmd, _ in lines):
+        want = [line for c, line in lines if c == cmd]
+        got = re.findall(prompt + re.escape(cmd) + r"\r?\n(.*?)\r?$", text, re.M)
+        checks.append((f"{name}: `{cmd}` prints {want} ({got})", got == want))
+    return checks
 
 
 def creat_wait(cmd):
@@ -136,13 +172,14 @@ def main() -> int:
                   ("# ", "mount -n /net"), ("# ", "cerrno")]
     checks = []
 
-    d, out, f = boot("fat32", "esp.img", root_steps + [(SUMMARY, "")])
+    lock = excl_lines("/LOCK")
+    d, out, f = boot("fat32", "esp.img", root_steps + [(SUMMARY, lock[0][0])] + creat_steps(lock))
     got = summaries(out)
     checks += [
         ("fat32: driven to the end", d),
         (f"fat32: root, {ROOT_CHECKS} checks, 0 failed", got == [(ROOT_CHECKS, 0)]),
         ("fat32: no fault lines", f == 0),
-    ]
+    ] + creat_checks("fat32: root", r"# ", out.split("cerrno: ", 1)[-1], lock)
     fat32 = out
 
     known = []
@@ -158,8 +195,7 @@ def main() -> int:
         (SUMMARY, "exit"),
         ("login:", "user"), ("assword", "user"), (r"\$ ", f"cerrno /etc/shadow {' '.join(known)}"),
         (SUMMARY, creat[0][0]),
-    ] + [(creat_wait(before), cmd) for (before, _), (cmd, _) in zip(creat, creat[1:])]
-        + [(creat_wait(creat[-1][0]), "")])
+    ] + creat_steps(creat))
     got = summaries(out)
     checks += [
         ("ext2: driven to the end", d),
@@ -168,10 +204,7 @@ def main() -> int:
          got[1:2] == [(USER_CHECKS, 0)]),
         ("ext2: no fault lines", f == 0),
     ]
-    tail = out.split("cerrno /etc/shadow", 1)[-1]
-    for cmd, line in creat:
-        got_line = re.findall(r"\$ " + re.escape(cmd) + r"\r?\n(.*?)\r?$", tail, re.M)
-        checks.append((f"ext2: user, `{cmd}` prints `{line}` ({got_line})", got_line == [line]))
+    checks += creat_checks("ext2: user", r"\$ ", out.split("cerrno /etc/shadow", 1)[-1], creat)
     for name, text in (("fat32", fat32), ("ext2", out)):
         for line in re.findall(r"^cerrno: (?:ok|FAIL).*$", text, re.M):
             print(f"     {name}: {line.rstrip()}")

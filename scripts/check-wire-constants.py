@@ -366,6 +366,9 @@ CHECKED = [
     "OPEN_WRITE",
     "OPEN_CREATE",
     "OPEN_TRUNC",
+    # O_CREAT|O_EXCL (2026-10-28): a drift makes libc ask for something
+    # else, and the lockfile idiom open an existing file again.
+    "OPEN_EXCL",
     # fsd's fid budget, ninep-abi's since 2026-09-12 (review of #128). The
     # server mirrors it so exhaustion behaves the same there, and the client's
     # fid gate must open MORE than it across closed sessions for its one
@@ -441,7 +444,7 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 43,  # counted 2026-09-23: +11 keyed-session names and NP_AUTH_HDR_SIGNED, now parsed as a sum (session-auth step 4); 32 on 09-20: NO_FS pinned by the second review of #145; 31 on 09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
+    "np9p_server.py": 45,  # counted 2026-10-28: +OPEN_EXCL and FS_ERR_ALREADY_EXISTS (O_CREAT|O_EXCL); 43 on 2026-09-23: +11 keyed-session names and NP_AUTH_HDR_SIGNED, now parsed as a sum (session-auth step 4); 32 on 09-20: NO_FS pinned by the second review of #145; 31 on 09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
     # Raised from 3 when step 3b's constants were pinned. The script's own
