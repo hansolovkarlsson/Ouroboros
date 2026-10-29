@@ -3264,3 +3264,34 @@ where the host peer refuses it.
   line. `partition`, `format` and `erase` are FSOP_* verbs, not NP_*, so
   the deliberate hold that they stay available is not touched. From the
   high review of #361, 2026-10-27.
+
+## `O_CREAT|O_EXCL` answers EEXIST, DONE (2026-10-28)
+
+One item closed later the same day, by #367, struck on its branch and moved
+here by the day's second closeout. What its high review left ungraded stays
+on the roadmap: three of fsd's `NP_OPEN` refusals that no boot reaches.
+
+- ~~**`O_EXCL` is dropped by libc.** `open()` in `libc/src/file.c` maps
+  `O_CREAT` and `O_TRUNC` but not `O_EXCL`, and the wire has no flag for
+  it, so `O_CREAT|O_EXCL` of an existing file opens it on every tree where
+  POSIX answers EEXIST: the lockfile idiom believes it made the lock. Since
+  #364 the same holds on a read-only tree, where it answered EROFS before.
+  Needs an `OPEN_EXCL` in ninep-abi, `libc/include/sys.h` and both Python
+  peers (`check-wire-constants.py` holds them together), fsd refusing an
+  existing file with it before anything acts, and a `ccreat`-style check.
+  From the second medium review of #364.~~ **Fixed 2026-10-28**
+  (`fix/o-excl`): `OPEN_EXCL` (16) on the wire, sent by libc beside
+  `O_CREAT`; fsd answers EEXIST (`exists_answer`, before `check_access`)
+  to a caller who may search the ancestors, without asking the file's own
+  mode or the read-only gate; `ccreat -x` in `test-cerrno` and
+  `test-long-set`. Graded by no boot: the search check itself (no rig has
+  a user who may not search a directory holding a name it asks for with
+  `O_EXCL`), so `exists_answer` answering EEXIST to everyone passes every
+  check; and fsd's refusal of `OPEN_EXCL` without `OPEN_CREATE` and of a
+  flag outside `OPEN_FLAGS`, which libc never sends (the host peer's
+  self-test rows check the peer's copy only). A probe sending a raw
+  `NP_OPEN` would grade all three. From the high review of #367, which
+  also noted that a peer running an fsd from before the fix ignores
+  `OPEN_EXCL`: nothing here can reach that build. Of the two Python peers
+  only `np9p_server.py` spells it: `np9p_client.py` sends no create, so it
+  has nothing to name.
