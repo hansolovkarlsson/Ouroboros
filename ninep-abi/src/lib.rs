@@ -348,9 +348,9 @@ pub const OPEN_TRUNC: u64 = 8;
 /// `FS_ERR_ALREADY_EXISTS` if the name exists (a file or a directory), so
 /// the open creates the file or does nothing. POSIX's `O_CREAT|O_EXCL`, the
 /// lockfile idiom: the server answers one request at a time, so the test and
-/// the create cannot be split by another client's. The answer comes after the
-/// ancestors' search check and before the file's own permission and the
-/// read-only gate, as POSIX and Linux give EEXIST there. Without
+/// the create cannot be split by another client's. The answer needs only the
+/// ancestors' search permission, not the file's own nor a writable tree, as
+/// POSIX and Linux give EEXIST there. Without
 /// [`OPEN_CREATE`] the request is malformed and refused (`FS_ERROR`); libc
 /// sends it only with `O_CREAT`, where POSIX defines it.
 pub const OPEN_EXCL: u64 = 16;

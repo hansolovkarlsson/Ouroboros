@@ -837,22 +837,20 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
         }
         _ => None,
     };
+    // `O_CREAT|O_EXCL` of a name that exists answers here, whole, and
+    // nothing acts: see [`exists_answer`]. Only the malformed requests above
+    // have answered before it, and none of them by the name's existence.
+    if let Some(Found { path, file: Ok(true) }) = open {
+        if p[0] & ninep_abi::OPEN_EXCL != 0 {
+            return status_reply(reply, exists_answer(fs, who, path));
+        }
+    }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
     // uid/gid against the target's owner+mode before running the op. ext2-only
     // (others return mode:None, which `check_access` treats as unrestricted);
     // root bypasses. See `check_access`.
     if !check_access(fs, who, verb, &p, payload, open) {
         return status_reply(reply, syscall_abi::FS_ERR_PERM);
-    }
-    // `O_CREAT|O_EXCL` of a name that exists: EEXIST, and nothing acts. After
-    // `check_access`, which asked only that the ancestors be searchable for
-    // it (the name's existence is what a search grants), and before the
-    // read-only gate, as POSIX gives EEXIST and not EROFS for an existing
-    // file. Until 2026-10-28 libc dropped `O_EXCL` and this open succeeded.
-    if let Some(Found { file: Ok(true), .. }) = open {
-        if p[0] & ninep_abi::OPEN_EXCL != 0 {
-            return status_reply(reply, syscall_abi::FS_ERR_ALREADY_EXISTS);
-        }
     }
     // A read-only tree (D5's fallback, or a volume its arm mounted read-only)
     // refuses every change, root's included: the gate has no rule for root.
@@ -1739,6 +1737,30 @@ fn models_modes(fs: &mut vfs::Filesystem) -> bool {
     models_modes_or_unknown(fs).unwrap_or(true)
 }
 
+/// The answer to an `O_CREAT|O_EXCL` open of `path`, a name that exists:
+/// FS_ERR_ALREADY_EXISTS (EEXIST) to a caller who may search its ancestors,
+/// which is what tells anyone the name exists, and FS_ERR_PERM to one who
+/// may not, or to no caller. The file's own mode is not asked: the open will
+/// neither read nor write it, and POSIX and Linux give EEXIST for a file the
+/// caller may not read. Nor is the read-only gate: POSIX gives EROFS only for
+/// a file the open would make. Made whole here, before [`check_access`], and
+/// not as a skip inside it with the EEXIST answered after: the control
+/// removing that later answer left the skip standing, and `user` opened
+/// /etc/shadow for writing and wrote it (the first build of the O_EXCL fix,
+/// 2026-10-28). Removing this one leaves `check_access` as it always was.
+/// Until 2026-10-28 libc dropped `O_EXCL` and such an open succeeded.
+fn exists_answer(fs: &mut vfs::Filesystem, who: Option<Caller>, path: &str) -> u64 {
+    let searchable = match who {
+        None => false,
+        Some(c) => c.uid == 0 || !models_modes(fs) || ancestors_searchable(fs, path, &c),
+    };
+    if searchable {
+        syscall_abi::FS_ERR_ALREADY_EXISTS
+    } else {
+        syscall_abi::FS_ERR_PERM
+    }
+}
+
 /// Enforce the caller's permission for `verb`. Returns `true` if allowed. Reads
 /// the object's owner+mode via `stat` and compares against the caller's uid/gid.
 ///
@@ -1797,14 +1819,6 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
                     Ok(exists) => exists,
                     Err(_) => return ancestors_searchable(fs, path, &who),
                 };
-                // `O_CREAT|O_EXCL` of a name that exists opens nothing:
-                // `handle_ninep` answers EEXIST next, so only the search that
-                // tells a caller the name exists is asked, not the file's own
-                // mode (Linux's order: EEXIST for a file the caller may not
-                // read).
-                if exists && flags & ninep_abi::OPEN_EXCL != 0 {
-                    return ancestors_searchable(fs, path, &who);
-                }
                 let wants_write = ninep_abi::open_changes(flags, exists);
                 let wants_read = flags & ninep_abi::OPEN_READ != 0;
                 if wants_read && !path_allows(fs, path, &who, PERM_R) {
