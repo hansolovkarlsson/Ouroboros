@@ -1401,6 +1401,24 @@ bit outside ninep-abi's `OPEN_FLAGS`. It also found `exists_answer` copying
 `NP_STAT` on the same path. Those two refusals in fsd are graded by no
 boot either.
 
+**exFAT's disk gate is graded again (2026-10-29).** Since 2026-10-28 fsd's
+verb gate refuses every change to a read-only tree before the arm, so no
+boot reached exFAT's own refusal, the second line (`gate::Gated`, its write
+check and the allocator's). fsd's `disk-gate-rig` feature leaves the arm out
+of `tree_read_only`; `make fsd-disk-gate-bin` builds it into
+`target/disk-gate`, apart from the shipped `fsd.bin`, and it prints a line of
+its own at startup. `make test-disk-gate` (`test-long-set.py --disk-gate`)
+puts it on a copy of `esp.img` and runs the five read-only boots on it with
+their checks unchanged, and each boot must print that line; every boot of
+the ordinary `test-long-set` must not. Controls: with every early
+`writable()` check removed it passes (the gate holds alone, 44 checks); with
+the gate's write check and the allocator's removed as well, 22 fail, each
+write answered as a disk I/O error and written, VF lost and fsck_exfat
+dirty; with the shipped fsd staged, each boot's line fails (5). A boot flag
+was the other way past the verb gate, and was not taken: a file on the disk
+would switch a gate off in the fsd that ships. From the high review of
+#364.
+
 **A directory opens for reading alone, on fsd and the host peer
 (2026-10-29).** fsd gave a fid for any `NP_OPEN` of a directory, so
 `open("/etc", O_WRONLY)` returned a descriptor whose first write failed,

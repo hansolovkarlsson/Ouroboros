@@ -2,6 +2,14 @@
 """exFAT entry sets as the spec shapes them, and only those, are patched whole.
 
     python3 scripts/test-long-set.py     (or `make test-long-set`, which builds the image)
+    python3 scripts/test-long-set.py --disk-gate   (or `make test-disk-gate`)
+
+--disk-gate (since 2026-10-29) runs the read-only boots alone, VBITMAP,
+VOVERLAP, VFIRST, VTWOFAT and VRUNS, on a copy of esp.img carrying fsd's
+`disk-gate-rig` build, whose verb gate does not ask an arm, so each refused
+write is exFAT's own disk gate's (`gate::Gated`), which no boot of the
+shipped fsd reaches since the verb gate of 2026-10-28. Every boot, in either
+mode, checks which fsd it ran by that build's startup line.
 
 When fsd changes a file's Stream entry (its first cluster and length, on a
 write), `patch_stream_ext` rewrites File and Stream and recomputes the set's

@@ -4461,7 +4461,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   it, or the kernel seeing a write to sector 0 or the GPT), or answer
   `BLOCK_BOOT_START` from the table as it is now. From the medium review of
   #362, 2026-10-27.
-- **exFAT's disk gate is graded by no boot.** Since 2026-10-28 fsd's verb
+- ~~**exFAT's disk gate is graded by no boot.** Since 2026-10-28 fsd's verb
   gate refuses every change to a read-only tree before the arm, so the
   read-only boots of `make test-long-set` and `test-volume-bound` pass with
   `gate::Gated`'s write check and the allocator's removed (measured that
@@ -4470,7 +4470,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   build of fsd that skips `refused_read_only` for the rig, or a host test of
   `exfat.rs` against an image file, which fsd's `no_std` arms do not have
   yet. The counts that graded it alone, before the verb gate, are in the
-  CHANGELOG entry of 2026-10-27 (14 checks). From the high review of #364.
+  CHANGELOG entry of 2026-10-27 (14 checks). From the high review of #364.~~
+  **Done 2026-10-29:** fsd's `disk-gate-rig` build (the verb gate does not
+  ask an arm), staged by `make test-disk-gate` on the read-only boots of
+  `test-long-set`; fails with the gate's two checks removed beside every
+  early `writable()` check (22 checks), and with the shipped fsd staged.
 - **Read-only has two sources in fsd.** `tree_read_only` asks
   `ROOT_READ_ONLY`, a static for tree 0 as D5's fallback, stored and cleared
   by hand on each path that changes tree 0 (`try_mount`, `FSOP_UNMOUNT`),
