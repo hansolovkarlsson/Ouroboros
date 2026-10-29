@@ -4567,6 +4567,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   owns it and nothing gives it back: one cluster for each such entry, which
   `fsck_exfat` reports. Reusing it was how a write reached another file's
   cluster; a leak is the safe side. Found by the high review of 2026-10-19.
+  **Kept as a leak, Hans's decision, 2026-10-29:** freeing the cluster
+  safely needs every directory walked on each such `rm`, to show no other
+  set names it, and `fsck_exfat` reclaims it. Do not re-propose without a
+  cheaper proof of ownership.
 - **`test-grow-dir` hung once in 31 runs, fsd silent mid-probe.** On
   2026-10-19, with the tree at e6655482, one boot stopped answering during
   `dirprobe /ZERO 100`: no fault line, no restart, the step's 90 s gone

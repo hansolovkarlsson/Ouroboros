@@ -138,7 +138,8 @@ fn tree_read_only(tree: usize, fs: &vfs::Filesystem) -> bool {
 
 /// An `NP_OPEN`'s path and what its one stat of it found: `Ok(true)` the file
 /// exists, `Ok(false)` it is missing, `Err` the status of any other failure (an
-/// I/O error, a path through a file). Made once in `handle_ninep`, before
+/// I/O error, a path through a file), and `dir` whether what exists is a
+/// directory (false when nothing does). Made once in `handle_ninep`, before
 /// [`check_access`], and read by it, by [`refused_read_only`] and by the
 /// handler, so the three cannot disagree on whether the open creates: a stat
 /// each let a transient I/O error authorize a create on the parent and the
@@ -150,15 +151,17 @@ fn tree_read_only(tree: usize, fs: &vfs::Filesystem) -> bool {
 struct Found<'a> {
     path: &'a str,
     file: Result<bool, u64>,
+    dir: bool,
 }
 
-/// [`Found::file`] for `path` on `fs`.
-fn found(fs: &mut vfs::Filesystem, path: &str) -> Result<bool, u64> {
-    match fs.stat(path) {
-        Ok(_) => Ok(true),
-        Err(fat32::Error::NotFound) => Ok(false),
-        Err(e) => Err(error_code(&e)),
-    }
+/// The [`Found`] for `path` on `fs`.
+fn found<'a>(fs: &mut vfs::Filesystem, path: &'a str) -> Found<'a> {
+    let (file, dir) = match fs.stat(path) {
+        Ok(st) => (Ok(true), st.is_dir),
+        Err(fat32::Error::NotFound) => (Ok(false), false),
+        Err(e) => (Err(error_code(&e)), false),
+    };
+    Found { path, file, dir }
 }
 
 /// The status `verb` on `tree`, mounted as `fs`, is refused with because that
@@ -201,7 +204,7 @@ fn refused_read_only(tree: usize, fs: &mut vfs::Filesystem, verb: u64, p: &[u64;
                 return READ_ONLY; // changes the file even where it exists
             }
             // Creates, and only when the file is missing.
-            let Some(Found { path, file }) = open else {
+            let Some(Found { path, file, .. }) = open else {
                 return READ_ONLY;
             };
             match file {
@@ -836,7 +839,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             }
-            Some(Found { path, file: found(fs, path) })
+            Some(found(fs, path))
         }
         _ => None,
     };
@@ -1120,7 +1123,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
         ninep_abi::NP_OPEN => {
             // The path and the one stat made above ([`Found`]), not another:
             // what `check_access` and the gate decided on is what this acts on.
-            let Some(Found { path, file }) = open else {
+            let Some(Found { path, file, dir }) = open else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
             // The user the fid is opened as. `check_access` above already
@@ -1146,6 +1149,16 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 Ok(exists) => exists,
                 Err(code) => return status_reply(reply, code),
             };
+            // A directory opens for reading alone, as POSIX has it: asked to
+            // write, truncate or create, it is EISDIR at the open. Until
+            // 2026-10-29 a write or create open of one got a fid, and only its
+            // first write failed; a truncate failed in `write_file`. After
+            // `check_access` and the read-only gate, so neither a caller who
+            // may not search the directory above nor a read-only tree is
+            // answered by what the name is.
+            if dir && flags & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_TRUNC | ninep_abi::OPEN_CREATE) != 0 {
+                return status_reply(reply, syscall_abi::FS_ERR_NOT_A_FILE);
+            }
             if flags & ninep_abi::OPEN_TRUNC != 0 {
                 // O_TRUNC WITHOUT O_CREAT MUST NOT CREATE. `write_file` creates
                 // the file when it is absent, so this branch made
@@ -1803,7 +1816,7 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
         // write/create-open needs W (on the file if it exists, else on the parent
         // dir for a create). a0 = flags, a1 = path length.
         ninep_abi::NP_OPEN => match open {
-            Some(Found { path, file }) => {
+            Some(Found { path, file, .. }) => {
                 let flags = p[0];
                 // OPEN_TRUNC is a WRITE: the handler acts on it by truncating
                 // the file, so leaving it out of this mask let

@@ -62,7 +62,7 @@ _spec.loader.exec_module(drive_qemu)
 
 # How many checks cerrno runs as root. A summary with fewer is a run that
 # skipped some, which must not pass.
-ROOT_CHECKS = 41
+ROOT_CHECKS = 45
 SUMMARY = r"cerrno: (\d+) checks, (\d+) failed\r?\n"
 # Files cerrno checks stat against, as `<path> <octal mode> <uid> <gid>`, the
 # values read from the ext2 partition itself by debugfs (owner_on_image), not
