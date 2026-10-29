@@ -80,7 +80,21 @@ def rust_consts(path):
     # rather than guessed at.
     sums = re.findall(r"pub const (\w+): usize =\s*([\w\s+]+?);", src)
     _resolve_sums(sums, out)
+    _resolve_ors(re.findall(r"pub const (\w+): u64 = ([A-Z_]+(?: \| [A-Z_]+)*);", src), out)
     return out
+
+
+def _resolve_ors(ors, out):
+    """Evaluate `A | B | C` masks (or a lone `A`) of names already in `out`, so a mask is
+    compared as the bits it holds (OPEN_FLAGS, OPEN_DIR_REFUSED: the medium
+    review of #370). A name that never resolves leaves the mask out."""
+    for name, expr in ors:
+        terms = [t.strip() for t in expr.split("|")]
+        if name not in out and all(t in out for t in terms):
+            value = 0
+            for t in terms:
+                value |= out[t]
+            out[name] = value
 
 
 def _resolve_sums(sums, out):
@@ -152,6 +166,7 @@ def py_consts(path):
     # NP_NONCE_LEN + ...`), the peers' spelling of the header lengths.
     sums = re.findall(r"^(\w+) = ((?:\w+\s*\+\s*)+\w+)\s*(?:#.*)?$", src, re.M)
     _resolve_sums(sums, out)
+    _resolve_ors(re.findall(r"^(\w+) = ([A-Z_]+(?: \| [A-Z_]+)*)\s*(?:#.*)?$", src, re.M), out)
     return out
 
 
@@ -369,6 +384,12 @@ CHECKED = [
     # O_CREAT|O_EXCL (2026-10-28): a drift makes libc ask for something
     # else, and the lockfile idiom open an existing file again.
     "OPEN_EXCL",
+    # The masks (the medium review of #370): every flag a server knows, and
+    # the ones that refuse an existing directory, which fsd and the host peer
+    # each apply; a drift makes the peer answer a directory's open as fsd
+    # does not, seen otherwise only by a QEMU boot.
+    "OPEN_FLAGS",
+    "OPEN_DIR_REFUSED",
     # fsd's fid budget, ninep-abi's since 2026-09-12 (review of #128). The
     # server mirrors it so exhaustion behaves the same there, and the client's
     # fid gate must open MORE than it across closed sessions for its one
@@ -444,7 +465,7 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 45,  # counted 2026-10-28: +OPEN_EXCL and FS_ERR_ALREADY_EXISTS (O_CREAT|O_EXCL); 43 on 2026-09-23: +11 keyed-session names and NP_AUTH_HDR_SIGNED, now parsed as a sum (session-auth step 4); 32 on 09-20: NO_FS pinned by the second review of #145; 31 on 09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
+    "np9p_server.py": 47,  # counted 2026-10-29: +OPEN_FLAGS and OPEN_DIR_REFUSED (the medium review of #370); 45 on 2026-10-28: +OPEN_EXCL and FS_ERR_ALREADY_EXISTS (O_CREAT|O_EXCL); 43 on 2026-09-23: +11 keyed-session names and NP_AUTH_HDR_SIGNED, now parsed as a sum (session-auth step 4); 32 on 09-20: NO_FS pinned by the second review of #145; 31 on 09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
     # Raised from 3 when step 3b's constants were pinned. The script's own

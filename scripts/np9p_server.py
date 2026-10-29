@@ -147,6 +147,8 @@ OPEN_CREATE = 4
 OPEN_TRUNC = 8
 OPEN_EXCL = 16
 OPEN_FLAGS = OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC | OPEN_EXCL
+# ninep-abi's OPEN_DIR_REFUSED: the flags that refuse an existing directory.
+OPEN_DIR_REFUSED = OPEN_WRITE | OPEN_TRUNC | OPEN_CREATE
 # fid -> path. Flags are not kept: this export is read-only, so the only flag
 # combination that ever gets a fid is a pure read.
 FIDS = {}
@@ -634,7 +636,7 @@ def serve_np(body, name, sealed):
         # fid, whose NP_PREAD is EISDIR and whose NP_FSTAT says a directory.
         # Until then this peer refused every open of a directory where fsd
         # gave a fid.
-        if fpath in DIRS and flags & (OPEN_WRITE | OPEN_TRUNC | OPEN_CREATE):
+        if fpath in DIRS and flags & OPEN_DIR_REFUSED:
             return sealed(FS_ERR_NOT_A_FILE)
         if flags & (OPEN_WRITE | OPEN_TRUNC) or (flags & OPEN_CREATE and not exists):
             if not flags & (OPEN_WRITE | OPEN_TRUNC) and parent not in DIRS:

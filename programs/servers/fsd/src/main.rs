@@ -150,18 +150,35 @@ fn tree_read_only(tree: usize, fs: &vfs::Filesystem) -> bool {
 #[derive(Clone, Copy)]
 struct Found<'a> {
     path: &'a str,
-    file: Result<bool, u64>,
-    dir: bool,
+    kind: Result<Kind, u64>,
+}
+
+/// What a [`Found`]'s stat found at its path, or that nothing is there. One
+/// value, so "a directory" cannot be written beside "missing" or a failed
+/// stat (the medium review of #370: a `dir: bool` beside the stat's result
+/// could be).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Missing,
+    File,
+    Dir,
+}
+
+impl Kind {
+    fn exists(self) -> bool {
+        self != Kind::Missing
+    }
 }
 
 /// The [`Found`] for `path` on `fs`.
 fn found<'a>(fs: &mut vfs::Filesystem, path: &'a str) -> Found<'a> {
-    let (file, dir) = match fs.stat(path) {
-        Ok(st) => (Ok(true), st.is_dir),
-        Err(fat32::Error::NotFound) => (Ok(false), false),
-        Err(e) => (Err(error_code(&e)), false),
+    let kind = match fs.stat(path) {
+        Ok(st) if st.is_dir => Ok(Kind::Dir),
+        Ok(_) => Ok(Kind::File),
+        Err(fat32::Error::NotFound) => Ok(Kind::Missing),
+        Err(e) => Err(error_code(&e)),
     };
-    Found { path, file, dir }
+    Found { path, kind }
 }
 
 /// The status `verb` on `tree`, mounted as `fs`, is refused with because that
@@ -204,10 +221,10 @@ fn refused_read_only(tree: usize, fs: &mut vfs::Filesystem, verb: u64, p: &[u64;
                 return READ_ONLY; // changes the file even where it exists
             }
             // Creates, and only when the file is missing.
-            let Some(Found { path, file, .. }) = open else {
+            let Some(Found { path, kind }) = open else {
                 return READ_ONLY;
             };
-            match file {
+            match kind.map(Kind::exists) {
                 Ok(true) => None,
                 Ok(false) => match fs.stat(parent_of(path)) {
                     Ok(st) if st.is_dir => READ_ONLY,
@@ -849,11 +866,13 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // does a directory opened to write, truncate or create: it opens for
     // reading alone, as POSIX has it (until 2026-10-29 such an open got a
     // fid, and only its first write failed).
-    if let Some(Found { file: Ok(true), dir, .. }) = open {
-        if p[0] & ninep_abi::OPEN_EXCL != 0 {
+    // `O_EXCL` is asked first, so `O_CREAT|O_EXCL` of a directory is EEXIST,
+    // as on Linux, whose `do_open` answers it before EISDIR.
+    if let Some(Found { kind: Ok(kind), .. }) = open {
+        if kind.exists() && p[0] & ninep_abi::OPEN_EXCL != 0 {
             return status_reply(reply, exists_answer(fs, who, &p, payload, syscall_abi::FS_ERR_ALREADY_EXISTS));
         }
-        if dir && p[0] & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_TRUNC | ninep_abi::OPEN_CREATE) != 0 {
+        if kind == Kind::Dir && p[0] & ninep_abi::OPEN_DIR_REFUSED != 0 {
             return status_reply(reply, exists_answer(fs, who, &p, payload, syscall_abi::FS_ERR_NOT_A_FILE));
         }
     }
@@ -1129,7 +1148,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
         ninep_abi::NP_OPEN => {
             // The path and the one stat made above ([`Found`]), not another:
             // what `check_access` and the gate decided on is what this acts on.
-            let Some(Found { path, file, .. }) = open else {
+            let Some(Found { path, kind }) = open else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
             // The user the fid is opened as. `check_access` above already
@@ -1151,8 +1170,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 return status_reply(reply, syscall_abi::FS_ERROR);
             }
             let flags = p[0];
-            let exists = match file {
-                Ok(exists) => exists,
+            let exists = match kind {
+                Ok(kind) => kind.exists(),
                 Err(code) => return status_reply(reply, code),
             };
             if flags & ninep_abi::OPEN_TRUNC != 0 {
@@ -1758,9 +1777,11 @@ fn models_modes(fs: &mut vfs::Filesystem) -> bool {
 /// `check_access`'s mode check and the read-only gate, as Linux's `may_open`
 /// answers EISDIR before both. "May stat it" is [`check_access`]'s own `NP_STAT` rule,
 /// asked of it, not a copy of it (the high review of #367): root, a
-/// filesystem without modes and the ancestor walk stay one rule. The file's own mode is not asked: the open will
-/// neither read nor write it, and POSIX and Linux give EEXIST for a file the
-/// caller may not read. Nor is the read-only gate: POSIX gives EROFS only for
+/// filesystem without modes and the ancestor walk stay one rule. The name's own mode is not asked: the open will
+/// neither read nor write it, and Linux answers both before it looks at the
+/// mode (`do_open`'s EEXIST, then its EISDIR for `O_CREAT` and `may_open`'s
+/// for a write or truncate, all before `inode_permission`), so EEXIST is given for a file the
+/// caller may not read and EISDIR for a directory it may not write. Nor is the read-only gate: POSIX gives EROFS only for
 /// a file the open would make. Made whole here, before [`check_access`], and
 /// not as a skip inside it with the EEXIST answered after: the control
 /// removing that later answer left the skip standing, and `user` opened
@@ -1816,7 +1837,7 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
         // write/create-open needs W (on the file if it exists, else on the parent
         // dir for a create). a0 = flags, a1 = path length.
         ninep_abi::NP_OPEN => match open {
-            Some(Found { path, file, .. }) => {
+            Some(Found { path, kind }) => {
                 let flags = p[0];
                 // OPEN_TRUNC is a WRITE: the handler acts on it by truncating
                 // the file, so leaving it out of this mask let
@@ -1832,8 +1853,8 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
                 // hear it, as for NP_STAT. An open asking neither to read nor
                 // to write never reaches here: `handle_ninep` refuses it first,
                 // for every caller alike.
-                let exists = match file {
-                    Ok(exists) => exists,
+                let exists = match kind {
+                    Ok(kind) => kind.exists(),
                     Err(_) => return ancestors_searchable(fs, path, &who),
                 };
                 let wants_write = ninep_abi::open_changes(flags, exists);
