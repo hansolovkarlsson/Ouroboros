@@ -237,6 +237,7 @@ write_fat_entry changes.
 import importlib.util
 import os
 import re
+import shutil
 import struct
 import sys
 
@@ -260,6 +261,45 @@ drive_qemu = load("drive_qemu", "drive-qemu.py")
 Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfatimg.entry_set
 
 IMAGE = os.path.join(ROOT, "build", "test-long-set.img")
+
+# --disk-gate (`make test-disk-gate`, since 2026-10-29): the read-only boots
+# alone, on espexfat-diskgate.img, whose ESP carries fsd's `disk-gate-rig`
+# build (FSD_GATE_BIN), so a write reaches exFAT's own disk gate rather than
+# fsd's verb gate. Every boot must print GATE_LINE in that mode, and must not
+# print it otherwise, so a boot of the wrong fsd fails either way.
+DISK_GATE = "--disk-gate" in sys.argv[1:]
+SOURCE = "espexfat-diskgate.img" if DISK_GATE else "espexfat.img"
+GATE_LINE = "fsd: the disk-gate rig's build: the verb gate does not ask an arm"
+FSD_GATE_BIN = os.path.join(ROOT, "target", "disk-gate", "aarch64-unknown-none", "release", "fsd.bin")
+
+
+def gate_image():
+    """build/espexfat-diskgate.img: espexfat.img's layout (scripts/mkexfat.py)
+    with a copy of esp.img whose \\EFI\\ORBS\\FSD.BIN is FSD_GATE_BIN."""
+    import mbrdisk
+    if not os.path.exists(FSD_GATE_BIN):
+        sys.exit(f"{FSD_GATE_BIN} not found - run `make fsd-disk-gate-bin` (or `make test-disk-gate`)")
+    esp = os.path.join(ROOT, "build", "esp-diskgate.img")
+    shutil.copyfile(os.path.join(ROOT, "build", "esp.img"), esp)
+    mp = drive_qemu.attach(esp, readonly=False)
+    try:
+        shutil.copyfile(FSD_GATE_BIN, os.path.join(mp, "EFI", "ORBS", "FSD.BIN"))
+    finally:
+        drive_qemu.detach(mp)
+    mbrdisk.assemble(os.path.join(ROOT, "build", SOURCE), [
+        (0x07, mbrdisk.exfat_payload(os.path.join(ROOT, "build", "exfatpart.img")), False),
+        (0x0B, mbrdisk.esp_payload(esp), True),
+    ])
+    os.remove(esp)
+
+
+def gate_check(label, out):
+    """The fsd this boot ran: the rig's build in --disk-gate mode, the shipped
+    one otherwise."""
+    said = GATE_LINE in out
+    if DISK_GATE:
+        return (f"{label}: fsd is the disk-gate rig's build ({GATE_LINE!r} printed)", said)
+    return (f"{label}: fsd is the shipped build (no {GATE_LINE!r})", not said)
 VENDOR = 17
 GUID = bytes(range(0x10, 0x20))
 DELETED = bytes([0x05]) + bytes(31)  # a deleted File entry: in-use bit clear
@@ -356,7 +396,7 @@ def boot(label, commands):
 
 def run_long():
     checks, notes = [], []
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     if len(vol.chain(vol.root)) != 1:
         return [("long: the image's root is one cluster, as the rig assumes", False)], notes
@@ -411,7 +451,7 @@ def run_long():
 
 
 def run_shape():
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     d = bytearray(vol.data(vol.chain(vol.root)))
     end = exfatimg.root_end(d)
@@ -443,7 +483,7 @@ def run_shape():
 def run_rename():
     """/VEND's 20-entry set, its File entry stamped, renamed to a name of two
     entries and back to one: the vendor entries move right and then left."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     d = bytearray(vol.data(vol.chain(vol.root)))
     end = exfatimg.root_end(d)
@@ -606,7 +646,7 @@ def run_valloc():
     """Allocations a set's benign secondaries name, freed with the set and
     only then, on a volume fsck_exfat passes. Fifteen clusters in a run, each
     contiguous run followed by one that must stay used."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     r = free_run(vol, 15)
     if r is None:
@@ -693,7 +733,7 @@ def run_vcross():
     cluster of the heap or the volume's own, a run past the heap, a run over
     a later cluster of a surviving chain, and an empty survivor with eight
     vendor runs."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     r = free_run(vol, 20)
     if r is None:
@@ -829,7 +869,7 @@ def run_vmeet():
     one, and VLINK, a FAT-chained file whose link leads into the bitmap,
     each refused a `writeat` with nothing written. A boot of its own:
     VCROSS's root has no room."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     r = free_run(vol, 7)
     if r is None:
@@ -968,7 +1008,7 @@ def run_vroot():
     reaching one of the volume's own clusters through a damaged set or chain,
     refused where the cluster becomes a sector (`sector_of`, since
     2026-10-26). A boot of its own: the root is filled to its last two slots."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     if len(vol.chain(vol.root)) != 1:
         return [("vroot: the image's root is one cluster, as the rig assumes", False)], []
@@ -1123,7 +1163,7 @@ def run_extent(label):
     the volume as fsd left it. A volume left writable must write and free;
     one left with no bitmap must refuse every write, before it writes."""
     damage, writable, second = EXTENTS[label]
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     if label in LATE:
         grow_root(vol)
@@ -1192,7 +1232,8 @@ def run_extent(label):
     newb_size = struct.unpack_from("<Q", newb.data, 56)[0] if newb else 0
     ok, lines = exfatimg.fsck_clean(IMAGE)
     said = [ln.strip() for ln in out.splitlines() if "fsd: mounted read-only" in ln]
-    checks = [(f"{label}: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out)]
+    checks = [(f"{label}: driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
+              gate_check(label, out)]
     if writable:
         checks.append((f"{label}: no read-only line at the mount ({said})", not said))
     else:
@@ -1233,7 +1274,7 @@ def run_vruns():
     left between each and the next, as a root grows on a volume where files
     are made between its growths: past ROOT_RUNS (64), so not recorded
     whole. The volume is read-only, and the mount line must say why."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     chain = vol.chain(vol.root)
     # Each cluster added is a run of its own: past the root's last cluster
@@ -1280,6 +1321,7 @@ def run_vruns():
          f"({printed(out, 'openprobe 2 /etc')})",
          printed(out, "openprobe 2 /etc") == ["openprobe: /etc 2 FS_ERR_NOT_A_FILE"]),
         ("vruns: no fault lines", faults == 0),
+        gate_check("vruns", out),
     ]
     return checks, []
 
@@ -1307,8 +1349,12 @@ def patch_root(vol, at, data):
 
 def main():
     checks, notes = [], []
-    for run in (run_long, run_shape, run_rename, run_valloc, run_vcross, run_vmeet, run_vroot, run_vruns,
-                *(lambda label=label: run_extent(label) for label in EXTENTS)):
+    runs = (run_long, run_shape, run_rename, run_valloc, run_vcross, run_vmeet, run_vroot, run_vruns,
+            *(lambda label=label: run_extent(label) for label in EXTENTS))
+    if DISK_GATE:
+        gate_image()
+        runs = (run_vruns, *(lambda label=label: run_extent(label) for label in EXTENTS if not EXTENTS[label][1]))
+    for run in runs:
         try:
             c, n = run()
         finally:

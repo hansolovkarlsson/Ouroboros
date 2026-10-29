@@ -83,6 +83,9 @@ fn main() -> ! {
     // shell's `mount -p` binds /proc to it; netd's export routes /proc paths to
     // it, so another machine can read this one's process table as files.
     mounts[ninep_abi::NS_PROC_TREE as usize] = Some(vfs::Filesystem::proc());
+    if cfg!(feature = "disk-gate-rig") {
+        print("fsd: the disk-gate rig's build: the verb gate does not ask an arm\r\n");
+    }
     print("fsd: filesystem server ready\r\n");
 
     // v2 protocol: requests arrive fully self-contained (header +
@@ -132,14 +135,16 @@ static ROOT_READ_ONLY: AtomicBool = AtomicBool::new(false);
 /// any tree whose arm answers [`vfs::Filesystem::read_only`] (exFAT's
 /// read-only volume, `/proc`). `fs` is a required parameter so no caller can
 /// ask without the volume (the high review of #361).
+///
+/// The `disk-gate-rig` build leaves the arm out, so the arm's own refusal is
+/// the one a read-only exFAT volume gets (`make test-disk-gate`).
 fn tree_read_only(tree: usize, fs: &vfs::Filesystem) -> bool {
-    (tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed)) || fs.read_only().is_some()
+    (tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed)) || (!cfg!(feature = "disk-gate-rig") && fs.read_only().is_some())
 }
 
-/// An `NP_OPEN`'s path and what its one stat of it found: `Ok(true)` the file
-/// exists, `Ok(false)` it is missing, `Err` the status of any other failure (an
-/// I/O error, a path through a file), and `dir` whether what exists is a
-/// directory (false when nothing does). Made once in `handle_ninep`, before
+/// An `NP_OPEN`'s path and what its one stat of it found: a [`Kind`] (missing,
+/// a file or a directory), or `Err` the status of any other failure (an I/O
+/// error, a path through a file). Made once in `handle_ninep`, before
 /// [`check_access`], and read by it, by [`refused_read_only`] and by the
 /// handler, so the three cannot disagree on whether the open creates: a stat
 /// each let a transient I/O error authorize a create on the parent and the
