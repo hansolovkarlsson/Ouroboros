@@ -4489,9 +4489,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   existing file with it before anything acts, and a `ccreat`-style check.
   From the second medium review of #364.~~ **Fixed 2026-10-28**
   (`fix/o-excl`): `OPEN_EXCL` (16) on the wire, sent by libc beside
-  `O_CREAT`; fsd answers EEXIST after the ancestor search and before the
-  file's own mode and the read-only gate; `ccreat -x` in `test-cerrno` and
-  `test-long-set`. Of the two Python peers only `np9p_server.py` spells it:
+  `O_CREAT`; fsd answers EEXIST (`exists_answer`, before `check_access`)
+  to a caller who may search the ancestors, without asking the file's own
+  mode or the read-only gate; `ccreat -x` in `test-cerrno` and
+  `test-long-set`. Graded by no boot: the search check itself (no rig has
+  a user who may not search a directory holding a name it asks for with
+  `O_EXCL`), so `exists_answer` answering EEXIST to everyone passes every
+  check. Of the two Python peers only `np9p_server.py` spells it:
   `np9p_client.py` sends no create, so it has nothing to name.
 - **fsd opens a directory as a fid; the host peer refuses it.** An
   `NP_OPEN` of a directory, with or without `OPEN_CREATE`, gets a fid from

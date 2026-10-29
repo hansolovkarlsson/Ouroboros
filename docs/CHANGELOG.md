@@ -1369,6 +1369,33 @@ peer takes the root as the parent of a path with no `/`, as `parent_of`
 does; and `test-cerrno` waits for each `ccreat` line and reads
 `/etc/passwd`'s size off the image.
 
+**`O_CREAT|O_EXCL` answers EEXIST (2026-10-28).** libc dropped `O_EXCL` and
+the wire had no flag for it, so an exclusive create of an existing file
+opened it on every tree, and the lockfile idiom believed it had made the
+lock. `OPEN_EXCL` (16) is in ninep-abi, `libc/include/sys.h` and
+`np9p_server.py`, pinned by `check-wire-constants.py`; libc sends it beside
+`O_CREAT` only, and fsd refuses it alone as malformed, first, with the open
+that asks neither to read nor to write. For a name that exists, a file or a
+directory, fsd answers in one place, `exists_answer`, before `check_access`:
+EEXIST to a caller who may search the ancestors, FS_ERR_PERM to one who may
+not. It asks neither the file's own mode nor the read-only gate, as POSIX
+and Linux give EEXIST for a file the caller may not read and EROFS only for
+a file the open would make. The first build skipped the file's mode inside
+`check_access` and answered EEXIST after it. The control removing that
+answer left the skip standing, and `user` opened `/etc/shadow` for writing
+and wrote it. Removing `exists_answer` now leaves `check_access` as it was.
+The host peer answers the same, with six self-test rows, and now refuses
+an open with no access mode first, as fsd does (it answered OPEN_CREATE
+alone of a missing file read-only). `ccreat -x` opens
+`O_WRONLY|O_CREAT|O_EXCL`. In `test-cerrno` a lock is made and then
+refused, on FAT32 as root and ext2 as `user`, and `/Users` and
+`/etc/shadow` answer EEXIST. In `test-long-set`'s read-only boots VG
+answers EEXIST and a missing VX EROFS. Controls: libc dropping the flag (4
+checks fail), fsd's answer removed (4, `/etc/shadow` EACCES and not
+written), the answer after `check_access` (2), and the answer after the
+read-only gate (5 in `test-long-set`). The search check itself is graded
+by no boot (roadmap).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
