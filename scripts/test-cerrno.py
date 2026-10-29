@@ -30,6 +30,14 @@ binding and a path below it, and a /net path (ENOSYS, not answered yet), after
   and of /etc/shadow, which `user` may not read (EEXIST comes before the
   file's own permission, as in Linux), while a missing /etc/newx is EACCES.
   The FAT32 boot, as root, makes /LOCK and is refused it the second time.
+  Then, as `user` (/bin/OPENPROBE, since 2026-10-29), the three `NP_OPEN`
+  refusals no libc flag word reaches, each sent raw: O_CREAT|O_EXCL of
+  /Users/user/hid/f answers EEXIST while `user` may search hid and EACCES
+  once hid is mode 0600, as does a missing name beside it, so the answer
+  tells nothing of what is in the directory (fsd's `exists_answer`);
+  OPEN_EXCL without OPEN_CREATE answers FS_ERROR for an existing and a
+  missing file; and a flag outside OPEN_FLAGS (32, and bit 63) answers
+  FS_ERROR, where a plain read open of the same file opens.
 
 Graded on cerrno's own summary line (`cerrno: N checks, 0 failed`, matched
 whole, with N exactly ROOT_CHECKS below: fewer is a run cut short, and more
@@ -91,11 +99,12 @@ def creat_lines(size):
     ]
 
 
-def creat_steps(lines):
+def creat_steps(lines, wait=None):
     """Driver steps for `lines`: each command typed once the one before it
     has printed its line."""
-    return ([(creat_wait(before), cmd) for (before, _), (cmd, _) in zip(lines, lines[1:])]
-            + [(creat_wait(lines[-1][0]), "")])
+    wait = wait or creat_wait
+    return ([(wait(before), cmd) for (before, _), (cmd, _) in zip(lines, lines[1:])]
+            + [(wait(lines[-1][0]), "")])
 
 
 def creat_checks(name, prompt, text, lines):
@@ -114,6 +123,46 @@ def creat_wait(cmd):
     """The line `cmd` prints: the next command is typed only once it is
     there, not on a `$ ` that may be the prompt printed before it."""
     return r"ccreat: " + re.escape(cmd.split()[-1]) + r" [^\n]*\n"
+
+
+# As `user`, raw NP_OPENs (/bin/OPENPROBE): `hid` is made, searchable, with a
+# file in it; the probe lines before CHMOD run with it so, those after with
+# hid at mode 0600, which `user` owns and may no longer search.
+HID = "/Users/user/hid"
+READ, EXCL_CREATE_READ, EXCL_READ = 1, 1 | 4 | 16, 1 | 16  # ninep_abi's OPEN_*
+CHMOD = f"chmod 600 {HID}"
+
+
+def probe(flags, path, answer):
+    return (f"openprobe {flags} {path}", f"openprobe: {path} {flags} {answer}")
+
+
+PROBE_BEFORE = [probe(EXCL_CREATE_READ, f"{HID}/f", "FS_ERR_ALREADY_EXISTS")]
+PROBE_AFTER = [
+    probe(EXCL_CREATE_READ, f"{HID}/f", "FS_ERR_PERM"),
+    probe(EXCL_CREATE_READ, f"{HID}/g", "FS_ERR_PERM"),
+    probe(READ, "/etc/passwd", "opened"),
+    probe(EXCL_READ, "/etc/passwd", "FS_ERROR"),
+    probe(EXCL_READ, "/etc/nofile", "FS_ERROR"),
+    probe(READ | 32, "/etc/passwd", "FS_ERROR"),
+    probe(READ | 1 << 63, "/etc/passwd", "FS_ERROR"),
+]
+
+
+def probe_wait(cmd):
+    """The line `cmd` prints, as creat_wait."""
+    _, flags, path = cmd.split()
+    return r"openprobe: " + re.escape(path) + " " + flags + r" [^\n]*\n"
+
+
+def probe_steps(after):
+    """Once the pattern `after` has matched: hid and its file made, the probe
+    before the chmod, the chmod, then the rest. The match that `after` waits
+    for must be a line, not a prompt: the driver's settle takes the prompt
+    after a matched line with it, so a `$ ` wait typed there waits for none."""
+    return ([(after, f"mkdir {HID}"), (r"\$ ", f"touch {HID}/f"), (r"\$ ", PROBE_BEFORE[0][0]),
+             (probe_wait(PROBE_BEFORE[-1][0]), CHMOD), (r"\$ ", PROBE_AFTER[0][0])]
+            + creat_steps(PROBE_AFTER, probe_wait))
 
 
 def debugfs_tool():
@@ -195,7 +244,7 @@ def main() -> int:
         (SUMMARY, "exit"),
         ("login:", "user"), ("assword", "user"), (r"\$ ", f"cerrno /etc/shadow {' '.join(known)}"),
         (SUMMARY, creat[0][0]),
-    ] + creat_steps(creat))
+    ] + creat_steps(creat)[:-1] + probe_steps(creat_wait(creat[-1][0])))
     got = summaries(out)
     checks += [
         ("ext2: driven to the end", d),
@@ -205,6 +254,8 @@ def main() -> int:
         ("ext2: no fault lines", f == 0),
     ]
     checks += creat_checks("ext2: user", r"\$ ", out.split("cerrno /etc/shadow", 1)[-1], creat)
+    checks += creat_checks("ext2: user", r"\$ ", out.split("cerrno /etc/shadow", 1)[-1],
+                           PROBE_BEFORE + PROBE_AFTER)
     for name, text in (("fat32", fat32), ("ext2", out)):
         for line in re.findall(r"^cerrno: (?:ok|FAIL).*$", text, re.M):
             print(f"     {name}: {line.rstrip()}")

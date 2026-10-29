@@ -1,0 +1,13 @@
+[package]
+name = "openprobe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ninep-abi = { path = "../../../ninep-abi" }
+syscall-abi = { path = "../../../syscall-abi" }
+ulib = { path = "../../../ulib" }
+
+[[bin]]
+name = "openprobe"
+path = "src/main.rs"
