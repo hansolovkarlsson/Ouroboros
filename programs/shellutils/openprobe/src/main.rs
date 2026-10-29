@@ -16,7 +16,8 @@
 //!
 //! ```text
 //! opened                  a fid, clunked again at once
-//! opened, clunk <n>       a fid whose clunk did not answer 0
+//! opened, clunk <n>       a fid whose clunk fsd answered with <n>, not 0
+//! opened, clunk no answer a fid whose clunk fsd never answered
 //! FS_ERR_ALREADY_EXISTS   EEXIST
 //! FS_ERR_PERM             EACCES
 //! FS_ERR_NOT_FOUND        ENOENT
@@ -29,15 +30,21 @@
 //! The call is made here, not through ulib's `fs_call`/`np_call`, which give
 //! `FS_ERROR` for a call fsd never answered too: a refusal must be told from
 //! an fsd that died on the request (the high review of #369). Exits 0 when fsd
-//! answered, 1 otherwise or on a refused argument.
+//! answered the open, and the clunk with 0 if it opened; 1 otherwise or on a
+//! refused argument.
 
 #![no_std]
 #![no_main]
 
-const PATH_MAX: usize = 128;
+/// fsd's `FID_PATH_MAX` (programs/servers/fsd/src/main.rs, private there): a
+/// longer path is refused FS_ERROR when the fid is made, which would read as
+/// the flag refusals this probe grades.
+const PATH_MAX: usize = 96;
+/// The digits of `u64::MAX`.
+const FLAGS_MAX: usize = 20;
 
 fn usage() -> ! {
-    ulib::con_write(b"usage: openprobe <flags> <path>  (path absolute, at most 128 bytes)\r\n");
+    ulib::con_write(b"usage: openprobe <flags> <path>  (path absolute, at most 96 bytes)\r\n");
     ulib::exit(1);
 }
 
@@ -49,7 +56,11 @@ enum Answer {
 }
 
 /// One `verb` to fsd's tree 0: the header ninep-abi defines (verb, tree,
-/// four params), then `payload` at `NP_REQ_PAYLOAD`.
+/// four params), then `payload` at `NP_REQ_PAYLOAD`. A copy of the encoding in
+/// ulib's private `np_call`, kept here so ulib has no public call past the
+/// namespace (the high review of #369). A drift that malformed the request
+/// cannot pass the rig: the plain read open must answer `opened` and the
+/// searchable `O_EXCL` open EEXIST.
 fn call(verb: u64, params: [u64; 4], payload: &[u8]) -> Answer {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
@@ -84,14 +95,14 @@ fn call(verb: u64, params: [u64; 4], payload: &[u8]) -> Answer {
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
     ulib::usage_if_requested(b"usage: openprobe <flags> <path>  (one raw NP_OPEN; prints fsd's answer)\r\n");
-    let mut flags_buf = [0u8; 24];
-    // One byte more than a path may be, so a longer one is seen and refused
-    // rather than cut short and sent.
+    // Each a byte more than an argument may be, so a longer one is seen and
+    // refused rather than cut short and sent (`ulib::arg` truncates).
+    let mut flags_buf = [0u8; FLAGS_MAX + 1];
     let mut path = [0u8; PATH_MAX + 1];
     let (Some(fl), Some(pl)) = (ulib::arg(1, &mut flags_buf), ulib::arg(2, &mut path)) else {
         usage();
     };
-    if pl == 0 || pl > PATH_MAX || path[0] != b'/' {
+    if fl > FLAGS_MAX || pl == 0 || pl > PATH_MAX || path[0] != b'/' {
         usage();
     }
     let Some(flags) = core::str::from_utf8(&flags_buf[..fl]).ok().and_then(ulib::parse_u64) else {
@@ -106,6 +117,7 @@ pub extern "C" fn _start() -> ! {
     ulib::emit(&mut line, &mut n, b" ");
     ulib::emit_dec(&mut line, &mut n, flags);
     ulib::emit(&mut line, &mut n, b" ");
+    let mut clunked = true;
     let answered = match answer {
         Answer::Status(r) => {
             let name: Option<&[u8]> = match r {
@@ -121,9 +133,14 @@ pub extern "C" fn _start() -> ! {
                     ulib::emit(&mut line, &mut n, b"opened");
                     match call(ninep_abi::NP_CLUNK, [r, 0, 0, 0], &[]) {
                         Answer::Status(0) => {}
-                        Answer::Status(c) | Answer::NoAnswer(c) | Answer::Short(c) => {
+                        Answer::Status(c) => {
                             ulib::emit(&mut line, &mut n, b", clunk ");
                             ulib::emit_dec(&mut line, &mut n, c);
+                            clunked = false;
+                        }
+                        Answer::NoAnswer(_) | Answer::Short(_) => {
+                            ulib::emit(&mut line, &mut n, b", clunk no answer");
+                            clunked = false;
                         }
                     }
                 }
@@ -132,7 +149,7 @@ pub extern "C" fn _start() -> ! {
                     ulib::emit_dec(&mut line, &mut n, r);
                 }
             }
-            true
+            clunked
         }
         Answer::NoAnswer(e) => {
             ulib::emit(&mut line, &mut n, b"no answer ");

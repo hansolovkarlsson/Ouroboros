@@ -137,6 +137,9 @@ CHMOD = f"chmod 600 {HID}"
 # answering EEXIST where it should refuse: hid's line in its parent's listing.
 LS = "ls -l /Users/user"
 HID_MODE = r"^drw------- .* hid/\r?$"
+# The kernel's line for a program's exit: `ls` has printed its whole listing,
+# whatever order its names sort in (`hid/` sorts first, the review of #369).
+EXITED = r"task \d+ exited \(code \d+\)\r?\n"
 
 
 def probe(flags, path, answer):
@@ -168,7 +171,7 @@ def probe_steps(after):
     after a matched line with it, so a `$ ` wait typed there waits for none."""
     return ([(after, f"mkdir {HID}"), (r"\$ ", f"touch {HID}/f"), (r"\$ ", PROBE_BEFORE[0][0])]
             + creat_steps(PROBE_BEFORE, probe_wait)[:-1]
-            + [(probe_wait(PROBE_BEFORE[-1][0]), CHMOD), (r"\$ ", LS), (r" hid/\r?\n", PROBE_AFTER[0][0])]
+            + [(probe_wait(PROBE_BEFORE[-1][0]), CHMOD), (r"\$ ", LS), (EXITED, PROBE_AFTER[0][0])]
             + creat_steps(PROBE_AFTER, probe_wait))
 
 
@@ -262,7 +265,8 @@ def main() -> int:
     ]
     as_user = out.split("cerrno /etc/shadow", 1)[-1]
     checks += creat_checks("ext2: user", r"\$ ", as_user, creat + PROBE_BEFORE + PROBE_AFTER)
-    listing = as_user.split(LS, 1)[-1].split("openprobe", 1)[0]
+    # No listing is a failure, not the transcript before it read as one.
+    listing = as_user.split(LS, 1)[1].split("openprobe", 1)[0] if LS in as_user else ""
     checks.append((f"ext2: user: `{CHMOD}` took, hid listed drw-------",
                    re.search(HID_MODE, listing, re.M) is not None))
     for name, text in (("fat32", fat32), ("ext2", out)):
