@@ -147,6 +147,8 @@ OPEN_CREATE = 4
 OPEN_TRUNC = 8
 OPEN_EXCL = 16
 OPEN_FLAGS = OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC | OPEN_EXCL
+# ninep-abi's OPEN_DIR_REFUSED: the flags that refuse an existing directory.
+OPEN_DIR_REFUSED = OPEN_WRITE | OPEN_TRUNC | OPEN_CREATE
 # fid -> path. Flags are not kept: this export is read-only, so the only flag
 # combination that ever gets a fid is a pure read.
 FIDS = {}
@@ -628,6 +630,14 @@ def serve_np(body, name, sealed):
         # before the read-only refusal, as fsd and POSIX have it.
         if flags & OPEN_EXCL and exists:
             return sealed(FS_ERR_ALREADY_EXISTS)
+        # A directory opens for reading alone, as on fsd since 2026-10-29: a
+        # write, truncate or create of one that exists is EISDIR, before the
+        # read-only refusal, as fsd and Linux order them. A read open gets a
+        # fid, whose NP_PREAD is EISDIR and whose NP_FSTAT says a directory.
+        # Until then this peer refused every open of a directory where fsd
+        # gave a fid.
+        if fpath in DIRS and flags & OPEN_DIR_REFUSED:
+            return sealed(FS_ERR_NOT_A_FILE)
         if flags & (OPEN_WRITE | OPEN_TRUNC) or (flags & OPEN_CREATE and not exists):
             if not flags & (OPEN_WRITE | OPEN_TRUNC) and parent not in DIRS:
                 return sealed(FS_ERR_NOT_FOUND)
@@ -635,9 +645,7 @@ def serve_np(body, name, sealed):
             print(f"  [read-only: refusing NP_OPEN flags=0x{flags:x} "
                   f"path={fpath!r}]", flush=True)
             return sealed(FS_ERR_READ_ONLY)
-        if fpath in DIRS:
-            return sealed(FS_ERR_NOT_A_FILE)
-        if fpath not in FILES:
+        if fpath not in FILES and fpath not in DIRS:
             return sealed(FS_ERR_NOT_FOUND)
         free = next((n for n in range(FID_BASE, FID_BASE + MAX_FIDS)
                      if n not in FIDS), None)
@@ -681,6 +689,8 @@ def serve_np(body, name, sealed):
                 return sealed(FS_ERR_NOT_FOUND)
             return sealed(STAT_INFO_LEN, info)
         # NP_PREAD: a1 = offset, a2 = count. Status = bytes read, 0 at EOF.
+        if fpath in DIRS:
+            return sealed(FS_ERR_NOT_A_FILE)
         data = FILES[fpath]
         off, count = a1, a2
         if off >= len(data):
@@ -768,7 +778,12 @@ SELF_TEST_VERBS = [
     ("NP_OPEN(rx)",   NP_BASE + 15, "generic-error", (OPEN_READ | OPEN_EXCL, "PLEN", 0), b"/HELLO.TXT"),
     # A flag the server does not know fails closed (ninep-abi OPEN_FLAGS).
     ("NP_OPEN(r+32)", NP_BASE + 15, "generic-error", (OPEN_READ | 32, "PLEN", 0), b"/HELLO.TXT"),
-    ("NP_OPEN(dir)",  NP_BASE + 15, "not-a-file",   (OPEN_READ, "PLEN", 0), b"/SUB"),
+    # A directory opens for reading, as on fsd; a write or a create of one
+    # is EISDIR, before the read-only refusal.
+    ("NP_OPEN(dir)",  NP_BASE + 15, "served",       (OPEN_READ, "PLEN", 0), b"/SUB"),
+    ("NP_OPEN(rc dir)", NP_BASE + 15, "not-a-file", (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/SUB"),
+    ("NP_OPEN(w dir)", NP_BASE + 15, "not-a-file",  (OPEN_WRITE, "PLEN", 0), b"/SUB"),
+    ("NP_OPEN(rt dir)", NP_BASE + 15, "not-a-file", (OPEN_READ | OPEN_TRUNC, "PLEN", 0), b"/SUB"),
     ("NP_OPEN(gone)", NP_BASE + 15, "not-found",    (OPEN_READ, "PLEN", 0), b"/NOPE.TXT"),
     # a0 = a FID, and no path at all.
     ("NP_PREAD",      NP_BASE + 16, "served",       (FID, 0, 512),     b""),
@@ -850,6 +865,10 @@ def self_test(quiet=True):
         for name, verb, want, params, path in SELF_TEST_VERBS:
             status, _ = _call(_frame(verb, params, path, fid), quiet)
             got = classify(status)
+            if verb == NP_BASE + 15 and got == "served":
+                # Give the fid back, so the table's opens cannot fill FIDS and
+                # make a later row fail for want of a fid.
+                _call(_frame(NP_BASE + 19, (FID, 0, 0), b"", status), quiet)
             if got != want:
                 bad.append(f"  - {name} (0x{verb:x}): dispatch says {got}, "
                            f"this table says {want}")
@@ -923,6 +942,24 @@ def self_test(quiet=True):
         if classify(st) != "generic-error":
             bad.append(f"  - fid round trip: NP_PREAD on a CLUNKED fid gave "
                        f"{classify(st)}; a freed handle must not still read")
+
+        # A directory's fid, as fsd gives one: NP_FSTAT says a directory, and
+        # NP_PREAD is EISDIR, not the read of a file.
+        st, _ = _call(_frame(NP_BASE + 15, (OPEN_READ, "PLEN", 0), b"/SUB", 0), quiet)
+        if classify(st) != "served":
+            bad.append(f"  - directory fid: NP_OPEN of /SUB gave {classify(st)}, expected a fid")
+        else:
+            fid = st
+            st, info = _call(_frame(NP_BASE + 18, (FID, 0, 0), b"", fid), quiet)
+            flags = struct.unpack("<I", info[STAT_FLAGS_OFF:STAT_FLAGS_OFF + 4])[0] if st == STAT_INFO_LEN else 0
+            if not flags & STAT_FLAG_DIR:
+                bad.append(f"  - directory fid: NP_FSTAT gave status {st}, flags {flags}; expected a directory")
+            st, _ = _call(_frame(NP_BASE + 16, (FID, 0, 16), b"", fid), quiet)
+            if classify(st) != "not-a-file":
+                bad.append(f"  - directory fid: NP_PREAD gave {classify(st)}, expected not-a-file")
+            st, _ = _call(_frame(NP_BASE + 19, (FID, 0, 0), b"", fid), quiet)
+            if st != 0:
+                bad.append(f"  - directory fid: NP_CLUNK status {st}, expected 0")
     finally:
         verify = real_verify
         FIDS.clear()

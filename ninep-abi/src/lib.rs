@@ -307,7 +307,14 @@ pub const NP_CHOWN: u64 = NP_BASE + 14;
 /// client until [`NP_CLUNK`], and BELONGS to the client that opened it: the
 /// sending task, and behind a relay that fronts many users (`netd`'s export,
 /// this peer set's host server) the user it was opened as. Every fid verb
-/// tests that; see [`NP_CLUNK`] for the answers.
+/// tests that; see [`NP_CLUNK`] for the answers. A directory opens for reading
+/// alone, as POSIX has it: an open of one that exists with a flag of
+/// [`OPEN_DIR_REFUSED`] is `FS_ERR_NOT_A_FILE` (EISDIR) to a caller who may
+/// stat it (`FS_ERR_PERM` otherwise), before the mode check and a read-only
+/// tree's refusal, as Linux orders them. [`OPEN_EXCL`]'s answer comes first:
+/// `OPEN_CREATE|OPEN_EXCL` of a directory is `FS_ERR_ALREADY_EXISTS`, as
+/// Linux gives EEXIST. Its fid's [`NP_PREAD`] is `FS_ERR_NOT_A_FILE` and its
+/// [`NP_FSTAT`] says it is a directory.
 pub const NP_OPEN: u64 = NP_BASE + 15;
 
 /// **Read** from a fid at an explicit offset: `a0` = fid, `a1` = offset,
@@ -361,6 +368,16 @@ pub const OPEN_EXCL: u64 = 16;
 /// does not know it (the high review of #367). A server built before this
 /// still ignores the bit, which no change here can reach.
 pub const OPEN_FLAGS: u64 = OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC | OPEN_EXCL;
+
+/// The [`NP_OPEN`] flags that refuse an existing directory (`FS_ERR_NOT_A_FILE`,
+/// EISDIR): the ones that would write, truncate or create it, so exactly
+/// those [`open_changes`] counts as a change of a missing name (its host test
+/// holds the two together). One spelling for fsd, which uses it, and for
+/// `scripts/np9p_server.py`, whose copy `scripts/check-wire-constants.py`
+/// compares with this one on every `make test` (the medium review of #370:
+/// the mask was written out in both, and a control that cut the peer's to
+/// `OPEN_CREATE` alone showed the copies can drift).
+pub const OPEN_DIR_REFUSED: u64 = OPEN_WRITE | OPEN_TRUNC | OPEN_CREATE;
 
 /// Whether an [`NP_OPEN`] with `flags` changes the disk, and so needs write
 /// access and is refused on a read-only tree: writing or truncating
@@ -1408,6 +1425,15 @@ mod tests {
         assert!(open_changes(OPEN_CREATE | OPEN_READ, false));
         assert!(!open_changes(OPEN_CREATE, true));
         assert!(!open_changes(OPEN_CREATE | OPEN_READ, true));
+    }
+
+    #[test]
+    fn a_directory_is_refused_exactly_where_a_missing_name_changes() {
+        for flags in 0..=OPEN_FLAGS {
+            assert_eq!(flags & OPEN_DIR_REFUSED != 0, open_changes(flags, false), "flags {flags:#x}");
+        }
+        assert_eq!(OPEN_DIR_REFUSED & OPEN_READ, 0);
+        assert_eq!(OPEN_DIR_REFUSED & OPEN_EXCL, 0);
     }
 
     #[test]

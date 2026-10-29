@@ -7,7 +7,8 @@ Step 2 of docs/roadmap/roadmap-c-hosting.md. `/bin/CERRNO` (libc/cerrno.c,
 picolibc) provokes every failure a C program can reach in the file layer and
 checks the errno POSIX names for it: a missing file, a path through a file, a
 full fd table, a bad fd, an fd used against its mode, a bad lseek, a directory
-read; and stat(path) (step 4): a missing path, a path through a file, an
+read, and a directory opened to write, read-write, create or truncate (EISDIR
+at the open, since 2026-10-29); and stat(path) (step 4): a missing path, a path through a file, an
 empty path, a null struct, a directory, a file against fstat's record, lstat,
 a full fd table, a trailing `/` or `/.` (a directory, or ENOTDIR), the console
 binding and a path below it, and a /net path (ENOSYS, not answered yet), after
@@ -62,7 +63,7 @@ _spec.loader.exec_module(drive_qemu)
 
 # How many checks cerrno runs as root. A summary with fewer is a run that
 # skipped some, which must not pass.
-ROOT_CHECKS = 41
+ROOT_CHECKS = 45
 SUMMARY = r"cerrno: (\d+) checks, (\d+) failed\r?\n"
 # Files cerrno checks stat against, as `<path> <octal mode> <uid> <gid>`, the
 # values read from the ext2 partition itself by debugfs (owner_on_image), not
@@ -131,7 +132,8 @@ def creat_wait(cmd):
 # file in it; the probe lines before CHMOD run with it so, those after with
 # hid at mode 0600, which `user` owns and may no longer search.
 HID = "/Users/user/hid"
-READ, EXCL_CREATE_READ, EXCL_READ = 1, 1 | 4 | 16, 1 | 16  # ninep_abi's OPEN_*
+READ, EXCL_CREATE_READ, EXCL_READ = 1, 1 | 4 | 16, 1 | 16
+WRITE, TRUNC_READ, CREATE_READ = 2, 1 | 8, 1 | 4  # ninep_abi's OPEN_*
 CHMOD = f"chmod 600 {HID}"
 # The chmod's own result, so a chmod that did not take is not read as fsd
 # answering EEXIST where it should refuse: hid's line in its parent's listing.
@@ -146,7 +148,12 @@ def probe(flags, path, answer):
     return (f"openprobe {flags} {path}", f"openprobe: {path} {flags} {answer}")
 
 
-PROBE_BEFORE = [probe(EXCL_CREATE_READ, f"{HID}/f", "FS_ERR_ALREADY_EXISTS")]
+# A directory opened to write, truncate or create is EISDIR to a caller who
+# may stat it, before the mode check (`user` may not write /etc) and EACCES
+# to one who may not (hid/d once hid is 0600), as EEXIST is (since
+# 2026-10-29, the review of #370).
+PROBE_BEFORE = [probe(EXCL_CREATE_READ, f"{HID}/f", "FS_ERR_ALREADY_EXISTS"),
+                probe(WRITE, f"{HID}/d", "FS_ERR_NOT_A_FILE")]
 PROBE_AFTER = [
     probe(EXCL_CREATE_READ, f"{HID}/f", "FS_ERR_PERM"),
     probe(EXCL_CREATE_READ, f"{HID}/g", "FS_ERR_PERM"),
@@ -155,6 +162,11 @@ PROBE_AFTER = [
     probe(EXCL_READ, "/etc/nofile", "FS_ERROR"),
     probe(READ | 32, "/etc/passwd", "FS_ERROR"),
     probe(READ | 1 << 63, "/etc/passwd", "FS_ERROR"),
+    probe(WRITE, f"{HID}/d", "FS_ERR_PERM"),
+    probe(WRITE, "/etc", "FS_ERR_NOT_A_FILE"),
+    probe(TRUNC_READ, "/etc", "FS_ERR_NOT_A_FILE"),
+    probe(CREATE_READ, "/etc", "FS_ERR_NOT_A_FILE"),
+    probe(READ, "/etc", "opened"),
 ]
 
 
@@ -169,7 +181,8 @@ def probe_steps(after):
     before the chmod, the chmod, then the rest. The match that `after` waits
     for must be a line, not a prompt: the driver's settle takes the prompt
     after a matched line with it, so a `$ ` wait typed there waits for none."""
-    return ([(after, f"mkdir {HID}"), (r"\$ ", f"touch {HID}/f"), (r"\$ ", PROBE_BEFORE[0][0])]
+    return ([(after, f"mkdir {HID}"), (r"\$ ", f"touch {HID}/f"), (r"\$ ", f"mkdir {HID}/d"),
+             (r"\$ ", PROBE_BEFORE[0][0])]
             + creat_steps(PROBE_BEFORE, probe_wait)[:-1]
             + [(probe_wait(PROBE_BEFORE[-1][0]), CHMOD), (r"\$ ", LS), (EXITED, PROBE_AFTER[0][0])]
             + creat_steps(PROBE_AFTER, probe_wait))

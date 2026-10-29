@@ -86,6 +86,17 @@ static void check(const char *what, int ok) {
         (void)r_;                         \
     } while (0)
 
+/* `open("/etc", flags)` must fail EISDIR; a descriptor it gave is closed, so
+ * the checks after it still have every fd. */
+static void dir_open(const char *what, int flags) {
+    errno = 0;
+    int fd = open("/etc", flags);
+    expect(what, fd < 0, EISDIR);
+    if (fd >= 0) {
+        close(fd);
+    }
+}
+
 static void as_root(void) {
     char buf[16];
     struct stat st;
@@ -210,6 +221,14 @@ static void as_root(void) {
         TRY("read of a directory", read(fd, buf, sizeof buf), r_ < 0, EISDIR);
         close(fd);
     }
+    /* A directory opened to write, truncate or create: EISDIR at the open,
+     * not a descriptor whose first write fails (fsd before 2026-10-29). The
+     * last is refused by fsd's write_file too, so it guards that a directory
+     * is never truncated rather than grading the open's refusal. */
+    dir_open("open of a directory O_WRONLY", O_WRONLY);
+    dir_open("open of a directory O_RDWR", O_RDWR);
+    dir_open("open of a directory O_RDONLY|O_CREAT", O_RDONLY | O_CREAT);
+    dir_open("open of a directory O_WRONLY|O_CREAT|O_TRUNC", O_WRONLY | O_CREAT | O_TRUNC);
 }
 
 int main(int argc, char **argv) {

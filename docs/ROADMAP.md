@@ -4491,12 +4491,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   three. From the high review of #367.~~ **Done 2026-10-29:**
   `/bin/OPENPROBE` in `test-cerrno`'s ext2 boot as `user`; each of the three
   refusals removed in turn fails its own checks.
-- **fsd opens a directory as a fid; the host peer refuses it.** An
+- ~~**fsd opens a directory as a fid; the host peer refuses it.** An
   `NP_OPEN` of a directory, with or without `OPEN_CREATE`, gets a fid from
   fsd, where `np9p_server.py` answers FS_ERR_NOT_A_FILE (its
   `NP_OPEN(dir)` self-test row pins the peer's side). Older than #364;
   one of the two should change, and the other follow. From the second
-  medium review of #364.
+  medium review of #364.~~ **Done 2026-10-29:** fsd's read open stands
+  (POSIX); a write, truncate or create open of a directory is EISDIR at
+  the open on fsd, and the peer gives a directory a fid for reading.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on
@@ -4567,6 +4569,10 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   owns it and nothing gives it back: one cluster for each such entry, which
   `fsck_exfat` reports. Reusing it was how a write reached another file's
   cluster; a leak is the safe side. Found by the high review of 2026-10-19.
+  **Kept as a leak, Hans's decision, 2026-10-29:** freeing the cluster
+  safely needs every directory walked on each such `rm`, to show no other
+  set names it, and `fsck_exfat` reclaims it. Do not re-propose without a
+  cheaper proof of ownership.
 - **`test-grow-dir` hung once in 31 runs, fsd silent mid-probe.** On
   2026-10-19, with the tree at e6655482, one boot stopped answering during
   `dirprobe /ZERO 100`: no fault line, no restart, the step's 90 s gone

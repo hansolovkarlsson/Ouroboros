@@ -138,7 +138,8 @@ fn tree_read_only(tree: usize, fs: &vfs::Filesystem) -> bool {
 
 /// An `NP_OPEN`'s path and what its one stat of it found: `Ok(true)` the file
 /// exists, `Ok(false)` it is missing, `Err` the status of any other failure (an
-/// I/O error, a path through a file). Made once in `handle_ninep`, before
+/// I/O error, a path through a file), and `dir` whether what exists is a
+/// directory (false when nothing does). Made once in `handle_ninep`, before
 /// [`check_access`], and read by it, by [`refused_read_only`] and by the
 /// handler, so the three cannot disagree on whether the open creates: a stat
 /// each let a transient I/O error authorize a create on the parent and the
@@ -149,16 +150,35 @@ fn tree_read_only(tree: usize, fs: &vfs::Filesystem) -> bool {
 #[derive(Clone, Copy)]
 struct Found<'a> {
     path: &'a str,
-    file: Result<bool, u64>,
+    kind: Result<Kind, u64>,
 }
 
-/// [`Found::file`] for `path` on `fs`.
-fn found(fs: &mut vfs::Filesystem, path: &str) -> Result<bool, u64> {
-    match fs.stat(path) {
-        Ok(_) => Ok(true),
-        Err(fat32::Error::NotFound) => Ok(false),
-        Err(e) => Err(error_code(&e)),
+/// What a [`Found`]'s stat found at its path, or that nothing is there. One
+/// value, so "a directory" cannot be written beside "missing" or a failed
+/// stat (the medium review of #370: a `dir: bool` beside the stat's result
+/// could be).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Missing,
+    File,
+    Dir,
+}
+
+impl Kind {
+    fn exists(self) -> bool {
+        self != Kind::Missing
     }
+}
+
+/// The [`Found`] for `path` on `fs`.
+fn found<'a>(fs: &mut vfs::Filesystem, path: &'a str) -> Found<'a> {
+    let kind = match fs.stat(path) {
+        Ok(st) if st.is_dir => Ok(Kind::Dir),
+        Ok(_) => Ok(Kind::File),
+        Err(fat32::Error::NotFound) => Ok(Kind::Missing),
+        Err(e) => Err(error_code(&e)),
+    };
+    Found { path, kind }
 }
 
 /// The status `verb` on `tree`, mounted as `fs`, is refused with because that
@@ -201,10 +221,10 @@ fn refused_read_only(tree: usize, fs: &mut vfs::Filesystem, verb: u64, p: &[u64;
                 return READ_ONLY; // changes the file even where it exists
             }
             // Creates, and only when the file is missing.
-            let Some(Found { path, file }) = open else {
+            let Some(Found { path, kind }) = open else {
                 return READ_ONLY;
             };
-            match file {
+            match kind.map(Kind::exists) {
                 Ok(true) => None,
                 Ok(false) => match fs.stat(parent_of(path)) {
                     Ok(st) if st.is_dir => READ_ONLY,
@@ -836,16 +856,24 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             }
-            Some(Found { path, file: found(fs, path) })
+            Some(found(fs, path))
         }
         _ => None,
     };
     // `O_CREAT|O_EXCL` of a name that exists answers here, whole, and
     // nothing acts: see [`exists_answer`]. Only the malformed requests above
-    // have answered before it, and none of them by the name's existence.
-    if let Some(Found { file: Ok(true), .. }) = open {
-        if p[0] & ninep_abi::OPEN_EXCL != 0 {
-            return status_reply(reply, exists_answer(fs, who, &p, payload));
+    // have answered before it, and none of them by the name's existence. So
+    // does a directory opened to write, truncate or create: it opens for
+    // reading alone, as POSIX has it (until 2026-10-29 such an open got a
+    // fid, and only its first write failed).
+    // `O_EXCL` is asked first, so `O_CREAT|O_EXCL` of a directory is EEXIST,
+    // as on Linux, whose `do_open` answers it before EISDIR.
+    if let Some(Found { kind: Ok(kind), .. }) = open {
+        if kind.exists() && p[0] & ninep_abi::OPEN_EXCL != 0 {
+            return status_reply(reply, exists_answer(fs, who, &p, payload, syscall_abi::FS_ERR_ALREADY_EXISTS));
+        }
+        if kind == Kind::Dir && p[0] & ninep_abi::OPEN_DIR_REFUSED != 0 {
+            return status_reply(reply, exists_answer(fs, who, &p, payload, syscall_abi::FS_ERR_NOT_A_FILE));
         }
     }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
@@ -1120,7 +1148,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
         ninep_abi::NP_OPEN => {
             // The path and the one stat made above ([`Found`]), not another:
             // what `check_access` and the gate decided on is what this acts on.
-            let Some(Found { path, file }) = open else {
+            let Some(Found { path, kind }) = open else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
             // The user the fid is opened as. `check_access` above already
@@ -1142,8 +1170,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 return status_reply(reply, syscall_abi::FS_ERROR);
             }
             let flags = p[0];
-            let exists = match file {
-                Ok(exists) => exists,
+            let exists = match kind {
+                Ok(kind) => kind.exists(),
                 Err(code) => return status_reply(reply, code),
             };
             if flags & ninep_abi::OPEN_TRUNC != 0 {
@@ -1740,26 +1768,32 @@ fn models_modes(fs: &mut vfs::Filesystem) -> bool {
     models_modes_or_unknown(fs).unwrap_or(true)
 }
 
-/// The answer to an `O_CREAT|O_EXCL` open (`p`, `payload`) of a name that
-/// exists: FS_ERR_ALREADY_EXISTS (EEXIST) to a caller who may stat it, which
-/// is what tells anyone the name exists, and FS_ERR_PERM to one who may not,
-/// or to no caller. "May stat it" is [`check_access`]'s own `NP_STAT` rule,
+/// The answer to an open (`p`, `payload`) of a name that exists, refused for
+/// what the name is: `known` to a caller who may stat it, which is what tells
+/// anyone the name exists and what it is, and FS_ERR_PERM to one who may not,
+/// or to no caller. `known` is FS_ERR_ALREADY_EXISTS (EEXIST) for
+/// `O_CREAT|O_EXCL`, and FS_ERR_NOT_A_FILE (EISDIR) for a directory opened to
+/// write, truncate or create (since 2026-10-29), each answered before
+/// `check_access`'s mode check and the read-only gate, as Linux's `may_open`
+/// answers EISDIR before both. "May stat it" is [`check_access`]'s own `NP_STAT` rule,
 /// asked of it, not a copy of it (the high review of #367): root, a
-/// filesystem without modes and the ancestor walk stay one rule. The file's own mode is not asked: the open will
-/// neither read nor write it, and POSIX and Linux give EEXIST for a file the
-/// caller may not read. Nor is the read-only gate: POSIX gives EROFS only for
+/// filesystem without modes and the ancestor walk stay one rule. The name's own mode is not asked: the open will
+/// neither read nor write it, and Linux answers both before it looks at the
+/// mode (`do_open`'s EEXIST, then its EISDIR for `O_CREAT` and `may_open`'s
+/// for a write or truncate, all before `inode_permission`), so EEXIST is given for a file the
+/// caller may not read and EISDIR for a directory it may not write. Nor is the read-only gate: POSIX gives EROFS only for
 /// a file the open would make. Made whole here, before [`check_access`], and
 /// not as a skip inside it with the EEXIST answered after: the control
 /// removing that later answer left the skip standing, and `user` opened
 /// /etc/shadow for writing and wrote it (the first build of the O_EXCL fix,
 /// 2026-10-28). Removing this one leaves `check_access` as it always was.
 /// Until 2026-10-28 libc dropped `O_EXCL` and such an open succeeded.
-fn exists_answer(fs: &mut vfs::Filesystem, who: Option<Caller>, p: &[u64; 4], payload: &[u8]) -> u64 {
+fn exists_answer(fs: &mut vfs::Filesystem, who: Option<Caller>, p: &[u64; 4], payload: &[u8], known: u64) -> u64 {
     // NP_STAT's `a0` is the path length, NP_OPEN's `a1`; the payload is the
     // same path at offset 0 for both.
     let stat = [p[1], 0, 0, 0];
     if check_access(fs, who, ninep_abi::NP_STAT, &stat, payload, None) {
-        syscall_abi::FS_ERR_ALREADY_EXISTS
+        known
     } else {
         syscall_abi::FS_ERR_PERM
     }
@@ -1803,7 +1837,7 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
         // write/create-open needs W (on the file if it exists, else on the parent
         // dir for a create). a0 = flags, a1 = path length.
         ninep_abi::NP_OPEN => match open {
-            Some(Found { path, file }) => {
+            Some(Found { path, kind }) => {
                 let flags = p[0];
                 // OPEN_TRUNC is a WRITE: the handler acts on it by truncating
                 // the file, so leaving it out of this mask let
@@ -1819,8 +1853,8 @@ fn check_access(fs: &mut vfs::Filesystem, who: Option<Caller>, verb: u64, p: &[u
                 // hear it, as for NP_STAT. An open asking neither to read nor
                 // to write never reaches here: `handle_ninep` refuses it first,
                 // for every caller alike.
-                let exists = match file {
-                    Ok(exists) => exists,
+                let exists = match kind {
+                    Ok(kind) => kind.exists(),
                     Err(_) => return ancestors_searchable(fs, path, &who),
                 };
                 let wants_write = ninep_abi::open_changes(flags, exists);

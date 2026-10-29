@@ -21,6 +21,7 @@
 //! FS_ERR_ALREADY_EXISTS   EEXIST
 //! FS_ERR_PERM             EACCES
 //! FS_ERR_NOT_FOUND        ENOENT
+//! FS_ERR_NOT_A_FILE       EISDIR
 //! FS_ERROR                fsd's own malformed-request answer
 //! status <n>              any other status fsd answered
 //! no answer <n>           MSG_CALL itself failed (no fsd, or <n> its error)
@@ -124,6 +125,7 @@ pub extern "C" fn _start() -> ! {
                 syscall_abi::FS_ERR_ALREADY_EXISTS => Some(b"FS_ERR_ALREADY_EXISTS"),
                 syscall_abi::FS_ERR_PERM => Some(b"FS_ERR_PERM"),
                 syscall_abi::FS_ERR_NOT_FOUND => Some(b"FS_ERR_NOT_FOUND"),
+                syscall_abi::FS_ERR_NOT_A_FILE => Some(b"FS_ERR_NOT_A_FILE"),
                 syscall_abi::FS_ERROR => Some(b"FS_ERROR"),
                 _ => None,
             };
