@@ -1405,16 +1405,27 @@ boot either.
 (2026-10-29).** fsd gave a fid for any `NP_OPEN` of a directory, so
 `open("/etc", O_WRONLY)` returned a descriptor whose first write failed,
 where POSIX answers a write, read-write or create open of a directory EISDIR
-at the open. fsd now does, after `check_access` and the read-only gate, so
-neither tells a caller what a name is before they would. The host peer
+at the open. fsd now does, beside `O_CREAT|O_EXCL`'s EEXIST and through the
+same `exists_answer`: EISDIR to a caller who may stat the name and EACCES to
+one who may not, before `check_access`'s mode check, the read-only gate and
+the fid table, as Linux's `may_open` orders them (the review of #370 found
+the first build's refusal after them, so `user` got EACCES for `/etc`). The host peer
 (`np9p_server.py`) refused every open of a directory, the disagreement the
 second medium review of #364 found: it now gives a fid for reading, whose
-`NP_PREAD` is EISDIR and whose `NP_FSTAT` says a directory, and a create of
-one is EISDIR. `test-cerrno` checks four such opens of `/etc` as root on
-FAT32 and ext2 (45 checks each), and the peer's self-test a directory's fid
-round trip. Controls: fsd's refusal removed (3 checks fail a boot; the
-truncate open is still refused by `write_file`), and the peer's three
-changes each reverted (its own rows fail). The roadmap also records Hans's
+`NP_PREAD` is EISDIR and whose `NP_FSTAT` says a directory, and a write,
+truncate or create of one is EISDIR before its read-only refusal.
+`test-cerrno` checks four such opens of `/etc` as root on FAT32 and ext2 (45
+checks each), and as `user` through `/bin/OPENPROBE` `/etc` opened to write,
+truncate and create (EISDIR) and to read (opened), and `hid/d` opened to
+write before and after `hid` is 0600 (EISDIR, then EACCES); `test-long-set`'s
+VRUNS boot opens `/etc` for writing on a read-only exFAT (EISDIR, not
+EROFS); the peer's self-test makes a directory's fid round trip. Controls:
+fsd's refusal removed (3 root checks a boot and 4 of `user`'s fail; the
+truncate open is still refused by `write_file`), the refusal after the gates
+as first built (`user`'s `/etc` write and truncate, and VRUNS), the refusal
+without the stat rule (`hid/d` after the chmod), and the peer's mask cut to
+create alone or put after its read-only refusal (its write and truncate
+rows). The roadmap also records Hans's
 decision to keep the size-0 exFAT entry's cluster as a leak.
 
 **fsd's three `NP_OPEN` refusals are graded (2026-10-29).** `/bin/OPENPROBE`

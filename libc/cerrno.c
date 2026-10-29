@@ -222,7 +222,9 @@ static void as_root(void) {
         close(fd);
     }
     /* A directory opened to write, truncate or create: EISDIR at the open,
-     * not a descriptor whose first write fails (fsd before 2026-10-29). */
+     * not a descriptor whose first write fails (fsd before 2026-10-29). The
+     * last is refused by fsd's write_file too, so it guards that a directory
+     * is never truncated rather than grading the open's refusal. */
     dir_open("open of a directory O_WRONLY", O_WRONLY);
     dir_open("open of a directory O_RDWR", O_RDWR);
     dir_open("open of a directory O_RDONLY|O_CREAT", O_RDONLY | O_CREAT);
