@@ -1401,6 +1401,22 @@ bit outside ninep-abi's `OPEN_FLAGS`. It also found `exists_answer` copying
 `NP_STAT` on the same path. Those two refusals in fsd are graded by no
 boot either.
 
+**A directory opens for reading alone, on fsd and the host peer
+(2026-10-29).** fsd gave a fid for any `NP_OPEN` of a directory, so
+`open("/etc", O_WRONLY)` returned a descriptor whose first write failed,
+where POSIX answers a write, read-write or create open of a directory EISDIR
+at the open. fsd now does, after `check_access` and the read-only gate, so
+neither tells a caller what a name is before they would. The host peer
+(`np9p_server.py`) refused every open of a directory, the disagreement the
+second medium review of #364 found: it now gives a fid for reading, whose
+`NP_PREAD` is EISDIR and whose `NP_FSTAT` says a directory, and a create of
+one is EISDIR. `test-cerrno` checks four such opens of `/etc` as root on
+FAT32 and ext2 (45 checks each), and the peer's self-test a directory's fid
+round trip. Controls: fsd's refusal removed (3 checks fail a boot; the
+truncate open is still refused by `write_file`), and the peer's three
+changes each reverted (its own rows fail). The roadmap also records Hans's
+decision to keep the size-0 exFAT entry's cluster as a leak.
+
 **fsd's three `NP_OPEN` refusals are graded (2026-10-29).** `/bin/OPENPROBE`
 sends one raw `NP_OPEN` with any flag word and prints fsd's answer by name.
 `test-cerrno`'s ext2 boot drives it as `user`. `O_CREAT|O_EXCL` of

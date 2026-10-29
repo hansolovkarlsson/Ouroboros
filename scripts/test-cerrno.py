@@ -7,7 +7,8 @@ Step 2 of docs/roadmap/roadmap-c-hosting.md. `/bin/CERRNO` (libc/cerrno.c,
 picolibc) provokes every failure a C program can reach in the file layer and
 checks the errno POSIX names for it: a missing file, a path through a file, a
 full fd table, a bad fd, an fd used against its mode, a bad lseek, a directory
-read; and stat(path) (step 4): a missing path, a path through a file, an
+read, and a directory opened to write, read-write, create or truncate (EISDIR
+at the open, since 2026-10-29); and stat(path) (step 4): a missing path, a path through a file, an
 empty path, a null struct, a directory, a file against fstat's record, lstat,
 a full fd table, a trailing `/` or `/.` (a directory, or ENOTDIR), the console
 binding and a path below it, and a /net path (ENOSYS, not answered yet), after
