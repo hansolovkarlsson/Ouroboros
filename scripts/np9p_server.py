@@ -146,6 +146,7 @@ OPEN_WRITE = 2
 OPEN_CREATE = 4
 OPEN_TRUNC = 8
 OPEN_EXCL = 16
+OPEN_FLAGS = OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC | OPEN_EXCL
 # fid -> path. Flags are not kept: this export is read-only, so the only flag
 # combination that ever gets a fid is a pure read.
 FIDS = {}
@@ -621,7 +622,7 @@ def serve_np(body, name, sealed):
         # FS_ERROR from fsd.
         if not flags & (OPEN_READ | OPEN_WRITE):
             return sealed(FS_ERROR)
-        if flags & (OPEN_EXCL | OPEN_CREATE) == OPEN_EXCL:
+        if flags & (OPEN_EXCL | OPEN_CREATE) == OPEN_EXCL or flags & ~OPEN_FLAGS:
             return sealed(FS_ERROR)
         # O_CREAT|O_EXCL of a name that exists, a file or a directory: EEXIST,
         # before the read-only refusal, as fsd and POSIX have it.
@@ -765,6 +766,8 @@ SELF_TEST_VERBS = [
     ("NP_OPEN(rcx dir)", NP_BASE + 15, "exists",    (OPEN_READ | OPEN_CREATE | OPEN_EXCL, "PLEN", 0), b"/SUB"),
     ("NP_OPEN(rcx new)", NP_BASE + 15, "read-only", (OPEN_READ | OPEN_CREATE | OPEN_EXCL, "PLEN", 0), b"/NOPE.TXT"),
     ("NP_OPEN(rx)",   NP_BASE + 15, "generic-error", (OPEN_READ | OPEN_EXCL, "PLEN", 0), b"/HELLO.TXT"),
+    # A flag the server does not know fails closed (ninep-abi OPEN_FLAGS).
+    ("NP_OPEN(r+32)", NP_BASE + 15, "generic-error", (OPEN_READ | 32, "PLEN", 0), b"/HELLO.TXT"),
     ("NP_OPEN(dir)",  NP_BASE + 15, "not-a-file",   (OPEN_READ, "PLEN", 0), b"/SUB"),
     ("NP_OPEN(gone)", NP_BASE + 15, "not-found",    (OPEN_READ, "PLEN", 0), b"/NOPE.TXT"),
     # a0 = a FID, and no path at all.

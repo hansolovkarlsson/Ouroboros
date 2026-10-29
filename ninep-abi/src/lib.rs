@@ -354,6 +354,13 @@ pub const OPEN_TRUNC: u64 = 8;
 /// [`OPEN_CREATE`] the request is malformed and refused (`FS_ERROR`); libc
 /// sends it only with `O_CREAT`, where POSIX defines it.
 pub const OPEN_EXCL: u64 = 16;
+/// Every [`NP_OPEN`] flag a server knows. A request with any other bit set is
+/// refused (`FS_ERROR`) rather than served with the bit ignored: a server
+/// that ignored [`OPEN_EXCL`] opened an existing file for a caller who had
+/// asked it not to, and a flag added later must fail closed on a server that
+/// does not know it (the high review of #367). A server built before this
+/// still ignores the bit, which no change here can reach.
+pub const OPEN_FLAGS: u64 = OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC | OPEN_EXCL;
 
 /// Whether an [`NP_OPEN`] with `flags` changes the disk, and so needs write
 /// access and is refused on a read-only tree: writing or truncating
@@ -1406,6 +1413,7 @@ mod tests {
     #[test]
     fn open_flags_are_distinct_bits() {
         let all = [OPEN_READ, OPEN_WRITE, OPEN_CREATE, OPEN_TRUNC, OPEN_EXCL];
+        assert_eq!(all.iter().fold(0, |m, f| m | f), OPEN_FLAGS);
         for (i, a) in all.iter().enumerate() {
             assert_eq!(a.count_ones(), 1);
             for b in &all[i + 1..] {

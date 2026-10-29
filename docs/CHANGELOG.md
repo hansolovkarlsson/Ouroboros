@@ -1394,7 +1394,12 @@ answers EEXIST and a missing VX EROFS. Controls: libc dropping the flag (4
 checks fail), fsd's answer removed (4, `/etc/shadow` EACCES and not
 written), the answer after `check_access` (2), and the answer after the
 read-only gate (5 in `test-long-set`). The search check itself is graded
-by no boot (roadmap).
+by no boot (roadmap). The high review of #367 found unknown flags ignored,
+so a new one could not fail closed: fsd and the host peer now refuse any
+bit outside ninep-abi's `OPEN_FLAGS`. It also found `exists_answer` copying
+`check_access`'s preamble and its stat rule: it now asks `check_access` for
+`NP_STAT` on the same path. Those two refusals in fsd are graded by no
+boot either.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

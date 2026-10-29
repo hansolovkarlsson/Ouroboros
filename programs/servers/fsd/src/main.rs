@@ -829,8 +829,11 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 return status_reply(reply, syscall_abi::FS_ERROR);
             }
             // `OPEN_EXCL` means something only beside `OPEN_CREATE`; alone
-            // it is a malformed request, refused here for the same reason.
-            if p[0] & (ninep_abi::OPEN_EXCL | ninep_abi::OPEN_CREATE) == ninep_abi::OPEN_EXCL {
+            // it is a malformed request, refused here for the same reason, as
+            // is a flag fsd does not know (`OPEN_FLAGS`), so it fails closed.
+            if p[0] & (ninep_abi::OPEN_EXCL | ninep_abi::OPEN_CREATE) == ninep_abi::OPEN_EXCL
+                || p[0] & !ninep_abi::OPEN_FLAGS != 0
+            {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             }
             Some(Found { path, file: found(fs, path) })
@@ -840,9 +843,9 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // `O_CREAT|O_EXCL` of a name that exists answers here, whole, and
     // nothing acts: see [`exists_answer`]. Only the malformed requests above
     // have answered before it, and none of them by the name's existence.
-    if let Some(Found { path, file: Ok(true) }) = open {
+    if let Some(Found { file: Ok(true), .. }) = open {
         if p[0] & ninep_abi::OPEN_EXCL != 0 {
-            return status_reply(reply, exists_answer(fs, who, path));
+            return status_reply(reply, exists_answer(fs, who, &p, payload));
         }
     }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
@@ -1737,10 +1740,12 @@ fn models_modes(fs: &mut vfs::Filesystem) -> bool {
     models_modes_or_unknown(fs).unwrap_or(true)
 }
 
-/// The answer to an `O_CREAT|O_EXCL` open of `path`, a name that exists:
-/// FS_ERR_ALREADY_EXISTS (EEXIST) to a caller who may search its ancestors,
-/// which is what tells anyone the name exists, and FS_ERR_PERM to one who
-/// may not, or to no caller. The file's own mode is not asked: the open will
+/// The answer to an `O_CREAT|O_EXCL` open (`p`, `payload`) of a name that
+/// exists: FS_ERR_ALREADY_EXISTS (EEXIST) to a caller who may stat it, which
+/// is what tells anyone the name exists, and FS_ERR_PERM to one who may not,
+/// or to no caller. "May stat it" is [`check_access`]'s own `NP_STAT` rule,
+/// asked of it, not a copy of it (the high review of #367): root, a
+/// filesystem without modes and the ancestor walk stay one rule. The file's own mode is not asked: the open will
 /// neither read nor write it, and POSIX and Linux give EEXIST for a file the
 /// caller may not read. Nor is the read-only gate: POSIX gives EROFS only for
 /// a file the open would make. Made whole here, before [`check_access`], and
@@ -1749,12 +1754,11 @@ fn models_modes(fs: &mut vfs::Filesystem) -> bool {
 /// /etc/shadow for writing and wrote it (the first build of the O_EXCL fix,
 /// 2026-10-28). Removing this one leaves `check_access` as it always was.
 /// Until 2026-10-28 libc dropped `O_EXCL` and such an open succeeded.
-fn exists_answer(fs: &mut vfs::Filesystem, who: Option<Caller>, path: &str) -> u64 {
-    let searchable = match who {
-        None => false,
-        Some(c) => c.uid == 0 || !models_modes(fs) || ancestors_searchable(fs, path, &c),
-    };
-    if searchable {
+fn exists_answer(fs: &mut vfs::Filesystem, who: Option<Caller>, p: &[u64; 4], payload: &[u8]) -> u64 {
+    // NP_STAT's `a0` is the path length, NP_OPEN's `a1`; the payload is the
+    // same path at offset 0 for both.
+    let stat = [p[1], 0, 0, 0];
+    if check_access(fs, who, ninep_abi::NP_STAT, &stat, payload, None) {
         syscall_abi::FS_ERR_ALREADY_EXISTS
     } else {
         syscall_abi::FS_ERR_PERM
