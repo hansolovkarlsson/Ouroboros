@@ -2491,7 +2491,8 @@ test-cargs: image
 # /etc/shadow and yet stat it; stat(path)'s checks are here too (step 4), and
 # since 2026-10-29 /bin/OPENPROBE's raw NP_OPENs as `user`, fsd's refusals no
 # libc flag word reaches. About two minutes; run it whenever libc/src/file.c's
-# error paths or stat, or fsd's answers to them, change.
+# error paths or stat, or fsd's answers to them (check_access, exists_answer,
+# NP_OPEN's flag refusals, OPEN_FLAGS), or the probe, change.
 test-cerrno: image image-ext2
 	DEBUGFS="$(DEBUGFS)" python3 scripts/test-cerrno.py
 

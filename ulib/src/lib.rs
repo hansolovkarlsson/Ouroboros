@@ -881,8 +881,7 @@ pub fn fs_call(op: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], resu
 /// `tree` is `0` for now (a single implicit mount); the per-task namespace
 /// resolves it to a real mount in a later step. The reply shape (status u64 +
 /// inline result) is identical to `fs_call`'s, so callers are unchanged.
-/// Public for `openprobe`, which sends `NP_OPEN` flags no client builds.
-pub fn np_call(verb: u64, tree: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
+fn np_call(verb: u64, tree: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], result: &mut [u8]) -> u64 {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     req[0..8].copy_from_slice(&verb.to_le_bytes());

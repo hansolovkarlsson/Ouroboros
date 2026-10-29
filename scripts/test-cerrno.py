@@ -37,7 +37,9 @@ binding and a path below it, and a /net path (ENOSYS, not answered yet), after
   tells nothing of what is in the directory (fsd's `exists_answer`);
   OPEN_EXCL without OPEN_CREATE answers FS_ERROR for an existing and a
   missing file; and a flag outside OPEN_FLAGS (32, and bit 63) answers
-  FS_ERROR, where a plain read open of the same file opens.
+  FS_ERROR, where a plain read open of the same file opens. The probe
+  makes its own call, so fsd never answering prints `no answer`, not
+  FS_ERROR, and `ls -l` must show hid at drw------- (the chmod took).
 
 Graded on cerrno's own summary line (`cerrno: N checks, 0 failed`, matched
 whole, with N exactly ROOT_CHECKS below: fewer is a run cut short, and more
@@ -131,6 +133,10 @@ def creat_wait(cmd):
 HID = "/Users/user/hid"
 READ, EXCL_CREATE_READ, EXCL_READ = 1, 1 | 4 | 16, 1 | 16  # ninep_abi's OPEN_*
 CHMOD = f"chmod 600 {HID}"
+# The chmod's own result, so a chmod that did not take is not read as fsd
+# answering EEXIST where it should refuse: hid's line in its parent's listing.
+LS = "ls -l /Users/user"
+HID_MODE = r"^drw------- .* hid/\r?$"
 
 
 def probe(flags, path, answer):
@@ -160,8 +166,9 @@ def probe_steps(after):
     before the chmod, the chmod, then the rest. The match that `after` waits
     for must be a line, not a prompt: the driver's settle takes the prompt
     after a matched line with it, so a `$ ` wait typed there waits for none."""
-    return ([(after, f"mkdir {HID}"), (r"\$ ", f"touch {HID}/f"), (r"\$ ", PROBE_BEFORE[0][0]),
-             (probe_wait(PROBE_BEFORE[-1][0]), CHMOD), (r"\$ ", PROBE_AFTER[0][0])]
+    return ([(after, f"mkdir {HID}"), (r"\$ ", f"touch {HID}/f"), (r"\$ ", PROBE_BEFORE[0][0])]
+            + creat_steps(PROBE_BEFORE, probe_wait)[:-1]
+            + [(probe_wait(PROBE_BEFORE[-1][0]), CHMOD), (r"\$ ", LS), (r" hid/\r?\n", PROBE_AFTER[0][0])]
             + creat_steps(PROBE_AFTER, probe_wait))
 
 
@@ -253,9 +260,11 @@ def main() -> int:
          got[1:2] == [(USER_CHECKS, 0)]),
         ("ext2: no fault lines", f == 0),
     ]
-    checks += creat_checks("ext2: user", r"\$ ", out.split("cerrno /etc/shadow", 1)[-1], creat)
-    checks += creat_checks("ext2: user", r"\$ ", out.split("cerrno /etc/shadow", 1)[-1],
-                           PROBE_BEFORE + PROBE_AFTER)
+    as_user = out.split("cerrno /etc/shadow", 1)[-1]
+    checks += creat_checks("ext2: user", r"\$ ", as_user, creat + PROBE_BEFORE + PROBE_AFTER)
+    listing = as_user.split(LS, 1)[-1].split("openprobe", 1)[0]
+    checks.append((f"ext2: user: `{CHMOD}` took, hid listed drw-------",
+                   re.search(HID_MODE, listing, re.M) is not None))
     for name, text in (("fat32", fat32), ("ext2", out)):
         for line in re.findall(r"^cerrno: (?:ok|FAIL).*$", text, re.M):
             print(f"     {name}: {line.rstrip()}")
