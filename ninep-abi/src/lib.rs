@@ -309,9 +309,10 @@ pub const NP_CHOWN: u64 = NP_BASE + 14;
 /// this peer set's host server) the user it was opened as. Every fid verb
 /// tests that; see [`NP_CLUNK`] for the answers. A directory opens for reading
 /// alone, as POSIX has it: [`OPEN_WRITE`], [`OPEN_TRUNC`] or [`OPEN_CREATE`]
-/// of one that exists is `FS_ERR_NOT_A_FILE` (EISDIR), where a read-only tree
-/// has not refused it first; its fid's [`NP_PREAD`] is `FS_ERR_NOT_A_FILE` and
-/// its [`NP_FSTAT`] says it is a directory.
+/// of one that exists is `FS_ERR_NOT_A_FILE` (EISDIR) to a caller who may stat
+/// it (`FS_ERR_PERM` otherwise), before the mode check and a read-only tree's
+/// refusal, as Linux orders them; its fid's [`NP_PREAD`] is `FS_ERR_NOT_A_FILE`
+/// and its [`NP_FSTAT`] says it is a directory.
 pub const NP_OPEN: u64 = NP_BASE + 15;
 
 /// **Read** from a fid at an explicit offset: `a0` = fid, `a1` = offset,

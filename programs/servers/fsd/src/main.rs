@@ -845,10 +845,16 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     };
     // `O_CREAT|O_EXCL` of a name that exists answers here, whole, and
     // nothing acts: see [`exists_answer`]. Only the malformed requests above
-    // have answered before it, and none of them by the name's existence.
-    if let Some(Found { file: Ok(true), .. }) = open {
+    // have answered before it, and none of them by the name's existence. So
+    // does a directory opened to write, truncate or create: it opens for
+    // reading alone, as POSIX has it (until 2026-10-29 such an open got a
+    // fid, and only its first write failed).
+    if let Some(Found { file: Ok(true), dir, .. }) = open {
         if p[0] & ninep_abi::OPEN_EXCL != 0 {
-            return status_reply(reply, exists_answer(fs, who, &p, payload));
+            return status_reply(reply, exists_answer(fs, who, &p, payload, syscall_abi::FS_ERR_ALREADY_EXISTS));
+        }
+        if dir && p[0] & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_TRUNC | ninep_abi::OPEN_CREATE) != 0 {
+            return status_reply(reply, exists_answer(fs, who, &p, payload, syscall_abi::FS_ERR_NOT_A_FILE));
         }
     }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
@@ -1123,7 +1129,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
         ninep_abi::NP_OPEN => {
             // The path and the one stat made above ([`Found`]), not another:
             // what `check_access` and the gate decided on is what this acts on.
-            let Some(Found { path, file, dir }) = open else {
+            let Some(Found { path, file, .. }) = open else {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             };
             // The user the fid is opened as. `check_access` above already
@@ -1149,16 +1155,6 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
                 Ok(exists) => exists,
                 Err(code) => return status_reply(reply, code),
             };
-            // A directory opens for reading alone, as POSIX has it: asked to
-            // write, truncate or create, it is EISDIR at the open. Until
-            // 2026-10-29 a write or create open of one got a fid, and only its
-            // first write failed; a truncate failed in `write_file`. After
-            // `check_access` and the read-only gate, so neither a caller who
-            // may not search the directory above nor a read-only tree is
-            // answered by what the name is.
-            if dir && flags & (ninep_abi::OPEN_WRITE | ninep_abi::OPEN_TRUNC | ninep_abi::OPEN_CREATE) != 0 {
-                return status_reply(reply, syscall_abi::FS_ERR_NOT_A_FILE);
-            }
             if flags & ninep_abi::OPEN_TRUNC != 0 {
                 // O_TRUNC WITHOUT O_CREAT MUST NOT CREATE. `write_file` creates
                 // the file when it is absent, so this branch made
@@ -1753,10 +1749,14 @@ fn models_modes(fs: &mut vfs::Filesystem) -> bool {
     models_modes_or_unknown(fs).unwrap_or(true)
 }
 
-/// The answer to an `O_CREAT|O_EXCL` open (`p`, `payload`) of a name that
-/// exists: FS_ERR_ALREADY_EXISTS (EEXIST) to a caller who may stat it, which
-/// is what tells anyone the name exists, and FS_ERR_PERM to one who may not,
-/// or to no caller. "May stat it" is [`check_access`]'s own `NP_STAT` rule,
+/// The answer to an open (`p`, `payload`) of a name that exists, refused for
+/// what the name is: `known` to a caller who may stat it, which is what tells
+/// anyone the name exists and what it is, and FS_ERR_PERM to one who may not,
+/// or to no caller. `known` is FS_ERR_ALREADY_EXISTS (EEXIST) for
+/// `O_CREAT|O_EXCL`, and FS_ERR_NOT_A_FILE (EISDIR) for a directory opened to
+/// write, truncate or create (since 2026-10-29), each answered before
+/// `check_access`'s mode check and the read-only gate, as Linux's `may_open`
+/// answers EISDIR before both. "May stat it" is [`check_access`]'s own `NP_STAT` rule,
 /// asked of it, not a copy of it (the high review of #367): root, a
 /// filesystem without modes and the ancestor walk stay one rule. The file's own mode is not asked: the open will
 /// neither read nor write it, and POSIX and Linux give EEXIST for a file the
@@ -1767,12 +1767,12 @@ fn models_modes(fs: &mut vfs::Filesystem) -> bool {
 /// /etc/shadow for writing and wrote it (the first build of the O_EXCL fix,
 /// 2026-10-28). Removing this one leaves `check_access` as it always was.
 /// Until 2026-10-28 libc dropped `O_EXCL` and such an open succeeded.
-fn exists_answer(fs: &mut vfs::Filesystem, who: Option<Caller>, p: &[u64; 4], payload: &[u8]) -> u64 {
+fn exists_answer(fs: &mut vfs::Filesystem, who: Option<Caller>, p: &[u64; 4], payload: &[u8], known: u64) -> u64 {
     // NP_STAT's `a0` is the path length, NP_OPEN's `a1`; the payload is the
     // same path at offset 0 for both.
     let stat = [p[1], 0, 0, 0];
     if check_access(fs, who, ninep_abi::NP_STAT, &stat, payload, None) {
-        syscall_abi::FS_ERR_ALREADY_EXISTS
+        known
     } else {
         syscall_abi::FS_ERR_PERM
     }

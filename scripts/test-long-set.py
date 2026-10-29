@@ -135,7 +135,9 @@ build/espexfat.img (exFAT root, partition 1):
   O_EXCL fix) one of VG with O_WRONLY|O_CREAT|O_EXCL must be EEXIST, not
   EROFS, as POSIX asks of an existing file, while one of a missing VX is
   EROFS with no VX made, in every read-only boot below (VRUNS opens
-  /etc/passwd, having no VG). VFIRST: the bitmap's entry naming cluster 0, and a
+  /etc/passwd, having no VG), and in VRUNS (since 2026-10-29, /bin/OPENPROBE)
+  an NP_OPEN of /etc for writing is FS_ERR_NOT_A_FILE, before the read-only
+  refusal, as Linux orders them. VFIRST: the bitmap's entry naming cluster 0, and a
   good copy of it planted after VG, as a volume of two FATs has FAT 2's
   bitmap entry after FAT 1's: the first is the bitmap, damaged, and the
   volume is read-only as in VBITMAP (the copy deleted on the host after
@@ -1251,7 +1253,7 @@ def run_vruns():
     if not checks[0][1]:
         return checks, [f"vruns before: {ln}" for ln in lines]
     driven, out, faults = boot("vruns", ["echo new > /NEWB", "ccreat /etc/passwd", "ccreat /VC",
-                                         "ccreat -x /etc/passwd", "ls /"])
+                                         "ccreat -x /etc/passwd", "openprobe 2 /etc", "ls /"])
     if drive_qemu.boot_stalled("test-long-set", "vruns", out, faults):
         STALLED.append("vruns")
         return [], []
@@ -1272,6 +1274,11 @@ def run_vruns():
         (f"vruns: O_WRONLY|O_CREAT|O_EXCL of /etc/passwd is EEXIST ({EEXIST}), not EROFS "
          f"({printed(out, 'ccreat -x /etc/passwd')})",
          printed(out, "ccreat -x /etc/passwd") == [f"ccreat: /etc/passwd open errno {EEXIST}"]),
+        # A directory opened to write is EISDIR before the read-only refusal,
+        # as Linux orders them (since 2026-10-29, the review of #370).
+        (f"vruns: NP_OPEN of /etc for writing is FS_ERR_NOT_A_FILE, not read-only "
+         f"({printed(out, 'openprobe 2 /etc')})",
+         printed(out, "openprobe 2 /etc") == ["openprobe: /etc 2 FS_ERR_NOT_A_FILE"]),
         ("vruns: no fault lines", faults == 0),
     ]
     return checks, []

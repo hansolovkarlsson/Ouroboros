@@ -628,6 +628,14 @@ def serve_np(body, name, sealed):
         # before the read-only refusal, as fsd and POSIX have it.
         if flags & OPEN_EXCL and exists:
             return sealed(FS_ERR_ALREADY_EXISTS)
+        # A directory opens for reading alone, as on fsd since 2026-10-29: a
+        # write, truncate or create of one that exists is EISDIR, before the
+        # read-only refusal, as fsd and Linux order them. A read open gets a
+        # fid, whose NP_PREAD is EISDIR and whose NP_FSTAT says a directory.
+        # Until then this peer refused every open of a directory where fsd
+        # gave a fid.
+        if fpath in DIRS and flags & (OPEN_WRITE | OPEN_TRUNC | OPEN_CREATE):
+            return sealed(FS_ERR_NOT_A_FILE)
         if flags & (OPEN_WRITE | OPEN_TRUNC) or (flags & OPEN_CREATE and not exists):
             if not flags & (OPEN_WRITE | OPEN_TRUNC) and parent not in DIRS:
                 return sealed(FS_ERR_NOT_FOUND)
@@ -635,13 +643,6 @@ def serve_np(body, name, sealed):
             print(f"  [read-only: refusing NP_OPEN flags=0x{flags:x} "
                   f"path={fpath!r}]", flush=True)
             return sealed(FS_ERR_READ_ONLY)
-        # A directory opens for reading alone, as on fsd since 2026-10-29: a
-        # write or truncate was refused read-only above, and a create of one
-        # that exists is EISDIR. A read open gets a fid, whose NP_PREAD is
-        # EISDIR and whose NP_FSTAT says it is a directory. Until then this
-        # peer refused every open of a directory where fsd gave a fid.
-        if fpath in DIRS and flags & OPEN_CREATE:
-            return sealed(FS_ERR_NOT_A_FILE)
         if fpath not in FILES and fpath not in DIRS:
             return sealed(FS_ERR_NOT_FOUND)
         free = next((n for n in range(FID_BASE, FID_BASE + MAX_FIDS)
@@ -775,11 +776,12 @@ SELF_TEST_VERBS = [
     ("NP_OPEN(rx)",   NP_BASE + 15, "generic-error", (OPEN_READ | OPEN_EXCL, "PLEN", 0), b"/HELLO.TXT"),
     # A flag the server does not know fails closed (ninep-abi OPEN_FLAGS).
     ("NP_OPEN(r+32)", NP_BASE + 15, "generic-error", (OPEN_READ | 32, "PLEN", 0), b"/HELLO.TXT"),
-    # A directory opens for reading, as on fsd; a create of one is EISDIR,
-    # and a write is read-only here before it is anything else.
+    # A directory opens for reading, as on fsd; a write or a create of one
+    # is EISDIR, before the read-only refusal.
     ("NP_OPEN(dir)",  NP_BASE + 15, "served",       (OPEN_READ, "PLEN", 0), b"/SUB"),
     ("NP_OPEN(rc dir)", NP_BASE + 15, "not-a-file", (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"/SUB"),
-    ("NP_OPEN(w dir)", NP_BASE + 15, "read-only",   (OPEN_WRITE, "PLEN", 0), b"/SUB"),
+    ("NP_OPEN(w dir)", NP_BASE + 15, "not-a-file",  (OPEN_WRITE, "PLEN", 0), b"/SUB"),
+    ("NP_OPEN(rt dir)", NP_BASE + 15, "not-a-file", (OPEN_READ | OPEN_TRUNC, "PLEN", 0), b"/SUB"),
     ("NP_OPEN(gone)", NP_BASE + 15, "not-found",    (OPEN_READ, "PLEN", 0), b"/NOPE.TXT"),
     # a0 = a FID, and no path at all.
     ("NP_PREAD",      NP_BASE + 16, "served",       (FID, 0, 512),     b""),
@@ -861,6 +863,10 @@ def self_test(quiet=True):
         for name, verb, want, params, path in SELF_TEST_VERBS:
             status, _ = _call(_frame(verb, params, path, fid), quiet)
             got = classify(status)
+            if verb == NP_BASE + 15 and got == "served":
+                # Give the fid back, so the table's opens cannot fill FIDS and
+                # make a later row fail for want of a fid.
+                _call(_frame(NP_BASE + 19, (FID, 0, 0), b"", status), quiet)
             if got != want:
                 bad.append(f"  - {name} (0x{verb:x}): dispatch says {got}, "
                            f"this table says {want}")
