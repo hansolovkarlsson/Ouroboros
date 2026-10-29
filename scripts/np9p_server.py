@@ -112,6 +112,7 @@ FS_ERROR = (1 << 64) - 1
 NO_FS = (1 << 64) - 1 - 1  # u64::MAX - 1: no filesystem mounted (transient)
 FS_ERR_NOT_FOUND = (1 << 64) - 1 - 2  # u64::MAX - 2: definitively absent
 FS_ERR_NOT_A_FILE = (1 << 64) - 1 - 3  # u64::MAX - 3: it is a directory
+FS_ERR_ALREADY_EXISTS = (1 << 64) - 1 - 6  # u64::MAX - 6: O_CREAT|O_EXCL of a name that exists
 FS_ERR_READ_ONLY = (1 << 64) - 1 - 29  # u64::MAX - 29
 FS_ERR_AUTH = (1 << 64) - 1 - 30  # u64::MAX - 30
 NP_SESSION = NP_BASE + 0x21  # open a session on this connection (Decision 3)
@@ -144,6 +145,8 @@ OPEN_READ = 1
 OPEN_WRITE = 2
 OPEN_CREATE = 4
 OPEN_TRUNC = 8
+OPEN_EXCL = 16
+OPEN_FLAGS = OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC | OPEN_EXCL
 # fid -> path. Flags are not kept: this export is read-only, so the only flag
 # combination that ever gets a fid is a pure read.
 FIDS = {}
@@ -611,6 +614,20 @@ def serve_np(body, name, sealed):
         exists = fpath in FILES or fpath in DIRS
         # fsd's parent_of: everything before the last `/`, the root for none.
         parent = fpath.rsplit(b"/", 1)[0] if b"/" in fpath[1:] else b"/"
+        # An open asks to read or to write (POSIX's access mode), and
+        # OPEN_EXCL comes only with OPEN_CREATE: both refused first, as fsd
+        # refuses them before anything else answers. Until 2026-10-28 this
+        # peer asked the access mode after its read-only refusal, so
+        # OPEN_CREATE alone of a missing file answered read-only here and
+        # FS_ERROR from fsd.
+        if not flags & (OPEN_READ | OPEN_WRITE):
+            return sealed(FS_ERROR)
+        if flags & (OPEN_EXCL | OPEN_CREATE) == OPEN_EXCL or flags & ~OPEN_FLAGS:
+            return sealed(FS_ERROR)
+        # O_CREAT|O_EXCL of a name that exists, a file or a directory: EEXIST,
+        # before the read-only refusal, as fsd and POSIX have it.
+        if flags & OPEN_EXCL and exists:
+            return sealed(FS_ERR_ALREADY_EXISTS)
         if flags & (OPEN_WRITE | OPEN_TRUNC) or (flags & OPEN_CREATE and not exists):
             if not flags & (OPEN_WRITE | OPEN_TRUNC) and parent not in DIRS:
                 return sealed(FS_ERR_NOT_FOUND)
@@ -618,10 +635,6 @@ def serve_np(body, name, sealed):
             print(f"  [read-only: refusing NP_OPEN flags=0x{flags:x} "
                   f"path={fpath!r}]", flush=True)
             return sealed(FS_ERR_READ_ONLY)
-        # An open asks to read or to write (POSIX's access mode), as fsd's
-        # NP_OPEN requires since the same review: OPEN_CREATE alone is refused.
-        if not flags & (OPEN_READ | OPEN_WRITE):
-            return sealed(FS_ERROR)
         if fpath in DIRS:
             return sealed(FS_ERR_NOT_A_FILE)
         if fpath not in FILES:
@@ -743,6 +756,18 @@ SELF_TEST_VERBS = [
     # No `/` at all: the parent is the root, as fsd's parent_of has it.
     ("NP_OPEN(rc bare)", NP_BASE + 15, "read-only",  (OPEN_READ | OPEN_CREATE, "PLEN", 0), b"NEW.TXT"),
     ("NP_OPEN(c)",    NP_BASE + 15, "generic-error", (OPEN_CREATE, "PLEN", 0), b"/HELLO.TXT"),
+    ("NP_OPEN(c new)", NP_BASE + 15, "generic-error", (OPEN_CREATE, "PLEN", 0), b"/NOPE.TXT"),
+    # O_CREAT|O_EXCL: a name that exists answers EEXIST, a file or a
+    # directory, and before the read-only refusal even with OPEN_WRITE; a
+    # missing one would be made, so it is read-only here; OPEN_EXCL without
+    # OPEN_CREATE is malformed.
+    ("NP_OPEN(rcx)",  NP_BASE + 15, "exists",       (OPEN_READ | OPEN_CREATE | OPEN_EXCL, "PLEN", 0), b"/HELLO.TXT"),
+    ("NP_OPEN(wcx)",  NP_BASE + 15, "exists",       (OPEN_WRITE | OPEN_CREATE | OPEN_EXCL, "PLEN", 0), b"/HELLO.TXT"),
+    ("NP_OPEN(rcx dir)", NP_BASE + 15, "exists",    (OPEN_READ | OPEN_CREATE | OPEN_EXCL, "PLEN", 0), b"/SUB"),
+    ("NP_OPEN(rcx new)", NP_BASE + 15, "read-only", (OPEN_READ | OPEN_CREATE | OPEN_EXCL, "PLEN", 0), b"/NOPE.TXT"),
+    ("NP_OPEN(rx)",   NP_BASE + 15, "generic-error", (OPEN_READ | OPEN_EXCL, "PLEN", 0), b"/HELLO.TXT"),
+    # A flag the server does not know fails closed (ninep-abi OPEN_FLAGS).
+    ("NP_OPEN(r+32)", NP_BASE + 15, "generic-error", (OPEN_READ | 32, "PLEN", 0), b"/HELLO.TXT"),
     ("NP_OPEN(dir)",  NP_BASE + 15, "not-a-file",   (OPEN_READ, "PLEN", 0), b"/SUB"),
     ("NP_OPEN(gone)", NP_BASE + 15, "not-found",    (OPEN_READ, "PLEN", 0), b"/NOPE.TXT"),
     # a0 = a FID, and no path at all.
@@ -770,6 +795,8 @@ def classify(status):
         return "not-found"
     if status == FS_ERR_NOT_A_FILE:
         return "not-a-file"
+    if status == FS_ERR_ALREADY_EXISTS:
+        return "exists"
     if status == FS_ERROR:
         return "generic-error"
     if status >= (1 << 64) - 64:

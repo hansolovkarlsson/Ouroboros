@@ -344,6 +344,23 @@ pub const OPEN_WRITE: u64 = 2;
 pub const OPEN_CREATE: u64 = 4;
 /// [`NP_OPEN`] flag: truncate the file to empty on open.
 pub const OPEN_TRUNC: u64 = 8;
+/// [`NP_OPEN`] flag, with [`OPEN_CREATE`] only: fail with
+/// `FS_ERR_ALREADY_EXISTS` if the name exists (a file or a directory), so
+/// the open creates the file or does nothing. POSIX's `O_CREAT|O_EXCL`, the
+/// lockfile idiom: the server answers one request at a time, so the test and
+/// the create cannot be split by another client's. The answer needs only the
+/// ancestors' search permission, not the file's own nor a writable tree, as
+/// POSIX and Linux give EEXIST there. Without
+/// [`OPEN_CREATE`] the request is malformed and refused (`FS_ERROR`); libc
+/// sends it only with `O_CREAT`, where POSIX defines it.
+pub const OPEN_EXCL: u64 = 16;
+/// Every [`NP_OPEN`] flag a server knows. A request with any other bit set is
+/// refused (`FS_ERROR`) rather than served with the bit ignored: a server
+/// that ignored [`OPEN_EXCL`] opened an existing file for a caller who had
+/// asked it not to, and a flag added later must fail closed on a server that
+/// does not know it (the high review of #367). A server built before this
+/// still ignores the bit, which no change here can reach.
+pub const OPEN_FLAGS: u64 = OPEN_READ | OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC | OPEN_EXCL;
 
 /// Whether an [`NP_OPEN`] with `flags` changes the disk, and so needs write
 /// access and is refused on a read-only tree: writing or truncating
@@ -1391,6 +1408,18 @@ mod tests {
         assert!(open_changes(OPEN_CREATE | OPEN_READ, false));
         assert!(!open_changes(OPEN_CREATE, true));
         assert!(!open_changes(OPEN_CREATE | OPEN_READ, true));
+    }
+
+    #[test]
+    fn open_flags_are_distinct_bits() {
+        let all = [OPEN_READ, OPEN_WRITE, OPEN_CREATE, OPEN_TRUNC, OPEN_EXCL];
+        assert_eq!(all.iter().fold(0, |m, f| m | f), OPEN_FLAGS);
+        for (i, a) in all.iter().enumerate() {
+            assert_eq!(a.count_ones(), 1);
+            for b in &all[i + 1..] {
+                assert_eq!(a & b, 0);
+            }
+        }
     }
 
     #[test]

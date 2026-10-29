@@ -116,6 +116,7 @@
 #define OPEN_WRITE 2
 #define OPEN_CREATE 4
 #define OPEN_TRUNC 8
+#define OPEN_EXCL 16
 #define FID_BASE 3
 
 /* Message/payload limits. */
