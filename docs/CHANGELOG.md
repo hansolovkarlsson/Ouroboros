@@ -1539,17 +1539,21 @@ recorded ones (the exFAT chain's 7 FAT sectors in test-spawn-reads, 6
 before, and test-write-walk's 775 on fat32-same, 774 before), and `main`'s
 scripts on the same images read 7 and 775, so the images moved them.
 
-**The kernel forgets the boot partition when the table is rewritten
+**The kernel answers the boot partition from the table as it stands
 (2026-10-30).** fsd stopped trusting `BLOCK_BOOT_START` after its own
 `erase` or `partition` by a flag of its own, which the supervisor's restart
 of fsd cleared, so a restarted fsd took the start read from the old table at
-boot again. Now a `BLOCK_WRITE` to sector 0 or 1 clears the kernel's answer
-before the write, and fsd's flag is gone: it asks the kernel every time and
-keeps nothing a restart could lose. No boot grades it, since `partition`
-makes one partition, which mounts writable whatever the start says; `make
-test-boot-partition`'s new disk-rewrite boot runs the rewrite on the boot
-disk and writes to the new root, and passes with the kernel's clear removed
-too. From the medium review of #362.
+boot again. Now the kernel keeps no start: each `BLOCK_BOOT_START` matches
+the partition the firmware named against the device's table, so a rewritten
+table is answered as rewritten, and fsd's flag is gone. The first version
+cleared the start at any write to sector 0 or 1; its review found that this
+would make a kept ESP a root candidate once steps 7 and 8 write a table of
+two partitions, missed a GPT read from its backup, and forgot on a rewrite
+that changed nothing. fsd now says after its mount line where the boot
+partition is, `fsd: the boot partition is on this disk, at LBA 2048`, and
+`make test-boot-partition`'s new disk-rewrite boot (`erase`, `partition`,
+`format`, `mount -a` and a write on the boot disk) requires that line at
+boot and not after the rewrite. From the medium review of #362.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

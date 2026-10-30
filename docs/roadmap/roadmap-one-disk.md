@@ -237,11 +237,14 @@ are still "first found" whichever was booted.
 2026-10-13**, with D1 settled as ext2. A new system call,
 `BLOCK_BOOT_START` (77), gated to `fsd` like the other `BLOCK_*` calls,
 answers the boot partition's start LBA on the installed device, or 0 when
-that device is not known to be the boot disk (and, since 2026-10-30, once
-the device's table has been written: a `BLOCK_WRITE` to sector 0 or 1
-clears it). The kernel keeps it beside the
-device and every install must pass it (`install_block_device`'s second
-argument), so the fallback and `MOUNT`'s late stick answer 0. The USB stick
+that device is not known to be the boot disk. The kernel kept it beside the
+device and every install had to pass it (`install_block_device`'s second
+argument), so the fallback and `MOUNT`'s late stick answered 0. Since
+2026-10-30 it keeps nothing: each call matches the firmware's partition
+against the device's table as it stands (`bootdisk::boot_start`), so a
+table `erase` or `partition` rewrote, or one steps 7 and 8 will write with
+the ESP kept, is answered as it now is (the medium review of #377), and
+fsd's mount line says what it answered. The USB stick
 is now always asked whether it is the boot disk, even when it is installed
 regardless, so a stick booted from tells `fsd` so. `vfs::mount` tries the
 boot partition last. `scripts/mkdisk.py` (`make disk`, `make run-disk`)
