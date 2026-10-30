@@ -1539,6 +1539,18 @@ recorded ones (the exFAT chain's 7 FAT sectors in test-spawn-reads, 6
 before, and test-write-walk's 775 on fat32-same, 774 before), and `main`'s
 scripts on the same images read 7 and 775, so the images moved them.
 
+**The kernel forgets the boot partition when the table is rewritten
+(2026-10-30).** fsd stopped trusting `BLOCK_BOOT_START` after its own
+`erase` or `partition` by a flag of its own, which the supervisor's restart
+of fsd cleared, so a restarted fsd took the start read from the old table at
+boot again. Now a `BLOCK_WRITE` to sector 0 or 1 clears the kernel's answer
+before the write, and fsd's flag is gone: it asks the kernel every time and
+keeps nothing a restart could lose. No boot grades it, since `partition`
+makes one partition, which mounts writable whatever the start says; `make
+test-boot-partition`'s new disk-rewrite boot runs the rewrite on the boot
+disk and writes to the new root, and passes with the kernel's clear removed
+too. From the medium review of #362.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

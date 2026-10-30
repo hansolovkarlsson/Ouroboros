@@ -4443,7 +4443,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   cache, about one sector a 128 clusters, so the free's three round trips a
   cluster are the cost, and the walk could be shared with the free when
   this item is done.
-- **The kernel's boot partition outlives fsd's own table rewrite.** After
+- ~~**The kernel's boot partition outlives fsd's own table rewrite.** After
   `erase` or `partition`, `Device::table_rewritten` makes fsd stop trusting
   `BLOCK_BOOT_START`, whose answer was read from the old table at boot. That
   flag is fsd's memory: when the supervisor restarts fsd from its image, the
@@ -4453,7 +4453,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   fix is there: forget the boot start at fsd's first table write (fsd telling
   it, or the kernel seeing a write to sector 0 or the GPT), or answer
   `BLOCK_BOOT_START` from the table as it is now. From the medium review of
-  #362, 2026-10-27.
+  #362, 2026-10-27.~~ *Done 2026-10-30:* a `BLOCK_WRITE` to sector 0 or 1
+  (the MBR or protective MBR, the GPT header) clears the kernel's boot start
+  before the write, and fsd's flag is gone, so fsd asks the kernel every
+  time and keeps nothing a restart could lose. **Graded by no boot.** The
+  defect is latent: `partition` makes one partition, and a disk whose only
+  partition is the boot one mounts it writable whatever the start says, so
+  a stale start changes nothing seen. With the kernel's clear removed,
+  `make test-boot-partition`'s new disk-rewrite boot (`erase`, `partition`,
+  `format`, `mount -a` and a write on the boot disk) still passes. The first
+  tool that writes a table of two partitions on the device (one-disk steps
+  7 and 8) is where it can be graded: a root beside a partition made at the
+  old boot start must mount writable.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on

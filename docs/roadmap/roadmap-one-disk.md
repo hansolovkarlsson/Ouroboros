@@ -237,7 +237,9 @@ are still "first found" whichever was booted.
 2026-10-13**, with D1 settled as ext2. A new system call,
 `BLOCK_BOOT_START` (77), gated to `fsd` like the other `BLOCK_*` calls,
 answers the boot partition's start LBA on the installed device, or 0 when
-that device is not known to be the boot disk. The kernel keeps it beside the
+that device is not known to be the boot disk (and, since 2026-10-30, once
+the device's table has been written: a `BLOCK_WRITE` to sector 0 or 1
+clears it). The kernel keeps it beside the
 device and every install must pass it (`install_block_device`'s second
 argument), so the fallback and `MOUNT`'s late stick answer 0. The USB stick
 is now always asked whether it is the boot disk, even when it is installed

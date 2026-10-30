@@ -45,9 +45,14 @@ tells it which partition it booted from (BLOCK_BOOT_START):
 In both, `fsd` must mount ext2, and `ls /` after login must show the root's
 tree, not the ESP's. Every boot checks the filesystem `fsd` mounted as `/`.
 
-and four on copies this script makes, each disk with a signature of its own
+and five on copies this script makes, each disk with a signature of its own
 (the reviews of #288): disk-format formats a copy of disk.img's root and
-finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock,
+finds `/` empty and the ESP whole; disk-rewrite (since 2026-10-30) runs
+`erase disk`, `partition ext2`, `format ext2` and `mount -a` on a copy of
+disk.img, the boot disk, and the new root, where the ESP began, must mount
+writable and take `help > /rwtest` (it passes too with the kernel's
+forgetting of the boot start at a table write removed: the one partition
+`partition` makes is no fallback, stale start or not); disk-badroot zeroes the root's superblock,
 `fsd` must say it fell back to the ESP read-only and refuse root's `touch`
 there (decision D5), open /etc/passwd with O_RDONLY|O_CREAT and read it while
 refusing a missing file EROFS at the open, one in a missing directory
@@ -192,10 +197,15 @@ BOOTS = [
     # fallback's reason is the untyped rule's.
     ("disk-untyped", "disk-untyped.img", "virtio", None, None, "FAT32", False),
     ("disk-format", "disk-format.img", "virtio", None, None, "ext2", False),
-    # A copy of disk.img whose table is rewritten in the boot: `erase disk`
-    # and `partition ext2` put the new root where the ESP, the boot partition,
-    # began, so a boot start answered from the old table would make the new
-    # root the read-only fallback (since 2026-10-30).
+    # A copy of disk.img whose table is rewritten in the boot: `erase disk`,
+    # `partition ext2` and `format ext2` on the boot disk, the new root where
+    # the ESP, the boot partition, began, which must mount writable and take a
+    # write (since 2026-10-30). It does not grade the kernel forgetting the
+    # boot start at the table write: the one partition `partition` makes
+    # mounts writable either way, since with no other partition it is no
+    # fallback (`RootOrder::is_fallback`); with the kernel's clear removed
+    # every check passes. Only a table of two partitions, which nothing on
+    # the system writes, would show a stale start.
     ("disk-rewrite", "disk-rewrite.img", "virtio", None, None, "ext2", False),
     # A copy of espgpt.img: `format` must refuse a GPT disk, which it would
     # have laid a filesystem over from LBA 1 (the medium review of #288).
