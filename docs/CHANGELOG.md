@@ -1507,6 +1507,24 @@ EROFS create on disk-badroot, disk-data-badroot and disk-data-unknown), and
 with D5's reason printed after the mount line two (the order, on
 disk-badroot and disk-untyped). From the high reviews of #364 and #373.
 
+**BESIDE's write is graded on exFAT's own gate (2026-10-30).** BESIDE, in
+`make test-volume-bound`, is an exFAT mounted read-only because its bitmap
+entry claims the next partition's first sector: the volume where a write
+past the gate would land on another partition. Its refusal was graded on
+fsd's verb gate alone. `test-volume-bound.py --disk-gate` now boots it from
+a copy of esp.img carrying fsd's `disk-gate-rig` build, whose verb gate does
+not ask an arm, so the refusal is exFAT's own, and `make test-disk-gate` runs
+it after test-long-set's mode, exiting with the worse of the two. What both
+modes share, the build's line, the staged ESP and the check of which fsd a
+boot ran, is `scripts/diskgate.py`, moved out of test-long-set. Every
+BESIDE boot now checks which fsd it ran, in either mode. Controls: with
+exFAT's gate removed (`writable()`, the allocator's check and
+`Gated::write_sector`'s), BESIDE in this mode fails one check, its write
+answered as an I/O error, the next partition kept only by
+`bitmap_sector_lba`'s bound, while BESIDE on the shipped fsd still passes;
+with the shipped fsd staged, the build check fails. From the medium review
+of #371.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

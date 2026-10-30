@@ -4461,13 +4461,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   it, or the kernel seeing a write to sector 0 or the GPT), or answer
   `BLOCK_BOOT_START` from the table as it is now. From the medium review of
   #362, 2026-10-27.
-- **BESIDE's write is graded on the verb gate alone.** `test-volume-bound`'s
+- ~~**BESIDE's write is graded on the verb gate alone.** `test-volume-bound`'s
   BESIDE (an exFAT read-only from its damaged bitmap entry, the partition
   after it inside the bitmap's claim) is the case where a write past the
   disk gate would land on another partition, and `make test-disk-gate` does
   not boot it on the rig's build of fsd: it grades only test-long-set's five
   read-only boots. To close: a `--disk-gate` mode for BESIDE, the same
-  staging on its disk. From the medium review of #371.
+  staging on its disk. From the medium review of #371.~~ Done 2026-10-30:
+  `test-volume-bound.py --disk-gate` boots BESIDE on the rig's fsd, run by
+  `make test-disk-gate` after test-long-set's mode; the staging is
+  `scripts/diskgate.py`, which both modes share.
 - ~~**Read-only has two sources in fsd.** `tree_read_only` asks
   `ROOT_READ_ONLY`, a static for tree 0 as D5's fallback, stored and cleared
   by hand on each path that changes tree 0 (`try_mount`, `FSOP_UNMOUNT`),
