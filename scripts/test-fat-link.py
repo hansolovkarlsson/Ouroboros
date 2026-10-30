@@ -57,15 +57,13 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import exfatimg  # noqa: E402  (its `place_mounted`)
 import fat32img  # noqa: E402
 import mbrdisk  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
 drive_qemu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(drive_qemu)
-_spec = importlib.util.spec_from_file_location("spawn_reads", os.path.join(HERE, "test-spawn-reads.py"))
-spawn_reads = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(spawn_reads)
 
 SECTOR = 512
 WITNESS_TYPE = 0xDA  # "non-filesystem data": nothing mounts it
@@ -96,7 +94,7 @@ def build():
         with open(ESP_COPY, "rb") as fh:
             cb = fat32img.Fat32(fh, mbrdisk.entries(fh.read(SECTOR))[0][2]).cluster_bytes
         one = {n: n[0].encode() * cb for n in ("APP", "RMF", "BADM", "ONE", "HEADR", "HEADM")}
-        spawn_reads.place_mounted(ESP_COPY, {**one, "RD": b"R" * (2 * cb), "HEADW": b"W" * 100})
+        exfatimg.place_mounted(ESP_COPY, {**one, "RD": b"R" * (2 * cb), "HEADW": b"W" * 100})
         esp = mbrdisk.esp_payload(ESP_COPY)
     finally:
         if os.path.exists(ESP_COPY):

@@ -4420,13 +4420,14 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bound from the size: BIG's 2 MiB was filled in one request on QEMU and
   the append went through, no wedge restart. So C holds at megabytes; the
   open risk is gigabytes, unmeasured.
-- **Two rigs still load `test-spawn-reads.py` as a module.**
+- ~~**Two rigs still load `test-spawn-reads.py` as a module.**
   `test-write-walk` and `test-fat-link` run it through `importlib` to take
   `partition`, `exfat_layout`, `exfat_chain` and `place_mounted` (the
   latter alone for `test-fat-link`), so a change to that rig's internals
   can break their imports, the trap #358 closed for the exFAT rigs. Move
   what they take into `exfatimg.py` or a shared host module. Found while
-  closing the item above, 2026-10-27.
+  closing the item above, 2026-10-27.~~ Done 2026-10-30: the four are
+  `exfatimg`'s, and all three rigs call them there.
 - **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
   chained walk reads and writes a bitmap sector and writes a FAT sector for
   every cluster, three round trips a cluster on the Pi's USB stick, and every

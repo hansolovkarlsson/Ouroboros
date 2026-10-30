@@ -1528,6 +1528,17 @@ answered as an I/O error, the next partition kept only by
 with the shipped fsd staged, the build check fails. From the medium review
 of #371.
 
+**No rig loads another as a module (2026-10-30).** `test-write-walk` and
+`test-fat-link` ran `test-spawn-reads.py` through `importlib` to take four
+host helpers, `partition`, `exfat_layout`, `exfat_chain` and
+`place_mounted`, so a change to that rig's internals could break their
+imports, the trap #358 closed for the exFAT rigs. The four are
+`exfatimg.py`'s now, unchanged but for the mount point's prefix, and all
+three rigs call them there. All three pass; two counts differ from the
+recorded ones (the exFAT chain's 7 FAT sectors in test-spawn-reads, 6
+before, and test-write-walk's 775 on fat32-same, 774 before), and `main`'s
+scripts on the same images read 7 and 775, so the images moved them.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
