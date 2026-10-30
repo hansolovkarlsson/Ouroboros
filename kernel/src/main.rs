@@ -1248,7 +1248,9 @@ fn install_boot_disk(held: Option<Held>) {
         // holds the boot partition from `BLOCK_BOOT_START`, which reads its
         // table when asked.
         // D6: a stick unreadable twice is installed, over a held virtio disk
-        // too, and the line above has said the read failed. Only a stick that was read and does not match is refused.
+        // too, and the line above has said the read failed. D6 decides only
+        // the install: once the table reads, `BLOCK_BOOT_START` answers by
+        // it. Only a stick that was read and does not match is refused.
         !matches!((holds_back, matched), (true, Some(bootdisk::Boot::No)))
     });
     let Some(Held { device, blank }) = held else { return };

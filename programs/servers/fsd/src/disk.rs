@@ -84,15 +84,20 @@ impl Device {
     /// matched this device as the disk it is on, else `None`: the firmware
     /// named no partition, or the device is a fallback or a stick taken late
     /// (`BLOCK_BOOT_START`, one-disk step 4). A kernel without the call
-    /// answers an error, which is `None` too. Asked afresh every time, never
-    /// kept: the kernel matches the table as it stands at each call, so a
-    /// table `erase` or `partition` rewrote is answered as rewritten, and fsd
-    /// holds nothing a restart could lose (since 2026-10-30).
-    pub fn boot_partition_start(&self) -> Option<u64> {
+    /// answers an error, which is `None` too. Asked afresh at each mount and
+    /// format, never kept: the kernel matches the table as it stands at each
+    /// call, so a table `erase` or `partition` rewrote is answered as
+    /// rewritten, and fsd holds nothing a restart could lose (since
+    /// 2026-10-30). [`DiskError::Io`] when the kernel's read of the table
+    /// failed: a failing disk is not one without the boot partition, so
+    /// `mount` and `format` refuse rather than take the ESP for the root.
+    pub fn boot_partition_start(&self) -> Result<Option<u64>, DiskError> {
         match block_svc(syscall_abi::BLOCK_BOOT_START, 0, 0) {
-            0 => None,
-            code if code >= syscall_abi::FS_ERR_MIN => None,
-            start => Some(start),
+            0 => Ok(None),
+            // Before the band test, which it is inside.
+            syscall_abi::BLOCK_ERR_IO => Err(DiskError::Io),
+            code if code >= syscall_abi::FS_ERR_MIN => Ok(None),
+            start => Ok(Some(start)),
         }
     }
 }

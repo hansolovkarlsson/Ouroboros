@@ -4458,7 +4458,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   table as it stands, and fsd's flag is gone, so fsd keeps nothing a
   restart could lose. (A first version cleared the start at a write to
   sector 0 or 1; the medium review of #377 found that would make a kept ESP
-  a root candidate at steps 7 and 8.) A stale start changes no mount today,
+  a root candidate at steps 7 and 8.) The match counts a GPT partition only
+  on a disk fsd reads as GPT, a failed read is an error fsd refuses on, and
+  `partition` signs its table anew. A stale start changes no mount today,
   since `partition` makes one partition, which mounts writable whatever the
   start says, so fsd prints the answer after its mount line and
   `make test-boot-partition`'s disk-rewrite boot requires it at boot and not

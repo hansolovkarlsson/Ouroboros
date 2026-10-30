@@ -53,7 +53,9 @@ disk.img, the boot disk, and the new root, where the ESP began, must mount
 writable and take `help > /rwtest`, and fsd's line that the boot partition is
 on this disk, at LBA 2048, printed at boot, must be gone from `mount -a`'s
 answer: the kernel matches BLOCK_BOOT_START against the table as it stands
-(fails with the start kept from the install); disk-badroot zeroes the root's superblock,
+(fails with the start kept from the install), and the table `partition`
+wrote must carry a disk signature, not 0 and not the copy's (read on the
+host after the boot); disk-badroot zeroes the root's superblock,
 `fsd` must say it fell back to the ESP read-only and refuse root's `touch`
 there (decision D5), open /etc/passwd with O_RDONLY|O_CREAT and read it while
 refusing a missing file EROFS at the open, one in a missing directory
@@ -430,6 +432,15 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             (f"{label}: `help > /rwtest` on the new root succeeds, and `cd /rwtest` finds a file",
              answer("help > /rwtest") == "" and "not a directory" in (answer("cd /rwtest") or "")),
         ]
+        # `partition` signs its table anew: never 0, which the firmware's
+        # node can carry and the kernel then matches the new entry by, and
+        # never the copy's own (the second medium review of #377).
+        with open(image, "rb") as fh:
+            sector0 = fh.read(512)
+        sig = struct.unpack_from("<I", sector0, 440)[0]
+        own = int.from_bytes(hashlib.sha256(b"disk-rewrite.img").digest()[:4], "little") or 1
+        checks.append((f"{label}: on the host, `partition` signed the new table ({sig:#010x}), not 0 and not the copy's",
+                       sector0[510:512] == b"\x55\xaa" and sig not in (0, own)))
     elif label == "disk-data-format":
         def answer(command):
             found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", out)

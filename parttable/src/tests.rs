@@ -430,3 +430,41 @@ fn blank_is_nothing_a_table_reader_or_firmware_takes() {
     m.fail.push(1);
     assert_eq!(is_blank(&mut m.reader()), None);
 }
+
+#[test]
+fn boot_start_answers_the_table_as_the_disk_is_read() {
+    let esp = mbr_boot(1, 2048, 1000, DiskSignature::Mbr(0x1234));
+    let mut m = Mem::new();
+    m.mbr(&[(0x0C, 2048, 1000)], 0x1234);
+    assert_eq!(boot_start(&esp, &mut m.reader(), DISK), Ok(2048));
+    // `partition`'s table: its own signature, the same entry.
+    m.mbr(&[(0x83, 2048, 1000)], 0x5678);
+    assert_eq!(boot_start(&esp, &mut m.reader(), DISK), Ok(0));
+    m.fail.push(0);
+    assert_eq!(boot_start(&esp, &mut m.reader(), DISK), Err(Unreadable));
+    let unknown = BootPartition { table: Table::Unknown, ..esp };
+    assert_eq!(boot_start(&unknown, &mut m.reader(), DISK), Ok(0));
+}
+
+#[test]
+fn boot_start_takes_no_gpt_backup_the_disk_is_not_read_by() {
+    let boot = gpt_boot(DiskSignature::Gpt(UNIQUE));
+    let m = Mem::gpt_disk(&[(ESP_GUID, UNIQUE, 34, 133)]);
+    assert_eq!(boot_start(&boot, &mut m.reader(), DISK), Ok(34));
+    // The primary gone with a protective MBR kept: still GPT, read from the
+    // backup, as discover reads it.
+    let mut m = Mem::gpt_disk(&[(ESP_GUID, UNIQUE, 34, 133)]);
+    m.sectors[1] = [0u8; SECTOR];
+    assert_eq!(boot_start(&boot, &mut m.reader(), DISK), Ok(34));
+    // `erase` and `partition`: sectors 0 and 1 rewritten as an MBR, the
+    // backup at the disk's end left whole. is_boot_disk still finds the
+    // partition there; discover reads the MBR, so no start is answered.
+    m.sectors[0] = [0u8; SECTOR];
+    m.mbr(&[(0x83, 2048, 1000)], 0x5678);
+    assert_eq!(ask(&m, &boot), Some(Boot::Yes), "the backup alone still validates");
+    assert_eq!(boot_start(&boot, &mut m.reader(), DISK), Ok(0));
+    // A failed read is not an answer.
+    let mut m = Mem::gpt_disk(&[(ESP_GUID, UNIQUE, 34, 133)]);
+    m.fail.push(0);
+    assert_eq!(boot_start(&boot, &mut m.reader(), DISK), Err(Unreadable));
+}

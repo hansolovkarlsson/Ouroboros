@@ -1549,11 +1549,18 @@ table is answered as rewritten, and fsd's flag is gone. The first version
 cleared the start at any write to sector 0 or 1; its review found that this
 would make a kept ESP a root candidate once steps 7 and 8 write a table of
 two partitions, missed a GPT read from its backup, and forgot on a rewrite
-that changed nothing. fsd now says after its mount line where the boot
-partition is, `fsd: the boot partition is on this disk, at LBA 2048`, and
+that changed nothing. The match reads the table fsd reads (a partition the
+firmware named in a GPT counts only while the disk is read as GPT, so a
+backup header `erase` left at the disk's end names nothing), a failed read
+is an I/O error that fsd's mount and format refuse on rather than 0, and
+`partition` signs the table it writes with a new disk signature, never 0,
+so no firmware node of signature 0 matches the new partition. fsd now says
+after its mount line where the boot partition is, the start the root was
+chosen by, `fsd: the boot partition is on this disk, at LBA 2048`, and
 `make test-boot-partition`'s new disk-rewrite boot (`erase`, `partition`,
 `format`, `mount -a` and a write on the boot disk) requires that line at
-boot and not after the rewrite. From the medium review of #362.
+boot and not after the rewrite, and the new table's signature read on the
+host. From the medium review of #362.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 

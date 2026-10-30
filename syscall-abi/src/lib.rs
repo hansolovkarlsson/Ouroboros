@@ -414,7 +414,8 @@ pub const BLOCK_INFO: u64 = 26;
 /// no longer holds the partition the firmware named: the kernel matches the
 /// table as it stands at each call (since 2026-10-30), so a table rewritten
 /// since the boot is answered as rewritten. `0` is never a partition start, sector
-/// 0 holding the table. [`BLOCK_ERR_NO_DEVICE`] with no device,
+/// 0 holding the table. [`BLOCK_ERR_IO`] when a read of the table failed,
+/// [`BLOCK_ERR_NO_DEVICE`] with no device,
 /// [`BLOCK_ERR_DENIED`] for any caller but [`FSD_TASK`], as [`BLOCK_INFO`].
 /// For `fsd` to mount as `/` the partition beside the ESP rather than the
 /// ESP (one-disk step 4, docs/roadmap/roadmap-one-disk.md).

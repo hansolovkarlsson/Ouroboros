@@ -258,10 +258,9 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS
             // What the kernel answered of the boot partition, last: the one
             // place a rig can see it, so a start answered for a table that no
             // longer holds it is graded (test-boot-partition's disk-rewrite,
-            // since 2026-10-30). Asked again here, after `mount` asked; the
-            // kernel reads the table each time, so both answer alike.
+            // since 2026-10-30): the answer `mount` chose the root by.
             let mut digits = [0u8; 20];
-            let [bpre, blba, bend] = match device.boot_partition_start() {
+            let [bpre, blba, bend] = match mounted.boot_start() {
                 Some(start) => {
                     let n = proc::u64_decimal(start, &mut digits);
                     ["fsd: the boot partition is on this disk, at LBA ", core::str::from_utf8(&digits[..n]).unwrap_or("?"), "\r\n"]
@@ -371,8 +370,8 @@ fn erase_disk(device: &disk::Device, sectors: u64) -> u64 {
 
 /// Write a fresh MBR with a single primary partition of type `type_byte`
 /// (`0` -> `0x0C`, FAT32-LBA) spanning the disk from
-/// [`PARTITION_START_LBA`] to the end. Only LBA 0 is written; the
-/// partition's contents are left for a later format. Returns `0`,
+/// [`PARTITION_START_LBA`] to the end, signed by [`new_signature`]. Only
+/// LBA 0 is written; the partition's contents are left for a later format. Returns `0`,
 /// [`MOUNT_NO_DEVICE`], [`FS_ERR_DISK_FULL`] (disk smaller than the 1 MiB
 /// alignment start), or [`FS_ERR_IO`].
 fn partition_disk(device: &disk::Device, type_byte: u8) -> u64 {
@@ -407,6 +406,13 @@ fn partition_disk(device: &disk::Device, type_byte: u8) -> u64 {
     mbr[e + 7] = 0xFF;
     mbr[e + 8..e + 12].copy_from_slice(&(start as u32).to_le_bytes());
     mbr[e + 12..e + 16].copy_from_slice(&part_sectors.to_le_bytes());
+    // The disk signature, a new one: never the old sector 0's.
+    let mut old = [0u8; 512];
+    let old = match device.disk().read_sector(0, &mut old) {
+        Ok(()) => u32::from_le_bytes([old[440], old[441], old[442], old[443]]),
+        Err(_) => 0,
+    };
+    mbr[440..444].copy_from_slice(&new_signature(old).to_le_bytes());
     // Boot signature.
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
@@ -415,6 +421,29 @@ fn partition_disk(device: &disk::Device, type_byte: u8) -> u64 {
         return syscall_abi::FS_ERR_IO;
     }
     0
+}
+
+/// A disk signature for the table `partition` writes: never 0 and never
+/// `old`, the signature sector 0 held before the write (0 after `erase`).
+/// The kernel matches the firmware's boot partition on an MBR by entry,
+/// start, size and signature, a signature of 0 included, so a table written
+/// with 0, as until 2026-10-30, on a stick whose firmware named a partition
+/// with signature 0 and the same start and size, the esp.img layout, was
+/// answered by `BLOCK_BOOT_START` as still holding the boot partition (the
+/// second medium review of #377). Every image recipe signs its disk too
+/// (scripts/disksig.py). From the clock and the boot counter, since entropy
+/// is absent on Parallels and the Pi: a new partition matching the firmware's
+/// node by chance needs the old signature, which `erase` cleared, guessed in
+/// 32 bits.
+fn new_signature(old: u32) -> u32 {
+    let us = syscall4::<{ syscall_abi::MONOTONIC_US }>(0, 0, 0, 0);
+    let boot = syscall4::<{ syscall_abi::BOOT_ID }>(syscall_abi::BOOT_ID_COUNTER, 0, 0, 0);
+    let mixed = us ^ (us >> 32) ^ boot.rotate_left(17) ^ (boot >> 29);
+    let mut sig = (mixed ^ (mixed >> 32)) as u32;
+    while sig == 0 || sig == old {
+        sig = sig.wrapping_mul(0x9E37_79B9).wrapping_add(1);
+    }
+    sig
 }
 
 /// The partition `format` lays a root on (start LBA, sector count): the
@@ -454,7 +483,7 @@ fn find_partition(device: &disk::Device) -> Result<Option<(u32, u32)>, fat32::Er
     // (the third review of #288 found the probe reaching it), and a damaged
     // typed root is formatted, not a data partition or an ESP beside it,
     // whether or not the boot partition is known (the review of #295).
-    let boot = device.boot_partition_start();
+    let boot = device.boot_partition_start()?;
     let roots = vfs::root_order(&parts, count, boot, device.disk().capacity_sectors().ok());
     let candidates = roots.format_targets();
     let probed = vfs::Filesystem::first_mounting(device, candidates);

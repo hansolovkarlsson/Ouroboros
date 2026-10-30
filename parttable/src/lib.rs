@@ -439,6 +439,28 @@ pub fn is_boot_disk(boot: &BootPartition, read: &mut ReadSector, capacity: u64) 
     }
 }
 
+/// The boot partition's start when the disk read through `read`, of
+/// `capacity` sectors, holds it as the disk is read now, else 0: what the
+/// kernel's `BLOCK_BOOT_START` answers, asked of the table at every call
+/// (since 2026-10-30). [`is_boot_disk`]'s rule, with one more: a partition
+/// the firmware named in a GPT is held only while [`discover`] reads the disk
+/// as GPT, so the kernel never names a start from a backup header that fsd,
+/// reading the MBR `partition` wrote over the primary, does not see (the
+/// second medium review of #377). An MBR the firmware named is matched on a
+/// disk read as GPT all the same: a hybrid MBR's entry is the same partition
+/// as the GPT's. [`Unreadable`] when a read the answer needed failed, so a
+/// failing disk is not answered as one without the boot partition.
+pub fn boot_start(boot: &BootPartition, read: &mut ReadSector, capacity: u64) -> Result<u64, Unreadable> {
+    if boot.table == Table::Gpt && !is_gpt(read).ok_or(Unreadable)? {
+        return Ok(0);
+    }
+    match is_boot_disk(boot, read, capacity) {
+        Some(Boot::Yes) => Ok(boot.start_lba),
+        Some(Boot::Unreadable) => Err(Unreadable),
+        Some(Boot::No) | None => Ok(0),
+    }
+}
+
 fn mbr_holds(boot: &BootPartition, sector: &[u8; SECTOR]) -> bool {
     if !has_boot_signature(sector) {
         return false;

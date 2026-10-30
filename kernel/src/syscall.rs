@@ -1940,11 +1940,12 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // the table still holds it (the medium review of #377 found a
             // start forgotten at every table write turning a kept ESP into
             // a root candidate). A disk held at boot as unreadable (D6)
-            // answers by what it reads now.
+            // answers by what it reads now. A read failing here is
+            // BLOCK_ERR_IO, which fsd's mount and format refuse on.
             let capacity = device.capacity_sectors();
             // SAFETY: as BLOCK_READ; one sector into a kernel buffer.
             let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
-            crate::bootdisk::boot_start(&mut read, capacity, "the block device")
+            crate::bootdisk::boot_start(&mut read, capacity).unwrap_or(syscall_abi::BLOCK_ERR_IO)
         }
         syscall_abi::BLOCK_INFO => {
             if !block_access_allowed() {

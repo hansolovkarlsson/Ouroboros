@@ -99,12 +99,17 @@ pub enum Filesystem {
 pub struct Mount {
     fs: Filesystem,
     held: Option<&'static str>,
+    /// The boot partition's start the root was chosen by
+    /// ([`Device::boot_partition_start`]), for the mount line, which so says
+    /// the answer the choice was made on rather than asking again (the
+    /// second medium review of #377).
+    boot: Option<u64>,
 }
 
 impl Mount {
     /// `fs`, read-only only as its arm says.
     fn new(fs: Filesystem) -> Self {
-        Mount { fs, held: None }
+        Mount { fs, held: None, boot: None }
     }
 
     /// The synthetic `/proc` filesystem - auto-mounted at the reserved `PROC_TREE`
@@ -121,6 +126,12 @@ impl Mount {
     /// The volume, to act on.
     pub fn fs_mut(&mut self) -> &mut Filesystem {
         &mut self.fs
+    }
+
+    /// The boot partition's start this mount chose the root by, `None` when
+    /// it was not known to be on the disk (and for `/proc`).
+    pub fn boot_start(&self) -> Option<u64> {
+        self.boot
     }
 
     /// Why this mount is read-only, for the mount lines alone: fsd's own
@@ -178,7 +189,7 @@ impl Filesystem {
     pub fn mount(device: &Device) -> Result<(Mount, bool), Error> {
         let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
         let count = partition::discover(&mut device.disk(), &mut parts)?;
-        let boot = device.boot_partition_start();
+        let boot = device.boot_partition_start()?;
         let roots = root_order(&parts, count, boot, device.disk().capacity_sectors().ok());
         let probed = Self::first_mounting(device, &roots.order[..roots.len]);
         let Some((i, fs)) = probed.found else {
@@ -193,7 +204,7 @@ impl Filesystem {
             (true, true, false) => Some("the partition typed as the root did not mount, so an untyped partition is `/`"),
             (true, false, _) => Some("no partition beside the boot partition mounted, so the boot partition is `/`"),
         };
-        Ok((Mount { fs, held }, probed.failed.is_some()))
+        Ok((Mount { fs, held, boot }, probed.failed.is_some()))
     }
 
     /// The first of `parts` that [`probe`](Self::probe)
