@@ -211,7 +211,8 @@ BOOTS = [
     # partition it is no fallback (`RootOrder::is_fallback`), so the answer is
     # read off fsd's mount line instead: the boot partition at LBA 2048 at
     # boot, and none after `mount -a`, the table rewritten (its new MBR
-    # carries no disk signature, so the firmware's partition is not in it).
+    # carries a disk signature of its own, so the firmware's partition is not
+    # in it; the rig's last check reads it on the host).
     ("disk-rewrite", "disk-rewrite.img", "virtio", None, None, "ext2", False),
     # A copy of espgpt.img: `format` must refuse a GPT disk, which it would
     # have laid a filesystem over from LBA 1 (the medium review of #288).
@@ -295,6 +296,10 @@ def make_copies():
 
 def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
     name = f"test-boot-partition[{label}]: "
+    # The signature the boot image carries before the boot, read off it, for
+    # disk-rewrite's check that `partition` wrote another.
+    with open(image, "rb") as fh:
+        own_before = struct.unpack_from("<I", fh.read(512), 440)[0]
     stick = image if bus == "usb" else on_usb
     extra = list(usb_hub.layout(True, stick)) if stick else []
     if bus == "nvme":
@@ -438,9 +443,8 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         with open(image, "rb") as fh:
             sector0 = fh.read(512)
         sig = struct.unpack_from("<I", sector0, 440)[0]
-        own = int.from_bytes(hashlib.sha256(b"disk-rewrite.img").digest()[:4], "little") or 1
         checks.append((f"{label}: on the host, `partition` signed the new table ({sig:#010x}), not 0 and not the copy's",
-                       sector0[510:512] == b"\x55\xaa" and sig not in (0, own)))
+                       sector0[510:512] == b"\x55\xaa" and sig not in (0, own_before)))
     elif label == "disk-data-format":
         def answer(command):
             found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", out)

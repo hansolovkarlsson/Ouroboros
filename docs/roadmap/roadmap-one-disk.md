@@ -244,9 +244,9 @@ argument), so the fallback and `MOUNT`'s late stick answered 0. Since
 against the device's table as it stands (`bootdisk::boot_start`), so a
 table `erase` or `partition` rewrote, or one steps 7 and 8 will write with
 the ESP kept, is answered as it now is (the medium review of #377), and
-fsd's mount line says what it answered. The match reads the table as fsd
-does (`parttable::boot_start`: a GPT partition only on a disk read as GPT),
-and a read failing in it is an error, not 0. D6 decides the install alone:
+fsd's mount line says what it answered. The match reads only the table fsd
+reads the disk by (`parttable::boot_start`: GPT when `is_gpt` says so, else
+the MBR), and a read failing twice in it is an error, not 0. D6 decides the install alone:
 a disk unreadable at boot is answered by its table once it reads. The USB stick
 is now always asked whether it is the boot disk, even when it is installed
 regardless, so a stick booted from tells `fsd` so. `vfs::mount` tries the

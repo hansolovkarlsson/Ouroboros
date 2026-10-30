@@ -4458,13 +4458,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   table as it stands, and fsd's flag is gone, so fsd keeps nothing a
   restart could lose. (A first version cleared the start at a write to
   sector 0 or 1; the medium review of #377 found that would make a kept ESP
-  a root candidate at steps 7 and 8.) The match counts a GPT partition only
-  on a disk fsd reads as GPT, a failed read is an error fsd refuses on, and
+  a root candidate at steps 7 and 8.) The match reads only the table fsd
+  reads the disk by, a read failing twice is an error fsd refuses on, and
   `partition` signs its table anew. A stale start changes no mount today,
   since `partition` makes one partition, which mounts writable whatever the
   start says, so fsd prints the answer after its mount line and
   `make test-boot-partition`'s disk-rewrite boot requires it at boot and not
   after the rewrite.
+- **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
+  writes sector 0 alone, so on a GPT disk not erased first the primary
+  header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s
+  GPT refusal and the kernel's `BLOCK_BOOT_START` all go on reading the old
+  GPT, and the MBR just written is invisible, with `partition` answering
+  success. It should refuse a disk `parttable::is_gpt` reads as GPT, as
+  `format` does, and say to `erase` first. From the third medium review of
+  #377, 2026-10-30.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on

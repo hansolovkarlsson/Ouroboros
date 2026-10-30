@@ -463,6 +463,13 @@ fn boot_start_takes_no_gpt_backup_the_disk_is_not_read_by() {
     m.mbr(&[(0x83, 2048, 1000)], 0x5678);
     assert_eq!(ask(&m, &boot), Some(Boot::Yes), "the backup alone still validates");
     assert_eq!(boot_start(&boot, &mut m.reader(), DISK), Ok(0));
+    // An MBR entry under a GPT header fsd reads by: not the table it reads.
+    let mut m = Mem::gpt_disk(&[(ESP_GUID, UNIQUE, 34, 133)]);
+    m.sectors[0] = [0u8; SECTOR];
+    m.mbr(&[(0x0C, 2048, 1000)], 0x1234);
+    let esp = mbr_boot(1, 2048, 1000, DiskSignature::Mbr(0x1234));
+    assert_eq!(ask(&m, &esp), Some(Boot::Yes), "the MBR alone holds it");
+    assert_eq!(boot_start(&esp, &mut m.reader(), DISK), Ok(0));
     // A failed read is not an answer.
     let mut m = Mem::gpt_disk(&[(ESP_GUID, UNIQUE, 34, 133)]);
     m.fail.push(0);

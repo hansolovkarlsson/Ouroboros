@@ -406,12 +406,13 @@ fn partition_disk(device: &disk::Device, type_byte: u8) -> u64 {
     mbr[e + 7] = 0xFF;
     mbr[e + 8..e + 12].copy_from_slice(&(start as u32).to_le_bytes());
     mbr[e + 12..e + 16].copy_from_slice(&part_sectors.to_le_bytes());
-    // The disk signature, a new one: never the old sector 0's.
+    // The disk signature, a new one: never the old sector 0's. A disk whose
+    // sector 0 will not read is not written to.
     let mut old = [0u8; 512];
-    let old = match device.disk().read_sector(0, &mut old) {
-        Ok(()) => u32::from_le_bytes([old[440], old[441], old[442], old[443]]),
-        Err(_) => 0,
-    };
+    if device.disk().read_sector(0, &mut old).is_err() {
+        return syscall_abi::FS_ERR_IO;
+    }
+    let old = u32::from_le_bytes([old[440], old[441], old[442], old[443]]);
     mbr[440..444].copy_from_slice(&new_signature(old).to_le_bytes());
     // Boot signature.
     mbr[510] = 0x55;
