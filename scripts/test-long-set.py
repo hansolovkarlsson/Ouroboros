@@ -247,21 +247,20 @@ write_fat_entry changes.
 import importlib.util
 import os
 import re
-import shutil
 import struct
-import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import diskgate  # noqa: E402
 import exfatimg  # noqa: E402
 
 
 # The boots QEMU's firmware never handed to the kernel (drive_qemu.boot_stalled).
 STALLED = []
 # Every boot's (label, transcript), so main checks which fsd each one ran
-# (gate_check): a boot added later cannot skip it.
+# (diskgate.check): a boot added later cannot skip it.
 BOOTED = []
 
 def load(name, file):
@@ -277,8 +276,8 @@ Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfati
 
 # --disk-gate (`make test-disk-gate`, since 2026-10-29): the read-only boots
 # alone, on espexfat-diskgate.img, whose ESP carries fsd's `disk-gate-rig`
-# build (FSD_GATE_BIN), so a write reaches exFAT's own disk gate rather than
-# fsd's verb gate. Every boot must print GATE_LINE in that mode, and must not
+# build (diskgate.FSD_GATE_BIN), so a write reaches exFAT's own disk gate rather than
+# fsd's verb gate. Every boot must print diskgate.GATE_LINE in that mode, and must not
 # print it otherwise, so a boot of the wrong fsd fails either way.
 DISK_GATE = "--disk-gate" in sys.argv[1:]
 # The rig's name, in its verdict, its stall log and its files, so the two
@@ -286,53 +285,25 @@ DISK_GATE = "--disk-gate" in sys.argv[1:]
 RIG = "test-disk-gate" if DISK_GATE else "test-long-set"
 IMAGE = os.path.join(ROOT, "build", f"{RIG}.img")
 SOURCE = "espexfat-diskgate.img" if DISK_GATE else "espexfat.img"
-GATE_LINE = "fsd: the disk-gate rig's build: the verb gate does not ask an arm"
-READY_LINE = "fsd: filesystem server ready"
-# The rig's fsd, named by the Makefile (its FSD_GATE_BIN), which rebuilds it
-# first: a direct run would stage whatever build was left there, and a path
-# spelled here too could drift from the Makefile's (the review of #371).
-FSD_GATE_BIN = os.environ.get("FSD_GATE_BIN")
 
 
 def gate_image():
     """build/espexfat-diskgate.img: espexfat.img's layout (scripts/mkexfat.py)
-    with a copy of esp.img whose \\EFI\\ORBS\\FSD.BIN is FSD_GATE_BIN."""
+    with a copy of esp.img whose \\EFI\\ORBS\\FSD.BIN is the rig's fsd
+    (diskgate.esp)."""
     import mbrdisk
-    if not FSD_GATE_BIN:
-        sys.exit("--disk-gate is run by `make test-disk-gate`, which builds the rig's fsd and names it")
-    if not os.path.exists(FSD_GATE_BIN):
-        sys.exit(f"{FSD_GATE_BIN} not found")
     esp = os.path.join(ROOT, "build", "esp-diskgate.img")
-    shutil.copyfile(os.path.join(ROOT, "build", "esp.img"), esp)
     try:
-        mp = drive_qemu.attach(esp, readonly=False)
-        try:
-            shutil.copyfile(FSD_GATE_BIN, os.path.join(mp, "EFI", "ORBS", "FSD.BIN"))
-            # What macOS leaves on a volume it mounts read-write, removed as
-            # the Makefile's image recipes do, so the ESP holds esp.img's
-            # files and no others, FSD.BIN the one changed (its FAT, FSInfo
-            # and FSD.BIN's entry are macOS's writing, not esp.img's).
-            subprocess.run(["find", mp, "-name", "._*", "-delete"], check=True)
-            for d in (".fseventsd", ".Trashes", ".Spotlight-V100"):
-                shutil.rmtree(os.path.join(mp, d), ignore_errors=True)
-        finally:
-            drive_qemu.detach(mp)
+        diskgate.esp(os.path.join(ROOT, "build", "esp.img"), esp, drive_qemu)
         mbrdisk.assemble(os.path.join(ROOT, "build", SOURCE), [
             (0x07, mbrdisk.exfat_payload(os.path.join(ROOT, "build", "exfatpart.img")), False),
             (0x0B, mbrdisk.esp_payload(esp), True),
         ])
     finally:
-        os.remove(esp)
+        if os.path.exists(esp):
+            os.remove(esp)
 
 
-def gate_check(label, out):
-    """The fsd this boot ran: the rig's build in --disk-gate mode, the shipped
-    one otherwise. Either way fsd must have said it is ready, so a boot that
-    died before fsd spoke is not taken for the shipped build."""
-    said, ready = GATE_LINE in out, READY_LINE in out
-    if DISK_GATE:
-        return (f"{label}: fsd is the disk-gate rig's build ({GATE_LINE!r} printed)", said and ready)
-    return (f"{label}: fsd is the shipped build ({READY_LINE!r} and no {GATE_LINE!r})", ready and not said)
 VENDOR = 17
 GUID = bytes(range(0x10, 0x20))
 DELETED = bytes([0x05]) + bytes(31)  # a deleted File entry: in-use bit clear
@@ -1400,7 +1371,7 @@ def main():
         gated = os.path.join(ROOT, "build", SOURCE)
         if DISK_GATE and os.path.exists(gated) and not os.environ.get("KEEP"):
             os.remove(gated)
-    checks += [gate_check(label, out) for label, out in BOOTED if label not in STALLED]
+    checks += [diskgate.check(label, out, DISK_GATE) for label, out in BOOTED if label not in STALLED]
     failed = 0
     for label, ok in checks:
         print(("PASS  " if ok else "FAIL  ") + label)

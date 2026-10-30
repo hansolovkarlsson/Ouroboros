@@ -2707,11 +2707,18 @@ test-long-set: image-exfat
 # test-long-set.py --disk-gate, since 2026-10-29): the read-only boots of
 # test-long-set again, on an ESP whose fsd is the `disk-gate-rig` build, so
 # each write reaches exFAT's own refusal; every boot must print that build's
-# line. Fails with the gate's write check and the allocator's removed beside
+# line. Since 2026-10-30 also test-volume-bound's BESIDE so (scripts/
+# test-volume-bound.py --disk-gate), the volume whose bitmap claims the next
+# partition's first sector. Both run, and the worse exit is the target's: a
+# failed check (1) or a refused run (2) over an INCONCLUSIVE boot (100) over
+# a pass. Fails with the gate's write check and the allocator's removed beside
 # every early writable() check. Run it whenever exFAT's gate, writable(),
 # alloc_cluster or a writer's first write changes.
-test-disk-gate: image $(EXFAT_PART) fsd-disk-gate-bin
-	FSD_GATE_BIN=$(FSD_GATE_BIN) python3 scripts/test-long-set.py --disk-gate
+test-disk-gate: image image-exfat image-ext2 $(EXFAT_PART) fsd-disk-gate-bin
+	@FSD_GATE_BIN=$(FSD_GATE_BIN) python3 scripts/test-long-set.py --disk-gate; a=$$?; \
+	FSD_GATE_BIN=$(FSD_GATE_BIN) python3 scripts/test-volume-bound.py --disk-gate; b=$$?; \
+	for c in $$a $$b; do case $$c in 0|100) ;; *) exit $$c;; esac; done; \
+	if [ $$a = 100 ] || [ $$b = 100 ]; then exit 100; fi
 
 # exFAT bytes past a file's ValidDataLength are zeros, read or written
 # (scripts/test-valid-length.py): on a copy of the exFAT image, four files
