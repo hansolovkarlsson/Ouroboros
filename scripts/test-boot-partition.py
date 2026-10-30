@@ -333,10 +333,12 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
                  ("# ", "format ext2"), ("# ", "mount -a"), ("# ", "mount 1 /data"), ("# ", "cd /data/bin"),
                  ("# ", "mount 0 /esp"), ("# ", "cd /esp/EFI"), ("# ", "cd /"), ("# ", "")]
     if label == "disk-rewrite":
-        # The table rewritten, a root made where the ESP was, and a write to it.
+        # The table rewritten, a root made where the ESP was, and a write to
+        # it. The new root has no /bin, so builtins: `help`'s output written
+        # to a file, and `cd` into it, which must find a file.
         steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "erase disk"),
                  ("# ", "partition ext2"), ("# ", "format ext2"), ("# ", "mount -a"),
-                 ("# ", "touch /rwtest"), ("# ", "ls /"), ("# ", "echo after-ls"), ("# ", "")]
+                 ("# ", "help > /rwtest"), ("# ", "cd /rwtest"), ("# ", "")]
     if label == "disk-format":
         # Format the root, then look with builtins, since the new root has no
         # /bin: `cd /bin` must fail on the empty ext2, and `cd /esp/EFI` must
@@ -390,15 +392,14 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", out)
             return found.group(1).strip() if found else ""
         remount = out.split("mount -a", 1)[1] if "mount -a" in out else ""
-        listed = re.search(r"ls /\r?\n([\s\S]*?)echo after-ls", out)
         checks += [
             (f"{label}: `erase disk`, `partition ext2` and `format ext2` each succeed",
              answer("erase disk").startswith("erased") and answer("partition ext2").startswith("partitioned")
              and answer("format ext2").startswith("formatted")),
             (f"{label}: `mount -a` mounts the new root writable, not as the boot partition",
              "ext2 mounted" in remount and "fsd: mounted read-only" not in remount),
-            (f"{label}: root's `touch /rwtest` on the new root succeeds, and `ls /` lists it",
-             answer("touch /rwtest") == "" and listed is not None and "rwtest" in listed.group(1)),
+            (f"{label}: `help > /rwtest` on the new root succeeds, and `cd /rwtest` finds a file",
+             answer("help > /rwtest") == "" and "not a directory" in answer("cd /rwtest")),
         ]
     elif label == "disk-data-format":
         def answer(command):
