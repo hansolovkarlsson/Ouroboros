@@ -1423,9 +1423,16 @@ in one place; the gate mode had shared test-long-set's scratch image and
 transcripts, and keeps its own (`build/test-disk-gate*`), reporting as
 `test-disk-gate`; its ESP copy is removed on a failure too, the assembled
 disk after the run, and macOS's sidecars before the detach, so the ESP
-differs from `esp.img` in `FSD.BIN` alone. The five boots are the whole of
+holds `esp.img`'s files and no others. The five boots are the whole of
 what it grades: `test-volume-bound`'s BESIDE is not booted on the rig's
-build, a roadmap item.
+build, a roadmap item. The second medium review of #371: each boot must also print
+fsd's ready line, so a boot that died before fsd spoke is not taken for the
+shipped build; `make test` checks fsd with the feature, which nothing else
+built (fsd reads it through `cfg!()`, so what that check alone sees is the
+feature renamed or dropped); the mode is run through `make` alone, which rebuilds the rig's fsd
+and names it to the script, so a stale build is never staged and the path is
+spelled once; and its prerequisites are `esp.img` and the exFAT partition,
+not the `espexfat.img` it never read.
 
 **A directory opens for reading alone, on fsd and the host peer
 (2026-10-29).** fsd gave a fid for any `NP_OPEN` of a directory, so

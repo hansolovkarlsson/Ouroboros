@@ -2,7 +2,7 @@
 """exFAT entry sets as the spec shapes them, and only those, are patched whole.
 
     python3 scripts/test-long-set.py     (or `make test-long-set`, which builds the image)
-    python3 scripts/test-long-set.py --disk-gate   (or `make test-disk-gate`)
+    make test-disk-gate     (the --disk-gate mode, run through make alone)
 
 --disk-gate (since 2026-10-29) runs the read-only boots alone, VBITMAP,
 VOVERLAP, VFIRST, VTWOFAT and VRUNS, on a copy of esp.img carrying fsd's
@@ -287,15 +287,21 @@ RIG = "test-disk-gate" if DISK_GATE else "test-long-set"
 IMAGE = os.path.join(ROOT, "build", f"{RIG}.img")
 SOURCE = "espexfat-diskgate.img" if DISK_GATE else "espexfat.img"
 GATE_LINE = "fsd: the disk-gate rig's build: the verb gate does not ask an arm"
-FSD_GATE_BIN = os.path.join(ROOT, "target", "disk-gate", "aarch64-unknown-none", "release", "fsd.bin")
+READY_LINE = "fsd: filesystem server ready"
+# The rig's fsd, named by the Makefile (its FSD_GATE_BIN), which rebuilds it
+# first: a direct run would stage whatever build was left there, and a path
+# spelled here too could drift from the Makefile's (the review of #371).
+FSD_GATE_BIN = os.environ.get("FSD_GATE_BIN")
 
 
 def gate_image():
     """build/espexfat-diskgate.img: espexfat.img's layout (scripts/mkexfat.py)
     with a copy of esp.img whose \\EFI\\ORBS\\FSD.BIN is FSD_GATE_BIN."""
     import mbrdisk
+    if not FSD_GATE_BIN:
+        sys.exit("--disk-gate is run by `make test-disk-gate`, which builds the rig's fsd and names it")
     if not os.path.exists(FSD_GATE_BIN):
-        sys.exit(f"{FSD_GATE_BIN} not found - run `make fsd-disk-gate-bin` (or `make test-disk-gate`)")
+        sys.exit(f"{FSD_GATE_BIN} not found")
     esp = os.path.join(ROOT, "build", "esp-diskgate.img")
     shutil.copyfile(os.path.join(ROOT, "build", "esp.img"), esp)
     try:
@@ -303,8 +309,9 @@ def gate_image():
         try:
             shutil.copyfile(FSD_GATE_BIN, os.path.join(mp, "EFI", "ORBS", "FSD.BIN"))
             # What macOS leaves on a volume it mounts read-write, removed as
-            # the Makefile's image recipes do, so the ESP differs from
-            # esp.img in FSD.BIN alone.
+            # the Makefile's image recipes do, so the ESP holds esp.img's
+            # files and no others, FSD.BIN the one changed (its FAT, FSInfo
+            # and FSD.BIN's entry are macOS's writing, not esp.img's).
             subprocess.run(["find", mp, "-name", "._*", "-delete"], check=True)
             for d in (".fseventsd", ".Trashes", ".Spotlight-V100"):
                 shutil.rmtree(os.path.join(mp, d), ignore_errors=True)
@@ -320,11 +327,12 @@ def gate_image():
 
 def gate_check(label, out):
     """The fsd this boot ran: the rig's build in --disk-gate mode, the shipped
-    one otherwise."""
-    said = GATE_LINE in out
+    one otherwise. Either way fsd must have said it is ready, so a boot that
+    died before fsd spoke is not taken for the shipped build."""
+    said, ready = GATE_LINE in out, READY_LINE in out
     if DISK_GATE:
-        return (f"{label}: fsd is the disk-gate rig's build ({GATE_LINE!r} printed)", said)
-    return (f"{label}: fsd is the shipped build (no {GATE_LINE!r})", not said)
+        return (f"{label}: fsd is the disk-gate rig's build ({GATE_LINE!r} printed)", said and ready)
+    return (f"{label}: fsd is the shipped build ({READY_LINE!r} and no {GATE_LINE!r})", ready and not said)
 VENDOR = 17
 GUID = bytes(range(0x10, 0x20))
 DELETED = bytes([0x05]) + bytes(31)  # a deleted File entry: in-use bit clear

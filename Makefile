@@ -2710,8 +2710,8 @@ test-long-set: image-exfat
 # line. Fails with the gate's write check and the allocator's removed beside
 # every early writable() check. Run it whenever exFAT's gate, writable(),
 # alloc_cluster or a writer's first write changes.
-test-disk-gate: image-exfat fsd-disk-gate-bin
-	python3 scripts/test-long-set.py --disk-gate
+test-disk-gate: image $(EXFAT_PART) fsd-disk-gate-bin
+	FSD_GATE_BIN=$(FSD_GATE_BIN) python3 scripts/test-long-set.py --disk-gate
 
 # exFAT bytes past a file's ValidDataLength are zeros, read or written
 # (scripts/test-valid-length.py): on a copy of the exFAT image, four files
@@ -2878,6 +2878,14 @@ test:
 	@# as a key problem rather than a constant problem.
 	@echo "== cross-language wire constants"
 	@python3 scripts/check-wire-constants.py || exit 1
+	@# fsd's disk-gate-rig feature (test-disk-gate's build) is built by
+	@# nothing else in this target. fsd reads it through cfg!(), so the
+	@# default build compiles both branches; what only this sees is the
+	@# feature itself renamed or dropped from fsd's Cargo.toml, or a build
+	@# with it that fails, until the rig is next needed. A check makes no
+	@# fsd.bin, so it cannot touch the shipped one (the review of #371).
+	@echo "== cargo check -p fsd --features disk-gate-rig"
+	@cargo check -q -p fsd --target $(USER_TARGET) --release --features disk-gate-rig --target-dir $(FSD_GATE_DIR) || exit 1
 	@# The host 9P peer's docstring lists which verbs it serves, and nothing
 	@# compared that prose to its dispatch chain - so when a range test silently
 	@# swallowed the five fid verbs, the prose went on claiming otherwise. This
