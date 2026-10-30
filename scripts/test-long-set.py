@@ -2,6 +2,16 @@
 """exFAT entry sets as the spec shapes them, and only those, are patched whole.
 
     python3 scripts/test-long-set.py     (or `make test-long-set`, which builds the image)
+    make test-disk-gate     (the --disk-gate mode, run through make alone)
+
+--disk-gate (since 2026-10-29) runs the read-only boots alone, VBITMAP,
+VOVERLAP, VFIRST, VTWOFAT and VRUNS, on a copy of esp.img carrying fsd's
+`disk-gate-rig` build, whose verb gate does not ask an arm, so each refused
+write is exFAT's own disk gate's (`gate::Gated`), which no boot of the
+shipped fsd reaches since the verb gate of 2026-10-28. Every boot, in either
+mode, checks which fsd it ran by that build's startup line. The mode keeps
+files of its own, build/test-disk-gate.img and its transcripts, and reports
+as test-disk-gate.
 
 When fsd changes a file's Stream entry (its first cluster and length, on a
 write), `patch_stream_ext` rewrites File and Stream and recomputes the set's
@@ -237,7 +247,9 @@ write_fat_entry changes.
 import importlib.util
 import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -248,6 +260,9 @@ import exfatimg  # noqa: E402
 
 # The boots QEMU's firmware never handed to the kernel (drive_qemu.boot_stalled).
 STALLED = []
+# Every boot's (label, transcript), so main checks which fsd each one ran
+# (gate_check): a boot added later cannot skip it.
+BOOTED = []
 
 def load(name, file):
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, file))
@@ -259,7 +274,65 @@ def load(name, file):
 drive_qemu = load("drive_qemu", "drive-qemu.py")
 Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfatimg.entry_set
 
-IMAGE = os.path.join(ROOT, "build", "test-long-set.img")
+
+# --disk-gate (`make test-disk-gate`, since 2026-10-29): the read-only boots
+# alone, on espexfat-diskgate.img, whose ESP carries fsd's `disk-gate-rig`
+# build (FSD_GATE_BIN), so a write reaches exFAT's own disk gate rather than
+# fsd's verb gate. Every boot must print GATE_LINE in that mode, and must not
+# print it otherwise, so a boot of the wrong fsd fails either way.
+DISK_GATE = "--disk-gate" in sys.argv[1:]
+# The rig's name, in its verdict, its stall log and its files, so the two
+# modes never share a scratch image or a transcript (the review of #371).
+RIG = "test-disk-gate" if DISK_GATE else "test-long-set"
+IMAGE = os.path.join(ROOT, "build", f"{RIG}.img")
+SOURCE = "espexfat-diskgate.img" if DISK_GATE else "espexfat.img"
+GATE_LINE = "fsd: the disk-gate rig's build: the verb gate does not ask an arm"
+READY_LINE = "fsd: filesystem server ready"
+# The rig's fsd, named by the Makefile (its FSD_GATE_BIN), which rebuilds it
+# first: a direct run would stage whatever build was left there, and a path
+# spelled here too could drift from the Makefile's (the review of #371).
+FSD_GATE_BIN = os.environ.get("FSD_GATE_BIN")
+
+
+def gate_image():
+    """build/espexfat-diskgate.img: espexfat.img's layout (scripts/mkexfat.py)
+    with a copy of esp.img whose \\EFI\\ORBS\\FSD.BIN is FSD_GATE_BIN."""
+    import mbrdisk
+    if not FSD_GATE_BIN:
+        sys.exit("--disk-gate is run by `make test-disk-gate`, which builds the rig's fsd and names it")
+    if not os.path.exists(FSD_GATE_BIN):
+        sys.exit(f"{FSD_GATE_BIN} not found")
+    esp = os.path.join(ROOT, "build", "esp-diskgate.img")
+    shutil.copyfile(os.path.join(ROOT, "build", "esp.img"), esp)
+    try:
+        mp = drive_qemu.attach(esp, readonly=False)
+        try:
+            shutil.copyfile(FSD_GATE_BIN, os.path.join(mp, "EFI", "ORBS", "FSD.BIN"))
+            # What macOS leaves on a volume it mounts read-write, removed as
+            # the Makefile's image recipes do, so the ESP holds esp.img's
+            # files and no others, FSD.BIN the one changed (its FAT, FSInfo
+            # and FSD.BIN's entry are macOS's writing, not esp.img's).
+            subprocess.run(["find", mp, "-name", "._*", "-delete"], check=True)
+            for d in (".fseventsd", ".Trashes", ".Spotlight-V100"):
+                shutil.rmtree(os.path.join(mp, d), ignore_errors=True)
+        finally:
+            drive_qemu.detach(mp)
+        mbrdisk.assemble(os.path.join(ROOT, "build", SOURCE), [
+            (0x07, mbrdisk.exfat_payload(os.path.join(ROOT, "build", "exfatpart.img")), False),
+            (0x0B, mbrdisk.esp_payload(esp), True),
+        ])
+    finally:
+        os.remove(esp)
+
+
+def gate_check(label, out):
+    """The fsd this boot ran: the rig's build in --disk-gate mode, the shipped
+    one otherwise. Either way fsd must have said it is ready, so a boot that
+    died before fsd spoke is not taken for the shipped build."""
+    said, ready = GATE_LINE in out, READY_LINE in out
+    if DISK_GATE:
+        return (f"{label}: fsd is the disk-gate rig's build ({GATE_LINE!r} printed)", said and ready)
+    return (f"{label}: fsd is the shipped build ({READY_LINE!r} and no {GATE_LINE!r})", ready and not said)
 VENDOR = 17
 GUID = bytes(range(0x10, 0x20))
 DELETED = bytes([0x05]) + bytes(31)  # a deleted File entry: in-use bit clear
@@ -342,21 +415,22 @@ def grow_root(vol, free=None, last=None):
 
 def boot(label, commands):
     steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in commands] + [("# ", "")]
-    guest = drive_qemu.Guest(IMAGE, label=f"test-long-set {label}: ")
+    guest = drive_qemu.Guest(IMAGE, label=f"{RIG} {label}: ")
     try:
         driven = guest.run(steps)
         out = guest.transcript()
         faults = guest.aborts()
     finally:
         guest.stop()
-    with open(os.path.join(ROOT, "build", f"test-long-set-{label}.txt"), "w") as fh:
+    with open(os.path.join(ROOT, "build", f"{RIG}-{label}.txt"), "w") as fh:
         fh.write(out)
+    BOOTED.append((label, out))
     return driven, out, faults
 
 
 def run_long():
     checks, notes = [], []
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     if len(vol.chain(vol.root)) != 1:
         return [("long: the image's root is one cluster, as the rig assumes", False)], notes
@@ -382,7 +456,7 @@ def run_long():
     if not all(c for _, c in checks):
         return checks, notes
     driven, out, faults = boot("long", ["echo hello >> /VEND", "cat /VEND"])
-    if drive_qemu.boot_stalled("test-long-set", "long", out, faults):
+    if drive_qemu.boot_stalled(RIG, "long", out, faults):
         STALLED.append("long")
         return checks, notes
     vol = Volume(IMAGE, start)
@@ -411,7 +485,7 @@ def run_long():
 
 
 def run_shape():
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     d = bytearray(vol.data(vol.chain(vol.root)))
     end = exfatimg.root_end(d)
@@ -424,7 +498,7 @@ def run_shape():
     d[end:end + len(planted)] = planted
     write_root(vol, d)
     driven, out, faults = boot("shape", ["echo x >> /GAPPY", "echo x >> /PRIM", "ls /"])
-    if drive_qemu.boot_stalled("test-long-set", "shape", out, faults):
+    if drive_qemu.boot_stalled(RIG, "shape", out, faults):
         STALLED.append("shape")
         return [], []
     vol = Volume(IMAGE, start)
@@ -443,7 +517,7 @@ def run_shape():
 def run_rename():
     """/VEND's 20-entry set, its File entry stamped, renamed to a name of two
     entries and back to one: the vendor entries move right and then left."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     d = bytearray(vol.data(vol.chain(vol.root)))
     end = exfatimg.root_end(d)
@@ -494,7 +568,7 @@ def run_rename():
         return checks, notes
     cmds = [f"mv /VEND /{LONG_NAME}", "ls /", f"mv /{LONG_NAME} /V2", "ls /", "mv /STRAY /S2"]
     driven, out, faults = boot("rename", cmds)
-    if drive_qemu.boot_stalled("test-long-set", "rename", out, faults):
+    if drive_qemu.boot_stalled(RIG, "rename", out, faults):
         STALLED.append("rename")
         return checks, notes
     listings = [blk.split("# ", 1)[0].split() for blk in out.split("# ls /")[1:3]]
@@ -606,7 +680,7 @@ def run_valloc():
     """Allocations a set's benign secondaries name, freed with the set and
     only then, on a volume fsck_exfat passes. Fifteen clusters in a run, each
     contiguous run followed by one that must stay used."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     r = free_run(vol, 15)
     if r is None:
@@ -645,7 +719,7 @@ def run_valloc():
     cmds = ["mv -f /SRC /VA2", "cat /VA2", "rm /VA1", "mv /VA3 /VA4", "mv -f /VA4 /va4",
             "rmdir /VD", "rm /VE2", "rm /VE0", "ls /"]
     driven, out, faults = boot("valloc", cmds)
-    if drive_qemu.boot_stalled("test-long-set", "valloc", out, faults):
+    if drive_qemu.boot_stalled(RIG, "valloc", out, faults):
         STALLED.append("valloc")
         return checks, notes
     vol = Volume(IMAGE, start)
@@ -693,7 +767,7 @@ def run_vcross():
     cluster of the heap or the volume's own, a run past the heap, a run over
     a later cluster of a surviving chain, and an empty survivor with eight
     vendor runs."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     r = free_run(vol, 20)
     if r is None:
@@ -758,7 +832,7 @@ def run_vcross():
     cmds = ["echo new > /NEW", "mv -f /SRC2 /DST2", "cat /DST2", "rm /VA5", "rm /VBAD", "rm /VSYS", "rm /VA6",
             "writeat /VHEAP 0 x", "rm /VHEAP", "mv -f /SRC3 /DST3", "mv -f /SRC4 /DST4", "ls /"]
     driven, out, faults = boot("vcross", cmds)
-    if drive_qemu.boot_stalled("test-long-set", "vcross", out, faults):
+    if drive_qemu.boot_stalled(RIG, "vcross", out, faults):
         STALLED.append("vcross")
         return checks, []
     vol = Volume(IMAGE, start)
@@ -829,7 +903,7 @@ def run_vmeet():
     one, and VLINK, a FAT-chained file whose link leads into the bitmap,
     each refused a `writeat` with nothing written. A boot of its own:
     VCROSS's root has no room."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     r = free_run(vol, 7)
     if r is None:
@@ -872,7 +946,7 @@ def run_vmeet():
     cmds = ["mv -f /SRC /DST", "write /VW new", "writeat /VSYSW 0 x", "rm /VSYSW", "writeat /VSYSC 0 x",
             "rm /VSYSC", f"writeat /VLINK {c} x", "rm /VLINK", "ls /"]
     driven, out, faults = boot("vmeet", cmds)
-    if drive_qemu.boot_stalled("test-long-set", "vmeet", out, faults):
+    if drive_qemu.boot_stalled(RIG, "vmeet", out, faults):
         STALLED.append("vmeet")
         return checks, []
     vol = Volume(IMAGE, start)
@@ -968,7 +1042,7 @@ def run_vroot():
     reaching one of the volume's own clusters through a damaged set or chain,
     refused where the cluster becomes a sector (`sector_of`, since
     2026-10-26). A boot of its own: the root is filled to its last two slots."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     if len(vol.chain(vol.root)) != 1:
         return [("vroot: the image's root is one cluster, as the rig assumes", False)], []
@@ -1020,7 +1094,7 @@ def run_vroot():
     cmds = ["writeat /RX 0 x", "touch /SD/N", "ls /SD", "cat /RR", f"writeat /LX {2 * c} x", f"writeat /HX {c} x",
             "touch /GROWN", "touch /AFTER", "rm /RX"]
     driven, out, faults = boot("vroot", cmds)
-    if drive_qemu.boot_stalled("test-long-set", "vroot", out, faults):
+    if drive_qemu.boot_stalled(RIG, "vroot", out, faults):
         STALLED.append("vroot")
         return checks, []
     vol = Volume(IMAGE, start)
@@ -1123,7 +1197,7 @@ def run_extent(label):
     the volume as fsd left it. A volume left writable must write and free;
     one left with no bitmap must refuse every write, before it writes."""
     damage, writable, second = EXTENTS[label]
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     if label in LATE:
         grow_root(vol)
@@ -1172,7 +1246,7 @@ def run_extent(label):
     # a missing VX (the O_EXCL fix of 2026-10-28).
     creat = [] if writable else ["ccreat /VG", "ccreat /VC", "ccreat -x /VG", "ccreat -x /VX"]
     driven, out, faults = boot(label, cmds[:-1] + creat + cmds[-1:])
-    if drive_qemu.boot_stalled("test-long-set", label, out, faults):
+    if drive_qemu.boot_stalled(RIG, label, out, faults):
         STALLED.append(label)
         return [], []
     for (at, field, _), was in zip(places, good):
@@ -1233,7 +1307,7 @@ def run_vruns():
     left between each and the next, as a root grows on a volume where files
     are made between its growths: past ROOT_RUNS (64), so not recorded
     whole. The volume is read-only, and the mount line must say why."""
-    start = exfatimg.copy_exfat(IMAGE)
+    start = exfatimg.copy_exfat(IMAGE, SOURCE)
     vol = Volume(IMAGE, start)
     chain = vol.chain(vol.root)
     # Each cluster added is a run of its own: past the root's last cluster
@@ -1254,7 +1328,7 @@ def run_vruns():
         return checks, [f"vruns before: {ln}" for ln in lines]
     driven, out, faults = boot("vruns", ["echo new > /NEWB", "ccreat /etc/passwd", "ccreat /VC",
                                          "ccreat -x /etc/passwd", "openprobe 2 /etc", "ls /"])
-    if drive_qemu.boot_stalled("test-long-set", "vruns", out, faults):
+    if drive_qemu.boot_stalled(RIG, "vruns", out, faults):
         STALLED.append("vruns")
         return [], []
     said = [ln.strip() for ln in out.splitlines() if "fsd: mounted read-only" in ln]
@@ -1307,22 +1381,33 @@ def patch_root(vol, at, data):
 
 def main():
     checks, notes = [], []
-    for run in (run_long, run_shape, run_rename, run_valloc, run_vcross, run_vmeet, run_vroot, run_vruns,
-                *(lambda label=label: run_extent(label) for label in EXTENTS)):
-        try:
-            c, n = run()
-        finally:
-            if os.path.exists(IMAGE) and not os.environ.get("KEEP"):
-                os.remove(IMAGE)
-        checks += c
-        notes += n
+    runs = (run_long, run_shape, run_rename, run_valloc, run_vcross, run_vmeet, run_vroot, run_vruns,
+            *(lambda label=label: run_extent(label) for label in EXTENTS))
+    if DISK_GATE:
+        runs = (run_vruns, *(lambda label=label: run_extent(label) for label in EXTENTS if not EXTENTS[label][1]))
+    try:
+        if DISK_GATE:
+            gate_image()
+        for run in runs:
+            try:
+                c, n = run()
+            finally:
+                if os.path.exists(IMAGE) and not os.environ.get("KEEP"):
+                    os.remove(IMAGE)
+            checks += c
+            notes += n
+    finally:
+        gated = os.path.join(ROOT, "build", SOURCE)
+        if DISK_GATE and os.path.exists(gated) and not os.environ.get("KEEP"):
+            os.remove(gated)
+    checks += [gate_check(label, out) for label, out in BOOTED if label not in STALLED]
     failed = 0
     for label, ok in checks:
         print(("PASS  " if ok else "FAIL  ") + label)
         failed += not ok
     for n in notes:
         print("      " + n)
-    return drive_qemu.verdict("test-long-set", failed, len(STALLED))
+    return drive_qemu.verdict(RIG, failed, len(STALLED))
 
 
 if __name__ == "__main__":

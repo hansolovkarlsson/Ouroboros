@@ -146,10 +146,10 @@ def exfat_start(image):
     return [p for p in parts if p[1] == 0x07][0][2]
 
 
-def copy_exfat(image):
-    """build/espexfat.img copied to `image`; answers its exFAT partition's
-    first sector."""
-    shutil.copyfile(os.path.join(BUILD, "espexfat.img"), image)
+def copy_exfat(image, source="espexfat.img"):
+    """build/espexfat.img (or `source`, another image under build/) copied to
+    `image`; answers its exFAT partition's first sector."""
+    shutil.copyfile(os.path.join(BUILD, source), image)
     return exfat_start(image)
 
 

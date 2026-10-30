@@ -1401,6 +1401,39 @@ bit outside ninep-abi's `OPEN_FLAGS`. It also found `exists_answer` copying
 `NP_STAT` on the same path. Those two refusals in fsd are graded by no
 boot either.
 
+**exFAT's disk gate is graded again (2026-10-29).** Since 2026-10-28 fsd's
+verb gate refuses every change to a read-only tree before the arm, so no
+boot reached exFAT's own refusal, the second line (`gate::Gated`, its write
+check and the allocator's). fsd's `disk-gate-rig` feature leaves the arm out
+of `tree_read_only`; `make fsd-disk-gate-bin` builds it into
+`target/disk-gate`, apart from the shipped `fsd.bin`, and it prints a line of
+its own at startup. `make test-disk-gate` (`test-long-set.py --disk-gate`)
+puts it on a copy of `esp.img` and runs the five read-only boots on it with
+their checks unchanged, and each boot must print that line; every boot of
+the ordinary `test-long-set` must not. Controls: with every early
+`writable()` check removed it passes (the gate holds alone, 44 checks); with
+the gate's write check and the allocator's removed as well, 22 fail, each
+write answered as a disk I/O error and written, VF lost and fsck_exfat
+dirty; with the shipped fsd staged, each boot's line fails (5). A boot flag
+was the other way past the verb gate, and was not taken: a file on the disk
+would switch a gate off in the fsd that ships. From the high review of
+#364. The medium review of #371: the build line was checked by six of the
+fourteen ordinary boots, and every boot records its transcript now, checked
+in one place; the gate mode had shared test-long-set's scratch image and
+transcripts, and keeps its own (`build/test-disk-gate*`), reporting as
+`test-disk-gate`; its ESP copy is removed on a failure too, the assembled
+disk after the run, and macOS's sidecars before the detach, so the ESP
+holds `esp.img`'s files and no others. The five boots are the whole of
+what it grades: `test-volume-bound`'s BESIDE is not booted on the rig's
+build, a roadmap item. The second medium review of #371: each boot must also print
+fsd's ready line, so a boot that died before fsd spoke is not taken for the
+shipped build; `make test` checks fsd with the feature, which nothing else
+built (fsd reads it through `cfg!()`, so what that check alone sees is the
+feature renamed or dropped); the mode is run through `make` alone, which rebuilds the rig's fsd
+and names it to the script, so a stale build is never staged and the path is
+spelled once; and its prerequisites are `esp.img` and the exFAT partition,
+not the `espexfat.img` it never read.
+
 **A directory opens for reading alone, on fsd and the host peer
 (2026-10-29).** fsd gave a fid for any `NP_OPEN` of a directory, so
 `open("/etc", O_WRONLY)` returned a descriptor whose first write failed,
