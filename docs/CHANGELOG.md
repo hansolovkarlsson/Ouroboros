@@ -1488,6 +1488,25 @@ opened), fsd panicking on `OPEN_EXCL` alone (2: `no answer`, the supervisor
 restarting it), and the rig's chmod made 700 (3, the listing among them).
 From the high review of #369.
 
+**Read-only is a property of the mount (2026-10-30).** fsd kept D5's
+fallback in a static, `ROOT_READ_ONLY`, stored by `try_mount` and cleared
+by hand in `FSOP_UNMOUNT`, and the verb gate asked it beside the arm's
+`read_only()`. `vfs::Mount` now holds the filesystem and fsd's own reason,
+both private, and only vfs's mount paths make one, so a fallback cannot come
+up without its reason, no volume can be put under another's, and the reason
+goes with the mount. The gate asks `Mount::refuses_changes`, written in
+terms of the mount's one `read_only`, and the arm's `read_only()` is private
+to vfs, so nothing outside it can ask the arm alone. The mount lines get
+both reasons (`Mount::reasons`): D5's before the mount line, now in the
+`fsd: mounted read-only: ` form, and the volume's after it, so a fallback
+that is a read-only exFAT says both. `make test-boot-partition` reads the
+new text, and its new disk-untyped boot (disk-badroot with the root typed
+0x07) prints the untyped rule's reason, which no boot did; with D5's half
+taken out of `refuses_changes` four checks fail (root's `touch` and the
+EROFS create on disk-badroot, disk-data-badroot and disk-data-unknown), and
+with D5's reason printed after the mount line two (the order, on
+disk-badroot and disk-untyped). From the high reviews of #364 and #373.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

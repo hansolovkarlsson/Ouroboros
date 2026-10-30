@@ -369,7 +369,7 @@ The plan for step 4, as it was written:
 
 **4b. Failing closed, D5 and D6. Built 2026-10-13.** D5: when `fsd` falls
 back to the boot partition beside a root that did not mount, tree 0 is
-read-only (`ROOT_READ_ONLY`): `handle_ninep` refuses every verb that
+read-only (`ROOT_READ_ONLY` then; since 2026-10-30 the reason is held by the mount, `vfs::Mount`): `handle_ninep` refuses every verb that
 changes the disk with `FS_ERR_READ_ONLY` before `check_access`, so root is
 refused too, and an `NP_OPEN` for writing, creating or truncating is
 refused, which leaves no fid that could write. Any other mount of tree 0,

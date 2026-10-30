@@ -86,27 +86,87 @@ pub enum Filesystem {
     Proc(proc::Fs),
 }
 
-impl Filesystem {
+/// A filesystem as fsd holds it in a tree: the volume, and why fsd itself
+/// keeps it read-only, which no arm knows. Today that is decision D5
+/// (docs/roadmap/roadmap-one-disk.md): the root beside the boot partition did
+/// not mount, so what came up instead is `/` to be looked at and repaired,
+/// with nothing written to it. Only this module's mount paths make one, so a
+/// fallback cannot come up without its reason, and the reason goes when the
+/// mount does (until 2026-10-30 a static in `main.rs` held it, stored and
+/// cleared by hand on each path that changed tree 0). Both fields are
+/// private, so no filesystem can be put under another's reason: a new
+/// volume is a new `Mount`, made here (the high review of #373).
+pub struct Mount {
+    fs: Filesystem,
+    held: Option<&'static str>,
+}
+
+impl Mount {
+    /// `fs`, read-only only as its arm says.
+    fn new(fs: Filesystem) -> Self {
+        Mount { fs, held: None }
+    }
+
     /// The synthetic `/proc` filesystem - auto-mounted at the reserved `PROC_TREE`
     /// index at boot (no disk, so no probing).
     pub fn proc() -> Self {
-        Filesystem::Proc(proc::Fs::new())
+        Mount::new(Filesystem::Proc(proc::Fs::new()))
     }
 
+    /// The volume.
+    pub fn fs(&self) -> &Filesystem {
+        &self.fs
+    }
+
+    /// The volume, to act on.
+    pub fn fs_mut(&mut self) -> &mut Filesystem {
+        &mut self.fs
+    }
+
+    /// Why this mount is read-only, for the mount lines alone: fsd's own
+    /// reason (D5), then the arm's ([`Filesystem::read_only`]), each `None`
+    /// when it does not hold. Both, since a fallback can be a volume read-only
+    /// for its own reason too, which the reader would otherwise not learn
+    /// until the root is repaired (the high review of #373). The gate asks
+    /// [`refuses_changes`](Self::refuses_changes), never these.
+    pub fn reasons(&self) -> (Option<&'static str>, Option<&'static str>) {
+        (self.held, self.fs.read_only())
+    }
+
+    /// Why this mount is read-only, `None` while it is writable: either of
+    /// [`reasons`](Self::reasons), read from it so a reason added there is
+    /// refused too (the medium review of #373).
+    fn read_only(&self) -> Option<&'static str> {
+        let (held, volume) = self.reasons();
+        held.or(volume)
+    }
+
+    /// Whether fsd's read-only gate (`refused_read_only` in `main.rs`) refuses
+    /// every change on this mount: whenever [`read_only`](Self::read_only)
+    /// answers, so a reason added there is refused here too. The
+    /// `disk-gate-rig` build asks fsd's own reason alone, leaving the arm's
+    /// out, so the arm's own refusal is the one a read-only exFAT volume gets
+    /// (`make test-disk-gate`); D5 it keeps, since no arm refuses for it.
+    pub fn refuses_changes(&self) -> bool {
+        if cfg!(feature = "disk-gate-rig") { self.held.is_some() } else { self.read_only().is_some() }
+    }
+}
+
+impl Filesystem {
     /// Discover the disk's partitions (MBR or GPT - see `partition::discover`)
     /// and mount one that holds a filesystem we recognize: each is probed as
     /// FAT32 ([`fat32::Fs::mount_at`]), exFAT ([`exfat::Fs::mount_at`]) and
     /// ext2 ([`ext2::Fs::mount_at`]), in table order, except as below.
     /// Returns [`Error::NoFat32Partition`] if no partition mounts as any
     /// known format, or the [`Error::Io`] of a probe whose read failed when
-    /// none mounts ([`first_mounting`](Self::first_mounting)). The
-    /// [`Fallback`] is set when what mounted is not the root's candidate,
-    /// every one of which failed to mount: the caller says
-    /// so and mounts it read-only, since a root that did not probe then
-    /// leaves the ESP or another partition as `/` (the high review of #288,
-    /// the review of #295). The last of the three is whether a partition
-    /// tried before the one that mounted would not read, for the caller to
-    /// say: a disk failing a read is not a partition with nothing on it.
+    /// none mounts ([`first_mounting`](Self::first_mounting)). When what
+    /// mounted is not the root's candidate, every one of which failed to
+    /// mount, the [`Mount`] is read-only (D5), its reason naming the rule the
+    /// root was looked for by, since a root that did not probe then leaves
+    /// the ESP or another partition as `/` (the high review of #288, the
+    /// review of #295). The second of the two is whether a partition tried
+    /// before the one that mounted would not read, for the caller to say: a
+    /// disk failing a read is not a partition with nothing on it.
     ///
     /// The partition the system booted from, when the kernel knows it is on
     /// this disk ([`Device::boot_partition_start`]), is passed over while any
@@ -115,7 +175,7 @@ impl Filesystem {
     /// filesystem is the boot partition mounts it as before (one-disk step 4,
     /// docs/roadmap/roadmap-one-disk.md). A partition typed as a root is
     /// tried before, and in place of, any untyped one ([`root_order`]).
-    pub fn mount(device: &Device) -> Result<(Self, Option<Fallback>, bool), Error> {
+    pub fn mount(device: &Device) -> Result<(Mount, bool), Error> {
         let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
         let count = partition::discover(&mut device.disk(), &mut parts)?;
         let boot = device.boot_partition_start();
@@ -124,11 +184,16 @@ impl Filesystem {
         let Some((i, fs)) = probed.found else {
             return Err(probed.failed.unwrap_or(Error::NoFat32Partition));
         };
-        let fallback = roots.is_fallback(i).then_some(Fallback {
-            typed_root: roots.typed,
-            boot_partition: Some(roots.order[i].part.start) == boot,
-        });
-        Ok((fs, fallback, probed.failed.is_some()))
+        // With a typed root, the untyped partitions beside it were never
+        // tried, so "none beside the boot partition mounted" would send
+        // whoever reads it after the wrong partition (the review of #295).
+        let held = match (roots.is_fallback(i), roots.typed, Some(roots.order[i].part.start) == boot) {
+            (false, ..) => None,
+            (true, true, true) => Some("the partition typed as the root did not mount, so the boot partition is `/`"),
+            (true, true, false) => Some("the partition typed as the root did not mount, so an untyped partition is `/`"),
+            (true, false, _) => Some("no partition beside the boot partition mounted, so the boot partition is `/`"),
+        };
+        Ok((Mount { fs, held }, probed.failed.is_some()))
     }
 
     /// The first of `parts` that [`probe`](Self::probe)
@@ -198,7 +263,7 @@ impl Filesystem {
     /// first. Returns
     /// [`Error::NoFat32Partition`] if `index` is out of range or the partition
     /// mounts as no known format, [`Error::Io`] if a read failed.
-    pub fn mount_partition(device: &Device, index: usize) -> Result<Self, Error> {
+    pub fn mount_partition(device: &Device, index: usize) -> Result<Mount, Error> {
         let mut parts = [partition::Partition::default(); partition::MAX_PARTITIONS];
         let count = partition::discover(&mut device.disk(), &mut parts)?;
         if index >= count {
@@ -208,7 +273,7 @@ impl Filesystem {
             return Err(Error::NoFat32Partition);
         };
         let bound = volume_bound(&parts[index], &parts[..count], device.disk().capacity_sectors().ok());
-        Self::probe(device, lba32, bound)?.ok_or(Error::NoFat32Partition)
+        Self::probe(device, lba32, bound)?.map(Mount::new).ok_or(Error::NoFat32Partition)
     }
 
     /// The mounted format's name, for the startup/mount log line.
@@ -227,10 +292,10 @@ impl Filesystem {
     /// read-only gate (`refused_read_only` in `main.rs`) refuses every change
     /// on a tree for which this answers**, so it is a security answer, not
     /// only the mount line's text: an arm answering `None` here opens its
-    /// volume to every write verb, its own refusal the only line left. Not
-    /// fsd's own read-only root, the ESP taken when the root did not mount
-    /// (D5, `ROOT_READ_ONLY`), which the gate and the boot line ask apart.
-    pub fn read_only(&self) -> Option<&'static str> {
+    /// volume to every write verb, its own refusal the only line left.
+    /// Private, so `main.rs` asks the [`Mount`], which adds fsd's own reason
+    /// (D5): asking the arm alone was a second source the gate could miss.
+    fn read_only(&self) -> Option<&'static str> {
         match self {
             Filesystem::ExFat(fs) => fs.read_only(),
             Filesystem::Proc(_) => Some("it is generated as it is read"),
@@ -465,16 +530,6 @@ pub struct Candidate {
 pub struct Probed {
     pub found: Option<(usize, Filesystem)>,
     pub failed: Option<Error>,
-}
-
-/// What [`Filesystem::mount`] fell back to when the root did not mount: for
-/// the line that says so, which names the rule the root was looked for by.
-pub struct Fallback {
-    /// The root was a partition typed as one.
-    pub typed_root: bool,
-    /// What mounted instead is the partition the system booted from (else
-    /// one of the untyped partitions, the boot partition not being known).
-    pub boot_partition: bool,
 }
 
 /// Where a root is looked for on one disk ([`root_order`]): the partitions

@@ -10,7 +10,7 @@ parttable = { path = "../../../parttable" }
 
 # A build for `make test-disk-gate` alone (scripts/test-long-set.py
 # --disk-gate), never staged on an image anything else boots: the verb gate
-# does not ask an arm's `read_only()` (main.rs's `tree_read_only`), so a
+# does not ask an arm's `read_only()` (`vfs::Mount::refuses_changes`), so a
 # write to a read-only exFAT volume reaches exFAT's own disk gate, which no
 # boot of the shipped fsd can. Built into target/disk-gate, apart from the
 # shipped fsd.bin, and it says so at startup.

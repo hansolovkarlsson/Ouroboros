@@ -4468,14 +4468,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   not boot it on the rig's build of fsd: it grades only test-long-set's five
   read-only boots. To close: a `--disk-gate` mode for BESIDE, the same
   staging on its disk. From the medium review of #371.
-- **Read-only has two sources in fsd.** `tree_read_only` asks
+- ~~**Read-only has two sources in fsd.** `tree_read_only` asks
   `ROOT_READ_ONLY`, a static for tree 0 as D5's fallback, stored and cleared
   by hand on each path that changes tree 0 (`try_mount`, `FSOP_UNMOUNT`),
   and the arm's `read_only()`. Making D5's read-only a property of the
   mount (kept with the mount slot, or in a `vfs` wrapper with its reason)
   would leave the gate one thing to ask and let the boot line read the
   reason the same way `read_only_line` does. A refactor of the mount
-  paths, so not done in #364. From its high review.
+  paths, so not done in #364. From its high review.~~ Done 2026-10-30:
+  `vfs::Mount` holds the filesystem and fsd's own reason, made only by
+  vfs's mount paths; the gate asks `Mount::refuses_changes` and the mount
+  lines `Mount::reasons`, which the gate's private `read_only` is read
+  from, and the arm's `read_only()` is private to vfs.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on

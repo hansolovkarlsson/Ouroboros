@@ -14,9 +14,9 @@
 //!
 //! **Its tables live in `main`'s own stack frame** - the mounted `Fs`
 //! instances and the fid table, which works because this server is one
-//! infinite loop that never returns. A few flags are statics (atomics, only
-//! the spelling of a mutable static in a task of one thread):
-//! `ROOT_READ_ONLY` here, `disk.rs`'s `CLAIMED`. The linker no longer
+//! infinite loop that never returns. One flag is a static (an atomic, only
+//! the spelling of a mutable static in a task of one thread): `disk.rs`'s
+//! `CLAIMED`. The linker no longer
 //! asserts `.data`/`.bss` empty (programs/linker.ld says why).
 //!
 //! **v2 protocol - fully self-contained, no client pointers.** The
@@ -43,7 +43,6 @@ mod vfs;
 
 use core::arch::asm;
 use core::ops::ControlFlow;
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::panic::PanicInfo;
 
 #[no_mangle]
@@ -55,9 +54,9 @@ pub extern "C" fn _start() -> ! {
 fn main() -> ! {
     // The mount table (cluster Phase 0 multi-mount): several filesystems held at
     // once, indexed by the ninep-abi `tree` selector. Tree 0 is the boot
-    // auto-mount; FSOP_MOUNT_AT fills the rest. Filesystem isn't Copy, so build
+    // auto-mount; FSOP_MOUNT_AT fills the rest. Mount isn't Copy, so build
     // the array of `None`s with a const block rather than `[None; N]`.
-    let mut mounts: [Option<vfs::Filesystem>; MAX_MOUNTS] = [const { None }; MAX_MOUNTS];
+    let mut mounts: [Option<vfs::Mount>; MAX_MOUNTS] = [const { None }; MAX_MOUNTS];
     // The open-file (fid) table - see the fid verbs. Lives here in main's frame
     // like `mounts`.
     let mut fids = [Fid::empty(); MAX_FIDS];
@@ -82,7 +81,7 @@ fn main() -> ! {
     // reserved PROC_TREE index - no disk, so it's just constructed here. The
     // shell's `mount -p` binds /proc to it; netd's export routes /proc paths to
     // it, so another machine can read this one's process table as files.
-    mounts[ninep_abi::NS_PROC_TREE as usize] = Some(vfs::Filesystem::proc());
+    mounts[ninep_abi::NS_PROC_TREE as usize] = Some(vfs::Mount::proc());
     if cfg!(feature = "disk-gate-rig") {
         print("fsd: the disk-gate rig's build: the verb gate does not ask an arm\r\n");
     }
@@ -121,25 +120,6 @@ fn main() -> ! {
     loop {
         core::hint::spin_loop();
     }
-}
-
-/// Whether tree 0 is the boot partition mounted read-only because the root
-/// beside it did not mount (decision D5, docs/roadmap/roadmap-one-disk.md):
-/// the system comes up to be looked at and repaired, and nothing is written
-/// to the ESP, by root either. Set by [`try_mount`] when it falls back,
-/// cleared by every other mount of tree 0 and by `FSOP_UNMOUNT`. fsd is one
-/// task, so an atomic is only the spelling of a mutable static.
-static ROOT_READ_ONLY: AtomicBool = AtomicBool::new(false);
-
-/// Whether `tree`, mounted as `fs`, is read-only: tree 0 as D5's fallback, or
-/// any tree whose arm answers [`vfs::Filesystem::read_only`] (exFAT's
-/// read-only volume, `/proc`). `fs` is a required parameter so no caller can
-/// ask without the volume (the high review of #361).
-///
-/// The `disk-gate-rig` build leaves the arm out, so the arm's own refusal is
-/// the one a read-only exFAT volume gets (`make test-disk-gate`).
-fn tree_read_only(tree: usize, fs: &vfs::Filesystem) -> bool {
-    (tree == 0 && ROOT_READ_ONLY.load(Ordering::Relaxed)) || (!cfg!(feature = "disk-gate-rig") && fs.read_only().is_some())
 }
 
 /// An `NP_OPEN`'s path and what its one stat of it found: a [`Kind`] (missing,
@@ -186,8 +166,9 @@ fn found<'a>(fs: &mut vfs::Filesystem, path: &'a str) -> Found<'a> {
     Found { path, kind }
 }
 
-/// The status `verb` on `tree`, mounted as `fs`, is refused with because that
-/// tree is read-only ([`tree_read_only`]), or `None` when it goes on: the one
+/// The status `verb` on `mount` is refused with because the mount is
+/// read-only ([`vfs::Mount::refuses_changes`]: D5's fallback, an arm's
+/// read-only volume, `/proc`), or `None` when it goes on: the one
 /// spelling of the gate, for `handle_ninep` and the fid path alike (the second
 /// high review of #291 found the predicate written out twice). A change is
 /// refused here before it reaches the arm, whose own refusal (exFAT's disk
@@ -205,7 +186,7 @@ fn found<'a>(fs: &mut vfs::Filesystem, path: &'a str) -> Found<'a> {
 /// as on a writable tree, and a "directory" that is a file ENOTDIR; any other
 /// failure answers its own status (an I/O error is not "read-only", the
 /// second and third medium reviews of #364).
-fn refused_read_only(tree: usize, fs: &mut vfs::Filesystem, verb: u64, p: &[u64; 4], open: Option<Found>) -> Option<u64> {
+fn refused_read_only(mount: &mut vfs::Mount, verb: u64, p: &[u64; 4], open: Option<Found>) -> Option<u64> {
     const READ_ONLY: Option<u64> = Some(syscall_abi::FS_ERR_READ_ONLY);
     match verb {
         ninep_abi::NP_READDIR
@@ -216,7 +197,7 @@ fn refused_read_only(tree: usize, fs: &mut vfs::Filesystem, verb: u64, p: &[u64;
         | ninep_abi::NP_PREAD
         | ninep_abi::NP_FSTAT
         | ninep_abi::NP_CLUNK => None,
-        _ if !tree_read_only(tree, fs) => None,
+        _ if !mount.refuses_changes() => None,
         ninep_abi::NP_OPEN => {
             let flags = p[0];
             if !ninep_abi::open_changes(flags, false) {
@@ -231,7 +212,7 @@ fn refused_read_only(tree: usize, fs: &mut vfs::Filesystem, verb: u64, p: &[u64;
             };
             match kind.map(Kind::exists) {
                 Ok(true) => None,
-                Ok(false) => match fs.stat(parent_of(path)) {
+                Ok(false) => match mount.fs_mut().stat(parent_of(path)) {
                     Ok(st) if st.is_dir => READ_ONLY,
                     Ok(_) => Some(syscall_abi::FS_ERR_NOT_A_DIRECTORY),
                     Err(e) => Some(error_code(&e)),
@@ -254,7 +235,7 @@ fn refused_read_only(tree: usize, fs: &mut vfs::Filesystem, verb: u64, p: &[u64;
 /// [`MOUNT_ALREADY`]: syscall_abi::MOUNT_ALREADY
 /// [`FS_ERR_IO`]: syscall_abi::FS_ERR_IO
 /// [`NO_FS`]: syscall_abi::NO_FS
-fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
+fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS]) -> u64 {
     if mounts[0].is_some() {
         return syscall_abi::MOUNT_ALREADY;
     }
@@ -262,35 +243,19 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_M
         return syscall_abi::NO_FS;
     }
     match vfs::Filesystem::mount(device) {
-        Ok((mounted, ..)) if tree_of(mounts, &mounted).is_some() => syscall_abi::MOUNT_ALREADY,
-        Ok((mounted, fallback, unread)) => {
-            // One write ([`con_write_parts`]), the read-only reason in it.
+        Ok((mounted, _)) if tree_of(mounts, mounted.fs()).is_some() => syscall_abi::MOUNT_ALREADY,
+        Ok((mounted, unread)) => {
+            // One write ([`con_write_parts`]), the read-only reasons in it.
             // When the disk has a partition beside the boot one, the root on one
-            // disk (one-disk step 4), and it did not mount, the line says so
-            // first rather than run on the ESP's tree without a word.
-            // D5: the fallback is read-only, so nothing is written to the ESP.
-            ROOT_READ_ONLY.store(fallback.is_some(), Ordering::Relaxed);
-            // Which rule the root was looked for by, and what came up instead:
-            // with a typed root, the untyped partitions beside it were never
-            // tried, so "none beside the boot partition mounted" would send
-            // whoever reads it after the wrong partition (the review of #295).
-            let fallback = match fallback {
-                None => "",
-                Some(vfs::Fallback { typed_root: true, boot_partition: true }) => {
-                    "fsd: the partition typed as the root did not mount - the boot partition is `/`, read-only\r\n"
-                }
-                Some(vfs::Fallback { typed_root: true, boot_partition: false }) => {
-                    "fsd: the partition typed as the root did not mount - an untyped partition is `/`, read-only\r\n"
-                }
-                Some(vfs::Fallback { typed_root: false, .. }) => {
-                    "fsd: no partition beside the boot partition mounted - the boot partition is `/`, read-only\r\n"
-                }
-            };
+            // disk (one-disk step 4), and it did not mount, fsd's reason says so
+            // first rather than run on the ESP's tree without a word: D5, the
+            // fallback is read-only, so nothing is written to the ESP. The
+            // volume's own reason, if it has one, follows the mount line.
             // A partition tried before it would not read: said, since what
             // it held is not known (a failing disk, not an empty partition).
             let unread = if unread { "fsd: a partition before it would not read (disk I/O error)\r\n" } else { "" };
-            let (ro, why, end) = read_only_line(&mounted);
-            con_write_parts(&[unread, fallback, "fsd: ", mounted.name(), " mounted, disk commands available\r\n", ro, why, end]);
+            let ([hro, hwhy, hend], [ro, why, end]) = read_only_lines(&mounted);
+            con_write_parts(&[unread, hro, hwhy, hend, "fsd: ", mounted.fs().name(), " mounted, disk commands available\r\n", ro, why, end]);
             mounts[0] = Some(mounted);
             0
         }
@@ -336,7 +301,7 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_M
 /// `MOUNT_NO_DEVICE` when the rescan found no stick, or the kernel's own
 /// refusal of the rescan as it came (`BLOCK_ERR_DENIED`: this task without
 /// `CAP_BLOCK`, a policy fault the shell names).
-fn mount_or_rescan(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS]) -> u64 {
+fn mount_or_rescan(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS]) -> u64 {
     let first = try_mount(device, mounts);
     if first != syscall_abi::NO_FS {
         return first;
@@ -354,12 +319,12 @@ fn mount_or_rescan(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>;
 /// own memory of them (FAT32's FAT-sector cache and read cursor), and a write
 /// through one would leave the other's stale. The synthetic `/proc` has no
 /// partition and never matches.
-fn tree_of(mounts: &[Option<vfs::Filesystem>; MAX_MOUNTS], candidate: &vfs::Filesystem) -> Option<usize> {
+fn tree_of(mounts: &[Option<vfs::Mount>; MAX_MOUNTS], candidate: &vfs::Filesystem) -> Option<usize> {
     if !candidate.is_disk() {
         return None;
     }
     mounts.iter().position(|m| {
-        m.as_ref().is_some_and(|m| m.is_disk() && m.partition_lba() == candidate.partition_lba())
+        m.as_ref().is_some_and(|m| m.fs().is_disk() && m.fs().partition_lba() == candidate.partition_lba())
     })
 }
 
@@ -627,7 +592,7 @@ impl Fid {
 /// ops (`NP_READ`/`NP_WRITE`/`NP_WRITE_AT`) to `SAFECOPY` against the client's
 /// grant (they move their data directly between task regions rather than inline
 /// in the reply).
-fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, call: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], sender: u64, call: u64, req: &[u8], reply: &mut [u8]) -> usize {
     if req.len() < REQ_PAYLOAD {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
@@ -693,14 +658,14 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUN
             return status_reply(reply, syscall_abi::NO_FS);
         }
         let index = p[0] as usize;
-        let fs = match vfs::Filesystem::mount_partition(device, index) {
-            Ok(fs) => fs,
+        let mount = match vfs::Filesystem::mount_partition(device, index) {
+            Ok(mount) => mount,
             // A partition that would not read is a failing disk, not "no
             // filesystem" (the review of #329).
             Err(fat32::Error::Io(_)) => return status_reply(reply, syscall_abi::FS_ERR_IO),
             Err(_) => return status_reply(reply, syscall_abi::NO_FS),
         };
-        if let Some(existing) = tree_of(mounts, &fs) {
+        if let Some(existing) = tree_of(mounts, mount.fs()) {
             return status_reply(reply, existing as u64);
         }
         let Some(tree) = (1..MAX_MOUNTS).find(|&t| mounts[t].is_none()) else {
@@ -708,16 +673,17 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUN
         };
         // `mount N` prints nothing when it mounts; a read-only one says why,
         // or its first write's refusal would be the first word of it.
-        if fs.read_only().is_some() {
-            let (ro, why, end) = read_only_line(&fs);
-            con_write_parts(&[ro, why, end]);
-        }
-        mounts[tree] = Some(fs);
+        // A partition mount holds no reason of fsd's (D5 is tree 0's), but
+        // both are printed so this line cannot drop one if that changes. A
+        // writable one writes nothing: every piece is empty.
+        let (held, volume) = read_only_lines(&mount);
+        con_write_parts(&[held[0], held[1], held[2], volume[0], volume[1], volume[2]]);
+        mounts[tree] = Some(mount);
         status_reply(reply, tree as u64)
     } else if op == syscall_abi::FSOP_MOUNT_INFO {
         // Report tree 0 (the primary mount), as ever. Handles the not-mounted
         // case itself (NO_FS).
-        let Some(mounted) = mounts[0].as_mut() else {
+        let Some(mounted) = mounts[0].as_mut().map(vfs::Mount::fs_mut) else {
             return status_reply(reply, syscall_abi::NO_FS);
         };
         let part_lba = mounted.partition_lba() as u64;
@@ -752,9 +718,8 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUN
         // is marked dead, not freed (see `Fid::dead`): it holds a tree number
         // and a path, and the slot may later hold another partition.
         let mut any = false;
-        ROOT_READ_ONLY.store(false, Ordering::Relaxed);
         for m in mounts.iter_mut() {
-            if m.as_ref().is_some_and(|fs| fs.is_disk()) {
+            if m.as_ref().is_some_and(|m| m.fs().is_disk()) {
                 *m = None;
                 any = true;
             }
@@ -781,7 +746,7 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUN
         // Disk trees only: the synthetic /proc tree is always there, and
         // counting it refused these tools every time since /proc landed (the
         // review of #213).
-        if mounts.iter().flatten().any(|m| m.is_disk()) {
+        if mounts.iter().flatten().any(|m| m.fs().is_disk()) {
             return status_reply(reply, syscall_abi::MOUNT_ALREADY);
         }
         let status = match op {
@@ -809,7 +774,7 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Filesystem>; MAX_MOUN
 ///
 /// [`NP_REQ_PAYLOAD`]: ninep_abi::NP_REQ_PAYLOAD
 #[allow(clippy::too_many_arguments)]
-fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], owner: u64, call: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
+fn handle_ninep(mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], fids: &mut [Fid; MAX_FIDS], owner: u64, call: u64, who: Option<Caller>, verb: u64, req: &[u8], reply: &mut [u8]) -> usize {
     const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     if req.len() < NP_HDR {
         return status_reply(reply, syscall_abi::FS_ERROR);
@@ -832,9 +797,11 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     if tree >= MAX_MOUNTS {
         return status_reply(reply, syscall_abi::FS_ERROR);
     }
-    let Some(fs) = mounts[tree].as_mut() else {
+    let Some(mount) = mounts[tree].as_mut() else {
         return status_reply(reply, syscall_abi::NO_FS);
     };
+    // The volume is `mount.fs_mut()` until the gate, which takes the whole
+    // mount, and `fs` after it.
     // An NP_OPEN's path and its one stat ([`Found`]), read by `check_access`,
     // the gate and the handler below. A malformed path, and an open asking
     // neither to read nor to write (POSIX's access mode, which libc always
@@ -861,7 +828,7 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
             {
                 return status_reply(reply, syscall_abi::FS_ERROR);
             }
-            Some(found(fs, path))
+            Some(found(mount.fs_mut(), path))
         }
         _ => None,
     };
@@ -875,17 +842,17 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // as on Linux, whose `do_open` answers it before EISDIR.
     if let Some(Found { kind: Ok(kind), .. }) = open {
         if kind.exists() && p[0] & ninep_abi::OPEN_EXCL != 0 {
-            return status_reply(reply, exists_answer(fs, who, &p, payload, syscall_abi::FS_ERR_ALREADY_EXISTS));
+            return status_reply(reply, exists_answer(mount.fs_mut(), who, &p, payload, syscall_abi::FS_ERR_ALREADY_EXISTS));
         }
         if kind == Kind::Dir && p[0] & ninep_abi::OPEN_DIR_REFUSED != 0 {
-            return status_reply(reply, exists_answer(fs, who, &p, payload, syscall_abi::FS_ERR_NOT_A_FILE));
+            return status_reply(reply, exists_answer(mount.fs_mut(), who, &p, payload, syscall_abi::FS_ERR_NOT_A_FILE));
         }
     }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
     // uid/gid against the target's owner+mode before running the op. ext2-only
     // (others return mode:None, which `check_access` treats as unrestricted);
     // root bypasses. See `check_access`.
-    if !check_access(fs, who, verb, &p, payload, open) {
+    if !check_access(mount.fs_mut(), who, verb, &p, payload, open) {
         return status_reply(reply, syscall_abi::FS_ERR_PERM);
     }
     // A read-only tree (D5's fallback, or a volume its arm mounted read-only)
@@ -893,9 +860,10 @@ fn handle_ninep(mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS], fids: &mut [
     // It comes AFTER `check_access`, so a caller who may not search a
     // directory learns nothing of the names in it from a create's EROFS
     // (the second medium review of #364), and before everything that acts.
-    if let Some(status) = refused_read_only(tree, fs, verb, &p, open) {
+    if let Some(status) = refused_read_only(mount, verb, &p, open) {
         return status_reply(reply, status);
     }
+    let fs = mount.fs_mut();
     // New files/dirs are owned by their creator, not root: stamp the caller's
     // identity onto the fs so touch/write/mkdir/open-create use it (ext2 only;
     // other arms ignore it). Root -> (0,0), the default, so nothing changes for
@@ -1301,7 +1269,7 @@ fn reap_dead_fids(fids: &mut [Fid; MAX_FIDS]) {
 /// takes.
 #[allow(clippy::too_many_arguments)]
 fn handle_fid_op(
-    mounts: &mut [Option<vfs::Filesystem>; MAX_MOUNTS],
+    mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS],
     fids: &mut [Fid; MAX_FIDS],
     owner: u64,
     call: u64,
@@ -1358,12 +1326,13 @@ fn handle_fid_op(
     // cannot outlive the unmount before the fallback, but nothing here should
     // depend on that staying true (the review of #291). The mount is looked
     // up first because the gate asks it.
-    let Some(fs) = mounts[tree].as_mut() else {
+    let Some(mount) = mounts[tree].as_mut() else {
         return status_reply(reply, syscall_abi::NO_FS);
     };
-    if let Some(status) = refused_read_only(tree, fs, verb, p, None) {
+    if let Some(status) = refused_read_only(mount, verb, p, None) {
         return status_reply(reply, status);
     }
+    let fs = mount.fs_mut();
     let Some(path) = fids[idx].path_str() else {
         return status_reply(reply, syscall_abi::FS_ERROR);
     };
@@ -2037,24 +2006,33 @@ fn print(s: &str) {
     con_write(s.as_bytes());
 }
 
-/// The line saying why `fs` was mounted read-only, in three pieces for
-/// [`con_write_parts`]; empty pieces when it is writable. Until 2026-10-26
-/// exFAT made a volume read-only with no word (the high review that day).
-fn read_only_line(fs: &vfs::Filesystem) -> (&'static str, &'static str, &'static str) {
-    match fs.read_only() {
-        Some(why) => ("fsd: mounted read-only: ", why, "\r\n"),
-        None => ("", "", ""),
-    }
+/// The lines saying `mount` is read-only and why, one for each of
+/// [`vfs::Mount::reasons`] (fsd's, then the volume's), each in three pieces
+/// for [`con_write_parts`], empty for a reason that does not hold: the one
+/// spelling for both mount lines (the medium review of #373). Until
+/// 2026-10-26 exFAT made a volume read-only with no word (the high review
+/// that day); since 2026-10-30 D5's fallback says so in this form too, before
+/// the mount line.
+fn read_only_lines(mount: &vfs::Mount) -> ([&'static str; 3], [&'static str; 3]) {
+    let line = |why: Option<&'static str>| match why {
+        Some(why) => ["fsd: mounted read-only: ", why, "\r\n"],
+        None => ["", "", ""],
+    };
+    let (held, volume) = mount.reasons();
+    (line(held), line(volume))
 }
 
 /// `parts` joined and written in one write, so no other task's line lands
 /// inside them: three pieces let accountd's ready line split "fsd: FAT32
 /// mounted" on a boot `make test-boot-partition` read (the review of #288).
 /// Bounded, so a longer name or message is cut, never a panic in the
-/// storage server (the third review of #288); 320 bytes stays under one
-/// console message, [`FS_DATA_MAX`](syscall_abi::FS_DATA_MAX).
+/// storage server (the third review of #288). One console message,
+/// [`FS_DATA_MAX`](syscall_abi::FS_DATA_MAX): until 2026-10-30 it was 320
+/// bytes, and the mount line, four lines since then (a partition that would
+/// not read, D5's reason, the mount, the volume's reason), reaches 290 (the
+/// medium review of #373).
 fn con_write_parts(parts: &[&str]) {
-    let mut line = [0u8; 320];
+    let mut line = [0u8; syscall_abi::FS_DATA_MAX as usize];
     let mut len = 0;
     for part in parts {
         let take = part.len().min(line.len() - len);
