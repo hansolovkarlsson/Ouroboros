@@ -4461,20 +4461,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   it, or the kernel seeing a write to sector 0 or the GPT), or answer
   `BLOCK_BOOT_START` from the table as it is now. From the medium review of
   #362, 2026-10-27.
-- ~~**exFAT's disk gate is graded by no boot.** Since 2026-10-28 fsd's verb
-  gate refuses every change to a read-only tree before the arm, so the
-  read-only boots of `make test-long-set` and `test-volume-bound` pass with
-  `gate::Gated`'s write check and the allocator's removed (measured that
-  day): the second line still stands, and nothing would see it fall. To
-  grade it again, a path past the verb gate is needed: a boot flag or a
-  build of fsd that skips `refused_read_only` for the rig, or a host test of
-  `exfat.rs` against an image file, which fsd's `no_std` arms do not have
-  yet. The counts that graded it alone, before the verb gate, are in the
-  CHANGELOG entry of 2026-10-27 (14 checks). From the high review of #364.~~
-  **Done 2026-10-29:** fsd's `disk-gate-rig` build (the verb gate does not
-  ask an arm), staged by `make test-disk-gate` on the read-only boots of
-  `test-long-set`; fails with the gate's two checks removed beside every
-  early `writable()` check (22 checks), and with the shipped fsd staged.
 - **BESIDE's write is graded on the verb gate alone.** `test-volume-bound`'s
   BESIDE (an exFAT read-only from its damaged bitmap entry, the partition
   after it inside the bitmap's claim) is the case where a write past the
@@ -4490,26 +4476,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   would leave the gate one thing to ask and let the boot line read the
   reason the same way `read_only_line` does. A refactor of the mount
   paths, so not done in #364. From its high review.
-- ~~**Three of fsd's `NP_OPEN` refusals are graded by no boot.** Since #367
-  (2026-10-28) fsd answers `O_CREAT|O_EXCL` of an existing name in
-  `exists_answer`, EEXIST only to a caller who may stat it (`check_access`'s
-  `NP_STAT` rule), and refuses `OPEN_EXCL` without `OPEN_CREATE` and any
-  flag outside `OPEN_FLAGS`. No rig has a user who may not search a
-  directory holding a name it opens with `O_EXCL`, so `exists_answer`
-  answering EEXIST to everyone passes every check, and libc never sends
-  the other two (the host peer's self-test rows check the peer's copy).
-  A probe sending a raw `NP_OPEN`, on ext2 as `user`, would grade all
-  three. From the high review of #367.~~ **Done 2026-10-29:**
-  `/bin/OPENPROBE` in `test-cerrno`'s ext2 boot as `user`; each of the three
-  refusals removed in turn fails its own checks.
-- ~~**fsd opens a directory as a fid; the host peer refuses it.** An
-  `NP_OPEN` of a directory, with or without `OPEN_CREATE`, gets a fid from
-  fsd, where `np9p_server.py` answers FS_ERR_NOT_A_FILE (its
-  `NP_OPEN(dir)` self-test row pins the peer's side). Older than #364;
-  one of the two should change, and the other follow. From the second
-  medium review of #364.~~ **Done 2026-10-29:** fsd's read open stands
-  (POSIX); a write, truncate or create open of a directory is EISDIR at
-  the open on fsd, and the peer gives a directory a fid for reading.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on
