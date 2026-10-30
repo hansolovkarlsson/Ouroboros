@@ -2,6 +2,7 @@
 """A volume claiming more than its partition is not mounted.
 
     python3 scripts/test-volume-bound.py     (or `make test-volume-bound`, which builds the images)
+    make test-disk-gate                      (the --disk-gate mode, BESIDE alone, run through make)
 
 fsd took a volume's size from its own boot sector alone: FAT32's total
 sectors, exFAT's VolumeLength, ClusterCount and offsets, ext2's block count.
@@ -93,6 +94,15 @@ can break only for a volume of one block (it guards the subtraction the
 groups rule makes). About eight minutes. Run it
 whenever a filesystem's `mount_at`, fsd's probe or `volume_bound`, or the
 partition table's sizes change.
+
+--disk-gate (since 2026-10-30) boots BESIDE alone, from a copy of esp.img
+whose \\EFI\\ORBS\\FSD.BIN is fsd's `disk-gate-rig` build (scripts/diskgate.py),
+whose verb gate does not ask an arm: the refused write is then exFAT's own
+disk gate's, the one line between that write and the partition its bitmap
+claims, which no boot of the shipped fsd reaches. `make test-disk-gate` runs
+it after test-long-set's mode, under files of its own (build/test-disk-gate-
+bound*). Every boot, in either mode, must print fsd's ready line, and the
+rig build's line in this mode alone.
 """
 import hashlib
 import importlib.util
@@ -107,6 +117,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BUILD = os.path.join(ROOT, "build")
 sys.path.insert(0, HERE)
+import diskgate  # noqa: E402
 import mbrdisk  # noqa: E402
 _spec = importlib.util.spec_from_file_location("drive_qemu", os.path.join(HERE, "drive-qemu.py"))
 drive_qemu = importlib.util.module_from_spec(_spec)
@@ -116,7 +127,11 @@ SECT = mbrdisk.SECT
 ESP = os.path.join(BUILD, "esp.img")
 EXFAT = os.path.join(BUILD, "espexfat.img")
 EXT2 = os.path.join(BUILD, "espext2.img")
-DISK = os.path.join(BUILD, "test-volume-bound.img")
+DISK_GATE, RIG, ARGS = diskgate.mode(sys.argv[1:], "test-volume-bound", "test-disk-gate-bound")
+DISK = os.path.join(BUILD, f"{RIG}.img")
+# What the firmware boots: esp.img, or in --disk-gate a copy carrying the
+# rig's fsd. The volumes the disk is built from are esp.img's either way.
+BOOT_ESP = os.path.join(BUILD, "esp-diskgate-bound.img") if DISK_GATE else ESP
 EXIT = re.compile(r"^Ouroboros kernel: task \d+ exited \(code (\d+)\)\r?$", re.M)
 NO_FS = "mount: no such partition, no filesystem on it, or `/` not mounted yet (`mount -a` first)"
 # A damaged ext2 descriptor is damage a fsck repairs, refused as an I/O
@@ -471,13 +486,13 @@ def boot(name, cmds):
     extra = [
         # bootindex=0 pins the firmware to the NVMe disk, which it boots and
         # the kernel cannot drive (test-boot-partition's fallback case).
-        "-drive", f"file={ESP},format=raw,if=none,id=nvboot,snapshot=on",
+        "-drive", f"file={BOOT_ESP},format=raw,if=none,id=nvboot,snapshot=on",
         "-device", "nvme,serial=boot,drive=nvboot,bootindex=0",
         "-drive", f"file={DISK},format=raw,if=none,id=hd0",
         "-device", "virtio-blk-device,drive=hd0",
     ]
     guest = drive_qemu.Guest(DISK, extra_args=extra, virtio_disk=False, stamp_from=ESP,
-                             label=f"test-volume-bound[{name}]: ")
+                             label=f"{RIG}[{name}]: ")
     try:
         driven = guest.run(steps)
         out = guest.transcript()
@@ -489,7 +504,7 @@ def boot(name, cmds):
         guest.stop()
         if os.path.exists(DISK):
             os.remove(DISK)
-    with open(os.path.join(BUILD, f"test-volume-bound-{name.lower()}.txt"), "w") as fh:
+    with open(os.path.join(BUILD, f"{RIG}-{name.lower()}.txt"), "w") as fh:
         fh.write(out)
     return driven, out, faults
 
@@ -520,7 +535,7 @@ def checks_of(name):
         return [(f"{name}: {label}", ok) for label, ok in pre], False
     cmds = commands(name, cases)
     driven, out, faults = boot(name, cmds)
-    if drive_qemu.boot_stalled("test-volume-bound", name, out, faults):
+    if drive_qemu.boot_stalled(RIG, name, out, faults):
         # The host's model checks are graded still; the guest's are not.
         return [(f"{name}: {label}", ok) for label, ok in pre], True
     o = dict(zip(cmds, outputs(out, cmds)))
@@ -564,6 +579,7 @@ def checks_of(name):
                 checks.append((f"mount {n}, {what}, refused (got {got!r})", got == SAYS.get(what, "") + ANSWER.get(what, NO_FS)))
         checks.append(("ls / still lists the root", "etc/" in (o["ls /"] or "").split()))
     checks.append(("no fault lines", faults == 0))
+    checks.append(diskgate.check("the boot", out, DISK_GATE))
     return [(f"{name}: {label}", ok) for label, ok in checks], False
 
 
@@ -573,18 +589,33 @@ def main():
             sys.exit(f"{f} not found - run `make test-volume-bound`, which builds it")
     # Each boot once, in the order named: a boot's label in the stall log
     # is its name, and drive-qemu refuses one label twice in a run.
-    only = list(dict.fromkeys(sys.argv[1:])) or BOOTS
+    only = list(dict.fromkeys(ARGS)) or BOOTS
+    unknown = [n for n in only if n not in BOOTS]
+    if unknown:
+        sys.exit(f"no such boot: {' '.join(unknown)} (the boots: {' '.join(BOOTS)})")
+    if DISK_GATE:
+        # BESIDE alone: its write is the one whose refusal, past the verb
+        # gate, keeps it off another partition; the other boots refuse mounts.
+        if ARGS and only != ["BESIDE"]:
+            sys.exit("--disk-gate boots BESIDE alone")
+        only = ["BESIDE"]
+        diskgate.esp(ESP, BOOT_ESP, drive_qemu)
     checks = []
     stalled = 0
-    for name in only:
-        got, stall = checks_of(name)
-        checks += got
-        stalled += stall
+    try:
+        for name in only:
+            got, stall = checks_of(name)
+            checks += got
+            stalled += stall
+    finally:
+        # The staged ESP kept with KEEP, as test-long-set keeps its image.
+        if DISK_GATE and os.path.exists(BOOT_ESP) and not os.environ.get("KEEP"):
+            os.remove(BOOT_ESP)
     failed = 0
     for label, ok in checks:
         print(("PASS  " if ok else "FAIL  ") + label)
         failed += not ok
-    return drive_qemu.verdict("test-volume-bound", failed, stalled)
+    return drive_qemu.verdict(RIG, failed, stalled)
 
 
 if __name__ == "__main__":
