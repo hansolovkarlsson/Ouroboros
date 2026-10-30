@@ -1205,7 +1205,7 @@ fn init_storage() -> Option<Held> {
     // reach via the BLOCK_* syscalls - the kernel no longer mounts
     // (or contains) any filesystem itself; the server's own boot-time
     // auto-mount takes it from here.
-    syscall::install_block_device(block::BlockDevice::Virtio(device), boot_start);
+    syscall::install_block_device(block::BlockDevice::Virtio(device));
     if boot_start == 0 {
         console::println!("Ouroboros kernel: block device installed for the filesystem server");
     } else {
@@ -1232,8 +1232,8 @@ struct Held {
 /// answer `None` and the order is the one before step 3, virtio then USB,
 /// except for a blank disk, the one virtio disk held then, which goes in
 /// after any stick. The `MOUNT` syscall's later rescan, which replaces the
-/// device with a stick attached late, installs whatever stick it finds but
-/// asks it the same question, so `BLOCK_BOOT_START` answers for it too.
+/// device with a stick attached late, installs whatever stick it finds, and
+/// `BLOCK_BOOT_START` reads its table when asked, so it answers for it too.
 fn install_boot_disk(held: Option<Held>) {
     // Held back for the stick's answer: a non-boot stick gives way to it.
     let holds_back = matches!(held, Some(Held { blank: false, .. }));
@@ -1244,15 +1244,12 @@ fn install_boot_disk(held: Option<Held>) {
         let matched = bootdisk::is_boot_disk_retrying(&mut read, capacity, "usb-msd");
         // With no virtio disk held back, or only a blank one, the stick goes
         // in whatever it is (the Pi and Parallels boot from a disk the kernel
-        // cannot drive and run from the stick); asked all the same, so `fsd`
-        // learns whether it holds the boot partition.
-        // D6: a stick unreadable twice is installed as not the boot disk,
-        // over a held virtio disk too, and the line above has said the read
-        // failed. Only a stick that was read and does not match is refused.
-        match (holds_back, matched) {
-            (true, Some(bootdisk::Boot::No)) => None,
-            _ => Some(bootdisk::start_if(matched)),
-        }
+        // cannot drive and run from the stick); `fsd` learns whether it
+        // holds the boot partition from `BLOCK_BOOT_START`, which reads its
+        // table when asked.
+        // D6: a stick unreadable twice is installed, over a held virtio disk
+        // too, and the line above has said the read failed. Only a stick that was read and does not match is refused.
+        !matches!((holds_back, matched), (true, Some(bootdisk::Boot::No)))
     });
     let Some(Held { device, blank }) = held else { return };
     // The held virtio disk is not the boot disk; it goes in only as the
@@ -1277,7 +1274,7 @@ fn install_boot_disk(held: Option<Held>) {
             return;
         }
     };
-    syscall::install_block_device(block::BlockDevice::Virtio(device), 0);
+    syscall::install_block_device(block::BlockDevice::Virtio(device));
     console::println!("Ouroboros kernel: virtio-blk installed as the fallback: {why}");
 }
 

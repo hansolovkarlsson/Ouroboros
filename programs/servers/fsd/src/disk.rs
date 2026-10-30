@@ -85,9 +85,9 @@ impl Device {
     /// named no partition, or the device is a fallback or a stick taken late
     /// (`BLOCK_BOOT_START`, one-disk step 4). A kernel without the call
     /// answers an error, which is `None` too. Asked afresh every time, never
-    /// kept: the kernel forgets the start at the first write to the table
-    /// (`erase`, `partition`), and answers a stick `MOUNT` installs anew, so
-    /// fsd holds nothing a restart could lose (since 2026-10-30).
+    /// kept: the kernel matches the table as it stands at each call, so a
+    /// table `erase` or `partition` rewrote is answered as rewritten, and fsd
+    /// holds nothing a restart could lose (since 2026-10-30).
     pub fn boot_partition_start(&self) -> Option<u64> {
         match block_svc(syscall_abi::BLOCK_BOOT_START, 0, 0) {
             0 => None,

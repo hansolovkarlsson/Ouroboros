@@ -146,10 +146,11 @@ pub(crate) fn is_boot_disk(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, ca
 }
 
 /// The boot partition's start LBA when the disk read through `read` holds it,
-/// else 0: what `BLOCK_BOOT_START` answers for a device about to be
-/// installed. For `MOUNT`'s rescan, which installs a stick whatever it is,
-/// so a boot stick taken there after a failed boot-time init still tells
-/// `fsd` (the high review of #288).
+/// else 0: what `BLOCK_BOOT_START` answers, read from the installed device's
+/// table each time it is asked (since 2026-10-30), so a boot stick `MOUNT`'s
+/// rescan takes after a failed boot-time init still tells `fsd` (the high
+/// review of #288), and a table rewritten since the boot is answered as it
+/// now stands (the medium review of #377).
 pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64, name: &str) -> u64 {
     start_if(is_boot_disk_retrying(read, capacity, name))
 }
@@ -182,8 +183,8 @@ pub(crate) fn is_boot_disk_retrying(
 }
 
 /// The boot partition's start LBA when [`is_boot_disk`] answered yes, else
-/// 0: the one spelling of `BLOCK_BOOT_START`'s answer, for the boot path and
-/// the rescan alike (the medium review of #288 found two copies). A firmware
+/// 0: the one spelling of `BLOCK_BOOT_START`'s answer, for the syscall and
+/// the boot path's line alike (the medium review of #288 found two copies). A firmware
 /// counting in blocks other than 512 bytes cannot be answered wrongly here:
 /// its LBAs would not match the disk's table, and the disk is no boot disk.
 pub(crate) fn start_if(matched: Option<Boot>) -> u64 {

@@ -50,9 +50,10 @@ and five on copies this script makes, each disk with a signature of its own
 finds `/` empty and the ESP whole; disk-rewrite (since 2026-10-30) runs
 `erase disk`, `partition ext2`, `format ext2` and `mount -a` on a copy of
 disk.img, the boot disk, and the new root, where the ESP began, must mount
-writable and take `help > /rwtest` (it passes too with the kernel's
-forgetting of the boot start at a table write removed: the one partition
-`partition` makes is no fallback, stale start or not); disk-badroot zeroes the root's superblock,
+writable and take `help > /rwtest`, and fsd's line that the boot partition is
+on this disk, at LBA 2048, printed at boot, must be gone from `mount -a`'s
+answer: the kernel matches BLOCK_BOOT_START against the table as it stands
+(fails with the start kept from the install); disk-badroot zeroes the root's superblock,
 `fsd` must say it fell back to the ESP read-only and refuse root's `touch`
 there (decision D5), open /etc/passwd with O_RDONLY|O_CREAT and read it while
 refusing a missing file EROFS at the open, one in a missing directory
@@ -122,6 +123,9 @@ LINE = re.compile(r"boot partition: (.*)")
 # syscall-abi's PARTITION_START_LBA: where `partition` starts the one
 # partition it makes.
 PARTITION_START_LBA = 2048
+# fsd's line after its mount line when BLOCK_BOOT_START names the boot
+# partition, followed by its start (since 2026-10-30).
+BOOT_LINE = "fsd: the boot partition is on this disk, at LBA "
 
 
 def expected(image):
@@ -200,12 +204,12 @@ BOOTS = [
     # A copy of disk.img whose table is rewritten in the boot: `erase disk`,
     # `partition ext2` and `format ext2` on the boot disk, the new root where
     # the ESP, the boot partition, began, which must mount writable and take a
-    # write (since 2026-10-30). It does not grade the kernel forgetting the
-    # boot start at the table write: the one partition `partition` makes
-    # mounts writable either way, since with no other partition it is no
-    # fallback (`RootOrder::is_fallback`); with the kernel's clear removed
-    # every check passes. Only a table of two partitions, which nothing on
-    # the system writes, would show a stale start.
+    # write (since 2026-10-30). The one partition `partition` makes mounts
+    # writable whatever BLOCK_BOOT_START answers, since with no other
+    # partition it is no fallback (`RootOrder::is_fallback`), so the answer is
+    # read off fsd's mount line instead: the boot partition at LBA 2048 at
+    # boot, and none after `mount -a`, the table rewritten (its new MBR
+    # carries no disk signature, so the firmware's partition is not in it).
     ("disk-rewrite", "disk-rewrite.img", "virtio", None, None, "ext2", False),
     # A copy of espgpt.img: `format` must refuse a GPT disk, which it would
     # have laid a filesystem over from LBA 1 (the medium review of #288).
@@ -382,6 +386,11 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
     ]
     listing = re.search(r"ls /\r?\n([\s\S]*?)echo after-ls", out)
     listing = listing.group(1) if listing else ""
+    if label in ("disk", "disk-usb"):
+        # disk.img's ESP, the boot partition, starts where `partition`
+        # starts its one partition (make_copies asserts it).
+        checks.append((f"{label}: fsd says the boot partition is on this disk, at LBA {PARTITION_START_LBA}",
+                       f"{BOOT_LINE}{PARTITION_START_LBA}\r\n" in out))
     if label == "disk-format":
         def answer(command):
             found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", out)
@@ -397,19 +406,29 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             (f"{label}: the ESP, partition 0, still holds EFI (`cd /esp/EFI` silent)", efi_answer == ""),
         ]
     elif label == "disk-rewrite":
-        # Each command once in the boot, so its answer is the text to the next prompt.
+        # Each command once in the boot, so its answer is the text from its
+        # echoed line to the next prompt; None when it was never echoed, so a
+        # step the guest never ran is no silent answer (the medium review of
+        # #377). `format ext2`'s own answer names `mount -a` in backquotes,
+        # never followed by the line's end, so the echo is what matches.
         def answer(command):
             found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", out)
-            return found.group(1).strip() if found else ""
-        remount = out.split("mount -a", 1)[1] if "mount -a" in out else ""
+            return found.group(1).strip() if found else None
+        boot = out.split("erase disk", 1)[0]
+        remount = answer("mount -a") or ""
         checks += [
+            (f"{label}: fsd says at boot the boot partition is on this disk, at LBA {PARTITION_START_LBA}",
+             f"{BOOT_LINE}{PARTITION_START_LBA}\r\n" in boot),
             (f"{label}: `erase disk`, `partition ext2` and `format ext2` each succeed",
-             answer("erase disk").startswith("erased") and answer("partition ext2").startswith("partitioned")
-             and answer("format ext2").startswith("formatted")),
-            (f"{label}: `mount -a` mounts the new root writable, not as the boot partition",
+             (answer("erase disk") or "").startswith("erased")
+             and (answer("partition ext2") or "").startswith("partitioned")
+             and (answer("format ext2") or "").startswith("formatted")),
+            (f"{label}: `mount -a` mounts the new root writable",
              "ext2 mounted" in remount and "fsd: mounted read-only" not in remount),
+            (f"{label}: after the rewrite, BLOCK_BOOT_START names no boot partition (no line from fsd)",
+             "ext2 mounted" in remount and BOOT_LINE not in remount),
             (f"{label}: `help > /rwtest` on the new root succeeds, and `cd /rwtest` finds a file",
-             answer("help > /rwtest") == "" and "not a directory" in answer("cd /rwtest")),
+             answer("help > /rwtest") == "" and "not a directory" in (answer("cd /rwtest") or "")),
         ]
     elif label == "disk-data-format":
         def answer(command):

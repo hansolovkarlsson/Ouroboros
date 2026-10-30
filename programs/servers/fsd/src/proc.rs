@@ -335,8 +335,9 @@ fn parse(path: &str) -> Node {
 }
 
 /// Format `v` as decimal into `buf`, returning the byte length. Manual digit loop
-/// (no `core::fmt`), relocation-safe.
-fn u64_decimal(v: u64, buf: &mut [u8]) -> usize {
+/// (no `core::fmt`), relocation-safe. Also the boot partition's LBA on
+/// fsd's mount line.
+pub(crate) fn u64_decimal(v: u64, buf: &mut [u8]) -> usize {
     if v == 0 {
         buf[0] = b'0';
         return 1;

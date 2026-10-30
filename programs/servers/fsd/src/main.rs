@@ -255,7 +255,20 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS
             // it held is not known (a failing disk, not an empty partition).
             let unread = if unread { "fsd: a partition before it would not read (disk I/O error)\r\n" } else { "" };
             let ([hro, hwhy, hend], [ro, why, end]) = read_only_lines(&mounted);
-            con_write_parts(&[unread, hro, hwhy, hend, "fsd: ", mounted.fs().name(), " mounted, disk commands available\r\n", ro, why, end]);
+            // What the kernel answered of the boot partition, last: the one
+            // place a rig can see it, so a start answered for a table that no
+            // longer holds it is graded (test-boot-partition's disk-rewrite,
+            // since 2026-10-30). Asked again here, after `mount` asked; the
+            // kernel reads the table each time, so both answer alike.
+            let mut digits = [0u8; 20];
+            let [bpre, blba, bend] = match device.boot_partition_start() {
+                Some(start) => {
+                    let n = proc::u64_decimal(start, &mut digits);
+                    ["fsd: the boot partition is on this disk, at LBA ", core::str::from_utf8(&digits[..n]).unwrap_or("?"), "\r\n"]
+                }
+                None => ["", "", ""],
+            };
+            con_write_parts(&[unread, hro, hwhy, hend, "fsd: ", mounted.fs().name(), " mounted, disk commands available\r\n", ro, why, end, bpre, blba, bend]);
             mounts[0] = Some(mounted);
             0
         }
@@ -2028,7 +2041,8 @@ fn read_only_lines(mount: &vfs::Mount) -> ([&'static str; 3], [&'static str; 3])
 /// [`FS_DATA_MAX`](syscall_abi::FS_DATA_MAX): until 2026-10-30 it was 320
 /// bytes, and the mount line, four lines since then (a partition that would
 /// not read, D5's reason, the mount, the volume's reason), reaches 290 (the
-/// medium review of #373).
+/// medium review of #373), and with the boot partition's line, a fifth since
+/// 2026-10-30, 361.
 fn con_write_parts(parts: &[&str]) {
     let mut line = [0u8; syscall_abi::FS_DATA_MAX as usize];
     let mut len = 0;
