@@ -2709,16 +2709,19 @@ test-long-set: image-exfat
 # each write reaches exFAT's own refusal; every boot must print that build's
 # line. Since 2026-10-30 also test-volume-bound's BESIDE so (scripts/
 # test-volume-bound.py --disk-gate), the volume whose bitmap claims the next
-# partition's first sector. Both run, and the worse exit is the target's: a
-# failed check (1) or a refused run (2) over an INCONCLUSIVE boot (100) over
-# a pass. Fails with the gate's write check and the allocator's removed beside
-# every early writable() check. Run it whenever exFAT's gate, writable(),
-# alloc_cluster or a writer's first write changes.
+# partition's first sector; BESIDE's disk holds an ext2, so this needs
+# e2fsprogs (`brew install e2fsprogs`) since then. Both run, and the recipe
+# exits with the worse of their codes, which make names in its `Error N` line
+# (make itself exits 2 on any): a refused or broken run (2, or any code but
+# these, the first of two) over a failed check (1) over an INCONCLUSIVE boot
+# (100) over a pass. Fails with the gate's write check and the allocator's
+# removed beside every early writable() check. Run it whenever exFAT's gate,
+# writable(), alloc_cluster or a writer's first write changes.
 test-disk-gate: image image-exfat image-ext2 $(EXFAT_PART) fsd-disk-gate-bin
-	@FSD_GATE_BIN=$(FSD_GATE_BIN) python3 scripts/test-long-set.py --disk-gate; a=$$?; \
+	FSD_GATE_BIN=$(FSD_GATE_BIN) python3 scripts/test-long-set.py --disk-gate; a=$$?; \
 	FSD_GATE_BIN=$(FSD_GATE_BIN) python3 scripts/test-volume-bound.py --disk-gate; b=$$?; \
-	for c in $$a $$b; do case $$c in 0|100) ;; *) exit $$c;; esac; done; \
-	if [ $$a = 100 ] || [ $$b = 100 ]; then exit 100; fi
+	rank() { case $$1 in 0) echo 0;; 100) echo 1;; 1) echo 2;; *) echo 3;; esac; }; \
+	if [ $$(rank $$b) -gt $$(rank $$a) ]; then exit $$b; else exit $$a; fi
 
 # exFAT bytes past a file's ValidDataLength are zeros, read or written
 # (scripts/test-valid-length.py): on a copy of the exFAT image, four files

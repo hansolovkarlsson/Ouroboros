@@ -9,9 +9,10 @@ does not ask an arm, so each refused write is exFAT's own disk gate's
 --disk-gate boots its five read-only volumes so, and since 2026-10-30
 test-volume-bound --disk-gate boots BESIDE, whose bitmap claims the next
 partition's first sector. This module is the one copy of what both modes
-share: the build's line, the ESP carrying the build, and the check of which
-fsd a boot ran (the review of #373: a second copy in test-volume-bound would
-drift).
+share: the flag and the names it gives a run, the build's line, the ESP
+carrying the build, and the check of which fsd a boot ran (a second copy in
+test-volume-bound would drift; the medium review of #374 found the flag's
+handling copied still).
 """
 import os
 import shutil
@@ -24,6 +25,16 @@ READY_LINE = "fsd: filesystem server ready"
 # first: a direct run would stage whatever build was left there, and a path
 # spelled here too could drift from the Makefile's (the review of #371).
 FSD_GATE_BIN = os.environ.get("FSD_GATE_BIN")
+FLAG = "--disk-gate"
+
+
+def mode(argv, rig, gate_rig):
+    """(gate, the run's name, argv's other arguments): whether `FLAG` was
+    given, and `gate_rig` then, else `rig`. The name is the run's in its
+    verdict, its stall log and its files, so the two modes never share a
+    scratch image or a transcript (the review of #371)."""
+    gate = FLAG in argv
+    return gate, gate_rig if gate else rig, [a for a in argv if a != FLAG]
 
 
 def esp(source, dest, drive_qemu):
@@ -35,18 +46,23 @@ def esp(source, dest, drive_qemu):
     if not os.path.exists(FSD_GATE_BIN):
         sys.exit(f"{FSD_GATE_BIN} not found")
     shutil.copyfile(source, dest)
-    mp = drive_qemu.attach(dest, readonly=False)
     try:
-        shutil.copyfile(FSD_GATE_BIN, os.path.join(mp, "EFI", "ORBS", "FSD.BIN"))
-        # What macOS leaves on a volume it mounts read-write, removed as the
-        # Makefile's image recipes do, so the ESP holds esp.img's files and no
-        # others, FSD.BIN the one changed (its FAT, FSInfo and FSD.BIN's entry
-        # are macOS's writing, not esp.img's).
-        subprocess.run(["find", mp, "-name", "._*", "-delete"], check=True)
-        for d in (".fseventsd", ".Trashes", ".Spotlight-V100"):
-            shutil.rmtree(os.path.join(mp, d), ignore_errors=True)
-    finally:
-        drive_qemu.detach(mp)
+        mp = drive_qemu.attach(dest, readonly=False)
+        try:
+            shutil.copyfile(FSD_GATE_BIN, os.path.join(mp, "EFI", "ORBS", "FSD.BIN"))
+            # What macOS leaves on a volume it mounts read-write, removed as
+            # the Makefile's image recipes do, so the ESP holds esp.img's
+            # files and no others, FSD.BIN the one changed (its FAT, FSInfo
+            # and FSD.BIN's entry are macOS's writing, not esp.img's).
+            subprocess.run(["find", mp, "-name", "._*", "-delete"], check=True)
+            for d in (".fseventsd", ".Trashes", ".Spotlight-V100"):
+                shutil.rmtree(os.path.join(mp, d), ignore_errors=True)
+        finally:
+            drive_qemu.detach(mp)
+    except BaseException:
+        # Half made: never left for a later run, KEEP or not.
+        os.remove(dest)
+        raise
 
 
 def check(label, out, gate):

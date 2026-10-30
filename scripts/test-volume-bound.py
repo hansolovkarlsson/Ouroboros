@@ -127,10 +127,7 @@ SECT = mbrdisk.SECT
 ESP = os.path.join(BUILD, "esp.img")
 EXFAT = os.path.join(BUILD, "espexfat.img")
 EXT2 = os.path.join(BUILD, "espext2.img")
-DISK_GATE = "--disk-gate" in sys.argv[1:]
-# The rig's name, in its verdict, its stall log and its files, so the two
-# modes never share a disk, a boot ESP or a transcript (test-long-set's rule).
-RIG = "test-disk-gate-bound" if DISK_GATE else "test-volume-bound"
+DISK_GATE, RIG, ARGS = diskgate.mode(sys.argv[1:], "test-volume-bound", "test-disk-gate-bound")
 DISK = os.path.join(BUILD, f"{RIG}.img")
 # What the firmware boots: esp.img, or in --disk-gate a copy carrying the
 # rig's fsd. The volumes the disk is built from are esp.img's either way.
@@ -592,29 +589,32 @@ def main():
             sys.exit(f"{f} not found - run `make test-volume-bound`, which builds it")
     # Each boot once, in the order named: a boot's label in the stall log
     # is its name, and drive-qemu refuses one label twice in a run.
-    only = list(dict.fromkeys(a for a in sys.argv[1:] if a != "--disk-gate")) or BOOTS
+    only = list(dict.fromkeys(ARGS)) or BOOTS
     unknown = [n for n in only if n not in BOOTS]
     if unknown:
         sys.exit(f"no such boot: {' '.join(unknown)} (the boots: {' '.join(BOOTS)})")
     if DISK_GATE:
         # BESIDE alone: its write is the one whose refusal, past the verb
         # gate, keeps it off another partition; the other boots refuse mounts.
-        if only not in (BOOTS, ["BESIDE"]):
+        if ARGS and only != ["BESIDE"]:
             sys.exit("--disk-gate boots BESIDE alone")
         only = ["BESIDE"]
         diskgate.esp(ESP, BOOT_ESP, drive_qemu)
     checks = []
     stalled = 0
-    for name in only:
-        got, stall = checks_of(name)
-        checks += got
-        stalled += stall
+    try:
+        for name in only:
+            got, stall = checks_of(name)
+            checks += got
+            stalled += stall
+    finally:
+        # The staged ESP kept with KEEP, as test-long-set keeps its image.
+        if DISK_GATE and os.path.exists(BOOT_ESP) and not os.environ.get("KEEP"):
+            os.remove(BOOT_ESP)
     failed = 0
     for label, ok in checks:
         print(("PASS  " if ok else "FAIL  ") + label)
         failed += not ok
-    if DISK_GATE:
-        os.remove(BOOT_ESP)
     return drive_qemu.verdict(RIG, failed, stalled)
 
 

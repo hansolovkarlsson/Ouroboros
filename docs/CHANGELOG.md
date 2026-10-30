@@ -1516,8 +1516,11 @@ a copy of esp.img carrying fsd's `disk-gate-rig` build, whose verb gate does
 not ask an arm, so the refusal is exFAT's own, and `make test-disk-gate` runs
 it after test-long-set's mode, exiting with the worse of the two. What both
 modes share, the build's line, the staged ESP and the check of which fsd a
-boot ran, is `scripts/diskgate.py`, moved out of test-long-set. Every
-BESIDE boot now checks which fsd it ran, in either mode. Controls: with
+boot ran, and the flag's handling, is `scripts/diskgate.py`, moved out of
+test-long-set. Every boot of `make test-volume-bound`, all fourteen, now
+checks that the shipped fsd ran and said it was ready, and BESIDE in this
+mode that the rig's build did. `make test-disk-gate` needs e2fsprogs since,
+for BESIDE's ext2. Controls: with
 exFAT's gate removed (`writable()`, the allocator's check and
 `Gated::write_sector`'s), BESIDE in this mode fails one check, its write
 answered as an I/O error, the next partition kept only by

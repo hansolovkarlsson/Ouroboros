@@ -276,13 +276,11 @@ Volume, set_checksum, entry_set = exfatimg.Volume, exfatimg.set_checksum, exfati
 
 # --disk-gate (`make test-disk-gate`, since 2026-10-29): the read-only boots
 # alone, on espexfat-diskgate.img, whose ESP carries fsd's `disk-gate-rig`
-# build (diskgate.FSD_GATE_BIN), so a write reaches exFAT's own disk gate rather than
-# fsd's verb gate. Every boot must print diskgate.GATE_LINE in that mode, and must not
-# print it otherwise, so a boot of the wrong fsd fails either way.
-DISK_GATE = "--disk-gate" in sys.argv[1:]
-# The rig's name, in its verdict, its stall log and its files, so the two
-# modes never share a scratch image or a transcript (the review of #371).
-RIG = "test-disk-gate" if DISK_GATE else "test-long-set"
+# build (diskgate.FSD_GATE_BIN), so a write reaches exFAT's own disk gate
+# rather than fsd's verb gate. Every boot must print diskgate.GATE_LINE in
+# that mode, and must not print it otherwise, so a boot of the wrong fsd
+# fails either way.
+DISK_GATE, RIG, _ = diskgate.mode(sys.argv[1:], "test-long-set", "test-disk-gate")
 IMAGE = os.path.join(ROOT, "build", f"{RIG}.img")
 SOURCE = "espexfat-diskgate.img" if DISK_GATE else "espexfat.img"
 
