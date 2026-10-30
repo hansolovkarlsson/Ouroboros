@@ -1497,8 +1497,8 @@ its reason and the reason goes with the mount. The gate asks
 `Mount::refuses_changes` and the mount line `Mount::read_only`, and the
 arm's `read_only()` is private to vfs, so nothing outside it can ask the
 arm alone. The fallback's line is now the read-only line, after the mount
-line: `fsd: mounted read-only: the partition typed as the root did not
-mount, so the boot partition is `/``. `make test-boot-partition` reads the
+line: ``fsd: mounted read-only: the partition typed as the root did not
+mount, so the boot partition is `/` ``. `make test-boot-partition` reads the
 new text and passes; with D5's half taken out of `refuses_changes`, four
 checks fail (root's `touch` and the EROFS create on disk-badroot,
 disk-data-badroot and disk-data-unknown). From the high review of #364.
