@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-28. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-29. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2259,3 +2259,52 @@ interleave with the line the check reads. The third medium review found it;
 no run was seen to misfire. Each step now waits for its own `ccreat:` line.
 **A wait is a check on the guest's state: a pattern that output from before
 the step can satisfy waits for nothing.**
+
+## Four more, from the open refusals and the disk gate (2026-10-29)
+
+Three PRs (#369, #370, #371), each a rig or a probe built to grade code that
+no boot reached. Each instrument was new, and four of them, two of them the
+same mistake, reported something they had not seen.
+
+**Silence read as the expected refusal, twice.** `/bin/OPENPROBE` (#369)
+graded two of fsd's `NP_OPEN` refusals by an answer of FS_ERROR, and made
+its call through ulib's `np_call`, which also answers FS_ERROR for a call
+fsd never answered. An fsd that panicked on `OPEN_EXCL` alone passed both
+checks while the supervisor restarted it. The probe now makes its own
+`MSG_CALL` and prints `no answer`, and the panic control fails two checks.
+Two days of work later, #371's rig checked in each ordinary boot that the
+disk-gate build's line was absent, so a boot that died before fsd printed
+anything counted as the shipped fsd. It now needs fsd's ready line beside
+the absence. **A check that passes on an answer has to tell the answer
+from no answer; one that passes on an absence has to see the thing that
+would have spoken.**
+
+**"Every boot" checked at six of fourteen.** #371's build check, which says
+which fsd a boot ran, was added by hand to the two boot functions the gate
+mode uses. The docstring, `CLAUDE.md` and the CHANGELOG all said every boot
+checked it, and the other eight never did. The first medium review found
+it. `boot()` now records every transcript and `main` checks them all, so a
+boot added later cannot skip it. It is this file's `fsd_write_at` grep in a
+rig: **a property claimed of every site is held by the one place every
+site passes through, not by the sites someone remembered.**
+
+**A check that could not tell the fix from the code before it.** #370 made
+fsd refuse a truncate, write or create open of a directory, and the rig
+opened the root four ways. With the refusal removed, the truncate open was
+still refused, by `write_file`'s own refusal of a directory, since every
+truncate reaches it. Both reviews proposed a different truncate check, and
+it would not have graded the fix either. The control that removed the
+refusal showed which checks fell (three root opens and `user`'s through the
+probe), and the CHANGELOG says three of the four root opens grade it.
+**Count the checks a control fails, not the checks that were written for
+the change.**
+
+**A control the code could not express.** The second review of #371 asked
+`make test` to build fsd with the rig's feature, which nothing compiled, so
+a change breaking only that path would go unseen. The check went in. Its
+control, a change that breaks only the feature's path, could not be built:
+fsd reads the feature through `cfg!()`, so the default build already
+compiles both branches. What only the new check sees is the feature renamed
+or dropped, and that control (renamed in `Cargo.toml`) makes `make test`
+exit 2. **When a control cannot be spelled, the check guards less than its
+reason says; find the failure it does catch, and write that down.**
