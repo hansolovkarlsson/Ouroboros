@@ -74,7 +74,6 @@ unless another of its boots ran and failed, which fails it.
 About two and a half minutes.
 """
 import functools
-import importlib.util
 import os
 import shutil
 import struct
@@ -87,9 +86,6 @@ import disktrace  # noqa: E402
 import exfatimg  # noqa: E402
 import fat32img  # noqa: E402
 
-_spec = importlib.util.spec_from_file_location("spawn_reads", os.path.join(HERE, "test-spawn-reads.py"))
-spawn_reads = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(spawn_reads)
 
 SECTOR = 512
 IMAGE = "espexfat.img"
@@ -101,12 +97,12 @@ def Fat32(image):
     """The ESP partition of an image as the host reads it (scripts/fat32img.py,
     the reader the rigs share): geometry, FAT entries from the first copy,
     chains, directories (short names only)."""
-    start, _ = spawn_reads.partition(image, 0x0B)
+    start, _ = exfatimg.partition(image, 0x0B)
     return fat32img.Fat32(open(image, "rb"), start)
 
 
 def exfat_read(image, chain, size):
-    g = spawn_reads.exfat_layout(image)
+    g = exfatimg.exfat_layout(image)
     out = b""
     with open(image, "rb") as fh:
         for c in chain:
@@ -220,7 +216,7 @@ def fat32_reads(chain, cluster_bytes, free_before, passed, start_sector, end, sr
 def exfat_entries(image, chain):
     """[(index of the directory's cluster holding the entry set, name, data
     length)] of an exFAT directory whose clusters are `chain`."""
-    g = spawn_reads.exfat_layout(image)
+    g = exfatimg.exfat_layout(image)
     cluster_bytes = g["spc"] * SECTOR
     data = exfat_read(image, chain, len(chain) * cluster_bytes)
     return [(s.offset // cluster_bytes, s.name, exfatimg.extent(s).size) for s in exfatimg.sets(data)]
@@ -231,7 +227,7 @@ def plant_backup(image):
     first: the bad-cluster mark where the first copy has 0. fsd reads no copy
     but the first, so the model is unchanged; `mirrored` then sees which
     sectors fsd wrote whole. Returns the entries planted."""
-    start, _ = spawn_reads.partition(image, 0x0B)
+    start, _ = exfatimg.partition(image, 0x0B)
     with open(image, "r+b") as fh:
         fs = fat32img.Fat32(fh, start)
         if fs.nfats < 2:
@@ -348,20 +344,20 @@ def main() -> int:
     shutil.copyfile(os.path.join(ROOT, "build", IMAGE), prepared)
     tally = disktrace.Tally("test-write-walk")
     try:
-        spawn_reads.place_mounted(prepared, files, part=1)
-        spawn_reads.place_mounted(prepared, files, part=2)
+        exfatimg.place_mounted(prepared, files, part=1)
+        exfatimg.place_mounted(prepared, files, part=2)
         planted = plant_backup(prepared)
         print(f"     the ESP's second FAT copy differs from the first at {planted} free entries")
-        g = spawn_reads.exfat_layout(prepared)
+        g = exfatimg.exfat_layout(prepared)
         f32 = Fat32(prepared)
         f32_region = (f32.fat, f32.fat_end)
         f32_root_len = len(f32.chain(f32.root))
         f32.fh.close()
 
         def exfat_inspect(copy, problems, found, src_name=None):
-            root, chain = spawn_reads.exfat_chain(copy, "CHAIN")
-            _, bin_chain = spawn_reads.exfat_chain(copy, "bin")
-            src = spawn_reads.exfat_chain(copy, src_name)[1] if src_name else None
+            root, chain = exfatimg.exfat_chain(copy, "CHAIN")
+            _, bin_chain = exfatimg.exfat_chain(copy, "bin")
+            src = exfatimg.exfat_chain(copy, src_name)[1] if src_name else None
             if chain is None or bin_chain is None or (src_name and src is None):
                 problems.append("/CHAIN, /bin or the source is contiguous: fsd writes every file FAT-chained, "
                                 "and the model reads where the cache starts off /bin's chain")

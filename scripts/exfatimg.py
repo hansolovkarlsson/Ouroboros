@@ -13,6 +13,10 @@ rule were repeated in four (the high review of 2026-10-22).
     hit = exfatimg.restream(d, hit, first=0, size=0)   # the Stream rewritten in d, the set resealed
     s = exfatimg.entry_set("NAME", first, size)  # a set as fsd builds it, sealed
     ok, lines = exfatimg.fsck_clean(image)       # fsck_exfat -n, nothing to repair
+    start, sectors = exfatimg.partition(image, 0x07)   # the one partition of an MBR type
+    g = exfatimg.exfat_layout(image)             # the exFAT partition's geometry
+    root, chain = exfatimg.exfat_chain(image, "NAME")   # its root's chain, NAME's
+    exfatimg.place_mounted(image, {"NAME": b"..."}, part=2)   # files written by macOS
     with exfatimg.attached(image) as dev: rc, lines = exfatimg.fsck(dev + "s1", "fsck_exfat")
 """
 import contextlib
@@ -21,6 +25,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 from collections import namedtuple
 
 import fat32img
@@ -29,6 +34,7 @@ import mbrdisk
 BUILD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build")
 
 ENTRY = 32
+SECTOR = 512  # a disk sector, for the image readers below
 FILE, STREAM, NAME = 0x85, 0xC0, 0xC1
 
 Set = namedtuple("Set", "offset count name data")
@@ -151,6 +157,87 @@ def copy_exfat(image, source="espexfat.img"):
     `image`; answers its exFAT partition's first sector."""
     shutil.copyfile(os.path.join(BUILD, source), image)
     return exfat_start(image)
+
+
+# Read and written by test-spawn-reads, test-write-walk and test-fat-link.
+# Until 2026-10-30 they lived in test-spawn-reads.py, and the other two ran
+# that rig as a module to take them (the trap #358 closed for the exFAT rigs).
+
+
+def partition(image, ptype):
+    """(start LBA, sectors) of the one partition of MBR type `ptype`."""
+    with open(image, "rb") as fh:
+        parts = mbrdisk.entries(fh.read(SECTOR)) or []
+    found = [p for p in parts if p[1] == ptype]
+    if len(found) != 1:
+        raise SystemExit(f"{image}: not one partition of type {ptype:#x}: {parts}")
+    return found[0][2], found[0][3]
+
+
+def place_mounted(image, files, part=1):
+    """Write `files` ({name: bytes}) to the root of partition `part` of
+    `image` (FAT32 or exFAT), attached without mounting and mounted alone,
+    since the exFAT image has the ESP beside it."""
+    out = subprocess.run(["hdiutil", "attach", "-nobrowse", "-nomount", image],
+                         check=True, capture_output=True, text=True).stdout
+    disk = out.split()[0]
+    mp = tempfile.mkdtemp(prefix="exfatimg.")
+    try:
+        subprocess.run(["diskutil", "mount", "-mountPoint", mp, f"{disk}s{part}"], check=True, capture_output=True)
+        for name, data in files.items():
+            with open(os.path.join(mp, name), "wb") as fh:
+                fh.write(data)
+        for f in os.listdir(mp):
+            if f.startswith("._"):
+                os.remove(os.path.join(mp, f))
+        subprocess.run(["diskutil", "unmount", mp], check=True, capture_output=True)
+    finally:
+        subprocess.run(["hdiutil", "detach", disk], capture_output=True)
+        os.rmdir(mp)
+
+
+def exfat_layout(image):
+    """The exFAT partition's geometry from its boot sector: its start, the
+    FAT's first LBA and length, the cluster heap's first LBA, the root
+    directory's first cluster and the cluster size in sectors."""
+    start, _ = partition(image, 0x07)
+    with open(image, "rb") as fh:
+        fh.seek(start * SECTOR)
+        b = fh.read(SECTOR)
+    fat, fat_len, heap, count, root = struct.unpack_from("<IIIII", b, 80)
+    return {"fat": start + fat, "fat_end": start + fat + fat_len, "heap": start + heap,
+            "count": count, "root": root, "spc": 1 << b[109]}
+
+
+def exfat_chain(image, name):
+    """(the root directory's clusters, `name`'s) in the exFAT root of `image`,
+    each in chain order, read by the host from the FAT; `name`'s is None when
+    the file is contiguous (NoFatChain). Raises ValueError for a chain longer
+    than the volume (a loop) or a name not there."""
+    g = exfat_layout(image)
+    with open(image, "rb") as fh:
+        def fat(c):
+            fh.seek((g["fat"] + c * 4 // SECTOR) * SECTOR + c * 4 % SECTOR)
+            return struct.unpack("<I", fh.read(4))[0]
+
+        def chain(first):
+            out = [first]
+            while 2 <= fat(out[-1]) < 0xFFFFFFF7:
+                if len(out) == g["count"]:
+                    raise ValueError(f"the FAT chain from cluster {first} is longer than the volume: a loop")
+                out.append(fat(out[-1]))
+            return out
+
+        root = chain(g["root"])
+        data = b""
+        for c in root:
+            fh.seek((g["heap"] + (c - 2) * g["spc"]) * SECTOR)
+            data += fh.read(g["spc"] * SECTOR)
+        s = find(data, name)
+        if s is not None:
+            e = extent(s)
+            return root, chain(e.first) if e.chained else None
+    raise ValueError(f"no {name} in the exFAT root of the boot's disk")
 
 
 def root_end(d):

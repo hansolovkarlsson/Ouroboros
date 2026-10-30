@@ -66,8 +66,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import bootstick  # noqa: E402  (its e2fsprogs lookup, `tool`)
 import disktrace  # noqa: E402
-import exfatimg  # noqa: E402  (its set walker, `sets` and `extent`)
-import mbrdisk  # noqa: E402  (its MBR reader, `entries`)
+import exfatimg  # noqa: E402  (`partition`, `exfat_layout`, `exfat_chain`, `place_mounted`)
 
 SECTOR = 512
 RUNS = 2
@@ -82,43 +81,11 @@ def requests(size):
     return math.ceil(size / SPAWN_READ) + 1
 
 
-def partition(image, ptype):
-    """(start LBA, sectors) of the one partition of MBR type `ptype`."""
-    with open(image, "rb") as fh:
-        parts = mbrdisk.entries(fh.read(SECTOR)) or []
-    found = [p for p in parts if p[1] == ptype]
-    if len(found) != 1:
-        raise SystemExit(f"{image}: not one partition of type {ptype:#x}: {parts}")
-    return found[0][2], found[0][3]
-
-
-def place_mounted(image, files, part=1):
-    """Write `files` ({name: bytes}) to the root of partition `part` of
-    `image` (FAT32 or exFAT), attached without mounting and mounted alone,
-    since the exFAT image has the ESP beside it."""
-    out = subprocess.run(["hdiutil", "attach", "-nobrowse", "-nomount", image],
-                         check=True, capture_output=True, text=True).stdout
-    disk = out.split()[0]
-    mp = tempfile.mkdtemp(prefix="test-spawn-reads.")
-    try:
-        subprocess.run(["diskutil", "mount", "-mountPoint", mp, f"{disk}s{part}"], check=True, capture_output=True)
-        for name, data in files.items():
-            with open(os.path.join(mp, name), "wb") as fh:
-                fh.write(data)
-        for f in os.listdir(mp):
-            if f.startswith("._"):
-                os.remove(os.path.join(mp, f))
-        subprocess.run(["diskutil", "unmount", mp], check=True, capture_output=True)
-    finally:
-        subprocess.run(["hdiutil", "detach", disk], capture_output=True)
-        os.rmdir(mp)
-
-
 def place_ext2(image, files):
     """Write `files` to the root of `image`'s ext2 partition with debugfs,
     whose complaints are read (it exits 0 whatever a command did), and
     return the root directory's first block's LBA."""
-    start, count = partition(image, 0x83)
+    start, count = exfatimg.partition(image, 0x83)
     try:
         debugfs, e2fsck = bootstick.tool("debugfs"), bootstick.tool("e2fsck")
     except bootstick.Refused as e:
@@ -150,7 +117,7 @@ def place_ext2(image, files):
 
 
 def root_fat32(image):
-    start, _ = partition(image, 0x0B)
+    start, _ = exfatimg.partition(image, 0x0B)
     with open(image, "rb") as fh:
         fh.seek(start * SECTOR)
         b = fh.read(SECTOR)
@@ -159,53 +126,9 @@ def root_fat32(image):
     return start + reserved + nfats * fatsz + (root - 2) * per_clus
 
 
-def exfat_layout(image):
-    """The exFAT partition's geometry from its boot sector: its start, the
-    FAT's first LBA and length, the cluster heap's first LBA, the root
-    directory's first cluster and the cluster size in sectors."""
-    start, _ = partition(image, 0x07)
-    with open(image, "rb") as fh:
-        fh.seek(start * SECTOR)
-        b = fh.read(SECTOR)
-    fat, fat_len, heap, count, root = struct.unpack_from("<IIIII", b, 80)
-    return {"fat": start + fat, "fat_end": start + fat + fat_len, "heap": start + heap,
-            "count": count, "root": root, "spc": 1 << b[109]}
-
-
 def root_exfat(image):
-    g = exfat_layout(image)
+    g = exfatimg.exfat_layout(image)
     return g["heap"] + (g["root"] - 2) * g["spc"]
-
-
-def exfat_chain(image, name):
-    """(the root directory's clusters, `name`'s) in the exFAT root of `image`,
-    each in chain order, read by the host from the FAT; `name`'s is None when
-    the file is contiguous (NoFatChain). Raises ValueError for a chain longer
-    than the volume (a loop) or a name not there."""
-    g = exfat_layout(image)
-    with open(image, "rb") as fh:
-        def fat(c):
-            fh.seek((g["fat"] + c * 4 // SECTOR) * SECTOR + c * 4 % SECTOR)
-            return struct.unpack("<I", fh.read(4))[0]
-
-        def chain(first):
-            out = [first]
-            while 2 <= fat(out[-1]) < 0xFFFFFFF7:
-                if len(out) == g["count"]:
-                    raise ValueError(f"the FAT chain from cluster {first} is longer than the volume: a loop")
-                out.append(fat(out[-1]))
-            return out
-
-        root = chain(g["root"])
-        data = b""
-        for c in root:
-            fh.seek((g["heap"] + (c - 2) * g["spc"]) * SECTOR)
-            data += fh.read(g["spc"] * SECTOR)
-        s = exfatimg.find(data, name)
-        if s is not None:
-            e = exfatimg.extent(s)
-            return root, chain(e.first) if e.chained else None
-    raise ValueError(f"no {name} in the exFAT root of the boot's disk")
 
 
 def chain_reads(chain, g):
@@ -250,7 +173,7 @@ def main() -> int:
                 root = place_ext2(prepared, files)
             else:
                 huge = {"HUGE": small + bytes(HUGE - len(small))} if ptype == 0x07 else {}
-                place_mounted(prepared, {**files, **huge})
+                exfatimg.place_mounted(prepared, {**files, **huge})
                 root = root_fat32(prepared) if ptype == 0x0B else root_exfat(prepared)
             small_boot = boot(f"{name}-small", prepared, image, "/SMALL")
             big_boot = boot(f"{name}-big", prepared, image, "/BIG")
@@ -282,12 +205,12 @@ def chain_walk(tally, prepared, image):
     """The two exFAT boots that grade the walk along a FAT chain, a case
     in `tally`. The first boot's inspect reads /CHAIN's chain off its disk,
     and what makes the chain unfit to grade is that boot's problem."""
-    g = exfat_layout(prepared)
+    g = exfatimg.exfat_layout(prepared)
     setup = ["cp /HUGE /CHAIN", "/CHAIN w"]
     read = []
 
     def inspect(copy, problems):
-        root, chain = exfat_chain(copy, "CHAIN")
+        root, chain = exfatimg.exfat_chain(copy, "CHAIN")
         if not chain:
             problems.append("/CHAIN, written by the guest's cp, is contiguous: no FAT chain to walk")
         elif len(root) > 1:
