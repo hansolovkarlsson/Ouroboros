@@ -3339,3 +3339,41 @@ fsd.
   ask an arm), staged by `make test-disk-gate` on the read-only boots of
   `test-long-set`; fails with the gate's two checks removed beside every
   early `writable()` check (22 checks), and with the shipped fsd staged.
+
+## Read-only as a property of the mount, BESIDE on exFAT's own gate, and no rig loading another, DONE (2026-10-30)
+
+Three items closed on 2026-10-30, by #373, #374 and #375, each struck on its
+branch with a *Done* note and moved here by the closeout. Their reviews are
+recorded in the CHANGELOG entries of the day. They put nothing new on the
+roadmap.
+
+- ~~**Read-only has two sources in fsd.** `tree_read_only` asks
+  `ROOT_READ_ONLY`, a static for tree 0 as D5's fallback, stored and cleared
+  by hand on each path that changes tree 0 (`try_mount`, `FSOP_UNMOUNT`),
+  and the arm's `read_only()`. Making D5's read-only a property of the
+  mount (kept with the mount slot, or in a `vfs` wrapper with its reason)
+  would leave the gate one thing to ask and let the boot line read the
+  reason the same way `read_only_line` does. A refactor of the mount
+  paths, so not done in #364. From its high review.~~ Done 2026-10-30:
+  `vfs::Mount` holds the filesystem and fsd's own reason, made only by
+  vfs's mount paths; the gate asks `Mount::refuses_changes` and the mount
+  lines `Mount::reasons`, which the gate's private `read_only` is read
+  from, and the arm's `read_only()` is private to vfs.
+- ~~**BESIDE's write is graded on the verb gate alone.** `test-volume-bound`'s
+  BESIDE (an exFAT read-only from its damaged bitmap entry, the partition
+  after it inside the bitmap's claim) is the case where a write past the
+  disk gate would land on another partition, and `make test-disk-gate` does
+  not boot it on the rig's build of fsd: it grades only test-long-set's five
+  read-only boots. To close: a `--disk-gate` mode for BESIDE, the same
+  staging on its disk. From the medium review of #371.~~ Done 2026-10-30:
+  `test-volume-bound.py --disk-gate` boots BESIDE on the rig's fsd, run by
+  `make test-disk-gate` after test-long-set's mode; the staging is
+  `scripts/diskgate.py`, which both modes share.
+- ~~**Two rigs still load `test-spawn-reads.py` as a module.**
+  `test-write-walk` and `test-fat-link` run it through `importlib` to take
+  `partition`, `exfat_layout`, `exfat_chain` and `place_mounted` (the
+  latter alone for `test-fat-link`), so a change to that rig's internals
+  can break their imports, the trap #358 closed for the exFAT rigs. Move
+  what they take into `exfatimg.py` or a shared host module. Found while
+  closing the item above, 2026-10-27.~~ Done 2026-10-30: the four are
+  `exfatimg`'s, and all three rigs call them there.
