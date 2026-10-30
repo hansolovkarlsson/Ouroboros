@@ -399,7 +399,7 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         found = re.search(r"cd /esp/EFI\r?\n([\s\S]*?)# ", after)
         checks += [
             (f"{label}: fsd says it fell back to the boot partition, read-only",
-             "fsd: mounted read-only: no partition beside the boot partition mounted, so the boot partition is `/`" in before),
+             "fsd: mounted read-only: the partition typed as the root did not mount, so the boot partition is `/`" in before),
             (f"{label}: root's `touch /rotest` on the fallback is refused as read-only",
              bool(re.search(r"touch /rotest\r?\n[^#]*read-only", before))),
             (f"{label}: O_RDONLY|O_CREAT on the fallback opens /etc/passwd and reads it, and is EROFS (30) "
