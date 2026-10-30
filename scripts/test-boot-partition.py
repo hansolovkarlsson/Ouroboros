@@ -45,15 +45,19 @@ tells it which partition it booted from (BLOCK_BOOT_START):
 In both, `fsd` must mount ext2, and `ls /` after login must show the root's
 tree, not the ESP's. Every boot checks the filesystem `fsd` mounted as `/`.
 
-and three on copies this script makes, each disk with a signature of its own
+and four on copies this script makes, each disk with a signature of its own
 (the reviews of #288): disk-format formats a copy of disk.img's root and
 finds `/` empty and the ESP whole; disk-badroot zeroes the root's superblock,
 `fsd` must say it fell back to the ESP read-only and refuse root's `touch`
 there (decision D5), open /etc/passwd with O_RDONLY|O_CREAT and read it while
 refusing a missing file EROFS at the open, one in a missing directory
 ENOENT and one under a file ENOTDIR (/bin/CCREAT, since 2026-10-28),
-and `format` must then take the damaged root, never the ESP; gpt-format runs `format` on a
-copy of espgpt.img, which must be refused.
+and `format` must then take the damaged root, never the ESP; disk-untyped
+is disk-badroot with the root's type 0x07, so the disk has no typed root and
+`fsd` must name the untyped rule in its read-only line, before the mount
+line, and refuse root's `touch` (since 2026-10-30, the high review of #373:
+no boot printed that reason); gpt-format runs `format` on a copy of
+espgpt.img, which must be refused.
 
 and four of build/disk-data.img, which this script builds: the ESP, an
 exFAT data partition (MBR type 0x07), the ext2 root (0x83). `fsd` must take
@@ -181,6 +185,9 @@ BOOTS = [
     # the root of, not the ESP, the boot partition (the review found
     # find_partition took partition 1).
     ("disk-badroot", "disk-badroot.img", "virtio", None, None, "FAT32", False),
+    # disk-badroot with the root typed 0x07, not 0x83: no typed root, so the
+    # fallback's reason is the untyped rule's.
+    ("disk-untyped", "disk-untyped.img", "virtio", None, None, "FAT32", False),
     ("disk-format", "disk-format.img", "virtio", None, None, "ext2", False),
     # A copy of espgpt.img: `format` must refuse a GPT disk, which it would
     # have laid a filesystem over from LBA 1 (the medium review of #288).
@@ -225,7 +232,10 @@ def make_copies():
     bad = bytearray(disk)
     superblock = root_start * 512 + 1024
     bad[superblock:superblock + 1024] = bytes(1024)
-    for name, data in (("disk-badroot.img", bad), ("disk-format.img", disk)):
+    untyped = bytearray(bad)
+    assert untyped[446 + 16 + 4] == mbrdisk.EXT2_TYPE, "disk.img's root is not partition 2, typed 0x83"
+    untyped[446 + 16 + 4] = 0x07
+    for name, data in (("disk-badroot.img", bad), ("disk-format.img", disk), ("disk-untyped.img", untyped)):
         # A signature of the copy's own, from its name: disk-format.img is
         # byte for byte disk.img, so signing it from its bytes gives disk.img's
         # signature back, which the check below refuses.
@@ -290,6 +300,8 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
                  ("# ", "ccreat /nodir/x"), ("# ", "ccreat /etc/passwd/x"), ("# ", "unmount"),
                  ("# ", "format ext2"), ("# ", "mount -a"), ("# ", "mount 0 /esp"), ("# ", "cd /esp/EFI"),
                  ("# ", "cd /"), ("# ", "")]
+    if label == "disk-untyped":
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "touch /rotest"), ("# ", "")]
     if label == "gpt-format":
         steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "format ext2"),
                  ("# ", "mount -a"), ("# ", "cd /EFI"), ("# ", "cd /"), ("# ", "")]
@@ -394,12 +406,22 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             (f"{label}: the disk mounts after, its ESP whole (`cd /EFI` silent)",
              "FAT32 mounted" in after and found is not None and found.group(1).strip() == ""),
         ]
+    elif label == "disk-untyped":
+        reason = "fsd: mounted read-only: no partition beside the boot partition mounted, so the boot partition is `/`"
+        at, mounted = out.find(reason), out.find("fsd: FAT32 mounted")
+        checks += [
+            (f"{label}: fsd names the untyped rule, read-only, before its mount line",
+             0 <= at < mounted and "typed as the root" not in out),
+            (f"{label}: root's `touch /rotest` on the fallback is refused as read-only",
+             bool(re.search(r"touch /rotest\r?\n[^#]*read-only", out))),
+        ]
     elif label == "disk-badroot":
         before, _, after = out.partition("format ext2")
         found = re.search(r"cd /esp/EFI\r?\n([\s\S]*?)# ", after)
+        reason = "fsd: mounted read-only: the partition typed as the root did not mount, so the boot partition is `/`"
         checks += [
-            (f"{label}: fsd says it fell back to the boot partition, read-only",
-             "fsd: mounted read-only: the partition typed as the root did not mount, so the boot partition is `/`" in before),
+            (f"{label}: fsd says it fell back to the boot partition, read-only, before its mount line",
+             0 <= before.find(reason) < before.find("fsd: FAT32 mounted")),
             (f"{label}: root's `touch /rotest` on the fallback is refused as read-only",
              bool(re.search(r"touch /rotest\r?\n[^#]*read-only", before))),
             (f"{label}: O_RDONLY|O_CREAT on the fallback opens /etc/passwd and reads it, and is EROFS (30) "

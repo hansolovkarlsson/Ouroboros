@@ -93,9 +93,11 @@ pub enum Filesystem {
 /// with nothing written to it. Only this module's mount paths make one, so a
 /// fallback cannot come up without its reason, and the reason goes when the
 /// mount does (until 2026-10-30 a static in `main.rs` held it, stored and
-/// cleared by hand on each path that changed tree 0).
+/// cleared by hand on each path that changed tree 0). Both fields are
+/// private, so no filesystem can be put under another's reason: a new
+/// volume is a new `Mount`, made here (the high review of #373).
 pub struct Mount {
-    pub fs: Filesystem,
+    fs: Filesystem,
     held: Option<&'static str>,
 }
 
@@ -111,25 +113,44 @@ impl Mount {
         Mount::new(Filesystem::Proc(proc::Fs::new()))
     }
 
-    /// Why this mount is read-only, `None` while it is writable: fsd's own
-    /// reason first, then the arm's ([`Filesystem::read_only`]). What the
-    /// mount line prints after `fsd: mounted read-only: `.
-    pub fn read_only(&self) -> Option<&'static str> {
+    /// The volume.
+    pub fn fs(&self) -> &Filesystem {
+        &self.fs
+    }
+
+    /// The volume, to act on.
+    pub fn fs_mut(&mut self) -> &mut Filesystem {
+        &mut self.fs
+    }
+
+    /// Why this mount is read-only, for the mount lines alone: fsd's own
+    /// reason (D5), then the arm's ([`Filesystem::read_only`]), each `None`
+    /// when it does not hold. Both, since a fallback can be a volume read-only
+    /// for its own reason too, which the reader would otherwise not learn
+    /// until the root is repaired (the high review of #373). The gate asks
+    /// [`refuses_changes`](Self::refuses_changes), never these.
+    pub fn reasons(&self) -> (Option<&'static str>, Option<&'static str>) {
+        (self.held, self.fs.read_only())
+    }
+
+    /// Why this mount is read-only, `None` while it is writable: either of
+    /// [`reasons`](Self::reasons).
+    fn read_only(&self) -> Option<&'static str> {
         self.held.or_else(|| self.fs.read_only())
     }
 
     /// Whether fsd's read-only gate (`refused_read_only` in `main.rs`) refuses
     /// every change on this mount: whenever [`read_only`](Self::read_only)
-    /// answers. The `disk-gate-rig` build leaves the arm's answer out, so the
-    /// arm's own refusal is the one a read-only exFAT volume gets (`make
-    /// test-disk-gate`); fsd's own reason it keeps, since no arm refuses for it.
+    /// answers, so a reason added there is refused here too. The
+    /// `disk-gate-rig` build asks fsd's own reason alone, leaving the arm's
+    /// out, so the arm's own refusal is the one a read-only exFAT volume gets
+    /// (`make test-disk-gate`); D5 it keeps, since no arm refuses for it.
     pub fn refuses_changes(&self) -> bool {
-        self.held.is_some() || (!cfg!(feature = "disk-gate-rig") && self.fs.read_only().is_some())
+        if cfg!(feature = "disk-gate-rig") { self.held.is_some() } else { self.read_only().is_some() }
     }
 }
 
 impl Filesystem {
-
     /// Discover the disk's partitions (MBR or GPT - see `partition::discover`)
     /// and mount one that holds a filesystem we recognize: each is probed as
     /// FAT32 ([`fat32::Fs::mount_at`]), exFAT ([`exfat::Fs::mount_at`]) and
