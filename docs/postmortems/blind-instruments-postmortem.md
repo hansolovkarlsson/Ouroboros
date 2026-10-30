@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-29. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-30. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2308,3 +2308,65 @@ compiles both branches. What only the new check sees is the feature renamed
 or dropped, and that control (renamed in `Cargo.toml`) makes `make test`
 exit 2. **When a control cannot be spelled, the check guards less than its
 reason says; find the failure it does catch, and write that down.**
+
+## Five more, from the read-only mount and the disk-gate staging (2026-10-30)
+
+Three PRs (#373, #374, #375), a refactor of fsd's read-only gate and two of
+the rigs around it. Every rig passed in the end; five of the instruments
+along the way said something they had not seen, three of them mine.
+
+**A check that matched what two messages shared.** `test-boot-partition`'s
+disk-badroot checked for "the boot partition is `/`, read-only", the tail
+the typed and the untyped fallback reasons both ended in. #373 changed the
+wording, and I guessed which reason that boot printed and guessed wrong: its
+root is typed. The first run said so, and the high review then found that
+the untyped reason was graded by no boot at all, since the shared tail had
+been the only place it would pass. A new boot, disk-untyped, prints it.
+**A substring check of a message checks what its variants have in common;
+to grade one variant, match what only it says, and know which boot says
+it.**
+
+**An order the code chose and no check held.** The old fallback line came
+before the mount line, and a comment said why: so fsd does not run on the
+ESP's tree without a word first. #373 moved it after, and nothing failed.
+The high review found it by quoting the old comment, whose word "first"
+#373's own diff had dropped while rewording it.
+Both rigs that print the reason now check it comes first, and a control
+that prints it after fails both. It is `true-when-written-postmortem.md`'s
+case in the output instead of the code: **a deliberate order is a claim,
+and a claim that guards behaviour is a check nobody has written yet.**
+
+**A control that overwrote the evidence it followed.** One run of
+`test-boot-partition` failed seven checks on disk-badroot: fsd printed its
+lines and the boot never reached the login prompt. The same background
+chain then ran the mutation control, which writes the same transcript file,
+and the failing boot's transcript was gone before anyone read it. The next
+clean run passed, so the hang is recorded as unexplained, a second beside
+the 27th's, with nothing to read. **A run whose failure is not yet
+understood keeps its transcript before anything else runs; chain a control
+after a rig only once the rig's result is read.**
+
+**A pass written before the result was read.** After #373's medium review
+I posted a PR comment that the second run had passed, in the same command
+that first printed the run's result, which was exit 100, INCONCLUSIVE. It
+was caught in that command's own output and corrected. This is
+`review-and-split-postmortem.md`'s green signal in my own hand: the
+comment was a claim, and nothing had been read to make it. **Read the
+verdict, then write the claim, in two steps; a command that does both
+publishes a guess.**
+
+**A check added everywhere and run once.** #374 added the which-fsd check
+to every boot of `test-volume-bound` through `checks_of`, which every boot
+passes through (yesterday's lesson, applied), then ran BESIDE alone and
+wrote in the CHANGELOG that BESIDE checks it. Thirteen boots carried a
+check no run had seen; the medium review found the CHANGELOG's claim
+narrower than the code and the code wider than the runs. All fourteen ran
+after it, each confirming the shipped fsd. The same review found
+`make test-disk-gate`'s "worse exit" took the first code that was not 0 or
+100, and the table that tested its replacement printed 2 for every pair,
+twice wrong: zsh did not split the loop's words, and make exits 2 on any
+failure, the recipe's code only in its `Error N` line. **Putting a check
+where every site passes makes it every site's; it is not graded until
+every site has run, and the tool that tests a ranking has to be able to
+see the rank.**
+
