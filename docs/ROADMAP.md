@@ -4475,6 +4475,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   ask an arm), staged by `make test-disk-gate` on the read-only boots of
   `test-long-set`; fails with the gate's two checks removed beside every
   early `writable()` check (22 checks), and with the shipped fsd staged.
+- **BESIDE's write is graded on the verb gate alone.** `test-volume-bound`'s
+  BESIDE (an exFAT read-only from its damaged bitmap entry, the partition
+  after it inside the bitmap's claim) is the case where a write past the
+  disk gate would land on another partition, and `make test-disk-gate` does
+  not boot it on the rig's build of fsd: it grades only test-long-set's five
+  read-only boots. To close: a `--disk-gate` mode for BESIDE, the same
+  staging on its disk. From the medium review of #371.
 - **Read-only has two sources in fsd.** `tree_read_only` asks
   `ROOT_READ_ONLY`, a static for tree 0 as D5's fallback, stored and cleared
   by hand on each path that changes tree 0 (`try_mount`, `FSOP_UNMOUNT`),

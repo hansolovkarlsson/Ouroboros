@@ -28,7 +28,11 @@ PONG_BIN     := target/$(USER_TARGET)/release/pong.bin
 FSD_ELF      := target/$(USER_TARGET)/release/fsd
 FSD_BIN      := target/$(USER_TARGET)/release/fsd.bin
 # fsd built for test-disk-gate alone (fsd's `disk-gate-rig` feature), in a
-# target dir of its own so it never lands where FSD_BIN is read.
+# target dir of its own so it never lands where FSD_BIN is read. That costs a
+# second cold build of fsd's dependencies; building in target/ and rebuilding
+# the shipped fsd after would save it, but leave the rig's build at FSD_BIN
+# for as long as the run, and after it if the run were stopped, for `esp` to
+# stage (the review of #371).
 FSD_GATE_DIR := target/disk-gate
 FSD_GATE_ELF := $(FSD_GATE_DIR)/$(USER_TARGET)/release/fsd
 FSD_GATE_BIN := $(FSD_GATE_DIR)/$(USER_TARGET)/release/fsd.bin

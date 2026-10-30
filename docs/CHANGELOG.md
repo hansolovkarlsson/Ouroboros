@@ -1417,7 +1417,15 @@ write answered as a disk I/O error and written, VF lost and fsck_exfat
 dirty; with the shipped fsd staged, each boot's line fails (5). A boot flag
 was the other way past the verb gate, and was not taken: a file on the disk
 would switch a gate off in the fsd that ships. From the high review of
-#364.
+#364. The medium review of #371: the build line was checked by six of the
+fourteen ordinary boots, and every boot records its transcript now, checked
+in one place; the gate mode had shared test-long-set's scratch image and
+transcripts, and keeps its own (`build/test-disk-gate*`), reporting as
+`test-disk-gate`; its ESP copy is removed on a failure too, the assembled
+disk after the run, and macOS's sidecars before the detach, so the ESP
+differs from `esp.img` in `FSD.BIN` alone. The five boots are the whole of
+what it grades: `test-volume-bound`'s BESIDE is not booted on the rig's
+build, a roadmap item.
 
 **A directory opens for reading alone, on fsd and the host peer
 (2026-10-29).** fsd gave a fid for any `NP_OPEN` of a directory, so
