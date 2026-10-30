@@ -254,9 +254,7 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS
             // A partition tried before it would not read: said, since what
             // it held is not known (a failing disk, not an empty partition).
             let unread = if unread { "fsd: a partition before it would not read (disk I/O error)\r\n" } else { "" };
-            let (held, volume) = mounted.reasons();
-            let (hro, hwhy, hend) = read_only_line(held);
-            let (ro, why, end) = read_only_line(volume);
+            let ([hro, hwhy, hend], [ro, why, end]) = read_only_lines(&mounted);
             con_write_parts(&[unread, hro, hwhy, hend, "fsd: ", mounted.fs().name(), " mounted, disk commands available\r\n", ro, why, end]);
             mounts[0] = Some(mounted);
             0
@@ -676,13 +674,10 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], 
         // `mount N` prints nothing when it mounts; a read-only one says why,
         // or its first write's refusal would be the first word of it.
         // A partition mount holds no reason of fsd's (D5 is tree 0's), but
-        // both are printed so this line cannot drop one if that changes.
-        let (held, volume) = mount.reasons();
-        if held.is_some() || volume.is_some() {
-            let (hro, hwhy, hend) = read_only_line(held);
-            let (ro, why, end) = read_only_line(volume);
-            con_write_parts(&[hro, hwhy, hend, ro, why, end]);
-        }
+        // both are printed so this line cannot drop one if that changes. A
+        // writable one writes nothing: every piece is empty.
+        let (held, volume) = read_only_lines(&mount);
+        con_write_parts(&[held[0], held[1], held[2], volume[0], volume[1], volume[2]]);
         mounts[tree] = Some(mount);
         status_reply(reply, tree as u64)
     } else if op == syscall_abi::FSOP_MOUNT_INFO {
@@ -2011,26 +2006,33 @@ fn print(s: &str) {
     con_write(s.as_bytes());
 }
 
-/// The line saying a mount is read-only and `why`, one of
-/// [`vfs::Mount::reasons`], in three pieces for [`con_write_parts`]; empty
-/// pieces for `None`. Until 2026-10-26 exFAT made a volume read-only with no
-/// word (the high review that day); since 2026-10-30 D5's fallback says so in
-/// this line too, before the mount line.
-fn read_only_line(why: Option<&'static str>) -> (&'static str, &'static str, &'static str) {
-    match why {
-        Some(why) => ("fsd: mounted read-only: ", why, "\r\n"),
-        None => ("", "", ""),
-    }
+/// The lines saying `mount` is read-only and why, one for each of
+/// [`vfs::Mount::reasons`] (fsd's, then the volume's), each in three pieces
+/// for [`con_write_parts`], empty for a reason that does not hold: the one
+/// spelling for both mount lines (the medium review of #373). Until
+/// 2026-10-26 exFAT made a volume read-only with no word (the high review
+/// that day); since 2026-10-30 D5's fallback says so in this form too, before
+/// the mount line.
+fn read_only_lines(mount: &vfs::Mount) -> ([&'static str; 3], [&'static str; 3]) {
+    let line = |why: Option<&'static str>| match why {
+        Some(why) => ["fsd: mounted read-only: ", why, "\r\n"],
+        None => ["", "", ""],
+    };
+    let (held, volume) = mount.reasons();
+    (line(held), line(volume))
 }
 
 /// `parts` joined and written in one write, so no other task's line lands
 /// inside them: three pieces let accountd's ready line split "fsd: FAT32
 /// mounted" on a boot `make test-boot-partition` read (the review of #288).
 /// Bounded, so a longer name or message is cut, never a panic in the
-/// storage server (the third review of #288); 320 bytes stays under one
-/// console message, [`FS_DATA_MAX`](syscall_abi::FS_DATA_MAX).
+/// storage server (the third review of #288). One console message,
+/// [`FS_DATA_MAX`](syscall_abi::FS_DATA_MAX): until 2026-10-30 it was 320
+/// bytes, and the mount line, four lines since then (a partition that would
+/// not read, D5's reason, the mount, the volume's reason), reaches 290 (the
+/// medium review of #373).
 fn con_write_parts(parts: &[&str]) {
-    let mut line = [0u8; 320];
+    let mut line = [0u8; syscall_abi::FS_DATA_MAX as usize];
     let mut len = 0;
     for part in parts {
         let take = part.len().min(line.len() - len);

@@ -134,9 +134,11 @@ impl Mount {
     }
 
     /// Why this mount is read-only, `None` while it is writable: either of
-    /// [`reasons`](Self::reasons).
+    /// [`reasons`](Self::reasons), read from it so a reason added there is
+    /// refused too (the medium review of #373).
     fn read_only(&self) -> Option<&'static str> {
-        self.held.or_else(|| self.fs.read_only())
+        let (held, volume) = self.reasons();
+        held.or(volume)
     }
 
     /// Whether fsd's read-only gate (`refused_read_only` in `main.rs`) refuses

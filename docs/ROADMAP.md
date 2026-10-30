@@ -4477,8 +4477,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   reason the same way `read_only_line` does. A refactor of the mount
   paths, so not done in #364. From its high review.~~ Done 2026-10-30:
   `vfs::Mount` holds the filesystem and fsd's own reason, made only by
-  vfs's mount paths; the gate asks `Mount::refuses_changes`, the line
-  `Mount::read_only`, and the arm's `read_only()` is private to vfs.
+  vfs's mount paths; the gate asks `Mount::refuses_changes` and the mount
+  lines `Mount::reasons`, which the gate's private `read_only` is read
+  from, and the arm's `read_only()` is private to vfs.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on
