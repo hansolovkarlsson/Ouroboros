@@ -114,6 +114,9 @@ TRANSCRIPT = os.path.join(BUILD, "test-boot-partition-{}.txt")
 # boots on an MBR disk.
 ESP_TYPES = (0x0B, 0x0C, 0xEF)
 LINE = re.compile(r"boot partition: (.*)")
+# syscall-abi's PARTITION_START_LBA: where `partition` starts the one
+# partition it makes.
+PARTITION_START_LBA = 2048
 
 
 def expected(image):
@@ -189,6 +192,11 @@ BOOTS = [
     # fallback's reason is the untyped rule's.
     ("disk-untyped", "disk-untyped.img", "virtio", None, None, "FAT32", False),
     ("disk-format", "disk-format.img", "virtio", None, None, "ext2", False),
+    # A copy of disk.img whose table is rewritten in the boot: `erase disk`
+    # and `partition ext2` put the new root where the ESP, the boot partition,
+    # began, so a boot start answered from the old table would make the new
+    # root the read-only fallback (since 2026-10-30).
+    ("disk-rewrite", "disk-rewrite.img", "virtio", None, None, "ext2", False),
     # A copy of espgpt.img: `format` must refuse a GPT disk, which it would
     # have laid a filesystem over from LBA 1 (the medium review of #288).
     ("gpt-format", "gpt-format.img", "virtio", None, None, "FAT32", False),
@@ -224,7 +232,8 @@ def bootdisk_entries(disk):
 
 
 def make_copies():
-    """disk-badroot.img and disk-format.img from disk.img, signed again."""
+    """disk-badroot.img, disk-untyped.img, disk-format.img and disk-rewrite.img
+    from disk.img, signed again, and the disk-data copies."""
     source = os.path.join(BUILD, "disk.img")
     with open(source, "rb") as fh:
         disk = bytearray(fh.read())
@@ -235,7 +244,12 @@ def make_copies():
     untyped = bytearray(bad)
     assert untyped[446 + 16 + 4] == mbrdisk.EXT2_TYPE, "disk.img's root is not partition 2, typed 0x83"
     untyped[446 + 16 + 4] = 0x07
-    for name, data in (("disk-badroot.img", bad), ("disk-format.img", disk), ("disk-untyped.img", untyped)):
+    # disk-rewrite's premise: the root `partition` makes starts where the ESP,
+    # the boot partition, did.
+    esp_start = struct.unpack_from("<I", disk, 446 + 8)[0]
+    assert esp_start == PARTITION_START_LBA, f"disk.img's ESP starts at {esp_start}, not {PARTITION_START_LBA}"
+    for name, data in (("disk-badroot.img", bad), ("disk-format.img", disk), ("disk-untyped.img", untyped),
+                       ("disk-rewrite.img", bytearray(disk))):
         # A signature of the copy's own, from its name: disk-format.img is
         # byte for byte disk.img, so signing it from its bytes gives disk.img's
         # signature back, which the check below refuses.
@@ -318,6 +332,11 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         steps = [("login:", "root"), ("assword", "root"), ("# ", "touch /rotest"), ("# ", "unmount"),
                  ("# ", "format ext2"), ("# ", "mount -a"), ("# ", "mount 1 /data"), ("# ", "cd /data/bin"),
                  ("# ", "mount 0 /esp"), ("# ", "cd /esp/EFI"), ("# ", "cd /"), ("# ", "")]
+    if label == "disk-rewrite":
+        # The table rewritten, a root made where the ESP was, and a write to it.
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "erase disk"),
+                 ("# ", "partition ext2"), ("# ", "format ext2"), ("# ", "mount -a"),
+                 ("# ", "touch /rwtest"), ("# ", "ls /"), ("# ", "echo after-ls"), ("# ", "")]
     if label == "disk-format":
         # Format the root, then look with builtins, since the new root has no
         # /bin: `cd /bin` must fail on the empty ext2, and `cd /esp/EFI` must
@@ -364,6 +383,22 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             (f"{label}: `mount -a` after the format mounts ext2", "ext2 mounted" in remount),
             (f"{label}: `format ext2` reformatted the root (`cd /bin` refused)", bool(bin_answer)),
             (f"{label}: the ESP, partition 0, still holds EFI (`cd /esp/EFI` silent)", efi_answer == ""),
+        ]
+    elif label == "disk-rewrite":
+        # Each command once in the boot, so its answer is the text to the next prompt.
+        def answer(command):
+            found = re.search(re.escape(command) + r"\r?\n([\s\S]*?)# ", out)
+            return found.group(1).strip() if found else ""
+        remount = out.split("mount -a", 1)[1] if "mount -a" in out else ""
+        listed = re.search(r"ls /\r?\n([\s\S]*?)echo after-ls", out)
+        checks += [
+            (f"{label}: `erase disk`, `partition ext2` and `format ext2` each succeed",
+             answer("erase disk").startswith("erased") and answer("partition ext2").startswith("partitioned")
+             and answer("format ext2").startswith("formatted")),
+            (f"{label}: `mount -a` mounts the new root writable, not as the boot partition",
+             "ext2 mounted" in remount and "fsd: mounted read-only" not in remount),
+            (f"{label}: root's `touch /rwtest` on the new root succeeds, and `ls /` lists it",
+             answer("touch /rwtest") == "" and listed is not None and "rwtest" in listed.group(1)),
         ]
     elif label == "disk-data-format":
         def answer(command):

@@ -344,7 +344,6 @@ fn erase_disk(device: &disk::Device, sectors: u64) -> u64 {
         sectors
     };
     let count = want.min(capacity);
-    device.table_rewritten();
     let mut disk = device.disk();
     let zero = [0u8; 512];
     let mut lba = 0u64;
@@ -374,7 +373,6 @@ fn partition_disk(device: &disk::Device, type_byte: u8) -> u64 {
     // MBR partitioning is a 32-bit LBA scheme; a partition past 2 TiB
     // can't be expressed here (that's what GPT, a later step, is for).
     let part_sectors = (capacity - start).min(u32::MAX as u64) as u32;
-    device.table_rewritten();
     let ptype = if type_byte == 0 { 0x0C } else { type_byte };
 
     let mut mbr = [0u8; 512];

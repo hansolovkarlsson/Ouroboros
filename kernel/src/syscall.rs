@@ -65,8 +65,20 @@ static BLOCK: SyncCell<Option<crate::block::BlockDevice>> = SyncCell::new(None);
 
 /// The start LBA of the boot partition on the device in [`BLOCK`], or 0 when
 /// that device is not known to be the boot disk: what `BLOCK_BOOT_START`
-/// answers. Written with `BLOCK`, always, by [`install_block_device`].
+/// answers. Written with `BLOCK`, always, by [`install_block_device`], and
+/// cleared by a write to the partition table ([`PARTITION_TABLE_SECTORS`]).
 static BLOCK_BOOT_START: SyncCell<u64> = SyncCell::new(0);
+
+/// The sectors whose rewrite can move the boot partition: 0, the MBR or a
+/// GPT disk's protective MBR, and 1, the GPT header, which every change to
+/// the GPT's entries rewrites for their CRC. A `BLOCK_WRITE` to either
+/// clears [`BLOCK_BOOT_START`] before the write, so the start read from the
+/// table at boot is not answered for a table rewritten since (fsd's `erase`
+/// and `partition`). The kernel forgets it, not fsd: fsd's own flag, until
+/// 2026-10-30, was cleared by the supervisor's restart of fsd, and a new
+/// partition at the old start was then mounted as the boot partition, the
+/// read-only fallback (the medium review of #362).
+const PARTITION_TABLE_SECTORS: core::ops::RangeInclusive<u64> = 0..=1;
 
 /// Installs the block device the `BLOCK_*` syscalls serve, over any one
 /// already there: the boot path installs once, and `MOUNT`'s replace path
@@ -1982,6 +1994,11 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             let Some(device) = (unsafe { &mut *BLOCK.get() }) else {
                 return syscall_abi::BLOCK_ERR_NO_DEVICE;
             };
+            // Before the write, so a write that fails partway, having
+            // changed the table or not, leaves the start forgotten too.
+            if PARTITION_TABLE_SECTORS.contains(&arg0) {
+                unsafe { *BLOCK_BOOT_START.get() = 0 };
+            }
             // SAFETY: same as BLOCK_READ.
             let buf = unsafe { &*(arg1 as *const [u8; 512]) };
             match unsafe { device.write_sector(arg0, buf) } {

@@ -410,8 +410,10 @@ pub const BLOCK_INFO: u64 = 26;
 /// `()` -> the start LBA of the partition the system booted from, on the
 /// installed block device, or `0` when that is unknown: the firmware named
 /// no partition, or the device installed is not the disk it is on (a
-/// fallback, or a stick taken by `MOUNT`'s rescan). `0` is never a partition
-/// start, sector 0 holding the table. [`BLOCK_ERR_NO_DEVICE`] with no device,
+/// fallback, or a stick taken by `MOUNT`'s rescan), or the partition table
+/// has been written since the device was installed (a [`BLOCK_WRITE`] to
+/// sector 0 or 1, since 2026-10-30). `0` is never a partition start, sector
+/// 0 holding the table. [`BLOCK_ERR_NO_DEVICE`] with no device,
 /// [`BLOCK_ERR_DENIED`] for any caller but [`FSD_TASK`], as [`BLOCK_INFO`].
 /// For `fsd` to mount as `/` the partition beside the ESP rather than the
 /// ESP (one-disk step 4, docs/roadmap/roadmap-one-disk.md).
