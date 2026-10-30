@@ -74,8 +74,8 @@ impl Device {
     /// passes: the whole table by its type, so neither an empty slice nor
     /// part of one can be handed in, though a table made up for the call
     /// still could.
-    pub fn replace(&self, mounts: &[Option<crate::vfs::Filesystem>; crate::MAX_MOUNTS]) -> Option<u64> {
-        if mounts.iter().flatten().any(|m| m.is_disk()) {
+    pub fn replace(&self, mounts: &[Option<crate::vfs::Mount>; crate::MAX_MOUNTS]) -> Option<u64> {
+        if mounts.iter().flatten().any(|m| m.fs.is_disk()) {
             return None;
         }
         let code = block_svc(syscall_abi::MOUNT, 1, 0);

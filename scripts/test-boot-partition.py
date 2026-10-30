@@ -372,11 +372,11 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
             return found.group(1).strip() if found else None
         if label == "disk-data-badroot":
             checks.append((f"{label}: fsd fell back to the boot partition, read-only, naming the typed root",
-                           "the partition typed as the root did not mount - the boot partition is `/`, read-only"
+                           "fsd: mounted read-only: the partition typed as the root did not mount, so the boot partition is `/`"
                            in before and "exFAT mounted" not in before))
         else:
             checks.append((f"{label}: with the boot partition unknown, an untyped partition comes up read-only",
-                           "the partition typed as the root did not mount - an untyped partition is `/`, read-only"
+                           "fsd: mounted read-only: the partition typed as the root did not mount, so an untyped partition is `/`"
                            in before))
         checks += [
             (f"{label}: root's `touch /rotest` is refused as read-only",
@@ -399,7 +399,7 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         found = re.search(r"cd /esp/EFI\r?\n([\s\S]*?)# ", after)
         checks += [
             (f"{label}: fsd says it fell back to the boot partition, read-only",
-             "the boot partition is `/`, read-only" in before),
+             "fsd: mounted read-only: no partition beside the boot partition mounted, so the boot partition is `/`" in before),
             (f"{label}: root's `touch /rotest` on the fallback is refused as read-only",
              bool(re.search(r"touch /rotest\r?\n[^#]*read-only", before))),
             (f"{label}: O_RDONLY|O_CREAT on the fallback opens /etc/passwd and reads it, and is EROFS (30) "
