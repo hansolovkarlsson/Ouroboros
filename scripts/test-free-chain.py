@@ -7,8 +7,9 @@ Until 2026-10-31 `free_data`'s chained walk read and wrote a bitmap sector
 and wrote a FAT sector for every cluster it freed, three round trips a
 cluster on the Pi's USB stick, so an `rm` of a large file could pass the
 supervisor's wedge limit and have fsd restarted in the middle of the free.
-It now holds one FAT sector and one bitmap sector and writes each when the
-walk leaves it. No program's output can show the difference; only the disk
+It now holds one FAT sector and one bitmap sector, writes the FAT sector when
+the walk leaves it, and writes the bitmap sector before each FAT sector and
+when the walk leaves it. No program's output can show the difference; only the disk
 can, so this rig counts QEMU's virtio-blk writes (scripts/disktrace.py).
 
 On a copy of build/espexfat.img the host puts /BIG (1 MiB) and /BLK (one
@@ -38,12 +39,14 @@ clean. Each chain must cross the case it stands for: /CHAIN two FAT
 sectors, /P and /Q a FAT sector each other's clusters are in, or the count
 could not tell a sector from a cluster.
 
-Measured on 2026-10-31: the 280 clusters take 10 FAT writes, 3 bitmap reads
-and MEASURED bitmap writes. Controls, each failing here: main's walk before
-that day (280 FAT writes, 280 bitmap reads and writes); #379's first
-version, which wrote a FAT sector before the bitmap sector holding its
-clusters' bits (the order; the medium review of #379); and free_chain's
-last FAT write removed (14 of the 280 clusters left set).
+Measured on 2026-10-31: the 280 clusters take 10 FAT writes, 10 bitmap
+writes and 3 bitmap reads, the 20 writes in the rule's order. Controls, each
+failing here: main's walk before that day (280 FAT writes, 280 bitmap reads
+and writes); #379's first version, which wrote a FAT sector before the
+bitmap sector holding its clusters' bits (3 bitmap writes, and the order;
+the medium review of #379); free_chain's end writing its FAT sector before
+its bitmap sector (the order alone, the counts as the rule's); and
+free_chain's last FAT write removed (14 of the 280 clusters left set).
 
 A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100, drive-qemu.py's
 classifier through disktrace.py), unless the other boot of the pair failed,

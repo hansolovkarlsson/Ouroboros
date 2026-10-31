@@ -2793,9 +2793,11 @@ test-dir-scan: image-exfat
 # on the exFAT image, /CHAIN (1 MiB by cp) and /P and /Q (interleaved, a
 # cluster at a time by appends in turn) removed, against a boot removing three
 # empty files; QEMU's writes of the FAT and the bitmap, and its bitmap reads,
-# must be one a sector each walk enters, from the chains read off the disk, and
-# every cluster freed. Two boots, about two minutes; run it whenever exFAT's
-# free_data, free_chain, bitmap_clear_run, clear_bit or the FAT cache changes.
+# must be free_chain's rule from the chains read off the disk, in its order
+# (every cleared bit on the disk before its FAT entry's zero), and every
+# cluster freed. Two boots, about two minutes; run it whenever exFAT's
+# free_data, free_chain, bitmap_clear_run, clear_bit, patch_fat_entry,
+# write_fat_entry or the FAT cache changes.
 test-free-chain: image-exfat
 	python3 scripts/test-free-chain.py
 
