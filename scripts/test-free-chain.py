@@ -26,11 +26,13 @@ graded boot writes more than the base must be what one write a sector the
 walk passes through predicts, from the three chains the host reads off the
 base boot's disk: a chain's FAT writes are the number of times its walk
 enters a FAT sector, and its bitmap writes and reads the number of times it
-enters a bitmap sector. On the tree of 2026-10-31 that is 4 FAT and 3
-bitmap writes where the old walk made 288 of each. After the graded boot
+enters a bitmap sector. On the tree of 2026-10-31 the 280 clusters take
+10 FAT writes and 3 bitmap reads and writes; main's walk before that day
+made 280 of each, and fails here. After the graded boot
 every cluster of the three chains must be clear in the bitmap and 0 in the
 FAT, the files gone and fsck_exfat -n clean, so a walk that leaves its last
-sector unwritten fails too. Each chain must cross the case it stands for:
+sector unwritten fails too (with free_chain's last FAT write removed, 14 of
+the 280 clusters were left set). Each chain must cross the case it stands for:
 /CHAIN two FAT sectors, /P and /Q a FAT sector each other's clusters are in,
 or the count could not tell a sector from a cluster.
 
@@ -38,7 +40,7 @@ A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100, drive-qemu.py's
 classifier through disktrace.py), unless the other boot of the pair failed,
 which fails it.
 
-About two minutes.
+Two boots, about two minutes.
 """
 import collections
 import functools
