@@ -17,8 +17,9 @@ FAT sector, and the scan going on from its last find. Only the disk can show
 the difference, so this rig counts QEMU's virtio-blk writes
 (scripts/disktrace.py).
 
-On a copy of build/espexfat.img the host puts /CONT, 2 MiB, on the exFAT
-root through macOS's driver, which writes it contiguous (NoFatChain). Both
+On a copy of build/espexfat.img the host plants /CONT, 2 MiB, on the exFAT
+root as a contiguous (NoFatChain) run at the heap's end, read back and
+fsck_exfat -n clean (macOS's driver wrote it FAT-chained into a hole). Both
 boots of the pair, the exFAT root at `/`, fill the free clusters in the
 bitmap's first sector with files made by `writeat` gap fills, all but 128,
 and `touch /G`. The graded boot then runs
@@ -60,6 +61,7 @@ import collections
 import functools
 import os
 import shutil
+import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -158,16 +160,49 @@ def main() -> int:
         cluster = g["spc"] * SECTOR
         start, _ = exfatimg.partition(prepared, 0x07)
         cont = bytes((i * 7 + i // 1000) & 0xFF for i in range(CONT))
-        exfatimg.place_mounted(prepared, {"CONT": cont}, part=1)
         pre = []
         with exfatimg.Volume(prepared, start) as vol:
             bitmap_lba = g["heap"] + (vol.bitmap - 2) * g["spc"]
-            first, size, chained = {exfatimg.fold(k): v for k, v in vol.listing(vol.root).items()}["CONT"]
-            if chained or size != CONT:
-                pre.append(f"/CONT as macOS wrote it is {'FAT-chained' if chained else 'contiguous'} and "
-                           f"{size} bytes, not contiguous and {CONT}: ensure_chained would not run")
-            run = list(range(first, first + CONT // cluster))
+            # /CONT contiguous at the heap's end, past every cluster the boot
+            # allocates (macOS's driver wrote it FAT-chained into a hole).
+            run = list(range(vol.count + 2 - CONT // cluster, vol.count + 2))
+            if any(vol.used(c) for c in run):
+                pre.append(f"the heap's last {len(run)} clusters are not free for /CONT")
+            rchain = vol.chain(vol.root)
+            d = bytearray(vol.data(rchain))
+            end = exfatimg.root_end(d)
+            heap_off, bitmap_off = vol.heap, vol.heap + (vol.bitmap - 2) * vol.cluster
+        st = bytearray(exfatimg.entry_set("CONT"))
+        st[33] = 0x03  # GeneralSecondaryFlags: AllocationPossible, NoFatChain
+        struct.pack_into("<Q", st, 40, CONT)  # ValidDataLength
+        struct.pack_into("<I", st, 52, run[0])
+        struct.pack_into("<Q", st, 56, CONT)  # DataLength
+        struct.pack_into("<H", st, 2, exfatimg.set_checksum(st))
+        if end + len(st) + 32 > len(d):
+            pre.append("no room in the root for /CONT's set")
+        if not pre:
+            d[end:end + len(st)] = st
+            with open(prepared, "r+b") as fh:
+                for k, c in enumerate(rchain):
+                    fh.seek(heap_off + (c - 2) * cluster)
+                    fh.write(d[k * cluster:(k + 1) * cluster])
+                for c in run:
+                    fh.seek(bitmap_off + (c - 2) // 8)
+                    b = fh.read(1)[0]
+                    fh.seek(-1, 1)
+                    fh.write(bytes([b | 1 << (c - 2) % 8]))
+                fh.seek(heap_off + (run[0] - 2) * cluster)
+                fh.write(cont)
+        with exfatimg.Volume(prepared, start) as vol:
+            listed = {exfatimg.fold(k): v for k, v in vol.listing(vol.root).items()}.get("cont")
+            if not pre and (listed != (run[0], CONT, False) or vol.data(run) != cont
+                            or not all(vol.used(c) for c in run)):
+                pre.append(f"/CONT does not read back as planted: {listed}")
             free_low = [c for c in range(2, 2 + BITS) if c < vol.count + 2 and not vol.used(c)]
+        if not pre:
+            ok, lines = exfatimg.fsck_clean(prepared)
+            if not ok:
+                pre.append("fsck_exfat -n is not clean with /CONT planted: " + " | ".join(lines[-6:]))
         fill = len(free_low) - LEFT
         fat_region = (g["fat"], g["fat_end"])
         bitmap_region = (bitmap_lba, bitmap_lba + -(-g["count"] // BITS))
@@ -177,6 +212,7 @@ def main() -> int:
         k = 0
         while fill > 0:
             n = min(per, fill)
+            setup.append(f"touch /F{k}")
             setup.append(f"writeat /F{k} {GAP if n == per else (n - 1) * cluster} f")
             fill -= n
             k += 1
