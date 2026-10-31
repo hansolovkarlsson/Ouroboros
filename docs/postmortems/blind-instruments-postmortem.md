@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2370,3 +2370,44 @@ where every site passes makes it every site's; it is not graded until
 every site has run, and the tool that tests a ranking has to be able to
 see the rank.**
 
+
+## Three more, from the boot start (2026-10-30, evening)
+
+One PR (#377), the kernel's `BLOCK_BOOT_START` answered from the partition
+table as it stands. Three of its instruments said something they had not
+seen; the fourth, the source-stamp guard, refused a boot on a tree I had
+edited mid-build, and was right.
+
+**A defect no mount could show.** disk-rewrite was built to grade the
+kernel forgetting a stale start: `erase disk`, `partition ext2`,
+`format ext2`, `mount -a`, then a write to the new root. With the fix taken
+out it passed too. `partition` makes one partition, and a disk whose only
+partition is the boot one mounts it writable whatever the start says, so the
+rig's check stood on behaviour the bug did not change. I first recorded the
+fix as graded by no boot. Once the review changed the design, Hans chose to
+make the answer visible instead: fsd prints the start after its mount line,
+and the control, a kernel answering its first start forever, fails exactly
+the check that the line is gone after `mount -a`. **When a defect changes
+no behaviour a rig can reach, the instrument is the value itself; print it
+where the rig reads, then mutate.**
+
+**Absent read as empty, and a slice anchored on a word that came earlier.**
+The rig's `answer(command)` returned "" for a command the transcript never
+echoed, so a check that the boot-partition line was absent from the answer
+passed on a boot that never ran the command. The remount's text was taken
+from the first `mount -a` onward, and `format`'s own hint, printed before,
+says to run `mount -a`, so the slice started a step early. The medium review
+found both. `answer()` now returns None for a step not echoed, and the
+remount is `mount -a`'s own answer. **An absence check is only as good as
+the read that says the place was looked at; "not found" and "not run" must
+be different values.**
+
+**An expected value recomputed instead of read.** The check that
+`partition` signed its table anew compared the new signature against the
+copy's old one, computed in the rig by a second copy of `make_copies`'
+formula. Had the recipe changed, the two would have agreed with each other
+and not with the disk. The third medium review found it, and the rig now
+reads sector 0's signature off the image before the boot. It is 2026-10-14's
+self-test written from the code's own belief, one step removed: **the
+"before" of a before-and-after check is read off the thing, not derived from
+how it was made.**

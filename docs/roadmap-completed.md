@@ -3377,3 +3377,33 @@ roadmap.
   what they take into `exfatimg.py` or a shared host module. Found while
   closing the item above, 2026-10-27.~~ Done 2026-10-30: the four are
   `exfatimg`'s, and all three rigs call them there.
+
+## The boot start from the table as it stands, DONE (2026-10-30)
+
+One item closed later on 2026-10-30, by #377, struck on its branch with a
+*Done* note and moved here by the day's second closeout. Its three medium
+reviews are recorded in the CHANGELOG entry of the day. It put one item on
+the roadmap: `partition` on a GPT disk writes an MBR nobody reads.
+
+- ~~**The kernel's boot partition outlives fsd's own table rewrite.** After
+  `erase` or `partition`, `Device::table_rewritten` makes fsd stop trusting
+  `BLOCK_BOOT_START`, whose answer was read from the old table at boot. That
+  flag is fsd's memory: when the supervisor restarts fsd from its image, the
+  new `Device` starts with it clear, and `mount` and `format` again pass over
+  or order by a partition start that may no longer exist. The static it was
+  until 2026-10-27 reset the same way. The kernel holds the answer, so the
+  fix is there: forget the boot start at fsd's first table write (fsd telling
+  it, or the kernel seeing a write to sector 0 or the GPT), or answer
+  `BLOCK_BOOT_START` from the table as it is now. From the medium review of
+  #362, 2026-10-27.~~ *Done 2026-10-30:* the kernel keeps no start; each
+  `BLOCK_BOOT_START` matches the firmware's partition against the device's
+  table as it stands, and fsd's flag is gone, so fsd keeps nothing a
+  restart could lose. (A first version cleared the start at a write to
+  sector 0 or 1; the medium review of #377 found that would make a kept ESP
+  a root candidate at steps 7 and 8.) The match reads only the table fsd
+  reads the disk by, a read failing twice is an error fsd refuses on, and
+  `partition` signs its table anew. A stale start changes no mount today,
+  since `partition` makes one partition, which mounts writable whatever the
+  start says, so fsd prints the answer after its mount line and
+  `make test-boot-partition`'s disk-rewrite boot requires it at boot and not
+  after the rewrite.
