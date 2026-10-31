@@ -88,13 +88,17 @@ class Model:
     by the allocator, read when its scan enters it, written when it leaves it
     with bits set. `seq` is the writes in order, `reads` the bitmap reads by
     sector. Raises AssertionError if a FAT sector is written with a link to
-    a cluster whose bit is not on the disk, so the model holds the rule."""
+    a cluster whose bit is not on the disk, or to one allocated here whose
+    own entry, in another sector, is not on the disk yet (a refused flush
+    would then leave a chain on the disk running into a stale entry, which
+    write_chain's give-back would walk), so the model holds both rules."""
 
     def __init__(self, fat_lba, bitmap_lba):
         self.fat_lba, self.bitmap_lba = fat_lba, bitmap_lba
         self.seq, self.reads = [], collections.Counter()
         self.fat, self.fat_dirty, self.links = None, False, set()
         self.allocated, self.on_disk = set(), set()
+        self.entries, self.entries_on_disk = set(), set()
 
     def fsec(self, c):
         return self.fat_lba + c * 4 // SECTOR
@@ -115,8 +119,12 @@ class Model:
         self.write_bits()
         missing = (self.links & self.allocated) - self.on_disk
         assert not missing, f"FAT sector {self.fat} written linking to {sorted(missing)[:3]} before their bits"
+        early = {t for t in self.links & self.allocated
+                 if self.fsec(t) != self.fat and t not in self.entries_on_disk}
+        assert not early, f"FAT sector {self.fat} written linking to {sorted(early)[:3]} before their entries"
         self.seq.append(self.fat)
-        self.fat_dirty, self.links = False, set()
+        self.entries_on_disk |= self.entries
+        self.fat_dirty, self.links, self.entries = False, set(), set()
 
     def touch(self, c):
         """`next_cluster(c)`: the FAT sector of `c`, through the cache."""
@@ -128,6 +136,7 @@ class Model:
     def set(self, c, value):
         self.touch(c)  # patch_fat_entry asks next_cluster first
         self.fat_dirty = True
+        self.entries.add(c)
         if value is not None:
             self.links.add(value)
 
