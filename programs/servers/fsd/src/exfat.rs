@@ -1862,18 +1862,11 @@ impl Fs {
         let mut bits = None;
         let mut fat = None;
         let walked = self.free_chain_walk(first, n, &mut bits, &mut fat);
-        let written = self.write_bits(&mut bits);
-        let fat_written = match (fat, &written) {
-            (Some(lba), Ok(())) => self.flush_fat(lba),
-            // The bits are not on the disk: zeroed entries must not be
-            // either, and the cache holding them is dropped.
-            (Some(_), Err(_)) => {
-                self.fat_cache = None;
-                Ok(())
-            }
-            (None, _) => Ok(()),
+        let flushed = match fat {
+            Some(lba) => self.flush_free(&mut bits, lba),
+            None => self.write_bits(&mut bits),
         };
-        walked.and(written).and(fat_written)
+        walked.and(flushed)
     }
 
     /// [`free_chain`](Self::free_chain)'s walk, leaving its bitmap sector in
@@ -1896,11 +1889,7 @@ impl Fs {
             if let Some(pending) = *fat {
                 if pending != self.fat_place(c).0 {
                     *fat = None;
-                    if let Err(e) = self.write_bits(bits) {
-                        self.fat_cache = None; // its zeroes stay off the disk
-                        return Err(e);
-                    }
-                    self.flush_fat(pending)?;
+                    self.flush_free(bits, pending)?;
                 }
             }
             self.clear_bit(bits, c)?;
@@ -1912,6 +1901,23 @@ impl Fs {
             }
         }
         Ok(())
+    }
+
+    /// Write a free's pending sectors: the bitmap sector `bits` holds, then
+    /// the FAT sector at `lba` with the zeroes the free set in it, so every
+    /// cleared bit is on the disk before its FAT entry's zero. A free cut
+    /// short between the two leaves free clusters with stale links, which
+    /// the bitmap makes harmless, never a zeroed entry on a cluster still
+    /// allocated. When the bits are refused the cache holding the zeroes is
+    /// dropped, and they never reach the disk. The one place the rule is
+    /// kept: until the second medium review of #379 (2026-10-31) the walk
+    /// and its end each spelled it out.
+    fn flush_free(&mut self, bits: &mut Option<BitmapSector>, lba: u64) -> Result<(), Error> {
+        if let Err(e) = self.write_bits(bits) {
+            self.fat_cache = None;
+            return Err(e);
+        }
+        self.flush_fat(lba)
     }
 
     /// Write the FAT sector at `lba`, which the [`fat_cache`](Self::fat_cache)

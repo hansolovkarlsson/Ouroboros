@@ -227,8 +227,13 @@ def main() -> int:
             # The frees are the boot's last writes to the FAT and the bitmap.
             ours = [w for w in more_order
                     if fat_region[0] <= w < fat_region[1] or bitmap_region[0] <= w < bitmap_region[1]]
-            tail = ours[-len(seq):]
-            if tail != seq:
+            # An empty model would make `ours[-0:]` the whole boot's writes,
+            # and the message below about them meaningless.
+            tail = ours[len(ours) - len(seq):]
+            if not seq:
+                problems.append("the model expects no FAT or bitmap writes: the chains read off the "
+                                "base boot's disk are empty, so the rig built nothing to free")
+            elif tail != seq:
                 at = next((i for i, (x, y) in enumerate(zip(tail, seq)) if x != y), min(len(tail), len(seq)))
                 problems.append(f"the frees' FAT and bitmap writes are not in the order that puts every bit "
                                 f"on the disk before its FAT entry's zero: from write {at} of {len(seq)}, "
