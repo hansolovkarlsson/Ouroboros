@@ -525,12 +525,14 @@ struct FatSector {
 const BITS_PER_SECTOR: u32 = (SECTOR_SIZE * 8) as u32;
 
 /// One sector of the allocation bitmap a free is clearing bits in, written
-/// when the free moves past it ([`Fs::clear_bit`]).
+/// before each FAT sector and when the free moves past it ([`Fs::clear_bit`]).
 struct BitmapSector {
     lba: u64,
     /// The first cluster whose bit the sector holds.
     first: u32,
     buf: [u8; SECTOR_SIZE],
+    /// Bits cleared in `buf` since it was last written.
+    dirty: bool,
 }
 
 /// A point in a file's cluster walk, for [`Fs::read_cursor`] and [`Fs::write_cursor`].
@@ -1680,6 +1682,21 @@ impl Fs {
     /// Writes one 32-bit FAT entry (exFAT has a single active FAT). `value` is a
     /// next-cluster number, `END_OF_CHAIN`, or `0` to free.
     fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
+        let (lba, _) = self.patch_fat_entry(cluster, value)?;
+        self.flush_fat(lba)
+    }
+
+    /// Set `cluster`'s FAT entry to `value` in the [`fat_cache`](Self::fat_cache)
+    /// alone, answering the sector's LBA, for [`flush_fat`](Self::flush_fat)
+    /// to write, and the walk's next cluster from the entry it replaced (as
+    /// [`next_cluster`](Self::next_cluster) answered it). Every FAT entry
+    /// written is set here: by [`write_fat_entry`](Self::write_fat_entry), and
+    /// by [`free_chain`](Self::free_chain), which writes a sector once for
+    /// all the entries it zeroes in it (until 2026-10-31 the free set its
+    /// entries itself, the rule below copied; the medium review of #379).
+    /// The caller writes the sector before it reads another FAT sector,
+    /// since the cache holds one.
+    fn patch_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(u64, Option<u32>), Error> {
         // A cluster outside the heap has no entry to write: past its end the
         // FAT's sectors run on into whatever follows it (FAT32's
         // `check_in_heap`, which this lacked until 2026-10-23, when a
@@ -1687,7 +1704,7 @@ impl Fs {
         if !self.in_heap(cluster) {
             return Err(Error::Io(DiskError::Io));
         }
-        // Every FAT entry written goes through here, so the cursors are
+        // Every FAT entry written is set here, so the cursors are
         // dropped here when a walk would go on from this cluster:
         // `fat32.rs`'s rule and reason, asked of `next_cluster` itself. An
         // entry where every walk stopped (`0` or end of chain) had no
@@ -1697,16 +1714,18 @@ impl Fs {
         // a FAT-chained file, which its `contiguous` key does not match.
         // `make test-stale-cursor` builds stale cases by removal; a
         // truncation or a relink has no sequence there (fsd makes neither).
-        if self.next_cluster(cluster)?.is_some() {
+        let next = self.next_cluster(cluster)?;
+        if next.is_some() {
             self.read_cursor = None;
             self.write_cursor = None;
         }
         let (lba, offset) = self.fat_place(cluster);
-        let mut buf = *self.fat_sector(lba)?;
-        buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-        self.disk.write_sector(lba, &buf)?;
-        self.fat_cache = Some(FatSector { lba, data: buf });
-        Ok(())
+        match self.fat_cache.as_mut() {
+            // `next_cluster` read the entry through the cache just now.
+            Some(sector) if sector.lba == lba => sector.data[offset..offset + 4].copy_from_slice(&value.to_le_bytes()),
+            _ => return Err(Error::Io(DiskError::Io)),
+        }
+        Ok((lba, next))
     }
 
     /// Zeroes every sector of a cluster - a fresh directory cluster must read
@@ -1816,34 +1835,49 @@ impl Fs {
 
     /// Free the first `n` clusters of the FAT chain from `first` (in the
     /// heap): each one's bitmap bit cleared and its FAT entry zeroed, with
-    /// one read and one write a bitmap sector and one write a FAT sector the
-    /// walk passes through, where until 2026-10-31 it was a bitmap read, a
-    /// bitmap write and a FAT write a cluster. fsd's first-fit allocator keeps
-    /// a file's clusters mostly in order, and two files grown in turn share
+    /// one read of each bitmap sector the walk enters and one write of each
+    /// FAT sector, where until 2026-10-31 it was a bitmap read, a bitmap
+    /// write and a FAT write a cluster. fsd's first-fit allocator keeps a
+    /// file's clusters mostly in order, and two files grown in turn share
     /// their sectors, so a walk stays in each sector for many clusters; a
     /// cluster at a time, an `rm` of a large file on the Pi's stick could
     /// pass the supervisor's wedge limit (the altitude review of 2026-10-23).
     ///
+    /// A cluster's bit reaches the disk before its zeroed FAT entry, as it
+    /// did when each cluster was freed whole: the bitmap sector held is
+    /// written before every FAT sector, so a free cut short, by an error or
+    /// by fsd's restart, leaves walked clusters free in the bitmap with a
+    /// link left in the FAT, which exFAT ignores (the bitmap says what is
+    /// free; the allocator writes a new cluster's entry), never zeroed in
+    /// the FAT and still set in the bitmap, a leak until a fsck. The FAT
+    /// written first was the medium review of #379. The bitmap sector is
+    /// then written again when the walk leaves it with more bits cleared.
+    ///
     /// The FAT sector being zeroed is the [`fat_cache`](Self::fat_cache)
     /// itself, written before the walk reads another, so the walk reads its
-    /// own zeroes where a damaged chain loops back, as it did when each entry
-    /// was written at once. What is pending is written when the walk stops,
-    /// at its end or at an error, so a free that fails has freed what it
-    /// walked, as before.
+    /// own zeroes where a damaged chain loops back. What is pending is
+    /// written when the walk stops, at its end or at an error, so a free
+    /// that fails has freed what it walked, as before.
     fn free_chain(&mut self, first: u32, n: u64) -> Result<(), Error> {
         let mut bits = None;
         let mut fat = None;
         let walked = self.free_chain_walk(first, n, &mut bits, &mut fat);
-        let bits_written = self.flush_bitmap(&mut bits);
-        let fat_written = match fat {
-            Some(lba) => self.flush_fat(lba),
-            None => Ok(()),
+        let written = self.write_bits(&mut bits);
+        let fat_written = match (fat, &written) {
+            (Some(lba), Ok(())) => self.flush_fat(lba),
+            // The bits are not on the disk: zeroed entries must not be
+            // either, and the cache holding them is dropped.
+            (Some(_), Err(_)) => {
+                self.fat_cache = None;
+                Ok(())
+            }
+            (None, _) => Ok(()),
         };
-        walked.and(bits_written).and(fat_written)
+        walked.and(written).and(fat_written)
     }
 
-    /// [`free_chain`](Self::free_chain)'s walk, leaving its last bitmap
-    /// sector in `bits` and the LBA of its last zeroed FAT sector in `fat`.
+    /// [`free_chain`](Self::free_chain)'s walk, leaving its bitmap sector in
+    /// `bits` and the LBA of its FAT sector with zeroes not yet written in `fat`.
     fn free_chain_walk(
         &mut self,
         first: u32,
@@ -1859,24 +1893,18 @@ impl Fs {
             if self.is_system(c) {
                 break;
             }
-            let (lba, offset) = self.fat_place(c);
             if let Some(pending) = *fat {
-                if pending != lba {
+                if pending != self.fat_place(c).0 {
                     *fat = None;
+                    if let Err(e) = self.write_bits(bits) {
+                        self.fat_cache = None; // its zeroes stay off the disk
+                        return Err(e);
+                    }
                     self.flush_fat(pending)?;
                 }
             }
-            let next = self.next_cluster(c)?;
-            // `write_fat_entry`'s rule, for the entries zeroed here.
-            if next.is_some() {
-                self.read_cursor = None;
-                self.write_cursor = None;
-            }
             self.clear_bit(bits, c)?;
-            match self.fat_cache.as_mut() {
-                Some(sector) if sector.lba == lba => sector.data[offset..offset + 4].fill(0),
-                _ => return Err(Error::Io(DiskError::Io)),
-            }
+            let (lba, next) = self.patch_fat_entry(c, 0)?;
             *fat = Some(lba);
             match next {
                 Some(next) if i + 1 < n => c = next,
@@ -1886,9 +1914,10 @@ impl Fs {
         Ok(())
     }
 
-    /// Write the zeroed FAT sector at `lba`, which the
-    /// [`fat_cache`](Self::fat_cache) holds. A cache the disk refused is
-    /// dropped, so no later walk reads entries the disk does not hold.
+    /// Write the FAT sector at `lba`, which the [`fat_cache`](Self::fat_cache)
+    /// holds as [`patch_fat_entry`](Self::patch_fat_entry) left it. A cache
+    /// the disk refused is dropped, so no later walk reads entries the disk
+    /// does not hold.
     fn flush_fat(&mut self, lba: u64) -> Result<(), Error> {
         let written = match &self.fat_cache {
             Some(sector) if sector.lba == lba => self.disk.write_sector(lba, &sector.data),
@@ -1905,44 +1934,56 @@ impl Fs {
     /// a cluster at a time, a contiguous run of thousands (a camera's file on
     /// the Pi's stick, each sector a USB round trip) kept `rm` past the
     /// supervisor's wedge limit, with the set still live over what it had
-    /// cleared (the max review of 2026-10-23).
+    /// cleared (the max review of 2026-10-23). A run cut short by an error
+    /// still writes the bits it cleared, as the chained free does; until
+    /// 2026-10-31 the sector it failed in was left as it was. Either way the
+    /// set is gone and nothing names the run.
     fn bitmap_clear_run(&mut self, first: u32, end: u32) -> Result<(), Error> {
         let mut bits = None;
         let cleared = (first..end).try_for_each(|c| self.clear_bit(&mut bits, c));
-        let written = self.flush_bitmap(&mut bits);
+        let written = self.write_bits(&mut bits);
         cleared.and(written)
     }
 
-    /// Clear cluster `c`'s bitmap bit (`c` in the heap) in `bits`, the
-    /// bitmap sector a free is in, reading `c`'s sector first when it is
-    /// another, after writing the one held. The sector is found once, by
-    /// [`bitmap_sector_lba`](Self::bitmap_sector_lba) and its bound, for its
-    /// first cluster; every other cluster whose bit it holds is in the heap,
-    /// and [`check_extents`](Self::check_extents) keeps a bitmap with fewer
-    /// bits than the heap has clusters off a writable volume, so its byte is
-    /// in the bitmap too. Until 2026-10-31 each cluster's sector was found
+    /// Clear cluster `c`'s bitmap bit in `bits`, the bitmap sector a free
+    /// is in, reading `c`'s sector first when it is another, after writing
+    /// the one held. `c`'s byte is bounded by the bitmap's length here, a
+    /// cluster at a time, so a cluster past the bitmap is refused whatever
+    /// [`check_extents`](Self::check_extents) let through; the sector itself
+    /// is found once, by [`bitmap_sector_lba`](Self::bitmap_sector_lba), for
+    /// its first cluster. Until 2026-10-31 each cluster's sector was found
     /// by a bound and a division of its own.
     fn clear_bit(&mut self, bits: &mut Option<BitmapSector>, c: u32) -> Result<(), Error> {
+        if c < 2 || ((c - 2) / 8) as u64 >= self.bitmap_bytes {
+            return Err(Error::Io(DiskError::Io));
+        }
         let first = 2 + (c - 2) / BITS_PER_SECTOR * BITS_PER_SECTOR;
-        if bits.as_ref().map(|s| s.first) != Some(first) {
-            self.flush_bitmap(bits)?;
-            let lba = self.bitmap_sector_lba(((first - 2) / 8) as u64)?;
-            let mut buf = [0u8; SECTOR_SIZE];
-            self.disk.read_sector(lba, &mut buf)?;
-            *bits = Some(BitmapSector { lba, first, buf });
-        }
-        if let Some(sector) = bits.as_mut() {
-            let bit = c - first;
-            sector.buf[(bit / 8) as usize] &= !(1u8 << (bit % 8));
-        }
+        let sector = match bits {
+            Some(sector) if sector.first == first => sector,
+            _ => {
+                self.write_bits(bits)?;
+                let lba = self.bitmap_sector_lba(((first - 2) / 8) as u64)?;
+                let mut buf = [0u8; SECTOR_SIZE];
+                self.disk.read_sector(lba, &mut buf)?;
+                bits.insert(BitmapSector { lba, first, buf, dirty: false })
+            }
+        };
+        let bit = c - first;
+        sector.buf[(bit / 8) as usize] &= !(1u8 << (bit % 8));
+        sector.dirty = true;
         Ok(())
     }
 
-    /// Write the bitmap sector `bits` holds, if any, and let it go.
-    fn flush_bitmap(&mut self, bits: &mut Option<BitmapSector>) -> Result<(), Error> {
-        match bits.take() {
-            Some(sector) => self.disk.write_sector(sector.lba, &sector.buf),
-            None => Ok(()),
+    /// Write the bitmap sector `bits` holds if it has bits cleared since it
+    /// was last written, and keep holding it.
+    fn write_bits(&mut self, bits: &mut Option<BitmapSector>) -> Result<(), Error> {
+        match bits {
+            Some(sector) if sector.dirty => {
+                self.disk.write_sector(sector.lba, &sector.buf)?;
+                sector.dirty = false;
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
 

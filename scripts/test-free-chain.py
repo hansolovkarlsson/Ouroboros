@@ -22,19 +22,28 @@ root, mounted as `/`, with the ESP mounted at /mnt/f:
 
 The base boot then removes the three empty files, which hold no cluster, and
 the graded boot removes /CHAIN, /P and /Q. The FAT and bitmap sectors the
-graded boot writes more than the base must be what one write a sector the
-walk passes through predicts, from the three chains the host reads off the
-base boot's disk: a chain's FAT writes are the number of times its walk
-enters a FAT sector, and its bitmap writes and reads the number of times it
-enters a bitmap sector. On the tree of 2026-10-31 the 280 clusters take
-10 FAT writes and 3 bitmap reads and writes; main's walk before that day
-made 280 of each, and fails here. After the graded boot
-every cluster of the three chains must be clear in the bitmap and 0 in the
-FAT, the files gone and fsck_exfat -n clean, so a walk that leaves its last
-sector unwritten fails too (with free_chain's last FAT write removed, 14 of
-the 280 clusters were left set). Each chain must cross the case it stands for:
-/CHAIN two FAT sectors, /P and /Q a FAT sector each other's clusters are in,
-or the count could not tell a sector from a cluster.
+graded boot writes and reads more than the base must be what free_chain's
+rule predicts from the three chains the host reads off the base boot's
+disk: one read of each bitmap sector a walk enters, one write of each FAT
+sector, and the bitmap sector written again before each FAT sector, so that
+a cluster's cleared bit is on the disk before its zeroed FAT entry. A free
+cut short (fsd restarted by the supervisor mid-free) then leaves a free
+cluster with a stale link, which exFAT ignores, never a zeroed entry with
+its bit still set, a leak until a fsck. The frees' writes, the boot's last
+to those two regions in the order QEMU handled them, must be the model's
+sequence exactly, and the model refuses to build a sequence that breaks
+that order. After the graded boot every cluster of the three chains must be
+clear in the bitmap and 0 in the FAT, the files gone and fsck_exfat -n
+clean. Each chain must cross the case it stands for: /CHAIN two FAT
+sectors, /P and /Q a FAT sector each other's clusters are in, or the count
+could not tell a sector from a cluster.
+
+Measured on 2026-10-31: the 280 clusters take 10 FAT writes, 3 bitmap reads
+and MEASURED bitmap writes. Controls, each failing here: main's walk before
+that day (280 FAT writes, 280 bitmap reads and writes); #379's first
+version, which wrote a FAT sector before the bitmap sector holding its
+clusters' bits (the order; the medium review of #379); and free_chain's
+last FAT write removed (14 of the 280 clusters left set).
 
 A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100, drive-qemu.py's
 classifier through disktrace.py), unless the other boot of the pair failed,
@@ -64,18 +73,50 @@ EMPTY = ("E1", "E2", "E3")
 
 
 def model(chains, fat_lba, bitmap_lba):
-    """{sector: writes} the frees of `chains`, one after another, make in
-    the FAT and the bitmap, and {sector: reads} in the bitmap, one write a
-    sector a walk enters (and one read, for the bitmap)."""
-    fat, bits = {}, {}
+    """The frees of `chains`, one after another, as free_chain makes them:
+    (the FAT and bitmap sectors written, in order, {bitmap sector: reads}).
+    A walk holds one FAT sector and one bitmap sector; before it writes the
+    FAT sector it is leaving, it writes the bitmap sector if it has bits
+    cleared since its last write; it writes the bitmap sector it is leaving
+    the same way, reads the one it enters, and at its end writes the bitmap
+    sector and then the FAT sector. Raises AssertionError if the order it
+    builds ever writes a FAT sector zeroing a cluster whose cleared bit is
+    not yet on the disk, so the model holds the rule the rig grades."""
+    seq, reads = [], {}
+    cleared_on_disk = set()
     for chain in chains:
-        fwalk = [fat_lba + c * 4 // SECTOR for c in chain]
-        bwalk = [bitmap_lba + (c - 2) // (SECTOR * 8) for c in chain]
-        for walk, out in ((fwalk, fat), (bwalk, bits)):
-            for i, s in enumerate(walk):
-                if i == 0 or s != walk[i - 1]:
-                    out[s] = out.get(s, 0) + 1
-    return fat, bits
+        bsec, bdirty, bheld, fsec, zeroed = None, False, set(), None, set()
+
+        def write_bits():
+            nonlocal bdirty
+            if bdirty:
+                seq.append(bsec)
+                cleared_on_disk.update(bheld)
+                bdirty = False
+
+        def write_fat():
+            missing = zeroed - cleared_on_disk
+            assert not missing, f"FAT sector {fsec} written before the bits of {sorted(missing)[:3]}"
+            seq.append(fsec)
+            zeroed.clear()
+
+        for c in chain:
+            f, b = fat_lba + c * 4 // SECTOR, bitmap_lba + (c - 2) // (SECTOR * 8)
+            if fsec is not None and fsec != f:
+                write_bits()
+                write_fat()
+            if bsec != b:
+                write_bits()
+                bsec, bheld = b, set()
+                reads[b] = reads.get(b, 0) + 1
+            bheld.add(c)
+            bdirty = True
+            fsec = f
+            zeroed.add(c)
+        write_bits()
+        if fsec is not None:
+            write_fat()
+    return seq, reads
 
 
 def main() -> int:
@@ -151,35 +192,51 @@ def main() -> int:
             if not ok:
                 problems.append("fsck_exfat -n is not clean after the frees: " + " | ".join(lines[-6:]))
 
-        base_writes, more_writes = collections.Counter(), collections.Counter()
+        base_writes, more_writes, more_order = collections.Counter(), collections.Counter(), []
         base_typed = setup + [f"rm /{f}" for f in EMPTY]
         more_typed = setup + [f"rm /{f}" for f in FREED]
         base = disktrace.boot(RIG, "base", prepared, IMAGE, steps(EMPTY), base_inspect,
                               functools.partial(said, base_typed), writes=base_writes)
         more = disktrace.boot(RIG, "more", prepared, IMAGE, steps(FREED), more_inspect,
-                              functools.partial(said, more_typed), writes=more_writes)
+                              functools.partial(said, more_typed), writes=more_writes, order=more_order)
         problems = tally.settle([base, more])
         if problems is None:
             return tally.verdict()
         got = {}
         if base and more and "chains" in found and not problems:
-            want_fat, want_bits = model([found["chains"][f] for f in FREED], g["fat"], bitmap_lba)
+            seq, want_reads = model([found["chains"][f] for f in FREED], g["fat"], bitmap_lba)
+            want_fat, want_bits = collections.Counter(), collections.Counter()
+            for sec in seq:
+                (want_fat if fat_region[0] <= sec < fat_region[1] else want_bits)[sec] += 1
             for what, base_c, more_c, region, want in (
                     ("FAT writes", base_writes, more_writes, fat_region, want_fat),
                     ("bitmap writes", base_writes, more_writes, bitmap_region, want_bits),
-                    ("bitmap reads", base[2], more[2], bitmap_region, want_bits)):
+                    ("bitmap reads", base[2], more[2], bitmap_region, want_reads)):
                 differ, per = disktrace.per_run(base_c, more_c, 1, region)
                 problems += [f"{what}: {d}" for d in differ]
                 if per is None:
                     continue
                 got[what] = (sum(per.values()), sum(want.values()))
-                if per != want:
+                if per != dict(want):
                     problems.append(f"the frees make {sum(per.values())} {what} ({dict(sorted(per.items()))}), "
                                     f"not {sum(want.values())} ({dict(sorted(want.items()))}): one a sector "
-                                    "a walk enters is the rule")
+                                    "a walk enters, and the bitmap's again before each FAT sector, is the rule")
+            # The frees are the boot's last writes to the FAT and the bitmap.
+            ours = [w for w in more_order
+                    if fat_region[0] <= w < fat_region[1] or bitmap_region[0] <= w < bitmap_region[1]]
+            tail = ours[-len(seq):]
+            if tail != seq:
+                at = next((i for i, (x, y) in enumerate(zip(tail, seq)) if x != y), min(len(tail), len(seq)))
+                problems.append(f"the frees' FAT and bitmap writes are not in the order that puts every bit "
+                                f"on the disk before its FAT entry's zero: from write {at} of {len(seq)}, "
+                                f"{tail[at:at + 4]} where the rule has {seq[at:at + 4]}")
+            else:
+                got["in order"] = (len(seq), len(seq))
         clusters = sum(len(c) for c in found.get("chains", {}).values())
         verdict = "FAIL" if problems else "ok  "
-        counts = ", ".join(f"{g_} {w} (want {m})" for w, (g_, m) in got.items()) or "not compared"
+        counts = ", ".join(f"{g_} {w} (want {m})" for w, (g_, m) in got.items() if w != "in order") or "not compared"
+        if "in order" in got:
+            counts += f", the {got['in order'][0]} writes in the rule's order"
         print(f"{verdict} free: `rm` of /CHAIN, /P and /Q, {clusters} clusters: {counts}")
         for p in problems:
             print(f"     {p}")
