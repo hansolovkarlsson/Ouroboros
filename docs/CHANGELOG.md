@@ -1582,8 +1582,17 @@ then grades a 1 MiB gap fill across it and the first append to a 2 MiB
 contiguous file: 14 FAT writes, 5 bitmap writes and 4 bitmap reads in exactly
 the batch's order, where `main` made 1,025, 257 and 386; it fails too with the
 scan starting at byte 0, with the FAT written before the bits, with the set
-written inside the batch and with nothing written at the batch's end. From
-the medium reviews of #379.
+written inside the batch and with nothing written at the batch's end. A
+link reaches the disk only after the entry it names (`extend_chain` sets the
+new cluster's end of chain first, and the cache's move writes it), so a flush
+the disk refuses leaves a chain ending at an end of chain; the rig's model
+asserts it. A refused flush drops the chain cursors with the cache, and
+outside a batch a FAT sector holding unwritten entries is refused at a move
+rather than written ahead of the free's cleared bits (with the free's own
+flush removed, `rm` answers an I/O error instead). A gap fill still writes
+every data sector, 2,048 for 1 MiB, measured inside the wedge limit on QEMU,
+not on the Pi; `ensure_chained` writes none. From the medium reviews of #379
+and #380.
 
 **exFAT frees a chained file a sector at a time (2026-10-31).** A removal,
 a replacing `mv` or a truncation of a FAT-chained file (every file fsd

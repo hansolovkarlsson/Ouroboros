@@ -4461,7 +4461,11 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   14 FAT writes, 5 bitmap writes and 4 bitmap reads, where `main` made
   1,025, 257 and 386. A request of 2 KiB still costs a bitmap write and a FAT
   write when it takes a cluster, which its order needs (bits, links, set);
-  `cp` of a large file is that a cluster. From the medium reviews of #379.
+  `cp` of a large file is that a cluster. A gap fill still writes each data
+  sector on its own, 2,048 for 1 MiB, measured inside the wedge limit on
+  QEMU and not on the Pi's stick (the medium review of #380). The cursors
+  dropped at a refused flush are graded by no boot. From the medium reviews
+  of #379 and #380.
 - **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s

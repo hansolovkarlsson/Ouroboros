@@ -51,7 +51,10 @@ reads, the first sector read again a cluster past it); flush_fat writing the
 FAT sector before the allocator's bits (the order alone, the counts as the
 model's); write_at's set written inside the batch (the order alone); and
 in_fat_batch not writing what is pending at its end (/CONT's chain lost, the
-fill short, fsck's bitmap complaint).
+fill short, fsck's bitmap complaint). The model also asserts that every link
+reaches the disk after the entry it names (the medium review of #380), so a
+refused flush leaves a chain ending at an end of chain. The cursors a refused
+flush drops are graded by no boot (no FAT write fails here).
 
 A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100, drive-qemu.py's
 classifier through disktrace.py), unless the other boot of the pair failed,
