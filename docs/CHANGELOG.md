@@ -1562,6 +1562,23 @@ chosen by, `fsd: the boot partition is on this disk, at LBA 2048`, and
 boot and not after the rewrite, and the new table's signature read on the
 host. From the medium review of #362.
 
+**exFAT frees a chained file a sector at a time (2026-10-31).** A removal,
+a replacing `mv` or a truncation of a FAT-chained file (every file fsd
+writes) read and wrote a bitmap sector and wrote a FAT sector for every
+cluster it freed, three round trips a cluster on the Pi's USB stick, so an
+`rm` of a large file could pass the supervisor's wedge limit and have fsd
+restarted in the middle of the free. The walk now keeps the FAT sector it is
+zeroing (the FAT cache itself) and the bitmap sector it is clearing, and
+writes each when it moves to another or stops, so a chain fsd's first-fit
+allocator laid down in order costs a write a sector, and two files grown in
+turn share theirs. A contiguous run's bits are cleared the same way, each
+sector found once rather than by a bound and a division a cluster. The new
+`make test-free-chain` removes a 1 MiB file and an interleaved pair, 280
+clusters, and requires QEMU's FAT and bitmap writes to be one a sector each
+walk enters: 10 FAT writes and 3 bitmap writes, where `main` made 280 of
+each. Deferred by Hans on 2026-10-23, from the altitude review of
+`fix/exfat-vendor-alloc`.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

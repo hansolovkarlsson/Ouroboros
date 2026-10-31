@@ -4420,7 +4420,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bound from the size: BIG's 2 MiB was filled in one request on QEMU and
   the append went through, no wedge restart. So C holds at megabytes; the
   open risk is gigabytes, unmeasured.
-- **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
+- ~~**exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
   chained walk reads and writes a bitmap sector and writes a FAT sector for
   every cluster, three round trips a cluster on the Pi's USB stick, and every
   file fsd writes is chained (a camera's file too, after its first append).
@@ -4442,7 +4442,13 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   the source's runs, since 2026-10-24); those walks read the FAT through its
   cache, about one sector a 128 clusters, so the free's three round trips a
   cluster are the cost, and the walk could be shared with the free when
-  this item is done.
+  this item is done.~~ *Done 2026-10-31:* the chained walk keeps one FAT
+  sector (the FAT cache) and one bitmap sector and writes each when it
+  leaves it, and a run's bits find their sector once, not a cluster at a
+  time; `make test-free-chain` counts the writes of an `rm` of 280
+  clusters, 10 FAT and 3 bitmap where main made 280 of each. The replacing
+  `mv`'s two full walks before its free are not shared with it: they read
+  through the FAT cache, about one sector a 128 clusters, and are left.
 - **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s
