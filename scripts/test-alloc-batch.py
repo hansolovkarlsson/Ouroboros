@@ -43,13 +43,15 @@ bytes and `x\\r\\n`, FAT-chained, and fsck_exfat -n clean. Each case must cross
 what it stands for, or the counts could not tell a sector from a cluster:
 /G both bitmap sectors and two FAT sectors, /CONT four FAT sectors.
 
-Measured on 2026-10-31: see the final line of a run (it prints the counts).
-Controls, each failing here: main's exfat.rs before that day (a FAT write an
-entry, a bitmap read and write a cluster); the batch's scan starting at byte
-0 (the first bitmap sector read again a cluster past it); flush_fat not
-writing the allocator's bits first (the order); write_at's set written
-inside the batch (the order); and in_fat_batch not writing what is pending
-at its end (the chains).
+Measured on 2026-10-31: 14 FAT writes, 5 bitmap writes and 4 bitmap reads,
+the 21 writes in the model's order. Controls, each failing here: main's
+exfat.rs before that day (1,025 FAT writes, 257 bitmap writes, 386 bitmap
+reads); the batch's scan starting at byte 0 (131 bitmap writes and 258
+reads, the first sector read again a cluster past it); flush_fat writing the
+FAT sector before the allocator's bits (the order alone, the counts as the
+model's); write_at's set written inside the batch (the order alone); and
+in_fat_batch not writing what is pending at its end (/CONT's chain lost, the
+fill short, fsck's bitmap complaint).
 
 A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100, drive-qemu.py's
 classifier through disktrace.py), unless the other boot of the pair failed,

@@ -1562,6 +1562,29 @@ chosen by, `fsd: the boot partition is on this disk, at LBA 2048`, and
 boot and not after the rewrite, and the new table's signature read on the
 host. From the medium review of #362.
 
+**exFAT sets a request's FAT entries and bits a sector at a time
+(2026-10-31).** Every FAT entry exFAT set was a FAT sector write of its own,
+and every cluster allocated a bitmap read and write, the scan starting at the
+bitmap's first byte, so a request that set hundreds of entries was hundreds
+of USB round trips on the Pi's stick: a gap fill of up to `MAX_GAP_FILL` (1
+MiB), a whole-file write, or `ensure_chained` linking a contiguous file at its
+first append (thousands of clusters on a camera's file), any of which could
+pass the supervisor's wedge limit with its chain half linked. Such a request
+is now a FAT batch (`in_fat_batch`): `write_fat_entry` leaves the entry in the
+FAT cache, written when the cache moves to another sector or the batch ends;
+the allocator holds its bitmap sector, written before any FAT sector
+(`flush_fat`), so a link never reaches the disk before its cluster's bit; and
+its scan goes on from its last find, since nothing is freed inside a batch
+(`clear_bit` refuses there). The set naming the chain is written after the
+batch, so the disk gets bits, then links, then the set, as before. The new
+`make test-alloc-batch` fills the bitmap's first sector to 128 free clusters,
+then grades a 1 MiB gap fill across it and the first append to a 2 MiB
+contiguous file: 14 FAT writes, 5 bitmap writes and 4 bitmap reads in exactly
+the batch's order, where `main` made 1,025, 257 and 386; it fails too with the
+scan starting at byte 0, with the FAT written before the bits, with the set
+written inside the batch and with nothing written at the batch's end. From
+the medium reviews of #379.
+
 **exFAT frees a chained file a sector at a time (2026-10-31).** A removal,
 a replacing `mv` or a truncation of a FAT-chained file (every file fsd
 writes) read and wrote a bitmap sector and wrote a FAT sector for every
