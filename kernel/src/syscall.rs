@@ -63,22 +63,15 @@ static TASK_REPORTS: [AtomicU64; crate::tasks::NUM_TASKS] =
 /// expected state whenever no disk was discovered this boot.
 static BLOCK: SyncCell<Option<crate::block::BlockDevice>> = SyncCell::new(None);
 
-/// The start LBA of the boot partition on the device in [`BLOCK`], or 0 when
-/// that device is not known to be the boot disk: what `BLOCK_BOOT_START`
-/// answers. Written with `BLOCK`, always, by [`install_block_device`].
-static BLOCK_BOOT_START: SyncCell<u64> = SyncCell::new(0);
-
 /// Installs the block device the `BLOCK_*` syscalls serve, over any one
 /// already there: the boot path installs once, and `MOUNT`'s replace path
-/// overwrites on purpose, so `fsd` must ask `BLOCK_BOOT_START` again after
-/// every mount and never cache it. `boot_start` is the boot
-/// partition's start LBA when `device` was matched as the boot disk
-/// (`bootdisk::is_boot_disk`), else 0: a required argument, so no install
-/// can leave the last device's answer behind (one-disk step 4).
-pub fn install_block_device(device: crate::block::BlockDevice, boot_start: u64) {
+/// overwrites on purpose. Nothing about the boot partition is kept with it:
+/// `BLOCK_BOOT_START` reads the device's table each time it is asked
+/// (since 2026-10-30), so no install, and no write to the table, can leave
+/// an answer behind.
+pub fn install_block_device(device: crate::block::BlockDevice) {
     unsafe {
         *BLOCK.get() = Some(device);
-        *BLOCK_BOOT_START.get() = boot_start;
     }
 }
 
@@ -166,11 +159,10 @@ pub(crate) fn net_ack_interrupt() {
 /// kernel only handles the device.
 ///
 /// `accept` is asked once the stick is initialised, before it is installed:
-/// whether it is the boot disk (one-disk step 3). `None` refuses it; `Some`
-/// installs it with that boot partition start (0 for "not the boot disk",
-/// [`BLOCK_BOOT_START`]'s answer). The answer says what happened, so the
-/// caller can say why nothing was installed.
-pub fn try_install_usb_block_device(accept: impl FnOnce(&mut crate::usb_msd::Device) -> Option<u64>) -> UsbInstall {
+/// whether it is the boot disk (one-disk step 3). `false` refuses it, `true`
+/// installs it. The answer says what happened, so the caller can say why
+/// nothing was installed.
+pub fn try_install_usb_block_device(accept: impl FnOnce(&mut crate::usb_msd::Device) -> bool) -> UsbInstall {
     if block_device_installed() {
         return UsbInstall::Installed;
     }
@@ -179,10 +171,10 @@ pub fn try_install_usb_block_device(accept: impl FnOnce(&mut crate::usb_msd::Dev
     }
     match crate::usb_msd::Device::init() {
         Ok(mut device) => {
-            let Some(boot_start) = accept(&mut device) else {
+            if !accept(&mut device) {
                 return UsbInstall::Refused;
-            };
-            install_block_device(crate::block::BlockDevice::UsbMsd(device), boot_start);
+            }
+            install_block_device(crate::block::BlockDevice::UsbMsd(device));
             console::println!("Ouroboros kernel: usb-msd block device installed");
             UsbInstall::Installed
         }
@@ -1759,17 +1751,13 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
                 return syscall_abi::MOUNT_NO_DEVICE;
             }
             match crate::usb_msd::Device::init() {
-                Ok(mut device) => {
-                    // Installed whatever it is, but asked whether it is the
-                    // boot disk, so a boot stick taken here (after its
-                    // boot-time init failed) still has `fsd` mount the root
-                    // beside its ESP. A stick passed through late on Parallels
-                    // is not the boot disk and answers 0.
-                    let capacity = device.capacity_sectors();
-                    // SAFETY: initialised, not yet installed.
-                    let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
-                    let boot_start = crate::bootdisk::boot_start(&mut read, capacity, "usb-msd");
-                    install_block_device(crate::block::BlockDevice::UsbMsd(device), boot_start);
+                Ok(device) => {
+                    // Installed whatever it is. A boot stick taken here
+                    // (after its boot-time init failed) still has `fsd` mount
+                    // the root beside its ESP, since `BLOCK_BOOT_START` reads
+                    // its table when asked; a stick passed through late on
+                    // Parallels is not the boot disk and answers 0.
+                    install_block_device(crate::block::BlockDevice::UsbMsd(device));
                     console::println!("Ouroboros kernel: usb-msd block device installed");
                     0
                 }
@@ -1942,10 +1930,22 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             if !block_access_allowed() {
                 return syscall_abi::BLOCK_ERR_DENIED;
             }
-            match unsafe { &*BLOCK.get() } {
-                Some(_) => unsafe { *BLOCK_BOOT_START.get() },
-                None => syscall_abi::BLOCK_ERR_NO_DEVICE,
-            }
+            let Some(device) = (unsafe { &mut *BLOCK.get() }) else {
+                return syscall_abi::BLOCK_ERR_NO_DEVICE;
+            };
+            // Matched against the table as it is now, never a start kept
+            // from the install: fsd's `erase` and `partition` rewrite the
+            // table, and steps 7 and 8 will write one that keeps the ESP, so
+            // the boot partition is the one the firmware named only while
+            // the table still holds it (the medium review of #377 found a
+            // start forgotten at every table write turning a kept ESP into
+            // a root candidate). A disk held at boot as unreadable (D6)
+            // answers by what it reads now. A read failing here is
+            // BLOCK_ERR_IO, which fsd's mount and format refuse on.
+            let capacity = device.capacity_sectors();
+            // SAFETY: as BLOCK_READ; one sector into a kernel buffer.
+            let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
+            crate::bootdisk::boot_start(&mut read, capacity).unwrap_or(syscall_abi::BLOCK_ERR_IO)
         }
         syscall_abi::BLOCK_INFO => {
             if !block_access_allowed() {

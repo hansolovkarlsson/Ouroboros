@@ -16,7 +16,6 @@
 //! the two that may.
 
 use core::arch::asm;
-use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// One sector, matching `syscall_abi::BLOCK_SECTOR_SIZE` (duplicated
@@ -45,9 +44,10 @@ static CLAIMED: AtomicBool = AtomicBool::new(false);
 /// its disk gate. Since 2026-10-27; until then `Disk` was a unit struct any
 /// code in fsd could name and write through (the high review of #361).
 pub struct Device {
-    /// Whether this server has rewritten the partition table this boot
-    /// ([`table_rewritten`](Self::table_rewritten)).
-    table_rewritten: Cell<bool>,
+    /// Private and empty: what keeps a `Device` from being made outside this
+    /// file. The device's state is the kernel's, the boot partition's start
+    /// included ([`boot_partition_start`](Self::boot_partition_start)).
+    _private: (),
 }
 
 impl Device {
@@ -55,7 +55,7 @@ impl Device {
     /// one an arm might write to reach the disk around its own handle,
     /// answers `None`, so it cannot be made to work by accident.
     pub fn claim() -> Option<Device> {
-        (!CLAIMED.swap(true, Ordering::Relaxed)).then_some(Device { table_rewritten: Cell::new(false) })
+        (!CLAIMED.swap(true, Ordering::Relaxed)).then_some(Device { _private: () })
     }
 
     /// A handle for one volume or one disk tool.
@@ -65,11 +65,10 @@ impl Device {
 
     /// Have the kernel rescan the USB ports and install a stick in this
     /// device's place (`MOUNT`, replace set): `Some(0)`, or the kernel's code
-    /// as it came. On `0` the new device's boot partition is asked afresh
-    /// ([`device_replaced`](Self::device_replaced)). Here, not through
-    /// `syscall4`, because a swap moves every `Disk`'s sectors to another
-    /// device: `None`, and no rescan, while any disk filesystem in `mounts` is
-    /// mounted, whose cached geometry would then describe the new disk. The
+    /// as it came. Here, not through `syscall4`, because a swap moves every
+    /// `Disk`'s sectors to another device: `None`, and no rescan, while any
+    /// disk filesystem in `mounts` is mounted, whose cached geometry would
+    /// then describe the new disk. The
     /// precondition is checked here, against the mount table the caller
     /// passes: the whole table by its type, so neither an empty slice nor
     /// part of one can be handed in, though a table made up for the call
@@ -78,44 +77,27 @@ impl Device {
         if mounts.iter().flatten().any(|m| m.fs().is_disk()) {
             return None;
         }
-        let code = block_svc(syscall_abi::MOUNT, 1, 0);
-        if code == 0 {
-            self.device_replaced();
-        }
-        Some(code)
-    }
-
-    /// Mark the partition table as rewritten by this server (`erase`,
-    /// `partition`), before the first sector is written: the kernel's
-    /// boot partition start was read from the table at boot, and after a
-    /// rewrite it could name a new, unrelated partition, which would then be
-    /// passed over (the medium review of #288). From then on this boot,
-    /// [`boot_partition_start`](Self::boot_partition_start) answers `None`.
-    pub fn table_rewritten(&self) {
-        self.table_rewritten.set(true);
-    }
-
-    /// The kernel installed another device in this one's place (fsd's own
-    /// `MOUNT` rescan): the old disk's [`table_rewritten`](Self::table_rewritten)
-    /// verdict is not the new one's, so a stick the kernel matched as the boot
-    /// disk answers its boot partition again.
-    fn device_replaced(&self) {
-        self.table_rewritten.set(false);
+        Some(block_svc(syscall_abi::MOUNT, 1, 0))
     }
 
     /// The start LBA of the partition the system booted from, when the kernel
     /// matched this device as the disk it is on, else `None`: the firmware
     /// named no partition, or the device is a fallback or a stick taken late
     /// (`BLOCK_BOOT_START`, one-disk step 4). A kernel without the call
-    /// answers an error, which is `None` too.
-    pub fn boot_partition_start(&self) -> Option<u64> {
-        if self.table_rewritten.get() {
-            return None;
-        }
+    /// answers an error, which is `None` too. Asked afresh at each mount and
+    /// format, never kept: the kernel matches the table as it stands at each
+    /// call, so a table `erase` or `partition` rewrote is answered as
+    /// rewritten, and fsd holds nothing a restart could lose (since
+    /// 2026-10-30). [`DiskError::Io`] when the kernel's read of the table
+    /// failed: a failing disk is not one without the boot partition, so
+    /// `mount` and `format` refuse rather than take the ESP for the root.
+    pub fn boot_partition_start(&self) -> Result<Option<u64>, DiskError> {
         match block_svc(syscall_abi::BLOCK_BOOT_START, 0, 0) {
-            0 => None,
-            code if code >= syscall_abi::FS_ERR_MIN => None,
-            start => Some(start),
+            0 => Ok(None),
+            // Before the band test, which it is inside.
+            syscall_abi::BLOCK_ERR_IO => Err(DiskError::Io),
+            code if code >= syscall_abi::FS_ERR_MIN => Ok(None),
+            start => Ok(Some(start)),
         }
     }
 }

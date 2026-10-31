@@ -145,13 +145,19 @@ pub(crate) fn is_boot_disk(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, ca
     parttable::is_boot_disk(&get()?, read, capacity)
 }
 
-/// The boot partition's start LBA when the disk read through `read` holds it,
-/// else 0: what `BLOCK_BOOT_START` answers for a device about to be
-/// installed. For `MOUNT`'s rescan, which installs a stick whatever it is,
-/// so a boot stick taken there after a failed boot-time init still tells
-/// `fsd` (the high review of #288).
-pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64, name: &str) -> u64 {
-    start_if(is_boot_disk_retrying(read, capacity, name))
+/// What `BLOCK_BOOT_START` answers, read from the installed device's table at
+/// every call (since 2026-10-30): [`parttable::boot_start`], the boot
+/// partition's start while the disk, as `fsd` reads it, holds it, else 0, and
+/// 0 when the firmware named no partition. A rewritten table is answered as
+/// it now stands, a boot stick `MOUNT`'s rescan takes after a failed
+/// boot-time init still tells `fsd` (the high review of #288), and a failed
+/// read is an error, never 0, so `fsd` does not take a failing boot disk for
+/// one without the ESP. Asked again once on a failed read, as D6 asks at
+/// boot (the third medium review of #377), but not logged: the call is
+/// `fsd`'s, which says what it does with the error (the second).
+pub(crate) fn boot_start(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, capacity: u64) -> Result<u64, parttable::Unreadable> {
+    let Some(boot) = get() else { return Ok(0) };
+    parttable::boot_start(&boot, read, capacity).or_else(|_| parttable::boot_start(&boot, read, capacity))
 }
 
 /// [`is_boot_disk`], asked again once when it answered
@@ -182,8 +188,8 @@ pub(crate) fn is_boot_disk_retrying(
 }
 
 /// The boot partition's start LBA when [`is_boot_disk`] answered yes, else
-/// 0: the one spelling of `BLOCK_BOOT_START`'s answer, for the boot path and
-/// the rescan alike (the medium review of #288 found two copies). A firmware
+/// 0, for the boot path's install line (the medium review of #288 found two
+/// copies). `BLOCK_BOOT_START` itself is [`boot_start`]. A firmware
 /// counting in blocks other than 512 bytes cannot be answered wrongly here:
 /// its LBAs would not match the disk's table, and the disk is no boot disk.
 pub(crate) fn start_if(matched: Option<Boot>) -> u64 {
