@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The disk reads of a driven boot, counted by QEMU: the one copy, for the
 rigs that grade what fsd reads (test-listing-walk.py, test-spawn-reads.py,
-test-write-walk.py, test-dir-scan.py).
+test-write-walk.py) and, with `writes`, what it writes too (test-dir-scan.py,
+test-free-chain.py).
 
     python3 scripts/disktrace.py --self-test    (run by `make test`)
 
@@ -48,7 +49,7 @@ READ = re.compile(rb"virtio_blk_handle_read .*?sector (\d+) nsectors (\d+)")
 WRITE = re.compile(rb"virtio_blk_handle_write .*?sector (\d+) nsectors (\d+)")
 
 
-def boot(rig, name, source, image, steps, inspect=None, check=None, writes=None):
+def boot(rig, name, source, image, steps, inspect=None, check=None, writes=None, order=None):
     """Boot a copy of `source` (the stale-image guard reads build/`image`),
     drive `steps`, and return the boot's answer, (problems, transcript lines,
     sectors read by sector number), or None when QEMU's firmware never
@@ -69,7 +70,8 @@ def boot(rig, name, source, image, steps, inspect=None, check=None, writes=None)
     returns the problems in the boot's transcript and reads. The boot is
     logged before either runs. When `writes` (a Counter) is given, QEMU
     traces writes too and it is filled with the sectors written, before
-    `check` runs."""
+    `check` runs; when `order` (a list) is given too, it is filled with the
+    sectors written in the order QEMU handled them, a sector a time."""
     tag = f"{rig}-{name}"
     copy = os.path.join(ROOT, "build", f"{tag}.img")
     log = os.path.join(ROOT, "build", f"{tag}.log")
@@ -121,6 +123,8 @@ def boot(rig, name, source, image, steps, inspect=None, check=None, writes=None)
         for sector, n in WRITE.findall(text):
             for s in range(int(n)):
                 writes[int(sector) + s] += 1
+                if order is not None:
+                    order.append(int(sector) + s)
     if not count:
         problems.append("no virtio_blk_handle_read events: the observer sees nothing")
     lines = out.split("\n")

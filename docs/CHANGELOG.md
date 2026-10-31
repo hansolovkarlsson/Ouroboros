@@ -1562,6 +1562,28 @@ chosen by, `fsd: the boot partition is on this disk, at LBA 2048`, and
 boot and not after the rewrite, and the new table's signature read on the
 host. From the medium review of #362.
 
+**exFAT frees a chained file a sector at a time (2026-10-31).** A removal,
+a replacing `mv` or a truncation of a FAT-chained file (every file fsd
+writes) read and wrote a bitmap sector and wrote a FAT sector for every
+cluster it freed, three round trips a cluster on the Pi's USB stick, so an
+`rm` of a large file could pass the supervisor's wedge limit and have fsd
+restarted in the middle of the free. The walk now keeps the FAT sector it is
+zeroing (the FAT cache itself) and the bitmap sector it is clearing, and
+writes the FAT sector when it moves to another or stops, the bitmap sector
+written first each time, so a free cut short leaves a stale link in a free
+cluster, which exFAT ignores, never a zeroed entry with its bit still set.
+A chain fsd's first-fit allocator laid down in order costs a write or two a
+sector, and two files grown in turn share theirs. Every FAT entry is still
+set in one place (`patch_fat_entry`, under `write_fat_entry` and the free
+alike), and a contiguous run's bits are cleared the same way, each sector
+found once. The new `make test-free-chain` removes a 1 MiB file and an
+interleaved pair, 280 clusters: 10 FAT writes, 10 bitmap writes and 3
+bitmap reads, where `main` made 280 of each, and the writes in the order
+that puts every bit on the disk before its FAT entry's zero
+(`disktrace.py` keeps the write order now). Deferred by Hans on 2026-10-23,
+from the altitude review of `fix/exfat-vendor-alloc`; the order and the one
+FAT writer are the medium review of #379.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

@@ -4420,7 +4420,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bound from the size: BIG's 2 MiB was filled in one request on QEMU and
   the append went through, no wedge restart. So C holds at megabytes; the
   open risk is gigabytes, unmeasured.
-- **exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
+- ~~**exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
   chained walk reads and writes a bitmap sector and writes a FAT sector for
   every cluster, three round trips a cluster on the Pi's USB stick, and every
   file fsd writes is chained (a camera's file too, after its first append).
@@ -4442,7 +4442,34 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   the source's runs, since 2026-10-24); those walks read the FAT through its
   cache, about one sector a 128 clusters, so the free's three round trips a
   cluster are the cost, and the walk could be shared with the free when
-  this item is done.
+  this item is done.~~ *Done 2026-10-31:* the chained walk keeps one FAT
+  sector (the FAT cache) and one bitmap sector, writing the bitmap sector
+  before each FAT sector so no bit lags its FAT zero, and a run's bits find
+  their sector once, not a cluster at a time; `make test-free-chain` counts
+  the writes of an `rm` of 280 clusters, 10 FAT and 10 bitmap where main
+  made 280 of each, and requires their order. The replacing `mv`'s two full
+  walks before its free are not shared with it: they read through the FAT
+  cache, about one sector a 128 clusters, and are left.
+- **exFAT's allocation writes a FAT sector for every entry it sets.**
+  `alloc_cluster` writes the new cluster's end of chain and the link to it
+  each through `write_fat_entry`, a sector write apiece, so `cp` of 1 MiB
+  onto exFAT (256 clusters of 4 KiB) writes the FAT at least 256 times where
+  a few sectors hold every entry; the allocator's bitmap write is one a
+  cluster too. Most writes come 2 KiB a request, under a cluster each, but
+  a gap fill allocates up to `MAX_GAP_FILL` (1 MiB) in one request: it was
+  measured inside the wedge limit on QEMU (2026-10-22, the ValidDataLength
+  item above), not on the Pi's stick. The free's pattern would serve: entries set in
+  the cache by `patch_fat_entry` and the sector written when the walk
+  leaves it, the bitmap first. From the medium review of #379, 2026-10-31.
+  `ensure_chained` is the same cost: the first append to a contiguous file
+  (a camera's video on the stick, thousands of clusters) links it on a
+  `write_fat_entry`, a FAT sector write, a cluster, so it can pass the
+  wedge limit with the chain half linked. The shape the second medium
+  review of #379 proposed fixes every writer at once: a `dirty` flag on the
+  FAT cache, the sector written when the cache moves to another or the
+  request ends, with an ordering hook so a writer's bitmap sector goes
+  first (the free's `flush_free` is that rule for one caller). Not built
+  with the free, to keep #379 the size of the free's bug.
 - **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s
