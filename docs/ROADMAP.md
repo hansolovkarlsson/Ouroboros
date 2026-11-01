@@ -4442,7 +4442,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   end of chain is refused; neither is reached by a boot. `make
   test-batch-refused`'s GAP refuses a gap fill's data write, SET and REPLACE
   a set write after the batch, and fsck_exfat passes after the boot.
-- **exFAT's FAT batch is a mode flag, and its misuse a disk error.**
+- ~~**exFAT's FAT batch is a mode flag, and its misuse a disk error.**
   `in_fat_batch` sets `fat_batch` on `Fs`, which changes what
   `write_fat_entry`, `fat_sector`, `alloc_cluster` and `clear_bit` do, and
   the two rules the batch rests on (nothing frees inside one; nothing leaves
@@ -4452,7 +4452,19 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   holding `&mut Fs`, the only way to set entries in a batch and with no free
   among its methods, would make the misuse unspellable
   (`unspellable-postmortem.md`), and an error of fsd's own would name what
-  is left. Asked by the second and third medium reviews of #380.
+  is left. Asked by the second and third medium reviews of #380.~~
+  *Done 2026-11-01:* `batch::FatBatch`, in a module of its own, holds the
+  only `&mut Fs` while a batch runs, is made only by `batch::run`, and sets
+  every FAT entry a batch sets; `write_at`'s walk, outside it, reads through
+  `&Fs` and can take a cluster, step the file's chain, chain a contiguous
+  run, write data sectors and leave the write cursor. Nine spellings of the
+  misuse (a free, a nested batch, `Fs`'s FAT writer, allocator or disk, an
+  entry or the cut cluster set by hand, a `FatBatch` by hand) fail to build,
+  checked by `check-disk-handle.py` on every `make test`. The write cursor
+  a body leaves is not held by the type. The refusals stay as tripwires no
+  path reaches, each printing a line of fsd's own; the client still sees
+  `FS_ERR_IO`, since a wire code of fsd's own would be a protocol change
+  for a path nothing reaches.
 - **exFAT's allocator rescans from the bitmap's first byte outside a batch.**
   Inside a FAT batch the scan goes on from its last find; every other
   allocation (`alloc_zeroed` for `mkdir` and a directory's growth, the

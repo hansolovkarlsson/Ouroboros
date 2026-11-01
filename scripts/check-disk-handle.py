@@ -43,6 +43,17 @@ that answers `Some` to a second caller (a run-time promise), and `unsafe`
 code in main.rs or disk.rs, the two files that may hold it. Two things no
 build case can see are read from the source instead (text_checks): that only
 `Device::disk` returns a `Disk`, and that no arm names `Device`.
+
+Since 2026-11-01 it checks exFAT's FAT batch the same way (BATCH_MUTANTS):
+`batch::FatBatch` holds the only `&mut Fs` while a batch runs and sets every
+FAT entry the batch sets, so work outside its module cannot free, run a
+batch inside a batch, reach `Fs`'s own FAT writer, allocator or disk, set an
+entry or name the cut cluster by hand, or make a `FatBatch`. Each is spelled
+as a batch body or an `Fs` method appended to exfat.rs and must fail at its
+line with the error named; the high review of #383 asked that the claim be
+a check rather than a sentence in the changelog. What it cannot see: the
+write cursor a body leaves (`set_write_cursor` takes any), and anything
+written inside the batch module itself, which holds `&mut Fs`.
 """
 import os
 import re
@@ -151,7 +162,28 @@ def mutants():
     for module in fs_modules():
         m.append(("a Disk zeroed in %s.rs" % module, module,
                   "fn mutant() -> %s { unsafe { core::mem::zeroed() } }" % DISK, ("unsafe",)))
+    for name, code, error in BATCH_MUTANTS:
+        m.append((name, "exfat", code, ("code", error)))
     return m
+
+
+# exFAT's FAT batch (exfat.rs's `batch` module): work outside the module,
+# written as a batch body or an `Fs` method, each on one line so rustc
+# reports it at the line appended.
+BATCH = "impl batch::FatBatch<'_> { fn mutant(&mut self, c: u32) -> Result<(), Error> { %s } }"
+BATCH_MUTANTS = [
+    ("a free through the batch's field", BATCH % "self.fs.free_data(c, false, 512)", "E0616"),
+    ("a free through the batch's &Fs", BATCH % "self.fs().free_data(c, false, 512)", "E0596"),
+    ("Fs's FAT writer inside a batch", BATCH % "self.fs().write_fat_entry(c, 0)", "E0596"),
+    ("Fs's allocator inside a batch", BATCH % "self.fs().alloc_cluster().map(|_| ())", "E0596"),
+    ("a raw disk write inside a batch", BATCH % "self.fs().disk.write_sector(0, &[0u8; SECTOR_SIZE])", "E0596"),
+    ("a FAT entry set by hand in a batch", BATCH % "self.write_fat_entry(c, 0)", "E0624"),
+    ("a cut cluster named by hand", BATCH % "self.extend_chain(c).map(|_| ())", "E0624"),
+    ("a batch inside a batch",
+     "impl Fs { fn mutant(&mut self) -> Result<u32, Error> { batch::run(self, |b| { let _ = self.write_chain(&[]); b.alloc_cluster() }) } }",
+     "E0500"),
+    ("a FatBatch made by hand", "fn mutant(fs: &mut Fs) { let _ = batch::FatBatch { fs }; }", "E0451"),
+]
 
 
 def make_copy():
