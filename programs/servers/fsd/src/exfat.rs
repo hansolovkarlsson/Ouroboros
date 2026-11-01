@@ -271,13 +271,20 @@ const NOT_ROLLED_BACK: &str = "fsd: a failed mv could not be rolled back - a fsc
 /// ([`Fs::insert_set`]).
 const SET_LEFT: &str = "fsd: a failed create left part of an entry set - a fsck repairs it\r\n";
 
-/// fsd's console line when its own code breaks a FAT batch's rule: a FAT
-/// sector left holding entries not yet written outside a batch
-/// ([`Fs::fat_sector`]), or a free while the allocator holds bits not yet
-/// written ([`Fs::clear_bit`]). Each refusal answers an I/O error, which
-/// the client cannot tell from a failing disk; this line says it is fsd's.
-/// Reached by no path since 2026-11-01 ([`batch::FatBatch`]).
-const BATCH_RULE_BROKEN: &str = "fsd: exFAT broke a FAT batch rule - an fsd bug, not the disk\r\n";
+/// fsd's console line when its own code leaves a FAT sector holding
+/// entries not yet written where the next FAT access cannot write it in
+/// order: read past outside a batch ([`Fs::fat_sector`], where only the
+/// free sets entries, which writes its sector before it moves), or held at
+/// a batch's start ([`batch::run`]). The refusal answers an I/O error,
+/// which the client cannot tell from a failing disk; this line says it is
+/// fsd's. Reached by no path since 2026-11-01; with `batch::run`'s end
+/// flush removed it printed at each later write.
+const FAT_LEFT_UNWRITTEN: &str = "fsd: exFAT left a FAT sector unwritten - an fsd bug, not the disk\r\n";
+
+/// fsd's console line when a free runs while the allocator holds a bitmap
+/// sector with bits not yet written ([`Fs::clear_bit`]): inside a FAT
+/// batch, which has no free ([`batch::FatBatch`]). Reached by no path.
+const FREE_IN_BATCH: &str = "fsd: exFAT freed inside a FAT batch - an fsd bug, not the disk\r\n";
 
 /// The most runs of consecutive clusters [`Fs::root_runs`] records the
 /// root's chain in. A root grows a cluster at a time, each a new run when
@@ -440,25 +447,35 @@ mod gate {
 }
 
 /// A FAT batch: the one way to take clusters and set FAT entries inside a
-/// request that takes many, and with no free among its methods. In a module
-/// of its own, as [`gate`] is, so its field is out of reach of the rest of
-/// this file: a `FatBatch` is made only by [`run`](batch::run), and the work
-/// it does is written against its methods alone, which read the volume
-/// through a shared `&Fs` (no `&self` method of `Fs` can reach the disk,
-/// since every read and write needs `&mut`), write a file's data sectors,
-/// take a cluster, read or set a FAT entry, and move the write cursor.
+/// request that takes many, with no free among its methods. In a module of
+/// its own, as [`gate`] is, so its field is out of reach of the rest of this
+/// file: a `FatBatch` is made only by [`run`](batch::run), and every FAT
+/// entry a batch sets is set here. Work outside the module, `write_at`'s
+/// walk, reads the volume through a shared `&Fs` (no `&self` method of `Fs`
+/// can reach the disk, since every read and write needs `&mut`) and does
+/// the rest through the batch's methods: take a cluster, step a file's
+/// chain (extending it at its end), chain a contiguous run, write a file's
+/// data sectors, and leave the write cursor.
 ///
 /// Until 2026-11-01 the batch was a `fat_batch` flag on `Fs`, which changed
 /// what `write_fat_entry`, `fat_sector`, `alloc_cluster` and `clear_bit`
-/// did, and its two rules (nothing frees inside one; nothing leaves a
-/// FAT sector with entries not yet written outside one) were held by
-/// refusals answering an I/O error, so a later change breaking either
-/// showed the user a failing disk (the second and third medium reviews of
-/// #380; `unspellable-postmortem.md`). Now a free inside a batch, a batch
-/// inside a batch (the body holds the only `&mut Fs`, inside the batch) and
-/// a FAT entry set in a batch by `Fs`'s own writer do not compile. The two
-/// refusals stay as tripwires, reached by no path, which print
-/// [`BATCH_RULE_BROKEN`].
+/// did, and its two rules (nothing frees inside one; nothing leaves a FAT
+/// sector with entries not yet written outside one) were held by refusals
+/// answering an I/O error, so a later change breaking either showed the
+/// user a failing disk (the second and third medium reviews of #380;
+/// `unspellable-postmortem.md`). Now, outside this module, a free inside a
+/// batch, a batch inside a batch (the work holds the only `&mut Fs`), `Fs`'s
+/// own FAT writer or allocator inside one, an entry set to any value by
+/// hand, the cut cluster named by hand, a write to a sector that is not a
+/// file's data, and a `FatBatch` made by hand do not compile:
+/// `scripts/check-disk-handle.py` tries each on every `make test`. What
+/// stays the caller's to get right is the cursor it leaves
+/// ([`set_write_cursor`](batch::FatBatch::set_write_cursor)) and, for
+/// [`file_step`](batch::FatBatch::file_step), that it is still on the
+/// file's own clusters. The refusals stay as tripwires, reached by no path,
+/// and print a line of fsd's own ([`FAT_LEFT_UNWRITTEN`],
+/// [`FREE_IN_BATCH`]); so does [`run`](batch::run) when it is entered with
+/// a FAT sector or bitmap sector still held (the high review of #383).
 ///
 /// The FAT entries a batch sets are written a sector at a time, and the
 /// bits its allocator sets a bitmap sector at a time, where each was a
@@ -474,14 +491,14 @@ mod gate {
 /// after the batch, so the disk gets bits, then links, then the set. A bit
 /// is on the disk before any link to its cluster: [`Fs::flush_fat`] writes
 /// the allocator's bitmap sector before any FAT sector. And a link is on the
-/// disk only after the entry it names: [`extend_chain`](batch::FatBatch::extend_chain)
-/// sets the new cluster's end of chain before the link to it, and a link in
-/// another sector is set only after the cache has left the new cluster's,
-/// writing it. So a refused flush never leaves a link on the disk into a
-/// stale entry (a contiguous run's links, which `link_run` sets over entries
-/// the volume leaves undefined, are read by no walk until the set says the
-/// file is chained); `make test-alloc-batch`'s model asserts it of every
-/// link. From the medium reviews of #379, 2026-10-31.
+/// disk only after the entry it names: `extend_chain` sets the new
+/// cluster's end of chain before the link to it, and a link in another
+/// sector is set only after the cache has left the new cluster's, writing
+/// it. So a refused flush never leaves a link on the disk into a stale entry
+/// (a contiguous run's links, which `link_run` sets over entries the volume
+/// leaves undefined, are read by no walk until the set says the file is
+/// chained); `make test-alloc-batch`'s model asserts it of every link. From
+/// the medium reviews of #379, 2026-10-31.
 ///
 /// A batch that fails gives back every cluster its allocator handed out
 /// ([`Fs::give_back`]), by its bit alone: no set names one, since every
@@ -493,7 +510,7 @@ mod gate {
 /// file's size (the high review of #380). When the work and the flush both
 /// fail the work's error is answered.
 mod batch {
-    use super::{ChainCursor, Error, Fs, Holder, Taken, END_OF_CHAIN, SECTOR_SIZE};
+    use super::{ChainCursor, Error, Fs, Holder, Taken, END_OF_CHAIN, FAT_LEFT_UNWRITTEN, SECTOR_SIZE};
     use crate::disk::DiskError;
 
     pub(super) struct FatBatch<'f> {
@@ -501,8 +518,19 @@ mod batch {
     }
 
     /// Run `work` as a FAT batch on `fs`, then write what it left pending,
-    /// and give back what it took if either failed.
+    /// and give back what it took if either failed. Entered with a FAT
+    /// sector holding entries not yet written, or the allocator holding a
+    /// bitmap sector, it refuses and says so: the batch's first FAT write
+    /// would write that sector through [`Fs::flush_fat`], the allocator's
+    /// bits first, which for a free cut short puts zeroed entries on the
+    /// disk ahead of its cleared bits. Reached by no path: every writer
+    /// outside a batch writes its sectors before it returns (the high
+    /// review of #383).
     pub(super) fn run<R>(fs: &mut Fs, work: impl FnOnce(&mut FatBatch<'_>) -> Result<R, Error>) -> Result<R, Error> {
+        if fs.fat_cache.as_ref().is_some_and(|c| c.dirty) || fs.alloc_bits.is_some() {
+            crate::print(FAT_LEFT_UNWRITTEN);
+            return Err(Error::Io(DiskError::Io));
+        }
         fs.taken = Taken::NONE;
         let made = work(&mut FatBatch { fs: &mut *fs });
         let pending = fs.fat_cache.as_ref().filter(|c| c.dirty).map(|c| c.lba);
@@ -538,17 +566,98 @@ mod batch {
             Ok(cluster)
         }
 
-        /// Set `cluster`'s FAT entry in the cache, written with its sector's
-        /// others when the batch moves to another sector or ends.
-        pub(super) fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
-            self.leave_for(cluster)?;
-            self.fs.patch_fat_entry(cluster, value).map(|_| ())
+        /// Allocate and write a fresh FAT-chained cluster chain holding
+        /// `data`, returning its first cluster (`0` for empty `data`). The
+        /// exFAT parallel of `fat32::write_chain`: each cluster is
+        /// bitmap-claimed and FAT-end-marked by `alloc_cluster`, then linked
+        /// to its predecessor.
+        ///
+        /// Out of space or an I/O error part way, nothing names the part
+        /// already linked, and the batch gives it back by its bits; it
+        /// leaked until 2026-10-19, and was then walked on the disk until
+        /// 2026-11-01.
+        pub(super) fn write_chain(&mut self, data: &[u8]) -> Result<u32, Error> {
+            let cluster_bytes = self.fs.cluster_bytes() as usize;
+            let mut first = 0u32;
+            let mut prev = 0u32;
+            for (i, piece) in data.chunks(cluster_bytes).enumerate() {
+                let cluster = self.alloc_cluster()?;
+                if i == 0 {
+                    first = cluster;
+                } else {
+                    self.write_fat_entry(prev, cluster)?;
+                }
+                self.write_cluster(cluster, piece)?;
+                prev = cluster;
+            }
+            Ok(first)
         }
 
-        /// The next cluster of `cluster`'s chain ([`Fs::next_cluster`]).
-        pub(super) fn next_cluster(&mut self, cluster: u32) -> Result<Option<u32>, Error> {
+        /// The cluster after `cluster` in a file being written: the next of
+        /// its chain while that is still the file's own (`owned`), else one
+        /// appended. A link to one of the volume's own clusters is damage,
+        /// refused before the write reaches it: it wrote the file's bytes
+        /// into the bitmap (the fourth high review of 2026-10-24).
+        /// [`Fs::sector_of`] would refuse the sector, but a walk passes a
+        /// cluster it does not write, and the step after it would link a new
+        /// cluster from the bitmap's FAT entry.
+        ///
+        /// `of_file` says `cluster` is the file's own, not one this write
+        /// took: a cluster appended after it is then the first, and
+        /// `cluster` the one a failed batch cuts its link from
+        /// ([`Taken::tail`]). Only the first such step names it.
+        pub(super) fn file_step(&mut self, cluster: u32, owned: bool, of_file: bool) -> Result<u32, Error> {
             self.leave_for(cluster)?;
-            self.fs.next_cluster(cluster)
+            match self.fs.next_cluster(cluster)? {
+                Some(next) if owned && self.fs.is_system(next) => Err(Error::Io(DiskError::Io)),
+                Some(next) if owned => Ok(next),
+                _ => {
+                    if of_file && self.fs.taken.tail.is_none() {
+                        self.fs.taken.tail = Some(cluster);
+                    }
+                    self.extend_chain(cluster)
+                }
+            }
+        }
+
+        /// Append one freshly allocated cluster after `tail`, returning it -
+        /// the exFAT `fat32::extend_chain`.
+        fn extend_chain(&mut self, tail: u32) -> Result<u32, Error> {
+            let new = self.alloc_cluster()?; // bitmap + FAT-end
+            self.write_fat_entry(tail, new)?;
+            Ok(new)
+        }
+
+        /// Link the `n` clusters of the contiguous run from `first` as a FAT
+        /// chain, and leave the write cursor on its last cluster.
+        /// [`Fs::run_to_chain`] has found the run whole in the heap and clear
+        /// of the volume's own clusters.
+        pub(super) fn link_run(&mut self, first: u32, n: u32) -> Result<(), Error> {
+            (0..n).try_for_each(|i| {
+                let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
+                self.write_fat_entry(first + i, value)
+            })?;
+            // The write that follows starts from the run's last cluster, not
+            // its head: from the head it read every FAT sector just written
+            // again to reach it, one round trip a sector, about a thousand on
+            // a 4 GiB camera file (the high review of #380). Set inside the
+            // batch, so a refused flush drops it with the rest (`flush_fat`).
+            let cluster_bytes = self.fs.cluster_bytes() as usize;
+            self.set_write_cursor(ChainCursor {
+                file_cluster: first,
+                contiguous: false,
+                cluster: first + n - 1,
+                cluster_pos: (n as usize - 1) * cluster_bytes,
+            });
+            Ok(())
+        }
+
+        /// Set `cluster`'s FAT entry in the cache, written with its sector's
+        /// others when the batch moves to another sector or ends. Private:
+        /// every entry a batch sets is set by this module's own work.
+        fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), Error> {
+            self.leave_for(cluster)?;
+            self.fs.patch_fat_entry(cluster, value).map(|_| ())
         }
 
         /// Write the cached FAT sector, when it holds entries not yet
@@ -567,6 +676,22 @@ mod batch {
                 }
                 _ => Ok(()),
             }
+        }
+
+        /// Write data cluster `cluster` whole: `bytes`, at most a cluster,
+        /// then zeros. Its first sector is found once
+        /// ([`Fs::sector_of`]), not once a sector (the high review of #383).
+        fn write_cluster(&mut self, cluster: u32, bytes: &[u8]) -> Result<(), Error> {
+            let lba = self.fs.sector_of(cluster, Holder::Data)? as u64;
+            let mut pieces = bytes.chunks(SECTOR_SIZE);
+            for s in 0..self.fs.sectors_per_cluster as u64 {
+                let mut sector = [0u8; SECTOR_SIZE];
+                if let Some(piece) = pieces.next() {
+                    sector[..piece.len()].copy_from_slice(piece);
+                }
+                self.fs.disk.write_sector(lba + s, &sector)?;
+            }
+            Ok(())
         }
 
         /// Write sector `sector` of data cluster `cluster`, which
@@ -590,101 +715,24 @@ mod batch {
             Ok(self.fs.sector_of(cluster, Holder::Data)? as u64 + sector)
         }
 
-        /// Leave the write cursor on a cluster of the chain the batch built:
-        /// a refused flush drops it ([`Fs::flush_fat`]), and so does a
-        /// give-back.
+        /// Leave the write cursor, which must name a cluster of the chain
+        /// the batch walked or built, at its place in the file: the one
+        /// thing here the type does not hold, since a cursor off its chain
+        /// sends the next write into another file's cluster. A refused
+        /// flush drops it ([`Fs::flush_fat`]), and so does a give-back.
         pub(super) fn set_write_cursor(&mut self, cursor: ChainCursor) {
             self.fs.write_cursor = Some(cursor);
-        }
-
-        /// Name `cluster`, the file's own, as the one the batch's first
-        /// cluster is linked on from ([`Taken::tail`]).
-        pub(super) fn set_tail(&mut self, cluster: u32) {
-            self.fs.taken.tail = Some(cluster);
         }
     }
 }
 
-/// The work of exFAT's FAT batches, written against
-/// [`batch::FatBatch`]'s methods alone.
+/// The work of exFAT's FAT batches that lies outside [`batch`], written
+/// against [`batch::FatBatch`]'s methods alone.
 impl batch::FatBatch<'_> {
-    /// Allocate and write a fresh FAT-chained cluster chain holding `data`,
-    /// returning its first cluster (`0` for empty `data`). The exFAT parallel of
-    /// `fat32::write_chain`: each cluster is bitmap-claimed and FAT-end-marked by
-    /// `alloc_cluster`, then linked to its predecessor.
-    ///
-    /// Out of space or an I/O error part way, nothing names the part already
-    /// linked, and the batch gives it back by its bits ([`batch`]); it
-    /// leaked until 2026-10-19, and was then walked on the disk until
-    /// 2026-11-01.
-    fn write_chain(&mut self, data: &[u8]) -> Result<u32, Error> {
-        if data.is_empty() {
-            return Ok(0);
-        }
-        let sectors_per_cluster = self.fs().sectors_per_cluster;
-        let cluster_bytes = sectors_per_cluster as usize * SECTOR_SIZE;
-        let num = data.len().div_ceil(cluster_bytes);
-        let mut first = 0u32;
-        let mut prev = 0u32;
-        let mut written = 0usize;
-        for i in 0..num {
-            let cluster = self.alloc_cluster()?;
-            if i == 0 {
-                first = cluster;
-            } else {
-                self.write_fat_entry(prev, cluster)?;
-            }
-            for s in 0..sectors_per_cluster {
-                let mut sector = [0u8; SECTOR_SIZE];
-                let start = written;
-                let end = (written + SECTOR_SIZE).min(data.len());
-                if start < end {
-                    sector[..end - start].copy_from_slice(&data[start..end]);
-                }
-                self.write_data(cluster, s as u64, &sector)?;
-                written += SECTOR_SIZE;
-            }
-            prev = cluster;
-        }
-        Ok(first)
-    }
-
-    /// The cluster after `cluster` in a file being written: the next of its
-    /// chain while that is still the file's own (`owned`), else one appended.
-    /// A link to one of the volume's own clusters is damage, refused before
-    /// the write reaches it: it wrote the file's bytes into the bitmap (the
-    /// fourth high review of 2026-10-24). [`Fs::sector_of`] would refuse the
-    /// sector, but a walk passes a cluster it does not write, and the step
-    /// after it would link a new cluster from the bitmap's FAT entry.
-    ///
-    /// `of_file` says `cluster` is the file's own, not one this write took:
-    /// a cluster appended after it is then the first, and `cluster` the one
-    /// a failed batch cuts its link from ([`Taken::tail`]).
-    fn file_step(&mut self, cluster: u32, owned: bool, of_file: bool) -> Result<u32, Error> {
-        match self.next_cluster(cluster)? {
-            Some(next) if owned && self.fs().is_system(next) => Err(Error::Io(DiskError::Io)),
-            Some(next) if owned => Ok(next),
-            _ => {
-                if of_file {
-                    self.set_tail(cluster);
-                }
-                self.extend_chain(cluster)
-            }
-        }
-    }
-
-    /// Append one freshly allocated cluster after `tail`, returning it - the
-    /// exFAT `fat32::extend_chain`.
-    fn extend_chain(&mut self, tail: u32) -> Result<u32, Error> {
-        let new = self.alloc_cluster()?; // bitmap + FAT-end
-        self.write_fat_entry(tail, new)?;
-        Ok(new)
-    }
-
     /// Convert a contiguous (`NoFatChain`) allocation into a FAT chain in
-    /// place, so it can be extended by `extend_chain`, inside the write's
-    /// batch ([`Fs::run_to_chain`] says what is linked, and refuses damage).
-    /// The caller then clears the entry's `NoFatChain` flag (which
+    /// place, so it can be extended, inside the batch
+    /// ([`Fs::run_to_chain`] says what is linked, and refuses damage). The
+    /// caller then clears the entry's `NoFatChain` flag (which
     /// `patch_stream_ext` does). No-op if already chained. The bitmap is
     /// unaffected (the clusters stay allocated).
     fn ensure_chained(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
@@ -694,27 +742,6 @@ impl batch::FatBatch<'_> {
         }
     }
 
-    /// Link the `n` clusters of the contiguous run from `first` as a FAT
-    /// chain, and leave the write cursor on its last cluster.
-    fn link_run(&mut self, first: u32, n: u32) -> Result<(), Error> {
-        (0..n).try_for_each(|i| {
-            let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
-            self.write_fat_entry(first + i, value)
-        })?;
-        // The write that follows starts from the run's last cluster, not
-        // its head: from the head it read every FAT sector just written
-        // again to reach it, one round trip a sector, about a thousand on
-        // a 4 GiB camera file (the high review of #380). Set inside the
-        // batch, so a refused flush drops it with the rest (`flush_fat`).
-        let cluster_bytes = self.fs().cluster_bytes() as usize;
-        self.set_write_cursor(ChainCursor {
-            file_cluster: first,
-            contiguous: false,
-            cluster: first + n - 1,
-            cluster_pos: (n as usize - 1) * cluster_bytes,
-        });
-        Ok(())
-    }
 
     /// [`write_at`](Fs::write_at)'s FAT batch: `entry`'s chain made
     /// chained, walked and extended to hold `data` at `offset` (zeros from
@@ -762,14 +789,14 @@ impl batch::FatBatch<'_> {
         let (mut cluster, pos) = ChainCursor::start(self.fs().write_cursor, head_cluster, false, write_start as usize);
         let mut cluster_pos = pos as u64;
         while cluster_pos + cluster_bytes <= write_start {
-            cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned, had_clusters && self.fs().taken.tail.is_none())?;
+            cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned, had_clusters)?;
             cluster_pos += cluster_bytes;
         }
 
         let mut pos = write_start;
         while pos < write_end {
             while pos >= cluster_pos + cluster_bytes {
-                cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned, had_clusters && self.fs().taken.tail.is_none())?;
+                cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned, had_clusters)?;
                 cluster_pos += cluster_bytes;
             }
             let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
@@ -812,7 +839,6 @@ impl batch::FatBatch<'_> {
         });
         Ok(head_cluster)
     }
-
 }
 
 pub struct Fs {
@@ -1559,7 +1585,7 @@ impl Fs {
     /// (the high review of #380).
     fn fat_sector(&mut self, lba: u64) -> Result<&[u8; SECTOR_SIZE], Error> {
         if self.fat_cache.as_ref().is_some_and(|c| c.dirty && c.lba != lba) {
-            crate::print(BATCH_RULE_BROKEN);
+            crate::print(FAT_LEFT_UNWRITTEN);
             self.fat_cache = None;
             self.read_cursor = None;
             self.write_cursor = None;
@@ -2557,9 +2583,13 @@ impl Fs {
         // write would undo; and the batch's scan starts past bits a free
         // would clear. A batch cannot free (`batch::FatBatch` has no free),
         // and the allocator holds a sector only inside one, so this is
-        // reached by no path; it says so if fsd ever breaks the rule.
+        // reached by no path; it says so if fsd ever breaks the rule. It
+        // sees a batch only once its allocator holds a sector: a free
+        // before a batch's first allocation, or in a batch that takes
+        // none (`link_run`'s), is not seen here, and the type is what
+        // stops it (until 2026-11-01 a flag on `Fs` was asked here).
         if self.alloc_bits.is_some() {
-            crate::print(BATCH_RULE_BROKEN);
+            crate::print(FREE_IN_BATCH);
             return Err(Error::Io(DiskError::Io));
         }
         if c < 2 || ((c - 2) / 8) as u64 >= self.bitmap_bytes {
@@ -3086,10 +3116,7 @@ impl Fs {
     /// ([`grow_dir`](Self::grow_dir)); a write converts its file inside its
     /// own batch ([`FatBatch::ensure_chained`](batch::FatBatch::ensure_chained)).
     fn ensure_chained(&mut self, first: u32, contiguous: bool, size: u64) -> Result<(), Error> {
-        match self.run_to_chain(first, contiguous, size)? {
-            Some(n) => batch::run(self, |b| b.link_run(first, n)),
-            None => Ok(()),
-        }
+        batch::run(self, |b| b.ensure_chained(first, contiguous, size))
     }
 
     /// Read-modify-write of a partial sector of file data (preserve the bytes
