@@ -105,7 +105,27 @@ SECTOR = 512
 L_BYTES = bytes((i * 29 + 3) & 0xFF for i in range(2048))
 A_BYTES = bytes((i * 17 + 11) & 0xFF for i in range(512))
 A_AT = 1000  # A's cluster: its FAT entry in sector 7 of X's FAT, past every cluster the boot takes
+# D, a directory in the root holding V and the directory E, which holds R:
+# their entries in FAT sector 8, past every cluster the boot takes. E is in
+# D, not the root, since the root's one sector holds 16 entries and a
+# fourth planted set there would have the guest's W grow it.
+D_AT, V_AT, E_AT, R_AT = 1100, 1101, 1102, 1103
+V_BYTES, R_BYTES = b"v\r\n", b"r\r\n"
 END = 0xFFFFFFFF
+
+
+def hand_set(name, first, size, is_dir=False):
+    """A FAT-chained entry set made by hand: a file of `size` bytes or a
+    directory of one cluster, on `first`."""
+    s = bytearray(exfatimg.entry_set(name))
+    if is_dir:
+        s[4] = 0x10  # FileAttributes: Directory
+    s[33] = 0x01  # GeneralSecondaryFlags: AllocationPossible, FAT-chained
+    struct.pack_into("<Q", s, 40, size)
+    struct.pack_into("<I", s, 52, first)
+    struct.pack_into("<Q", s, 56, size)
+    struct.pack_into("<H", s, 2, exfatimg.set_checksum(s))
+    return bytes(s)
 
 
 def make_small():
@@ -157,27 +177,38 @@ def plant(start):
         d = bytearray(vol.data(rchain))
         end = exfatimg.root_end(d)
         fat_byte, heap_byte, bitmap = vol.fat, vol.heap, vol.bitmap
-    s = bytearray(exfatimg.entry_set("A"))
-    s[33] = 0x01  # GeneralSecondaryFlags: AllocationPossible, FAT-chained
-    struct.pack_into("<Q", s, 40, len(A_BYTES))
-    struct.pack_into("<I", s, 52, A_AT)
-    struct.pack_into("<Q", s, 56, len(A_BYTES))
-    struct.pack_into("<H", s, 2, exfatimg.set_checksum(s))
-    if end + len(s) + 32 > len(d):
+        if any(vol.used(c) or vol.entry(c) != 0 for c in (D_AT, V_AT, E_AT, R_AT)):
+            return f"clusters {D_AT} to {R_AT} are not free for D, V, E and R"
+    # The root must not grow, or every cluster the rig names moves. Its one
+    # sector holds the volume's three entries, L's set, and two sets macOS
+    # deleted (its own files'): A goes after them, D into the second
+    # deleted run, and W, which the guest makes, into the first, where fsd
+    # reuses deleted slots.
+    a = hand_set("A", A_AT, len(A_BYTES))
+    if end + len(a) + 32 > len(d):
         return "no room in X's root for A's set"
-    d[end:end + len(s)] = s
+    d[end:end + len(a)] = a
+    runs = [i for i in range(0, end - 64, 32)
+            if all(d[j] & 0x80 == 0 and d[j] != 0 for j in (i, i + 32, i + 64))
+            and (i == 0 or d[i - 32] & 0x80)]
+    if len(runs) < 2:
+        return f"X's root has {len(runs)} runs of three deleted slots, not two (for W and D)"
+    d[runs[-1]:runs[-1] + 96] = hand_set("D", D_AT, SECTOR, is_dir=True)
+    dsec = (hand_set("V", V_AT, len(V_BYTES)) + hand_set("E", E_AT, SECTOR, is_dir=True)).ljust(SECTOR, b"\0")
+    esec = hand_set("R", R_AT, len(R_BYTES)).ljust(SECTOR, b"\0")
     with open(IMAGE, "r+b") as fh:
         for k, c in enumerate(rchain):
             fh.seek(heap_byte + (c - 2) * SECTOR)
             fh.write(d[k * SECTOR:(k + 1) * SECTOR])
-        fh.seek(heap_byte + (bitmap - 2) * SECTOR + (A_AT - 2) // 8)
-        b = fh.read(1)[0]
-        fh.seek(-1, 1)
-        fh.write(bytes([b | 1 << (A_AT - 2) % 8]))
-        fh.seek(fat_byte + A_AT * 4)
-        fh.write(struct.pack("<I", END))
-        fh.seek(heap_byte + (A_AT - 2) * SECTOR)
-        fh.write(A_BYTES)
+        for c, data in ((A_AT, A_BYTES), (D_AT, dsec), (V_AT, V_BYTES), (E_AT, esec), (R_AT, R_BYTES)):
+            fh.seek(heap_byte + (bitmap - 2) * SECTOR + (c - 2) // 8)
+            b = fh.read(1)[0]
+            fh.seek(-1, 1)
+            fh.write(bytes([b | 1 << (c - 2) % 8]))
+            fh.seek(fat_byte + c * 4)
+            fh.write(struct.pack("<I", END))
+            fh.seek(heap_byte + (c - 2) * SECTOR)
+            fh.write(data.ljust(SECTOR, b"\0"))
     with Volume(IMAGE, start) as vol:
         h = next(c for c in range(2, vol.count + 2) if not vol.used(c))
     with open(IMAGE, "r+b") as fh:
@@ -215,17 +246,24 @@ def run():
     h, l0, fat_lba, heap_lba = planted
     sh, sa = fat_lba + h * 4 // SECTOR, fat_lba + A_AT * 4 // SECTOR
     sd = heap_lba + h + 4 - 2  # h+4's one sector: GAP's fill refused there
+    sv, se = heap_lba + D_AT - 2, heap_lba + E_AT - 2  # D's and E's one sector: SET's and REPLACE's sets
     with Volume(IMAGE, start) as vol:
         listed = {exfatimg.fold(k): v for k, v in vol.listing(vol.root).items()}
         l_ok = listed.get("l", (None,))[0] == l0 and vol.data(list(range(l0, l0 + 4))) == L_BYTES
         a_ok = (listed.get("a") == (A_AT, len(A_BYTES), True) and vol.chain(A_AT) == [A_AT]
                 and vol.data([A_AT]) == A_BYTES and vol.used(A_AT))
         h_ok = not vol.used(h) and vol.entry(h) == l0 and all(not vol.used(c) for c in range(h, h + 8))
+        dl = {exfatimg.fold(k): v for k, v in vol.listing(D_AT).items()}
+        el = {exfatimg.fold(k): v for k, v in vol.listing(E_AT).items()}
+        dve_ok = (listed.get("d") == (D_AT, SECTOR, True) and dl.get("v") == (V_AT, 3, True)
+                  and dl.get("e") == (E_AT, SECTOR, True) and el.get("r") == (R_AT, 3, True)
+                  and vol.data([V_AT])[:3] == V_BYTES and vol.data([R_AT])[:3] == R_BYTES)
     ok, lines = exfatimg.fsck_clean(IMAGE, part="s3")
     checks = [
         (f"before: L on X at {l0}, four clusters, its bytes", l_ok),
         (f"before: A chained on cluster {A_AT} alone, its bytes, its bit set", a_ok),
         (f"before: h ({h}) and the seven after it free, h's entry linking to L's first cluster", h_ok),
+        (f"before: D on {D_AT} holding V ({V_AT}) and E ({E_AT}), E holding R ({R_AT}), their bytes", dve_ok),
         (f"before: SH ({sh}) and SA ({sa}) are two sectors, h to h+4 all in SH",
          sh != sa and all(fat_lba + c * 4 // SECTOR == sh for c in range(h, h + 5))),
         ("before: fsck_exfat -n passes X with the plants", ok),
@@ -235,11 +273,11 @@ def run():
         return checks, notes, 0
 
     with open(BLKDEBUG, "w") as fh:
-        for sector in (sh, sa, sd):
+        for sector in (sh, sa, sd, sv, se):
             fh.write(f'[inject-error]\nevent = "write_aio"\niotype = "write"\nerrno = "5"\n'
                      f'sector = "{sector}"\nonce = "on"\n\n')
     cmds = ["mount 2 /mnt/x", "cursorprobe whole /mnt/x/H 2048", "echo x >> /mnt/x/A", "echo x >> /mnt/x/A",
-            "echo w > /mnt/x/W", "writeat /mnt/x/W 3000 y"]
+            "echo w > /mnt/x/W", "writeat /mnt/x/W 3000 y", "writeat /mnt/x/D/V 3000 y", "write /mnt/x/D/E/R zzz"]
     steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in cmds] + [("# ", "")]
     extra = [
         # bootindex=0 pins the firmware to the NVMe disk, which it boots and
@@ -266,6 +304,7 @@ def run():
     probe = answer(out, cmds[1]) or ""
     first, second = answer(out, cmds[2], 0) or "", answer(out, cmds[2], 1)
     made_w, gap = answer(out, cmds[4]), answer(out, cmds[5]) or ""
+    set_answer, replace_answer = answer(out, cmds[6]) or "", answer(out, cmds[7]) or ""
     with Volume(IMAGE, start) as vol:
         listed = {exfatimg.fold(k): v for k, v in vol.listing(vol.root).items()}
         l_kept = (listed.get("l", (None,))[0] == l0 and all(vol.used(c) for c in range(l0, l0 + 4))
@@ -275,8 +314,16 @@ def run():
         a_data = vol.data(a_chain)[:a[1]] if a else b""
         w = listed.get("w")
         w_data = vol.data([w[0]])[:w[1]] if w and w[0] >= 2 else b""
-        gap_bits = [vol.used(c) for c in range(h + 2, h + 7)]
-        w_links = [vol.entry(c) for c in range(h + 1, h + 5)]
+        freed = [vol.used(c) for c in range(h + 2, h + 7)]
+        w_end = vol.entry(h + 1)
+        set_links = [vol.entry(c) for c in range(h + 3, h + 7)]
+        h2_data = vol.data([h + 2])[:3]
+        dl = {exfatimg.fold(k): v for k, v in vol.listing(D_AT).items()}
+        el = {exfatimg.fold(k): v for k, v in vol.listing(E_AT).items()}
+        v, r = dl.get("v"), el.get("r")
+        v_kept = v == (V_AT, 3, True) and vol.data([V_AT])[:3] == V_BYTES
+        v_end = vol.entry(V_AT)
+        r_kept = r == (R_AT, 3, True) and vol.data([R_AT])[:3] == R_BYTES and vol.entry(R_AT) == END
     fsck_ok, fsck_lines = exfatimg.fsck_clean(IMAGE, part="s3")
     if not fsck_ok:
         notes += [f"after: {ln}" for ln in fsck_lines]
@@ -285,9 +332,9 @@ def run():
         (f"HEAD: the whole-file write answered an I/O error ({probe!r})",
          "cursorprobe: whole:" in probe and "I/O error" in probe),
         ("HEAD: L kept every bit, its first cluster and its bytes (no give-back walked h's stale link)", l_kept),
-        (f"HEAD: h to h+3 given back: taken again by A's append (h), W (h+1) and the gap fill "
-         f"(h+2, h+3) (A {a_chain}, W {w}, the fill's links {w_links})",
-         a_chain[1:] == [h] and bool(w) and w[0] == h + 1 and w_links[1:3] == [h + 3, h + 4]),
+        (f"HEAD: h to h+3 given back: taken again by A's append (h), W (h+1) and SET (h+2, h+3) "
+         f"(A {a_chain}, W {w}, SET's links on h+3 to h+6 {set_links})",
+         a_chain[1:] == [h] and bool(w) and w[0] == h + 1 and set_links == [h + 4, h + 5, h + 6, END]),
         ("HEAD: no H in X's root", "h" not in listed),
         (f"CURSOR: the first append answered an I/O error ({first!r})", "I/O error" in first),
         (f"CURSOR: the retried append answered nothing ({second!r})", second == ""),
@@ -300,10 +347,19 @@ def run():
          made_w == "" and w == (h + 1, 3, True)),
         (f"GAP: the gap fill answered an I/O error ({gap!r})", "I/O error" in gap),
         ("GAP: W still three bytes, w\\r\\n", w_data == b"w\r\n"),
-        (f"GAP: W's chain cut back to its one cluster, the fill's links after it left in free clusters "
-         f"(h+1 to h+4: {w_links})", w_links == [END, h + 3, h + 4, END]),
-        (f"GAP: h+2 to h+6 free in the bitmap, the clusters the fill took given back ({gap_bits})",
-         not any(gap_bits)),
+        (f"GAP: W's chain cut back to its one cluster (h+1's entry {w_end})", w_end == END),
+        (f"GAP: h+2 to h+4 given back: taken again by SET, its links on h+3 to h+6 ({set_links})",
+         set_links == [h + 4, h + 5, h + 6, END]),
+        (f"SET: the gap fill whose set write was refused answered an I/O error ({set_answer!r})",
+         "I/O error" in set_answer),
+        (f"SET: V as planted, three bytes on {V_AT} ({v})", v_kept),
+        (f"SET: V's chain cut back to {V_AT} alone (its entry {v_end})", v_end == END),
+        (f"SET: h+2 to h+6 given back: h+2 taken again by REPLACE, holding zzz ({h2_data!r})", h2_data == b"zzz"),
+        (f"REPLACE: the whole-file write whose set write was refused answered an I/O error ({replace_answer!r})",
+         "I/O error" in replace_answer),
+        (f"REPLACE: R as planted, three bytes on {R_AT} alone ({r})", r_kept),
+        (f"after: h+2 to h+6 free in the bitmap, every cluster SET and REPLACE took given back ({freed})",
+         not any(freed)),
         ("after: fsck_exfat -n passes X (nothing leaked)", fsck_ok),
         (f"no fault lines in QEMU's trace ({faults})", faults == 0),
     ]
