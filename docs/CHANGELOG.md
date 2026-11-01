@@ -1634,6 +1634,29 @@ that puts every bit on the disk before its FAT entry's zero
 from the altitude review of `fix/exfat-vendor-alloc`; the order and the one
 FAT writer are the medium review of #379.
 
+**A failed exFAT FAT batch gives back its clusters by their bits
+(2026-11-01).** A batch that failed gave back its clusters by a walk of
+the FAT on the disk, or not at all. `write_chain` walked its chain from the
+head, and since #380 skipped the walk whenever a refused flush had lost
+entries (`BatchFailed`), so the whole chain leaked. `write_at` gave back
+none of the clusters it linked past the file's size when a data write
+failed part way, a leak older than the batch. The batch now records the
+clusters its allocator hands out as runs (`Taken`, 32 runs in 256 bytes:
+inside a batch the scan only goes forward, so neighbouring finds extend a
+run). A batch that fails clears their bits and walks nothing, after its FAT
+sectors are written or dropped. It writes one FAT entry first: the end of
+chain of the file's last cluster that `write_at` linked on from, without
+which fsck_exfat follows the link past the size and finds the clusters free.
+If that write is refused nothing is given back. A find past 32 runs is not
+recorded and leaks, as every failed batch did before. `BatchFailed` and
+`fat_lost` had no other reader and are gone. `make test-batch-refused`
+checks the HEAD and CURSOR clusters taken again by later commands. Its new
+GAP case refuses a gap fill's data write: the file is as it was, its chain
+cut back, the fill's clusters free, and fsck_exfat clean after the boot,
+which the rig did not ask before. It fails with the give-back removed (8
+checks), with the end of chain not written back (2) and with both cursor
+drops removed (7). From the high review of #380.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
