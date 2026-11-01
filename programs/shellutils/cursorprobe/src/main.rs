@@ -102,7 +102,9 @@ fn whole(target: u64) -> ! {
     let mut num = [0u8; 16];
     let Some(nlen) = ulib::arg(3, &mut num) else { usage(target) };
     let Some(len) = core::str::from_utf8(&num[..nlen]).ok().and_then(ulib::parse_u64) else { usage(target) };
-    if plen == 0 || len == 0 || len > PIECE as u64 {
+    // `ulib::arg` cuts an argument at the buffer: one filling it is refused,
+    // not written to the shorter path.
+    if plen == 0 || plen >= PATH_MAX || len == 0 || len > PIECE as u64 {
         usage(target);
     }
     let mut data = [0u8; PIECE];

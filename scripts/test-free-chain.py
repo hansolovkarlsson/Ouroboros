@@ -206,8 +206,15 @@ def main() -> int:
         if problems is None:
             return tally.verdict()
         got = {}
+        seq = None
         if base and more and "chains" in found and not problems:
-            seq, want_reads = model([found["chains"][f] for f in FREED], g["fat"], bitmap_lba)
+            try:
+                seq, want_reads = model([found["chains"][f] for f in FREED], g["fat"], bitmap_lba)
+            except AssertionError as e:
+                # The model refuses the order it would have to build: a
+                # failing check, said as one, not a traceback past the verdict.
+                problems.append(f"the model refuses the frees' order for these chains: {e}")
+        if seq is not None:
             want_fat, want_bits = collections.Counter(), collections.Counter()
             for sec in seq:
                 (want_fat if fat_region[0] <= sec < fat_region[1] else want_bits)[sec] += 1

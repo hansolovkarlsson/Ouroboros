@@ -312,28 +312,42 @@ def main() -> int:
             if problems is None:
                 return tally.verdict()
         got = {}
+        m = None
         if base and more and "sets" in found and not problems:
-            m = Model(g["fat"], bitmap_lba)
-            # writeat /G: the head allocated, then each step past a cluster's
-            # end asks its FAT entry, allocates and links it.
-            m.begin()
-            gch = found["g_chain"]
-            m.alloc(gch[0])
-            for prev, c in zip(gch, gch[1:]):
-                m.touch(prev)
-                m.alloc(c)
-                m.set(prev, c)
-            m.end(found["sets"]["G"])
-            # echo >> /CONT: ensure_chained links the run, the walk asks
-            # every entry, and the last step allocates and links one.
-            m.begin()
-            for i, c in enumerate(run):
-                m.set(c, c + 1 if i + 1 < len(run) else None)
-            for c in run:
-                m.touch(c)
-            m.alloc(found["c_new"])
-            m.set(run[-1], found["c_new"])
-            m.end(found["sets"]["CONT"])
+            def build():
+                m = Model(g["fat"], bitmap_lba)
+                # writeat /G: the head allocated, then each step past a cluster's
+                # end asks its FAT entry, allocates and links it.
+                m.begin()
+                gch = found["g_chain"]
+                m.alloc(gch[0])
+                for prev, c in zip(gch, gch[1:]):
+                    m.touch(prev)
+                    m.alloc(c)
+                    m.set(prev, c)
+                m.end(found["sets"]["G"])
+                # echo >> /CONT: ensure_chained links the run and leaves the
+                # write cursor on its last cluster, so the walk asks that entry
+                # alone (from the head it asked every one, writing the run's last
+                # FAT sector early and again: the high review of #380), and the
+                # step past it allocates and links one.
+                m.begin()
+                for i, c in enumerate(run):
+                    m.set(c, c + 1 if i + 1 < len(run) else None)
+                m.touch(run[-1])
+                m.alloc(found["c_new"])
+                m.set(run[-1], found["c_new"])
+                m.end(found["sets"]["CONT"])
+                return m
+
+            try:
+                m = build()
+            except AssertionError as e:
+                # The model refuses the order it would have to build: a
+                # failing check, said as one, not a traceback past the verdict.
+                problems.append(f"the model refuses the batch's order for these chains: {e}")
+                m = None
+        if m is not None:
             seq = m.seq
             set_secs = set(found["sets"]["G"]) | set(found["sets"]["CONT"])
             want_fat, want_bits = collections.Counter(), collections.Counter()

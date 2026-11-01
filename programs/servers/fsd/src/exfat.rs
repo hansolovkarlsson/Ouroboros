@@ -1139,9 +1139,16 @@ impl Fs {
     /// before them (zeroes on the disk ahead of their cleared bits). The
     /// free writes its sector before it moves, so it never comes here with
     /// one; this holds a later walk to that (the medium review of #380).
+    /// The refused sector is dropped with the cursors, its entries never
+    /// written (a leak at most, the bitmap saying what is free): kept, it
+    /// refused every later read of another FAT sector until fsd restarted
+    /// (the high review of #380).
     fn fat_sector(&mut self, lba: u64) -> Result<&[u8; SECTOR_SIZE], Error> {
         if let Some(held) = self.fat_cache.as_ref().filter(|c| c.dirty && c.lba != lba).map(|c| c.lba) {
             if !self.fat_batch {
+                self.fat_cache = None;
+                self.read_cursor = None;
+                self.write_cursor = None;
                 return Err(Error::Io(DiskError::Io));
             }
             self.flush_fat(held)?;
@@ -1818,10 +1825,18 @@ impl Fs {
 
     /// Write the allocator's bitmap sector if it holds bits not yet written.
     fn write_alloc_bits(&mut self) -> Result<(), Error> {
-        let mut bits = self.alloc_bits.take();
-        let written = self.write_bits(&mut bits);
-        self.alloc_bits = bits;
-        written
+        self.with_alloc_bits(|fs, held| fs.write_bits(held))
+    }
+
+    /// `f` given the allocator's held bitmap sector beside `self`, which it
+    /// is put back into on every path: the one place it is taken out, so no
+    /// early return can drop bits set and not yet written while a link to
+    /// them may be (the high review of #380).
+    fn with_alloc_bits<R>(&mut self, f: impl FnOnce(&mut Self, &mut Option<BitmapSector>) -> R) -> R {
+        let mut held = self.alloc_bits.take();
+        let made = f(self, &mut held);
+        self.alloc_bits = held;
+        made
     }
 
     /// Set `cluster`'s FAT entry to `value` in the [`fat_cache`](Self::fat_cache)
@@ -1918,9 +1933,7 @@ impl Fs {
         // batch it stays there, written by `flush_fat` before any link to
         // it; outside one it is written now, before the cluster's entry, and
         // let go, the next scan starting at the bitmap's first byte.
-        let mut held = self.alloc_bits.take();
-        let found = self.alloc_scan(&mut held);
-        self.alloc_bits = held;
+        let found = self.with_alloc_bits(|fs, held| fs.alloc_scan(held));
         if !self.fat_batch {
             self.end_alloc_hold()?;
         }
@@ -2167,6 +2180,10 @@ impl Fs {
             self.disk.read_sector(lba, &mut buf)?;
             *held = Some(BitmapSector { lba, first, buf, dirty: false });
         }
+        // Held now on both paths; the error is never answered. A match that
+        // returns the held sector from one arm and reloads in the other is
+        // refused by the borrow checker (a borrow returned from a function
+        // conditionally, E0499), which is why the lookup is split.
         held.as_mut().ok_or(Error::Io(DiskError::Io))
     }
 
@@ -2729,11 +2746,24 @@ impl Fs {
             return Err(Error::Io(DiskError::Io));
         }
         let n = n as u32;
+        let cluster_bytes = self.cluster_bytes() as usize;
         Ok(self.in_fat_batch(|fs| {
             (0..n).try_for_each(|i| {
                 let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
                 fs.write_fat_entry(first + i, value)
-            })
+            })?;
+            // The write that follows starts from the run's last cluster, not
+            // its head: from the head it read every FAT sector just written
+            // again to reach it, one round trip a sector, about a thousand on
+            // a 4 GiB camera file (the high review of #380). Set inside the
+            // batch, so a refused flush drops it with the rest (`flush_fat`).
+            fs.write_cursor = Some(ChainCursor {
+                file_cluster: first,
+                contiguous: false,
+                cluster: first + n - 1,
+                cluster_pos: (n as usize - 1) * cluster_bytes,
+            });
+            Ok(())
         })?)
     }
 
