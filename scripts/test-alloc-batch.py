@@ -51,7 +51,10 @@ reads, the first sector read again a cluster past it); flush_fat writing the
 FAT sector before the allocator's bits (the order alone, the counts as the
 model's); write_at's set written inside the batch (the order alone); and
 in_fat_batch not writing what is pending at its end (/CONT's chain lost, the
-fill short, fsck's bitmap complaint). The model also asserts that every link
+fill short, fsck's bitmap complaint); and ensure_chained not leaving the
+write cursor on /CONT's last cluster (the order alone, from write 16: the walk
+from the head writes the run's last FAT sector early, and reads every one it
+linked again; the high review of #380). The model also asserts that every link
 reaches the disk after the entry it names (the medium review of #380). That
 holds of links alone: a chain's head is no link, its end of chain waits in the
 cache too, so a refused first flush leaves the head's old entry on the disk.

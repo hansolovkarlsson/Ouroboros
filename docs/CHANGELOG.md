@@ -1603,8 +1603,14 @@ two FAT sectors of a 512-byte-cluster exFAT failing once, a whole-file write
 of 2 KiB from a cluster whose entry the host linked into a live file must
 leave that file whole, and a retried append after a refused one must chain
 both clusters; it fails with the give-back ungated and with the cursors kept.
-`cursorprobe whole` is its whole-file writer. From the medium reviews of #379
-and #380.
+`cursorprobe whole` is its whole-file writer. From the high review of #380:
+a FAT sector refused at a move outside a batch is dropped with the cursors
+(kept, it refused every later FAT read until fsd restarted), and
+`ensure_chained` leaves the write cursor on the run's last cluster, so the
+first append to a contiguous file no longer reads every FAT sector it just
+linked again (about a thousand on a 4 GiB camera file; `test-alloc-batch`
+fails on the order without it). From the medium reviews of #379 and #380 and
+the high review of #380.
 
 **exFAT frees a chained file a sector at a time (2026-10-31).** A removal,
 a replacing `mv` or a truncation of a FAT-chained file (every file fsd

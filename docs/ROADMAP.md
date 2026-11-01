@@ -4467,6 +4467,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   batch, the head's stale entry and the cursors dropped with a refused
   sector, is `make test-batch-refused`'s. From the medium reviews of #379
   and #380.
+- **exFAT gives back a failed batch by a FAT walk, or not at all.**
+  `write_chain`'s give-back walks the chain on the disk, so since the third
+  medium review of #380 it is skipped whenever a refused flush lost entries
+  (`BatchFailed`), and the whole chain leaks, even where its head's end of
+  chain reached the disk and the walk was safe; and `write_at`, whose batch
+  links clusters past the file's size before a data write fails, gives none
+  of them back (a leak older than the batch: the next write cuts the link
+  off them). The bitmap alone says what is free, so a batch that recorded
+  the clusters it took could give them back by their bits, with no walk for
+  a stale entry to steer and nothing to leak. The record is the design: the
+  clusters are not always consecutive (the scan passes used ones), and fsd
+  has no heap for a list. From the high review of #380, 2026-10-31.
 - **exFAT's FAT batch is a mode flag, and its misuse a disk error.**
   `in_fat_batch` sets `fat_batch` on `Fs`, which changes what
   `write_fat_entry`, `fat_sector`, `alloc_cluster` and `clear_bit` do, and
