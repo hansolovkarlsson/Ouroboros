@@ -4463,9 +4463,29 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   write when it takes a cluster, which its order needs (bits, links, set);
   `cp` of a large file is that a cluster. A gap fill still writes each data
   sector on its own, 2,048 for 1 MiB, measured inside the wedge limit on
-  QEMU and not on the Pi's stick (the medium review of #380). The cursors
-  dropped at a refused flush are graded by no boot. From the medium reviews
-  of #379 and #380.
+  QEMU and not on the Pi's stick (the medium review of #380). A refused
+  batch, the head's stale entry and the cursors dropped with a refused
+  sector, is `make test-batch-refused`'s. From the medium reviews of #379
+  and #380.
+- **exFAT's FAT batch is a mode flag, and its misuse a disk error.**
+  `in_fat_batch` sets `fat_batch` on `Fs`, which changes what
+  `write_fat_entry`, `fat_sector`, `alloc_cluster` and `clear_bit` do, and
+  the two rules the batch rests on (nothing frees inside one; nothing leaves
+  a dirty FAT sector outside one) are held by refusals answering
+  `Error::Io`: a later change breaking either shows the user a failing disk,
+  not fsd's fault, and the rigs blame the disk too. A scoped batch type
+  holding `&mut Fs`, the only way to set entries in a batch and with no free
+  among its methods, would make the misuse unspellable
+  (`unspellable-postmortem.md`), and an error of fsd's own would name what
+  is left. Asked by the second and third medium reviews of #380.
+- **exFAT's allocator rescans from the bitmap's first byte outside a batch.**
+  Inside a FAT batch the scan goes on from its last find; every other
+  allocation (`alloc_zeroed` for `mkdir` and a directory's growth, the
+  root's growth, a 2 KiB write taking a cluster) starts at byte 0, so on a
+  nearly full stick each reads every bitmap sector before the first clear
+  bit. A hint kept across requests and lowered by every free, as FAT32's
+  allocator keeps one, would serve them all. From the third medium review
+  of #380.
 - **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s

@@ -52,9 +52,11 @@ FAT sector before the allocator's bits (the order alone, the counts as the
 model's); write_at's set written inside the batch (the order alone); and
 in_fat_batch not writing what is pending at its end (/CONT's chain lost, the
 fill short, fsck's bitmap complaint). The model also asserts that every link
-reaches the disk after the entry it names (the medium review of #380), so a
-refused flush leaves a chain ending at an end of chain. The cursors a refused
-flush drops are graded by no boot (no FAT write fails here).
+reaches the disk after the entry it names (the medium review of #380). That
+holds of links alone: a chain's head is no link, its end of chain waits in the
+cache too, so a refused first flush leaves the head's old entry on the disk.
+A refused batch is make test-batch-refused's: the give-back that does not
+walk such a head, and the cursors dropped with a refused sector.
 
 A boot QEMU's firmware never starts is INCONCLUSIVE (exit 100, drive-qemu.py's
 classifier through disktrace.py), unless the other boot of the pair failed,
@@ -93,8 +95,9 @@ class Model:
     sector. Raises AssertionError if a FAT sector is written with a link to
     a cluster whose bit is not on the disk, or to one allocated here whose
     own entry, in another sector, is not on the disk yet (a refused flush
-    would then leave a chain on the disk running into a stale entry, which
-    write_chain's give-back would walk), so the model holds both rules."""
+    would then leave a link on the disk into a stale entry), so the model
+    holds both rules. The chain's head is no link, and is not checked here:
+    test-batch-refused grades a refused head."""
 
     def __init__(self, fat_lba, bitmap_lba):
         self.fat_lba, self.bitmap_lba = fat_lba, bitmap_lba
