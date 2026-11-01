@@ -1676,15 +1676,24 @@ entries not yet written outside one) were held by refusals answering an I/O
 error. A later change breaking either would have shown the user a failing
 disk. Now `batch::FatBatch` lives in a module of its own, as the disk gate
 does, and holds the only `&mut Fs` while the batch runs. Its methods are the
-batch's work alone: take a cluster, read or set a FAT entry, write a file's
-data sectors, move the write cursor, name the cut cluster. `write_chain`,
-`write_at`'s walk and `ensure_chained`'s links are written against them. A
-free inside a batch, a batch inside a batch, `Fs`'s own FAT writer or
-allocator inside one, and a write to a sector that is not a file's data no
-longer compile; seven such spellings were tried and each fails to build.
-The two refusals stay as tripwires that no path reaches, and print a line
-saying the fault is fsd's, not the disk's: with `batch::run`'s end flush
-removed, the next read refused the sector left behind and printed it.
+FAT entry a batch sets is set inside that module (`write_chain`,
+`file_step`, `extend_chain`, `link_run`); `write_at`'s walk, outside it,
+reads the volume through `&Fs` and can only take a cluster, step the file's
+chain, chain a contiguous run, write data sectors and leave the write
+cursor. A free inside a batch, a batch inside a batch, `Fs`'s own FAT
+writer, allocator or disk inside one, an entry set or the cut cluster named
+by hand, and a `FatBatch` made by hand no longer compile, and
+`check-disk-handle.py` builds each of those nine spellings on every `make
+test` (with the field or the entry writer made `pub(super)` it fails on the
+three they open). The cursor a body leaves is still its own to get right.
+The two refusals stay as tripwires that no path reaches, and each prints a
+line of fsd's own (`FAT_LEFT_UNWRITTEN`, `FREE_IN_BATCH`), as does
+`batch::run` entered with a FAT or bitmap sector still held: with
+`batch::run`'s end flush removed, the next read refused the sector left
+behind and printed it. The high review of #383 narrowed the methods (an
+entry writer taking any value, 0 among them, and a setter for the cut
+cluster were open), split the line in two, made the spellings a check and
+gave `write_chain` its first sector once a cluster again.
 `make test` and the eleven exFAT rigs pass; `test-alloc-batch` fails with
 that flush removed and `test-batch-refused` with the give-back removed (10
 checks, as before the move). Asked by the second and third medium reviews

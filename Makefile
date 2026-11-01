@@ -2889,6 +2889,9 @@ check-statics:
 
 # No file in fsd but disk.rs can make a disk handle (scripts/check-disk-handle.py):
 # a copy of fsd, outside the tree, with each such spelling must fail to check.
+# Since 2026-11-01 also exFAT's FAT batch: nine spellings of work outside
+# exfat.rs's batch module (a free, a nested batch, Fs's FAT writer, allocator
+# or disk, an entry or the cut cluster set by hand, a FatBatch made by hand).
 check-disk-handle:
 	@python3 scripts/check-disk-handle.py
 
