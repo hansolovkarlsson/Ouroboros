@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-30. It began
+*A process retrospective, 2026-09-02, extended through 2026-10-31. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2411,3 +2411,63 @@ reads sector 0's signature off the image before the boot. It is 2026-10-14's
 self-test written from the code's own belief, one step removed: **the
 "before" of a before-and-after check is read off the thing, not derived from
 how it was made.**
+
+## Four more, from the FAT batch (2026-10-31)
+
+Two PRs (#379, #380): exFAT's free and its allocation made to write the FAT
+and the bitmap a sector at a time, graded by QEMU's disk trace. Four times an
+instrument, or my reading of one, said more than it had seen.
+
+**Counts that could not see an order.** `test-free-chain`'s first version
+compared each sector's write count with a model of the walk, and the first
+version of the free passed it: 10 FAT writes, 3 bitmap writes, 3 reads, the
+model's numbers. The model was the code's own procedure, so it agreed with
+the code, and the procedure was wrong: zeroed FAT entries reached the disk
+before the bits they belonged to, a leak if fsd is restarted mid-free, the
+case the change existed for. The medium review found it by reading. The rig
+now records the order of writes (`disktrace`'s `order`) and requires the
+model's sequence exactly, and the model refuses to build a sequence that
+breaks the property; a control that swaps only the free's last two writes
+fails on the order with every count right. **A model of the procedure grades
+the procedure; grade the property the procedure is for, and let the model
+refuse to break it.**
+
+**An assertion that skipped the one case it was cited for.** After declining
+a finding that `write_chain`'s give-back could walk stale FAT entries, I had
+`test-alloc-batch`'s model assert that every link reaches the disk after the
+entry it names, and wrote that the model held the rule that kept the
+give-back safe. The assertion checked link targets. The give-back starts its
+walk at the chain's head, which is no link's target, and whose end of chain
+waits in the cache like the rest; the next review found a refused first
+flush leaving the head's old entry on the disk, a stale link there leading
+the walk into a live file. The check could not fail for that cluster
+whatever the code did. The claim was cut to what the assertion covers, and
+the head is graded by a rig that refuses the write (below). **Before citing
+a check as proof of a property, ask which input the property is about, and
+whether the check ever looks at it.**
+
+**A fix shipped graded by no boot.** The first medium round's stale cursor
+(a write's cursor outliving a refused flush) was fixed and recorded as
+"graded by no boot", since no rig could make a FAT write fail, and the
+fix's own reasoning was the only evidence. Two rounds later the head's stale
+entry sat on the same unreachable path. `test-batch-refused` is the
+instrument both needed: QEMU's blkdebug fails the first write of two FAT
+sectors once, and each fix taken out fails its own case (a live file's first
+cluster freed; an append's file one cluster for 515 bytes). The high review
+also found the rigs' models raising a bare `AssertionError` inside the run,
+so a model refusing an order would have ended the rig with a traceback and
+no verdict; both now report it as a failing check. **When the worst findings
+of two rounds sit on one path no rig reaches, the missing instrument is the
+finding; and an instrument that can crash must crash into its verdict.**
+
+**A prediction of the wrong quantity.** For the high review's fix that
+leaves the write cursor on a linked run's last cluster, I told Hans that
+`test-alloc-batch` would show fewer FAT writes. It showed 14, as before. The
+walk from the head had written the run's last FAT sector early and again
+later, and the cursor writes it later only: the same count, a different
+order, and the re-reads the fix saves are reads the rig does not grade. The
+control (the cursor not set) fails on the order at write 16, which is what
+the rig can see, and the records say the reads are unmeasured. **Name the
+quantity a fix changes before naming the instrument that will show it; a
+right instrument read for the wrong quantity reports a wrong result with
+confidence.**
