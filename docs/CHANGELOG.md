@@ -1669,6 +1669,27 @@ chain not written back (3), no cut cluster named (3), `write_at`'s
 give-back after a refused set removed (4), the replace's free removed (2)
 and both cursor drops removed (9).
 
+**exFAT's FAT batch is a type, not a mode flag (2026-11-01).** A FAT batch
+was a `fat_batch` flag on `Fs`, which changed what four methods did, and its
+two rules (nothing frees inside a batch; nothing leaves a FAT sector with
+entries not yet written outside one) were held by refusals answering an I/O
+error. A later change breaking either would have shown the user a failing
+disk. Now `batch::FatBatch` lives in a module of its own, as the disk gate
+does, and holds the only `&mut Fs` while the batch runs. Its methods are the
+batch's work alone: take a cluster, read or set a FAT entry, write a file's
+data sectors, move the write cursor, name the cut cluster. `write_chain`,
+`write_at`'s walk and `ensure_chained`'s links are written against them. A
+free inside a batch, a batch inside a batch, `Fs`'s own FAT writer or
+allocator inside one, and a write to a sector that is not a file's data no
+longer compile; seven such spellings were tried and each fails to build.
+The two refusals stay as tripwires that no path reaches, and print a line
+saying the fault is fsd's, not the disk's: with `batch::run`'s end flush
+removed, the next read refused the sector left behind and printed it.
+`make test` and the eleven exFAT rigs pass; `test-alloc-batch` fails with
+that flush removed and `test-batch-refused` with the give-back removed (10
+checks, as before the move). Asked by the second and third medium reviews
+of #380.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

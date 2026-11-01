@@ -2807,9 +2807,9 @@ test-free-chain: image-exfat
 # file macOS wrote, against a boot without them; QEMU's FAT and bitmap writes
 # and bitmap reads must be the FAT batch's from the chains read off the disk,
 # in its order (bits, then the links to them, then the set). Two boots, about
-# three minutes; run it whenever exFAT's in_fat_batch, alloc_cluster,
-# alloc_scan, ensure_chained, write_chain, write_at, write_fat_entry,
-# flush_fat or the FAT cache changes.
+# three minutes; run it whenever exFAT's batch module (batch::run,
+# FatBatch), alloc_cluster, alloc_find, alloc_scan, ensure_chained,
+# write_chain, write_at, write_fat_entry, flush_fat or the FAT cache changes.
 test-alloc-batch: image-exfat
 	python3 scripts/test-alloc-batch.py
 
@@ -2823,8 +2823,9 @@ test-alloc-batch: image-exfat
 # back, no give-back walking the stale link planted in a head's entry, the
 # file's chain cut back to its size, no cursor left on a link the disk
 # refused, fsck_exfat clean after. One boot, about a minute; run it whenever
-# exFAT's in_fat_batch, give_back, Taken, file_step, extend_chain,
-# write_chain, write_at, write_file, flush_fat or the cursors change.
+# exFAT's batch module (batch::run, FatBatch), give_back, Taken, file_step,
+# extend_chain, write_chain, write_at, write_file, flush_fat or the cursors
+# change.
 test-batch-refused: image image-exfat
 	python3 scripts/test-batch-refused.py
 

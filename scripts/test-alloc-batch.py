@@ -10,7 +10,7 @@ fill of up to MAX_GAP_FILL, 1 MiB) or linking a contiguous file as a chain
 (`ensure_chained`, at the first append to a file another driver wrote,
 thousands of clusters on a camera's file) was one USB round trip an entry
 on the Pi's stick, and could pass the supervisor's wedge limit. Such a
-request is now a FAT batch (`in_fat_batch`): the entries are set in the FAT
+request is now a FAT batch (`in_fat_batch`, `batch::run` since 2026-11-01): the entries are set in the FAT
 cache and its sector written when the cache moves to another or the batch
 ends, the allocator's bits held in one bitmap sector and written before any
 FAT sector, and the scan going on from its last find. Only the disk can show
@@ -50,8 +50,10 @@ reads); the batch's scan starting at byte 0 (131 bitmap writes and 258
 reads, the first sector read again a cluster past it); flush_fat writing the
 FAT sector before the allocator's bits (the order alone, the counts as the
 model's); write_at's set written inside the batch (the order alone); and
-in_fat_batch not writing what is pending at its end (/CONT's chain lost, the
-fill short, fsck's bitmap complaint); and ensure_chained not leaving the
+the batch not writing what is pending at its end (/CONT's chain lost, the
+fill short, fsck's bitmap complaint; on 2026-11-01, with `batch::run`'s end
+flush removed, the fill stopped at its first gap, each `writeat` printing
+fsd's line that a FAT batch rule was broken, so the case was not built); and ensure_chained not leaving the
 write cursor on /CONT's last cluster (the order alone, from write 16: the walk
 from the head writes the run's last FAT sector early, and reads every one it
 linked again; the high review of #380). The model also asserts that every link

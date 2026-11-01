@@ -4442,7 +4442,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   end of chain is refused; neither is reached by a boot. `make
   test-batch-refused`'s GAP refuses a gap fill's data write, SET and REPLACE
   a set write after the batch, and fsck_exfat passes after the boot.
-- **exFAT's FAT batch is a mode flag, and its misuse a disk error.**
+- ~~**exFAT's FAT batch is a mode flag, and its misuse a disk error.**
   `in_fat_batch` sets `fat_batch` on `Fs`, which changes what
   `write_fat_entry`, `fat_sector`, `alloc_cluster` and `clear_bit` do, and
   the two rules the batch rests on (nothing frees inside one; nothing leaves
@@ -4452,7 +4452,18 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   holding `&mut Fs`, the only way to set entries in a batch and with no free
   among its methods, would make the misuse unspellable
   (`unspellable-postmortem.md`), and an error of fsd's own would name what
-  is left. Asked by the second and third medium reviews of #380.
+  is left. Asked by the second and third medium reviews of #380.~~
+  *Done 2026-11-01:* `batch::FatBatch`, in a module of its own, holds the
+  only `&mut Fs` while a batch runs and is made only by `batch::run`; the
+  batch's work reads the volume through `&Fs` and writes through its methods
+  alone (take a cluster, read or set a FAT entry, write a file's data
+  sectors, move the write cursor, name the cut cluster). A free inside a
+  batch, a batch inside a batch, `Fs`'s own FAT writer or allocator inside
+  one and a write to a sector that is not a file's data do not compile
+  (seven spellings tried). The two refusals stay as tripwires no path
+  reaches; each prints a line saying the fault is fsd's. The client still
+  sees `FS_ERR_IO`, since a wire code of fsd's own would be a protocol
+  change for a path nothing reaches.
 - **exFAT's allocator rescans from the bitmap's first byte outside a batch.**
   Inside a FAT batch the scan goes on from its last find; every other
   allocation (`alloc_zeroed` for `mkdir` and a directory's growth, the

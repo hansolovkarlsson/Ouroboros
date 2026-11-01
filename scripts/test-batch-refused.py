@@ -4,7 +4,7 @@
     python3 scripts/test-batch-refused.py    (or `make test-batch-refused`, which builds the images)
 
 exFAT sets a request's FAT entries in its FAT cache and writes them a sector
-at a time (`in_fat_batch`, 2026-10-31). Defects followed when the disk
+at a time (`in_fat_batch`, 2026-10-31; `batch::run` since 2026-11-01). Defects followed when the disk
 refused one of those writes, the first two found by the medium reviews of
 #380:
 
