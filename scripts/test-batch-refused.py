@@ -4,8 +4,9 @@
     python3 scripts/test-batch-refused.py    (or `make test-batch-refused`, which builds the images)
 
 exFAT sets a request's FAT entries in its FAT cache and writes them a sector
-at a time (`in_fat_batch`, 2026-10-31). Two defects followed when the disk
-refused one of those writes, both found by the medium reviews of #380:
+at a time (`in_fat_batch`, 2026-10-31). Defects followed when the disk
+refused one of those writes, the first two found by the medium reviews of
+#380:
 
 - HEAD: a whole-file write's first cluster keeps its end of chain in the cache
   until the batch's first flush. Refused, the cluster's FAT entry on the disk
@@ -24,52 +25,67 @@ refused one of those writes, both found by the medium reviews of #380:
 - GAP (2026-11-01): `write_at` links clusters past a file's size as its
   batch goes, and when a data write was refused part way it gave back none
   of them (a leak older than the batch, the high review of #380).
+- SET and REPLACE (the high review of #382): a batch that succeeded, then
+  its set write refused. `write_at` left its clusters linked past the
+  file's size and allocated; `write_file`'s replace left its new chain
+  allocated.
 
 No rig made a FAT write fail before this one. One boot: the firmware boots
 build/esp.img from NVMe (which the kernel cannot drive), and virtio holds a
 disk of three partitions (the exFAT root, the ESP, and an 8 MiB exFAT of
-512-byte clusters made by newfs_exfat, X) through QEMU's blkdebug, with the
-first write of each of two FAT sectors of X failing EIO (`once`). On X the
+512-byte clusters made by newfs_exfat, X) through QEMU's blkdebug. On X the
 host plants:
 
 - L, 2 KiB written by macOS (four clusters, contiguous);
 - A, one cluster, FAT-chained, set by hand far from the clusters the boot
   allocates, so its FAT entry is in a sector of its own, SA;
+- D, a directory in the root holding the file V and the directory E, which
+  holds the file R, each on a cluster of its own past those the boot takes
+  (D's set in a run of slots macOS deleted, so the root's one sector keeps
+  room for W and never grows);
 - in the FAT entry of h, the first free cluster (the allocator's first find),
   a link to L's first cluster, as a driver may leave a freed cluster's entry.
 
-h's FAT sector, SH, and SA fail their first write, and so does the data
-sector of h+4, SD. Then, logged in, with X at /mnt/x:
+The first write of each of five sectors fails EIO (`once`): h's FAT sector,
+SH, SA, the data sector of h+4, and D's and E's sectors. Then, logged in,
+with X at /mnt/x:
 
-- `cursorprobe whole /mnt/x/H 2048`: four clusters from h, their entries in
-  SH, refused at the batch's end: the probe must say an I/O error, L must
-  keep every bit, its bytes and its first cluster (no give-back walked h's
-  planted link), no H in X's root, and h to h+3 must come back: the next
-  three commands take them again, h by A's append, h+1 by W and h+2 and h+3
-  by the gap fill, which the host reads off the disk after the boot;
-- `echo x >> /mnt/x/A`: the append's link from A's cluster, in SA, refused
-  at the batch's end: an I/O error, the cluster it took (h) given back;
-- `echo x >> /mnt/x/A` again: answered, and A then FAT-chained over two
-  clusters, its first as planted and its second h, holding its bytes and
-  `x\\r\\n`;
-- `echo w > /mnt/x/W` (one cluster, h+1), then `writeat /mnt/x/W 3000 y`:
-  five clusters past W's one, linked as the gap fill goes, the fill's write
-  to h+4 refused (SD): an I/O error, W's size and bytes as before, W's chain
-  cut back to h+1 (its end of chain written again, or fsck_exfat finds the
-  chain too long for the size and its clusters free) and h+2 to h+6 free in
-  the bitmap, the links h+2 to h+4 left in free clusters.
+- HEAD: `cursorprobe whole /mnt/x/H 2048`, four clusters from h, their
+  entries in SH, refused at the batch's end: an I/O error, L keeping every
+  bit, its bytes and its first cluster (no give-back walked h's planted
+  link), no H in X's root;
+- CURSOR: `echo x >> /mnt/x/A`, the append's link from A's cluster, in SA,
+  refused at the batch's end: an I/O error; then again: answered, A
+  FAT-chained over two clusters, its first as planted and its second h,
+  holding its bytes and `x\\r\\n`;
+- GAP: `echo w > /mnt/x/W` (one cluster, h+1), then `writeat /mnt/x/W 3000
+  y`: the fill takes h+2, h+3 and h+4 as its walk reaches them and its
+  write to h+4 is refused: an I/O error, W's size and bytes as before, W's
+  chain cut back to h+1 (its end of chain written again, or fsck_exfat
+  finds the chain too long for the size and its clusters free);
+- SET: `writeat /mnt/x/D/V 3000 y`, h+2 to h+6 taken and written, then V's
+  set refused (D's sector): an I/O error, V as planted, its chain cut back;
+- REPLACE: `write /mnt/x/D/E/R zzz`, a new chain on h+2, then R's set
+  refused (E's sector): an I/O error, R as planted.
+
+Each give-back is read off the disk after the boot as the next command
+taking the same clusters again: A's append and W take h and h+1, SET's
+links run from h+2 to h+6 (so HEAD's and GAP's clusters were free), and
+REPLACE's zzz is on h+2; at the end h+2 to h+6 are free in the bitmap.
 
 Every plant is read back on the host before the boot, and fsck_exfat -n
 passes X then and after the boot (nothing leaks; until 2026-11-01 HEAD's
 four clusters did, and fsck was not asked). Fails with the give-back not
-called (A's second cluster not h, W not on h+1, the fill's clusters
-allocated, fsck's lost clusters), with W's end of chain not written back
-(W's chain, and fsck's too many clusters) and with the cursors kept by both
-flush_fat and the give-back (A's chain one cluster for its 515 bytes; either
-drop alone passes, since 2026-11-01 each covers a refused batch). A batch of more runs than
-fsd records (32), whose finds past them leak, and a refused write of the end
-of chain, after which nothing is given back, are reached by no boot. A boot
-QEMU's firmware never starts is INCONCLUSIVE (exit 100). About a minute.
+called (10 checks), with W's and V's end of chain not written back (3),
+with `write_at_chain` naming no cut cluster (3), with `write_at` not giving
+back after its set is refused (4), with the replace not freeing its new
+chain (2), and with the cursors kept by both flush_fat and the give-back (9:
+A's chain one cluster for its 515 bytes; either drop alone passes, since
+2026-11-01 each covers a refused batch). Not reached by a boot: a batch of
+more runs than fsd records (32), whose finds past them leak; a refused write
+of the end of chain, after which nothing is given back; and a bitmap sector
+refused during a give-back, which loses only its own runs. A boot QEMU's
+firmware never starts is INCONCLUSIVE (exit 100). About a minute.
 """
 import importlib.util
 import os

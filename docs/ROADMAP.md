@@ -4433,13 +4433,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   clusters are not always consecutive (the scan passes used ones), and fsd
   has no heap for a list. From the high review of #380, 2026-10-31.~~
   *Done 2026-11-01:* the batch records its allocator's finds as runs
-  (`Taken`, 32 runs, 256 bytes; the scan only goes forward inside a batch),
-  and a batch that fails writes back the end of chain of the file's last
-  cluster `write_at` linked on from, then clears the recorded bits, walking
-  nothing. A find past 32 runs still leaks, and so does everything when the
+  (`Taken`, 32 runs, about 270 bytes; the scan only goes forward inside a
+  batch), and a batch that fails writes back the end of chain of the file's
+  last cluster `write_at` linked on from, then clears the recorded bits,
+  walking nothing; so does `write_at` when its set write is refused after
+  the batch, and `write_file`'s replace then frees its new chain by a walk
+  (the high review of #382). A find past 32 runs still leaks, and so does everything when the
   end of chain is refused; neither is reached by a boot. `make
-  test-batch-refused`'s GAP refuses a gap fill's data write, and fsck_exfat
-  passes after the boot.
+  test-batch-refused`'s GAP refuses a gap fill's data write, SET and REPLACE
+  a set write after the batch, and fsck_exfat passes after the boot.
 - **exFAT's FAT batch is a mode flag, and its misuse a disk error.**
   `in_fat_batch` sets `fat_batch` on `Fs`, which changes what
   `write_fat_entry`, `fat_sector`, `alloc_cluster` and `clear_bit` do, and
