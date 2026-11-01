@@ -525,6 +525,30 @@ pub struct Fs {
     /// last allocation was found in, since nothing is freed inside a batch
     /// (`clear_bit` refuses there). `0` outside one, the scan's start.
     alloc_from: u64,
+    /// Set when [`flush_fat`](Self::flush_fat) drops a FAT sector holding
+    /// entries the disk refused, so the chain on the disk is not the one the
+    /// cache built; cleared at a FAT batch's start, read at its end
+    /// ([`BatchFailed`]).
+    fat_lost: bool,
+}
+
+/// A FAT batch ([`Fs::in_fat_batch`]) that failed: its error, and whether
+/// entries it set were dropped with a FAT sector the disk refused. Then the
+/// chain on the disk may start or run at entries as they were before the
+/// batch (a head's end of chain never written, the old entry another driver
+/// left), so a give-back must not walk it: `write_chain` leaks the chain
+/// instead. Until the third medium review of #380 the batch answered its
+/// error alone, and the give-back walked a stale head's link into a live
+/// file's clusters on a volume of 512-byte clusters.
+struct BatchFailed {
+    error: Error,
+    entries_lost: bool,
+}
+
+impl From<BatchFailed> for Error {
+    fn from(failed: BatchFailed) -> Error {
+        failed.error
+    }
 }
 
 /// One sector of the FAT, as cached by [`Fs::fat_cache`], `dirty` while it
@@ -659,6 +683,7 @@ impl Fs {
             fat_batch: false,
             alloc_bits: None,
             alloc_from: 0,
+            fat_lost: false,
         };
         // The root inside the heap, by the rule every later cluster meets.
         if !fs.in_heap(fs.root_cluster) {
@@ -1746,30 +1771,49 @@ impl Fs {
     /// the entry it names: [`extend_chain`](Self::extend_chain) sets the new
     /// cluster's end of chain before the link to it, and a link in another
     /// sector is set only after the cache has left the new cluster's,
-    /// writing it. So a flush the disk refuses leaves a chain on the disk
-    /// that ends at an end of chain, which `write_chain`'s give-back frees,
-    /// leaking what it allocated past it (the safe side), never a link to a
-    /// stale entry (a contiguous run's links, which `ensure_chained` sets
-    /// over entries the volume leaves undefined, are read by no walk until
-    /// the set says the file is chained). `make test-alloc-batch`'s model
-    /// asserts it. A batch inside a batch is the outer one. From the medium
+    /// writing it. So a refused flush never leaves a link on the disk into a
+    /// stale entry (a contiguous run's links, which `ensure_chained` sets over
+    /// entries the volume leaves undefined, are read by no walk until the set
+    /// says the file is chained); `make test-alloc-batch`'s model asserts it
+    /// of every link. The chain's head is no link: its end of chain waits in
+    /// the cache too, and a refused first flush leaves its old entry on the
+    /// disk, so the failure says entries were lost ([`BatchFailed`]) and
+    /// `write_chain` does not walk it (`make test-batch-refused`). A batch
+    /// inside a batch is the outer one. From the medium
     /// reviews of #379, 2026-10-31.
-    fn in_fat_batch<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R, Error>) -> Result<R, Error> {
+    ///
+    /// A failure answers [`BatchFailed`], saying whether a refused flush lost
+    /// entries; when the work and the flush both fail it carries the work's
+    /// error, and the loss with it.
+    fn in_fat_batch<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R, Error>) -> Result<R, BatchFailed> {
         if self.fat_batch {
-            return f(self);
+            return f(self).map_err(|error| BatchFailed { error, entries_lost: self.fat_lost });
         }
         self.fat_batch = true;
+        self.fat_lost = false;
         let made = f(self);
         self.fat_batch = false;
         let pending = self.fat_cache.as_ref().filter(|c| c.dirty).map(|c| c.lba);
-        let written = match pending {
+        let flushed = match pending {
             Some(lba) => self.flush_fat(lba),
-            None => self.write_alloc_bits(),
+            None => Ok(()),
         };
+        let held = self.end_alloc_hold();
+        let entries_lost = self.fat_lost;
+        match (made, flushed.and(held)) {
+            (Ok(made), Ok(())) => Ok(made),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(BatchFailed { error, entries_lost }),
+        }
+    }
+
+    /// End the allocator's hold on its bitmap sector: written if it holds
+    /// bits not yet written, let go, and the next scan from the bitmap's
+    /// first byte. At a FAT batch's end, and after each allocation outside one.
+    fn end_alloc_hold(&mut self) -> Result<(), Error> {
+        let written = self.write_alloc_bits();
         self.alloc_bits = None;
         self.alloc_from = 0;
-        let made = made?;
-        written.map(|()| made)
+        written
     }
 
     /// Write the allocator's bitmap sector if it holds bits not yet written.
@@ -1878,10 +1922,7 @@ impl Fs {
         let found = self.alloc_scan(&mut held);
         self.alloc_bits = held;
         if !self.fat_batch {
-            let written = self.write_alloc_bits();
-            self.alloc_bits = None;
-            self.alloc_from = 0;
-            written?;
+            self.end_alloc_hold()?;
         }
         let cluster = found?;
         self.write_fat_entry(cluster, END_OF_CHAIN)?;
@@ -2054,7 +2095,10 @@ impl Fs {
         });
         match (written.is_ok(), self.fat_cache.as_mut()) {
             (true, Some(sector)) => sector.dirty = false,
-            (false, _) => {
+            (false, cache) => {
+                if cache.is_some_and(|sector| sector.dirty) {
+                    self.fat_lost = true;
+                }
                 self.fat_cache = None;
                 self.read_cursor = None;
                 self.write_cursor = None;
@@ -2581,13 +2625,22 @@ impl Fs {
     /// `alloc_cluster`, then linked to its predecessor.
     fn write_chain(&mut self, data: &[u8]) -> Result<u32, Error> {
         let mut first = 0u32;
-        let made = self.in_fat_batch(|fs| fs.write_chain_from(data, &mut first));
-        if made.is_err() && first >= 2 {
-            // Out of space or an I/O error part way: nothing names the part
-            // already linked, so it is given back (it leaked until 2026-10-19).
-            let _ = self.free_data(first, false, data.len() as u64);
+        match self.in_fat_batch(|fs| fs.write_chain_from(data, &mut first)) {
+            Ok(first) => Ok(first),
+            Err(failed) => {
+                // Out of space or an I/O error part way: nothing names the
+                // part already linked, so it is given back (it leaked until
+                // 2026-10-19), walked on the disk, unless the disk refused
+                // entries the batch set: then the walk could start at a head
+                // whose end of chain was never written and follow the link
+                // another driver left there into a live file (`BatchFailed`),
+                // so the chain leaks, the safe side.
+                if first >= 2 && !failed.entries_lost {
+                    let _ = self.free_data(first, false, data.len() as u64);
+                }
+                Err(failed.error)
+            }
         }
-        made
     }
 
     /// [`write_chain`](Self::write_chain)'s body, leaving its first cluster in
@@ -2676,12 +2729,12 @@ impl Fs {
             return Err(Error::Io(DiskError::Io));
         }
         let n = n as u32;
-        self.in_fat_batch(|fs| {
+        Ok(self.in_fat_batch(|fs| {
             (0..n).try_for_each(|i| {
                 let value = if i + 1 < n { first + i + 1 } else { END_OF_CHAIN };
                 fs.write_fat_entry(first + i, value)
             })
-        })
+        })?)
     }
 
     /// Read-modify-write of a partial sector of file data (preserve the bytes
@@ -2890,95 +2943,104 @@ impl Fs {
 
         // The chain is built and the bytes written as one FAT batch, its
         // bits and links on the disk before the set below names them.
+        let head_cluster = self.in_fat_batch(|fs| fs.write_at_chain(&entry, offset, data))?;
         let write_end = offset + data.len() as u64;
-        let head_cluster = self.in_fat_batch(|fs| {
-            // Make the existing allocation FAT-chained so it can be extended.
-            fs.ensure_chained(entry.first_cluster, entry.contiguous, old_size)?;
-            // A chained file on one of the volume's own clusters is damage,
-            // refused before anything is written, as `ensure_chained` refuses a
-            // contiguous run over one and `file_step` a link to one: a chained
-            // file on the bitmap's cluster took the write into it (the fourth
-            // high review of 2026-10-24). `sector_of` refuses its sectors too,
-            // but a write starting at its end writes none of them, and links a
-            // new cluster from its FAT entry.
-            if fs.is_system(entry.first_cluster) {
-                return Err(Error::Io(DiskError::Io));
-            }
-
-            let cluster_bytes = fs.cluster_bytes();
-            let mut head_cluster = entry.first_cluster;
-            if head_cluster < 2 {
-                head_cluster = fs.alloc_cluster()?;
-            }
-
-            let write_start = valid.min(offset);
-            // The bytes the file's own clusters hold: a link past them (a crash
-            // between a chain's extension and its size write, or another tool)
-            // may name another file's cluster, so a walk past them extends the
-            // chain from there, cutting the link, where it followed it and wrote
-            // into that cluster (the medium review of 2026-10-19).
-            let owned = old_size.div_ceil(cluster_bytes) * cluster_bytes;
-
-            // Walk to the cluster holding `write_start`, extending if needed:
-            // from the write cursor when it is this file's and not past
-            // `write_start`, else from the head cluster.
-            // A write's walk is always FAT-chained: `ensure_chained` ran above.
-            let (mut cluster, pos) = ChainCursor::start(fs.write_cursor, head_cluster, false, write_start as usize);
-            let mut cluster_pos = pos as u64;
-            while cluster_pos + cluster_bytes <= write_start {
-                cluster = fs.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
-                cluster_pos += cluster_bytes;
-            }
-
-            let mut pos = write_start;
-            while pos < write_end {
-                while pos >= cluster_pos + cluster_bytes {
-                    cluster = fs.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
-                    cluster_pos += cluster_bytes;
-                }
-                let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
-                let sector_lba = fs.sector_of(cluster, Holder::Data)? as u64 + sector_in_cluster;
-                let sector_start = cluster_pos + sector_in_cluster * SECTOR_SIZE as u64;
-                let in_off = (pos - sector_start) as usize;
-                let n = ((SECTOR_SIZE - in_off) as u64).min(write_end - pos) as usize;
-
-                // Zeros before `offset` (the gap), `data` from `offset` on.
-                let mut chunk = [0u8; SECTOR_SIZE];
-                for (i, slot) in chunk[..n].iter_mut().enumerate() {
-                    let fp = pos + i as u64;
-                    if fp >= offset {
-                        *slot = data[(fp - offset) as usize];
-                    }
-                }
-
-                if in_off == 0 && n == SECTOR_SIZE {
-                    fs.disk.write_sector(sector_lba, &chunk)?;
-                } else if sector_start < valid {
-                    // Valid bytes in the sector outside the write: kept. A
-                    // sector holding none is written whole, zeros after the
-                    // write, and not read first; stale bytes left past the write
-                    // in a sector read here lie past the new valid length.
-                    fs.write_partial_sector(sector_lba, in_off, &chunk[..n])?;
-                } else {
-                    let mut sector = [0u8; SECTOR_SIZE];
-                    sector[in_off..in_off + n].copy_from_slice(&chunk[..n]);
-                    fs.disk.write_sector(sector_lba, &sector)?;
-                }
-                pos += n as u64;
-            }
-
-            // `cluster` and `cluster_pos` moved together through the chain this
-            // write walked and extended, so they name one of its clusters.
-            fs.write_cursor = Some(ChainCursor {
-                file_cluster: head_cluster,
-                contiguous: false,
-                cluster,
-                cluster_pos: cluster_pos as usize,
-            });
-            Ok(head_cluster)
-        })?;
         let new_size = old_size.max(write_end);
         self.patch_stream_ext(at, head_cluster, valid.max(write_end), new_size)
+    }
+
+    /// [`write_at`](Self::write_at)'s FAT batch: `entry`'s chain made
+    /// chained, walked and extended to hold `data` at `offset` (zeros from
+    /// its valid length to `offset`), the bytes written, and the write
+    /// cursor left on the chain. Answers the file's first cluster, which a
+    /// file of no cluster is given here.
+    fn write_at_chain(&mut self, entry: &DirEntry, offset: u64, data: &[u8]) -> Result<u32, Error> {
+        let (old_size, valid) = (entry.size, entry.valid);
+        let write_end = offset + data.len() as u64;
+        // Make the existing allocation FAT-chained so it can be extended.
+        self.ensure_chained(entry.first_cluster, entry.contiguous, old_size)?;
+        // A chained file on one of the volume's own clusters is damage,
+        // refused before anything is written, as `ensure_chained` refuses a
+        // contiguous run over one and `file_step` a link to one: a chained
+        // file on the bitmap's cluster took the write into it (the fourth
+        // high review of 2026-10-24). `sector_of` refuses its sectors too,
+        // but a write starting at its end writes none of them, and links a
+        // new cluster from its FAT entry.
+        if self.is_system(entry.first_cluster) {
+            return Err(Error::Io(DiskError::Io));
+        }
+
+        let cluster_bytes = self.cluster_bytes();
+        let mut head_cluster = entry.first_cluster;
+        if head_cluster < 2 {
+            head_cluster = self.alloc_cluster()?;
+        }
+
+        let write_start = valid.min(offset);
+        // The bytes the file's own clusters hold: a link past them (a crash
+        // between a chain's extension and its size write, or another tool)
+        // may name another file's cluster, so a walk past them extends the
+        // chain from there, cutting the link, where it followed it and wrote
+        // into that cluster (the medium review of 2026-10-19).
+        let owned = old_size.div_ceil(cluster_bytes) * cluster_bytes;
+
+        // Walk to the cluster holding `write_start`, extending if needed:
+        // from the write cursor when it is this file's and not past
+        // `write_start`, else from the head cluster.
+        // A write's walk is always FAT-chained: `ensure_chained` ran above.
+        let (mut cluster, pos) = ChainCursor::start(self.write_cursor, head_cluster, false, write_start as usize);
+        let mut cluster_pos = pos as u64;
+        while cluster_pos + cluster_bytes <= write_start {
+            cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
+            cluster_pos += cluster_bytes;
+        }
+
+        let mut pos = write_start;
+        while pos < write_end {
+            while pos >= cluster_pos + cluster_bytes {
+                cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
+                cluster_pos += cluster_bytes;
+            }
+            let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
+            let sector_lba = self.sector_of(cluster, Holder::Data)? as u64 + sector_in_cluster;
+            let sector_start = cluster_pos + sector_in_cluster * SECTOR_SIZE as u64;
+            let in_off = (pos - sector_start) as usize;
+            let n = ((SECTOR_SIZE - in_off) as u64).min(write_end - pos) as usize;
+
+            // Zeros before `offset` (the gap), `data` from `offset` on.
+            let mut chunk = [0u8; SECTOR_SIZE];
+            for (i, slot) in chunk[..n].iter_mut().enumerate() {
+                let fp = pos + i as u64;
+                if fp >= offset {
+                    *slot = data[(fp - offset) as usize];
+                }
+            }
+
+            if in_off == 0 && n == SECTOR_SIZE {
+                self.disk.write_sector(sector_lba, &chunk)?;
+            } else if sector_start < valid {
+                // Valid bytes in the sector outside the write: kept. A
+                // sector holding none is written whole, zeros after the
+                // write, and not read first; stale bytes left past the write
+                // in a sector read here lie past the new valid length.
+                self.write_partial_sector(sector_lba, in_off, &chunk[..n])?;
+            } else {
+                let mut sector = [0u8; SECTOR_SIZE];
+                sector[in_off..in_off + n].copy_from_slice(&chunk[..n]);
+                self.disk.write_sector(sector_lba, &sector)?;
+            }
+            pos += n as u64;
+        }
+
+        // `cluster` and `cluster_pos` moved together through the chain this
+        // write walked and extended, so they name one of its clusters.
+        self.write_cursor = Some(ChainCursor {
+            file_cluster: head_cluster,
+            contiguous: false,
+            cluster,
+            cluster_pos: cluster_pos as usize,
+        });
+        Ok(head_cluster)
     }
 
     /// Delete the set `entry`, at `at` ([`unlink_set`](Self::unlink_set)),
