@@ -4420,53 +4420,6 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bound from the size: BIG's 2 MiB was filled in one request on QEMU and
   the append went through, no wedge restart. So C holds at megabytes; the
   open risk is gigabytes, unmeasured.
-- ~~**exFAT frees a FAT-chained file a cluster at a time.** `free_data`'s
-  chained walk reads and writes a bitmap sector and writes a FAT sector for
-  every cluster, three round trips a cluster on the Pi's USB stick, and every
-  file fsd writes is chained (a camera's file too, after its first append).
-  An `rm`, a replacing `mv` or a `>` truncation of a large file can then
-  pass the supervisor's wedge limit (WEDGE_TICKS, about 2.5 s) and fsd is
-  restarted mid-free; since 2026-10-23 the set is deleted first, so that
-  leaks rather than cross-links. A contiguous run clears its bits a bitmap
-  sector at a time since the same day. Grouping a chain's consecutive
-  clusters (fsd's first-fit allocator keeps them mostly so) into runs for
-  `bitmap_clear_run`, and zeroing FAT entries a FAT sector at a time, would
-  end it. The altitude review of
-  `fix/exfat-vendor-alloc`, 2026-10-23, deferred by Hans; found again by the
-  high review of 2026-10-24, and again by the second high review that day,
-  which adds that `bitmap_clear_run` itself bounds and divides for every
-  cluster (`bitmap_sector_lba`) where a sector's end, known after the
-  first, would do; deferred with this item, to be fixed with it. The third
-  high review that day found it once more, and adds that a replacing `mv`
-  now walks both chains in full before its free (the overlap test against
-  the source's runs, since 2026-10-24); those walks read the FAT through its
-  cache, about one sector a 128 clusters, so the free's three round trips a
-  cluster are the cost, and the walk could be shared with the free when
-  this item is done.~~ *Done 2026-10-31:* the chained walk keeps one FAT
-  sector (the FAT cache) and one bitmap sector, writing the bitmap sector
-  before each FAT sector so no bit lags its FAT zero, and a run's bits find
-  their sector once, not a cluster at a time; `make test-free-chain` counts
-  the writes of an `rm` of 280 clusters, 10 FAT and 10 bitmap where main
-  made 280 of each, and requires their order. The replacing `mv`'s two full
-  walks before its free are not shared with it: they read through the FAT
-  cache, about one sector a 128 clusters, and are left.
-- ~~**exFAT's allocation writes a FAT sector for every entry it sets.**~~
-  *Done 2026-10-31:* a request that sets many entries is a FAT batch
-  (`in_fat_batch`): `ensure_chained`, `write_chain` and `write_at`'s walk
-  and data writes set entries in the FAT cache, written a sector at a time,
-  and the allocator's bits in one held bitmap sector, written before any FAT
-  sector, the scan going on from its last find. The set naming the chain is
-  written after the batch. `make test-alloc-batch` grades a 1 MiB gap fill
-  across a bitmap sector and the first append to a 2 MiB contiguous file:
-  14 FAT writes, 5 bitmap writes and 4 bitmap reads, where `main` made
-  1,025, 257 and 386. A request of 2 KiB still costs a bitmap write and a FAT
-  write when it takes a cluster, which its order needs (bits, links, set);
-  `cp` of a large file is that a cluster. A gap fill still writes each data
-  sector on its own, 2,048 for 1 MiB, measured inside the wedge limit on
-  QEMU and not on the Pi's stick (the medium review of #380). A refused
-  batch, the head's stale entry and the cursors dropped with a refused
-  sector, is `make test-batch-refused`'s. From the medium reviews of #379
-  and #380.
 - **exFAT gives back a failed batch by a FAT walk, or not at all.**
   `write_chain`'s give-back walks the chain on the disk, so since the third
   medium review of #380 it is skipped whenever a refused flush lost entries
