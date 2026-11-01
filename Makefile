@@ -2454,7 +2454,9 @@ test-write-walk: image-exfat
 # file on another chain, then the new file read or written where the old
 # cursor was, every file read back and the setup confirmed on the disk; and a
 # write past a size-0 NoFatChain file's cluster the host planted (Q's bytes
-# unchanged). One boot, about a minute; run it whenever a filesystem's
+# unchanged). Every stale case needs the removed file's cluster reused, so
+# it also fails with exFAT's free not lowering the allocator's hint
+# (clear_bit, since 2026-11-01). One boot, about a minute; run it whenever a filesystem's
 # cursors, write_fat_entry, ends_walk, ensure_chained, allocator or free path
 # changes.
 test-stale-cursor: image-exfat
@@ -2806,9 +2808,11 @@ test-free-chain: image-exfat
 # the bitmap's first two sectors and the first append to a 2 MiB contiguous
 # file macOS wrote, against a boot without them; QEMU's FAT and bitmap writes
 # and bitmap reads must be the FAT batch's from the chains read off the disk,
-# in its order (bits, then the links to them, then the set). Two boots, about
+# in its order (bits, then the links to them, then the set), the second
+# request's scan going on from the first's last find (the allocator's hint,
+# since 2026-11-01). Two boots, about
 # three minutes; run it whenever exFAT's batch module (batch::run,
-# FatBatch), alloc_cluster, alloc_find, alloc_scan, ensure_chained,
+# FatBatch), alloc_cluster, alloc_find, alloc_scan, end_alloc_hold, ensure_chained,
 # write_chain, write_at, write_fat_entry, flush_fat or the FAT cache changes.
 test-alloc-batch: image-exfat
 	python3 scripts/test-alloc-batch.py

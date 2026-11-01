@@ -4465,14 +4465,19 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   path reaches, each printing a line of fsd's own; the client still sees
   `FS_ERR_IO`, since a wire code of fsd's own would be a protocol change
   for a path nothing reaches.
-- **exFAT's allocator rescans from the bitmap's first byte outside a batch.**
+- ~~**exFAT's allocator rescans from the bitmap's first byte outside a batch.**
   Inside a FAT batch the scan goes on from its last find; every other
   allocation (`alloc_zeroed` for `mkdir` and a directory's growth, the
   root's growth, a 2 KiB write taking a cluster) starts at byte 0, so on a
   nearly full stick each reads every bitmap sector before the first clear
   bit. A hint kept across requests and lowered by every free, as FAT32's
   allocator keeps one, would serve them all. From the third medium review
-  of #380.
+  of #380.~~
+  *Done 2026-11-01:* `alloc_from` is kept across requests and lowered by
+  `clear_bit`, the one place a bit is cleared, and the scan wraps to byte 0
+  before `DiskFull`. Graded by `test-alloc-batch` (the hint kept: 3 bitmap
+  reads, 4 without) and `test-stale-cursor` (the lowering); the wrap is
+  reached by no boot.
 - **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s

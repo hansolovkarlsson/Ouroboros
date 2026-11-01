@@ -1699,6 +1699,24 @@ that flush removed and `test-batch-refused` with the give-back removed (10
 checks, as before the move). Asked by the second and third medium reviews
 of #380.
 
+**exFAT's allocator keeps its hint across requests (2026-11-01).** Only a
+FAT batch went on from its last find; every other allocation (`mkdir`, a
+directory's growth, a one-cluster write) scanned from the bitmap's first
+byte, on a nearly full stick a USB round trip for every bitmap sector before
+the first clear bit. `alloc_from` is now kept until a free lowers it:
+`clear_bit`, the one place a bit is cleared (a free, a give-back), sets it
+no higher than the freed cluster's byte, so every byte below it is full and
+placement is first fit as before. The scan wraps to byte 0 before it
+answers `DiskFull`, as FAT32's does; while every free lowers the hint the
+wrap finds nothing, and no boot reaches it. `test-alloc-batch`'s second
+request now reads 3 bitmap sectors where it read 4, and reads 4 again with
+the hint set back to 0 when the allocator lets go of its sector;
+`test-stale-cursor` fails 4 checks with the lowering removed (a removed
+file's cluster not reused, so its stale cases are not built).
+`test-batch-refused` passes with it removed: its given-back clusters lie in
+the bitmap byte the hint is already on. `make test` and the eleven exFAT
+rigs pass. From the third medium review of #380.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
