@@ -545,13 +545,25 @@ const TAKEN_RUNS: usize = 32;
 /// two. A find past [`TAKEN_RUNS`] runs is not recorded, and a failed batch
 /// leaks it, as every failed batch leaked before the record (the high
 /// review of #380, 2026-10-31).
+///
+/// `tail` is the cluster outside the record that the batch first linked one
+/// of its clusters from: an existing file's last cluster, which `write_at`
+/// extends ([`extend_chain`](Fs::extend_chain)). A failed batch writes its
+/// end of chain back before any bit is cleared, so no chain on the disk
+/// runs into a cluster given back.
 struct Taken {
     runs: [(u32, u32); TAKEN_RUNS],
     len: usize,
+    tail: Option<u32>,
 }
 
 impl Taken {
-    const NONE: Taken = Taken { runs: [(0, 0); TAKEN_RUNS], len: 0 };
+    const NONE: Taken = Taken { runs: [(0, 0); TAKEN_RUNS], len: 0, tail: None };
+
+    /// Whether `cluster` is recorded.
+    fn holds(&self, cluster: u32) -> bool {
+        self.runs[..self.len].iter().any(|&(first, count)| cluster >= first && cluster - first < count)
+    }
 
     /// Record `cluster`, found past every cluster already recorded.
     fn add(&mut self, cluster: u32) {
@@ -1836,21 +1848,31 @@ impl Fs {
 
     /// Give back the clusters a failed FAT batch took ([`Taken`]): each
     /// one's bit cleared, a bitmap sector read and written once for the
-    /// runs in it, and no FAT entry touched, so nothing on the disk steers
-    /// it: a FAT entry left in a free cluster is harmless, the bitmap
-    /// saying what is free, as the free leaves its links (#379). The FAT
-    /// sectors the batch set are settled first, written or dropped, so no
-    /// link to a cluster given back is written after its bit is cleared. A
-    /// link the batch did write to one (from a file's last cluster, by
-    /// `write_at`) lies past the file's size, where no walk follows it
-    /// ([`file_step`](Self::file_step) cuts it at the next extension). The
-    /// cursors are dropped, since the batch may have left one on a cluster
-    /// given back. A bit the disk refuses to clear is left set: a leak, the
-    /// safe side, and the batch's own error is the one answered.
+    /// runs in it, and no chain walked, so nothing on the disk steers it: a
+    /// FAT entry left in a free cluster is harmless, the bitmap saying what
+    /// is free, as the free leaves its links (#379). The FAT sectors the
+    /// batch set are settled first, written or dropped, so no link to a
+    /// cluster given back is written after its bit is cleared.
+    ///
+    /// One FAT entry is written: the end of chain of the file's last
+    /// cluster, when `write_at`'s batch linked its clusters on from it
+    /// ([`Taken::tail`]), before any bit is cleared. The link lay past the
+    /// file's size, where fsd's walks stop, but fsck_exfat follows a chain
+    /// to its end ("too many clusters for its size") and finds the clusters
+    /// free ("the bitmap needs to be repaired"): `make test-batch-refused`'s
+    /// GAP. When that write is refused nothing is given back, a leak, the
+    /// safe side, as is a bit the disk refuses to clear; the batch's own
+    /// error is the one answered. The cursors are dropped, since the batch
+    /// may have left one on a cluster given back.
     fn give_back(&mut self) {
         self.read_cursor = None;
         self.write_cursor = None;
         let taken = core::mem::replace(&mut self.taken, Taken::NONE);
+        if let Some(tail) = taken.tail {
+            if self.write_fat_entry(tail, END_OF_CHAIN).is_err() {
+                return;
+            }
+        }
         // Bits cleared before an error are written all the same, as
         // `bitmap_clear_run` writes them: each is a cluster nothing names.
         let mut bits = None;
@@ -2749,6 +2771,14 @@ impl Fs {
     /// exFAT `fat32::extend_chain`.
     fn extend_chain(&mut self, tail: u32) -> Result<u32, Error> {
         let new = self.alloc_cluster()?; // bitmap + FAT-end
+        // The first link out of a cluster the batch did not take is the one
+        // a failed batch cuts (`Taken::tail`): an existing file's last
+        // cluster. Every later one is from a cluster the batch took, and so
+        // is the first when the batch gave the file its first cluster, which
+        // its allocator found before any other.
+        if self.fat_batch && self.taken.tail.is_none() && !self.taken.holds(tail) {
+            self.taken.tail = Some(tail);
+        }
         self.write_fat_entry(tail, new)?;
         Ok(new)
     }

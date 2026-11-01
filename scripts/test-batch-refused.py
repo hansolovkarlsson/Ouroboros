@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A FAT batch the disk refuses: no give-back walks a stale head, no cursor outlives its links.
+"""A FAT batch the disk refuses: its clusters come back by their bits, no cursor outlives its links.
 
     python3 scripts/test-batch-refused.py    (or `make test-batch-refused`, which builds the images)
 
@@ -12,13 +12,18 @@ refused one of those writes, both found by the medium reviews of #380:
   is what it was before, and `write_chain`'s give-back walked from it, so a
   link another driver left in a free cluster's entry took the walk into a live
   file, whose clusters it freed. On a volume of 512-byte clusters a 2 KiB
-  write walks four. The batch now says its entries were lost
-  (`BatchFailed`), and the give-back leaks the chain instead.
+  write walks four. The batch then said its entries were lost
+  (`BatchFailed`), and the give-back leaked the chain instead; since
+  2026-11-01 a failed batch gives back the clusters its allocator took by
+  their bits alone (`give_back`), walking nothing.
 - CURSOR: `write_at` sets its write cursor inside the batch, before the
   batch's last flush. Refused, the cursor named a cluster the file's link to
   never reached the disk, and a retried append resumed there: its bytes went
   into a cluster the chain on the disk does not hold. `flush_fat` now drops
   the cursors with the cache it drops.
+- GAP (2026-11-01): `write_at` links clusters past a file's size as its
+  batch goes, and when a data write was refused part way it gave back none
+  of them (a leak older than the batch, the high review of #380).
 
 No rig made a FAT write fail before this one. One boot: the firmware boots
 build/esp.img from NVMe (which the kernel cannot drive), and virtio holds a
@@ -33,25 +38,37 @@ host plants:
 - in the FAT entry of h, the first free cluster (the allocator's first find),
   a link to L's first cluster, as a driver may leave a freed cluster's entry.
 
-h's FAT sector, SH, and SA are the two that fail once. Then, logged in, with
-X at /mnt/x:
+h's FAT sector, SH, and SA fail their first write, and so does the data
+sector of h+4, SD. Then, logged in, with X at /mnt/x:
 
 - `cursorprobe whole /mnt/x/H 2048`: four clusters from h, their entries in
-  SH, refused at the batch's end: the probe must say an I/O error, and L
-  must keep every bit, its bytes and its first cluster, h's entry still the
-  planted link (nothing walked it), h and the three after it left allocated
-  (the leak, the safe side), no H in X's root;
+  SH, refused at the batch's end: the probe must say an I/O error, L must
+  keep every bit, its bytes and its first cluster (no give-back walked h's
+  planted link), no H in X's root, and h to h+3 must come back: the next
+  three commands take them again, h by A's append, h+1 by W and h+2 and h+3
+  by the gap fill, which the host reads off the disk after the boot;
 - `echo x >> /mnt/x/A`: the append's link from A's cluster, in SA, refused
-  at the batch's end: an I/O error;
+  at the batch's end: an I/O error, the cluster it took (h) given back;
 - `echo x >> /mnt/x/A` again: answered, and A then FAT-chained over two
-  clusters, its first as planted, holding its bytes and `x\\r\\n`.
+  clusters, its first as planted and its second h, holding its bytes and
+  `x\\r\\n`;
+- `echo w > /mnt/x/W` (one cluster, h+1), then `writeat /mnt/x/W 3000 y`:
+  five clusters past W's one, linked as the gap fill goes, the fill's write
+  to h+4 refused (SD): an I/O error, W's size and bytes as before, W's chain
+  cut back to h+1 (its end of chain written again, or fsck_exfat finds the
+  chain too long for the size and its clusters free) and h+2 to h+6 free in
+  the bitmap, the links h+2 to h+4 left in free clusters.
 
 Every plant is read back on the host before the boot, and fsck_exfat -n
-passes X then. After the boot fsck_exfat is not asked for clean: the leaks
-are the point. Fails with the give-back not asking whether entries were lost
-(L's first cluster freed, h's entry zeroed) and with flush_fat keeping the
-cursors (A's chain one cluster for its 515 bytes). A boot QEMU's firmware
-never starts is INCONCLUSIVE (exit 100). About a minute.
+passes X then and after the boot (nothing leaks; until 2026-11-01 HEAD's
+four clusters did, and fsck was not asked). Fails with the give-back not
+called (A's second cluster not h, W not on h+1, the fill's clusters
+allocated, fsck's lost clusters), with W's end of chain not written back
+(W's chain, and fsck's too many clusters) and with flush_fat keeping the
+cursors (A's chain one cluster for its 515 bytes). A batch of more runs than
+fsd records (32), whose finds past them leak, and a refused write of the end
+of chain, after which nothing is given back, are reached by no boot. A boot
+QEMU's firmware never starts is INCONCLUSIVE (exit 100). About a minute.
 """
 import importlib.util
 import os
@@ -125,7 +142,7 @@ def make_small():
 def plant(start):
     """A set by hand on its own cluster, chained, and h's FAT entry linked to
     L's first cluster. Answers (h, L's first cluster, the FAT's first
-    sector in the image) or a reason it could not."""
+    sector and the heap's first sector in the image) or a reason it could not."""
     with Volume(IMAGE, start) as vol:
         if vol.cluster != SECTOR:
             return f"X's clusters are {vol.cluster} bytes, not 512"
@@ -165,7 +182,7 @@ def plant(start):
     with open(IMAGE, "r+b") as fh:
         fh.seek(fat_byte + h * 4)
         fh.write(struct.pack("<I", l0))
-    return h, l0, fat_byte // SECTOR
+    return h, l0, fat_byte // SECTOR, heap_byte // SECTOR
 
 
 def answer(out, cmd, nth=0):
@@ -194,19 +211,20 @@ def run():
     planted = plant(start)
     if isinstance(planted, str):
         return [(f"before: {planted}", False)], [], 0
-    h, l0, fat_lba = planted
+    h, l0, fat_lba, heap_lba = planted
     sh, sa = fat_lba + h * 4 // SECTOR, fat_lba + A_AT * 4 // SECTOR
+    sd = heap_lba + h + 4 - 2  # h+4's one sector: GAP's fill refused there
     with Volume(IMAGE, start) as vol:
         listed = {exfatimg.fold(k): v for k, v in vol.listing(vol.root).items()}
         l_ok = listed.get("l", (None,))[0] == l0 and vol.data(list(range(l0, l0 + 4))) == L_BYTES
         a_ok = (listed.get("a") == (A_AT, len(A_BYTES), True) and vol.chain(A_AT) == [A_AT]
                 and vol.data([A_AT]) == A_BYTES and vol.used(A_AT))
-        h_ok = not vol.used(h) and vol.entry(h) == l0 and all(not vol.used(c) for c in range(h, h + 6))
+        h_ok = not vol.used(h) and vol.entry(h) == l0 and all(not vol.used(c) for c in range(h, h + 8))
     ok, lines = exfatimg.fsck_clean(IMAGE, part="s3")
     checks = [
         (f"before: L on X at {l0}, four clusters, its bytes", l_ok),
         (f"before: A chained on cluster {A_AT} alone, its bytes, its bit set", a_ok),
-        (f"before: h ({h}) and the five after it free, h's entry linking to L's first cluster", h_ok),
+        (f"before: h ({h}) and the seven after it free, h's entry linking to L's first cluster", h_ok),
         (f"before: SH ({sh}) and SA ({sa}) are two sectors, h to h+4 all in SH",
          sh != sa and all(fat_lba + c * 4 // SECTOR == sh for c in range(h, h + 5))),
         ("before: fsck_exfat -n passes X with the plants", ok),
@@ -216,10 +234,11 @@ def run():
         return checks, notes, 0
 
     with open(BLKDEBUG, "w") as fh:
-        for sector in (sh, sa):
+        for sector in (sh, sa, sd):
             fh.write(f'[inject-error]\nevent = "write_aio"\niotype = "write"\nerrno = "5"\n'
                      f'sector = "{sector}"\nonce = "on"\n\n')
-    cmds = ["mount 2 /mnt/x", "cursorprobe whole /mnt/x/H 2048", "echo x >> /mnt/x/A", "echo x >> /mnt/x/A"]
+    cmds = ["mount 2 /mnt/x", "cursorprobe whole /mnt/x/H 2048", "echo x >> /mnt/x/A", "echo x >> /mnt/x/A",
+            "echo w > /mnt/x/W", "writeat /mnt/x/W 3000 y"]
     steps = [("login:", "root"), ("assword", "root")] + [("# ", c) for c in cmds] + [("# ", "")]
     extra = [
         # bootindex=0 pins the firmware to the NVMe disk, which it boots and
@@ -245,28 +264,46 @@ def run():
 
     probe = answer(out, cmds[1]) or ""
     first, second = answer(out, cmds[2], 0) or "", answer(out, cmds[2], 1)
+    made_w, gap = answer(out, cmds[4]), answer(out, cmds[5]) or ""
     with Volume(IMAGE, start) as vol:
         listed = {exfatimg.fold(k): v for k, v in vol.listing(vol.root).items()}
         l_kept = (listed.get("l", (None,))[0] == l0 and all(vol.used(c) for c in range(l0, l0 + 4))
                   and vol.data(list(range(l0, l0 + 4))) == L_BYTES)
-        h_entry = vol.entry(h)
-        leaked = [vol.used(c) for c in range(h, h + 4)]
         a = listed.get("a")
         a_chain = vol.chain(A_AT) if a and a[2] else []
         a_data = vol.data(a_chain)[:a[1]] if a else b""
+        w = listed.get("w")
+        w_data = vol.data([w[0]])[:w[1]] if w and w[0] >= 2 else b""
+        gap_bits = [vol.used(c) for c in range(h + 2, h + 7)]
+        w_links = [vol.entry(c) for c in range(h + 1, h + 5)]
+    fsck_ok, fsck_lines = exfatimg.fsck_clean(IMAGE, part="s3")
+    if not fsck_ok:
+        notes += [f"after: {ln}" for ln in fsck_lines]
     checks += [
         ("driven to the end, fsd mounted exFAT", driven and "fsd: exFAT mounted" in out),
         (f"HEAD: the whole-file write answered an I/O error ({probe!r})",
          "cursorprobe: whole:" in probe and "I/O error" in probe),
         ("HEAD: L kept every bit, its first cluster and its bytes (no give-back walked h's stale link)", l_kept),
-        (f"HEAD: h's FAT entry still the planted link to {l0} (now {h_entry})", h_entry == l0),
-        (f"HEAD: h and the three after it left allocated, the safe side ({leaked})", all(leaked)),
+        (f"HEAD: h to h+3 given back: taken again by A's append (h), W (h+1) and the gap fill "
+         f"(h+2, h+3) (A {a_chain}, W {w}, the fill's links {w_links})",
+         a_chain[1:] == [h] and bool(w) and w[0] == h + 1 and w_links[:2] == [h + 2, h + 3]),
         ("HEAD: no H in X's root", "h" not in listed),
         (f"CURSOR: the first append answered an I/O error ({first!r})", "I/O error" in first),
         (f"CURSOR: the retried append answered nothing ({second!r})", second == ""),
         (f"CURSOR: A FAT-chained over two clusters from {A_AT} ({a}, chain {a_chain})",
          bool(a) and a[0] == A_AT and a[1] == len(A_BYTES) + 3 and a[2] and len(a_chain) == 2),
+        (f"CURSOR: A's second cluster is h ({h}), the one the refused append gave back",
+         a_chain[1:] == [h]),
         ("CURSOR: A holds its bytes and x\\r\\n", a_data == A_BYTES + b"x\r\n"),
+        (f"GAP: W made on h+1 ({h + 1}), three bytes, chained ({made_w!r}, {w})",
+         made_w == "" and w == (h + 1, 3, True)),
+        (f"GAP: the gap fill answered an I/O error ({gap!r})", "I/O error" in gap),
+        ("GAP: W still three bytes, w\\r\\n", w_data == b"w\r\n"),
+        (f"GAP: W's chain cut back to its one cluster, the fill's links after it left in free clusters "
+         f"(h+1 to h+4: {w_links})", w_links == [END, h + 3, h + 4, END]),
+        (f"GAP: h+2 to h+6 free in the bitmap, the clusters the fill took given back ({gap_bits})",
+         not any(gap_bits)),
+        ("after: fsck_exfat -n passes X (nothing leaked)", fsck_ok),
         (f"no fault lines in QEMU's trace ({faults})", faults == 0),
     ]
     return checks, notes, 0
