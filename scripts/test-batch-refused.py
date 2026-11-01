@@ -286,7 +286,7 @@ def run():
         ("HEAD: L kept every bit, its first cluster and its bytes (no give-back walked h's stale link)", l_kept),
         (f"HEAD: h to h+3 given back: taken again by A's append (h), W (h+1) and the gap fill "
          f"(h+2, h+3) (A {a_chain}, W {w}, the fill's links {w_links})",
-         a_chain[1:] == [h] and bool(w) and w[0] == h + 1 and w_links[:2] == [h + 2, h + 3]),
+         a_chain[1:] == [h] and bool(w) and w[0] == h + 1 and w_links[1:3] == [h + 3, h + 4]),
         ("HEAD: no H in X's root", "h" not in listed),
         (f"CURSOR: the first append answered an I/O error ({first!r})", "I/O error" in first),
         (f"CURSOR: the retried append answered nothing ({second!r})", second == ""),
