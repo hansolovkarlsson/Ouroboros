@@ -64,8 +64,9 @@ passes X then and after the boot (nothing leaks; until 2026-11-01 HEAD's
 four clusters did, and fsck was not asked). Fails with the give-back not
 called (A's second cluster not h, W not on h+1, the fill's clusters
 allocated, fsck's lost clusters), with W's end of chain not written back
-(W's chain, and fsck's too many clusters) and with flush_fat keeping the
-cursors (A's chain one cluster for its 515 bytes). A batch of more runs than
+(W's chain, and fsck's too many clusters) and with the cursors kept by both
+flush_fat and the give-back (A's chain one cluster for its 515 bytes; either
+drop alone passes, since 2026-11-01 each covers a refused batch). A batch of more runs than
 fsd records (32), whose finds past them leak, and a refused write of the end
 of chain, after which nothing is given back, are reached by no boot. A boot
 QEMU's firmware never starts is INCONCLUSIVE (exit 100). About a minute.
