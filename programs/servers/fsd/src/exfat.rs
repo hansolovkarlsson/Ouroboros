@@ -531,8 +531,8 @@ pub struct Fs {
     taken: Taken,
 }
 
-/// How many runs of clusters a FAT batch records ([`Taken`]): 256 bytes in
-/// every exFAT `Fs`, which lives in a `Mount` on fsd's 56 KiB stack, where a
+/// How many runs of clusters a FAT batch records ([`Taken`]): about 270
+/// bytes in every exFAT `Fs` (the runs' 256 and `len` and `tail`), which lives in a `Mount` on fsd's 56 KiB stack, where a
 /// cluster a slot for the largest batch (a 1 MiB gap fill on 512-byte
 /// clusters, some 2,050) would be 8 KiB in each.
 const TAKEN_RUNS: usize = 32;
@@ -546,11 +546,17 @@ const TAKEN_RUNS: usize = 32;
 /// leaks it, as every failed batch leaked before the record (the high
 /// review of #380, 2026-10-31).
 ///
-/// `tail` is the cluster outside the record that the batch first linked one
-/// of its clusters from: an existing file's last cluster, which `write_at`
-/// extends ([`extend_chain`](Fs::extend_chain)). A failed batch writes its
-/// end of chain back before any bit is cleared, so no chain on the disk
-/// runs into a cluster given back.
+/// `tail` is the existing file's cluster `write_at` first linked one of the
+/// batch's clusters from ([`file_step`](Fs::file_step), told by its caller
+/// that the walk has not yet left the file's own clusters). A failed batch
+/// writes its end of chain back before any bit is cleared, so no chain on
+/// the disk runs into a cluster given back. Until the high review of #382
+/// `extend_chain` inferred it as the first link from a cluster not in the
+/// record, which a find past [`TAKEN_RUNS`] runs is not.
+///
+/// The record stays until the next batch starts, so a caller whose set
+/// write fails after its batch succeeded gives the clusters back too
+/// (`write_at`).
 struct Taken {
     runs: [(u32, u32); TAKEN_RUNS],
     len: usize,
@@ -560,10 +566,6 @@ struct Taken {
 impl Taken {
     const NONE: Taken = Taken { runs: [(0, 0); TAKEN_RUNS], len: 0, tail: None };
 
-    /// Whether `cluster` is recorded.
-    fn holds(&self, cluster: u32) -> bool {
-        self.runs[..self.len].iter().any(|&(first, count)| cluster >= first && cluster - first < count)
-    }
 
     /// Record `cluster`, found past every cluster already recorded.
     fn add(&mut self, cluster: u32) {
@@ -1873,12 +1875,15 @@ impl Fs {
                 return;
             }
         }
-        // Bits cleared before an error are written all the same, as
-        // `bitmap_clear_run` writes them: each is a cluster nothing names.
+        // Each run on its own, so a bitmap sector that will not read or
+        // write loses only the runs in it (until the high review of #382 the
+        // first error ended the give-back); bits cleared before an error are
+        // written all the same, as `bitmap_clear_run` writes them: each is a
+        // cluster nothing names.
         let mut bits = None;
-        let _ = taken.runs[..taken.len]
-            .iter()
-            .try_for_each(|&(first, count)| (first..first + count).try_for_each(|c| self.clear_bit(&mut bits, c)));
+        for &(first, count) in &taken.runs[..taken.len] {
+            let _ = self.clear_run(&mut bits, first, first + count);
+        }
         let _ = self.write_bits(&mut bits);
     }
 
@@ -2201,9 +2206,18 @@ impl Fs {
     /// set is gone and nothing names the run.
     fn bitmap_clear_run(&mut self, first: u32, end: u32) -> Result<(), Error> {
         let mut bits = None;
-        let cleared = (first..end).try_for_each(|c| self.clear_bit(&mut bits, c));
+        let cleared = self.clear_run(&mut bits, first, end);
         let written = self.write_bits(&mut bits);
         cleared.and(written)
+    }
+
+    /// Clear the bits of clusters `first..end` in `bits`, the bitmap sector
+    /// held, which the caller writes when it is done:
+    /// [`bitmap_clear_run`](Self::bitmap_clear_run) after one run,
+    /// [`give_back`](Self::give_back) after all of its, so runs sharing a
+    /// sector share its read and write.
+    fn clear_run(&mut self, bits: &mut Option<BitmapSector>, first: u32, end: u32) -> Result<(), Error> {
+        (first..end).try_for_each(|c| self.clear_bit(bits, c))
     }
 
     /// Clear cluster `c`'s bitmap bit in `bits`, the bitmap sector a free
@@ -2759,11 +2773,20 @@ impl Fs {
     /// would refuse the sector, but a walk passes a cluster it does not
     /// write, and the step after it would link a new cluster from the
     /// bitmap's FAT entry.
-    fn file_step(&mut self, cluster: u32, owned: bool) -> Result<u32, Error> {
+    ///
+    /// `of_file` says `cluster` is the file's own, not one this write took:
+    /// a cluster appended after it is then the first, and `cluster` the one
+    /// a failed batch cuts its link from ([`Taken::tail`]).
+    fn file_step(&mut self, cluster: u32, owned: bool, of_file: bool) -> Result<u32, Error> {
         match self.next_cluster(cluster)? {
             Some(next) if owned && self.is_system(next) => Err(Error::Io(DiskError::Io)),
             Some(next) if owned => Ok(next),
-            _ => self.extend_chain(cluster),
+            _ => {
+                if of_file {
+                    self.taken.tail = Some(cluster);
+                }
+                self.extend_chain(cluster)
+            }
         }
     }
 
@@ -2771,14 +2794,6 @@ impl Fs {
     /// exFAT `fat32::extend_chain`.
     fn extend_chain(&mut self, tail: u32) -> Result<u32, Error> {
         let new = self.alloc_cluster()?; // bitmap + FAT-end
-        // The first link out of a cluster the batch did not take is the one
-        // a failed batch cuts (`Taken::tail`): an existing file's last
-        // cluster. Every later one is from a cluster the batch took, and so
-        // is the first when the batch gave the file its first cluster, which
-        // its allocator found before any other.
-        if self.fat_batch && self.taken.tail.is_none() && !self.taken.holds(tail) {
-            self.taken.tail = Some(tail);
-        }
         self.write_fat_entry(tail, new)?;
         Ok(new)
     }
@@ -2976,8 +2991,7 @@ impl Fs {
             Plan::Replace(entry, at) => {
                 // The set names the new chain before the old one is freed, as
                 // a removal deletes its set first (`delete_set`): an error or
-                // a crash between leaks the old chain (or, if the patch
-                // fails, the new one) and never leaves the set over clusters
+                // a crash between leaks the old chain and never leaves the set over clusters
                 // the allocator may hand out again. Until 2026-10-23 the old
                 // chain was freed first. Not freed where the set's own
                 // vendor runs, which it keeps, overlap it (damage, as
@@ -2985,9 +2999,20 @@ impl Fs {
                 // and the allocator handed the cluster to another file a
                 // later `rm` freed it under (the third high review of
                 // 2026-10-24). Read before the patch, as `runs_of` is.
+                //
+                // A set the disk refuses names none of the new chain (the
+                // Stream is the last sector `patch_stream_ext` writes), so it
+                // is freed by a walk, as `Create` frees one its directory
+                // refuses: the batch succeeded, so the chain on the disk is
+                // the one it built. It leaked until the high review of #382.
                 let mut vendor = Runs::NONE;
-                self.add_secondaries(at, &entry, &mut vendor)?;
-                self.patch_stream_ext(at, new_cluster, data.len() as u64, data.len() as u64)?;
+                let named = self
+                    .add_secondaries(at, &entry, &mut vendor)
+                    .and_then(|()| self.patch_stream_ext(at, new_cluster, data.len() as u64, data.len() as u64));
+                if named.is_err() {
+                    let _ = self.free_data(new_cluster, false, data.len() as u64);
+                    return named;
+                }
                 if self.holds(&vendor, Alloc::stream(&entry))? {
                     return Ok(()); // a leak, the safe side
                 }
@@ -3042,7 +3067,16 @@ impl Fs {
         let head_cluster = self.in_fat_batch(|fs| fs.write_at_chain(&entry, offset, data))?;
         let write_end = offset + data.len() as u64;
         let new_size = old_size.max(write_end);
-        self.patch_stream_ext(at, head_cluster, valid.max(write_end), new_size)
+        // A set the disk refuses names none of the clusters the batch
+        // linked on (the Stream, holding the size and first cluster, is the
+        // last sector `patch_stream_ext` writes), so they are given back as
+        // a failed batch's are; until the high review of #382 they leaked
+        // with the file's chain run on past its size.
+        let named = self.patch_stream_ext(at, head_cluster, valid.max(write_end), new_size);
+        if named.is_err() {
+            self.give_back();
+        }
+        named
     }
 
     /// [`write_at`](Self::write_at)'s FAT batch: `entry`'s chain made
@@ -3068,6 +3102,10 @@ impl Fs {
 
         let cluster_bytes = self.cluster_bytes();
         let mut head_cluster = entry.first_cluster;
+        // Whether the file had clusters of its own: its first extension,
+        // the first `file_step` that appends (`Taken::tail` still unset),
+        // links on from one of them.
+        let had_clusters = head_cluster >= 2;
         if head_cluster < 2 {
             head_cluster = self.alloc_cluster()?;
         }
@@ -3087,14 +3125,14 @@ impl Fs {
         let (mut cluster, pos) = ChainCursor::start(self.write_cursor, head_cluster, false, write_start as usize);
         let mut cluster_pos = pos as u64;
         while cluster_pos + cluster_bytes <= write_start {
-            cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
+            cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned, had_clusters && self.taken.tail.is_none())?;
             cluster_pos += cluster_bytes;
         }
 
         let mut pos = write_start;
         while pos < write_end {
             while pos >= cluster_pos + cluster_bytes {
-                cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned)?;
+                cluster = self.file_step(cluster, cluster_pos + cluster_bytes < owned, had_clusters && self.taken.tail.is_none())?;
                 cluster_pos += cluster_bytes;
             }
             let sector_in_cluster = (pos - cluster_pos) / SECTOR_SIZE as u64;
