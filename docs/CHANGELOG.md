@@ -1562,6 +1562,56 @@ chosen by, `fsd: the boot partition is on this disk, at LBA 2048`, and
 boot and not after the rewrite, and the new table's signature read on the
 host. From the medium review of #362.
 
+**exFAT sets a request's FAT entries and bits a sector at a time
+(2026-10-31).** Every FAT entry exFAT set was a FAT sector write of its own,
+and every cluster allocated a bitmap read and write, the scan starting at the
+bitmap's first byte, so a request that set hundreds of entries was hundreds
+of USB round trips on the Pi's stick: a gap fill of up to `MAX_GAP_FILL` (1
+MiB), a whole-file write, or `ensure_chained` linking a contiguous file at its
+first append (thousands of clusters on a camera's file), any of which could
+pass the supervisor's wedge limit with its chain half linked. Such a request
+is now a FAT batch (`in_fat_batch`): `write_fat_entry` leaves the entry in the
+FAT cache, written when the cache moves to another sector or the batch ends;
+the allocator holds its bitmap sector, written before any FAT sector
+(`flush_fat`), so a link never reaches the disk before its cluster's bit; and
+its scan goes on from its last find, since nothing is freed inside a batch
+(`clear_bit` refuses there). The set naming the chain is written after the
+batch, so the disk gets bits, then links, then the set, as before. The new
+`make test-alloc-batch` fills the bitmap's first sector to 128 free clusters,
+then grades a 1 MiB gap fill across it and the first append to a 2 MiB
+contiguous file: 14 FAT writes, 5 bitmap writes and 4 bitmap reads in exactly
+the batch's order, where `main` made 1,025, 257 and 386; it fails too with the
+scan starting at byte 0, with the FAT written before the bits, with the set
+written inside the batch and with nothing written at the batch's end. A
+link reaches the disk only after the entry it names (`extend_chain` sets the
+new cluster's end of chain first, and the cache's move writes it), so a flush
+the disk refuses leaves a chain ending at an end of chain; the rig's model
+asserts it. A refused flush drops the chain cursors with the cache, and
+outside a batch a FAT sector holding unwritten entries is refused at a move
+rather than written ahead of the free's cleared bits (with the free's own
+flush removed, `rm` answers an I/O error instead). A gap fill still writes
+every data sector, 2,048 for 1 MiB, measured inside the wedge limit on QEMU,
+not on the Pi; `ensure_chained` writes none. A chain's head is no link: its
+end of chain waits in the cache too, so a refused first flush left its old
+entry on the disk and `write_chain`'s give-back walked a stale link there into
+a live file (four clusters of 2 KiB on a volume of 512-byte clusters, the
+third medium review of #380). The batch now answers `BatchFailed`, saying
+whether a refused flush lost entries (also when the work failed first), and
+the give-back leaks the chain when it did. The new `make test-batch-refused`
+is the first rig to refuse a FAT write: on QEMU's blkdebug, the first write of
+two FAT sectors of a 512-byte-cluster exFAT failing once, a whole-file write
+of 2 KiB from a cluster whose entry the host linked into a live file must
+leave that file whole, and a retried append after a refused one must chain
+both clusters; it fails with the give-back ungated and with the cursors kept.
+`cursorprobe whole` is its whole-file writer. From the high review of #380:
+a FAT sector refused at a move outside a batch is dropped with the cursors
+(kept, it refused every later FAT read until fsd restarted), and
+`ensure_chained` leaves the write cursor on the run's last cluster, so the
+first append to a contiguous file no longer reads every FAT sector it just
+linked again (about a thousand on a 4 GiB camera file; `test-alloc-batch`
+fails on the order without it). From the medium reviews of #379 and #380 and
+the high review of #380.
+
 **exFAT frees a chained file a sector at a time (2026-10-31).** A removal,
 a replacing `mv` or a truncation of a FAT-chained file (every file fsd
 writes) read and wrote a bitmap sector and wrote a FAT sector for every

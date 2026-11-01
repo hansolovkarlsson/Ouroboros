@@ -203,7 +203,7 @@ stopped by the rig's own disk, and its checks are graded and fail. `make test` r
 `test-ext2-blocks`, `test-long-set` and `test-valid-length` (built with it,
 2026-10-22), and since 2026-10-25 the disk-trace rigs, `test-write-walk`,
 `test-spawn-reads`, `test-listing-walk`, `test-dir-scan` and (2026-10-31)
-`test-free-chain`, through
+`test-free-chain` and `test-alloc-batch`, through
 `disktrace.boot`, which requires a name of its own for every boot
 (`boot_stalled` refuses a label used twice in one run, empty, or holding a
 space) and folds what the rig's `inspect` (of the guest's disk) and `check`

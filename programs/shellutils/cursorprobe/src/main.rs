@@ -60,6 +60,16 @@
 //! sequence (`cursorprobe: ok read`, `cursorprobe: FAIL write-append: ...`),
 //! then `cursorprobe: ok` or `cursorprobe: FAIL` on every exit, a refused
 //! argument included, and exit 0 or 1. Since 2026-10-18.
+//!
+//! ```text
+//! cursorprobe whole <path> <bytes>
+//! ```
+//!
+//! One whole-file write (`NP_WRITE`) of `<bytes>` of the pattern (tag `W`),
+//! at most `SAFECOPY_MAX`, to `<path>`, then `cursorprobe: whole ok` or
+//! `cursorprobe: whole: ` and fsd's answer: the only client of a whole-file
+//! write longer than a 512-byte cluster (`write`'s text is bounded by argv),
+//! for `make test-batch-refused` (2026-10-31).
 
 #![no_std]
 #![no_main]
@@ -81,8 +91,39 @@ fn finish(target: u64, failed: bool) -> ! {
 }
 
 fn usage(target: u64) -> ! {
-    ulib::write_out(target, b"usage: cursorprobe <dir> <cluster bytes>\r\n");
+    ulib::write_out(target, b"usage: cursorprobe <dir> <cluster bytes> | whole <path> <bytes>\r\n");
     finish(target, true)
+}
+
+/// `cursorprobe whole <path> <bytes>`: one whole-file write, its answer said.
+fn whole(target: u64) -> ! {
+    let mut pathbuf = [0u8; PATH_MAX];
+    let Some(plen) = ulib::arg(2, &mut pathbuf) else { usage(target) };
+    let mut num = [0u8; 16];
+    let Some(nlen) = ulib::arg(3, &mut num) else { usage(target) };
+    let Some(len) = core::str::from_utf8(&num[..nlen]).ok().and_then(ulib::parse_u64) else { usage(target) };
+    // `ulib::arg` cuts an argument at the buffer: one filling it is refused,
+    // not written to the shorter path.
+    if plen == 0 || plen >= PATH_MAX || len == 0 || len > PIECE as u64 {
+        usage(target);
+    }
+    let mut data = [0u8; PIECE];
+    for (i, b) in data[..len as usize].iter_mut().enumerate() {
+        *b = pattern(b'W', i);
+    }
+    let path = core::str::from_utf8(&pathbuf[..plen]).unwrap_or("");
+    let r = ulib::fs_write_bulk(path, &data[..len as usize]);
+    if ulib::is_fs_error(r) {
+        let mut out = [0u8; 96];
+        let mut n = 0;
+        ulib::emit(&mut out, &mut n, b"cursorprobe: whole: ");
+        ulib::emit(&mut out, &mut n, ulib::fs_error_msg(r));
+        ulib::emit(&mut out, &mut n, b"\r\n");
+        ulib::write_out(target, &out[..n]);
+        finish(target, true);
+    }
+    ulib::write_out(target, b"cursorprobe: whole ok\r\n");
+    finish(target, false)
 }
 
 /// The byte at `offset` of a file tagged `tag`: each aligned four bytes are the
@@ -328,8 +369,12 @@ impl Probe {
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: cursorprobe <dir> <cluster bytes>\r\n");
+    ulib::usage_if_requested(b"usage: cursorprobe <dir> <cluster bytes> | whole <path> <bytes>\r\n");
     let target = ulib::stdout_target();
+    let mut mode = [0u8; 8];
+    if ulib::arg(1, &mut mode) == Some(5) && &mode[..5] == b"whole" {
+        whole(target);
+    }
     let mut probe =
         Probe { target, dir: [0; PATH_MAX], dir_len: 0, cluster: 0, sub: core::cell::Cell::new(0) };
     let Some(len) = ulib::arg(1, &mut probe.dir) else { usage(target) };

@@ -2,7 +2,7 @@
 """The disk reads of a driven boot, counted by QEMU: the one copy, for the
 rigs that grade what fsd reads (test-listing-walk.py, test-spawn-reads.py,
 test-write-walk.py) and, with `writes`, what it writes too (test-dir-scan.py,
-test-free-chain.py).
+test-free-chain.py, test-alloc-batch.py).
 
     python3 scripts/disktrace.py --self-test    (run by `make test`)
 

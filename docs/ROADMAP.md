@@ -4450,26 +4450,54 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   made 280 of each, and requires their order. The replacing `mv`'s two full
   walks before its free are not shared with it: they read through the FAT
   cache, about one sector a 128 clusters, and are left.
-- **exFAT's allocation writes a FAT sector for every entry it sets.**
-  `alloc_cluster` writes the new cluster's end of chain and the link to it
-  each through `write_fat_entry`, a sector write apiece, so `cp` of 1 MiB
-  onto exFAT (256 clusters of 4 KiB) writes the FAT at least 256 times where
-  a few sectors hold every entry; the allocator's bitmap write is one a
-  cluster too. Most writes come 2 KiB a request, under a cluster each, but
-  a gap fill allocates up to `MAX_GAP_FILL` (1 MiB) in one request: it was
-  measured inside the wedge limit on QEMU (2026-10-22, the ValidDataLength
-  item above), not on the Pi's stick. The free's pattern would serve: entries set in
-  the cache by `patch_fat_entry` and the sector written when the walk
-  leaves it, the bitmap first. From the medium review of #379, 2026-10-31.
-  `ensure_chained` is the same cost: the first append to a contiguous file
-  (a camera's video on the stick, thousands of clusters) links it on a
-  `write_fat_entry`, a FAT sector write, a cluster, so it can pass the
-  wedge limit with the chain half linked. The shape the second medium
-  review of #379 proposed fixes every writer at once: a `dirty` flag on the
-  FAT cache, the sector written when the cache moves to another or the
-  request ends, with an ordering hook so a writer's bitmap sector goes
-  first (the free's `flush_free` is that rule for one caller). Not built
-  with the free, to keep #379 the size of the free's bug.
+- ~~**exFAT's allocation writes a FAT sector for every entry it sets.**~~
+  *Done 2026-10-31:* a request that sets many entries is a FAT batch
+  (`in_fat_batch`): `ensure_chained`, `write_chain` and `write_at`'s walk
+  and data writes set entries in the FAT cache, written a sector at a time,
+  and the allocator's bits in one held bitmap sector, written before any FAT
+  sector, the scan going on from its last find. The set naming the chain is
+  written after the batch. `make test-alloc-batch` grades a 1 MiB gap fill
+  across a bitmap sector and the first append to a 2 MiB contiguous file:
+  14 FAT writes, 5 bitmap writes and 4 bitmap reads, where `main` made
+  1,025, 257 and 386. A request of 2 KiB still costs a bitmap write and a FAT
+  write when it takes a cluster, which its order needs (bits, links, set);
+  `cp` of a large file is that a cluster. A gap fill still writes each data
+  sector on its own, 2,048 for 1 MiB, measured inside the wedge limit on
+  QEMU and not on the Pi's stick (the medium review of #380). A refused
+  batch, the head's stale entry and the cursors dropped with a refused
+  sector, is `make test-batch-refused`'s. From the medium reviews of #379
+  and #380.
+- **exFAT gives back a failed batch by a FAT walk, or not at all.**
+  `write_chain`'s give-back walks the chain on the disk, so since the third
+  medium review of #380 it is skipped whenever a refused flush lost entries
+  (`BatchFailed`), and the whole chain leaks, even where its head's end of
+  chain reached the disk and the walk was safe; and `write_at`, whose batch
+  links clusters past the file's size before a data write fails, gives none
+  of them back (a leak older than the batch: the next write cuts the link
+  off them). The bitmap alone says what is free, so a batch that recorded
+  the clusters it took could give them back by their bits, with no walk for
+  a stale entry to steer and nothing to leak. The record is the design: the
+  clusters are not always consecutive (the scan passes used ones), and fsd
+  has no heap for a list. From the high review of #380, 2026-10-31.
+- **exFAT's FAT batch is a mode flag, and its misuse a disk error.**
+  `in_fat_batch` sets `fat_batch` on `Fs`, which changes what
+  `write_fat_entry`, `fat_sector`, `alloc_cluster` and `clear_bit` do, and
+  the two rules the batch rests on (nothing frees inside one; nothing leaves
+  a dirty FAT sector outside one) are held by refusals answering
+  `Error::Io`: a later change breaking either shows the user a failing disk,
+  not fsd's fault, and the rigs blame the disk too. A scoped batch type
+  holding `&mut Fs`, the only way to set entries in a batch and with no free
+  among its methods, would make the misuse unspellable
+  (`unspellable-postmortem.md`), and an error of fsd's own would name what
+  is left. Asked by the second and third medium reviews of #380.
+- **exFAT's allocator rescans from the bitmap's first byte outside a batch.**
+  Inside a FAT batch the scan goes on from its last find; every other
+  allocation (`alloc_zeroed` for `mkdir` and a directory's growth, the
+  root's growth, a 2 KiB write taking a cluster) starts at byte 0, so on a
+  nearly full stick each reads every bitmap sector before the first clear
+  bit. A hint kept across requests and lowered by every free, as FAT32's
+  allocator keeps one, would serve them all. From the third medium review
+  of #380.
 - **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s
