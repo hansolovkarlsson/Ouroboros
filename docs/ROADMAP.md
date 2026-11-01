@@ -4420,7 +4420,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bound from the size: BIG's 2 MiB was filled in one request on QEMU and
   the append went through, no wedge restart. So C holds at megabytes; the
   open risk is gigabytes, unmeasured.
-- **exFAT gives back a failed batch by a FAT walk, or not at all.**
+- ~~**exFAT gives back a failed batch by a FAT walk, or not at all.**
   `write_chain`'s give-back walks the chain on the disk, so since the third
   medium review of #380 it is skipped whenever a refused flush lost entries
   (`BatchFailed`), and the whole chain leaks, even where its head's end of
@@ -4431,7 +4431,17 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   the clusters it took could give them back by their bits, with no walk for
   a stale entry to steer and nothing to leak. The record is the design: the
   clusters are not always consecutive (the scan passes used ones), and fsd
-  has no heap for a list. From the high review of #380, 2026-10-31.
+  has no heap for a list. From the high review of #380, 2026-10-31.~~
+  *Done 2026-11-01:* the batch records its allocator's finds as runs
+  (`Taken`, 32 runs, about 270 bytes; the scan only goes forward inside a
+  batch), and a batch that fails writes back the end of chain of the file's
+  last cluster `write_at` linked on from, then clears the recorded bits,
+  walking nothing; so does `write_at` when its set write is refused after
+  the batch, and `write_file`'s replace then frees its new chain by a walk
+  (the high review of #382). A find past 32 runs still leaks, and so does everything when the
+  end of chain is refused; neither is reached by a boot. `make
+  test-batch-refused`'s GAP refuses a gap fill's data write, SET and REPLACE
+  a set write after the batch, and fsck_exfat passes after the boot.
 - **exFAT's FAT batch is a mode flag, and its misuse a disk error.**
   `in_fat_batch` sets `fat_batch` on `Fs`, which changes what
   `write_fat_entry`, `fat_sector`, `alloc_cluster` and `clear_bit` do, and

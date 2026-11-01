@@ -2813,13 +2813,18 @@ test-free-chain: image-exfat
 test-alloc-batch: image-exfat
 	python3 scripts/test-alloc-batch.py
 
-# A FAT batch the disk refuses (scripts/test-batch-refused.py, /bin/CURSORPROBE
-# whole): on QEMU's blkdebug, the first write of two FAT sectors of an exFAT
-# of 512-byte clusters failing once; a whole-file write's give-back must not
-# walk the stale link planted in its head's entry into a live file, and a
-# retried append must not resume on a cursor whose link the disk refused.
-# One boot, about a minute; run it whenever exFAT's in_fat_batch,
-# BatchFailed, write_chain's give-back, flush_fat or the cursors change.
+# A FAT batch the disk refuses, and its clusters given back by their bits
+# (scripts/test-batch-refused.py, /bin/CURSORPROBE whole): on QEMU's blkdebug,
+# the first write of two FAT sectors, a data sector and two planted
+# directories' sectors of an exFAT of 512-byte clusters failing once; a
+# whole-file write refused at its flush, an append refused at its link, a gap
+# fill refused at a data write (GAP), a gap fill and a whole-file write whose
+# set writes are refused (SET, REPLACE): every cluster each took must come
+# back, no give-back walking the stale link planted in a head's entry, the
+# file's chain cut back to its size, no cursor left on a link the disk
+# refused, fsck_exfat clean after. One boot, about a minute; run it whenever
+# exFAT's in_fat_batch, give_back, Taken, file_step, extend_chain,
+# write_chain, write_at, write_file, flush_fat or the cursors change.
 test-batch-refused: image image-exfat
 	python3 scripts/test-batch-refused.py
 
