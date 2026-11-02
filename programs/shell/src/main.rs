@@ -4334,6 +4334,7 @@ fn cmd_partition(arg: &str) {
         0 => print_line("partitioned - one MBR partition spanning the disk (unformatted; use `format` next)"),
         MOUNT_ALREADY => print_line("partition: a filesystem is mounted - run `unmount` first"),
         MOUNT_NO_DEVICE => print_line("partition: no disk device"),
+        syscall_abi::FS_ERR_NOT_SUPPORTED => print_line("partition: the disk holds a GPT, which this would not replace - run `erase disk` first"),
         _ => print_line("partition: disk too small or I/O error"),
     }
 }

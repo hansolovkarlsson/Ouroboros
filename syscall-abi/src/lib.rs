@@ -1940,6 +1940,8 @@ pub const FS_ERR_READ_ONLY: u64 = u64::MAX - 29;
 /// bits are an ext2 concept; FAT32/exFAT/`/proc` return this rather than
 /// silently pretending to succeed - the same honest per-filesystem
 /// degradation the read side (`stat`'s `mode_valid` byte) already uses.
+/// Also `FSOP_PARTITION`'s answer for a GPT disk, which it writes only an
+/// MBR over and so refuses until `erase` has cleared the GPT.
 pub const FS_ERR_NOT_SUPPORTED: u64 = u64::MAX - 31;
 
 /// **Permission denied**: the caller's uid/gid isn't allowed the requested

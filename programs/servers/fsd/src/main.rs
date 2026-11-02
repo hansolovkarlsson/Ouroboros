@@ -373,11 +373,24 @@ fn erase_disk(device: &disk::Device, sectors: u64) -> u64 {
 /// [`PARTITION_START_LBA`] to the end, signed by [`new_signature`]. Only
 /// LBA 0 is written; the partition's contents are left for a later format. Returns `0`,
 /// [`MOUNT_NO_DEVICE`], [`FS_ERR_DISK_FULL`] (disk smaller than the 1 MiB
-/// alignment start), or [`FS_ERR_IO`].
+/// alignment start), [`FS_ERR_NOT_SUPPORTED`] (a GPT disk, which `erase`
+/// must clear first), or [`FS_ERR_IO`] (also when the GPT test would not
+/// read).
 fn partition_disk(device: &disk::Device, type_byte: u8) -> u64 {
     let Ok(capacity) = device.disk().capacity_sectors() else {
         return syscall_abi::MOUNT_NO_DEVICE;
     };
+    // A GPT disk, by the test `mount` and `format` read it with. Writing
+    // sector 0 alone leaves "EFI PART" at LBA 1, so `discover`, `format` and
+    // the kernel's BLOCK_BOOT_START go on reading the old GPT and the MBR
+    // written here is invisible, while this answered success (the third
+    // medium review of #377). Refused, so the caller runs `erase` first,
+    // which clears both the protective MBR and the primary header.
+    match partition::is_gpt(&mut device.disk()) {
+        Ok(false) => {}
+        Ok(true) => return syscall_abi::FS_ERR_NOT_SUPPORTED,
+        Err(_) => return syscall_abi::FS_ERR_IO,
+    }
     let start = syscall_abi::PARTITION_START_LBA;
     if capacity <= start {
         return syscall_abi::FS_ERR_DISK_FULL;
