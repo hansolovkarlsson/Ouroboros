@@ -1714,9 +1714,12 @@ No boot refuses an allocator's bitmap write, so that is reasoned, not
 graded. The scan wraps to byte 0 before it answers `DiskFull`, as FAT32's
 does; while those rules hold the wrap finds nothing, and no boot reaches
 it. A request that finds the volume full reads every bitmap sector once,
-the hint to the end and then byte 0 to the hint, as one scan from byte 0
-did. `test-alloc-batch`'s model checks its premise that the setup leaves
-the hint in the bitmap's first sector, and refuses a wrapped find. `test-alloc-batch`'s second
+the hint's sector to the end and then the sectors before it, as one scan
+from byte 0 did (from the hint's byte the wrap read the hint's sector
+twice: the medium review of #384). `test-alloc-batch`'s model starts the
+hint at the setup's last find, read off the base boot's disk, and refuses
+a wrapped find. Neither the refused write's lowering nor the wrap can be
+failed by any rig; the roadmap holds the case that would. `test-alloc-batch`'s second
 request now reads 3 bitmap sectors where it read 4, and reads 4 again with
 the hint set back to 0 when the allocator lets go of its sector;
 `test-stale-cursor` fails 4 checks with the lowering removed (a removed

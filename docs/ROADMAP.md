@@ -4479,6 +4479,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   to byte 0 before `DiskFull`. Graded by `test-alloc-batch` (the hint kept: 3 bitmap
   reads, 4 without) and `test-stale-cursor` (the lowering); the wrap is
   reached by no boot.
+- **No rig can fail exFAT's allocator hint on a refused bitmap write.**
+  `end_alloc_hold` lowers the hint to a refused sector's first byte, and
+  `alloc_scan` wraps to byte 0 before `DiskFull`; deleting either passes
+  every rig (the medium review of #384). The lowering matters only when a
+  batch's bitmap sector and then its give-back's end of chain are both
+  refused, so `give_back` clears nothing. A case in
+  `test-batch-refused`'s shape would build it: on X, a FAT-chained file
+  whose last cluster's FAT sector, and the bitmap sector a gap fill takes
+  the last free clusters of, refuse every write (blkdebug without
+  `once`); the fill must fail, and the next allocation must fail too,
+  finding the dropped clusters in that sector, where without the lowering
+  it goes on to the next sector and succeeds (a file there, read off the
+  disk). The wrap is reached only once such a rule is broken, so this
+  case with the lowering removed would grade it as well, if the next
+  sector is full.
 - **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s

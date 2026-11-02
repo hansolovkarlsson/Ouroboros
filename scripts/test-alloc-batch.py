@@ -103,24 +103,23 @@ class Model:
     by the allocator, read when its scan enters it, written when it leaves it
     with bits set. `seq` is the writes in order, `reads` the bitmap reads by
     sector, each allocation's scan going on from the last one's byte, in this
-    request or an earlier one (nothing is freed between them). Raises AssertionError if a FAT sector is written with a link to
+    request, an earlier one or the setup (nothing is freed between them). Raises AssertionError if a FAT sector is written with a link to
     a cluster whose bit is not on the disk, or to one allocated here whose
     own entry, in another sector, is not on the disk yet (a refused flush
     would then leave a link on the disk into a stale entry), so the model
     holds both rules. The chain's head is no link, and is not checked here:
     test-batch-refused grades a refused head."""
 
-    def __init__(self, fat_lba, bitmap_lba):
+    def __init__(self, fat_lba, bitmap_lba, hint):
         self.fat_lba, self.bitmap_lba = fat_lba, bitmap_lba
         self.seq, self.reads = [], collections.Counter()
         self.fat, self.fat_dirty, self.links = None, False, set()
         self.allocated, self.on_disk = set(), set()
         self.entries, self.entries_on_disk = set(), set()
         # The allocator's hint, kept across requests (fsd's alloc_from since
-        # 2026-11-01). The setup leaves it in the bitmap's first sector, where
-        # 0 puts it too, and the model counts sectors: base_inspect checks
-        # that every fill file lies in that sector.
-        self.scan_from = 0
+        # 2026-11-01): the bitmap byte of the setup's last find, which
+        # base_inspect reads off the disk.
+        self.scan_from = hint
 
     def fsec(self, c):
         return self.fat_lba + c * 4 // SECTOR
@@ -205,6 +204,7 @@ def main() -> int:
             if any(vol.used(c) for c in run):
                 pre.append(f"the heap's last {len(run)} clusters are not free for /CONT")
             rchain = vol.chain(vol.root)
+            prep_root = set(rchain)
             d = bytearray(vol.data(rchain))
             end = exfatimg.root_end(d)
             heap_off, bitmap_off = vol.heap, vol.heap + (vol.bitmap - 2) * vol.cluster
@@ -277,18 +277,21 @@ def main() -> int:
                 if len(left) != LEFT:
                     problems.append(f"the fill left {len(left)} clusters free in the bitmap's first sector, "
                                     f"not {LEFT}: the root grew, or a file took other than its count")
-                # The model starts the allocator's hint in the bitmap's first
-                # sector: the setup's last find must be there.
+                # The allocator's hint after the setup, where the model starts
+                # it: the setup frees nothing, so its finds only go forward
+                # and the last is the highest cluster it took, a fill file's
+                # or the root's growth.
+                taken = set(v.chain(v.root)) - prep_root
                 for name in fills:
                     try:
-                        past = [c for c in v.file_chain(name) if (c - 2) // BITS != 0]
+                        taken |= set(v.file_chain(name))
                     except ValueError as e:
                         problems.append(f"after the setup: {e}")
-                        break
-                    if past:
-                        problems.append(f"{name} has clusters {past[:3]} past the bitmap's first sector, "
-                                        "so the allocator's hint after the setup is not where the model starts it")
-                        break
+                        return
+                if not taken:
+                    problems.append("the setup took no cluster, so the allocator's hint is not known")
+                else:
+                    found["hint"] = (max(taken) - 2) // 8
 
         def more_inspect(copy, problems):
             with exfatimg.Volume(copy, start) as v:
@@ -345,9 +348,9 @@ def main() -> int:
                 return tally.verdict()
         got = {}
         m = None
-        if base and more and "sets" in found and not problems:
+        if base and more and "sets" in found and "hint" in found and not problems:
             def build():
-                m = Model(g["fat"], bitmap_lba)
+                m = Model(g["fat"], bitmap_lba, found["hint"])
                 # writeat /G: the head allocated, then each step past a cluster's
                 # end asks its FAT entry, allocates and links it.
                 m.begin()
