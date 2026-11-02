@@ -120,6 +120,8 @@ _spec.loader.exec_module(usb_hub)
 
 BUILD = os.path.join(ROOT, "build")
 TRANSCRIPT = os.path.join(BUILD, "test-boot-partition-{}.txt")
+# gpt-format.img's sectors 0 and 1 as copied, before its boot (make_copies).
+GPT_FORMAT_BEFORE = bytearray()
 # FAT32 (CHS and LBA) and the EFI System type: the partition the firmware
 # boots on an MBR disk.
 ESP_TYPES = (0x0B, 0x0C, 0xEF)
@@ -293,7 +295,11 @@ def make_copies():
     # A GPT disk is named by its partition GUID, not the MBR signature, so
     # its copy needs none of its own: it is never attached beside espgpt.img.
     with open(os.path.join(BUILD, "espgpt.img"), "rb") as src, open(os.path.join(BUILD, "gpt-format.img"), "wb") as dst:
-        dst.write(src.read())
+        copy = src.read()
+        dst.write(copy)
+    # Its first two sectors as the boot starts, from the copy itself, so
+    # gpt-format's check does not depend on espgpt.img staying as it was.
+    GPT_FORMAT_BEFORE[:] = copy[:1024]
 
 
 def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
@@ -487,15 +493,15 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
         # "EFI PART" at LBA 1 and an MBR nothing reads, answering success
         # (the third medium review of #377). It must refuse, naming `erase`,
         # and leave the protective MBR and the primary header as built.
-        with open(os.path.join(BUILD, "espgpt.img"), "rb") as fh:
-            built = fh.read(1024)
         with open(os.path.join(BUILD, "gpt-format.img"), "rb") as fh:
             now = fh.read(1024)
+        built = bytes(GPT_FORMAT_BEFORE)
         refused = re.search(r"partition ext2\r?\n([\s\S]*?)# ", out)
         checks += [
             (f"{label}: `partition` refuses a GPT disk, naming `erase disk`",
              refused is not None and "holds a GPT" in refused.group(1) and "erase disk" in refused.group(1)),
-            (f"{label}: sectors 0 and 1 (protective MBR, primary GPT header) as built", now == built),
+            (f"{label}: sectors 0 and 1 (protective MBR, primary GPT header) as built",
+             len(built) == 1024 and now == built),
             (f"{label}: `format` refuses a GPT disk", "a GPT disk is not formatted here" in after),
             (f"{label}: the disk mounts after, its ESP whole (`cd /EFI` silent)",
              "FAT32 mounted" in after and found is not None and found.group(1).strip() == ""),

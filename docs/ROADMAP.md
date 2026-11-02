@@ -4450,6 +4450,16 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `make test-boot-partition`'s gpt-format boot runs `partition ext2` and
   reads sectors 0 and 1 back as built; with the refusal removed those two
   checks fail and the rest pass, which is the bug as reported.
+- **`erase disk` leaves a GPT's backup at the disk's end.** It zeros the
+  first 2048 sectors, so a GPT disk's backup header and entry array, in its
+  last 33 sectors, survive inside the partition `partition` then makes.
+  Nothing here reads them after the erase (`is_gpt` reads sector 0 and
+  LBA 1 only), but a host tool that falls back to the alternate header
+  (gdisk, Linux's gpt=force, macOS diskutil) may report a conflicting or
+  damaged GPT on the stick. Since 2026-11-02 `partition` sends a GPT disk to
+  `erase disk`, so the case is now the advised path. `erase` should zero the
+  last 33 sectors too, and a rig should read them back. From the medium
+  review of `fsd/partition-refuses-gpt`.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on
