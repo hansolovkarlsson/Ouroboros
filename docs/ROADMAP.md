@@ -4420,7 +4420,7 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   bound from the size: BIG's 2 MiB was filled in one request on QEMU and
   the append went through, no wedge restart. So C holds at megabytes; the
   open risk is gigabytes, unmeasured.
-- **No rig can fail exFAT's allocator hint on a refused bitmap write.**
+- ~~**No rig can fail exFAT's allocator hint on a refused bitmap write.**
   `end_alloc_hold` lowers the hint to a refused sector's first byte, and
   `alloc_scan` wraps to byte 0 before `DiskFull`; deleting either passes
   every rig (the medium review of #384). The lowering matters only when a
@@ -4432,9 +4432,20 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `once`); the fill must fail, and the next allocation must fail too,
   finding the dropped clusters in that sector, where without the lowering
   it goes on to the next sector and succeeds (a file there, read off the
-  disk). The wrap is reached only once such a rule is broken, so this
-  case with the lowering removed would grade it as well, if the next
-  sector is full.
+  disk).~~
+  *Settled 2026-11-02 as unriggable, the lowering kept:* the case above
+  does not separate it. Why, and why it is kept anyway, is in
+  `end_alloc_hold`'s doc in `programs/servers/fsd/src/exfat.rs`, the one
+  statement of it. Removing it was tried the same day and put back after
+  a medium review.
+- **No rig can fail `alloc_scan`'s wrap to byte 0 before `DiskFull`.** The
+  wrap finds a cluster only once a rule keeping every byte below the hint
+  full is broken (a free that does not lower the hint, a refused write that
+  does not), and both the lowering in `end_alloc_hold` and the scan's
+  start at its sector's first byte stand in the way, so no boot builds it;
+  deleting the wrap passes every rig (the medium review of #384). A rig
+  would need a mutated build that breaks one of those rules, then a disk
+  whose only free clusters sit below the hint.
 - ~~**`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s
