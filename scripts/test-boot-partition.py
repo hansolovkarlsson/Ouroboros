@@ -65,7 +65,9 @@ is disk-badroot with the root's type 0x07, so the disk has no typed root and
 `fsd` must name the untyped rule in its read-only line, before the mount
 line, and refuse root's `touch` (since 2026-10-30, the high review of #373:
 no boot printed that reason); gpt-format runs `format` on a copy of
-espgpt.img, which must be refused.
+espgpt.img, which must be refused, and `partition` before it, which must be
+refused naming `erase disk` and leave sectors 0 and 1 as built (since
+2026-11-02: it wrote an MBR nothing reads over the protective one).
 
 and four of build/disk-data.img, which this script builds: the ESP, an
 exFAT data partition (MBR type 0x07), the ext2 root (0x83). `fsd` must take
@@ -118,6 +120,8 @@ _spec.loader.exec_module(usb_hub)
 
 BUILD = os.path.join(ROOT, "build")
 TRANSCRIPT = os.path.join(BUILD, "test-boot-partition-{}.txt")
+# gpt-format.img's sectors 0 and 1 as copied, before its boot (make_copies).
+GPT_FORMAT_BEFORE = bytearray()
 # FAT32 (CHS and LBA) and the EFI System type: the partition the firmware
 # boots on an MBR disk.
 ESP_TYPES = (0x0B, 0x0C, 0xEF)
@@ -291,7 +295,11 @@ def make_copies():
     # A GPT disk is named by its partition GUID, not the MBR signature, so
     # its copy needs none of its own: it is never attached beside espgpt.img.
     with open(os.path.join(BUILD, "espgpt.img"), "rb") as src, open(os.path.join(BUILD, "gpt-format.img"), "wb") as dst:
-        dst.write(src.read())
+        copy = src.read()
+        dst.write(copy)
+    # Its first two sectors as the boot starts, from the copy itself, so
+    # gpt-format's check does not depend on espgpt.img staying as it was.
+    GPT_FORMAT_BEFORE[:] = copy[:1024]
 
 
 def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
@@ -338,8 +346,8 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
     if label == "disk-untyped":
         steps = [("login:", "root"), ("assword", "root"), ("# ", "touch /rotest"), ("# ", "")]
     if label == "gpt-format":
-        steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "format ext2"),
-                 ("# ", "mount -a"), ("# ", "cd /EFI"), ("# ", "cd /"), ("# ", "")]
+        steps = [("login:", "root"), ("assword", "root"), ("# ", "unmount"), ("# ", "partition ext2"),
+                 ("# ", "format ext2"), ("# ", "mount -a"), ("# ", "cd /EFI"), ("# ", "cd /"), ("# ", "")]
     if label == "disk-data-format":
         # Format the root, then: `/` is the empty ext2 (`cd /bin` refused),
         # and the exFAT data partition, table index 1, still holds its tree.
@@ -481,7 +489,19 @@ def boot(label, image, bus, want, on_virtio, on_usb, root, one_disk):
     elif label == "gpt-format":
         after = out.split("format ext2", 1)[1] if "format ext2" in out else ""
         found = re.search(r"cd /EFI\r?\n([\s\S]*?)# ", out)
+        # `partition` writes sector 0 alone, so on a GPT disk it left
+        # "EFI PART" at LBA 1 and an MBR nothing reads, answering success
+        # (the third medium review of #377). It must refuse, naming `erase`,
+        # and leave the protective MBR and the primary header as built.
+        with open(os.path.join(BUILD, "gpt-format.img"), "rb") as fh:
+            now = fh.read(1024)
+        built = bytes(GPT_FORMAT_BEFORE)
+        refused = re.search(r"partition ext2\r?\n([\s\S]*?)# ", out)
         checks += [
+            (f"{label}: `partition` refuses a GPT disk, naming `erase disk`",
+             refused is not None and "holds a GPT" in refused.group(1) and "erase disk" in refused.group(1)),
+            (f"{label}: sectors 0 and 1 (protective MBR, primary GPT header) as built",
+             len(built) == 1024 and now == built),
             (f"{label}: `format` refuses a GPT disk", "a GPT disk is not formatted here" in after),
             (f"{label}: the disk mounts after, its ESP whole (`cd /EFI` silent)",
              "FAT32 mounted" in after and found is not None and found.group(1).strip() == ""),

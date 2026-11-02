@@ -4435,14 +4435,31 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   disk). The wrap is reached only once such a rule is broken, so this
   case with the lowering removed would grade it as well, if the next
   sector is full.
-- **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
+- ~~**`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s
   GPT refusal and the kernel's `BLOCK_BOOT_START` all go on reading the old
   GPT, and the MBR just written is invisible, with `partition` answering
   success. It should refuse a disk `parttable::is_gpt` reads as GPT, as
   `format` does, and say to `erase` first. From the third medium review of
-  #377, 2026-10-30.
+  #377, 2026-10-30.~~
+  *Done 2026-11-02:* `partition_disk` asks `partition::is_gpt` first and
+  answers `FS_ERR_NOT_SUPPORTED` for a GPT disk (`FS_ERR_IO` when the test
+  would not read), writing nothing; the shell says the disk holds a GPT and
+  to run `erase disk` first, which zeros both sectors the test reads.
+  `make test-boot-partition`'s gpt-format boot runs `partition ext2` and
+  reads sectors 0 and 1 back as built; with the refusal removed those two
+  checks fail and the rest pass, which is the bug as reported.
+- **`erase disk` leaves a GPT's backup at the disk's end.** It zeros the
+  first 2048 sectors, so a GPT disk's backup header and entry array, in its
+  last 33 sectors, survive inside the partition `partition` then makes.
+  Nothing here reads them after the erase (`is_gpt` reads sector 0 and
+  LBA 1 only), but a host tool that falls back to the alternate header
+  (gdisk, Linux's gpt=force, macOS diskutil) may report a conflicting or
+  damaged GPT on the stick. Since 2026-11-02 `partition` sends a GPT disk to
+  `erase disk`, so the case is now the advised path. `erase` should zero the
+  last 33 sectors too, and a rig should read them back. From the medium
+  review of `fsd/partition-refuses-gpt`.
 - **exFAT reads the first FAT of a volume of two.** A TexFAT volume has
   NumberOfFats 2, and VolumeFlags' ActiveFat names which FAT and bitmap
   are live. fsd reads the first FAT and takes the first bitmap entry, so on
