@@ -1728,6 +1728,19 @@ file's cluster not reused, so its stale cases are not built).
 the bitmap byte the hint is already on. `make test` and the eleven exFAT
 rigs pass. From the third medium review of #380.
 
+**`partition` refuses a GPT disk (2026-11-02).** `partition` writes
+sector 0 alone, so on a GPT disk not erased first the primary header at
+LBA 1 still said "EFI PART": fsd's `discover`, `format`'s refusal and the
+kernel's `BLOCK_BOOT_START` went on reading the old GPT, and the MBR just
+written was invisible, with `partition` answering success. fsd now asks the
+same `is_gpt` test `format` and `mount` use, and answers
+`FS_ERR_NOT_SUPPORTED` (an I/O error when the test would not read) with
+nothing written; the shell says the disk holds a GPT and to run `erase disk`
+first, which zeros both sectors the test reads. `make
+test-boot-partition`'s gpt-format boot runs `partition ext2` before its
+`format` and reads sectors 0 and 1 back as built; with the refusal removed
+exactly those two checks fail. From the third medium review of #377.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
