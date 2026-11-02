@@ -1675,8 +1675,8 @@ two rules (nothing frees inside a batch; nothing leaves a FAT sector with
 entries not yet written outside one) were held by refusals answering an I/O
 error. A later change breaking either would have shown the user a failing
 disk. Now `batch::FatBatch` lives in a module of its own, as the disk gate
-does, and holds the only `&mut Fs` while the batch runs. Its methods are the
-FAT entry a batch sets is set inside that module (`write_chain`,
+does, and holds the only `&mut Fs` while the batch runs. Every FAT entry
+a batch sets is set inside that module (`write_chain`,
 `file_step`, `extend_chain`, `link_run`); `write_at`'s walk, outside it,
 reads the volume through `&Fs` and can only take a cluster, step the file's
 chain, chain a contiguous run, write data sectors and leave the write

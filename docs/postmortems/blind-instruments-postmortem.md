@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-10-31. It began
+*A process retrospective, 2026-09-02, extended through 2026-11-01. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2471,3 +2471,57 @@ the rig can see, and the records say the reads are unmeasured. **Name the
 quantity a fix changes before naming the instrument that will show it; a
 right instrument read for the wrong quantity reports a wrong result with
 confidence.**
+
+## Four more, from the batch's give-back, type and hint (2026-11-01)
+
+Three PRs (#382, #383, #384): a failed exFAT batch given back by its bits,
+the batch made a type, and the allocator's hint kept across requests. Four
+times an instrument, or my reading of one, said more than it had seen.
+
+**An exit code that flattened two verdicts.** The loops that run the eleven
+exFAT rigs log each target's exit status, and on #383's final tree one line
+read `test-long-set exit 2`. The rig exits 100 for a boot the firmware
+never started and 1 for a failed check; `make` reports both as 2. Only the
+rig's own last line said INCONCLUSIVE, no check failed, and it passed when
+run again, which I read before Hans merged. The summary was built to save
+reading the logs, and on that line it could not say what it was for. **A
+wrapper's exit status is the wrapper's verdict; when the thing inside has
+more than two answers, log its own line, not the status that reaches you.**
+
+**A hint a byte wide, read a cluster at a time.** For #384 I named three
+rigs that would fail if a free stopped lowering the hint, and ran the
+mutant. Two failed; `test-batch-refused` passed. Its given-back clusters
+lie in the bitmap byte the hint already points at, and the hint is kept a
+byte at a time, eight clusters, so lowering it or not changes nothing that
+rig does. Two rounds later I made the same mistake by hand. I declined a
+review finding with arithmetic: on a full volume the wrapped scan reads
+every bitmap sector once. It read the hint's own sector twice, because the
+second pass ran up to the hint's byte, inside the sector the first pass
+began in; the medium review counted it. Both times the quantity was right
+and its unit was wrong. The control's pass is in the CHANGELOG as a pass,
+and the scan now starts at the hint's sector. **Before predicting what a
+check or a count will see, name the unit the state is kept in; a byte, a
+sector and a cluster are three different instruments.**
+
+**A model that started where it assumed.** `test-alloc-batch`'s model
+counts the bitmap sectors each allocation's scan enters, and once the hint
+was kept across requests it had to start somewhere. I started it at 0, and
+wrote that the setup left fsd's hint in the first sector, "where 0 puts it
+too". The high review asked for the premise to be checked, so the rig
+checked that every fill file lay in the first sector. The medium review
+found that weaker than it looked: the setup's last find could be a root
+growth, and a model started at 0 cannot see a wrap at its first
+allocation, so its new wrap assertion could not fire there. The model now
+starts at the setup's highest find, read off the base boot's disk. **A
+model's starting state is an input like any other; read it off the system
+rather than asserting the value that makes the arithmetic agree.**
+
+**Two citations that pointed at nothing.** #383's first review comment was
+posted with a placeholder where the fix commit's hash belonged, and the zsh
+substitution meant to fill it failed on its own pattern. #384's second
+comment cited the commit by its hash before I amended a roadmap item into
+it, so the hash named a commit nobody can fetch. Both were corrected through
+the API, from a file. The reviews' readers would have checked the change
+against a commit that did not hold it. **A hash is evidence only once it
+names what was pushed; take it from `git rev-parse` after the last amend,
+never from memory of an earlier one.**
