@@ -1706,9 +1706,17 @@ byte, on a nearly full stick a USB round trip for every bitmap sector before
 the first clear bit. `alloc_from` is now kept until a free lowers it:
 `clear_bit`, the one place a bit is cleared (a free, a give-back), sets it
 no higher than the freed cluster's byte, so every byte below it is full and
-placement is first fit as before. The scan wraps to byte 0 before it
-answers `DiskFull`, as FAT32's does; while every free lowers the hint the
-wrap finds nothing, and no boot reaches it. `test-alloc-batch`'s second
+placement is first fit as before. A bitmap sector the disk refuses
+lowers it too, to the sector's first byte (`end_alloc_hold`), since the
+bits the allocator set there stay clear on the disk; the high review of
+#384 found the hint left past them, those clusters unused until a wrap.
+No boot refuses an allocator's bitmap write, so that is reasoned, not
+graded. The scan wraps to byte 0 before it answers `DiskFull`, as FAT32's
+does; while those rules hold the wrap finds nothing, and no boot reaches
+it. A request that finds the volume full reads every bitmap sector once,
+the hint to the end and then byte 0 to the hint, as one scan from byte 0
+did. `test-alloc-batch`'s model checks its premise that the setup leaves
+the hint in the bitmap's first sector, and refuses a wrapped find. `test-alloc-batch`'s second
 request now reads 3 bitmap sectors where it read 4, and reads 4 again with
 the hint set back to 0 when the allocator lets go of its sector;
 `test-stale-cursor` fails 4 checks with the lowering removed (a removed

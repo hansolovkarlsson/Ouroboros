@@ -558,7 +558,10 @@ mod batch {
         /// Take one cluster: its bit set in the bitmap sector the allocator
         /// keeps until the batch writes a FAT sector or ends, recorded for a
         /// give-back, and its end of chain set. The scan goes on from the
-        /// last find, since nothing is freed inside a batch.
+        /// allocator's hint ([`alloc_from`](Fs::alloc_from)), the last find,
+        /// this batch's or an earlier request's, since nothing is freed
+        /// inside a batch; only a wrap to the bitmap's first byte finds a
+        /// cluster before the last ([`Taken`] starts a run there).
         pub(super) fn alloc_cluster(&mut self) -> Result<u32, Error> {
             let cluster = self.fs.alloc_find()?;
             self.fs.taken.add(cluster);
@@ -2243,8 +2246,24 @@ impl Fs {
     /// bits not yet written, and let go; the next scan goes on from
     /// [`alloc_from`](Self::alloc_from). At a FAT batch's end, and after
     /// each allocation outside one.
+    ///
+    /// A sector the disk refuses is dropped with the bits it set, which stay
+    /// clear on the disk below the hint; the hint is lowered to the sector's
+    /// first byte, so the next scan finds them again and every byte below the
+    /// hint stays full. Only the held sector can hold such bits: the scan
+    /// moves to another only after writing it ([`hold_bitmap_sector`]), and
+    /// a batch's earlier sectors are on the disk. Until the high review of
+    /// #384 the hint stayed past them, and those clusters went unused until
+    /// the scan wrapped (before the hint, the next scan started at byte 0).
+    ///
+    /// [`hold_bitmap_sector`]: Self::hold_bitmap_sector
     fn end_alloc_hold(&mut self) -> Result<(), Error> {
         let written = self.write_alloc_bits();
+        if written.is_err() {
+            if let Some(sector) = &self.alloc_bits {
+                self.alloc_from = self.alloc_from.min(((sector.first - 2) / 8) as u64);
+            }
+        }
         self.alloc_bits = None;
         written
     }
@@ -2379,10 +2398,14 @@ impl Fs {
     /// from [`alloc_from`](Self::alloc_from) to the bitmap's end, then from
     /// its first byte up to there, set in `held`, which the caller writes,
     /// and `alloc_from` left at its byte. Every byte below `alloc_from` is
-    /// full while every free lowers it, so the second pass finds a bit only
-    /// where that broke (a bitmap write refused after its bits were cleared
-    /// in memory is the case reasoned about; no boot builds one), and on a
-    /// full volume reads the sectors before the hint once more.
+    /// full while every free lowers it ([`clear_bit`](Self::clear_bit)) and
+    /// a refused allocator write does
+    /// ([`end_alloc_hold`](Self::end_alloc_hold)), so the second pass
+    /// finds nothing unless a rule here is broken; it is the safe side of
+    /// one, reached by no boot. It costs nothing a request did not pay
+    /// before the hint: a request that finds the volume full reads every
+    /// bitmap sector once in all, the hint to the end and then the first
+    /// byte to the hint, as one scan from byte 0 did.
     fn alloc_scan(&mut self, held: &mut Option<BitmapSector>) -> Result<u32, Error> {
         let nbytes = self.cluster_count.div_ceil(8) as u64;
         let start = self.alloc_from.min(nbytes);
@@ -2608,8 +2631,9 @@ impl Fs {
     fn clear_bit(&mut self, bits: &mut Option<BitmapSector>, c: u32) -> Result<(), Error> {
         // Inside a FAT batch the allocator holds a bitmap sector with bits
         // not yet written, which a sector read here would not see and its
-        // write would undo; and the batch's scan starts past bits a free
-        // would clear. A batch cannot free (`batch::FatBatch` has no free),
+        // write would undo; and the hint this lowers would turn the batch's
+        // scan back mid-batch, so a find would no longer be past the last
+        // and [`Taken`]'s runs would not hold its order. A batch cannot free (`batch::FatBatch` has no free),
         // and the allocator holds a sector only inside one, so this is
         // reached by no path; it says so if fsd ever breaks the rule. It
         // sees a batch only once its allocator holds a sector: a free

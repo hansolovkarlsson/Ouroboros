@@ -117,8 +117,9 @@ class Model:
         self.allocated, self.on_disk = set(), set()
         self.entries, self.entries_on_disk = set(), set()
         # The allocator's hint, kept across requests (fsd's alloc_from since
-        # 2026-11-01); the setup leaves it in the bitmap's first sector, where
-        # 0 puts it too, and the model counts sectors.
+        # 2026-11-01). The setup leaves it in the bitmap's first sector, where
+        # 0 puts it too, and the model counts sectors: base_inspect checks
+        # that every fill file lies in that sector.
         self.scan_from = 0
 
     def fsec(self, c):
@@ -163,6 +164,9 @@ class Model:
 
     def alloc(self, c):
         target = (c - 2) // 8
+        # A find before the hint is fsd's scan wrapping to byte 0, which
+        # nothing here frees to make happen and the count below cannot hold.
+        assert target >= self.scan_from, f"cluster {c} found before the allocator's hint: a wrap"
         for byte_sector in range(self.scan_from // SECTOR, target // SECTOR + 1):
             s = self.bitmap_lba + byte_sector
             if self.bits != s:
@@ -248,6 +252,7 @@ def main() -> int:
             setup.append(f"writeat /F{k} {GAP if n == per else (n - 1) * cluster} f")
             fill -= n
             k += 1
+        fills = [f"/F{i}" for i in range(k)]
         setup.append("touch /G")
         graded = [f"writeat /G {GAP} x", "echo x >> /CONT"]
 
@@ -272,6 +277,18 @@ def main() -> int:
                 if len(left) != LEFT:
                     problems.append(f"the fill left {len(left)} clusters free in the bitmap's first sector, "
                                     f"not {LEFT}: the root grew, or a file took other than its count")
+                # The model starts the allocator's hint in the bitmap's first
+                # sector: the setup's last find must be there.
+                for name in fills:
+                    try:
+                        past = [c for c in v.file_chain(name) if (c - 2) // BITS != 0]
+                    except ValueError as e:
+                        problems.append(f"after the setup: {e}")
+                        break
+                    if past:
+                        problems.append(f"{name} has clusters {past[:3]} past the bitmap's first sector, "
+                                        "so the allocator's hint after the setup is not where the model starts it")
+                        break
 
         def more_inspect(copy, problems):
             with exfatimg.Volume(copy, start) as v:

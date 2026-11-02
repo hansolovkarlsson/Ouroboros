@@ -4474,8 +4474,9 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   allocator keeps one, would serve them all. From the third medium review
   of #380.~~
   *Done 2026-11-01:* `alloc_from` is kept across requests and lowered by
-  `clear_bit`, the one place a bit is cleared, and the scan wraps to byte 0
-  before `DiskFull`. Graded by `test-alloc-batch` (the hint kept: 3 bitmap
+  `clear_bit`, the one place a bit is cleared, and by a refused allocator
+  bitmap write (`end_alloc_hold`, reached by no boot), and the scan wraps
+  to byte 0 before `DiskFull`. Graded by `test-alloc-batch` (the hint kept: 3 bitmap
   reads, 4 without) and `test-stale-cursor` (the lowering); the wrap is
   reached by no boot.
 - **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
