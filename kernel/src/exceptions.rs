@@ -218,6 +218,9 @@ msr fpcr, \a
 msr fpsr, \b
 .endm
 
+// Plain `.text`, never a custom section name: in `.section .text.exceptions`
+// the PE/COFF backend left the page non-executable, and the first jump here
+// faulted (EC 0x21, IFSC 0x0F) and looped. See docs/boot-history.md.
 .text
 .balign 0x800
 .global exception_vector_table
