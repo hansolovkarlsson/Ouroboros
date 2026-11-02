@@ -2251,15 +2251,42 @@ impl Fs {
     /// each allocation outside one.
     ///
     /// A sector the disk refuses is dropped with the bits it set, which stay
-    /// clear on the disk below the hint; the hint is lowered to the sector's
-    /// first byte, so the next scan finds them again and every byte below the
-    /// hint stays full. Only the held sector can hold such bits: the scan
-    /// moves to another only after writing it ([`hold_bitmap_sector`]), and
-    /// a batch's earlier sectors are on the disk. Until the high review of
-    /// #384 the hint stayed past them, and those clusters went unused until
-    /// the scan wrapped (before the hint, the next scan started at byte 0).
+    /// clear on the disk; the hint is lowered to the sector's first byte, so
+    /// every byte below the hint stays full. Only the held sector can hold
+    /// such bits: the scan moves to another only after writing it
+    /// ([`hold_bitmap_sector`]), and a batch's earlier sectors are on the
+    /// disk. Until the high review of #384 the hint stayed past them, and
+    /// those clusters went unused until the scan wrapped.
     ///
+    /// **No rig can fail this lowering, and it is kept on purpose.** This
+    /// paragraph is the one statement of why; `alloc_scan`'s doc, the
+    /// roadmap and the CHANGELOG point here. Only [`alloc_scan`] sets bits
+    /// in the held sector, so a dropped one is the last sector a scan read,
+    /// one of three:
+    ///
+    /// - The scan found a cluster: the sector is the hint's own (a find
+    ///   leaves the hint at its byte there), and the scan starts at that
+    ///   sector's first byte, so the next scan reads it again either way.
+    /// - It answered `DiskFull` with the hint in the first sector, so there
+    ///   was no second pass: the sector is the bitmap's last, at or past the
+    ///   hint's, and the lowering changes no scan.
+    /// - It answered `DiskFull` after the second pass, from a hint in a later
+    ///   sector: the sector is the one just before the hint's, and the
+    ///   lowering moves the hint back to it.
+    ///
+    /// In both `DiskFull` cases the sector's only new bits are the volume's
+    /// own clusters, marked on the way ([`is_system`]); in the third they are
+    /// marked again on the next scan rather than on its second pass. None of
+    /// the three gives a cluster out differently, so no boot can tell. The
+    /// lowering stays as the local guard: it keeps every byte below the hint
+    /// full, the invariant [`clear_bit`] states, whatever shape the scan's
+    /// start takes; without it only that start, in another function and
+    /// unchecked, would bring a dropped find's clusters back into use.
+    ///
+    /// [`alloc_scan`]: Self::alloc_scan
+    /// [`clear_bit`]: Self::clear_bit
     /// [`hold_bitmap_sector`]: Self::hold_bitmap_sector
+    /// [`is_system`]: Self::is_system
     fn end_alloc_hold(&mut self) -> Result<(), Error> {
         let written = self.write_alloc_bits();
         if written.is_err() {
@@ -2399,16 +2426,18 @@ impl Fs {
 
     /// [`alloc_find`](Self::alloc_find)'s scan: the first clear bit from
     /// the first byte of [`alloc_from`](Self::alloc_from)'s sector to the
-    /// bitmap's end, then from its first byte up to that sector, set in `held`, which the caller writes,
-    /// and `alloc_from` left at its byte. Every byte below `alloc_from` is
-    /// full while every free lowers it ([`clear_bit`](Self::clear_bit)) and
-    /// a refused allocator write does
-    /// ([`end_alloc_hold`](Self::end_alloc_hold)), so the second pass
-    /// finds nothing unless a rule here is broken; it is the safe side of
-    /// one, reached by no boot. It costs nothing a request did not pay
-    /// before the hint: a request that finds the volume full reads every
-    /// bitmap sector once in all, the hint's sector to the end and then
-    /// the sectors before it, as one scan from byte 0 did.
+    /// bitmap's end, then from its first byte up to that sector, set in
+    /// `held`, which the caller writes, and `alloc_from` left at its byte.
+    /// Every byte below `alloc_from` is full while every free lowers it
+    /// ([`clear_bit`](Self::clear_bit)) and a refused allocator write does
+    /// ([`end_alloc_hold`](Self::end_alloc_hold), whose doc says how that
+    /// lowering and this start cover a refused write). The second pass finds
+    /// nothing unless a rule here is broken; it is the safe side of one, and
+    /// no boot makes it find a cluster, so no rig fails it (the roadmap's
+    /// item on the wrap before `DiskFull`). It costs nothing a request did
+    /// not pay before the hint: a request that finds the volume full reads
+    /// every bitmap sector once in all, the hint's sector to the end and
+    /// then the sectors before it, as one scan from byte 0 did.
     fn alloc_scan(&mut self, held: &mut Option<BitmapSector>) -> Result<u32, Error> {
         let nbytes = self.cluster_count.div_ceil(8) as u64;
         // From the first byte of the hint's sector, already held or read

@@ -1719,8 +1719,10 @@ from byte 0 did (from the hint's byte the wrap read the hint's sector
 twice: the medium review of #384). `test-alloc-batch`'s model starts the
 hint at the setup's last find, read off the base boot's disk, and refuses
 a wrapped find. Neither the refused write's lowering nor the wrap can be
-failed by any rig; the roadmap holds the case that would. `test-alloc-batch`'s second
-request now reads 3 bitmap sectors where it read 4, and reads 4 again with
+failed by any rig; the roadmap held a case for the lowering, found on
+2026-11-02 not to separate it (see the entry below), and holds the wrap's
+own item. `test-alloc-batch`'s second request now reads 3 bitmap sectors
+where it read 4, and reads 4 again with
 the hint set back to 0 when the allocator lets go of its sector;
 `test-stale-cursor` fails 4 checks with the lowering removed (a removed
 file's cluster not reused, so its stale cases are not built).
@@ -1740,6 +1742,14 @@ first, which zeros both sectors the test reads. `make
 test-boot-partition`'s gpt-format boot runs `partition ext2` before its
 `format` and reads sectors 0 and 1 back as built; with the refusal removed
 exactly those two checks fail. From the third medium review of #377.
+
+**exFAT's allocator keeps its lowering for a refused bitmap write
+(2026-11-02).** No rig can fail `end_alloc_hold`'s lowering of the hint to
+a refused bitmap sector's first byte. It was removed on that ground and put
+back the same day after a medium review, as the local guard of the
+invariant that every byte below the hint is full. Its doc is the one
+statement of why; the roadmap item is settled as unriggable, and the wrap
+before `DiskFull` has its own item. No behaviour changes.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
