@@ -1699,6 +1699,35 @@ that flush removed and `test-batch-refused` with the give-back removed (10
 checks, as before the move). Asked by the second and third medium reviews
 of #380.
 
+**exFAT's allocator keeps its hint across requests (2026-11-01).** Only a
+FAT batch went on from its last find; every other allocation (`mkdir`, a
+directory's growth, a one-cluster write) scanned from the bitmap's first
+byte, on a nearly full stick a USB round trip for every bitmap sector before
+the first clear bit. `alloc_from` is now kept until a free lowers it:
+`clear_bit`, the one place a bit is cleared (a free, a give-back), sets it
+no higher than the freed cluster's byte, so every byte below it is full and
+placement is first fit as before. A bitmap sector the disk refuses
+lowers it too, to the sector's first byte (`end_alloc_hold`), since the
+bits the allocator set there stay clear on the disk; the high review of
+#384 found the hint left past them, those clusters unused until a wrap.
+No boot refuses an allocator's bitmap write, so that is reasoned, not
+graded. The scan wraps to byte 0 before it answers `DiskFull`, as FAT32's
+does; while those rules hold the wrap finds nothing, and no boot reaches
+it. A request that finds the volume full reads every bitmap sector once,
+the hint's sector to the end and then the sectors before it, as one scan
+from byte 0 did (from the hint's byte the wrap read the hint's sector
+twice: the medium review of #384). `test-alloc-batch`'s model starts the
+hint at the setup's last find, read off the base boot's disk, and refuses
+a wrapped find. Neither the refused write's lowering nor the wrap can be
+failed by any rig; the roadmap holds the case that would. `test-alloc-batch`'s second
+request now reads 3 bitmap sectors where it read 4, and reads 4 again with
+the hint set back to 0 when the allocator lets go of its sector;
+`test-stale-cursor` fails 4 checks with the lowering removed (a removed
+file's cluster not reused, so its stale cases are not built).
+`test-batch-refused` passes with it removed: its given-back clusters lie in
+the bitmap byte the hint is already on. `make test` and the eleven exFAT
+rigs pass. From the third medium review of #380.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

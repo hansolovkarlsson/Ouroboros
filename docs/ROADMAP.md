@@ -4465,14 +4465,35 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   path reaches, each printing a line of fsd's own; the client still sees
   `FS_ERR_IO`, since a wire code of fsd's own would be a protocol change
   for a path nothing reaches.
-- **exFAT's allocator rescans from the bitmap's first byte outside a batch.**
+- ~~**exFAT's allocator rescans from the bitmap's first byte outside a batch.**
   Inside a FAT batch the scan goes on from its last find; every other
   allocation (`alloc_zeroed` for `mkdir` and a directory's growth, the
   root's growth, a 2 KiB write taking a cluster) starts at byte 0, so on a
   nearly full stick each reads every bitmap sector before the first clear
   bit. A hint kept across requests and lowered by every free, as FAT32's
   allocator keeps one, would serve them all. From the third medium review
-  of #380.
+  of #380.~~
+  *Done 2026-11-01:* `alloc_from` is kept across requests and lowered by
+  `clear_bit`, the one place a bit is cleared, and by a refused allocator
+  bitmap write (`end_alloc_hold`, reached by no boot), and the scan wraps
+  to byte 0 before `DiskFull`. Graded by `test-alloc-batch` (the hint kept: 3 bitmap
+  reads, 4 without) and `test-stale-cursor` (the lowering); the wrap is
+  reached by no boot.
+- **No rig can fail exFAT's allocator hint on a refused bitmap write.**
+  `end_alloc_hold` lowers the hint to a refused sector's first byte, and
+  `alloc_scan` wraps to byte 0 before `DiskFull`; deleting either passes
+  every rig (the medium review of #384). The lowering matters only when a
+  batch's bitmap sector and then its give-back's end of chain are both
+  refused, so `give_back` clears nothing. A case in
+  `test-batch-refused`'s shape would build it: on X, a FAT-chained file
+  whose last cluster's FAT sector, and the bitmap sector a gap fill takes
+  the last free clusters of, refuse every write (blkdebug without
+  `once`); the fill must fail, and the next allocation must fail too,
+  finding the dropped clusters in that sector, where without the lowering
+  it goes on to the next sector and succeeds (a file there, read off the
+  disk). The wrap is reached only once such a rule is broken, so this
+  case with the lowering removed would grade it as well, if the next
+  sector is full.
 - **`partition` on a GPT disk writes an MBR nobody reads.** `partition`
   writes sector 0 alone, so on a GPT disk not erased first the primary
   header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s

@@ -13,7 +13,8 @@ on the Pi's stick, and could pass the supervisor's wedge limit. Such a
 request is now a FAT batch (`in_fat_batch`, `batch::run` since 2026-11-01): the entries are set in the FAT
 cache and its sector written when the cache moves to another or the batch
 ends, the allocator's bits held in one bitmap sector and written before any
-FAT sector, and the scan going on from its last find. Only the disk can show
+FAT sector, and the scan going on from its last find (since 2026-11-01 from
+the last find of any request, the hint kept until a free lowers it). Only the disk can show
 the difference, so this rig counts QEMU's virtio-blk writes
 (scripts/disktrace.py).
 
@@ -29,7 +30,9 @@ and `touch /G`. The graded boot then runs
   batch crosses a bitmap sector and its scan's start is seen: a scan from
   byte 0 reads the first sector again for every cluster past it;
 - `echo x >> /CONT`: `ensure_chained` links /CONT's 512 clusters over four
-  FAT sectors, then the append takes a cluster.
+  FAT sectors, then the append takes a cluster, its scan going on from /G's
+  last find in the bitmap's second sector: a hint not kept across requests
+  reads the first sector again.
 
 The FAT writes, bitmap writes and bitmap reads the graded boot makes more
 than the base must be what a model of the batch predicts from the chains the
@@ -44,7 +47,9 @@ what it stands for, or the counts could not tell a sector from a cluster:
 /G both bitmap sectors and two FAT sectors, /CONT four FAT sectors.
 
 Measured on 2026-10-31: 14 FAT writes, 5 bitmap writes and 4 bitmap reads,
-the 21 writes in the model's order. Controls, each failing here: main's
+the 21 writes in the model's order; 3 bitmap reads since the hint of
+2026-11-01, and 4 with `end_alloc_hold` setting it back to 0 again (the
+control). Controls, each failing here: main's
 exfat.rs before that day (1,025 FAT writes, 257 bitmap writes, 386 bitmap
 reads); the batch's scan starting at byte 0 (131 bitmap writes and 258
 reads, the first sector read again a cluster past it); flush_fat writing the
@@ -97,19 +102,24 @@ class Model:
     when it holds bits set), and at the batch's end; one bitmap sector held
     by the allocator, read when its scan enters it, written when it leaves it
     with bits set. `seq` is the writes in order, `reads` the bitmap reads by
-    sector. Raises AssertionError if a FAT sector is written with a link to
+    sector, each allocation's scan going on from the last one's byte, in this
+    request, an earlier one or the setup (nothing is freed between them). Raises AssertionError if a FAT sector is written with a link to
     a cluster whose bit is not on the disk, or to one allocated here whose
     own entry, in another sector, is not on the disk yet (a refused flush
     would then leave a link on the disk into a stale entry), so the model
     holds both rules. The chain's head is no link, and is not checked here:
     test-batch-refused grades a refused head."""
 
-    def __init__(self, fat_lba, bitmap_lba):
+    def __init__(self, fat_lba, bitmap_lba, hint):
         self.fat_lba, self.bitmap_lba = fat_lba, bitmap_lba
         self.seq, self.reads = [], collections.Counter()
         self.fat, self.fat_dirty, self.links = None, False, set()
         self.allocated, self.on_disk = set(), set()
         self.entries, self.entries_on_disk = set(), set()
+        # The allocator's hint, kept across requests (fsd's alloc_from since
+        # 2026-11-01): the bitmap byte of the setup's last find, which
+        # base_inspect reads off the disk.
+        self.scan_from = hint
 
     def fsec(self, c):
         return self.fat_lba + c * 4 // SECTOR
@@ -118,7 +128,7 @@ class Model:
         return self.bitmap_lba + byte // SECTOR
 
     def begin(self):
-        self.bits, self.bits_dirty, self.bits_held, self.scan_from = None, False, set(), 0
+        self.bits, self.bits_dirty, self.bits_held = None, False, set()
 
     def write_bits(self):
         if self.bits_dirty:
@@ -153,6 +163,9 @@ class Model:
 
     def alloc(self, c):
         target = (c - 2) // 8
+        # A find before the hint is fsd's scan wrapping to byte 0, which
+        # nothing here frees to make happen and the count below cannot hold.
+        assert target >= self.scan_from, f"cluster {c} found before the allocator's hint: a wrap"
         for byte_sector in range(self.scan_from // SECTOR, target // SECTOR + 1):
             s = self.bitmap_lba + byte_sector
             if self.bits != s:
@@ -191,6 +204,7 @@ def main() -> int:
             if any(vol.used(c) for c in run):
                 pre.append(f"the heap's last {len(run)} clusters are not free for /CONT")
             rchain = vol.chain(vol.root)
+            prep_root = set(rchain)
             d = bytearray(vol.data(rchain))
             end = exfatimg.root_end(d)
             heap_off, bitmap_off = vol.heap, vol.heap + (vol.bitmap - 2) * vol.cluster
@@ -238,6 +252,7 @@ def main() -> int:
             setup.append(f"writeat /F{k} {GAP if n == per else (n - 1) * cluster} f")
             fill -= n
             k += 1
+        fills = [f"/F{i}" for i in range(k)]
         setup.append("touch /G")
         graded = [f"writeat /G {GAP} x", "echo x >> /CONT"]
 
@@ -262,6 +277,21 @@ def main() -> int:
                 if len(left) != LEFT:
                     problems.append(f"the fill left {len(left)} clusters free in the bitmap's first sector, "
                                     f"not {LEFT}: the root grew, or a file took other than its count")
+                # The allocator's hint after the setup, where the model starts
+                # it: the setup frees nothing, so its finds only go forward
+                # and the last is the highest cluster it took, a fill file's
+                # or the root's growth.
+                taken = set(v.chain(v.root)) - prep_root
+                for name in fills:
+                    try:
+                        taken |= set(v.file_chain(name))
+                    except ValueError as e:
+                        problems.append(f"after the setup: {e}")
+                        return
+                if not taken:
+                    problems.append("the setup took no cluster, so the allocator's hint is not known")
+                else:
+                    found["hint"] = (max(taken) - 2) // 8
 
         def more_inspect(copy, problems):
             with exfatimg.Volume(copy, start) as v:
@@ -318,9 +348,9 @@ def main() -> int:
                 return tally.verdict()
         got = {}
         m = None
-        if base and more and "sets" in found and not problems:
+        if base and more and "sets" in found and "hint" in found and not problems:
             def build():
-                m = Model(g["fat"], bitmap_lba)
+                m = Model(g["fat"], bitmap_lba, found["hint"])
                 # writeat /G: the head allocated, then each step past a cluster's
                 # end asks its FAT entry, allocates and links it.
                 m.begin()

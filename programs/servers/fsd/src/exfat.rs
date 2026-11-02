@@ -558,7 +558,10 @@ mod batch {
         /// Take one cluster: its bit set in the bitmap sector the allocator
         /// keeps until the batch writes a FAT sector or ends, recorded for a
         /// give-back, and its end of chain set. The scan goes on from the
-        /// last find, since nothing is freed inside a batch.
+        /// allocator's hint ([`alloc_from`](Fs::alloc_from)): the last find,
+        /// this batch's or an earlier request's, or lower where a free came
+        /// since. Nothing frees inside a batch, so within one each find is
+        /// past the last unless the scan wraps ([`Taken`]).
         pub(super) fn alloc_cluster(&mut self) -> Result<u32, Error> {
             let cluster = self.fs.alloc_find()?;
             self.fs.taken.add(cluster);
@@ -929,9 +932,15 @@ pub struct Fs {
     /// its sector at once. Until 2026-11-01 a `fat_batch` flag on `Fs` said
     /// which, and changed what four methods did.
     alloc_bits: Option<BitmapSector>,
-    /// The bitmap byte a FAT batch's next allocation scans from: the one its
-    /// last allocation was found in, since nothing is freed inside a batch
-    /// (a [`batch::FatBatch`] has no free). `0` outside one, the scan's start.
+    /// The bitmap byte the next allocation scans from, kept across requests:
+    /// the byte the last allocation was found in, lowered by every free to
+    /// the freed cluster's ([`clear_bit`](Self::clear_bit)), so every byte
+    /// below it is full and freed space is found next. `0` at mount. The scan
+    /// wraps to byte 0 before it answers `DiskFull` (FAT32's hint, one past
+    /// its last answer, does the same). Until 2026-11-01 only a FAT batch
+    /// went on from its last find; every other allocation (`mkdir`, a
+    /// directory's growth, a write of one cluster) read every bitmap sector
+    /// before the first clear bit, each a USB round trip on the Pi's stick.
     alloc_from: u64,
     /// The clusters the allocator handed out inside the current FAT batch,
     /// which a batch that fails gives back by their bits
@@ -946,11 +955,14 @@ pub struct Fs {
 const TAKEN_RUNS: usize = 32;
 
 /// The clusters a FAT batch's allocator handed out, as runs of consecutive
-/// clusters (first, count), the first `len` of them. Inside a batch the scan
-/// only goes forward ([`alloc_from`](Fs::alloc_from), nothing freed), so
-/// each find is past the last and a run grows while the finds are
-/// neighbours; a run starts again only where a used cluster lies between
-/// two. A find past [`TAKEN_RUNS`] runs is not recorded, and a failed batch
+/// clusters (first, count), the first `len` of them, in the order found.
+/// Nothing is freed inside a batch, so the scan goes on from its last find
+/// ([`alloc_from`](Fs::alloc_from)) and a run grows while the finds are
+/// neighbours; a run starts again where a used cluster lies between two. A
+/// scan that wraps to the bitmap's first byte (none does while the hint's
+/// rules hold, see [`alloc_scan`](Fs::alloc_scan)) finds a cluster before
+/// the last, so the runs are not sorted and nothing here may assume they
+/// are. A find past [`TAKEN_RUNS`] runs is not recorded, and a failed batch
 /// leaks it, as every failed batch leaked before the record (the high
 /// review of #380, 2026-10-31).
 ///
@@ -975,7 +987,8 @@ impl Taken {
     const NONE: Taken = Taken { runs: [(0, 0); TAKEN_RUNS], len: 0, tail: None };
 
 
-    /// Record `cluster`, found past every cluster already recorded.
+    /// Record `cluster`, found past every cluster already recorded, or
+    /// after the scan wrapped, when it starts a run of its own.
     fn add(&mut self, cluster: u32) {
         if let Some((first, count)) = self.runs[..self.len].last_mut() {
             if *first + *count == cluster {
@@ -2233,12 +2246,28 @@ impl Fs {
     }
 
     /// End the allocator's hold on its bitmap sector: written if it holds
-    /// bits not yet written, let go, and the next scan from the bitmap's
-    /// first byte. At a FAT batch's end, and after each allocation outside one.
+    /// bits not yet written, and let go; the next scan goes on from
+    /// [`alloc_from`](Self::alloc_from). At a FAT batch's end, and after
+    /// each allocation outside one.
+    ///
+    /// A sector the disk refuses is dropped with the bits it set, which stay
+    /// clear on the disk below the hint; the hint is lowered to the sector's
+    /// first byte, so the next scan finds them again and every byte below the
+    /// hint stays full. Only the held sector can hold such bits: the scan
+    /// moves to another only after writing it ([`hold_bitmap_sector`]), and
+    /// a batch's earlier sectors are on the disk. Until the high review of
+    /// #384 the hint stayed past them, and those clusters went unused until
+    /// the scan wrapped (before the hint, the next scan started at byte 0).
+    ///
+    /// [`hold_bitmap_sector`]: Self::hold_bitmap_sector
     fn end_alloc_hold(&mut self) -> Result<(), Error> {
         let written = self.write_alloc_bits();
+        if written.is_err() {
+            if let Some(sector) = &self.alloc_bits {
+                self.alloc_from = self.alloc_from.min(((sector.first - 2) / 8) as u64);
+            }
+        }
         self.alloc_bits = None;
-        self.alloc_from = 0;
         written
     }
 
@@ -2345,8 +2374,8 @@ impl Fs {
     /// ext2's allocator passes over its metadata the same way.
     ///
     /// Outside a FAT batch: the bitmap sector is written now, before the
-    /// cluster's entry, and let go, the next scan starting at the bitmap's
-    /// first byte. Inside one a cluster is taken by
+    /// cluster's entry, and let go, the next scan going on from this one's
+    /// byte ([`alloc_from`](Self::alloc_from)). Inside one a cluster is taken by
     /// [`batch::FatBatch::alloc_cluster`], which keeps the sector.
     fn alloc_cluster(&mut self) -> Result<u32, Error> {
         let found = self.alloc_find();
@@ -2368,13 +2397,43 @@ impl Fs {
         self.with_alloc_bits(|fs, held| fs.alloc_scan(held))
     }
 
-    /// [`alloc_find`](Self::alloc_find)'s scan: the first clear bit
-    /// from [`alloc_from`](Self::alloc_from), set in `held`, which the
-    /// caller writes, and `alloc_from` left at its byte.
+    /// [`alloc_find`](Self::alloc_find)'s scan: the first clear bit from
+    /// the first byte of [`alloc_from`](Self::alloc_from)'s sector to the
+    /// bitmap's end, then from its first byte up to that sector, set in `held`, which the caller writes,
+    /// and `alloc_from` left at its byte. Every byte below `alloc_from` is
+    /// full while every free lowers it ([`clear_bit`](Self::clear_bit)) and
+    /// a refused allocator write does
+    /// ([`end_alloc_hold`](Self::end_alloc_hold)), so the second pass
+    /// finds nothing unless a rule here is broken; it is the safe side of
+    /// one, reached by no boot. It costs nothing a request did not pay
+    /// before the hint: a request that finds the volume full reads every
+    /// bitmap sector once in all, the hint's sector to the end and then
+    /// the sectors before it, as one scan from byte 0 did.
     fn alloc_scan(&mut self, held: &mut Option<BitmapSector>) -> Result<u32, Error> {
         let nbytes = self.cluster_count.div_ceil(8) as u64;
-        let mut byte_index = self.alloc_from;
-        while byte_index < nbytes {
+        // From the first byte of the hint's sector, already held or read
+        // first either way, so the second pass ends before that sector and
+        // no sector is read twice (the medium review of #384: from the hint's
+        // byte, the second pass read it again).
+        let sector_bytes = SECTOR_SIZE as u64;
+        let start = self.alloc_from.min(nbytes) / sector_bytes * sector_bytes;
+        match self.alloc_scan_range(held, start, nbytes)? {
+            Some(cluster) => Ok(cluster),
+            None => self.alloc_scan_range(held, 0, start)?.ok_or(Error::DiskFull),
+        }
+    }
+
+    /// The first clear bit in bitmap bytes `from..to`, as
+    /// [`alloc_scan`](Self::alloc_scan) takes it; `None` when there is none
+    /// before `to` or the heap's last cluster.
+    fn alloc_scan_range(
+        &mut self,
+        held: &mut Option<BitmapSector>,
+        from: u64,
+        to: u64,
+    ) -> Result<Option<u32>, Error> {
+        let mut byte_index = from;
+        while byte_index < to {
             let first = 2 + (byte_index / SECTOR_SIZE as u64) as u32 * BITS_PER_SECTOR;
             let sector = self.hold_bitmap_sector(held, first)?;
             let off = (byte_index % SECTOR_SIZE as u64) as usize;
@@ -2390,11 +2449,11 @@ impl Fs {
                     continue; // marked used, and this byte looked at again
                 }
                 self.alloc_from = byte_index;
-                return Ok(cluster);
+                return Ok(Some(cluster));
             }
             byte_index += 1;
         }
-        Err(Error::DiskFull)
+        Ok(None)
     }
 
     /// Free a data allocation (none for a first cluster outside the heap: an
@@ -2580,8 +2639,9 @@ impl Fs {
     fn clear_bit(&mut self, bits: &mut Option<BitmapSector>, c: u32) -> Result<(), Error> {
         // Inside a FAT batch the allocator holds a bitmap sector with bits
         // not yet written, which a sector read here would not see and its
-        // write would undo; and the batch's scan starts past bits a free
-        // would clear. A batch cannot free (`batch::FatBatch` has no free),
+        // write would undo; and the hint this lowers would turn the
+        // batch's scan back mid-batch, its finds no longer in order. A
+        // batch cannot free (`batch::FatBatch` has no free),
         // and the allocator holds a sector only inside one, so this is
         // reached by no path; it says so if fsd ever breaks the rule. It
         // sees a batch only once its allocator holds a sector: a free
@@ -2600,6 +2660,13 @@ impl Fs {
         let bit = c - first;
         sector.buf[(bit / 8) as usize] &= !(1u8 << (bit % 8));
         sector.dirty = true;
+        // The allocator's next scan starts no later than this byte, so freed
+        // space is found next and every byte below the hint stays full. Every
+        // bit cleared is cleared here (a free, a give-back), so no free can
+        // leave a clear bit behind the hint. Lowered before the write: a
+        // write refused leaves the bit set on the disk, and the scan reads
+        // the sector again for nothing.
+        self.alloc_from = self.alloc_from.min(((c - 2) / 8) as u64);
         Ok(())
     }
 
