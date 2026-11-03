@@ -1759,11 +1759,22 @@ them a comment saying the spawn allocator never frees. The documents had
 about thirty more. `scripts/check-doc-pointers.py`, run by `make test` and
 `make check-doc-pointers`, finds every pointer of that shape in the
 tracked source and documents (the dated records skipped) and fails when the
-file holds no heading or bold lead-in containing the quoted name. It was
-seen failing with a heading renamed, with bold markers paired across a
-whole file, and with its extractor broken. It checks the name, not what the
+file holds no heading or bold lead-in with the quoted name; a name that
+several of them contain must equal one whole, since its high review found a
+renamed "Phase 4" passing on the cluster's 4a and 4b. It was seen failing
+with a heading renamed, with bold markers paired across a whole file, and
+with its extractor broken. It checks the name, not what the
 section says. The documents' dead pointers are repointed, and so are the
 unquoted references that sent a reader to `CLAUDE.md` for history.
+
+**The documents and the site drop the em dash (2026-11-03).** The living
+documents, the code's comments, `CLAUDE.md`, `README.md` and the site's
+guide, reference and research pages follow the no-em-dash rule, each dash
+rewritten by hand as a comma, colon or period (#394 to #403). The dated
+records keep their punctuation as written, as do the site's postmortem
+pages, which abridge them; `CLAUDE.md`'s "Prose style" section names both
+(#394, #404). Page titles on the site now separate with a middle dot
+("Glossary · Ouroboros"). No behaviour changes.
 
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
