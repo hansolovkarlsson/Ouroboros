@@ -1,6 +1,6 @@
 # The `docs/` index
 
-Every document under `docs/`, with a full annotation each — what it covers,
+Every document under `docs/`, with a full annotation each: what it covers,
 and why it says what it says. **Read this index rather than guessing from
 filenames**: several of these files are named for a subsystem but organized
 around a lesson, and the annotation is what tells them apart.
@@ -9,7 +9,7 @@ This index used to live inline in `CLAUDE.md`'s `## Structure` section. It was
 moved here on 2026-09-03, verbatim, for the same reason the milestone narrative
 moved to [`CHANGELOG.md`](CHANGELOG.md): `CLAUDE.md` is read at the start of
 *every* session, whether or not any of this is relevant, while an index next to
-the documents it indexes is read when it is needed — and is far likelier to stay
+the documents it indexes is read when it is needed, and is far likelier to stay
 current, since it is edited in the same commit as the doc it describes.
 `CLAUDE.md` keeps a short pointer list and defers here.
 
@@ -81,7 +81,7 @@ docs/
 ## Also under `docs/`
 
 Present in the tree but not in the index above, which is itself a small piece
-of evidence for moving it here — an index inside `CLAUDE.md` drifted away from
+of evidence for moving it here: an index inside `CLAUDE.md` drifted away from
 the directory it described.
 
 ```

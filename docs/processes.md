@@ -12,7 +12,7 @@ design. See the postmortems under `postmortems/` for the reasoning trail and wha
 The shell used to be kernel code: a fixed EL0 poll loop with all its
 actual line-editing logic living at EL1, compiled permanently into the
 kernel binary. That made it impossible to replace without rebuilding the
-kernel, which doesn't match how any real Unix-like system works — the
+kernel, which doesn't match how any real Unix-like system works: the
 shell is supposed to be *a program*, swappable through configuration (like
 `/etc/passwd`'s shell field on Linux), not a kernel feature.
 
@@ -24,13 +24,13 @@ its own space. All three are covered below.
 ## Loading mechanism
 
 There is **no runtime disk driver**. `loader.rs` does all its work during
-the UEFI boot-services window, before `exit_boot_services` — the same
+the UEFI boot-services window, before `exit_boot_services`, the same
 window the kernel's own binary was loaded in, using UEFI's own FAT32
 driver on the ESP (`SimpleFileSystem` protocol via `boot::get_image_file_system`).
 This is a deliberate scope decision, not a placeholder: a real
 post-boot storage stack (a virtio-blk driver, feature negotiation, a
 request queue, plus a filesystem reader) is a genuinely separate,
-much larger subsystem — comparable in scope to the virtio-console work
+much larger subsystem, comparable in scope to the virtio-console work
 later built for Parallels console output (`kernel/src/virtio_console.rs`,
 see `CHANGELOG.md`'s "a real transmit-only driver" virtio-console entry), and was explicitly *not* what this milestone needed. It gets real once something
 needs to load a program *after* boot (dynamic `exec()`-style spawning);
@@ -39,13 +39,13 @@ boot time.
 
 The sequence, all before `exit_boot_services`:
 
-1. Read `\EFI\ORBS\INIT.CFG` — a config file containing exactly one
+1. Read `\EFI\ORBS\INIT.CFG`, a config file containing exactly one
    line: the path of the program to load.
 2. Read that program's bytes.
 3. Allocate an EL0-accessible, 2MB-aligned region sized to fit it (see
    "Memory model" below) and copy the bytes in.
 
-If any step fails, boot fails loudly (a panic through the UEFI logger) —
+If any step fails, boot fails loudly (a panic through the UEFI logger):
 there's no fallback program, matching this project's established stance on
 console discovery: no confirmed data means no guessing, not a silent wrong
 answer.
@@ -55,10 +55,10 @@ answer.
 `\EFI\ORBS\INIT.CFG` is deliberately minimal: one line, no key/value
 syntax, no comments, just a path (trimmed of surrounding whitespace). The
 Makefile's `esp` target writes it automatically, pointing at the built-in
-shell. Note the directory is `ORBS`, not `OUROBOROS` — the full project
+shell. Note the directory is `ORBS`, not `OUROBOROS`: the full project
 name is 9 characters, one over FAT's 8.3 short-name limit. The reason is
 partly historical now: `fat32.rs` *reads* long filenames today (LFN
-reconstruction), so a 9-character name would be reachable — but it still
+reconstruction), so a 9-character name would be reachable, but it still
 can't *create* one, so keeping this project-controlled path 8.3 avoids
 depending on LFN write support that doesn't exist. (It was first truncated
 to `OUROBORO`, exactly 8 characters, then renamed to the tidier `ORBS`.)
@@ -68,11 +68,11 @@ to `OUROBORO`, exactly 8 characters, then renamed to the tidier `ORBS`.)
 ```
 
 To run a different program at boot, either edit this file directly on the
-ESP, or point `INIT.CFG` at a different `.bin` staged there — no kernel
+ESP, or point `INIT.CFG` at a different `.bin` staged there. No kernel
 rebuild required. This is the actual "replaceable through configuration"
 behavior the whole design is for.
 
-The format only grows if something actually needs a second setting —
+The format only grows if something actually needs a second setting:
 don't add key/value parsing preemptively.
 
 ## Memory model
@@ -94,7 +94,7 @@ the program reaches via the `heap_info` syscall (a `&mut [u8]`, not a `GlobalAll
 "Binary format" for why `alloc`'s `Vec`/`String` can't be used here) - the
 shell uses it to hold a redirect/pipe capture far larger than its stack, so
 `cat big > file` works. `.bss`/`.data` are now supported too (see "Binary
-format" below) — beyond code, the heap area, and a stack, a program can now
+format" below): beyond code, the heap area, and a stack, a program can now
 have real static state.
 
 **Why the region is 2MB-aligned even though it's usually only a few KB:**
@@ -105,7 +105,7 @@ guarantees 4KB alignment, so a multi-page region could easily straddle a
 2MB boundary depending on where the allocator happens to put it. Rather
 than teaching `mmu.rs` to split a region across multiple L2 slots,
 `loader.rs` asks for `size + 2MB` worth of pages, then frees whatever
-falls before/after the first 2MB-aligned address in that range — the
+falls before/after the first 2MB-aligned address in that range. The
 region that's left over is guaranteed not to straddle a slot, the same
 guarantee the kernel's own compile-time EL0 statics used to get for free
 from `#[repr(align(N))]`. This costs up to just under 2MB of
@@ -141,9 +141,9 @@ path refuses a slot before any table is built for it.
 
 ## Binary format
 
-Real ELF64, self-relocating — not a flat binary anymore. `loader.rs`
+Real ELF64, self-relocating, not a flat binary anymore. `loader.rs`
 hand-rolls a small ELF64 parser (header, program headers, section
-headers, `Elf64_Rela` entries — no crate, matching this project's
+headers, `Elf64_Rela` entries, with no crate, matching this project's
 established discipline of hand-rolling formats simple enough to
 justify it, same as `acpi.rs`/`madt.rs`/`fat32.rs`): it walks `PT_LOAD`
 program headers to copy each segment's bytes to `region_base +
@@ -157,14 +157,14 @@ this replaced a flat, position-*dependent* loader that copied raw bytes
 to a fixed address with no relocation step at all, which was this
 project's single most-repeated bug class.
 
-Consequences of "real ELF, real relocations, but still narrowly scoped
-— no dynamic linking, no imported symbols, no `exec()`":
+Consequences of "real ELF, real relocations, but still narrowly scoped:
+no dynamic linking, no imported symbols, no `exec()`":
 
 - **Entry must still be the first byte, by convention, not necessity.**
   The linker script (`programs/linker.ld`) still sets the link address to
   `0x0` and places the entry symbol first in `.text` via
   `KEEP(*(.text.start))`, keeping `LoadedProgram::entry == ::base`
-  trivially true — but `loader.rs` computes `entry` as `base + e_entry`
+  trivially true, but `loader.rs` computes `entry` as `base + e_entry`
   from the real ELF header now, so a program's entry point doesn't
   *have* to be its first byte the way it did under the old flat loader;
   this project's own shell just still keeps it that way, out of
@@ -174,10 +174,10 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
   `.bss` (`p_memsz - p_filesz`) for every `PT_LOAD` segment, in both the
   boot-load and runtime-spawn paths, re-initialized fresh per spawn; the
   old `programs/linker.ld` ASSERTs that rejected them are gone. So a
-  userland program may have mutable statics/globals — a C global or
+  userland program may have mutable statics/globals: a C global or
   file-scope array, or a simple Rust `static mut`. **Caveat for Rust
   programs specifically:** this does *not* lift the separate liballoc
-  ceiling — `alloc`'s collections still fail to link on an
+  ceiling: `alloc`'s collections still fail to link on an
   `R_AARCH64_ABS64` in prebuilt liballoc (a different constraint; see the
   heap milestone). Plain scalar/array `static`s are fine.
 - **Build with `relocation-model=pic` + `-pie` + `--no-dynamic-linker`**
@@ -185,40 +185,40 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
   `relocation-model=static` anymore. This makes the compiler emit
   `R_AARCH64_RELATIVE` self-relocations for absolute data pointers it
   can't express PC-relatively (`core::fmt`'s argument-dispatch tables,
-  literal references used in certain codegen shapes — see below),
+  literal references used in certain codegen shapes, see below),
   instead of baking in raw base-`0x0` addresses with nothing to fix
   them up. `-pie` specifically matters: `relocation-model=pic` *alone*
   produces an ordinary static executable with GOT entries silently
-  resolved to base-`0x0` addresses at link time — the identical bug,
+  resolved to base-`0x0` addresses at link time, the identical bug,
   one level down. `--no-dynamic-linker` is correct because there
-  genuinely is none — no `PT_INTERP`, no imported symbols, nothing
+  genuinely is none: no `PT_INTERP`, no imported symbols, nothing
   `ld.so` would normally resolve.
-- **Must be built with `--release`, not debug — a hard, confirmed
+- **Must be built with `--release`, not debug: a hard, confirmed
   toolchain constraint, not a style preference.** A debug build of a
   userland program fails to *link* at all under this model:
   `rust-lld` rejects an `R_AARCH64_ABS64` relocation inside the
-  prebuilt (not rebuilt-per-project — see `rust-toolchain.toml`)
+  prebuilt (not rebuilt-per-project, see `rust-toolchain.toml`)
   `libcore.rlib`'s own `core::fmt::builders::PadAdapter` object code,
   pulled in by ordinary debug-build panic/bounds-check formatting
   machinery regardless of whether your own code calls
   `write!`/`format!` at all. A release build's optimizer eliminates
   enough of that unreachable-in-practice code that the poisoned object
-  never gets linked in. `make shell-bin` already does this — replicate
+  never gets linked in. `make shell-bin` already does this. Replicate
   it (`cargo build -p <your-crate> --target aarch64-unknown-none
   --release`) for any new program.
-- **Some libcore code paths break the link even in `--release` — a
+- **Some libcore code paths break the link even in `--release`: a
   small, growing list of known instances of the same underlying
   constraint.** Confirmed cases: `&str[a..b]` range slicing of a `str`
   (its out-of-bounds panic path, `slice_error_fail`, formats the
-  offending string — use non-panicking `.get(a..b)` instead; found
+  offending string, so use non-panicking `.get(a..b)` instead; found
   during the output-redirection milestone), and `str::rfind` with a
   `char` pattern (pulls libcore's `memrchr`, whose prebuilt non-PIC
-  object carries `R_AARCH64_ABS64` relocations outright — use a manual
+  object carries `R_AARCH64_ABS64` relocations outright, so use a manual
   reverse byte scan; found porting `fat32.rs` into the filesystem
   server). Byte-slice (`[u8]`) indexing, `find`/forward `memchr`,
   `copy_from_slice`, and `core::fmt` itself are all confirmed fine.
   The failure is loud (a link error naming `R_AARCH64_ABS64`), never
-  silent — when you hit a new one, replace the libcore call with a
+  silent. When you hit a new one, replace the libcore call with a
   hand-rolled equivalent and add it to this list.
 - **The whole `alloc` crate is unusable** for the same reason, and there's
   no hand-rolled-around-it fix: prebuilt lib`alloc`'s own `.rodata`
@@ -226,41 +226,41 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
   carries `R_AARCH64_ABS64` relocations, so `extern crate alloc` +
   any collection fails the `-pie` link. The only fix is `-Z build-std`
   (rebuild lib`alloc` with PIE flags), which is nightly-only and off-limits
-  on this stable project — so **no `Vec`/`String`/`Box`**. The userland
+  on this stable project, so **no `Vec`/`String`/`Box`**. The userland
   heap is a *raw buffer* (`heap_info`), not a `GlobalAlloc` heap, because
   of this (found by the go/no-go gate that opened the userland-heap
   milestone).
-- **`core::fmt` (`write!`, `{}` formatting) is safe now — confirmed,
+- **`core::fmt` (`write!`, `{}` formatting) is safe now: confirmed,
   not just reasoned about.** Historically unsafe here for the identical
   reason the old flat loader made *any* absolute data pointer unsafe
   (`core::fmt::Arguments` builds its per-argument dispatch out of a
-  function-pointer array in `.rodata`, not direct `bl` calls) — but
+  function-pointer array in `.rodata`, not direct `bl` calls), but
   that mechanism is exactly what real relocation processing fixes. The
   shell's `selftest` builtin (`shell/src/main.rs`) exercises `write!`
   over a small `core::fmt::Write` wrapper around `putc` specifically to
   prove this, and it works. `print_u64_decimal` is left as hand-rolled
-  decimal formatting anyway — not because it has to be, just because it
+  decimal formatting anyway, not because it has to be, just because it
   already existed and doesn't need `core::fmt`'s machinery for
   something this simple.
 - **Comparing a slice/string against a literal is safe now too, same
   reasoning, also confirmed via `selftest`.** The historical crash
   (`cwd_bytes != b"/"` in `cd`'s old path-resolution code) was the
-  identical class of bug — a reference to literal `.rodata` data needing
+  identical class of bug: a reference to literal `.rodata` data needing
   a relocation that never happened under the old model. `resolve_path`'s
   `is_root`/`is_dot`/`is_dotdot` helpers still use scalar comparisons
   (not because it's still required, just because they were already
   written that way and there was no reason to change working code as
   part of this milestone).
 - **Still no dynamic linking or imported symbols.** Exactly one
-  relocation type is supported (`R_AARCH64_RELATIVE`) — anything else is
+  relocation type is supported (`R_AARCH64_RELATIVE`). Anything else is
   a hard loader error, not silently ignored, since this project has no
   shared libraries and nothing else should ever legitimately appear in
   `.rela.dyn`.
 - **A second (and up to a fourth) program can now be loaded and started
-  at runtime, without a reboot** — the shell's `exec <path>` command,
+  at runtime, without a reboot**: the shell's `exec <path>` command,
   backed by a new `spawn` syscall (`SPAWN`, 16). This is genuinely
   `tasks::spawn` (adds a new, independent task alongside the caller),
-  not POSIX exec-replaces-current-process — the caller keeps running.
+  not POSIX exec-replaces-current-process. The caller keeps running.
   See `docs/architecture.md`'s "Dynamic task creation" section and
   `CHANGELOG.md`'s "Dynamic task creation and `exec`" entry for the
   full design and the real `Vec`/allocator hang bug found building it.
@@ -291,7 +291,7 @@ keyboard** now (a pager, an editor, a REPL): the shell hands a foreground
 command keyboard ownership at spawn, so `read_char` returns real keystrokes;
 `ulib::read_char()` is the wrapper, and `programs/shellutils/readkey` is a
 minimal working example. Ctrl+C **terminates** a foreground program (the kernel
-kills it and returns to the shell) — it's not delivered as a catchable signal
+kills it and returns to the shell). It's not delivered as a catchable signal
 yet. A *background*/piped program never owns the keyboard, so `read_char` there
 blocks forever; a pipeline consumer reads its stdin as messages (below), not from
 the keyboard. **Convention:** a program that takes arguments should call
@@ -309,27 +309,27 @@ kernel (see `docs/architecture.md`'s "The console server"). `get_ticks`
 follow whenever a command needs real kernel state it can't get any other
 way.
 
-**File operations are not syscalls anymore** — they're IPC requests to
+**File operations are not syscalls anymore**: they're IPC requests to
 the filesystem server (`fsd/`, task 2), sent as `FSOP_*` messages via
 `msg_call` (see `docs/architecture.md`'s "The filesystem server" and
 the protocol notes under its syscall table). The old eight `fs_*`
 syscalls' numbers (7-14) are deliberate gaps now; their exact contracts
 survive unchanged as the protocol ops, and the shell's `fs_call`/
 `fs_list_dir`/`fs_read_file`/... wrapper functions
-(`shell/src/main.rs`) are the reference client to copy — a request is a
+(`shell/src/main.rs`) are the reference client to copy. A request is a
 header (op + four little-endian u64 params) plus an inline payload
 (path, then data), the reply a status u64 plus an inline result, all
 copied task-to-task by the kernel (the payloads are *inline*, not
-pointers — per-task page tables make a client's memory unreadable by
+pointers: per-task page tables make a client's memory unreadable by
 the server; see `docs/architecture.md`'s protocol section).
 Two failure values every client should know: `NO_FS` (`u64::MAX - 1`)
 means no filesystem is available (nothing mounted, or no server loaded
-this boot — the wrappers fold `msg_call`'s no-such-task answer into it),
+this boot: the wrappers fold `msg_call`'s no-such-task answer into it),
 and any value `>= FS_ERR_MIN` is an error, with one named `FS_ERR_*`
 code per real reason (not found, already exists, disk full, ...).
 
 `spawn` (`SPAWN`, 16) starts a staged program image as a new,
-independent task — since the kernel has no filesystem, the caller first
+independent task. Since the kernel has no filesystem, the caller first
 reads the program via the server (`FSOP_READ_AT`, 512 bytes per round
 trip) and feeds each chunk through `spawn_stage` (30) into the kernel's
 staging buffer; see the shell's `cmd_exec` for the reference flow and
@@ -374,8 +374,8 @@ The default shell (`shell/`) is a real, if minimal, example to copy. To
 write your own:
 
 1. **New crate**, `no_std` + `no_main`, built for `aarch64-unknown-none`
-   (already an installed target — see `rust-toolchain.toml`).
-2. **Copy `programs/linker.ld`** as-is, or adapt it — the constraints above
+   (already an installed target, see `rust-toolchain.toml`).
+2. **Copy `programs/linker.ld`** as-is, or adapt it: the constraints above
    (entry first, no `.bss`/`.data`, the `.rela.dyn`/`.dynsym`/`.dynamic`/
    `.data.rel.ro` sections LLD needs for a well-formed self-relocating
    `ET_DYN`) apply to any program loaded this way, not just the shell.
@@ -392,32 +392,32 @@ write your own:
        main()
    }
    ```
-5. **No global mutable state** — anything you'd normally reach for a
+5. **No global mutable state**: anything you'd normally reach for a
    `static mut` or a non-const `static` for needs to be a local variable
    passed down through your call stack instead (see `shell/src/main.rs`'s
    `on_byte` for the pattern: buffer and length live in `main`'s frame,
    passed by `&mut` reference).
 6. **`core::fmt` and slice/string-vs-literal comparisons are both safe
-   now** — see "Binary format" above for why they used to crash and
+   now**: see "Binary format" above for why they used to crash and
    what actually fixed it (real relocation processing, not a coding
    convention). Ordinary Rust idioms are fine; `shell/src/main.rs`'s
    `selftest` builtin is a working example of both.
-7. **A `#[panic_handler]`** — there's no `std`, and no `uefi` crate's
+7. **A `#[panic_handler]`**: there's no `std`, and no `uefi` crate's
    panic handling either (that only exists on the boot-services side).
    Looping on `wfe` forever is a reasonable minimum.
-8. **Build and stage it in release mode — required, not optional** (see
+8. **Build and stage it in release mode: required, not optional** (see
    "Binary format" above for why debug builds fail to link at all):
    `cargo build -p <crate> --target aarch64-unknown-none --release`,
-   then `llvm-objcopy --strip-all <elf> <name>.bin` (no `-O binary` —
+   then `llvm-objcopy --strip-all <elf> <name>.bin` (no `-O binary`:
    the loader needs a real ELF, not a flat dump; see the Makefile's
    `shell-bin` target for the exact invocation, including where to find
-   `llvm-objcopy` — it isn't on `PATH` by default). Copy the resulting
+   `llvm-objcopy`, which isn't on `PATH` by default). Copy the resulting
    `.bin` (still a real, stripped ELF despite the extension) onto the
    ESP and point `INIT.CFG` at it.
 
 ## Writing a program in C (the userland-libc arc)
 
-A program doesn't have to be Rust — the loader only cares about the ELF, not the
+A program doesn't have to be Rust: the loader only cares about the ELF, not the
 source language. The first C program (`libc/hello.c`, built by `make
 chello-bin`) runs through the identical loader and syscall boundary. The
 toolchain path, all from tools already present (no cross-toolchain to install):
@@ -428,7 +428,7 @@ toolchain path, all from tools already present (no cross-toolchain to install):
    `relocation-model=pic`.
 2. **Link with Rust's bundled LLD** (`ld.lld`, found in the toolchain's
    `gcc-ld/` dir) against the *same* `programs/linker.ld` and PIE flags the Rust
-   programs use (`-pie --no-dynamic-linker -z max-page-size=4096`) — producing
+   programs use (`-pie --no-dynamic-linker -z max-page-size=4096`), producing
    the same self-relocating `ET_DYN`.
 3. **`llvm-objcopy --strip-all`** to the `.bin` (a stripped ELF), staged like any
    other `/bin` program.
@@ -438,11 +438,11 @@ The **constraints are the loader's, and they bite C harder than Rust**:
 - **Globals/statics work** (the loader's `.data`/`.bss` milestone). Initialized
   file-scope data (`int g = 7;`) lands in `.data` and is loaded from the file;
   uninitialized data (`static int counter;`, `char buf[64];`) lands in `.bss`
-  and is zeroed — both per PT_LOAD segment, in both the boot-load and
+  and is zeroed, both per PT_LOAD segment, in both the boot-load and
   runtime-spawn paths, and **re-initialized fresh on every spawn** (a mutation
   from one run doesn't leak into the next). A global holding a pointer emits an
-  `R_AARCH64_RELATIVE` the loader applies. (String *literals* were always fine —
-  they live in `.rodata`.) The region is RW (in fact RWX — the W^X weakness noted
+  `R_AARCH64_RELATIVE` the loader applies. (String *literals* were always fine:
+  they live in `.rodata`.) The region is RW (in fact RWX, the W^X weakness noted
   elsewhere), so statics are writable.
 - **`_start` is the entry**, placed in `.text.start` (offset 0) via
   `__attribute__((section(".text.start")))`. The kernel has already set up the
@@ -479,7 +479,7 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   or `EOVERFLOW` for a bad `lseek`, `ESPIPE` for `lseek` on a console fd,
   whose `fstat` says a character device); `make test-cerrno` checks each. Paths collapse `.` and
   `..` before the namespace picks a mount, and an empty path is `ENOENT`. A **fid** is a
-  server-side open-file handle (a POSIX fd *is* a 9P fid) — `open` establishes it
+  server-side open-file handle (a POSIX fd *is* a 9P fid): `open` establishes it
   in `fsd` (`NP_OPEN`, which authorizes the access against the file's mode/owner
   *once*), and the fd the C program holds *is* that fid; `read`/`write`/`fstat`/
   `close` reference it (`NP_PREAD`/`NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`). The cursor
@@ -487,8 +487,8 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   **coexist** with the path-per-op verbs (the shell/`cat` still use those). Paths
   resolve against the cwd; tree 0 (the default disk mount) only. And `write(1|2)`
   is **stdout-target-aware**: the console (batched via `cond`) or a pipe consumer
-  (`MSG_SEND`) — so `cfile | grep hello` works. Two things that had to be right
-  for pipes: stdout is **buffered** (line-buffered at the `write` boundary —
+  (`MSG_SEND`), so `cfile | grep hello` works. Two things that had to be right
+  for pipes: stdout is **buffered** (line-buffered at the `write` boundary,
   flushed on newline / full buffer / a read from stdin / exit) rather than one
   `write` per char, and the pipe send **yields and retries** on a full consumer
   mailbox (`MSG_ERR_FULL`) instead of dropping bytes.
@@ -503,7 +503,7 @@ The **constraints are the loader's, and they bite C harder than Rust**:
   `llvm-objdump -R`): an `R_AARCH64_ABS64` is unloadable. Simple code is
   PC-relative and needs none; richer code emits `R_AARCH64_RELATIVE`, which the
   loader handles. `memcpy`/`memset` calls the compiler synthesizes for
-  struct/array copies would be *undefined symbols* — provide them (a few lines
+  struct/array copies would be *undefined symbols*: provide them (a few lines
   each) when they first appear.
 
 ### The picolibc port (the real C library)
@@ -511,14 +511,14 @@ The **constraints are the loader's, and they bite C harder than Rust**:
 The hand-rolled libc above is enough for simple programs; for unmodified
 standard-C code (float `printf`, `snprintf`, `qsort`, `strtol`, …) there is a
 **picolibc port** (`make cpico-bin` → `/bin/CPICO`, demo `libc/picodemo.c`). The
-key insight is that **picolibc slots on top of the *same* porting layer** — our
-`crt0` + `os.c`/`file.c` syscall stubs — with no new kernel work:
+key insight is that **picolibc slots on top of the *same* porting layer** (our
+`crt0` + `os.c`/`file.c` syscall stubs), with no new kernel work:
 
 - **picolibc is the C library; `libc/src` is its porting layer.** picolibc is
   built `-fPIC`, so it produces the same self-relocating `ET_DYN`
-  (`R_AARCH64_RELATIVE` only, **zero `ABS64`** — verified with `llvm-objdump
+  (`R_AARCH64_RELATIVE` only, **zero `ABS64`**, verified with `llvm-objdump
   -R`) our loader already handles. Built with `-Dposix-console=true`, its
-  `stdin`/`stdout`/`stderr` wire to fd 0/1/2 — i.e. straight to the
+  `stdin`/`stdout`/`stderr` wire to fd 0/1/2, i.e. straight to the
   `write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit` stubs we already
   wrote. So a picolibc program links `picolibc.a` + `crt0.o os.o file.o` (the
   stubs, compiled against picolibc's *own* headers so `struct stat`/flags match; true only since 2026-10-05, when `libc/include` moved to the quote path
@@ -535,7 +535,7 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   `scripts/build-picolibc.sh` regenerates it (clone picolibc, meson/ninja with
   `libc/picolibc-cross.txt`, strip, copy). Build options: `-fPIC`,
   `-Dposix-console=true`, `-Dnewlib-global-errno=true` (one global `errno`, no
-  TLS — we have no threads), `-Dthread-local-storage=false`, `-Dpicocrt=false`
+  TLS, as we have no threads), `-Dthread-local-storage=false`, `-Dpicocrt=false`
   (our `crt0`), `-Dsemihost=false`, `-Dmultilib=false`, `-Dtests=false`.
   malloc is picolibc's default, nano-malloc, which walks one free list on
   every call (about 360 ns an operation at 500 slots, 1,740 at 4,000, `make
@@ -571,19 +571,19 @@ key insight is that **picolibc slots on top of the *same* porting layer** — ou
   double members need are linked by nothing yet.
 
 **Closed 2026-08-29** (this was the arc's one open follow-up): picolibc's
-`posix-console` stdout is *unbuffered* — one `write(1,&c,1)` per char, so console
+`posix-console` stdout is *unbuffered*: one `write(1,&c,1)` per char, so console
 output cost one IPC round trip **per character**. It is now line-buffered by a
 shim at the **`write` boundary** (`libc/src/file.c`) rather than inside one
 stdio, so the same buffer serves picolibc, our hand-rolled `stdio.c`, and a
 program calling `write(1, …)` directly. Deliberately still unbuffered: `fd 2`
 (stderr writes through, after flushing fd 1, so a message before a crash is out
-and in order) and a `read` from fd 0 (flushes first — the stdin/stdout tie, so a
+and in order) and a `read` from fd 0 (flushes first: the stdin/stdout tie, so a
 prompt without a newline shows before the program blocks).
 
 The exit flush had to go in **`_exit`**, the one path every C library's `exit`
 reaches, and that turned out to matter for more than buffering: a picolibc
 program does *not* link our `stdlib.c`, so picolibc's `exit()` meant
-`__libc_end_stdout()` — the end-of-stream marker a pipe consumer waits for — was
+`__libc_end_stdout()`, the end-of-stream marker a pipe consumer waits for, was
 never called at all. `cpico | wc` hung: the program exited, `wc` blocked forever,
 the shell never came back. `_exit` now flushes and sends the marker
 (idempotently, since our own `exit()` still calls it), and the flush happens
@@ -627,7 +627,7 @@ Worth knowing before building further on this:
   `spawn`. Once both spawnable slots are in use, a further `exec` fails
   with `SPAWN_ERR_NO_FREE_SLOT` rather than growing the scheduler
   further.
-- **No `alloc`-backed heap, and no `.bss`** — so no dynamic collections
+- **No `alloc`-backed heap, and no `.bss`**, so no dynamic collections
   (`Vec`/`String`/`Box`) and no static mutable state. There **is** a 1 MiB
   *raw* heap area per program (`heap_info` syscall, a `&mut [u8]`), which
   lifts fixed-buffer caps (the shell's redirect/pipe capture uses it) - but
@@ -636,11 +636,11 @@ Worth knowing before building further on this:
   needs nightly `-Z build-std` (see "Binary format").
 - **Stack size is fixed** (the loader's `STACK_PAGES`; `heap_info` reports
   the extent) regardless of what a program
-  actually needs, but there **is** a guard page now — a stack overflow
+  actually needs, but there **is** a guard page now: a stack overflow
   lands in an inaccessible page below the stack and takes a clean EL0
   fault (the task is killed alone) instead of silently corrupting the code
   below. One caveat: a single stack frame larger than the one-page guard
-  (4KB) could skip over it — the standard single-guard limitation.
+  (4KB) could skip over it, the standard single-guard limitation.
 - **Must be built in `--release`, not debug.** A real, confirmed
   toolchain constraint (an `R_AARCH64_ABS64` relocation inside prebuilt
   `libcore`'s own object code that only a release build's optimizer
@@ -704,13 +704,13 @@ Worth knowing before building further on this:
   full replace, `>>` is a `write_at` append; the *new* output is bounded
   by the 1024-byte capture, but the target file it appends to isn't. A parent directory that's out of free
   entry slots is grown by a cluster automatically (`insert_dir_entry`'s
-  extension — directories never *shrink*, though: an emptied extension
+  extension. Directories never *shrink*, though: an emptied extension
   cluster stays linked until the directory is removed). Every filesystem
   operation returns a specific `FS_ERR_*` code for every failure reason
-  ("already exists", "disk full", "invalid name", ... — a reserved top
+  ("already exists", "disk full", "invalid name", ...: a reserved top
   band `>= FS_ERR_MIN` in `syscall-abi`, mapped from the server's
   `fat32::Error` by `fsd/src/main.rs::error_code`), alongside the
-  existing `NO_FS` distinction — the old one-collapsed-sentinel gap is
+  existing `NO_FS` distinction. The old one-collapsed-sentinel gap is
   closed, and `spawn`'s codes are split the same way. See `CHANGELOG.md`'s "first filesystem write support" (Phase 4)
   and the phase entries after it, through Phase 8. **This closes the write-support arc phase 3 deliberately
   deferred** - what's left in the parking lot from here is genuinely

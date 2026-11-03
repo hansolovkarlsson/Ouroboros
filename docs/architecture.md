@@ -1,7 +1,7 @@
 # Ouroboros architecture
 
 Reference documentation for how the kernel is built, as of the current
-codebase — not a development log. For the history behind each design
+codebase, not a development log. For the history behind each design
 decision (what was tried, what broke, how it was diagnosed), see
 [`CHANGELOG.md`](CHANGELOG.md), [`boot-history.md`](boot-history.md) and the
 postmortems under `postmortems/`; this document assumes those decisions
@@ -17,7 +17,7 @@ microkernel's (MINIX), see
 
 ## Design goals
 
-The original brief — a `notes.txt` at the repo root, since removed, whose
+The original brief (a `notes.txt` at the repo root, since removed), whose
 goals are reproduced here in full:
 
 - Microkernel architecture
@@ -31,14 +31,14 @@ goals are reproduced here in full:
 ## Boot flow
 
 The kernel is itself a UEFI application (`kernel/`, built for
-`aarch64-unknown-uefi`) — there is no separate bootloader stage. `main()`
+`aarch64-unknown-uefi`): there is no separate bootloader stage. `main()`
 in `kernel/src/main.rs` runs the following, in order:
 
 1. **UEFI init** (`uefi::helpers::init`). Logging, the global allocator,
    and UEFI protocol access all work normally from here through step 4.
 2. **Console discovery** (`devicetree.rs` → `acpi.rs` → `pci.rs`, first
    match wins). Determines the console's MMIO address and driver kind, but
-   doesn't touch it yet — see "Console" below.
+   doesn't touch it yet. See "Console" below.
 3. **Program loading** (`loader.rs`). Reads a config file and a program
    binary off the ESP via UEFI's own filesystem protocol, into a freshly
    allocated, page-aligned buffer. Still boot-services-only; see
@@ -51,7 +51,7 @@ in `kernel/src/main.rs` runs the following, in order:
    out afterwards, and `netd` derives every keyed session's ephemeral from
    it; no trusted counter means no keyed sessions.
 4. **`exit_boot_services`**. The UEFI memory map is captured (not
-   discarded — `mmu.rs` uses it) and permanently leaves the boot-services
+   discarded: `mmu.rs` uses it) and permanently leaves the boot-services
    world. Nothing after this point may use `log::*`, `alloc`, or any UEFI
    protocol.
 5. **`exceptions::install`**. Points `VBAR_EL1` at the kernel's own vector
@@ -74,13 +74,13 @@ in `kernel/src/main.rs` runs the following, in order:
    tables and vectors when this returns.
 8. **virtio-console fallback** (`try_virtio_console`), tried only if step
    2's three mechanisms all failed. Has to run here, after step 7, not
-   alongside step 6 — see "Console" below for why.
+   alongside step 6. See "Console" below for why.
 9. **GIC + timer init** (`gic.rs`, `timer.rs`). Arms the periodic
    preemption tick.
 10. **`tasks::init`**. Builds both EL0 tasks' initial `Context` (see
     "Process model" below).
 11. **IRQs unmasked**, then **`tasks::start`** drops to EL0 and never
-    returns — every further transition back to EL1 goes through the
+    returns. Every further transition back to EL1 goes through the
     exception vector table.
 
 ## Privilege model
@@ -96,15 +96,15 @@ every boot (`running at EL{n} after the exit`) and the drop when it
 happens.
 
 EL0 code cannot access kernel memory, MMIO, or privileged system
-registers; the only way back to EL1 is a trap — a syscall (`svc`), a
-fault, or the timer interrupt — handled through the exception vector table
+registers; the only way back to EL1 is a trap (a syscall (`svc`), a
+fault, or the timer interrupt), handled through the exception vector table
 (`exceptions.rs`) and, for syscalls specifically, dispatched by
 `syscall.rs`. See "Syscall ABI" below for the calling convention.
 
 ## Memory layout
 
 `mmu.rs` builds a 4-level (L0→L1→L2→L3) identity map and switches
-`TTBR0_EL1` to it — the MMU is never disabled; this only changes which
+`TTBR0_EL1` to it. The MMU is never disabled; this only changes which
 tables it walks. Two coarse block kinds cover almost everything:
 
 | Region | Range | Attributes |
@@ -117,7 +117,7 @@ the eleven scheduler slots has its *own* translation-table view (its own
 L0/L1/L2/L3 in `mmu.rs`): identical kernel and device mappings in every
 view, but EL0 access granted only to that task's own region. From any
 view, every other task's memory is ordinary EL1-only RAM, so an EL0
-touch of it faults — and, per the fault-isolation design above, kills
+touch of it faults, and, per the fault-isolation design above, kills
 only the toucher. `mmu::activate_task` switches `TTBR0_EL1` to the
 incoming task's view (and flushes the TLB) at every context switch;
 `tasks.rs` calls it wherever `CURRENT` changes, and it takes a
@@ -153,7 +153,7 @@ program reaches via the `heap_info` syscall (a `&mut [u8]`, *not* a
 loader) - the shell backs its redirect/pipe capture with it, so
 `cat big > file` holds and writes the whole file. The complementary half is at the syscall boundary: every
 `(pointer, length)` argument is checked to fall inside the calling
-task's own region (`syscall.rs::in_caller_region`) — otherwise a task
+task's own region (`syscall.rs::in_caller_region`): otherwise a task
 could launder access to another's memory *through* a kernel copy.
 
 See [`processes.md`](processes.md) for how the regions are sized and
@@ -166,11 +166,11 @@ Per-task ASIDs (which would make a context switch a plain `TTBR0`
 write, no TLB flush) were implemented and worked on QEMU but faulted
 the idle task on real Parallels hardware; reverted in favor of the
 flush-on-switch design, which is confirmed correct on both. The flush
-is cheap relative to everything else a tick already does — ASIDs stay a
+is cheap relative to everything else a tick already does. ASIDs stay a
 recorded future optimization, not a need.
 
 The walk starts at **L0** with `T0SZ=20`, matching firmware's own
-configuration — deliberately, not a simplification opportunity; a
+configuration, deliberately, not a simplification opportunity; a
 single-level-simpler table was tried first and hard-faulted.
 
 ## Exception handling
@@ -179,10 +179,10 @@ single-level-simpler table was tried first and hard-faulted.
 
 - **Diverging** (EL1 faults and every other unexpected vector): capture
   `ESR_EL1`/`FAR_EL1`/`ELR_EL1`, report through the console if one
-  exists, halt. Never returns — a *kernel* fault has nothing safe to
+  exists, halt. Never returns: a *kernel* fault has nothing safe to
   resume.
 - **Resumable** (IRQ vectors, the SVC vector when `ESR_EL1`'s EC field
-  is `0x15`, and — since the fault-isolation milestone — every *other*
+  is `0x15`, and, since the fault-isolation milestone, every *other*
   synchronous EL0 exception): save the full general-purpose register
   set plus `SP_EL0`/`ELR_EL1`/`SPSR_EL1` to a stack frame (`Context`,
   mirrored exactly by `tasks.rs`'s task state), call into Rust,
@@ -190,18 +190,18 @@ single-level-simpler table was tried first and hard-faulted.
 
 The IRQ path's saved frame is what makes task switching possible: a timer
 tick's handler is handed a pointer to that live frame and can overwrite it
-in place (`tasks::on_tick`) — the trampoline's restore-and-`eret`
+in place (`tasks::on_tick`): the trampoline's restore-and-`eret`
 afterward doesn't know or care that the values changed underneath it.
 
-**An EL0 fault is contained, not fatal** — the actual payoff of process
+**An EL0 fault is contained, not fatal**: the actual payoff of process
 isolation. A userland wild pointer used to take the diverging path and
 halt the whole system; now the fault handler
 (`rust_el0_fault_handler`) reports it, tears down *just the faulting
 task* (same teardown as `kill`: region freed, keyboard reverted,
-anyone blocked mid-`msg_call` to it woken with a failed call —
-`tasks::fail_calls_to` — slot reaped), overwrites the frame with the
+anyone blocked mid-`msg_call` to it woken with a failed call by
+`tasks::fail_calls_to`, slot reaped), overwrites the frame with the
 next runnable task's context, and the trampoline resumes the survivor.
-Tasks 0 (the boot shell) and 1 (idle) faulting still halt — nothing
+Tasks 0 (the boot shell) and 1 (idle) faulting still halt: nothing
 meaningful survives those. If the dead task is the filesystem server,
 the kernel restarts it from an image kept at boot (see "The filesystem
 server" below).
@@ -218,59 +218,59 @@ and across preemption between two tasks that both hold vector state.
 ## Process model
 
 `tasks.rs` implements round-robin scheduling among up to `NUM_TASKS` (11)
-EL0 task slots — no priorities, no queue. Every task is either `Unused`,
+EL0 task slots, with no priorities and no queue. Every task is either `Unused`,
 `Runnable`, `Blocked(reason)`, or `Zombie(status)`; the scheduler only
 ever picks among the runnable ones. Two things move execution from one
 task to another: the timer tick catching the current task mid-execution
 and switching to the next runnable one (`on_tick`), and a blocking
-syscall (`read_char`, `wait`, `msg_recv`, `msg_call` — see the syscall
+syscall (`read_char`, `wait`, `msg_recv`, `msg_call`, see the syscall
 table below) suspending its own caller immediately and switching away
 mid-syscall (`block_current_and_switch`) rather than waiting for the
 next tick. A `msg_call` additionally switches *straight to the
 destination server* (`block_current_and_switch_to`'s `prefer`) rather
-than to the next runnable task — otherwise the round-robin would pick
+than to the next runnable task. Otherwise the round-robin would pick
 the always-runnable idle task before the just-woken server, and a
 synchronous request/reply would cost a full tick per call (visible as
 dropped input once per-character console echo became an IPC round trip).
 
-- **Task 0** runs whatever program `loader.rs` loaded from disk — see
+- **Task 0** runs whatever program `loader.rs` loaded from disk: see
   [`processes.md`](processes.md).
 - **Task 1** is a genuine idle task: a busy-spin loop (`nop; b 1b`), never
-  blocked, always runnable — real Parallels hardware has a confirmed,
+  blocked, always runnable. Real Parallels hardware has a confirmed,
   unresolved hang when an EL0 task executes `wfe` (see `tasks.rs`'s
   module doc comment), so idling is a real spin, not an architectural
   `wfe` wait, and blocking syscalls are built the same way for the same
   reason (see below) rather than having a task call `wfe` itself.
 - **Task 2** is reserved for the filesystem server (`fsd/`, boot-loaded
-  from `\EFI\ORBS\FSD.BIN` — see "The filesystem server" below). It
+  from `\EFI\ORBS\FSD.BIN`, see "The filesystem server" below). It
   stays `Unused` if no FSD.BIN exists, and `spawn` never fills it: the
   slot is block-syscall-privileged, so a spawned program landing there
   would inherit the server's disk access.
 - **Task 3** is reserved for the console server (`cond/`, boot-loaded
-  from `\EFI\ORBS\COND.BIN` — see "The console server" below). Same
+  from `\EFI\ORBS\COND.BIN`, see "The console server" below). Same
   posture as the filesystem server: stays `Unused` without COND.BIN,
   never filled by `spawn` (its slot is the only one the `con_write`/
   `fb_*` syscalls accept).
 - **Task slots 4 and 5** start `Unused` and are filled by `tasks::spawn`
   when the `spawn` syscall starts a further program at runtime (the
-  shell's `exec <path>` command) — see "Dynamic task creation" below.
+  shell's `exec <path>` command). See "Dynamic task creation" below.
 
-### The filesystem server (`fsd/`) — the first component moved out of the kernel
+### The filesystem server (`fsd/`): the first component moved out of the kernel
 
 The FAT32 filesystem lives in userland (driver isolation part 2, the
-MINIX-style first move — pure logic, no MMIO/DMA, which couldn't be
+MINIX-style first move: pure logic, no MMIO/DMA, which couldn't be
 meaningfully isolated without an IOMMU anyway). The split:
 
 - **The kernel keeps the device**: `virtio_blk.rs`/`usb_msd.rs` and the
   `BlockDevice` enum stay kernel-side, held in `syscall.rs`'s block
   cell. Three syscalls (`block_info`/`block_read`/`block_write`) expose
-  it one 512-byte sector at a time — **only to task 2** (any other
+  it one 512-byte sector at a time, **only to task 2** (any other
   caller gets `BLOCK_ERR_DENIED`), which is the "supervised" in
   "supervised EL0 process".
 - **The server owns the filesystem**: `fsd/src/fat32.rs` is the
   kernel's old module, moved essentially verbatim (its `BlockDevice`
   became a zero-sized shim over the `block_*` syscalls). The mounted
-  state lives in the server's own stack frame — userland programs have
+  state lives in the server's own stack frame: userland programs have
   no static mutable state, and the server is one infinite request loop
   that never returns.
 - **Clients speak IPC**: requests are `FSOP_*` messages (see the
@@ -281,27 +281,27 @@ meaningfully isolated without an IOMMU anyway). The split:
 
 A missing FSD.BIN degrades gracefully: the kernel logs a warning at
 boot, slot 2 stays `Unused`, and every request fails with
-`TASK_ERR_NO_SUCH_TASK` — which the shell reports with its ordinary
+`TASK_ERR_NO_SUCH_TASK`, which the shell reports with its ordinary
 no-filesystem message.
 
-**A failed server is restarted, not fatal** — general server
+**A failed server is restarted, not fatal**: general server
 supervision (MINIX's reincarnation server / Helix's self-heal, minimal
 edition), owned by `kernel/src/supervisor.rs`. A registry keeps each
 supervised server's raw ELF image from boot (`loader.rs` registers both
 `fsd` and `cond` via `supervisor::register`; 128KB cap each), and
-restarts one from that copy on either failure mode — no filesystem
+restarts one from that copy on either failure mode, with no filesystem
 needed to reload it, which matters since one of the servers *is* the
 filesystem:
 
 - **A crash.** The EL0-fault handler, on a fault in any supervised slot
-  (not just fsd — `cond` recovers too), tears the task down and calls
+  (not just fsd: `cond` recovers too), tears the task down and calls
   `supervisor::restart`.
 - **A wedge.** A server stuck in an infinite loop never faults, so the
   crash path can't see it. A passive **heartbeat** in `tasks::on_tick`
   catches it: a healthy server keeps returning to a `Blocked` state
   (idle in `msg_recv`, or briefly busy), so staying continuously
-  `Runnable` for ~2.5s (128 ticks) is the wedge signal — no server
-  changes, no new ABI. It restarts on the same teardown path as a crash.
+  `Runnable` for ~2.5s (128 ticks) is the wedge signal, with no server
+  changes and no new ABI. It restarts on the same teardown path as a crash.
   Since 2026-10-05 a server's call to `msg_recv` also clears the count
   (`supervisor::note_progress`): a server busy with a stream of requests
   may never be *seen* blocked, because a tick that fires during its disk
@@ -311,19 +311,19 @@ filesystem:
 
 The client whose call the server died under gets a cleanly failed call
 (`fail_calls_to`; the shell shows its no-filesystem message once); the
-fresh server re-runs its own startup and remounts from disk — all its
+fresh server re-runs its own startup and remounts from disk. All its
 state was always derivable from disk, which is what makes this a real
 recovery. A shared per-boot cap (3 restarts, covering crashes *and*
 wedges) guards against loops: past it the kernel gives up and the slot
 stays `Unused` (a dead `fsd` degrades like a missing FSD.BIN; a dead
 `cond` falls back to the kernel's own `PUTC` console). What this doesn't
 cover: a server *deadlocked while blocked* (waiting forever on a call
-that never completes) — the passive heartbeat only sees a `Runnable`
+that never completes): the passive heartbeat only sees a `Runnable`
 wedge, so an active health ping is the real fix (deferred), and Ctrl+C
 remains the rescue for a *client* blocked calling one; and disk state a
-crashing server corrupted mid-write — there's no journaling.
+crashing server corrupted mid-write, since there's no journaling.
 
-### The console server (`cond/`) — the second component moved out of the kernel
+### The console server (`cond/`): the second component moved out of the kernel
 
 The *steady-state* console lives in userland too (driver isolation part
 3). Userland text output no longer goes straight to the kernel: the
@@ -334,7 +334,7 @@ one of two backends at startup from `con_info`:
 
 - **Byte-stream** (QEMU's UART): forward the text to the kernel's
   console via the gated `con_write` syscall. Nothing to render.
-- **Framebuffer** (Parallels, QEMU `ramfb`): render the text *here* —
+- **Framebuffer** (Parallels, QEMU `ramfb`): render the text *here*:
   the console rendering logic (an 8x8 font, the cursor, line wrap,
   scroll decisions, a small ANSI parser) moved out of the kernel's
   `fbconsole` into `cond`. Each glyph is looked up in the server's own
@@ -350,22 +350,22 @@ one of two backends at startup from `con_info`:
   the reverted per-task ASIDs already showed is silicon-only trouble).
 
 The kernel retains a minimal *emergency* console for its own boot and
-fault reporting — the fault handlers and all post-`exit_boot_services`
+fault reporting: the fault handlers and all post-`exit_boot_services`
 bring-up print with no userland available. On a framebuffer-only
 platform, once `cond` is up the kernel goes quiet on its console (a
 `CONSOLE_QUIET` flag armed in `main`) so its operational logs don't
 render at the kernel's own cursor and corrupt the server's output; fault
-reports bypass the flag (`console::print_force`) — a fault is worth
+reports bypass the flag (`console::print_force`): a fault is worth
 showing even if it overwrites the screen. On a byte-stream console
 (QEMU's UART) the flag stays off, keeping those logs for dev. A payoff
 beyond parity: `cond` parses ANSI, so `clear` actually clears on a
-framebuffer — the kernel's old `fbconsole` never did.
+framebuffer, which the kernel's old `fbconsole` never did.
 
 ### Dynamic task creation (`spawn`/`exec`)
 
 `exec <path>` in the shell loads a *second* (or third/fourth) program
 from disk and starts it running **alongside** whatever's already
-running — this is `tasks::spawn`, not POSIX exec-replaces-current-process
+running. This is `tasks::spawn`, not POSIX exec-replaces-current-process
 semantics. The shell command is named `exec` to match
 `docs/ROADMAP.md`'s original wording for this item, but nothing about
 the calling task is replaced or stopped; it keeps running, and the new
@@ -373,7 +373,7 @@ program becomes a new, independent task in whichever spawnable slot
 (4-5) is `Unused`.
 
 **Where a spawned program's output goes** is set at spawn time (`spawn`'s
-stdout-target argument, arg1). Normally it's `CON_TASK` — output goes
+stdout-target argument, arg1). Normally it's `CON_TASK`: output goes
 straight to the console server. But the shell can point it elsewhere, which
 is what makes program-to-program pipes and `exec … > file` work:
 
@@ -390,7 +390,7 @@ is what makes program-to-program pipes and `exec … > file` work:
   "Runtime capability delegation" below).
 - For `exec prog > file` the shell sets the producer's stdout to *itself*
   (learning its own index via `self`, 39), captures the producer's output,
-  and writes it to the file — no delegation needed, since `producer → shell`
+  and writes it to the file, with no delegation needed, since `producer → shell`
   is already permitted by the send-mask.
 
 A producer reads its target via `stdout_target` (38) and routes accordingly:
@@ -401,7 +401,7 @@ Since the filesystem moved to userland, "loads from disk" is a
 two-step, client-driven flow: the shell reads the program via the
 filesystem server (`FSOP_READ_AT`, 512 bytes per round trip), feeds
 each chunk into the kernel's staging buffer (`SPAWN_STAGING_SIZE`; `spawn_stage`, 30),
-and only then invokes `spawn` (16) with the staged total — the kernel
+and only then invokes `spawn` (16) with the staged total, since the kernel
 itself can't read a path anymore. The staging has one owner at a time
 (since 2026-10-11, `syscall::SPAWN_STAGER`): the first staging call claims
 it for the caller, every other task's staging call and `spawn` answer
@@ -412,8 +412,8 @@ spawners (a shell blocked in `fsd` between chunks and `netd`'s `cpu`, or
 two cores) interleaved their chunks. The kernel-side pieces, in the order
 the `spawn` syscall then exercises them:
 
-1. **A runtime physical-page bump allocator** (`tasks::allocate_runtime_region`)
-   — `boot::allocate_pages` (what `loader.rs` uses for task 0 at boot) is
+1. **A runtime physical-page bump allocator** (`tasks::allocate_runtime_region`).
+   `boot::allocate_pages` (what `loader.rs` uses for task 0 at boot) is
    a UEFI boot-services API, long gone by the time a shell command can
    run. `NEXT_RUNTIME_REGION_TOP` starts at the top of discovered RAM
    (`mmu::ram_span()`) and grows downward, one 2MB-aligned slot per call.
@@ -422,7 +422,7 @@ the `spawn` syscall then exercises them:
 2. **The same ELF loading `loader.rs` already had**, split so its parsing
    half (`elf_region_size`) and its copy/relocate half
    (`populate_region`) can each be called independently of *how* the
-   destination region was obtained — boot-time `load()` still does its
+   destination region was obtained. Boot-time `load()` still does its
    own `boot::allocate_pages`/`free_pages` dance around them; the syscall
    handler instead uses the bump allocator from step 1.
 3. **`mmu::install_identity_map` called a second time**, with the same
@@ -430,7 +430,7 @@ the `spawn` syscall then exercises them:
    make the new region EL0-accessible. Reuses the exact mechanism that
    already replaced firmware's own tables at boot (swap the whole table
    set under `TTBR0_EL1` while code keeps executing) rather than a new
-   incremental-remap primitive — the SVC handler holds IRQs masked
+   incremental-remap primitive: the SVC handler holds IRQs masked
    throughout, the same reasoning that already makes
    `block_current_and_switch` safe. `mmu.rs` stashes the original boot
    memory map and extra-device list (`STORED_MEMORY_MAP`/
@@ -441,11 +441,11 @@ the `spawn` syscall then exercises them:
    `sp_el0` = the top of its own region), and marks it `Runnable`.
 
 **A real bug found building this, not a hypothetical:** the first
-version hung completely — no exception, no output, `-d int` showed zero
-aborts — when `spawn`'s ELF parsing path (`elf_region_size` →
+version hung completely (no exception, no output, `-d int` showed zero
+aborts) when `spawn`'s ELF parsing path (`elf_region_size` →
 `parse_program_headers`) used a `Vec` internally. That path runs both at
 boot (where `alloc` is fine, boot services are still up) and from this
-runtime syscall (where they aren't — `exit_boot_services` already made
+runtime syscall (where they aren't: `exit_boot_services` already made
 the global allocator boot-services-backed and invalid). The allocator
 doesn't panic or return an error in that state; it hangs. Fixed by
 giving `parse_program_headers` a fixed-capacity `[ProgramHeader;
@@ -458,7 +458,7 @@ whichever blocked task happens to ask first.** The first version of this
 feature had a real bug here, found immediately by testing: with more
 than one task simultaneously `Blocked(WaitReason::Keyboard)` (e.g. two
 shell instances both idling on `read_char`), `on_tick`'s wake-check
-polled every blocked task's wait reason once per tick in index order —
+polled every blocked task's wait reason once per tick in index order,
 since the underlying poll (`syscall::poll_keyboard_byte`) destructively
 consumes a byte the instant anything asks, a single keystroke went to
 whichever task happened to still be blocked at that exact tick, which
@@ -471,13 +471,13 @@ below): the wake-check now
 skips polling keyboard input entirely for every other task, so an
 unconsumed byte just stays queued in the console/xHCI driver's own
 hardware buffer until the owner task's own wait asks for it. A
-non-owner task blocked on `Keyboard` simply stays blocked — it behaves
+non-owner task blocked on `Keyboard` simply stays blocked: it behaves
 like a genuine background task with no input, not a second terminal
 racing the first, but it also has no way to *become* the owner without a
 future `fg`/job-control mechanism this kernel doesn't have yet.
 
-**Real Parallels hardware confirmation:** the full flow — including the
-success path, a second program really loading from disk and running —
+**Real Parallels hardware confirmation:** the full flow, including the
+success path, a second program really loading from disk and running,
 is confirmed on real hardware, via the USB mass-storage path (`mount` a
 passed-through stick holding the program binaries; see `CHANGELOG.md`'s
 "Driver isolation part 1" entry for the first such run, and the
@@ -486,32 +486,32 @@ server).
 
 **Blocking primitives.** A task that has nothing to do until some
 condition holds (a keyboard byte arriving, another task exiting, a
-message arriving, or network input arriving —
+message arriving, or network input arriving:
 `WaitReason::Keyboard`/`TaskExit`/`Message`/`NetInput`) can
 block instead of busy-polling. `NetInput` is the network server's
 async-receive wait: unlike the others it consumes nothing when it fires
 (the waiter drains the frame or message itself), and its wake condition
 is *three* sources (a waiting NIC frame, a queued message, **or** an
-optional `deadline`) — a minimal poll/select that lets `netd` react to the
+optional `deadline`): a minimal poll/select that lets `netd` react to the
 wire and to client IPC without starving either, plus a timer (the only
 `WaitReason` with one) that fires the TCP retransmit timeout when a peer
 goes silent and no frames arrive. `on_tick` runs a wake-check every tick
 before its normal scheduling decision: for each blocked task, it
 evaluates that task's wait reason, and if satisfied, stashes the
 resulting value into the task's saved context (`x0`) and marks it
-runnable again — the task resumes exactly where its blocking syscall
+runnable again. The task resumes exactly where its blocking syscall
 left off, with the value already in hand, indistinguishable from the
 syscall having simply returned it. Worst-case wake latency from the
-tick path is one tick period — but message delivery doesn't wait for
+tick path is one tick period, but message delivery doesn't wait for
 it: `tasks::send_message` *directly delivers* to a destination already
 blocked in a matching message wait (copy into its buffer, stash its
 `x0`, mark it runnable), the eager version of the wake-check's own
-logic, which is what makes `msg_call`'s synchronous round trips — and
-therefore every filesystem operation — sub-tick. The shell's main loop
-uses `read_char` instead of the busy-poll it used before — see
+logic, which is what makes `msg_call`'s synchronous round trips (and
+therefore every filesystem operation) sub-tick. The shell's main loop
+uses `read_char` instead of the busy-poll it used before: see
 `shell/src/main.rs`'s `main` for the current shape.
 
-The tick period is 20ms (`timer::TICK_INTERVAL_MS`) — short specifically
+The tick period is 20ms (`timer::TICK_INTERVAL_MS`), short specifically
 so that a task waiting its turn (e.g. the shell, when task 1 currently has
 the CPU) doesn't introduce perceptible input lag. A 1-second period was
 tried first and produced up to a full second of latency, exactly as
@@ -520,25 +520,25 @@ unconditional round-robin scheduling would predict.
 ## Syscall ABI
 
 Convention: syscall number in `x8`, up to 4 arguments in `x0`-`x3`, return
-value in `x0` — chosen to match Linux's shape (a reasonable default for a
+value in `x0`, chosen to match Linux's shape (a reasonable default for a
 "POSIX-ish" project), not for ABI compatibility with anything. Grew from
 1 argument to 4 for phase 3c's file-I/O syscalls, which needed a path
-pointer/length and a buffer pointer/length at once — see
+pointer/length and a buffer pointer/length at once. See
 `exceptions.rs`'s module doc comment for how the SVC trampoline marshals
 them. The eight `fs_*` syscalls that motivated that growth are gone
 again (numbers 7–14 are deliberate gaps now): the filesystem lives in
-userland (the `fsd/` server — see "The filesystem server" below), and
+userland (the `fsd/` server, see "The filesystem server" below), and
 file operations are IPC requests to it, not syscalls. Every number and
 sentinel in the table below is a constant in the `syscall-abi` crate
-(`syscall-abi/src/lib.rs`), not a bare literal — both
+(`syscall-abi/src/lib.rs`), not a bare literal: both
 `kernel/src/syscall.rs`'s dispatch table and `shell/src/main.rs` depend
 on it directly, so the two sides of this ABI can't silently drift apart
 the way hand-duplicated numbers did before this crate existed.
 
-### Philosophy — not POSIX, not Linux, a message-passing microkernel ABI
+### Philosophy: not POSIX, not Linux, a message-passing microkernel ABI
 
-The "POSIX-ish" project goal describes a *feel* — a shell, familiar
-command names, byte-masked exit codes — not any real conformance. Nothing
+The "POSIX-ish" project goal describes a *feel* (a shell, familiar
+command names, byte-masked exit codes), not any real conformance. Nothing
 in this ABI is POSIX- or Linux-compatible, and it isn't meant to be. What
 it borrows from Linux is exactly one thing: the **register shape** of the
 calling convention (number in `x8`, args in `x0`-`x3`, return in `x0`,
@@ -549,8 +549,8 @@ of ABI from either:
 
 - **`spawn`, not `fork`+`exec`.** There is no `fork`, no address-space
   copy, no exec-replaces-current-process. `spawn` (16) creates a *new*
-  task running *alongside* the caller, which is left completely untouched
-  — closer to `posix_spawn`/`CreateProcess` than to Unix process
+  task running *alongside* the caller, which is left completely untouched,
+  closer to `posix_spawn`/`CreateProcess` than to Unix process
   creation. This is a deliberate microkernel choice, not a not-yet-built
   simplification: per-task page tables and EL0 isolation make a new
   isolated region the natural unit, and a copy-on-write `fork` over that
@@ -559,20 +559,20 @@ of ABI from either:
 - **The syscall surface is deliberately tiny; the real "API" is IPC to
   userland servers.** What POSIX makes a kernel entry point, Ouroboros
   makes a *message* to a server. There is no `open`/`read`/`write`/`stat`/
-  `mkdir`/`unlink`, no `socket`/`connect` — none of the POSIX file or
+  `mkdir`/`unlink`, no `socket`/`connect`: none of the POSIX file or
   network calls exist as syscalls. They used to (the `fs_*` calls at
   7-14); they were moved *out* of the kernel into the filesystem server's
   `FSOP_*` message protocol, and their old numbers are left as gaps
   (gravestones, for ABI stability). The kernel keeps only: task lifecycle
   (`spawn`/`exit`/`kill`/`wait`/`task_state`/`fg`), IPC primitives
   (`msg_send`/`msg_recv`/`msg_call`/`grant`/`safecopy`/`delegate`), raw
-  console I/O, and — its *entire* remaining storage role — the three
+  console I/O, and (its *entire* remaining storage role) the three
   `block_*` calls, gated to `fsd` alone. Files go to `fsd`, the console to
   `cond`, the network to `netd`, each over the same message verbs.
 
 - **It composes into the cluster for free.** Because "a file operation" is
   already a message to a server rather than a kernel trap, the same verbs
-  run over TCP instead of local IPC with no new kernel surface — which is
+  run over TCP instead of local IPC with no new kernel surface, which is
   why remote mounts, remote `/proc`/`/dev/cons`/`/net`, and remote `cpu`
   fell out of the existing design rather than requiring new syscalls.
 
@@ -591,26 +591,26 @@ something the kernel alone can say.
 
 | Number | Name | Arguments | Returns | Notes |
 |---|---|---|---|---|
-| 0 | `print` | value to log | `0` | Debug/demo only — logs through the kernel console with a fixed prefix, not a general write primitive |
-| 1 | `double` | a number | `arg0 * 2` | Demo only — proves a return value survives the trampoline |
-| 2 | `report` | a task ID | `0` or `u64::MAX` | Demo only — original two-task milestone's proof of per-task syscall state |
+| 0 | `print` | value to log | `0` | Debug/demo only: logs through the kernel console with a fixed prefix, not a general write primitive |
+| 1 | `double` | a number | `arg0 * 2` | Demo only: proves a return value survives the trampoline |
+| 2 | `report` | a task ID | `0` or `u64::MAX` | Demo only: the original two-task milestone's proof of per-task syscall state |
 | 3 | `try_read_char` | ignored | a byte, or `NO_CHAR` (`u64::MAX`) if none waiting or the caller does not own the keyboard | Non-blocking; only the keyboard owner's reads consume keystrokes (see `fg`) |
 | 4 | `putc` | a byte | `0` | Raw single-byte write to the kernel's console, no newline translation. Now mostly a *fallback*: userland output normally goes to the console server over IPC (`con_write` below), and every client's helper falls back to `putc` only when no console server is present this boot |
 | *5* | *(gap)* | | | `shell_input` used to live here; removed when line editing moved into userland. Left unfilled rather than renumbered, see the comment at the gap in `syscall-abi/src/lib.rs` |
-| 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin — the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
+| 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin, the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
 | *7–14* | *(gaps)* | | | The eight `fs_*` syscalls (`list_dir`/`read_file`/`mkdir`/`rmdir`/`touch`/`rm`/`write_file`/`mv`) lived here until the filesystem moved out of the kernel entirely. Their exact contracts survive unchanged as the filesystem server's `FSOP_*` request protocol (below); the numbers stay unfilled, same stable-ABI reasoning as the gap at 5 |
 | 15 | `read_char` | ignored | a byte | Blocking: if none is waiting, suspends the calling task and switches to another runnable one instead of returning `NO_CHAR`; resumes with the byte once available, and only once the caller owns the keyboard (a non-owner stays suspended until an `fg` names it or ownership reverts to it). See `tasks.rs`'s `block_current_and_switch` and the "Blocking primitives" section below |
 | 16 | `spawn` | total staged length, **stdout target** | **the new task's slot index**, `SPAWN_ERROR`, a `SPAWN_ERR_*` code, `TASK_ERR_NO_SUCH_TASK` (a stdout target other than `CON_TASK` that is not a live task) or `MSG_ERR_DENIED` (one the caller may not grant) | Parses, relocates, and starts the program image previously fed into the kernel's staging buffer (`SPAWN_STAGING_SIZE`) via `spawn_stage` (30), as a **new, independent task** alongside the caller. The **stdout target** (arg1) is the task the program's output should go to: `CON_TASK` for a plain `exec`, the shell itself for a redirect or capture, or the next stage for a pipeline's producer (see `stdout_target`, 38). **Since 2026-10-12 `spawn` grants the child the right to send to it** before the child can run, where the child does not already reach it (the console statically, its spawner from the spawn), under `delegate`'s rule (the caller holds a send right to the target), and refuses the spawn, before anything is allocated, when the target is not a live task (`CON_TASK` excepted: every task reaches it, and with no console server writes fall back to `PUTC`) or the caller may not grant it. This is `tasks::spawn`, not exec-replaces-current-process. **Contract changed with the userland-filesystem milestone**: it used to take a path, but the kernel has no filesystem to read one with anymore, so the caller reads the program via the filesystem server (`FSOP_READ_AT`, 512 bytes at a time) and stages it first; see the shell's `cmd_exec` for the reference flow. Failures: `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE` (the file, or empty)/`SPAWN_ERR_IMAGE_TOO_LARGE` (the loaded image, ceiling in `heap_info` field 4)/`SPAWN_ERR_NO_FREE_SLOT`; a failure after the region allocation gives the memory back (`tasks::free_runtime_region`, always the LIFO case). See "Dynamic task creation" above. **Since 2026-10-11 only the staging's owner may `spawn`** (another task's call is `SPAWN_ERR_STAGING_BUSY`, a task that staged nothing gets `SPAWN_ERROR`), and the staging is released whatever the answer; a total of 0 is refused as empty, as always, and releases it: how a stager gives up. A child gets no more than its owner staged: the argv and cwd lengths are capped to what `args_stage`/`cwd_stage` gave and a total past the program its owner staged (in order from 0, see 30) is `SPAWN_ERROR` |
-| 17 | `exit` | exit code | **does not return** (or `EXIT_DENIED`) | Destroys the calling task: its slot becomes spawnable again, its EL0 mapping is removed (a fresh `mmu::rebuild_with_el0_regions`), and its RAM is returned to the runtime bump allocator when LIFO order allows (`tasks::free_runtime_region` — most-recent allocation only; anything else leaks, deliberately). Every slot below `FIRST_SPAWNABLE` (6) is refused with `EXIT_DENIED`, the only case where this syscall returns — the boot shell (0, the sole keyboard owner), idle (1), and the four servers whose death would strand a resource: fsd (2), cond (3), netd (4) and accountd (5). The guard derives from the constant rather than listing slots, so adding a server protects it automatically. The exit code is kept as `Zombie(status)` until a `wait` collects it |
+| 17 | `exit` | exit code | **does not return** (or `EXIT_DENIED`) | Destroys the calling task: its slot becomes spawnable again, its EL0 mapping is removed (a fresh `mmu::rebuild_with_el0_regions`), and its RAM is returned to the runtime bump allocator when LIFO order allows (`tasks::free_runtime_region`: most-recent allocation only, and anything else leaks, deliberately). Every slot below `FIRST_SPAWNABLE` (6) is refused with `EXIT_DENIED`, the only case where this syscall returns: the boot shell (0, the sole keyboard owner), idle (1), and the four servers whose death would strand a resource: fsd (2), cond (3), netd (4) and accountd (5). The guard derives from the constant rather than listing slots, so adding a server protects it automatically. The exit code is kept as `Zombie(status)` until a `wait` collects it |
 | 18 | `task_state` | task index | a `TASK_STATE_*` code, or `TASK_STATE_INVALID` past the last slot | Read-only observability for the spawn/exit lifecycle (the shell's `ps`): `UNUSED`/`RUNNABLE`/`BLOCKED` per slot. Probing indices upward until `INVALID` is how a caller discovers the slot count without it leaking into the ABI |
 | 19 | `kill` | task index | `0`, `TASK_ERR_PROTECTED`, `TASK_ERR_SELF`, or `TASK_ERR_NO_SUCH_TASK` | Destroys another task: `exit`'s teardown minus the context switch (a non-current task isn't executing; its saved context is simply discarded). Every slot below `FIRST_SPAWNABLE` (the boot shell, idle and the servers) is protected (`TASK_ERR_PROTECTED`), and so is the caller's own slot (`TASK_ERR_SELF`). If the killed task held the keyboard, ownership reverts as on any death (see `fg`) |
 | 20 | `fg` | task index | `0`, `TASK_ERR_PROTECTED`, or `TASK_ERR_NO_SUCH_TASK` | Hands keyboard ownership to the given task (the input-owner state every keyboard poll is gated on, previously hardcoded to task 0). **The shell `fg`s every foreground command it runs** (in `run_found_command`, before it `wait`s), so an interactive `/bin` program (a pager, an editor, a REPL) can `read_char` while it runs; only the keyboard owner receives keystrokes, enforced at the read syscalls themselves (a non-owner's `try_read_char` answers `NO_CHAR` without consuming, and its `read_char` blocks until ownership reaches it), not only at the tick's wake-check. On the program's death ownership reverts automatically (`revert_input_owner_if`) to the task that held the keyboard when `fg` handed it over, provided it is still that occupant and alive, else to task 0: a nested shell gets the keyboard back from each command it runs, and the boot shell gets it back when the nested shell dies. The kernel records the previous owner as a packed identity, not a slot, so a reused slot cannot inherit it, and keeps the chain a stack: `fg` to a task already below the owner in it pops everything above that task, `fg` to any other task pushes. **Ctrl+C** (`0x03`) while any task but the boot shell owns the keyboard now **terminates** that task (a foreground program, or a nested shell at its own prompt): the poll choke point marks it (`PENDING_KILL`), `on_tick` kills it (the `KILL` teardown), and the shell's `wait` wakes with `TASK_KILLED_STATUS`. It's a terminate, not a deliverable signal (the program can't catch it; a later refinement). A task in raw keyboard mode (`kbd_mode`, 70) reads Ctrl+C as a byte instead, and **Ctrl+\** (`0x1c`) does all of this in every mode. Idle can't be foregrounded; index 0 is an explicit "give it back" |
 | 21 | `wait` | task index | exit status `0..=255`, `TASK_KILLED_STATUS` (`0x100`), `WAIT_INTERRUPTED`, `TASK_ERR_PROTECTED`, `TASK_ERR_SELF`, or `TASK_ERR_NO_SUCH_TASK` | Blocks until the task dies (via `WaitReason::TaskExit`, the same blocking machinery as `read_char`), or returns immediately if it's already a zombie. **Collecting the status is what reaps**: an exited task holds its slot as `Zombie(status)` until waited (`kill` reaps immediately instead, since the killer already knows the outcome). Ctrl+C (in cooked mode) or Ctrl+\ (in every mode) during a wait goes to whichever task owns the keyboard: a waited child that owns it (the shell's normal flow, `fg` then `wait`) is terminated and the wait returns `TASK_KILLED_STATUS`; a waiter that owns it is itself terminated, unless the waiter is task 0, the one owner they never terminate, whose wait is instead interrupted (`WAIT_INTERRUPTED`, the target keeps running), what was typed before it flushed. Other typing during a wait is kept in the kernel's keyboard queue for the owner's next read. Waiting on a slot below `FIRST_SPAWNABLE` is refused (`TASK_ERR_PROTECTED`: those tasks never die), and so is waiting on yourself (`TASK_ERR_SELF`) |
 | 22 | `mount` | replace flag | `0` (a USB device was installed), `MOUNT_ALREADY`, `MOUNT_NO_DEVICE`, or `BLOCK_ERR_DENIED` (any caller but the filesystem server) | **The device half only** since the filesystem moved to userland: rescans the xHCI ports for storage devices that attached after boot (`xhci::rescan_ports`) and installs the first mass-storage device (`usb_msd.rs`, Bulk-Only Transport + SCSI) as the kernel's block device for the server to reach via `block_read`/`block_write`. Actually mounting what it holds is the server's `FSOP_MOUNT` request, and since 2026-10-19 the server is the only caller (`CAP_BLOCK`, as for the `BLOCK_*` calls): `FSOP_MOUNT` asks for the rescan itself when the device it holds has no filesystem. `replace != 0` allows swapping out an installed-but-unmountable device (e.g. `make run`'s FAT16 vvfat disk); the server passes it only with no disk filesystem mounted, which it is the one task to know. The Parallels workflow is unchanged: boot, wait, `mount` |
-| 23 | `msg_send` | dest task, buf ptr, len | `0`, `TASK_ERR_NO_SUCH_TASK`, `MSG_ERR_DENIED` (the capability send-mask forbids reaching `dest` — see "IPC capabilities" below), `MSG_ERR_TOO_BIG` (>`MSG_MAX_LEN`, 768 bytes), or `MSG_ERR_FULL` | IPC: delivers straight into a matching blocked receiver's buffer (direct delivery), or into the destination's bounded mailbox (4 pending max). No shared memory, no blocking sends. **A zero-length message is legal** — the end-of-stream marker in the shell's pipeline convention (data messages, then one empty message meaning "finish and exit"). A dead task's queued mail is cleared on exit/kill/fault |
-| 24 | `msg_recv` | buf ptr, len | `(sender << 32) \| copied_len`, or `RECV_INTERRUPTED` (Ctrl+C) | Blocks until a message arrives (`WaitReason::Message` — the third user of the blocking machinery), copying the oldest queued message into the buffer |
+| 23 | `msg_send` | dest task, buf ptr, len | `0`, `TASK_ERR_NO_SUCH_TASK`, `MSG_ERR_DENIED` (the capability send-mask forbids reaching `dest`, see "IPC capabilities" below), `MSG_ERR_TOO_BIG` (>`MSG_MAX_LEN`, 768 bytes), or `MSG_ERR_FULL` | IPC: delivers straight into a matching blocked receiver's buffer (direct delivery), or into the destination's bounded mailbox (4 pending max). No shared memory, no blocking sends. **A zero-length message is legal**: the end-of-stream marker in the shell's pipeline convention (data messages, then one empty message meaning "finish and exit"). A dead task's queued mail is cleared on exit/kill/fault |
+| 24 | `msg_recv` | buf ptr, len | `(sender << 32) \| copied_len`, or `RECV_INTERRUPTED` (Ctrl+C) | Blocks until a message arrives (`WaitReason::Message`, the third user of the blocking machinery), copying the oldest queued message into the buffer |
 | 25 | `msg_try_recv` | buf ptr, len | same as `msg_recv`, or `NO_MSG` | The non-blocking sibling, same pairing as `try_read_char`/`read_char` |
-| 26 | `block_info` | none | capacity in sectors, `BLOCK_ERR_NO_DEVICE`, or `BLOCK_ERR_DENIED` | Raw block-device introspection for the filesystem server. **All three `block_*` syscalls are gated to task 2** (`FSD_TASK`): any other caller gets `BLOCK_ERR_DENIED` — the kernel holds the device, and exactly one task may ask it to touch the disk |
+| 26 | `block_info` | none | capacity in sectors, `BLOCK_ERR_NO_DEVICE`, or `BLOCK_ERR_DENIED` | Raw block-device introspection for the filesystem server. **All three `block_*` syscalls are gated to task 2** (`FSD_TASK`): any other caller gets `BLOCK_ERR_DENIED`: the kernel holds the device, and exactly one task may ask it to touch the disk |
 | 27 | `block_read` | LBA, buf ptr | `0` or a `BLOCK_ERR_*` code | Reads exactly one 512-byte sector (the length is implied, not passed). Same `FSD_TASK` gate |
 | 28 | `block_write` | LBA, buf ptr | `0` or a `BLOCK_ERR_*` code | Writes exactly one 512-byte sector. Same gate |
 | 77 | `block_boot_start` | none | the boot partition's start LBA on the installed device, `0` when unknown or the device is not the boot disk, `BLOCK_ERR_NO_DEVICE`, or `BLOCK_ERR_DENIED` | **Task 2 (the fsd server) only**, like the other `block_*` calls. The kernel matches the disk it installs against the partition the firmware booted from (`bootdisk.rs`, one-disk steps 1 and 3) and keeps the start beside the device, written by every install; `fsd` passes that partition over while another on the disk mounts, so on one disk carrying the ESP and a root the root is `/` (step 4). Numbered after `fb_cursor`, not beside its siblings |
@@ -618,21 +618,21 @@ something the kernel alone can say.
 | 30 | `spawn_stage` | offset, chunk ptr, chunk len | `0` or `SPAWN_ERROR` | Copies one chunk of a program image into the kernel's spawn staging buffer: the feed half of the two-step `spawn` (16). The first staging call claims the staging for the caller (`claim_staging`); another task's is `SPAWN_ERR_STAGING_BUSY` until the owner spawns or ends, and nothing of it is copied. Chunks go in order: one that starts neither at 0 nor where the caller's last ended is `SPAWN_ERROR` and claims nothing, and one at 0 starts the spawn over, dropping any argv, cwd or env staged before it (since 2026-10-16) |
 | 31 | `grant` | grantee task, buf ptr, buf len, dir | `0` or `GRANT_ERR` | Records, in the caller's own single per-task grant slot, that `grantee` may bulk-copy the exact `buf` (which must lie in the caller's own region) in direction `dir` (`GRANT_READ`/`GRANT_WRITE`). The capability half of the enforced bulk-transfer primitive: `buf len` capped at `GRANT_MAX` (64 KiB, since 2026-10-17; `SAFECOPY_MAX`, 2048, before), each `safecopy` within it at `SAFECOPY_MAX`. See "Grant/safecopy" below |
 | 32 | `safecopy` | call (`sender_call`'s handle; the client's slot until 2026-10-09), client offset, local buf ptr, len, **dir (5th arg, from the saved frame's x4)** | `len` or `SAFECOPY_ERR` | A *server* copies `len` bytes between a client's granted buffer and its own `local buf`, in direction `dir`. Authorized only when the client's grant names this server and permits the direction, the client is *currently* blocked in the `msg_call` to it that the handle names, and both ranges are in bounds. Not task-gated (unlike `block_*`): the grant plus the active call is the whole capability. See "Grant/safecopy" below |
-| 33 | `con_write` | buf ptr, len | `0` or an error | The console server's byte-stream backend: writes `len` bytes to the kernel's console. **Gated to task 3** (`CON_TASK`), like `block_*` to task 2 — ordinary tasks reach the console only through the server (a `DSPOP_WRITE` message); the kernel's own `console::*` stays the emergency/boot path. See "Console" below |
+| 33 | `con_write` | buf ptr, len | `0` or an error | The console server's byte-stream backend: writes `len` bytes to the kernel's console. **Gated to task 3** (`CON_TASK`), like `block_*` to task 2. Ordinary tasks reach the console only through the server (a `DSPOP_WRITE` message); the kernel's own `console::*` stays the emergency/boot path. See "Console" below |
 | 34 | `con_info` | field | the geometry value | Lets the console server discover its backend and framebuffer size at startup, and any program read the screen size. **Open to every task** since 2026-10-07 (it was gated to task 3); C reaches it through `ioctl(TIOCGWINSZ)`, Rust through `ulib::screen_size`. Fields: kind (`CON_KIND_BYTESTREAM`/`CON_KIND_FRAMEBUFFER`), cols, rows (both 0 on a byte-stream console, whose size is unknown) |
-| 35 | `fb_blit` | glyphs ptr, count, col, row | `0` or an error | Plots `count` 8-byte glyph bitmaps (from the server's own font, in its own region) at framebuffer cells `(col..col+count, row)`. **Gated to task 3**. The dumb blit half of the framebuffer backend — the server owns the font/cursor/wrap/scroll/ANSI, this just puts pixels on screen (`fbdev.rs`) |
+| 35 | `fb_blit` | glyphs ptr, count, col, row | `0` or an error | Plots `count` 8-byte glyph bitmaps (from the server's own font, in its own region) at framebuffer cells `(col..col+count, row)`. **Gated to task 3**. The dumb blit half of the framebuffer backend: the server owns the font/cursor/wrap/scroll/ANSI, this just puts pixels on screen (`fbdev.rs`) |
 | 36 | `fb_scroll` | count | `0` | Scrolls the framebuffer up `count` character rows (a `ptr::copy` memmove), blanking the exposed bottom. **Gated to task 3** |
 | 37 | `fb_clear` | none | `0` | Blanks the whole framebuffer. **Gated to task 3**. Used by the server's startup and its `clear`/ANSI-`2J` handling |
 | 76 | `fb_cursor` | col, row | `0` or an error | Puts the console's cursor on one character cell, drawn as that cell inverted, or nowhere when the cell is past the screen (`FB_CURSOR_NONE`). **Gated to task 3**. The kernel owns the one inverted cell (2026-10-11): a blit over it draws that glyph inverted, a scroll, a clear and its own fault report lift it and put it back, and it dies with the server (`fbdev::server_ended`), so the server names the cell when its write ends, keeps no copy of the screen, and nothing is left inverted that is not the cursor. Every FB_* arm takes the console lock around its pixels, so a halting core's fault report and the server's cursor are serialised. Numbered after `core_info`, not beside its siblings (`fbdev.rs`) |
-| 38 | `stdout_target` | none | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable — program-to-program pipes and `exec … > file` |
-| 39 | `self` | none | the caller's own task slot index | A task's identity (otherwise unknowable — every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
+| 38 | `stdout_target` | none | the caller's stdout target task index | Where this program's output should go (set by whoever `spawn`ed it; `CON_TASK` by default). A producer routes output there: `CON_TASK` → the console server (`DSPOP_WRITE`); otherwise a raw byte stream (chunked data messages + an empty end-of-stream message) to that task, which relays or captures it. This is what makes a task's own output capturable: program-to-program pipes and `exec … > file` |
+| 39 | `self` | none | the caller's own task slot index | A task's identity (otherwise unknowable: every other task-aware syscall takes an index). The shell needs it to route a pipe producer's stdout back to itself, and a foreground-spawned shell isn't task 0 |
 | 40 | `heap_info` | field (`0`=heap base, `1`=heap size, `2`=stack base, `3`=stack size, `4`=the largest image a program may load, `HEAP_INFO_IMAGE_MAX`) | the requested heap-area geometry, or `0` | Each program's region carries a fixed 1 MiB **raw heap area** (the loader's `HEAP_PAGES`, 256KB until 2026-10-05), between its code and its stack guard page and zeroed at load, which it reads/writes via a `&mut [u8]`: space far larger than the stack (whose extent fields `2`/`3` report, so a program never restates the loader's page count), for data a fixed stack buffer can't hold (the shell backs its redirect/pipe capture with it, so `cat big > file` works). *Not* a `GlobalAlloc` heap: `alloc`'s collections can't link under this PIE loader (prebuilt lib`alloc` has `R_AARCH64_ABS64` relocations a `-pie` link rejects; the fix is nightly `-Z build-std`) |
 | 41 | `delegate` | grantee task, target task | `0`, `TASK_ERR_NO_SUCH_TASK` (either slot not a live task; the ordinary way a pipeline link failed, when a stage exited before it was authorized, until `spawn` took over that grant on 2026-10-12), or `MSG_ERR_DENIED` (a grantee below the spawnable range or not the caller's own child, or a target the caller neither spawned nor holds a send right to; checked in that order) | **Runtime capability delegation**: grant `grantee` the right to initiate sends to `target`, a dynamic addition to `grantee`'s send-mask. One rule: the grantee must be the caller's **own direct child**, and the target a task the caller may itself reach (its children always are). Rights flow one step down and nowhere else, so a nested shell wires its pipelines and passes on the network right it was given exactly as the boot shell does, and no task can reach one it could not reach before. A parent and its child are granted each other at spawn. Cleared when the grantee dies, and when the target's slot is reused by a new spawn; a grant aimed at a supervised server therefore survives its restart (the slot can only ever hold that server again). See "Runtime capability delegation" below |
-| 42 | `net_send` | frame ptr, frame len | `0` or `NET_ERROR` | Transmit one raw Ethernet frame through the kernel's virtio-net driver. **Gated to `NET_TASK`** (the network server) — the DMA-owning NIC driver stays in the kernel (no IOMMU), reached only by the one task that owns the protocol stack, the `block_*` → fsd pattern |
+| 42 | `net_send` | frame ptr, frame len | `0` or `NET_ERROR` | Transmit one raw Ethernet frame through the kernel's virtio-net driver. **Gated to `NET_TASK`** (the network server). The DMA-owning NIC driver stays in the kernel (no IOMMU), reached only by the one task that owns the protocol stack, the `block_*` → fsd pattern |
 | 43 | `net_recv` | buf ptr, buf len | the frame's length (copied into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting, or `NET_ERROR` | Non-blocking poll of the virtio-net receive ring. Gated to `NET_TASK` like `net_send` |
 | 44 | `net_mac` | none | the NIC's 6-byte MAC packed little-endian into a `u64`, or `NET_ERROR` | The network server needs it to build the Ethernet source of every frame. Gated to `NET_TASK` |
-| 45 | `net_wait` | timeout ms (`0` = none) | returns when input or the timeout is pending (value not meaningful) | Blocks the caller until a frame arrives on the NIC, a message is queued in its mailbox, **or** the timeout elapses (`WaitReason::NetInput { deadline }`), then returns — the async-receive primitive (a minimal poll/select) plus a timer. The caller drains sources itself (`net_recv` / `msg_try_recv`). The frame/message halves let `netd` wait on incoming frames and client IPC at once (so it can *answer* the network); the timeout is the timer the TCP retransmit timeout (RTO) needs to fire when a peer goes silent and no frames arrive. Gated to `NET_TASK` |
-| 46 | `monotonic_us` | none | microseconds since boot (the ARM generic timer's free-running counter) | A high-resolution monotonic clock, unlike `get_ticks`'s 20 ms preemption tick — needed where a real elapsed duration matters (the network server's TCP round-trip-time estimation for the RTO is the first user; a fetch RTT of tens of ms is 1–2 of `get_ticks`'s ticks). Overflow-safe; only meaningful as a difference of two readings. Not gated — a monotonic clock is a harmless read for any task |
+| 45 | `net_wait` | timeout ms (`0` = none) | returns when input or the timeout is pending (value not meaningful) | Blocks the caller until a frame arrives on the NIC, a message is queued in its mailbox, **or** the timeout elapses (`WaitReason::NetInput { deadline }`), then returns: the async-receive primitive (a minimal poll/select) plus a timer. The caller drains sources itself (`net_recv` / `msg_try_recv`). The frame/message halves let `netd` wait on incoming frames and client IPC at once (so it can *answer* the network); the timeout is the timer the TCP retransmit timeout (RTO) needs to fire when a peer goes silent and no frames arrive. Gated to `NET_TASK` |
+| 46 | `monotonic_us` | none | microseconds since boot (the ARM generic timer's free-running counter) | A high-resolution monotonic clock, unlike `get_ticks`'s 20 ms preemption tick, needed where a real elapsed duration matters (the network server's TCP round-trip-time estimation for the RTO is the first user; a fetch RTT of tens of ms is 1–2 of `get_ticks`'s ticks). Overflow-safe; only meaningful as a difference of two readings. Not gated: a monotonic clock is a harmless read for any task |
 | 47 | `args_stage` | blob ptr, blob len | `0` or `SPAWN_ERROR` | Stages an **argv blob** for the next `spawn` (16), whose arg2 carries the blob length (`0` = no args). The blob is `[argc: u32 LE]` then, per argument, `[len: u32 LE][bytes]`, read with unaligned loads and bounded by `ARGV_MAX` (512). Delivered kernel-side and fetched by the child, exactly like `stdout_target` (38), so a spawned program's start-up register and stack state is unchanged. Not gated. A staging call: claims the staging, or `SPAWN_ERR_STAGING_BUSY` while another task holds it (2026-10-11) |
 | 48 | `get_argc` | none | the caller's argument count | `0` for a task spawned with no argv: every boot-loaded task (the shell, the servers) and any `spawn` with arg2 = 0. Not gated |
 | 49 | `get_arg` | index, out ptr, out capacity | the argument's true length (up to `capacity` bytes copied into the buffer), or `NO_ARG` if `index >= argc` | The read half of the argv trio. A zero-length *real* argument returns `0`, which is deliberately distinct from `NO_ARG`. No capacity is too large: the copy is at most the argument, and only the bytes copied must lie in the caller's region |
@@ -641,17 +641,17 @@ something the kernel alone can say.
 | 52 | `ns_set` | blob ptr, blob len | `0` or `SPAWN_ERROR` | Sets the **calling task's own** namespace: the per-task table of `bind`ings mapping a path prefix to a mount subtree (the Plan 9 namespace, cluster Phase 0). A child inherits its parent's at `spawn` because the kernel copies it, so `bind` need only update the caller's own view. An empty namespace means identity-to-tree-0, so a task that never calls this behaves exactly as it did before namespaces existed. Bounded by `NS_MAX` (256) |
 | 53 | `get_ns` | out ptr, out capacity | the namespace blob's true length (up to `capacity` bytes copied), or `0` if the task has none | Every task resolves paths through its own blob, which is how it sees the view its parent did. Each binding is `[tree:u8][prefix_len:u8][target_len:u8][prefix bytes][target bytes]`. No capacity is too large: the copy is at most the blob, and only the bytes copied must lie in the caller's region |
 | 54 | `task_name` | task index, out ptr, out capacity | the name's true length (up to `capacity` bytes copied into the buffer), or `0` if the slot has no name | Read-only observability, the companion to `task_state` (18) that turns `ps`'s slot list into named processes. Returns the task's `argv[0]`: boot-loaded tasks (`shell`/`idle`/`fsd`/`cond`/`netd`/`accountd`) are named by the loader/kernel, spawned tasks carry the argv they were launched with, and unused/reaped-pending slots return `0`. Not gated: a name is harmless to read, like `task_state`. A name can be up to `ARGV_MAX` (512) bytes; no capacity is too large, and only the bytes copied must lie in the caller's region |
-| 55 | `task_exit_code` | task index | the exit status `0..=255` of a **zombie** task, **peeked without reaping**, or `TASK_NO_EXIT_CODE` (`u64::MAX`) for any non-zombie slot | Read-only, the third `ps` observability syscall (with `task_state`/`task_name`): lets `ps` show *why* an exited task is holding its slot (`exited (code N)`) before anyone `wait`s on it. Unlike `wait` (21), it leaves the zombie in place — collecting the status is still `wait`'s job. A killed task is never a zombie (it goes straight to unused, no status), so this never reports one. Not gated |
-| 56 | `power` | mode (`0`=off, `1`=halt) | does not return on success; `POWER_BAD_MODE` (`u64::MAX`) for an unknown mode | Machine power control (`power.rs`). `POWER_OFF` powers the machine off via **PSCI `SYSTEM_OFF`** — the `hvc`/`smc` conduit is read from ACPI's FADT at boot (`power::discover_conduit`), and if PSCI is unavailable it falls back to a halt. `POWER_HALT` masks interrupts and parks the core in `wfi` forever (the whole machine stops, power not cut). Backs the shell's `shutdown`/`halt` builtins. Not gated — a single-user machine lets its shell turn itself off |
+| 55 | `task_exit_code` | task index | the exit status `0..=255` of a **zombie** task, **peeked without reaping**, or `TASK_NO_EXIT_CODE` (`u64::MAX`) for any non-zombie slot | Read-only, the third `ps` observability syscall (with `task_state`/`task_name`): lets `ps` show *why* an exited task is holding its slot (`exited (code N)`) before anyone `wait`s on it. Unlike `wait` (21), it leaves the zombie in place. Collecting the status is still `wait`'s job. A killed task is never a zombie (it goes straight to unused, no status), so this never reports one. Not gated |
+| 56 | `power` | mode (`0`=off, `1`=halt) | does not return on success; `POWER_BAD_MODE` (`u64::MAX`) for an unknown mode | Machine power control (`power.rs`). `POWER_OFF` powers the machine off via **PSCI `SYSTEM_OFF`**. The `hvc`/`smc` conduit is read from ACPI's FADT at boot (`power::discover_conduit`), and if PSCI is unavailable it falls back to a halt. `POWER_HALT` masks interrupts and parks the core in `wfi` forever (the whole machine stops, power not cut). Backs the shell's `shutdown`/`halt` builtins. Not gated: a single-user machine lets its shell turn itself off |
 | 57 | `yield` | none | `0` | A **cooperative** yield, not a block, so nothing has to wake the caller: the kernel saves the still-runnable task, switches to another runnable one (preferring real work over idle), and resumes it on a later switch. Its purpose is to let a *consumer* run when a producer cannot make progress. `pipe_out`, on a momentarily full consumer mailbox (`MSG_ERR_FULL`), yields instead of busy-spinning until the next tick, so the consumer drains (or exits early, like `head`) and the producer's retry then succeeds or fails fast. Harmless if nothing else is runnable |
 | 58 | `env_stage` | blob ptr, blob len | `0` or `SPAWN_ERROR` | Stages an **environment blob** for the next `spawn`, in the *same* encoding as an argv blob, each entry's bytes being a `NAME=VALUE` string. Unlike argv and cwd it is a **pending latch** rather than a length argument, because `spawn`'s four arguments are already full; staging again before the next spawn replaces it. Bounded by `ENV_MAX` (2048), which since 2026-09-22 is the bound actually enforced. It was not: every staging call ran the blanket `valid_user_range` (512) first, which for argv, cwd and namespaces is at or above their own limits but left `ENV_STAGE`'s own check dead above 512. A blob over 512 was refused, and because the whole environment travels as ONE blob the child inherited **nothing** rather than a truncated set, silently, because the shell discarded the result. Both halves are fixed: `valid_stage_range` checks each staging call against its own maximum (containment in the caller's region is unchanged), and the shell reports a refusal and a truncation instead of swallowing them. A staging call: claims the staging, or `SPAWN_ERR_STAGING_BUSY` while another task holds it; the latch is cleared with every release, so a stager that ends leaves no environment for the next (2026-10-11) |
 | 59 | `get_envc` | none | the caller's environment variable count | `0` for a task spawned with none: every boot-loaded task, or a `spawn` with no preceding `env_stage` |
 | 60 | `get_env` | index, out ptr, out capacity | the entry's true length as a `NAME=VALUE` string (up to `capacity` bytes copied), or `NO_ARG` if `index >= envc` | Mirrors `get_arg` (49); `ulib::getenv` splits on the first `=`. No capacity is too large: the copy is at most the entry, and only the bytes copied must lie in the caller's region, so a buffer of `ENV_MAX` (2048) holds any entry (until 2026-10-06 a capacity over `MAX_USER_LEN`, 512, was refused, and the refusal read as `NO_ARG`) |
 | 61 | `set_id` | uid, gid, groups ptr, group count | `0` or `SET_ID_DENIED` | Sets the calling task's user identity. Root may become any user (the mechanism `login` uses). A non-root task may make exactly one move: **back to its own saved identity**, the one it held before the last change (`!is_root && new != saved_id_of(cur)` is the whole refusal). Every other change from non-root is `SET_ID_DENIED`, so there is no escalation to a *third* identity. The saved-identity restore is not an oversight and is load-bearing: the shell never dies, so `logout` uses it to return to root for the next login prompt. It also means the kernel alone does **not** stop a logged-in user's shell from calling `set_id(0)` once root is its saved identity; what stops it is that `su` is gated in the shell, which is where the authentication lives. Children inherit at `spawn`, so a command runs as whoever started it. Children inherit at `spawn`, so a command runs as whoever started it. **`arg2`/`arg3` are the supplementary group list**, a (pointer, count) pair capped at `MAX_SUPP_GROUPS` (8), and this is the ABI detail a caller gets wrong silently: passing `0, 0` does *not* mean "leave the groups alone", it means **clear them**. That is the right default, because an identity change carrying a stale group list is a privilege leak, and requiring a second call is how that leak happens. The group half is **root only** even where the identity change itself would be allowed, since membership is a privilege grant; a non-root caller may pass only an *empty* list, which only ever removes privilege. The kernel owns this binding because it is the only component that unforgeably knows an IPC message's real sender |
 | 62 | `get_id` | task index | the packed `(gid << 32) \| uid`, or `GET_ID_ERR` for an out-of-range **or dead** task | Read-only and ungated: an identity is not a secret. The dead-slot refusal is deliberate and is the half that matters: `reset_id` stores root into a slot on task death, so answering for a reaped task would report a caller that sent a request and then exited as **root**. It gates on `live_index` and lets the asker fail closed. A task reads its own by passing its `self` (39) index, which `ulib`'s `getuid`/`getgid` wrap. Backs `/bin/id`. It is **not** what a server authorizes against, and `sender_id` (65) below is the row explaining why the slot's *current* occupant is the wrong question |
-| 63 | `random` | out ptr, out capacity | bytes written into the buffer, or `RANDOM_UNAVAILABLE` (`u64::MAX`) when this machine has no entropy device | Hardware entropy from a **virtio-rng** device (`virtio_rng.rs`), the fix for clock-derived password salts. Deliberately *not* gated to one task the way `BLOCK_*`/`NET_*` are: entropy has no state to corrupt and every account tool needs it. **Absence is the ordinary case, not an error** — only a QEMU run started with `-device virtio-rng-device` has one (Parallels and the Pi expose no virtio-mmio at all), so callers degrade *loudly*: `accounts::salt_from` returns a `strong` flag and `passwd`/`useradd` print "no hardware RNG - using a weaker clock-derived salt". The device may return fewer bytes than asked, and the kernel does not pad — a partly-random value presented as a full one is the quiet weakness this exists to remove. |
+| 63 | `random` | out ptr, out capacity | bytes written into the buffer, or `RANDOM_UNAVAILABLE` (`u64::MAX`) when this machine has no entropy device | Hardware entropy from a **virtio-rng** device (`virtio_rng.rs`), the fix for clock-derived password salts. Deliberately *not* gated to one task the way `BLOCK_*`/`NET_*` are: entropy has no state to corrupt and every account tool needs it. **Absence is the ordinary case, not an error**: only a QEMU run started with `-device virtio-rng-device` has one (Parallels and the Pi expose no virtio-mmio at all), so callers degrade *loudly*: `accounts::salt_from` returns a `strong` flag and `passwd`/`useradd` print "no hardware RNG - using a weaker clock-derived salt". The device may return fewer bytes than asked, and the kernel does not pad: a partly-random value presented as a full one is the quiet weakness this exists to remove. |
 | 64 | `get_groups` | task index, out ptr, out capacity in **gids** | the task's true group count (up to `capacity` gids copied), or `GET_ID_ERR` for an out-of-range or dead task | The companion of `get_id` (62), ungated for the same reason. Note the capacity counts **gids, not bytes**. `fsd` needs the *sender's* list to decide the group triad on every op, and takes it from `sender_groups` (66), never from here |
-| 65–66 | `sender_id` / `sender_groups` | (none) / out ptr, out capacity | the packed `(gid << 32) \| uid` of the sender of the last message received, and its supplementary group list — or `GET_ID_ERR` if none | **The credential a server authorizes against**, bound by the kernel *when the message was sent*. `get_id(sender)` cannot serve this purpose: it answers "who occupies slot N **now**", and a caller can `MSG_SEND` (which does not block), `EXIT`, and have its slot reaped and re-spawned before the server drains its mailbox — so a request made by a user gets read as one made by whatever landed in the slot, root included. Refusing a *dead* slot does not close it; a **recycled** slot is alive, and a message carries a bare slot number with no generation to tell the two apart. The kernel therefore captures the sender's credential (identity *and* groups, together — the `set_id` group half exists so the two cannot be set out of step, so they must not be captured out of step) into the queued message, or straight into the receiver's cell on the direct-delivery path. Only a receive updates it: the reply to your own `msg_call` does not (since 2026-10-09 it is delivered into the call, never received), so a server may log to `cond` or read a file through `fsd` mid-request without the reply replacing the credential it is about to authorize against. A message the kernel sends on nobody's behalf (the supervisor health ping, sender `KERNEL_SENDER`) carries no credential at all, so anything trying to authorize it fails closed. |
+| 65–66 | `sender_id` / `sender_groups` | (none) / out ptr, out capacity | the packed `(gid << 32) \| uid` of the sender of the last message received, and its supplementary group list, or `GET_ID_ERR` if none | **The credential a server authorizes against**, bound by the kernel *when the message was sent*. `get_id(sender)` cannot serve this purpose: it answers "who occupies slot N **now**", and a caller can `MSG_SEND` (which does not block), `EXIT`, and have its slot reaped and re-spawned before the server drains its mailbox, so a request made by a user gets read as one made by whatever landed in the slot, root included. Refusing a *dead* slot does not close it; a **recycled** slot is alive, and a message carries a bare slot number with no generation to tell the two apart. The kernel therefore captures the sender's credential (identity *and* groups, together: the `set_id` group half exists so the two cannot be set out of step, so they must not be captured out of step) into the queued message, or straight into the receiver's cell on the direct-delivery path. Only a receive updates it: the reply to your own `msg_call` does not (since 2026-10-09 it is delivered into the call, never received), so a server may log to `cond` or read a file through `fsd` mid-request without the reply replacing the credential it is about to authorize against. A message the kernel sends on nobody's behalf (the supervisor health ping, sender `KERNEL_SENDER`) carries no credential at all, so anything trying to authorize it fails closed. |
 | 67–68 | `sender_task` / `task_identity` | (none) / task index | the packed **task identity** `(generation << 8) \| slot` of the sender of the last message received, or of the occupant of a slot (zombies included), `GET_ID_ERR` if none | **A slot number is a position; this is the occupant.** A slot is recycled the moment its task is reaped, and the next occupant is indistinguishable from the last by number, so a server that remembers "slot 6 is my remote-exec child" or "slot 6 owns this run" can be answered by a stranger a few ticks later. The kernel issues every task a generation when its slot becomes live (a boot-wide counter that never repeats; a supervised server's restart is a new occupant too) and captures the sender's packed identity with its credential at send time, so `sender_task` is as trustworthy as `sender_id` and stable for the whole handling of a request. `task_identity` is the other direction: a server records it for a task it just `spawn`ed and matches the child's later messages against `sender_task`, never against the bare slot `spawn` returned. Servers only for now: `ps`, `wait`, `kill` and `fg` still speak in slots. First user: `netd`'s remote-exec child and run owner (2026-09-06); the `/net/tcp` connection table and `fsd`'s fids have the same disease and are next. |
 | 69 | `boot_id` | selector; for `BOOT_ID_ENTROPY` also out ptr, out capacity | `BOOT_ID_COUNTER`: this boot's counter or `BOOT_ID_NONE`; `BOOT_ID_STORES`: the `BOOT_ID_STORE_*` bits of the stores that held a counter from before this boot; `BOOT_ID_ENTROPY_LEN`: bytes of boot entropy (0 for none); `BOOT_ID_ENTROPY`: the entropy's length, copied, or `BOOT_ID_NONE` | **The boot identity**, established before `ExitBootServices` (`kernel/src/bootid.rs`, session-auth step 3): a counter raised once per boot and persisted in a UEFI variable and an ESP file, trusted only if a store held it from before this boot, and `EFI_RNG_PROTOCOL` entropy. The counter, stores and entropy length are for anyone; **the entropy itself for the `CAP_NET` holder (`netd`) alone**, since it feeds every session key `netd` derives. No counter means the node keys no sessions. `/bin/bootid` reads it. |
 | 70 | `kbd_mode` | `KBD_COOKED` (0), `KBD_RAW` (1) or `KBD_QUERY` (2), optionally with `KBD_FLUSH` (0x100) OR'd in | the caller's mode after the call, or `KBD_MODE_BAD` (`u64::MAX - 1`, apart from the unknown-syscall answer) for any other argument | **Ctrl+C as a key** (step 1 of `docs/roadmap/roadmap-ctrl-c.md`). In raw mode the escape hatch lets Ctrl+C (`0x03`) through to the keyboard owner as an ordinary byte, for a program that binds it (an editor's page down). **Ctrl+\ (`0x1c`) is the way out in every mode**: it does what Ctrl+C does in cooked mode (terminate a foreground command, detach a `fg`-handed session), so no program can take it away; the USB keyboard sends it for Ctrl on the backslash key (the ANSI key 0x31, and 0x32, the ISO key in the same position, mapped as 0x31 throughout; not 0x64, the ISO `<>` key), and a host terminal on the serial line already does. A key's meaning is settled when the kernel reads it, as on Unix: a Ctrl+C read ahead for a raw owner stays a byte if the owner turns cooked or ends before reading it, and the boot shell's waits are interrupted only by an interrupt key read for the shell itself, decided as it is read (it is never queued, so a full queue cannot drop it), not by finding the byte in the queue. The kill line names the key pressed. `KBD_FLUSH` (since 2026-10-08, `tcsetattr`'s `TCSAFLUSH`) discards the keys typed ahead before the mode is set (under the mode they were typed in, as POSIX has `TCSAFLUSH`), for the keyboard owner only, an interrupt among them still acting. A task sets only its own mode, whether or not it owns the keyboard; every task starts cooked and `end_task` resets the mode, so it ends with the task. At the boot shell neither key kills: either interrupts the shell's waits (for a child, and for a message, its calls to the servers included) and is otherwise a byte the line editor ignores. `/bin/READKEY raw` and `readkey mode` are the observers, `make test-kbd-mode` the rig. |
@@ -666,77 +666,77 @@ something the kernel alone can say.
 
 File operations are messages to the filesystem server (task 2,
 `FSD_TASK`), normally sent via `msg_call`. The protocol is **fully
-self-contained** — payloads travel *inside* the message, not as
+self-contained**: payloads travel *inside* the message, not as
 pointers into the caller's memory, because per-task page tables make a
 client's memory unreadable by the server. A request is a header (the op
 as a little-endian u64 at offset 0, then four u64 parameters at
-8/16/24/32 — `FS_REQ_PAYLOAD`) followed by the inline payload (path
+8/16/24/32, `FS_REQ_PAYLOAD`) followed by the inline payload (path
 bytes, then data bytes for `write`/`mv`). The reply is a status u64
 (`FS_REPLY_PAYLOAD`) followed by the inline result (a listing, file
 data). Everything is copied task-to-task by the kernel's message
 machinery; no pointer crosses a task boundary. Inline per-operation
-payloads are capped at `FS_DATA_MAX` (512) — which is why `MSG_MAX_LEN`
+payloads are capped at `FS_DATA_MAX` (512), which is why `MSG_MAX_LEN`
 is 768: one message holds a header, a full path, and a full data buffer.
 Bulk file reads/writes escape that cap via the grant/safecopy path
 (below), not by growing the message. The
-status carries exactly the old syscalls' return-value semantics — byte
+status carries exactly the old syscalls' return-value semantics: byte
 counts and real sizes on success, or a value in the reserved error band
 (`>= FS_ERR_MIN`): `NO_FS` when nothing is mounted, a specific
 `FS_ERR_*` code per real failure reason, `FS_ERROR` for
 argument-validation rejections. A call to an empty task-2 slot (no
 FSD.BIN this boot) fails at the `msg_call` layer with
-`TASK_ERR_NO_SUCH_TASK`, which the shell's wrappers fold into `NO_FS` —
-literally true. Ops (constants in `syscall-abi`, contracts identical to
+`TASK_ERR_NO_SUCH_TASK`, which the shell's wrappers fold into `NO_FS`,
+which is literally true. Ops (constants in `syscall-abi`, contracts identical to
 the old syscalls of the same names): `FSOP_LIST_DIR`, `FSOP_READ_FILE`,
 `FSOP_READ_AT` (windowed reads at a byte offset, what `exec`'s chunked
 program loading is built on), `FSOP_WRITE_FILE` (zero-length data is
-valid — truncate to empty), `FSOP_MKDIR`, `FSOP_RMDIR`, `FSOP_TOUCH`,
+valid: truncate to empty), `FSOP_MKDIR`, `FSOP_RMDIR`, `FSOP_TOUCH`,
 `FSOP_RM`, `FSOP_MV`, and `FSOP_MOUNT` (the FS half of the `mount`
 command), plus the two **bulk** ops that carry their data via
 grant/safecopy rather than inline: `FSOP_READ_BULK` (params
 `path len, offset, want`; the server `safecopy`s up to `want` ≤
 `SAFECOPY_MAX` bytes into the client's `GRANT_WRITE` buffer, status =
-bytes delivered — `cat` loops it to stream any size) and
+bytes delivered, and `cat` loops it to stream any size) and
 `FSOP_WRITE_BULK` (params `path len, data len`; the server `safecopy`s
 the client's `GRANT_READ` buffer out, then writes), and `FSOP_WRITE_AT`
 (params `path len, offset, data len`; same `GRANT_READ` transfer, but
 `fat32::write_at` writes the data at a byte `offset` and *extends* the
-file rather than replacing it — **without** rewriting the bytes before
+file rather than replacing it, **without** rewriting the bytes before
 `offset`, the FAT32 random-access offset-write primitive behind streaming
 `cp`, unbounded `>>`, and the `writeat` builtin; an `offset` past the end
 of file zero-fills the gap on disk, bounded by a 1 MiB cap). The shell's
 `fs_*` wrapper functions
 (`shell/src/main.rs::fs_call` and friends) are the reference client.
-This inline-payload design is the first half of MINIX's — small
-messages plus kernel-mediated copies — and the grant/safecopy primitive
+This inline-payload design is the first half of MINIX's (small
+messages plus kernel-mediated copies), and the grant/safecopy primitive
 below is the second half.
 
 One later addition, the **stat** verb (`NP_STAT`): given a path, the server
-returns a fixed 27-byte metadata record — size, a directory flag, a broken-down
+returns a fixed 27-byte metadata record: size, a directory flag, a broken-down
 calendar modified time, and a POSIX mode/uid/gid triple (`STAT_*` offsets in
 `ninep-abi`). The time is a calendar, not an epoch, so no filesystem's epoch
 leaks into the ABI and the client formats it with no date math; a `time_valid`
 byte says whether it's meaningful (only FAT32 decodes a timestamp today).
-Symmetrically, a `mode_valid` byte guards the mode/owner triple — only ext2
+Symmetrically, a `mode_valid` byte guards the mode/owner triple: only ext2
 stores an owner and permission bits, so FAT32/exFAT/`/proc` leave it zero and
 the client synthesizes a conventional mode for display. It's the metadata behind
 `ls -l` (permission string + owner + size + time), which reads the directory
 then stats each entry (`ulib::fs_stat` and the `stat_*` accessors, incl.
 `stat_mode`).
 
-### IPC capabilities — who-may-call-whom
+### IPC capabilities: who-may-call-whom
 
 Memory isolation is MMU-enforced, but the IPC *topology* is enforced too:
 a task can only initiate a `msg_send`/`msg_call` to the endpoints its
 capabilities allow. Because task-slot roles are static (0 shell, 1 idle,
 2 fsd, 3 cond, 4 netd, 5 accountd, 6–10 spawnable), capabilities are a **pure function of
-slot** — no stored table, no runtime state — living entirely in
+slot** (no stored table, no runtime state), living entirely in
 `tasks::caps_for_slot(slot)`. A slot's capability word packs a **send-mask**
 (which slots it may initiate IPC to) plus resource bits (`CAP_BLOCK` gates
 `block_*` to the filesystem server; `CAP_CON` gates `con_write`/`fb_*` to
 the console server, while `con_info` is open to every task since
 2026-10-07; `CAP_NET` gates `net_send`/`net_recv`/`net_mac`
-to the network server — the three device gates, formerly hardcoded
+to the network server. The three device gates, formerly hardcoded
 `== FSD_TASK`/`== CON_TASK` checks, are the resource half of this same
 model).
 
@@ -748,20 +748,20 @@ The policy:
 | 1 | idle | none | none |
 | 2 | fsd | cond (its logs) | `CAP_BLOCK` |
 | 3 | cond | none (only replies) | `CAP_CON` |
-| 4 | netd | fsd (serving files over HTTP), cond (its logs), and itself — the self-send bit exists only so netd may *delegate* the reply capability to a remote-exec child whose output pipes back to it | `CAP_NET` |
+| 4 | netd | fsd (serving files over HTTP), cond (its logs), and itself. The self-send bit exists only so netd may *delegate* the reply capability to a remote-exec child whose output pipes back to it | `CAP_NET` |
 | 5 | accountd | fsd (`/etc/passwd`, `/etc/shadow`), cond (its logs) | none (its privilege is policy, not a device) |
 | 6–10 | spawnable | shell, fsd, cond, accountd | none |
 
 **`netd` is missing from that last row, and in practice it is not.** The shell
 delegates `TO_NET` to *every* command it spawns (`spawn_path`), because it
-cannot know from a program's name whether it needs the network — a plain
+cannot know from a program's name whether it needs the network: a plain
 `cat` does, the moment its path lies under a remote mount. So the static
 refusal of `TO_NET` to spawnable slots stays literally true in the kernel and
 is close to vacuous at runtime: a `wc` in a pipeline holds a send right to
 `netd` for its whole life. That is a deliberate trade on the same ground
-`caps_for_slot` already records for `TO_ACCT` — holding the capability to
-*ask* is not permission to succeed, and `netd` authorizes each request itself
-— but it is a widening, and it is the reason the delegation set accumulates
+`caps_for_slot` already records for `TO_ACCT`: holding the capability to
+*ask* is not permission to succeed, and `netd` authorizes each request itself,
+but it is a widening, and it is the reason the delegation set accumulates
 rather than replacing.
 
 Enforced at the `msg_send`/`msg_call` boundary by `tasks::may_send(src,
@@ -783,11 +783,11 @@ capability for bulk *data*.
 ### Runtime capability delegation
 
 The static send-mask is a baseline; `delegate(grantee, target)` (41) hands
-one task the runtime right to initiate sends to another — a dynamic addition
+one task the runtime right to initiate sends to another, a dynamic addition
 to `grantee`'s send-mask, consulted by `may_send` after the static check. It
 is stored as a per-task **set** (`tasks::DELEGATED_SEND`, a bitmask over slot
 indices in the same `1 << slot` shape the static mask uses) and cleared on task
-death — both a dying task's delegated-out capabilities and any delegation aimed
+death: both a dying task's delegated-out capabilities and any delegation aimed
 *at* it, so a reused slot can never inherit a stale one; the set is also zeroed
 wherever a slot becomes live, so that safety does not rest on every teardown
 path remembering.
@@ -828,7 +828,7 @@ delegation, and a send with no covering capability, both return
 difference to stay quiet when a pipeline stage exited before its link was
 authorized, and to say so when the link was genuinely refused.
 
-### Grant/safecopy — enforced capability-based bulk transfer
+### Grant/safecopy: enforced capability-based bulk transfer
 
 The inline FSOP payload cap (`FS_DATA_MAX`, 512) is fine for paths and
 directory listings but too small to move file contents. Rather than
@@ -854,7 +854,7 @@ per-task view (only the EL0-access overlay is per-task), so it reaches
 both regions regardless of which view's `TTBR0` is active. This is the
 MINIX `safecopy` model: the server can touch *only* the bytes a client
 explicitly designated, *only* during a call that client initiated, and
-can never reach a third task — enforced by the kernel, not trusted. The
+can never reach a third task, enforced by the kernel, not trusted. The
 per-op transfer is capped at `SAFECOPY_MAX` (2048); larger transfers
 stream in a loop (`cat`), or grant a buffer up to `GRANT_MAX` (64 KiB) that
 the server fills a `safecopy` at a time at rising offsets in one request
@@ -874,7 +874,7 @@ writing a new userland program.
 
 ## Console
 
-The *steady-state* console is a userland server (`cond/`, task 3 — see
+The *steady-state* console is a userland server (`cond/`, task 3, see
 "The console server" above); this section is about the **kernel's own
 console**, which is now the emergency/boot path only: it carries the
 messages printed before any userland exists (all post-`exit_boot_services`
@@ -891,17 +891,17 @@ instead (`xhci.rs`).
 Which driver, and at what address, is determined by trying up to five
 mechanisms in order, logging why each failed before trying the next:
 
-1. **Devicetree** (`devicetree.rs`) — confirmed dead on both QEMU (default
+1. **Devicetree** (`devicetree.rs`): confirmed dead on both QEMU (default
    `acpi=on` config) and Parallels; both are ACPI-oriented. (A later,
    incidental finding: QEMU's bundled firmware switches to advertising a
-   devicetree blob instead when booted with `acpi=off` — an artifact of
+   devicetree blob instead when booted with `acpi=off`, an artifact of
    that specific, non-default configuration, not a change to this
    mechanism's normal QEMU/Parallels behavior.)
-2. **ACPI RSDP → XSDT → SPCR** (`acpi.rs`) — works on QEMU, confirmed dead
+2. **ACPI RSDP → XSDT → SPCR** (`acpi.rs`): works on QEMU, confirmed dead
    on Parallels (no SPCR table entry at all).
-3. **PCI enumeration for a class 0x07/0x00 serial controller** (`pci.rs`)
-   — confirmed dead on both (neither platform exposes a PCI 16550).
-4. **GOP framebuffer console** (`framebuffer.rs`/`fbconsole.rs`) — tried
+3. **PCI enumeration for a class 0x07/0x00 serial controller** (`pci.rs`):
+   confirmed dead on both (neither platform exposes a PCI 16550).
+4. **GOP framebuffer console** (`framebuffer.rs`/`fbconsole.rs`): tried
    after devicetree/ACPI/PCI, and (like virtio below) only *after*
    `mmu::install_identity_map`, since the framebuffer must be mapped
    under this kernel's own tables before it can be drawn to. Unlike every
@@ -915,12 +915,12 @@ mechanisms in order, logging why each failed before trying the next:
    to the *same* framebuffer through the gated `fb_*` primitives (see
    "The console server" above).
 5. **virtio-mmio for a console device** (`virtio_console.rs`, device ID
-   3) — tried only if all four above fail, and only *after*
+   3): tried only if all four above fail, and only *after*
    `mmu::install_identity_map` rather than alongside the first three (see
    `virtio_console.rs`'s module doc comment for the real MMU-mapping
    constraint that forces this later placement). Confirmed working end to
    end on QEMU: discovery, feature negotiation, transmitq0 setup, and
-   real data reaching the host. Transmit-only — no receive virtqueue
+   real data reaching the host. Transmit-only: no receive virtqueue
    exists yet, so `Console::Virtio`'s read always returns `None`.
    **Confirmed dead on Parallels**, with real evidence, not just an
    untested guess: a full PCI device inventory taken on real hardware
@@ -935,7 +935,7 @@ mechanisms in order, logging why each failed before trying the next:
 
 When all three of devicetree/ACPI/PCI 16550 fail, `pci::log_all_devices`
 (`pci.rs`) logs every PCI device's vendor:device and class:subclass
-through the still-working boot-services console — a general-purpose
+through the still-working boot-services console, a general-purpose
 diagnostic, not specific to virtio, kept as a real tool for whatever the
 next "why can't this platform's hardware be found" question turns out
 to be.
@@ -948,5 +948,5 @@ hard-crashes real Parallels hardware.
 
 This document describes the current, working state. For active
 limitations and what's reasonably next, see `ROADMAP.md`'s "What's next (the current frontier)"
-section, which is kept current as the project's actual state changes —
+section, which is kept current as the project's actual state changes,
 not duplicated here, since it would just go stale.

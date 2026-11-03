@@ -1,6 +1,6 @@
 # Ouroboros shell commands
 
-Reference for the builtin commands in `shell/` — Ouroboros's default
+Reference for the builtin commands in `shell/`, Ouroboros's default
 userland shell, loaded from disk at boot (see
 [`processes.md`](processes.md)). This document describes *what the
 commands do and how to use them*; for the syscalls backing them see
@@ -9,7 +9,7 @@ debugging history behind specific design choices (why `cd`'s path
 resolution works the way it does, why some errors read "no filesystem
 mounted", etc.) see `CHANGELOG.md`'s phase write-ups. Since the shell is
 just a loaded program like any other (`docs/processes.md`), this
-document describes the *default* one — a replacement program is free to
+document describes the *default* one: a replacement program is free to
 implement a completely different command set. For the **cluster commands**
 (`mount -r`, remote `/proc`/`/net`/`/dev/cons`, `cpu` remote execution, and
 `dial`/`serve` for using another machine's network) shown here,
@@ -32,20 +32,20 @@ a machine whose public key the other does not list is refused.
   it is `[` or `O`, which start a sequence (so a host terminal's Alt+x
   types `x`).
 - **Tokenization: whitespace-split, no quoting.** `echo "a b"` sees the
-  literal words `"a` and `b"`, not one quoted argument — there is no
+  literal words `"a` and `b"`, not one quoted argument. There is no
   quote-stripping. Every command except `echo`/`write` only ever looks
   at its *first one or two* words after the command name (`cp`/`mv`
   take exactly two paths; every other command just one); any further
   words are ignored (`mkdir a b c` creates `a` and says nothing about
   `b`/`c`).
 - **Output redirection (`> file` / `>> file`) and multi-stage pipes
-  (`a | b | c`) work** — see the dedicated sections below (pipelines are
+  (`a | b | c`) work**: see the dedicated sections below (pipelines are
   N-stage now, with arguments and `$PATH` lookup on every stage), plus
   `exec prog > file`. **No input redirection (`<`), `;`/`&&` chaining, or
   command history yet.** One command (or one pipeline) per line.
 - **Filename wildcards (globbing):** `*` (any run) and `?` (any single
   character) in a command line expand against the filesystem before the
-  command runs — `echo *.txt`, `cat /bin/L*`, `ls sub/*.log`. Matching is
+  command runs: `echo *.txt`, `cat /bin/L*`, `ls sub/*.log`. Matching is
   case-insensitive (FAT is); dotfiles match only when the pattern starts
   with `.` (so `*` skips `.`/`..`); a token matching nothing is left
   literal. Each token can expand to several names, so it pairs best with
@@ -66,7 +66,7 @@ a machine whose public key the other does not list is refused.
   `rm`): a leading `/` is an absolute path; anything else is resolved
   against the current working directory. `.` and `..` are collapsed
   client-side before the path ever reaches the kernel (`..` past root
-  simply stays at root, same as a real shell) — see `resolve_path`/
+  simply stays at root, same as a real shell), see `resolve_path`/
   `normalize_path` in `shell/src/main.rs`. An empty argument to a
   path-taking command means "the current directory" (so `ls` with no
   argument lists `pwd`'s output; `cd` with no argument re-resolves to
@@ -75,7 +75,7 @@ a machine whose public key the other does not list is refused.
 - **Name matching is case-insensitive**, same as FAT itself (`ls`/`cat`/
   `cd` on `boot`, `Boot`, or `BOOT` all find the same entry).
 - **No filesystem available this boot** (e.g. `make run`'s fast
-  dev-loop disk is FAT16, which the server can't mount — or no FSD.BIN
+  dev-loop disk is FAT16, which the server can't mount, or no FSD.BIN
   was on the ESP at all, so there's no filesystem server) makes every
   disk command print one shared message rather than a command-specific
   error, since no path could ever resolve in that state. Use `make
@@ -86,7 +86,7 @@ a machine whose public key the other does not list is refused.
   shell can now *create* them too: `mkdir`/`touch`/`write`/`mv` accept a
   name that doesn't fit 8.3 (too long, extra dots, spaces, non-8.3
   characters) and lay down a generated `NAME~N` short alias plus the LFN
-  entries carrying the real name — so `index.html` both reads back and can
+  entries carrying the real name, so `index.html` both reads back and can
   be created by its real name. A name that *does* fit 8.3 keeps its case
   too (since 2026-10-06): `foo.txt` is a short entry carrying FAT's
   lowercase flags and lists as `foo.txt`, and `File.txt`, whose base is in
@@ -98,66 +98,66 @@ a machine whose public key the other does not list is refused.
 
 | Command | Syntax | Description | Notes |
 |---|---|---|---|
-| `help` | `help` | Lists the shell **builtins** only, and points to `/bin` (via `ls /bin`) for the externalized programs. | Static text, no syscall. Deliberately doesn't enumerate `/bin` — those change as programs are added, and `ls /bin` is the live list. For per-command detail: `<cmd> -?` (one line) or `man <cmd>` (full page); `man sh` is the shell overview (builtins in full, plus pipes/redirection/wildcards/`$VAR`). |
-| `man` | `man <command>` | Prints a command's manual page — a plain-text file read from `/man/<command>` on disk. `man grep \| more` to page a long one. | A `/bin` program. Plain text only: the framebuffer console drops ANSI styling (bold/colour), so pages use UPPERCASE section headers (`NAME`/`SYNOPSIS`/`DESCRIPTION`/…). Source pages live in `manpages/`, staged to `/man` by the build. |
+| `help` | `help` | Lists the shell **builtins** only, and points to `/bin` (via `ls /bin`) for the externalized programs. | Static text, no syscall. Deliberately doesn't enumerate `/bin`: those change as programs are added, and `ls /bin` is the live list. For per-command detail: `<cmd> -?` (one line) or `man <cmd>` (full page); `man sh` is the shell overview (builtins in full, plus pipes/redirection/wildcards/`$VAR`). |
+| `man` | `man <command>` | Prints a command's manual page, a plain-text file read from `/man/<command>` on disk. `man grep \| more` to page a long one. | A `/bin` program. Plain text only: the framebuffer console drops ANSI styling (bold/colour), so pages use UPPERCASE section headers (`NAME`/`SYNOPSIS`/`DESCRIPTION`/…). Source pages live in `manpages/`, staged to `/man` by the build. |
 | `echo` | `echo [words...]` | Prints all words after `echo`, space-separated. | The one command that uses more than its first argument. |
-| `uptime` | `uptime` | Prints the preemption tick count since boot. | Backed by `get_ticks` — real kernel state, not a demo. |
+| `uptime` | `uptime` | Prints the preemption tick count since boot. | Backed by `get_ticks`: real kernel state, not a demo. |
 | `clear` | `clear` | Clears the screen (ANSI `\x1b[2J\x1b[H`), after showing the cursor and restoring normal video (`\x1b[0m\x1b[?25h`, since 2026-10-11): the way back from a program that exited with either changed. | A raw escape sequence, not a syscall: the console has no notion of a screen. |
-| `pwd` | `pwd` | Prints the current working directory. | A `/bin` program (externalized from a builtin): reads the cwd the shell delivers at spawn (`GET_CWD`) and prints it — behaviour-identical to the old builtin. |
+| `pwd` | `pwd` | Prints the current working directory. | A `/bin` program (externalized from a builtin): reads the cwd the shell delivers at spawn (`GET_CWD`) and prints it, behaviour-identical to the old builtin. |
 | `ls` | `ls [-l] [-a] [path...]` | Lists its operands, **sorted by name** (case-insensitive), defaulting to the current directory. Default layout is multi-column (files plain, subdirectories suffixed `/`); **`-l`** is the long form, one entry per line: a permission string (`drwxr-xr-x`), owner uid/gid, size, and modified `YYYY-MM-DD HH:MM`. **`-a`** includes dotfiles (and `.`/`..`), hidden otherwise. Flags combine (`-la`). Takes **any number of operands** (so `ls *.txt` works): **file** operands are listed as a group, **directory** operands have their contents listed with a `name:` header when there's more than one operand. | The long form's fields come from a `stat` of each entry (`NP_STAT`). **Mode + owner** are real on **ext2** (the one arm that stores `i_mode`/`i_uid`/`i_gid`, e.g. `lost+found` shows `drwx------ 0 0`); **FAT32/exFAT/`/proc`** can't model an owner, so `ls` synthesizes a conventional mode and shows `-` for the owner. **Time** shows only where the filesystem records one: **FAT32** does (real dates on the disk), exFAT/ext2/`/proc` show `-`. Size and type are always real. Assumes an 80-column width. Reads a directory page after page (`NP_READDIR`, since 2026-10-16) into 4 KiB, sorting up to 256 entries; a directory longer than either is listed as far as it fits, then `ls: <dir>: more entries than ls can hold; the listing above is cut short`, and `ls` exits 1. |
 | `tree` | `tree [path]` | Recursively lists a directory as an indented tree (ASCII branches `\|-- `/`` `-- ``, since the framebuffer font is ASCII-only), ending with a `N directories, M files` summary. Defaults to the current directory. Entries are sorted alphabetically (case-insensitive), directories and files interleaved. | Depth-capped at 16 levels (the fixed spawn stack bounds recursion; a deeper subtree isn't descended). `.`/`..` are skipped. Each directory's listing is read page by page into 512 bytes per level, and up to 64 entries per directory are sorted; a directory longer than either ends with a `(cut short: more entries than tree can hold)` line. |
 | `cat` | `cat <file>` | Prints a file's contents. | Streams the file in chunks via the grant/safecopy bulk path, so it prints a file of *any* size (no truncation) without ever holding the whole thing; a file argument is required. |
 | `more` | `more <file>` or `<command> \| more` (also `less`) | Pages output a screen at a time: as many lines as the screen has rows less one (on a serial console, whose size is unknown, 23). At each `--More--` pause: **space** shows the next screen, **Enter** shows one more line, **q** quits; **Ctrl+C** aborts. | A **`/bin` program** now (it was a builtin until the keyboard arc let a spawned program read keys: a pipeline's last stage is handed the keyboard, so a piped pager works). Pages a file argument or stdin (a pipe); content is buffered in its heap, so a very large source is paged up to that and then truncated. `less` is the same program under a second name. Assumes ~24 rows. |
-| `cd` | `cd [path]` | Changes the current working directory. | Validates the target exists and is a directory first (via a listing call — there's no dedicated "does this exist" syscall). |
-| `bind` | `bind <newpath> <oldpath>` | Maps `newpath` onto the existing subtree `oldpath` in this shell's **namespace**, so any path under `newpath` resolves as if it were under `oldpath` (Plan 9 `bind`; the cluster's per-task namespace, Phase 0). E.g. `bind /mnt /EFI` makes `ls /mnt` list `/EFI`. | **Per-task**: only this shell and the commands it spawns (which inherit the namespace) see it — no other task's view changes. Both paths are resolved against the cwd. A bare `bind` remaps *within* the current mount; to point `newpath` at a *different* disk partition use `mount <n> <path>`, and at *another machine* use `mount -r` (both below). |
-| `mkdir` | `mkdir <dir>` | Creates an empty subdirectory. | Fails with a specific message for each reason (already exists, invalid name, parent missing, disk full — the kernel returns distinct `FS_ERR_*` codes now). Grows a full parent directory by a cluster automatically (as do `touch`/`write`/`cp`/`mv` when creating entries). |
+| `cd` | `cd [path]` | Changes the current working directory. | Validates the target exists and is a directory first (via a listing call: there's no dedicated "does this exist" syscall). |
+| `bind` | `bind <newpath> <oldpath>` | Maps `newpath` onto the existing subtree `oldpath` in this shell's **namespace**, so any path under `newpath` resolves as if it were under `oldpath` (Plan 9 `bind`; the cluster's per-task namespace, Phase 0). E.g. `bind /mnt /EFI` makes `ls /mnt` list `/EFI`. | **Per-task**: only this shell and the commands it spawns (which inherit the namespace) see it. No other task's view changes. Both paths are resolved against the cwd. A bare `bind` remaps *within* the current mount; to point `newpath` at a *different* disk partition use `mount <n> <path>`, and at *another machine* use `mount -r` (both below). |
+| `mkdir` | `mkdir <dir>` | Creates an empty subdirectory. | Fails with a specific message for each reason (already exists, invalid name, parent missing, disk full: the kernel returns distinct `FS_ERR_*` codes now). Grows a full parent directory by a cluster automatically (as do `touch`/`write`/`cp`/`mv` when creating entries). |
 | `rmdir` | `rmdir <dir>` | Removes an *empty* subdirectory. | Fails if it doesn't exist, isn't empty, or is root. |
-| `touch` | `touch <file>` | Creates an empty (zero-byte) file, or succeeds silently if one already exists there. | There's no RTC on this kernel, so unlike real `touch`, an existing file's "timestamp" isn't updated — nothing happens, successfully. Fails if the target is a directory. |
-| `rm` | `rm <file>` | Removes a file. | Fails if it doesn't exist or is a directory — use `rmdir` for those. |
-| `write` | `write <file> [words...]` | Joins every word after the filename with a single space (same style as `echo`, no trailing newline) and writes the result as the file's *entire* contents, replacing whatever was there. Creates the file if it doesn't exist; `write <file>` with no words truncates it to empty. | A `/bin` program (externalized from a builtin — the old builtin already word-split and rejoined, so it's behaviour-identical). Content is bounded by the staged argv (`ARGV_MAX`) and the bulk-write cap; for exact bytes or large content use `writeat`/redirection. Fails if the target is a directory or the parent is missing. |
-| `writeat` | `writeat <file> <offset> <text...>` | A **random-access write**: writes the text at byte `offset`, overwriting bytes *in place* and leaving everything outside the written window intact (unlike `write`, which replaces the whole file). If `offset` is past the end of the file, the gap is **zero-filled** on disk. | The file must **already exist** — `writeat` does not create it (use `write`/`touch` first). The text is bounded by the input line. A past-EOF gap is capped at 1 MiB (a larger offset reports a device I/O error). Fails on a missing file, or if the target is a directory. |
-| `cp` | `cp [-f] <src> <dst>` | Copies `src`'s contents to `dst`. An existing `dst` is **refused** (`cp: /B.TXT exists (use -f to overwrite)`) unless `-f` is given — a deliberate departure from POSIX, on a system with no undo, trash or snapshots. | **Streams the copy one chunk at a time via the FAT32 offset-write primitive, so it handles a file of any size** (bounded by disk space, not a shell buffer) — the old 2048-byte ceiling is gone. `cp x x` (a file onto itself, however the two paths are spelled) is **refused**: streaming truncates `dst` first, which would destroy the source. A missing source leaves `dst` untouched. Non-atomic: an interrupted copy leaves `dst` truncated (a partial copy is a wrong copy). No recursive directory copy. |
+| `touch` | `touch <file>` | Creates an empty (zero-byte) file, or succeeds silently if one already exists there. | There's no RTC on this kernel, so unlike real `touch`, an existing file's "timestamp" isn't updated: nothing happens, successfully. Fails if the target is a directory. |
+| `rm` | `rm <file>` | Removes a file. | Fails if it doesn't exist or is a directory. Use `rmdir` for those. |
+| `write` | `write <file> [words...]` | Joins every word after the filename with a single space (same style as `echo`, no trailing newline) and writes the result as the file's *entire* contents, replacing whatever was there. Creates the file if it doesn't exist; `write <file>` with no words truncates it to empty. | A `/bin` program (externalized from a builtin: the old builtin already word-split and rejoined, so it's behaviour-identical). Content is bounded by the staged argv (`ARGV_MAX`) and the bulk-write cap; for exact bytes or large content use `writeat`/redirection. Fails if the target is a directory or the parent is missing. |
+| `writeat` | `writeat <file> <offset> <text...>` | A **random-access write**: writes the text at byte `offset`, overwriting bytes *in place* and leaving everything outside the written window intact (unlike `write`, which replaces the whole file). If `offset` is past the end of the file, the gap is **zero-filled** on disk. | The file must **already exist**: `writeat` does not create it (use `write`/`touch` first). The text is bounded by the input line. A past-EOF gap is capped at 1 MiB (a larger offset reports a device I/O error). Fails on a missing file, or if the target is a directory. |
+| `cp` | `cp [-f] <src> <dst>` | Copies `src`'s contents to `dst`. An existing `dst` is **refused** (`cp: /B.TXT exists (use -f to overwrite)`) unless `-f` is given, a deliberate departure from POSIX, on a system with no undo, trash or snapshots. | **Streams the copy one chunk at a time via the FAT32 offset-write primitive, so it handles a file of any size** (bounded by disk space, not a shell buffer): the old 2048-byte ceiling is gone. `cp x x` (a file onto itself, however the two paths are spelled) is **refused**: streaming truncates `dst` first, which would destroy the source. A missing source leaves `dst` untouched. Non-atomic: an interrupted copy leaves `dst` truncated (a partial copy is a wrong copy). No recursive directory copy. |
 | `ps` | `ps` | One line per scheduler slot: the state (`unused`, `running on core N` for a task a core is executing at that instant (since 2026-10-11; the shell itself, running `ps`, is one), `runnable` for one waiting its turn, `blocked (waiting)`, or `` exited (code N) - `wait` to collect `` for a zombie, where `N` is the exit code) followed by the task's **name**. Boot tasks are named `shell`/`idle`/`fsd`/`cond`/`netd`; a spawned task shows its `argv[0]` (the path `exec`/a pipeline launched it with); unused slots and reaped-pending zombies (whose argv was cleared on exit) show no name. | The name comes from the `TASK_NAME` syscall (`argv[0]` of the named slot); the zombie exit code from `TASK_EXIT_CODE` (peeked without reaping, `wait` is still what collects the status and frees the slot). A task on a core at that instant shows `running on core N`; the shell itself is one while it runs `ps`. Output is redirectable like any other command's. |
 | `kill` | `kill <n>` | Destroys task `n` (see `ps` for numbers). | The permanent slots (the boot shell, idle and the servers, every slot below the first spawnable one) are protected, and so is the shell's own slot: a `fg`-handed child shell is NOT killed by Ctrl+C (that detaches it back to the parent, alive); end it with `kill <n>` from its parent shell after detaching, and its `exit` only logs out and leaves the slot alive. A killed task's slot becomes spawnable again and its memory is reclaimed when allocation order allows. |
 | `fg` | `fg <n>` | Hands the keyboard to task `n`, e.g. `exec /EFI/ORBS/SH.BIN` then `fg <n>` gives a nested shell session (its `exit` only logs out; Ctrl+C at its prompt **detaches** it, returning the keyboard here while the session survives, and `fg <n>` resumes it; `kill <n>` from here ends it). The nested shell keeps the keyboard across the commands it runs: when one of them dies, ownership returns to the task that held the keyboard when it was foregrounded, so the boot shell only gets it back when the nested shell itself dies. (Run `/EFI/ORBS/SH.BIN` as a foreground command instead and the boot shell is in a `wait` on it until then.) | **Ctrl+C** (or **Ctrl+\**) does one of two things by what the owner is; a program in raw keyboard mode (`kbd_mode`, an editor that binds ^C) reads Ctrl+C as a key, and only **Ctrl+\** does it there. A foreground *command* (the shell that ran it is blocked in a `wait` on it) is **terminated**, exactly as `kill` would, and ownership reverts to that shell. A nested shell handed the keyboard with `fg` (its parent is at its own prompt, not waiting) is instead **detached**: ownership reverts to the parent and the session survives, to be resumed with `fg` or ended with `kill`. While this shell owns the keyboard, Ctrl+C (like every unhandled control byte) is ignored by the line editor. `fg` itself is refused unless the caller currently owns the keyboard, so the ownership chain always names the caller. |
 | `send` | `send <n> <words...>` | Sends the words (space-joined, like `write`) as one IPC message (up to 768 bytes) to task `n`'s mailbox. | A `/bin` program (externalized: it only calls a syscall). Fails distinctly for a missing task, an over-long message, or a full mailbox (4 pending max). The IPC test companion to `recv`. |
 | `recv` | `recv` | Blocks until a message arrives and prints `task N: <message>`. | A `/bin` program; receives into its own spawned slot (run it, find its slot in `ps`, `send <slot> …` from elsewhere). Ctrl+C aborts. |
 | `wait` | `wait <n>` | Blocks until task `n` dies, then reports its exit status, which is also what *reaps* it (an exited task holds its slot as a zombie, shown by `ps`, until waited). | Ctrl+C during the boot shell's wait interrupts it (the task keeps running); in a nested shell that holds the keyboard, Ctrl+C detaches that shell back to its parent (the wait keeps running; `kill` it from the parent, or `fg` back). Ctrl+\ does the same as Ctrl+C here. Any other typing during a wait is kept for the next read, like type-ahead at a busy foreground job in `sh`, unless an interrupt flushes it. Waiting on a permanent slot (the boot shell, idle and the servers, every slot below the first spawnable one) is refused because it never dies; waiting on yourself is refused separately, as a deadlock. **Behavior change from earlier builds:** an un-waited exited task holds its slot: `exec` something three times without waiting and the third fails with "no free task slot" until you `wait` (or the task is `kill`ed, which reaps immediately). |
-| `exit` / `logout` | `exit` | Ends the current login **session**: the shell restores root and returns to the login prompt (a different user can then log in). | The shell itself never exits — it's task 0, the sole keyboard owner — so this is logout, not process death. Each new session starts clean (fresh env + cwd). A spawned/replacement program *can* genuinely exit (`hello/` via `exec /EFI/ORBS/HELLO.BIN` demonstrates the `exit` syscall). |
-| `shutdown` | `shutdown` (alias `poweroff`) | Powers the machine off (the `POWER` syscall → PSCI `SYSTEM_OFF`; under QEMU the VM exits). | A **builtin**, not a `/bin` program — you must be able to power off even with no disk mounted (the same reasoning as `erase`/`partition`/`format`). The PSCI conduit (`hvc`/`smc`) is read from ACPI's FADT at boot; if PSCI is unavailable, it falls back to a halt. Does not return. |
-| `halt` | `halt` | Halts the CPU: masks interrupts and parks the core forever, so the whole machine stops (but power is not cut — under QEMU the VM keeps running with the CPU halted). | A builtin, like `shutdown`. Nothing runs after it — not even the timer tick. Use `shutdown` to actually power off. |
-| `exec` | `exec <path> [args...]` | Loads the program at `path` and starts it as a new, independent task alongside this shell (see `ps`) — spawn semantics, not exec-replaces-current-process. | Any words after the path become the program's **argv** (`argv[0]` is the path), read via the `GET_ARGC`/`GET_ARG` syscalls. Reads the program via the filesystem server in 512-byte chunks, stages them into the kernel, then spawns (see `architecture.md`'s "Dynamic task creation"). Fire-and-forget (not waited); fails with the specific reason: no such file, is a directory, not a loadable program (bad ELF), too large, or no free task slot. |
-| `mount` | `mount` | With no argument, **reports what's mounted**: the filesystem format, the first sector (LBA) of its partition, and the disk's capacity — e.g. `exFAT mounted at partition LBA 2048 (disk 182272 sectors, 89 MiB)`, or `nothing mounted` if none is. | Asks the filesystem server `FSOP_MOUNT_INFO`. Redirectable like any command's output. The disk-management arc (milestone 1) repurposed bare `mount` to *list*, Unix-style; the mounting action moved to `mount -a`. |
+| `exit` / `logout` | `exit` | Ends the current login **session**: the shell restores root and returns to the login prompt (a different user can then log in). | The shell itself never exits (it's task 0, the sole keyboard owner), so this is logout, not process death. Each new session starts clean (fresh env + cwd). A spawned/replacement program *can* genuinely exit (`hello/` via `exec /EFI/ORBS/HELLO.BIN` demonstrates the `exit` syscall). |
+| `shutdown` | `shutdown` (alias `poweroff`) | Powers the machine off (the `POWER` syscall → PSCI `SYSTEM_OFF`; under QEMU the VM exits). | A **builtin**, not a `/bin` program: you must be able to power off even with no disk mounted (the same reasoning as `erase`/`partition`/`format`). The PSCI conduit (`hvc`/`smc`) is read from ACPI's FADT at boot; if PSCI is unavailable, it falls back to a halt. Does not return. |
+| `halt` | `halt` | Halts the CPU: masks interrupts and parks the core forever, so the whole machine stops (but power is not cut: under QEMU the VM keeps running with the CPU halted). | A builtin, like `shutdown`. Nothing runs after it, not even the timer tick. Use `shutdown` to actually power off. |
+| `exec` | `exec <path> [args...]` | Loads the program at `path` and starts it as a new, independent task alongside this shell (see `ps`): spawn semantics, not exec-replaces-current-process. | Any words after the path become the program's **argv** (`argv[0]` is the path), read via the `GET_ARGC`/`GET_ARG` syscalls. Reads the program via the filesystem server in 512-byte chunks, stages them into the kernel, then spawns (see `architecture.md`'s "Dynamic task creation"). Fire-and-forget (not waited); fails with the specific reason: no such file, is a directory, not a loadable program (bad ELF), too large, or no free task slot. |
+| `mount` | `mount` | With no argument, **reports what's mounted**: the filesystem format, the first sector (LBA) of its partition, and the disk's capacity, e.g. `exFAT mounted at partition LBA 2048 (disk 182272 sectors, 89 MiB)`, or `nothing mounted` if none is. | Asks the filesystem server `FSOP_MOUNT_INFO`. Redirectable like any command's output. The disk-management arc (milestone 1) repurposed bare `mount` to *list*, Unix-style; the mounting action moved to `mount -a`. |
 | `mount -a` | `mount -a` | Makes a USB storage stick's filesystem available. The Parallels workflow: passthrough USB attaches a few seconds *after* boot, so boot, wait a moment, then `mount -a`. | One request to the filesystem server, which first retries mounting whatever block device the kernel already holds; only if that yields nothing, and nothing is mounted, does it have the kernel rescan the USB ports and install a found stick as a *replacement* device, then mount it. Only the server may ask the kernel for that swap (since 2026-10-19). An unmountable boot-time disk (e.g. `make run`'s FAT16) therefore never blocks a later stick. |
 | `mount <n> <path>` | `mount 1 /mnt/f` | **Mounts the disk's `n`-th partition and makes it visible at `<path>`**: a *second* filesystem alongside the boot mount at `/` (cluster Phase 0 multi-mount). `fsd` mounts the partition (`FSOP_MOUNT_AT`) and returns its tree id; the shell `bind`s `<path>` onto it. So `ls /mnt/f` lists the mounted partition while `ls /` still lists the boot filesystem, two different on-disk filesystems at once. | **Per-task** (it's a `bind`): only this shell and the commands it spawns see it. The partition index is the MBR/GPT discovery order (partition 0 is usually the boot auto-mount at tree 0). A partition is mounted once: mounting one that is already mounted (by this shell, another, or as `/`) binds `<path>` to the same tree, so every view of a partition is one filesystem. Needs `/` mounted first (`mount -a`). Up to 3 more partitions at once; past that, `every mount slot is in use`. |
-| `mount -r <host:port> <path>` | `mount -r 10.0.2.10:564 /mnt/a` | **Remote-mount another machine's 9P export** into this shell's namespace at `<path>` (cluster Phase 1c). A path under `<path>` then resolves to a `NETOP_RMOUNT` round trip through `netd` to `host:port`, so `ls /mnt/a` / `cat /mnt/a/file` read (and write) the *remote* machine's disk over TCP. | **Per-task**, inherited by spawned commands. Read+write (single-writer, no distributed lock). **Authenticated** with per-machine Ed25519 keys — a peer whose public key the far side does not list in `/etc/cluster/authorized` is refused; both request and reply are signed (integrity, not confidentiality — bytes cross in cleartext). `host` is a dotted-quad IPv4; `port` defaults to 564. A disconnect fails the next op cleanly rather than hanging. See `manual.md`'s cluster section. |
+| `mount -r <host:port> <path>` | `mount -r 10.0.2.10:564 /mnt/a` | **Remote-mount another machine's 9P export** into this shell's namespace at `<path>` (cluster Phase 1c). A path under `<path>` then resolves to a `NETOP_RMOUNT` round trip through `netd` to `host:port`, so `ls /mnt/a` / `cat /mnt/a/file` read (and write) the *remote* machine's disk over TCP. | **Per-task**, inherited by spawned commands. Read+write (single-writer, no distributed lock). **Authenticated** with per-machine Ed25519 keys: a peer whose public key the far side does not list in `/etc/cluster/authorized` is refused; both request and reply are signed (integrity, not confidentiality: bytes cross in cleartext). `host` is a dotted-quad IPv4; `port` defaults to 564. A disconnect fails the next op cleanly rather than hanging. See `manual.md`'s cluster section. |
 | `mount -p <path>` | `mount -p /proc` | Binds the synthetic **`/proc`** filesystem, the process table as files (cluster Phase 3), at `<path>`. Then `ls <path>` lists `cpus` and one dir per task slot, `cat <path>/cpus` reads how many cores take tasks (since 2026-10-11), `cat <path>/<n>/state` reads a slot's scheduler state (`runnable`/`blocked`/`zombie`/`unused`), and `cat <path>/<n>/core` the core executing it at that instant, or `none`. | Read-only. A *remote* machine's `/proc` needs no bind: read it at `<remote-mount>/proc` (netd's export routes it). |
 | `mount -c <path>` | `mount -c /dev/cons` | Binds the **console** as a *writable* file (cluster Phase 3 `/dev/cons`) at `<path>`. A write to `<path>` renders on the console; reads are refused. So `echo hi > /dev/cons` prints on screen, and `write <remote-mount>/dev/cons msg` prints on *another machine's* screen. | Write-only; a write routes to the console server (`cond`). |
 | `mount -n <path>` | `mount -n /net` | Binds the network server's synthetic **`/net`** (this machine's network identity as read-only files, cluster Phase 3) at `<path>`. `cat <path>/ip` reads the IPv4, `cat <path>/mac` the MAC. | Read-only. `cat <remote-mount>/net/ip` reads *another* machine's address. |
 | `unmount` | `unmount` | Drops every mounted disk filesystem (`FSOP_UNMOUNT`), `/` and any `mount <n> <path>` partitions alike, so the disk can be reformatted or a different volume mounted; prints `unmounted`, or `nothing was mounted`. Files open on them answer "no filesystem" until closed. `/proc` stays. This shell's own `mount <n> <path>` bindings are removed with them; another shell's stay, and may reach whatever partition a later mount puts in the same slot (mount again rather than reuse an old path there). | The kernel's block device is untouched: `mount -a` re-probes and remounts it. The disk-management arc, milestone 1. |
-| `erase` | `erase disk` | **Destructive.** Zeroes the disk's first 2048 sectors (1 MiB) — the partition table plus any filesystem metadata near the start — so the disk can be freshly partitioned (`FSOP_ERASE`). | Requires the literal `disk` argument as a guard against an accidental bare `erase`. Refused while a filesystem is mounted (`run unmount first`) and if there's no disk device. A **builtin**, not a `/bin` program: it runs when nothing is mounted, which is exactly when `/bin` can't be read to load a program. Disk-management arc, milestone 2. |
+| `erase` | `erase disk` | **Destructive.** Zeroes the disk's first 2048 sectors (1 MiB), the partition table plus any filesystem metadata near the start, so the disk can be freshly partitioned (`FSOP_ERASE`). | Requires the literal `disk` argument as a guard against an accidental bare `erase`. Refused while a filesystem is mounted (`run unmount first`) and if there's no disk device. A **builtin**, not a `/bin` program: it runs when nothing is mounted, which is exactly when `/bin` can't be read to load a program. Disk-management arc, milestone 2. |
 | `partition` | `partition [fat32\|exfat\|ext2]` | **Destructive.** Writes a fresh MBR with one primary partition spanning the disk from LBA 2048 to the end, tagged with the given type (default `fat32` → 0x0C; `exfat` → 0x07; `ext2`/`linux` → 0x83) (`FSOP_PARTITION`). | Only LBA 0 (the partition table) is written; the partition is left **unformatted**: `format` lays a filesystem into it, and `mount` won't succeed until then. Refused while mounted. A GPT disk is refused too, since writing LBA 0 alone would leave the GPT in force and the new MBR unread: it says `the disk holds a GPT` and to run `erase disk` first. Writing a GPT is a later step. A builtin, same reason as `erase`. Disk-management arc, milestone 2. |
 | `format` | `format [fat32\|exfat\|ext2]` | **Destructive.** Lays a fresh filesystem into the disk's root partition (`FSOP_FORMAT`), mkfs: the first partition, or on one disk carrying the ESP and a root the partition `mount` takes as `/`, by the same rule: the first beside the partition the system booted from that holds a filesystem, else the first beside it, so the ESP is never formatted while a root sits beside it (one-disk step 4). A GPT disk is refused: this formatter addresses MBR partitions only. **FAT32, exFAT, and ext2** are all supported. | The partition must already exist (`partition` first); refused while mounted. After it succeeds, `mount -a` then `ls` shows an empty root (or `lost+found`, on ext2). Validated against macOS `fsck_msdos` / `fsck_exfat` and, for ext2, `e2fsck` + `debugfs`. The ext2 formatter is single-block-group (128 MiB cap). A builtin, same reason as `erase`/`partition`. Disk-management arc, milestone 3 (complete). The typical prep flow is `unmount` → `erase disk` → `partition ext2` → `format ext2` → `mount -a`. |
-| `ping` | `ping <a.b.c.d>` | Sends an ICMP echo request to a host and reports whether a reply came back (`reply from …`, `no reply … (timeout)`, `… is unreachable (no ARP reply)`, or `no network interface this boot`). | Asks the network server (`netd`) to ARP-resolve the host and ICMP-echo it — the whole protocol stack lives there; the shell just packs the target and reads the status. **Guest-initiated only** (the guest can't yet *answer* a host's ping — needs async receive). QEMU only for now (Parallels' virtio-net is PCI, unsupported); the source IP `10.0.2.15` and /24 assumption are the QEMU user-net convention. |
-| `resolve` | `resolve <hostname>` | Looks up a hostname's IPv4 via DNS and prints `<host> is a.b.c.d`, or `could not resolve …` / `no response for …`. | Asks `netd` to send a DNS A-record query over **UDP** to the QEMU user-net DNS server (`10.0.2.3`), which forwards to the host's resolver — so it resolves *real* names (`resolve example.com`). A records only; QEMU only (same reasons as `ping`). |
-| `fetch` | `fetch <hostname>` | Opens a **client TCP** connection to the host on port 80, sends a minimal HTTP `GET /`, and prints the response (e.g. `fetch example.com` → `HTTP/1.1 200 OK …`). | Chains the whole stack in `netd`: resolve → route (via the gateway for off-subnet hosts) → TCP handshake → HTTP → clean teardown. A client command; one connection, no retransmission; the response is capped at what fits one IPC reply (the full length is reported). (`netd` itself *does* serve TCP — see `dial`/`serve` below and its HTTP/export listeners.) QEMU only (same reasons as `ping`). |
-| `dial` | `dial /net 1.2.3.4 80 GET / HTTP/1.0` | **Dial out of a machine's NIC** (`/net/tcp` connection files): opens a raw TCP connection to `<ip> <port>` and prints the reply, optionally sending the trailing words as a request first. `<base>` picks *whose* network dials: `dial /net …` uses this machine; `dial /mnt/a/net …` (a remote-mounted export) dials out of **machine A's** NIC — "use another machine's network." | A raw connection you drive yourself (unlike `cpu A fetch`, which runs a *program* on A). Stop-and-wait, small transactions. Needs `<base>/tcp` reachable — bind local with `mount -n /net`, or a remote export with `mount -r`. See `manual.md`'s cluster section. |
-| `serve` | `serve /net 9000 hi there` | **Accept an inbound connection on a machine's NIC** (`/net/tcp` dial-in, the mirror of `dial`): announces `<port>`, accepts one client, sends the trailing words as a response, and closes. `serve /mnt/a/net 9000 …` announces on **machine A's** network, so a client that connects to A's address is answered here — A lends its ingress, this machine owns the service. | Inverse of `cpu A <server>` (which runs the server *on* A): here the service's state lives where `serve` runs. Small fan-out, TCP, one accept-then-exit (a persistent loop is a straightforward extension). See `manual.md`'s cluster section. |
-| `cpu` | `cpu <host:port> <command...>` | **Remote execution** (cluster Phase 4, the Plan 9 `cpu` model): runs `<command>` on the machine at `host:port` and prints its output here. The command runs on the *remote's* CPU using its `/bin`, but reads **this** machine's files through the caller's namespace imported at **`/host`** — so within the command, `/` is the machine it runs on and `/host` is the machine you launched from. E.g. `cpu 10.0.2.10:564 ls /host` lists *your* root; `cpu 10.0.2.10:564 cat /host/x` runs `cat` on the remote but reads *your* `x`. | **Authenticated** with per-machine Ed25519 keys (a peer the far side does not authorize is refused); the export also refuses `cpu` entirely if the remote has a `\NOEXEC` flag file (disk-share allowed, remote-exec off). The command's program is loaded from the *remote's* `/bin`, so both machines should share it. Output up to ~2 KB comes back whole — the shell pulls it in chunks (`NETOP_RUN_MORE`); larger output is still bounded (truly unbounded streaming is a documented later refinement). Under the hood: `netd` frames an `NP_RUN` to the remote export, which spawns the command with stdout piped back and `/host` mounted to the caller; the caller's `netd` stays responsive to serve the command's `/host` reads *during* the run. See `manual.md`'s cluster section and `roadmap-cluster-phase4.md`. |
+| `ping` | `ping <a.b.c.d>` | Sends an ICMP echo request to a host and reports whether a reply came back (`reply from …`, `no reply … (timeout)`, `… is unreachable (no ARP reply)`, or `no network interface this boot`). | Asks the network server (`netd`) to ARP-resolve the host and ICMP-echo it. The whole protocol stack lives there; the shell just packs the target and reads the status. **Guest-initiated only** (the guest can't yet *answer* a host's ping, which needs async receive). QEMU only for now (Parallels' virtio-net is PCI, unsupported); the source IP `10.0.2.15` and /24 assumption are the QEMU user-net convention. |
+| `resolve` | `resolve <hostname>` | Looks up a hostname's IPv4 via DNS and prints `<host> is a.b.c.d`, or `could not resolve …` / `no response for …`. | Asks `netd` to send a DNS A-record query over **UDP** to the QEMU user-net DNS server (`10.0.2.3`), which forwards to the host's resolver, so it resolves *real* names (`resolve example.com`). A records only; QEMU only (same reasons as `ping`). |
+| `fetch` | `fetch <hostname>` | Opens a **client TCP** connection to the host on port 80, sends a minimal HTTP `GET /`, and prints the response (e.g. `fetch example.com` → `HTTP/1.1 200 OK …`). | Chains the whole stack in `netd`: resolve → route (via the gateway for off-subnet hosts) → TCP handshake → HTTP → clean teardown. A client command; one connection, no retransmission; the response is capped at what fits one IPC reply (the full length is reported). (`netd` itself *does* serve TCP: see `dial`/`serve` below and its HTTP/export listeners.) QEMU only (same reasons as `ping`). |
+| `dial` | `dial /net 1.2.3.4 80 GET / HTTP/1.0` | **Dial out of a machine's NIC** (`/net/tcp` connection files): opens a raw TCP connection to `<ip> <port>` and prints the reply, optionally sending the trailing words as a request first. `<base>` picks *whose* network dials: `dial /net …` uses this machine; `dial /mnt/a/net …` (a remote-mounted export) dials out of **machine A's** NIC: "use another machine's network." | A raw connection you drive yourself (unlike `cpu A fetch`, which runs a *program* on A). Stop-and-wait, small transactions. Needs `<base>/tcp` reachable: bind local with `mount -n /net`, or a remote export with `mount -r`. See `manual.md`'s cluster section. |
+| `serve` | `serve /net 9000 hi there` | **Accept an inbound connection on a machine's NIC** (`/net/tcp` dial-in, the mirror of `dial`): announces `<port>`, accepts one client, sends the trailing words as a response, and closes. `serve /mnt/a/net 9000 …` announces on **machine A's** network, so a client that connects to A's address is answered here. A lends its ingress, this machine owns the service. | Inverse of `cpu A <server>` (which runs the server *on* A): here the service's state lives where `serve` runs. Small fan-out, TCP, one accept-then-exit (a persistent loop is a straightforward extension). See `manual.md`'s cluster section. |
+| `cpu` | `cpu <host:port> <command...>` | **Remote execution** (cluster Phase 4, the Plan 9 `cpu` model): runs `<command>` on the machine at `host:port` and prints its output here. The command runs on the *remote's* CPU using its `/bin`, but reads **this** machine's files through the caller's namespace imported at **`/host`**, so within the command, `/` is the machine it runs on and `/host` is the machine you launched from. E.g. `cpu 10.0.2.10:564 ls /host` lists *your* root; `cpu 10.0.2.10:564 cat /host/x` runs `cat` on the remote but reads *your* `x`. | **Authenticated** with per-machine Ed25519 keys (a peer the far side does not authorize is refused); the export also refuses `cpu` entirely if the remote has a `\NOEXEC` flag file (disk-share allowed, remote-exec off). The command's program is loaded from the *remote's* `/bin`, so both machines should share it. Output up to ~2 KB comes back whole: the shell pulls it in chunks (`NETOP_RUN_MORE`); larger output is still bounded (truly unbounded streaming is a documented later refinement). Under the hood: `netd` frames an `NP_RUN` to the remote export, which spawns the command with stdout piped back and `/host` mounted to the caller; the caller's `netd` stays responsive to serve the command's `/host` reads *during* the run. See `manual.md`'s cluster section and `roadmap-cluster-phase4.md`. |
 | `env` | `env` | Lists every environment variable as `NAME=VALUE`, one per line. | Shell-local variables (`PATH` is preset to `/bin`). Redirectable like any command's output. |
-| `set` / `export` | `set NAME=VALUE` | Sets (or replaces) an environment variable. `export` is an alias. | The value is a **single token** — no quoting, so `set X=a b` sets `X` to `a` (same limitation as `echo`). Fails if the name/value is too long or the table is full (16 vars). Variables are **exported to every spawned command** (see `printenv`), in addition to `$VAR` expansion. |
+| `set` / `export` | `set NAME=VALUE` | Sets (or replaces) an environment variable. `export` is an alias. | The value is a **single token**, with no quoting, so `set X=a b` sets `X` to `a` (same limitation as `echo`). Fails if the name/value is too long or the table is full (16 vars). Variables are **exported to every spawned command** (see `printenv`), in addition to `$VAR` expansion. |
 | `unset` | `unset NAME` | Removes an environment variable. | Silent if it wasn't set. |
-| `su` | `su <uid>[:<gid>]` | (Root only) changes this session's **user identity** (uid and/or gid; numeric). Forms are chown-style: `uid`, `uid:gid`, `:gid`. | A **builtin** because `SET_ID` acts on the caller, so it must change the shell's *own* task identity (a `/bin` program would only change its short-lived child); commands spawned afterward inherit it (`id` proves it), and the prompt switches `#`↔`$`. **Root only, enforced by the shell** so a logged-in user can't escalate — the kernel's saved-uid restore is reserved for `logout`, and a user's children can't restore root. Root uses it to drop to a user; a user's way to root is `logout` + logging in as root. See `man su`, `man login`. |
-| `printenv` | `printenv` | Prints the environment inherited from the shell, one `NAME=VALUE` per line. | A `/bin` program (reads the exported env via `GET_ENVC`/`GET_ENV`). Proves the export works: a spawned program sees the shell's env (the `set` vars plus `PATH`). A pipeline stage like any other — `printenv \| grep PATH`. |
-| `selftest` | `selftest` | Exercises the two historically-crashing code patterns (`write!`/`core::fmt` formatting, slice/str-vs-literal comparison) and prints pass/fail lines. | A `/bin` program now — so it tests a *spawned* PIE binary's relocation (what actually matters), including that `core::fmt` links and runs. The relocating loader's permanent acceptance test — see `processes.md`'s "Binary format". |
+| `su` | `su <uid>[:<gid>]` | (Root only) changes this session's **user identity** (uid and/or gid; numeric). Forms are chown-style: `uid`, `uid:gid`, `:gid`. | A **builtin** because `SET_ID` acts on the caller, so it must change the shell's *own* task identity (a `/bin` program would only change its short-lived child); commands spawned afterward inherit it (`id` proves it), and the prompt switches `#`↔`$`. **Root only, enforced by the shell** so a logged-in user can't escalate: the kernel's saved-uid restore is reserved for `logout`, and a user's children can't restore root. Root uses it to drop to a user; a user's way to root is `logout` + logging in as root. See `man su`, `man login`. |
+| `printenv` | `printenv` | Prints the environment inherited from the shell, one `NAME=VALUE` per line. | A `/bin` program (reads the exported env via `GET_ENVC`/`GET_ENV`). Proves the export works: a spawned program sees the shell's env (the `set` vars plus `PATH`). A pipeline stage like any other: `printenv \| grep PATH`. |
+| `selftest` | `selftest` | Exercises the two historically-crashing code patterns (`write!`/`core::fmt` formatting, slice/str-vs-literal comparison) and prints pass/fail lines. | A `/bin` program now, so it tests a *spawned* PIE binary's relocation (what actually matters), including that `core::fmt` links and runs. The relocating loader's permanent acceptance test. See `processes.md`'s "Binary format". |
 | `bootid` | `bootid` | Prints this boot's counter, which stores (UEFI variable, ESP file) held it from before this boot, and how many bytes of boot entropy the firmware gave. | A `/bin` program over the `BOOT_ID` syscall. It also asks for the entropy itself and reports the kernel's refusal (only `netd` may read it), exiting 2 if the kernel ever hands it over; otherwise 0 with a counter and 1 without. |
-| `mv` | `mv [-f] <src> <dst>` | Renames or moves a file or directory to `dst` — and if `dst` is an existing directory, moves `src` *into* it keeping its basename (`mv notes.txt backup/`), like real `mv`. An existing destination *file* is **refused** unless `-f` is given, reported by the name that would actually be replaced (`mv a dir` says `dir/a`). | A `dst` that exists and is an ordinary file is **replaced, but only with `-f`** (since 2026-09-02): `fsd` can replace it — that is POSIX `rename`, and right for a protocol verb with no user to consult — while `/bin/mv` refuses without the flag. A **refusal rather than a prompt**, because prompting needs the keyboard and `mv` has none in a pipeline, under `cpu`, or from a 9P peer. Replacing a *directory*, or moving a directory onto an existing name, is refused whatever flags are given. On ext2 the replacement is near-atomic — one write re-points the destination's directory entry at the source's inode, so the name never resolves to nothing; FAT32/exFAT have no inode indirection, so there it takes two writes rather than one — but the new entry is written *first*, so the name is never absent either; a reader in between finds two entries and gets one of the two files. What those formats cost is atomicity, not the name. `mv x x` is refused ("source and destination are the same") — and refused *again* inside `fsd`, since a remote 9P client does not go through `/bin/mv`. Moving a directory to a different parent correctly updates its own `..` entry, so `cd ..` inside it still resolves to the *new* parent afterward. No cycle detection beyond the trivial self-move guard. |
+| `mv` | `mv [-f] <src> <dst>` | Renames or moves a file or directory to `dst`, and if `dst` is an existing directory, moves `src` *into* it keeping its basename (`mv notes.txt backup/`), like real `mv`. An existing destination *file* is **refused** unless `-f` is given, reported by the name that would actually be replaced (`mv a dir` says `dir/a`). | A `dst` that exists and is an ordinary file is **replaced, but only with `-f`** (since 2026-09-02): `fsd` can replace it (that is POSIX `rename`, and right for a protocol verb with no user to consult), while `/bin/mv` refuses without the flag. A **refusal rather than a prompt**, because prompting needs the keyboard and `mv` has none in a pipeline, under `cpu`, or from a 9P peer. Replacing a *directory*, or moving a directory onto an existing name, is refused whatever flags are given. On ext2 the replacement is near-atomic: one write re-points the destination's directory entry at the source's inode, so the name never resolves to nothing; FAT32/exFAT have no inode indirection, so there it takes two writes rather than one, but the new entry is written *first*, so the name is never absent either; a reader in between finds two entries and gets one of the two files. What those formats cost is atomicity, not the name. `mv x x` is refused ("source and destination are the same"), and refused *again* inside `fsd`, since a remote 9P client does not go through `/bin/mv`. Moving a directory to a different parent correctly updates its own `..` entry, so `cd ..` inside it still resolves to the *new* parent afterward. No cycle detection beyond the trivial self-move guard. |
 
 Any other input names a **program to run** in the foreground, with the whole
 line as its argv. How the program is found follows the standard shell rule:
 
-- A **bare name** (no `/`) is looked up on **`$PATH`** — each `:`-separated
-  directory in turn, e.g. `/bin/<name>` — so a command binary is invoked by
+- A **bare name** (no `/`) is looked up on **`$PATH`**: each `:`-separated
+  directory in turn, e.g. `/bin/<name>`, so a command binary is invoked by
   name, no `exec` or leading path needed (`echo hello`).
 - A word **containing `/`** is a **pathname**, resolved against the current
   directory (or used as-is if absolute) and **not** searched on `$PATH`:
@@ -183,39 +183,39 @@ cat a.txt > b.txt
 Semantics, deliberately close to `sh` where the architecture allows:
 
 - **Only a command's output is redirected; error messages always stay
-  on the screen** — the POSIX stdout/stderr split, without a separate
+  on the screen**: the POSIX stdout/stderr split, without a separate
   `2>` mechanism to reroute the error half.
 - **The target file is created (or, for `>`, truncated) even if the
-  command produced nothing** — `> f.txt` on its own, with no command at
+  command produced nothing**: `> f.txt` on its own, with no command at
   all, legitimately creates an empty file, same as `sh`. `>> f.txt` to
   a missing file creates it.
 - **The operator must be its own whitespace-separated word.**
-  `echo hi>f` is a single token, not a redirect — the same no-quoting
+  `echo hi>f` is a single token, not a redirect, the same no-quoting
   tokenization rule as everywhere else. Exactly one word (the target
   path) may follow the operator.
 - `cat`'s display-only trailing newline stays off the captured bytes,
   so `cat a > b` copies `a`'s bytes exactly. `cat big > b` now captures
   and writes the whole thing (`cat` streams any size, and the capture is
-  heap-backed — see below), no longer refusing.
+  heap-backed, see below), no longer refusing.
 
 Limits, all refuse-outright rather than write-something-wrong:
 
 - A command's redirected output is captured in the shell's **1 MiB heap
-  region** (the userland-heap milestone — a raw buffer far larger than the
+  region** (the userland-heap milestone: a raw buffer far larger than the
   stack, so `cat big > file` fits and is written to disk in `SAFECOPY_MAX`
   chunks); a command that emits more than 1 MiB prints
   `output too large to capture` and **nothing is written at all**.
 - `>>` **appends at the file's end via the FAT32 offset-write
-  primitive** (`write_at`) — no read-back of the existing content, so it
+  primitive** (`write_at`), with no read-back of the existing content, so it
   works on a target file of **any existing size** (the old
   read-concatenate-rewrite capped both halves at a combined buffer and
   refused a large existing file; that refusal is gone). The *new* output
-  is still bounded by the 1024-byte capture above — the input side — but
+  is still bounded by the 1024-byte capture above (the input side), but
   what you append it to is not.
 
 ## Pipelines
 
-Chain commands with `|` — a full N-stage pipeline (`a | b | c | …`). Each
+Chain commands with `|`: a full N-stage pipeline (`a | b | c | …`). Each
 stage is resolved like any command (bare name via `$PATH`, or a path), and
 **stages take arguments**:
 
@@ -227,22 +227,22 @@ ps | upper                               ->  the process list, uppercased
 ```
 
 - **A single builtin may appear at any position.** A builtin runs *in the
-  shell*, not as a task, and no builtin reads stdin — so a builtin can only be a
+  shell*, not as a task, and no builtin reads stdin, so a builtin can only be a
   pipeline's *source*, never a stream transformer. A non-first builtin therefore
   means "run everything upstream for its side effects, discard its output, and
   let the builtin be the source of the stages after it." So `ps | grep x`
-  (first), `cat f | ps` (last), and `ls | ps | grep x` (middle — `ls` drained,
+  (first), `cat f | ps` (last), and `ls | ps | grep x` (middle: `ls` drained,
   `ps` feeds `grep`) all work, and a builtin last stage can be redirected
   (`cat f | ps > out`). A builtin runs with its output captured (the same
-  capture the redirection machinery uses — a bigger output refuses rather than
+  capture the redirection machinery uses: a bigger output refuses rather than
   truncating), then streamed on. **Two or more builtins** in one pipeline are
-  refused ("only one builtin per pipeline") — only one thing can be the source.
+  refused ("only one builtin per pipeline"): only one thing can be the source.
 - **Every *program* later stage reads its predecessor's output as stdin**; an
   unknown name reports "not found (a pipeline stage must be a program)".
 - Programs stream **directly** to the next stage - the shell is not in the
   byte path (except for the one hop out of a builtin first stage). The shell
   spawns the stages, aims each one's stdout at the next (the last at the
-  console, or — with a trailing `> file`/`>> file` — at the shell, which
+  console, or (with a trailing `> file`/`>> file`) at the shell, which
   captures it and writes it to the file), and each producer gets a runtime
   capability to reach its consumer, granted by the kernel's `SPAWN` itself
   since 2026-10-12 (a `DELEGATE` before that, made after every stage was
@@ -250,7 +250,7 @@ ps | upper                               ->  the process list, uppercased
   sibling-to-sibling send is otherwise forbidden by the IPC send-mask, and
   only the stages' spawner can grant it. Each stage holds its
   consumer *and* the `TO_NET` every spawned command gets, so the delegation set
-  is a per-task bitmask rather than a single target — it was one slot until
+  is a per-task bitmask rather than a single target: it was one slot until
   2026-09-06, and a piped read of a remote mount could not work until it was
   not. The shell then waits for every stage to exit.
 
@@ -269,7 +269,7 @@ cat out.txt                          ->  Hello from a second program! ...
 ```
 
 **`a | b > file`** (and `>> file`) **redirects the pipeline's output to a
-file** — the last stage's output is captured by the shell and written to the
+file**: the last stage's output is captured by the shell and written to the
 file (create/replace for `>`, append for `>>`), exactly the way a single
 `cmd > file` is captured, and subject to the same 1 MiB capture limit. The
 redirect is parsed off first, so the `|` chain runs normally with only its
@@ -296,7 +296,7 @@ killed after the same timeout.
   `dial`, `serve`), and `echo`/`uptime`/`clear` are `/bin` programs, not
   builtins.** They were
   externalized (they run as `/bin/ECHO`, `/bin/LS`, `/bin/PING`, etc., found via
-  `$PATH`) — behaviour is identical from a user's view, but they're
+  `$PATH`). Behaviour is identical from a user's view, but they're
   **unavailable on a boot without a mounted filesystem** (e.g. `make run`'s
   FAT16, or real hardware with no USB stick), where a bare `echo` reports
   "unknown command" instead. (The filesystem ones need a mounted disk to do
@@ -310,26 +310,26 @@ killed after the same timeout.
   `mount`/`selftest`/`help`.
 - **Pipeline filters live in `/bin` too:** `upper` (uppercases its input),
   `grep [-i] [-v] [-n] [-F] <pattern>` (lines matching an **extended regular
-  expression** — `.` `*` `+` `?` `[a-z]` `[^0-9]` `^` `$` `|` `(...)` and `\`
+  expression**: `.` `*` `+` `?` `[a-z]` `[^0-9]` `^` `$` `|` `(...)` and `\`
   escapes, via the shared `regex` crate; `-i` ignores case, `-v` inverts to
   non-matching lines, `-n` prefixes the input line number, `-F` matches the
   pattern literally instead; flags may combine, e.g. `-in`. The line terminator
   is stripped before matching, so `$` anchors to the visible end of the line. A
   bad pattern is reported and `grep` exits rather than falling back to a
   substring search. Note there are no quotes yet: a bare `|` between spaces is a
-  pipeline separator, so write alternation without spaces — `grep a|b`), `wc` (line/word/byte
+  pipeline separator, so write alternation without spaces, `grep a|b`), `wc` (line/word/byte
   counts), `head [N]` (first N lines, default 10), `tail [N]` (last N lines,
-  default 10 — the complement of `head`; capped at 64 retained lines), `nl`
+  default 10, the complement of `head`; capped at 64 retained lines), `nl`
   (numbers every line, right-aligned 6-column count + tab, like `cat -n`),
   `rev` (reverses the character order of each line), `uniq` (collapses
   runs of *adjacent* identical lines), and `sort [-r] [-n] [-u] [-f]` (sorts
-  all input lines — `-r` reverse, `-n` numeric, `-u` unique, `-f` fold case;
+  all input lines: `-r` reverse, `-n` numeric, `-u` unique, `-f` fold case;
   flags combine, e.g. `-rn`). Each reads stdin and writes to its
   stdout target, so they chain: `cat FILE | grep x | wc`,
   `ls /bin | tail 5`, `cat FILE | sort | uniq`, `echo hi | rev`. They only do
   anything as a pipeline stage (they read piped input); run bare, they just
   wait for input that never comes (Ctrl+C to abort). Most are bounded to a
-  256-byte line buffer with no heap — a longer line is handled in pieces
+  256-byte line buffer with no heap, so a longer line is handled in pieces
   (`tail` truncates it), the shared caveat of these fixed-buffer filters.
   `sort` is the exception: it *can't* stream (it must see every line before
   emitting one), so it buffers the whole input in its heap and sorts an
@@ -347,13 +347,13 @@ killed after the same timeout.
 - **`mv` has no cycle detection** beyond the trivial self-move guard
   (moving a directory into its own descendant isn't prevented).
 - **Every filesystem failure prints its specific reason** ("already
-  exists", "no such file or directory", "disk full", ...) — the
+  exists", "no such file or directory", "disk full", ...): the
   filesystem server returns one named `FS_ERR_*` code per real cause
   (see `architecture.md`'s protocol notes), decoded by one shared
   message table in the shell.
-- **`cd ..` from `/` stays at `/`** rather than erroring — a minor,
+- **`cd ..` from `/` stays at `/`** rather than erroring, a minor,
   deliberate rough edge, not a bug.
-- **Tasks are MMU-isolated from each other** — each runs under its own
+- **Tasks are MMU-isolated from each other**: each runs under its own
   page-table view where only its own memory is accessible, so a buggy
   or hostile program faults (and dies alone) rather than corrupting the
   shell or the filesystem server (see `processes.md`'s "known rough

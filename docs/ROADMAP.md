@@ -2802,7 +2802,7 @@ be reviewed after the fact from the saved screenshots.
 **The goal, restated honestly.** The original `notes.txt` intent was
 "POSIX-ish system calls." What actually got built is *not* POSIX and not
 Linux — it's a message-passing microkernel ABI (see
-`docs/architecture.md`'s "Philosophy — not POSIX, not Linux" subsection):
+`docs/architecture.md`'s "Philosophy: not POSIX, not Linux" subsection):
 a tiny syscall trap surface plus a set of userland servers reached by IPC,
 and — via the cluster arc — the same verbs over TCP. That divergence was
 *forced* by the microkernel/isolation work (a filesystem the kernel
