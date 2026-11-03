@@ -3537,3 +3537,47 @@ write, or its wrap, which stays in the roadmap with the case that would.
   to byte 0 before `DiskFull`. Graded by `test-alloc-batch` (the hint kept: 3 bitmap
   reads, 4 without) and `test-stale-cursor` (the lowering); the wrap is
   reached by no boot.
+
+## `partition` refuses a GPT disk; the allocator hint's lowering settled as unriggable, DONE (2026-11-02)
+
+Two items closed on 2026-11-02, each struck on its branch with a note and
+moved here by the day's closeout: the `partition` refusal by #387, and the
+rig asked for the allocator hint's lowering by #388, settled as unriggable
+with the lowering kept. The wrap before `DiskFull`, which shared that item,
+stays in the roadmap as an item of its own. The reviews (one medium of
+#387, three medium of #388) are recorded in the CHANGELOG entries of the
+day.
+
+- ~~**`partition` on a GPT disk writes an MBR nobody reads.** `partition`
+  writes sector 0 alone, so on a GPT disk not erased first the primary
+  header at sector 1 still says "EFI PART": fsd's `discover`, `format`'s
+  GPT refusal and the kernel's `BLOCK_BOOT_START` all go on reading the old
+  GPT, and the MBR just written is invisible, with `partition` answering
+  success. It should refuse a disk `parttable::is_gpt` reads as GPT, as
+  `format` does, and say to `erase` first. From the third medium review of
+  #377, 2026-10-30.~~
+  *Done 2026-11-02:* `partition_disk` asks `partition::is_gpt` first and
+  answers `FS_ERR_NOT_SUPPORTED` for a GPT disk (`FS_ERR_IO` when the test
+  would not read), writing nothing; the shell says the disk holds a GPT and
+  to run `erase disk` first, which zeros both sectors the test reads.
+  `make test-boot-partition`'s gpt-format boot runs `partition ext2` and
+  reads sectors 0 and 1 back as built; with the refusal removed those two
+  checks fail and the rest pass, which is the bug as reported.
+- ~~**No rig can fail exFAT's allocator hint on a refused bitmap write.**
+  `end_alloc_hold` lowers the hint to a refused sector's first byte, and
+  `alloc_scan` wraps to byte 0 before `DiskFull`; deleting either passes
+  every rig (the medium review of #384). The lowering matters only when a
+  batch's bitmap sector and then its give-back's end of chain are both
+  refused, so `give_back` clears nothing. A case in
+  `test-batch-refused`'s shape would build it: on X, a FAT-chained file
+  whose last cluster's FAT sector, and the bitmap sector a gap fill takes
+  the last free clusters of, refuse every write (blkdebug without
+  `once`); the fill must fail, and the next allocation must fail too,
+  finding the dropped clusters in that sector, where without the lowering
+  it goes on to the next sector and succeeds (a file there, read off the
+  disk).~~
+  *Settled 2026-11-02 as unriggable, the lowering kept:* the case above
+  does not separate it. Why, and why it is kept anyway, is in
+  `end_alloc_hold`'s doc in `programs/servers/fsd/src/exfat.rs`, the one
+  statement of it. Removing it was tried the same day and put back after
+  a medium review.
