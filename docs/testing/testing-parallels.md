@@ -1,11 +1,11 @@
 # Running and testing Ouroboros on real Parallels hardware
 
 > **Status: PARKED ("perhaps do at some point later"), 2026-08-26.** Parallels
-> real-hardware testing is **not a current priority**. QEMU — single machine and
-> the two-node cluster (see [`testing-qemu.md`](testing-qemu.md)) — is good enough
+> real-hardware testing is **not a current priority**. QEMU, single machine and
+> the two-node cluster (see [`testing-qemu.md`](testing-qemu.md)), is good enough
 > for now, and Parallels can't prove the cluster anyway (no NIC transport; see the
 > caveat below). The intended physical target going forward is **2× Raspberry Pi
-> 4** (real ARM hardware, on order) — the Plan 9 mechanics fit genuine physical
+> 4** (real ARM hardware, on order). The Plan 9 mechanics fit genuine physical
 > machines better than a VM, and the concrete Pi test plan is now written:
 > [`testing-pi4.md`](testing-pi4.md). This document is kept as a **reference** (and because the
 > single-machine matrix + the `netd` boot-race analysis stay valid if anyone does
@@ -23,8 +23,8 @@ Read the caveat below **first**: it decides what you can and can't validate here
 On real Parallels hardware the kernel sets `virtio_mmio_probe_safe = false` (it
 keys off ACPI/SPCR console discovery, which Parallels doesn't provide), so
 `main.rs` skips **both** `init_storage()` (virtio-blk) **and** `init_net()`
-(virtio-net). Storage still works — through the separate **USB mass-storage /
-xHCI** path — but **networking has no working path at all**:
+(virtio-net). Storage still works, through the separate **USB mass-storage /
+xHCI** path, but **networking has no working path at all**:
 
 - `netd`'s NIC driver is **virtio-mmio**, which is skipped on Parallels; and
 - Parallels' own NIC is **virtio-PCI**, a transport this project deliberately
@@ -36,12 +36,12 @@ boot,"* and **every network/cluster feature is unreachable**: `ping`, `resolve`,
 anything two-node. Those are all validated on **two QEMU VMs** instead (see
 [`testing-qemu.md`](testing-qemu.md) §5) until a virtio-PCI transport exists.
 
-**What you *can* validate on real Parallels:** the single-machine surface — boot,
+**What you *can* validate on real Parallels:** the single-machine surface (boot,
 console, USB keyboard, USB storage + the disk/filesystem commands, the shell and
-`/bin` — **and** that the networked code *degrades gracefully* with no NIC
+`/bin`) **and** that the networked code *degrades gracefully* with no NIC
 (fails cleanly, never faults or wedges). That last part is not busywork: two
 releases (v0.10.0 auth, v0.11.0 dial-out) changed `netd`'s **boot path**, and the
-change runs on Parallels even with no NIC — see [Risk #1](#risk-1--netd-boot-race)
+change runs on Parallels even with no NIC: see [Risk #1](#risk-1--netd-boot-race)
 below.
 
 | Capability | Real Parallels | Two QEMU VMs |
@@ -72,12 +72,12 @@ own `prl_disk_tool`. (For a release image, `scripts/release.sh build` also
 produces a self-contained `ouroboros-<ver>-esp.dmg`; wrap it into a `.hdd` with
 the one-liner in the release notes.)
 
-## The automated path — `make test-parallels`
+## The automated path: `make test-parallels`
 
 `scripts/test-parallels.sh` (via `make test-parallels`) rebuilds `esp.hdd`, boots
 the registered VM **headlessly**, types a `;`-separated list of shell commands
 through `prlctl send-key-event` (real decimal PS/2 Set-1 scancodes), and saves a
-`prlctl capture` screenshot **after each command** — no human watching the VM
+`prlctl capture` screenshot **after each command**, with no human watching the VM
 live, no physical typing.
 
 ```sh
@@ -87,10 +87,10 @@ make test-parallels CMDS="help;echo hi;uptime;ls;env"
 
 Review the saved screenshots for correct output. **Caveat:** `send-key-event`
 drives Parallels' *synthetic* keyboard, not the physical USB keyboard from the
-xHCI postmortem — a legitimate scripted-regression stand-in, but **not** a
+xHCI postmortem. It is a legitimate scripted-regression stand-in, but **not** a
 substitute for a real-physical-keyboard pass (checks A5 below).
 
-## Part A — the single-machine validation matrix
+## Part A: the single-machine validation matrix
 
 Everything here runs on one Parallels VM. A1–A2 are the **new coverage** these
 releases need; A3–A5 re-confirm the boot/USB surface (including the fixed xHCI
@@ -98,19 +98,19 @@ keyboard↔storage contention, which has real-hardware-only failure modes).
 
 | # | Check | How | Pass signal |
 | --- | --- | --- | --- |
-| **A1** | Clean boot; `netd` does **not** wedge | Boot the `.hdd`; read the console during startup | `netd: no NIC this boot`, then either `netd: export open, accepts signed requests` **or** `netd: export CLOSED … (fail-closed)` — and **no** `server slot 4 restarted/wedged/failed` loop |
-| **A2** | No-NIC graceful degradation | `ping 10.0.2.2` ; `mount -n /net` then `cat /net/ip` ; `dial /net 1.1.1.1 80` | Each fails with a *clean* "no network" message — **no** `EL0 FAULT`, no hang |
+| **A1** | Clean boot; `netd` does **not** wedge | Boot the `.hdd`; read the console during startup | `netd: no NIC this boot`, then either `netd: export open, accepts signed requests` **or** `netd: export CLOSED … (fail-closed)`, and **no** `server slot 4 restarted/wedged/failed` loop |
+| **A2** | No-NIC graceful degradation | `ping 10.0.2.2` ; `mount -n /net` then `cat /net/ip` ; `dial /net 1.1.1.1 80` | Each fails with a *clean* "no network" message, **no** `EL0 FAULT`, no hang |
 | **A3** | Shell + core commands | `make test-parallels CMDS="help;echo hi;uptime;ls;env;pwd"` | Screenshots show correct output |
 | **A4** | USB disk + filesystem | With a FAT32 stick passed through: `ls`, `cat FILE`, `mkdir D`, `write F text`, `writeat F 0 x`, then reboot and re-`cat` | Files read/write/persist across reboot; no mid-transfer stall |
 | **A6** | The boot identity (owed by step 3 of [`roadmap-session-auth.md`](../roadmap/roadmap-session-auth.md)) | `bootid`, restart the VM, `bootid` again; read the kernel's `boot identity:` line both times | The counter rises by one; record which store held it from before the boot (UEFI variable or ESP file) and the boot entropy's length, since no entropy means no forward secrecy for that node's sessions |
 | **A5** | Physical keyboard | Type A1–A4 **by hand** on the real USB keyboard (not `send-key-event`) | Interactive typing works; no raw-HID-report flood, no keyboard death during disk I/O |
 | **A7** | The ISO keyboard's two extra keys (HID 0x32 and 0x64), a check NO rig can run: QEMU's USB keyboard has no key code that sends 0x32 (`sendkey backslash` is 0x31, measured 2026-10-10), and `prlctl send-key-event` speaks PS/2, which gives both backslash positions one scancode | On an ISO keyboard (UK, Swedish, German: a tall Enter with a key to its left, and a key between left Shift and Z), by hand: type the key left of Enter plain and shifted at the shell; then `readkey raw` and press Ctrl with that key; then type the key beside left Shift plain, and `readkey raw` again with Ctrl on it, then Ctrl+\ on the key left of Enter | The key left of Enter types `\` and `\|`; Ctrl on it ends `readkey raw` with the kill line naming Ctrl+\ as the key; the key beside left Shift types nothing, and Ctrl on it does NOT end `readkey raw` (an uncatchable kill on Ctrl+< would be a trap); the last Ctrl+\ ends it. An ANSI (US) keyboard has neither key and cannot run this row |
 
-### <a name="risk-1--netd-boot-race"></a>Risk #1 — the `netd` boot race (the reason A1 exists)
+### <a name="risk-1--netd-boot-race"></a>Risk #1: the `netd` boot race (the reason A1 exists)
 
 `netd`'s `serve()` calls `load_auth()` **before** entering its event loop, and
 `load_auth` does *blocking* `read_file_chunk` calls to `fsd` for **three**
-files — the `\NOEXEC` flag, `/etc/cluster/id` and `/etc/cluster/authorized` —
+files (the `\NOEXEC` flag, `/etc/cluster/id` and `/etc/cluster/authorized`),
 each retried on a transient failure (**one shared budget** of 50 tries ×
 `NET_WAIT(40)` ≈ 2 s across all three, not per read) for the case where the disk
 isn't mounted yet.
@@ -121,29 +121,29 @@ defaults to setting the lever rather than clearing it. See its comment in
 `load_auth`, and `testing-pi4.md`'s Risk 4, which mirrors this section.
 
 On QEMU this is a non-event: virtio-blk auto-mounts before `netd` ever asks, so
-`load_auth` returns on the first call. **On Parallels the disk is USB-MSD** —
-slower to enumerate, and absent entirely if no stick is attached — so `load_auth`
+`load_auth` returns on the first call. **On Parallels the disk is USB-MSD**,
+slower to enumerate, and absent entirely if no stick is attached, so `load_auth`
 can spend the full ~2 s in its retry loop. If the supervisor's health-ping fires
 during that window (netd isn't draining its mailbox yet), `netd` could be
-restarted mid-`load_auth`, potentially into the per-boot give-up cap — a boot
+restarted mid-`load_auth`, potentially into the per-boot give-up cap: a boot
 loop that **cannot reproduce on QEMU**. This is precisely the emulator-hides-a-bug
 class the project keeps hitting (see the filesystems-arc and USB-storage
 postmortems).
 
 **If A1 fails** (netd restart/wedge loop at boot on Parallels): the fix is to stop
-`load_auth` from blocking startup — e.g. make it lazy (read the key on first
+`load_auth` from blocking startup, e.g. make it lazy (read the key on first
 export use instead of at boot) or bound the retry far tighter and treat "not yet"
-as "closed for now, re-check later." That's a small, isolated patch — a `0.11.1`
+as "closed for now, re-check later." That's a small, isolated patch, a `0.11.1`
 candidate.
 
 ### Staging note: the cluster identity lives on the USB stick here
 
 On Parallels, `fsd`'s mounted disk (tree 0) is the **USB stick**, not the boot
-ESP — so `load_auth` reads `/etc/cluster/id` and `/etc/cluster/authorized` from
+ESP, so `load_auth` reads `/etc/cluster/id` and `/etc/cluster/authorized` from
 the stick. Functionally it changes nothing (there's no NIC, so the export is
 inert regardless), but to exercise the *found* branch of `load_auth` rather than
 the retry-then-closed branch, put an `/etc/cluster/` directory at the root of the
-pass-through stick. Its absence is a valid test too — you should see
+pass-through stick. Its absence is a valid test too: you should see
 `export CLOSED - no /etc/cluster/id to sign replies with (fail-closed)`, not a
 crash.
 
@@ -151,11 +151,11 @@ Note that `clusterkey new` **cannot** generate an identity on Parallels: there i
 no virtio-rng, and generation refuses without real entropy rather than producing
 a guessable machine key. Copy one in from a machine that has entropy.
 
-## Part B — the cluster (blocked; the real path forward)
+## Part B: the cluster (blocked; the real path forward)
 
 Genuine **two-node real-hardware** cluster testing is gated, in order, on:
 
-1. **A virtio-PCI transport for the NIC** — the named sub-project in
+1. **A virtio-PCI transport for the NIC**, the named sub-project in
    [`ROADMAP.md`](../ROADMAP.md) ("Platform reality: the storage story again").
    Same shape as storage: virtio-mmio on QEMU, a separate PCI path for Parallels.
    Until it lands, `netd` has no NIC on Parallels, so **no cluster feature can
@@ -163,12 +163,12 @@ Genuine **two-node real-hardware** cluster testing is gated, in order, on:
    networking for the project, which makes it the highest-leverage networking
    arc regardless of cluster testing.
 2. Then: two Parallels VMs (or a Parallels VM ↔ another machine) on a shared
-   network, running the two-node matrix — `mount -r`, remote read/write, `cpu`,
+   network, running the two-node matrix: `mount -r`, remote read/write, `cpu`,
    `dial`, authorized-vs-unauthorized peer keys, and the SIGKILL-a-node
    clean-disconnect check.
 
 Every item in that matrix is **already validated on two QEMU VMs**
-([`testing-qemu.md`](testing-qemu.md) §5) — the local `esp.img`-per-machine
+([`testing-qemu.md`](testing-qemu.md) §5): the local `esp.img`-per-machine
 socket-link setup, the auth cross-check via `scripts/np9p_client.py`, and the
 dial-out foreign-observer test. That remains the cluster's validation path until
 step 1 exists.
@@ -227,16 +227,16 @@ output.
    A1/A2/A4/A5) and it's the responsible check after two releases that changed
    `netd`'s boot path. A1 is the one that could surface a real,
    QEMU-invisible bug.
-2. **Treat virtio-PCI as the gate** for any real-hardware *cluster* validation —
+2. **Treat virtio-PCI as the gate** for any real-hardware *cluster* validation,
    and, because it also unblocks all Parallels networking, as a strong candidate
    for the next arc in its own right.
 
 ## Related
 
-- [`testing-qemu.md`](testing-qemu.md) — the QEMU dev loop and the two-node
+- [`testing-qemu.md`](testing-qemu.md): the QEMU dev loop and the two-node
   cluster testing that covers everything Parallels currently can't.
-- [`ROADMAP.md`](../ROADMAP.md) — the virtio-PCI transport sub-project (Part B step 1).
+- [`ROADMAP.md`](../ROADMAP.md): the virtio-PCI transport sub-project (Part B step 1).
 - [`xhci-keyboard-postmortem.md`](../postmortems/xhci-keyboard-postmortem.md),
   [`usb-storage-postmortem.md`](../postmortems/usb-storage-postmortem.md),
-  [`filesystems-arc-postmortem.md`](../postmortems/filesystems-arc-postmortem.md) — the
+  [`filesystems-arc-postmortem.md`](../postmortems/filesystems-arc-postmortem.md): the
   real-hardware bug classes A4/A5 guard against.

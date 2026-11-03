@@ -1,7 +1,7 @@
 # Running and testing Ouroboros on QEMU
 
-The practical guide to booting Ouroboros under QEMU — the fast dev loop the whole
-project relies on — from a single machine up to a **two-node cluster** on a shared
+The practical guide to booting Ouroboros under QEMU, the fast dev loop the whole
+project relies on, from a single machine up to a **two-node cluster** on a shared
 virtual network. Companion to [`manual.md`](../manual.md) (which covers *using* the
 OS once it's booted) and [`testing-exfat.md`](testing-exfat.md) (the exFAT disk
 rig). Every command here is a `make` target defined in the repository `Makefile`.
@@ -22,7 +22,7 @@ make run-image    # boots build/esp.img - a real FAT32 disk; disk commands work
 ```
 
 The everyday gotcha: **`make run`'s disk is FAT16** (an artifact of QEMU's vvfat
-driver), which the FAT32-only filesystem server can't mount — so every disk command
+driver), which the FAT32-only filesystem server can't mount, so every disk command
 prints "no filesystem mounted" there. Use **`make run-image`** whenever you want
 `ls`/`cat`/`write`/`exec` and the rest to actually work; it builds and boots
 `build/esp.img`, a genuine MBR+FAT32 disk.
@@ -50,12 +50,12 @@ EL2 to EL1, on our own tables and vectors` (`kernel/src/el2.rs`); on a plain
 ## 1b. Driving the shell unattended (`scripts/drive-qemu.py`)
 
 Every run above expects a human at the keyboard. `scripts/drive-qemu.py` removes
-that: each argument is a `WAIT@@TYPE` step — wait for a regex to appear in *new*
-guest output, then type a line — and it prints the transcript followed by the
+that: each argument is a `WAIT@@TYPE` step (wait for a regex to appear in *new*
+guest output, then type a line), and it prints the transcript followed by the
 abort count from QEMU's own `-d int` trace.
 
 An empty `TYPE` waits without typing. A `TYPE` of **`<ENTER>`** types an *empty
-line* — a bare Enter — which is how a prompt that must **refuse** an empty
+line*, a bare Enter, which is how a prompt that must **refuse** an empty
 answer gets tested. Without it every such rule was unreachable from this rig,
 including `useradd`'s and `passwd`'s empty-password refusals.
 
@@ -95,7 +95,7 @@ says on stderr that the run is not a result. `python3 scripts/srcid.py check
 This is what makes login, permission enforcement and `cpu` testable in a loop.
 
 **Why it types one character at a time.** The PL011 the guest reads has **no RX
-FIFO**, so a byte arriving while the guest is not polling is not queued — it is
+FIFO**, so a byte arriving while the guest is not polling is not queued. It is
 gone. Piping a script straight into QEMU loses most of it. Two consequences,
 both load-bearing:
 
@@ -103,7 +103,7 @@ both load-bearing:
 2. Each step matches only output produced **since the previous step**. Searching
    the whole buffer matches an *earlier* prompt and starts typing while the
    guest is still printing, which silently eats the first characters of the
-   command — `cat /etc/shadow` arrives as `t /etc/shadow`, and the test fails
+   command: `cat /etc/shadow` arrives as `t /etc/shadow`, and the test fails
    for a reason that has nothing to do with the code under test.
 
 A timeout prints which pattern it was waiting for, which is usually enough to
@@ -239,7 +239,7 @@ round-trip (including verifying against macOS's own `fsck_exfat`).
 **Disk-management from inside the guest** (works on any of these, or a blank disk):
 `erase disk`, `partition [fat32|exfat|ext2]`, then `format [fat32|exfat|ext2]`
 lay down a fresh filesystem; `mount -a` mounts it. These are shell *builtins*
-(they must run when nothing is mounted — see [`manual.md`](../manual.md)).
+(they must run when nothing is mounted, see [`manual.md`](../manual.md)).
 
 ---
 
@@ -254,14 +254,14 @@ make run-image-server # + SLIRP hostfwd tcp::5555->:80 so the host can reach net
 - **Client ops:** boot `make run-image-net`, then at the shell `ping 10.0.2.2`,
   `resolve example.com`, or `fetch example.com`. SLIRP reaches the outside world.
 - **Server:** boot `make run-image-server`, then on the host `curl
-  http://localhost:5555/` — the guest's from-scratch TCP stack serves a page. Any
+  http://localhost:5555/`: the guest's from-scratch TCP stack serves a page. Any
   path streams a file from `fsd` (`curl http://localhost:5555/EFI/ORBS/INIT.CFG`);
   a directory returns a browsable HTML index. Every frame is dumped to
   `build/net.pcap` for `tcpdump`/Wireshark inspection.
 
 QEMU's user-mode networking assigns the guest **10.0.2.15**, gateway **10.0.2.2**,
 DNS **10.0.2.3**. (Parallels' virtio-net is PCI, which this project's virtio-mmio
-path doesn't drive — networking is QEMU-only.)
+path doesn't drive. Networking is QEMU-only.)
 
 ---
 
@@ -521,7 +521,7 @@ full table, and on the reap (measured, 2026-09-07).
 printed the byte count as a "size", so it could not exercise the one verb that
 reaches `fsd`'s ancestor walk without going through `path_allows`). `mv` exists
 because the guest's own `/bin/mv` guards `mv f f` before `fsd` ever sees it, so
-the server-side guard — the one protecting the path where paths arrive raw — had
+the server-side guard (the one protecting the path where paths arrive raw) had
 no client that could reach it.
 
 ```sh
@@ -603,12 +603,12 @@ make test-async-rmount        # rebuilds the image, then the three boots (script
 
 Not decoration: a spawned command reaches `netd` only through a capability the
 shell delegates, and until 2026-09-06 **two of the shell's five spawn paths did
-not delegate it** — so every network program was broken in a pipeline and under
+not delegate it**, so every network program was broken in a pipeline and under
 `exec`, for months, while every recipe on this page ran unpiped commands and
 passed. The bug was invisible to the tests that were supposed to cover it
 because they all exercised the one spawn path that worked. `BIG.TXT` is also
 the control that the failure is not a timeout: it is ~28 round trips over ~17 s,
-far past the supervisor's 2.56 s wedge threshold, and it must **succeed** —
+far past the supervisor's 2.56 s wedge threshold, and it must **succeed**:
 that is what distinguishes a capability denial (fails instantly, no packets)
 from a server restart (`server slot 4 wedged` on the console).
 
@@ -747,7 +747,7 @@ python3 scripts/np9p_client.py localhost 5640 readdir / --peer=node-b     # -> R
 ```
 
 `run` drives the `cpu` path from the host, which is the only surface where the
-export's refusals are *prose* rather than a status code — a remote-run reply is
+export's refusals are *prose* rather than a status code. A remote-run reply is
 an output stream, not a framed reply:
 
 ```sh
@@ -759,7 +759,7 @@ python3 scripts/np9p_client.py localhost 5640 run "uptime" --sign=nobody  # cpu:
 unusable frame runs *before* authentication, on nothing but the magic number, so
 whatever it says is said to a stranger. To check that, run the same refused
 command against a configured node and one with no `/etc/cluster/id`, and compare
-the two lines — they must be byte-identical:
+the two lines. They must be byte-identical:
 
 ```sh
 # a second image with no identity (nothing stages this; do it by hand)
@@ -773,8 +773,8 @@ python3 scripts/np9p_client.py localhost 5640 run "uptime" --sign=nobody   # con
 python3 scripts/np9p_client.py localhost 5642 run "uptime" --sign=nobody   # no identity
 ```
 
-Until 2026-09-01 these differed — the second said "the remote machine cannot
-serve signed requests (no identity of its own, or no authorized peers)" — so
+Until 2026-09-01 these differed. The second said "the remote machine cannot
+serve signed requests (no identity of its own, or no authorized peers)", so
 anyone who could reach port 564 could fingerprint every node's configuration
 while holding no key at all. The distinction now lives only in each machine's own
 boot log, where it is useful and where nobody else can ask for it.
@@ -792,7 +792,7 @@ This host↔guest round trip is the real cross-implementation check: the python
 peer's Ed25519 and the guest's hand-rolled `ed25519` crate must agree
 byte-for-byte over the same signed bytes, or a correctly-keyed peer is rejected
 too (that is how a magic-byte transposition in the python peers was caught under
-the older MAC format — see `docs/postmortems/cluster-auth-postmortem.md`). A machine with a
+the older MAC format, see `docs/postmortems/cluster-auth-postmortem.md`). A machine with a
 `\NOEXEC` flag file authenticates mounts but refuses `cpu` remote-exec.
 
 The guest reaches the host at **10.0.2.2** over SLIRP with no hostfwd (SLIRP routes
@@ -820,8 +820,8 @@ served reply). See `docs/postmortems/dial-out-postmortem.md` / `docs/postmortems
 
 ## 5. The two-node cluster (the real thing)
 
-Two Ouroboros guests on a **shared L2 link** — a QEMU socket "hub", no host in the
-middle — let you exercise the whole distributed stack (Phases 1–4): remote disk
+Two Ouroboros guests on a **shared L2 link** (a QEMU socket "hub", no host in the
+middle) let you exercise the whole distributed stack (Phases 1–4): remote disk
 mount, remote `/proc`/`/dev/cons`/`/net`, and remote execution (`cpu`).
 
 ```sh
@@ -834,13 +834,13 @@ make run-image-2vm-b
 
 **How the link works.** `run-image-2vm-a` runs a QEMU `-netdev
 socket,listen=127.0.0.1:12340`; `-2vm-b` runs `connect=127.0.0.1:12340`. That pair
-is a virtual Ethernet hub joining the two guests at layer 2 — no SLIRP, no
+is a virtual Ethernet hub joining the two guests at layer 2: no SLIRP, no
 gateway, no DNS. Each guest gets its own disk copy (`build/esp-a.img` /
 `esp-b.img`, since two QEMU write-locks can't share one file) and its own pcap
 (`build/net-a.pcap` / `net-b.pcap`).
 
 **FAT32 or ext2? This one matters.** The `run-image-2vm-a`/`-b` pair boots the
-**FAT32** image, which is right for everything except permissions — FAT32
+**FAT32** image, which is right for everything except permissions. FAT32
 records no mode, so `fsd` has nothing to enforce and **every remote request
 looks permitted there regardless of who sent it**. That is not a bug in the rig,
 but it means a permission test on it passes *before* a fix and *after* it,
@@ -857,21 +857,21 @@ make run-image-2vm-ext2-b      # terminal 2
 as long as the cluster shared a single symmetric key. Since per-machine keypairs
 (2026-08-31) each node carries its own `/etc/cluster/id`, so `-a` and `-b` are
 separate builds (`CLUSTER_NODE=node-a` / `node-b`) and `make images-2vm-ext2`
-produces the pair. Their `authorized` files are identical — every node accepts
-the same peers — so the only difference is which private key each holds. The dev
+produces the pair. Their `authorized` files are identical (every node accepts
+the same peers), so the only difference is which private key each holds. The dev
 identities come from fixed seeds, so rebuilding one of them reproduces the same
 keys rather than desynchronising the pair.
 
 It has its **own link port**, so it can run alongside the FAT32 pair rather than
 colliding with it (a collision shows up as an unrelated guest-side timeout,
 which is a miserable thing to debug). `make image-ext2` stages
-`/etc/cluster/id` onto that disk — without it `netd`'s export is fail-closed and
-the rig cannot come up — at **mode 0600**, because ext2 is the one image where
+`/etc/cluster/id` onto that disk (without it `netd`'s export is fail-closed and
+the rig cannot come up) at **mode 0600**, because ext2 is the one image where
 `fsd` enforces modes and a machine's private key is what its whole identity
 rests on: anyone who can read it can impersonate the machine.
 
 **Driving both nodes unattended.** `scripts/drive-2vm.py` starts A, runs its
-steps, then starts B and runs its steps while A stays alive — printing both
+steps, then starts B and runs its steps while A stays alive, printing both
 transcripts and both health bars:
 
 ```sh
@@ -884,21 +884,21 @@ python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
      '\$ @@'
 ```
 
-**Note the trailing `'\$ @@'`** — a wait with nothing typed. Without it only the
+**Note the trailing `'\$ @@'`**: a wait with nothing typed. Without it only the
 4-second linger separates the last keystroke from the transcript print, and a
 remote mount plus read under TCG routinely takes longer; the empty tail then
 looks exactly like the refusal you were trying to observe. Both `--a` and `--b`
 are required and each needs at least one step, because a run that types nothing
 and exits 0 is worse than no run at all.
 
-It shares `drive-qemu.py`'s `Guest` class rather than copying the console rules
-— the paced typing and the match-only-new-output high-water mark are the
+It shares `drive-qemu.py`'s `Guest` class rather than copying the console rules.
+The paced typing and the match-only-new-output high-water mark are the
 load-bearing parts, and a second copy would drift from the first.
 
 **What the permission test should show, and why one line is not enough.** Since
 2026-08-31 a remote request carries the requesting user's name, so the run above
 prints `cat: permission denied` where it once printed A's password hashes. A
-refusal on its own is weak evidence, though — a broken export refuses too — so
+refusal on its own is weak evidence, though (a broken export refuses too), so
 run the matrix, which needs the *served* cases as well as the denied one:
 
 ```sh
@@ -913,7 +913,7 @@ python3 scripts/drive-2vm.py build/espext2-a.img build/espext2-b.img \
 ```
 
 Expected: `HELLO.TXT` served, `/etc/shadow` refused, and `cpu … id` reporting
-`uid=1000(user) gid=1000(user)` — the last of these is what proves identity
+`uid=1000(user) gid=1000(user)`. The last of these is what proves identity
 reaches a *spawned* command and not just a file verb. Repeat the same steps after
 `logout` and a `root` login and all three should succeed, which is what
 distinguishes "the far side enforces permissions" from "the far side is broken".
@@ -921,7 +921,7 @@ distinguishes "the far side enforces permissions" from "the far side is broken".
 **Run the negative control too.** `git stash` the change (or check out `main`),
 rebuild the image, and run the identical script: it should print the hashes and
 report `uid=0(root)`. A permission test that has never been seen to fail is a
-test whose passing means nothing — and on the FAT32 rig it *cannot* fail, which
+test whose passing means nothing, and on the FAT32 rig it *cannot* fail, which
 is the whole reason this section says to use ext2.
 
 **The client-session witness** (Decision 4 of `roadmap-fid-verbs.md`, the
@@ -986,7 +986,7 @@ rather than reporting success. Against the pre-step-7 tree a remote `write()`
 returned `-1`. A first-op `capability` denial here was the libc delegation race
 fixed 2026-09-23 (see the cbig note above); seen again, it is a regression.
 
-**A remote op fails spuriously now and then — know which message is which.**
+**A remote op fails spuriously now and then: know which message is which.**
 Measured 2026-08-31 on this rig: roughly one remote read in six fails on the
 shared socket link, on `main` as much as on any branch (3 scripted runs each:
 2/6 failed ops on `main`, 1/6 on the branch under test). It is the same
@@ -996,10 +996,10 @@ permission result, and the two are told apart by the message:
 
 | message | meaning |
 |---|---|
-| `cat: failed` | transport flake — **retry the step** |
+| `cat: failed` | transport flake: **retry the step** |
 | `cat: permission denied` | the far side enforced a mode; this is a real result |
 
-Read the specific message, never just "the command failed" — a permission test
+Read the specific message, never just "the command failed". A permission test
 whose refusal you cannot distinguish from a dropped packet proves nothing. When
 in doubt, repeat the step: the flake does not repeat, a refusal does.
 
@@ -1014,7 +1014,7 @@ octet): the two-VM targets set MAC `…:0a` → **10.0.2.10** (machine A) and `�
 single-VM SLIRP runs are unchanged.) Read a machine's own address any time with
 `mount -n /net ; cat /net/ip`.
 
-**What to do once both are up** — see [`manual.md`](../manual.md)'s cluster section
+**What to do once both are up**: see [`manual.md`](../manual.md)'s cluster section
 for the full command set. The essentials, typed in **machine B's** shell:
 
 ```
@@ -1028,7 +1028,7 @@ cpu 10.0.2.10:564 cat /host/x       # run cat on A, reading THIS machine's /x
 ```
 
 Watch the wire with `tcpdump -nr build/net-a.pcap` (or `-b`) to confirm it's real
-cross-machine traffic. Zero exception-trace aborts is the health bar — see §7.
+cross-machine traffic. Zero exception-trace aborts is the health bar, see §7.
 
 ---
 
@@ -1120,7 +1120,7 @@ SMP=4 make test-kbd-mode   # any rig that boots through drive-qemu.py's Guest, o
 
 On the USB targets you can inject keystrokes through the monitor socket:
 `printf 'sendkey u\n' | nc -U qemu-monitor.sock`. (USB on *real* hardware is a
-Parallels story — see [`manual.md`](../manual.md).)
+Parallels story, see [`manual.md`](../manual.md).)
 
 ---
 
@@ -1128,7 +1128,7 @@ Parallels story — see [`manual.md`](../manual.md).)
 
 QEMU's `-nographic` routes the guest console to stdio, so you can drive the shell
 by feeding it commands and reading its output. For anything beyond a quick manual
-check — and for the two-VM cluster, where you're juggling two consoles — drive it
+check, and for the two-VM cluster, where you're juggling two consoles, drive it
 from a small script over a pty (Python's `pty.fork` + `select`), sending a line and
 reading until the `$ ` prompt. The `scripts/np9p_*.py` peers and the two-VM targets
 are meant to be driven this way.
@@ -1146,17 +1146,17 @@ grep -cE "Data Abort|Prefetch Abort|SError" build/int-*.log   # must be 0
 Call]` (firmware PSCI at boot) are all expected and benign; an *abort* is a real
 fault. A clean run is zero aborts.
 
-**Real-hardware testing** (Parallels) is a separate path — `make test-parallels`;
+**Real-hardware testing** (Parallels) is a separate path, `make test-parallels`;
 see [`manual.md`](../manual.md)'s Parallels section.
 
 ---
 
-## Quick reference — every run target
+## Quick reference: every run target
 
 | Target | What it adds |
 |---|---|
 | `run` | fastest loop; vvfat FAT16 disk (no real FS) |
-| `run-image` | real FAT32 disk (`build/esp.img`) — disk commands work; **+ virtio-rng** |
+| `run-image` | real FAT32 disk (`build/esp.img`): disk commands work; **+ virtio-rng** |
 | `run-image-gpt` | FAT32 inside a bootable GPT (GPT discovery) |
 | `run-image-exfat` | exFAT partition + FAT32 ESP (`fsd` mounts exFAT) |
 | `run-image-ext2` | ext2 partition + FAT32 ESP (needs `e2fsprogs`); **+ virtio-rng** |
@@ -1169,7 +1169,7 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `run-image-2vm-a` | machine A of the two-node cluster on FAT32 (listen, IP `.10`, port 12340) |
 | `run-image-2vm-b` | machine B of the FAT32 pair (connect, IP `.11`) |
 | `images-2vm-ext2` | build both ext2 node images (they differ: per-machine keypairs) |
-| `run-image-2vm-ext2-a` | machine A on **ext2** — the only rig that can test cluster *permissions* (port 12341) |
+| `run-image-2vm-ext2-a` | machine A on **ext2**, the only rig that can test cluster *permissions* (port 12341) |
 | `run-image-2vm-ext2-b` | machine B of the ext2 pair (connect, IP `.11`) |
 | `run-usb-kbd` | xHCI + USB keyboard |
 | `run-usb-multi` | xHCI + tablet + storage stick |
