@@ -156,10 +156,12 @@ current when the code changes**; the history is a record and is not.
 The no-em-dash rule in `~/.claude/CLAUDE.md` holds for the living documents
 and for code comments. The dated records keep their punctuation as written:
 `docs/work-journal/`, `docs/archive/`, `docs/release-notes/`,
-`docs/handoffs/`, `docs/CHANGELOG.md`, the postmortems, `docs/boot-history.md`
-and `docs/roadmap-completed.md`. Each says what was written on its day, and
+`docs/handoffs/`, `docs/CHANGELOG.md`, the postmortems and their pages on
+the site (`docs/site/postmortem-*.html`), `docs/boot-history.md` and
+`docs/roadmap-completed.md`. Each says what was written on its day, and
 rewriting one is a decision, not a fix. New text in them follows the rule.
-Settled by Hans on 2026-11-03, after the first `/style-check` sweep.
+Settled by Hans on 2026-11-03, after the first `/style-check` sweep. The
+site's other pages were swept the same day (#403).
 
 ## Commands
 
