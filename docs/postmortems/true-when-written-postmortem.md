@@ -1171,6 +1171,44 @@ each other, all of them wording written in the first two rounds; the fix
 was to keep the argument once, in the function's doc, and have the roadmap
 and CHANGELOG point to it.
 
+## Claims a move left behind (2026-11-03)
+
+#386 moved two thirds of `CLAUDE.md` out word for word, and nothing it
+moved was wrong. Thirty-four comments in the code and about thirty
+pointers in the documents still sent the reader to "CLAUDE.md's ..." for
+sections that now lived in the CHANGELOG or `boot-history.md`, or had gone
+there long before. A move is this file's mechanism at its purest: the
+falsifying edit touches only the destination, and every sentence that
+named the old place is in a file the diff never opens.
+
+Repointing them turned up two older claims of the same kind. `tasks.rs`
+said the runtime-region allocator never frees and that no task destruction
+exists; `free_runtime_region` has given regions back since `exit` landed,
+in another function of the same file. And `gicv3.rs` argued three times
+from a single core, true when written and false since multi-core; `SGI_BASE`
+in particular was "this CPU's" frame, which is now right only on the boot
+core. Neither was found by looking for it. Both were found because a
+mechanical task, fixing a pointer, made someone read the paragraph around
+it. The high review then found five pointers that named a section which
+existed and did not hold what the comment promised.
+
+The answer this time was the one the file closes on, a claim that guards
+behaviour made into a check: `scripts/check-doc-pointers.py` fails when a
+quoted section name is not a heading or bold lead-in of the file named. Its
+own limit is the second finding above. **A check that a pointer's section
+exists says the address is valid, not that the letter still says what the
+pointer promised.** The name can be checked mechanically; the content
+cannot, and the review that read the content found what the name check
+would have passed.
+
+The same day showed the copy beside the copy once more, inside one sweep.
+Two cluster phase plans quoted sentences of `roadmap-cluster.md`; #398
+reworded those sentences to remove their dashes, and the quotes, faithful
+copies, were wrong the moment it merged. They were found only because the
+next PR swept the files that held them. **When a change rewords a sentence,
+grep for the sentence before calling the change done: a quotation is a copy
+that does not know it is one.**
+
 ## What actually worked
 
 Three things, none of them "be more careful".

@@ -2525,3 +2525,42 @@ the API, from a file. The reviews' readers would have checked the change
 against a commit that did not hold it. **A hash is evidence only once it
 names what was pushed; take it from `git rev-parse` after the last amend,
 never from memory of an earlier one.**
+
+## Three more, from the pointer check and the style sweep (2026-11-03)
+
+A day of records rather than code: #390 and #391 repointed the code's
+references into a `CLAUDE.md` that had moved and added a check for them,
+and #394 to #404 removed the em dash from every living document. Three
+times an instrument said more than it had seen.
+
+**A matcher that passed on the neighbours.** `check-doc-pointers.py`'s
+first version accepted a pointer when any heading of the file contained the
+quoted name. It was mutation-tested three ways and failed each time, as it
+should. The high review found the case none of those mutations made: rename
+"Phase 4" and the pointer stayed green on the cluster's "4a" and "4b". Eight
+pointers had been leaning on a neighbour all along. A name that several
+anchors hold must now equal one of them whole. **A containment match is
+graded by the anchors that are left after the one it was meant to find is
+gone; mutate by renaming the target, not only by breaking the tool.**
+
+**A commit message written from the plan.** #391's first commit said
+`architecture.md`'s syscall-5 row was fixed. The edit sat in a batch of
+replacements whose helper asserts each anchor occurs once and stops at the
+first that does not; an earlier anchor failed, so the row was never
+touched, and the message described the batch I had written rather than the
+diff I had made. The review read the row. This file has recorded a fix that
+fails to apply since 2026-09-06; the helper that refuses a bad anchor is
+that lesson built in, and it did its job. What it cannot do is stop the
+summary being written before its output is read. **Write the commit message
+from `git diff`, not from the list of edits you meant to make.**
+
+**A scan whose exemptions belonged to another repository.** The no-em-dash
+scan came from the `/style-check` skill, written for Metaxis, and skips
+every line starting with `>` as a quotation. `ROADMAP.md`'s callouts are
+`>` lines and are the document's own current prose. #396 reported zero
+dashes left in `ROADMAP.md` with sixteen still in its callouts, found only
+by a `grep -c` run after the merge to confirm the zero. The scan now reads
+`>` lines, and the sweeps after #397 found them where they were. **An
+exemption is a claim about the documents it was written for; carried to
+another tree, it is a blind spot until someone checks what that tree puts
+on the lines it skips.**
