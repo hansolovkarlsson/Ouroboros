@@ -1333,8 +1333,9 @@ unsafe fn build_tables(
     // Boot-only: this is a long diagnostic (the full region array). On a
     // framebuffer-only platform (Parallels) the kernel console and the
     // userland console server share the screen, so re-logging it on every
-    // runtime rebuild (spawn/exit) would corrupt the server's rendering -
-    // see CLAUDE.md's "Driver isolation, part 3".
+    // runtime rebuild (spawn/exit) would corrupt the server's rendering - see
+    // `docs/postmortems/console-server-postmortem.md`'s "The handoff: the
+    // kernel has to learn to shut up".
     if log {
         crate::console::println!(
             "Ouroboros kernel: identity map RAM {min_addr:#x}-{max_addr:#x}, device 0x0-{:#x}, per-task EL0 regions {el0_regions:x?}",

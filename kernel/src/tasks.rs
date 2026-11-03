@@ -27,30 +27,29 @@
 //!
 //! **This was `wfe` (wait-for-event, the architecturally "correct",
 //! power-efficient choice) until a real, confirmed bug on real Parallels
-//! hardware forced it to change - worth knowing before reverting this.**
-//! The very first real task switch on real Parallels hardware (the
-//! MADT/GICv3 milestone - see `CLAUDE.md` - finally made GIC/timer IRQs
-//! work there at all) hung the whole system outright: no exception
-//! reported, keystrokes stopped being echoed, indistinguishable from a
-//! dead machine. A single-variable diagnostic (temporarily skip just the
-//! task-switch call, leave GIC/timer otherwise fully active) proved
-//! IRQ delivery itself was solid there - `uptime` kept incrementing
-//! correctly. That isolated the hang to *this loop specifically*, and
-//! swapping `wfe` for a busy-spin (with task switching left fully
-//! enabled) fixed it completely, confirmed by a sustained real-hardware
-//! test across several interactive commands with no hang. **Root cause
-//! not fully confirmed, only worked around** - the leading hypothesis is
-//! that real hardware's `wfe` is trapped/emulated by the host hypervisor
-//! (Apple's own virtualization layer, one level above this guest kernel
-//! entirely) in a way QEMU/TCG's `wfe` never is: this kernel's
-//! `nTWE`/`nTWI` bits (see [`init`]) only ever controlled whether EL0's
-//! own `wfe` traps *to EL1*, a decision this kernel owns completely;
-//! whatever EL2 does to `wfe` above that is outside this kernel's
-//! control or visibility. Not yet tested further. The practical
+//! hardware forced it to change - worth knowing before reverting this.** The
+//! very first real task switch on real Parallels hardware (the MADT/GICv3
+//! milestone, see `docs/CHANGELOG.md`'s "MADT/GICv3" entry, finally made
+//! GIC/timer IRQs work there at all) hung the whole system outright: no
+//! exception reported, keystrokes stopped being echoed, indistinguishable
+//! from a dead machine. A single-variable diagnostic (temporarily skip just
+//! the task-switch call, leave GIC/timer otherwise fully active) proved IRQ
+//! delivery itself was solid there - `uptime` kept incrementing correctly.
+//! That isolated the hang to *this loop specifically*, and swapping `wfe` for
+//! a busy-spin (with task switching left fully enabled) fixed it completely,
+//! confirmed by a sustained real-hardware test across several interactive
+//! commands with no hang. **Root cause not fully confirmed, only worked
+//! around** - the leading hypothesis is that real hardware's `wfe` is
+//! trapped/emulated by the host hypervisor (Apple's own virtualization layer,
+//! one level above this guest kernel entirely) in a way QEMU/TCG's `wfe`
+//! never is: this kernel's `nTWE`/`nTWI` bits (see [`init`]) only ever
+//! controlled whether EL0's own `wfe` traps *to EL1*, a decision this kernel
+//! owns completely; whatever EL2 does to `wfe` above that is outside this
+//! kernel's control or visibility. Not yet tested further. The practical
 //! consequence of the fix is just power efficiency (this task now spins
-//! instead of actually idling) - correctness-wise it's indistinguishable
-//! from `wfe`, and this kernel doesn't optimize for idle power anywhere
-//! else either (task 0's own I/O polling already busy-waits).
+//! instead of actually idling) - correctness-wise it's indistinguishable from
+//! `wfe`, and this kernel doesn't optimize for idle power anywhere else
+//! either (task 0's own I/O polling already busy-waits).
 //!
 //! There's no cooperative yielding anywhere — the *only* thing that ever
 //! moves execution from one task to the other is the timer tick catching
@@ -322,12 +321,13 @@ const TO_ACCT: u32 = 1 << (syscall_abi::ACCT_TASK as u32); // slot 5
 /// the two constants, so raising `NUM_TASKS` widens it automatically.
 const TO_SPAWNABLE: u32 = ((1u32 << NUM_TASKS) - 1) & !((1u32 << FIRST_SPAWNABLE) - 1);
 
-/// The capability set for `slot`, a pure function of the slot's static
-/// role. This is the single source of truth for the capability policy -
-/// the send-mask (who this slot may initiate IPC to) plus resource caps.
-/// Validated against every real IPC flow (see the plan / CLAUDE.md's
-/// capability-model section): servers answer calls with `MSG_REPLY`, which
-/// needs no right, so only *unsolicited* sends need a mask bit.
+/// The capability set for `slot`, a pure function of the slot's static role.
+/// This is the single source of truth for the capability policy - the
+/// send-mask (who this slot may initiate IPC to) plus resource caps.
+/// Validated against every real IPC flow (see docs/CHANGELOG.md's "A
+/// capability model for who-may-call-whom"): servers answer calls with
+/// `MSG_REPLY`, which needs no right, so only *unsolicited* sends need a mask
+/// bit.
 fn caps_for_slot(slot: usize) -> u32 {
     match slot as u64 {
         // Shell: calls the filesystem, console, network and account servers,
@@ -405,15 +405,16 @@ pub(crate) fn may_send(src: usize, dest: usize) -> bool {
 
 /// Bump allocator for dynamically `spawn`ed programs' EL0 regions -
 /// deliberately the simplest correct thing, not a real allocator: grows
-/// *downward* from the top of discovered RAM (`init_runtime_allocator`),
-/// never frees, never reuses an address. No destruction exists yet (see
-/// CLAUDE.md's "dynamic task creation" milestone for why that's a
-/// deliberate scope cut, not an oversight), so this can never be asked to
-/// hand back an address it already gave out. Growing *downward* from
-/// `mmu::ram_span`'s `max_addr` means this never needs to know where the
-/// kernel's own image, task 0's loaded program, or task 1's idle region
-/// actually sit - all three are guaranteed to be somewhere *below*
-/// wherever this starts, since `max_addr` is by definition past every
+/// *downward* from the top of discovered RAM (`init_runtime_allocator`). It
+/// takes a region back only in LIFO order: [`free_runtime_region`], called
+/// when a task ends, moves the cursor back up when the region was the most
+/// recent allocation and leaks it otherwise (see `docs/CHANGELOG.md`'s "Task
+/// destruction (`exit`)" entry). So an address is handed out again only after
+/// the task that held it has ended, and never while it is still held. Growing
+/// *downward* from `mmu::ram_span`'s `max_addr` means this never needs to
+/// know where the kernel's own image, task 0's loaded program, or task 1's
+/// idle region actually sit - all three are guaranteed to be somewhere
+/// *below* wherever this starts, since `max_addr` is by definition past every
 /// general-RAM descriptor the UEFI memory map ever reported, including
 /// whichever ones cover them.
 static NEXT_RUNTIME_REGION_TOP: AtomicU64 = AtomicU64::new(0);
@@ -429,14 +430,14 @@ pub(crate) fn init_runtime_allocator() {
 /// Hands out `size` bytes (rounded up to a multiple of the loader's
 /// `SLOT_ALIGN`, so a region `elf_region_size` has bounded to one slot's
 /// worth of bytes also lies inside ONE slot, the invariant `mmu.rs`'s
-/// per-task view rests on) of fresh RAM,
-/// already identity-mapped EL1-accessible (all of discovered RAM is,
-/// unconditionally - see `mmu.rs`) but not yet EL0-accessible; the caller
-/// still has to fold the returned `(base, size)` into a fresh call to
-/// `mmu::rebuild_with_el0_regions` before any EL0 task can actually touch
-/// it. Never fails, never reuses an address - see this module's own doc
-/// comment for why that's an accepted, deliberate limit for now rather
-/// than a real allocator.
+/// per-task view rests on) of fresh RAM, already identity-mapped
+/// EL1-accessible (all of discovered RAM is, unconditionally - see `mmu.rs`)
+/// but not yet EL0-accessible; the caller still has to fold the returned
+/// `(base, size)` into a fresh call to `mmu::rebuild_with_el0_regions` before
+/// any EL0 task can actually touch it. Never fails, and reuses an address
+/// only after [`free_runtime_region`] has given it back - see
+/// [`NEXT_RUNTIME_REGION_TOP`]'s doc comment for why a bump cursor is an
+/// accepted, deliberate limit for now rather than a real allocator.
 pub(crate) fn allocate_runtime_region(size: u64) -> u64 {
     let aligned_size = size.next_multiple_of(SLOT_ALIGN);
     NEXT_RUNTIME_REGION_TOP.fetch_sub(aligned_size, Ordering::Relaxed) - aligned_size

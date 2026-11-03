@@ -14,12 +14,13 @@
 //! the raw put-pixel/memmove, a dumb 2D blitter.
 //!
 //! The kernel's own `fbconsole` (the emergency/boot console) writes the
-//! *same* framebuffer independently, for boot messages and fault
-//! reports. The console lock serialises the two (`FbCell`'s SAFETY note
-//! below: the `FB_*` arms take it, the kernel's prints hold it; the kernel
-//! lock does not cover a halting core's fault report); on a framebuffer-only platform they do share
-//! the screen (kernel during boot/faults, `cond` in steady state) - see
-//! `CLAUDE.md`'s "Driver isolation, part 3".
+//! *same* framebuffer independently, for boot messages and fault reports. The
+//! console lock serialises the two (`FbCell`'s SAFETY note below: the `FB_*`
+//! arms take it, the kernel's prints hold it; the kernel lock does not cover
+//! a halting core's fault report); on a framebuffer-only platform they do
+//! share the screen (kernel during boot/faults, `cond` in steady state) - see
+//! `docs/postmortems/console-server-postmortem.md`'s "The handoff: the kernel
+//! has to learn to shut up".
 
 use core::cell::UnsafeCell;
 

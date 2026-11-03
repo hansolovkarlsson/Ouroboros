@@ -252,31 +252,32 @@ extern "C" fn kernel_main() -> ! {
     }
     // A real, hardware-confirmed reason for this flag, not a hedge - and
     // confirmed twice over now, not once. Real Parallels hardware took a
-    // genuine Synchronous External Abort (ESR_EL1 EC=0x25, DFSC=0x10 - a
-    // real bus fault, not a permission/translation issue) reading
-    // virtio_mmio's very first scan address (`FAR_EL1` matched
-    // `virtio_mmio::SLOT_BASE` exactly) - see `virtio_mmio.rs`'s module
-    // doc comment and CLAUDE.md's "GOP framebuffer console, take four".
-    // With that scan skipped, a *second*, differently-addressed instance
-    // of the identical fault signature showed up next, this time with
-    // `FAR_EL1` matching the old hardcoded `gic.rs`'s `GICD_BASE` exactly
-    // - see CLAUDE.md's "take five". That second crash is what the
-    // MADT/GICv3 work (`madt.rs`, `gicv3.rs`, `gic_confirmed` below) fixed
-    // properly - GIC/timer setup no longer depends on this heuristic at
-    // all, it depends on a real MADT parse. **This flag now only gates
-    // virtio-console/virtio-blk** (renamed from the old `qemu_device_region_safe`
-    // to reflect that): `virtio_mmio::find_device`'s scan still has no
-    // MADT-equivalent real-discovery mechanism of its own (MADT describes
-    // interrupt controllers, not virtio transports), and Parallels'
-    // own PCI device inventory (`pci::log_all_devices`, see CLAUDE.md's
-    // "virtio-console" section) shows no virtio-blk/virtio-console device
-    // there at all regardless - so this heuristic is still the only thing
-    // standing between `find_device`'s scan and a repeat of that first
-    // crash. This is still a heuristic, not a proof (a platform could in
-    // principle have no early console yet still safely expose virtio-mmio),
-    // but it's grounded in the one real data point this project has - QEMU,
-    // the only platform this scan has ever been confirmed safe on, also
-    // always has a working ACPI/SPCR console.
+    // genuine Synchronous External Abort (ESR_EL1 EC=0x25, DFSC=0x10 - a real
+    // bus fault, not a permission/translation issue) reading virtio_mmio's
+    // very first scan address (`FAR_EL1` matched `virtio_mmio::SLOT_BASE`
+    // exactly) - see `virtio_mmio.rs`'s module doc comment and
+    // `docs/CHANGELOG.md`'s "GOP framebuffer console, round three". With that
+    // scan skipped, a *second*, differently-addressed instance of the
+    // identical fault signature showed up next, this time with `FAR_EL1`
+    // matching the old hardcoded `gic.rs`'s `GICD_BASE` exactly - see
+    // docs/CHANGELOG.md's "GOP framebuffer console, round four". That second
+    // crash is what the MADT/GICv3 work (`madt.rs`, `gicv3.rs`,
+    // `gic_confirmed` below) fixed properly - GIC/timer setup no longer
+    // depends on this heuristic at all, it depends on a real MADT parse.
+    // **This flag now only gates virtio-console/virtio-blk** (renamed from
+    // the old `qemu_device_region_safe` to reflect that):
+    // `virtio_mmio::find_device`'s scan still has no MADT-equivalent
+    // real-discovery mechanism of its own (MADT describes interrupt
+    // controllers, not virtio transports), and Parallels' own PCI device
+    // inventory (`pci::log_all_devices`, see docs/CHANGELOG.md's "Parallels
+    // console: virtio-console confirmed not applicable") shows no
+    // virtio-blk/virtio-console device there at all regardless - so this
+    // heuristic is still the only thing standing between `find_device`'s scan
+    // and a repeat of that first crash. This is still a heuristic, not a
+    // proof (a platform could in principle have no early console yet still
+    // safely expose virtio-mmio), but it's grounded in the one real data
+    // point this project has - QEMU, the only platform this scan has ever
+    // been confirmed safe on, also always has a working ACPI/SPCR console.
     let virtio_mmio_probe_safe = discovery.is_some();
 
     // GOP framebuffer discovery - also boot-services-only (see
@@ -753,24 +754,23 @@ extern "C" fn kernel_main() -> ! {
         unsafe { fbdev::install(&info) };
     }
 
-    // A fourth console-discovery fallback: the GOP framebuffer, tried
-    // right after devicetree/ACPI/PCI - ahead of virtio-console below,
-    // not after it. This ordering is deliberate, not the original design
-    // (which tried virtio-console first): a real-Parallels-hardware test
-    // confirmed the framebuffer mapping and direct-write visibility both
-    // work correctly here (a temporary raw full-screen fill diagnostic
-    // turned the whole display solid white, then was removed once that
-    // was confirmed - see CLAUDE.md's "GOP framebuffer console, take
-    // three"), while that same test then froze solid, before reaching
-    // this point, while still inside try_virtio_console() below - see
-    // that function's own doc comment for why its virtio-mmio scan is
-    // now the prime suspect for an unconfirmed, possibly platform-unsafe
-    // assumption. Trying the now-hardware-validated framebuffer console
-    // first means Parallels gets a working console before that riskier
-    // scan ever runs, and - as a real side benefit - if virtio-mmio
-    // scanning does fault on some future platform, there will finally be
-    // a console installed to report the exception through instead of a
-    // silent freeze.
+    // A fourth console-discovery fallback: the GOP framebuffer, tried right
+    // after devicetree/ACPI/PCI - ahead of virtio-console below, not after
+    // it. This ordering is deliberate, not the original design (which tried
+    // virtio-console first): a real-Parallels-hardware test confirmed the
+    // framebuffer mapping and direct-write visibility both work correctly
+    // here (a temporary raw full-screen fill diagnostic turned the whole
+    // display solid white, then was removed once that was confirmed - see
+    // docs/CHANGELOG.md's "GOP framebuffer console, round two"), while that
+    // same test then froze solid, before reaching this point, while still
+    // inside try_virtio_console() below - see that function's own doc comment
+    // for why its virtio-mmio scan is now the prime suspect for an
+    // unconfirmed, possibly platform-unsafe assumption. Trying the
+    // now-hardware-validated framebuffer console first means Parallels gets a
+    // working console before that riskier scan ever runs, and - as a real
+    // side benefit - if virtio-mmio scanning does fault on some future
+    // platform, there will finally be a console installed to report the
+    // exception through instead of a silent freeze.
     if !console::is_installed() {
         try_framebuffer_console(fb_info);
     }
@@ -778,12 +778,12 @@ extern "C" fn kernel_main() -> ! {
     // A fifth and final fallback, tried only if every mechanism above -
     // including the framebuffer console - has failed, *and* only if
     // `virtio_mmio_probe_safe` says the underlying scan isn't known to be
-    // dangerous here. Confirmed dead on Parallels specifically (no such
-    // PCI device, see CLAUDE.md's "virtio-console" section) and now
-    // confirmed to crash outright there too, not just fail to find
-    // anything (see `virtio_mmio_probe_safe`'s own comment above) - kept
-    // only for a hypothetical future platform with no GOP but a real,
-    // safely-probeable virtio-mmio console device.
+    // dangerous here. Confirmed dead on Parallels specifically (no such PCI
+    // device, see docs/CHANGELOG.md's "Parallels console: virtio-console
+    // confirmed not applicable") and now confirmed to crash outright there
+    // too, not just fail to find anything (see `virtio_mmio_probe_safe`'s own
+    // comment above) - kept only for a hypothetical future platform with no
+    // GOP but a real, safely-probeable virtio-mmio console device.
     if virtio_mmio_probe_safe && !console::is_installed() {
         try_virtio_console();
     }
@@ -880,30 +880,30 @@ extern "C" fn kernel_main() -> ! {
     install_boot_disk(held_virtio);
 
     // GIC/timer setup - gated on `gic_info` being `Some` (real MADT
-    // discovery, `madt.rs`), not the console-discovery heuristic this used to share
-    // with virtio-mmio above. The old shared gate existed because real
-    // Parallels hardware directly confirmed (a decoded Synchronous
-    // External Abort, `FAR_EL1` matching the old hardcoded `GICD_BASE`
-    // exactly) that writing to `gic.rs`'s QEMU-devicetree-derived
-    // addresses crashes just as hard as virtio-mmio's did - see
-    // CLAUDE.md's "take five". `madt.rs`/`gicv2.rs`/`gicv3.rs` fix that
+    // discovery, `madt.rs`), not the console-discovery heuristic this used to
+    // share with virtio-mmio above. The old shared gate existed because real
+    // Parallels hardware directly confirmed (a decoded Synchronous External
+    // Abort, `FAR_EL1` matching the old hardcoded `GICD_BASE` exactly) that
+    // writing to `gic.rs`'s QEMU-devicetree-derived addresses crashes just as
+    // hard as virtio-mmio's did - see docs/CHANGELOG.md's "GOP framebuffer
+    // console, round four". `madt.rs`/`gicv2.rs`/`gicv3.rs` fix that
     // properly: the addresses used below now come from the platform's own
-    // ACPI MADT, confirmed real for *this* boot, not a QEMU-shaped
-    // convention borrowed from a devicetree dump - see `madt.rs`'s module
-    // doc comment. Skipping this (when MADT parsing itself fails - a real,
-    // live possibility on a platform whose MADT doesn't describe an
-    // interrupt controller the way Parallels' SPCR doesn't describe a
-    // console, still unconfirmed either way) means no preemption this
-    // boot (no tick ever fires, so `tasks.rs`'s round-robin never switches
-    // away from task 0) - a real, known limitation, not silently
-    // swallowed: `tasks::start` below does a straight `eret` into task 0
-    // with no dependency on any of this having run, so the interactive
-    // shell still works, just without ever preempting - task 0 simply
-    // keeps running forever, which is fine for a single always-runnable
-    // interactive task. `timer::arm` is deliberately not called at all in
-    // that case: it's harmless either way (pure system-register access,
-    // see `timer.rs`'s module doc comment), but arming a timer whose
-    // interrupt will never be forwarded anywhere is just dead work.
+    // ACPI MADT, confirmed real for *this* boot, not a QEMU-shaped convention
+    // borrowed from a devicetree dump - see `madt.rs`'s module doc comment.
+    // Skipping this (when MADT parsing itself fails - a real, live
+    // possibility on a platform whose MADT doesn't describe an interrupt
+    // controller the way Parallels' SPCR doesn't describe a console, still
+    // unconfirmed either way) means no preemption this boot (no tick ever
+    // fires, so `tasks.rs`'s round-robin never switches away from task 0) - a
+    // real, known limitation, not silently swallowed: `tasks::start` below
+    // does a straight `eret` into task 0 with no dependency on any of this
+    // having run, so the interactive shell still works, just without ever
+    // preempting - task 0 simply keeps running forever, which is fine for a
+    // single always-runnable interactive task. `timer::arm` is deliberately
+    // not called at all in that case: it's harmless either way (pure
+    // system-register access, see `timer.rs`'s module doc comment), but
+    // arming a timer whose interrupt will never be forwarded anywhere is just
+    // dead work.
     if let Some(info) = gic_info {
         // Re-printed through whatever console is live now, same reason
         // xhci_info's diagnostic is re-printed below - the boot-services-only

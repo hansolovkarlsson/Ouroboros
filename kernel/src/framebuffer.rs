@@ -1,15 +1,16 @@
 //! Framebuffer console discovery via `EFI_GRAPHICS_OUTPUT_PROTOCOL` (GOP) -
 //! the real lead for Parallels console output, replacing the virtio-console
-//! lead confirmed dead there (see `CLAUDE.md`'s "virtio-console" section).
-//! Real evidence, not another guess: a Parallels ARM64 VM's own config only
-//! offers two "video type" options (a proprietary Parallels GPU, or
-//! VirtIO GPU) - no serial option exists at all - and a real user's FreeBSD
-//! boot log on that exact platform shows `efifb` (the generic UEFI GOP
-//! framebuffer driver) driving console output before any GPU-specific
-//! driver takes over. That's the same mechanism already visibly working in
-//! this project's own Parallels boot screenshots - this module continues
-//! writing into that same framebuffer past `exit_boot_services`, instead of
-//! it going dark the moment boot services end.
+//! lead confirmed dead there (see `docs/CHANGELOG.md`'s "Parallels console:
+//! virtio-console confirmed not applicable"). Real evidence, not another
+//! guess: a Parallels ARM64 VM's own config only offers two "video type"
+//! options (a proprietary Parallels GPU, or VirtIO GPU) - no serial option
+//! exists at all - and a real user's FreeBSD boot log on that exact platform
+//! shows `efifb` (the generic UEFI GOP framebuffer driver) driving console
+//! output before any GPU-specific driver takes over. That's the same
+//! mechanism already visibly working in this project's own Parallels boot
+//! screenshots - this module continues writing into that same framebuffer
+//! past `exit_boot_services`, instead of it going dark the moment boot
+//! services end.
 //!
 //! Unlike every previous console-discovery module, GOP needs no address
 //! guessing or platform-specific convention at all: it's a standard,

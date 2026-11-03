@@ -1,17 +1,16 @@
 /* Self-relocating (position-independent) linker script for Ouroboros
  * userland programs.
  *
- * Loaded and run at EL0 by the kernel (`loader.rs`/`tasks.rs`) - a real,
- * if narrowly-scoped, ELF loader now: it walks PT_LOAD program headers to
- * know what to copy where, and processes R_AARCH64_RELATIVE entries in
- * .rela.dyn against wherever it actually placed the program (see
- * loader.rs's own module doc comment for the full mechanism, and
- * CLAUDE.md's "relocating loader" milestone for why this replaced the
- * old flat-binary approach). Entry is still deliberately kept at the
- * very first byte of output (`KEEP(*(.text.start))`, link address 0x0)
- * even though a real ELF's entry point doesn't have to be - it keeps
- * `LoadedProgram::entry == LoadedProgram::base` trivially true, one
- * fewer thing to get wrong.
+ * Loaded and run at EL0 by the kernel (`loader.rs`/`tasks.rs`) - a real, if
+ * narrowly-scoped, ELF loader now: it walks PT_LOAD program headers to know
+ * what to copy where, and processes R_AARCH64_RELATIVE entries in .rela.dyn
+ * against wherever it actually placed the program (see loader.rs's own module
+ * doc comment for the full mechanism, and docs/CHANGELOG.md's "A real
+ * relocating loader" entry for why this replaced the old flat-binary
+ * approach). Entry is still deliberately kept at the very first byte of
+ * output (`KEEP(*(.text.start))`, link address 0x0) even though a real ELF's
+ * entry point doesn't have to be - it keeps `LoadedProgram::entry ==
+ * LoadedProgram::base` trivially true, one fewer thing to get wrong.
  *
  * .data/.bss are now supported (the loader's .data/.bss milestone): the
  * loader copies initialized data (p_filesz) and zeroes .bss (p_memsz -

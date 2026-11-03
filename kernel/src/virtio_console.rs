@@ -1,11 +1,11 @@
 //! virtio-console: a transmit-only driver over `virtio_mmio`'s transport -
 //! the real lead for console output on Parallels, first raised (and
 //! deliberately deferred) in the "Console discovery" section of
-//! `CLAUDE.md`: Parallels' Apple Silicon virtualization exposes its
-//! serial port via virtio (`console=hvc0` is the standard Linux console
-//! parameter for this class of VM), not a classic PL011/16550 UART -
-//! which is exactly why all three of `devicetree.rs`/`acpi.rs`/`pci.rs`
-//! come back empty there.
+//! `docs/boot-history.md`: Parallels' Apple Silicon virtualization exposes
+//! its serial port via virtio (`console=hvc0` is the standard Linux console
+//! parameter for this class of VM), not a classic PL011/16550 UART - which is
+//! exactly why all three of `devicetree.rs`/`acpi.rs`/`pci.rs` come back
+//! empty there.
 //!
 //! Modeled directly on `virtio_blk.rs`'s structure (discover/init/one
 //! virtqueue/poll-based synchronous completion) - see that module's doc
