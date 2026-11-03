@@ -1,7 +1,7 @@
 //! Version-dispatching facade over `gicv2.rs` (GICv2) and `gicv3.rs` (GICv3)
 //! — the real GIC version is now discovered at boot via `madt.rs`, not
 //! assumed, so this module exists to keep `main.rs`'s and `exceptions.rs`'s
-//! call sites (`init`/`enable_interrupt`/`acknowledge`/ `end_of_interrupt`)
+//! call sites (`init`/`enable_interrupt`/`acknowledge`/`end_of_interrupt`)
 //! exactly the same shape they were when this file *was* the GICv2 driver
 //! directly. `exceptions.rs`'s two call sites
 //! (`acknowledge`/`end_of_interrupt`, both inside the resumable IRQ path)

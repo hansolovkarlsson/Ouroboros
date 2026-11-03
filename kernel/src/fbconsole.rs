@@ -19,11 +19,12 @@
 //! all yet, a real gap independent of this console, not something this
 //! module could address on its own.
 //!
-//! # Safety model The raw framebuffer pointer/stride/format are captured
-//! during boot services (`framebuffer::discover`) and used via
-//! `write_volatile`/ `ptr::copy` after `exit_boot_services` - the
-//! `GraphicsOutput`/ `FrameBuffer` objects themselves are never held past
-//! boot services. The UEFI spec doesn't guarantee the pointer stays valid
+//! # Safety model
+//! The raw framebuffer pointer/stride/format are captured during boot
+//! services (`framebuffer::discover`) and used via
+//! `write_volatile`/`ptr::copy` after `exit_boot_services` - the
+//! `GraphicsOutput`/`FrameBuffer` objects themselves are never held past boot
+//! services. The UEFI spec doesn't guarantee the pointer stays valid
 //! post-exit (see `framebuffer.rs`), but this is the only way to find out -
 //! confirmed working on QEMU's `ramfb` device (screendump-verified, see
 //! `docs/CHANGELOG.md`'s "a fifth, better-grounded lead" entry). Whether the

@@ -1,9 +1,9 @@
-//! GICv3 backend — selected by `gic.rs`'s facade whenever `madt::discover`
-//! reports `GicVersion::V3` (the version Parallels almost certainly runs,
-//! per Apple Silicon virtualization convention — see `madt.rs`'s module
-//! doc comment for why this exists at all: `gicv2.rs`'s addresses and
-//! register layout are QEMU-shaped and already confirmed unsafe on real
-//! Parallels hardware).
+//! GICv3 backend, selected by `gic.rs`'s facade whenever `madt::discover`
+//! reports `GicVersion::V3` (the version Parallels almost certainly runs, per
+//! Apple Silicon virtualization convention; see `madt.rs`'s module doc
+//! comment for why this exists at all: `gicv2.rs`'s addresses and register
+//! layout are QEMU-shaped and already confirmed unsafe on real Parallels
+//! hardware).
 //!
 //! Real, material differences from `gicv2.rs`, each cross-checked against
 //! Linux's `include/linux/irqchip/arm-gic-v3.h` rather than transcribed
@@ -11,19 +11,18 @@
 //! register-bit sourcing to):
 //!
 //! - **The CPU interface is system-register-based, not memory-mapped at
-//!   all.** `ICC_SRE_EL1` must be set (and read back to confirm it stuck —
+//!   all.** `ICC_SRE_EL1` must be set (and read back to confirm it stuck:
 //!   this project's "verify, don't assume a system-register write took
-//!   effect" discipline, established hard by `mmu.rs`'s TCR_EL1 work)
-//!   before `ICC_*_EL1` accesses mean anything; then `ICC_PMR_EL1`
-//!   (priority mask, same role as `gicv2.rs`'s `GICC_PMR`),
-//!   `ICC_IGRPEN1_EL1` (enable Group 1), `ICC_IAR1_EL1` (acknowledge —
-//!   read), `ICC_EOIR1_EL1` (end of interrupt — write).
+//!   effect" discipline, established hard by `mmu.rs`'s TCR_EL1 work) before
+//!   `ICC_*_EL1` accesses mean anything; then `ICC_PMR_EL1` (priority mask,
+//!   same role as `gicv2.rs`'s `GICC_PMR`), `ICC_IGRPEN1_EL1` (enable Group
+//!   1), `ICC_IAR1_EL1` (acknowledge, read), `ICC_EOIR1_EL1` (end of
+//!   interrupt, write).
 //! - **PPI enable moves to the Redistributor, not the Distributor.**
-//!   `GICD_ISENABLER` (what `gicv2.rs::enable_interrupt` writes) only
-//!   covers SPIs (intid >= 32) in GICv3 — the timer PPI (30) is enabled
-//!   via the SGI_base frame's `GICR_ISENABLER0` instead, at the *same*
-//!   register offset (0x100) coincidentally, but a completely different
-//!   base address.
+//!   `GICD_ISENABLER` (what `gicv2.rs::enable_interrupt` writes) only covers
+//!   SPIs (intid >= 32) in GICv3. The timer PPI (30) is enabled via the
+//!   SGI_base frame's `GICR_ISENABLER0` instead, at the *same* register
+//!   offset (0x100) coincidentally, but a completely different base address.
 //! - **Redistributor wake-up, no GICv2 equivalent at all.** Must clear
 //!   `GICR_WAKER.ProcessorSleep` and poll `GICR_WAKER.ChildrenAsleep`
 //!   until it clears before the redistributor accepts anything.
@@ -33,14 +32,13 @@
 //!   for many, confirmed via both a devicetree dump and this driver's own
 //!   MADT parse, see `main.rs`'s MADT log line and the Makefile's `run-gicv3`
 //!   comment). `init` walks redistributor frames (stride `0x2_0000`, or
-//!   `0x4_0000` if `GICR_TYPER.VLPIS` is set — a real possibility this driver
+//!   `0x4_0000` if `GICR_TYPER.VLPIS` is set, a real possibility this driver
 //!   checks for rather than assuming away) comparing each frame's
 //!   `GICR_TYPER` affinity field against this CPU's own `MPIDR_EL1`, stopping
 //!   at a match or at `GICR_TYPER`'s "Last" bit. Real discovery, not
-//!   hardcoded to frame 0, even though this kernel is single-core — matches
-//!   this project's existing discipline of discovering rather than assuming
-//!   (e.g. `xhci.rs` scanning every port rather than trusting the first
-//!   device found).
+//!   hardcoded to frame 0: every core runs the walk for itself
+//!   ([`init_this_core`], a secondary's half of [`init`]) and finds its own
+//!   frame by its own `MPIDR_EL1`.
 
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
@@ -95,20 +93,23 @@ const GICD_CTLR_ARE_NS: u32 = 1 << 4;
 const GICD_CTLR_RWP: u32 = 1 << 31;
 const GICD_CTLR_INIT: u32 = GICD_CTLR_ENABLE_G1 | GICD_CTLR_ENABLE_G1A | GICD_CTLR_ARE_NS;
 
-/// This CPU's own redistributor SGI_base frame, found once by [`init`] and
-/// reused by [`enable_interrupt`] — `acknowledge`/`end_of_interrupt` need
-/// no memory address at all, only the `ICC_*_EL1` system registers.
-/// `AtomicUsize` for the same reason `exceptions.rs`'s `TICKS` counter is
-/// an atomic rather than a bare `static mut` - this project's established
-/// idiom for kernel-global state, even though nothing here is genuinely
-/// concurrent (single core, and `init` always completes before any IRQ
-/// that could call the others is unmasked).
+/// The BOOT core's redistributor SGI_base frame, found by [`init`] and read
+/// by [`enable_interrupt`]; `acknowledge`/`end_of_interrupt` need no memory
+/// address at all, only the `ICC_*_EL1` system registers. It is per core by
+/// nature and right only on the boot core: a secondary's frame is the one
+/// [`init_this_core`] returns to it, which it never stores here, and
+/// `enable_interrupt` is called only from `main.rs` on the boot core (class B
+/// in `docs/roadmap/roadmap-smp.md`'s inventory). Written once, before the
+/// secondaries start and before any IRQ is unmasked, so nothing reads it
+/// concurrently with the write. `AtomicUsize` is this project's idiom for
+/// kernel-global state, as for `exceptions.rs`'s `TICKS`.
 static SGI_BASE: AtomicUsize = AtomicUsize::new(0);
 
 /// The distributor base, stashed by [`init`] for [`enable_interrupt`]'s SPI
 /// path (a PPI needs only the redistributor's [`SGI_BASE`]; an SPI needs the
-/// distributor). Same single-core "set in init before any IRQ" reasoning as
-/// [`SGI_BASE`].
+/// distributor). Written once by [`init`] on the boot core before any
+/// `CPU_ON`, which is the happens-before edge for every core that reads it
+/// after (class A in `docs/roadmap/roadmap-smp.md`'s inventory).
 static GICD_BASE: AtomicUsize = AtomicUsize::new(0);
 
 unsafe fn read_reg32(base: usize, offset: usize) -> u32 {
@@ -135,10 +136,10 @@ pub(crate) fn read_mpidr() -> u64 {
     mpidr
 }
 
-/// Packs `MPIDR_EL1`'s Aff0/Aff1/Aff2/Aff3 fields into the same 32-bit
-/// layout `GICR_TYPER`'s Affinity field uses (Aff3:Aff2:Aff1:Aff0, one
-/// byte each) — the standard comparison every GICv3 redistributor probe
-/// (this driver's `init` included) has to do to find its own frame.
+/// Packs `MPIDR_EL1`'s Aff0/Aff1/Aff2/Aff3 fields into the same 32-bit layout
+/// `GICR_TYPER`'s Affinity field uses (Aff3:Aff2:Aff1:Aff0, one byte each):
+/// the standard comparison every GICv3 redistributor probe (this driver's
+/// `init` included) has to do to find its own frame.
 fn mpidr_affinity_packed(mpidr: u64) -> u32 {
     let aff0 = (mpidr & 0xff) as u32;
     let aff1 = ((mpidr >> 8) & 0xff) as u32;
@@ -174,21 +175,21 @@ fn find_own_redistributor(gicr_base: usize, gicr_size: usize) -> Option<usize> {
     None
 }
 
-/// Wakes the redistributor (clears `ProcessorSleep`, polls
-/// `ChildrenAsleep` until clear — no GICv2 equivalent, see this module's
-/// doc comment), enables the distributor, routes the CPU interface to
-/// system registers (`ICC_SRE_EL1`, read back to confirm it stuck), and
-/// opens the priority mask/Group 1 enable.
+/// Wakes the redistributor (clears `ProcessorSleep`, polls `ChildrenAsleep`
+/// until clear; no GICv2 equivalent, see this module's doc comment), enables
+/// the distributor, routes the CPU interface to system registers
+/// (`ICC_SRE_EL1`, read back to confirm it stuck), and opens the priority
+/// mask/Group 1 enable.
 ///
 /// # Safety
-/// Must run after `mmu.rs`'s identity map is installed (`gicd_base` and
-/// the `[gicr_base, gicr_base + gicr_size)` region must be mapped) and
-/// before unmasking IRQ in DAIF. Panics (via a failed `Option::expect`,
-/// same fail-fast posture `loader.rs` uses for its own "nothing to run"
-/// case) if this CPU's own redistributor frame can't be found in the
-/// given region — a real, confirmed-safe address that doesn't actually
-/// contain a matching frame is a genuine discovery-logic bug, not
-/// something to silently limp past.
+/// Must run after `mmu.rs`'s identity map is installed (`gicd_base` and the
+/// `[gicr_base, gicr_base + gicr_size)` region must be mapped) and before
+/// unmasking IRQ in DAIF. Panics (via a failed `Option::expect`, same
+/// fail-fast posture `loader.rs` uses for its own "nothing to run" case) if
+/// this CPU's own redistributor frame can't be found in the given region: a
+/// real, confirmed-safe address that doesn't actually contain a matching
+/// frame is a genuine discovery-logic bug, not something to silently limp
+/// past.
 pub unsafe fn init(gicd_base: usize, gicr_base: usize, gicr_size: usize) {
     GICD_BASE.store(gicd_base, Ordering::Relaxed);
     unsafe {
@@ -271,15 +272,17 @@ pub unsafe fn enable_ppi_on(sgi_base: usize, intid: u32) {
 
 /// Enables forwarding of `intid`.
 ///
-/// A PPI (intid < 32, e.g. the timer, 30) is enabled at this CPU's own
-/// redistributor frame (found by [`init`]) - unlike GICv2, the distributor
-/// plays no part. An SPI (intid >= 32, e.g. a virtio-mmio device) lives in
-/// the distributor instead and needs three writes: put it in Group 1 (or it
-/// defaults to Group 0/FIQ and never reaches this kernel's IRQ handler - the
-/// exact bug `init`'s `GICR_IGROUPR0` write already fixed for PPIs), route
-/// it to this CPU via `GICD_IROUTER`, then enable it. Trigger mode/priority
-/// are left at reset for the same reasons `gicv2.rs::enable_interrupt`
-/// documents.
+/// Called on the boot core alone (`main.rs`). A PPI (intid < 32, e.g. the
+/// timer, 30) is enabled at the boot core's redistributor frame
+/// ([`SGI_BASE`], found by [`init`]); a secondary enables its own through
+/// `gic::enable_ppi_this_core`. Unlike GICv2, the distributor plays no part.
+/// An SPI (intid >= 32, e.g. a virtio-mmio device) lives in the distributor
+/// instead and needs three writes: put it in Group 1 (or it defaults to Group
+/// 0/FIQ and never reaches this kernel's IRQ handler - the exact bug `init`'s
+/// `GICR_IGROUPR0` write already fixed for PPIs), route it to the calling
+/// core, the boot core, via `GICD_IROUTER`, then enable it. Trigger
+/// mode/priority are left at reset for the same reasons
+/// `gicv2.rs::enable_interrupt` documents.
 ///
 /// # Safety
 /// Must run after [`init`].
@@ -362,10 +365,10 @@ pub unsafe fn send_sgi(sgi: u32, gicd_base: usize, mpidr: u64) -> Result<(), &'s
     Ok(())
 }
 
-/// Reads the highest-priority pending interrupt ID and acknowledges it —
+/// Reads the highest-priority pending interrupt ID and acknowledges it; it
 /// must be paired with [`end_of_interrupt`], same contract as
-/// `gicv2.rs::acknowledge`. Pure system-register access, no memory
-/// address involved at all.
+/// `gicv2.rs::acknowledge`. Pure system-register access, no memory address
+/// involved at all.
 ///
 /// # Safety
 /// Must run after [`init`], from IRQ-handling context.
