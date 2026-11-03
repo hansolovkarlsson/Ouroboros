@@ -8,7 +8,8 @@ record — how each arc was sequenced and what was learned) and
 document stays about what's *still open*. For *how* something already built
 actually works, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md); for the debugging history and lessons
-behind each decision, see the postmortems under `docs/postmortems/` and `CLAUDE.md`.
+behind each decision, see the postmortems under `docs/postmortems/`,
+[`CHANGELOG.md`](CHANGELOG.md) and [`boot-history.md`](boot-history.md).
 This document is the one to update first when direction changes.
 
 > **The long-term direction** — a Plan 9-style **resource-sharing cluster**
@@ -2914,7 +2915,7 @@ of writing them down now rather than from scratch later.
 > restore cursor, scroll regions, and a return channel.
 
 cond already renders a **small ANSI parser** in the framebuffer backend
-(cursor, wrap, scroll — see `CLAUDE.md`'s "Driver isolation, part 3"), so
+(cursor, wrap and scroll, see `CHANGELOG.md`'s "Console server"), so
 this is *extending an existing subsystem*, not a new one. The goal is a
 usefully-complete VT100/VT220-ish terminal: SGR colors + bold/underline/
 reverse, cursor positioning (`ESC[H`, `ESC[<n>;<m>H`), line/screen erase

@@ -2,9 +2,9 @@
 //! one USB HID boot-protocol keyboard, over the real xHCI PCI controller
 //! (`pci::discover_xhci`) - this kernel's first keyboard input path, and the
 //! reason the whole GOP framebuffer console effort (docs/CHANGELOG.md's "GOP
-//! framebuffer console" entries, from "a fifth, better-grounded lead" to
-//! "confirmed") mattered enough to keep pushing on: that console is
-//! write-only, and until this module, so was Parallels itself.
+//! framebuffer console: a fifth, better-grounded lead" entry and the rounds
+//! after it, through "confirmed") mattered enough to keep pushing on: that
+//! console is write-only, and until this module, so was Parallels itself.
 //!
 //! ## Why this is safe to attempt even where `qemu_device_region_safe` is
 //! ## false
@@ -22,12 +22,12 @@
 //! `GICD_BASE` - both fixed, QEMU-shaped conventions confirmed unsafe on
 //! Parallels by two decoded Synchronous External Aborts (see
 //! `virtio_mmio.rs`'s module doc comment and `docs/CHANGELOG.md`'s "GOP
-//! framebuffer console, round three/four"). This address is *discovered*, not
-//! guessed, the same category of thing as the GOP framebuffer's own address -
-//! which real Parallels hardware testing already confirmed is safe to map and
-//! write post-`exit_boot_services`. `main.rs` therefore calls this module's
-//! `init` unconditionally whenever a BAR was found, independent of
-//! `qemu_device_region_safe`.
+//! framebuffer console, round three" and "round four" entries). This address
+//! is *discovered*, not guessed, the same category of thing as the GOP
+//! framebuffer's own address - which real Parallels hardware testing already
+//! confirmed is safe to map and write post-`exit_boot_services`. `main.rs`
+//! therefore calls this module's `init` unconditionally whenever a BAR was
+//! found, independent of `qemu_device_region_safe`.
 //!
 //! ## Scope: the narrowest slice that can type into the shell
 //!

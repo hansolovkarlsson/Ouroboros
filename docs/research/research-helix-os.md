@@ -103,7 +103,7 @@ not production-ready.
 | | Helix | Ouroboros |
 |---|---|---|
 | Target architecture | x86_64 (AArch64/RISC-V stubbed, unimplemented) | AArch64 (Parallels on Apple Silicon primary, QEMU for dev) |
-| Boot | Limine / Multiboot2 / UEFI, three interchangeable frontends | UEFI only — the only boot path that works on both QEMU and the real Parallels target (see `CLAUDE.md`'s "Boot architecture") |
+| Boot | Limine / Multiboot2 / UEFI, three interchangeable frontends | UEFI only: the only boot path that works on both QEMU and the real Parallels target (see `docs/boot-history.md`'s "Boot architecture") |
 | Language | Rust, `no_std`, nightly | Rust, `no_std`/`alloc` pre-`exit_boot_services`, stable toolchain (no nightly, no `-Z build-std` needed — see `CLAUDE.md`'s "Toolchain" section) |
 | Kernel/policy boundary | Explicit, trait-based: core is "mechanism, not policy," every scheduler/allocator/filesystem behavior is a swappable module outside the TCB | None yet — MMU, exceptions, console drivers, and the scheduler are all undifferentiated EL1 kernel code |
 | Fault isolation | Modules can crash and be restarted, with attempted state migration, without a full reboot | None — a bug in any kernel-resident driver or the scheduler takes down the whole system, same gap noted against MINIX |
@@ -145,7 +145,7 @@ picture that MINIX's boot sequence didn't emphasize as much is a
 concrete vocabulary for the layer *within* a kernel that MINIX pushes
 entirely into user-space servers instead: if Ouroboros's own drivers
 (console, virtio-blk, eventually virtio-console) ever get pulled behind
-trait boundaries the way `docs/ROADMAP.md`'s "actual microkernel-style
+trait boundaries the way `docs/roadmap-completed.md`'s "actual microkernel-style
 driver isolation" parking-lot item already gestures at, Helix's
 mechanism/policy split (`core/` vs. `subsystems/` vs. `modules_impl/`)
 is a concrete shape for what "isolated but still fast" could look like

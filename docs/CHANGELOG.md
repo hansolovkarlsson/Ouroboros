@@ -1751,6 +1751,20 @@ invariant that every byte below the hint is full. Its doc is the one
 statement of why; the roadmap item is settled as unriggable, and the wrap
 before `DiskFull` has its own item. No behaviour changes.
 
+**Pointers to a document's section are checked (2026-11-03).** Thirty-four
+comments in the code named sections of `CLAUDE.md` that had moved to this
+file or to `boot-history.md`, or were gone; #390 repointed them, and its
+high review found five whose named entry did not hold the claim, one of
+them a comment saying the spawn allocator never frees. The documents had
+about thirty more. `scripts/check-doc-pointers.py`, run by `make test` and
+`make check-doc-pointers`, finds every pointer of that shape in the
+tracked source and documents (the dated records skipped) and fails when the
+file holds no heading or bold lead-in containing the quoted name. It was
+seen failing with a heading renamed, with bold markers paired across a
+whole file, and with its extractor broken. It checks the name, not what the
+section says. The documents' dead pointers are repointed, and so are the
+unquoted references that sent a reader to `CLAUDE.md` for history.
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
@@ -5693,7 +5707,7 @@ Foundational for the rest of the arc — you unmount before formatting, and
 mount-info is how you confirm a format worked. Verified on QEMU across FAT32
 (partition LBA 1) and exFAT (partition LBA 2048): the full mount-info → unmount →
 "nothing mounted" → `mount -a` → remount cycle, `ls` after remount, and the
-`mount xyz` usage guard, with zero `-d int` aborts. See `ROADMAP.md`'s "Disk
+`mount xyz` usage guard, with zero `-d int` aborts. See `roadmap-completed.md`'s "Disk
 management tools" arc for milestones 2 (partition/erase) and 3 (format).
 
 ## More filesystems, step 5: ext2 read-write (the arc's finale)

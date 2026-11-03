@@ -8,7 +8,8 @@
 //! don't change at all; `main.rs` gains one `configure` call ahead of the
 //! existing `init`/`enable_interrupt` pair. A facade was chosen over matching
 //! `madt::GicVersion` at every call site (more churn for no real benefit,
-//! since every call site would need the match anyway).
+//! since every call site would need the match anyway); `docs/CHANGELOG.md`'s
+//! "MADT/GICv3" entry records the change.
 //!
 //! Multi-core step 4(c) changed the IRQ path's two call sites after all:
 //! `acknowledge` returns an [`Acked`], whose ID is [`Acked::intid`] and
