@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-10-20. Five PRs, no new subsystem, and four defects that were all
+through 2026-11-02. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -10,8 +10,9 @@ removed its own test, an authority that was already wrong, a diagnosis written
 before its dump was read, a comment that named its own expiry, a limit's
 "unreachable" made false by globbing, a comment falsified by a later
 commit of its own pull request, a rig outside the suite reading a line
-the suite's own change rewrote, and a defect written down without reading
-the code that would have produced it.*
+the suite's own change rewrote, a defect written down without reading
+the code that would have produced it, and a guard deleted as doing nothing
+on a premise that held for one of its paths.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -1129,6 +1130,46 @@ NVMe. `test-long-set`, which boots from virtio, stalled the same way that
 afternoon, and the item was corrected on #338. It is the 2026-10-12 shape: a
 diagnosis written before its cause was looked at, here named from the one
 property its few instances happened to share.
+
+## A claim that a guard does nothing (2026-11-02)
+
+The roadmap asked for a rig that could fail exFAT's allocator lowering its
+hint when a bitmap write is refused (`end_alloc_hold`), since deleting the
+lowering passed every rig. I argued instead that it could not be failed:
+since #384's medium review the scan starts at the first byte of the hint's
+sector, the hint is never past the sector a refused write drops, so the
+lowering changes no scan. Hans took the recommendation and the line was
+deleted, with a doc saying why.
+
+The first medium review reversed it on a different ground: with the
+lowering gone, the one thing keeping a dropped find's clusters in use was
+that rounding, in another function, which nothing checks and which the
+scan had not done a day earlier. The deleted `min` cost nothing and made
+the function correct by itself; deleting it turned a property the code
+held into one the comments asserted, and made `clear_bit`'s comment
+("every byte below the hint stays full") false in a file the change did
+not touch. It went back, with a doc saying no rig can fail it and why it is
+kept.
+
+The second review then found the premise itself false. A request that
+answers `DiskFull` after the scan's second pass ends holding the sector
+before the hint's, dirty with the volume's own clusters it marked on the
+way, and there the lowering does move the hint. The claim "never past the
+held sector" was a claim about every path that leaves a sector held, and I
+had pictured the one with a find. Checking the rewrite before the third
+review turned up a third path (`DiskFull` with no second pass); the doc now
+lists all three, after confirming that only `alloc_scan` sets bits in the
+held sector, which is what bounds the list. 2026-10-20's rule again, from
+the other side: **a claim that something has no effect is a claim about
+every path through it; list the paths, and say what bounds the list.**
+
+And one about the decision: **"no rig can fail it" is a reason to say so,
+not a reason to delete it.** A guard that is redundant today is the only
+local defence the day the thing it duplicates changes, and that day no rig
+will notice either. The third review found only records disagreeing with
+each other, all of them wording written in the first two rounds; the fix
+was to keep the argument once, in the function's doc, and have the roadmap
+and CHANGELOG point to it.
 
 ## What actually worked
 
