@@ -7,17 +7,17 @@ and the per-milestone record in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Versioning scheme
 
-Semver-shaped, pre-1.0 — `0.MINOR.PATCH`, where the leading `0.` is a
+Semver-shaped, pre-1.0: `0.MINOR.PATCH`, where the leading `0.` is a
 deliberate, honest signal: nothing here is API- or on-disk-format-stable
 yet, and a release may change either.
 
-- **Minor bump (`0.N.0`)** — one **completed arc**. An arc is the unit the
+- **Minor bump (`0.N.0`)**: one **completed arc**. An arc is the unit the
   CHANGELOG and the postmortems already think in: a coherent capability
   landing end to end (the network stack; the filesystems arc; disk
   management; a cluster phase). This is the normal release trigger.
-- **Patch bump (`0.N.P`)** — an **isolated fix** on top of a released
+- **Patch bump (`0.N.P`)**: an **isolated fix** on top of a released
   minor, with no new arc: a hardware bug, a regression, a security fix.
-  (The xHCI keyboard↔storage contention fix is the archetype — had it
+  (The xHCI keyboard↔storage contention fix is the archetype. Had it
   landed after `0.4.0` shipped, it would have been `0.4.1`.)
 - **`1.0.0`** is not near. It means committing to a stable syscall ABI and
   on-disk formats. Explicitly out of scope until the cluster direction
@@ -29,7 +29,7 @@ step with it.
 
 ### Version history
 
-Real, artifact-bearing releases start at **`0.4.0`** — the first cut, which
+Real, artifact-bearing releases start at **`0.4.0`**, the first cut, which
 bundles *everything built to date* (four major arcs already in the tree:
 boot/shell/FAT32, USB keyboard+storage, the network stack, and the
 filesystems arc). Earlier arcs were never packaged and shipped, so there
@@ -41,22 +41,22 @@ is `0.5.0`.
 | Version | Date | Arc |
 | --- | --- | --- |
 | `0.4.0` | 2026-08-24 | everything to date: boot/shell/FAT32, USB, network, filesystems |
-| `0.4.1` | 2026-08-24 | patch — the `fsd` large-read restart |
+| `0.4.1` | 2026-08-24 | patch: the `fsd` large-read restart |
 | `0.5.0` | 2026-08-25 | cluster Phase 0: one verb set, per-task namespaces, multi-mount |
-| `0.6.0` | 2026-08-25 | Phase 1 — 9P-over-TCP: export, remote-mount, two nodes |
-| `0.7.0` | 2026-08-25 | Phase 2 — two-node read **and write** disk sharing |
-| `0.8.0` | 2026-08-25 | Phase 3 — resources as files: `/proc`, `/dev/cons`, `/net` |
-| `0.9.0` | 2026-08-26 | Phase 4 — remote execution, the full Plan 9 `cpu` model |
+| `0.6.0` | 2026-08-25 | Phase 1, 9P-over-TCP: export, remote-mount, two nodes |
+| `0.7.0` | 2026-08-25 | Phase 2: two-node read **and write** disk sharing |
+| `0.8.0` | 2026-08-25 | Phase 3, resources as files: `/proc`, `/dev/cons`, `/net` |
+| `0.9.0` | 2026-08-26 | Phase 4: remote execution, the full Plan 9 `cpu` model |
 | `0.10.0` | 2026-08-26 | export hardening: shared-cluster-key HMAC auth |
-| `0.11.0` | 2026-08-26 | `/net/tcp` dial-out — use another machine's NIC |
-| `0.12.0` | 2026-08-26 | dial-in — accept inbound on another machine's NIC |
+| `0.11.0` | 2026-08-26 | `/net/tcp` dial-out: use another machine's NIC |
+| `0.12.0` | 2026-08-26 | dial-in: accept inbound on another machine's NIC |
 | `0.13.0` | 2026-08-26 | reply authentication (mutual auth) |
 | `0.14.0` | 2026-08-27 | `cpu` chunked output delivery + four more `/bin` filters |
 | `0.15.0` | 2026-08-31 | per-**user** cluster identity (wire flag day: `AUTHNP01`→`02`) |
 | `0.16.0` | 2026-09-01 | per-**machine** Ed25519 keypairs (wire flag day: `AUTHNP02`→`03`) |
 | `0.17.0` | 2026-09-02 | small gaps: `mv` replaces a file (`-f` required, on `cp` too), POSIX classes in `grep` |
 | `0.18.0` | 2026-09-03 | correctness: cross-mount `mv` refused (was a silent local rename), `ls` reports the real error, host peer serves `NP_STAT` |
-| `0.18.1` | 2026-09-03 | patch — the remote-read flake closed (supervisor no longer restarts `netd` mid-read; delegation race), `ls` exits non-zero on failure |
+| `0.18.1` | 2026-09-03 | patch: the remote-read flake closed (supervisor no longer restarts `netd` mid-read; delegation race), `ls` exits non-zero on failure |
 | `0.19.0` | 2026-09-07 | delegation reworked (grants accumulate, one-step-down rule, `SENDER_TASK`/`TASK_IDENTITY`), network programs in pipelines, C `open()` on a remote mount, `FS_ERR_NO_SUCH_VERB` (floor to `MAX-39`), MIT licence, `docs/` folders |
 | `0.20.0` | 2026-09-22 | the fid verbs reach the export (C `open()`/`read()`/`write()` on a remote file), the keyboard follows a chain, the remote mount goes asynchronous; error floor to `MAX-43` |
 | `0.21.0` | 2026-09-26 | held sessions keyed (X25519 + HMAC-SHA-512, `AUTHNP04`, offered not required: no flag day), the kernel boot identity (`BOOT_ID`), a park never signs |
@@ -76,7 +76,7 @@ cost a v0.14.0 amend-and-diverge that took a `reset --soft` to untangle.
 
 **2. Ship the `.dmg`, never a zipped `.hdd`.** `prl_disk_tool create --dmg`
 writes an `.hdd` *bundle* whose `DiskDescriptor.xml` references the disk data by
-**absolute path** to the `.dmg` — the bundle's own data file is 0 bytes. A zipped
+**absolute path** to the `.dmg`. The bundle's own data file is 0 bytes. A zipped
 `.hdd` is therefore useless on any machine but the one that built it. The `.dmg`
 is self-contained; the notes carry the one-line `prl_disk_tool create` recipe for
 wrapping it locally.
@@ -85,7 +85,7 @@ wrapping it locally.
 fourteen releases: the tag and the GitHub Release were pushed while the commit
 they name stayed local, so the release pointed at something not on `origin/main`
 and the repository still advertised the *previous* `VERSION`. It escaped notice
-because the next merged PR carried the release commit up afterwards — the state
+because the next merged PR carried the release commit up afterwards. The state
 repaired itself, just never before someone looked. Found at v0.17.0 by checking
 `git rev-parse HEAD origin/main` after publishing instead of trusting the "published"
 line. `release.sh` now pushes the branch first (and skips that on a detached
@@ -94,7 +94,7 @@ HEAD, which the two-arcs recipe below uses deliberately).
 **4. Smoke-test the built image before publishing.** The artifacts are what
 people download, and `release.sh build` is the last point at which a bad one is
 free to fix. Boot `build/esp.img` and check the console reaches a login prompt
-with no faults — `python3 scripts/drive-qemu.py --slirp build/esp.img
+with no faults. `python3 scripts/drive-qemu.py --slirp build/esp.img
 'login:@@root' 'assword@@root' '# @@uptime'` does it unattended and prints the
 abort count.
 
@@ -111,9 +111,9 @@ Every release is three things:
 2. **A GitHub Release** page with human-readable notes derived from the
    CHANGELOG arc(s) since the previous tag.
 3. **Bootable, downloadable artifacts**, built from the **release** profile:
-   - `ouroboros-X.Y.Z-esp.img.zip` — the raw MBR+FAT32 disk image; boot it
+   - `ouroboros-X.Y.Z-esp.img.zip`: the raw MBR+FAT32 disk image; boot it
      under QEMU (`qemu-system-aarch64 … -drive`) or any UEFI-AArch64 VM.
-   - `ouroboros-X.Y.Z-esp.dmg` — a self-contained, UDZO-compressed disk
+   - `ouroboros-X.Y.Z-esp.dmg`: a self-contained, UDZO-compressed disk
      image for Parallels on Apple Silicon. A downloader wraps it into a
      Parallels-native `.hdd` locally with one command (in the release
      notes): `prl_disk_tool create --hdd esp.hdd --dmg <path>/…-esp.dmg`.
@@ -147,7 +147,7 @@ scripts/release.sh publish
 ```
 
 `make release` is an alias for `scripts/release.sh build`. There is no
-`make` alias for `publish` — publishing is deliberately a conscious,
+`make` alias for `publish`. Publishing is deliberately a conscious,
 typed-out step.
 
 ### Preconditions the script enforces

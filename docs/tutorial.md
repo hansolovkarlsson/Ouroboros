@@ -1,6 +1,6 @@
 # Build an ARM64 OS from scratch: the working path
 
-This is a tutorial distilled from building [Ouroboros](../README.md) — a
+This is a tutorial distilled from building [Ouroboros](../README.md), a
 from-scratch aarch64 microkernel in Rust that boots via UEFI, runs a
 preemptively-scheduled userland shell loaded from disk, and works on
 both QEMU and real Parallels-on-Apple-Silicon hardware. Unlike the
@@ -8,21 +8,21 @@ both QEMU and real Parallels-on-Apple-Silicon hardware. Unlike the
 that *found* this path, this document presents only the path itself:
 each stage as the working design, with real code from the finished
 kernel, and a short "why this way" note wherever the working choice is
-non-obvious. Follow the stages in order — each one is independently
+non-obvious. Follow the stages in order. Each one is independently
 bootable and testable, which is the single most important property of
 the whole approach.
 
 **What you need:** a Mac or Linux machine, stable Rust (`rustup`), QEMU
-(`brew install qemu` — this also installs the aarch64 UEFI firmware),
+(`brew install qemu`, which also installs the aarch64 UEFI firmware),
 and no prior kernel experience beyond comfort with Rust and a
 willingness to read ARM documentation. No nightly toolchain, no
-`build-std`, no cross-compiler to set up — both targets used here ship
+`build-std`, no cross-compiler to set up: both targets used here ship
 prebuilt `core`/`alloc` on stable Rust.
 
 **The three principles the whole path rests on:**
 
-1. **Discover, never hardcode.** Every address — the console, the
-   interrupt controller, RAM itself — comes from something the platform
+1. **Discover, never hardcode.** Every address (the console, the
+   interrupt controller, RAM itself) comes from something the platform
    tells you (ACPI tables, the UEFI memory map, PCI config space),
    never from a constant that happened to work on one emulator.
    Hardcoded addresses are the single biggest source of "works on QEMU,
@@ -38,11 +38,11 @@ prebuilt `core`/`alloc` on stable Rust.
 
 ---
 
-## Stage 0: Project setup — your kernel *is* a UEFI application
+## Stage 0: Project setup (your kernel *is* a UEFI application)
 
 Skip the classic bootloader entirely. UEFI firmware will load a PE/COFF
 executable from a FAT filesystem for you, with your code running at EL1
-with the MMU on and a working console — that's a better starting point
+with the MMU on and a working console. That's a better starting point
 than a bare assembly boot stub, and it's the *only* boot path some real
 platforms (Parallels among them) offer at all.
 
@@ -117,7 +117,7 @@ fn halt() -> ! {
 }
 ```
 
-Note that `main` never returns `Status::SUCCESS` — returning hands
+Note that `main` never returns `Status::SUCCESS`: returning hands
 control back to firmware, which is a dead end for a kernel. Park the
 core instead.
 
@@ -137,15 +137,15 @@ qemu-system-aarch64 \
 ```
 
 **Confirm:** the log line appears on QEMU's serial console. You have a
-kernel. Put the QEMU invocation in a Makefile now — you will run it
+kernel. Put the QEMU invocation in a Makefile now. You will run it
 hundreds of times.
 
 ---
 
-## Stage 1: Find your console — then leave boot services
+## Stage 1: Find your console, then leave boot services
 
 Everything so far prints through UEFI's own console, which dies the
-moment you call `exit_boot_services` — and you must eventually call it,
+moment you call `exit_boot_services`, and you must eventually call it,
 because boot services own the machine (memory, timers, drivers) until
 you do. So the first real driver you write is a serial console, and the
 first real *discovery* you do is finding its address.
@@ -153,14 +153,14 @@ first real *discovery* you do is finding its address.
 **Why discovery instead of QEMU's well-known PL011 address
 (`0x0900_0000`):** nothing guarantees that address exists on any other
 platform, and writing to an unmapped device address doesn't fail
-politely — it can take down the whole VM. The working rule: *no
+politely. It can take down the whole VM. The working rule: *no
 confirmed address means no console output, not a guess.*
 
 The mechanism that works on ACPI platforms (QEMU's firmware and most
 real firmware) is the **SPCR table** ("Serial Port Console
 Redirection"): firmware's own declaration of where its console UART
-lives. The walk is three fixed-offset struct reads — RSDP → XSDT → scan
-for the table you want — and needs no ACPI crate:
+lives. The walk is three fixed-offset struct reads (RSDP → XSDT → scan
+for the table you want) and needs no ACPI crate:
 
 ```rust
 // kernel/src/acpi.rs (condensed)
@@ -224,7 +224,7 @@ pub unsafe fn find_table(rsdp: *const u8, signature: &[u8; 4])
 
 The SPCR table's body then gives you an interface type (check for PL011
 or the register-compatible SBSA Generic UART) and a base address. Use
-`read_unaligned` for every ACPI struct read — the tables carry no
+`read_unaligned` for every ACPI struct read: the tables carry no
 alignment guarantees, and packed-struct field access through references
 is undefined behavior in Rust.
 
@@ -295,10 +295,10 @@ if let Some(base) = console_base {
 
 Two rules embedded there: **do all discovery and log its results before
 the exit** (so failures are visible on a console that still works), and
-**keep the memory map `exit_boot_services` returns** — it's the only
+**keep the memory map `exit_boot_services` returns**. It's the only
 description of RAM you will ever get, and the MMU stage is built on it.
 Wrap the installed console in a small global (an
-`UnsafeCell<Option<Console>>` with a `println!` macro over it — fine on
+`UnsafeCell<Option<Console>>` with a `println!` macro over it, fine on
 a single core) so everything after this point, including the exception
 handler you're about to write, has somewhere to print.
 
@@ -307,7 +307,7 @@ driver, at an address you discovered rather than assumed.
 
 ---
 
-## Stage 2: Exception vectors — before anything else can fault
+## Stage 2: Exception vectors, before anything else can fault
 
 With boot services gone, a bad memory access has nowhere to go: an
 unconfigured `VBAR_EL1` turns your first pointer bug into a silent
@@ -370,17 +370,17 @@ extern "C" fn rust_exception_handler(esr: u64, far: u64, elr: u64, vector: u64) 
 
 **Why `.text` and not a custom section name:** the PE/COFF backend
 marks `.text` executable but does not infer that for unrecognized
-custom section names — a table in `.section .text.exceptions` links
+custom section names. A table in `.section .text.exceptions` links
 fine, points `VBAR_EL1` at the right address, and then faults on its
 own first instruction. Keep the `global_asm!` block in plain `.text`.
 
-**Confirm — deliberately.** Write a temporary
+**Confirm, deliberately.** Write a temporary
 `write_volatile(0 as *mut u8, 0xAB)` (address 0 is unmapped on QEMU's
 `virt` machine), boot, and check that exactly one clean `EXCEPTION`
 line prints and the machine halts stably. Run QEMU with `-d int -D
 qemu.log` and check its own trace agrees: one Data Abort, no fault
-loop. Then delete the test. That habit — cross-checking your kernel's
-own reporting against QEMU's independent exception trace — is worth
+loop. Then delete the test. That habit (cross-checking your kernel's
+own reporting against QEMU's independent exception trace) is worth
 keeping for every stage after this one; "zero unexpected aborts in the
 `-d int` log" is the cheapest regression test a bare-metal project can
 have.
@@ -392,11 +392,11 @@ the moment you can read these.
 
 ---
 
-## Stage 3: Your own page tables — swapped live, matching firmware
+## Stage 3: Your own page tables, swapped live, matching firmware
 
 Firmware hands you a running MMU on tables you don't control. A kernel
-needs its own — for device mappings, for user/kernel permission
-separation later — and the working technique is a **live swap**: build
+needs its own (for device mappings, for user/kernel permission
+separation later), and the working technique is a **live swap**: build
 a complete identity map, then repoint `TTBR0_EL1` at it with the MMU
 continuously enabled, properly barriered. No disable/re-enable step.
 
@@ -405,9 +405,9 @@ The map that works as a first cut is deliberately coarse:
 - **RAM**: every 1GB block overlapping the memory map's general-RAM
   descriptors (including the `LOADER_CODE`/`LOADER_DATA` your own image
   occupies!) mapped Normal, write-back cacheable, executable, EL1-only.
-  The range comes from the **real memory map** you kept in stage 1 —
+  The range comes from the **real memory map** you kept in stage 1,
   never a constant.
-- **Devices**: the low 1GB mapped Device-nGnRnE, non-executable — this
+- **Devices**: the low 1GB mapped Device-nGnRnE, non-executable. This
   covers the discovered console.
 
 Descriptor construction, with the bit positions that matter:
@@ -452,9 +452,9 @@ fn table_desc(next_level_addr: u64) -> u64 {
 }
 ```
 
-Source your bit positions from an authority — Linux's
+Source your bit positions from an authority. Linux's
 `arch/arm64/include/asm/pgtable-hwdef.h` is the reference this kernel's
-were checked against — because a wrong bit here often doesn't fault, it
+were checked against, because a wrong bit here often doesn't fault, it
 silently mistranslates.
 
 **The one configuration rule that matters most: match firmware's
@@ -462,7 +462,7 @@ starting level.** Read back firmware's `TCR_EL1` and use the same
 `T0SZ` (44-bit VA, `T0SZ=20`, which walks from L0 through a two-level
 L0→L1 structure, is what UEFI firmware uses on these platforms). A
 single L1 table with `T0SZ=25` is architecturally legal and covers the
-same addresses — and hard-faults when swapped in live on this
+same addresses, and hard-faults when swapped in live on this
 firmware's configuration. Changing attributes during a live swap works;
 changing the walk's starting level does not. Take the two-level
 structure as given and move on.
@@ -499,20 +499,20 @@ unsafe {
 **Confirm two ways:** print the discovered RAM span and mapped blocks;
 then repeat stage 2's deliberate-fault test at an address your new
 tables genuinely don't map, proving the exception handler still works
-*under your own tables* — a different code path than before the switch.
+*under your own tables*, a different code path than before the switch.
 
 ---
 
-## Stage 4: A timer tick — your first resumable exception
+## Stage 4: A timer tick, your first resumable exception
 
 Everything so far halts on any exception. Preemption needs the
 opposite: an interrupt that fires, gets handled, and *returns to what
 it interrupted*. Two pieces of hardware and one new trampoline.
 
 **The interrupt controller (GIC).** Discover its version and addresses
-from the ACPI **MADT** table (signature `"APIC"` — the historical x86
+from the ACPI **MADT** table (signature `"APIC"`, the historical x86
 name) using the same `find_table` walk from stage 1. The MADT's GICD
-structure carries a `GIC Version` byte — that, not a guess, decides
+structure carries a `GIC Version` byte. That, not a guess, decides
 whether you drive GICv2 (memory-mapped CPU interface) or GICv3
 (system-register CPU interface plus per-CPU redistributors). QEMU's
 default is GICv2, and its whole driver is this small:
@@ -543,7 +543,7 @@ pub unsafe fn end_of_interrupt(gicc: usize, intid: u32) {
 }
 ```
 
-**The timer.** The ARM generic timer is pure system registers — no
+**The timer.** The ARM generic timer is pure system registers: no
 MMIO, no platform-specific address, works on any ARMv8 CPU. Its
 non-secure EL1 physical timer is PPI 14, which is GIC interrupt ID 30
 (PPIs start at INTID 16):
@@ -639,24 +639,24 @@ idle loop.
 
 **Confirm sustained, not once:** print the tick counter for 20+ seconds.
 A save/restore bug in the trampoline rarely breaks the first
-round-trip — it corrupts state that only shows up after several. The
+round-trip. It corrupts state that only shows up after several. The
 `-d int` log should show a steady stream of IRQs and zero aborts.
 
 ---
 
-## Stage 5: EL0 and syscalls — a real privilege boundary
+## Stage 5: EL0 and syscalls, a real privilege boundary
 
 Now drop to user mode. Three pieces: memory user code may run in, a
 controlled way down, and a controlled way back up.
 
-**Give EL0 its own region — do not share the kernel's RAM block.** The
+**Give EL0 its own region: do not share the kernel's RAM block.** The
 working design maps almost everything EL1-only and carves out a small,
 dedicated region (its own 4KB pages, via an L2→L3 table split at that
 one spot) with `AP_EL1_EL0_RW` and no `UXN`, holding only the user
 code and stack. Flipping EL0 permissions onto the same block the
 kernel is actively executing from is the configuration that *doesn't*
 work reliably; a genuinely separate region does, and it's also the
-right architecture — it's your first user/kernel memory separation.
+right architecture: it's your first user/kernel memory separation.
 
 **The way down** is an `eret` with prepared state:
 
@@ -681,10 +681,10 @@ pub unsafe fn start() -> ! {
 clear DAIF bits mean the timer tick can preempt user code from the
 first instruction.
 
-**The way back up** is `svc`. Pick a convention and freeze it early —
-this kernel uses the familiar Linux shape: syscall number in `x8`,
+**The way back up** is `svc`. Pick a convention and freeze it early.
+This kernel uses the familiar Linux shape: syscall number in `x8`,
 arguments in `x0`–`x3`, return value in `x0`. EL0's `svc` lands in
-vector slot 8 ("Synchronous, lower EL AArch64") — but so does any EL0
+vector slot 8 ("Synchronous, lower EL AArch64"), but so does any EL0
 *fault*, so the slot must check `ESR_EL1`'s exception class first and
 only take the syscall path for EC 0x15:
 
@@ -705,8 +705,8 @@ mov x3, #8
 b   1f                     // ordinary report-and-halt for EL0 faults
 ```
 
-The syscall trampoline (`3:`) mirrors the IRQ one — same 272-byte
-`Context`-layout frame, including `SP_EL0` — then loads the dispatch
+The syscall trampoline (`3:`) mirrors the IRQ one (the same 272-byte
+`Context`-layout frame, including `SP_EL0`), then loads the dispatch
 arguments from the saved frame and calls Rust:
 
 ```asm
@@ -739,18 +739,18 @@ instead of executing.
 
 **Confirm:** a hand-written EL0 stub issues one `svc`, the kernel logs
 the number and argument, EL0 resumes, and the timer keeps ticking
-*while EL0 runs* (interrupts from EL0 land in slot 9 — point it at the
+*while EL0 runs* (interrupts from EL0 land in slot 9: point it at the
 same resumable trampoline as slot 5, or ticks will silently die the
 moment user code starts).
 
 ---
 
-## Stage 6: Preemptive multitasking — a struct copy, not a mechanism
+## Stage 6: Preemptive multitasking as a struct copy, not a mechanism
 
 Here's the payoff of handing the IRQ trampoline's frame to Rust: task
 switching is nothing more than overwriting that frame between save and
 restore. The trampoline neither knows nor cares that the frame now
-holds a different task's registers — it restores whatever is there and
+holds a different task's registers. It restores whatever is there and
 `eret`s into it.
 
 ```rust
@@ -794,14 +794,14 @@ pub unsafe fn on_tick(frame: *mut Context) {
 
 Each task's initial `Context` is: `elr_el1` = its entry point,
 `sp_el0` = the top of its region (stacks grow down), `spsr_el1` = 0.
-Start with two tasks — your real one plus a trivial idle loop — in
+Start with two tasks (your real one plus a trivial idle loop) in
 separate pages of the EL0 region.
 
 Two working notes: after copying task code into its region, do
 D-cache clean + I-cache invalidate over the *whole* region (`dc cvau`
-per cache line, then `ic ialluis` + barriers) — instruction and data
+per cache line, then `ic ialluis` + barriers): instruction and data
 caches are not coherent for freshly written code. And make the idle
-task a plain busy-spin (`b .` around a `nop`), not `wfe` — `wfe` in an
+task a plain busy-spin (`b .` around a `nop`), not `wfe`. `wfe` in an
 EL0 task under a real hypervisor can hang in ways an emulator never
 shows; the busy-spin costs only idle power you aren't optimizing anyway.
 
@@ -812,16 +812,16 @@ against the lines printed.
 
 ---
 
-## Stage 7: Userland as real programs — PIE ELF, loaded from disk
+## Stage 7: Userland as real programs (PIE ELF, loaded from disk)
 
 Compiled-in task stubs prove the boundary; a real OS loads programs.
 The working shortcut for a first loader: read the program file **during
 boot services** (UEFI's own FAT driver, `SimpleFileSystem`), stash it
-in an allocated region, and hand it to the scheduler after the exit —
-no disk driver needed yet.
+in an allocated region, and hand it to the scheduler after the exit,
+with no disk driver needed yet.
 
-The load format that works — and removes an entire class of crashes
-before you ever hit it — is a **position-independent (PIE) ELF with
+The load format that works (and removes an entire class of crashes
+before you ever hit it) is a **position-independent (PIE) ELF with
 self-relocations**. A flat binary linked at base 0 works right up until
 the compiler bakes an absolute data pointer into `.rodata` (a
 formatting dispatch table, a slice comparison against a literal), which
@@ -842,7 +842,7 @@ rustflags = [
 ]
 ```
 
-(`pic` alone is not enough — without `-pie` the linker resolves
+(`pic` alone is not enough: without `-pie` the linker resolves
 everything to fixed addresses at link time and you're back where you
 started. And build userland `--release`: the prebuilt `core` library
 contains some non-PIC object code that debug builds' panic machinery
@@ -870,7 +870,7 @@ ASSERT(SIZEOF(.bss) == 0, "no loader support for zeroed statics yet")
 ```
 
 The loader walks `PT_LOAD` program headers (copy `p_filesz` bytes, zero
-the `p_memsz` remainder), then applies relocations — for a
+the `p_memsz` remainder), then applies relocations. For a
 no-shared-libraries world, exactly one relocation type exists:
 
 ```rust
@@ -932,13 +932,13 @@ fn panic(_: &PanicInfo) -> ! { loop { core::hint::spin_loop(); } }
 ```
 
 Put the syscall numbers in a shared `#![no_std]` crate of bare
-`pub const` values that both kernel and userland depend on — scalar
+`pub const` values that both kernel and userland depend on. Scalar
 constants inline as immediates on both sides (no relocation concerns),
 and a mismatched number becomes a compile error instead of a runtime
 mystery.
 
-**Confirm:** the program's banner prints — output that only exists
-because code *loaded from disk* produced it — and, the real acceptance
+**Confirm:** the program's banner prints (output that only exists
+because code *loaded from disk* produced it) and, the real acceptance
 test, `write!`-formatting a runtime value and comparing a slice against
 a literal both work inside it. Those two operations are exactly what a
 non-relocated loader breaks.
@@ -955,13 +955,13 @@ Attach the disk explicitly (`-device virtio-blk-device` with
 `-global virtio-mmio.force-legacy=false` for the modern register
 layout) and the driver reduces to: scan the transport's device slots
 for a magic value, reset the device, negotiate `VIRTIO_F_VERSION_1`,
-set up one virtqueue (descriptor table, available ring, used ring —
+set up one virtqueue (descriptor table, available ring, used ring,
 plain structs in your own memory), then per request post a 3-descriptor
 chain (16-byte header, 512-byte data buffer, 1-byte status), write the
 queue-notify doorbell, and poll the used ring with a `dmb` in the
 loop. Barriers are for ordering; QEMU's virtio is DMA-coherent, so no
 cache maintenance is needed on the buffers. Verify with a read of
-sector 0: bytes 510–511 must be `0x55 0xAA` (the MBR signature) — a
+sector 0: bytes 510–511 must be `0x55 0xAA` (the MBR signature), a
 value a bug can't produce by accident.
 
 **FAT32, hand-rolled, read-only first.** The format is genuinely small:
@@ -972,13 +972,13 @@ file's content is a linked list of clusters walked through the FAT
 (entry N holds the number of the cluster after N; ≥ `0x0FFFFFF8` means
 end). Two conventions to build in from day one: a directory entry's
 cluster `0` in a `..` entry means "the root directory" (substitute the
-real root cluster — for directories only), and stick to 8.3 names
+real root cluster, for directories only), and stick to 8.3 names
 (name your own directories within it; it beats parsing long-filename
 entries in a first reader).
 
 A note on heap: after `exit_boot_services` there is no allocator (the
-UEFI one died with boot services). Write the FAT32 code — and
-everything else post-exit — against fixed-size buffers and statics.
+UEFI one died with boot services). Write the FAT32 code, and
+everything else post-exit, against fixed-size buffers and statics.
 It's less limiting than it sounds and it removes an entire category of
 runtime failure.
 
@@ -986,7 +986,7 @@ Expose it as syscalls (`fs_list_dir`, `fs_read_file`, taking pointer +
 length pairs) and your userland shell grows `ls` and `cat` over real
 storage. Writes, when you're ready, come in the same narrow-first
 order this project used: `mkdir`/`rmdir`, then `touch`/`rm`, then
-whole-file `write`, then `cp`/`mv` — each one claim-resources-first,
+whole-file `write`, then `cp`/`mv`, each one claim-resources-first,
 check-everything-before-writing, so a failed operation never leaves
 half-applied state.
 
@@ -996,7 +996,7 @@ disk rather than a cached shadow of it.
 
 ---
 
-## Stage 9: From demo to OS — the mechanisms that compose
+## Stage 9: From demo to OS, the mechanisms that compose
 
 Everything past this point reuses machinery you already have, which is
 the sign the foundations are right. In the order that worked:
@@ -1006,7 +1006,7 @@ the sign the foundations are right. In the order that worked:
   struct-copy as `on_tick`), mark it `Blocked(reason)`, load another
   runnable task into the frame. The tick's handler polls each blocked
   task's wait reason; on success it writes the result into the *saved*
-  context's `x0` and marks the task runnable — the task resumes as if
+  context's `x0` and marks the task runnable. The task resumes as if
   the syscall had simply returned. One subtlety: have the blocking path
   return the *new* frame's `x0` so the trampoline's unconditional
   return-value write is a no-op, and route input to exactly one
@@ -1014,7 +1014,7 @@ the sign the foundations are right. In the order that worked:
   first."
 - **`spawn`/`exec`.** A bump allocator carving task regions off the
   top of discovered RAM, plus rebuilding your identity map with one
-  more EL0 region — the same table-swap you already trust from boot,
+  more EL0 region, the same table-swap you already trust from boot,
   executed a second time at runtime. The ELF loader from stage 7 is
   already reusable if you split "parse" from "populate."
 - **`exit`, `wait`, `kill`, `fg`.** Task slots gain
@@ -1041,19 +1041,19 @@ observable behavior, sustained operation, and a clean `-d int` trace.
 - **Script your interactive tests.** QEMU's stdin can be a FIFO
   (`mkfifo pipe; exec 3<>pipe`) so a script can wait for your kernel's
   own "ready" banner in the serial log, then inject keystrokes on a
-  timer. Waiting for the banner matters — bytes sent during firmware
+  timer. Waiting for the banner matters: bytes sent during firmware
   boot get eaten.
 - **`-d int -D log` on every run.** QEMU's internal exception trace is
   an independent witness: zero unexpected aborts is your standing
   regression test, and exact SVC/IRQ counts can be cross-checked
   against what your kernel printed. (Count only after a known post-boot
-  marker — firmware's own boot-time interrupts pollute whole-run
+  marker. Firmware's own boot-time interrupts pollute whole-run
   totals.)
 - **The QEMU monitor is a hardware inspector.** `info qtree` shows what
-  devices actually exist, `xp/1xw addr` reads guest physical memory —
-  verify a device's register layout *before* writing its driver.
+  devices actually exist, `xp/1xw addr` reads guest physical memory.
+  Verify a device's register layout *before* writing its driver.
 - **Verify state through a second channel.** The MBR signature, a file
-  surviving a reboot, a screendump of the framebuffer — each stage's
+  surviving a reboot, a screendump of the framebuffer: each stage's
   confirmation should be a value or behavior your code couldn't
   accidentally fake.
 
@@ -1063,9 +1063,9 @@ observable behavior, sustained operation, and a clean `-d int` trace.
 
 The path above gets you a preemptive, multi-tasking OS with real
 userland programs on QEMU. Taking it to real hardware is its own
-journey — different console (a GOP framebuffer, when no UART exists),
+journey: different console (a GOP framebuffer, when no UART exists),
 different interrupt controller (GICv3, discovered via the same MADT),
-genuinely discovered device addresses everywhere — and the same
+genuinely discovered device addresses everywhere, and the same
 discover-don't-assume discipline above is precisely what makes it
 survivable. That story, including everything that goes differently on
 real hardware, is told in the four postmortems:
@@ -1075,7 +1075,7 @@ real hardware, is told in the four postmortems:
 [USB storage](postmortems/usb-storage-postmortem.md).
 
 For the complete, working implementation of every stage in this
-tutorial — including all the parts condensed here — the
+tutorial, including all the parts condensed here, the
 [Ouroboros source](https://github.com/hansolovkarlsson/Ouroboros) is
 the reference: `kernel/src/` maps almost one-to-one onto the stages
 above, and [`docs/manual.md`](manual.md) covers building and running

@@ -1,26 +1,26 @@
 # Gap analysis: what mainstream Unixes have that Ouroboros doesn't (yet)
 
-A **factual inventory of the current boundary** — the concrete companion to
+A **factual inventory of the current boundary**, the concrete companion to
 [`comparison.md`](comparison.md). Where that doc argues the *trade* ("what you
 gain, what you give up") at the level of philosophy, this one is a checklist:
 for each capability a MINIX/Linux/Unix/Plan 9 user expects, does Ouroboros
-**have** it, have it **partially**, or **not** — and, in one line, *what it
+**have** it, have it **partially**, or **not**, and, in one line, *what it
 would take* and which roadmap arc it lives under.
 
 This exists to **sequence the work**, not to aspire. It is the organizing
 exercise behind the "North-star directions" section of
 [`ROADMAP.md`](ROADMAP.md): it surfaces which gaps are one small program and
 which are multi-milestone arcs, so the order of the next arcs falls out of the
-map rather than being guessed. Keep it *factual* — a description of where the
+map rather than being guessed. Keep it *factual*: a description of where the
 line is today, the way the roadmap's parking lot tracks specific known gaps,
 just organized as a coherent map. When a row changes, update it here.
 
 **Status legend:**
 
-- ✅ **Have** — present and confirmed working (see `CHANGELOG.md`).
-- ◐ **Partial** — a real but scoped/limited version exists; the notes say how
+- ✅ **Have**: present and confirmed working (see `CHANGELOG.md`).
+- ◐ **Partial**: a real but scoped/limited version exists; the notes say how
   it falls short.
-- ✗ **Don't** — not present. The notes say what it would take.
+- ✗ **Don't**: not present. The notes say what it would take.
 
 Cross-references: syscalls are named as in [`syscall-abi/src/lib.rs`]; the
 server protocols are `FSOP_*` (fsd) / `NETOP_*` (netd) / the `ninep-abi` verb
@@ -38,13 +38,13 @@ permission enforcement as missing.
 | Capability | Status | Notes / what it would take |
 |---|---|---|
 | Spawn a new task | ✅ | `SPAWN` + `SPAWN_STAGE` (two-step: the caller reads the ELF via `fsd` and stages it, since the kernel has no filesystem). Runs *alongside* the caller. |
-| `posix_spawn`-shape (spawn + args + cwd + stdout) | ◐ | The pieces exist (`ARGS_STAGE`/`CWD_STAGE`/stdout target), but there's no `posix_spawn` API surface — it's the shell's bespoke flow. The POSIX-libc arc maps `posix_spawn` onto exactly these. |
-| `fork()` | ✗ | No address-space copy exists, by design (a microkernel can't cheaply honor it — see the POSIX-divergence postmortem). The plan is `posix_spawn` native + porting fork-then-exec programs. |
-| `exec()` (replace current image) | ✗ | The shell's `exec` builtin is a misnomer — it *spawns* alongside, nothing about the caller is replaced. True image-replacement isn't implemented. |
+| `posix_spawn`-shape (spawn + args + cwd + stdout) | ◐ | The pieces exist (`ARGS_STAGE`/`CWD_STAGE`/stdout target), but there's no `posix_spawn` API surface. It's the shell's bespoke flow. The POSIX-libc arc maps `posix_spawn` onto exactly these. |
+| `fork()` | ✗ | No address-space copy exists, by design (a microkernel can't cheaply honor it, see the POSIX-divergence postmortem). The plan is `posix_spawn` native + porting fork-then-exec programs. |
+| `exec()` (replace current image) | ✗ | The shell's `exec` builtin is a misnomer: it *spawns* alongside, nothing about the caller is replaced. True image-replacement isn't implemented. |
 | `wait()` / reaping / exit status | ✅ | `WAIT` (21) blocks on a task's death, returns a byte status; a `Zombie(status)` slot holds until waited (or `kill`ed, which reaps immediately). |
-| Kill another task | ✅ | `KILL` (19) — but by **slot index**, not by signal. |
+| Kill another task | ✅ | `KILL` (19), but by **slot index**, not by signal. |
 | Signals (`SIGINT`/`SIGTERM`/handlers/`sigaction`) | ✗ | Ctrl+C **terminates** the keyboard owner (any but the boot shell), not a delivered signal (`FG`'s doc: nothing is delivered for the task to catch). A real signal mechanism is unbuilt. |
-| Job control (`fg`/`bg`/`&`/jobs) | ◐ | `fg`/`ps`/`kill`/`wait` exist as builtins, and `exec prog` starts a program alongside the shell without waiting (the one way to background it); **no `&`**, no `bg`, no job table. Deliberately builtin (slot reuse makes an external `ps` race itself — see the userland-and-pipelines postmortem). |
+| Job control (`fg`/`bg`/`&`/jobs) | ◐ | `fg`/`ps`/`kill`/`wait` exist as builtins, and `exec prog` starts a program alongside the shell without waiting (the one way to background it); **no `&`**, no `bg`, no job table. Deliberately builtin (slot reuse makes an external `ps` race itself, see the userland-and-pipelines postmortem). |
 | Stable PIDs | ◐ | Task **slot indices** (0–10, `NUM_TASKS` 11 in `tasks.rs`) identify tasks, but a freed slot is reused immediately, so a number isn't a stable identity across commands. |
 | Process groups / sessions / controlling terminal | ✗ | No grouping abstraction; there is one keyboard owner (`FG`/`INPUT_OWNER`, handed back along the chain of previous owners on death), not a session/pgrp model. |
 | Parent/child process trees | ✗ | Tasks are flat peers in the scheduler; no recorded parent, no orphan reparenting, no process hierarchy. |
@@ -53,11 +53,11 @@ permission enforcement as missing.
 
 | Category | Status | Notes |
 |---|---|---|
-| I/O to a server (files/console/net) | ✅ | Not raw syscalls — messages to `fsd`/`cond`/`netd` (`FSOP_*`/`NP_*`/`NETOP_*`) over `MSG_CALL`. The kernel trap surface is small (about 85 arms in `syscall.rs`'s dispatch, 2026-10-28). |
-| Raw block device | ◐ | `BLOCK_INFO`/`BLOCK_READ`/`BLOCK_WRITE`, gated to `fsd` alone — one 512-byte sector per call. |
+| I/O to a server (files/console/net) | ✅ | Not raw syscalls: messages to `fsd`/`cond`/`netd` (`FSOP_*`/`NP_*`/`NETOP_*`) over `MSG_CALL`. The kernel trap surface is small (about 85 arms in `syscall.rs`'s dispatch, 2026-10-28). |
+| Raw block device | ◐ | `BLOCK_INFO`/`BLOCK_READ`/`BLOCK_WRITE`, gated to `fsd` alone, one 512-byte sector per call. |
 | Bulk transfer / zero-copy | ◐ | `GRANT`/`SAFECOPY` (capability-gated, ≤2048 B/op, loop to stream). MINIX's `safecopy` shape; no page-flip/`mmap` zero-copy. |
 | Time | ◐ | `GET_TICKS` (20 ms tick) + `MONOTONIC_US` (µs since boot), and `SLEEP_UNTIL` (a blocked sleep to a tick's precision, 2026-10-08). **No wall-clock/RTC** (no real date): the C library's clock is 1970 plus uptime. |
-| Namespaces / `bind` | ✅ | `NS_SET`/`GET_NS` — per-task Plan 9 namespaces, inherited at spawn. Ahead of most Unixes here. |
+| Namespaces / `bind` | ✅ | `NS_SET`/`GET_NS`: per-task Plan 9 namespaces, inherited at spawn. Ahead of most Unixes here. |
 | Memory / `brk`/`mmap` | ◐ | A fixed heap area per task (`HEAP_INFO`, 256 pages, 1 MiB, since 2026-10-07; `make test-heap`), which the C library's `sbrk` hands out and cannot grow past; no `mmap`. |
 | `ioctl`, `fcntl`, `poll`/`select` (general) | ✗ | No general fd-control or multiplexing syscalls; `NET_WAIT` is a *netd-only* two-source wait, not a general `poll`. The C library's `ioctl` answers one request, `TIOCGWINSZ` (the console's size, 2026-10-07), and nothing else. `tcgetattr`/`tcsetattr` exist since 2026-10-08, with one flag that acts (`ISIG`, raw keyboard mode); the rest of `<termios.h>` (speeds, `tcflush`, `tcdrain`) is absent. `poll` exists since 2026-10-08: fd 0 waits for a key with a timeout (to a tick's precision, for Edit), fds 0 to 2 are ready for `POLLOUT`, a file on a filesystem is ready, and only a closed fd is `POLLNVAL` (a `/net` file would be `POLLERR`, but `open` refuses `/net`, so none can be polled); there is no `select`, and a wait on anything but the keyboard and the clock (a pipe, a socket) is not possible. |
 
@@ -65,18 +65,18 @@ permission enforcement as missing.
 
 | Capability | Status | Notes / what it would take |
 |---|---|---|
-| Multiple filesystems | ✅ | FAT32, exFAT, ext2 — all read+write, behind fsd's `Filesystem` enum. |
+| Multiple filesystems | ✅ | FAT32, exFAT, ext2, all read+write, behind fsd's `Filesystem` enum. |
 | GPT + MBR partitions, multi-mount | ✅ | `partition::discover`; several partitions mountable at once (`FSOP_MOUNT_AT` → a tree bound into the namespace). |
 | Mount / unmount / mkfs / partition / erase | ✅ | The disk-management arc: `FSOP_MOUNT`/`UNMOUNT`/`FORMAT`/`PARTITION`/`ERASE`. |
-| Integer file descriptors (open→fd, cursor, `dup`) | ◐ | **fids exist** (libc arc step 5): `fsd` has server-side open-file handles (`NP_OPEN`→fid≥3, `NP_PREAD`/`NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`, a per-client table), directly usable as a C fd — a POSIX fd *is* a 9P fid, paying off twice as predicted. The path-per-op verbs coexist. `NP_FSTAT` answers a fid's metadata. Still missing: `dup`/`dup2`, and fds for non-file objects (sockets/pipes). |
+| Integer file descriptors (open→fd, cursor, `dup`) | ◐ | **fids exist** (libc arc step 5): `fsd` has server-side open-file handles (`NP_OPEN`→fid≥3, `NP_PREAD`/`NP_PWRITE`/`NP_FSTAT`/`NP_CLUNK`, a per-client table), directly usable as a C fd: a POSIX fd *is* a 9P fid, paying off twice as predicted. The path-per-op verbs coexist. `NP_FSTAT` answers a fid's metadata. Still missing: `dup`/`dup2`, and fds for non-file objects (sockets/pipes). |
 | `open`/`close`/`read`/`write`/`lseek` | ✅ | Both as **fids** (a cursored open-file handle in `fsd`, the C libc's path) and as path-per-op verbs (`FSOP_READ_AT`/`WRITE_AT` + a `read_cursor`, the shell's path). |
-| `stat`/`fstat` (per-file metadata) | ◐ | A per-file **`stat` op** (`NP_STAT`): size, a directory flag, a broken-down calendar mtime, **and POSIX mode/uid/gid** (guarded by a `mode_valid` byte) — backs `ls -l`. ext2 surfaces its real on-disk `i_mode`/`i_uid`/`i_gid` (`ls -l` shows `drwx------ 0 0` for `lost+found`, real owners for user files); FAT32 decodes the timestamp; exFAT/ext2/`/proc` leave the time unset and FAT32/exFAT/`/proc` leave mode/owner unmodeled (`ls -l` synthesizes a conventional mode, `-` owner). A fid has `NP_FSTAT` too (C's `fstat`). |
+| `stat`/`fstat` (per-file metadata) | ◐ | A per-file **`stat` op** (`NP_STAT`): size, a directory flag, a broken-down calendar mtime, **and POSIX mode/uid/gid** (guarded by a `mode_valid` byte), backing `ls -l`. ext2 surfaces its real on-disk `i_mode`/`i_uid`/`i_gid` (`ls -l` shows `drwx------ 0 0` for `lost+found`, real owners for user files); FAT32 decodes the timestamp; exFAT/ext2/`/proc` leave the time unset and FAT32/exFAT/`/proc` leave mode/owner unmodeled (`ls -l` synthesizes a conventional mode, `-` owner). A fid has `NP_FSTAT` too (C's `fstat`). |
 | File permissions (mode bits) | ◐ | **Stored, surfaced, writable and enforced on ext2**: its uid/gid/mode are read *and written* (`stat`/`ls -l`/`chmod`/`chown`) and `fsd`'s `check_access` enforces them (§6). FAT32, exFAT and `/proc` cannot model them, so they enforce none. |
 | `chmod`/`chown` | ◐ | **Present, ext2-only** (`NP_CHMOD`/`NP_CHOWN` → `/bin/chmod`, `/bin/chown`): numeric **and symbolic** modes (`chmod 755`, `chmod u+x`/`go-w`/`a=rx`/`g=u`, comma-separated clauses, conditional `X`) and owners **by name or id** (`chown alice:staff`, `chown 501:20`, resolved through `/etc/passwd`+`/etc/group` with the shared `accounts` lookups); the on-disk inode fields are patched in place (e2fsck-clean). FAT32/exFAT/`/proc` return `FS_ERR_NOT_SUPPORTED`. |
 | Symbolic links | ◐ | ext2 symlinks are **reported, not followed**; no creation. |
 | Hard links | ✗ | Not implemented (ext2 link counts are maintained for dirs, but no user-facing `ln`). |
 | Named pipes (FIFOs) / Unix domain sockets | ✗ | Pipes are shell-orchestrated IPC streams (below), not filesystem objects. |
-| `/dev` device namespace | ✗ | Deliberately deferred — one block device, nothing to name yet. The Plan 9 devfs direction (roadmap "Disk management / /dev"). |
+| `/dev` device namespace | ✗ | Deliberately deferred: one block device, nothing to name yet. The Plan 9 devfs direction (roadmap "Disk management / /dev"). |
 | `/proc` | ◐ | A synthetic read-only `/proc` in fsd: each slot's `state` and `core`, and `cpus`, the cores that take tasks (2026-10-11); refused at fsd's read-only gate since 2026-10-28. Far thinner than Linux's. |
 | Journaling / crash consistency | ✗ | Writes are staged/ordered but not journaled; a mid-write crash can corrupt (noted in the isolation postmortem). |
 
@@ -88,7 +88,7 @@ permission enforcement as missing.
 | Keyboard input | ✅ | USB HID (xHCI) on real hardware; kernel delivers bytes to the input owner. |
 | ANSI / VT100 escape codes | ◐ | cond's framebuffer backend does cursor addressing (`CSI row;col H`), erase in line and screen (`K`, `J`), reverse video (SGR 7), a late wrap at the last column, the cursor shown and hidden (`CSI ? 25 l`/`h`, 2026-10-11), and consumes every other escape without drawing it (#228, the editor's set). No SGR color, bold or underline, no save/restore cursor, no scroll regions, and **no return channel** for query sequences. The terminal arc (roadmap item 1). |
 | Output redirection `>` / `>>` | ✅ | Shell-side, for every builtin/command. |
-| Pipelines `a \| b \| c` | ◐ | Real N-stage pipelines of `/bin` programs (IPC + capability delegation); **`a \| b > file`/`>> file` compose** (last stage captured to the file); and a **single builtin may sit at any position** (`cat f \| ps`, `ls \| ps \| grep x` — a non-first builtin drains its upstream and becomes the source). Still no job control / `&` backgrounding of a whole pipeline. |
+| Pipelines `a \| b \| c` | ◐ | Real N-stage pipelines of `/bin` programs (IPC + capability delegation); **`a \| b > file`/`>> file` compose** (last stage captured to the file); and a **single builtin may sit at any position** (`cat f \| ps`, `ls \| ps \| grep x`: a non-first builtin drains its upstream and becomes the source). Still no job control / `&` backgrounding of a whole pipeline. |
 | `select`/`poll`/`epoll` (general multiplexing) | ◐ | `poll` in the C library since 2026-10-08 waits on the keyboard and the clock (`KEY_WAIT_UNTIL`), which is what Edit needed (§2's row). No `select` or `epoll`, and a program still cannot wait on "stdin *or* a socket" or a pipe; `NET_WAIT` is netd's own. |
 | TTY line discipline (canonical mode, `^U`/`^W`, raw mode) | ◐ | A program can put the keyboard into raw mode (`KBD_MODE`, and `tcsetattr` with `ISIG` in C, 2026-10-08), where Ctrl+C is read as a key and Ctrl+\ still ends it; arrows and function keys arrive as whole VT100 sequences (`keyseq`). The canonical line editing is each reader's own (the shell's, `login`'s, `ulib::read_line`), not a kernel line discipline. |
 | `isatty`/pseudo-terminals (ptys) | ✗ | No pty layer; nothing multiplexes a terminal. |
@@ -97,11 +97,11 @@ permission enforcement as missing.
 
 | Capability | Status | Notes / what it would take |
 |---|---|---|
-| A libc (C) | ◐→✓ | **Exists as a userland POSIX personality — picolibc is ported** (`/bin/CPICO`: float `printf`, `snprintf`, `qsort`, `malloc`, `strtol`), *not* a kernel ABI. Built `-fPIC` (self-relocates under the loader, zero `ABS64`), linked against ~8 syscall stubs (`write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit`) that map onto existing server messages. A hand-rolled minimal libc (`libc/src`) preceded it. **Done:** the mechanism (unmodified C stdlib code runs), and since 2026-10-13 two real applications, DevTools's preprocessor (`/bin/cpp`) and editor (`/bin/edit`), built with clang or with DevTools's own `cc`, `as` and `ld`. **Left:** larger ports (SQLite, a compiler) — see the libc-arc postmortem + `ROADMAP.md`. |
-| `malloc`/`free` (real heap) | ◐ | **C:** picolibc's `malloc`/`free`/`realloc` over the `sbrk` stub (`HEAP_INFO`) — a real allocator. **Rust:** a raw fixed **heap area** used as `&mut [u8]`; **no `alloc`-backed `Vec`/`Box`/`String`** — prebuilt `liballoc` isn't PIE-linkable on stable (`R_AARCH64_ABS64`; `-Z build-std` is nightly). |
+| A libc (C) | ◐→✓ | **Exists as a userland POSIX personality: picolibc is ported** (`/bin/CPICO`: float `printf`, `snprintf`, `qsort`, `malloc`, `strtol`), *not* a kernel ABI. Built `-fPIC` (self-relocates under the loader, zero `ABS64`), linked against ~8 syscall stubs (`write`/`read`/`open`/`close`/`lseek`/`fstat`/`sbrk`/`_exit`) that map onto existing server messages. A hand-rolled minimal libc (`libc/src`) preceded it. **Done:** the mechanism (unmodified C stdlib code runs), and since 2026-10-13 two real applications, DevTools's preprocessor (`/bin/cpp`) and editor (`/bin/edit`), built with clang or with DevTools's own `cc`, `as` and `ld`. **Left:** larger ports (SQLite, a compiler), see the libc-arc postmortem + `ROADMAP.md`. |
+| `malloc`/`free` (real heap) | ◐ | **C:** picolibc's `malloc`/`free`/`realloc` over the `sbrk` stub (`HEAP_INFO`), a real allocator. **Rust:** a raw fixed **heap area** used as `&mut [u8]`; **no `alloc`-backed `Vec`/`Box`/`String`**: prebuilt `liballoc` isn't PIE-linkable on stable (`R_AARCH64_ABS64`; `-Z build-std` is nightly). |
 | Dynamic linking / shared libraries | ✗ | Every program is a **static position-independent** `aarch64-none` binary (`R_AARCH64_RELATIVE` only). No `.so`, no `dlopen`. picolibc is linked statically. |
 | Threads (shared address space) | ✗ | One task = one thread of control in its own region. No `pthread`, no in-process threads. picolibc built `-Dthread-local-storage=false`, global `errno`. |
-| On-device compiler (C) | ✗ | The **preprocessor runs on the device** (DevTools's `cpp`, since 2026-10-13, with the C headers on the disk), and its output matches the Mac's byte for byte (`make test-cpp`); no compiler yet. A small C compiler (tcc/chibicc) is realistic **atop the libc, which now exists** (a compiler is a C program) — it becomes "port one more program." Realistic *first* step is still an **assembler** (text → the ELF the loader already parses). Roadmap item 5. |
+| On-device compiler (C) | ✗ | The **preprocessor runs on the device** (DevTools's `cpp`, since 2026-10-13, with the C headers on the disk), and its output matches the Mac's byte for byte (`make test-cpp`); no compiler yet. A small C compiler (tcc/chibicc) is realistic **atop the libc, which now exists** (a compiler is a C program). It becomes "port one more program." Realistic *first* step is still an **assembler** (text → the ELF the loader already parses). Roadmap item 5. |
 | On-device compiler (Rust) | ✗ | Effectively out of reach near-term (rustc's scale + the `-Z build-std` wall). |
 | Self-hosting (builds itself) | ✗ | You cross-compile from macOS. The endgame the project's name points at, gated behind everything above. |
 
@@ -109,10 +109,10 @@ permission enforcement as missing.
 
 | Capability | Status | Notes / what it would take |
 |---|---|---|
-| User accounts / uid / gid | ● | **A full account model now exists.** A kernel-owned uid/gid per task (`SET_ID`/`GET_ID`, default root, inherited across spawn, root-gated) *plus* the userland account layer: `/etc/passwd` + `/etc/group` + `/etc/shadow`, a shared pure `accounts` crate, `/bin/{passwd,useradd,groupadd,usermod}`, `su <name>`, `id` with names, per-user `/Users/<name>` homes. **Supplementary groups shipped 2026-08-29**: `SET_ID` carries a gid list in `arg2`/`arg3` (root-only to set a non-empty one, `MAX_SUPP_GROUPS` 8), inherited at spawn, and `fsd` grants the group triad on a primary **or** any supplementary match. Since 2026-08-31 identity also **crosses a machine**: a remote request carries the caller's name and the far side resolves it through its own `/etc/passwd` — see the cluster row for what that still does not cover. |
-| Login / authentication (passwords) | ● | **Present**: the shell gates every session on a `login:` prompt, authenticating username + password, then `SET_ID`-ing to that user (identity *and* group list in one call, so a session never carries the previous user's groups); `logout` restores root (saved-uid) and re-prompts. `/etc/passwd` is four fields (`name:uid:gid:home`) and **world-readable on purpose** — every `id`, `ls -l` and `chown` needs the name↔id map; the secrets moved to **`/etc/shadow`** (`name:salt:hash`, `hash = SHA-256(salt‖password)`, mode 0600 root) on 2026-08-29, and the lookup **streams one line** rather than reading the file, because a whole-file read reports `0` on overflow — harmless for `passwd` ("no accounts, root session"), a **total lockout including root** for `shadow`. Salts use **hardware entropy** where the machine has a virtio-rng, and say so loudly when they fall back to the clock. Accounts are managed on-device, and **a non-root user can change their own password** (`passwd` → `accountd`, 2026-08-30). Thinner than Unix: no PAM, no sessions, no password ageing or lockout, and a filesystem without modes (FAT32/exFAT) can enforce none of it — which `login` warns about at the prompt. |
-| Enforced file permissions | ◐ | **Enforced on ext2**: `fsd`'s `check_access` gates every file verb — the caller's uid/gid (`GET_ID(sender)`) vs. the inode owner/mode, owner→group→other, root bypasses, `FS_ERR_PERM` on refusal (`chmod` owner-only, `chown` root-only). FAT/exFAT stay unrestricted (no mode to check). The search (`x`) bit is checked on every ancestor directory (`ancestors_searchable`, for `stat` too), and `O_RDONLY|O_CREAT` of an existing file asks for no write (#364). Thinner than POSIX: a remote caller is judged on uid + primary gid only (supplementary groups do not cross the cluster, which can only under-privilege). Remote requests are **no longer served as root**: the caller's name travels in the authenticated header and `fsd` authorizes it as the local account of that name. |
-| Privilege boundary (root / sudo) | ◐ | A per-task **capability send-mask** governs who-may-call-whom (topological isolation) — the mechanism a privilege model would build on, but there's no user-facing privileged/unprivileged split. |
+| User accounts / uid / gid | ● | **A full account model now exists.** A kernel-owned uid/gid per task (`SET_ID`/`GET_ID`, default root, inherited across spawn, root-gated) *plus* the userland account layer: `/etc/passwd` + `/etc/group` + `/etc/shadow`, a shared pure `accounts` crate, `/bin/{passwd,useradd,groupadd,usermod}`, `su <name>`, `id` with names, per-user `/Users/<name>` homes. **Supplementary groups shipped 2026-08-29**: `SET_ID` carries a gid list in `arg2`/`arg3` (root-only to set a non-empty one, `MAX_SUPP_GROUPS` 8), inherited at spawn, and `fsd` grants the group triad on a primary **or** any supplementary match. Since 2026-08-31 identity also **crosses a machine**: a remote request carries the caller's name and the far side resolves it through its own `/etc/passwd`, see the cluster row for what that still does not cover. |
+| Login / authentication (passwords) | ● | **Present**: the shell gates every session on a `login:` prompt, authenticating username + password, then `SET_ID`-ing to that user (identity *and* group list in one call, so a session never carries the previous user's groups); `logout` restores root (saved-uid) and re-prompts. `/etc/passwd` is four fields (`name:uid:gid:home`) and **world-readable on purpose**: every `id`, `ls -l` and `chown` needs the name↔id map; the secrets moved to **`/etc/shadow`** (`name:salt:hash`, `hash = SHA-256(salt‖password)`, mode 0600 root) on 2026-08-29, and the lookup **streams one line** rather than reading the file, because a whole-file read reports `0` on overflow, harmless for `passwd` ("no accounts, root session"), a **total lockout including root** for `shadow`. Salts use **hardware entropy** where the machine has a virtio-rng, and say so loudly when they fall back to the clock. Accounts are managed on-device, and **a non-root user can change their own password** (`passwd` → `accountd`, 2026-08-30). Thinner than Unix: no PAM, no sessions, no password ageing or lockout, and a filesystem without modes (FAT32/exFAT) can enforce none of it, which `login` warns about at the prompt. |
+| Enforced file permissions | ◐ | **Enforced on ext2**: `fsd`'s `check_access` gates every file verb: the caller's uid/gid (`GET_ID(sender)`) vs. the inode owner/mode, owner→group→other, root bypasses, `FS_ERR_PERM` on refusal (`chmod` owner-only, `chown` root-only). FAT/exFAT stay unrestricted (no mode to check). The search (`x`) bit is checked on every ancestor directory (`ancestors_searchable`, for `stat` too), and `O_RDONLY|O_CREAT` of an existing file asks for no write (#364). Thinner than POSIX: a remote caller is judged on uid + primary gid only (supplementary groups do not cross the cluster, which can only under-privilege). Remote requests are **no longer served as root**: the caller's name travels in the authenticated header and `fsd` authorizes it as the local account of that name. |
+| Privilege boundary (root / sudo) | ◐ | A per-task **capability send-mask** governs who-may-call-whom (topological isolation), the mechanism a privilege model would build on, but there's no user-facing privileged/unprivileged split. |
 | Cluster authentication | ◐ | **Per-machine keypairs + per-user identity**: each machine holds an Ed25519 key and authorizes peers by public key (`/etc/cluster/authorized`, the `known_hosts` model: revoke by deleting a line), mutually authenticated (both request and reply signed, domain-separated) on the 9P export, fail-closed, `\NOEXEC`; and, since 2026-08-31, the requesting user's **name** inside the signature, resolved through the far side's own `/etc/passwd` (a stranger is refused) and carried into `fsd` as a required request field, so remote file access and `cpu` run as that user rather than root. A **held session is keyed** (2026-09-26): an X25519 exchange inside the signed `NP_SESSION`, then an HMAC and a strict sequence number a message, so a captured keyed message cannot be replayed (a one-shot request still can). **Root squash** (2026-10-04): an export refuses a remote uid or gid 0 unless the peer's `authorized` line ends with `root`. **Per-user keys** are half built (`roadmap/roadmap-user-keys.md` steps 0 to 4: each user's key held by `netd` from login to logout); until step 5 puts them on the wire, an authorized machine can still claim any non-root user with an account on the export. **No on-the-wire encryption.** Trusted-LAN by design. |
 | Cryptography | ◐ | Hand-rolled SHA-256 (NIST-validated) for password hashing, hand-rolled Ed25519 (RFC 8032 vectors) signing every cluster request and reply, and X25519 with HMAC-SHA-512 keying a held session. No TLS, no encryption on the wire or at rest. |
 | Sandboxing beyond MMU isolation (seccomp/cgroups/quotas) | ✗ | Isolation is per-task MMU + the capability mask; no resource quotas or syscall filtering. |
@@ -125,7 +125,7 @@ permission enforcement as missing.
 | UDP + DNS | ✅ | `resolve` (DNS-over-UDP). |
 | TCP client | ✅ | `fetch` (HTTP GET), plus congestion control, SACK, adaptive RTO. |
 | TCP server | ✅ | Concurrent HTTP static-file server (up to 4 conns), directory listings, `HEAD`, `405`. |
-| Dial-out / dial-in over another node's NIC | ✅ | `/net/tcp` connection files (`dial`/`serve`) — a Plan 9 resource-sharing capability most Unixes lack. |
+| Dial-out / dial-in over another node's NIC | ✅ | `/net/tcp` connection files (`dial`/`serve`), a Plan 9 resource-sharing capability most Unixes lack. |
 | Sockets as file descriptors (BSD `socket`/`bind`/`connect`) | ✗ | The interface is netd's IPC protocol + path-based `/net/tcp`, closer to Plan 9 than to BSD sockets. A POSIX socket layer would be a libc/`netd` addition. |
 | IPv6 | ✗ | IPv4 only. |
 | Real-hardware NIC (Parallels, Raspberry Pi) | ✗ | Parallels' virtio-net is **PCI**; the kernel has virtio-**mmio** only (QEMU). A virtio-pci transport is the gating sub-project there; the Pi 4's Ethernet (GENET) has no driver either. So the cluster runs on QEMU alone. |
@@ -148,10 +148,10 @@ permission enforcement as missing.
 |---|---|---|
 | MMU paging + per-task page tables | ✅ | Per-slot L0–L3 translation views; EL0 sees only its own region. |
 | Stack guard page | ✅ | Guarded stack, sized by the loader's `STACK_PAGES` (the guard has caught real overflows). |
-| Runtime physical-page allocator | ◐ | A bump allocator (LIFO reclaim in the common case; leaks otherwise — no free list). |
+| Runtime physical-page allocator | ◐ | A bump allocator (LIFO reclaim in the common case; leaks otherwise, with no free list). |
 | Demand paging / swap / paging-to-disk | ✗ | All resident; no swap. |
 | `mmap` (anon + file-backed) | ✗ | Anon could map to region allocation; file-backed is harder. Unbuilt. |
-| Copy-on-write / shared memory | ✗ | IPC is **copy only** (no shared pages) — a deliberate isolation choice; `fork` COW would need new machinery. |
+| Copy-on-write / shared memory | ✗ | IPC is **copy only** (no shared pages), a deliberate isolation choice; `fork` COW would need new machinery. |
 
 ## 10. Concurrency & scheduling
 
@@ -163,7 +163,7 @@ permission enforcement as missing.
 | SMP / multicore | ✅ | Since 2026-10-12 (`roadmap-smp.md`, v0.23.0): the secondary cores start by PSCI, each with its own timer, and spawned programs run on them while the shell and servers stay on the boot core, under one kernel lock (not split yet); on QEMU, the Pi 4 and Parallels (`make test-smp`). |
 | In-process threads | ✗ | See §5. |
 
-## 11. Distributed / cluster — *where Ouroboros is ahead*
+## 11. Distributed / cluster: *where Ouroboros is ahead*
 
 | Capability | Status | Notes |
 |---|---|---|
@@ -173,8 +173,8 @@ permission enforcement as missing.
 | Remote execution (`cpu`) with namespace import | ✅ | `cpu host cmd` runs on the remote while reading *your* files at `/host`. |
 | Chunked/streamed remote output | ◐ | `cpu` output via a chunked pull (`NETOP_RUN_MORE`), bounded ~2 KB per run; truly unbounded streaming is a later refinement (roadmap-cluster). |
 
-*Most rows here have **no equivalent** in MINIX/Linux/Unix out of the box —
-this is the Plan 9 inheritance, and the project's distinctive strength.*
+*Most rows here have **no equivalent** in MINIX/Linux/Unix out of the box.
+This is the Plan 9 inheritance, and the project's distinctive strength.*
 
 ## 12. Time & clocks
 
@@ -201,12 +201,12 @@ ps kill fg wait send recv selftest env set unset cpu`.
 
 | Utility | Status | Notes |
 |---|---|---|
-| `sort` | ✅ | `-r`/`-n`/`-u`/`-f`. The one filter that can't stream — buffers the whole input in its heap and heapsorts an in-place line index; a documented size cap (truncate + warn) handles the fixed-buffer/no-alloc constraint. |
+| `sort` | ✅ | `-r`/`-n`/`-u`/`-f`. The one filter that can't stream: it buffers the whole input in its heap and heapsorts an in-place line index; a documented size cap (truncate + warn) handles the fixed-buffer/no-alloc constraint. |
 | `tail` `nl` `rev` `uniq` | ✅ | Shipped as `/bin` `ulib` filters (the turnkey pattern). `tail`/`uniq` bounded to a fixed line buffer; `nl` is `cat -n` style. |
 | `tee` `tr` `cut` | ✗ | The remaining small `ulib` filters (`tee` also needs an fsd write path for its file arg). |
 | `find` `du` `df` | ✗ | Client-side directory walking (new but small); `df` wants the volume info fsd already returns. |
 | `date` `sleep` | ✗ | `date` is blocked on wall-clock (§12); `sleep` only lacks the program, since `SLEEP_UNTIL` exists. |
-| `chmod` `chown` `ln` | ◐ | `chmod`/`chown` **shipped** (ext2-only; `chmod` takes octal *or* symbolic modes, `chown` names *or* numeric ids); `ln`/`ln -s` are still open (the ext2 link foundation exists — `i_links_count` is maintained and symlinks are reported — so it's a small follow-up, see roadmap §b). |
+| `chmod` `chown` `ln` | ◐ | `chmod`/`chown` **shipped** (ext2-only; `chmod` takes octal *or* symbolic modes, `chown` names *or* numeric ids); `ln`/`ln -s` are still open (the ext2 link foundation exists: `i_links_count` is maintained and symlinks are reported, so it's a small follow-up, see roadmap §b). |
 | Command flags (`ls -l`, `grep -i/-r`, `rm -r`, `cp -r`, real regex) | ◐ | `ls` takes `-l`/`-a` (on the `stat` op) and `grep` takes `-i`/`-v`/`-n`/`-F` with **real extended-regex** matching including the twelve POSIX `[[:alpha:]]` character classes (the pure, host-tested `regex` crate; `-F` for literal), and `cp`/`mv` take `-f` (plus `--` to end options) since replacing an existing file requires it; the rest are still positional-only. A shared `ulib` option parser would generalize flag handling (roadmap item 2). |
 | An editor + a pager (`less`/`more`) | ✅ | `more` pages to the screen's size (`TIOCGWINSZ`), and DevTools's editor runs as `/bin/edit` (2026-10-13, `make test-edit`), the consumers the VT100 work (§4) was built for. No `less`. |
 | `sed` `awk` `find … -exec` | ✗ | Larger; realistic once a libc/scripting layer exists. |
@@ -216,7 +216,7 @@ ps kill fg wait send recv selftest env set unset cpu`.
 | Capability | Status | Notes |
 |---|---|---|
 | Boot to a shell | ✅ | UEFI → kernel → servers → shell, on QEMU, real Parallels and the Raspberry Pi 4 (2026-10-03). |
-| Server supervision / restart | ◐ | `supervisor.rs` restarts `fsd`/`cond`/`netd` on crash or wedge (from the boot image; **state is lost, not migrated** — cf. Helix). Capped per boot. |
+| Server supervision / restart | ◐ | `supervisor.rs` restarts `fsd`/`cond`/`netd` on crash or wedge (from the boot image; **state is lost, not migrated**, cf. Helix). Capped per boot. |
 | General service/daemon manager (init system) | ✗ | The three servers are hardcoded at boot; no `init`/`systemd`-style unit model, no user-defined services. |
 | `cron` / scheduled jobs | ✗ | None. |
 | Runlevels / targets / dependency ordering | ✗ | None. |
@@ -235,24 +235,24 @@ ps kill fg wait send recv selftest env set unset cpu`.
 
 ---
 
-## The biggest gaps, ranked — and where they lead
+## The biggest gaps, ranked, and where they lead
 
 Reading the map top-down, the highest-leverage missing pieces, each pointing
 at a roadmap arc:
 
-1. **The users/permissions arc — DONE, refinements included (2026-08-28 →
+1. **The users/permissions arc: DONE, refinements included (2026-08-28 →
    2026-08-31).** The four original pieces landed on day one: the `stat`
    mode/owner surface + `chmod`/`chown` (ext2, e2fsck-clean); a kernel-owned
    uid/gid per task (`SET_ID`/`GET_ID`, saved-uid); a `login` gate; and **`fsd`
-   permission enforcement** (`check_access` — caller uid/gid vs. inode
+   permission enforcement** (`check_access`: caller uid/gid vs. inode
    owner/mode, root bypass, `FS_ERR_PERM`). Every refinement then listed here as
    remaining has since shipped too: ancestor-directory `x` traversal,
    `/etc/shadow`, the account tools, per-user homes under `/Users`, groups
-   *including* supplementary membership, and — 2026-08-30 — self-service
+   *including* supplementary membership, and, on 2026-08-30, self-service
    passwords via `accountd`, with the message credential bound at **send**
    underneath it, closing a privilege escalation that was live in `fsd`.
 
-   **The last item — per-user *cluster* identity — shipped 2026-08-31.** The 9P
+   **The last item, per-user *cluster* identity, shipped 2026-08-31.** The 9P
    export used to authenticate a machine and nothing else, with `netd` relaying
    remote requests under its own root identity, so `check_access` short-circuited
    on the root bypass before any mode was read: an unprivileged user on node B
@@ -262,16 +262,16 @@ at a roadmap arc:
    remains is the tier below it: the key is still per-*machine*, so a peer that
    holds it can claim any name, except a root-equivalent one unless the export
    flags it `root` (root squash, 2026-09-26).
-2. **A userland libc personality — DONE, mechanism (2026-08-28).** POSIX/C
+2. **A userland libc personality: DONE, mechanism (2026-08-28).** POSIX/C
    portability was the single biggest thing given up across every comparison.
    The six-step libc arc built it: a C program runs, and **picolibc is ported**
-   (`/bin/CPICO`: float `printf`, `qsort`, `malloc`, `strtol`) — as a userland
+   (`/bin/CPICO`: float `printf`, `qsort`, `malloc`, `strtol`), as a userland
    personality, no kernel change. **fids** (the file-descriptor gap, once ranked
    separately) landed as step 5: a cursored server-side handle that is *both* a
    9P fid and a POSIX fd, one feature two payoffs. What *remains* and is now the
    highest-leverage gap: **porting a real application**. Two are ported
    (DevTools's `cpp` and `edit`, 2026-10-13); SQLite and a small C compiler
-   are next — "port one more program" — plus the architectural mismatches
+   are next ("port one more program"), plus the architectural mismatches
    (`posix_spawn`/`fork`, general `select`/`poll`, signals, `mmap`). → roadmap "POSIX /
    C-program portability", `roadmap-completed.md`, `docs/postmortems/libc-arc-postmortem.md`.
 3. **A richer terminal + its first full-screen consumer: DONE as scoped
@@ -280,7 +280,7 @@ at a roadmap arc:
    DevTools's `edit` as the consumers. Colour, scroll regions and a return
    channel for queries are left (§4).
 4. **General `select`/`poll`, signals, and a service manager.** Each unblocks
-   a class of "normal Unix program" (multiplexers, job control, daemons) —
+   a class of "normal Unix program" (multiplexers, job control, daemons):
    medium arcs, and the natural companions to porting real C applications.
    `poll` exists for the keyboard and the clock only (§4).
 5. **A NIC off QEMU.** The cluster, the project's distinctive strength, runs
@@ -292,7 +292,7 @@ at a roadmap arc:
 nothing in the current direction needs it yet.
 
 And the counterweight worth stating plainly: §11 is the column where
-Ouroboros **leads** the comparison set — a working distributed cluster, remote
+Ouroboros **leads** the comparison set: a working distributed cluster, remote
 `cpu`, and resources-as-files are things most of these systems don't have out
 of the box. The gaps above are what it would take to make the *single-machine*
 experience as complete as its *distributed* one already is.
