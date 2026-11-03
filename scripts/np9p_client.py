@@ -655,7 +655,8 @@ class Session:
 EXPECTED_SESSIONS = 3
 # netd reaps a silent connection after CONN_IDLE_TICKS, which is 30 s of GUEST
 # TICKS - and a guest tick is not a wall-clock 20 ms. Under TCG the timer fires
-# at whatever rate the host affords (CLAUDE.md records ~37 ms once), so the same
+# at whatever rate the host affords (docs/boot-history.md records ~37 ms once),
+# so the same
 # 1500 ticks can be 30 s or well over a minute of the host's time, varying with
 # host load. A single fixed wait therefore measured the host's clock against the
 # guest's and flaked: three runs of the same build gave 3/3, 2/3 and 0/3 reaped.

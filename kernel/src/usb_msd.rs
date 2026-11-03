@@ -1,8 +1,9 @@
 //! USB Mass Storage over Bulk-Only Transport (BOT) with the
 //! SCSI-transparent command set - the disk driver real Parallels
 //! hardware actually needed: it exposes no storage controller of any
-//! kind on the PCI bus (confirmed by direct diagnosis - see CLAUDE.md's
-//! "Parallels disk diagnostic"), but a passed-through USB 3.x stick
+//! kind on the PCI bus (confirmed by direct diagnosis - see
+//! docs/CHANGELOG.md's "Parallels disk diagnostic"), but a passed-through USB
+//! 3.x stick
 //! lands on the xHCI controller this kernel already drives and presents
 //! exactly interface `class=0x08 subclass=0x06 protocol=0x50`
 //! (confirmed by the enumeration checks, on QEMU's `usb-storage` and

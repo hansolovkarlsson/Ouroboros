@@ -1588,7 +1588,7 @@ fn parse_redirect(line: &str) -> RedirectParse<'_> {
         // enough of `core::fmt` to drag prebuilt non-PIC libcore
         // objects into the link, which fails outright under this
         // crate's PIE model (the same "release-only builds" constraint
-        // documented in CLAUDE.md's relocating-loader section, hit here
+        // documented in docs/CHANGELOG.md's relocating-loader entry, hit here
         // even in release). The Option path pulls none of that in.
         let Some(cmd) = line.get(..offset) else { return RedirectParse::NoRedirect };
         let Some(rest) = line.get(offset + token.len()..) else { return RedirectParse::NoRedirect };
@@ -2913,8 +2913,9 @@ impl Output<'_> {
     /// near-null address instead of real code, confirmed directly by
     /// trying `write!` here first). **This is now fixed**, since
     /// `loader.rs` processes real `R_AARCH64_RELATIVE` relocations
-    /// against the actual runtime load address (see CLAUDE.md's
-    /// "relocating loader" milestone and `selftest` (now `/bin/selftest`), which proves
+    /// against the actual runtime load address (see docs/CHANGELOG.md's
+    /// "A real relocating loader" entry and `selftest` (now `/bin/selftest`),
+    /// which proves
     /// it) - but this is left as hand-rolled decimal formatting anyway,
     /// simply because it was already written, works, and doesn't need
     /// `core::fmt`'s machinery to do something this simple.

@@ -262,7 +262,7 @@ b   1f
 // slot 8: Synchronous, lower EL AArch64 - EL0's svc lands here, but so
 // would an EL0 fault. Check EC before committing to the resumable path.
 // x9 is userland's, not ours, at this point - a real bug, found and
-// fixed during the relocating-loader milestone (CLAUDE.md): the old
+// fixed during the relocating-loader milestone (docs/CHANGELOG.md): the old
 // version clobbered x9 with `mrs x9, esr_el1` before "3:"'s own save
 // sequence ever ran, permanently losing whatever value userland had
 // live in x9 at the moment of the `svc` - "3:" would faithfully

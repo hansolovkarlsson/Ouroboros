@@ -256,11 +256,12 @@ extern "C" fn kernel_main() -> ! {
     // real bus fault, not a permission/translation issue) reading
     // virtio_mmio's very first scan address (`FAR_EL1` matched
     // `virtio_mmio::SLOT_BASE` exactly) - see `virtio_mmio.rs`'s module
-    // doc comment and CLAUDE.md's "GOP framebuffer console, take four".
+    // doc comment and `docs/CHANGELOG.md`'s "GOP framebuffer console, round three".
     // With that scan skipped, a *second*, differently-addressed instance
     // of the identical fault signature showed up next, this time with
     // `FAR_EL1` matching the old hardcoded `gic.rs`'s `GICD_BASE` exactly
-    // - see CLAUDE.md's "take five". That second crash is what the
+    // - see docs/CHANGELOG.md's "GOP framebuffer console, round four". That
+    // second crash is what the
     // MADT/GICv3 work (`madt.rs`, `gicv3.rs`, `gic_confirmed` below) fixed
     // properly - GIC/timer setup no longer depends on this heuristic at
     // all, it depends on a real MADT parse. **This flag now only gates
@@ -268,8 +269,8 @@ extern "C" fn kernel_main() -> ! {
     // to reflect that): `virtio_mmio::find_device`'s scan still has no
     // MADT-equivalent real-discovery mechanism of its own (MADT describes
     // interrupt controllers, not virtio transports), and Parallels'
-    // own PCI device inventory (`pci::log_all_devices`, see CLAUDE.md's
-    // "virtio-console" section) shows no virtio-blk/virtio-console device
+    // own PCI device inventory (`pci::log_all_devices`, see docs/CHANGELOG.md's
+    // "virtio-console" entries) shows no virtio-blk/virtio-console device
     // there at all regardless - so this heuristic is still the only thing
     // standing between `find_device`'s scan and a repeat of that first
     // crash. This is still a heuristic, not a proof (a platform could in
@@ -760,8 +761,8 @@ extern "C" fn kernel_main() -> ! {
     // confirmed the framebuffer mapping and direct-write visibility both
     // work correctly here (a temporary raw full-screen fill diagnostic
     // turned the whole display solid white, then was removed once that
-    // was confirmed - see CLAUDE.md's "GOP framebuffer console, take
-    // three"), while that same test then froze solid, before reaching
+    // was confirmed - see docs/CHANGELOG.md's "GOP framebuffer console,
+    // round two"), while that same test then froze solid, before reaching
     // this point, while still inside try_virtio_console() below - see
     // that function's own doc comment for why its virtio-mmio scan is
     // now the prime suspect for an unconfirmed, possibly platform-unsafe
@@ -779,7 +780,7 @@ extern "C" fn kernel_main() -> ! {
     // including the framebuffer console - has failed, *and* only if
     // `virtio_mmio_probe_safe` says the underlying scan isn't known to be
     // dangerous here. Confirmed dead on Parallels specifically (no such
-    // PCI device, see CLAUDE.md's "virtio-console" section) and now
+    // PCI device, see docs/CHANGELOG.md's "virtio-console" entries) and now
     // confirmed to crash outright there too, not just fail to find
     // anything (see `virtio_mmio_probe_safe`'s own comment above) - kept
     // only for a hypothetical future platform with no GOP but a real,
@@ -886,7 +887,8 @@ extern "C" fn kernel_main() -> ! {
     // External Abort, `FAR_EL1` matching the old hardcoded `GICD_BASE`
     // exactly) that writing to `gic.rs`'s QEMU-devicetree-derived
     // addresses crashes just as hard as virtio-mmio's did - see
-    // CLAUDE.md's "take five". `madt.rs`/`gicv2.rs`/`gicv3.rs` fix that
+    // docs/CHANGELOG.md's "GOP framebuffer console, round four".
+    // `madt.rs`/`gicv2.rs`/`gicv3.rs` fix that
     // properly: the addresses used below now come from the platform's own
     // ACPI MADT, confirmed real for *this* boot, not a QEMU-shaped
     // convention borrowed from a devicetree dump - see `madt.rs`'s module

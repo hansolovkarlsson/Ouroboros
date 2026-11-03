@@ -2103,7 +2103,7 @@ fn con_write_parts(parts: &[&str]) {
 /// The filesystem server only prints at startup / on `mount`, so this is
 /// never on a hot path; without it the server's few lines would render at
 /// the kernel's own fbconsole cursor instead of `cond`'s, stranded on a
-/// framebuffer-only platform (see CLAUDE.md's "Driver isolation, part 3").
+/// framebuffer-only platform (see docs/CHANGELOG.md's "Console server" entry).
 fn con_write(bytes: &[u8]) {
     let payload_off = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut off = 0;

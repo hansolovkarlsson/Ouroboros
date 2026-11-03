@@ -1,7 +1,7 @@
 //! xHCI (eXtensible Host Controller Interface) driver: minimal bring-up of
 //! one USB HID boot-protocol keyboard, over the real xHCI PCI controller
 //! (`pci::discover_xhci`) - this kernel's first keyboard input path, and
-//! the reason the whole GOP framebuffer console effort (see CLAUDE.md)
+//! the reason the whole GOP framebuffer console effort (see docs/CHANGELOG.md)
 //! mattered enough to keep pushing on: that console is write-only, and
 //! until this module, so was Parallels itself.
 //!
@@ -21,7 +21,8 @@
 //! `SLOT_BASE`/`gic.rs`'s `GICD_BASE` - both fixed, QEMU-shaped
 //! conventions confirmed unsafe on Parallels by two decoded Synchronous
 //! External Aborts (see `virtio_mmio.rs`'s module doc comment and
-//! CLAUDE.md's "GOP framebuffer console, take four/five"). This address is
+//! `docs/CHANGELOG.md`'s "GOP framebuffer console, round three/four"). This
+//! address is
 //! *discovered*, not guessed, the same category of thing as the GOP
 //! framebuffer's own address - which real Parallels hardware testing
 //! already confirmed is safe to map and write post-`exit_boot_services`.
@@ -1989,8 +1990,8 @@ impl Xhci {
     /// contain more than one newly-pressed keycode at once** - most likely
     /// when a poll gets skipped (this task preempted between two hardware
     /// samples, missing an intermediate report - a real, new possibility
-    /// once real preemption started working on Parallels, see CLAUDE.md's
-    /// "MADT/GICv3" section), but not exclusively: two keys genuinely
+    /// once real preemption started working on Parallels, see docs/CHANGELOG.md's
+    /// "MADT/GICv3" entry), but not exclusively: two keys genuinely
     /// pressed within one poll interval can do it too, preemption or not.
     /// The original version of this function returned on the *first*
     /// qualifying keycode in `buf[2..8]` after already recording the whole

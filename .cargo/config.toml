@@ -23,7 +23,7 @@ rustflags = ["-C", "force-frame-pointers=yes"]
 # Position-independent, self-relocating executable (real relocations
 # processed by `loader.rs` at runtime), not the flat, position-dependent
 # binary this used to be - see `docs/processes.md`'s "Binary format"
-# section and CLAUDE.md's "relocating loader" milestone for why: a flat
+# section and docs/CHANGELOG.md's "A real relocating loader" entry for why: a flat
 # binary linked at a fixed base of 0x0 but loaded somewhere else, with no
 # relocation step, was this project's single most-repeated bug class
 # (core::fmt's argument-dispatch table and slice/literal comparisons both

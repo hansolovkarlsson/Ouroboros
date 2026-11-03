@@ -32,7 +32,7 @@
 //! Abort, same exception level) with DFSC `0x10` (Synchronous External
 //! abort, not a translation-table-walk fault - i.e. a real bus fault,
 //! not a permission or mapping bug), and `FAR_EL1` matched [`SLOT_BASE`]
-//! exactly. See CLAUDE.md's "GOP framebuffer console, take four" for the
+//! exactly. See `docs/CHANGELOG.md`'s "GOP framebuffer console, round three" for the
 //! full account. `main.rs` now gates every caller of [`find_device`]
 //! (`virtio_console`'s discovery and `virtio_blk`'s, the only two) behind
 //! a `virtio_mmio_probe_safe` heuristic - true only when a byte-stream

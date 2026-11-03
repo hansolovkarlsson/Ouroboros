@@ -19,7 +19,7 @@
 //! below: the `FB_*` arms take it, the kernel's prints hold it; the kernel
 //! lock does not cover a halting core's fault report); on a framebuffer-only platform they do share
 //! the screen (kernel during boot/faults, `cond` in steady state) - see
-//! `CLAUDE.md`'s "Driver isolation, part 3".
+//! `docs/CHANGELOG.md`'s "Console server" entry.
 
 use core::cell::UnsafeCell;
 

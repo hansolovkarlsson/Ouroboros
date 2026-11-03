@@ -6,8 +6,8 @@
 //! *was* the GICv2 driver directly. `exceptions.rs`'s two call sites
 //! (`acknowledge`/`end_of_interrupt`, both inside the resumable IRQ path)
 //! don't change at all; `main.rs` gains one `configure` call ahead of the
-//! existing `init`/`enable_interrupt` pair — see CLAUDE.md's MADT/GICv3
-//! scoping notes for why a facade was chosen over matching
+//! existing `init`/`enable_interrupt` pair, see `docs/CHANGELOG.md`'s
+//! "MADT/GICv3" entry for why a facade was chosen over matching
 //! `madt::GicVersion` at every call site instead (more churn for no real
 //! benefit, since every call site would need the match anyway).
 //!

@@ -27,7 +27,8 @@
 //! UEFI spec doesn't guarantee the pointer stays valid post-exit (see
 //! `framebuffer.rs`), but this is the only way to find out - confirmed
 //! working on QEMU's `ramfb` device (screendump-verified, see
-//! `CLAUDE.md`'s framebuffer-console section). Whether the framebuffer
+//! `docs/CHANGELOG.md`'s "a fifth, better-grounded lead" entry). Whether the
+//! framebuffer
 //! lands inside the identity map's discovered-RAM span or needs
 //! `mmu.rs`'s separate device-region fallback determines its memory type:
 //! inside RAM (QEMU `ramfb`, the Raspberry Pi) it is ordinary write-back

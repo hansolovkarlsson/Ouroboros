@@ -6,7 +6,7 @@
 //! dispatch over).
 //!
 //! Introduced when USB mass storage became the second disk path (see
-//! CLAUDE.md's mass-storage milestone): `fat32.rs` was written
+//! `docs/CHANGELOG.md`'s "USB mass storage" entry): `fat32.rs` was written
 //! directly over `virtio_blk::Device`, which was fine while that was
 //! the only block driver this kernel had - and wrong the moment real
 //! Parallels hardware (which exposes no storage controller virtio or

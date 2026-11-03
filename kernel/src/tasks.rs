@@ -29,7 +29,7 @@
 //! power-efficient choice) until a real, confirmed bug on real Parallels
 //! hardware forced it to change - worth knowing before reverting this.**
 //! The very first real task switch on real Parallels hardware (the
-//! MADT/GICv3 milestone - see `CLAUDE.md` - finally made GIC/timer IRQs
+//! MADT/GICv3 milestone - see `docs/CHANGELOG.md` - finally made GIC/timer IRQs
 //! work there at all) hung the whole system outright: no exception
 //! reported, keystrokes stopped being echoed, indistinguishable from a
 //! dead machine. A single-variable diagnostic (temporarily skip just the
@@ -325,8 +325,9 @@ const TO_SPAWNABLE: u32 = ((1u32 << NUM_TASKS) - 1) & !((1u32 << FIRST_SPAWNABLE
 /// The capability set for `slot`, a pure function of the slot's static
 /// role. This is the single source of truth for the capability policy -
 /// the send-mask (who this slot may initiate IPC to) plus resource caps.
-/// Validated against every real IPC flow (see the plan / CLAUDE.md's
-/// capability-model section): servers answer calls with `MSG_REPLY`, which
+/// Validated against every real IPC flow (see docs/CHANGELOG.md's
+/// "A capability model for who-may-call-whom"): servers answer calls with
+/// `MSG_REPLY`, which
 /// needs no right, so only *unsolicited* sends need a mask bit.
 fn caps_for_slot(slot: usize) -> u32 {
     match slot as u64 {
@@ -407,7 +408,7 @@ pub(crate) fn may_send(src: usize, dest: usize) -> bool {
 /// deliberately the simplest correct thing, not a real allocator: grows
 /// *downward* from the top of discovered RAM (`init_runtime_allocator`),
 /// never frees, never reuses an address. No destruction exists yet (see
-/// CLAUDE.md's "dynamic task creation" milestone for why that's a
+/// docs/CHANGELOG.md's "Dynamic task creation" entry for why that's a
 /// deliberate scope cut, not an oversight), so this can never be asked to
 /// hand back an address it already gave out. Growing *downward* from
 /// `mmu::ram_span`'s `max_addr` means this never needs to know where the

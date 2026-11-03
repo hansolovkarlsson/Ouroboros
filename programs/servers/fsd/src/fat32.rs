@@ -6,7 +6,7 @@
 //! are the `BLOCK_*` syscalls (the kernel keeps the device and only
 //! accepts those calls from this task). Every algorithm, ordering
 //! decision, and documented bug fix is unchanged - see the original
-//! module's history in `docs/CHANGELOG.md` and CLAUDE.md (phases 3b
+//! module's history in `docs/CHANGELOG.md` (phases 3b
 //! through 8, directory extension, the cluster-0-means-root saga).
 //!
 //! Still hand-rolled, still zero-heap - a constraint that carries over
@@ -1252,7 +1252,8 @@ impl Fs {
     /// its parent must already exist and be a directory).
     ///
     /// First write-capable command this filesystem has ever had - see
-    /// `CLAUDE.md`'s mkdir/rmdir section for the full design rationale.
+    /// `docs/CHANGELOG.md`'s "Phase 4" mkdir/rmdir entry for the full design
+    /// rationale.
     /// (Its original deliberately-narrow no-directory-extension
     /// limitation is gone: a parent whose existing clusters have no free
     /// entry slot now grows by a cluster - see

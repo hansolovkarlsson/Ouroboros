@@ -32,7 +32,7 @@
 //!   one CPU's redistributor (QEMU's default `virt,gic-version=3` region
 //!   is sized for many, confirmed via both a devicetree dump and this
 //!   driver's own MADT parse — see `main.rs`'s MADT log line and
-//!   CLAUDE.md's MADT/GICv3 scoping notes). `init` walks redistributor
+//!   `docs/CHANGELOG.md`'s "MADT/GICv3" entry). `init` walks redistributor
 //!   frames (stride `0x2_0000`, or `0x4_0000` if `GICR_TYPER.VLPIS` is
 //!   set — a real possibility this driver checks for rather than
 //!   assuming away) comparing each frame's `GICR_TYPER` affinity field
