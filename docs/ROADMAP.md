@@ -12,11 +12,11 @@ behind each decision, see the postmortems under `docs/postmortems/`,
 [`CHANGELOG.md`](CHANGELOG.md) and [`boot-history.md`](boot-history.md).
 This document is the one to update first when direction changes.
 
-> **The long-term direction** — a Plan 9-style **resource-sharing cluster**
+> **The long-term direction** is a Plan 9-style **resource-sharing cluster**
 > (distributed Ouroboros: machines sharing storage/devices/services over
-> per-machine namespaces and a uniform file protocol) now has its own phased
+> per-machine namespaces and a uniform file protocol). It now has its own phased
 > plan in [`roadmap-cluster.md`](roadmap/roadmap-cluster.md). The Plan 9 "local
-> namespace + uniform protocol" work below is **Phase 0** of that arc — the
+> namespace + uniform protocol" work below is **Phase 0** of that arc: the
 > foundation the whole distributed vision builds on, not a standalone item.
 
 ## What's next (the current frontier)
@@ -1407,10 +1407,10 @@ The small open tails those arcs deliberately left:
 ## Testing infrastructure: scripted real-hardware round trips
 
 > **Direction update (2026-08-26): Parallels real-hardware testing is PARKED.**
-> QEMU (single machine *and* the two-node cluster on a shared socket link — see
+> QEMU (single machine *and* the two-node cluster on a shared socket link, see
 > [`testing-qemu.md`](testing/testing-qemu.md)) is the working dev/test loop and is
-> **good enough for now**. Parallels was never going to prove the cluster anyway
-> — it has no working NIC transport (virtio-PCI, unsupported), so networking and
+> **good enough for now**. Parallels was never going to prove the cluster anyway:
+> it has no working NIC transport (virtio-PCI, unsupported), so networking and
 > the whole Plan 9 cluster are unreachable there (see
 > [`testing-parallels.md`](testing/testing-parallels.md) for the full analysis, kept as a
 > "perhaps later" reference, not an active plan). **The intended physical target
@@ -1424,7 +1424,7 @@ The small open tails those arcs deliberately left:
 > **Pi-4 bring-up reference (pre-read, for when the boards arrive):**
 > `docs/research/research-redox-and-pi.md` (Part 2) maps the
 > `rust-raspberrypi-OS-tutorials` repo onto our situation. The key call: **try
-> the [pftf/RPi4](https://github.com/pftf/RPi4) EDK2 UEFI+ACPI firmware first** —
+> the [pftf/RPi4](https://github.com/pftf/RPi4) EDK2 UEFI+ACPI firmware first**:
 > a Pi 4 under it exposes UEFI + ACPI + a GOP framebuffer, so our existing boot
 > path (UEFI loader, ACPI MADT → `gicv2.rs` for the Pi 4's GIC-400/GICv2, GOP
 > `fbconsole`) should carry over largely unchanged, rather than rewriting for raw
@@ -2560,15 +2560,15 @@ be reviewed after the fact from the saved screenshots.
 > Rust's LLD against `programs/linker.ld` → the existing loader → the syscall
 > boundary, spawned like any `/bin` program (`# chello` → `hello from C on
 > Ouroboros`). No loader or kernel change was needed. That closes the one real
-> uncertainty — the toolchain path — so the rest is *growing a libc*, not
+> uncertainty, the toolchain path, so the rest is *growing a libc*, not
 > inventing the mechanism. **`.data`/`.bss` support landed next** (the second
-> step): userland programs may now have mutable statics/globals — the loader
+> step): userland programs may now have mutable statics/globals. The loader
 > already loaded initialized data and zeroed `.bss` per PT_LOAD segment, so this
 > was removing the linker-script ASSERTs and verifying (fresh-per-spawn,
 > `data=7 bss=0` → `data=8 bss=5`, RELATIVE relocs only). That was the real
 > blocker for non-trivial C. **A minimal libc landed next** (third step):
 > `libc/` now has standard headers + sources (`crt0`, syscall stubs, `printf`,
-> `malloc`/`free` over `sbrk`, `string.h`) — a C program `#include`s `<stdio.h>`
+> `malloc`/`free` over `sbrk`, `string.h`), so a C program `#include`s `<stdio.h>`
 > and calls `printf`/`malloc` (`make cdemo-bin`, `/bin/CDEMO`: formatted output,
 > heap allocation, `sum(1..100)=5050`). **File I/O + pipe-aware output landed
 > next** (fourth step): `open`/`read`/`write`/`close`/`lseek`/`fstat` over `fsd`
@@ -2577,27 +2577,27 @@ be reviewed after the fact from the saved screenshots.
 > `cfile | grep hello` filters its output). **Fids landed next** (fifth step): fsd
 > gained real server-side open-file handles (`NP_OPEN`/`NP_PREAD`/`NP_PWRITE`/
 > `NP_FSTAT`/`NP_CLUNK`, a per-client fid table, permission checked once at open),
-> the C libc uses them, and they coexist with the path verbs — the
+> the C libc uses them, and they coexist with the path verbs. This is the
 > deferred-since-Phase-0 "a POSIX fd ≈ a 9P fid" feature, paying off for both C
 > portability and the 9P model. **picolibc landed next** (sixth step, the real C
 > library): `picolibc` 1.8.9 is built `-fPIC` (so it self-relocates under our
-> loader — `R_AARCH64_RELATIVE` only, zero `ABS64`) and linked against OUR
-> porting layer — the same `crt0`/syscall stubs (`write`/`read`/`open`/`sbrk`/
+> loader: `R_AARCH64_RELATIVE` only, zero `ABS64`) and linked against OUR
+> porting layer: the same `crt0`/syscall stubs (`write`/`read`/`open`/`sbrk`/
 > `_exit`), which is exactly what picolibc's `posix-console` stdio bottoms out
 > at, plus two 128-bit-shift builtins its float printf needs (`libc/pico/
 > builtins.c`). `make cpico-bin`, `/bin/CPICO`: **full `%f`/`%e`/`%g` float
-> formatting** (ryu), `snprintf`, `qsort`, `malloc`, `strtol` — unmodified
+> formatting** (ryu), `snprintf`, `qsort`, `malloc`, `strtol`: unmodified
 > standard C the hand-rolled libc couldn't run. The prebuilt static lib + headers
 > are committed under `third_party/picolibc-prebuilt` (regenerate with
 > `scripts/build-picolibc.sh`), so `make` needs no meson/ninja. **The arc's one
-> open follow-up — picolibc's unbuffered console stdout — closed 2026-08-29**:
+> open follow-up, picolibc's unbuffered console stdout, closed 2026-08-29**:
 > stdout is line-buffered at the `write` boundary (in `file.c`, so it serves
 > whichever C library is linked), stderr and a read-from-stdin stay unbuffered,
-> and exit flushes from `_exit` — which also fixed a real hang, since a picolibc
+> and exit flushes from `_exit`. That also fixed a real hang, since a picolibc
 > program links picolibc's `exit()`, not our `stdlib.c`'s, so it had never been
 > sending a pipe consumer its end-of-stream marker (`cpico | wc` hung). See
 > `CHANGELOG.md`. **Remaining:**
-> port a real application on top (SQLite, a small C compiler) — now "port one
+> port a real application on top (SQLite, a small C compiler), now "port one
 > more program," not "invent the mechanism." See `docs/processes.md`'s "Writing a
 > program in C." The reasoning below is the original parked plan, still accurate.
 >
