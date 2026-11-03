@@ -1,25 +1,25 @@
 //! Replaces UEFI firmware's translation tables with our own.
 //!
-//! The MMU is already on when we get control — UEFI runs with paging
+//! The MMU is already on when we get control: UEFI runs with paging
 //! active, and we've been running under firmware's own tables this whole
 //! time. That's fine for a boot-services guest but not something to build a
 //! kernel on: those tables aren't ours to reason about or extend (device
 //! mappings for future drivers, W^X, guard pages, a user/kernel VA split
 //! for whenever there's a userspace). This installs a minimal identity map
-//! we control instead — same technique either way, just swapping which
+//! we control instead. Same technique either way, just swapping which
 //! tables TTBR0_EL1 points at while the MMU stays continuously enabled, no
 //! disable/re-enable step.
 //!
 //! Deliberately coarse for this first cut: two kinds of 1GB block mapping,
 //! nothing finer-grained yet.
 //! - RAM: whatever the UEFI memory map actually reports (not a hardcoded
-//!   address range — that exact mistake already burned this project once,
+//!   address range, the mistake that already burned this project once,
 //!   with a hardcoded QEMU UART address that hard-crashed Parallels; see
 //!   `uart.rs`'s history). Every 1GB block overlapping any "general RAM"
 //!   descriptor (everything except MMIO/MMIO_PORT_SPACE/RESERVED/
-//!   UNACCEPTED — that includes our own currently-executing LOADER_CODE/
+//!   UNACCEPTED, which includes our own currently-executing LOADER_CODE/
 //!   LOADER_DATA image and stack, not just CONVENTIONAL) gets mapped
-//!   Normal, cacheable, executable, EL1-only — except one small carved-out
+//!   Normal, cacheable, executable, EL1-only, except one small carved-out
 //!   region for `tasks.rs`'s EL0 code, see below.
 //! - Device: the low 1GB (0x0-0x3FFF_FFFF), hardcoded as Device-nGnRnE,
 //!   non-executable. This one *is* still a QEMU-shaped convention (low
@@ -28,21 +28,21 @@
 //!   if one was discovered, keeps working after the table switch instead
 //!   of becoming unmapped out from under it.
 //!
-//! ## Two levels (L0 -> L1), not one — a real bug, not a style choice
+//! ## Two levels (L0 -> L1), not one: a real bug, not a style choice
 //!
 //! The walk starts at L0 with `T0SZ = 20` (44-bit VA), matching *firmware's
 //! own* TCR_EL1 configuration read back at the start of
-//! [`install_identity_map`] — not a coincidence, and not simplifiable to a
+//! [`install_identity_map`]. Not a coincidence, and not simplifiable to a
 //! single L1 table with `T0SZ = 25` (39-bit VA, which would still legally
 //! cover every address this module maps). That single-table version was
 //! the first thing tried here, and it hard-faulted: `ESR_EL1` decoded to a
 //! Permission fault at translation level 2 on the very next instruction
 //! fetch after the switch, then an identical fault on the exception vector
-//! table itself, in an infinite loop — despite every table entry, MAIR_EL1,
+//! table itself, in an infinite loop, despite every table entry, MAIR_EL1,
 //! and TCR_EL1 bit verified correct by hand against authoritative bit-layout
 //! references (Linux's `pgtable-hwdef.h` and `arch/arm64/tools/sysreg`) and
 //! independently re-derived with a Python script from the actual runtime
-//! values. PXN/UXN weren't it either — removing them entirely changed
+//! values. PXN/UXN weren't it either: removing them entirely changed
 //! nothing. What actually fixed it was matching firmware's L0-start walk
 //! instead of switching to a different starting level. Changing MAIR_EL1/
 //! TCR_EL1/TTBR0_EL1 together while the MMU stays continuously enabled
@@ -53,37 +53,37 @@
 //! and clean boot. Don't collapse this back to a single L1 table without
 //! re-verifying against a real fault trace first.
 //!
-//! ## RAM is EL1-only, not EL0-accessible — a second mystery (resolved below)
+//! ## RAM is EL1-only, not EL0-accessible: a second mystery (resolved below)
 //!
 //! `tasks.rs` needs EL0 to be able to read/write/execute its demo task
 //! and stack, both of which live in this same RAM block. The obvious fix
 //! (`AP[2:1] = 01`, EL1+EL0 R/W, on `normal_block`) was tried and
-//! extensively tested — and it hard-faults, in exactly the same shape as
+//! extensively tested, and it hard-faults, in exactly the same shape as
 //! the starting-level bug above: the very first instruction fetch after
 //! the table switch takes a Permission fault and loops forever. Unlike
 //! that bug, **this one was not resolved.** What was ruled out, each by a
 //! direct, repeatable test, not by assumption:
-//! - Wrong AP bit position — cross-checked bit-for-bit against Linux's
+//! - Wrong AP bit position: cross-checked bit-for-bit against Linux's
 //!   `pgtable-hwdef.h` three separate times, including a from-scratch
 //!   Python re-derivation of the actual runtime descriptor value. Correct
 //!   every time.
-//! - UXN — removing it entirely (on top of the AP change) changed nothing.
+//! - UXN: removing it entirely (on top of the AP change) changed nothing.
 //! - PAN/EPAN (ARMv8.1, would plausibly block EL1 executing EL0-accessible
-//!   memory) — cortex-a72 is ARMv8.0 and doesn't implement it; confirmed
+//!   memory): cortex-a72 is ARMv8.0 and doesn't implement it; confirmed
 //!   directly by trying to clear PSTATE.PAN via its raw system-register
 //!   encoding (`S3_0_C4_C2_3`, since the assembler doesn't even recognize
 //!   the named `PAN` mnemonic here) and getting an EC=0 "Unknown reason"
-//!   trap — the register access itself is undefined on this CPU.
+//!   trap. The register access itself is undefined on this CPU.
 //! - `AP[2:1] = 10` (EL1 read-only, still no EL0) was also tried as a
 //!   control: it correctly produces a *Data* Abort (denied write) instead
-//!   of an *Instruction* Abort — proof the AP bit positions and their
+//!   of an *Instruction* Abort, proof the AP bit positions and their
 //!   general effect are being interpreted correctly. Only the *specific*
 //!   combination of "AP grants EL1 exec" + "AP != 00" faults on execute,
 //!   which shouldn't be possible per the architecture (AP doesn't gate
 //!   execute at all; only PXN/UXN do).
-//! - Shareability (SH_INNER vs none) and `ic ialluis` (removed entirely) —
+//! - Shareability (SH_INNER vs none) and `ic ialluis` (removed entirely):
 //!   both changed nothing.
-//! - Granularity — rebuilt the RAM block as an L2 sub-table (2MB blocks,
+//! - Granularity: rebuilt the RAM block as an L2 sub-table (2MB blocks,
 //!   same AP=01 permissions) instead of a single L1 1GB block: identical
 //!   failure. Not a huge-page-specific issue.
 //!
@@ -96,17 +96,17 @@
 //! *separate* region instead of the same RAM block containing the kernel
 //! code that's actively executing right after the table switch.
 //! `tasks.rs` carves out one dedicated 8KB slot (`el0_region()`) holding
-//! its two EL0 tasks and their stacks — nothing else from the kernel
+//! its two EL0 tasks and their stacks, and nothing else from the kernel
 //! shares it. 8KB, not something rounder like 2MB, because 2MB alignment
-//! turned out to be unachievable at all on this target — see `tasks.rs`'s
+//! turned out to be unachievable at all on this target (see `tasks.rs`'s
 //! module doc comment for the precisely-bisected `rustc`/PE-COFF limit
-//! that forced this. Because 8KB is far smaller than this module's L2
+//! that forced this). Because 8KB is far smaller than this module's L2
 //! (2MB) block granularity, giving *only* the EL0 region EL0 access
 //! required a fourth translation table level: the one L2 slot that
 //! contains it gets split into a real L3 sub-table (4KB pages,
 //! `EL0_L3_TABLE`), where only the region's own page(s) get EL0 access
-//! (`el0_page_4k`) and every other page in that same 2MB slot — the ~2MB
-//! of surrounding kernel code/data that happens to share it — stays
+//! (`el0_page_4k`) and every other page in that same 2MB slot (the ~2MB
+//! of surrounding kernel code/data that happens to share it) stays
 //! EL1-only (`kernel_page_4k`), same as every other 2MB slot in the block
 //! (`kernel_block_2m`) and every 1GB block that doesn't overlap the EL0
 //! region at all (`normal_block`).
@@ -114,13 +114,13 @@
 //! **Confirmed working, sustained, not just "boots once":** the EL0 demo
 //! task's real `svc` round-trip succeeds (`syscall from EL0 (number=0,
 //! arg0=0x2a)`), and 14 consecutive timer ticks fired correctly over 20+
-//! seconds afterward with no repeated faults — meaning EL0 reached and
+//! seconds afterward with no repeated faults, meaning EL0 reached and
 //! stayed in its post-syscall idle loop rather than faulting again.
 //! Cross-checked against QEMU's own `-d int` trace for the same kind of
 //! run: exactly one `[SVC]` exception (the single syscall the demo task
 //! makes) and zero aborts across the whole session. (Getting a clean idle
 //! loop also needed one more fix, now in `tasks.rs`: EL0's own `wfe`
-//! traps to EL1 by default — `SCTLR_EL1.nTWE`/`nTWI`, unrelated to the
+//! traps to EL1 by default (`SCTLR_EL1.nTWE`/`nTWI`), unrelated to the
 //! mapping work here.)
 //!
 //! ## Since generalized to one independent region per task slot
@@ -797,14 +797,14 @@ fn overlaps(region: (u64, u64), start: u64, end: u64) -> bool {
 }
 
 /// Builds the identity map and switches TTBR0_EL1 to it. The MMU stays
-/// enabled throughout — no SCTLR_EL1.M toggle, just barriers around each
+/// enabled throughout: no SCTLR_EL1.M toggle, just barriers around each
 /// step so the table walker and TLB never see a half-updated config.
 ///
 /// # Safety
 /// Must be called after `exit_boot_services` (touches TCR_EL1/MAIR_EL1/
 /// TTBR0_EL1 directly) and with `memory_map` being the map that call
 /// returned. The discovered RAM span must actually cover the code
-/// currently executing and its stack — true for any UEFI-loaded image,
+/// currently executing and its stack, true for any UEFI-loaded image,
 /// since firmware reports it as LOADER_CODE/LOADER_DATA in the same map.
 /// `el0_regions` are the (start, size) pairs that get EL0 access -
 /// everything else in RAM stays EL1-only. Each must independently fit

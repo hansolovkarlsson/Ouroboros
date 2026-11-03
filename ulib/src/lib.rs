@@ -419,7 +419,7 @@ pub fn try_read_char() -> Option<u8> {
 
 /// A microsecond-resolution monotonic timestamp since boot (`MONOTONIC_US`).
 /// The same clock netd's RTT estimator uses; the account tools fall back to it
-/// as (weak, clock-derived) salt entropy when there is no hardware RNG — see
+/// as (weak, clock-derived) salt entropy when there is no hardware RNG. See
 /// [`random_bytes8`] and `accounts::salt_from`.
 pub fn monotonic_us() -> u64 {
     syscall(syscall_abi::MONOTONIC_US, 0)
@@ -437,12 +437,12 @@ pub fn groups_of(task: u64, out: &mut [u32]) -> usize {
 }
 
 /// Fill `buf` with hardware entropy (`RANDOM`), returning how many bytes were
-/// written — `0` when this machine has no entropy device, which is the ordinary
+/// written: `0` when this machine has no entropy device, which is the ordinary
 /// case rather than an error (only a QEMU run with `-device virtio-rng-device`
 /// has one). `buf` is bounded by `MAX_USER_LEN` (512) like every user pointer.
 ///
 /// The device may legitimately return fewer bytes than asked for, so a caller
-/// needing exactly N must check the count — see [`random_bytes8`].
+/// needing exactly N must check the count. See [`random_bytes8`].
 pub fn random(buf: &mut [u8]) -> usize {
     if buf.is_empty() {
         return 0;
@@ -462,7 +462,7 @@ pub fn random(buf: &mut [u8]) -> usize {
 
 /// Eight bytes of hardware entropy, or `None` when there is no entropy device
 /// (or it returned short). `None` is a normal answer: the caller is expected to
-/// degrade *loudly* — `accounts::salt_from` takes exactly this `Option` and
+/// degrade *loudly*: `accounts::salt_from` takes exactly this `Option` and
 /// reports whether the salt it built is strong.
 pub fn random_bytes8() -> Option<[u8; 8]> {
     let mut b = [0u8; 8];
@@ -477,7 +477,7 @@ pub fn random_bytes8() -> Option<[u8; 8]> {
 /// count. Submits on CR/LF, supports destructive backspace, and ignores other
 /// control bytes. When `echo` is set each byte is echoed to the console (a
 /// username); a password is read silently (`echo == false`). The interactive
-/// `/bin` account tools (`passwd`/`useradd`) use this — they only receive
+/// `/bin` account tools (`passwd`/`useradd`) use this, as they only receive
 /// keystrokes while foreground (the shell hands a spawned command the keyboard,
 /// like the pager). Mirrors the shell's own `login::read_field`, through the
 /// same [`keyseq`] filter: an arrow or function key's sequence is dropped
@@ -876,7 +876,7 @@ pub fn fs_call(op: u64, params: [u64; 4], payload1: &[u8], payload2: &[u8], resu
 }
 
 /// One filesystem-server round trip over the uniform verb set ([`ninep-abi`],
-/// the Phase 0 cluster protocol) — `fs_call`'s sibling, with the `tree` mount
+/// the Phase 0 cluster protocol): `fs_call`'s sibling, with the `tree` mount
 /// selector at offset 8 and the payload at [`ninep_abi::NP_REQ_PAYLOAD`] (48).
 /// `tree` is `0` for now (a single implicit mount); the per-task namespace
 /// resolves it to a real mount in a later step. The reply shape (status u64 +

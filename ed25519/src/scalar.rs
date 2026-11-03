@@ -11,7 +11,7 @@
 //! multiplies (`sc_reduce` in ref10 is about 200 lines of unexplained
 //! constants). This does bit-by-bit long division instead: 512 iterations of
 //! "double the remainder, add the next bit, subtract L if it fits". That is
-//! perhaps twenty times slower and it is *obviously* correct — you can check it
+//! perhaps twenty times slower and it is *obviously* correct: you can check it
 //! against the definition of division rather than against another
 //! implementation's constants.
 //!
@@ -34,8 +34,8 @@ const L: [u64; 4] = [0x5812_631a_5cf5_d3ed, 0x14de_f9de_a2f7_9cd6, 0x0, 0x1000_0
 pub struct Scalar([u64; 4]);
 
 impl Scalar {
-    /// Reduce a 512-bit hash (little-endian) mod L — how both of a signature's
-    /// scalars are derived.
+    /// Reduce a 512-bit hash (little-endian) mod L, which is how both of a
+    /// signature's scalars are derived.
     pub fn from_hash(bytes: &[u8; 64]) -> Scalar {
         let mut wide = [0u64; 8];
         for (i, w) in wide.iter_mut().enumerate() {
@@ -62,7 +62,7 @@ impl Scalar {
     ///
     /// This is the one a verifier must use for a signature's `s`. Accepting
     /// `s ≥ L` and reducing it would make every signature come in `2⁶⁴`-ish
-    /// variants that all verify — the classic malleability, and the same shape
+    /// variants that all verify: the classic malleability, and the same shape
     /// as the non-canonical point encoding that this crate's step 3 refused.
     pub fn from_canonical_bytes(bytes: &[u8; SCALAR_LEN]) -> Option<Scalar> {
         let mut w = [0u64; 4];
@@ -86,7 +86,7 @@ impl Scalar {
         out
     }
 
-    /// `(a · b + c) mod L` — the signing equation, `s = r + k·a`.
+    /// `(a · b + c) mod L`: the signing equation, `s = r + k·a`.
     pub fn mul_add(a: Scalar, b: Scalar, c: Scalar) -> Scalar {
         // Schoolbook 4×4 → 8 limbs. Both inputs are below L < 2²⁵³, so the
         // product is below 2⁵⁰⁶ and adding c cannot reach 2⁵¹².

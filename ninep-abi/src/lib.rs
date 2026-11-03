@@ -1,4 +1,4 @@
-//! `ninep-abi` — the uniform, server-agnostic file-protocol verb set for the
+//! `ninep-abi`: the uniform, server-agnostic file-protocol verb set for the
 //! distributed-cluster arc (Phase 0; see `docs/roadmap/roadmap-cluster-phase0.md`).
 //!
 //! The whole cluster direction rests on one insight: *"remote" is just "the
@@ -6,19 +6,19 @@
 //! own bespoke protocol (`fsd`'s `FSOP_*`, `cond`'s `DSPOP_*`); this crate
 //! defines the single verb set that replaces them, so mounting a remote
 //! machine's service (a later phase) is the same operation as reaching a local
-//! one — the transport changes, the model doesn't.
+//! one. The transport changes, the model doesn't.
 //!
 //! This first step (0a+0b) defines the verbs and makes them the real in-use
 //! path between clients (`ulib` → every `/bin` filesystem command) and `fsd`,
 //! which speaks them alongside `FSOP_*` during the migration. No logic here,
-//! just `pub const`s — safe under either build target, every value a scalar
+//! just `pub const`s, safe under either build target, every value a scalar
 //! inlined at the use site (the `syscall-abi` discipline).
 //!
 //! ## Wire format (request)
 //!
 //! A request is a header + inline payload, copied task-to-task by the kernel's
 //! message machinery (no pointer crosses a task boundary), exactly like
-//! `FSOP_*` — with one added field, the `tree` selector at offset 8 that the
+//! `FSOP_*`, with one added field, the `tree` selector at offset 8 that the
 //! whole design turns on:
 //!
 //! | offset | field            | meaning                                        |
@@ -29,7 +29,7 @@
 //! | 40     | `a3: u64`        | WHO the request is for (see `NP_ID_*`)         |
 //! | 48..   | payload          | path bytes, then any inline data               |
 //!
-//! Reply: `status: u64` at offset 0, result payload from [`NP_REPLY_PAYLOAD`] —
+//! Reply: `status: u64` at offset 0, result payload from [`NP_REPLY_PAYLOAD`],
 //! identical to `FSOP_*`, and status codes are (for now) `syscall-abi`'s
 //! existing `FS_ERR_*` / size conventions, so a verb returns byte-identical
 //! results to the `FSOP_*` op it replaces. Bulk file data still moves by the
@@ -42,7 +42,7 @@ use core::ops::ControlFlow;
 /// Request header size: `verb`(8) + `tree`(8) + four `u64` params(32) - the
 /// last of which (`a3`) is the identity word, not an op param. The
 /// inline payload (path, then any data) starts here. One `u64` larger than
-/// `FSOP_*`'s `FS_REQ_PAYLOAD` (40) — that extra word is the `tree` selector.
+/// `FSOP_*`'s `FS_REQ_PAYLOAD` (40): that extra word is the `tree` selector.
 pub const NP_REQ_PAYLOAD: u64 = 48;
 
 /// Reply header size: the status `u64` at offset 0; result payload follows.
@@ -277,7 +277,7 @@ pub const NP_WRITE_FILE: u64 = NP_BASE + 11;
 /// the reply status is [`STAT_INFO_LEN`] and the result payload is a
 /// [`StatInfo`](the `STAT_*` field layout below); on failure it's an `FS_ERR_*`
 /// code. The per-file metadata behind `ls -l` (size, dir flag, modified time,
-/// and — when the filesystem can model them — POSIX mode/owner).
+/// and, when the filesystem can model them, POSIX mode/owner).
 pub const NP_STAT: u64 = NP_BASE + 12;
 
 /// **Change mode** of a single path (the write side of `stat`'s mode field):
@@ -408,7 +408,7 @@ pub const fn open_changes(flags: u64, exists: bool) -> bool {
 /// the checker says so.
 pub const MAX_FIDS: usize = 8;
 
-/// One past the last defined verb — a server dispatches the `[NP_BASE, NP_LIMIT)`
+/// One past the last defined verb: a server dispatches the `[NP_BASE, NP_LIMIT)`
 /// range to its verb handler and lets everything else (including `SYSOP_PING`)
 /// fall through to its existing path.
 pub const NP_LIMIT: u64 = NP_CLUNK + 1;
@@ -457,14 +457,14 @@ pub const STAT_MODEVALID_OFF: usize = 26;
 /// [`STAT_FLAGS_OFF`] bit: the entry is a directory.
 pub const STAT_FLAG_DIR: u32 = 1 << 0;
 
-/// Remote-execution **run** request (cluster Phase 4a — the Plan 9 `cpu` model):
+/// Remote-execution **run** request (cluster Phase 4a, the Plan 9 `cpu` model):
 /// carried over the export connection in the same framed shape as an NP verb, but
 /// its "reply" is the spawned command's **output stream** (bytes, then FIN), not a
 /// single NP reply. `a0` = command-line length; the payload is the command line
 /// (program name + space-separated args, e.g. `ls /` or `cat /net/ip`). The
 /// export gateway spawns it on *this* machine (from `/bin`), captures its stdout,
 /// and streams it back to the caller. Chosen well above `NP_LIMIT` so the fs-verb
-/// dispatch never sees it — the cpu path handles it explicitly.
+/// dispatch never sees it: the cpu path handles it explicitly.
 pub const NP_RUN: u64 = NP_BASE + 0x20;
 
 /// **Open a session on this connection** (docs/roadmap/roadmap-fid-verbs.md,
@@ -525,7 +525,7 @@ pub const NP_NET_MAX: usize = 48 + 2048;
 /// The NP message header as a `usize`: [`NP_REQ_PAYLOAD`], which every encoder
 /// already sizes from.
 ///
-/// Was `6 * 8` — a second spelling of the same 48, in the same file, so adding a
+/// Was `6 * 8`, a second spelling of the same 48, in the same file, so adding a
 /// seventh header word would have moved one and not the other.
 const NP_MSG_HDR: usize = NP_REQ_PAYLOAD as usize;
 
@@ -548,7 +548,7 @@ const _: () = assert!(
 
 // THE BULK-CHUNK HALF OF THIS BOUND LIVES IN `netd`, not here.
 //
-// It used to be asserted here against a local `const SAFECOPY_MAX = 2048` — a
+// It used to be asserted here against a local `const SAFECOPY_MAX = 2048`, a
 // hand-copy of `syscall_abi::SAFECOPY_MAX`, which made the check unable to fail
 // for the cross-crate drift its own comment claimed to catch: raise the real
 // constant to 4096 and this still compared against the stale copy and passed,
@@ -787,7 +787,7 @@ pub const NP_NAME_LEN: usize = 32;
 pub const NP_AUTH_NONCE_OFF: usize = 8;
 /// Offset of the requesting user's name within the auth header.
 pub const NP_AUTH_NAME_OFF: usize = 8 + NP_NONCE_LEN;
-/// Magic marking a **signed** framed request — the per-machine-keypair format
+/// Magic marking a **signed** framed request, the per-machine-keypair format
 /// (`docs/roadmap/roadmap-cluster-keys.md`). The ONLY accepted format since the flag
 /// day; it was accepted alongside the shared-key MAC'd magic `AUTHNP02` during
 /// the transition, which is what let the exporter learn to verify signatures
@@ -801,7 +801,7 @@ pub const NP_AUTH_NAME_OFF: usize = 8 + NP_NONCE_LEN;
 /// [len:4][magic:8][nonce:16][name:32][pubkey:32][sig:64][NP message]
 /// ```
 ///
-/// The signature covers `SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖ message` — the
+/// The signature covers `SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖ message`: the
 /// same bytes, after the domain tag, that the retired MAC
 /// covered. What changed is not *what* is authenticated but *who can produce
 /// it*: a secret every machine holds, or a private key only one machine holds.
@@ -812,7 +812,7 @@ pub const NP_PUBKEY_LEN: usize = 32;
 /// Bytes of Ed25519 signature in a signed auth header.
 pub const NP_SIG_LEN: usize = 64;
 
-/// Offset of the offered public key within a signed auth header — where the
+/// Offset of the offered public key within a signed auth header, where the
 /// retired MAC'd format kept its MAC.
 pub const NP_AUTH_PUBKEY_OFF: usize = 8 + NP_NONCE_LEN + NP_NAME_LEN;
 /// Offset of the signature within a signed auth header.
@@ -862,7 +862,7 @@ pub const NP_SESSION_KEY_LEN: usize = 32;
 pub const SIG_DOMAIN_REQUEST: &[u8] = b"ouroboros-cluster-request-v1\0";
 
 /// Domain tag prefixed to the bytes a **reply** signature covers. See
-/// [`SIG_DOMAIN_REQUEST`] — tagging only one side would leave the other
+/// [`SIG_DOMAIN_REQUEST`]: tagging only one side would leave the other
 /// direction open, because the tag would then be forgeable by choosing a nonce.
 pub const SIG_DOMAIN_REPLY: &[u8] = b"ouroboros-cluster-reply-v1\0";
 
@@ -908,7 +908,7 @@ pub const REALM_MAX: usize = 32;
 /// The longest domain tag, so a caller can size a buffer for either.
 ///
 /// COMPUTED, NOT TRANSCRIBED. This was the literal `29`, tied to the tags it
-/// describes by nothing but a `#[cfg(test)]` assertion — and `netd` sizes four
+/// describes by nothing but a `#[cfg(test)]` assertion, and `netd` sizes four
 /// signing buffers as `SIG_DOMAIN_MAX + …` and writes their last byte, so one
 /// byte of tag growth is a slice-index panic in `authenticate_signed`, reached
 /// from `handle_9p` BEFORE any key lookup. Anyone able to send 152 bytes to
@@ -916,7 +916,7 @@ pub const REALM_MAX: usize = 32;
 /// cap. A `cargo test` is the wrong guard for that: it does not run for
 /// `make esp` or any image target.
 ///
-/// Evaluating the definition removes both problems at once — it cannot be
+/// Evaluating the definition removes both problems at once: it cannot be
 /// transcribed wrongly, and it cannot be stale. Same move as the small-order-key
 /// table this arc replaced with `[8]P == identity`.
 ///
@@ -964,7 +964,7 @@ const _: () = {
 /// `nonce ‖ name`.
 ///
 /// **The name is inside the signature, which is the whole point.** It costs
-/// nothing — the signature was already there — and it means the claimed user
+/// nothing (the signature was already there), and it means the claimed user
 /// cannot be edited in flight by anything without the machine's private key. A
 /// tamper attempt fails verification exactly as a tampered path or offset does.
 ///

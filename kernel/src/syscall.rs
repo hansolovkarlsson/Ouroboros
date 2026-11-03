@@ -1,4 +1,4 @@
-//! The `svc` trap path from EL0 back to EL1 — the dispatch table itself.
+//! The `svc` trap path from EL0 back to EL1: the dispatch table itself.
 //! Dropping to EL0 and the tasks that run there now live in `tasks.rs`;
 //! this module is just what they call into.
 //!
@@ -7,7 +7,7 @@
 //! here is Linux-ABI-compatible): syscall number in x8, up to 4 arguments
 //! in x0-x3, return value in x0. `exceptions.rs`'s slot-8 trampoline is
 //! what actually marshals registers into and out of [`dispatch`]'s call
-//! signature — see its module doc comment for why that trampoline exists,
+//! signature. See its module doc comment for why that trampoline exists,
 //! how it differs from every other vector, and why it grew from 1 argument
 //! to 4 for phase 3c's file-I/O syscalls.
 //!
@@ -45,8 +45,8 @@ use crate::loader;
 use crate::mmu;
 use crate::tasks;
 
-/// One independent counter per `tasks.rs` slot, proof — alongside
-/// `double`/`print` below — that syscalls arriving from *different*,
+/// One independent counter per `tasks.rs` slot, proof (alongside
+/// `double`/`print` below) that syscalls arriving from *different*,
 /// actually-switching contexts still land in the right dispatch arm with
 /// the right per-caller state, not just that the dispatch table has more
 /// than one entry. Sized by `NUM_TASKS` like everything else in

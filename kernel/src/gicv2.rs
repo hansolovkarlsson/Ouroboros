@@ -1,18 +1,18 @@
-//! GICv2 (Generic Interrupt Controller) backend — just enough to enable
+//! GICv2 (Generic Interrupt Controller) backend: just enough to enable
 //! one PPI (the timer tick, see `timer.rs`) and acknowledge/complete
 //! interrupts as they arrive. Selected by `gic.rs`'s facade whenever
 //! `madt::discover` reports `GicVersion::V2` (confirmed via the real ACPI
 //! MADT now, not just the QEMU devicetree dump this module's addresses
-//! were originally pinned down by — see `madt.rs`'s module doc comment).
+//! were originally pinned down by, see `madt.rs`'s module doc comment).
 //!
 //! Addresses are no longer hardcoded here: `init` takes them as
 //! parameters, sourced from `madt::GicInfo`. Originally confirmed for
 //! QEMU by dumping its internal devicetree
 //! (`qemu-system-aarch64 -machine virt,dumpdtb=...`, not anything our own
 //! kernel reads at boot): `intc@8000000 { compatible =
-//! "arm,cortex-a15-gic"; reg = <... 0x8000000 ... 0x8010000 ...> }` —
+//! "arm,cortex-a15-gic"; reg = <... 0x8000000 ... 0x8010000 ...> }`:
 //! GICv2 (the `cortex-a15-gic` compatible string), distributor at
-//! 0x08000000, CPU interface at 0x08010000 — and now separately
+//! 0x08000000, CPU interface at 0x08010000. It is now separately
 //! cross-checked against the real MADT via `madt.rs`, giving the same
 //! values through a completely independent path.
 //!
@@ -194,11 +194,11 @@ pub unsafe fn enable_interrupt(gicd_base: usize, intid: u32) {
 }
 
 /// Reads the highest-priority pending interrupt ID and acknowledges it
-/// (removing it from the pending set) — must be paired with [`end_of_interrupt`]
-/// once handled, or the GIC will never consider it complete. The whole
-/// `GICC_IAR`: for an SGI, bits 12:10 name the CPU that sent it, and the
-/// end of interrupt must write them back, so the interrupt ID is
-/// [`intid_of`] this value and not the value itself.
+/// (removing it from the pending set). It must be paired with
+/// [`end_of_interrupt`] once handled, or the GIC will never consider it
+/// complete. The whole `GICC_IAR`: for an SGI, bits 12:10 name the CPU that
+/// sent it, and the end of interrupt must write them back, so the interrupt ID
+/// is [`intid_of`] this value and not the value itself.
 ///
 /// # Safety
 /// Must run after [`init`], from IRQ-handling context.

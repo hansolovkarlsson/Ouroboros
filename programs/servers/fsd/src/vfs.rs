@@ -487,7 +487,7 @@ impl Filesystem {
     }
 
     /// Set a path's permission bits (the low 12 of the mode; the type nibble is
-    /// preserved). The write twin of [`stat`](Self::stat)'s mode field — ext2
+    /// preserved). The write twin of [`stat`](Self::stat)'s mode field, ext2
     /// only, since it's the one arm that stores a mode. FAT32/exFAT/`/proc`
     /// return [`Error::Unsupported`] rather than pretend to succeed.
     pub fn chmod(&mut self, path: &str, mode: u16) -> Result<(), Error> {

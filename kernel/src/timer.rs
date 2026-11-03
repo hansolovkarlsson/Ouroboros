@@ -1,11 +1,11 @@
-//! ARM generic timer (non-secure EL1 physical timer, CNTP) — the source of
+//! ARM generic timer (non-secure EL1 physical timer, CNTP), the source of
 //! the preemption tick.
 //!
 //! Confirmed via the same devicetree dump used for `gic.rs`: `timer {
 //! compatible = "arm,armv8-timer"; interrupts = <1 13 ...>, <1 14 ...>, <1
 //! 11 ...>, <1 10 ...>; }`. The arm,gic devicetree binding's fixed order
 //! for this compatible string is secure-physical, non-secure-physical,
-//! virtual, hypervisor — so PPI 14 is the non-secure EL1 physical timer,
+//! virtual, hypervisor, so PPI 14 is the non-secure EL1 physical timer,
 //! the one available without any EL2 involvement. PPI-to-INTID is `16 +
 //! PPI number` (SGIs occupy INTID 0-15), so GIC INTID 30. Control register
 //! bit positions (ENABLE/IMASK/ISTATUS) cross-checked against Linux's
@@ -73,7 +73,7 @@ pub(crate) fn monotonic_us() -> u64 {
 }
 
 /// Arms the timer to fire once, `interval_ms` milliseconds from now.
-/// Re-arming (calling this again) is how a periodic tick is built — see
+/// Re-arming (calling this again) is how a periodic tick is built. See
 /// the IRQ handler in `exceptions.rs`, which calls this again each time the
 /// timer fires.
 pub fn arm(interval_ms: u64) {

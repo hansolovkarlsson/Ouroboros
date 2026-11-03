@@ -28,7 +28,7 @@
 //! ## PIE safety
 //! Everything is byte-only (no `&str` slicing by a runtime index, which would
 //! pull in `core::fmt`'s panic formatter and an `R_AARCH64_ABS64` relocation the
-//! `-pie` link rejects — the recurring trap). The password check is
+//! `-pie` link rejects, the recurring trap). The password check is
 //! constant-time ([`digest_eq`]).
 
 #![cfg_attr(not(test), no_std)]
@@ -42,7 +42,7 @@ pub use sha256::{digest_eq, sha256_two, DIGEST};
 pub const SALT_MAX: usize = 16;
 
 /// The conventional first uid/gid for a normal (non-system) account, the base
-/// [`next_free_uid`]/[`next_free_gid`] allocate from — matching the dev
+/// [`next_free_uid`]/[`next_free_gid`] allocate from, matching the dev
 /// accounts' `1000` and the common Linux `UID_MIN`.
 pub const FIRST_NORMAL_ID: u32 = 1000;
 
@@ -165,7 +165,7 @@ pub struct Group<'a> {
 }
 
 /// Iterate `/etc/passwd` accounts, skipping blank lines. Returns `None` for a
-/// malformed line rather than erroring the whole file — callers use the finder
+/// malformed line rather than erroring the whole file: callers use the finder
 /// helpers, which just skip a bad line.
 /// Parse one `/etc/passwd` line. Two shapes are accepted:
 ///
@@ -517,7 +517,7 @@ pub fn next_free_gid(group: &[u8]) -> u32 {
 /// which it was: `(salt, strong)`.
 ///
 /// `random` is eight bytes from a hardware RNG (`ulib::random_bytes8`) when the
-/// machine has one — those *are* the salt, used directly, since they are already
+/// machine has one. Those *are* the salt, used directly, since they are already
 /// uniform. `None` falls back to [`make_salt`]'s clock derivation, and `strong`
 /// comes back `false` so the caller can **say so out loud** rather than quietly
 /// storing a guessable salt. This crate stays pure: the caller does the syscall
@@ -536,7 +536,7 @@ pub fn make_salt(entropy: u64) -> [u8; 8] {
     salt
 }
 
-/// `SHA-256(salt || password)` — the stored hash for a new/changed password.
+/// `SHA-256(salt || password)`: the stored hash for a new/changed password.
 pub fn hash_password(salt: &[u8], password: &[u8]) -> [u8; DIGEST] {
     sha256_two(salt, password)
 }

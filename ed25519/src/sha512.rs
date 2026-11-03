@@ -4,12 +4,12 @@
 //! `programs/servers/netd/src/hmac.rs`, with the differences that matter: 64-bit
 //! words instead of 32, 80 rounds instead of 64, a 128-byte block, and a
 //! 128-bit length field in the padding. Kept as its own implementation rather
-//! than a generalisation of the SHA-256 one — the two share a silhouette and
+//! than a generalisation of the SHA-256 one: the two share a silhouette and
 //! no constants, and merging them would make both harder to check against the
 //! spec.
 //!
 //! Incremental (`Sha512::update`) as well as one-shot, because Ed25519 always
-//! hashes a *concatenation* it never has in one buffer — `dom ‖ R ‖ A ‖ M` —
+//! hashes a *concatenation* it never has in one buffer (`dom ‖ R ‖ A ‖ M`),
 //! and building that buffer would mean either a heap or a cap on message size.
 
 /// Bytes in a SHA-512 digest.
@@ -20,7 +20,7 @@ pub(crate) const BLOCK_LEN: usize = 128;
 
 /// The first 64 bits of the fractional parts of the cube roots of the first 80
 /// primes (FIPS 180-4 §4.2.3). A plain `u64` array: no references, so no
-/// relocations — see the crate docs.
+/// relocations. See the crate docs.
 const K: [u64; 80] = [
     0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
     0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
@@ -45,7 +45,7 @@ const K: [u64; 80] = [
 ];
 
 /// The first 64 bits of the fractional parts of the square roots of the first
-/// eight primes (FIPS 180-4 §5.3.5) — SHA-512's initial state. SHA-384 and the
+/// eight primes (FIPS 180-4 §5.3.5): SHA-512's initial state. SHA-384 and the
 /// truncated variants differ only here, which is why this is worth naming.
 const H0: [u64; 8] = [
     0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
@@ -84,7 +84,7 @@ impl Sha512 {
     }
 
     /// Absorb `data`. Any number of calls with any split points must produce the
-    /// same digest as one call with the concatenation — which is exactly what
+    /// same digest as one call with the concatenation, which is exactly what
     /// the `incremental_matches_one_shot` test checks, at every split point.
     pub fn update(&mut self, data: &[u8]) {
         self.total_len = self.total_len.wrapping_add(data.len() as u64);
@@ -268,7 +268,7 @@ mod tests {
         ]
     }
 
-    /// Every byte value 0..=255, so the vectors are not all printable ASCII —
+    /// Every byte value 0..=255, so the vectors are not all printable ASCII:
     /// a high-bit handling bug would otherwise go unseen.
     static BINARY_0_255: &[u8; 256] = &{
         let mut b = [0u8; 256];

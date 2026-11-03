@@ -1806,9 +1806,9 @@ pub const FS_ERR_DISK_FULL: u64 = u64::MAX - 9;
 /// already-mounted filesystem, mapped here rather than omitted.
 pub const FS_ERR_IO: u64 = u64::MAX - 10;
 /// Cluster authentication failed on a remote (9P-over-TCP) operation: the
-/// export refused the request's Ed25519 signature — an unauthorized public key,
+/// export refused the request's Ed25519 signature (an unauthorized public key,
 /// a signature that does not verify, or a user name this machine has no account
-/// for — or refused a remote-run because the exporter has `NP_RUN` disabled (the
+/// for), or refused a remote-run because the exporter has `NP_RUN` disabled (the
 /// no-exec lever). Surfaces as a remote-mount / `cpu` failure so the shell can
 /// say "authentication failed" distinctly from [`NO_FS`] (an unreachable peer).
 /// In the `FS_ERR_*` band, so `>= FS_ERR_MIN` treats it as an error like every

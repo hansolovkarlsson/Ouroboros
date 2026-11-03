@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.jpg" alt="Ouroboros logo — a neon circuit-board ouroboros serpent" width="260">
+  <img src="docs/assets/logo.jpg" alt="Ouroboros logo: a neon circuit-board ouroboros serpent" width="260">
 </p>
 
 # Ouroboros
@@ -8,12 +8,12 @@ A microkernel operating system for ARM64 (aarch64), written in Rust with some as
 
 **[Project site & debugging postmortems →](https://hansolovkarlsson.github.io/Ouroboros/)**
 
-**[Tutorial: build an OS like this from scratch →](docs/tutorial.md)** —
+**[Tutorial: build an OS like this from scratch →](docs/tutorial.md)**:
 the working path only, staged from UEFI hello world to preemptive
 multitasking and disk-loaded userland, with code samples from this
 kernel. Also [on the project site](https://hansolovkarlsson.github.io/Ouroboros/tutorial.html).
 
-**[User manual →](docs/manual.md)** — building, running (QEMU &
+**[User manual →](docs/manual.md)**: building, running (QEMU &
 Parallels), testing, shell usage, and the syscall ABI, in one place.
 
 ## Design goals
@@ -21,7 +21,7 @@ Parallels), testing, shell usage, and the syscall ABI, in one place.
 - Microkernel architecture, POSIX-ish system calls
 - Preemptive multitasking
 - ARM64 target, developed and tested primarily in Parallels on Apple Silicon
-- Filesystem support TBD — likely a simple filesystem to start
+- Filesystem support TBD, likely a simple filesystem to start
 - Draws inspiration from Linux, Minix, and Plan 9
 
 ## Boot strategy
@@ -33,7 +33,7 @@ UEFI firmware and has no equivalent of QEMU's direct-kernel-boot shortcut, so
 UEFI is the one boot path that works on both the fast QEMU dev loop and the
 real Parallels test target.
 
-Right now the kernel *is* the UEFI application — there's no separate
+Right now the kernel *is* the UEFI application: there's no separate
 bootloader stage yet. As the kernel grows past what's reasonable to run under
 UEFI boot services, expect this to split into a thin UEFI bootloader that
 loads and hands off to a separate kernel binary.
@@ -75,33 +75,33 @@ Produces `esp.hdd`, a Parallels-native virtual hard disk with the kernel at
 installed OS, and in its Hardware settings attach `esp.hdd` as the **Hard
 Disk** device specifically:
 
-- Not `esp.img` directly — Parallels' Hard Disk device only accepts its own
+- Not `esp.img` directly: Parallels' Hard Disk device only accepts its own
   `.hdd` format, not a raw disk image.
-- Not the CD/DVD device — that expects an ISO9660 optical filesystem, and
+- Not the CD/DVD device, which expects an ISO9660 optical filesystem, and
   `esp.img`/`esp.hdd` is an MBR+FAT32 hard disk image. Attaching it there
   makes firmware see a block device but find no filesystem on it.
 
 `esp.hdd` is a thin wrapper that points at `esp.dmg`'s absolute path rather
-than embedding its data — keep both files together; `make clean` removes
+than embedding its data. Keep both files together; `make clean` removes
 them as a pair.
 
 `make parallels-hdd` requires Parallels Desktop to be installed (it shells
 out to `prl_disk_tool`, bundled with the app).
 
-Start the VM once attached — UEFI firmware should pick up `BOOTAA64.EFI`
+Start the VM once attached. UEFI firmware should pick up `BOOTAA64.EFI`
 from the disk automatically, the same way it does in QEMU.
 
 ## Testing on real ARM hardware (Raspberry Pi 4)
 
 The physical target is a **Raspberry Pi 4** running
-[pftf/RPi4](https://github.com/pftf/RPi4) EDK2 UEFI firmware — because the
+[pftf/RPi4](https://github.com/pftf/RPi4) EDK2 UEFI firmware. Because the
 kernel boots as a UEFI application, the requirement is not "an ARM board" but
 "an ARM board with usable UEFI firmware," which is a much shorter list. Format
 a card as FAT32 once, then `make sdcard SDCARD=/Volumes/<card>` puts the pinned
 firmware and the ESP tree on it; do *not* `dd` `esp.img`, which has no room for
 the firmware.
 
-**[Full test plan → `docs/testing/testing-pi4.md`](docs/testing/testing-pi4.md)** — board
+**[Full test plan → `docs/testing/testing-pi4.md`](docs/testing/testing-pi4.md)**: board
 selection, the bench rig and serial wiring, the firmware settings that matter,
 an ordered boot-checkpoint list, and the ranked risks. Two caveats up front: the
 Pi's GENET NIC is not virtio, so networking and the cluster are as unreachable
@@ -117,4 +117,4 @@ kernel/     the kernel, built as a UEFI application (aarch64-unknown-uefi)
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE).

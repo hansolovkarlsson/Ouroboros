@@ -1,5 +1,5 @@
 //! Global console handle, shared between `main`'s boot sequence and the
-//! exception handler — a fault needs somewhere to report through too, if a
+//! exception handler: a fault needs somewhere to report through too, if a
 //! console happens to have been installed before it fired.
 
 use core::fmt;

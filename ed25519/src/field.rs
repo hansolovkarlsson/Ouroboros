@@ -16,7 +16,7 @@
 //! - `Fe::carry` normalises to limbs **below 2⁵¹**, in two full passes. That
 //!   is the strong form, and `encode` needs it before it can conditionally
 //!   subtract p.
-//! - `reduce128` — the fold behind `mul`/`square` — settles in ONE pass, giving
+//! - `reduce128`, the fold behind `mul`/`square`, settles in ONE pass, giving
 //!   limbs **below 2⁵²**: limb 0 alone can exceed 2⁵¹, by at most 19, because
 //!   the top carry is folded into it without a re-mask. Every operation here
 //!   accepts inputs below 2⁵², so that is sufficient, and the second pass would
@@ -27,16 +27,16 @@
 //! the "the advertised invariant was false and nothing noticed" failure this
 //! module has already had once. `reduce128_leaves_limbs_below_2_52` pins the
 //! weaker bound so neither claim rests on prose. The
-//! textbook version of this representation reduces lazily — `add` leaves limbs
-//! oversized and the next multiply cleans up — which is faster and requires
+//! textbook version of this representation reduces lazily (`add` leaves limbs
+//! oversized and the next multiply cleans up), which is faster and requires
 //! every caller to know how many additions it may do before it must reduce. A
 //! test wrote here caught that being wrong (64 successive doublings wrapped a
 //! `u64` limb and returned a wrong answer silently), and a rule someone has to
 //! remember is exactly the kind of invariant this project keeps getting wrong.
 //! The carry costs five shifts against the 254 squarings in one inversion.
 //!
-//! Values are still not necessarily *canonical* — an element can be held as any
-//! representative congruent mod p — so equality and encoding reduce fully.
+//! Values are still not necessarily *canonical*: an element can be held as any
+//! representative congruent mod p, so equality and encoding reduce fully.
 //!
 //! Reduction uses the field's defining shape: **2²⁵⁵ ≡ 19**, so a bit carried
 //! out of the top limb comes back in at the bottom multiplied by 19.
@@ -59,7 +59,7 @@ pub const ELEM_LEN: usize = 32;
 ///
 /// The limbs are `pub(crate)`, not `pub`: the curve layer above needs them, but
 /// an outside caller must not be able to build an `Fe` the invariant does not
-/// cover. `Fe([u64::MAX; 5])` is representable but not *valid* — `mul` would
+/// cover. `Fe([u64::MAX; 5])` is representable but not *valid*: `mul` would
 /// overflow computing `19 * limb`, which on the target means a userland panic or
 /// a silently wrong signature rather than a failed test. `decode` is the only
 /// way in from bytes.
@@ -98,7 +98,7 @@ impl Fe {
     /// it may do before reducing. That is a rule someone has to remember, which
     /// is the shape of invariant this project keeps getting wrong (see
     /// `docs/postmortems/unspellable-postmortem.md`). Carrying costs five shifts and five
-    /// adds against 254 squarings in a single inversion — far below measurable —
+    /// adds against 254 squarings in a single inversion, far below measurable,
     /// and buys the invariant that **every `Fe` always has limbs below 2⁵¹**, so
     /// no caller can create an unreduced one by accident.
     pub fn add(self, rhs: Fe) -> Fe {
@@ -114,7 +114,7 @@ impl Fe {
     /// Computed as `self + (2p - rhs)` rather than a borrowing subtraction: add
     /// a multiple of p large enough that every limb stays non-negative, so the
     /// result is congruent and no limb underflows. `2p` in this representation
-    /// has limbs `(2⁵² - 38, 2⁵² - 2, 2⁵² - 2, 2⁵² - 2, 2⁵² - 2)` — the 38 is
+    /// has limbs `(2⁵² - 38, 2⁵² - 2, 2⁵² - 2, 2⁵² - 2, 2⁵² - 2)`. The 38 is
     /// 2·19, the field's defining constant.
     pub fn sub(self, rhs: Fe) -> Fe {
         const TWO_P: [u64; 5] = [
@@ -150,7 +150,7 @@ impl Fe {
     /// its position; the terms that would land *above* 2²⁵⁵ are multiplied by
     /// **19** and land at the bottom instead, which is what `2²⁵⁵ ≡ 19` means
     /// operationally. The `u128` accumulators cannot overflow: each is a sum of
-    /// at most five products of values below 2⁵⁴, times 19 — well under 2¹²⁸.
+    /// at most five products of values below 2⁵⁴, times 19, well under 2¹²⁸.
     pub fn mul(self, rhs: Fe) -> Fe {
         let a = self.0;
         let b = rhs.0;
@@ -175,8 +175,8 @@ impl Fe {
     ///
     /// A thin alias for `mul` today, and named separately because squaring is
     /// most of the work in an inversion (250 of its 254 steps) and is therefore
-    /// the one place a dedicated implementation — the symmetric cross terms
-    /// doubled once rather than computed twice, roughly a 30% saving — would be
+    /// the one place a dedicated implementation (the symmetric cross terms
+    /// doubled once rather than computed twice, roughly a 30% saving) would be
     /// worth having. That is deferred until step 5 measures whether signing cost
     /// matters at all on the target; optimising before then would be guessing.
     pub fn square(self) -> Fe {
@@ -195,8 +195,8 @@ impl Fe {
     /// The multiplicative inverse, or **zero for zero** (which has none).
     ///
     /// By Fermat's little theorem: `x⁻¹ = x^(p−2)`. The addition chain below is
-    /// the standard one for this exponent — 11 multiplications and 254
-    /// squarings — and returning zero for zero matches what every reference
+    /// the standard one for this exponent (11 multiplications and 254
+    /// squarings), and returning zero for zero matches what every reference
     /// implementation does, so a caller that forgets to check gets a wrong
     /// answer rather than a panic. Callers that care must check.
     pub fn invert(self) -> Fe {
@@ -250,21 +250,21 @@ impl Fe {
 
     /// Propagate carries so every limb is below 2⁵¹, folding the top carry back
     /// in times 19. The result is congruent to the input but not necessarily the
-    /// *canonical* residue — `encode` does that last step.
+    /// *canonical* residue: `encode` does that last step.
     ///
     /// **Two full passes, and the second one is not optional.** The first
     /// version of this did one pass plus a single extra step on limb 0, on the
     /// argument that the top fold can only overflow limb 0. That is true and
     /// insufficient: adding that carry to limb 1 can leave it at *exactly* 2⁵¹
     /// when it was already `MASK`, and nothing then re-masks it. `32 - 1`
-    /// produces it — an ordinary subtraction, not an exotic input. The values
+    /// produces it, an ordinary subtraction, not an exotic input. The values
     /// stayed correct (everything downstream tolerates limbs below 2⁵²), but the
     /// invariant this module advertises was false, which is worse than a wrong
     /// bound: step 3 would have been written against it.
     ///
     /// Two passes provably settle for any input below 2⁵³, which is the most any
     /// operation here produces. In the worst case the second pass ripples all
-    /// the way to limb 4 and folds 19 back into limb 0 — but a limb 0 that
+    /// the way to limb 4 and folds 19 back into limb 0, but a limb 0 that
     /// carried in the first place is left below 2⁷ by its own masking, so
     /// adding 19 cannot overflow it again.
     fn carry(self) -> Fe {
@@ -276,7 +276,7 @@ impl Fe {
     /// Fully reduces first: an element may be held as any representative
     /// congruent mod p, and two encodings of the same value must be identical
     /// or every equality check downstream is wrong. Done by conditionally
-    /// subtracting p **without branching on the answer** — compute `self + 19`,
+    /// subtracting p **without branching on the answer**: compute `self + 19`,
     /// see whether it overflowed past 2²⁵⁵, and use that as a mask.
     pub fn encode(self) -> [u8; ELEM_LEN] {
         let mut l = self.carry().0;
@@ -311,7 +311,7 @@ impl Fe {
 
     /// Decode 32 little-endian bytes.
     ///
-    /// **Bit 255 is ignored**, as Ed25519 specifies — in the curve layer that
+    /// **Bit 255 is ignored**, as Ed25519 specifies. In the curve layer that
     /// bit carries the sign of x, not part of the field element. A non-canonical
     /// input (a value in `[p, 2²⁵⁵)`) is accepted and reduced, matching every
     /// reference implementation; rejecting it is the caller's business where it
@@ -351,7 +351,7 @@ impl Fe {
     /// reduces it, which is right for a field element. It is **wrong for a
     /// compressed point**: RFC 8032 §5.1.3 requires decoding to fail when y ≥ p,
     /// and without that check each point has 19 distinct byte encodings that all
-    /// verify. That is signature malleability, and worse here than usual —
+    /// verify. That is signature malleability, and worse here than usual:
     /// the Python peer that checks this cluster's wire rejects them, so the two
     /// implementations would disagree about whether a frame is valid, which no
     /// vector of valid inputs can catch.
@@ -388,9 +388,10 @@ impl Fe {
     ///
     /// Scalar multiplication drives this with **bits of a secret key**, so it
     /// must not become a branch: the whole point is that the sequence of
-    /// operations does not depend on the scalar. `choice` must be exactly 0 or 1
-    /// — anything else produces a nonsense mask, which is why it is not a `bool`
-    /// crossing an API boundary but a value this crate produces itself.
+    /// operations does not depend on the scalar. `choice` must be 0 or 1, and
+    /// nothing else: any other value produces a nonsense mask, which is why it
+    /// is not a `bool` crossing an API boundary but a value this crate produces
+    /// itself.
     pub(crate) fn ct_select(a: Fe, b: Fe, choice: u8) -> Fe {
         debug_assert!(choice == 0 || choice == 1);
         let mask = 0u64.wrapping_sub(choice as u64); // 0 or all-ones
@@ -401,7 +402,7 @@ impl Fe {
         Fe(out)
     }
 
-    /// The low bit of the canonical encoding — Ed25519's notion of a field
+    /// The low bit of the canonical encoding, Ed25519's notion of a field
     /// element being "negative", which is what a point's compressed form stores
     /// as the sign of x.
     pub(crate) fn is_negative(self) -> u8 {
@@ -418,7 +419,7 @@ impl Fe {
 /// next, and fold the top limb's overflow back into limb 0 times 19 (which is
 /// what `2²⁵⁵ ≡ 19` means operationally).
 ///
-/// A single pass does NOT guarantee every limb ends below 2⁵¹ — the fold into
+/// A single pass does NOT guarantee every limb ends below 2⁵¹: the fold into
 /// limb 0, and the ripple it can start, are why `carry` runs this twice.
 fn carry_pass(mut l: [u64; 5]) -> [u64; 5] {
     let mut c;
@@ -471,7 +472,7 @@ mod tests {
     //! **Every expected value here was produced by `scripts/gen-field-vectors.py`
     //! using Python's arbitrary-precision integers.** Python has no limbs, no
     //! carries and no reduction chain, so it cannot be wrong in the same way this
-    //! code can — which is the entire reason to check against it rather than
+    //! code can, which is the entire reason to check against it rather than
     //! against values this implementation printed. The script is in the tree so
     //! the vectors are reproducible rather than merely asserted.
     use super::*;

@@ -1,8 +1,8 @@
-//! `ed25519` — the signature primitive behind **per-machine cluster keypairs**
+//! `ed25519`: the signature primitive behind **per-machine cluster keypairs**
 //! (see `docs/roadmap/roadmap-cluster-keys.md` for the arc this belongs to).
 //!
-//! Being built in steps, each verifiable on its own, because the alternative —
-//! landing a curve implementation in one reviewable-in-theory diff — is how the
+//! Being built in steps, each verifiable on its own, because the alternative,
+//! landing a curve implementation in one reviewable-in-theory diff, is how the
 //! rejected per-user-identity branch went wrong. **What is here so far:**
 //!
 //! - **SHA-512** (step 1). Ed25519 hashes with SHA-512 throughout: the secret
@@ -11,7 +11,7 @@
 //!   challenge scalar is a hash of `R ‖ A ‖ M`.
 //!
 //! - **Field arithmetic mod 2²⁵⁵−19** (step 2). Five 51-bit limbs, carried on
-//!   **every** operation (deliberately *not* the usual lazy reduction — see
+//!   **every** operation (deliberately *not* the usual lazy reduction, see
 //!   `field.rs` for why a rule the caller must remember was the wrong trade),
 //!   and the inversion chain the curve layer needs.
 //!
@@ -19,7 +19,7 @@
 //!   a unified addition formula with no special cases, and a double-and-add that
 //!   does the same work for every scalar bit.
 //!
-//! - **Scalar arithmetic mod L, and sign/verify** (step 4 — the arc's go/no-go
+//! - **Scalar arithmetic mod L, and sign/verify** (step 4, the arc's go/no-go
 //!   gate). RFC 8032 §5.1 with no variations, deterministic, no randomness.
 //!
 //! The primitive is complete. What remains is putting it on the target (step 5)

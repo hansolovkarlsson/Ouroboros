@@ -1,11 +1,11 @@
-//! `/bin/edtest` — the on-target check for the `ed25519` crate.
+//! `/bin/edtest`: the on-target check for the `ed25519` crate.
 //!
 //! Step 5 of `docs/roadmap/roadmap-cluster-keys.md`, and the step that decides whether
 //! the design survives contact with the machine. The host tests prove the
 //! arithmetic; this proves three things they cannot:
 //!
 //! 1. **The same vectors pass on the target.** Different pointer width, a
-//!    different code generator, and a loader that relocates the binary — none of
+//!    different code generator, and a loader that relocates the binary, none of
 //!    which the host exercises.
 //! 2. **Peak stack use**, measured rather than assumed. `netd` has the same
 //!    fixed stack every task gets (the loader's `STACK_PAGES`; this program
@@ -45,7 +45,7 @@ use ed25519::{
     SigningKey,
 };
 
-/// RFC 8032 §7.1 TEST 1 — the same vector the host tests use, so a disagreement
+/// RFC 8032 §7.1 TEST 1, the same vector the host tests use, so a disagreement
 /// between host and target is visible as a disagreement about a published value
 /// rather than about something this project made up.
 const SK1: [u8; 32] = [

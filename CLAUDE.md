@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Start here
 
-`scratch/daily-standup.md` — written at the end of the previous working day to
+`scratch/daily-standup.md` is written at the end of the previous working day to
 be read at the start of the next: where the tree was left, what went in, and
 what is outstanding. `scratch/` is gitignored and is not part of this
 repository, so the file is absent on a fresh clone and on any day that was not
@@ -32,47 +32,47 @@ file can stay focused on durable, load-bearing guidance. `docs/README.md`
 is the full annotated index of everything under `docs/`; the pointers below
 are the ones worth having in mind before you open it:
 
-- **`docs/CHANGELOG.md`** — the full milestone record, phase 0 to the
+- **`docs/CHANGELOG.md`**: the full milestone record, phase 0 to the
   present, newest first. Every completed step (the shell, disk/FAT32
   support, USB keyboard + storage, the userland servers, the network
   stack, …) is recorded there in condensed form. Check it for *what was
   built, and why it works the way it does*.
-- **`docs/ROADMAP.md`** — the forward-looking plan of known future work
+- **`docs/ROADMAP.md`**: the forward-looking plan of known future work
   (open frontier, remaining follow-ups, north-star directions, open gaps).
-- **`docs/roadmap-completed.md`** — the finished arcs that used to live in
+- **`docs/roadmap-completed.md`**: the finished arcs that used to live in
   `ROADMAP.md`, moved out so the roadmap stays forward-looking (the
   *plan-shaped* companion to `CHANGELOG.md`'s condensed milestone log).
-- **The postmortems under `docs/postmortems/`** (thirty-one of them) — the design, bug
+- **The postmortems under `docs/postmortems/`** (thirty-one of them) hold the design, bug
   and process retrospectives: *the traps already hit and the lessons
   learned*. Read the relevant one before reworking a subsystem.
   `docs/README.md` indexes all of them with a full annotation each, and every
-  postmortem itself opens with an abstract and its spine in a blockquote — so
+  postmortem itself opens with an abstract and its spine in a blockquote, so
   the index is enough to pick one. The five whose lessons are load-bearing
   well beyond the subsystem they came from:
-  - `cluster-keys-postmortem.md` — *a step is only verifiable if the check can
+  - `cluster-keys-postmortem.md`: *a step is only verifiable if the check can
     fail*. Most of that arc's real findings were checks that could not.
-  - `repairing-the-repairs-postmortem.md` — *a repair is a change, and changes
+  - `repairing-the-repairs-postmortem.md`: *a repair is a change, and changes
     have the same defect rate as the code they fix*; keep the fix the size of
     the bug.
-  - `blind-instruments-postmortem.md` — *the observer is a check too, and it is
+  - `blind-instruments-postmortem.md`: *the observer is a check too, and it is
     the one nobody mutates*. Five tools reported success while proving nothing.
-  - `unspellable-postmortem.md` — *make the wrong thing unspellable, not
+  - `unspellable-postmortem.md`: *make the wrong thing unspellable, not
     un-grepped*: a required parameter beats an opt-in wrapper.
-  - `review-and-split-postmortem.md` — *a green signal is a claim, not
+  - `review-and-split-postmortem.md`: *a green signal is a claim, not
     evidence*, and *a diff too big to review is too big to fix*.
-  - `true-when-written-postmortem.md` — *the comment was true when it was
+  - `true-when-written-postmortem.md`: *the comment was true when it was
     written; that is the problem*. A claim that guards behaviour is a check
     nobody has written yet, and the edit that falsifies it is always in
-    another file — so compiler, tests and review all miss it.
-- **`docs/work-journal/`** — a chronological dev-log, one file per day (narrative "what and why
+    another file, so compiler, tests and review all miss it.
+- **`docs/work-journal/`**: a chronological dev-log, one file per day (narrative "what and why
   each day"), a lighter companion to the milestone-oriented `CHANGELOG.md`.
-- **`docs/README.md`** — the annotated index of every document under `docs/`;
-  **`docs/source-map.md`** — the annotated index of every source file. Both
+- **`docs/README.md`**: the annotated index of every document under `docs/`;
+  **`docs/source-map.md`**: the annotated index of every source file. Both
   hold the long-form detail this file used to carry inline.
 - **Reference docs**: `docs/architecture.md` (boot flow, privilege model,
   memory layout, exceptions, syscall ABI, console), `docs/processes.md`
   (userland loading, the ELF/PIE binary format, and the relocation-class
-  traps — **read this before writing any userland program**), and
+  traps: **read this before writing any userland program**), and
   `docs/shell-commands.md` (the shell builtins).
 
 The section "Rules for boot and low-level code" below is the deliberate
@@ -150,6 +150,16 @@ current when the code changes**; the history is a record and is not.
   with `-d int -D <log>`, expecting exactly one exception and our handler's
   line, and a sustained run (many ticks) with zero aborts in the trace.
   Remove the temporary fault afterwards.
+
+## Prose style
+
+The no-em-dash rule in `~/.claude/CLAUDE.md` holds for the living documents
+and for code comments. The dated records keep their punctuation as written:
+`docs/work-journal/`, `docs/archive/`, `docs/release-notes/`,
+`docs/handoffs/`, `docs/CHANGELOG.md`, the postmortems, `docs/boot-history.md`
+and `docs/roadmap-completed.md`. Each says what was written on its day, and
+rewriting one is a decision, not a fix. New text in them follows the rule.
+Settled by Hans on 2026-11-03, after the first `/style-check` sweep.
 
 ## Commands
 
@@ -283,7 +293,7 @@ keystrokes and screenshots). What `make test` covers, and the history of
 ## Toolchain
 
 Pinned via `rust-toolchain.toml` (stable channel, targets
-`aarch64-unknown-uefi` and `aarch64-unknown-none` — both install
+`aarch64-unknown-uefi` and `aarch64-unknown-none`, which both install
 automatically on first build). Both targets ship prebuilt `core`/`alloc`
 on stable, so no nightly toolchain or `-Z build-std` is needed.
 `.cargo/config.toml` defaults the build target to `aarch64-unknown-uefi`
@@ -297,10 +307,10 @@ already target `kernel` correctly; building `shell` needs the explicit
 
 ## Structure
 
-A skeleton — one line per file, enough to find the right one and to know what
+A skeleton: one line per file, enough to find the right one and to know what
 else a change will touch. The full annotation for every entry is in
 `docs/source-map.md` (source) and `docs/README.md` (docs). Each file also
-carries its own `//!` module doc — but on the most-changed files those have
+carries its own `//!` module doc, but on the most-changed files those have
 themselves fallen behind (see `docs/source-map.md`'s closing caveat), so the
 code is the authority and every annotation is a claim to check.
 

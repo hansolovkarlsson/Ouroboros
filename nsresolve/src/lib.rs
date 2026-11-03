@@ -1,9 +1,9 @@
-//! Namespace resolution for the C fd path — the one piece of `ulib`'s routing
+//! Namespace resolution for the C fd path: the one piece of `ulib`'s routing
 //! that a C program cannot reach.
 //!
 //! **Why this crate exists.** Step 3 of `docs/roadmap/roadmap-fid-verbs.md`: a C
 //! `open("/mnt/a/F")` today goes straight to `fsd`, which knows nothing about
-//! `/mnt/a` — that is a *namespace* binding, and only `ninep_abi::resolve_ns`
+//! `/mnt/a`. That is a *namespace* binding, and only `ninep_abi::resolve_ns`
 //! knows how to read one. `resolve_ns` is deliberately the **single source** for
 //! that logic, shared by `ulib` and `netd`, and C cannot call it. A third
 //! hand-written copy in C would be *behaviour*, not constants, so
@@ -11,12 +11,12 @@
 //! compare the copies.
 //!
 //! **The toolchain cost, stated because it is real.** The C programs link no
-//! other Rust — they are clang + LLD against `programs/linker.ld` with `-pie`,
+//! other Rust: they are clang + LLD against `programs/linker.ld` with `-pie`,
 //! and the hard constraint of that link is **no `R_AARCH64_ABS64`**, the same
 //! constraint that makes `alloc`'s collections unlinkable here. This crate was
 //! therefore built as a **build gate first**: a trivial `x + 1`, linked and
 //! relocation-checked, before any logic was written against the assumption that
-//! it would work. The precedent is deliberate — a one-build gate proved `alloc`
+//! it would work. The precedent is deliberate: a one-build gate proved `alloc`
 //! could not be PIE-linked on stable before a week was spent on it
 //! (`docs/postmortems/capability-and-hardening-postmortem.md`).
 //!

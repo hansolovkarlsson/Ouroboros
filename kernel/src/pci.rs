@@ -1,17 +1,17 @@
 //! Discovers a console UART by enumerating PCI devices for a serial
-//! controller — tried after both devicetree and ACPI/SPCR fail (see
+//! controller, tried after both devicetree and ACPI/SPCR fail (see
 //! `devicetree.rs`, `acpi.rs`). Confirmed on Parallels: it has an ACPI RSDP
 //! and XSDT (both parse fine) but no SPCR table entry at all, even after
 //! adding a serial port device to the VM's hardware. That means its console
-//! isn't described via SPCR — this checks whether it's exposed as a PCI
+//! isn't described via SPCR, so this checks whether it's exposed as a PCI
 //! device instead.
 //!
 //! Entirely boot-services-based (`PciRootBridgeIo`), unlike `devicetree.rs`/
-//! `acpi.rs`'s find-pointer-then-parse-memory split — there's no
+//! `acpi.rs`'s find-pointer-then-parse-memory split: there's no
 //! post-`exit_boot_services` half here, the whole discovery must run before.
 //!
 //! PCI class 0x07 subclass 0x00 ("Serial controller") is specifically the
-//! 8250/16450/16550 family, per the PCI Code and ID Assignment spec — never
+//! 8250/16450/16550 family, per the PCI Code and ID Assignment spec, never
 //! how a PL011 would be identified over PCI. A match here means the console
 //! is a completely different device to the ones `devicetree.rs`/`acpi.rs`
 //! look for, hence returning [`crate::uart16550::Uart16550`]'s base address, not a
@@ -59,7 +59,7 @@ pub enum DiscoveryError {
     /// subclass 0x00 serial controller.
     NoSerialDevice,
     /// Found a serial controller, but its BAR0 is I/O space, not memory
-    /// space — this driver only speaks memory-mapped MMIO.
+    /// space: this driver only speaks memory-mapped MMIO.
     UnsupportedAddressSpace,
     /// Found a serial controller with a memory BAR, but its type bits
     /// don't match either 32-bit or 64-bit memory (reserved/unknown).
@@ -79,7 +79,7 @@ pub enum DiscoveryError {
 /// subclass 0x00 serial controller, returning the CPU address its BAR0
 /// decodes at (firmware's, checked against the BAR - see [`bar0_address`]).
 /// Must be
-/// called before `exit_boot_services` — entirely boot-services-based, no
+/// called before `exit_boot_services`: entirely boot-services-based, no
 /// part of this can run after.
 pub fn discover_uart16550() -> Result<usize, DiscoveryError> {
     let handles =

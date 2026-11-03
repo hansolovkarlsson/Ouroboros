@@ -9,7 +9,7 @@
 //!
 //! A point is `(X : Y : Z : T)` with `x = X/Z`, `y = Y/Z` and `x·y = T/Z`. The
 //! redundant `T` is what buys an addition formula with no inversions and no
-//! special cases — the same code adds any two points, including a point to
+//! special cases: the same code adds any two points, including a point to
 //! itself and anything to the identity. That matters more here than speed: a
 //! formula with exceptions needs branches, and branches on secret data are how
 //! a signature scheme leaks its key.
@@ -21,8 +21,8 @@
 //!
 //! `mul` is written so its *sequence of operations* does not depend on the
 //! scalar: every bit does one doubling and one addition, and a branchless select
-//! keeps or discards the sum. It is not a formal constant-time claim — that
-//! needs the compiler not to outsmart it, which nothing here verifies — but the
+//! keeps or discards the sum. It is not a formal constant-time claim (that
+//! needs the compiler not to outsmart it, which nothing here verifies), but the
 //! algorithm is the right shape, and the shape is a precondition for the claim.
 
 use crate::field::Fe;
@@ -121,7 +121,7 @@ impl Point {
     /// runtime that depends on the key's Hamming weight.
     ///
     /// No windowing or precomputed tables. A fixed-base table would speed up
-    /// signing considerably and is the obvious optimisation — deferred until
+    /// signing considerably and is the obvious optimisation, deferred until
     /// step 5 measures whether the cost matters on the target, and noted in
     /// `roadmap-cluster-keys.md` as such. Any table it adds must be plain
     /// integers, not references (the crate's relocation rule).
@@ -157,7 +157,7 @@ impl Point {
     ///
     /// Recovers `x` from `y` via `x² = (y²−1)/(d·y²+1)`, taking the root whose
     /// low bit matches the stored sign. **Returns `None` rather than a wrong
-    /// point** when no root exists (the input is off the curve) — a signature
+    /// point** when no root exists (the input is off the curve): a signature
     /// verifier is fed attacker-controlled bytes here, and "not a point" must be
     /// a refusal, not a value.
     pub fn decode(bytes: &[u8; POINT_LEN]) -> Option<Point> {
@@ -202,7 +202,7 @@ impl Point {
 
     /// Whether two points are equal.
     ///
-    /// Compared **projectively** — `X₁·Z₂ = X₂·Z₁` and `Y₁·Z₂ = Y₂·Z₁` — which
+    /// Compared **projectively**, `X₁·Z₂ = X₂·Z₁` and `Y₁·Z₂ = Y₂·Z₁`, which
     /// is four field multiplications. The obvious implementation compares
     /// compressed forms instead, and that costs two field *inversions*, about
     /// 508 squarings; signature verification compares points, and this crate's
@@ -213,7 +213,7 @@ impl Point {
         self.x.mul(rhs.z).ct_eq(rhs.x.mul(self.z)) && self.y.mul(rhs.z).ct_eq(rhs.y.mul(self.z))
     }
 
-    /// Whether this point has **small order** — that is, whether multiplying it
+    /// Whether this point has **small order**, that is, whether multiplying it
     /// by the cofactor 8 gives the identity.
     ///
     /// COMPUTED, NOT ENUMERATED, and that is the whole point. The usual way to
@@ -222,8 +222,8 @@ impl Point {
     /// out by hand. Three of its entries were wrong: it missed three genuine
     /// small-order keys (which it therefore accepted) and blocked one ordinary
     /// valid key and one string that is not a curve point at all. The values
-    /// look plausible either way — nobody reads 32 bytes of hex and notices
-    /// that `13e8…` should have been `26e8…` — and the test that was supposed
+    /// look plausible either way (nobody reads 32 bytes of hex and notices
+    /// that `13e8…` should have been `26e8…`), and the test that was supposed
     /// to cover it only exercised the two entries that happened to be right.
     ///
     /// `[8]P == identity` IS the definition, costs three doublings, and cannot
