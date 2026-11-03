@@ -1,4 +1,4 @@
-//! Ouroboros's default shell — a real, separately-loaded userland program,
+//! Ouroboros's default shell: a real, separately-loaded userland program,
 //! not kernel code. This is the first thing the kernel loads and runs: see
 //! `kernel/src/loader.rs` for how a binary gets from the ESP's filesystem
 //! into memory, and `kernel/src/tasks.rs` for how it gets turned into a
@@ -1453,7 +1453,7 @@ fn end_pipeline(stages: &[&str], slots: &[u64]) {
 /// window.** The two syscalls are separate trips through EL0 and the shell is
 /// preemptible between them. A successful `KILL` frees the slot, `tasks::spawn`
 /// hands out the lowest free slot, and `netd` issues its own `SPAWN` for a
-/// remote-exec child — so an inbound `cpu` request landing in that gap can take
+/// remote-exec child, so an inbound `cpu` request landing in that gap can take
 /// the slot, and the `WAIT` then blocks on an unrelated task until it exits
 /// (escapable with Ctrl+C, which returns `WAIT_INTERRUPTED`). Accepted rather
 /// than closed: it needs a concurrent remote request inside a two-syscall

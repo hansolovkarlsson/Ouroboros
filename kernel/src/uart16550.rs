@@ -1,7 +1,7 @@
 //! Minimal polling driver for a 16550-compatible UART at a runtime-supplied
 //! base address, register stride 4 (the common convention for a 16550 core
 //! wired up as MMIO on an ARM platform, as opposed to its native x86 1-byte
-//! I/O port stride) — used for a PCI-discovered console (`pci.rs`), which
+//! I/O port stride), used for a PCI-discovered console (`pci.rs`), which
 //! is a completely different register layout from the PL011 in `uart.rs`.
 //! PCI class 0x07 subclass 0x00 ("Simple Communication Controller / Serial
 //! controller") is specifically the 16550 family; it is not how a PL011
@@ -46,7 +46,7 @@ impl Uart16550 {
 
     /// Non-blocking: `None` if LSR's Data Ready bit isn't set. Untested
     /// against real hardware, same caveat as this whole module (see the
-    /// module doc comment) — stride/offsets are the first thing to question
+    /// module doc comment): stride/offsets are the first thing to question
     /// if this doesn't behave once a PCI 16550 console is actually live.
     pub(crate) fn read_byte(&mut self) -> Option<u8> {
         unsafe {

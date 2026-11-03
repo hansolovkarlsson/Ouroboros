@@ -8,7 +8,7 @@
 //! pointer, so it must run before `exit_boot_services` (it's UEFI table
 //! data, gone once boot services are torn down). `discover_pl011` parses
 //! that blob (via the `fdt` crate) and doesn't touch any firmware service,
-//! so it works either side of `exit_boot_services` — `main.rs` deliberately
+//! so it works either side of `exit_boot_services`. `main.rs` deliberately
 //! calls it *before*, so the result can be logged through the UEFI console
 //! (safe on any platform) rather than only via the raw MMIO UART this module
 //! resolves an address for, which isn't validated until it's actually
@@ -17,7 +17,7 @@
 use fdt::Fdt;
 use uefi::{guid, Guid};
 
-/// `EFI_DTB_TABLE_GUID`, per the UEFI spec — the devicetree blob, when
+/// `EFI_DTB_TABLE_GUID`, per the UEFI spec: the devicetree blob, when
 /// firmware provides one, is published under this configuration table GUID.
 const DTB_GUID: Guid = guid!("b1b621d5-f19c-41a5-830b-d9152c69aae0");
 
@@ -46,7 +46,7 @@ pub enum DiscoveryError {
     /// is no `/chosen`, or no `stdout-path` in it), and no `compatible =
     /// "arm,pl011"` node exists either.
     NoConsoleNode,
-    /// A console node exists but isn't PL011-compatible — this driver
+    /// A console node exists but isn't PL011-compatible: this driver
     /// doesn't know its register layout.
     UnsupportedConsole,
     /// A PL011 node exists but has no usable `reg` property.
@@ -60,7 +60,7 @@ pub enum DiscoveryError {
 /// Only understands PL011: if the platform's console is some other UART
 /// type, this returns `Err` rather than guess at a register layout our
 /// driver doesn't implement. Safe to call either side of
-/// `exit_boot_services` — this only touches the blob itself, not any UEFI
+/// `exit_boot_services`: this only touches the blob itself, not any UEFI
 /// service.
 ///
 /// # Safety

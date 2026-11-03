@@ -1,10 +1,10 @@
-//! Ed25519 signing and verification — step 4 of
+//! Ed25519 signing and verification, step 4 of
 //! `docs/roadmap/roadmap-cluster-keys.md`, and the arc's **go/no-go gate**.
 //!
 //! Everything below is RFC 8032 §5.1 with no variations. The scheme is
 //! deterministic: a signature is a function of the key and the message alone,
 //! with no randomness anywhere. That is the property this whole arc chose
-//! Ed25519 for — hardware entropy is absent on Parallels and on the Raspberry
+//! Ed25519 for: hardware entropy is absent on Parallels and on the Raspberry
 //! Pi, and a scheme needing a fresh random nonce per signature would leak its
 //! private key the first time two signatures reused one.
 //!
@@ -19,19 +19,19 @@
 //!   reducing it, because reducing would make every signature come in many
 //!   equally-valid encodings.
 //! - **Small-order public keys ARE rejected**, in `verify_prefixed`. This bullet
-//!   used to say the opposite — "not rejected … this cluster's keys are
+//!   used to say the opposite ("not rejected … this cluster's keys are
 //!   generated rather than accepted from strangers … this is the check to add
-//!   if that stops being true" — and it stopped being true without anyone
+//!   if that stops being true"), and it stopped being true without anyone
 //!   editing the sentence: a peer offers a public key in every signed frame,
 //!   and `/etc/cluster/authorized` is a file people edit by hand. Against a
 //!   small-order `A` the cofactorless equation is satisfiable with no secret at
 //!   all, so such a key is a universal forgery rather than a weak one.
 //!
-//!   The test is `[8]A == identity`, which is small order EXACTLY — it is not a
+//!   The test is `[8]A == identity`, which is small order EXACTLY. It is not a
 //!   prime-order-subgroup check. A **mixed-order** key (order `8L`) still
 //!   passes, and that is deliberate: rejecting it needs a full `[L]A` scalar
 //!   multiplication per verification, which is the whole cost of a second
-//!   signature check, and a mixed-order key is not forgeable — it still
+//!   signature check, and a mixed-order key is not forgeable: it still
 //!   requires the discrete log of its prime part.
 
 use crate::curve::{Point, POINT_LEN};
@@ -48,7 +48,7 @@ pub const SIGNATURE_LEN: usize = 64;
 /// Expand a secret seed into the scalar `a` and the nonce prefix, per RFC 8032
 /// §5.1.5: SHA-512 the seed, clamp the low half, keep the high half.
 ///
-/// The clamping — clearing the low three bits and the top bit, setting bit 254 —
+/// The clamping (clearing the low three bits and the top bit, setting bit 254)
 /// is what forces the scalar into the prime-order subgroup and fixes its bit
 /// length, which is why it is not optional and not a detail.
 fn expand(secret: &[u8; SECRET_LEN]) -> ([u8; 32], [u8; 32]) {
@@ -73,7 +73,7 @@ pub fn public_key(secret: &[u8; SECRET_LEN]) -> [u8; PUBLIC_LEN] {
 ///
 /// **This is what a repeated signer should hold.** A scalar multiplication is
 /// ~4,600 field multiplications, and a signature inherently needs one (for `R`).
-/// Deriving `A` needs a second — but `A` never changes, so recomputing it per
+/// Deriving `A` needs a second, but `A` never changes, so recomputing it per
 /// signature doubles the cost of every signature for nothing. `netd` reads its
 /// key once at boot and signs per frame, which is exactly the shape this serves;
 /// with the free `sign` below it would have paid twice on every frame, and step
@@ -84,7 +84,7 @@ pub struct SigningKey {
     a: [u8; 32],
     /// The nonce prefix, the high half of the expanded seed.
     prefix: [u8; 32],
-    /// `A = a·B`, compressed — computed once here.
+    /// `A = a·B`, compressed, computed once here.
     public: [u8; PUBLIC_LEN],
 }
 
@@ -107,7 +107,7 @@ impl SigningKey {
     }
 }
 
-/// Sign over `prefix ‖ message` without joining them — the counterpart of
+/// Sign over `prefix ‖ message` without joining them, the counterpart of
 /// [`verify_prefixed`].
 ///
 /// # Precondition: the prefix must be FIXED-LENGTH for a given signature use
@@ -120,7 +120,7 @@ impl SigningKey {
 /// Every caller here satisfies this the same way, and it is not a coincidence:
 /// the verifier builds the prefix ITSELF out of fixed-width fields it reads at
 /// fixed offsets (a domain tag, a 16-byte nonce, a 32-byte name), so there is no
-/// split for a peer to shift — the only thing it supplies is the message tail.
+/// split for a peer to shift: the only thing it supplies is the message tail.
 /// A future caller whose prefix length varies with attacker-controlled data must
 /// frame the parts (a length prefix, or a delimiter that cannot occur inside
 /// them) before using this. `SIG_DOMAIN_REQUEST` in `ninep-abi` is how the tags
@@ -191,7 +191,7 @@ fn sign_two_part(
 
 /// Verify `signature` over `message` against `public`.
 ///
-/// Returns `false` for anything malformed — a public key or `R` that is not a
+/// Returns `false` for anything malformed: a public key or `R` that is not a
 /// canonical point, an `s` that is not reduced, or an equation that does not
 /// hold. Every input here is attacker-controlled, so there is no path that
 /// panics and none that returns a value other than a verdict.
@@ -201,14 +201,14 @@ pub fn verify(public: &[u8; PUBLIC_LEN], message: &[u8], signature: &[u8; SIGNAT
 
 /// Verify a signature over `prefix ‖ message` **without joining them in memory**.
 ///
-/// Signed data is often a concatenation a caller does not hold contiguously —
+/// Signed data is often a concatenation a caller does not hold contiguously:
 /// the cluster's frames carry a nonce and a user name in a header, and the
 /// message after a public key and the signature itself. Joining them means a
 /// second buffer as large as the biggest message, which for `netd` is 2 KB on a
 /// 32 KB stack that has hit its guard page five times.
 ///
 /// It is not needed: the challenge is a *hash* of `R ‖ A ‖ M`, and SHA-512 here
-/// is incremental, so the two halves are simply fed in turn — exactly what
+/// is incremental, so the two halves are simply fed in turn, exactly what
 /// signing already does with its own prefix.
 ///
 /// # Precondition: the prefix must be FIXED-LENGTH for a given signature use
@@ -221,7 +221,7 @@ pub fn verify(public: &[u8; PUBLIC_LEN], message: &[u8], signature: &[u8; SIGNAT
 /// Every caller here satisfies this the same way, and it is not a coincidence:
 /// the verifier builds the prefix ITSELF out of fixed-width fields it reads at
 /// fixed offsets (a domain tag, a 16-byte nonce, a 32-byte name), so there is no
-/// split for a peer to shift — the only thing it supplies is the message tail.
+/// split for a peer to shift: the only thing it supplies is the message tail.
 /// A future caller whose prefix length varies with attacker-controlled data must
 /// frame the parts (a length prefix, or a delimiter that cannot occur inside
 /// them) before using this. `SIG_DOMAIN_REQUEST` in `ninep-abi` is how the tags
@@ -255,7 +255,7 @@ pub fn verify_prefixed(
     // frame, and `/etc/cluster/authorized` is a text file someone edits.
     //
     // Against a small-order `A` the cofactorless equation `s·B == R + k·A`
-    // becomes satisfiable without knowing any secret — `s = 0` with a matching
+    // becomes satisfiable without knowing any secret: `s = 0` with a matching
     // small-order `R` verifies whenever `k` lands in the right residue, which
     // for an attacker who can choose or grind the message is simply a retry.
     // Such a key is not a weak credential, it is a UNIVERSAL FORGERY, so it is
@@ -435,14 +435,14 @@ mod tests {
     /// THE CANDIDATES ARE DERIVED, NOT TYPED. One order-8 generator is written
     /// down; the other seven encodings come from adding it to itself. That is
     /// what makes this list complete by construction rather than by my counting
-    /// to eight — the guard this replaced was a hand-written table of these same
+    /// to eight. The guard this replaced was a hand-written table of these same
     /// values with three entries wrong, and its test only exercised the two that
     /// happened to be right. The generator itself is checked, not trusted: a
     /// mistyped one does not have order 8, so the subgroup does not close.
     ///
     /// TWO FORGERY FAMILIES, and the second is the one that matters. The first
     /// version of this test only built `s = 0` forgeries whose `R` also came
-    /// from the small-order set — so a guard placed on `R` instead of `A` caught
+    /// from the small-order set, so a guard placed on `R` instead of `A` caught
     /// every case it tried, and the whole suite passed with the check on the
     /// wrong point. The large-order-`R` family has no such accident: it picks
     /// any `s`, sets `R = s·B + [(8-j) mod 8]·A`, and grinds the message until
@@ -525,7 +525,7 @@ mod tests {
         }
     }
 
-    /// `k = H(R ‖ A ‖ M)`, the verifier's challenge — shared by the two forgery
+    /// `k = H(R ‖ A ‖ M)`, the verifier's challenge, shared by the two forgery
     /// constructions above so they cannot drift from what `verify` computes.
     fn challenge(r: &[u8; 32], a: &[u8; 32], msg: &[u8]) -> Scalar {
         let mut h = Sha512::new();

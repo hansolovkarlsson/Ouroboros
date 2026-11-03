@@ -334,21 +334,21 @@ const ID_PATH: &[u8] = b"/etc/cluster/id";
 /// The list is of codes that mean **the server could not answer**, which is a
 /// different question from "was this an error":
 ///
-/// - `NO_FS` — the disk is not mounted yet. `netd` and `fsd` start together, so
+/// - `NO_FS`: the disk is not mounted yet. `netd` and `fsd` start together, so
 ///   the first reads race the mount.
-/// - `TASK_ERR_NO_SUCH_TASK` — `fsd` is being restarted underneath us
+/// - `TASK_ERR_NO_SUCH_TASK`: `fsd` is being restarted underneath us
 ///   (`tasks::fail_calls_to` fails every in-flight `MSG_CALL` to a slot being
 ///   torn down); the supervisor reinstalls it in the same handler.
-/// - `FS_ERROR` — how `read_file_chunk` reports a refused `GRANT`. It grants
+/// - `FS_ERROR`: how `read_file_chunk` reports a refused `GRANT`. It grants
 ///   BEFORE it calls, and the kernel refuses a grant to a non-existent task, so
-///   this — not `TASK_ERR_NO_SUCH_TASK` — is what the restart window actually
+///   this, not `TASK_ERR_NO_SUCH_TASK`, is what the restart window actually
 ///   produces. Two earlier versions of this function missed it by enumerating
 ///   the codes they expected rather than the ones the path emits.
-/// - `MSG_ERR_FULL` — `fsd`'s mailbox was momentarily full.
+/// - `MSG_ERR_FULL`: `fsd`'s mailbox was momentarily full.
 ///
 /// WHY NOT "EVERYTHING EXCEPT A DEFINITIVE ANSWER", which this briefly was:
-/// because a PERMANENT error is then retried forever. `mkdir /NOEXEC` — a
-/// plausible way to reach for the flag — makes `read_at` return
+/// because a PERMANENT error is then retried forever. `mkdir /NOEXEC`, a
+/// plausible way to reach for the flag, makes `read_at` return
 /// `FS_ERR_NOT_A_FILE`, and this read is netd's first, so the whole shared
 /// budget is spent sleeping in `NET_WAIT` with the mailbox undrained, for a
 /// condition waiting cannot change. That starves the two reads that configure
@@ -3839,8 +3839,8 @@ const EXPORT_CHUNK: usize = 1400;
 ///
 /// HERE RATHER THAN IN `ninep-abi` because this is the only place both real
 /// constants are in scope. `ninep-abi` asserted it against a hand-copied
-/// `SAFECOPY_MAX = 2048`, so raising `syscall_abi::SAFECOPY_MAX` — which its own
-/// doc invites — left the assertion comparing against the stale copy and
+/// `SAFECOPY_MAX = 2048`, so raising `syscall_abi::SAFECOPY_MAX`, which its own
+/// doc invites, left the assertion comparing against the stale copy and
 /// passing, while export reads silently stopped fitting. There is zero slack
 /// today (2096 == 48 + 2048), so this is not a theoretical margin.
 const _: () = assert!(
@@ -4490,7 +4490,7 @@ fn authenticate_signed<'a>(
     Some((np, nonce, who, peer_root))
 }
 
-/// Seal a framed export reply — reply-auth, i.e. mutual authentication.
+/// Seal a framed export reply: reply-auth, i.e. mutual authentication.
 ///
 /// `c.prefix[..n]` holds the finished framed reply `[len:4][status:8][result…]`;
 /// rewrite it to `[len':4][sig:64][status:8][result…]`, signed over
@@ -4498,8 +4498,8 @@ fn authenticate_signed<'a>(
 /// holds the private key AND ties this reply to THAT request, so a captured
 /// reply cannot be replayed against another. Returns the new framed length.
 ///
-/// (The `cpu`-run output *stream* is not framed and stays reply-unauthenticated
-/// — the harder streaming case, still deferred.)
+/// (The `cpu`-run output *stream* is not framed and stays reply-unauthenticated:
+/// the harder streaming case, still deferred.)
 ///
 /// Took a `signed: bool` until the flag day, because the reply format followed
 /// whichever format the request used. With one format there is nothing to
@@ -5110,10 +5110,10 @@ fn cpu_spawn(cmdline: &[u8]) -> Result<u8, CpuSpawnError> {
     Ok(slot as u8)
 }
 
-/// `netd`'s **export namespace** (cluster Phase 3 — the namespace-aware export):
+/// `netd`'s **export namespace** (cluster Phase 3, the namespace-aware export):
 /// the composed tree the export serves to remote clients. An exported request
 /// path resolves through this with the *same* [`ninep_abi::resolve_ns`] a local
-/// client uses on its own namespace — the Plan 9 model ("a server exports a
+/// client uses on its own namespace: the Plan 9 model ("a server exports a
 /// namespace"), replacing the per-server prefix special-cases the earlier steps
 /// used. Unbound paths default to the boot disk (`fsd` tree 0); these three
 /// bindings add the synthetic servers. A binding is
@@ -5624,10 +5624,10 @@ fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usiz
 }
 
 /// Passive open (dial-in): if `frame` is a fresh inbound SYN to a port some slot
-/// has `announce`d, accept it — allocate a new `DialConn` for the connection,
+/// has `announce`d, accept it: allocate a new `DialConn` for the connection,
 /// send the SYN-ACK, and mark it `pending` for the listener's `listen` read.
 /// Returns true if the SYN was for an announced port (accepted, or dropped
-/// because the table is full — either way it isn't a server-conn segment).
+/// because the table is full: either way it isn't a server-conn segment).
 /// Called from `on_frame` after `dial_on_segment` (so a *retransmitted* SYN for
 /// an already-accepted conn matches there first and never double-accepts).
 fn dial_accept(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL]) -> bool {
@@ -5824,7 +5824,7 @@ fn hex_digit(v: u8) -> u8 {
 }
 
 /// The `len` bytes of `payload` starting at `off`, clamped to what is actually
-/// there — the one way this server slices a wire-supplied range.
+/// there, the one way this server slices a wire-supplied range.
 ///
 /// Both numbers come straight off the network. `off` is a `usize` and `len` a
 /// `u64`, so the obvious spellings are both wrong in release builds, in
@@ -5832,7 +5832,7 @@ fn hex_digit(v: u8) -> u8 {
 ///
 /// - `&payload[off..off + n]` does not clamp the range **START**. A frame with
 ///   `a0 = 0xFFFF` against a 100-byte payload panics on "range start index out
-///   of range" — and a panic here kills `netd`, tearing down every live TCP
+///   of range", and a panic here kills `netd`, tearing down every live TCP
 ///   connection, dial slot and export session; repeat it and the per-boot
 ///   restart cap is gone, taking the network stack down for the boot.
 /// - `(off + len as usize).min(payload.len())` **wraps** rather than
@@ -5842,7 +5842,7 @@ fn hex_digit(v: u8) -> u8 {
 /// Computing the start first and the length from what remains makes
 /// `start + n <= payload.len()` true by construction, with no arithmetic that
 /// can overflow. Reaching this at all needs a valid MAC, so it is a
-/// trusted-peer fault — but a truncated or mis-built frame gets here by
+/// trusted-peer fault, but a truncated or mis-built frame gets here by
 /// accident, which is the likelier way to meet it.
 fn wire_slice(payload: &[u8], off: usize, len: u64) -> &[u8] {
     let start = off.min(payload.len());

@@ -1,6 +1,6 @@
 //! GICv3 backend, selected by `gic.rs`'s facade whenever `madt::discover`
 //! reports `GicVersion::V3` (the version Parallels almost certainly runs, per
-//! Apple Silicon virtualization convention; see `madt.rs`'s module doc
+//! Apple Silicon virtualization convention, and see `madt.rs`'s module doc
 //! comment for why this exists at all: `gicv2.rs`'s addresses and register
 //! layout are QEMU-shaped and already confirmed unsafe on real Parallels
 //! hardware).
@@ -176,8 +176,8 @@ fn find_own_redistributor(gicr_base: usize, gicr_size: usize) -> Option<usize> {
 }
 
 /// Wakes the redistributor (clears `ProcessorSleep`, polls `ChildrenAsleep`
-/// until clear; no GICv2 equivalent, see this module's doc comment), enables
-/// the distributor, routes the CPU interface to system registers
+/// until clear, with no GICv2 equivalent: see this module's doc comment),
+/// enables the distributor, routes the CPU interface to system registers
 /// (`ICC_SRE_EL1`, read back to confirm it stuck), and opens the priority
 /// mask/Group 1 enable.
 ///
@@ -365,7 +365,7 @@ pub unsafe fn send_sgi(sgi: u32, gicd_base: usize, mpidr: u64) -> Result<(), &'s
     Ok(())
 }
 
-/// Reads the highest-priority pending interrupt ID and acknowledges it; it
+/// Reads the highest-priority pending interrupt ID and acknowledges it. It
 /// must be paired with [`end_of_interrupt`], same contract as
 /// `gicv2.rs::acknowledge`. Pure system-register access, no memory address
 /// involved at all.

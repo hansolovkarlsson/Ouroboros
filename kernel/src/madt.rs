@@ -1,11 +1,11 @@
 //! Discovers the platform's real GIC (Generic Interrupt Controller) version
-//! and register addresses from the ACPI MADT — ACPI's signature for this
+//! and register addresses from the ACPI MADT. ACPI's signature for this
 //! table is literally `"APIC"`, its historical x86 name, not `"MADT"`.
 //!
 //! Exists to replace `main.rs`'s `qemu_device_region_safe` heuristic for
 //! GIC/timer setup specifically with genuine discovery. `gic.rs`'s original
 //! addresses (`0x0800_0000`/`0x0801_0000`) were only ever confirmed via a
-//! QEMU-internal devicetree dump — a QEMU-shaped convention real Parallels
+//! QEMU-internal devicetree dump, a QEMU-shaped convention real Parallels
 //! hardware already directly disproved (a decoded Synchronous External Abort
 //! with `FAR_EL1` matching `GICD_BASE` exactly, see `docs/CHANGELOG.md`'s
 //! "GOP framebuffer console, round four"). MADT is the platform's own,
@@ -23,8 +23,8 @@
 //! Struct field layouts (`MadtGicc`/`MadtGicd`/`MadtGicr`) and the
 //! `TYPE_*` constants are cross-checked against Linux's own
 //! `include/acpi/actbl2.h` (`acpi_madt_generic_interrupt`/
-//! `_distributor`/`_redistributor`) rather than transcribed from memory —
-//! same discipline `gic.rs`/`mmu.rs` already hold their register-bit
+//! `_distributor`/`_redistributor`) rather than transcribed from memory,
+//! the same discipline `gic.rs`/`mmu.rs` already hold their register-bit
 //! sourcing to.
 
 use core::mem::size_of;
@@ -43,23 +43,23 @@ pub enum GicVersion {
 pub struct GicInfo {
     pub version: GicVersion,
     pub gicd_base: u64,
-    /// Only meaningful when `version == V2` — the GICC (CPU interface)
+    /// Only meaningful when `version == V2`: the GICC (CPU interface)
     /// MMIO base.
     pub gicc_base: u64,
-    /// Only meaningful when `version == V3` — a Redistributor region base.
+    /// Only meaningful when `version == V3`: a Redistributor region base.
     pub gicr_base: u64,
-    /// Only meaningful when `version == V3` — how much of `gicr_base` to
+    /// Only meaningful when `version == V3`: how much of `gicr_base` to
     /// map (from a GICR structure's own declared length when one exists;
     /// a conservative one-CPU-frame-pair default, `0x2_0000`, when this
     /// came from a GICC entry's own `gicr_base_address` field instead,
-    /// which carries no length of its own — see [`discover`]'s doc
+    /// which carries no length of its own, see [`discover`]'s doc
     /// comment on that fallback).
     pub gicr_size: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum DiscoveryError {
-    /// RSDP/XSDT-level failure finding the MADT at all — wraps
+    /// RSDP/XSDT-level failure finding the MADT at all. Wraps
     /// `acpi::DiscoveryError` for everything before the table itself was
     /// located. Only ever consulted via this enum's derived `Debug` (in
     /// `main.rs`'s `{e:?}` diagnostic log line), which the dead-code
@@ -69,11 +69,11 @@ pub enum DiscoveryError {
     Acpi(acpi::DiscoveryError),
     /// XSDT walked fine; no table had the MADT ("APIC") signature.
     NoMadt,
-    /// MADT exists, but had no GIC Distributor (Type 0x0C) structure —
-    /// exactly one is required by spec.
+    /// MADT exists, but had no GIC Distributor (Type 0x0C) structure,
+    /// and exactly one is required by spec.
     NoGicd,
     /// The Distributor structure's own `version` byte named something
-    /// other than 2 or 3 — this driver only has GICv2/GICv3 backends.
+    /// other than 2 or 3: this driver only has GICv2/GICv3 backends.
     /// Same `Debug`-only-read situation as `Acpi` above.
     #[allow(dead_code)]
     UnsupportedGicVersion(u8),
@@ -151,16 +151,16 @@ pub fn cores() -> CoreList {
     unsafe { *CORES.get() }
 }
 
-/// Offset of `gicr_base_address` within `MadtGicc` — read directly via a
+/// Offset of `gicr_base_address` within `MadtGicc`, read directly via a
 /// bounds-checked raw offset rather than the full `MadtGicc` struct,
 /// because that field was only added in a later ACPI revision than the
 /// structure's original definition: an older/shorter GICC entry (a real,
-/// live possibility, not hypothetical — this is exactly the kind of
+/// live possibility, not hypothetical: this is exactly the kind of
 /// table-revision skew `find_table`'s callers have to expect) must not be
 /// read past its own declared `length`.
 const GICC_GICR_BASE_OFFSET: usize = 60;
 /// One CPU's worth of Redistributor frames (RD_base + SGI_base, 64KB
-/// each) — the conservative default `gicr_size` when a region's real
+/// each): the conservative default `gicr_size` when a region's real
 /// extent isn't known (the GICC-field fallback path, see [`GicInfo`]).
 const GICR_DEFAULT_SIZE: u64 = 0x2_0000;
 
@@ -200,7 +200,7 @@ struct MadtGicr {
 
 /// Parses the MADT reachable from `rsdp` (if present) and resolves the
 /// real GIC version and register addresses. Safe to call either side of
-/// `exit_boot_services` — only reads plain memory, no UEFI service.
+/// `exit_boot_services`: it only reads plain memory, no UEFI service.
 ///
 /// Deliberately conservative in the same way every other discovery module
 /// in this project is: any structure whose declared `length` doesn't

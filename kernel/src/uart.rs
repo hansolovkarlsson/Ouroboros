@@ -1,6 +1,6 @@
 //! Minimal polling driver for a PL011 UART at a runtime-supplied base
 //! address. The base address must come from actual hardware discovery (see
-//! `devicetree.rs`) — there is deliberately no hardcoded fallback address
+//! `devicetree.rs`): there is deliberately no hardcoded fallback address
 //! here. There used to be one (QEMU's `virt`-machine PL011 base); it was
 //! removed after confirming that blindly writing to it on Parallels, where
 //! nothing is mapped there, hard-crashes the VM. No confirmed address means
@@ -38,7 +38,7 @@ impl Uart {
 
     /// Non-blocking: `None` if the receive FIFO is empty. DR's upper bits
     /// (framing/parity/break/overrun error flags) are deliberately ignored
-    /// for now — masked off, not checked — good enough for a first echo
+    /// for now (masked off, not checked), good enough for a first echo
     /// path; a real line discipline would need to surface them.
     pub(crate) fn read_byte(&mut self) -> Option<u8> {
         unsafe {

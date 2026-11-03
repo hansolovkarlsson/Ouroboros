@@ -1,13 +1,13 @@
 //! Minimal AArch64 exception vectors.
 //!
 //! Without these, any bad memory access anywhere in the kernel is an
-//! unrecoverable platform-level fault with no diagnostic — confirmed
+//! unrecoverable platform-level fault with no diagnostic, confirmed
 //! directly: writing to an unmapped MMIO address on Parallels didn't just
 //! crash the kernel, it crashed the whole VM, reported by Parallels as a
 //! guest failure with no indication of what happened. `install()` points
 //! VBAR_EL1 at a real vector table so the same class of mistake instead
 //! reports what it can (vector taken, ESR/FAR/ELR_EL1) through the global
-//! console — if one exists yet — and then halts, rather than running off
+//! console, if one exists yet, and then halts, rather than running off
 //! into whatever undefined behavior an unconfigured VBAR_EL1 produces.
 //!
 //! Runs at EL1. QEMU and Parallels hand off at EL1 (typical for a UEFI OS
@@ -22,7 +22,7 @@
 //! (`HCR_EL2.E2H`), where the `_EL1` name would reach `VBAR_EL2` and
 //! replace the firmware's own vectors while it is still the handler.
 //!
-//! Deliberately not installed until after `exit_boot_services` — firmware
+//! Deliberately not installed until after `exit_boot_services`: firmware
 //! has its own VBAR_EL1 that its boot-services internals may depend on;
 //! clobbering it while boot services are still active would be touching
 //! state we don't own yet. A fault before that point is reported by
@@ -69,7 +69,7 @@
 //! ## The tick is taken from EL0 only; an IRQ at EL1 is a fault
 //!
 //! A timer IRQ firing *while EL0 code is running* lands in a different
-//! vector slot than one firing at EL1 — the table is grouped by [current EL
+//! vector slot than one firing at EL1. The table is grouped by [current EL
 //! w/ SP_EL0][current EL w/ SP_ELx][lower EL AArch64][lower EL AArch32], so
 //! "IRQ at EL1h" (slot 5, our own kernel code) and "IRQ from lower EL
 //! AArch64" (slot 9, EL0 tasks) are different entries entirely. Slot 9
@@ -83,7 +83,7 @@
 //! that (`synccell.rs`). An IRQ taken at EL1 is therefore a broken
 //! invariant, and reporting it (`EXCEPTION vector=5`) beats saving a
 //! kernel frame as a task context and finding out later.
-//! Slot 8 (Synchronous, lower EL AArch64) is where EL0's `svc` lands — but
+//! Slot 8 (Synchronous, lower EL AArch64) is where EL0's `svc` lands, but
 //! that same slot is also where an EL0 *fault* would land (bad memory
 //! access, etc.), so it isn't unconditionally treated as a syscall: it
 //! checks ESR_EL1's EC field first and only takes the resumable syscall
@@ -91,7 +91,7 @@
 //! diverging report-and-halt path otherwise.
 //!
 //! **The SVC trampoline (`3:`) passes up to 4 syscall arguments, not
-//! just 1** — added for phase 3c's file-I/O syscalls (`fs_list_dir`/
+//! just 1**, added for phase 3c's file-I/O syscalls (`fs_list_dir`/
 //! `fs_read_file`, `syscall.rs`), which need a path pointer, path
 //! length, output buffer pointer, and output buffer length all at once.
 //! `x0`-`x3` at the moment of the `svc` become `dispatch`'s `arg0`-`arg3`
@@ -103,20 +103,20 @@
 //! specifically to avoid clobbering the argument registers before
 //! they're consumed).
 //!
-//! ## The IRQ trampoline hands its saved frame to Rust — this is what
+//! ## The IRQ trampoline hands its saved frame to Rust: this is what
 //! ## makes real task switching possible
 //!
-//! The frame `2:` builds (`x0`-`x30`, `SP_EL0`, `ELR_EL1`, `SPSR_EL1` — see
+//! The frame `2:` builds (`x0`-`x30`, `SP_EL0`, `ELR_EL1`, `SPSR_EL1`, see
 //! [`Context`], which mirrors this layout exactly) isn't just scratch space
 //! to preserve-and-discard anymore: its address is passed as
 //! `rust_irq_handler`'s argument (`mov x0, sp` right before the `bl`), and
-//! on a timer tick `tasks::on_tick` overwrites it in place — copying the
+//! on a timer tick `tasks::on_tick` overwrites it in place, copying the
 //! *interrupted* task's registers out to its saved [`Context`], then
 //! copying the *next* task's saved [`Context`] in. The trampoline's own
 //! restore-and-`eret` afterward doesn't know or care that the frame now
 //! holds different values than it saved a moment ago; it resumes whatever
 //! is there, which is the whole mechanism. `SP_EL0` specifically had to be
-//! added here for this to work — the pre-tasks.rs version of this
+//! added here for this to work: the pre-tasks.rs version of this
 //! trampoline never saved it, because there was only ever one EL0 context
 //! and it never needed to move.
 
@@ -689,10 +689,10 @@ pub fn set_net_intid(intid: u32) {
 }
 
 /// Runs on every IRQ, called from the vector table's slots 5/9 trampoline
-/// with a pointer to its saved [`Context`] — `frame` *is* whatever was
+/// with a pointer to its saved [`Context`]. `frame` *is* whatever was
 /// interrupted; overwriting it (as `tasks::on_tick` does) is how a task
 /// switch happens. Must return normally (the trampoline restores from
-/// `frame` and `eret`s back) — never halt or diverge from here.
+/// `frame` and `eret`s back): never halt or diverge from here.
 extern "C" fn rust_irq_handler(frame: *mut Context) {
     // Acknowledged before the kernel lock: the CPU interface is this
     // core's own (GICv2's banked GICC, GICv3's ICC_* system registers) and

@@ -1,4 +1,4 @@
-//! `/bin/clusterkey` — this machine's cluster identity.
+//! `/bin/clusterkey`: this machine's cluster identity.
 //!
 //! Step 6c of `docs/roadmap/roadmap-cluster-keys.md`. Four things an operator needs:
 //!

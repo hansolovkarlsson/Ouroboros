@@ -1,5 +1,5 @@
 //! Discovers the platform's console UART from the ACPI SPCR (Serial Port
-//! Console Redirection) table — the actual mechanism, unlike devicetree
+//! Console Redirection) table, the actual mechanism, unlike devicetree
 //! (`devicetree.rs`), since both QEMU's and Parallels' firmware are
 //! confirmed ACPI-oriented and neither publishes a devicetree.
 //!
@@ -42,7 +42,7 @@ pub enum DiscoveryError {
     NoRsdp,
     /// Found a pointer, but it doesn't start with the RSDP signature.
     BadRsdpSignature,
-    /// RSDP is ACPI 1.0 (no XSDT) — not supported, only 32-bit RSDT
+    /// RSDP is ACPI 1.0 (no XSDT): not supported, only 32-bit RSDT
     /// pointers, unexpected on any aarch64 platform this targets.
     NoXsdt,
     /// XSDT pointer doesn't start with the XSDT signature.
@@ -54,7 +54,7 @@ pub enum DiscoveryError {
     /// call site so its public error shape doesn't change.
     TableNotFound,
     /// SPCR exists, but its console isn't in system memory (e.g. I/O port
-    /// or PCI config space) — this driver only speaks memory-mapped PL011.
+    /// or PCI config space): this driver only speaks memory-mapped PL011.
     UnsupportedAddressSpace,
     /// SPCR exists and is memory-mapped, but its interface type isn't one
     /// this driver's PL011 register layout understands.
@@ -116,13 +116,13 @@ const INTERFACE_TYPE_ARM_SBSA_GENERIC_UART: u8 = 0x0e;
 const INTERFACE_TYPE_ARM_SBSA_GENERIC_UART_2X: u8 = 0x0a;
 
 /// Walks RSDP -> XSDT looking for a table whose header signature matches
-/// `signature` (e.g. `b"SPCR"`, `b"APIC"` — MADT's signature is `"APIC"`,
+/// `signature` (e.g. `b"SPCR"`, `b"APIC"`: MADT's signature is `"APIC"`,
 /// its historical x86 name, not `"MADT"`). Returns a pointer to that
 /// table's own header (callers cast/parse from there). Shared by
-/// `discover_pl011` (SPCR) and `madt::discover` (MADT) — pulled out once a
+/// `discover_pl011` (SPCR) and `madt::discover` (MADT), pulled out once a
 /// second real caller needed the identical walk, not speculatively.
 ///
-/// Safe to call either side of `exit_boot_services` — only reads plain
+/// Safe to call either side of `exit_boot_services`: it only reads plain
 /// memory, no UEFI service. Does not verify any ACPI checksum; trusts the
 /// firmware-provided pointer the same way devicetree discovery trusts the
 /// DTB pointer.
@@ -261,7 +261,7 @@ unsafe fn aml_cca_zero_offset(table: *const u8) -> Option<usize> {
 
 /// Parses the ACPI tables reachable from `rsdp` (if present) and resolves
 /// the SPCR table to a PL011-compatible UART base address. Safe to call
-/// either side of `exit_boot_services` — only reads plain memory, no UEFI
+/// either side of `exit_boot_services`: it only reads plain memory, no UEFI
 /// service.
 ///
 /// # Safety

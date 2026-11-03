@@ -1,4 +1,4 @@
-//! `clusterkeys` — the on-disk format for per-machine cluster identity.
+//! `clusterkeys`: the on-disk format for per-machine cluster identity.
 //!
 //! Step 6a of `docs/roadmap/roadmap-cluster-keys.md`. Pure: parsing and formatting only,
 //! no I/O and no syscalls, so it is host-testable like `accounts` and `regex`.
@@ -30,7 +30,7 @@
 //! The two directions of the protocol ask different questions, and one file has
 //! to answer both (see Decision 3 in the design doc):
 //!
-//! - An **exporter** verifying a client looks the peer up **by key** — the
+//! - An **exporter** verifying a client looks the peer up **by key**: the
 //!   client offers its public key in the frame, and the only question is whether
 //!   this machine accepts it.
 //! - A **client** verifying an exporter's signed reply must look up **by
@@ -42,7 +42,7 @@
 //!
 //! No `&str`, no runtime string slicing. Slicing a `&str` by a runtime index
 //! pulls in `core::fmt`'s char-boundary panic path, which emits
-//! `R_AARCH64_ABS64` relocations this project's loader cannot process — a trap
+//! `R_AARCH64_ABS64` relocations this project's loader cannot process, a trap
 //! this codebase has hit repeatedly. See `docs/processes.md`.
 
 #![cfg_attr(not(test), no_std)]
@@ -66,8 +66,8 @@ pub const NAME_MAX: usize = 32;
 ///
 /// LIVES HERE BECAUSE TWO PROGRAMS MUST AGREE ON IT. `netd` reads this much into
 /// a buffer on `serve`'s stack and authorizes only what fits; `clusterkey peers`
-/// exists to answer "which peers does this machine accept", and read 2048 —
-/// twice as much — so it listed peers with the right key and address that the
+/// exists to answer "which peers does this machine accept", and read 2048,
+/// twice as much, so it listed peers with the right key and address that the
 /// export would refuse, and its truncation warning said they "may still be
 /// authorized", which was the opposite of true. One constant, both readers.
 ///
@@ -80,7 +80,7 @@ pub const AUTHORIZED_MAX: usize = 1024;
 /// One authorized peer.
 #[derive(Clone, Copy)]
 pub struct Peer<'a> {
-    /// The machine's name, for diagnostics — never the thing authorized.
+    /// The machine's name, for diagnostics, never the thing authorized.
     pub name: &'a [u8],
     /// The address this peer is expected at, used when verifying a reply from
     /// a host we dialled.
@@ -93,7 +93,7 @@ pub struct Peer<'a> {
 
 /// Decode exactly `KEY_HEX_LEN` hex characters into a key.
 ///
-/// Rejects anything shorter, longer, or not hex — a truncated key that decoded
+/// Rejects anything shorter, longer, or not hex: a truncated key that decoded
 /// to a *prefix* would be a different key that might well be authorized.
 pub fn decode_key(hex: &[u8]) -> Option<[u8; KEY_LEN]> {
     if hex.len() != KEY_HEX_LEN {
@@ -193,7 +193,7 @@ pub fn format_ip(ip: &[u8; 4], out: &mut [u8; 15]) -> usize {
 pub enum LineKind<'a> {
     /// Nothing on the line.
     Blank,
-    /// A `#` comment — including a peer deliberately commented out.
+    /// A `#` comment, including a peer deliberately commented out.
     Comment,
     /// A well-formed peer.
     Peer(Peer<'a>),
@@ -256,7 +256,7 @@ fn parse_peer(line: &[u8]) -> Option<Peer<'_>> {
     Some(Peer { name, ip: parse_ip(ip_text)?, key: decode_key(key_text)?, root })
 }
 
-/// The peer whose **public key** matches — what an exporter asks when a client
+/// The peer whose **public key** matches: what an exporter asks when a client
 /// offers a key.
 ///
 /// **ROOT ONLY IF EVERY LINE FOR THE KEY SAYS SO.** The peer returned is the
@@ -281,7 +281,7 @@ pub fn find_by_key<'a>(authorized: &'a [u8], key: &[u8; KEY_LEN]) -> Option<Peer
     hit
 }
 
-/// The peer expected at an **address** — what a client asks before trusting a
+/// The peer expected at an **address**: what a client asks before trusting a
 /// reply from the host it dialled.
 pub fn find_by_ip<'a>(authorized: &'a [u8], ip: &[u8; 4]) -> Option<Peer<'a>> {
     let mut hit = None;
@@ -402,12 +402,12 @@ pub(crate) fn trim(s: &[u8]) -> &[u8] {
     &s[a..b]
 }
 
-/// Whitespace for this format — **including NUL**.
+/// Whitespace for this format, **including NUL**.
 ///
 /// A consumer reads `authorized` into a fixed zero-initialised buffer, and if it
 /// passes the whole buffer rather than just the bytes read, the trailing NUL run
 /// would otherwise become a line of its own. That line is skipped as malformed,
-/// which sounds harmless — except that without a trailing newline the NULs join
+/// which sounds harmless, except that without a trailing newline the NULs join
 /// the LAST peer's line and take it with them. For a one-line file that is every
 /// peer, silently. It fails closed, so it is availability rather than
 /// authorization, but it is invisible, and treating NUL as whitespace removes
@@ -801,7 +801,7 @@ mod generator_agreement {
     //! implementations, one format, and nothing but a test between them.
     //!
     //! The fixtures below are `scripts/mkclusterkeys.py`'s real output, pasted
-    //! verbatim — not a hand-written approximation of it, which would test only
+    //! verbatim, not a hand-written approximation of it, which would test only
     //! that this parser agrees with my idea of the generator. Regenerate with:
     //!
     //! ```text

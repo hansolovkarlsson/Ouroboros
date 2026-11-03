@@ -50,7 +50,7 @@ use console::Console;
 use uart::Uart;
 use uart16550::Uart16550;
 
-/// Which register layout a discovered console needs — devicetree/ACPI SPCR
+/// Which register layout a discovered console needs: devicetree/ACPI SPCR
 /// only ever identify a PL011; PCI enumeration only ever identifies a
 /// 16550-family device (that's what PCI class 0x07/0x00 means). See
 /// `pci.rs` for why these are genuinely different hardware, not just a
@@ -80,7 +80,7 @@ impl ConsoleKind {
 /// failed before trying the next. Must run before `exit_boot_services`:
 /// devicetree/ACPI need the UEFI config table to find their blob pointers,
 /// and PCI enumeration is entirely boot-services-based throughout (no
-/// find-pointer-then-parse-memory split like the other two — there's
+/// find-pointer-then-parse-memory split like the other two, so there's
 /// nothing to defer).
 fn discover_console(
     dtb: Option<*const u8>,
@@ -226,12 +226,12 @@ extern "C" fn kernel_main() -> ! {
     // Deliberately still before exit_boot_services, even though some of
     // this parsing doesn't itself need boot services: logging the result
     // here goes through the UEFI console, which works on any platform, so
-    // we get a trustworthy diagnostic before ever touching raw MMIO —
+    // we get a trustworthy diagnostic before ever touching raw MMIO,
     // which, without a confirmed address, might not be mapped to anything
     // at all and fault instead of printing. Confirmed the hard way: writing
     // to a hardcoded "fallback" address whenever discovery failed
     // hard-crashed real Parallels hardware where that address wasn't
-    // mapped. So there is no fallback anymore — no confirmed address means
+    // mapped. So there is no fallback anymore: no confirmed address means
     // no post-exit console, full stop.
     let discovery = discover_console(dtb, rsdp);
     let mut pci_inventory = None;
@@ -581,7 +581,7 @@ extern "C" fn kernel_main() -> ! {
 
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
-    // log::*, alloc, or UEFI protocols — only the raw MMIO in `uart`/
+    // log::*, alloc, or UEFI protocols, only the raw MMIO in `uart`/
     // `uart16550`, and only when `discovery` gave us an address to trust.
     // The returned memory map is kept, not discarded: mmu.rs uses it to
     // identity-map real discovered RAM instead of a hardcoded address.

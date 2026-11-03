@@ -1,59 +1,59 @@
 //! Loads a userland program from the ESP into an EL0-accessible buffer,
 //! entirely during the UEFI boot-services window (before
-//! `exit_boot_services`) — there is no runtime disk driver yet, and won't
-//! be for a while; see `docs/processes.md` for the full design and why
+//! `exit_boot_services`). There is no runtime disk driver yet, and won't
+//! be for a while: see `docs/processes.md` for the full design and why
 //! this is a deliberate, documented shortcut rather than a placeholder for
 //! "fix later" carelessness.
 //!
-//! Which program to load is read from a tiny one-line config file rather
-//! than hardcoded, so the shell (or, eventually, whatever else gets loaded
-//! this way) can be swapped by editing a file on the ESP, no kernel
-//! rebuild required — the actual "configuration" that milestone was about.
+//! Which program to load is read from a tiny one-line config file rather than
+//! hardcoded, so the shell (or, eventually, whatever else gets loaded this way)
+//! can be swapped by editing a file on the ESP, no kernel rebuild required.
+//! That was the actual "configuration" that milestone was about.
 //!
-//! ## A real ELF loader now, not a flat-binary `memcpy` — the relocating
+//! ## A real ELF loader now, not a flat-binary `memcpy`: the relocating
 //! ## loader milestone
 //!
 //! Every userland program used to be a flat, position-*dependent* binary:
 //! linked at a fixed base of `0x0`, copied byte-for-byte to wherever
 //! `boot::allocate_pages` happened to place it, with no relocation step to
 //! fix the mismatch. That was this project's single most-repeated bug
-//! class — `core::fmt`'s argument-dispatch table and slice/literal
+//! class: `core::fmt`'s argument-dispatch table and slice/literal
 //! comparisons both crashed for the identical reason (a data *pointer*
-//! baked in for the wrong base address) — previously avoided only by
+//! baked in for the wrong base address), previously avoided only by
 //! hand-discipline ("don't do that"), not actually fixed. This module now
 //! parses real ELF64: walks `PT_LOAD` program headers to know what to copy
 //! where, and processes `R_AARCH64_RELATIVE` self-relocations in
 //! `.rela.dyn` against wherever the program actually landed.
 //!
-//! Hand-rolled, not a crate — matching this project's established
+//! Hand-rolled, not a crate, matching this project's established
 //! discipline (`acpi.rs`/`madt.rs`/`fat32.rs` all hand-roll their formats
 //! rather than pull in a library, since each is simple enough on its own
 //! terms to justify it). ELF64's header, program headers, section headers,
-//! and `Elf64_Rela` entries are all small, fixed-offset structs — the same
+//! and `Elf64_Rela` entries are all small, fixed-offset structs, the same
 //! category of "simple enough" this project has repeatedly judged in favor
 //! of hand-rolling. This module runs entirely before `exit_boot_services`,
-//! so `alloc` is fully available here (unlike `fat32.rs`) — a real,
+//! so `alloc` is fully available here (unlike `fat32.rs`), a real,
 //! worth-noting difference in constraints from every other hand-rolled
 //! parser in this codebase, though this parser doesn't lean on it much.
 //!
 //! **Deliberately narrow in scope, matching this project's "narrowest
 //! useful case" discipline:** only `R_AARCH64_RELATIVE` self-relocations
-//! are supported — this project has no shared libraries and no imported
+//! are supported: this project has no shared libraries and no imported
 //! symbols to resolve, so no other relocation type should ever
 //! legitimately appear, and one does show up unexpectedly, that's a hard
 //! error, not a silently-ignored one. No W^X segment permission
 //! separation (still one combined RWX EL0 region, same as before this
-//! milestone — a separately-tracked, pre-existing weakness this work
+//! milestone, a separately-tracked, pre-existing weakness this work
 //! doesn't attempt to solve). No dynamic linking, no `PT_INTERP` support
 //! (the build passes `--no-dynamic-linker` for exactly this reason).
 //!
 //! **A real, hard-won toolchain constraint, confirmed by direct
 //! experiment, not guessed:** userland programs must be built in
 //! `--release`, not debug. A debug build fails to *link* at all under the
-//! new position-independent model — `rust-lld` rejects an
+//! new position-independent model: `rust-lld` rejects an
 //! `R_AARCH64_ABS64` relocation inside
 //! `core::fmt::builders::PadAdapter`, pulled in from the prebuilt (not
-//! rebuilt-per-project — see `rust-toolchain.toml`) `libcore.rlib` by
+//! rebuilt-per-project, see `rust-toolchain.toml`) `libcore.rlib` by
 //! ordinary debug-build panic/bounds-check formatting machinery, which
 //! that prebuilt rlib was never compiled with `-C relocation-model=pic`
 //! support for. A release build's optimizer eliminates enough of that
@@ -67,14 +67,14 @@
 //!
 //! `mmu.rs` gives a task's EL0 region fine-grained (4KB page) access by
 //! splitting exactly one 2MB L2 slot into an L3 sub-table. That only works
-//! if the whole region fits inside a single 2MB-aligned slot — true by
+//! if the whole region fits inside a single 2MB-aligned slot, true by
 //! construction for the old compile-time `#[repr(align(N))]` EL0 statics,
 //! but `boot::allocate_pages` only guarantees 4KB (page) alignment, so a
 //! multi-page region loaded this way could easily straddle a 2MB boundary
 //! depending on where the allocator happens to put it. Rather than
 //! generalizing `mmu.rs` to handle a region spanning multiple L2 slots,
 //! [`load`] asks for `size + 2MB` worth of pages, then frees whatever
-//! falls before/after the first 2MB-aligned address inside that range —
+//! falls before/after the first 2MB-aligned address inside that range,
 //! guaranteeing the final region can't straddle a slot, the same
 //! invariant the old static got for free from its alignment. Costs up to
 //! just under 2MB of transiently-allocated-then-freed memory at boot; RAM
