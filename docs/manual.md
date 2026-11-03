@@ -3,7 +3,7 @@
 The one-stop reference for using Ouroboros: building it, running it,
 using the shell and the `/bin` commands, **sharing resources across a
 cluster of machines**, and the syscall ABI. Each section links to the
-deeper reference where one exists — [`testing-qemu.md`](testing/testing-qemu.md)
+deeper reference where one exists: [`testing-qemu.md`](testing/testing-qemu.md)
 for the full QEMU run/test guide (single machine *and* the two-node
 cluster), [`architecture.md`](architecture.md) for how the kernel works,
 [`processes.md`](processes.md) for the userland program model,
@@ -15,22 +15,22 @@ for what's next, and [`CHANGELOG.md`](CHANGELOG.md) with the postmortems under
 
 **What Ouroboros is, in one line:** an ARM64 microkernel OS whose
 filesystem, console, and network are userland servers reached over a
-uniform file protocol — which is exactly what lets several machines share
+uniform file protocol, which is exactly what lets several machines share
 their disks, processes, consoles, and even *run programs on each other*
 over the network (the [cluster](#cluster-sharing-resources-across-machines)
 section below).
 
 ## Prerequisites
 
-- **Rust** — pinned by `rust-toolchain.toml` (stable channel; the
+- **Rust**: pinned by `rust-toolchain.toml` (stable channel; the
   `aarch64-unknown-uefi` and `aarch64-unknown-none` targets and the
   `llvm-tools` component install automatically on first build). No
   nightly, no `-Z build-std`.
-- **QEMU** — `brew install qemu`, which also provides the aarch64 OVMF
+- **QEMU**: `brew install qemu`, which also provides the aarch64 OVMF
   firmware the run targets point at.
-- **macOS's `hdiutil`** — used by `make image` to build the FAT32 disk
+- **macOS's `hdiutil`**: used by `make image` to build the FAT32 disk
   image.
-- **Parallels Desktop** (optional, for real-hardware runs) — provides
+- **Parallels Desktop** (optional, for real-hardware runs): provides
   `prl_disk_tool` (used by `make parallels-hdd`) and `prlctl` (used by
   `make test-parallels`).
 
@@ -45,12 +45,12 @@ make esp                    # stage the full ESP directory layout
 ```
 
 The workspace has 62 crates: `kernel` (a UEFI application,
-`aarch64-unknown-uefi`); every userland program under `programs/` — the
-shell, the four servers, and the `/bin` commands (`aarch64-unknown-none`);
+`aarch64-unknown-uefi`); every userland program under `programs/` (the
+shell, the four servers, and the `/bin` commands, `aarch64-unknown-none`);
 and the shared libraries both sides import, of which `syscall-abi` is the
 one that matters most, since it is why syscall numbers can never silently
 drift. Userland
-programs **always build `--release`** regardless of `PROFILE` — a hard
+programs **always build `--release`** regardless of `PROFILE`, a hard
 toolchain constraint of the position-independent build, not a
 preference (a debug build fails to link; see `processes.md`'s "Binary
 format").
@@ -71,7 +71,7 @@ The staged ESP layout:
 \etc\                    passwd, group, and the cluster identity
 ```
 
-Swap the boot program by editing `INIT.CFG` — no kernel rebuild needed.
+Swap the boot program by editing `INIT.CFG`: no kernel rebuild needed.
 (`ORBS`, not the full project name: FAT's 8.3 short-name limit, which
 the runtime FAT32 reader doesn't parse long-filename entries around.)
 
@@ -87,14 +87,14 @@ make run-image-net   # real FAT32 + a NIC - the fullest single-machine run
 
 The one everyday gotcha: **`make run`'s disk is FAT16** (a QEMU vvfat
 artifact), and FAT16 is the one format the filesystem server does *not*
-implement (it reads FAT32, exFAT and ext2) — so every disk command prints
+implement (it reads FAT32, exFAT and ext2), so every disk command prints
 "no filesystem mounted" there. Use **`make run-image`**
 whenever you want `ls`/`cat`/`write`/`exec` to actually work. Exit QEMU
 with **`Ctrl+a x`**.
 
-That's enough to get a working shell. The **full run/test guide** — every
+That's enough to get a working shell. The **full run/test guide** (every
 `make run-*` target, the exFAT/ext2/GPT test disks, the network runs, the
-9P host peers, and the **two-node cluster** setup — is
+9P host peers, and the **two-node cluster** setup) is
 [`testing-qemu.md`](testing/testing-qemu.md). You'll want it for the
 [cluster](#cluster-sharing-resources-across-machines) section below.
 
@@ -113,11 +113,11 @@ absolute path, so the two files must stay together.
 
 What works on real Parallels hardware today: the GOP framebuffer
 console, a real USB keyboard (including Shift and Ctrl chords),
-preemptive multitasking, the whole shell — **and real disk access via
+preemptive multitasking, the whole shell, **and real disk access via
 a passed-through USB stick** (Parallels exposes no storage controller
 this kernel can drive, but USB mass storage over the xHCI driver
 works: pass a USB 3.x stick through to the VM, boot, wait a few
-seconds for it to attach, and type `mount` — a FAT32-formatted stick
+seconds for it to attach, and type `mount`: a FAT32-formatted stick
 then serves the full disk-command surface, `exec` included; USB 2.0
 sticks land on the EHCI controller instead and can't be used).
 
@@ -130,7 +130,7 @@ make test-parallels CMDS="help;ls;uptime" [BOOT_WAIT=12] [VM_NAME=Ouroboros]
 Rebuilds `build/esp.hdd`, boots the registered VM headlessly, types each
 `;`-separated command via `prlctl send-key-event`, and saves a
 screenshot after each into a `parallels-test-<timestamp>/` directory
-(gitignored — delete it when done). Supports `>` (a held-Shift chord)
+(gitignored: delete it when done). Supports `>` (a held-Shift chord)
 and a `CTRL-C` pseudo-command (a held-Ctrl chord, no Enter). Requires
 the VM registered in Parallels with its Hard Disk pointed at this
 repo's `build/esp.hdd`.
@@ -156,7 +156,7 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 
 ### Commands come from two places
 
-- **Builtins** run inside the shell itself — a deliberately minimal set:
+- **Builtins** run inside the shell itself, a deliberately minimal set:
   `help  cd  bind  mount  unmount  erase  partition  format
   exec  exit/logout  shutdown  halt  ps  kill  fg  wait  env  set  unset  su  cpu`.
   The shell **gates each session on a login** (username + password against
@@ -169,19 +169,19 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
 - **Account management** (`/bin`): `useradd <name> [-u uid] [-g group|gid]`
   (creates the account, prompts a password, makes `/Users/<name>`),
   `groupadd <name>`, and `usermod <user> [-g <group>] [-G <list>]` (primary and
-  supplementary groups) — all **root only**. `passwd [user]` is the exception:
+  supplementary groups), all **root only**. `passwd [user]` is the exception:
   **any user may change their own password**, and must supply the current one;
   only root may set someone else's, and need not. That works because the check
   lives in a *server* (`accountd`) which asks the kernel who sent the request,
-  rather than in a setuid bit on a file — see `man passwd`. `id` shows your
+  rather than in a setuid bit on a file. See `man passwd`. `id` shows your
   uid/gid and groups **with names**. On ext2, file permissions are enforced
   (owner→group→other, matching a **primary or any supplementary** group; root
   bypasses; every ancestor directory's search bit is checked), so a normal user
   can write in `~` but not in `/`, and cannot read `/etc/shadow` at all. On
   FAT32/exFAT there are no modes to enforce and `login` says so at the prompt.
   Job control (`ps`/`kill`/`fg`/`wait`/`exec`), the disk-management trio
-  (`erase`/`partition`/`format` — they must run when *nothing* is mounted,
-  exactly when `/bin` can't be read), power control (`shutdown`/`halt` — same
+  (`erase`/`partition`/`format`: they must run when *nothing* is mounted,
+  exactly when `/bin` can't be read), power control (`shutdown`/`halt`, same
   no-disk reasoning), the environment (`env`/`set`/`unset`) and
   cwd/namespace (`cd`/`bind`) that *are* the shell's state, the mount commands,
   and `cpu` (remote execution) are builtins for reasons the cluster section and
@@ -202,14 +202,14 @@ $ set PATH=/bin ; env           # a real environment; $VAR expansion
   A `/bin` command resolves relative paths against the shell's working
   directory, delivered to it at spawn.
 
-**Usage help:** append `-?` to any command that takes arguments — builtin or
-`/bin` — for a one-line usage reminder (`ls -?`, `mount -?`, `dial -?`). For a
+**Usage help:** append `-?` to any command that takes arguments, builtin or
+`/bin`, for a one-line usage reminder (`ls -?`, `mount -?`, `dial -?`). For a
 full manual page, `man <command>` (e.g. `man ls`, `man cpu`); pipe a long one to
 the pager, `man grep | more`. Pages are plain-text files under `/man` on disk.
 
 **Wildcards & completion:** `*` and `?` in a command line expand against the
 filesystem (`echo *.txt`, `cat /bin/L*`); a pattern matching nothing is left
-literal. Press **Tab** to complete the last word as a filename — one match fills
+literal. Press **Tab** to complete the last word as a filename: one match fills
 it in, several extend to the common prefix and then list.
 
 **Output redirection & pipelines** work across both:
@@ -261,7 +261,7 @@ $ unmount                    # drop the mounted filesystem
 ```
 
 Every mount/`bind` changes **only this shell's** namespace (and the
-commands it spawns inherit it) — a per-task view, never a global one.
+commands it spawns inherit it), a per-task view, never a global one.
 Preparing a blank disk from inside the guest: `erase disk`, then
 `partition fat32` (or `exfat`/`ext2`), then `format fat32`, then
 `mount -a`. `mount -r`, and remote `/proc`/`/net`/`/dev/cons`, are the
@@ -270,15 +270,15 @@ Preparing a blank disk from inside the guest: `erase disk`, then
 ## Cluster: sharing resources across machines
 
 This is what Ouroboros is ultimately about: **several machines sharing
-their resources as one system** — one machine reads another's disk,
-inspects its processes, writes its screen, or *runs a program on it* — over
+their resources as one system**: one machine reads another's disk,
+inspects its processes, writes its screen, or *runs a program on it*, over
 a from-scratch 9P-style protocol carried on the network. It's the Plan 9
 model: *"remote" is just the same file protocol over TCP instead of local
 IPC*, so the commands you already know (`ls`, `cat`, `mkdir`, `cpu`) work
-across machines with no new syntax — only *where a path points* changes.
+across machines with no new syntax. Only *where a path points* changes.
 
 **Trust, stated plainly:** every machine has its **own Ed25519 keypair**, and
-authorizes its peers **by public key** — the `known_hosts`/`authorized_keys`
+authorizes its peers **by public key**, the `known_hosts`/`authorized_keys`
 model, not a shared password. The private half lives in `/etc/cluster/id`
 (mode 0600); the peers this machine will talk to are listed one per line in
 `/etc/cluster/authorized`, each line naming a peer, its address and its public
@@ -303,19 +303,19 @@ requests (a shell `cat` over a mount, `cpu`) are still signed one by one.
 This replaced a **shared** secret (`\CLUSTER.KEY`, v0.10.0–v0.15.0). The
 difference that matters is **revocation**: with one secret every member was
 interchangeable and removing one meant re-keying all of them, whereas now you
-delete a line. It is still **integrity, not secrecy** — bytes cross the wire in
+delete a line. It is still **integrity, not secrecy**: bytes cross the wire in
 cleartext.
 
 Fail-closed in both directions: a machine with no `/etc/cluster/id` cannot sign,
 so its export is **closed** and it can make no remote requests; a machine with
-no authorized peers serves nobody. A `\NOEXEC` flag file is the one other knob —
+no authorized peers serves nobody. A `\NOEXEC` flag file is the one other knob:
 the machine shares its disk but refuses remote `cpu` execution.
 
 **Who is asking, not just which machine** (since 2026-08-31). Each request also
 carries the **name** of the user making it, inside the signature so it cannot
 be altered by anyone without the machine's private key. The far side resolves that name through **its own**
 `/etc/passwd` and applies its own permissions to it, refusing a name it does not
-know — so an unprivileged user reading a remote mount gets exactly what that
+know, so an unprivileged user reading a remote mount gets exactly what that
 account may read there, and `cpu` runs the command as that user rather than as
 root. Two consequences worth knowing:
 
@@ -343,7 +343,7 @@ Ouroboros export to a genuinely hostile network yet.
 
 **The built-in HTTP server is anonymous, and unprivileged.** `netd` also serves
 the disk over plain HTTP on port 80 (`make run-image-server`), which has no user
-model at all — so it reads files as **`nobody`**, never as root: world-readable
+model at all, so it reads files as **`nobody`**, never as root: world-readable
 files are served, anything else gets **403 Forbidden**. On FAT32/exFAT, which
 record no mode, everything remains readable. Do not treat that server as a
 private one: it requires no key and no account.
@@ -369,13 +369,13 @@ signs as (`docs/testing/testing-qemu.md`). On a real machine: run
 the other should hold, and paste it into that machine's
 `/etc/cluster/authorized`. `clusterkey peers` lists what a machine currently
 accepts and flags a line that cannot work. Key generation **refuses without real
-entropy** rather than producing a guessable identity — see
+entropy** rather than producing a guessable identity. See
 [`testing-qemu.md`](testing/testing-qemu.md) for which platforms have it.
 
 ### Setting up two machines
 
 Any two Ouroboros machines on the same network can do this. The dev setup
-is two QEMU guests on a shared virtual link — **see
+is two QEMU guests on a shared virtual link: **see
 [`testing-qemu.md`](testing/testing-qemu.md) §5** for the exact commands
 (`make run-image-2vm-a` in one terminal, `make run-image-2vm-b` in
 another). In that setup machine **A is 10.0.2.10** and **B is 10.0.2.11**;
@@ -387,7 +387,7 @@ Everything below is typed at one machine's shell and reaches the other over
 the network. The examples run on **machine B**, reaching **machine A**
 (`10.0.2.10`).
 
-### Sharing a disk — `mount -r`
+### Sharing a disk: `mount -r`
 
 Mount another machine's exported filesystem into your namespace, then read
 (and write) it like any local path:
@@ -403,14 +403,14 @@ $ cp /BIN/LS /mnt/a/ls.copy         # stream a local file onto A (chunked)
 
 The mount is **per-shell** and inherited by spawned commands. Read/write
 both work (single-writer: one machine writes a given tree at a time, by
-convention — no distributed lock yet). If A disconnects, the next operation
+convention, no distributed lock yet). If A disconnects, the next operation
 on `/mnt/a` fails cleanly rather than hanging.
 
-### Another machine's processes — remote `/proc`
+### Another machine's processes: remote `/proc`
 
 `/proc` is a synthetic view of a machine's task table as files. Mount your
 own with `mount -p /proc`; read *another* machine's straight off its remote
-mount (no bind needed — `netd`'s export serves `/proc` too):
+mount (no bind needed: `netd`'s export serves `/proc` too):
 
 ```
 $ mount -p /proc                    # your own process table
@@ -422,7 +422,7 @@ $ ls /mnt/a/proc                    # MACHINE A's task slots
 $ cat /mnt/a/proc/2/state           # A's filesystem-server state
 ```
 
-### Writing another machine's screen — remote `/dev/cons`
+### Writing another machine's screen: remote `/dev/cons`
 
 `/dev/cons` is the console as a **writable** file. Write to your own with
 `mount -c /dev/cons`; write *another* machine's screen over its remote
@@ -434,7 +434,7 @@ $ echo hello > /dev/cons            # ...prints on this screen
 $ write /mnt/a/dev/cons "ping from B"   # prints on MACHINE A's screen
 ```
 
-### Another machine's network identity — remote `/net`
+### Another machine's network identity: remote `/net`
 
 `/net` exposes a machine's IPv4 and MAC as read-only files:
 
@@ -444,10 +444,10 @@ $ cat /mnt/a/net/ip                 # MACHINE A's address -> 10.0.2.10
 $ cat /mnt/a/net/mac                # MACHINE A's MAC
 ```
 
-### Running a program on another machine — `cpu`
+### Running a program on another machine: `cpu`
 
 `cpu <host:port> <command>` runs `<command>` on the remote machine's CPU and
-streams its output back to you — and, crucially, the command reads **your**
+streams its output back to you, and, crucially, the command reads **your**
 files, through your namespace **imported at `/host`**. That's the Plan 9
 `cpu` model: ship the computation to another machine while its data stays
 yours.
@@ -464,14 +464,14 @@ So within one remote command, **`/`** is the machine it runs on and
 **`/host`** is the machine you launched it from. `cpu B ls /` shows B's
 disk; `cpu B ls /host` shows yours. The command's `/bin` program is loaded
 from the remote's disk, so both machines should have the same `/bin`.
-(Output up to ~2 KB comes back whole — the shell pulls it in chunks; larger
+(Output up to ~2 KB comes back whole: the shell pulls it in chunks; larger
 output is still bounded, with truly unbounded streaming a documented later
 refinement. The imported namespace covers filesystem access, not the remote's
 `/proc`/`/net` unless you reach them under `/host`.)
 
-### Dialing out of another machine's network — `/net/tcp`
+### Dialing out of another machine's network: `/net/tcp`
 
-A machine can open a TCP connection **out of another machine's NIC** — use A's
+A machine can open a TCP connection **out of another machine's NIC**: use A's
 network to reach the outside. It's exposed as Plan 9's `/net/tcp` connection
 files: read `clone` for a connection number, write `connect <ip>!<port>` to its
 `ctl`, then read/write its `data`. The `dial` command drives the whole sequence:
@@ -484,13 +484,13 @@ $ dial /mnt/a/net 93.184.216.34 80 GET / HTTP/1.0   # dial out of A's nic
 ```
 
 The only thing that changes is the base path: `/net` is your network,
-`/mnt/a/net` is A's — so the last line reaches the web *through A's connection*,
+`/mnt/a/net` is A's, so the last line reaches the web *through A's connection*,
 authenticated by the same machine keypair as any export access. Unlike `cpu A fetch`
 (which runs a program on A), `dial` gives you a raw connection you drive
 yourself, with no matching program needed on A. Scoped to a TCP client
 (stop-and-wait, small transactions); UDP is later work.
 
-### Accepting connections on another machine's network — `/net/tcp` dial-in
+### Accepting connections on another machine's network: `/net/tcp` dial-in
 
 The mirror of `dial`: **accept inbound** connections on another machine's network
 presence. `announce` a port, then `listen` hands out each accepted connection; a
@@ -505,7 +505,7 @@ $ serve /mnt/a/net 9000 hi there   # answer clients that connect to A on :9000
 ```
 
 The last line makes a program *here* answer clients that connect to **machine A's
-address** — A lends its ingress, this machine owns the service. It's the inverse
+address**. A lends its ingress, this machine owns the service. It's the inverse
 of `cpu A <server>` (which runs the server on A): here the server's state lives
 where `serve` runs. Scoped to a small fan-out (a listener plus a couple of
 concurrent connections), TCP only; a persistent multi-client server loop is a
@@ -528,7 +528,7 @@ syscall table; the authoritative constants live in
 `syscall-abi/src/lib.rs` and `ninep-abi/src/lib.rs`, imported by both the
 kernel and every userland program. (The table below covers the core
 syscalls; the filesystem protocol has since moved to the uniform
-`ninep-abi` verb set — `NP_READDIR`/`NP_READ`/`NP_WRITE`/… — and the
+`ninep-abi` verb set (`NP_READDIR`/`NP_READ`/`NP_WRITE`/…) and the
 network/cluster ops to the `NETOP_*` protocol, both documented in those
 crates.)
 
@@ -581,7 +581,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 
 **File operations** are `FSOP_*` requests to the filesystem server
 (task 2), sent via `msg_call`: a 56-byte message (op + six LE u64
-args — pointers into your own buffers), one u64 reply with the old
+args, pointers into your own buffers), one u64 reply with the old
 syscalls' exact return semantics. Ops: `LIST_DIR`, `READ_FILE`,
 `READ_AT` (windowed read at an offset), `WRITE_FILE`, `MKDIR`,
 `RMDIR`, `TOUCH`, `RM`, `MV`, `MOUNT`. The shell's `fs_call` wrapper
@@ -601,6 +601,6 @@ The full guide is [`processes.md`](processes.md); `hello/` is the
 working ~70-line template. The essentials: `#![no_std]`/`#![no_main]`,
 `_start` placed first in `.text` via `.text.start`, syscalls via inline
 `svc #0`, **release builds only**, and **no static mutable state**
-(the linker script asserts `.data`/`.bss` empty — keep state in
+(the linker script asserts `.data`/`.bss` empty: keep state in
 `main`'s stack frame). Stage the stripped ELF on the ESP and either
 point `INIT.CFG` at it (boot into it) or `exec` it from the shell.

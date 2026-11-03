@@ -1,12 +1,12 @@
 # Source map
 
-Every source file in the tree, annotated: what it does, and — more usefully —
+Every source file in the tree, annotated: what it does, and, more usefully,
 the constraint that made it the shape it is. `kernel/`, all of `programs/`, the
 shared library crates, `libc/`, and `scripts/`.
 
 This is a *map*, not the reference. For any one subsystem the deeper sources are
-better: each file carries its own `//!` module doc — though see the caveat at
-the end of this file — the design rationale is in
+better: each file carries its own `//!` module doc (though see the caveat at
+the end of this file), the design rationale is in
 [`architecture.md`](architecture.md) and [`processes.md`](processes.md), the
 milestone record in [`CHANGELOG.md`](CHANGELOG.md), and the traps already hit in
 the postmortems ([`README.md`](README.md) indexes them). What this file is *for*
@@ -17,7 +17,7 @@ This map used to live inline in `CLAUDE.md`'s `## Structure` section, and was
 moved here on 2026-09-03, verbatim. `CLAUDE.md` is read at the start of *every*
 session; this is 90KB of detail that matters only once you know which subsystem
 you are in, and it was being paid for unconditionally. `CLAUDE.md` keeps the
-tree skeleton — one line per file, enough to find the right one — and defers
+tree skeleton (one line per file, enough to find the right one) and defers
 here.
 
 Some annotations carry cross-references worded "see … above". Those pointed at
@@ -180,7 +180,7 @@ scripts/
 ## Where a new file goes
 
 New userland programs slot into the matching `programs/<category>/` directory
-(or a new category), depending on `syscall-abi` — and usually `ulib` — via the
+(or a new category), depending on `syscall-abi` (and usually `ulib`) via the
 `../../../` path their siblings use. Every userland crate is deliberately
 excluded from the workspace's `default-members` (see the root `Cargo.toml`),
 since they need a different `--target` than `kernel`.
@@ -192,10 +192,10 @@ since they need a different `--target` than `kernel`.
 
 An annotation here is a claim about code, written at some point in the past, and
 this project has a postmortem about precisely what happens to those
-([`blind-instruments-postmortem.md`](postmortems/blind-instruments-postmortem.md) — five
+([`blind-instruments-postmortem.md`](postmortems/blind-instruments-postmortem.md): five
 restatements that drifted, none of them visible to the compiler or any test).
 If an annotation names a file, function, constant or flag, and you are about to
 rely on it, check the source. Known drift as of the move is recorded in
 [`work-journal/2026-09-03.md`](work-journal/2026-09-03.md) under *"shrinking `CLAUDE.md`, and what the move
-exposed"* (2026-09-03) — named rather than dated because that day has more than
+exposed"* (2026-09-03), named rather than dated because that day has more than
 one entry and a bare date now resolves to the wrong one.
