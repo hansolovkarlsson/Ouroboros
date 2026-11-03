@@ -13,10 +13,10 @@ The catch that shapes the whole setup: **UEFI can only boot from a FAT
 filesystem**, and `fsd` mounts the *first* partition it can. So to make `fsd`
 mount exFAT while the disk still boots, the test disk is a two-partition MBR:
 
-- **partition 1 — exFAT** (`fsd` discovers it first; the FAT32 probe fails, the
-  exFAT probe succeeds — the real `Filesystem`-enum fallthrough), carrying
+- **partition 1, exFAT** (`fsd` discovers it first; the FAT32 probe fails, the
+  exFAT probe succeeds: the real `Filesystem`-enum fallthrough), carrying
   `/bin` (so the shell runs its commands off exFAT) plus a few test files;
-- **partition 2 — the FAT32 ESP** (UEFI ignores the exFAT partition it can't
+- **partition 2, the FAT32 ESP** (UEFI ignores the exFAT partition it can't
   read and boots `BOOTAA64` from here).
 
 One block device, no slot-ordering ambiguity. The exFAT filesystem is built with
@@ -25,11 +25,11 @@ combined disk by `scripts/mkexfat.py`.
 
 ## Prerequisites
 
-- On the `exfat-readonly` branch (it carries the read + write code) — or `main`
+- On the `exfat-readonly` branch (it carries the read + write code), or `main`
   once it's merged there.
 - QEMU: `brew install qemu` (also provides the aarch64 OVMF firmware the run
   targets point at).
-- macOS's `newfs_exfat`/`diskutil`/`fsck_exfat` — already present on macOS, used
+- macOS's `newfs_exfat`/`diskutil`/`fsck_exfat`, already present on macOS, used
   by the build and the verification step.
 
 ## 1. Build and boot
@@ -134,14 +134,14 @@ diskutil unmount "$DEV"
 hdiutil detach "$DEV"
 ```
 
-If `fsck_exfat` passes and `cmp` reports identical, the on-disk structures — the
+If `fsck_exfat` passes and `cmp` reports identical, the on-disk structures (the
 allocation bitmap, the FAT chains, and both the `SetChecksum` and `NameHash`
-each entry carries — are all spec-correct.
+each entry carries) are all spec-correct.
 
 ## What about real Parallels hardware?
 
 Not a one-command path, and not covered here. Storage on Parallels/Apple Silicon
-is USB-mass-storage only (no emulated disk controller on the PCI bus — see
+is USB-mass-storage only (no emulated disk controller on the PCI bus, see
 [`ROADMAP.md`](../ROADMAP.md)'s parking lot), so testing exFAT there needs a
 physical exFAT-formatted USB stick passed through to the VM. QEMU
 (`run-image-exfat`) is the honest test surface for this feature, the same as the
