@@ -1787,7 +1787,7 @@ fn holds_send_right(src: usize, dest: usize) -> bool {
 /// This is what lets a spawned `SH.BIN` run a pipeline or reach the network
 /// at all - until 2026-09-06 every `DELEGATE` it issued was refused, because
 /// the rule then was "statically hold the target", which only slot 0 can. It
-/// is the one-step form of ROADMAP.md's "transitive delegation" item, built
+/// is the one-step form of ROADMAP.md's "General / transitive capability delegation" item, built
 /// now because the nested shell is the consumer that item was waiting for. A
 /// right already in hand outlives the parent that gave it, like every other
 /// grant; only the authority to grant anything NEW dies with the parent.

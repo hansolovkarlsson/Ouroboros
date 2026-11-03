@@ -22,7 +22,7 @@
 //! `GICD_BASE` - both fixed, QEMU-shaped conventions confirmed unsafe on
 //! Parallels by two decoded Synchronous External Aborts (see
 //! `virtio_mmio.rs`'s module doc comment and `docs/CHANGELOG.md`'s "GOP
-//! framebuffer console, round three/four"). This address is *discovered*, not
+//! framebuffer console, round three" and "round four" entries). This address is *discovered*, not
 //! guessed, the same category of thing as the GOP framebuffer's own address -
 //! which real Parallels hardware testing already confirmed is safe to map and
 //! write post-`exit_boot_services`. `main.rs` therefore calls this module's

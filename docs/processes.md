@@ -3,7 +3,7 @@
 How Ouroboros gets a userland program from a file on disk into a running
 EL0 task, why it works the way it does, and what's involved in writing a
 replacement for the default shell. Reference documentation for the current
-design — see `CLAUDE.md` for the reasoning trail and what was tried first,
+design. See the postmortems under `postmortems/` for the reasoning trail and what was tried first,
 [`CHANGELOG.md`](CHANGELOG.md) for completed milestones, and
 [`ROADMAP.md`](ROADMAP.md) for what's still ahead.
 
@@ -32,7 +32,7 @@ post-boot storage stack (a virtio-blk driver, feature negotiation, a
 request queue, plus a filesystem reader) is a genuinely separate,
 much larger subsystem — comparable in scope to the virtio-console work
 later built for Parallels console output (`kernel/src/virtio_console.rs`,
-see `CLAUDE.md`) — and was explicitly *not* what this milestone needed. It gets real once something
+see `CHANGELOG.md`'s "a real transmit-only driver" virtio-console entry), and was explicitly *not* what this milestone needed. It gets real once something
 needs to load a program *after* boot (dynamic `exec()`-style spawning);
 until then, everything that will ever run has to be known and loadable at
 boot time.
@@ -82,8 +82,8 @@ the base, then a fixed **heap area**, then one inaccessible **guard
 page**, then a fixed stack allowance (the loader's `STACK_PAGES`; ask
 `heap_info` for the extent rather than restating it), with the stack pointer starting at the
 top and growing down - so a stack overflow lands in the guard page and
-takes a clean fault instead of corrupting the code below (see "Stack guard
-page" in `CLAUDE.md`; the guard has repeatedly caught real overflows, each
+takes a clean fault instead of corrupting the code below (see `CHANGELOG.md`'s "Stack guard
+page" entry; the guard has repeatedly caught real overflows, each
 growing the stack - the shell's `exec` path forced 8KB->16KB, and the
 network server forced 16KB->24KB->32KB->40KB as it gained TCP buffers,
 then concurrent connections, then the remote-mount session path; the size
@@ -152,7 +152,7 @@ falls out of this for free, see below), then finds `.rela.dyn` by name
 and applies every `R_AARCH64_RELATIVE` entry it contains against
 `region_base`, fixing up every absolute pointer the compiler needed to
 bake into data for wherever the program actually landed. See
-`CLAUDE.md`'s "A real relocating loader" section for the full history —
+`CHANGELOG.md`'s "A real relocating loader" entry for the full history:
 this replaced a flat, position-*dependent* loader that copied raw bytes
 to a fixed address with no relocation step at all, which was this
 project's single most-repeated bug class.
@@ -262,7 +262,7 @@ Consequences of "real ELF, real relocations, but still narrowly scoped
   `tasks::spawn` (adds a new, independent task alongside the caller),
   not POSIX exec-replaces-current-process — the caller keeps running.
   See `docs/architecture.md`'s "Dynamic task creation" section and
-  `CLAUDE.md`'s "Dynamic task creation and `exec()`" section for the
+  `CHANGELOG.md`'s "Dynamic task creation and `exec`" entry for the
   full design and the real `Vec`/allocator hang bug found building it.
   A task can also *end*: the `exit` syscall (17) destroys the calling
   task, frees its slot for a future `spawn`, unmaps its region, and
@@ -647,7 +647,7 @@ Worth knowing before building further on this:
   eliminates), not a preference - see "Binary format" above.
 - **~~No ELF, no relocations, no dynamic linking~~ - real ELF and real
   `R_AARCH64_RELATIVE` relocations, fixed.** See "Binary format" above
-  and `CLAUDE.md`'s "A real relocating loader" section. Still no
+  and `CHANGELOG.md`'s "A real relocating loader" entry. Still no
   dynamic linking, no imported symbols, no `exec()` - deliberately out
   of scope, not a remaining gap in what was attempted.
 - **~~No `core::fmt`, and no comparing a slice/string against a
@@ -711,7 +711,7 @@ Worth knowing before building further on this:
   band `>= FS_ERR_MIN` in `syscall-abi`, mapped from the server's
   `fat32::Error` by `fsd/src/main.rs::error_code`), alongside the
   existing `NO_FS` distinction — the old one-collapsed-sentinel gap is
-  closed, and `spawn`'s codes are split the same way. See `CLAUDE.md`'s "Phase 4" through "Phase 8"
-  sections. **This closes the write-support arc phase 3 deliberately
+  closed, and `spawn`'s codes are split the same way. See `CHANGELOG.md`'s "Phase 4" through "Phase 8"
+  entries. **This closes the write-support arc phase 3 deliberately
   deferred** - what's left in the parking lot from here is genuinely
   bigger work, not more commands of this shape.

@@ -257,6 +257,7 @@ make check-xhci-barriers      # the xHCI driver's two DMA barriers found in the 
 make check-site               # the published GitHub Pages site vs the documents it abridges
 make check-statics            # every static in kernel/src against the multi-core plan's inventory
 make check-disk-handle        # no fsd file but disk.rs can reach the disk
+make check-doc-pointers       # every pointer to a document's section names one that exists
 make check-link-layout        # programs/linker.ld against the pin DevTools's ld holds
 make check-picolibc           # the committed C library
 

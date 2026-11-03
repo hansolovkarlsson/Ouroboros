@@ -9,8 +9,8 @@ cluster), [`architecture.md`](architecture.md) for how the kernel works,
 [`processes.md`](processes.md) for the userland program model,
 [`shell-commands.md`](shell-commands.md) for the builtin command
 reference, [`ROADMAP.md`](ROADMAP.md) / [`roadmap-cluster.md`](roadmap/roadmap-cluster.md)
-for what's next, and `CLAUDE.md` at the repository root for the debugging
-history behind every design decision. To build an OS like this yourself,
+for what's next, and [`CHANGELOG.md`](CHANGELOG.md) with the postmortems under
+`postmortems/` for the debugging history behind every design decision. To build an OS like this yourself,
 [`tutorial.md`](tutorial.md) is the staged from-scratch guide.
 
 **What Ouroboros is, in one line:** an ARM64 microkernel OS whose
@@ -105,8 +105,8 @@ make image           # build/esp.img - raw MBR+FAT32 disk image
 make parallels-hdd   # wraps it into build/esp.hdd via prl_disk_tool
 ```
 
-Attach `build/esp.hdd` as the VM's **Hard Disk** device. Two confirmed traps
-(see `CLAUDE.md`'s "Parallels disk attachment"): Parallels rejects raw
+Attach `build/esp.hdd` as the VM's **Hard Disk** device. Two confirmed traps:
+Parallels rejects raw
 `.img` files on the Hard Disk device, and attaching the image to the
 CD/DVD device *looks* like it works but doesn't (the optical driver
 wants ISO9660). Also: `build/esp.hdd` stores a *pointer* to `build/esp.dmg`'s

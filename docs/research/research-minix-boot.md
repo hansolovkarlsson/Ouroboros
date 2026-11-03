@@ -80,7 +80,7 @@ side-by-side reading:
    boot-monitor stage. This is a deliberate choice specific to this
    project's primary hardware target (Parallels on Apple Silicon), which
    boots ARM VMs exclusively through UEFI firmware with no direct-kernel
-   shortcut — see `CLAUDE.md`'s "Boot architecture" section.
+   shortcut, see `docs/boot-history.md`'s "Boot architecture" section.
 2. **The kernel does its own console discovery** (devicetree → ACPI/SPCR →
    PCI) and **loads its one userland program** (the shell, per a config
    file) — both still using UEFI boot services, since this is the same

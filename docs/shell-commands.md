@@ -7,7 +7,7 @@ commands do and how to use them*; for the syscalls backing them see
 [`architecture.md`](architecture.md)'s syscall table, and for the
 debugging history behind specific design choices (why `cd`'s path
 resolution works the way it does, why some errors read "no filesystem
-mounted", etc.) see `CLAUDE.md`'s phase write-ups. Since the shell is
+mounted", etc.) see `CHANGELOG.md`'s phase write-ups. Since the shell is
 just a loaded program like any other (`docs/processes.md`), this
 document describes the *default* one — a replacement program is free to
 implement a completely different command set. For the **cluster commands**

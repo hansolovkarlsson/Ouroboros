@@ -3,7 +3,8 @@
 Reference documentation for how the kernel is built, as of the current
 codebase — not a development log. For the history behind each design
 decision (what was tried, what broke, how it was diagnosed), see
-`CLAUDE.md` at the repository root; this document assumes those decisions
+[`CHANGELOG.md`](CHANGELOG.md), [`boot-history.md`](boot-history.md) and the
+postmortems under `postmortems/`; this document assumes those decisions
 and describes the result.
 
 For the process-loading/userland-program model specifically (the newest
@@ -478,8 +479,8 @@ future `fg`/job-control mechanism this kernel doesn't have yet.
 **Real Parallels hardware confirmation:** the full flow — including the
 success path, a second program really loading from disk and running —
 is confirmed on real hardware, via the USB mass-storage path (`mount` a
-passed-through stick holding the program binaries; see `CLAUDE.md`'s
-"Driver isolation, part 1" section for the first such run, and the
+passed-through stick holding the program binaries; see `CHANGELOG.md`'s
+"Driver isolation part 1" entry for the first such run, and the
 userland-filesystem milestone for the same flow through the fsd
 server).
 
@@ -928,8 +929,9 @@ mechanisms in order, logging why each failed before trying the next:
    for networking, no virtio-console device ID over PCI at all, and no
    direct evidence of one over MMIO either. Parallels' actual serial
    port is very likely a proprietary device (PCI vendor `0x1ab8`, class
-   `0xff`/unclassified) with no public specification — see `CLAUDE.md`'s
-   "virtio-console" section for the full device inventory and reasoning.
+   `0xff`/unclassified) with no public specification. See `CHANGELOG.md`'s
+   "Parallels console: virtio-console confirmed not applicable" for the full
+   device inventory and reasoning.
 
 When all three of devicetree/ACPI/PCI 16550 fail, `pci::log_all_devices`
 (`pci.rs`) logs every PCI device's vendor:device and class:subclass
@@ -945,6 +947,6 @@ hard-crashes real Parallels hardware.
 ## What's not here yet
 
 This document describes the current, working state. For active
-limitations and what's reasonably next, see `CLAUDE.md`'s "Next milestone"
+limitations and what's reasonably next, see `ROADMAP.md`'s "What's next"
 section, which is kept current as the project's actual state changes —
 not duplicated here, since it would just go stale.

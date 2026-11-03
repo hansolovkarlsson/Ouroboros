@@ -515,7 +515,7 @@ step, not a Stage 1 concern.
    not "no error returned." Gated behind `virtio_mmio_probe_safe` (QEMU-only;
    Parallels' virtio-net is PCI). The gated `NET_SEND`/`NET_RECV` syscalls
    deferred to Stage 2 with `netd`, their first consumer, rather than dead
-   code now. See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage 1."
+   code now. See `CHANGELOG.md`'s "Network stack, Stage 1".
 2. ~~**ARP + IPv4 + ICMP echo (`netd`).**~~ **DONE (2026-08-21).** The
    protocol stack moved to a userland server (`netd/`, the eighth userland
    program, a fourth protected task slot — `NET_TASK`, 4 — reached via the
@@ -529,8 +529,8 @@ step, not a Stage 1 concern.
    Stage 4b's `NET_WAIT`/`WaitReason::NetInput` (`netd` now answers ARP
    requests and serves TCP; a host-ping responder would be a trivial add on
    the same event loop, though SLIRP can't route an inbound host→guest ping
-   to test it). See `CHANGELOG.md` / `CLAUDE.md`'s "Network stack, Stage
-   2/4b."
+   to test it). See `CHANGELOG.md`'s "Network stack, Stage
+   2" and "Network stack, Stage 4b".
 3. ~~**UDP.**~~ **DONE (2026-08-21).** UDP send/receive, proven by real
    **DNS resolution**: a `NETOP_RESOLVE` op in `netd` (the `NETOP_*`/`FSOP_*`
    shape) does a DNS A-query over UDP to the user-net DNS server, parses the
@@ -539,8 +539,8 @@ step, not a Stage 1 concern.
    resolving real hostnames via SLIRP's DNS proxy (`resolve example.com` →
    `172.66.147.243`), cross-checked against a `tcpdump` of the pcap. No kernel
    changes — a whole new transport landed purely in userland, the payoff of
-   the driver/protocol split. See `CHANGELOG.md` / `CLAUDE.md`'s "Network
-   stack, Stage 3."
+   the driver/protocol split. See `CHANGELOG.md`'s "Network
+   stack, Stage 3".
 4. **TCP — client active-open DONE (2026-08-21, Stage 4a); server side
    DONE (2026-08-21, Stage 4b).** Decided hand-roll (not `smoltcp`) and
    minimal scope with the user. Stage 4a: `netd` gained a hand-rolled client
@@ -584,7 +584,7 @@ step, not a Stage 1 concern.
    sender-side SACK — negotiate SACK-permitted, parse the peer's SACK blocks,
    selectively retransmit only the hole instead of go-back-N (SLIRP doesn't
    speak SACK, so the go-back-N fallback is the exercised path there).) See
-   `CHANGELOG.md`'s "Network stack, Stage 4a–4o."
+   `CHANGELOG.md`'s "Network stack, Stage 4a" through "Stage 4o" entries.
 
 **Decisions to settle before starting (not now):**
 
@@ -1267,7 +1267,7 @@ phase:
   system-register reads, no GIC or interrupts needed — the same
   property `timer.rs` already relies on). Confirmed fixed by the user
   on the exact real-world scenario that originally failed. See
-  `CLAUDE.md`'s "xHCI's busy-waits were iteration-bounded" section for
+  `CHANGELOG.md`'s "xHCI busy-waits switched from iteration-bounded to time-bounded" entry for
   the full writeup.
 - ~~Diagnose the real-Parallels task-switch hang~~ — **done, same day it
   was found.** Root cause traced (well enough to fix) to task 1's idle
@@ -1297,7 +1297,7 @@ phase:
   virtio-console device over PCI, and no direct evidence of one over
   MMIO either. Parallels' actual serial port is very likely a
   proprietary device (PCI vendor `0x1ab8`, no public spec) - see
-  `CLAUDE.md`'s "virtio-console" section. Reverse-engineering that
+  `CHANGELOG.md`'s "Parallels console: virtio-console confirmed not applicable". Reverse-engineering that
   device was considered and explicitly declined (open-ended, no
   guaranteed payoff); revisit only if real documentation or driver
   source for it ever surfaces. The virtio-console *driver* itself stays
@@ -1306,7 +1306,7 @@ phase:
 - ~~Build a GOP framebuffer console (the real lead after virtio-console)~~
   — done, **and confirmed reaching a real, working shell prompt live on
   real Parallels hardware** ("take six" - `framebuffer.rs`/`font.rs`/
-  `fbconsole.rs`, see `CLAUDE.md`/`CHANGELOG.md`). Five real-Parallels
+  `fbconsole.rs`, see `CHANGELOG.md`). Five real-Parallels
   test rounds, each finding and fixing one real bug: `open_protocol_exclusive`
   disconnecting firmware's own boot console from GOP; `try_virtio_console`'s
   MMIO scan freezing the boot with no console yet installed to report
@@ -1374,7 +1374,7 @@ phase:
   two-task round-robin multitasking now works end to end on real
   Parallels hardware, confirmed by a sustained interactive test with a
   genuinely, correctly incrementing `uptime` throughout. See
-  `CLAUDE.md`'s "MADT/GICv3" section for the full writeup, including the
+  `CHANGELOG.md`'s "MADT/GICv3" entry for the full writeup, including the
   two real GICv3 bugs found and fixed on QEMU first (`GICR_IGROUPR0`
   Group-1 assignment, `GICD_CTLR`'s multi-bit enable) before ever
   risking a Parallels round trip on them, and the task-switch fix
@@ -1402,7 +1402,7 @@ phase:
   overflow refusals/error cases, zero aborts) and on real Parallels
   hardware (the `NO_FS` path - no disk driver exists there - plus a
   `test-parallels.sh` extension typing `>` as a real held-Shift
-  scancode chord). See `CLAUDE.md`'s "Output redirection" section and
+  scancode chord). See `CHANGELOG.md`'s "Output redirection" entry and
   `docs/shell-commands.md`.
 - ~~**Lifting `mkdir`'s no-directory-extension limitation** - a full
   parent directory currently makes `mkdir` fail rather than growing it.~~
@@ -1419,7 +1419,7 @@ phase:
   512-byte cluster with 20 entries, write/cat on an extended-cluster
   file, root-directory extension too, reboot persistence, rmdir on the
   two-cluster directory, freed-cluster reuse, sibling integrity, zero
-  aborts) — see `CLAUDE.md`'s "Directory extension" section.
+  aborts), see `CHANGELOG.md`'s "Directory extension" entry.
 - ~~A real relocating loader (ELF + relocation processing) — would also
   lift the current `core::fmt`/`write!` restriction in userland
   programs.~~ **Done** — real ELF64 parsing and `R_AARCH64_RELATIVE`
@@ -1429,7 +1429,7 @@ phase:
   plus a real pre-existing kernel bug this work surfaced and fixed (the
   SVC trampoline losing `x9` across every syscall — also confirmed fixed
   on real hardware via a genuinely multi-digit `uptime` value). See
-  `CLAUDE.md`'s "A real relocating loader" section for the full writeup.
+  `CHANGELOG.md`'s "A real relocating loader" entry for the full writeup.
 - ~~Blocking/waiting primitives, so tasks aren't limited to unconditional
   round-robin `wfe` polling.~~ **Done** — `tasks.rs` gained real
   `Runnable`/`Blocked(reason)` task state, a `block_current_and_switch`
@@ -1444,8 +1444,8 @@ phase:
   all, `ELR`/`SPSR` at the wrong offset) - harmless for every syscall
   before this one, since none needed the frame to be a fully
   interchangeable `Context`, but it directly corrupted the resumed
-  task's `ELR_EL1` the first time one did. See `CLAUDE.md`'s "Blocking
-  primitives" section for the full writeup.
+  task's `ELR_EL1` the first time one did. See `CHANGELOG.md`'s "Blocking
+  primitives" entry for the full writeup.
 - ~~Dynamic task creation and `exec()` — running more than one loaded
   program, or reloading one without a reboot.~~ **Done** — a new `spawn`
   syscall (16) loads a program from disk at runtime and starts it as a
@@ -1468,14 +1468,14 @@ phase:
   Parallels hardware for every piece except the actual disk-load success
   path, which real hardware can't reach yet — a pre-existing,
   already-tracked gap (no working virtio-blk on Parallels at all, see
-  below), not something this feature introduces. See `CLAUDE.md`'s
-  "Dynamic task creation and `exec()`" section and
+  below), not something this feature introduces. See `CHANGELOG.md`'s
+  "Dynamic task creation and `exec`" entry and
   `docs/architecture.md`'s "Dynamic task creation" section for the full
   writeup.
 - **Disk on real Parallels hardware — diagnosed (2026-08-17), and the
   answer rules out every documented PCI storage controller.** A
-  dedicated diagnostic round (see `CLAUDE.md`'s "Parallels disk
-  diagnostic" section) confirmed with fresh evidence, not the old
+  dedicated diagnostic round (see `CHANGELOG.md`'s "Parallels disk
+  diagnostic" entry) confirmed with fresh evidence, not the old
   inventory alone: the VM's own boot disk is attached as `sata:0`, yet
   the PCI bus shows **no storage controller of any kind** — the same
   five devices as ever (audio, EHCI, xHCI, virtio-net, and Parallels'
@@ -1566,7 +1566,7 @@ phase:
   exactly `0x08`/`0x06`/`0x50`), and keeps non-keyboard devices
   addressed, ready for a driver. Confirmed on real Parallels hardware
   (mouse + keyboard concurrently addressed, typing unregressed). See
-  `CLAUDE.md`'s "xHCI multi-device support" section. Remaining
+  `CHANGELOG.md`'s "xHCI multi-device support" entry. Remaining
   constraints going in: everything stays polled, matching the rest of
   the kernel; no hot-plug (the stick must be attached before boot);
   no hubs.
@@ -1589,7 +1589,7 @@ phase:
   (`WaitReason::TaskExit`), and Ctrl+C interrupts a wait so the
   session can't be bricked. The task-lifecycle arc
   (spawn/ps/exit/kill/fg/Ctrl+C/wait) is complete; nothing is left in
-  this area short of real signals/parent-child process trees. See `CLAUDE.md`'s "Task destruction" section.
+  this area short of real signals/parent-child process trees. See `CHANGELOG.md`'s "Task destruction" entry.
 - **Actual microkernel-style driver isolation** — moving components
   out of the EL1 kernel and into supervised EL0 processes, per
   `docs/research/research-minix-boot.md`'s comparison (process-boundary
@@ -1620,7 +1620,7 @@ phase:
   missing-FSD.BIN degradation, the USB replace flow) and on real
   Parallels hardware (the whole mount → INQUIRY → server-side FAT32
   mount → `ls` of the real stick chain; reads only by policy). See
-  `CLAUDE.md`'s userland-filesystem section. **The follow-up - EL0
+  `CHANGELOG.md`'s "Driver isolation part 2" entry. **The follow-up - EL0
   fault isolation + server supervision - is done too (2026-08-18):**
   an EL0 fault now kills just the faulting task and the system keeps
   running (a new resumable fault trampoline in `exceptions.rs`; a
@@ -1680,8 +1680,8 @@ phase:
   minimal emergency console (fbconsole/UART) for boot/faults.
   **Real-Parallels confirmation is pending** - the framebuffer backend is
   what matters most there (no UART console), on the user to test like
-  every framebuffer milestone. See `CLAUDE.md`'s "Driver isolation, part
-  3". **(Update: the general supervision/heartbeat mechanism named here
+  every framebuffer milestone. See `CHANGELOG.md`'s "Console server"
+  entry. **(Update: the general supervision/heartbeat mechanism named here
   as the next step is now done - 2026-08-19, `supervisor.rs`; and the
   capability model for who-may-call-whom that followed it is done too -
   2026-08-20, IPC send-mask enforced at the `MSG_SEND`/`MSG_CALL`
