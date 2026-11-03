@@ -106,9 +106,8 @@ make parallels-hdd   # wraps it into build/esp.hdd via prl_disk_tool
 ```
 
 Attach `build/esp.hdd` as the VM's **Hard Disk** device. Two confirmed traps:
-Parallels rejects raw
-`.img` files on the Hard Disk device, and attaching the image to the
-CD/DVD device *looks* like it works but doesn't (the optical driver
+Parallels rejects raw `.img` files on the Hard Disk device, and attaching the
+image to the CD/DVD device *looks* like it works but doesn't (the optical driver
 wants ISO9660). Also: `build/esp.hdd` stores a *pointer* to `build/esp.dmg`'s
 absolute path, so the two files must stay together.
 

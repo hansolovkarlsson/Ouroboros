@@ -711,7 +711,7 @@ Worth knowing before building further on this:
   band `>= FS_ERR_MIN` in `syscall-abi`, mapped from the server's
   `fat32::Error` by `fsd/src/main.rs::error_code`), alongside the
   existing `NO_FS` distinction — the old one-collapsed-sentinel gap is
-  closed, and `spawn`'s codes are split the same way. See `CHANGELOG.md`'s "Phase 4" through "Phase 8"
-  entries. **This closes the write-support arc phase 3 deliberately
+  closed, and `spawn`'s codes are split the same way. See `CHANGELOG.md`'s "first filesystem write support" (Phase 4)
+  and the phase entries after it, through Phase 8. **This closes the write-support arc phase 3 deliberately
   deferred** - what's left in the parking lot from here is genuinely
   bigger work, not more commands of this shape.

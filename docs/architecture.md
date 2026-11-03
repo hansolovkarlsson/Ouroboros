@@ -596,7 +596,7 @@ something the kernel alone can say.
 | 2 | `report` | a task ID | `0` or `u64::MAX` | Demo only — original two-task milestone's proof of per-task syscall state |
 | 3 | `try_read_char` | ignored | a byte, or `NO_CHAR` (`u64::MAX`) if none waiting or the caller does not own the keyboard | Non-blocking; only the keyboard owner's reads consume keystrokes (see `fg`) |
 | 4 | `putc` | a byte | `0` | Raw single-byte write to the kernel's console, no newline translation. Now mostly a *fallback*: userland output normally goes to the console server over IPC (`con_write` below), and every client's helper falls back to `putc` only when no console server is present this boot |
-| *5* | *(gap)* | | | `shell_input` used to live here; removed when line editing moved into userland. Left unfilled rather than renumbered — see `syscall.rs`'s module doc comment |
+| *5* | *(gap)* | | | `shell_input` used to live here; removed when line editing moved into userland. Left unfilled rather than renumbered, see the comment at the gap in `syscall-abi/src/lib.rs` |
 | 6 | `get_ticks` | ignored | preemption tick count since boot | Added for phase 2's `uptime` builtin — the first syscall added specifically so a loaded program could read real kernel state, not just I/O |
 | *7–14* | *(gaps)* | | | The eight `fs_*` syscalls (`list_dir`/`read_file`/`mkdir`/`rmdir`/`touch`/`rm`/`write_file`/`mv`) lived here until the filesystem moved out of the kernel entirely. Their exact contracts survive unchanged as the filesystem server's `FSOP_*` request protocol (below); the numbers stay unfilled, same stable-ABI reasoning as the gap at 5 |
 | 15 | `read_char` | ignored | a byte | Blocking: if none is waiting, suspends the calling task and switches to another runnable one instead of returning `NO_CHAR`; resumes with the byte once available, and only once the caller owns the keyboard (a non-owner stays suspended until an `fg` names it or ownership reverts to it). See `tasks.rs`'s `block_current_and_switch` and the "Blocking primitives" section below |
@@ -947,6 +947,6 @@ hard-crashes real Parallels hardware.
 ## What's not here yet
 
 This document describes the current, working state. For active
-limitations and what's reasonably next, see `ROADMAP.md`'s "What's next"
+limitations and what's reasonably next, see `ROADMAP.md`'s "What's next (the current frontier)"
 section, which is kept current as the project's actual state changes —
 not duplicated here, since it would just go stale.
