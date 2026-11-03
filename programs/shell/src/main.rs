@@ -1581,15 +1581,15 @@ fn parse_redirect(line: &str) -> RedirectParse<'_> {
         }
 
         let offset = token.as_ptr() as usize - line.as_ptr() as usize;
-        // `.get()` rather than `&line[..offset]`: both offsets are
-        // guaranteed char boundaries (the token is a whitespace-split
-        // subslice of `line`), but indexing's can't-happen failure path
-        // (`str::slice_error_fail`) formats the offending string with
-        // enough of `core::fmt` to drag prebuilt non-PIC libcore
-        // objects into the link, which fails outright under this
-        // crate's PIE model (the same "release-only builds" constraint
-        // documented in docs/CHANGELOG.md's relocating-loader entry, hit here
-        // even in release). The Option path pulls none of that in.
+        // `.get()` rather than `&line[..offset]`: both offsets are guaranteed
+        // char boundaries (the token is a whitespace-split subslice of
+        // `line`), but indexing's can't-happen failure path
+        // (`str::slice_error_fail`) formats the offending string with enough
+        // of `core::fmt` to drag prebuilt non-PIC libcore objects into the
+        // link, which fails outright under this crate's PIE model (the same
+        // "release-only builds" constraint documented in docs/CHANGELOG.md's
+        // relocating-loader entry, hit here even in release). The Option path
+        // pulls none of that in.
         let Some(cmd) = line.get(..offset) else { return RedirectParse::NoRedirect };
         let Some(rest) = line.get(offset + token.len()..) else { return RedirectParse::NoRedirect };
         let mut rest_words = rest.split_whitespace();
@@ -2900,25 +2900,24 @@ impl Output<'_> {
     }
 
     /// Hand-rolled decimal formatting. Historical note, kept because it
-    /// explains why `selftest` (now `/bin/selftest`) exists and why this still
-    /// hand-rolls rather than switching to `write!` itself: under the
+    /// explains why `selftest` (now `/bin/selftest`) exists and why this
+    /// still hand-rolls rather than switching to `write!` itself: under the
     /// *old*, non-relocating flat-binary loader, `write!`/
     /// `core::fmt::Arguments` crashed here. That machinery builds its
-    /// per-argument dispatch out of *data* (an array of function
-    /// pointers, one per formatted argument) rather than direct `bl`
-    /// calls - a binary linked for base `0x0` but loaded somewhere else
-    /// (always, in practice) had no way to know those embedded pointer
-    /// values needed correcting, so they pointed at whatever link-time
-    /// address `0x0` would have meant (`ELR_EL1` landing on a tiny
-    /// near-null address instead of real code, confirmed directly by
-    /// trying `write!` here first). **This is now fixed**, since
-    /// `loader.rs` processes real `R_AARCH64_RELATIVE` relocations
-    /// against the actual runtime load address (see docs/CHANGELOG.md's
-    /// "A real relocating loader" entry and `selftest` (now `/bin/selftest`),
-    /// which proves
-    /// it) - but this is left as hand-rolled decimal formatting anyway,
-    /// simply because it was already written, works, and doesn't need
-    /// `core::fmt`'s machinery to do something this simple.
+    /// per-argument dispatch out of *data* (an array of function pointers,
+    /// one per formatted argument) rather than direct `bl` calls - a binary
+    /// linked for base `0x0` but loaded somewhere else (always, in practice)
+    /// had no way to know those embedded pointer values needed correcting, so
+    /// they pointed at whatever link-time address `0x0` would have meant
+    /// (`ELR_EL1` landing on a tiny near-null address instead of real code,
+    /// confirmed directly by trying `write!` here first). **This is now
+    /// fixed**, since `loader.rs` processes real `R_AARCH64_RELATIVE`
+    /// relocations against the actual runtime load address (see
+    /// docs/CHANGELOG.md's "A real relocating loader" entry and `selftest`
+    /// (now `/bin/selftest`), which proves it) - but this is left as
+    /// hand-rolled decimal formatting anyway, simply because it was already
+    /// written, works, and doesn't need `core::fmt`'s machinery to do
+    /// something this simple.
     fn put_u64_decimal(&mut self, mut n: u64) {
         if n == 0 {
             self.put(b'0');

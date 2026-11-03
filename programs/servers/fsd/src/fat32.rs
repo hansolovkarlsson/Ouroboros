@@ -1,12 +1,11 @@
 //! The filesystem server's FAT32 engine - the kernel's old
-//! `kernel/src/fat32.rs`, moved here verbatim when the filesystem left
-//! the kernel (driver isolation part 2), with exactly one structural
-//! change: the `block::BlockDevice` it used to own by value became
-//! [`Disk`], a zero-sized handle whose `read_sector`/`write_sector`
-//! are the `BLOCK_*` syscalls (the kernel keeps the device and only
-//! accepts those calls from this task). Every algorithm, ordering
-//! decision, and documented bug fix is unchanged - see the original
-//! module's history in `docs/CHANGELOG.md` (phases 3b
+//! `kernel/src/fat32.rs`, moved here verbatim when the filesystem left the
+//! kernel (driver isolation part 2), with exactly one structural change: the
+//! `block::BlockDevice` it used to own by value became [`Disk`], a zero-sized
+//! handle whose `read_sector`/`write_sector` are the `BLOCK_*` syscalls (the
+//! kernel keeps the device and only accepts those calls from this task).
+//! Every algorithm, ordering decision, and documented bug fix is unchanged -
+//! see the original module's history in `docs/CHANGELOG.md` (phases 3b
 //! through 8, directory extension, the cluster-0-means-root saga).
 //!
 //! Still hand-rolled, still zero-heap - a constraint that carries over
@@ -1252,11 +1251,10 @@ impl Fs {
     /// its parent must already exist and be a directory).
     ///
     /// First write-capable command this filesystem has ever had - see
-    /// `docs/CHANGELOG.md`'s "Phase 4" mkdir/rmdir entry for the full design
-    /// rationale.
-    /// (Its original deliberately-narrow no-directory-extension
-    /// limitation is gone: a parent whose existing clusters have no free
-    /// entry slot now grows by a cluster - see
+    /// `docs/CHANGELOG.md`'s "first filesystem write support" entry for the
+    /// full design rationale. (Its original deliberately-narrow
+    /// no-directory-extension limitation is gone: a parent whose existing
+    /// clusters have no free entry slot now grows by a cluster - see
     /// [`insert_dir_entry`](Self::insert_dir_entry).)
     pub fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         let (parent_path, name) = split_parent(path).ok_or(Error::InvalidName)?;

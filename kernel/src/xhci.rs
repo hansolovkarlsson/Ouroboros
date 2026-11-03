@@ -1,33 +1,33 @@
 //! xHCI (eXtensible Host Controller Interface) driver: minimal bring-up of
 //! one USB HID boot-protocol keyboard, over the real xHCI PCI controller
-//! (`pci::discover_xhci`) - this kernel's first keyboard input path, and
-//! the reason the whole GOP framebuffer console effort (see docs/CHANGELOG.md)
-//! mattered enough to keep pushing on: that console is write-only, and
-//! until this module, so was Parallels itself.
+//! (`pci::discover_xhci`) - this kernel's first keyboard input path, and the
+//! reason the whole GOP framebuffer console effort (docs/CHANGELOG.md's "GOP
+//! framebuffer console" entries, from "a fifth, better-grounded lead" to
+//! "confirmed") mattered enough to keep pushing on: that console is
+//! write-only, and until this module, so was Parallels itself.
 //!
 //! ## Why this is safe to attempt even where `qemu_device_region_safe` is
 //! ## false
 //!
 //! Every register this module touches lives at an address firmware itself
 //! reports for the xHCI controller's BAR0 (`pci::discover_xhci`: the host
-//! address from the controller's own `PciIo.GetBarAttributes`, accepted
-//! only when it agrees with the BAR read out of PCI configuration space).
-//! **Not the mechanism Parallels confirmed**: there the address was the
-//! raw BAR, read through `PciRootBridgeIo`. The two are the same wherever
-//! the PCIe window is not translated, and the Raspberry Pi 4/400's is,
-//! which is why it changed (2026-09-27); the new path is checked on QEMU
-//! only, so the first Parallels or Pi boot is its first real test. That's a
-//! fundamentally different situation from `virtio_mmio.rs`'s
-//! `SLOT_BASE`/`gic.rs`'s `GICD_BASE` - both fixed, QEMU-shaped
-//! conventions confirmed unsafe on Parallels by two decoded Synchronous
-//! External Aborts (see `virtio_mmio.rs`'s module doc comment and
-//! `docs/CHANGELOG.md`'s "GOP framebuffer console, round three/four"). This
-//! address is
-//! *discovered*, not guessed, the same category of thing as the GOP
-//! framebuffer's own address - which real Parallels hardware testing
-//! already confirmed is safe to map and write post-`exit_boot_services`.
-//! `main.rs` therefore calls this module's `init` unconditionally whenever
-//! a BAR was found, independent of `qemu_device_region_safe`.
+//! address from the controller's own `PciIo.GetBarAttributes`, accepted only
+//! when it agrees with the BAR read out of PCI configuration space). **Not
+//! the mechanism Parallels confirmed**: there the address was the raw BAR,
+//! read through `PciRootBridgeIo`. The two are the same wherever the PCIe
+//! window is not translated, and the Raspberry Pi 4/400's is, which is why it
+//! changed (2026-09-27); the new path is checked on QEMU only, so the first
+//! Parallels or Pi boot is its first real test. That's a fundamentally
+//! different situation from `virtio_mmio.rs`'s `SLOT_BASE`/`gic.rs`'s
+//! `GICD_BASE` - both fixed, QEMU-shaped conventions confirmed unsafe on
+//! Parallels by two decoded Synchronous External Aborts (see
+//! `virtio_mmio.rs`'s module doc comment and `docs/CHANGELOG.md`'s "GOP
+//! framebuffer console, round three/four"). This address is *discovered*, not
+//! guessed, the same category of thing as the GOP framebuffer's own address -
+//! which real Parallels hardware testing already confirmed is safe to map and
+//! write post-`exit_boot_services`. `main.rs` therefore calls this module's
+//! `init` unconditionally whenever a BAR was found, independent of
+//! `qemu_device_region_safe`.
 //!
 //! ## Scope: the narrowest slice that can type into the shell
 //!
@@ -1989,23 +1989,22 @@ impl Xhci {
     /// **A real, confirmed bug lived here: a single report can legitimately
     /// contain more than one newly-pressed keycode at once** - most likely
     /// when a poll gets skipped (this task preempted between two hardware
-    /// samples, missing an intermediate report - a real, new possibility
-    /// once real preemption started working on Parallels, see docs/CHANGELOG.md's
-    /// "MADT/GICv3" entry), but not exclusively: two keys genuinely
-    /// pressed within one poll interval can do it too, preemption or not.
-    /// The original version of this function returned on the *first*
-    /// qualifying keycode in `buf[2..8]` after already recording the whole
-    /// report as `last_report` - so any second new keycode in that same
-    /// report was silently gone forever: it would never be "new" again on
-    /// a later poll, since `last_report` already included it. Confirmed on
-    /// real Parallels hardware: `uptime` typed via a scripted test
-    /// occasionally arrived at the shell one character short (e.g.
-    /// `uptme`), even though the xHCI debug log below showed every
-    /// expected report, including the dropped character's own. Fixed by
-    /// draining every qualifying keycode from a report into `pending`
-    /// (all of them, up to the 6 slots of `buf[2..8]`, each key's last
-    /// byte marked in `pending_last`; this function only pops from there)
-    /// instead of discarding everything past the first.
+    /// samples, missing an intermediate report - a real, new possibility once
+    /// real preemption started working on Parallels, see docs/CHANGELOG.md's
+    /// "MADT/GICv3" entry), but not exclusively: two keys genuinely pressed
+    /// within one poll interval can do it too, preemption or not. The
+    /// original version of this function returned on the *first* qualifying
+    /// keycode in `buf[2..8]` after already recording the whole report as
+    /// `last_report` - so any second new keycode in that same report was
+    /// silently gone forever: it would never be "new" again on a later poll,
+    /// since `last_report` already included it. Confirmed on real Parallels
+    /// hardware: `uptime` typed via a scripted test occasionally arrived at
+    /// the shell one character short (e.g. `uptme`), even though the xHCI
+    /// debug log below showed every expected report, including the dropped
+    /// character's own. Fixed by draining every qualifying keycode from a
+    /// report into `pending` (all of them, up to the 6 slots of `buf[2..8]`,
+    /// each key's last byte marked in `pending_last`; this function only pops
+    /// from there) instead of discarding everything past the first.
     fn poll_key(&mut self) -> Option<(u8, bool)> {
         // Drain any keycodes still queued from the last processed report
         // before touching the event ring at all.

@@ -44,11 +44,11 @@ pub const TRY_READ_CHAR: u64 = 3;
 /// byte to write.
 pub const PUTC: u64 = 4;
 
-// 5 is a deliberate gap, not an oversight - `shell_input` used to live
-// here; removed when line editing moved out of the kernel and into
-// userland (see docs/CHANGELOG.md's Phase 1.5, "the shell becomes a real
-// process"). Left unfilled rather than renumbering every syscall after
-// it: a stable ABI matters more than a dense one.
+// 5 is a deliberate gap, not an oversight - `shell_input` used to live here;
+// removed when line editing moved out of the kernel and into userland (see
+// row 5 of the syscall table in `docs/architecture.md`). Left unfilled rather
+// than renumbering every syscall after it: a stable ABI matters more than a
+// dense one.
 
 /// Preemption tick count since boot - the first syscall added
 /// specifically so a loaded program could read real kernel state, not

@@ -2099,11 +2099,12 @@ fn con_write_parts(parts: &[&str]) {
 
 /// Route output through the console server (task `CON_TASK`) as a batched
 /// `DSPOP_WRITE` message, falling back to the kernel console (`PUTC`) if
-/// there's no server this boot - same shape as the shell's `con_write`.
-/// The filesystem server only prints at startup / on `mount`, so this is
-/// never on a hot path; without it the server's few lines would render at
-/// the kernel's own fbconsole cursor instead of `cond`'s, stranded on a
-/// framebuffer-only platform (see docs/CHANGELOG.md's "Console server" entry).
+/// there's no server this boot - same shape as the shell's `con_write`. The
+/// filesystem server only prints at startup / on `mount`, so this is never on
+/// a hot path; without it the server's few lines would render at the kernel's
+/// own fbconsole cursor instead of `cond`'s, stranded on a framebuffer-only
+/// platform (see `docs/postmortems/console-server-postmortem.md`'s "The
+/// handoff: the kernel has to learn to shut up").
 fn con_write(bytes: &[u8]) {
     let payload_off = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut off = 0;

@@ -1391,16 +1391,16 @@ run-net: esp
 
 # Same as `run`, plus a virtio-mmio console device (device ID 3, the
 # virtio-console/virtio-serial class - see kernel/src/virtio_console.rs)
-# attached via a separate chardev, for testing that driver. On this
-# machine (default OVMF firmware, ACPI present), devicetree/ACPI/PCI
-# console discovery always wins before virtio_console.rs ever gets a
-# chance to run - this target only makes the *device* available, it
-# doesn't organically force the fallback to trigger. To actually
-# exercise it, temporarily force main.rs's `if !found_console_early`
-# check to `if true` (see docs/CHANGELOG.md's "virtio-console" entries for how
-# this was originally verified, and why acpi=off doesn't work for this -
-# it makes devicetree discovery succeed instead, a real surprise, not a
-# path to "everything fails").
+# attached via a separate chardev, for testing that driver. On this machine
+# (default OVMF firmware, ACPI present), devicetree/ACPI/PCI console discovery
+# always wins before virtio_console.rs ever gets a chance to run - this target
+# only makes the *device* available, it doesn't organically force the fallback
+# to trigger. To actually exercise it, temporarily force main.rs's `if
+# !found_console_early` check to `if true` (see docs/CHANGELOG.md's "a real
+# transmit-only driver" virtio-console entry for how this was originally
+# verified, and why acpi=off doesn't work for this - it makes devicetree
+# discovery succeed instead, a real surprise, not a path to "everything
+# fails").
 run-virtio-console: esp
 	qemu-system-aarch64 \
 		-machine virt \
@@ -1511,13 +1511,13 @@ run-usb-hub: esp $(USBSTICK_IMG)
 # default GICv2 (`-machine virt,help` confirms `gic-version` accepts
 # 2/3/4/x-5/host/max - real, checked, not assumed). For exercising
 # kernel/src/gicv3.rs and kernel/src/madt.rs's GICv3 discovery path without
-# needing real Parallels hardware for every iteration - see docs/CHANGELOG.md's
-# "MADT/GICv3" entry. Confirmed via a devicetree dump
+# needing real Parallels hardware for every iteration - see
+# docs/CHANGELOG.md's "MADT/GICv3" entry. Confirmed via a devicetree dump
 # (`qemu-system-aarch64 -machine virt,gic-version=3,dumpdtb=...`) that this
-# QEMU build describes GICv3 as one contiguous GICR region (GICD @
-# 0x08000000, GICR @ 0x080a0000 size 0xf60000), not per-CPU GICC.GICR
-# fields - madt.rs's parser confirmed independently to report the exact
-# same addresses from the real ACPI MADT, not just the devicetree.
+# QEMU build describes GICv3 as one contiguous GICR region (GICD @ 0x08000000,
+# GICR @ 0x080a0000 size 0xf60000), not per-CPU GICC.GICR fields - madt.rs's
+# parser confirmed independently to report the exact same addresses from the
+# real ACPI MADT, not just the devicetree.
 run-gicv3: esp
 	qemu-system-aarch64 \
 		-machine virt,gic-version=3 \

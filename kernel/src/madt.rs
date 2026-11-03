@@ -3,15 +3,14 @@
 //! table is literally `"APIC"`, its historical x86 name, not `"MADT"`.
 //!
 //! Exists to replace `main.rs`'s `qemu_device_region_safe` heuristic for
-//! GIC/timer setup specifically with genuine discovery. `gic.rs`'s
-//! original addresses (`0x0800_0000`/`0x0801_0000`) were only ever
-//! confirmed via a QEMU-internal devicetree dump — a QEMU-shaped
-//! convention real Parallels hardware already directly disproved (a
-//! decoded Synchronous External Abort with `FAR_EL1` matching `GICD_BASE`
-//! exactly, see `docs/CHANGELOG.md`'s "GOP framebuffer console, round
-//! four"). MADT is the platform's own,
-//! genuinely portable way of describing this, the same role SPCR plays
-//! for the console (`acpi.rs`).
+//! GIC/timer setup specifically with genuine discovery. `gic.rs`'s original
+//! addresses (`0x0800_0000`/`0x0801_0000`) were only ever confirmed via a
+//! QEMU-internal devicetree dump — a QEMU-shaped convention real Parallels
+//! hardware already directly disproved (a decoded Synchronous External Abort
+//! with `FAR_EL1` matching `GICD_BASE` exactly, see `docs/CHANGELOG.md`'s
+//! "GOP framebuffer console, round four"). MADT is the platform's own,
+//! genuinely portable way of describing this, the same role SPCR plays for
+//! the console (`acpi.rs`).
 //!
 //! Reuses `acpi::find_table` (the RSDP -> XSDT walk `discover_pl011`
 //! already needed) rather than a second table-walking implementation.

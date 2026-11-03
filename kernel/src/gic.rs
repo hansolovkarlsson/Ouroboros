@@ -1,15 +1,14 @@
-//! Version-dispatching facade over `gicv2.rs` (GICv2) and `gicv3.rs`
-//! (GICv3) — the real GIC version is now discovered at boot via
-//! `madt.rs`, not assumed, so this module exists to keep `main.rs`'s and
-//! `exceptions.rs`'s call sites (`init`/`enable_interrupt`/`acknowledge`/
-//! `end_of_interrupt`) exactly the same shape they were when this file
-//! *was* the GICv2 driver directly. `exceptions.rs`'s two call sites
+//! Version-dispatching facade over `gicv2.rs` (GICv2) and `gicv3.rs` (GICv3)
+//! — the real GIC version is now discovered at boot via `madt.rs`, not
+//! assumed, so this module exists to keep `main.rs`'s and `exceptions.rs`'s
+//! call sites (`init`/`enable_interrupt`/`acknowledge`/ `end_of_interrupt`)
+//! exactly the same shape they were when this file *was* the GICv2 driver
+//! directly. `exceptions.rs`'s two call sites
 //! (`acknowledge`/`end_of_interrupt`, both inside the resumable IRQ path)
 //! don't change at all; `main.rs` gains one `configure` call ahead of the
-//! existing `init`/`enable_interrupt` pair, see `docs/CHANGELOG.md`'s
-//! "MADT/GICv3" entry for why a facade was chosen over matching
-//! `madt::GicVersion` at every call site instead (more churn for no real
-//! benefit, since every call site would need the match anyway).
+//! existing `init`/`enable_interrupt` pair. A facade was chosen over matching
+//! `madt::GicVersion` at every call site (more churn for no real benefit,
+//! since every call site would need the match anyway).
 //!
 //! Multi-core step 4(c) changed the IRQ path's two call sites after all:
 //! `acknowledge` returns an [`Acked`], whose ID is [`Acked::intid`] and

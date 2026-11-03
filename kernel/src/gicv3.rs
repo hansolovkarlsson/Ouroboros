@@ -28,20 +28,19 @@
 //!   `GICR_WAKER.ProcessorSleep` and poll `GICR_WAKER.ChildrenAsleep`
 //!   until it clears before the redistributor accepts anything.
 //! - **Finding *this* CPU's redistributor frame.** `madt::GicInfo`'s
-//!   `gicr_base`/`gicr_size` describe a region that may hold more than
-//!   one CPU's redistributor (QEMU's default `virt,gic-version=3` region
-//!   is sized for many, confirmed via both a devicetree dump and this
-//!   driver's own MADT parse — see `main.rs`'s MADT log line and
-//!   `docs/CHANGELOG.md`'s "MADT/GICv3" entry). `init` walks redistributor
-//!   frames (stride `0x2_0000`, or `0x4_0000` if `GICR_TYPER.VLPIS` is
-//!   set — a real possibility this driver checks for rather than
-//!   assuming away) comparing each frame's `GICR_TYPER` affinity field
-//!   against this CPU's own `MPIDR_EL1`, stopping at a match or at
-//!   `GICR_TYPER`'s "Last" bit. Real discovery, not hardcoded to frame 0,
-//!   even though this kernel is single-core — matches this project's
-//!   existing discipline of discovering rather than assuming (e.g.
-//!   `xhci.rs` scanning every port rather than trusting the first device
-//!   found).
+//!   `gicr_base`/`gicr_size` describe a region that may hold more than one
+//!   CPU's redistributor (QEMU's default `virt,gic-version=3` region is sized
+//!   for many, confirmed via both a devicetree dump and this driver's own
+//!   MADT parse — see `main.rs`'s MADT log line and the Makefile's
+//!   `run-gicv3` comment). `init` walks redistributor frames (stride
+//!   `0x2_0000`, or `0x4_0000` if `GICR_TYPER.VLPIS` is set — a real
+//!   possibility this driver checks for rather than assuming away) comparing
+//!   each frame's `GICR_TYPER` affinity field against this CPU's own
+//!   `MPIDR_EL1`, stopping at a match or at `GICR_TYPER`'s "Last" bit. Real
+//!   discovery, not hardcoded to frame 0, even though this kernel is
+//!   single-core — matches this project's existing discipline of discovering
+//!   rather than assuming (e.g. `xhci.rs` scanning every port rather than
+//!   trusting the first device found).
 
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};

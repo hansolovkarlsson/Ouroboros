@@ -19,25 +19,23 @@
 //! all yet, a real gap independent of this console, not something this
 //! module could address on its own.
 //!
-//! # Safety model
-//! The raw framebuffer pointer/stride/format are captured during boot
-//! services (`framebuffer::discover`) and used via `write_volatile`/
-//! `ptr::copy` after `exit_boot_services` - the `GraphicsOutput`/
-//! `FrameBuffer` objects themselves are never held past boot services. The
-//! UEFI spec doesn't guarantee the pointer stays valid post-exit (see
-//! `framebuffer.rs`), but this is the only way to find out - confirmed
-//! working on QEMU's `ramfb` device (screendump-verified, see
+//! # Safety model The raw framebuffer pointer/stride/format are captured
+//! during boot services (`framebuffer::discover`) and used via
+//! `write_volatile`/ `ptr::copy` after `exit_boot_services` - the
+//! `GraphicsOutput`/ `FrameBuffer` objects themselves are never held past
+//! boot services. The UEFI spec doesn't guarantee the pointer stays valid
+//! post-exit (see `framebuffer.rs`), but this is the only way to find out -
+//! confirmed working on QEMU's `ramfb` device (screendump-verified, see
 //! `docs/CHANGELOG.md`'s "a fifth, better-grounded lead" entry). Whether the
-//! framebuffer
-//! lands inside the identity map's discovered-RAM span or needs
+//! framebuffer lands inside the identity map's discovered-RAM span or needs
 //! `mmu.rs`'s separate device-region fallback determines its memory type:
 //! inside RAM (QEMU `ramfb`, the Raspberry Pi) it is ordinary write-back
 //! cacheable memory, and every write path here ends in `publish`, which
-//! cleans the written bytes out to memory for the display engine - it
-//! reads memory, not the CPU's caches (`docs/testing/testing-pi4.md` Risk
-//! 7); outside RAM (a PCI BAR, Parallels) it is a Device-nGnRnE block, on
-//! which the clean is a no-op. The `ptr::copy` scroll path is
-//! screendump-checked on the former (QEMU `ramfb`).
+//! cleans the written bytes out to memory for the display engine - it reads
+//! memory, not the CPU's caches (`docs/testing/testing-pi4.md` Risk 7);
+//! outside RAM (a PCI BAR, Parallels) it is a Device-nGnRnE block, on which
+//! the clean is a no-op. The `ptr::copy` scroll path is screendump-checked on
+//! the former (QEMU `ramfb`).
 
 use crate::font;
 use crate::framebuffer::Info;

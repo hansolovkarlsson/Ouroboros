@@ -7,11 +7,10 @@
 //!
 //! Introduced when USB mass storage became the second disk path (see
 //! `docs/CHANGELOG.md`'s "USB mass storage" entry): `fat32.rs` was written
-//! directly over `virtio_blk::Device`, which was fine while that was
-//! the only block driver this kernel had - and wrong the moment real
-//! Parallels hardware (which exposes no storage controller virtio or
-//! otherwise, only USB) needed the same filesystem over a different
-//! transport.
+//! directly over `virtio_blk::Device`, which was fine while that was the only
+//! block driver this kernel had - and wrong the moment real Parallels
+//! hardware (which exposes no storage controller virtio or otherwise, only
+//! USB) needed the same filesystem over a different transport.
 
 use crate::usb_msd;
 use crate::virtio_blk;
