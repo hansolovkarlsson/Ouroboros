@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Documentation — Ouroboros</title>
-<meta name="description" content="The full documentation library for Ouroboros — guides, architecture and reference, debugging postmortems, and research notes, each as a web page and backed by a Markdown source in the repository.">
+<title>Documentation · Ouroboros</title>
+<meta name="description" content="The full documentation library for Ouroboros: guides, architecture and reference, debugging postmortems, and research notes, each as a web page and backed by a Markdown source in the repository.">
 <link rel="icon" type="image/png" href="../assets/favicon.png">
 <link rel="stylesheet" href="../assets/site.css">
 </head>
@@ -29,7 +29,7 @@
 
   <h1 class="title">The documentation library</h1>
   <p class="dek">
-    Every document in this project — the build-it-yourself guide, the
+    Every document in this project, the build-it-yourself guide, the
     architecture and reference material, the debugging postmortems, and the
     research notes. Each page here abridges a Markdown source of record in the
     repository under <code class="inline">docs/</code>; the fast-moving
@@ -39,7 +39,7 @@
   <article>
 
     <h2>Guides</h2>
-    <p>Start here — how to build the system, and how to use and extend it.</p>
+    <p>Start here: how to build the system, and how to use and extend it.</p>
     <div class="postmortem-cards">
       <a class="pm-card" href="manual.html">
         <span class="pm-eyebrow">Guide · start here</span>
@@ -49,17 +49,17 @@
       <a class="pm-card" href="tutorial.html">
         <span class="pm-eyebrow">Guide · the working path</span>
         <h3>Build an ARM64 OS from scratch</h3>
-        <p>Nine ordered stages from a UEFI hello world to preemptive multitasking and position-independent userland loaded from disk — the working path only, no bug narratives. Stable Rust and QEMU are all you need.</p>
+        <p>Nine ordered stages from a UEFI hello world to preemptive multitasking and position-independent userland loaded from disk, the working path only, no bug narratives. Stable Rust and QEMU are all you need.</p>
       </a>
       <a class="pm-card" href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/shell-commands.md">
         <span class="pm-eyebrow">Reference · Markdown ↗</span>
         <h3>Shell commands</h3>
-        <p>The default shell's builtin commands — syntax, behaviour, and known limitations, command by command. Read on GitHub, where it is always current: the shell gains commands faster than a hand-written abridgement can track them.</p>
+        <p>The default shell's builtin commands: syntax, behaviour, and known limitations, command by command. Read on GitHub, where it is always current: the shell gains commands faster than a hand-written abridgement can track them.</p>
       </a>
       <a class="pm-card" href="glossary.html">
         <span class="pm-eyebrow">Guide · reference</span>
         <h3>Glossary</h3>
-        <p>Every acronym and term this project leans on — EL0/EL1, GIC, MMIO, PPI, virtqueue, PIE, FAT32, xHCI — defined in one place, grouped by area.</p>
+        <p>Every acronym and term this project leans on (EL0/EL1, GIC, MMIO, PPI, virtqueue, PIE, FAT32, xHCI), defined in one place, grouped by area.</p>
       </a>
     </div>
 
@@ -74,17 +74,17 @@
       <a class="pm-card" href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/processes.md">
         <span class="pm-eyebrow">Reference · Markdown ↗</span>
         <h3>The process model</h3>
-        <p>How userland programs are loaded, laid out in memory, and structured — the ELF/PIE binary format, the config mechanism, and a guide to writing a replacement program (and the relocation-class traps to avoid). Read on GitHub.</p>
+        <p>How userland programs are loaded, laid out in memory, and structured: the ELF/PIE binary format, the config mechanism, and a guide to writing a replacement program (and the relocation-class traps to avoid). Read on GitHub.</p>
       </a>
       <a class="pm-card" href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/ROADMAP.md">
         <span class="pm-eyebrow">Reference · Markdown ↗</span>
         <h3>Roadmap</h3>
-        <p>The forward-looking plan — the open frontier, the small tails finished arcs left behind, and the north-star directions. It moves every working day, so it is served from the repository rather than copied here.</p>
+        <p>The forward-looking plan: the open frontier, the small tails finished arcs left behind, and the north-star directions. It moves every working day, so it is served from the repository rather than copied here.</p>
       </a>
       <a class="pm-card" href="https://github.com/hansolovkarlsson/Ouroboros/blob/main/docs/CHANGELOG.md">
         <span class="pm-eyebrow">Reference · Markdown ↗</span>
         <h3>Changelog</h3>
-        <p>The full milestone-by-milestone record, phase 0 to the present, newest first — every completed step with the same level of detail as the postmortems.</p>
+        <p>The full milestone-by-milestone record, phase 0 to the present, newest first, every completed step with the same level of detail as the postmortems.</p>
       </a>
     </div>
 
@@ -92,7 +92,7 @@
       <span class="aside-label">Why four of these leave the site</span>
       <p>
         The shell reference, the process model, the roadmap and the changelog
-        are <strong>reference</strong> material — worth more <em>current</em>
+        are <strong>reference</strong> material, worth more <em>current</em>
         than abridged, and they move on days when nothing else does. They used
         to be hand-written pages here, and hand-written pages fall behind: the
         whole site froze for twelve days once, still presenting a superseded
@@ -104,7 +104,7 @@
 
     <h2>Postmortems</h2>
     <p>
-      Every real bug that mattered, written up in full — symptom, root
+      Every real bug that mattered, written up in full: symptom, root
       cause, how it was actually confirmed, and the generalizable lesson.
       In chronological order, each usable on its own.
     </p>
@@ -122,7 +122,7 @@
       <a class="pm-card" href="postmortem-xhci-keyboard.html">
         <span class="pm-eyebrow">Part 3 · xHCI keyboard</span>
         <h3>Getting a USB keyboard working on Parallels</h3>
-        <p>Seven real, confirmed hardware bugs bringing keyboard input to the kernel — a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, a driver reading the wrong device, and two found weeks later, one of them by a user, not a script.</p>
+        <p>Seven real, confirmed hardware bugs bringing keyboard input to the kernel: a PCI Command register bit, a real UEFI firmware panic, a page-table assumption, a silently-dropped USB request class, a driver reading the wrong device, and two found weeks later, one of them by a user, not a script.</p>
       </a>
       <a class="pm-card" href="postmortem-usb-storage.html">
         <span class="pm-eyebrow">Part 4 · USB storage</span>
@@ -132,7 +132,7 @@
       <a class="pm-card" href="postmortem-isolation-dataflow.html">
         <span class="pm-eyebrow">Retrospective · a different era</span>
         <h3>Enforce the isolation, rebuild the data flow</h3>
-        <p>A design-led day, not a bug hunt: MMU-enforced per-task isolation and fault containment, then rebuilding every cheap data path enforcement broke — grant/safecopy IPC, a FAT32 offset-write, and the one works-on-QEMU-fails-on-silicon reversal.</p>
+        <p>A design-led day, not a bug hunt: MMU-enforced per-task isolation and fault containment, then rebuilding every cheap data path enforcement broke: grant/safecopy IPC, a FAT32 offset-write, and the one works-on-QEMU-fails-on-silicon reversal.</p>
       </a>
       <a class="pm-card" href="postmortem-console-server.html">
         <span class="pm-eyebrow">Retrospective · driver isolation</span>
@@ -142,7 +142,7 @@
       <a class="pm-card" href="postmortem-capability-hardening.html">
         <span class="pm-eyebrow">Retrospective · scoping</span>
         <h3>Scope it down before you build it</h3>
-        <p>Five milestones in one day — an active health-ping, a capability model, program-to-program pipes, a stack guard page, a userland heap — whose lesson is scoping: three shrank when asked whether the clean design needed the hard part, a guard page found a silent overflow on its first test, and a one-build gate proved <code class="inline">alloc</code> can't be PIE-linked on stable before a week was spent on it.</p>
+        <p>Five milestones in one day (an active health-ping, a capability model, program-to-program pipes, a stack guard page, a userland heap) whose lesson is scoping: three shrank when asked whether the clean design needed the hard part, a guard page found a silent overflow on its first test, and a one-build gate proved <code class="inline">alloc</code> can't be PIE-linked on stable before a week was spent on it.</p>
       </a>
       <a class="pm-card" href="postmortem-network-stack.html">
         <span class="pm-eyebrow">Retrospective · networking</span>
@@ -157,13 +157,13 @@
       <a class="pm-card" href="postmortem-filesystems.html">
         <span class="pm-eyebrow">Retrospective · the filesystems arc</span>
         <h3>exFAT, ext2, and what real hardware revealed</h3>
-        <p>Two filesystems added to the server — each read-only then read-write, all behind one unchanged protocol — with the lessons: an abstraction is only tested by a genuinely different implementation (ext2's inodes), validate against a foreign checker not your own reader, a freed inode's <code class="inline">i_dtime</code> that e2fsck misread as an orphan pointer, and a real-hardware pass that found a USB keyboard/storage bug the emulator structurally cannot show.</p>
+        <p>Two filesystems added to the server, each read-only then read-write, all behind one unchanged protocol, with the lessons: an abstraction is only tested by a genuinely different implementation (ext2's inodes), validate against a foreign checker not your own reader, a freed inode's <code class="inline">i_dtime</code> that e2fsck misread as an orphan pointer, and a real-hardware pass that found a USB keyboard/storage bug the emulator structurally cannot show.</p>
       </a>
     </div>
 
     <h2>Research &amp; assessments</h2>
     <p>
-      Where this project sits against the ideas it draws on — a current
+      Where this project sits against the ideas it draws on: a current
       self-assessment, and notes on the two outside influences it measures
       itself against.
     </p>
@@ -171,29 +171,29 @@
       <a class="pm-card" href="microkernel-comparison.html">
         <span class="pm-eyebrow">Assessment · self</span>
         <h3>Microkernel, protection, fault tolerance</h3>
-        <p>How close the mechanisms actually are — measured against MINIX and Helix OS on three axes, with a consolidated scorecard and a ranked list of what would close each gap. On its one moved service, a genuine microkernel; what's missing is breadth, not honesty.</p>
+        <p>How close the mechanisms actually are, measured against MINIX and Helix OS on three axes, with a consolidated scorecard and a ranked list of what would close each gap. On its one moved service, a genuine microkernel; what's missing is breadth, not honesty.</p>
       </a>
       <a class="pm-card" href="research-directions.html">
         <span class="pm-eyebrow">Assessment · directions</span>
         <h3>Where the influences point next</h3>
-        <p>A synthesis across MINIX, Linux, Plan 9, and Helix asking which architectural idea is still worth building — and why Plan 9's per-process namespaces plus a uniform file protocol is the standout: the one mechanism that would unify the servers, the capability model, and delegation instead of piling on a feature.</p>
+        <p>A synthesis across MINIX, Linux, Plan 9, and Helix asking which architectural idea is still worth building, and why Plan 9's per-process namespaces plus a uniform file protocol is the standout: the one mechanism that would unify the servers, the capability model, and delegation instead of piling on a feature.</p>
       </a>
       <a class="pm-card" href="research-minix-boot.html">
         <span class="pm-eyebrow">Research · influence</span>
         <h3>How MINIX boots</h3>
-        <p>How a decades-mature microkernel boots and starts its user-space servers — on x86 and on ARM — and where Ouroboros's UEFI-native boot resembles or deliberately diverges from it.</p>
+        <p>How a decades-mature microkernel boots and starts its user-space servers, on x86 and on ARM, and where Ouroboros's UEFI-native boot resembles or deliberately diverges from it.</p>
       </a>
       <a class="pm-card" href="research-helix-os.html">
         <span class="pm-eyebrow">Research · influence</span>
         <h3>Helix OS's fault-tolerant design</h3>
-        <p>A young, layered, trait-based Rust kernel that makes hot-reload and self-healing first-class primitives — and the real difference between its in-address-space module recovery and MINIX-style process isolation.</p>
+        <p>A young, layered, trait-based Rust kernel that makes hot-reload and self-healing first-class primitives, and the real difference between its in-address-space module recovery and MINIX-style process isolation.</p>
       </a>
     </div>
 
   </article>
 
   <footer class="site-footer">
-    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <span>Ouroboros, an ARM64 microkernel, written from scratch in Rust</span>
     <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
   </footer>
 
