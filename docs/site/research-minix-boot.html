@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How MINIX Boots — Ouroboros</title>
-<meta name="description" content="A research note on how MINIX — a decades-mature microkernel and one of Ouroboros's stated influences — actually boots and starts its first user-space servers, on both x86 and ARM, compared side by side with Ouroboros's UEFI-native boot.">
+<title>How MINIX Boots · Ouroboros</title>
+<meta name="description" content="A research note on how MINIX, a decades-mature microkernel and one of Ouroboros's stated influences, actually boots and starts its first user-space servers, on both x86 and ARM, compared side by side with Ouroboros's UEFI-native boot.">
 <link rel="icon" type="image/png" href="../assets/favicon.png">
 <link rel="stylesheet" href="../assets/site.css">
 <style>
@@ -47,17 +47,17 @@
 
   <div class="kicker">Research note · Ouroboros</div>
 
-  <h1 class="title small">How MINIX boots — and how Ouroboros differs</h1>
+  <h1 class="title small">How MINIX boots, and how Ouroboros differs</h1>
   <p class="dek">
     MINIX is one of this project's stated influences. This note looks at
     how a real, decades-mature microkernel actually boots and starts its
     first processes, and where Ouroboros's own boot sequence resembles or
-    diverges from it — deliberately or not.
+    diverges from it, deliberately or not.
   </p>
 
   <div class="companion">
     <span class="companion-icon">📚</span>
-    <span>One of two outward-looking research notes — see also <a href="research-helix-os.html">Helix OS's fault-tolerant design</a> — that feed the current <a href="microkernel-comparison.html">microkernel self-assessment</a>. For Ouroboros's own boot flow in depth, see the <a href="architecture-overview.html">architecture overview</a>.</span>
+    <span>One of two outward-looking research notes (see also <a href="research-helix-os.html">Helix OS's fault-tolerant design</a>) that feed the current <a href="microkernel-comparison.html">microkernel self-assessment</a>. For Ouroboros's own boot flow in depth, see the <a href="architecture-overview.html">architecture overview</a>.</span>
   </div>
 
   <article>
@@ -71,25 +71,25 @@
 
     <ol>
       <li>
-        <strong>BIOS reads the first sector</strong> and executes it —
+        <strong>BIOS reads the first sector</strong> and executes it:
         ordinary MBR-style boot, no UEFI. That code loads
         <code class="inline">/boot/boot</code>, the <strong>MINIX Boot
         Monitor</strong>, MINIX's own small boot-loading program.
       </li>
       <li>
-        <strong>The Boot Monitor loads <code class="inline">/boot/image</code></strong>
-        — a multi-part file containing several separate programs packed
+        <strong>The Boot Monitor loads <code class="inline">/boot/image</code></strong>,
+        a multi-part file containing several separate programs packed
         together: the kernel, plus the initial set of user-space servers.
         It also reads boot environment variables that configure driver
         behaviour.
       </li>
       <li>
         <strong>The kernel starts,</strong> initializing itself and its own
-        kernel-resident tasks — CLOCK and SYSTEM, plus IPC — before
+        kernel-resident tasks (CLOCK and SYSTEM, plus IPC) before
         anything in user space runs.
       </li>
       <li>
-        <strong>The kernel starts PM and VFS</strong> — the Process Manager
+        <strong>The kernel starts PM and VFS</strong>: the Process Manager
         and Virtual File System, the first two user-space processes. PM
         gets PID 0 and is genuinely the first thing running outside the
         kernel.
@@ -103,15 +103,15 @@
       </li>
       <li>
         <strong><code class="inline">init</code> runs <code class="inline">/etc/rc</code></strong>,
-        which starts everything that <em>wasn't</em> in the boot image —
+        which starts everything that <em>wasn't</em> in the boot image:
         PCI enumeration, disk controllers, the keyboard driver, networking,
-        procfs — before finally starting login.
+        procfs, before finally starting login.
       </li>
     </ol>
 
     <p>
       So the boot image is deliberately minimal, and <em>everything
-      else</em> — every real device driver, the TCP/IP stack, procfs — is a
+      else</em> (every real device driver, the TCP/IP stack, procfs) is a
       separate, independently-restartable user-space process started later,
       not compiled into the kernel at all.
     </p>
@@ -123,8 +123,8 @@
       BeagleBone-class Cortex-A8 SoCs) boots much closer to embedded ARM
       Linux: <strong>U-Boot</strong>, a third-party bootloader, loads the
       MINIX kernel at a fixed, hardcoded memory address
-      (<code class="inline">0x80200000</code>) and jumps to it directly —
-      there is no MINIX-authored boot monitor on ARM.
+      (<code class="inline">0x80200000</code>) and jumps to it directly.
+      There is no MINIX-authored boot monitor on ARM.
     </p>
 
     <blockquote class="aside">
@@ -142,7 +142,7 @@
     <ol>
       <li>
         <strong>UEFI firmware loads the kernel directly</strong> as a UEFI
-        application — no MBR, no boot sector, no separate boot-monitor
+        application: no MBR, no boot sector, no separate boot-monitor
         stage. A deliberate choice specific to the primary target
         (Parallels on Apple Silicon), which boots ARM VMs exclusively
         through UEFI with no direct-kernel shortcut.
@@ -150,23 +150,23 @@
       <li>
         <strong>The kernel does its own console discovery</strong> and
         <strong>loads its userland programs</strong> (the shell and the
-        filesystem server, per config) — still using UEFI boot services,
+        filesystem server, per config), still using UEFI boot services,
         the same window MINIX's boot monitor would occupy.
       </li>
       <li>
-        <strong><code class="inline">exit_boot_services</code></strong> —
+        <strong><code class="inline">exit_boot_services</code></strong>:
         the one-way transition out of the UEFI world. Nothing before this
         resembles a "kernel"; everything after it does.
       </li>
       <li>
         <strong>The kernel installs its own exception vectors, then its own
-        MMU identity map,</strong> replacing firmware's page tables — a step
+        MMU identity map,</strong> replacing firmware's page tables, a step
         with no equivalent in MINIX's sequence, specific to arriving at EL1
         with the MMU already active.
       </li>
       <li>
         <strong>Interrupt controller + timer init, then the kernel drops to
-        EL0</strong> — running the loaded shell, the idle task, and the
+        EL0</strong>, running the loaded shell, the idle task, and the
         filesystem server.
       </li>
     </ol>
@@ -184,7 +184,7 @@
           <tr><th scope="row">First code to run</th><td>Boot Monitor (MINIX-authored)</td><td>U-Boot (not MINIX-authored)</td><td class="oc">The kernel's own entry point, immediately</td></tr>
           <tr><th scope="row">Load address</th><td>Chosen by the Boot Monitor</td><td>Hardcoded (<code class="inline">0x80200000</code>)</td><td class="oc">Wherever UEFI places it (queried, not assumed)</td></tr>
           <tr><th scope="row">Where drivers / FS live</th><td>User-space servers, restartable by RS</td><td>Same</td><td class="oc">Filesystem, console, network and account servers in user space; device drivers still kernel-resident</td></tr>
-          <tr><th scope="row">Fault isolation of OS components</th><td>Strong — a crashed driver is a crashed process</td><td>Same</td><td class="oc">All four servers are isolated + supervised; in-kernel drivers are not</td></tr>
+          <tr><th scope="row">Fault isolation of OS components</th><td>Strong: a crashed driver is a crashed process</td><td>Same</td><td class="oc">All four servers are isolated + supervised; in-kernel drivers are not</td></tr>
         </tbody>
       </table>
     </div>
@@ -193,19 +193,19 @@
 
     <p>
       When these notes were first written, Ouroboros was considerably more
-      monolithic than either MINIX platform — MMU, exceptions, drivers, and
+      monolithic than either MINIX platform: MMU, exceptions, drivers, and
       scheduling all undifferentiated EL1 code, with nothing in user space
       but a demo. That has since changed for four components: the
       filesystem, the console, the network stack and account management each
       run as an isolated, supervised, restartable userland server, reached
       over <code class="inline">sendrec</code>-shaped IPC with
       <code class="inline">grant</code>/<code class="inline">safecopy</code>
-      capability copies — MINIX's <code class="inline">sys_safecopy</code>
+      capability copies: MINIX's <code class="inline">sys_safecopy</code>
       and its reincarnation server, in miniature. The gap versus MINIX is now
       <strong>breadth</strong>, not the absence of the model: four servers
       rather than a full fleet, no VFS or process manager, no process trees.
       MINIX's boot sequence remains the concrete existence proof of the
-      fuller version — a typed set of cooperating servers started in
+      fuller version, a typed set of cooperating servers started in
       dependency order, each independently replaceable.
     </p>
 
@@ -214,20 +214,20 @@
     <ul>
       <li>
         <strong>A "boot image" of more than one program.</strong> Ouroboros
-        already loads a shell <em>and</em> a filesystem server at boot — a
+        already loads a shell <em>and</em> a filesystem server at boot, a
         natural step toward MINIX packing kernel + PM + VFS + RS together;
         config could name a <em>list</em> of programs to start.
       </li>
       <li>
         <strong>A supervisor / restart process (MINIX's RS).</strong>
         Ouroboros now has a special-cased version of exactly this for its
-        filesystem server; the general form — any registered server
-        health-checked and restarted — is the natural next step.
+        filesystem server; the general form (any registered server
+        health-checked and restarted) is the natural next step.
       </li>
       <li>
         <strong>MINIX's ARM boot chain is the cautionary comparison, not
         the aspirational one.</strong> U-Boot, a fixed load address,
-        "everything hard-coded" — a reminder that Ouroboros's UEFI-native,
+        "everything hard-coded", a reminder that Ouroboros's UEFI-native,
         address-discovered approach is already ahead of what MINIX's own ARM
         port does, for reasons this project learned the hard way (a
         hardcoded QEMU address once hard-crashed real Parallels hardware).
@@ -243,7 +243,7 @@
   </article>
 
   <footer class="site-footer">
-    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <span>Ouroboros, an ARM64 microkernel, written from scratch in Rust</span>
     <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
   </footer>
 

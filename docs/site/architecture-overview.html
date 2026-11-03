@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ouroboros — architecture at a glance</title>
-<meta name="description" content="How Ouroboros — an ARM64 microkernel for Apple Silicon — separates its layers: the EL0/EL1 privilege boundary, a filesystem and a console running as unprivileged userland servers, and MMU-enforced task isolation.">
+<title>Ouroboros: architecture at a glance</title>
+<meta name="description" content="How Ouroboros, an ARM64 microkernel for Apple Silicon, separates its layers: the EL0/EL1 privilege boundary, a filesystem and a console running as unprivileged userland servers, and MMU-enforced task isolation.">
 <link rel="icon" type="image/png" href="../assets/favicon.png">
 <link rel="stylesheet" href="../assets/site.css">
 <style>
@@ -187,7 +187,7 @@
   <p class="dek">
     Most operating systems put the filesystem, the drivers, and the
     scheduler together in one privileged blob. Ouroboros draws a hard
-    line instead — and pushes everything it can across it. This is that
+    line instead, and pushes everything it can across it. This is that
     line, and what lives on each side of it.
   </p>
 
@@ -207,8 +207,8 @@
       two: <strong>EL1</strong> for the kernel, <strong>EL0</strong> for
       everything else. EL0 code cannot touch kernel memory, device
       registers, or privileged system registers. The only way from EL0
-      into EL1 is a <strong>trap</strong> — a system call
-      (<code class="inline">svc</code>), a fault, or the timer interrupt —
+      into EL1 is a <strong>trap</strong>: a system call
+      (<code class="inline">svc</code>), a fault, or the timer interrupt,
       caught by the exception vector table. That single crossing is where
       the whole design lives. Firmware decides which level the kernel is
       entered at: QEMU and Parallels hand off at EL1, the Raspberry Pi at
@@ -262,8 +262,8 @@
 
     <p>
       The kernel is deliberately small. It owns the things that
-      <em>require</em> privilege — trap handling, memory mapping, the
-      interrupt controller, raw devices — and the mechanisms tasks use to
+      <em>require</em> privilege (trap handling, memory mapping, the
+      interrupt controller, raw devices) and the mechanisms tasks use to
       talk to each other. It does not contain policy it can push outward.
     </p>
 
@@ -272,7 +272,7 @@
         <div class="rcard">
           <span class="tag">Traps</span>
           <h3>Exception vectors</h3>
-          <p>A 16-entry <code class="inline">VBAR_EL1</code> table catches every syscall, fault, and interrupt. Kernel faults report and halt; EL0 faults are contained — only the faulting task dies.</p>
+          <p>A 16-entry <code class="inline">VBAR_EL1</code> table catches every syscall, fault, and interrupt. Kernel faults report and halt; EL0 faults are contained: only the faulting task dies.</p>
         </div>
         <div class="rcard">
           <span class="tag">Scheduling</span>
@@ -302,37 +302,37 @@
         <div class="rcard">
           <span class="tag">Console</span>
           <h3>Console: discovery + emergency</h3>
-          <p>Five discovery paths tried in order (a GOP framebuffer wins on Apple Silicon), a minimal emergency console for boot and fault reporting, and dumb framebuffer pixel primitives. The rendering itself moved out — see below.</p>
+          <p>Five discovery paths tried in order (a GOP framebuffer wins on Apple Silicon), a minimal emergency console for boot and fault reporting, and dumb framebuffer pixel primitives. The rendering itself moved out, see below.</p>
         </div>
         <div class="rcard">
           <span class="tag">Devices</span>
           <h3>Raw hardware</h3>
-          <p>A from-scratch <strong>xHCI</strong> USB stack (keyboard and mass storage) and a <strong>virtio</strong> transport with block, network, console and entropy drivers — the parts that genuinely touch MMIO and DMA.</p>
+          <p>A from-scratch <strong>xHCI</strong> USB stack (keyboard and mass storage) and a <strong>virtio</strong> transport with block, network, console and entropy drivers, the parts that genuinely touch MMIO and DMA.</p>
         </div>
         <div class="rcard">
           <span class="tag">Storage</span>
           <h3>Block-device custody</h3>
-          <p>The kernel holds the raw disk and hands out one 512-byte sector at a time — but only to the filesystem server. Any other caller is denied.</p>
+          <p>The kernel holds the raw disk and hands out one 512-byte sector at a time, but only to the filesystem server. Any other caller is denied.</p>
         </div>
         <div class="rcard out">
           <span class="tag">Not here</span>
           <h3>The filesystem → userland</h3>
-          <p>FAT32, exFAT and ext2 parsing, partition tables, directories, paths, permissions — none of it lives in the kernel. It moved out to a task (<code class="inline">fsd</code>), reached only over IPC.</p>
+          <p>FAT32, exFAT and ext2 parsing, partition tables, directories, paths, permissions: none of it lives in the kernel. It moved out to a task (<code class="inline">fsd</code>), reached only over IPC.</p>
         </div>
         <div class="rcard out">
           <span class="tag">Not here</span>
           <h3>The console → userland</h3>
-          <p>Font, cursor, line wrap, scrolling, ANSI parsing — the console rendering moved out to a task (<code class="inline">cond</code>) too, driving the kernel's dumb pixel primitives over gated syscalls.</p>
+          <p>Font, cursor, line wrap, scrolling, ANSI parsing: the console rendering moved out to a task (<code class="inline">cond</code>) too, driving the kernel's dumb pixel primitives over gated syscalls.</p>
         </div>
         <div class="rcard out">
           <span class="tag">Not here</span>
           <h3>The network → userland</h3>
-          <p>ARP, IPv4, ICMP, UDP, DNS and TCP are a userland task (<code class="inline">netd</code>) — the whole protocol stack, plus an HTTP server and the cluster's 9P gateway. The kernel keeps only the DMA-owning NIC driver, gated to that one task.</p>
+          <p>ARP, IPv4, ICMP, UDP, DNS and TCP are a userland task (<code class="inline">netd</code>): the whole protocol stack, plus an HTTP server and the cluster's 9P gateway. The kernel keeps only the DMA-owning NIC driver, gated to that one task.</p>
         </div>
         <div class="rcard out">
           <span class="tag">Not here</span>
           <h3>Accounts → userland</h3>
-          <p>Password changes go to a task (<code class="inline">accountd</code>) rather than a setuid binary — which could not work here, since the loader is an ordinary program and "this is setuid" would be a claim by a task the capability model distrusts.</p>
+          <p>Password changes go to a task (<code class="inline">accountd</code>) rather than a setuid binary, which could not work here, since the loader is an ordinary program and "this is setuid" would be a claim by a task the capability model distrusts.</p>
         </div>
       </div>
       <figcaption><span class="fig">FIG 2</span> &nbsp;Kernel responsibilities. The dashed cards are what was deliberately <em>removed</em> from the kernel.</figcaption>
@@ -341,10 +341,10 @@
     <h2>The tasks</h2>
 
     <p>
-      Eleven scheduler slots. The first six have fixed roles — the shell,
+      Eleven scheduler slots. The first six have fixed roles: the shell,
       idle, and the four servers; the remaining five are filled at runtime,
       when the shell runs a command or builds a pipeline. Each is an
-      ordinary EL0 program — the shell is not special kernel code, it is
+      ordinary EL0 program. The shell is not special kernel code, it is
       just the program loaded into slot 0, and neither is any server.
     </p>
 
@@ -364,13 +364,13 @@
             <tr>
               <td class="slot">1</td>
               <td class="tname">Idle</td>
-              <td><span class="d">A bare busy-spin — runs when nothing else can. (A real spin, not <code class="inline">wfe</code>: EL0 <code class="inline">wfe</code> hangs under the Apple hypervisor.)</span></td>
+              <td><span class="d">A bare busy-spin that runs when nothing else can. (A real spin, not <code class="inline">wfe</code>: EL0 <code class="inline">wfe</code> hangs under the Apple hypervisor.)</span></td>
               <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
               <td class="slot">2</td>
               <td class="tname">FS server</td>
-              <td><span class="d">Owns FAT32, exFAT, ext2, a synthetic <code class="inline">/proc</code>, partition discovery and permission enforcement. The only task allowed the block-device syscalls. Boot-loaded and supervised — the kernel restarts it from a kept image if it crashes or wedges.</span></td>
+              <td><span class="d">Owns FAT32, exFAT, ext2, a synthetic <code class="inline">/proc</code>, partition discovery and permission enforcement. The only task allowed the block-device syscalls. Boot-loaded and supervised: the kernel restarts it from a kept image if it crashes or wedges.</span></td>
               <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
@@ -382,19 +382,19 @@
             <tr>
               <td class="slot">4</td>
               <td class="tname">Network server</td>
-              <td><span class="d">The entire protocol stack in userland — ARP, IPv4, ICMP, UDP, DNS, TCP — plus an HTTP server, the cluster's 9P export gateway, and remote execution. The only task allowed the NIC syscalls; the DMA-owning driver stays in the kernel because there is no IOMMU.</span></td>
+              <td><span class="d">The entire protocol stack in userland (ARP, IPv4, ICMP, UDP, DNS, TCP), plus an HTTP server, the cluster's 9P export gateway, and remote execution. The only task allowed the NIC syscalls; the DMA-owning driver stays in the kernel because there is no IOMMU.</span></td>
               <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
               <td class="slot">5</td>
               <td class="tname">Account server</td>
-              <td><span class="d">Changes passwords for callers who may not write <code class="inline">/etc/shadow</code> themselves. It holds no device capability at all — its privilege is policy, and it authorizes on the sender credential the kernel bound when the message was sent, never on who occupies a slot now.</span></td>
+              <td><span class="d">Changes passwords for callers who may not write <code class="inline">/etc/shadow</code> themselves. It holds no device capability at all. Its privilege is policy, and it authorizes on the sender credential the kernel bound when the message was sent, never on who occupies a slot now.</span></td>
               <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>
               <td class="slot">6–10</td>
               <td class="tname">Spawnable</td>
-              <td><span class="d">Five slots filled by running a command — a <code class="inline">/bin</code> program, a background job, or the stages of a pipeline running concurrently. Own memory, own view, reaped when they exit. Job control (<code class="inline">fg</code>, <code class="inline">kill</code>, <code class="inline">wait</code>) and IPC let them cooperate.</span></td>
+              <td><span class="d">Five slots filled by running a command: a <code class="inline">/bin</code> program, a background job, or the stages of a pipeline running concurrently. Own memory, own view, reaped when they exit. Job control (<code class="inline">fg</code>, <code class="inline">kill</code>, <code class="inline">wait</code>) and IPC let them cooperate.</span></td>
               <td><span class="tbadge spawn">runtime</span></td>
             </tr>
           </tbody>
@@ -417,17 +417,17 @@
         <div class="icell">
           <div class="num">01 · separation</div>
           <h3>Per-task page tables</h3>
-          <p>Every task runs under its own translation view. From inside any task, another's memory is simply not mapped for EL0 — touching it faults, and the fault kills only the toucher. Proven by injection: the same read succeeds under a shared map and faults under views. The same mechanism guards a task from itself: a page mapped EL1-only sits between its heap and its stack, so a stack overflow faults cleanly instead of quietly corrupting what is below it — it has caught real overflows three times.</p>
+          <p>Every task runs under its own translation view. From inside any task, another's memory is simply not mapped for EL0. Touching it faults, and the fault kills only the toucher. Proven by injection: the same read succeeds under a shared map and faults under views. The same mechanism guards a task from itself: a page mapped EL1-only sits between its heap and its stack, so a stack overflow faults cleanly instead of quietly corrupting what is below it, and it has caught real overflows three times.</p>
         </div>
         <div class="icell">
           <div class="num">02 · communication</div>
           <h3>Messages by copy</h3>
-          <p>Tasks never share memory. A message is copied — out of the sender, into the kernel, into the destination's mailbox. Small, bounded, safe by construction: no pointer from one task is ever dereferenced by another. And a task may only message the endpoints its per-slot capability mask allows — a spawned program can reach the servers it legitimately needs and the shell, not the device drivers' hardware and not arbitrary tasks — so isolation is topological, not just memory-level. The mask is a baseline: a task holding a capability may hand it onward at runtime, which is how the shell wires one program's output straight into the next, and how any command gets to speak to the network server at all.</p>
+          <p>Tasks never share memory. A message is copied: out of the sender, into the kernel, into the destination's mailbox. Small, bounded, safe by construction: no pointer from one task is ever dereferenced by another. And a task may only message the endpoints its per-slot capability mask allows. A spawned program can reach the servers it legitimately needs and the shell, not the device drivers' hardware and not arbitrary tasks, so isolation is topological, not just memory-level. The mask is a baseline: a task holding a capability may hand it onward at runtime, which is how the shell wires one program's output straight into the next, and how any command gets to speak to the network server at all.</p>
         </div>
         <div class="icell">
           <div class="num">03 · bulk data</div>
           <h3>Grant &amp; safecopy</h3>
-          <p>To move file contents, a client <em>grants</em> the server an exact buffer, in one direction. The server may copy only those bytes, only while the client's call is in flight, never a third task's — a capability the kernel checks, not a trust it assumes.</p>
+          <p>To move file contents, a client <em>grants</em> the server an exact buffer, in one direction. The server may copy only those bytes, only while the client's call is in flight, never a third task's: a capability the kernel checks, not a trust it assumes.</p>
         </div>
       </div>
     </figure>
@@ -436,7 +436,7 @@
       <div class="memo">
         <div class="memblk">
           <div class="who"><span class="el">EL0</span> Shell · task 0</div>
-          <div class="memrow mine">its own region — rw</div>
+          <div class="memrow mine">its own region: rw</div>
           <div class="memrow locked">fsd region</div>
           <div class="memrow locked">cond region</div>
           <div class="memrow locked">netd region</div>
@@ -449,7 +449,7 @@
         </div>
         <div class="memblk">
           <div class="who"><span class="el">EL0</span> Filesystem · task 2</div>
-          <div class="memrow mine">its own region — rw</div>
+          <div class="memrow mine">its own region: rw</div>
           <div class="memrow locked">shell region</div>
           <div class="memrow locked">kernel region</div>
         </div>
@@ -462,7 +462,7 @@
     <p>
       Because the filesystem is a separate process, a plain
       <code class="inline">cat</code> crosses the privilege boundary
-      several times. This is the cost the microkernel split pays — and,
+      several times. This is the cost the microkernel split pays, and,
       right beside it, exactly what it buys.
     </p>
 
@@ -518,19 +518,19 @@
           </div>
         </div>
       </div>
-      <div class="lnote"><b>What it costs:</b> several boundary crossings per read, where a monolithic kernel would have none. <b>What it buys:</b> a filesystem bug can corrupt only its own memory and its own mount — it cannot scribble on the shell, and if it crashes or wedges, the kernel restarts it from a kept image (the same supervision covers the console server). The disk is never reachable except through the one supervised task.</div>
+      <div class="lnote"><b>What it costs:</b> several boundary crossings per read, where a monolithic kernel would have none. <b>What it buys:</b> a filesystem bug can corrupt only its own memory and its own mount. It cannot scribble on the shell, and if it crashes or wedges, the kernel restarts it from a kept image (the same supervision covers the console server). The disk is never reachable except through the one supervised task.</div>
       <figcaption><span class="fig">FIG 5</span> &nbsp;<code class="inline">cat</code> as a sequence of traps. Light cards are EL0; dark panels are the kernel.</figcaption>
     </figure>
 
     <div class="lesson">
       <span class="lesson-label">The payoff</span>
-      <p><strong>An EL0 fault is contained, not fatal.</strong> A wild pointer in any userland program used to halt the whole system. Now the kernel reports the fault, tears down just that task, and resumes the rest. If the dead task is the filesystem server, it is reloaded from an image kept at boot and remounts from disk — because all of its state was always derivable from the disk. That is the whole reason the filesystem was worth moving out.</p>
+      <p><strong>An EL0 fault is contained, not fatal.</strong> A wild pointer in any userland program used to halt the whole system. Now the kernel reports the fault, tears down just that task, and resumes the rest. If the dead task is the filesystem server, it is reloaded from an image kept at boot and remounts from disk, because all of its state was always derivable from the disk. That is the whole reason the filesystem was worth moving out.</p>
     </div>
 
     <h2>From firmware to EL0</h2>
 
     <p>
-      There is no separate bootloader — the kernel <em>is</em> a UEFI
+      There is no separate bootloader: the kernel <em>is</em> a UEFI
       application, the only boot path that works on both the QEMU dev
       loop and the real Parallels target. It sets itself up while still
       inside firmware, then leaves that world for good.
@@ -539,7 +539,7 @@
     <figure>
       <div class="ttable-wrap">
         <div class="ribbon">
-          <div class="rstep"><div class="rn">01</div><div class="rt">UEFI init</div><div class="rd">Logging, allocator, protocols — all still firmware-backed.</div></div>
+          <div class="rstep"><div class="rn">01</div><div class="rt">UEFI init</div><div class="rd">Logging, allocator, protocols, all still firmware-backed.</div></div>
           <div class="rstep"><div class="rn">02</div><div class="rt">Find console</div><div class="rd">Devicetree → ACPI → PCI → framebuffer.</div></div>
           <div class="rstep"><div class="rn">03</div><div class="rt">Load programs</div><div class="rd">The shell and the four servers, off the ESP; then the boot identity, a persisted per-boot counter and firmware entropy that session keys are made from.</div></div>
           <div class="rstep mark"><div class="rn">04</div><div class="rt">Exit boot services</div><div class="rd">Firmware left behind, permanently.</div></div>
@@ -547,7 +547,7 @@
           <div class="rstep"><div class="rn">06</div><div class="rt">Own the MMU</div><div class="rd">Swap in the kernel's own page tables.</div></div>
           <div class="rstep"><div class="rn">07</div><div class="rt">GIC + timer</div><div class="rd">Arm the 20 ms preemption tick.</div></div>
           <div class="rstep"><div class="rn">08</div><div class="rt">Build tasks</div><div class="rd">Initial context for shell, idle, servers.</div></div>
-          <div class="rstep mark"><div class="rn">09</div><div class="rt">Drop to EL0</div><div class="rd"><code class="inline">tasks::start</code> — and never returns.</div></div>
+          <div class="rstep mark"><div class="rn">09</div><div class="rt">Drop to EL0</div><div class="rd"><code class="inline">tasks::start</code>, and never returns.</div></div>
         </div>
       </div>
       <figcaption><span class="fig">FIG 6</span> &nbsp;The boot sequence. After step 9, every return to the kernel is a trap through the vector table.</figcaption>
@@ -567,7 +567,7 @@
   </article>
 
   <footer class="site-footer">
-    <span>Ouroboros — an ARM64 microkernel, written from scratch in Rust</span>
+    <span>Ouroboros, an ARM64 microkernel, written from scratch in Rust</span>
     <a href="https://github.com/hansolovkarlsson/Ouroboros">github.com/hansolovkarlsson/Ouroboros</a>
   </footer>
 
