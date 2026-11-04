@@ -294,6 +294,17 @@ by _STA)`, the stick installed, `3 of 3 started cores up, 4 cores in all`,
 `shell ready`, and after `root` logged in, `mount` read `ext2 mounted at
 partition LBA 133120` (the stick's root) and `bootid` `boot 14`.
 
+**Then the stick's own kernel, from the stick.** Re-staged by `make
+bootstick` at `ea0215a4` and chosen in Boot Manager (the boot order `usb`
+alone still goes to the setup screen first): `console live, build
+ea0215a49096 debug`, the same `skipping virtio-blk` line, the stick
+installed, 4 cores, `fsd: the boot partition is on this disk, at LBA 2048`
+(the line a `.hdd` boot cannot give: its boot partition is on the `.hdd`),
+and after `root` logged in, `mount` read `ext2 mounted at partition LBA
+133120` and `bootid` `boot 16`. So on Parallels one stick carries the boot
+partition and the root, as on the Pi; the `.hdd` stayed attached but was
+not booted.
+
 **A lead for networking here.** The VM's NIC is `net0 type=shared
 card=virtio`, and the DSDT declares four NICs as virtio-mmio (`_CID
 "LNRO0005"`) at `0x021C0000` up, each behind `NET_`'s bits. The 2026-08 PCI

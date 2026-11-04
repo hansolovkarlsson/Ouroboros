@@ -136,9 +136,11 @@ check.
   fixed the same day (probe only declared transports whose `_STA` says
   present), after which the `.hdd`'s kernel ran a session on the stick's
   ext2 root (`testing-parallels.md`, "Parallels 27.1 and the one-disk
-  stick"). Open: the stick's own kernel at that build, booted from the
-  stick (the stick still carries `ae102432`), and a boot entry that makes
-  the firmware take the stick unattended.
+  stick"). Then the stick, re-staged at `ea0215a4` and chosen in Boot
+  Manager, booted its own kernel to a login on its ext2 root, `fsd`
+  saying the boot partition is on the same disk. Open: a boot entry that
+  makes the firmware take the stick unattended, and step 7 (the `.hdd`
+  detached, the multi-core checks).
 
 Both answers go into `testing-parallels.md` and `testing-pi4.md`. Only these
 two boots can show it. QEMU already boots from a stick
