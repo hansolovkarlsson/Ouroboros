@@ -13,6 +13,10 @@ reached.
 On the host, before any boot, every refusal must leave its disk's bytes as
 they were: a FAT volume holding someone's file, a Pi card, a one-disk layout
 whose ext2 root lacks /etc/srcid, a disk too small, a partition's node.
+Then one disk attached with mounting allowed, as a real stick is: macOS
+mounts the new ESP as soon as the write gives the disk a table, and the
+write must still read back (a real stick's failed on 2026-11-04), with the
+mount itself checked, since without it the case proves nothing.
 Then the Pi's stick (step 5b), on the host but for one boot: the pinned
 firmware on a fresh one, its settings and config.txt carried by a re-stage,
 FIRMWARE=1 resetting the settings and keeping config.txt, PI=0 dropping it. Then
