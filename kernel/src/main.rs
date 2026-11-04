@@ -268,12 +268,14 @@ extern "C" fn kernel_main() -> ! {
                 ),
                 None => log::info!("Ouroboros kernel: ACPI declares no virtio-mmio transport: no virtio-mmio device is probed"),
             }
-            if found.dropped + found.unreadable > 0 {
-                log::warn!(
-                    "Ouroboros kernel: virtio-mmio: {} declared past the {} kept, {} whose _CRS could not be read (not probed)",
+            if found.dropped + found.unreadable + found.absent + found.status_unknown > 0 {
+                log::info!(
+                    "Ouroboros kernel: virtio-mmio not probed: {} declared past the {} kept, {} whose _CRS could not be read, {} whose _STA says absent, {} whose _STA is a method",
                     found.dropped,
                     amlscan::MAX_TRANSPORTS,
-                    found.unreadable
+                    found.unreadable,
+                    found.absent,
+                    found.status_unknown
                 );
             }
             found
@@ -842,7 +844,10 @@ extern "C" fn kernel_main() -> ! {
     // firmware declares (`virtio`, read before the exit); with none, none of
     // them runs, which is the case on Parallels and the Pi.
     let held_virtio = if virtio.is_empty() {
-        console::println!("Ouroboros kernel: skipping virtio-blk (no virtio-mmio transport declared on this platform)");
+        console::println!(
+            "Ouroboros kernel: skipping virtio-blk (no virtio-mmio transport declared present on this platform; {} passed over by _STA)",
+            virtio.absent + virtio.status_unknown
+        );
         None
     } else {
         // Said again after the exit, before the first read: the pre-exit
