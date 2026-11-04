@@ -937,17 +937,19 @@ def write(target):
             with open(mbr_file, "wb") as fh:
                 fh.write(mbr)
             try:
-                disk.write_file(headless)
                 # The last MiB up to the very end, where a backup GPT's header
                 # is (the last LBA), whatever the disk's size is a multiple
                 # of; only what lies past the image when the image ends inside
-                # that MiB (the second review of #293).
+                # that MiB (the second review of #293). First, so no old table
+                # is left on the disk while sector 0 is blank (the review of
+                # #406).
                 tail = max(size, disk.size - MIB)
                 if tail < disk.size:
                     zeros = os.path.join(tmp, "zeros")
                     with open(zeros, "wb") as fh:
                         fh.write(bytes(disk.size - tail))
                     disk.write_file(zeros, tail)
+                disk.write_file(headless)
                 want = hashlib.sha256(open(headless, "rb").read()).hexdigest()
                 same = hashlib.sha256(disk.read(0, size)).hexdigest() == want
                 if same:
@@ -973,7 +975,16 @@ def write(target):
             subprocess.run(["hdiutil", "detach", attached], capture_output=True)
     if not attached:
         if opts["EJECT"] == "1":
-            diskutil("eject", target)
+            # macOS is mounting the ESP the MBR just exposed, and an eject
+            # meanwhile is refused as busy (the review of #406): asked again.
+            for tries in range(10):
+                try:
+                    diskutil("eject", target)
+                    break
+                except Refused:
+                    if tries == 9:
+                        raise
+                    time.sleep(1)
         else:
             say(f"not ejected; run diskutil eject {target} (or pass EJECT=1)")
 

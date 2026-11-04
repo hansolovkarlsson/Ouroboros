@@ -120,9 +120,16 @@ def automounted():
     dev = out.stdout.split()[0]
     try:
         code, text = bootstick_run(dev, carry=True)
+        # The new ESP, by its kernel, not any volume at s1: the test's own
+        # FAT volume is mounted there at attach (the review of #406). A
+        # missing s1 is no mount, not a crash.
         mounted = False
-        for _ in range(20):
-            if bootstick.diskutil("info", dev + "s1").get("MountPoint"):
+        for _ in range(60):
+            try:
+                point = bootstick.diskutil("info", dev + "s1").get("MountPoint")
+            except bootstick.Refused:
+                point = None
+            if point and os.path.isfile(os.path.join(point, "EFI", "BOOT", "BOOTAA64.EFI")):
                 mounted = True
                 break
             time.sleep(0.5)

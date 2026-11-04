@@ -407,7 +407,7 @@ real stick may differ in what macOS does to a mounted volume, as the first
 real card did (`blind-instruments-postmortem.md`, "A disk image that was not
 the card").
 
-### One disk: the stick alone (planned to replace card and stick)
+### One disk: the stick alone
 
 One-disk step 5b (`docs/roadmap/roadmap-one-disk.md`) writes one stick that
 holds everything: the firmware at the root of partition 1, the ESP tree
