@@ -25,14 +25,28 @@
 //!     79 00                                   EndTag })
 //! ```
 //!
+//! **A declaration is only one if `_STA` says the device is there.**
+//! Parallels 27.1's DSDT declares a virtio-mmio GPU (`_HID "LNRO0005"` at
+//! `0x2180000`) whose `_STA` is a method reading a hardware field; in a VM
+//! without that GPU it answers "not present", and a read of its registers
+//! is a synchronous external abort (seen 2026-11-04). ACPI says a device
+//! with no `_STA` is present and enabled, which is QEMU's case. So a device
+//! is taken when it has no `_STA`, or a `Name (_STA, value)` with both the
+//! present and enabled bits set; a `_STA` this scan cannot evaluate, a
+//! method, is counted in [`Transports::status_unknown`] and not taken.
+//!
 //! **A scan, not an interpreter.** It finds the `_HID` by its fixed encoding,
-//! bounds the search for the `_CRS` by the package length of the `Device`
-//! that holds it, and reads only those two descriptor kinds. What it cannot
-//! see, stated because the answer then is "no transport", which is the safe
-//! one: a `_HID` given as an EISA id or returned by a method, a `_CRS`
-//! built by a method, a 64-bit or address-space memory descriptor. Each
-//! transport found is still checked by the kernel against the virtio-mmio
-//! magic value before it is used.
+//! bounds the search for the `_CRS` and `_STA` by the package length of the
+//! `Device` that holds it, and reads only those two descriptor kinds. What
+//! it cannot see, stated because the answer then is "no transport", which
+//! is the safe one: a `_HID` given as an EISA id or returned by a method (a
+//! device naming `LNRO0005` only as its `_CID`, as Parallels' balloon and
+//! NICs do, is not taken), a `_CRS` built by a method, a 64-bit or
+//! address-space memory descriptor, any `_STA` but a plain `Name`. A `_STA`
+//! of a child device inside the declaring one is read as the declaring
+//! one's, which can only keep a transport out. Each transport found is
+//! still checked by the kernel against the virtio-mmio magic value before
+//! it is used.
 //!
 //! Every length read from the table is bounded: a table only being read
 //! must never panic the kernel. Pure: no I/O, no heap, so it builds and is
@@ -69,6 +83,13 @@ pub struct Transports {
     /// `LNRO0005` devices whose `_CRS` this scan could not read: declared,
     /// so worth a line in the boot log, but never probed.
     pub unreadable: usize,
+    /// `LNRO0005` devices whose `Name (_STA, ...)` says not present or not
+    /// enabled: not probed.
+    pub absent: usize,
+    /// `LNRO0005` devices with a `_STA` this scan cannot evaluate (a
+    /// method): not probed, since only running it says whether the device
+    /// is there.
+    pub status_unknown: usize,
 }
 
 impl Default for Transports {
@@ -79,7 +100,14 @@ impl Default for Transports {
 
 impl Transports {
     pub const fn new() -> Self {
-        Self { list: [Transport { base: 0, size: 0, intid: None }; MAX_TRANSPORTS], count: 0, dropped: 0, unreadable: 0 }
+        Self {
+            list: [Transport { base: 0, size: 0, intid: None }; MAX_TRANSPORTS],
+            count: 0,
+            dropped: 0,
+            unreadable: 0,
+            absent: 0,
+            status_unknown: 0,
+        }
     }
 
     /// The transports kept.
@@ -110,6 +138,43 @@ pub const HEADER_LEN: usize = 36;
 const DEVICE_OP: [u8; 2] = [0x5b, 0x82];
 const NAME_HID: [u8; 6] = [0x08, b'_', b'H', b'I', b'D', 0x0d];
 const NAME_CRS: [u8; 6] = [0x08, b'_', b'C', b'R', b'S', 0x11];
+const STA: [u8; 4] = [b'_', b'S', b'T', b'A'];
+
+/// What a device's `_STA` says.
+#[derive(Debug, PartialEq, Eq)]
+enum Status {
+    /// No `_STA`, or one whose value has the present and enabled bits.
+    Present,
+    /// A `Name (_STA, value)` without both bits.
+    Absent,
+    /// A `_STA` that is not a plain `Name` with a constant.
+    Unknown,
+}
+
+/// The `_STA` inside `table[start..end]`, by the rule in the module doc.
+fn status(table: &[u8], start: usize, end: usize) -> Status {
+    let Some(at) = find(table, start, end, &STA) else { return Status::Present };
+    // `Name (_STA, constant)`: NameOp right before the name.
+    if at == 0 || table[at - 1] != 0x08 {
+        return Status::Unknown;
+    }
+    let v = at + STA.len();
+    let value = match table.get(v) {
+        Some(0x00) => Some(0),
+        Some(0x01) => Some(1),
+        Some(0xff) => Some(u32::MAX),
+        Some(0x0a) => table.get(v + 1).map(|&b| u32::from(b)),
+        Some(0x0b) => table.get(v + 1..v + 3).map(|b| u32::from(u16::from_le_bytes([b[0], b[1]]))),
+        Some(0x0c) => table.get(v + 1..v + 5).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+        _ => None,
+    };
+    match value {
+        // Bit 0 present, bit 1 enabled (ACPI 6.5, 6.3.7).
+        Some(x) if x & 0x3 == 0x3 => Status::Present,
+        Some(_) => Status::Absent,
+        None => Status::Unknown,
+    }
+}
 
 /// Adds to `into` every virtio-mmio transport the AML table `table` (a
 /// DSDT or SSDT, its header included) declares. Called once a table, so
@@ -131,6 +196,17 @@ pub fn virtio_mmio(table: &[u8], into: &mut Transports) {
             into.unreadable += 1;
             continue;
         };
+        match status(table, start, end) {
+            Status::Present => {}
+            Status::Absent => {
+                into.absent += 1;
+                continue;
+            }
+            Status::Unknown => {
+                into.status_unknown += 1;
+                continue;
+            }
+        }
         match find(table, start, end, &NAME_CRS).and_then(|crs| resources(table, crs + NAME_CRS.len(), end)) {
             Some(t) => into.push(t),
             None => into.unreadable += 1,

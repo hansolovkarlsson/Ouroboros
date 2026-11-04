@@ -216,3 +216,79 @@ fn qemus_whole_reference_dsdt_when_given() {
     }
     assert_eq!((found.dropped, found.unreadable), (0, 0));
 }
+
+/// Parallels 27.1's virtio-mmio GPU, byte for byte from its DSDT (read off
+/// a boot on 2026-11-04): `_HID "LNRO0005"`, and a `_STA` method that
+/// answers present only when the VM has that GPU (`If (GPU_ & 0x10)
+/// Return (0x0F)`). A VM without it faults on the registers.
+const PARALLELS_GPU1: &[u8] = &[
+    0x5b, 0x82, 0x45, 0x06, b'G', b'P', b'U', b'1', 0x08, b'_', b'H', b'I', b'D', 0x0d, b'L', b'N', b'R', b'O', b'0',
+    b'0', b'0', b'5', 0x00, 0x08, b'_', b'U', b'I', b'D', 0x0a, 0x04, 0x08, b'_', b'C', b'C', b'A', 0x01, 0x14, 0x15,
+    b'_', b'S', b'T', b'A', 0x00, 0xa0, 0x0c, 0x7b, b'G', b'P', b'U', b'_', 0x0a, 0x10, 0x00, 0xa4, 0x0a, 0x0f, 0xa4,
+    0x00, 0x08, b'_', b'C', b'L', b'S', 0x12, 0x07, 0x03, 0x0a, 0x03, 0x0a, 0x02, 0x00, 0x08, b'_', b'C', b'R', b'S',
+    0x11, 0x1a, 0x0a, 0x17, 0x86, 0x09, 0x00, 0x01, 0x00, 0x00, 0x18, 0x02, 0x00, 0x40, 0x00, 0x00, 0x89, 0x06, 0x00,
+    0x01, 0x01, 0x27, 0x00, 0x00, 0x00, 0x79, 0x00,
+];
+
+/// Parallels' first NIC, the same way: an EISA `_HID`, `LNRO0005` only as
+/// its `_CID`, and a `_STA` method.
+const PARALLELS_ETH0: &[u8] = &[
+    0x5b, 0x82, 0x4c, 0x06, b'E', b'T', b'H', b'0', 0x08, b'_', b'H', b'I', b'D', 0x0c, 0x42, 0x4c, 0x40, 0x09, 0x08,
+    b'_', b'C', b'I', b'D', 0x0d, b'L', b'N', b'R', b'O', b'0', b'0', b'0', b'5', 0x00, 0x08, b'_', b'U', b'I', b'D',
+    0x00, 0x08, b'_', b'C', b'C', b'A', 0x01, 0x14, 0x14, b'_', b'S', b'T', b'A', 0x00, 0xa0, 0x0b, 0x7b, b'N', b'E',
+    b'T', b'_', 0x01, 0x00, 0xa4, 0x0a, 0x0f, 0xa4, 0x00, 0x08, b'_', b'C', b'L', b'S', 0x12, 0x06, 0x03, 0x0a, 0x02,
+    0x00, 0x00, 0x08, b'_', b'C', b'R', b'S', 0x11, 0x1a, 0x0a, 0x17, 0x86, 0x09, 0x00, 0x01, 0x00, 0x00, 0x1c, 0x02,
+    0x00, 0x40, 0x00, 0x00, 0x89, 0x06, 0x00, 0x03, 0x01, 0x2c, 0x00, 0x00, 0x00, 0x79, 0x00,
+];
+
+#[test]
+fn parallels_package_lengths_cover_their_devices() {
+    assert_eq!(pkg_length(PARALLELS_GPU1, 2).map(|(n, _)| 2 + n), Some(PARALLELS_GPU1.len()));
+    assert_eq!(pkg_length(PARALLELS_ETH0, 2).map(|(n, _)| 2 + n), Some(PARALLELS_ETH0.len()));
+}
+
+#[test]
+fn a_status_method_keeps_parallels_gpu_out() {
+    let found = scan(&table(&[PARALLELS_GPU1, PARALLELS_ETH0]));
+    assert!(found.is_empty());
+    assert_eq!((found.status_unknown, found.absent, found.unreadable), (1, 0, 0));
+}
+
+#[test]
+fn a_device_naming_lnro0005_only_as_its_cid_is_not_taken() {
+    let found = scan(&table(&[PARALLELS_ETH0]));
+    assert!(found.is_empty());
+    assert_eq!((found.status_unknown, found.absent, found.unreadable), (0, 0, 0));
+}
+
+fn with_status(sta: &[u8]) -> Vec<u8> {
+    let mut name = std::vec![0x08, b'_', b'S', b'T', b'A'];
+    name.extend_from_slice(sta);
+    device(b"VR00", &[hid(b"LNRO0005").as_slice(), &name, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat())
+}
+
+#[test]
+fn a_named_status_is_read_by_its_present_and_enabled_bits() {
+    for (sta, present) in [
+        (&[0x0a, 0x0f][..], true),
+        (&[0x0a, 0x03][..], true),
+        (&[0xff][..], true),
+        (&[0x0c, 0x0f, 0x00, 0x00, 0x00][..], true),
+        (&[0x00][..], false),
+        (&[0x01][..], false),
+        (&[0x0a, 0x0d][..], false),
+        (&[0x0b, 0x0e, 0x00][..], false),
+    ] {
+        let found = scan(&table(&[&with_status(sta)]));
+        assert_eq!(!found.is_empty(), present, "_STA {sta:02x?}");
+        assert_eq!(found.absent, usize::from(!present), "_STA {sta:02x?}");
+    }
+}
+
+#[test]
+fn a_status_that_is_not_a_constant_is_unknown() {
+    // A NameOp, then something that is no integer constant.
+    let found = scan(&table(&[&with_status(&[0x70])]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+}
