@@ -132,9 +132,13 @@ check.
   stick in Boot Manager and boots it when chosen, but a boot order of `usb`
   alone went to the setup screen, so it does not yet boot the stick
   unattended. The keyboard and the stick both came up. The kernel then
-  faulted on the virtio-mmio scan, from the stick and the `.hdd` alike,
-  which stops the rest of the step (`testing-parallels.md`, "Parallels
-  27.1 and the one-disk stick").
+  faulted on the virtio-mmio scan, from the stick and the `.hdd` alike;
+  fixed the same day (probe only declared transports whose `_STA` says
+  present), after which the `.hdd`'s kernel ran a session on the stick's
+  ext2 root (`testing-parallels.md`, "Parallels 27.1 and the one-disk
+  stick"). Open: the stick's own kernel at that build, booted from the
+  stick (the stick still carries `ae102432`), and a boot entry that makes
+  the firmware take the stick unattended.
 
 Both answers go into `testing-parallels.md` and `testing-pi4.md`. Only these
 two boots can show it. QEMU already boots from a stick

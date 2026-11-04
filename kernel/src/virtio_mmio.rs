@@ -10,8 +10,11 @@
 //! holding its register block and its GIC interrupt (`acpi::
 //! virtio_mmio_transports`, the scan itself in the `amlscan` crate).
 //! [`find_device`] takes that list as a required argument, so no caller can
-//! reach a virtio-mmio address the firmware did not give. A platform that
-//! declares none (Parallels, the Pi) is never touched.
+//! reach a virtio-mmio address the firmware did not give. A declaration
+//! counts only when its `_STA` says the device is present: Parallels 27.1
+//! declares a virtio GPU behind a `_STA` method, and in a VM without that
+//! GPU its registers fault too. A platform that declares none present
+//! (Parallels, the Pi) is never touched.
 //!
 //! **Why, twice over.** QEMU's `virt` machine puts 32 transports 0x200
 //! bytes apart from `0xa000000` (its DSDT declares exactly those, SPI 16 up

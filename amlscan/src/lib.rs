@@ -138,7 +138,7 @@ pub const HEADER_LEN: usize = 36;
 const DEVICE_OP: [u8; 2] = [0x5b, 0x82];
 const NAME_HID: [u8; 6] = [0x08, b'_', b'H', b'I', b'D', 0x0d];
 const NAME_CRS: [u8; 6] = [0x08, b'_', b'C', b'R', b'S', 0x11];
-const STA: [u8; 4] = [b'_', b'S', b'T', b'A'];
+const STA: [u8; 4] = *b"_STA";
 
 /// What a device's `_STA` says.
 #[derive(Debug, PartialEq, Eq)]

@@ -106,11 +106,12 @@ current when the code changes**; the history is a record and is not.
   hard-crashed Parallels. A `Uart` is built only from a discovered address;
   no address means no post-exit console, not a guess. The same goes for RAM
   and device ranges: discover them, never hardcode QEMU's map.
-- **virtio-mmio is probed only where the DSDT declares it** (`_HID
-  "LNRO0005"`, `acpi::virtio_mmio_transports`; `find_device` takes that
-  list). A read of an undeclared slot is a synchronous external abort on
-  Parallels, and a console found was once taken to mean QEMU: Parallels 27.1
-  gained one and every boot faulted (2026-11-04).
+- **virtio-mmio is probed only where the DSDT declares it present** (`_HID
+  "LNRO0005"` and a `_STA` that says so, `acpi::virtio_mmio_transports`;
+  `find_device` takes that list). A read of an undeclared slot, or of
+  Parallels' declared GPU in a VM without it, is a synchronous external
+  abort; a console found was once taken to mean QEMU, and when Parallels
+  27.1 gained one every boot faulted (2026-11-04).
 - **Console discovery order is devicetree, ACPI SPCR, PCI serial**, the
   parsing done before the exit so failures log through UEFI. All three were
   dead on Parallels until 27.1 (2026-11-03): its VM's serial port is now

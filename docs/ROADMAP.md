@@ -21,16 +21,21 @@ This document is the one to update first when direction changes.
 
 ## What's next (the current frontier)
 
-> **In progress 2026-11-04: the kernel faults on Parallels 27.1, from any
-> disk.** The virtio-mmio scan at QEMU's `0xa000000` is gated on finding a
-> serial console before the exit, which was true only on QEMU; Parallels
-> 27.1 (updated 2026-11-03) now gives the VM a discoverable serial console,
-> so the scan runs and takes a synchronous external abort
-> (`testing-parallels.md`, "Parallels 27.1 and the one-disk stick"). The
-> fix, Hans's choice of the two offered: probe only the virtio-mmio
-> transports the firmware's DSDT declares (`_HID "LNRO0005"`), so the
-> scan's address is discovered like every other device's, and no
-> declaration means no scan.
+> **Fixed 2026-11-04: the kernel faulted on Parallels 27.1, from any
+> disk.** The virtio-mmio scan at QEMU's `0xa000000` was gated on finding a
+> serial console before the exit, which had been true only on QEMU;
+> Parallels 27.1 (updated 2026-11-03) gave the VM a discoverable serial
+> console, so the scan ran and took a synchronous external abort. The fix,
+> Hans's choice of the two offered: probe only the virtio-mmio transports
+> the firmware declares (`_HID "LNRO0005"` in the DSDT and SSDTs, the
+> `amlscan` crate), and only those whose `_STA` says present, since
+> Parallels declares a virtio GPU it gates by a `_STA` method. Parallels
+> boots to a login on the stick's ext2 root again
+> (`testing-parallels.md`, "Parallels 27.1 and the one-disk stick").
+> **Open from it:** Parallels declares its NICs as virtio-mmio devices
+> (`_CID "LNRO0005"` at `0x021C0000` up, gated by `NET_`), a possible way
+> to networking there without virtio-PCI, untried; and which mechanism
+> finds Parallels' serial console, not yet read.
 
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)

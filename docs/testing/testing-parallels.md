@@ -267,9 +267,41 @@ console only, and scrolls off the screen before a capture. Seen through the
 too. Without it the screen stops at `exiting boot services`.
 
 **So a Parallels boot has a serial log now**, `parallels/com.output.txt`,
-read as the Pi's `screenlog.0` is. The fix in progress replaces the
-heuristic with the firmware's own list of virtio-mmio devices (`ROADMAP.md`,
-"What's next").
+read as the Pi's `screenlog.0` is.
+
+**The fix, and what Parallels' DSDT declares.** The kernel now probes only
+the virtio-mmio transports the firmware declares (`acpi::
+virtio_mmio_transports`, the `amlscan` crate). The first build of it still
+faulted, at `0x2180000`: Parallels' own DSDT declares virtio-mmio devices.
+Read off a boot by a temporary dump of the AML around each `LNRO0005`:
+
+```
+Device (GPU1)  _HID "LNRO0005"  Method (_STA) { If (GPU_ & 0x10) Return (0x0F)  Return (0) }  0x02180000, 0x4000, INTID 39
+Device (BLN0)  _HID EISA id, _CID "LNRO0005"  Method (_STA) on LOON            0x021A0000, 0x4000, INTID 38
+Device (ETH0)  _HID EISA id, _CID "LNRO0005"  Method (_STA) on NET_ & 0x01     0x021C0000, 0x4000, INTID 44
+Device (ETH1..ETH3)  the same, NET_ & 0x04, 0x10, 0x40                         0x021D0000 .. 0x021F0000, INTID 45 .. 47
+```
+
+Each device is gated by a `_STA` method reading a hardware field: whether
+the VM has it. This VM's video is Parallels' own, not the virtio GPU, so
+`GPU1`'s `_STA` answers "not present" and its registers fault. The scan now
+honours `_STA`: none is ACPI's "present" (QEMU's case), a `Name (_STA,
+value)` is read by its present and enabled bits, and a method, which only
+an AML interpreter could run, keeps the device out. With that, from the
+`.hdd` built at `4837bec7` with the stick attached: `skipping virtio-blk
+(no virtio-mmio transport declared present on this platform; 1 passed over
+by _STA)`, the stick installed, `3 of 3 started cores up, 4 cores in all`,
+`shell ready`, and after `root` logged in, `mount` read `ext2 mounted at
+partition LBA 133120` (the stick's root) and `bootid` `boot 14`.
+
+**A lead for networking here.** The VM's NIC is `net0 type=shared
+card=virtio`, and the DSDT declares four NICs as virtio-mmio (`_CID
+"LNRO0005"`) at `0x021C0000` up, each behind `NET_`'s bits. The 2026-08 PCI
+inventory found a virtio-net PCI function (`0x1af4:0x1000`) too. Whether
+`ETH0` is live, which needs `NET_` read or a guarded probe, is not tried;
+if it is, the kernel's existing virtio-mmio virtio-net driver may serve
+Parallels without the virtio-PCI transport `ROADMAP.md` names as the
+blocker.
 
 **The boot identity, A6's question, answered on the way:** `boot 6; from
 before this boot: variable present, file present; boot entropy 0 bytes`.
