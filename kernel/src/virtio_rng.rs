@@ -30,8 +30,8 @@
 //! ## Absent on most platforms, and that is a supported case
 //!
 //! QEMU only has this device when `-device virtio-rng-device` is passed;
-//! Parallels and the Pi have no virtio-mmio at all (see `virtio_mmio.rs`'s
-//! `virtio_mmio_probe_safe` gate). So "no entropy device" is the *common* case,
+//! Parallels and the Pi declare no virtio-mmio transport, so nothing is
+//! probed there (`virtio_mmio.rs`'s module doc). So "no entropy device" is the *common* case,
 //! not an error path: discovery returns [`Error::NotFound`] quietly and the
 //! `RANDOM` syscall reports `RANDOM_UNAVAILABLE`, which callers are expected to
 //! handle by degrading loudly rather than failing.
@@ -158,15 +158,13 @@ pub struct Device {
 }
 
 impl Device {
-    /// Scans every virtio-mmio slot for an entropy device (`DEVICE_ID`, 4).
-    /// Does not touch the device's state.
+    /// The first declared virtio-mmio transport holding an entropy device
+    /// (`DEVICE_ID`, 4). Does not touch the device's state.
     ///
     /// # Safety
-    /// The low-1GB device region must already be mapped, and the caller must
-    /// have established that scanning virtio-mmio slots is safe on this
-    /// platform (see `virtio_mmio.rs` - the scan bus-faults on real Parallels).
-    pub unsafe fn discover() -> Result<Self, Error> {
-        let base = unsafe { virtio_mmio::find_device(DEVICE_ID) }.ok_or(Error::NotFound)?;
+    /// As [`virtio_mmio::find_device`]: the kernel's identity map installed.
+    pub unsafe fn discover(declared: &virtio_mmio::Transports) -> Result<Self, Error> {
+        let base = unsafe { virtio_mmio::find_device(declared, DEVICE_ID) }.ok_or(Error::NotFound)?.base;
         let version = unsafe { read_reg(base, virtio_mmio::REG_VERSION) };
         if version != 2 {
             return Err(Error::UnexpectedVersion(version));

@@ -144,14 +144,14 @@ pub struct Device {
 }
 
 impl Device {
-    /// Scans every virtio-mmio slot for a console device (`DEVICE_ID`,
-    /// 3) - see `virtio_mmio::find_device`. Does not touch the device's
-    /// state.
+    /// The first declared virtio-mmio transport holding a console device
+    /// (`DEVICE_ID`, 3) - see `virtio_mmio::find_device`. Does not touch
+    /// the device's state.
     ///
     /// # Safety
-    /// The low-1GB device region must already be mapped.
-    pub unsafe fn discover() -> Result<Self, Error> {
-        let base = unsafe { virtio_mmio::find_device(DEVICE_ID) }.ok_or(Error::NotFound)?;
+    /// As [`virtio_mmio::find_device`]: the kernel's identity map installed.
+    pub unsafe fn discover(declared: &virtio_mmio::Transports) -> Result<Self, Error> {
+        let base = unsafe { virtio_mmio::find_device(declared, DEVICE_ID) }.ok_or(Error::NotFound)?.base;
         let version = unsafe { read_reg(base, virtio_mmio::REG_VERSION) };
         if version != 2 {
             return Err(Error::UnexpectedVersion(version));

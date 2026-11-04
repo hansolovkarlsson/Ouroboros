@@ -20,6 +20,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "amlscan"
+version = "0.1.0"
+
+[[package]]
 name = "args"
 version = "0.1.0"
 dependencies = [
@@ -362,6 +366,7 @@ dependencies = [
 name = "ouroboros-kernel"
 version = "0.23.0"
 dependencies = [
+ "amlscan",
  "fdt",
  "keyseq",
  "log",

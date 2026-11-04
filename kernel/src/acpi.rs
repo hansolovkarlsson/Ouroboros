@@ -87,6 +87,9 @@ pub(crate) struct SdtHeader {
     creator_revision: u32,
 }
 
+// `amlscan` skips the header by its own count; the two are one quantity.
+const _: () = assert!(amlscan::HEADER_LEN == size_of::<SdtHeader>(), "amlscan's header length is SdtHeader's");
+
 #[repr(C, packed)]
 struct GenericAddress {
     address_space_id: u8,
@@ -212,10 +215,26 @@ pub struct CcaZero {
 /// # Safety
 /// Same as [`find_table`].
 pub unsafe fn dma_noncoherent(rsdp: Option<*const u8>) -> Result<Option<CcaZero>, DiscoveryError> {
-    for table in unsafe { xsdt_entries(rsdp) }? {
+    for aml in unsafe { aml_tables(rsdp) }? {
+        if let Some(offset) = unsafe { aml_cca_zero_offset(aml) } {
+            let table = unsafe { ptr::read_unaligned(aml.cast::<SdtHeader>()) }.signature;
+            return Ok(Some(CcaZero { table, offset }));
+        }
+    }
+    Ok(None)
+}
+
+/// Every AML table the firmware gives, the DSDT and each SSDT, in XSDT
+/// order: the one walk `dma_noncoherent` and `virtio_mmio_transports`
+/// share, so where the DSDT is found cannot drift between them.
+///
+/// # Safety
+/// Same as [`find_table`].
+unsafe fn aml_tables(rsdp: Option<*const u8>) -> Result<impl Iterator<Item = *const u8>, DiscoveryError> {
+    Ok(unsafe { xsdt_entries(rsdp) }?.filter_map(|table| {
         let header = unsafe { ptr::read_unaligned(table.cast::<SdtHeader>()) };
-        let aml = if &header.signature == b"SSDT" {
-            table
+        if &header.signature == b"SSDT" {
+            Some(table)
         } else if &header.signature == b"FACP" {
             // The DSDT hangs off the FADT: X_DSDT (64-bit, offset 140)
             // when the table is long enough and it is set, else DSDT
@@ -227,19 +246,37 @@ pub unsafe fn dma_noncoherent(rsdp: Option<*const u8>) -> Result<Option<CcaZero>
             };
             let dsdt = unsafe { ptr::read_unaligned(table.add(40).cast::<u32>()) } as u64;
             let addr = if x_dsdt != 0 { x_dsdt } else { dsdt };
-            if addr == 0 {
-                continue;
-            }
-            addr as *const u8
+            (addr != 0).then_some(addr as *const u8)
         } else {
-            continue;
-        };
-        if let Some(offset) = unsafe { aml_cca_zero_offset(aml) } {
-            let table = unsafe { ptr::read_unaligned(aml.cast::<SdtHeader>()) }.signature;
-            return Ok(Some(CcaZero { table, offset }));
+            None
         }
+    }))
+}
+
+/// The virtio-mmio transports the firmware declares: every `_HID
+/// "LNRO0005"` device in the DSDT and the SSDTs, its registers and its
+/// interrupt from its `_CRS` (the scan is the `amlscan` crate's, and its
+/// module doc says what it can and cannot read). An empty list means no
+/// virtio-mmio address may be touched on this platform: `virtio_mmio::
+/// find_device` reads nothing else. QEMU `virt` declares 32; Parallels and
+/// the Pi declare none.
+///
+/// # Safety
+/// Same as [`find_table`].
+pub unsafe fn virtio_mmio_transports(rsdp: Option<*const u8>) -> Result<amlscan::Transports, DiscoveryError> {
+    let mut found = amlscan::Transports::new();
+    for aml in unsafe { aml_tables(rsdp) }? {
+        let header = unsafe { ptr::read_unaligned(aml.cast::<SdtHeader>()) };
+        let len = header.length as usize;
+        if len <= size_of::<SdtHeader>() {
+            continue;
+        }
+        // SAFETY: the table is mapped for its header's length (the caller's
+        // contract, as for `aml_cca_zero_offset`).
+        let bytes = unsafe { core::slice::from_raw_parts(aml, len) };
+        amlscan::virtio_mmio(bytes, &mut found);
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// The byte offset, within the AML table at `table` (a DSDT or SSDT,

@@ -18,8 +18,9 @@
 //! window is not translated, and the Raspberry Pi 4/400's is, which is why it
 //! changed (2026-09-27); the new path is checked on QEMU only, so the first
 //! Parallels or Pi boot is its first real test. That's a fundamentally
-//! different situation from `virtio_mmio.rs`'s `SLOT_BASE`/`gic.rs`'s
-//! `GICD_BASE` - both fixed, QEMU-shaped conventions confirmed unsafe on
+//! different situation from `virtio_mmio.rs`'s old `SLOT_BASE` and `gic.rs`'s
+//! old `GICD_BASE` - both fixed, QEMU-shaped conventions (both now replaced
+//! by the firmware's own tables, the DSDT and the MADT) confirmed unsafe on
 //! Parallels by two decoded Synchronous External Aborts (see
 //! `virtio_mmio.rs`'s module doc comment and `docs/CHANGELOG.md`'s "GOP
 //! framebuffer console, round three" and "round four" entries). This address

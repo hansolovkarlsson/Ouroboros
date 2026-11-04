@@ -1,47 +1,41 @@
 //! virtio-mmio transport: device discovery and the register layout shared
 //! by every virtio-mmio device (block, console, net, ...), independent of
-//! what any specific device does with it. `virtio_blk.rs` is the first,
-//! and so far only, consumer.
+//! what any specific device does with it. `virtio_blk.rs`,
+//! `virtio_console.rs`, `virtio_net.rs` and `virtio_rng.rs` use it.
 //!
-//! ## Transport addresses and register layout - confirmed, not assumed
+//! ## Where the transports are: the firmware says, nothing is scanned blind
 //!
-//! QEMU's `virt` machine exposes 32 virtio-mmio transport slots, 0x200
-//! bytes apart starting at `0xa000000` - confirmed via the same
-//! `qemu-system-aarch64 -machine virt,dumpdtb=...` + `dtc` technique used
-//! for `gic.rs`/`timer.rs`, not assumed: every slot showed up as
-//! `virtio_mmio@a000000` .. `virtio_mmio@a003e00` in the dumped
-//! devicetree, each `reg = <0x0 0xaXXXXXX 0x0 0x200>`.
+//! A transport is probed only when the firmware declares it: ACPI's DSDT or
+//! an SSDT names each one as a `Device` with `_HID "LNRO0005"` and a `_CRS`
+//! holding its register block and its GIC interrupt (`acpi::
+//! virtio_mmio_transports`, the scan itself in the `amlscan` crate).
+//! [`find_device`] takes that list as a required argument, so no caller can
+//! reach a virtio-mmio address the firmware did not give. A platform that
+//! declares none (Parallels, the Pi) is never touched.
 //!
-//! A slot is unpopulated until a `-device virtio-*-device` is actually
-//! attached to it - which specific slot a given device lands on is a
-//! QEMU implementation detail (observed: the last-numbered slot fills
-//! first), so [`find_device`] scans all 32 rather than assuming a slot
-//! number. Directly confirmed empirically, not just read from the spec:
+//! **Why, twice over.** QEMU's `virt` machine puts 32 transports 0x200
+//! bytes apart from `0xa000000` (its DSDT declares exactly those, SPI 16 up
+//! for their interrupts), and until 2026-11-04 this module scanned that
+//! range, hardcoded, behind a heuristic in `main.rs`: a serial console found
+//! before the exit was taken to mean QEMU. On Parallels the first slot's
+//! read is a synchronous external abort (`ESR_EL1 0x96000010`, EC `0x25`,
+//! DFSC `0x10`, `FAR_EL1` the slot's address): seen in 2026-08, when every
+//! console mechanism failed there and the heuristic held (`docs/
+//! CHANGELOG.md`'s "GOP framebuffer console, round three"), and again on
+//! 2026-11-04, when Parallels 27.1 gave its VM a serial console and the
+//! heuristic opened the scan (`docs/testing/testing-parallels.md`,
+//! "Parallels 27.1 and the one-disk stick"). This kernel has no resumable
+//! EL1 synchronous-fault path (`exceptions.rs`), so a probe cannot fail
+//! soft; not probing an undeclared address is the only safe rule.
+//!
+//! A declared slot is unpopulated until a `-device virtio-*-device` is
+//! attached to it (observed: the last-numbered slot fills first), so
+//! [`find_device`] checks every declared one for the magic value and the
+//! device id. Directly confirmed empirically, not just read from the spec:
 //! peeking the block device's slot via the QEMU monitor (`xp/1xw`) before
 //! writing any driver code showed `MagicValue=0x74726976` ("virt"),
 //! `Version=2`, `DeviceID=2`, `VendorID=0x554d4551` ("QEMU") - exactly
 //! the modern (non-legacy) register layout below.
-//!
-//! **This scan is now confirmed unsafe to run on real Parallels hardware -
-//! not "unconfirmed," a direct, decoded crash.** An earlier version of this
-//! comment asserted an unpopulated slot "reads as 0, not the magic value" on
-//! real hardware - stated as fact, but never actually confirmed. It was
-//! wrong. Real-Parallels-hardware testing hit a genuine Synchronous External
-//! Abort on the very first read of the very first slot: `ESR_EL1 =
-//! 0x96000010` decodes to EC `0x25` (Data Abort, same exception level) with
-//! DFSC `0x10` (Synchronous External abort, not a translation-table-walk
-//! fault - i.e. a real bus fault, not a permission or mapping bug), and
-//! `FAR_EL1` matched [`SLOT_BASE`] exactly. See `docs/CHANGELOG.md`'s "GOP
-//! framebuffer console, round three" for the full account. `main.rs` now
-//! gates every caller of [`find_device`] (`virtio_console`'s discovery and
-//! `virtio_blk`'s, the only two) behind a `virtio_mmio_probe_safe` heuristic
-//! - true only when a byte-stream console was already found via
-//! devicetree/ACPI/PCI, the one platform shape (QEMU) this scan has ever
-//! actually been confirmed safe on. This kernel has no resumable EL1
-//! synchronous-fault path (see `exceptions.rs`), so there is currently no way
-//! for `find_device` itself to fail soft from a real bus fault - avoiding the
-//! scan entirely on unconfirmed platforms is the only mitigation available
-//! today.
 //!
 //! **Modern, not legacy - a deliberate choice, not a default.** QEMU's
 //! `virtio-mmio` transport defaults to `force-legacy=true` (confirmed via
@@ -71,9 +65,7 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-pub const SLOT_BASE: u64 = 0xa000000;
-pub const SLOT_STRIDE: u64 = 0x200;
-pub const SLOT_COUNT: u64 = 32;
+pub use amlscan::{Transport, Transports};
 
 const MAGIC_VALUE: u64 = 0x74726976; // "virt", little-endian bytes of the ASCII string
 
@@ -115,25 +107,36 @@ pub(crate) const STATUS_DRIVER: u32 = 2;
 pub(crate) const STATUS_DRIVER_OK: u32 = 4;
 pub(crate) const STATUS_FEATURES_OK: u32 = 8;
 
-/// Scans every transport slot for a device matching `device_id` (2 =
-/// block, per the virtio spec's device ID registry - `virtio_blk.rs` is
-/// the only current caller). Returns the slot's MMIO base address.
+/// The first declared transport holding a device matching `device_id`
+/// (virtio's device id registry: 1 net, 2 block, 3 console, 4 entropy).
+/// Only the transports in `declared` are read: the firmware's list, never
+/// an address of this kernel's own.
+///
+/// A declared transport that does not walk as device memory in this
+/// kernel's own tables (`mmu::walks_as_device`, its first and last byte),
+/// or is too short for the registers, is skipped, not read.
 ///
 /// # Safety
-/// The low 1GB device region must already be mapped (true from very early
-/// in `main()` - see `mmu.rs`'s fixed Device block covering `0x0`-`0x3FFFFFFF`).
-pub unsafe fn find_device(device_id: u32) -> Option<u64> {
-    for slot in 0..SLOT_COUNT {
-        let base = SLOT_BASE + slot * SLOT_STRIDE;
-        // SAFETY: within the always-mapped low-1GB device region.
-        let magic = unsafe { read_reg(base, REG_MAGIC_VALUE) } as u64;
+/// The kernel's identity map must be installed (`mmu::install_identity_map`).
+pub unsafe fn find_device(declared: &Transports, device_id: u32) -> Option<Transport> {
+    for t in declared.as_slice() {
+        // The registers read here lie in the first 0x100 bytes.
+        if t.size < 0x100 {
+            continue;
+        }
+        let Some(last) = t.base.checked_add(u64::from(t.size) - 1) else { continue };
+        if !crate::mmu::walks_as_device(t.base) || !crate::mmu::walks_as_device(last) {
+            continue;
+        }
+        // SAFETY: inside the always-mapped device region, and declared.
+        let magic = unsafe { read_reg(t.base, REG_MAGIC_VALUE) } as u64;
         if magic != MAGIC_VALUE {
-            continue; // Unpopulated slot on QEMU - see module doc comment for why this doesn't hold on all hardware.
+            continue; // A declared slot with nothing attached.
         }
         // SAFETY: same as above.
-        let id = unsafe { read_reg(base, REG_DEVICE_ID) };
+        let id = unsafe { read_reg(t.base, REG_DEVICE_ID) };
         if id == device_id {
-            return Some(base);
+            return Some(*t);
         }
     }
     None

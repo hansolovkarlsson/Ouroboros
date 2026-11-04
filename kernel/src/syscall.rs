@@ -135,7 +135,7 @@ pub(crate) fn net_has_frame() -> bool {
 /// `None` if no NIC was installed this boot - `main.rs` uses it to enable
 /// the interrupt at the GIC and register it with the IRQ handler.
 pub(crate) fn net_intid() -> Option<u32> {
-    unsafe { &*NET.get() }.as_ref().map(|device| device.intid())
+    unsafe { &*NET.get() }.as_ref().and_then(|device| device.intid())
 }
 
 /// Acknowledges the NIC's pending interrupt at the device (from the IRQ

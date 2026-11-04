@@ -250,35 +250,39 @@ extern "C" fn kernel_main() -> ! {
         // power-on - see log_all_devices's doc comment).
         pci_inventory = Some(pci::log_all_devices());
     }
-    // A real, hardware-confirmed reason for this flag, not a hedge - and
-    // confirmed twice over now, not once. Real Parallels hardware took a
-    // genuine Synchronous External Abort (ESR_EL1 EC=0x25, DFSC=0x10 - a real
-    // bus fault, not a permission/translation issue) reading virtio_mmio's
-    // very first scan address (`FAR_EL1` matched `virtio_mmio::SLOT_BASE`
-    // exactly) - see `virtio_mmio.rs`'s module doc comment and
-    // `docs/CHANGELOG.md`'s "GOP framebuffer console, round three". With that
-    // scan skipped, a *second*, differently-addressed instance of the
-    // identical fault signature showed up next, this time with `FAR_EL1`
-    // matching the old hardcoded `gic.rs`'s `GICD_BASE` exactly - see
-    // docs/CHANGELOG.md's "GOP framebuffer console, round four". That second
-    // crash is what the MADT/GICv3 work (`madt.rs`, `gicv3.rs`,
-    // `gic_confirmed` below) fixed properly - GIC/timer setup no longer
-    // depends on this heuristic at all, it depends on a real MADT parse.
-    // **This flag now only gates virtio-console/virtio-blk** (renamed from
-    // the old `qemu_device_region_safe` to reflect that):
-    // `virtio_mmio::find_device`'s scan still has no MADT-equivalent
-    // real-discovery mechanism of its own (MADT describes interrupt
-    // controllers, not virtio transports), and Parallels' own PCI device
-    // inventory (`pci::log_all_devices`, see docs/CHANGELOG.md's "Parallels
-    // console: virtio-console confirmed not applicable") shows no
-    // virtio-blk/virtio-console device there at all regardless - so this
-    // heuristic is still the only thing standing between `find_device`'s scan
-    // and a repeat of that first crash. This is still a heuristic, not a
-    // proof (a platform could in principle have no early console yet still
-    // safely expose virtio-mmio), but it's grounded in the one real data
-    // point this project has - QEMU, the only platform this scan has ever
-    // been confirmed safe on, also always has a working ACPI/SPCR console.
-    let virtio_mmio_probe_safe = discovery.is_some();
+    // The virtio-mmio transports the firmware declares (ACPI `_HID
+    // "LNRO0005"`), read while the tables are certainly mapped. Every
+    // virtio-mmio probe below reads only these: until 2026-11-04 it scanned
+    // QEMU's hardcoded slots whenever a console had been found above, and on
+    // Parallels, which gained a console in 27.1, that read was a synchronous
+    // external abort (`virtio_mmio.rs`'s module doc). No declaration, no
+    // probe: Parallels and the Pi declare none.
+    let virtio = match unsafe { acpi::virtio_mmio_transports(rsdp) } {
+        Ok(found) => {
+            match found.as_slice().first() {
+                Some(first) => log::info!(
+                    "Ouroboros kernel: ACPI declares {} virtio-mmio transport(s), the first @ {:#x} (INTID {:?})",
+                    found.as_slice().len(),
+                    first.base,
+                    first.intid
+                ),
+                None => log::info!("Ouroboros kernel: ACPI declares no virtio-mmio transport: no virtio-mmio device is probed"),
+            }
+            if found.dropped + found.unreadable > 0 {
+                log::warn!(
+                    "Ouroboros kernel: virtio-mmio: {} declared past the {} kept, {} whose _CRS could not be read (not probed)",
+                    found.dropped,
+                    amlscan::MAX_TRANSPORTS,
+                    found.unreadable
+                );
+            }
+            found
+        }
+        Err(e) => {
+            log::info!("Ouroboros kernel: no ACPI tables to declare virtio-mmio ({e:?}): no virtio-mmio device is probed");
+            amlscan::Transports::new()
+        }
+    };
 
     // GOP framebuffer discovery - also boot-services-only (see
     // framebuffer.rs's module doc comment), so it has to happen here
@@ -521,7 +525,7 @@ extern "C" fn kernel_main() -> ! {
     // checked against the BAR itself (`pci::bar0_address`; they differ on
     // the Pi, whose PCIe window is translated), rather than guessed - see
     // xhci.rs's module doc comment for why that makes it safe to actually
-    // use later regardless of `virtio_mmio_probe_safe`.
+    // use later.
     // Boot flag files (bootflags.rs), read here, before the takeover: `\NOXHCI`
     // skips this step, `\XHCINOWR` skips only its command-register write.
     // Bench diagnostics for bisecting a hang on real hardware, except
@@ -776,16 +780,13 @@ extern "C" fn kernel_main() -> ! {
     }
 
     // A fifth and final fallback, tried only if every mechanism above -
-    // including the framebuffer console - has failed, *and* only if
-    // `virtio_mmio_probe_safe` says the underlying scan isn't known to be
-    // dangerous here. Confirmed dead on Parallels specifically (no such PCI
-    // device, see docs/CHANGELOG.md's "Parallels console: virtio-console
-    // confirmed not applicable") and now confirmed to crash outright there
-    // too, not just fail to find anything (see `virtio_mmio_probe_safe`'s own
-    // comment above) - kept only for a hypothetical future platform with no
-    // GOP but a real, safely-probeable virtio-mmio console device.
-    if virtio_mmio_probe_safe && !console::is_installed() {
-        try_virtio_console();
+    // including the framebuffer console - has failed, and only on the
+    // transports the firmware declares (`virtio`, above). Kept for a platform
+    // with no GOP but a declared virtio-mmio console device; Parallels has
+    // neither the device nor a declaration (docs/CHANGELOG.md's "Parallels
+    // console: virtio-console confirmed not applicable").
+    if !console::is_installed() {
+        try_virtio_console(&virtio);
     }
 
     // Re-print the boot-services PCI inventory (captured above, only on
@@ -807,9 +808,8 @@ extern "C" fn kernel_main() -> ! {
     }
 
     // USB HID keyboard (kernel/src/xhci.rs) - the first keyboard input
-    // path this kernel has ever had. Deliberately NOT gated on
-    // `virtio_mmio_probe_safe`: unlike virtio-mmio, the xHCI address is
-    // genuinely discovered (firmware's own address for the BAR, checked
+    // path this kernel has ever had. Like virtio-mmio's since 2026-11-04,
+    // the xHCI address is genuinely discovered (firmware's own address for the BAR, checked
     // against config space), not a guessed QEMU-shaped convention - see
     // xhci.rs's module doc comment. Not
     // fatal if it fails (no controller found, no device connected, ...) -
@@ -838,33 +838,25 @@ extern "C" fn kernel_main() -> ! {
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk
     // + FAT32, installed globally for fs_list_dir/fs_read_file
     // (syscall.rs) to use. Not fatal if it fails - see init_storage's doc
-    // comment. Gated on the same `virtio_mmio_probe_safe` flag as
-    // virtio-console above - virtio_blk::Device::discover() goes through
-    // the identical `virtio_mmio::find_device` scan that's now confirmed
-    // to crash on real Parallels hardware, so this is skipped there for
-    // the same reason, not a separate decision. **Not** helped by the
-    // MADT/GICv3 work below - MADT describes interrupt controllers, not
-    // virtio transports, and Parallels' own PCI inventory
-    // (`pci::log_all_devices`) shows no virtio-blk device there at all
-    // regardless of whether the scan itself would be safe.
-    let held_virtio = if virtio_mmio_probe_safe {
-        let held = init_storage();
-        // Network stack, Stage 1 (docs/ROADMAP.md): the virtio-net driver +
-        // a raw-frame ARP round-trip proof. Same gate as storage - the
-        // virtio-mmio scan crashes real Parallels hardware, and Parallels
-        // exposes virtio-net over PCI anyway (needs a transport this project
-        // doesn't have yet). Silent when no NIC is attached (only
-        // `make run-net` attaches one).
-        init_net();
-        // The entropy source behind the RANDOM syscall (password salts). Same
-        // gate and the same "silent when absent" rule as the NIC: only a QEMU
-        // run started with `-device virtio-rng-device` has one, and userland is
-        // built to degrade loudly without it.
-        init_entropy();
-        held
-    } else {
-        console::println!("Ouroboros kernel: skipping virtio-blk (unconfirmed-safe virtio-mmio scan on this platform) - disk commands won't work this boot");
+    // comment. Every virtio-mmio driver below probes only the transports the
+    // firmware declares (`virtio`, read before the exit); with none, none of
+    // them runs, which is the case on Parallels and the Pi.
+    let held_virtio = if virtio.is_empty() {
+        console::println!("Ouroboros kernel: skipping virtio-blk (no virtio-mmio transport declared on this platform)");
         None
+    } else {
+        let held = init_storage(&virtio);
+        // Network stack, Stage 1 (docs/ROADMAP.md): the virtio-net driver +
+        // a raw-frame ARP round-trip proof. Parallels exposes virtio-net over
+        // PCI, a transport this project does not have yet. Silent when no NIC
+        // is attached (only `make run-net` attaches one).
+        init_net(&virtio);
+        // The entropy source behind the RANDOM syscall (password salts). The
+        // same "silent when absent" rule as the NIC: only a QEMU run started
+        // with `-device virtio-rng-device` has one, and userland is built to
+        // degrade loudly without it.
+        init_entropy(&virtio);
+        held
     };
 
     // Second disk path: USB mass storage over the xHCI driver, if the
@@ -953,8 +945,9 @@ extern "C" fn kernel_main() -> ! {
             // SPI paths) and tell the IRQ handler which INTID it is, so a
             // delivered frame wakes the network server immediately rather
             // than at the next tick's poll. Only when a NIC was actually
-            // installed (init_net, behind virtio_mmio_probe_safe - QEMU
-            // only); the tick-poll fallback covers everything otherwise.
+            // installed (init_net, on a declared transport) and its
+            // declaration names an interrupt; the tick-poll fallback covers
+            // everything otherwise.
             if let Some(intid) = nic_intid {
                 gic::enable_interrupt(intid);
                 exceptions::set_net_intid(intid);
@@ -1031,9 +1024,8 @@ extern "C" fn kernel_main() -> ! {
 /// comment), now confirmed both nonexistent there *and* built on a scan
 /// (`virtio_mmio::find_device`) that's confirmed to crash real Parallels
 /// hardware outright - see `virtio_mmio.rs`'s module doc comment for the
-/// decoded exception. Only reached at all when `virtio_mmio_probe_safe`
-/// (`main`'s caller) is true, and even then only after the framebuffer
-/// console has had its chance.
+/// decoded exception. Reads only the transports in `declared`, and only
+/// after the framebuffer console has had its chance.
 ///
 /// **Runs here, after `mmu::install_identity_map`, unlike devicetree/ACPI/
 /// PCI - a real constraint, not an arbitrary placement choice.**
@@ -1042,8 +1034,8 @@ extern "C" fn kernel_main() -> ! {
 /// comment) - `virtio_blk::Device::discover` (`init_storage`, below)
 /// already only ever runs at this same point in boot, for the same
 /// reason.
-fn try_virtio_console() {
-    let mut device = match unsafe { virtio_console::Device::discover() } {
+fn try_virtio_console(declared: &virtio_mmio::Transports) {
+    let mut device = match unsafe { virtio_console::Device::discover(declared) } {
         Ok(device) => device,
         Err(e) => {
             console::println!("Ouroboros kernel: virtio-console discovery failed ({e})");
@@ -1129,21 +1121,18 @@ fn try_framebuffer_console(fb_info: Option<framebuffer::Info>) {
 /// nothing else depends on storage existing, unlike `program` above; the
 /// shell just won't have working disk commands.
 ///
-/// Only ever called when `main`'s `virtio_mmio_probe_safe` is true -
-/// `virtio_blk::Device::discover` goes through the same
-/// `virtio_mmio::find_device` scan confirmed to crash real Parallels
-/// hardware (see that module's doc comment), so this whole function is
-/// skipped there rather than "not fatal if it fails" the way every other
-/// failure mode here is - a crash isn't a failure this function could
-/// recover from and report.
+/// Reads only the transports in `declared`, the firmware's own list: a
+/// probe of an undeclared address can be a synchronous external abort
+/// (Parallels, `virtio_mmio.rs`'s module doc), which is not a failure this
+/// function could recover from and report.
 ///
 /// Since one-disk step 3 (docs/roadmap/roadmap-one-disk.md) it installs the
 /// disk only when it is the one the system booted from, or when that is
 /// unknown (`bootdisk::is_boot_disk`). Any other virtio disk is handed back,
 /// held for [`install_boot_disk`], which installs it only if no USB stick
 /// is the boot disk either, and a blank one only if no stick is attached.
-fn init_storage() -> Option<Held> {
-    let mut device = match unsafe { virtio_blk::Device::discover() } {
+fn init_storage(declared: &virtio_mmio::Transports) -> Option<Held> {
+    let mut device = match unsafe { virtio_blk::Device::discover(declared) } {
         Ok(device) => device,
         Err(e) => {
             console::println!("Ouroboros kernel: virtio-blk discovery failed ({e})");
@@ -1290,8 +1279,8 @@ fn install_boot_disk(held: Option<Held>) {
 /// Silent when no NIC is attached: plain `make run`/`run-image` don't attach
 /// one (only `make run-net`/`run-image-net` do), so a `NotFound` returns
 /// quietly rather than logging on every normal dev boot.
-fn init_net() {
-    let mut device = match unsafe { virtio_net::Device::discover() } {
+fn init_net(declared: &virtio_mmio::Transports) {
+    let mut device = match unsafe { virtio_net::Device::discover(declared) } {
         Ok(d) => d,
         Err(virtio_net::Error::NotFound) => return, // no NIC this boot - stay quiet
         Err(e) => {
@@ -1322,8 +1311,8 @@ fn init_net() {
 /// serves. Absence is the ordinary case (only `-device virtio-rng-device`
 /// provides one), so `NotFound` returns quietly - userland then sees
 /// `RANDOM_UNAVAILABLE` and falls back to its documented weak path.
-fn init_entropy() {
-    let mut device = match unsafe { virtio_rng::Device::discover() } {
+fn init_entropy(declared: &virtio_mmio::Transports) {
+    let mut device = match unsafe { virtio_rng::Device::discover(declared) } {
         Ok(d) => d,
         Err(virtio_rng::Error::NotFound) => return, // no RNG this boot - stay quiet
         Err(e) => {

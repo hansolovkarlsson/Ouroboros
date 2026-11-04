@@ -37,8 +37,8 @@
 //! Platform: QEMU exposes virtio-net over virtio-mmio (`-device
 //! virtio-net-device`), reachable with this transport. Parallels exposes it
 //! over PCI, which needs a virtio-pci transport this project doesn't have -
-//! so this driver, like `virtio_blk`, only runs behind the
-//! `virtio_mmio_probe_safe` gate (QEMU), never on real Parallels yet. See
+//! so this driver, like `virtio_blk`, only runs on a transport the firmware
+//! declares (QEMU's), never on real Parallels yet. See
 //! `docs/ROADMAP.md`'s network-stack section.
 
 use core::cell::UnsafeCell;
@@ -191,27 +191,27 @@ static TX_BUF: TxBuffer = TxBuffer(UnsafeCell::new([0; BUF_SIZE]));
 
 pub struct Device {
     base: u64,
+    /// The GIC INTID the firmware declared for this transport, if any.
+    intid: Option<u32>,
     mac: [u8; 6],
     /// The receiveq used-ring index we've drained up to (see `poll_frame`).
     rx_last_used: u16,
 }
 
 impl Device {
-    /// Scans every virtio-mmio slot for a net device (`DEVICE_ID`, 1). Does
-    /// not touch device state.
+    /// The first declared virtio-mmio transport holding a net device
+    /// (`DEVICE_ID`, 1). Does not touch device state.
     ///
     /// # Safety
-    /// The low-1GB device region must already be mapped (true from early in
-    /// `main()`), and the caller must have confirmed the virtio-mmio scan is
-    /// safe on this platform (`virtio_mmio_probe_safe` - QEMU only; the scan
-    /// crashes real Parallels hardware, see `virtio_mmio.rs`).
-    pub unsafe fn discover() -> Result<Self, Error> {
-        let base = unsafe { virtio_mmio::find_device(DEVICE_ID) }.ok_or(Error::NotFound)?;
+    /// As [`virtio_mmio::find_device`]: the kernel's identity map installed.
+    pub unsafe fn discover(declared: &virtio_mmio::Transports) -> Result<Self, Error> {
+        let transport = unsafe { virtio_mmio::find_device(declared, DEVICE_ID) }.ok_or(Error::NotFound)?;
+        let base = transport.base;
         let version = unsafe { read_reg(base, virtio_mmio::REG_VERSION) };
         if version != 2 {
             return Err(Error::UnexpectedVersion(version));
         }
-        Ok(Device { base, mac: [0; 6], rx_last_used: 0 })
+        Ok(Device { base, intid: transport.intid, mac: [0; 6], rx_last_used: 0 })
     }
 
     /// The device's MAC address (from config space, valid after
@@ -220,19 +220,14 @@ impl Device {
         self.mac
     }
 
-    /// The GIC INTID this device's interrupt is wired to. QEMU's `virt`
-    /// machine assigns virtio-mmio slot `i` (base `SLOT_BASE + i *
-    /// SLOT_STRIDE`) to SPI `16 + i`, i.e. GIC INTID `32 + 16 + i` - a
-    /// QEMU-shaped convention like the transport addresses themselves,
-    /// confirmed via the same devicetree dump (`virtio_mmio@a000000 {
-    /// interrupts = <0x00 0x10 0x01>; }` = SPI 16, each subsequent slot
-    /// +1), not assumed. QEMU-only, like the rest of this driver (see the
-    /// module doc comment); `main.rs` enables it at the GIC only behind the
-    /// `virtio_mmio_probe_safe` gate.
-    pub fn intid(&self) -> u32 {
-        let slot = (self.base - virtio_mmio::SLOT_BASE) / virtio_mmio::SLOT_STRIDE;
-        // 32 (SPI base INTID) + 16 (this machine's first virtio-mmio SPI) + slot.
-        48 + slot as u32
+    /// The GIC INTID this device's interrupt is wired to, as the firmware
+    /// declared it (the transport's `_CRS` Extended Interrupt; QEMU `virt`
+    /// puts slot `i` on SPI `16 + i`, INTID `48 + i`). `None` when the
+    /// declaration names no interrupt: the NIC is then polled on the tick
+    /// (`main.rs`). Until 2026-11-04 this was computed from the slot's
+    /// offset from QEMU's base address.
+    pub fn intid(&self) -> Option<u32> {
+        self.intid
     }
 
     /// Acknowledges the device's pending interrupt: reads InterruptStatus
