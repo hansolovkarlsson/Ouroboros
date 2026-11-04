@@ -72,10 +72,13 @@ an attached image file belongs to the user and needs no sudo.
 The old root is checked for /etc/srcid in place, on the device, before any
 of it is copied. The disk as it will be written is built at
 build/bootstick-written.img and kept until the disk reads it back, since
-once the write starts it is the only copy of the old /etc and /Users. After
-the write the bytes are read back and compared, and the disk's last MiB, up
-to its last LBA, is zeroed, so a backup GPT left by a stick's old table
-cannot be found behind the new MBR.
+once the write starts it is the only copy of the old /etc and /Users. The
+disk is written with sector 0 blank, and its last MiB, up to its last LBA,
+is zeroed, so a backup GPT left by a stick's old table cannot be found
+behind the new MBR. The bytes are read back and compared, and only then is
+the MBR written and read back: macOS mounts partition 1 the moment the disk
+has a table, and its mount writes there, so a read-back after the table
+would compare macOS's writes, not the write's.
 """
 import contextlib
 import hashlib
@@ -917,26 +920,52 @@ def write(target):
                     os.remove(image)
                 raise
             say(f"writing {size // MIB} MiB to {disk.dev}")
+            # macOS reads a disk's table again whenever a write to it ends,
+            # and mounts partition 1 when it finds one, writing there
+            # (.fseventsd, the FAT's dirty bit, FSInfo): a read-back after that
+            # fails (a real stick, 2026-11-04), and a raw write while it is
+            # mounted is refused as busy. So sector 0 is blanked first, by a
+            # write of its own, and every later write finds no table, old or
+            # new, until the MBR goes on last and is read back alone; macOS's
+            # own writes come after the check.
+            with open(image, "rb") as fh:
+                mbr = fh.read(SECT)
+            headless = os.path.join(tmp, "headless.img")
+            shutil.copyfile(image, headless)
+            with open(headless, "r+b") as fh:
+                fh.write(bytes(SECT))
+            mbr_file = os.path.join(tmp, "mbr")
+            with open(mbr_file, "wb") as fh:
+                fh.write(mbr)
+            blank_file = os.path.join(tmp, "blank")
+            with open(blank_file, "wb") as fh:
+                fh.write(bytes(SECT))
             try:
-                disk.write_file(image)
-                want = hashlib.sha256(open(image, "rb").read()).hexdigest()
+                disk.write_file(blank_file)
+                # The last MiB up to the very end, where a backup GPT's header
+                # is (the last LBA), whatever the disk's size is a multiple
+                # of; only what lies past the image when the image ends inside
+                # that MiB (the second review of #293). Before the image, so no
+                # old backup GPT is left on the disk while sector 0 is blank
+                # (the review of #406).
+                tail = max(size, disk.size - MIB)
+                if tail < disk.size:
+                    zeros = os.path.join(tmp, "zeros")
+                    with open(zeros, "wb") as fh:
+                        fh.write(bytes(disk.size - tail))
+                    disk.write_file(zeros, tail)
+                disk.write_file(headless)
+                want = hashlib.sha256(open(headless, "rb").read()).hexdigest()
                 same = hashlib.sha256(disk.read(0, size)).hexdigest() == want
+                if same:
+                    disk.write_file(mbr_file)
+                    same = disk.read(0, SECT) == mbr
             except (Refused, OSError) as e:
                 raise Refused(f"writing {disk.dev} failed: {e}. The disk as it should be, the old disk's "
                               f"/etc and /Users in it, is {image}; write it with dd once the disk works")
             if not same:
                 raise Refused(f"{disk.dev} does not read back what was written; do not boot it. The disk "
                               f"as it should be, the old disk's /etc and /Users in it, is {image}")
-            # The last MiB up to the very end, where a backup GPT's header is
-            # (the last LBA), whatever the disk's size is a multiple of; only
-            # what lies past the image when the image ends inside that MiB
-            # (the second review of #293).
-            tail = max(size, disk.size - MIB)
-            if tail < disk.size:
-                zeros = os.path.join(tmp, "zeros")
-                with open(zeros, "wb") as fh:
-                    fh.write(bytes(disk.size - tail))
-                disk.write_file(zeros, tail)
             say(f"wrote and read back {disk.dev}: ESP partition 1, ext2 root partition 2, "
                 f"disk signature {sig:#010x}{' (kept)' if old_sig else ' (new)'}")
             say(f"carried {carried} files from the old disk's /etc and /Users" if carried
@@ -951,7 +980,16 @@ def write(target):
             subprocess.run(["hdiutil", "detach", attached], capture_output=True)
     if not attached:
         if opts["EJECT"] == "1":
-            diskutil("eject", target)
+            # macOS is mounting the ESP the MBR just exposed, and an eject
+            # meanwhile is refused as busy (the review of #406): asked again.
+            for tries in range(10):
+                try:
+                    diskutil("eject", target)
+                    break
+                except Refused:
+                    if tries == 9:
+                        raise
+                    time.sleep(1)
         else:
             say(f"not ejected; run diskutil eject {target} (or pass EJECT=1)")
 

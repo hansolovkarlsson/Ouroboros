@@ -13,6 +13,10 @@ reached.
 On the host, before any boot, every refusal must leave its disk's bytes as
 they were: a FAT volume holding someone's file, a Pi card, a one-disk layout
 whose ext2 root lacks /etc/srcid, a disk too small, a partition's node.
+Then one disk attached with mounting allowed, as a real stick is: macOS
+mounts the new ESP as soon as the write gives the disk a table, and the
+write must still read back (a real stick's failed on 2026-11-04), with the
+mount itself checked, since without it the case proves nothing.
 Then the Pi's stick (step 5b), on the host but for one boot: the pinned
 firmware on a fresh one, its settings and config.txt carried by a re-stage,
 FIRMWARE=1 resetting the settings and keeping config.txt, PI=0 dropping it. Then
@@ -45,6 +49,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -96,6 +101,53 @@ def fat_volume(name, files):
     os.replace(cdr, path)
     shutil.rmtree(src)
     return path
+
+
+def automounted():
+    """A disk macOS is let mount, as it mounts a real stick: every other case
+    attaches with -nomount (bootstick.py's own attach), where nothing mounts
+    the new ESP. Here bootstick.py gets the attached /dev/diskN, and macOS
+    mounts partition 1 the moment the write gives the disk a table, writing
+    .fseventsd and the FAT's dirty bit. Before 2026-11-04 the read-back then
+    failed on a real stick, or the tail's zeroing was refused as busy.
+    The second check is the observer's: with no mount the first proves
+    nothing."""
+    path = fat_volume("automount", {})
+    out = subprocess.run(["hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nobrowse", path],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return [("a disk macOS may mount: attached", False)]
+    dev = out.stdout.split()[0]
+    try:
+        code, text = bootstick_run(dev, carry=True)
+        # The new ESP, by its kernel, not any volume at s1: the test's own
+        # FAT volume is mounted there at attach (the review of #406). A
+        # missing s1 is no mount, not a crash.
+        mounted = False
+        for _ in range(60 if code == 0 else 0):
+            try:
+                point = bootstick.diskutil("info", dev + "s1").get("MountPoint")
+            except bootstick.Refused:
+                point = None
+            if point and os.path.isfile(os.path.join(point, "EFI", "BOOT", "BOOTAA64.EFI")):
+                mounted = True
+                break
+            time.sleep(0.5)
+    finally:
+        subprocess.run(["hdiutil", "detach", "-force", dev], capture_output=True)
+    if code != 0:
+        print(text, end="")
+    # A failed write keeps its image, which every later run would refuse on.
+    if os.path.exists(bootstick.KEPT_IMG):
+        os.remove(bootstick.KEPT_IMG)
+    with open(path, "rb") as fh:
+        parts = bootstick.parse_mbr(fh.read(512)) or []
+    os.remove(path)
+    return [
+        ("a disk macOS may mount: written and read back, the one-disk table on it",
+         code == 0 and "wrote and read back" in text and bootstick.is_one_disk(parts) is not None),
+        ("a disk macOS may mount: macOS mounted its ESP after the write (the observer)", mounted),
+    ]
 
 
 def blank(name, size):
@@ -366,6 +418,7 @@ def main():
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(WORK)
     checks = refusals()
+    checks += automounted()
     checks += pi_stick()
 
     checks += sources()

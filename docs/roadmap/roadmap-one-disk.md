@@ -124,6 +124,10 @@ check.
   OS's `rpi-eeprom-config`, or the boot ROM's diagnostic screen on HDMI
   (predicted). Then try a stick staged as a card (pftf plus `build/esp`) with
   no card in the slot.
+  **Answered 2026-11-04 by booting, not by reading:** with no card in the
+  slot the boot ROM logged `USB boot mode 2` and read `config.txt`, the
+  devicetree and `RPI_EFI.fd` off a `make bootstick PI=1` stick, so this
+  board's `BOOT_ORDER` tries USB. `BOOT_ORDER` itself is still unread.
 
 Both answers go into `testing-parallels.md` and `testing-pi4.md`. Only these
 two boots can show it. QEMU already boots from a stick
@@ -565,6 +569,14 @@ unmountable ESP refused and then repaired by `PI=0`, and `PI=true`
 refused. Each new check failed with its fix reverted, as did installing
 one file short. No rig reaches a busy volume's detach.
 
+On 2026-11-04 the first real stick failed its read-back: macOS mounted
+partition 1 as soon as `dd` wrote the table, and the mount wrote six
+sectors there (`.fseventsd`, the FAT's dirty bit, FSInfo) before the
+comparison. The rig, by then at 48 checks, had attached every file with
+`-nomount`, so nothing ever mounted. Sector 0 is now blanked first and the
+MBR goes on last, after the read-back, and the rig has a disk macOS may
+mount, at 50 checks.
+
 **6. The boot partition at a path** (decision D3). Optional for the arc:
 mount the ESP at `/boot` for every task, so a new kernel can be put on the
 disk from inside Ouroboros.
@@ -577,6 +589,24 @@ what a release ships.
 **8. The Pi 4 on the stick alone.** A full session with no card, then the
 same with the card in the slot, to see which the firmware takes (step 3
 makes the kernel follow it).
+**The first half done 2026-11-04** (build `7512000f`, a 128 GB Lexar stick,
+no card): the kernel named the stick's partition 1 its boot partition,
+installed the stick as its block device, `fsd` mounted the ext2 root
+(`ext2 mounted at partition LBA 133120`) and said the boot partition was
+on the same disk at LBA 2048, all four cores came up, and `root` logged in,
+listed `/` and read `bootid` (boot 2). The session was read on serial, with
+no display or keyboard attached (`testing-pi4.md`, "One disk").
+**The second half done the same day** (build `c1aaa0dd` on card and stick):
+with the card in the slot as well, the boot ROM boots the card
+(`arasan_emmc_open`, no `USB boot mode` line), the kernel names the card's
+partition 1 at LBA 32768 its boot partition (`VenHw(100C2CFA-...)/HD(1,
+MBR,0x00000000,...)`), still installs the stick, the only disk it can
+drive, and `fsd` mounts the stick's ext2 root by its type, with no line
+saying the boot partition is on that disk. The card carries no disk
+signature (`0x00000000`): it was formatted by hand, not by `disksig.py`.
+A card still at a build from before step 1 mounted the stick's ESP as `/`
+instead (`ROADMAP.md`, "A Pi boot from a card and a stick of different
+builds").
 
 **Not in this arc:** the SD card as one disk needs the EMMC2 driver
 (`ROADMAP.md` Pi item 2). This plan's rule applies to the card unchanged

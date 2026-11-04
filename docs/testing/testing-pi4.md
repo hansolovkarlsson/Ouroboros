@@ -407,7 +407,7 @@ real stick may differ in what macOS does to a mounted volume, as the first
 real card did (`blind-instruments-postmortem.md`, "A disk image that was not
 the card").
 
-### One disk: the stick alone (planned to replace card and stick)
+### One disk: the stick alone
 
 One-disk step 5b (`docs/roadmap/roadmap-one-disk.md`) writes one stick that
 holds everything: the firmware at the root of partition 1, the ESP tree
@@ -436,7 +436,47 @@ it once it runs.
 *Built 2026-10-14, checked only on image files* (`make test-bootstick`):
 the pinned files on a fresh stick, the settings and `config.txt` carried,
 `FIRMWARE=1` and `PI=0`, and the stick booting on QEMU, which cannot run the
-Pi's firmware. The first time on the Pi, set §5's settings in the firmware
+Pi's firmware. The first real stick was written on 2026-11-04. Its first
+write failed its read-back because macOS mounted the new ESP between the
+write and the check; sector 0 is now blanked first and the MBR goes on
+last. That order wrote, read back and ejected the same stick over its own
+one-disk table (`ae102432`, `EJECT=1`), the case no image-file rig tells
+apart. macOS still mounts
+partition 1 once the run ends, and leaves `.fseventsd` there, so eject the
+stick (`EJECT=1`, or `diskutil eject`) before moving it to the Pi.
+
+**Observed 2026-11-04, the stick alone** (build `7512000f`, a 128 GB Lexar
+stick, no card in the slot). The boot ROM logs `USB boot mode 2` and reads
+the firmware off the stick, so this board tries USB. The kernel logs
+`booted from .../USB(0x2,0x0)/HD(1,MBR,...)` and `boot partition: 1 of
+MBR at LBA 2048`, installs the stick (`usb-msd block device installed`),
+and `fsd` mounts the ext2 root and says `the boot partition is on this
+disk, at LBA 2048`. At the prompt `mount` reads `ext2 mounted at partition
+LBA 133120`.
+
+**With the card in the slot as well** (the same day): the boot ROM boots
+the card, which is the order to expect, and the stick is then the data
+disk. Re-stage the card at the stick's build first. A card at
+`e2417109b1c3+dirty` (2026-10-11, before one-disk step 1) mounted the
+stick's ESP as `/`, writable, with the FAT32 permissions warning. Re-staged
+at `c1aaa0dd`, the kernel named the card's partition 1 (`VenHw(...)/HD(1,
+MBR,0x00000000,0x8000,...)`) its boot partition, installed the stick, and
+`mount` read `ext2 mounted at partition LBA 133120`. `make sdcard` rolls
+the card's boot counter back to 1, as above; a stick re-staged by
+`bootstick` keeps its own.
+
+**The console depended on the display (observed once each, cause not
+separated).** The stick's firmware was the pinned release with its
+settings as shipped, since the stick it replaced had none to carry. With an
+HDMI display and a keyboard attached at power-on, the kernel found no
+serial console (`NoDtb`, then `NoSpcr`, then `NoSerialDevice`), so the
+serial cable went silent at `exiting boot services` and the session was on
+HDMI only. With neither attached, it found `console @ 0xfe201000 (via ACPI
+SPCR)` and the whole session was on serial. That is the first board
+reading of §6 item 2's address. Both boots said `NoDtb`. The display and
+the keyboard were removed together, so which of them, if either, decides
+SPCR is not known. When the serial line goes quiet at the exit, check
+HDMI. The first time on the Pi, set §5's settings in the firmware
 menu, since a fresh stick's `RPI_EFI.fd` is the release's.
 
 ---
@@ -484,7 +524,8 @@ localises the failure without any guessing.
    ARM. `dtranges.rs` now translates through the ancestors' `ranges`, so the
    line should read `0xfe201000`. Checked on the host against
    `bcm2711-rpi-4-b.dtb` and `bcm2711-rpi-400.dtb` from the pinned firmware,
-   not yet on a board.)* The
+   not yet on a board. Observed 2026-11-04 with no display attached:
+   `console @ 0xfe201000 (via ACPI SPCR)`, see "One disk" in §4.)* The
    RPi4 EDK2 firmware ships a real SPCR table, so the ACPI branch should
    resolve a PL011 base. **If this line is missing**, `pci::log_all_devices`
    runs instead as a diagnostic, and after `exit_boot_services` there is no
