@@ -449,7 +449,18 @@ the firmware off the stick, so this board tries USB. The kernel logs
 MBR at LBA 2048`, installs the stick (`usb-msd block device installed`),
 and `fsd` mounts the ext2 root and says `the boot partition is on this
 disk, at LBA 2048`. At the prompt `mount` reads `ext2 mounted at partition
-LBA 133120`. Not yet tried: the card in the slot as well.
+LBA 133120`.
+
+**With the card in the slot as well** (the same day): the boot ROM boots
+the card, which is the order to expect, and the stick is then the data
+disk. Re-stage the card at the stick's build first. A card at
+`e2417109b1c3+dirty` (2026-10-11, before one-disk step 1) mounted the
+stick's ESP as `/`, writable, with the FAT32 permissions warning. Re-staged
+at `c1aaa0dd`, the kernel named the card's partition 1 (`VenHw(...)/HD(1,
+MBR,0x00000000,0x8000,...)`) its boot partition, installed the stick, and
+`mount` read `ext2 mounted at partition LBA 133120`. `make sdcard` rolls
+the card's boot counter back to 1, as above; a stick re-staged by
+`bootstick` keeps its own.
 
 **The console depended on the display (observed once each, cause not
 separated).** The stick's firmware was the pinned release with its

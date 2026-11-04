@@ -594,8 +594,18 @@ installed the stick as its block device, `fsd` mounted the ext2 root
 (`ext2 mounted at partition LBA 133120`) and said the boot partition was
 on the same disk at LBA 2048, all four cores came up, and `root` logged in,
 listed `/` and read `bootid` (boot 2). The session was read on serial, with
-no display or keyboard attached (`testing-pi4.md`, "One disk"). Open: the
-same with the card in the slot.
+no display or keyboard attached (`testing-pi4.md`, "One disk").
+**The second half done the same day** (build `c1aaa0dd` on card and stick):
+with the card in the slot as well, the boot ROM boots the card
+(`arasan_emmc_open`, no `USB boot mode` line), the kernel names the card's
+partition 1 at LBA 32768 its boot partition (`VenHw(100C2CFA-...)/HD(1,
+MBR,0x00000000,...)`), still installs the stick, the only disk it can
+drive, and `fsd` mounts the stick's ext2 root by its type, with no line
+saying the boot partition is on that disk. The card carries no disk
+signature (`0x00000000`): it was formatted by hand, not by `disksig.py`.
+A card still at a build from before step 1 mounted the stick's ESP as `/`
+instead (`ROADMAP.md`, "A Pi boot from a card and a stick of different
+builds").
 
 **Not in this arc:** the SD card as one disk needs the EMMC2 driver
 (`ROADMAP.md` Pi item 2). This plan's rule applies to the card unchanged

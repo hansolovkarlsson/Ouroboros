@@ -769,9 +769,10 @@ not yet checked on this tree are marked (predicted).
       **The Pi 4 on the stick, 2026-11-04:** the first real stick was
       written (its read-back failure fixed in #406), and the Pi booted it
       with no card to a login on the ext2 root, which answers the Pi's half
-      of step 0 and the first half of step 8.
-      **Open:** step 0 on Parallels, step 8 with the card in the slot, and
-      steps 6 and 7.
+      of step 0 and the first half of step 8. With the card in the slot
+      too, the firmware boots the card, and a card re-staged at the same
+      build mounts the stick's ext2 root: step 8 done.
+      **Open:** step 0 on Parallels, and steps 6 and 7.
       Follow-up: the root on a stick is the image's 24 MiB; growing it to
       fill the device needs `fsd`'s ext2 run at that size first (Hans,
       2026-10-14: its own item, not step 5's).
@@ -1837,6 +1838,12 @@ The small open tails those arcs deliberately left:
 >       requires both lines to name the staged image's identity and that
 >       identity to be HEAD's commit, and fails on a stale ESP (shown). Open: the
 >       stick's stamp and the comparison once it mounts.*
+>       *Seen on the board 2026-11-04, with the one-disk stick: a card left
+>       at `e2417109b1c3+dirty` (2026-10-11, before one-disk step 1) booted
+>       beside a `7512000f` stick, and its kernel, knowing nothing of a boot
+>       partition, mounted the stick's ESP as `/`, writable, instead of its
+>       ext2 root. The stick's root has carried `/etc/srcid` since step 5, so
+>       the stamp the comparison needs is there on a one-disk stick.*
 > - [x] **fix** **A USB3 stick on the Pi 4's SuperSpeed root port comes out
 >       of its reset with speed 0.** Same boot: `port 3 reset, speed=0`,
 >       `unsupported port speed 0`, at boot and again on `mount -a`'s
