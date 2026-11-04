@@ -766,8 +766,12 @@ not yet checked on this tree are marked (predicted).
       a whole disk, the old disk's `/etc`, `/Users`, boot counter and
       signature carried over, and with `PI=1` the Pi's firmware on
       partition 1, carried whole on a re-stage (`make test-bootstick`).
-      **Open:** step 0 on Parallels and the Pi 4 (Hans at the hardware),
-      a real stick written, and steps 6 to 8.
+      **The Pi 4 on the stick, 2026-11-04:** the first real stick was
+      written (its read-back failure fixed in #406), and the Pi booted it
+      with no card to a login on the ext2 root, which answers the Pi's half
+      of step 0 and the first half of step 8.
+      **Open:** step 0 on Parallels, step 8 with the card in the slot, and
+      steps 6 and 7.
       Follow-up: the root on a stick is the image's 24 MiB; growing it to
       fill the device needs `fsd`'s ext2 run at that size first (Hans,
       2026-10-14: its own item, not step 5's).

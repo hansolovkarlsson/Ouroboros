@@ -124,6 +124,10 @@ check.
   OS's `rpi-eeprom-config`, or the boot ROM's diagnostic screen on HDMI
   (predicted). Then try a stick staged as a card (pftf plus `build/esp`) with
   no card in the slot.
+  **Answered 2026-11-04 by booting, not by reading:** with no card in the
+  slot the boot ROM logged `USB boot mode 2` and read `config.txt`, the
+  devicetree and `RPI_EFI.fd` off a `make bootstick PI=1` stick, so this
+  board's `BOOT_ORDER` tries USB. `BOOT_ORDER` itself is still unread.
 
 Both answers go into `testing-parallels.md` and `testing-pi4.md`. Only these
 two boots can show it. QEMU already boots from a stick
@@ -584,6 +588,14 @@ what a release ships.
 **8. The Pi 4 on the stick alone.** A full session with no card, then the
 same with the card in the slot, to see which the firmware takes (step 3
 makes the kernel follow it).
+**The first half done 2026-11-04** (build `7512000f`, a 128 GB Lexar stick,
+no card): the kernel named the stick's partition 1 its boot partition,
+installed the stick as its block device, `fsd` mounted the ext2 root
+(`ext2 mounted at partition LBA 133120`) and said the boot partition was
+on the same disk at LBA 2048, all four cores came up, and `root` logged in,
+listed `/` and read `bootid` (boot 2). The session was read on serial, with
+no display or keyboard attached (`testing-pi4.md`, "One disk"). Open: the
+same with the card in the slot.
 
 **Not in this arc:** the SD card as one disk needs the EMMC2 driver
 (`ROADMAP.md` Pi item 2). This plan's rule applies to the card unchanged
