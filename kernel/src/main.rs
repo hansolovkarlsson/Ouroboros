@@ -845,6 +845,20 @@ extern "C" fn kernel_main() -> ! {
         console::println!("Ouroboros kernel: skipping virtio-blk (no virtio-mmio transport declared on this platform)");
         None
     } else {
+        // Said again after the exit, before the first read: the pre-exit
+        // line reaches only the UEFI console, and on Parallels the serial
+        // log is the one that can be read afterwards.
+        let list = virtio.as_slice();
+        for (i, t) in list.iter().enumerate().filter(|&(i, _)| i < 2 || i + 1 == list.len()) {
+            console::println!(
+                "Ouroboros kernel: virtio-mmio: declared transport {} of {}: {:#x}, {:#x} bytes, INTID {:?}",
+                i + 1,
+                list.len(),
+                t.base,
+                t.size,
+                t.intid
+            );
+        }
         let held = init_storage(&virtio);
         // Network stack, Stage 1 (docs/ROADMAP.md): the virtio-net driver +
         // a raw-frame ARP round-trip proof. Parallels exposes virtio-net over
