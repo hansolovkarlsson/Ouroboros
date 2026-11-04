@@ -42,11 +42,13 @@
 //! is the safe one: a `_HID` given as an EISA id or returned by a method (a
 //! device naming `LNRO0005` only as its `_CID`, as Parallels' balloon and
 //! NICs do, is not taken), a `_CRS` built by a method, a 64-bit or
-//! address-space memory descriptor, any `_STA` but a plain `Name`. A `_STA`
-//! of a child device inside the declaring one is read as the declaring
-//! one's, which can only keep a transport out. Each transport found is
-//! still checked by the kernel against the virtio-mmio magic value before
-//! it is used.
+//! address-space memory descriptor, any `_STA` but a plain `Name`. A child
+//! `Device` inside the declaring one is skipped whole by both searches, so
+//! a child's `_CRS` or `_STA` is never read as the declaring device's (the
+//! review of #407); bytes in a buffer that happen to look like a child
+//! `Device` can only hide the device's own objects, which keeps it out.
+//! Each transport found is still checked by the kernel against the
+//! virtio-mmio magic value before it is used.
 //!
 //! Every length read from the table is bounded: a table only being read
 //! must never panic the kernel. Pure: no I/O, no heap, so it builds and is
@@ -151,11 +153,15 @@ enum Status {
     Unknown,
 }
 
-/// The `_STA` inside `table[start..end]`, by the rule in the module doc.
+/// The device `table[start..end]`'s own `_STA`, by the rule in the module
+/// doc.
 fn status(table: &[u8], start: usize, end: usize) -> Status {
-    let Some(at) = find(table, start, end, &STA) else { return Status::Present };
-    // `Name (_STA, constant)`: NameOp right before the name.
-    if at == 0 || table[at - 1] != 0x08 {
+    let Some(at) = find_own(table, start, end, &STA) else { return Status::Present };
+    // `Name (_STA, constant)`: NameOp right before the name. A 0x08 there
+    // may instead be the last byte of a `Method (_STA)`'s PkgLength (`14 08
+    // _STA ...` is an 8-byte method), so it counts as a NameOp only when no
+    // MethodOp's PkgLength ends there (the review of #407).
+    if at == 0 || table[at - 1] != 0x08 || method_pkg_ends_at(table, at) {
         return Status::Unknown;
     }
     let v = at + STA.len();
@@ -207,11 +213,43 @@ pub fn virtio_mmio(table: &[u8], into: &mut Transports) {
                 continue;
             }
         }
-        match find(table, start, end, &NAME_CRS).and_then(|crs| resources(table, crs + NAME_CRS.len(), end)) {
+        match find_own(table, start, end, &NAME_CRS).and_then(|crs| resources(table, crs + NAME_CRS.len(), end)) {
             Some(t) => into.push(t),
             None => into.unreadable += 1,
         }
     }
+}
+
+/// Whether a `MethodOp` (0x14) and a PkgLength of 1 to 4 bytes end just
+/// before `at`.
+fn method_pkg_ends_at(table: &[u8], at: usize) -> bool {
+    (1..=4).any(|n| {
+        at > n && table[at - n - 1] == 0x14 && pkg_length(table, at - n).is_some_and(|(_, bytes)| bytes == n)
+    })
+}
+
+/// The first offset of `pat` among the device `table[start..end]`'s own
+/// objects: after its header (DeviceOp, PkgLength, name), and skipping
+/// every `Device` nested inside it whole.
+fn find_own(table: &[u8], start: usize, end: usize, pat: &[u8]) -> Option<usize> {
+    let (_, pkg_bytes) = pkg_length(table, start + DEVICE_OP.len())?;
+    let mut p = start + DEVICE_OP.len() + pkg_bytes + 4;
+    while p + pat.len() <= end {
+        if table[p..].starts_with(&DEVICE_OP) {
+            if let Some((len, _)) = pkg_length(table, p + DEVICE_OP.len()) {
+                let child_end = p + DEVICE_OP.len() + len;
+                if child_end <= end && len > 0 {
+                    p = child_end;
+                    continue;
+                }
+            }
+        }
+        if table[p..].starts_with(pat) {
+            return Some(p);
+        }
+        p += 1;
+    }
+    None
 }
 
 /// The first offset of `pat` in `table[from..to]`.

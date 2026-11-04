@@ -120,6 +120,24 @@ pub unsafe fn enable_ppi_this_core(intid: u32, this: ThisCore) {
     }
 }
 
+/// Whether `intid` is a shared peripheral interrupt this distributor
+/// implements: at least 32 (below are each core's SGIs and PPIs, the kick
+/// and the timer among them), and below `GICD_TYPER.ITLinesNumber`'s limit,
+/// `32 * (N + 1)`, and 1020 (1020-1023 are special). The register and its
+/// field are the same on GICv2 and GICv3. For an INTID the firmware gave,
+/// not one this kernel chose: a virtio-mmio declaration's (2026-11-04).
+///
+/// # Safety
+/// Must run after [`init`].
+pub unsafe fn is_implemented_spi(intid: u32) -> bool {
+    const GICD_TYPER: usize = 0x004;
+    let info = info();
+    // SAFETY: the distributor is mapped and discovered from the MADT.
+    let typer = unsafe { core::ptr::read_volatile((info.gicd_base as usize + GICD_TYPER) as *const u32) };
+    let limit = (32 * ((typer & 0x1f) + 1)).min(1020);
+    (32..limit).contains(&intid)
+}
+
 /// Enables forwarding of `intid` (e.g. the timer PPI, 30).
 ///
 /// # Safety

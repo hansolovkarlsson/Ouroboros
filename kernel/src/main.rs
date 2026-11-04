@@ -965,19 +965,27 @@ extern "C" fn kernel_main() -> ! {
             // delivered frame wakes the network server immediately rather
             // than at the next tick's poll. Only when a NIC was actually
             // installed (init_net, on a declared transport) and its
-            // declaration names an interrupt; the tick-poll fallback covers
-            // everything otherwise.
-            if let Some(intid) = nic_intid {
+            // declaration names an interrupt that is an SPI this GIC
+            // implements: the INTID is the firmware's now, and one below 32
+            // would be an SGI or PPI (the kick, the timer), one past the
+            // distributor's limit a write past its registers (the review of
+            // #407). The tick-poll fallback covers everything otherwise.
+            let nic_spi = nic_intid.filter(|&intid| gic::is_implemented_spi(intid));
+            if let Some(intid) = nic_spi {
                 gic::enable_interrupt(intid);
                 exceptions::set_net_intid(intid);
             }
+            match (nic_intid, nic_spi) {
+                (Some(intid), None) => console::println!(
+                    "Ouroboros kernel: NIC interrupt {intid} is not an SPI this GIC implements: the NIC is polled"
+                ),
+                (_, Some(intid)) => console::println!(
+                    "Ouroboros kernel: NIC receive interrupt enabled (GIC INTID {intid})"
+                ),
+                _ => {}
+            }
         }
         timer::arm(timer::TICK_INTERVAL_MS);
-        if let Some(intid) = nic_intid {
-            console::println!(
-                "Ouroboros kernel: NIC receive interrupt enabled (GIC INTID {intid})"
-            );
-        }
     } else {
         console::println!(
             "Ouroboros kernel: skipping GIC/timer init (no MADT-confirmed interrupt controller on this platform) - no preemption this boot"

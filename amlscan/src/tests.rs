@@ -292,3 +292,64 @@ fn a_status_that_is_not_a_constant_is_unknown() {
     assert!(found.is_empty());
     assert_eq!(found.status_unknown, 1);
 }
+
+/// A child `Device` with its own `_CRS` and `_STA`, to nest inside a
+/// declaring one.
+fn child(sta: &[u8]) -> Vec<u8> {
+    let mut name = std::vec![0x08, b'_', b'S', b'T', b'A'];
+    name.extend_from_slice(sta);
+    device(b"CH00", &[name.as_slice(), crs(&mem32(0x0219_0000, 0x200)).as_slice()].concat())
+}
+
+#[test]
+fn a_childs_crs_is_never_the_declaring_devices() {
+    // The declaring device has no _CRS of its own: nothing is taken, the
+    // child's address above all.
+    let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), child(&[0x0a, 0x0f]).as_slice()].concat());
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.unreadable, 1);
+    // With its own _CRS after the child, its own is the one read.
+    let d = device(
+        b"VR00",
+        &[hid(b"LNRO0005").as_slice(), child(&[0x0a, 0x0f]).as_slice(), crs(&mem32(0x0a00_0000, 0x200)).as_slice()]
+            .concat(),
+    );
+    assert_eq!(scan(&table(&[&d])).as_slice(), &[Transport { base: 0x0a00_0000, size: 0x200, intid: None }]);
+}
+
+#[test]
+fn a_childs_status_is_never_the_declaring_devices() {
+    // A child saying present, before the declaring device's own _STA method
+    // (Parallels' GPU shape): the method decides, so not taken.
+    let method = [0x14, 0x0a, b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x0a, 0x0f, 0xa4, 0x00];
+    let d = device(
+        b"GPU1",
+        &[hid(b"LNRO0005").as_slice(), child(&[0x0a, 0x0f]).as_slice(), &method, crs(&mem32(0x0218_0000, 0x4000)).as_slice()]
+            .concat(),
+    );
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+    // A child saying absent does not keep a device with no _STA out.
+    let d = device(
+        b"VR00",
+        &[hid(b"LNRO0005").as_slice(), child(&[0x00]).as_slice(), crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat(),
+    );
+    assert_eq!(scan(&table(&[&d])).as_slice().len(), 1);
+}
+
+#[test]
+fn an_eight_byte_status_method_is_not_a_name() {
+    // `Method (_STA) { Return (One) }`: 14 08 _STA 00 A4 01, whose
+    // PkgLength byte is 0x08, NameOp's value.
+    let method = [0x14, 0x08, b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x01];
+    let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &method, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!((found.status_unknown, found.absent), (1, 0));
+    // The same with a two-byte PkgLength ending in 0x08.
+    let method = [0x14, 0x48, 0x08, b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x01];
+    let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &method, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
+    assert_eq!(scan(&table(&[&d])).status_unknown, 1);
+}

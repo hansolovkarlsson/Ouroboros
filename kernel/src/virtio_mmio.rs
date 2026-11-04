@@ -70,6 +70,12 @@ use core::ptr::{read_volatile, write_volatile};
 
 pub use amlscan::{Transport, Transports};
 
+/// The shortest declared register block used: the registers, then config
+/// space from [`REG_CONFIG`], which every driver here reads within its
+/// first 0x100 bytes.
+const MIN_TRANSPORT_SIZE: u32 = 0x200;
+const _: () = assert!(MIN_TRANSPORT_SIZE as usize >= REG_CONFIG + 0x100);
+
 const MAGIC_VALUE: u64 = 0x74726976; // "virt", little-endian bytes of the ASCII string
 
 // Register byte offsets, modern (non-legacy) interface only - see module
@@ -123,8 +129,11 @@ pub(crate) const STATUS_FEATURES_OK: u32 = 8;
 /// The kernel's identity map must be installed (`mmu::install_identity_map`).
 pub unsafe fn find_device(declared: &Transports, device_id: u32) -> Option<Transport> {
     for t in declared.as_slice() {
-        // The registers read here lie in the first 0x100 bytes.
-        if t.size < 0x100 {
+        // The registers lie in the first 0x100 bytes and each device's
+        // config space from `REG_CONFIG` (0x100) on: a block no longer than
+        // QEMU's 0x200 would have its drivers read past what was declared
+        // (the review of #407). Parallels declares 0x4000.
+        if t.size < MIN_TRANSPORT_SIZE {
             continue;
         }
         let Some(last) = t.base.checked_add(u64::from(t.size) - 1) else { continue };
