@@ -845,8 +845,11 @@ extern "C" fn kernel_main() -> ! {
     // them runs, which is the case on Parallels and the Pi.
     let held_virtio = if virtio.is_empty() {
         console::println!(
-            "Ouroboros kernel: skipping virtio-blk (no virtio-mmio transport declared present on this platform; {} passed over by _STA)",
-            virtio.absent + virtio.status_unknown
+            "Ouroboros kernel: skipping virtio-blk (no virtio-mmio transport declared present on this platform; passed over: {} by _STA, {} with a _CRS not read, {} past the {} kept)",
+            virtio.absent + virtio.status_unknown,
+            virtio.unreadable,
+            virtio.dropped,
+            amlscan::MAX_TRANSPORTS
         );
         None
     } else {
