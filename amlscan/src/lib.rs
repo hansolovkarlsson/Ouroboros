@@ -124,7 +124,7 @@ pub fn virtio_mmio(table: &[u8], into: &mut Transports) {
         at = name;
         // The string, then its NUL: "LNRO0005" and not a longer id that
         // starts with it.
-        if table.get(name..name + 9).map_or(true, |s| &s[..8] != VIRTIO_MMIO_HID || s[8] != 0) {
+        if table.get(name..name + 9).is_none_or(|s| &s[..8] != VIRTIO_MMIO_HID || s[8] != 0) {
             continue;
         }
         let Some((start, end)) = enclosing_device(table, found) else {

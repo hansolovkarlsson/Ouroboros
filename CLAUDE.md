@@ -106,10 +106,17 @@ current when the code changes**; the history is a record and is not.
   hard-crashed Parallels. A `Uart` is built only from a discovered address;
   no address means no post-exit console, not a guess. The same goes for RAM
   and device ranges: discover them, never hardcode QEMU's map.
+- **virtio-mmio is probed only where the DSDT declares it** (`_HID
+  "LNRO0005"`, `acpi::virtio_mmio_transports`; `find_device` takes that
+  list). A read of an undeclared slot is a synchronous external abort on
+  Parallels, and a console found was once taken to mean QEMU: Parallels 27.1
+  gained one and every boot faulted (2026-11-04).
 - **Console discovery order is devicetree, ACPI SPCR, PCI serial**, the
-  parsing done before the exit so failures log through UEFI. All three are
-  dead on Parallels (its console is the framebuffer; virtio-console is
-  transmit-only and is not Parallels' serial port).
+  parsing done before the exit so failures log through UEFI. All three were
+  dead on Parallels until 27.1 (2026-11-03): its VM's serial port is now
+  found by one of them (which one is not yet read) and writes
+  `parallels/com.output.txt`. virtio-console is transmit-only and is not
+  Parallels' serial port.
 - **The exception vector table must be in plain `.text`.** In a custom
   section (`.text.exceptions`) the PE/COFF backend made the page
   non-executable: EC 0x21, IFSC 0x0F on the first jump, then a fault loop.
@@ -284,7 +291,7 @@ add llvm-tools` for `llvm-objcopy` (the Makefile's `OBJCOPY` comment says why).
 
 The kernel and userland programs have no unit test suite; the **pure crates**
 (`accounts`, `regex`, `ed25519`, `clusterkeys`, `ninep-abi`, `keyseq`,
-`parttable`) do, and `make test` runs them with the host-side checks. Such a
+`parttable`, `amlscan`) do, and `make test` runs them with the host-side checks. Such a
 crate is a workspace member but not a default-member, so until something
 depends on it `cargo build`, `make build` and `make esp` stay green while it
 is broken: run `make test` before pushing anything that touches one.
@@ -387,7 +394,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/tasks.rs       task slots, round-robin scheduler, mailboxes, grants, capability send-mask, per-task identity.
                      THE AUTHORITY on slot numbers and counts - restating that map elsewhere has drifted before,
                      see docs/postmortems/asking-the-right-question-postmortem.md
-  src/virtio_mmio.rs virtio-mmio transport: 32-slot discovery, modern register layout
+  src/virtio_mmio.rs virtio-mmio transport: probes only the transports the firmware's DSDT declares (amlscan), modern register layout
   src/block.rs       BlockDevice enum (Virtio | UsbMsd) - what fsd's disk layer sits on
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI over xhci's bulk endpoints, with BOT error recovery
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
@@ -450,6 +457,8 @@ regex/               a small POSIX-ERE engine behind grep. An explicit backtrack
 parttable/           partition tables, read: the MBR and GPT parsing (both CRCs, the backup header, checked bounds), the partition list
                      with root types, and the boot-disk matcher, through a read-sector closure; the ONE copy, which the kernel's
                      bootdisk.rs and fsd's partition.rs both call, host-tested in make test
+amlscan/             the virtio-mmio transports an ACPI table declares (_HID "LNRO0005", its _CRS registers and interrupt), by a
+                     bounded byte scan of the AML; the kernel probes no other virtio-mmio address. Host-tested in make test
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses
                      (the shell's line editor, login, ulib::read_line and read_key), so two readers never disagree on what was typed;
                      the kernel uses it too, to keep keys whole in its keyboard queue
@@ -466,8 +475,8 @@ scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py
                      FOREIGN OBSERVER for both directions of the export)
 ```
 
-Seventy-two-crate workspace (`cargo metadata`'s count, 2026-10-14). `kernel` and the shared libs (`ulib`,
-`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `keyseq`, `parttable`, `nsresolve`) sit at the repo root; **every userland
+Seventy-seven-crate workspace (`cargo metadata`'s count, 2026-11-04). `kernel` and the shared libs (`ulib`,
+`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `keyseq`, `parttable`, `amlscan`, `nsresolve`) sit at the repo root; **every userland
 program lives under `programs/`, grouped by role** (`programs/shell`,
 `programs/servers/{fsd,cond,netd,accountd}`, `programs/demos/{hello,pong}`,
 `programs/fileutils/*`, `programs/textutils/*`, `programs/netutils/*`,
