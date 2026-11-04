@@ -45,6 +45,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -96,6 +97,46 @@ def fat_volume(name, files):
     os.replace(cdr, path)
     shutil.rmtree(src)
     return path
+
+
+def automounted():
+    """A disk macOS is let mount, as it mounts a real stick: every other case
+    attaches with -nomount (bootstick.py's own attach), where nothing mounts
+    the new ESP. Here bootstick.py gets the attached /dev/diskN, and macOS
+    mounts partition 1 the moment the write gives the disk a table, writing
+    .fseventsd and the FAT's dirty bit. Before 2026-11-04 the read-back then
+    failed on a real stick, or the tail's zeroing was refused as busy.
+    The second check is the observer's: with no mount the first proves
+    nothing."""
+    path = fat_volume("automount", {})
+    out = subprocess.run(["hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nobrowse", path],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return [("a disk macOS may mount: attached", False)]
+    dev = out.stdout.split()[0]
+    try:
+        code, text = bootstick_run(dev, carry=True)
+        mounted = False
+        for _ in range(20):
+            if bootstick.diskutil("info", dev + "s1").get("MountPoint"):
+                mounted = True
+                break
+            time.sleep(0.5)
+    finally:
+        subprocess.run(["hdiutil", "detach", "-force", dev], capture_output=True)
+    if code != 0:
+        print(text, end="")
+    # A failed write keeps its image, which every later run would refuse on.
+    if os.path.exists(bootstick.KEPT_IMG):
+        os.remove(bootstick.KEPT_IMG)
+    with open(path, "rb") as fh:
+        parts = bootstick.parse_mbr(fh.read(512)) or []
+    os.remove(path)
+    return [
+        ("a disk macOS may mount: written and read back, the one-disk table on it",
+         code == 0 and "wrote and read back" in text and bootstick.is_one_disk(parts) is not None),
+        ("a disk macOS may mount: macOS mounted its ESP after the write (the observer)", mounted),
+    ]
 
 
 def blank(name, size):
@@ -366,6 +407,7 @@ def main():
     shutil.rmtree(WORK, ignore_errors=True)
     os.makedirs(WORK)
     checks = refusals()
+    checks += automounted()
     checks += pi_stick()
 
     checks += sources()
