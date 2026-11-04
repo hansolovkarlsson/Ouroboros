@@ -221,6 +221,61 @@ got every check above through. `ROADMAP.md` has it under "Remaining follow-ups";
 is fixed, read every typed line back off the screenshot before trusting its
 output.
 
+## Parallels 27.1 and the one-disk stick (2026-11-04)
+
+One-disk step 0 (`roadmap-one-disk.md`), with the Lexar stick `make
+bootstick PI=1` wrote for the Pi (the whole ESP, `EFI` included, and the
+ext2 root; the Pi's firmware files at its root mean nothing here). Parallels
+Desktop 27.1.0 (58756), whose `Info.plist` is dated 2026-11-03: it updated
+the day before. The VM: four vCPUs, 2 GB, the stick set to connect to it.
+
+**The firmware sees the stick and boots it when chosen, not by itself.**
+With the boot order set to `usb` alone (`prlctl set Ouroboros
+--device-bootorder usb`), the firmware went to its setup screen on both
+boots tried. Its Boot Manager lists `UEFI Shell`, `UEFI esp ...` (the
+`.hdd`) and `UEFI Lexar USB Flash Drive 9713517587108382`, device path
+`PciRoot(0x0)/Pci(0x3,0x0)/USB(0x2,0x0)`. Choosing the Lexar entry ran the
+stick's kernel (build `ae102432`). The UEFI Shell maps the stick's two
+partitions at `HD(1,MBR,0x4CEE5866,0x800,0x1FFFF)` and
+`HD(2,MBR,0x4CEE5866,0x20800,0xC000)`. Whether a boot entry of the stick's
+own (Boot Maintenance Manager) makes it boot unattended is not tried yet.
+
+**The keyboard and the stick come up together.** On the same boot xHCI
+found the keyboard on port 2 (`keyboard ready`) and the stick on port 3
+(`USB mass storage - activating after the scan`).
+
+**Then the kernel faults, from either disk.** Right after `keyboard ready`:
+
+```
+Ouroboros kernel: EXCEPTION core=0 vector=4 esr_el1=0x96000010 far_el1=0xa000000 elr_el1=0xbb9b5ad0
+Ouroboros kernel: system halted
+```
+
+A synchronous external abort at `0xa000000`, QEMU `virt`'s first
+virtio-mmio slot: the fault the virtio-mmio scan took on Parallels in 2026-08
+(`virtio_mmio.rs`'s module doc). The `.hdd` built from `main` at `2df96c44`
+faults the same way, so it is not the stick. The scan is gated on
+`virtio_mmio_probe_safe = discovery.is_some()` (`main.rs`): a byte-stream
+console found before the exit was taken to mean QEMU, since no other
+platform had one. **Parallels now has one.** The VM's serial port, writing
+to `parallels/com.output.txt`, stayed empty on 2026-10-12 (above); on
+2026-11-04 it held the kernel's whole post-exit log, `boot services exited,
+console live` to the fault. Which mechanism found it is not yet read: the
+`console @ ... (via ...)` line is printed before the exit, on the UEFI
+console only, and scrolls off the screen before a capture. Seen through the
+`\FBCON` flag on the stick, which puts the post-exit lines on the screen
+too. Without it the screen stops at `exiting boot services`.
+
+**So a Parallels boot has a serial log now**, `parallels/com.output.txt`,
+read as the Pi's `screenlog.0` is. The fix in progress replaces the
+heuristic with the firmware's own list of virtio-mmio devices (`ROADMAP.md`,
+"What's next").
+
+**The boot identity, A6's question, answered on the way:** `boot 6; from
+before this boot: variable present, file present; boot entropy 0 bytes`.
+Both stores serve the counter here, and the firmware offers no
+`EFI_RNG_PROTOCOL`.
+
 ## Recommended sequence
 
 1. **Run Part A now.** It's fast (`make test-parallels` for A3, a hand pass for

@@ -21,6 +21,17 @@ This document is the one to update first when direction changes.
 
 ## What's next (the current frontier)
 
+> **In progress 2026-11-04: the kernel faults on Parallels 27.1, from any
+> disk.** The virtio-mmio scan at QEMU's `0xa000000` is gated on finding a
+> serial console before the exit, which was true only on QEMU; Parallels
+> 27.1 (updated 2026-11-03) now gives the VM a discoverable serial console,
+> so the scan runs and takes a synchronous external abort
+> (`testing-parallels.md`, "Parallels 27.1 and the one-disk stick"). The
+> fix, Hans's choice of the two offered: probe only the virtio-mmio
+> transports the firmware's DSDT declares (`_HID "LNRO0005"`), so the
+> scan's address is discovered like every other device's, and no
+> declaration means no scan.
+
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
 > and [`roadmap-completed.md`](roadmap-completed.md)). The next direction, set
