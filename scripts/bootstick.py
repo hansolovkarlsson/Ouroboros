@@ -920,13 +920,14 @@ def write(target):
                     os.remove(image)
                 raise
             say(f"writing {size // MIB} MiB to {disk.dev}")
-            # macOS mounts partition 1 as soon as a write gives the disk a
-            # table it can read, and the mount writes to it (.fseventsd, the
-            # FAT's dirty bit, FSInfo): a read-back after it fails, and the
-            # tail's write is refused as busy. So the disk is written with
-            # sector 0 blank, nothing on it to mount, then read back, and the
-            # MBR goes on last and is read back alone; macOS's own writes come
-            # after the check (a real stick, 2026-11-04).
+            # macOS reads a disk's table again whenever a write to it ends,
+            # and mounts partition 1 when it finds one, writing there
+            # (.fseventsd, the FAT's dirty bit, FSInfo): a read-back after that
+            # fails (a real stick, 2026-11-04), and a raw write while it is
+            # mounted is refused as busy. So sector 0 is blanked first, by a
+            # write of its own, and every later write finds no table, old or
+            # new, until the MBR goes on last and is read back alone; macOS's
+            # own writes come after the check.
             with open(image, "rb") as fh:
                 mbr = fh.read(SECT)
             headless = os.path.join(tmp, "headless.img")
@@ -936,13 +937,17 @@ def write(target):
             mbr_file = os.path.join(tmp, "mbr")
             with open(mbr_file, "wb") as fh:
                 fh.write(mbr)
+            blank_file = os.path.join(tmp, "blank")
+            with open(blank_file, "wb") as fh:
+                fh.write(bytes(SECT))
             try:
+                disk.write_file(blank_file)
                 # The last MiB up to the very end, where a backup GPT's header
                 # is (the last LBA), whatever the disk's size is a multiple
                 # of; only what lies past the image when the image ends inside
-                # that MiB (the second review of #293). First, so no old table
-                # is left on the disk while sector 0 is blank (the review of
-                # #406).
+                # that MiB (the second review of #293). Before the image, so no
+                # old backup GPT is left on the disk while sector 0 is blank
+                # (the review of #406).
                 tail = max(size, disk.size - MIB)
                 if tail < disk.size:
                     zeros = os.path.join(tmp, "zeros")

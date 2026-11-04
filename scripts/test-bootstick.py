@@ -124,7 +124,7 @@ def automounted():
         # FAT volume is mounted there at attach (the review of #406). A
         # missing s1 is no mount, not a crash.
         mounted = False
-        for _ in range(60):
+        for _ in range(60 if code == 0 else 0):
             try:
                 point = bootstick.diskutil("info", dev + "s1").get("MountPoint")
             except bootstick.Refused:

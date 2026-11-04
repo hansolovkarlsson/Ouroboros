@@ -437,8 +437,8 @@ it once it runs.
 the pinned files on a fresh stick, the settings and `config.txt` carried,
 `FIRMWARE=1` and `PI=0`, and the stick booting on QEMU, which cannot run the
 Pi's firmware. The first real stick was written on 2026-11-04. Its first
-write failed its read-back because macOS mounted the new ESP in the
-middle of the write; the MBR now goes on last. macOS still mounts
+write failed its read-back because macOS mounted the new ESP between the
+write and the check; the MBR now goes on last. macOS still mounts
 partition 1 once the run ends, and leaves `.fseventsd` there, so eject the
 stick (`EJECT=1`, or `diskutil eject`) before moving it to the Pi.
 

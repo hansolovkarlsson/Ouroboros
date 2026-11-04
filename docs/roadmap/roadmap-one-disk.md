@@ -564,17 +564,18 @@ The high review of #294 found ten things, all taken:
   It passes each option from the command line only, and its usage lists
   them. CLAUDE.md's and the Makefile's rig descriptions are current.
 
-On 2026-11-04 the first real stick failed its read-back: macOS mounted
-partition 1 as soon as `dd` wrote the table, and the mount wrote six
-sectors there (`.fseventsd`, the FAT's dirty bit, FSInfo) before the
-comparison. The rig had attached every file with `-nomount`, so nothing
-ever mounted. The MBR now goes on last, after the read-back, and the rig
-has a disk macOS may mount, at 50 checks.
-
-The rig was then at 43 checks: a flag and a directory not carried, an
+The rig is at 43 checks: a flag and a directory not carried, an
 unmountable ESP refused and then repaired by `PI=0`, and `PI=true`
 refused. Each new check failed with its fix reverted, as did installing
 one file short. No rig reaches a busy volume's detach.
+
+On 2026-11-04 the first real stick failed its read-back: macOS mounted
+partition 1 as soon as `dd` wrote the table, and the mount wrote six
+sectors there (`.fseventsd`, the FAT's dirty bit, FSInfo) before the
+comparison. The rig, by then at 48 checks, had attached every file with
+`-nomount`, so nothing ever mounted. Sector 0 is now blanked first and the
+MBR goes on last, after the read-back, and the rig has a disk macOS may
+mount, at 50 checks.
 
 **6. The boot partition at a path** (decision D3). Optional for the arc:
 mount the ESP at `/boot` for every task, so a new kernel can be put on the
