@@ -843,3 +843,35 @@ count, owes a grep of the rigs for it, not only a run of the rig at hand.
 Each fix and each review finding has a rig case or a mutant behind it,
 recorded in the CHANGELOG. #354 and #357 had two rounds, the others one, so whether
 their repairs carry defects of their own is, as before, not known.
+
+## One scan, four reviews, and the design as the defect (2026-11-04)
+
+The ACPI scan that decides which virtio-mmio addresses the kernel may read
+was reviewed four times in a day (#407, then #408), and every review found a
+way to read a device whose `_STA` says absent as present. The spine of this
+file held exactly: the second review's finding was in the first review's
+repair. To keep a child device's `_CRS` from being read as its parent's, I
+skipped anything shaped like a child, and the bytes `5B 82` inside a
+constant were enough to skip the device's own `Name (_STA, Zero)`.
+
+What was new is how it ended. The second round's repair was a walk of the
+device's own objects, and the third review found two more ways past it and
+a third that no scan of one device could see at all: a `_STA` added from
+outside, by a later `Scope` of the device's path or by another table. Three
+rounds in a row had found the same class, presence decided from bytes
+without the namespace. At that point I stopped patching and offered Hans
+the redesign, a two-pass walk of every table from its top level with names
+resolved to absolute paths, and he took it. The fourth review, of that
+design, found real defects again (an unbounded recursion, a constant `_STA`
+that load-time code can overwrite, field units as names), but none of the
+earlier class. **When consecutive reviews find the same kind of defect, the
+defect is the representation; change what the code reasons over, and the
+next review finds new kinds instead of the old one again.**
+
+The same day had the small version too. #406's first review moved a disk
+write so a backup GPT could not be found behind a blank sector 0; its
+second review saw that the move left the old table in place during that
+write, where macOS could remount the old ESP. No rig could tell the two
+orders apart. The real stick, re-staged with the order the second review
+asked for, was the only check that could.
+
