@@ -353,3 +353,108 @@ fn an_eight_byte_status_method_is_not_a_name() {
     let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &method, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
     assert_eq!(scan(&table(&[&d])).status_unknown, 1);
 }
+
+fn name_int(seg: &[u8; 4], value: &[u8]) -> Vec<u8> {
+    let mut n = std::vec![0x08];
+    n.extend_from_slice(seg);
+    n.extend_from_slice(value);
+    n
+}
+
+#[test]
+fn device_op_bytes_inside_a_constant_do_not_hide_the_status() {
+    // The second review of #407, reproduced: Name (_UID, 0x825B) holds the
+    // bytes 5B 82, which the byte search took for a child Device and
+    // skipped, hiding Name (_STA, Zero), so the device read as present.
+    let d = device(
+        b"VR00",
+        &[
+            hid(b"LNRO0005").as_slice(),
+            &name_int(b"_UID", &[0x0b, 0x5b, 0x82]),
+            &name_int(b"_STA", &[0x00]),
+            &name_int(b"_ADR", &[0x00]),
+            crs(&mem32(0x0a00_0000, 0x200)).as_slice(),
+        ]
+        .concat(),
+    );
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.absent, 1);
+}
+
+#[test]
+fn a_constant_ending_in_a_method_op_byte_does_not_make_status_a_method() {
+    // Name (_UID, 0x14), then Name (_STA, 0x0F): 0A 14 08 _STA looked like
+    // MethodOp 14, PkgLength 08.
+    let d = device(
+        b"VR00",
+        &[
+            hid(b"LNRO0005").as_slice(),
+            &name_int(b"_UID", &[0x0a, 0x14]),
+            &name_int(b"_STA", &[0x0a, 0x0f]),
+            crs(&mem32(0x0a00_0000, 0x200)).as_slice(),
+        ]
+        .concat(),
+    );
+    assert_eq!(scan(&table(&[&d])).as_slice().len(), 1);
+}
+
+#[test]
+fn a_power_resources_status_is_not_the_devices() {
+    // PowerResource (PR00, 0, 0) { Name (_STA, Zero) } inside the device.
+    let inner = name_int(b"_STA", &[0x00]);
+    let mut pr = std::vec![0x5b, 0x84, (1 + 4 + 3 + inner.len()) as u8, b'P', b'R', b'0', b'0', 0x00, 0x00, 0x00];
+    pr.extend_from_slice(&inner);
+    let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &pr, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
+    let found = scan(&table(&[&d]));
+    assert_eq!(found.as_slice().len(), 1, "absent {} unknown {}", found.absent, found.status_unknown);
+}
+
+#[test]
+fn a_status_method_after_a_buffer_holding_device_op_bytes_is_still_seen() {
+    let mut buf_name = std::vec![0x08, b'B', b'U', b'F', b'0', 0x11, 0x06, 0x0a, 0x03, 0x5b, 0x82, 0x08];
+    let method = [0x14, 0x0a, b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x0a, 0x0f, 0xa4, 0x00];
+    buf_name.extend_from_slice(&method);
+    let d = device(b"GPU1", &[hid(b"LNRO0005").as_slice(), &buf_name, crs(&mem32(0x0218_0000, 0x4000)).as_slice()].concat());
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+}
+
+#[test]
+fn a_child_running_past_its_parent_ends_the_walk_and_is_not_taken() {
+    let mut ch = child(&[0x0a, 0x0f]);
+    ch[2] += 4; // the child's PkgLength now reaches past the parent's end
+    let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), ch.as_slice()].concat());
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+}
+
+#[test]
+fn an_op_the_walk_does_not_know_before_any_status_makes_it_unknown() {
+    // OperationRegion (REG0, SystemMemory, 0x1000, 0x10): not walked.
+    let opregion = [0x5b, 0x80, b'R', b'E', b'G', b'0', 0x00, 0x0b, 0x00, 0x10, 0x0a, 0x10];
+    let d = device(
+        b"VR00",
+        &[hid(b"LNRO0005").as_slice(), &opregion, &name_int(b"_STA", &[0x00]), crs(&mem32(0x0a00_0000, 0x200)).as_slice()]
+            .concat(),
+    );
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+}
+
+#[test]
+fn a_hid_inside_a_value_is_not_the_devices() {
+    // The _HID's bytes inside a buffer of an ordinary device: the walk of
+    // that device never meets them as a Name of its own.
+    let mut inner = hid(b"LNRO0005");
+    inner.extend_from_slice(&crs(&mem32(0x0a00_0000, 0x200)));
+    let mut buf = std::vec![0x08, b'B', b'U', b'F', b'0', 0x11, (3 + inner.len()) as u8, 0x0a, inner.len() as u8];
+    buf.extend_from_slice(&inner);
+    let d = device(b"L000", &[hid(b"PNP0C0F").as_slice(), buf.as_slice()].concat());
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.unreadable, 1);
+}

@@ -35,20 +35,28 @@
 //! present and enabled bits set; a `_STA` this scan cannot evaluate, a
 //! method, is counted in [`Transports::status_unknown`] and not taken.
 //!
-//! **A scan, not an interpreter.** It finds the `_HID` by its fixed encoding,
-//! bounds the search for the `_CRS` and `_STA` by the package length of the
-//! `Device` that holds it, and reads only those two descriptor kinds. What
-//! it cannot see, stated because the answer then is "no transport", which
-//! is the safe one: a `_HID` given as an EISA id or returned by a method (a
-//! device naming `LNRO0005` only as its `_CID`, as Parallels' balloon and
-//! NICs do, is not taken), a `_CRS` built by a method, a 64-bit or
-//! address-space memory descriptor, any `_STA` but a plain `Name`. A child
-//! `Device` inside the declaring one is skipped whole by both searches, so
-//! a child's `_CRS` or `_STA` is never read as the declaring device's (the
-//! review of #407); bytes in a buffer that happen to look like a child
-//! `Device` can only hide the device's own objects, which keeps it out.
-//! Each transport found is still checked by the kernel against the
-//! virtio-mmio magic value before it is used.
+//! **A walk of one level, not an interpreter.** The `_HID` is found by its
+//! fixed encoding; then the `Device` that holds it, the nearest `DeviceOp`
+//! before it whose package reaches past it, has its own objects walked in
+//! order, as a parser would at that level: each `Name` by its value's
+//! encoding (an integer, a string, a buffer, a package), and every op that
+//! carries a PkgLength (a `Method`, a child `Device`, `PowerResource`,
+//! `Processor` or `ThermalZone`, a `Scope`, `If`, `Else`, `While`, a
+//! `Field`) skipped whole. So bytes inside a value or a child are never read
+//! as the device's own objects: the `_HID`, `_STA` and `_CRS` used are the
+//! device's. Until the second review of #407 this was a byte search for each
+//! name, and a `5B 82` inside a constant, skipped as a child, hid the
+//! device's own `_STA`, which then read as present.
+//!
+//! What it cannot see, stated because the answer then is "no transport",
+//! which is the safe one: an op the walk does not know (an `OperationRegion`
+//! among them) ends the walk, and a device whose walk ends before its end
+//! with no `_STA` seen counts its status unknown; a `_HID` given as an EISA
+//! id, or a device naming `LNRO0005` only as its `_CID` (Parallels'
+//! balloon and NICs), is not taken; a `_CRS` built by a method, a 64-bit or
+//! address-space memory descriptor, any `_STA` but a constant. Each
+//! transport found is still checked by the kernel against the virtio-mmio
+//! magic value before it is used.
 //!
 //! Every length read from the table is bounded: a table only being read
 //! must never panic the kernel. Pure: no I/O, no heap, so it builds and is
@@ -139,48 +147,6 @@ pub const HEADER_LEN: usize = 36;
 
 const DEVICE_OP: [u8; 2] = [0x5b, 0x82];
 const NAME_HID: [u8; 6] = [0x08, b'_', b'H', b'I', b'D', 0x0d];
-const NAME_CRS: [u8; 6] = [0x08, b'_', b'C', b'R', b'S', 0x11];
-const STA: [u8; 4] = *b"_STA";
-
-/// What a device's `_STA` says.
-#[derive(Debug, PartialEq, Eq)]
-enum Status {
-    /// No `_STA`, or one whose value has the present and enabled bits.
-    Present,
-    /// A `Name (_STA, value)` without both bits.
-    Absent,
-    /// A `_STA` that is not a plain `Name` with a constant.
-    Unknown,
-}
-
-/// The device `table[start..end]`'s own `_STA`, by the rule in the module
-/// doc.
-fn status(table: &[u8], start: usize, end: usize) -> Status {
-    let Some(at) = find_own(table, start, end, &STA) else { return Status::Present };
-    // `Name (_STA, constant)`: NameOp right before the name. A 0x08 there
-    // may instead be the last byte of a `Method (_STA)`'s PkgLength (`14 08
-    // _STA ...` is an 8-byte method), so it counts as a NameOp only when no
-    // MethodOp's PkgLength ends there (the review of #407).
-    if at == 0 || table[at - 1] != 0x08 || method_pkg_ends_at(table, at) {
-        return Status::Unknown;
-    }
-    let v = at + STA.len();
-    let value = match table.get(v) {
-        Some(0x00) => Some(0),
-        Some(0x01) => Some(1),
-        Some(0xff) => Some(u32::MAX),
-        Some(0x0a) => table.get(v + 1).map(|&b| u32::from(b)),
-        Some(0x0b) => table.get(v + 1..v + 3).map(|b| u32::from(u16::from_le_bytes([b[0], b[1]]))),
-        Some(0x0c) => table.get(v + 1..v + 5).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
-        _ => None,
-    };
-    match value {
-        // Bit 0 present, bit 1 enabled (ACPI 6.5, 6.3.7).
-        Some(x) if x & 0x3 == 0x3 => Status::Present,
-        Some(_) => Status::Absent,
-        None => Status::Unknown,
-    }
-}
 
 /// Adds to `into` every virtio-mmio transport the AML table `table` (a
 /// DSDT or SSDT, its header included) declares. Called once a table, so
@@ -202,7 +168,14 @@ pub fn virtio_mmio(table: &[u8], into: &mut Transports) {
             into.unreadable += 1;
             continue;
         };
-        match status(table, start, end) {
+        let body = walk_device(table, start, end);
+        // The `_HID` must be one of the device's own objects, seen by the
+        // walk, not bytes inside one of them.
+        if body.hid_at != Some(found) {
+            into.unreadable += 1;
+            continue;
+        }
+        match body.status() {
             Status::Present => {}
             Status::Absent => {
                 into.absent += 1;
@@ -213,43 +186,175 @@ pub fn virtio_mmio(table: &[u8], into: &mut Transports) {
                 continue;
             }
         }
-        match find_own(table, start, end, &NAME_CRS).and_then(|crs| resources(table, crs + NAME_CRS.len(), end)) {
+        match body.crs_buffer.and_then(|buf| resources(table, buf + 1, end)) {
             Some(t) => into.push(t),
             None => into.unreadable += 1,
         }
     }
 }
 
-/// Whether a `MethodOp` (0x14) and a PkgLength of 1 to 4 bytes end just
-/// before `at`.
-fn method_pkg_ends_at(table: &[u8], at: usize) -> bool {
-    (1..=4).any(|n| {
-        at > n && table[at - n - 1] == 0x14 && pkg_length(table, at - n).is_some_and(|(_, bytes)| bytes == n)
+/// What a device's `_STA` says.
+#[derive(Debug, PartialEq, Eq)]
+enum Status {
+    /// No `_STA` in a device walked whole, or a constant with the present
+    /// and enabled bits.
+    Present,
+    /// A constant `_STA` without both bits.
+    Absent,
+    /// A `_STA` method or a value that is not a constant, or a device the
+    /// walk could not finish before seeing one.
+    Unknown,
+}
+
+/// A device's own objects, as [`walk_device`] found them.
+#[derive(Default)]
+struct Body {
+    /// Where its `Name (_HID, "LNRO0005")` starts.
+    hid_at: Option<usize>,
+    /// `Some(Some(v))` for `Name (_STA, constant v)`, `Some(None)` for a
+    /// `_STA` method or any other value.
+    sta: Option<Option<u64>>,
+    /// Where its `Name (_CRS, Buffer ...)`'s BufferOp is.
+    crs_buffer: Option<usize>,
+    /// Whether the walk reached the device's end.
+    complete: bool,
+}
+
+impl Body {
+    fn status(&self) -> Status {
+        match self.sta {
+            // Bit 0 present, bit 1 enabled (ACPI 6.5, 6.3.7).
+            Some(Some(v)) if v & 0x3 == 0x3 => Status::Present,
+            Some(Some(_)) => Status::Absent,
+            Some(None) => Status::Unknown,
+            None if self.complete => Status::Present,
+            None => Status::Unknown,
+        }
+    }
+}
+
+/// A NameString's length at `at`, and its single NameSeg when it is one
+/// (no root, parent or multi-segment prefix).
+fn name_string(table: &[u8], at: usize) -> Option<(usize, Option<[u8; 4]>)> {
+    let mut p = at;
+    while matches!(table.get(p), Some(b'\\' | b'^')) {
+        p += 1;
+    }
+    let segs = match *table.get(p)? {
+        0x00 => return Some((p + 1 - at, None)),
+        0x2e => {
+            p += 1;
+            2
+        }
+        0x2f => {
+            p += 2;
+            usize::from(*table.get(p - 1)?)
+        }
+        b'A'..=b'Z' | b'_' => 1,
+        _ => return None,
+    };
+    let len = segs.checked_mul(4)?;
+    let seg = table.get(p..p.checked_add(len)?)?;
+    let single = (segs == 1 && p == at).then(|| [seg[0], seg[1], seg[2], seg[3]]);
+    Some((p + len - at, single))
+}
+
+/// A Name's value.
+enum Data {
+    Int(u64),
+    Str(usize, usize),
+    Buffer,
+    Other,
+}
+
+/// The DataRefObject at `at`: its kind, and where the next object starts.
+/// `None` for any encoding this walk does not take apart.
+fn data(table: &[u8], at: usize) -> Option<(Data, usize)> {
+    let le = |n: usize| -> Option<u64> {
+        let b = table.get(at + 1..at + 1 + n)?;
+        Some(b.iter().rev().fold(0u64, |v, &x| (v << 8) | u64::from(x)))
+    };
+    Some(match *table.get(at)? {
+        0x00 => (Data::Int(0), at + 1),
+        0x01 => (Data::Int(1), at + 1),
+        0xff => (Data::Int(u64::MAX), at + 1),
+        0x0a => (Data::Int(le(1)?), at + 2),
+        0x0b => (Data::Int(le(2)?), at + 3),
+        0x0c => (Data::Int(le(4)?), at + 5),
+        0x0e => (Data::Int(le(8)?), at + 9),
+        0x0d => {
+            let nul = at + 1 + table.get(at + 1..)?.iter().position(|&b| b == 0)?;
+            (Data::Str(at + 1, nul), nul + 1)
+        }
+        0x11 => (Data::Buffer, at + 1 + pkg_length(table, at + 1)?.0),
+        0x12 | 0x13 => (Data::Other, at + 1 + pkg_length(table, at + 1)?.0),
+        _ => return None,
     })
 }
 
-/// The first offset of `pat` among the device `table[start..end]`'s own
-/// objects: after its header (DeviceOp, PkgLength, name), and skipping
-/// every `Device` nested inside it whole.
-fn find_own(table: &[u8], start: usize, end: usize, pat: &[u8]) -> Option<usize> {
-    let (_, pkg_bytes) = pkg_length(table, start + DEVICE_OP.len())?;
-    let mut p = start + DEVICE_OP.len() + pkg_bytes + 4;
-    while p + pat.len() <= end {
-        if table[p..].starts_with(&DEVICE_OP) {
-            if let Some((len, _)) = pkg_length(table, p + DEVICE_OP.len()) {
-                let child_end = p + DEVICE_OP.len() + len;
-                if child_end <= end && len > 0 {
-                    p = child_end;
-                    continue;
+/// Walks the device `table[start..end]`'s own objects in order, the way an
+/// AML parser would at that level: a `Name` by its value's encoding, and
+/// every op with a PkgLength (a `Method`, a child `Device`, `Processor`,
+/// `PowerResource` or `ThermalZone`, a `Scope`, `If`, `Else`, `While`, a
+/// `Field`) skipped whole, so nothing inside one of them is read as the
+/// device's (the second review of #407: a byte search took data bytes for a
+/// child and hid the device's own `_STA`). An op it does not know ends the
+/// walk with [`Body::complete`] false.
+fn walk_device(table: &[u8], start: usize, end: usize) -> Body {
+    let mut body = Body::default();
+    let Some((_, pkg_bytes)) = pkg_length(table, start + DEVICE_OP.len()) else { return body };
+    let Some((name_len, _)) = name_string(table, start + DEVICE_OP.len() + pkg_bytes) else { return body };
+    let mut p = start + DEVICE_OP.len() + pkg_bytes + name_len;
+    // Skips an op whose PkgLength starts at `p + op_len`.
+    let skip = |p: usize, op_len: usize| pkg_length(table, p + op_len).and_then(|(len, _)| (p + op_len).checked_add(len));
+    while p < end {
+        let next = match table[p] {
+            // NameOp: the name, then its value.
+            0x08 => (|| {
+                let (len, seg) = name_string(table, p + 1)?;
+                let value = p + 1 + len;
+                let (d, next) = data(table, value)?;
+                match (seg.as_ref(), &d) {
+                    (Some(b"_HID"), Data::Str(a, b)) if &table[*a..*b] == VIRTIO_MMIO_HID => body.hid_at = Some(p),
+                    (Some(b"_STA"), Data::Int(v)) => body.sta = Some(Some(*v)),
+                    (Some(b"_STA"), _) => body.sta = Some(None),
+                    (Some(b"_CRS"), Data::Buffer) => body.crs_buffer = Some(value),
+                    _ => {}
                 }
-            }
+                Some(next)
+            })(),
+            // MethodOp: its name is after its PkgLength.
+            0x14 => (|| {
+                let (len, bytes) = pkg_length(table, p + 1)?;
+                if let Some((_, Some(seg))) = name_string(table, p + 1 + bytes) {
+                    if &seg == b"_STA" {
+                        body.sta = Some(None);
+                    }
+                }
+                (p + 1).checked_add(len)
+            })(),
+            // ScopeOp, IfOp, ElseOp, WhileOp.
+            0x10 | 0xa0 | 0xa1 | 0xa2 => skip(p, 1),
+            // NoopOp.
+            0xa3 => Some(p + 1),
+            0x5b => match table.get(p + 1) {
+                // Field, Device, Processor, PowerResource, ThermalZone,
+                // IndexField, BankField.
+                Some(0x81..=0x87) => skip(p, 2),
+                // Mutex: a name and a SyncFlags byte. Event: a name.
+                Some(0x01) => name_string(table, p + 2).map(|(len, _)| p + 2 + len + 1),
+                Some(0x02) => name_string(table, p + 2).map(|(len, _)| p + 2 + len),
+                _ => None,
+            },
+            _ => None,
+        };
+        match next {
+            Some(n) if n > p && n <= end => p = n,
+            _ => return body,
         }
-        if table[p..].starts_with(pat) {
-            return Some(p);
-        }
-        p += 1;
     }
-    None
+    body.complete = p == end;
+    body
 }
 
 /// The first offset of `pat` in `table[from..to]`.
