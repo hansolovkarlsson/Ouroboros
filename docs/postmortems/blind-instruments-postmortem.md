@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-11-01. It began
+*A process retrospective, 2026-09-02, extended through 2026-11-04. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2564,3 +2564,37 @@ by a `grep -c` run after the merge to confirm the zero. The scan now reads
 exemption is a claim about the documents it was written for; carried to
 another tree, it is a blind spot until someone checks what that tree puts
 on the lines it skips.**
+
+## Three more, from the first real stick and the ACPI walk (2026-11-04)
+
+**A rig that could not see the mount.** `make test-bootstick` passed 48 of
+48 on the morning the first real stick failed its read-back. Every image it
+wrote was attached with `hdiutil -nomount`, `bootstick.py`'s own way of
+attaching a file, so macOS never mounted the new ESP and never wrote into it
+between the write and the comparison. The real stick, which macOS mounts the
+moment it has a table, was the first disk to show it. The new case attaches
+one image with mounting allowed, and its second check is the observer's:
+that macOS did mount it, since without the mount the first check proves
+nothing. With the disk attached `-nomount` that check fails. **A rig that
+attaches its target more gently than the world does cannot fail on what the
+world does to it.**
+
+**A helper whose encoding broke the test before the walk did.** The test of
+the walk's nesting bound built a `Scope (\)` nest ten thousand deep with a
+helper that wrote at most a two-byte PkgLength. Past a few hundred levels
+every length was truncated, the nest was malformed, and the walk stopped at
+the first bad length long before the bound, so the test passed for the
+wrong reason. Found by asking what the test would do with the bound
+removed. The helper now encodes one to four bytes, the test asserts the
+outer package covers the whole nest, and with the bound removed the test
+overflows its stack and aborts. **When a test builds its input, check the
+input is what the test says before trusting what the code did with it.**
+
+**A grep that moved the fault.** The first Parallels boot of the fix
+faulted at `0x2180000`, and my filter of the serial log kept `console live`
+and `EXCEPTION` and dropped the xHCI lines between them, so the fault read
+as coming right after the exit. A second boot with a wider filter showed it
+after `keyboard ready`, where the storage step probes, which is what led to
+the declared GPU. **A filter decides what the evidence says; read the
+unfiltered log around any line the filter makes look adjacent.**
+

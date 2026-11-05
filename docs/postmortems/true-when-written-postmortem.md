@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-11-02. Five PRs, no new subsystem, and four defects that were all
+through 2026-11-04. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -11,8 +11,10 @@ before its dump was read, a comment that named its own expiry, a limit's
 "unreachable" made false by globbing, a comment falsified by a later
 commit of its own pull request, a rig outside the suite reading a line
 the suite's own change rewrote, a defect written down without reading
-the code that would have produced it, and a guard deleted as doing nothing
-on a premise that held for one of its paths.*
+the code that would have produced it, a guard deleted as doing nothing
+on a premise that held for one of its paths, claims a move left behind,
+and a heuristic that one platform had already falsified and a vendor's
+update falsified loudly.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -1208,6 +1210,33 @@ copies, were wrong the moment it merged. They were found only because the
 next PR swept the files that held them. **When a change rewords a sentence,
 grep for the sentence before calling the change done: a quotation is a copy
 that does not know it is one.**
+
+## A heuristic another platform had falsified first (2026-11-04)
+
+The kernel decided whether to scan QEMU's hardcoded virtio-mmio slots by
+whether it had found a serial console before the exit, and its comment said
+exactly what that was: "still a heuristic, not a proof", but "grounded in
+the one real data point this project has", QEMU being the only platform
+with a discoverable console. `CLAUDE.md` said the same thing as a rule: all three
+console mechanisms "are dead on Parallels". Both were true when written.
+
+On 2026-11-03 Parallels Desktop updated itself to 27.1, its VM gained a
+serial console the kernel could find, the scan ran, and every Parallels
+boot halted on a synchronous external abort at `0xa000000`. No file in the
+repository changed. This is the purest case this file has met: the
+falsifying edit was not in another file of the tree but outside the tree,
+in a vendor's release.
+
+The part worth keeping is that the heuristic had been false since
+2026-09-28, when the Pi 4 first booted with a console found through its
+devicetree. From then on the Pi passed the same gate and read `0xa000000`
+on every boot. There it is RAM, the reads returned no magic value, and the
+boot went on, so nothing reported it. The line `virtio-blk discovery failed
+(no virtio-mmio block device found)` sat in `testing-pi4.md` as an ordinary
+result. **A heuristic is a claim about every platform it has not met; the
+first one that falsifies it quietly is the one to look for, because the
+loud one comes later.** The fix removed the inference: the kernel now
+probes only what the firmware's DSDT declares present.
 
 ## What actually worked
 

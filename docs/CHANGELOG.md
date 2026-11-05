@@ -1776,6 +1776,42 @@ pages, which abridge them; `CLAUDE.md`'s "Prose style" section names both
 (#394, #404). Page titles on the site now separate with a middle dot
 ("Glossary · Ouroboros"). No behaviour changes.
 
+**`make bootstick` writes a real stick (2026-11-04).** The first stick
+written, the Pi's Lexar, failed its read-back: macOS mounts partition 1 as
+soon as `dd` gives the disk a table, and its mount wrote six sectors there
+(`.fseventsd`, the FAT's dirty bit, FSInfo) before the comparison.
+`bootstick.py` now blanks sector 0 by a write of its own, zeroes the disk's
+last MiB, writes the image with sector 0 still blank, reads it all back,
+and only then writes the MBR and reads that sector back alone; macOS's own
+writes come after the check, and `EJECT=1` asks again while it mounts.
+`make test-bootstick` attaches one image the way a real stick is, mounting
+allowed, and checks the mount happened (50 checks). The same stick, re-staged
+over its own table, wrote and ejected cleanly (#406).
+
+**One stick boots the Pi 4 and Parallels (2026-11-04).** The stick `make
+bootstick PI=1` writes booted the Pi 4 with no card in the slot (`USB boot
+mode 2`) to a login on its own ext2 root, and with the card in, the firmware
+booted the card and the kernel mounted the stick's root. On Parallels 27.1
+the stick, chosen in the firmware's Boot Manager, booted its own kernel to
+its ext2 root, `fsd` reporting the boot partition on the same disk. The
+records are `testing-pi4.md` and `testing-parallels.md`.
+
+**The kernel probes virtio-mmio only where the firmware declares it present
+(2026-11-04).** Since Parallels Desktop 27.1, every Parallels boot halted
+with a synchronous external abort at `0xa000000`: the kernel scanned QEMU's
+hardcoded virtio-mmio slots whenever it found a serial console before the
+exit, and Parallels' VM now has one. A new pure crate, `amlscan`, walks the
+DSDT and every SSDT together from their top level, as a parser loads them,
+and finds each `_HID "LNRO0005"` device with its registers and interrupt;
+a device counts only when nothing in the tables was unseeable and its
+`_STA` is absent or a constant saying present that no method names, since
+Parallels declares a virtio GPU behind a `_STA` method that faults in a VM
+without one. `virtio_mmio::find_device` reads only that list, the NIC's
+interrupt is the declared one and is enabled only as an SPI the GIC
+implements, and config space is reachable only through the length the
+declared block was checked against. QEMU's 32 transports are found as
+before; Parallels and the Pi probe none (#407, #408).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
