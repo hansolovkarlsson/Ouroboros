@@ -147,37 +147,49 @@ impl Transports {
 /// The size of an ACPI table header: AML starts after it.
 pub const HEADER_LEN: usize = 36;
 
-const DEVICE_OP: [u8; 2] = [0x5b, 0x82];
-const NAME_HID: [u8; 6] = [0x08, b'_', b'H', b'I', b'D', 0x0d];
+/// The most AML tables taken in one scan (the DSDT and the SSDTs).
+pub const MAX_TABLES: usize = 32;
 
-/// Adds to `into` every virtio-mmio transport the AML table `table` (a
-/// DSDT or SSDT, its header included) declares. Called once a table, so
-/// the DSDT and every SSDT add to one list.
-pub fn virtio_mmio(table: &[u8], into: &mut Transports) {
-    if table.len() <= HEADER_LEN {
-        return;
+/// The deepest name path followed; a deeper one makes the scan uncertain.
+const MAX_DEPTH: usize = 8;
+
+/// The most `LNRO0005` devices tracked; past it they are counted as
+/// dropped.
+const MAX_CANDIDATES: usize = 2 * MAX_TRANSPORTS;
+
+/// Adds to `into` every virtio-mmio transport the AML tables `tables` (the
+/// DSDT and every SSDT, each with its header) declare present. One call
+/// for all of them: a device's `_STA` or `_CRS` may be defined in another
+/// table than the device, by a `Scope` of its path (the third review of
+/// #407).
+pub fn virtio_mmio(tables: &[&[u8]], into: &mut Transports) {
+    // Pass 1: the path of every Device with `Name (_HID, "LNRO0005")`.
+    let mut find = FindHids { paths: [Path::ROOT; MAX_CANDIDATES], count: 0, dropped: 0 };
+    let mut uncertain = false;
+    for t in tables {
+        walk_table(t, &mut find, &mut uncertain);
     }
-    let mut at = HEADER_LEN;
-    while let Some(found) = find(table, at, table.len(), &NAME_HID) {
-        let name = found + NAME_HID.len();
-        at = name;
-        // The string, then its NUL: "LNRO0005" and not a longer id that
-        // starts with it.
-        if table.get(name..name + 9).is_none_or(|s| &s[..8] != VIRTIO_MMIO_HID || s[8] != 0) {
-            continue;
-        }
-        let Some((start, end)) = enclosing_device(table, found) else {
+    into.dropped += find.dropped;
+    // Pass 2: everything defined at each of those paths, in any table.
+    let mut facts = [Facts::default(); MAX_CANDIDATES];
+    let mut gather = Gather { paths: &find.paths[..find.count], facts: &mut facts[..find.count] };
+    for t in tables {
+        walk_table(t, &mut gather, &mut uncertain);
+    }
+    for f in &facts[..find.count] {
+        if !f.device || f.crs_bad || f.hids != 1 {
             into.unreadable += 1;
             continue;
+        }
+        let status = match f.sta {
+            Sta::None if uncertain => Status::Unknown,
+            Sta::None => Status::Present,
+            // Bit 0 present, bit 1 enabled (ACPI 6.5, 6.3.7).
+            Sta::Value(v) if v & 0x3 == 0x3 => Status::Present,
+            Sta::Value(_) => Status::Absent,
+            Sta::Unknown => Status::Unknown,
         };
-        let body = walk_device(table, start, end);
-        // The `_HID` must be one of the device's own objects, seen by the
-        // walk, not bytes inside one of them.
-        if body.hid_at != Some(found) {
-            into.unreadable += 1;
-            continue;
-        }
-        match body.status() {
+        match status {
             Status::Present => {}
             Status::Absent => {
                 into.absent += 1;
@@ -188,7 +200,7 @@ pub fn virtio_mmio(table: &[u8], into: &mut Transports) {
                 continue;
             }
         }
-        match body.crs_buffer.and_then(|buf| resources(table, buf + 1, end)) {
+        match f.crs {
             Some(t) => into.push(t),
             None => into.unreadable += 1,
         }
@@ -198,52 +210,55 @@ pub fn virtio_mmio(table: &[u8], into: &mut Transports) {
 /// What a device's `_STA` says.
 #[derive(Debug, PartialEq, Eq)]
 enum Status {
-    /// No `_STA` in a device walked whole, or a constant with the present
-    /// and enabled bits.
     Present,
-    /// A constant `_STA` without both bits.
     Absent,
-    /// A `_STA` method or a value that is not a constant, or a device the
-    /// walk could not finish before seeing one.
     Unknown,
 }
 
-/// A device's own objects, as [`walk_device`] found them.
-#[derive(Default)]
-struct Body {
-    /// Where its `Name (_HID, "LNRO0005")` starts.
-    hid_at: Option<usize>,
-    /// `Some(Some(v))` for `Name (_STA, constant v)`, `Some(None)` for a
-    /// `_STA` method or any other value.
-    sta: Option<Option<u64>>,
-    /// Where its `Name (_CRS, Buffer ...)`'s BufferOp is.
-    crs_buffer: Option<usize>,
-    /// Whether the walk reached the device's end.
-    complete: bool,
+/// An absolute name path, NameSeg by NameSeg. Equal by the segments in
+/// use only: `segs` past `len` may hold a segment [`Path::split_last`] left.
+#[derive(Clone, Copy)]
+struct Path {
+    segs: [[u8; 4]; MAX_DEPTH],
+    len: usize,
 }
 
-impl Body {
-    fn status(&self) -> Status {
-        match self.sta {
-            // Bit 0 present, bit 1 enabled (ACPI 6.5, 6.3.7).
-            Some(Some(v)) if v & 0x3 == 0x3 => Status::Present,
-            Some(Some(_)) => Status::Absent,
-            Some(None) => Status::Unknown,
-            None if self.complete => Status::Present,
-            None => Status::Unknown,
-        }
+impl PartialEq for Path {
+    fn eq(&self, other: &Path) -> bool {
+        self.segs[..self.len] == other.segs[..other.len]
     }
 }
 
-/// A NameString's length at `at`, and its single NameSeg when it is one
-/// (no root, parent or multi-segment prefix).
-fn name_string(table: &[u8], at: usize) -> Option<(usize, Option<[u8; 4]>)> {
+impl Eq for Path {}
+
+impl Path {
+    const ROOT: Path = Path { segs: [[0; 4]; MAX_DEPTH], len: 0 };
+
+    /// The parent of this path, and its last segment.
+    fn split_last(&self) -> Option<(Path, [u8; 4])> {
+        let last = *self.segs.get(self.len.checked_sub(1)?)?;
+        let mut parent = *self;
+        parent.len -= 1;
+        Some((parent, last))
+    }
+}
+
+/// A NameString at `at` resolved against `scope`: the absolute path it
+/// names, and its length in bytes. `None` for an encoding this scan does
+/// not read, or a path deeper than [`MAX_DEPTH`].
+fn name_string(table: &[u8], at: usize, scope: &Path) -> Option<(Path, usize)> {
     let mut p = at;
-    while matches!(table.get(p), Some(b'\\' | b'^')) {
+    let mut path = *scope;
+    if table.get(p) == Some(&b'\\') {
+        path = Path::ROOT;
+        p += 1;
+    }
+    while table.get(p) == Some(&b'^') {
+        path.len = path.len.checked_sub(1)?;
         p += 1;
     }
     let segs = match *table.get(p)? {
-        0x00 => return Some((p + 1 - at, None)),
+        0x00 => return Some((path, p + 1 - at)),
         0x2e => {
             p += 1;
             2
@@ -255,22 +270,29 @@ fn name_string(table: &[u8], at: usize) -> Option<(usize, Option<[u8; 4]>)> {
         b'A'..=b'Z' | b'_' => 1,
         _ => return None,
     };
-    let len = segs.checked_mul(4)?;
-    let seg = table.get(p..p.checked_add(len)?)?;
-    let single = (segs == 1 && p == at).then(|| [seg[0], seg[1], seg[2], seg[3]]);
-    Some((p + len - at, single))
+    for _ in 0..segs {
+        let seg = table.get(p..p + 4)?;
+        if path.len == MAX_DEPTH || !seg.iter().all(|&c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_') {
+            return None;
+        }
+        path.segs[path.len] = [seg[0], seg[1], seg[2], seg[3]];
+        path.len += 1;
+        p += 4;
+    }
+    Some((path, p - at))
 }
 
 /// A Name's value.
 enum Data {
     Int(u64),
     Str(usize, usize),
-    Buffer,
+    /// A Buffer: where its BufferOp is.
+    Buffer(usize),
     Other,
 }
 
 /// The DataRefObject at `at`: its kind, and where the next object starts.
-/// `None` for any encoding this walk does not take apart.
+/// `None` for any encoding this scan does not take apart.
 fn data(table: &[u8], at: usize) -> Option<(Data, usize)> {
     let le = |n: usize| -> Option<u64> {
         let b = table.get(at + 1..at + 1 + n)?;
@@ -288,84 +310,219 @@ fn data(table: &[u8], at: usize) -> Option<(Data, usize)> {
             let nul = at + 1 + table.get(at + 1..)?.iter().position(|&b| b == 0)?;
             (Data::Str(at + 1, nul), nul + 1)
         }
-        0x11 => (Data::Buffer, at + 1 + pkg_length(table, at + 1)?.0),
-        0x12 | 0x13 => (Data::Other, at + 1 + pkg_length(table, at + 1)?.0),
+        0x11 => (Data::Buffer(at), (at + 1).checked_add(pkg_length(table, at + 1)?.0)?),
+        0x12 | 0x13 => (Data::Other, (at + 1).checked_add(pkg_length(table, at + 1)?.0)?),
         _ => return None,
     })
 }
 
-/// Walks the device `table[start..end]`'s own objects in order, the way an
-/// AML parser would at that level: a `Name` by its value's encoding, and
-/// every op with a PkgLength (a `Method`, a child `Device`, `Processor`,
-/// `PowerResource` or `ThermalZone`, a `Scope`, `If`, `Else`, `While`, a
-/// `Field`) skipped whole, so nothing inside one of them is read as the
-/// device's (the second review of #407: a byte search took data bytes for a
-/// child and hid the device's own `_STA`). An op it does not know ends the
-/// walk with [`Body::complete`] false.
-fn walk_device(table: &[u8], start: usize, end: usize) -> Body {
-    let mut body = Body::default();
-    let Some((_, pkg_bytes)) = pkg_length(table, start + DEVICE_OP.len()) else { return body };
-    let Some((name_len, _)) = name_string(table, start + DEVICE_OP.len() + pkg_bytes) else { return body };
-    let mut p = start + DEVICE_OP.len() + pkg_bytes + name_len;
-    // Skips an op whose PkgLength starts at `p + op_len`.
-    let skip = |p: usize, op_len: usize| pkg_length(table, p + op_len).and_then(|(len, _)| (p + op_len).checked_add(len));
+/// What a walk reports, object by object, at their absolute paths.
+trait Visit {
+    fn device(&mut self, _path: &Path) {}
+    fn name(&mut self, _table: &[u8], _path: &Path, _value: &Data) {}
+    /// A Method, an Alias or anything else that defines `path` with a
+    /// value this scan cannot know.
+    fn opaque(&mut self, _path: &Path) {}
+}
+
+/// Walks the table `table`'s whole TermList from its top level.
+fn walk_table<V: Visit>(table: &[u8], v: &mut V, uncertain: &mut bool) {
+    if table.len() <= HEADER_LEN {
+        return;
+    }
+    if !term_list(table, HEADER_LEN, table.len(), &Path::ROOT, v) {
+        *uncertain = true;
+    }
+}
+
+/// Walks the objects of `table[p..end]` in the scope `scope`, as an AML
+/// parser would: a `Name` by its value's encoding, a `Scope`, `Device`,
+/// `Processor`, `PowerResource` or `ThermalZone` by recursing into its
+/// body at its own path, a `Method` or a `Field` skipped whole by its
+/// PkgLength. `false` when it met something it cannot see through: an
+/// `If`, `Else` or `While` outside a method (which may define any name), an
+/// op it does not know, or a length past its end; the rest of the scope is
+/// then unseen, so the scan as a whole is uncertain.
+fn term_list<V: Visit>(table: &[u8], mut p: usize, end: usize, scope: &Path, v: &mut V) -> bool {
+    // An op's PkgLength at `at`: (where its package ends, where the
+    // PkgLength ends). `None` when the package runs past `end`.
+    let pkg = |at: usize| -> Option<(usize, usize)> {
+        let (len, bytes) = pkg_length(table, at)?;
+        let pkg_end = at.checked_add(len)?;
+        (pkg_end <= end && len >= bytes).then_some((pkg_end, at + bytes))
+    };
     while p < end {
-        let next = match table[p] {
+        let next = match (table[p], table.get(p + 1).copied()) {
             // NameOp: the name, then its value.
-            0x08 => (|| {
-                let (len, seg) = name_string(table, p + 1)?;
-                let value = p + 1 + len;
-                let (d, next) = data(table, value)?;
-                match (seg.as_ref(), &d) {
-                    (Some(b"_HID"), Data::Str(a, b)) if &table[*a..*b] == VIRTIO_MMIO_HID => body.hid_at = Some(p),
-                    (Some(b"_STA"), Data::Int(v)) => body.sta = Some(Some(*v)),
-                    (Some(b"_STA"), _) => body.sta = Some(None),
-                    (Some(b"_CRS"), Data::Buffer) => body.crs_buffer = Some(value),
-                    _ => {}
-                }
+            (0x08, _) => (|| {
+                let (path, len) = name_string(table, p + 1, scope)?;
+                let (value, next) = data(table, p + 1 + len)?;
+                v.name(table, &path, &value);
                 Some(next)
             })(),
-            // MethodOp: its name is after its PkgLength.
-            0x14 => (|| {
-                let (len, bytes) = pkg_length(table, p + 1)?;
-                if let Some((_, Some(seg))) = name_string(table, p + 1 + bytes) {
-                    if &seg == b"_STA" {
-                        body.sta = Some(None);
-                    }
-                }
-                (p + 1).checked_add(len)
+            // MethodOp: skipped whole; what it defines is unknowable here.
+            (0x14, _) => (|| {
+                let (pkg_end, body) = pkg(p + 1)?;
+                let (path, _) = name_string(table, body, scope)?;
+                v.opaque(&path);
+                Some(pkg_end)
             })(),
-            // ScopeOp, IfOp, ElseOp, WhileOp.
-            0x10 | 0xa0 | 0xa1 | 0xa2 => skip(p, 1),
+            // ScopeOp, and the ExtOp scopes with a fixed header after
+            // their name: Device (none), Processor (6 bytes), PowerResource
+            // (3 bytes), ThermalZone (none).
+            (0x10, _) | (0x5b, Some(0x82..=0x85)) => (|| {
+                let ext = usize::from(table[p] == 0x5b);
+                let (pkg_end, body) = pkg(p + 1 + ext)?;
+                let (path, len) = name_string(table, body, scope)?;
+                let header = match table.get(p + 1).copied() {
+                    Some(0x83) if ext == 1 => 6,
+                    Some(0x84) if ext == 1 => 3,
+                    _ => 0,
+                };
+                if ext == 1 && table[p + 1] == 0x82 {
+                    v.device(&path);
+                }
+                let start = body + len + header;
+                (start <= pkg_end && term_list(table, start, pkg_end, &path, v)).then_some(pkg_end)
+            })(),
+            // ExternalOp: a name, an ObjectType and an ArgumentCount.
+            (0x15, _) => name_string(table, p + 1, scope).map(|(_, len)| p + 1 + len + 2),
+            // AliasOp: the new name is defined to something unknowable.
+            (0x06, _) => (|| {
+                let (_, len) = name_string(table, p + 1, scope)?;
+                let (alias, len2) = name_string(table, p + 1 + len, scope)?;
+                v.opaque(&alias);
+                Some(p + 1 + len + len2)
+            })(),
             // NoopOp.
-            0xa3 => Some(p + 1),
-            0x5b => match table.get(p + 1) {
-                // Field, Device, Processor, PowerResource, ThermalZone,
-                // IndexField, BankField.
-                Some(0x81..=0x87) => skip(p, 2),
-                // Mutex: a name and a SyncFlags byte. Event: a name.
-                Some(0x01) => name_string(table, p + 2).map(|(len, _)| p + 2 + len + 1),
-                Some(0x02) => name_string(table, p + 2).map(|(len, _)| p + 2 + len),
-                _ => None,
-            },
+            (0xa3, _) => Some(p + 1),
+            // Field, IndexField, BankField: skipped whole.
+            (0x5b, Some(0x81 | 0x86 | 0x87)) => pkg(p + 2).map(|(pkg_end, _)| pkg_end),
+            // OperationRegion: a name, a RegionSpace byte, and an offset
+            // and a length taken only as integer constants.
+            (0x5b, Some(0x80)) => (|| {
+                let (path, len) = name_string(table, p + 2, scope)?;
+                v.opaque(&path);
+                let (Data::Int(_), q) = data(table, p + 2 + len + 1)? else { return None };
+                let (Data::Int(_), q) = data(table, q)? else { return None };
+                Some(q)
+            })(),
+            // Mutex (a name and a SyncFlags byte), Event (a name).
+            (0x5b, Some(0x01)) => name_string(table, p + 2, scope).map(|(_, len)| p + 2 + len + 1),
+            (0x5b, Some(0x02)) => name_string(table, p + 2, scope).map(|(_, len)| p + 2 + len),
+            // If, Else, While, and anything else: not seen through.
             _ => None,
         };
         match next {
             Some(n) if n > p && n <= end => p = n,
-            _ => return body,
+            _ => return false,
         }
     }
-    body.complete = p == end;
-    body
+    true
 }
 
-/// The first offset of `pat` in `table[from..to]`.
-fn find(table: &[u8], from: usize, to: usize, pat: &[u8]) -> Option<usize> {
-    let to = to.min(table.len());
-    if from >= to || to - from < pat.len() {
-        return None;
+/// Pass 1: every device path given `_HID "LNRO0005"`.
+struct FindHids {
+    paths: [Path; MAX_CANDIDATES],
+    count: usize,
+    dropped: usize,
+}
+
+impl Visit for FindHids {
+    fn name(&mut self, table: &[u8], path: &Path, value: &Data) {
+        let (Some((parent, b"_HID")), Data::Str(a, b)) = (path.split_last().as_ref().map(|(p, s)| (*p, s)), value) else {
+            return;
+        };
+        if &table[*a..*b] != VIRTIO_MMIO_HID || self.paths[..self.count].contains(&parent) {
+            return;
+        }
+        if self.count < MAX_CANDIDATES {
+            self.paths[self.count] = parent;
+            self.count += 1;
+        } else {
+            self.dropped += 1;
+        }
     }
-    table[from..to].windows(pat.len()).position(|w| w == pat).map(|p| from + p)
+}
+
+/// A `_STA` as the tables define it.
+#[derive(Clone, Copy, Default)]
+enum Sta {
+    #[default]
+    None,
+    Value(u64),
+    /// A method, a value that is not a constant, or two definitions.
+    Unknown,
+}
+
+/// Everything pass 2 found defined at one device path.
+#[derive(Clone, Copy, Default)]
+struct Facts {
+    device: bool,
+    hids: u8,
+    sta: Sta,
+    crs: Option<Transport>,
+    /// A `_CRS` this scan cannot read, or two of them.
+    crs_bad: bool,
+}
+
+/// Pass 2: the facts at each path pass 1 found.
+struct Gather<'a> {
+    paths: &'a [Path],
+    facts: &'a mut [Facts],
+}
+
+impl Gather<'_> {
+    fn at(&mut self, path: &Path) -> Option<(&mut Facts, [u8; 4])> {
+        let (parent, seg) = path.split_last()?;
+        let i = self.paths.iter().position(|p| *p == parent)?;
+        Some((&mut self.facts[i], seg))
+    }
+}
+
+impl Visit for Gather<'_> {
+    fn device(&mut self, path: &Path) {
+        if let Some(i) = self.paths.iter().position(|p| p == path) {
+            self.facts[i].device = true;
+        }
+    }
+
+    fn name(&mut self, table: &[u8], path: &Path, value: &Data) {
+        let Some((f, seg)) = self.at(path) else { return };
+        match &seg {
+            b"_HID" => f.hids = f.hids.saturating_add(1),
+            b"_STA" => {
+                f.sta = match (f.sta, value) {
+                    (Sta::None, Data::Int(v)) => Sta::Value(*v),
+                    _ => Sta::Unknown,
+                }
+            }
+            b"_CRS" => match (f.crs.is_some() || f.crs_bad, value) {
+                (false, Data::Buffer(at)) => match resources(table, at + 1, table.len()) {
+                    Some(t) => f.crs = Some(t),
+                    None => f.crs_bad = true,
+                },
+                _ => {
+                    f.crs = None;
+                    f.crs_bad = true;
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn opaque(&mut self, path: &Path) {
+        let Some((f, seg)) = self.at(path) else { return };
+        match &seg {
+            b"_STA" => f.sta = Sta::Unknown,
+            b"_CRS" => {
+                f.crs = None;
+                f.crs_bad = true;
+            }
+            b"_HID" => f.hids = f.hids.saturating_add(1),
+            _ => {}
+        }
+    }
 }
 
 /// An AML PkgLength at `at`: (its value, the bytes it takes). The value
@@ -381,25 +538,6 @@ fn pkg_length(table: &[u8], at: usize) -> Option<(usize, usize)> {
         value |= usize::from(*table.get(at + 1 + i)?) << (4 + 8 * i);
     }
     Some((value, 1 + follow))
-}
-
-/// The byte range of the innermost `Device` whose package holds `inside`:
-/// the nearest `DeviceOp` before it whose length reaches past it.
-fn enclosing_device(table: &[u8], inside: usize) -> Option<(usize, usize)> {
-    let mut at = inside;
-    while at > HEADER_LEN {
-        at -= 1;
-        if table[at..].starts_with(&DEVICE_OP) {
-            let pkg = at + DEVICE_OP.len();
-            if let Some((len, _)) = pkg_length(table, pkg) {
-                let end = pkg.checked_add(len)?;
-                if end > inside && end <= table.len() {
-                    return Some((at, end));
-                }
-            }
-        }
-    }
-    None
 }
 
 /// The transport a `_CRS` buffer describes, the buffer's PkgLength at

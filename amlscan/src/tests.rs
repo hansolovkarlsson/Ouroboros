@@ -30,8 +30,12 @@ fn table(body: &[&[u8]]) -> Vec<u8> {
 }
 
 fn scan(t: &[u8]) -> Transports {
+    scan_all(&[t])
+}
+
+fn scan_all(tables: &[&[u8]]) -> Transports {
     let mut found = Transports::new();
-    virtio_mmio(t, &mut found);
+    virtio_mmio(tables, &mut found);
     found
 }
 
@@ -160,7 +164,10 @@ fn a_word_sized_buffer_and_a_long_device_are_read() {
 #[test]
 fn more_than_the_maximum_are_counted_not_kept() {
     let devs: Vec<Vec<u8>> = (0..MAX_TRANSPORTS as u32 + 3)
-        .map(|i| device(b"VRxx", &[hid(b"LNRO0005").as_slice(), crs(&mem32(0x0a00_0000 + i * 0x200, 0x200)).as_slice()].concat()))
+        .map(|i| {
+            let name = [b'V', b'0' + (i / 100) as u8, b'0' + (i / 10 % 10) as u8, b'0' + (i % 10) as u8];
+            device(&name, &[hid(b"LNRO0005").as_slice(), crs(&mem32(0x0a00_0000 + i * 0x200, 0x200)).as_slice()].concat())
+        })
         .collect();
     let parts: Vec<&[u8]> = devs.iter().map(|d| d.as_slice()).collect();
     let found = scan(&table(&parts));
@@ -169,11 +176,13 @@ fn more_than_the_maximum_are_counted_not_kept() {
 }
 
 #[test]
-fn the_same_declaration_in_two_tables_is_kept_once() {
-    let mut found = Transports::new();
-    virtio_mmio(&table(&[VR00]), &mut found);
-    virtio_mmio(&table(&[VR00]), &mut found);
-    assert_eq!(found.as_slice().len(), 1);
+fn the_same_device_defined_in_two_tables_is_not_taken() {
+    // Two _HIDs and two _CRSs at one path: not a declaration this scan can
+    // read as one device.
+    let (a, b) = (table(&[VR00]), table(&[VR00]));
+    let found = scan_all(&[&a, &b]);
+    assert!(found.is_empty());
+    assert_eq!(found.unreadable, 1);
 }
 
 #[test]
@@ -432,8 +441,26 @@ fn a_child_running_past_its_parent_ends_the_walk_and_is_not_taken() {
 }
 
 #[test]
-fn an_op_the_walk_does_not_know_before_any_status_makes_it_unknown() {
-    // OperationRegion (REG0, SystemMemory, 0x1000, 0x10): not walked.
+fn an_op_the_walk_does_not_know_makes_a_device_without_a_constant_status_unknown() {
+    // Store (One, Local0) at device level: executed at load, not walked.
+    let store = [0x70, 0x01, 0x60];
+    let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), crs(&mem32(0x0a00_0000, 0x200)).as_slice(), &store].concat());
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+    // A constant _STA saying present still stands: no other definition of
+    // it could be valid AML.
+    let d = device(
+        b"VR00",
+        &[hid(b"LNRO0005").as_slice(), &name_int(b"_STA", &[0x0a, 0x0f]), crs(&mem32(0x0a00_0000, 0x200)).as_slice(), &store]
+            .concat(),
+    );
+    assert_eq!(scan(&table(&[&d])).as_slice().len(), 1);
+}
+
+#[test]
+fn an_operation_region_with_constant_bounds_is_walked_past() {
+    // OperationRegion (REG0, SystemMemory, 0x1000, 0x10), then the _STA.
     let opregion = [0x5b, 0x80, b'R', b'E', b'G', b'0', 0x00, 0x0b, 0x00, 0x10, 0x0a, 0x10];
     let d = device(
         b"VR00",
@@ -442,7 +469,7 @@ fn an_op_the_walk_does_not_know_before_any_status_makes_it_unknown() {
     );
     let found = scan(&table(&[&d]));
     assert!(found.is_empty());
-    assert_eq!(found.status_unknown, 1);
+    assert_eq!(found.absent, 1);
 }
 
 #[test]
@@ -455,6 +482,147 @@ fn a_hid_inside_a_value_is_not_the_devices() {
     buf.extend_from_slice(&inner);
     let d = device(b"L000", &[hid(b"PNP0C0F").as_slice(), buf.as_slice()].concat());
     let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    // Not a declaration at all, so not a line in the boot log either (the
+    // third review of #407).
+    assert_eq!((found.unreadable, found.status_unknown, found.absent), (0, 0, 0));
+}
+
+#[test]
+fn device_op_bytes_in_a_value_before_the_hid_are_not_the_device() {
+    // The third review of #407, reproduced: Name (_UID, QWord) whose bytes
+    // hold 5B 82 LL 00, a "Device" with a null name whose package ends
+    // before the real device's Name (_STA, Zero).
+    let tail_len = (hid(b"LNRO0005").len() + crs(&mem32(0x0a00_0000, 0x200)).len()) as u8;
+    let uid = [0x08, b'_', b'U', b'I', b'D', 0x0e, 0x01, 0x02, 0x03, 0x04, 0x5b, 0x82, 2 + tail_len, 0x00];
+    let d = device(
+        b"VR00",
+        &[uid.as_slice(), hid(b"LNRO0005").as_slice(), crs(&mem32(0x0a00_0000, 0x200)).as_slice(), &name_int(b"_STA", &[0x00])]
+            .concat(),
+    );
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty(), "taken although its _STA says absent");
+}
+
+#[test]
+fn a_status_inside_an_if_at_device_level_is_not_missed() {
+    // The third review of #407, reproduced: If (One) { Name (_STA, Zero) }.
+    let inner = name_int(b"_STA", &[0x00]);
+    let mut iff = std::vec![0xa0, (2 + inner.len()) as u8, 0x01];
+    iff.extend_from_slice(&inner);
+    let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &iff, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty(), "taken although a _STA inside its If may say absent");
+}
+
+
+/// A Scope of `path` (a NameString's bytes) around `body`.
+fn scope(path: &[u8], body: &[u8]) -> Vec<u8> {
+    let inner = path.len() + body.len();
+    let mut s = std::vec![0x10];
+    if inner + 1 < 0x40 {
+        s.push((inner + 1) as u8);
+    } else {
+        let len = inner + 2;
+        s.push(0x40 | (len & 0x0f) as u8);
+        s.push((len >> 4) as u8);
+    }
+    s.extend_from_slice(path);
+    s.extend_from_slice(body);
+    s
+}
+
+/// QEMU's declaration with no _STA, under \_SB_ as QEMU puts it.
+fn qemu_under_sb() -> Vec<u8> {
+    scope(b"\\_SB_", VR00)
+}
+
+#[test]
+fn qemus_declaration_under_sb_is_found() {
+    assert_eq!(scan(&table(&[&qemu_under_sb()])).as_slice().len(), 1);
+}
+
+#[test]
+fn a_status_added_by_a_later_scope_of_the_device_is_seen() {
+    // The third review of #407: Scope (\_SB.VR00) { Name (_STA, Zero) }
+    // later in the same table.
+    let later = scope(b"\\\x2e_SB_VR00", &name_int(b"_STA", &[0x00]));
+    let found = scan(&table(&[&qemu_under_sb(), &later]));
+    assert!(found.is_empty());
+    assert_eq!(found.absent, 1);
+}
+
+#[test]
+fn a_status_added_in_another_table_is_seen() {
+    // The same Scope in an SSDT.
+    let dsdt = table(&[&qemu_under_sb()]);
+    let ssdt = table(&[&scope(b"\\\x2e_SB_VR00", &name_int(b"_STA", &[0x00]))]);
+    let found = scan_all(&[&dsdt, &ssdt]);
+    assert!(found.is_empty());
+    assert_eq!(found.absent, 1);
+    // And a method there.
+    let method = [0x14, 0x0a, b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x0a, 0x0f, 0xa4, 0x00];
+    let ssdt = table(&[&scope(b"\\\x2e_SB_VR00", &method)]);
+    assert_eq!(scan_all(&[&dsdt, &ssdt]).status_unknown, 1);
+}
+
+#[test]
+fn a_status_named_by_its_full_path_is_seen() {
+    // Name (\_SB.VR00._STA, Zero), at the table's top level.
+    let mut name = std::vec![0x08, b'\\', 0x2f, 0x03];
+    name.extend_from_slice(b"_SB_VR00_STA");
+    name.push(0x00);
+    let found = scan(&table(&[&qemu_under_sb(), &name]));
+    assert!(found.is_empty());
+    assert_eq!(found.absent, 1);
+}
+
+#[test]
+fn a_status_named_from_a_parent_prefix_is_seen() {
+    // Inside \_SB_.L000: Name (^VR00._STA, Zero).
+    let mut name = std::vec![0x08, b'^', 0x2e];
+    name.extend_from_slice(b"VR00_STA");
+    name.push(0x00);
+    let l000 = device(b"L000", &[hid(b"PNP0C0F").as_slice(), &name].concat());
+    let sb = scope(b"\\_SB_", &[VR00, l000.as_slice()].concat());
+    let found = scan(&table(&[&sb]));
+    assert!(found.is_empty());
+    assert_eq!(found.absent, 1);
+}
+
+#[test]
+fn an_if_anywhere_outside_a_method_makes_a_device_without_a_constant_status_unknown() {
+    // If (One) { } in a different device altogether: it could define any
+    // name, \_SB.VR00._STA among them.
+    let iff = [0xa0, 0x02, 0x01];
+    let other = device(b"L000", &[hid(b"PNP0C0F").as_slice(), &iff].concat());
+    let found = scan(&table(&[&scope(b"\\_SB_", &[VR00, other.as_slice()].concat())]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+}
+
+#[test]
+fn a_status_on_a_power_resource_or_processor_inside_is_theirs() {
+    // Processor (CPU0, 0, 0, 0) { Name (_STA, Zero) } inside the device:
+    // its _STA is \VR00.CPU0's.
+    let inner = name_int(b"_STA", &[0x00]);
+    let mut cpu = std::vec![0x5b, 0x83, (1 + 4 + 6 + inner.len()) as u8, b'C', b'P', b'U', b'0', 0, 0, 0, 0, 0, 0];
+    cpu.extend_from_slice(&inner);
+    let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &cpu, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
+    assert_eq!(scan(&table(&[&d])).as_slice().len(), 1);
+}
+
+#[test]
+fn a_device_named_but_never_defined_as_a_device_is_not_taken() {
+    // Name (\VR00._HID, "LNRO0005") and its _CRS with no Device (VR00).
+    let mut hid_name = std::vec![0x08, b'\\', 0x2e];
+    hid_name.extend_from_slice(b"VR00_HID");
+    hid_name.push(0x0d);
+    hid_name.extend_from_slice(b"LNRO0005\0");
+    let mut crs_name = std::vec![0x08, b'\\', 0x2e];
+    crs_name.extend_from_slice(b"VR00");
+    crs_name.extend_from_slice(&crs(&mem32(0x0a00_0000, 0x200))[1..]);
+    let found = scan(&table(&[&hid_name, &crs_name]));
     assert!(found.is_empty());
     assert_eq!(found.unreadable, 1);
 }
