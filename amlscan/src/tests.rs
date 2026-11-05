@@ -448,14 +448,17 @@ fn an_op_the_walk_does_not_know_makes_a_device_without_a_constant_status_unknown
     let found = scan(&table(&[&d]));
     assert!(found.is_empty());
     assert_eq!(found.status_unknown, 1);
-    // A constant _STA saying present still stands: no other definition of
-    // it could be valid AML.
+    // Not even a constant _STA saying present: load-time code such as this
+    // Store may overwrite it before the OS reads it (the fourth review of
+    // #407).
     let d = device(
         b"VR00",
         &[hid(b"LNRO0005").as_slice(), &name_int(b"_STA", &[0x0a, 0x0f]), crs(&mem32(0x0a00_0000, 0x200)).as_slice(), &store]
             .concat(),
     );
-    assert_eq!(scan(&table(&[&d])).as_slice().len(), 1);
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
 }
 
 #[test]
@@ -518,18 +521,38 @@ fn a_status_inside_an_if_at_device_level_is_not_missed() {
 
 /// A Scope of `path` (a NameString's bytes) around `body`.
 fn scope(path: &[u8], body: &[u8]) -> Vec<u8> {
-    let inner = path.len() + body.len();
     let mut s = std::vec![0x10];
-    if inner + 1 < 0x40 {
-        s.push((inner + 1) as u8);
-    } else {
-        let len = inner + 2;
-        s.push(0x40 | (len & 0x0f) as u8);
-        s.push((len >> 4) as u8);
-    }
+    s.extend_from_slice(&pkg_len(path.len() + body.len()));
     s.extend_from_slice(path);
     s.extend_from_slice(body);
     s
+}
+
+/// The PkgLength encoding for a package of `inner` bytes after it, in the
+/// fewest bytes (1 to 4) that hold it.
+fn pkg_len(inner: usize) -> Vec<u8> {
+    if inner + 1 < 0x40 {
+        return std::vec![(inner + 1) as u8];
+    }
+    for follow in 1..=3usize {
+        let len = inner + 1 + follow;
+        if len < 1 << (4 + 8 * follow) {
+            let mut v = std::vec![((follow as u8) << 6) | (len & 0x0f) as u8];
+            for i in 0..follow {
+                v.push((len >> (4 + 8 * i)) as u8);
+            }
+            return v;
+        }
+    }
+    panic!("a package too long for a PkgLength");
+}
+
+#[test]
+fn the_test_pkg_len_is_read_back_by_the_scans() {
+    for inner in [0, 0x3e, 0x3f, 0x100, 0xffd, 0xffe, 0x10_0000, 0xff_fff0] {
+        let enc = pkg_len(inner);
+        assert_eq!(pkg_length(&enc, 0), Some((inner + enc.len(), enc.len())), "inner {inner:#x}");
+    }
 }
 
 /// QEMU's declaration with no _STA, under \_SB_ as QEMU puts it.
@@ -625,4 +648,85 @@ fn a_device_named_but_never_defined_as_a_device_is_not_taken() {
     let found = scan(&table(&[&hid_name, &crs_name]));
     assert!(found.is_empty());
     assert_eq!(found.unreadable, 1);
+}
+
+#[test]
+fn nesting_past_the_limit_is_uncertain_not_a_stack_overflow() {
+    // Scope (\) { Scope (\) { ... } } ten thousand deep: the path stays at
+    // the root, so only the nesting bound stops it (the fourth review of
+    // #407).
+    let mut body = qemu_under_sb();
+    for _ in 0..10_000 {
+        body = scope(b"\\\0", &body);
+    }
+    // Well formed all the way down: the root scope's package covers it all.
+    assert_eq!(pkg_length(&body, 1).map(|(n, _)| 1 + n), Some(body.len()));
+    // The device past the bound is never reached: nothing found, nothing
+    // probed, and the walk returned instead of running the stack out.
+    assert!(scan(&table(&[&body])).is_empty());
+}
+
+#[test]
+fn a_method_naming_sta_keeps_a_constant_status_out() {
+    // Method (\_SB._INI) { Store (Zero, \_SB.VR00._STA) }: ACPI runs
+    // \_SB._INI before any device's _STA, so the constant may not be what
+    // the OS reads.
+    let mut ini = std::vec![0x14, 0x00, b'_', b'I', b'N', b'I', 0x00, 0x70, 0x00, b'\\', 0x2f, 0x03];
+    ini.extend_from_slice(b"_SB_VR00_STA");
+    ini[1] = (ini.len() - 1) as u8;
+    let vr = device(
+        b"VR00",
+        &[hid(b"LNRO0005").as_slice(), &name_int(b"_STA", &[0x0a, 0x0f]), crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat(),
+    );
+    let sb = scope(b"\\_SB_", &[vr.as_slice(), &ini].concat());
+    let found = scan(&table(&[&sb]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+    // Without the method, the constant is trusted.
+    let sb = scope(b"\\_SB_", &vr);
+    assert_eq!(scan(&table(&[&sb])).as_slice().len(), 1);
+}
+
+#[test]
+fn a_method_that_loads_a_table_makes_the_scan_uncertain() {
+    // Method (LDT0) { LoadTable (...) }: the 5B 1F bytes in its body.
+    let method = [0x14, 0x08, b'L', b'D', b'T', b'0', 0x00, 0x5b, 0x1f, 0x00];
+    let found = scan(&table(&[&qemu_under_sb(), &method]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+}
+
+#[test]
+fn a_field_unit_named_sta_is_a_definition() {
+    // OperationRegion (R000, SystemMemory, 0x1000, 4)
+    // Field (R000, ByteAcc, NoLock, Preserve) { _STA, 8 }
+    let opregion = [0x5b, 0x80, b'R', b'0', b'0', b'0', 0x00, 0x0b, 0x00, 0x10, 0x0a, 0x04];
+    let field_body = [b'R', b'0', b'0', b'0', 0x01, b'_', b'S', b'T', b'A', 0x08];
+    let mut field = std::vec![0x5b, 0x81, (1 + field_body.len()) as u8];
+    field.extend_from_slice(&field_body);
+    let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &opregion, &field, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
+    let found = scan(&table(&[&d]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+}
+
+#[test]
+fn a_crs_value_running_past_its_device_is_not_read() {
+    // The device's PkgLength ends inside its _CRS buffer: the value is not
+    // recorded, and the scan is uncertain.
+    let mut d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &name_int(b"_STA", &[0x0a, 0x0f]), crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
+    d[2] -= 6;
+    let found = scan(&table(&[&d, &[0xa3; 6]]));
+    assert!(found.is_empty());
+}
+
+#[test]
+fn a_child_that_cannot_be_read_does_not_hide_the_devices_after_it() {
+    // A device holding an unknown op, then QEMU's declaration: both are
+    // counted, the second as unknown since the scan is uncertain (the
+    // fourth review of #407: it went uncounted).
+    let bad = device(b"L000", &[hid(b"PNP0C0F").as_slice(), &[0x70, 0x01, 0x60]].concat());
+    let found = scan(&table(&[&scope(b"\\_SB_", &[bad.as_slice(), VR00].concat())]));
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
 }
