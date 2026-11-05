@@ -730,3 +730,21 @@ fn a_child_that_cannot_be_read_does_not_hide_the_devices_after_it() {
     assert!(found.is_empty());
     assert_eq!(found.status_unknown, 1);
 }
+
+#[test]
+fn a_value_running_past_its_scope_is_never_recorded() {
+    // White-box: what the walk hands pass 2. Through the public scan the
+    // device is already kept out, as uncertain; this pins the bound itself.
+    let mut d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
+    d[2] -= 6;
+    let t = table(&[&d, &[0xa3; 6]]);
+    let mut seen = Seen::default();
+    let mut find = FindHids { paths: [Path::ROOT; MAX_CANDIDATES], count: 0, dropped: 0 };
+    walk_table(&t, &mut find, &mut seen);
+    assert_eq!(find.count, 1);
+    let mut facts = [Facts::default(); MAX_CANDIDATES];
+    let mut g = Gather { paths: &find.paths[..1], facts: &mut facts[..1] };
+    walk_table(&t, &mut g, &mut seen);
+    assert!(facts[0].crs.is_none() && !facts[0].crs_bad, "the overrunning _CRS was recorded");
+    assert!(seen.uncertain);
+}
