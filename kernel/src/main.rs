@@ -268,15 +268,8 @@ extern "C" fn kernel_main() -> ! {
                 ),
                 None => log::info!("Ouroboros kernel: ACPI declares no virtio-mmio transport: no virtio-mmio device is probed"),
             }
-            if found.dropped + found.unreadable + found.absent + found.status_unknown > 0 {
-                log::info!(
-                    "Ouroboros kernel: virtio-mmio declarations not probed: {} whose _STA says absent, {} whose _STA could not be read, {} whose declaration could not be read, {} past the {} kept",
-                    found.absent,
-                    found.status_unknown,
-                    found.unreadable,
-                    found.dropped,
-                    amlscan::MAX_TRANSPORTS
-                );
+            if let Some(line) = virtio_mmio::NotProbed::of(&found) {
+                log::info!("Ouroboros kernel: {line}");
             }
             found
         }
@@ -837,25 +830,19 @@ extern "C" fn kernel_main() -> ! {
         unsafe { xhci::init(info.base) };
     }
 
+    // Every declaration not probed, whether or not another was kept, said
+    // again after the exit: the pre-exit line reaches only the UEFI console
+    // (the second review of #407). One `NotProbed` writes both.
+    if let Some(line) = virtio_mmio::NotProbed::of(&virtio) {
+        console::println!("Ouroboros kernel: {line}");
+    }
+
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk
     // + FAT32, installed globally for fs_list_dir/fs_read_file
     // (syscall.rs) to use. Not fatal if it fails - see init_storage's doc
     // comment. Every virtio-mmio driver below probes only the transports the
     // firmware declares (`virtio`, read before the exit); with none, none of
     // them runs, which is the case on Parallels and the Pi.
-    // Every declaration not probed, whether or not another was kept: the
-    // pre-exit line with these counts reaches only the UEFI console (the
-    // second review of #407).
-    if virtio.absent + virtio.status_unknown + virtio.unreadable + virtio.dropped > 0 {
-        console::println!(
-            "Ouroboros kernel: virtio-mmio declarations not probed: {} whose _STA says absent, {} whose _STA could not be read, {} whose declaration could not be read, {} past the {} kept",
-            virtio.absent,
-            virtio.status_unknown,
-            virtio.unreadable,
-            virtio.dropped,
-            amlscan::MAX_TRANSPORTS
-        );
-    }
     let held_virtio = if virtio.is_empty() {
         console::println!("Ouroboros kernel: skipping virtio-blk (no virtio-mmio transport declared present on this platform)");
         None

@@ -70,6 +70,32 @@ use core::ptr::{read_volatile, write_volatile};
 
 pub use amlscan::{Transport, Transports};
 
+/// The one line naming the declarations a scan did not probe, written
+/// before the exit (UEFI console) and after it (the serial console) alike.
+pub struct NotProbed<'a>(&'a Transports);
+
+impl<'a> NotProbed<'a> {
+    /// `None` when every declaration found was kept.
+    pub fn of(t: &'a Transports) -> Option<Self> {
+        (t.absent + t.status_unknown + t.unreadable + t.dropped > 0).then_some(Self(t))
+    }
+}
+
+impl core::fmt::Display for NotProbed<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let t = self.0;
+        write!(
+            f,
+            "virtio-mmio declarations not probed: {} whose _STA says absent, {} whose _STA could not be read, {} whose declaration could not be read, {} past the {} kept",
+            t.absent,
+            t.status_unknown,
+            t.unreadable,
+            t.dropped,
+            amlscan::MAX_TRANSPORTS
+        )
+    }
+}
+
 const MAGIC_VALUE: u64 = 0x74726976; // "virt", little-endian bytes of the ASCII string
 
 // Register byte offsets, modern (non-legacy) interface only - see module

@@ -1,5 +1,5 @@
-//! The virtio-mmio transports an ACPI table declares, found by a byte scan
-//! of its AML. The kernel probes a virtio-mmio address only when the
+//! The virtio-mmio transports the ACPI tables declare present, found by
+//! walking their AML namespace. The kernel probes a virtio-mmio address only when the
 //! firmware has said a transport is there: until 2026-11-04 it scanned
 //! QEMU `virt`'s 32 slots from `0xa000000` whenever a serial console had
 //! been found before the exit, and Parallels 27.1, which gave its VM a
@@ -31,32 +31,45 @@
 //! without that GPU it answers "not present", and a read of its registers
 //! is a synchronous external abort (seen 2026-11-04). ACPI says a device
 //! with no `_STA` is present and enabled, which is QEMU's case. So a device
-//! is taken when it has no `_STA`, or a `Name (_STA, value)` with both the
-//! present and enabled bits set; a `_STA` this scan cannot evaluate, a
-//! method, is counted in [`Transports::status_unknown`] and not taken.
+//! is taken when it has a constant `_STA` with both the present and enabled
+//! bits set, or no `_STA` at all in tables walked whole; a `_STA` this scan
+//! cannot evaluate, a method, is counted in [`Transports::status_unknown`]
+//! and not taken.
 //!
-//! **A walk of one level, not an interpreter.** The `_HID` is found by its
-//! fixed encoding; then the `Device` that holds it, the nearest `DeviceOp`
-//! before it whose package reaches past it, has its own objects walked in
-//! order, as a parser would at that level: each `Name` by its value's
-//! encoding (an integer, a string, a buffer, a package), and every op that
-//! carries a PkgLength (a `Method`, a child `Device`, `PowerResource`,
-//! `Processor` or `ThermalZone`, a `Scope`, `If`, `Else`, `While`, a
-//! `Field`) skipped whole. So bytes inside a value or a child are never read
-//! as the device's own objects: the `_HID`, `_STA` and `_CRS` used are the
-//! device's. Until the second review of #407 this was a byte search for each
-//! name, and a `5B 82` inside a constant, skipped as a child, hid the
-//! device's own `_STA`, which then read as present.
+//! **A walk of the namespace, not an interpreter.** A `_STA` need not be
+//! inside its device: `Scope (\_SB.VR00) { Name (_STA, Zero) }` later in the
+//! DSDT, or in an SSDT, or `Name (\_SB.VR00._STA, Zero)` anywhere, defines it
+//! too (the third review of #407). So every table is walked from its top
+//! level, all of them in one [`virtio_mmio`] call, as a parser would load
+//! them: a `Scope`, `Device`, `Processor`, `PowerResource` or `ThermalZone`
+//! by recursing into its body at its own path, each name resolved to an
+//! absolute path (`\`, `^` and multi-segment names included), each `Name`
+//! by its value's encoding, a `Method` or a `Field` skipped whole. Pass 1
+//! finds the path of every device given `Name (_HID, "LNRO0005")`; pass 2
+//! gathers every `_STA` and `_CRS` defined at those paths, wherever they
+//! are. Bytes inside a value, a method or another device are never read as
+//! a name. Until the reviews of #407 this was a search of one device's
+//! bytes, and each review found a way for it to read an absent device as
+//! present.
 //!
-//! What it cannot see, stated because the answer then is "no transport",
-//! which is the safe one: an op the walk does not know (an `OperationRegion`
-//! among them) ends the walk, and a device whose walk ends before its end
-//! with no `_STA` seen counts its status unknown; a `_HID` given as an EISA
-//! id, or a device naming `LNRO0005` only as its `_CID` (Parallels'
-//! balloon and NICs), is not taken; a `_CRS` built by a method, a 64-bit or
-//! address-space memory descriptor, any `_STA` but a constant. Each
-//! transport found is still checked by the kernel against the virtio-mmio
-//! magic value before it is used.
+//! **What makes the scan uncertain, and what that costs.** Anything the
+//! walk cannot see through means the rest of that scope is unseen, and it
+//! could define any name, a `_STA` included: an `If`, `Else` or `While`
+//! outside a method (executed at load), an op the walk does not know (an
+//! `OperationRegion` whose bounds are not constants, a `Store`), a length
+//! running past its parent, a path deeper than 8 segments. Then a device
+//! with no constant `_STA` counts as unknown, not present; a constant
+//! `_STA` still stands, since AML allows no second definition of a name.
+//! QEMU's DSDT is walked whole (the test of its reference copy says so).
+//!
+//! Not taken, stated because the answer then is "no transport", which is
+//! the safe one: a `_HID` given as an EISA id, or a device naming `LNRO0005`
+//! only as its `_CID` (Parallels' balloon and NICs); a `_STA`, `_HID` or
+//! `_CRS` defined twice or by a method or an `Alias`; a `_CRS` with no
+//! `Memory32Fixed`, or only 64-bit or address-space descriptors; a `_HID`
+//! named at a path no `Device` defines. Each transport found is still
+//! checked by the kernel against the virtio-mmio magic value before it is
+//! used.
 //!
 //! Every length read from the table is bounded: a table only being read
 //! must never panic the kernel. Pure: no I/O, no heap, so it builds and is
@@ -90,17 +103,17 @@ pub struct Transports {
     count: usize,
     /// Declared past [`MAX_TRANSPORTS`], so not kept.
     pub dropped: usize,
-    /// `LNRO0005` `_HID`s this scan could not read a device for: no
-    /// enclosing `Device`, a `_HID` that is not one of its own objects, or
-    /// no `_CRS` buffer it can read. Never probed.
+    /// `LNRO0005` declarations this scan could not read as one device: a
+    /// path no `Device` defines, a second `_HID`, or no single `_CRS`
+    /// buffer it can read. Never probed.
     pub unreadable: usize,
     /// `LNRO0005` devices whose `Name (_STA, ...)` says not present or not
     /// enabled: not probed.
     pub absent: usize,
     /// `LNRO0005` devices with a `_STA` this scan cannot evaluate (a
-    /// method, or a value that is not a constant), or whose walk ended
-    /// before any `_STA` was seen: not probed, since only an interpreter
-    /// could say whether the device is there.
+    /// method, a value that is not a constant, two definitions), or with no
+    /// `_STA` seen in a scan that was uncertain: not probed, since only an
+    /// interpreter could say whether the device is there.
     pub status_unknown: usize,
 }
 

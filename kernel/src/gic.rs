@@ -145,6 +145,9 @@ pub unsafe fn enable_declared_spi(intid: u32) -> bool {
     if !(32..limit).contains(&intid) {
         return false;
     }
+    // SAFETY: after `init` (the caller's contract), and `intid` was just
+    // checked to be an SPI the distributor implements, so the enable
+    // writes land inside its registers.
     unsafe { enable_interrupt(intid) };
     true
 }
