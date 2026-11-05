@@ -63,6 +63,15 @@ CHECK_LINES = [
 ]
 
 
+def output_of(seg):
+    """A command's own output: past the shell's echo of the typed line, up to
+    the prompt that follows it, so the echo and the prompt cannot pass or
+    fail a check about the command."""
+    first = seg.find("\n")
+    last = seg.rfind(PROMPT)
+    return seg[first + 1:last] if 0 <= first < last else ""
+
+
 def newlines_clean(text):
     """Every `\n` after a `\r`, and no `\r` doubled: what the console's ONLCR
     sends, whichever path a line came by."""
@@ -155,11 +164,11 @@ def main() -> int:
         ("after a program died raw, the next starts with ISIG set",
          "ctermios: initial ok" in seg.get("again", "")),
         ("a file's LF-only lines reach the serial line as CR LF",
-         "#define _SYS_TERMIOS_H\r\n" in seg.get("newline", "")
-         and newlines_clean(seg.get("newline", ""))),
+         "#define _SYS_TERMIOS_H\r\n" in output_of(seg.get("newline", ""))
+         and newlines_clean(output_of(seg.get("newline", "")))),
         ("nl: every line ending reaches the serial line as one CR LF",
-         all(f"nl-{x}\r\n" in seg.get("nl", "") for x in "abcde")
-         and newlines_clean(seg.get("nl", ""))),
+         all(f"nl-{x}\r\n" in output_of(seg.get("nl", "")) for x in "abcde")
+         and newlines_clean(output_of(seg.get("nl", "")))),
         ("no fault lines", faults == 0),
     ]
     failed = 0

@@ -300,7 +300,7 @@ prints the usage and exits when invoked with `-?`, the uniform help flag every
 arg-taking command (builtin and `/bin`) honors. **Output goes to the console
 server, not straight to the kernel:** a program builds its text into a
 `DSPOP_WRITE` message and sends it to the console server (task 3,
-`CON_TASK`) via `msg_call`, falling back to `putc` (`PUTC`, one raw byte)
+`CON_TASK`) via `msg_call`, falling back to `putc` (`PUTC`, one byte, a bare `\n` sent as `\r\n`)
 only if no console server is loaded this boot. Every userland program
 here carries the same small `con_write` helper for this (copy the
 shell's or `hello/`'s); it's what moved console *rendering* out of the

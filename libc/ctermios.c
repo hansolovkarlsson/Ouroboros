@@ -38,7 +38,10 @@
  * and `\n` in two writes, `nl-b` with a bare `\n`, `nl-c` with `\r\n` in
  * one write, `nl-d` by PUTC a byte at a time with a bare `\n`, and `nl-e`
  * with its `\r` by PUTC between two writes through the console server.
- * Each must reach the serial line as `nl-X\r\n`, with no `\r\r`. */
+ * Each must reach the serial line as `nl-X\r\n`, with no `\r\r`. Every
+ * piece is written to fd 2, which goes to the console at once: fd 1 holds
+ * its bytes in libc's line buffer until a `\n`, fflush included, so a `\r`
+ * written there would leave in the same write as its `\n`. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -188,22 +191,21 @@ static void putc_text(const char *s) {
     }
 }
 
+/* One console write, now: fd 2 is not buffered (libc/src/file.c's write). */
+static void now(const char *s) {
+    write(2, s, strlen(s));
+}
+
 static int newlines(void) {
-    printf("nl-a\r");
-    fflush(stdout);
-    printf("\n");
-    fflush(stdout);
-    printf("nl-b\n");
-    fflush(stdout);
-    printf("nl-c\r\n");
-    fflush(stdout);
+    now("nl-a\r");
+    now("\n");
+    now("nl-b\n");
+    now("nl-c\r\n");
     putc_text("nl-d\n");
-    printf("nl-e");
-    fflush(stdout);
+    now("nl-e");
     putc_text("\r");
-    printf("\n");
-    fflush(stdout);
-    printf("ctermios: nl done\r\n");
+    now("\n");
+    now("ctermios: nl done\r\n");
     return 0;
 }
 

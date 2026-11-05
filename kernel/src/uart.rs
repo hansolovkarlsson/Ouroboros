@@ -6,7 +6,6 @@
 //! nothing is mapped there, hard-crashes the VM. No confirmed address means
 //! no console, not a guess.
 
-use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
 
 const DR_OFFSET: usize = 0x00;
@@ -50,17 +49,5 @@ impl Uart {
             let dr = (self.base + DR_OFFSET) as *const u32;
             Some(read_volatile(dr) as u8)
         }
-    }
-}
-
-impl fmt::Write for Uart {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            if byte == b'\n' {
-                self.write_byte(b'\r');
-            }
-            self.write_byte(byte);
-        }
-        Ok(())
     }
 }
