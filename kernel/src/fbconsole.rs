@@ -177,12 +177,3 @@ impl FbConsole {
         }
     }
 }
-
-impl core::fmt::Write for FbConsole {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        for byte in s.bytes() {
-            self.put_char(byte);
-        }
-        Ok(())
-    }
-}

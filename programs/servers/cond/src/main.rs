@@ -440,7 +440,9 @@ impl Fb {
 }
 
 /// Byte-stream backend: push bytes to the kernel console via the gated
-/// `CON_WRITE`, chunked at the kernel's per-buffer cap.
+/// `CON_WRITE`, chunked at the kernel's per-buffer cap. Raw from this side:
+/// the kernel gives a bare `\n` its `\r` (`console::write_bytes`), so cond
+/// must not add one of its own.
 fn con_write_raw(bytes: &[u8]) {
     let mut off = 0;
     while off < bytes.len() {

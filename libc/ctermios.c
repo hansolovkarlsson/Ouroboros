@@ -38,7 +38,10 @@
  * and `\n` in two writes, `nl-b` with a bare `\n`, `nl-c` with `\r\n` in
  * one write, `nl-d` by PUTC a byte at a time with a bare `\n`, and `nl-e`
  * with its `\r` by PUTC between two writes through the console server.
- * Each must reach the serial line as `nl-X\r\n`, with no `\r\r`. Every
+ * Then `nl-f` and `nl-g`, 256 and 255 bytes before a bare `\n`, so the
+ * inserted `\r` falls at the end of the kernel's 256-byte chunk (write_out)
+ * and just past it. Each must reach the serial line as `nl-X...\r\n`, with
+ * no `\r\r`. Every
  * piece is written to fd 2, which goes to the console at once: fd 1 holds
  * its bytes in libc's line buffer until a `\n`, fflush included, so a `\r`
  * written there would leave in the same write as its `\n`. */
@@ -205,6 +208,14 @@ static int newlines(void) {
     now("nl-e");
     putc_text("\r");
     now("\n");
+    /* The chunk's two edges: 256 and 255 bytes, then a bare \n. */
+    static char line[260];
+    for (int n = 256; n >= 255; n--) {
+        memset(line, 'x', sizeof line);
+        memcpy(line, n == 256 ? "nl-f" : "nl-g", 4);
+        line[n] = '\n';
+        write(2, line, (size_t)n + 1);
+    }
     now("ctermios: nl done\r\n");
     return 0;
 }

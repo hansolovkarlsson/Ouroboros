@@ -52,63 +52,54 @@ impl Console {
     /// translated the kernel's lines on its own, with no memory of the last
     /// byte, and program output went out untranslated.
     ///
-    /// Virtio is batched through a local buffer and sent as chunked
-    /// virtqueue transfers: each `virtio_console::Device::write` is a full
-    /// round trip (notify, then poll the used ring), so a whole line in one
-    /// or a few transfers matters there in a way it does not for an MMIO
-    /// UART, which takes a byte at a time.
+    ///
+    /// One loop for every driver, translating into a local buffer that goes
+    /// to the driver a chunk at a time ([`Console::write_chunk`]), so the
+    /// rule exists once and the boots the rigs run (the PL011) exercise the
+    /// same code as a virtio console. The chunk is for virtio's sake: each
+    /// `virtio_console::Device::write` is a full round trip (notify, then
+    /// poll the used ring), so a line in one or a few transfers matters
+    /// there in a way it does not for an MMIO UART.
     fn write_out(&mut self, bytes: &[u8]) {
+        const CHUNK: usize = 256;
+        let mut buf = [0u8; CHUNK];
+        let mut len = 0usize;
         let mut after_cr = AFTER_CR.load(Ordering::Relaxed);
-        if let Console::Virtio(dev) = self {
-            const CHUNK: usize = 256;
-            let mut buf = [0u8; CHUNK];
-            let mut len = 0usize;
-            // SAFETY, every `write` below: `dev` was only ever constructed
-            // after a successful `init()` - see `main.rs`'s console-discovery
-            // sequence.
-            for &b in bytes {
-                if b == b'\n' && !after_cr {
-                    if len == CHUNK {
-                        let _ = unsafe { dev.write(&buf[..len]) };
-                        len = 0;
-                    }
-                    buf[len] = b'\r';
-                    len += 1;
-                }
+        for &b in bytes {
+            if b == b'\n' && !after_cr {
                 if len == CHUNK {
-                    let _ = unsafe { dev.write(&buf[..len]) };
+                    self.write_chunk(&buf[..len]);
                     len = 0;
                 }
-                buf[len] = b;
+                buf[len] = b'\r';
                 len += 1;
-                after_cr = b == b'\r';
             }
-            if len > 0 {
-                let _ = unsafe { dev.write(&buf[..len]) };
+            if len == CHUNK {
+                self.write_chunk(&buf[..len]);
+                len = 0;
             }
-        } else {
-            for &b in bytes {
-                if b == b'\n' && !after_cr {
-                    self.write_byte(b'\r');
-                }
-                self.write_byte(b);
-                after_cr = b == b'\r';
-            }
+            buf[len] = b;
+            len += 1;
+            after_cr = b == b'\r';
+        }
+        if len > 0 {
+            self.write_chunk(&buf[..len]);
         }
         AFTER_CR.store(after_cr, Ordering::Relaxed);
     }
 
-    /// One byte to the driver, untranslated: [`Console::write_out`] is its
-    /// one caller. Not used for Virtio, which `write_out` batches.
-    fn write_byte(&mut self, byte: u8) {
+    /// Bytes to the driver, untranslated: [`Console::write_out`] is its one
+    /// caller.
+    fn write_chunk(&mut self, chunk: &[u8]) {
         match self {
-            Console::Pl011(uart) => uart.write_byte(byte),
-            Console::Uart16550(uart) => uart.write_byte(byte),
-            // SAFETY: as in write_out.
+            Console::Pl011(uart) => chunk.iter().for_each(|&b| uart.write_byte(b)),
+            Console::Uart16550(uart) => chunk.iter().for_each(|&b| uart.write_byte(b)),
+            // SAFETY: `dev` was only ever constructed after a successful
+            // `init()` - see `main.rs`'s console-discovery sequence.
             Console::Virtio(dev) => {
-                let _ = unsafe { dev.write(&[byte]) };
+                let _ = unsafe { dev.write(chunk) };
             }
-            Console::Framebuffer(fb) => fb.put_char(byte),
+            Console::Framebuffer(fb) => chunk.iter().for_each(|&b| fb.put_char(b)),
         }
     }
 
@@ -133,7 +124,11 @@ static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
 /// an earlier write or from another writer. Class E: read and written
 /// inside [`with_console`], under the console lock, and by the early fault
 /// reporter (`earlyfault.rs`), which writes its own `Console` before the
-/// exit, on one core, before any lock exists.
+/// exit, on one core, before any lock exists. Two cases share the price the
+/// lock already pays: after a takeover (`lock`) two cores can read it at
+/// once, and the early reporter's console hands its last byte to the one
+/// installed after the exit; either costs at most one `\r` doubled or
+/// missing, on the line that was already interleaved or the first line.
 static AFTER_CR: AtomicBool = AtomicBool::new(false);
 
 /// The console lock (class E of the multi-core plan's inventory): the

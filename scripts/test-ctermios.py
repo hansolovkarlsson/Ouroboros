@@ -30,13 +30,14 @@ One boot:
    file whose lines end in a bare LF, and `ctermios nl`, five lines ending
    each a different way (a `\r` and its `\n` in two writes, a bare `\n`,
    `\r\n`, a bare `\n` by PUTC, a `\r` by PUTC between two writes through
-   cond), must reach the serial line with every `\n` after a `\r`, no
-   `\r\r`, and each `nl-X` line as `nl-X\r\n`. Before 2026-11-05 a file's
+   cond), then two lines of 256 and 255 bytes before a bare `\n` (the
+   kernel's chunk edge), must reach the serial line with every `\n` after a
+   `\r`, no `\r\r`, and each line whole with its `\r\n`. Before 2026-11-05 a file's
    lines went out as they are and stepped down a serial terminal one column
    further each line.
 
 QEMU's own trace must hold no fault line. About a minute. Run it whenever
-libc's termios, sys/termios.h, KBD_MODE or the kernel's console::write_bytes
+libc's termios, sys/termios.h, KBD_MODE or the kernel's console::write_out
 changes.
 """
 import importlib.util
@@ -169,6 +170,9 @@ def main() -> int:
         ("nl: every line ending reaches the serial line as one CR LF",
          all(f"nl-{x}\r\n" in output_of(seg.get("nl", "")) for x in "abcde")
          and newlines_clean(output_of(seg.get("nl", "")))),
+        ("nl: a \\r inserted at the kernel's 256-byte chunk edge and past it",
+         "nl-f" + "x" * 252 + "\r\n" in output_of(seg.get("nl", ""))
+         and "nl-g" + "x" * 251 + "\r\n" in output_of(seg.get("nl", ""))),
         ("no fault lines", faults == 0),
     ]
     failed = 0
