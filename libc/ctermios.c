@@ -5,10 +5,11 @@
  *
  * `ctermios check` prints one line per question:
  *
- *     ctermios: initial ok             (ISIG set, VMIN 1, VINTR 3, VQUIT 28)
+ *     ctermios: initial ok             (ISIG set, OPOST and ONLCR set, VMIN 1,
+ *                                       VINTR 3, VQUIT 28)
  *     ctermios: set ok                 (Edit's raw recipe, TCSADRAIN)
- *     ctermios: readback ok            (Edit's recipe reads back as set: it
- *                                       clears only flags the console lacks)
+ *     ctermios: readback ok            (Edit's recipe reads back as set, but
+ *                                       for OPOST: the console always has it)
  *     ctermios: honest ok              (flags the console cannot apply are
  *                                       accepted, and tcgetattr says they are off)
  *     ctermios: restore ok             (the saved settings, TCSAFLUSH)
@@ -71,21 +72,25 @@ static int check(void) {
         printf("ctermios: check done\r\n");
         return 1;
     }
-    result("initial", (saved.c_lflag & ISIG) && saved.c_cc[VMIN] == 1
-                          && saved.c_cc[VINTR] == 3 && saved.c_cc[VQUIT] == 28);
+    result("initial", (saved.c_lflag & ISIG) && (saved.c_oflag & (OPOST | ONLCR)) == (OPOST | ONLCR)
+                          && saved.c_cc[VMIN] == 1 && saved.c_cc[VINTR] == 3 && saved.c_cc[VQUIT] == 28);
     t = saved;
     edit_raw(&t);
+    /* What is in force after Edit's recipe: the recipe, with OPOST still
+     * set, because cond translates a bare \n whatever the settings say. */
+    struct termios want = t;
+    want.c_oflag |= OPOST | ONLCR;
     result("set", tcsetattr(0, TCSADRAIN, &t) == 0);
-    result("readback", tcgetattr(0, &back) == 0 && same(&back, &t));
+    result("readback", tcgetattr(0, &back) == 0 && same(&back, &want));
     /* Flags the console cannot apply: accepted (POSIX: success when any
      * change was made), and tcgetattr shows what is in force, which is the
      * raw settings above, not these. */
     struct termios odd = t;
     odd.c_iflag |= ICRNL | IXON;
-    odd.c_oflag |= OPOST | ONLCR;
+    odd.c_oflag |= OCRNL;
     odd.c_lflag |= ECHO | ICANON;
     odd.c_cc[VTIME] = 5;
-    result("honest", tcsetattr(0, TCSANOW, &odd) == 0 && tcgetattr(0, &back) == 0 && same(&back, &t));
+    result("honest", tcsetattr(0, TCSANOW, &odd) == 0 && tcgetattr(0, &back) == 0 && same(&back, &want));
     result("restore", tcsetattr(0, TCSAFLUSH, &saved) == 0 && tcgetattr(0, &back) == 0
                           && same(&back, &saved));
     /* ISIG is the kernel's answer, not the copy last set: the mode changed

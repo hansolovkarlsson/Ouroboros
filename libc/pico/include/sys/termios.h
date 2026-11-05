@@ -20,15 +20,20 @@
  *     with no echo and no line editing in the kernel (programs do their own).
  *   - ICRNL, INLCR, IGNCR: Enter arrives as 13 and nothing is translated.
  *   - IXON, IXOFF, IXANY: there is no flow control.
- *   - OPOST, ONLCR: output is written as it is; write "\r\n" for a new line.
+ *   - OPOST, ONLCR: set, and cannot be cleared. A bare "\n" starts a new line
+ *     at column 0, on the serial line (cond sends it as "\r\n") as on the
+ *     screen; "\r\n" is sent as it is. Nothing else is translated. Since
+ *     2026-11-05: before, output went out as it is and a file's LF-only
+ *     lines stepped down a serial terminal.
  *   - BRKINT, INPCK, ISTRIP, PARMRK, CSIZE, CS8, PARENB, CREAD, CLOCAL: no
  *     serial line settings reach the hardware.
  *   - VINTR and VQUIT: the keys are fixed at Ctrl+C (3) and Ctrl+\ (28).
  *   - VMIN and VTIME: a read of fd 0 blocks for one byte and returns it.
  *   - VERASE: reported as 0x7f, what a serial terminal's Backspace sends;
  *     the USB keyboard's Backspace sends 8, so a program should take both.
- * So Edit's raw recipe, which clears flags the console already lacks, reads
- * back exactly as it was set, and saving and restoring the settings works.
+ * So Edit's raw recipe reads back as it was set except for OPOST, which it
+ * clears and tcgetattr still reports set, and saving and restoring the
+ * settings works.
  *
  * On a kernel without KBD_MODE, tcgetattr reports the cooked settings (that
  * kernel has no other mode) and tcsetattr answers ENOSYS; tcsetattr answers

@@ -9,10 +9,11 @@ mode on the POSIX way, with `tcsetattr` and ISIG cleared, and reads Ctrl+C as
 a key. /bin/CTERMIOS (libc/ctermios.c) uses Edit's own recipe, flag for flag.
 One boot:
 
-1. **`ctermios check`**: the initial settings (ISIG set, VMIN 1, VINTR 3,
-   VQUIT 28), Edit's recipe set with TCSADRAIN and read back, flags the
-   console cannot apply (ECHO, ICANON, ICRNL, OPOST, VTIME 5) accepted and
-   reported off by tcgetattr (it shows what is in force, as POSIX has it), the
+1. **`ctermios check`**: the initial settings (ISIG, OPOST and ONLCR set,
+   VMIN 1, VINTR 3, VQUIT 28), Edit's recipe set with TCSADRAIN and read back
+   with OPOST still set (the console always translates), flags the console
+   cannot apply (ECHO, ICANON, ICRNL, OCRNL, VTIME 5) accepted and reported
+   off by tcgetattr (it shows what is in force, as POSIX has it), the
    saved settings restored with TCSAFLUSH and read back, ISIG following the
    kernel's mode when it is set directly with KBD_MODE, and the errors:
    EBADF on fd 9, ENOTTY on an open file, EINVAL for an unknown action,
@@ -24,12 +25,19 @@ One boot:
 3. **Died raw**: another `ctermios raw` ended by Ctrl+\\ while still raw, and
    then `ctermios check` must start with ISIG set: the mode ended with the
    program, by the kernel's reset (the runs before turned cooked themselves).
+4. **New lines on the serial line** (ONLCR, which tcgetattr reports set):
+   `cat /include/sys/termios.h | head 3`, a file whose lines end in a bare LF,
+   must reach the serial line with every `\n` after a `\r`, as cond's
+   byte-stream backend sends it (`write_stream`). Before 2026-11-05 a file's
+   lines went out as they are and stepped down a serial terminal one column
+   further each line.
 
 QEMU's own trace must hold no fault line. About a minute. Run it whenever
-libc's termios, sys/termios.h or KBD_MODE changes.
+libc's termios, sys/termios.h, KBD_MODE or cond's byte-stream backend changes.
 """
 import importlib.util
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -105,6 +113,11 @@ def main() -> int:
             guest.type_line("ctermios check")
             ok = guest.wait_for(r"check done[\s\S]*" + PROMPT)
             seg["again"] = guest.transcript()[start:]
+        if ok:
+            start = len(guest.transcript())
+            guest.type_line("cat /include/sys/termios.h | head 3")
+            ok = guest.wait_for(r"_SYS_TERMIOS_H[\s\S]*_SYS_TERMIOS_H[\s\S]*" + PROMPT)
+            seg["newline"] = guest.transcript()[start:]
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -126,6 +139,9 @@ def main() -> int:
         ("raw: Ctrl+\\ ended it while raw", "Ctrl+\\ - foreground task" in seg.get("died raw", "")),
         ("after a program died raw, the next starts with ISIG set",
          "ctermios: initial ok" in seg.get("again", "")),
+        ("a file's LF-only lines reach the serial line as CR LF",
+         "#define _SYS_TERMIOS_H\r\n" in seg.get("newline", "")
+         and re.search(r"(?<!\r)\n", seg.get("newline", "")) is None),
         ("no fault lines", faults == 0),
     ]
     failed = 0

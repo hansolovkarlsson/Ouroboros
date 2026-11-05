@@ -1111,6 +1111,7 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
  * echo is on when it is not. */
 static void termios_fixed(struct termios *t) {
     memset(t, 0, sizeof *t);
+    t->c_oflag = OPOST | ONLCR; /* cond sends a bare \n as \r\n, on serial and screen alike */
     t->c_cflag = CS8 | CREAD;
     t->c_lflag = ISIG;
     t->c_cc[VINTR] = 3;
