@@ -31,10 +31,12 @@
 //! without that GPU it answers "not present", and a read of its registers
 //! is a synchronous external abort (seen 2026-11-04). ACPI says a device
 //! with no `_STA` is present and enabled, which is QEMU's case. So a device
-//! is taken when it has a constant `_STA` with both the present and enabled
-//! bits set, or no `_STA` at all in tables walked whole; a `_STA` this scan
-//! cannot evaluate, a method, is counted in [`Transports::status_unknown`]
-//! and not taken.
+//! is taken only from tables walked whole, and then when it has no `_STA`
+//! at all, or a constant `_STA` with both the present and enabled bits set
+//! that no method body anywhere names (a `Name` can be stored to, by
+//! `\_SB._INI` before any `_STA` is read, say: the fourth review of #407);
+//! a `_STA` this scan cannot evaluate, a method, is counted in
+//! [`Transports::status_unknown`] and not taken.
 //!
 //! **A walk of the namespace, not an interpreter.** A `_STA` need not be
 //! inside its device: `Scope (\_SB.VR00) { Name (_STA, Zero) }` later in the
@@ -44,7 +46,8 @@
 //! them: a `Scope`, `Device`, `Processor`, `PowerResource` or `ThermalZone`
 //! by recursing into its body at its own path, each name resolved to an
 //! absolute path (`\`, `^` and multi-segment names included), each `Name`
-//! by its value's encoding, a `Method` or a `Field` skipped whole. Pass 1
+//! by its value's encoding, a `Method` skipped whole, each unit of a
+//! `Field`, `IndexField` or `BankField` taken as a name. Pass 1
 //! finds the path of every device given `Name (_HID, "LNRO0005")`; pass 2
 //! gathers every `_STA` and `_CRS` defined at those paths, wherever they
 //! are. Bytes inside a value, a method or another device are never read as
@@ -54,13 +57,17 @@
 //!
 //! **What makes the scan uncertain, and what that costs.** Anything the
 //! walk cannot see through means the rest of that scope is unseen, and it
-//! could define any name, a `_STA` included: an `If`, `Else` or `While`
+//! could define any name or store to one: an `If`, `Else` or `While`
 //! outside a method (executed at load), an op the walk does not know (an
 //! `OperationRegion` whose bounds are not constants, a `Store`), a length
-//! running past its parent, a path deeper than 8 segments. Then a device
-//! with no constant `_STA` counts as unknown, not present; a constant
-//! `_STA` still stands, since AML allows no second definition of a name.
-//! QEMU's DSDT is walked whole (the test of its reference copy says so).
+//! running past its parent, a path deeper than 8 segments, scopes nested
+//! more than 32 deep (bounded on its own, since a name from the root keeps
+//! the path short however deep, and the recursion must not run the
+//! kernel's stack out), a method whose body holds `Load` or `LoadTable`.
+//! Where the thing has a PkgLength the walk goes on after it, so what
+//! follows is still found and counted. Then no device counts as present,
+//! a constant `_STA` included. QEMU's DSDT is walked whole (the test of its
+//! reference copy says so), and none of its methods names `_STA`.
 //!
 //! Not taken, stated because the answer then is "no transport", which is
 //! the safe one: a `_HID` given as an EISA id, or a device naming `LNRO0005`

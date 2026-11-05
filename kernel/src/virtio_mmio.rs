@@ -149,13 +149,13 @@ pub(crate) const STATUS_FEATURES_OK: u32 = 8;
 ///
 /// # Safety
 /// The kernel's identity map must be installed (`mmu::install_identity_map`).
-pub unsafe fn find_device(declared: &Transports, device_id: u32, config_len: usize) -> Option<Transport> {
+pub unsafe fn find_device<const CONFIG_LEN: usize>(declared: &Transports, device_id: u32) -> Option<(Transport, Config<CONFIG_LEN>)> {
     for t in declared.as_slice() {
         // The registers lie below `REG_CONFIG` (0x100), and the caller's
         // config space from there: a block too short for both would have
         // the driver read past what was declared (the reviews of #407).
         // QEMU declares 0x200, Parallels 0x4000.
-        if (t.size as usize) < REG_CONFIG + config_len {
+        if (t.size as usize) < REG_CONFIG + CONFIG_LEN {
             continue;
         }
         let Some(last) = t.base.checked_add(u64::from(t.size) - 1) else { continue };
@@ -163,40 +163,56 @@ pub unsafe fn find_device(declared: &Transports, device_id: u32, config_len: usi
             continue;
         }
         // SAFETY: inside the always-mapped device region, and declared.
-        let magic = unsafe { read_reg(t.base, REG_MAGIC_VALUE) } as u64;
+        let magic = unsafe { read_reg::<REG_MAGIC_VALUE>(t.base) } as u64;
         if magic != MAGIC_VALUE {
             continue; // A declared slot with nothing attached.
         }
         // SAFETY: same as above.
-        let id = unsafe { read_reg(t.base, REG_DEVICE_ID) };
+        let id = unsafe { read_reg::<REG_DEVICE_ID>(t.base) };
         if id == device_id {
-            return Some(*t);
+            return Some((*t, Config { base: t.base }));
         }
     }
     None
 }
 
-/// The 32-bit config-space word `OFF` bytes from `REG_CONFIG`, for a
-/// driver whose [`find_device`] call declared it reads `LEN` config bytes:
-/// a read past them does not compile, so the length the transport was
-/// checked against and the reads made cannot drift apart (the third review
-/// of #407).
+/// A transport's config space, `LEN` bytes from `REG_CONFIG`: the only way
+/// to read it, and made only by [`find_device`] for the same `LEN` it
+/// checked the declared block against. A read past `LEN` does not compile,
+/// and the register accessors cannot reach config space at all, so the
+/// length checked and the reads made cannot drift apart (the third and
+/// fourth reviews of #407).
+#[derive(Clone, Copy)]
+pub struct Config<const LEN: usize> {
+    base: u64,
+}
+
+impl<const LEN: usize> Config<LEN> {
+    /// The 32-bit config word `OFF` bytes in.
+    ///
+    /// # Safety
+    /// The kernel's identity map installed, as for [`find_device`].
+    pub(crate) unsafe fn read<const OFF: usize>(&self) -> u32 {
+        const { assert!(OFF % 4 == 0 && OFF + 4 <= LEN, "a config read past the length find_device checked") };
+        unsafe { read_volatile((self.base as usize + REG_CONFIG + OFF) as *const u32) }
+    }
+}
+
+/// The register at `OFF`, which must lie below `REG_CONFIG`: config space
+/// is read through [`Config`] only.
 ///
 /// # Safety
-/// `base` must be a transport [`find_device`] returned for `LEN`.
-pub(crate) unsafe fn read_config<const LEN: usize, const OFF: usize>(base: u64) -> u32 {
-    const { assert!(OFF + 4 <= LEN, "a config read past the length find_device checked") };
-    unsafe { read_reg(base, REG_CONFIG + OFF) }
+/// `base` must be a mapped virtio-mmio transport.
+pub(crate) unsafe fn read_reg<const OFF: usize>(base: u64) -> u32 {
+    const { assert!(OFF % 4 == 0 && OFF < REG_CONFIG, "a register, not config space") };
+    unsafe { read_volatile((base as usize + OFF) as *const u32) }
 }
 
+/// Writes the register at `OFF`, which must lie below `REG_CONFIG`.
+///
 /// # Safety
-/// `base + offset` must be a valid, mapped virtio-mmio register.
-pub(crate) unsafe fn read_reg(base: u64, offset: usize) -> u32 {
-    unsafe { read_volatile((base as usize + offset) as *const u32) }
-}
-
-/// # Safety
-/// `base + offset` must be a valid, mapped virtio-mmio register.
-pub(crate) unsafe fn write_reg(base: u64, offset: usize, value: u32) {
-    unsafe { write_volatile((base as usize + offset) as *mut u32, value) }
+/// `base` must be a mapped virtio-mmio transport.
+pub(crate) unsafe fn write_reg<const OFF: usize>(base: u64, value: u32) {
+    const { assert!(OFF % 4 == 0 && OFF < REG_CONFIG, "a register, not config space") };
+    unsafe { write_volatile((base as usize + OFF) as *mut u32, value) }
 }

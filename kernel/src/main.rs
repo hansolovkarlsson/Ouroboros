@@ -257,6 +257,9 @@ extern "C" fn kernel_main() -> ! {
     // Parallels, which gained a console in 27.1, that read was a synchronous
     // external abort (`virtio_mmio.rs`'s module doc). No declaration, no
     // probe: Parallels and the Pi declare none.
+    // The reason when none could be read, said again after the exit (the
+    // fourth review of #407: it reached only the UEFI console).
+    let mut virtio_unread = None;
     let virtio = match unsafe { acpi::virtio_mmio_transports(rsdp) } {
         Ok(found) => {
             match found.as_slice().first() {
@@ -274,7 +277,8 @@ extern "C" fn kernel_main() -> ! {
             found
         }
         Err(e) => {
-            log::info!("Ouroboros kernel: no ACPI tables to declare virtio-mmio ({e:?}): no virtio-mmio device is probed");
+            log::info!("Ouroboros kernel: virtio-mmio declarations not read ({e:?}): no virtio-mmio device is probed");
+            virtio_unread = Some(e);
             amlscan::Transports::new()
         }
     };
@@ -835,6 +839,9 @@ extern "C" fn kernel_main() -> ! {
     // (the second review of #407). One `NotProbed` writes both.
     if let Some(line) = virtio_mmio::NotProbed::of(&virtio) {
         console::println!("Ouroboros kernel: {line}");
+    }
+    if let Some(e) = virtio_unread {
+        console::println!("Ouroboros kernel: virtio-mmio declarations not read ({e:?}): no virtio-mmio device is probed");
     }
 
     // The runtime storage stack (docs/CHANGELOG.md phases 3a/3b): virtio-blk

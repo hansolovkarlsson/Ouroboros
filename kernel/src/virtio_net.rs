@@ -191,6 +191,7 @@ static TX_BUF: TxBuffer = TxBuffer(UnsafeCell::new([0; BUF_SIZE]));
 
 pub struct Device {
     base: u64,
+    config: virtio_mmio::Config<CONFIG_LEN>,
     /// The GIC INTID the firmware declared for this transport, if any.
     intid: Option<u32>,
     mac: [u8; 6],
@@ -208,13 +209,13 @@ impl Device {
     /// # Safety
     /// As [`virtio_mmio::find_device`]: the kernel's identity map installed.
     pub unsafe fn discover(declared: &virtio_mmio::Transports) -> Result<Self, Error> {
-        let transport = unsafe { virtio_mmio::find_device(declared, DEVICE_ID, CONFIG_LEN) }.ok_or(Error::NotFound)?;
+        let (transport, config) = unsafe { virtio_mmio::find_device::<CONFIG_LEN>(declared, DEVICE_ID) }.ok_or(Error::NotFound)?;
         let base = transport.base;
-        let version = unsafe { read_reg(base, virtio_mmio::REG_VERSION) };
+        let version = unsafe { read_reg::<{ virtio_mmio::REG_VERSION }>(base) };
         if version != 2 {
             return Err(Error::UnexpectedVersion(version));
         }
-        Ok(Device { base, intid: transport.intid, mac: [0; 6], rx_last_used: 0 })
+        Ok(Device { base, config, intid: transport.intid, mac: [0; 6], rx_last_used: 0 })
     }
 
     /// The device's MAC address (from config space, valid after
@@ -246,9 +247,9 @@ impl Device {
     /// # Safety
     /// Must be called after [`init`](Self::init), from IRQ context.
     pub unsafe fn ack_interrupt(&self) {
-        let status = unsafe { virtio_mmio::read_reg(self.base, virtio_mmio::REG_INTERRUPT_STATUS) };
+        let status = unsafe { virtio_mmio::read_reg::<{ virtio_mmio::REG_INTERRUPT_STATUS }>(self.base) };
         if status != 0 {
-            unsafe { virtio_mmio::write_reg(self.base, virtio_mmio::REG_INTERRUPT_ACK, status) };
+            unsafe { virtio_mmio::write_reg::<{ virtio_mmio::REG_INTERRUPT_ACK }>(self.base, status) };
         }
     }
 
@@ -266,39 +267,35 @@ impl Device {
         unsafe {
             // Reset unconditionally (the device may already be initialized -
             // same reasoning as virtio_blk::init).
-            write_reg(base, virtio_mmio::REG_STATUS, 0);
-            write_reg(base, virtio_mmio::REG_STATUS, virtio_mmio::STATUS_ACKNOWLEDGE);
-            write_reg(base, virtio_mmio::REG_STATUS, virtio_mmio::STATUS_ACKNOWLEDGE | virtio_mmio::STATUS_DRIVER);
+            write_reg::<{ virtio_mmio::REG_STATUS }>(base, 0);
+            write_reg::<{ virtio_mmio::REG_STATUS }>(base, virtio_mmio::STATUS_ACKNOWLEDGE);
+            write_reg::<{ virtio_mmio::REG_STATUS }>(base, virtio_mmio::STATUS_ACKNOWLEDGE | virtio_mmio::STATUS_DRIVER);
 
             // Feature negotiation across both words. Check the device offers
             // what we require before requesting it, the same discipline as
             // virtio_blk.
-            write_reg(base, virtio_mmio::REG_DEVICE_FEATURES_SEL, 0);
-            let offered_lo = read_reg(base, virtio_mmio::REG_DEVICE_FEATURES);
-            write_reg(base, virtio_mmio::REG_DEVICE_FEATURES_SEL, 1);
-            let offered_hi = read_reg(base, virtio_mmio::REG_DEVICE_FEATURES);
+            write_reg::<{ virtio_mmio::REG_DEVICE_FEATURES_SEL }>(base, 0);
+            let offered_lo = read_reg::<{ virtio_mmio::REG_DEVICE_FEATURES }>(base);
+            write_reg::<{ virtio_mmio::REG_DEVICE_FEATURES_SEL }>(base, 1);
+            let offered_hi = read_reg::<{ virtio_mmio::REG_DEVICE_FEATURES }>(base);
             if offered_lo & VIRTIO_NET_F_MAC == 0 || offered_hi & VIRTIO_F_VERSION_1 == 0 {
                 return Err(Error::FeaturesRejected);
             }
-            write_reg(base, virtio_mmio::REG_DRIVER_FEATURES_SEL, 0);
-            write_reg(base, virtio_mmio::REG_DRIVER_FEATURES, VIRTIO_NET_F_MAC);
-            write_reg(base, virtio_mmio::REG_DRIVER_FEATURES_SEL, 1);
-            write_reg(base, virtio_mmio::REG_DRIVER_FEATURES, VIRTIO_F_VERSION_1);
+            write_reg::<{ virtio_mmio::REG_DRIVER_FEATURES_SEL }>(base, 0);
+            write_reg::<{ virtio_mmio::REG_DRIVER_FEATURES }>(base, VIRTIO_NET_F_MAC);
+            write_reg::<{ virtio_mmio::REG_DRIVER_FEATURES_SEL }>(base, 1);
+            write_reg::<{ virtio_mmio::REG_DRIVER_FEATURES }>(base, VIRTIO_F_VERSION_1);
 
-            write_reg(
-                base,
-                virtio_mmio::REG_STATUS,
-                virtio_mmio::STATUS_ACKNOWLEDGE | virtio_mmio::STATUS_DRIVER | virtio_mmio::STATUS_FEATURES_OK,
-            );
-            if read_reg(base, virtio_mmio::REG_STATUS) & virtio_mmio::STATUS_FEATURES_OK == 0 {
+            write_reg::<{ virtio_mmio::REG_STATUS }>(base, virtio_mmio::STATUS_ACKNOWLEDGE | virtio_mmio::STATUS_DRIVER | virtio_mmio::STATUS_FEATURES_OK, );
+            if read_reg::<{ virtio_mmio::REG_STATUS }>(base) & virtio_mmio::STATUS_FEATURES_OK == 0 {
                 return Err(Error::FeaturesRejected);
             }
 
             // MAC from config space: the first field of virtio_net_config,
             // 6 bytes at offset 0, little-endian byte order. Read as two
             // u32 words and take the low 6 bytes.
-            let w0 = virtio_mmio::read_config::<CONFIG_LEN, 0>(base);
-            let w1 = virtio_mmio::read_config::<CONFIG_LEN, 4>(base);
+            let w0 = self.config.read::<0>();
+            let w1 = self.config.read::<4>();
             self.mac = [
                 w0 as u8,
                 (w0 >> 8) as u8,
@@ -326,7 +323,7 @@ impl Device {
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
             rx_avail.idx = RX_COUNT as u16;
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-            write_reg(base, virtio_mmio::REG_QUEUE_NOTIFY, 0);
+            write_reg::<{ virtio_mmio::REG_QUEUE_NOTIFY }>(base, 0);
 
             // Transmitq (queue 1) - no buffers pre-posted; send_frame fills
             // descriptor 0 on demand.
@@ -338,14 +335,10 @@ impl Device {
             (*TX_AVAIL.0.get()).flags = VIRTQ_AVAIL_F_NO_INTERRUPT;
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
 
-            write_reg(
-                base,
-                virtio_mmio::REG_STATUS,
-                virtio_mmio::STATUS_ACKNOWLEDGE
+            write_reg::<{ virtio_mmio::REG_STATUS }>(base, virtio_mmio::STATUS_ACKNOWLEDGE
                     | virtio_mmio::STATUS_DRIVER
                     | virtio_mmio::STATUS_FEATURES_OK
-                    | virtio_mmio::STATUS_DRIVER_OK,
-            );
+                    | virtio_mmio::STATUS_DRIVER_OK, );
         }
         Ok(())
     }
@@ -358,19 +351,19 @@ impl Device {
     unsafe fn setup_queue(&self, queue: u32, desc: u64, avail: u64, used: u64) -> Result<(), Error> {
         let base = self.base;
         unsafe {
-            write_reg(base, virtio_mmio::REG_QUEUE_SEL, queue);
-            let max = read_reg(base, virtio_mmio::REG_QUEUE_NUM_MAX);
+            write_reg::<{ virtio_mmio::REG_QUEUE_SEL }>(base, queue);
+            let max = read_reg::<{ virtio_mmio::REG_QUEUE_NUM_MAX }>(base);
             if (max as usize) < QUEUE_SIZE {
                 return Err(Error::QueueTooSmall(max));
             }
-            write_reg(base, virtio_mmio::REG_QUEUE_NUM, QUEUE_SIZE as u32);
-            write_reg(base, virtio_mmio::REG_QUEUE_DESC_LOW, desc as u32);
-            write_reg(base, virtio_mmio::REG_QUEUE_DESC_HIGH, (desc >> 32) as u32);
-            write_reg(base, virtio_mmio::REG_QUEUE_DRIVER_LOW, avail as u32);
-            write_reg(base, virtio_mmio::REG_QUEUE_DRIVER_HIGH, (avail >> 32) as u32);
-            write_reg(base, virtio_mmio::REG_QUEUE_DEVICE_LOW, used as u32);
-            write_reg(base, virtio_mmio::REG_QUEUE_DEVICE_HIGH, (used >> 32) as u32);
-            write_reg(base, virtio_mmio::REG_QUEUE_READY, 1);
+            write_reg::<{ virtio_mmio::REG_QUEUE_NUM }>(base, QUEUE_SIZE as u32);
+            write_reg::<{ virtio_mmio::REG_QUEUE_DESC_LOW }>(base, desc as u32);
+            write_reg::<{ virtio_mmio::REG_QUEUE_DESC_HIGH }>(base, (desc >> 32) as u32);
+            write_reg::<{ virtio_mmio::REG_QUEUE_DRIVER_LOW }>(base, avail as u32);
+            write_reg::<{ virtio_mmio::REG_QUEUE_DRIVER_HIGH }>(base, (avail >> 32) as u32);
+            write_reg::<{ virtio_mmio::REG_QUEUE_DEVICE_LOW }>(base, used as u32);
+            write_reg::<{ virtio_mmio::REG_QUEUE_DEVICE_HIGH }>(base, (used >> 32) as u32);
+            write_reg::<{ virtio_mmio::REG_QUEUE_READY }>(base, 1);
         }
         Ok(())
     }
@@ -405,7 +398,7 @@ impl Device {
         avail.idx = avail.idx.wrapping_add(1);
         unsafe {
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-            write_reg(self.base, virtio_mmio::REG_QUEUE_NOTIFY, 1); // transmitq
+            write_reg::<{ virtio_mmio::REG_QUEUE_NOTIFY }>(self.base, 1); // transmitq
         }
 
         let deadline = crate::timer::now_ticks().wrapping_add(timeout_ticks);
@@ -477,7 +470,7 @@ impl Device {
         avail.idx = avail.idx.wrapping_add(1);
         unsafe {
             core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-            write_reg(self.base, virtio_mmio::REG_QUEUE_NOTIFY, 0); // receiveq
+            write_reg::<{ virtio_mmio::REG_QUEUE_NOTIFY }>(self.base, 0); // receiveq
         }
 
         self.rx_last_used = self.rx_last_used.wrapping_add(1);
