@@ -277,6 +277,12 @@ pub unsafe fn virtio_mmio_transports(rsdp: Option<*const u8>) -> Result<amlscan:
         if len <= size_of::<SdtHeader>() {
             continue;
         }
+        // A table the XSDT lists twice is one table: walked twice, each of
+        // its devices would be defined twice and read as none (the fourth
+        // review of #407).
+        if tables[..count].iter().any(|t| t.as_ptr() == aml) {
+            continue;
+        }
         // More tables than it can hold: one left out could define a
         // device's `_STA`, so nothing is declared at all.
         if count == amlscan::MAX_TABLES {
