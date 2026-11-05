@@ -128,6 +128,19 @@ check.
   slot the boot ROM logged `USB boot mode 2` and read `config.txt`, the
   devicetree and `RPI_EFI.fd` off a `make bootstick PI=1` stick, so this
   board's `BOOT_ORDER` tries USB. `BOOT_ORDER` itself is still unread.
+  **Parallels, 2026-11-04 (Parallels 27.1):** its firmware lists the
+  stick in Boot Manager and boots it when chosen, but a boot order of `usb`
+  alone went to the setup screen, so it does not yet boot the stick
+  unattended. The keyboard and the stick both came up. The kernel then
+  faulted on the virtio-mmio scan, from the stick and the `.hdd` alike;
+  fixed the same day (probe only declared transports whose `_STA` says
+  present), after which the `.hdd`'s kernel ran a session on the stick's
+  ext2 root (`testing-parallels.md`, "Parallels 27.1 and the one-disk
+  stick"). Then the stick, re-staged at `ea0215a4` and chosen in Boot
+  Manager, booted its own kernel to a login on its ext2 root, `fsd`
+  saying the boot partition is on the same disk. Open: a boot entry that
+  makes the firmware take the stick unattended, and step 7 (the `.hdd`
+  detached, the multi-core checks).
 
 Both answers go into `testing-parallels.md` and `testing-pi4.md`. Only these
 two boots can show it. QEMU already boots from a stick

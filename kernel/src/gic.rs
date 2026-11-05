@@ -120,6 +120,38 @@ pub unsafe fn enable_ppi_this_core(intid: u32, this: ThisCore) {
     }
 }
 
+/// The distributor's type register, at the same offset with the same
+/// `ITLinesNumber` field (bits 4:0) on GICv2 and GICv3; `gicv3.rs` reads
+/// its `RSS` bit from this one constant too.
+pub(crate) const GICD_TYPER: usize = 0x004;
+
+/// Enables an INTID the firmware gave (a virtio-mmio declaration's, since
+/// 2026-11-04), not one this kernel chose, and only when it is a shared
+/// peripheral interrupt this distributor implements: at least 32 (below
+/// are each core's SGIs and PPIs, the kick and the timer among them), below
+/// `GICD_TYPER.ITLinesNumber`'s limit, `32 * (N + 1)`, and below 1020
+/// (1020-1023 are special). `false`, and nothing enabled, otherwise: one
+/// past the limit would be a write past the distributor's registers (the
+/// reviews of #407). [`enable_interrupt`] stays for the kernel's own
+/// constants (the timer, the kick SGI).
+///
+/// # Safety
+/// Must run after [`init`].
+pub unsafe fn enable_declared_spi(intid: u32) -> bool {
+    let info = info();
+    // SAFETY: the distributor is mapped and discovered from the MADT.
+    let typer = unsafe { core::ptr::read_volatile((info.gicd_base as usize + GICD_TYPER) as *const u32) };
+    let limit = (32 * ((typer & 0x1f) + 1)).min(1020);
+    if !(32..limit).contains(&intid) {
+        return false;
+    }
+    // SAFETY: after `init` (the caller's contract), and `intid` was just
+    // checked to be an SPI the distributor implements, so the enable
+    // writes land inside its registers.
+    unsafe { enable_interrupt(intid) };
+    true
+}
+
 /// Enables forwarding of `intid` (e.g. the timer PPI, 30).
 ///
 /// # Safety

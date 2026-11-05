@@ -40,6 +40,7 @@
 //!   ([`init_this_core`], a secondary's half of [`init`]) and finds its own
 //!   frame by its own `MPIDR_EL1`.
 
+use crate::gic::GICD_TYPER;
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -330,7 +331,6 @@ const ICC_SGI1R_AFF3_SHIFT: u32 = 48;
 const ICC_CTLR_RSS: u64 = 1 << 18;
 /// `GICD_TYPER.RSS`: the distributor routes an SGI with a range selector.
 /// Linux requires this one and the CPU interface's before it sets RS.
-const GICD_TYPER: usize = 0x0004;
 const GICD_TYPER_RSS: u32 = 1 << 26;
 
 /// Sends Group 1 SGI `sgi` (0 to 15) to the one core whose affinity is

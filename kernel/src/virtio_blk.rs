@@ -157,15 +157,18 @@ pub struct Device {
     base: u64,
 }
 
+/// The config-space bytes this driver reads from `REG_CONFIG` (the capacity, a u64).
+const CONFIG_LEN: usize = 8;
+
 impl Device {
-    /// Scans every virtio-mmio slot for a block device (`DEVICE_ID`, 2) -
-    /// see `virtio_mmio::find_device`. Does not touch the device's state.
+    /// The first declared virtio-mmio transport holding a block device
+    /// (`DEVICE_ID`, 2) - see `virtio_mmio::find_device`. Does not touch
+    /// the device's state.
     ///
     /// # Safety
-    /// The low-1GB device region must already be mapped (true from very
-    /// early in `main()`).
-    pub unsafe fn discover() -> Result<Self, Error> {
-        let base = unsafe { virtio_mmio::find_device(DEVICE_ID) }.ok_or(Error::NotFound)?;
+    /// As [`virtio_mmio::find_device`]: the kernel's identity map installed.
+    pub unsafe fn discover(declared: &virtio_mmio::Transports) -> Result<Self, Error> {
+        let base = unsafe { virtio_mmio::find_device(declared, DEVICE_ID, CONFIG_LEN) }.ok_or(Error::NotFound)?.base;
         let version = unsafe { read_reg(base, virtio_mmio::REG_VERSION) };
         if version != 2 {
             // Legacy (version 1) isn't implemented - see virtio_mmio.rs's
@@ -265,8 +268,8 @@ impl Device {
     /// first field, always present regardless of negotiated features.
     pub fn capacity_sectors(&self) -> u64 {
         unsafe {
-            let lo = read_reg(self.base, virtio_mmio::REG_CONFIG) as u64;
-            let hi = read_reg(self.base, virtio_mmio::REG_CONFIG + 4) as u64;
+            let lo = virtio_mmio::read_config::<CONFIG_LEN, 0>(self.base) as u64;
+            let hi = virtio_mmio::read_config::<CONFIG_LEN, 4>(self.base) as u64;
             lo | (hi << 32)
         }
     }
