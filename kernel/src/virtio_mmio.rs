@@ -150,6 +150,19 @@ pub unsafe fn find_device(declared: &Transports, device_id: u32, config_len: usi
     None
 }
 
+/// The 32-bit config-space word `OFF` bytes from `REG_CONFIG`, for a
+/// driver whose [`find_device`] call declared it reads `LEN` config bytes:
+/// a read past them does not compile, so the length the transport was
+/// checked against and the reads made cannot drift apart (the third review
+/// of #407).
+///
+/// # Safety
+/// `base` must be a transport [`find_device`] returned for `LEN`.
+pub(crate) unsafe fn read_config<const LEN: usize, const OFF: usize>(base: u64) -> u32 {
+    const { assert!(OFF + 4 <= LEN, "a config read past the length find_device checked") };
+    unsafe { read_reg(base, REG_CONFIG + OFF) }
+}
+
 /// # Safety
 /// `base + offset` must be a valid, mapped virtio-mmio register.
 pub(crate) unsafe fn read_reg(base: u64, offset: usize) -> u32 {

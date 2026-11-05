@@ -59,6 +59,9 @@ pub enum DiscoveryError {
     /// SPCR exists and is memory-mapped, but its interface type isn't one
     /// this driver's PL011 register layout understands.
     UnsupportedInterface,
+    /// More AML tables (the DSDT and SSDTs) than `amlscan::MAX_TABLES`:
+    /// one left out could define a device's `_STA`, so none is read.
+    TooManyAmlTables,
 }
 
 #[repr(C, packed)]
@@ -264,18 +267,28 @@ unsafe fn aml_tables(rsdp: Option<*const u8>) -> Result<impl Iterator<Item = *co
 /// # Safety
 /// Same as [`find_table`].
 pub unsafe fn virtio_mmio_transports(rsdp: Option<*const u8>) -> Result<amlscan::Transports, DiscoveryError> {
-    let mut found = amlscan::Transports::new();
+    // All the tables at once: a device's `_STA` may be defined in another
+    // table than the device (the third review of #407).
+    let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
+    let mut count = 0;
     for aml in unsafe { aml_tables(rsdp) }? {
         let header = unsafe { ptr::read_unaligned(aml.cast::<SdtHeader>()) };
         let len = header.length as usize;
         if len <= size_of::<SdtHeader>() {
             continue;
         }
+        // More tables than it can hold: one left out could define a
+        // device's `_STA`, so nothing is declared at all.
+        if count == amlscan::MAX_TABLES {
+            return Err(DiscoveryError::TooManyAmlTables);
+        }
         // SAFETY: the table is mapped for its header's length (the caller's
         // contract, as for `aml_cca_zero_offset`).
-        let bytes = unsafe { core::slice::from_raw_parts(aml, len) };
-        amlscan::virtio_mmio(bytes, &mut found);
+        tables[count] = unsafe { core::slice::from_raw_parts(aml, len) };
+        count += 1;
     }
+    let mut found = amlscan::Transports::new();
+    amlscan::virtio_mmio(&tables[..count], &mut found);
     Ok(found)
 }
 

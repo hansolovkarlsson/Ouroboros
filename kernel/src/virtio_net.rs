@@ -297,8 +297,8 @@ impl Device {
             // MAC from config space: the first field of virtio_net_config,
             // 6 bytes at offset 0, little-endian byte order. Read as two
             // u32 words and take the low 6 bytes.
-            let w0 = read_reg(base, virtio_mmio::REG_CONFIG);
-            let w1 = read_reg(base, virtio_mmio::REG_CONFIG + 4);
+            let w0 = virtio_mmio::read_config::<CONFIG_LEN, 0>(base);
+            let w1 = virtio_mmio::read_config::<CONFIG_LEN, 4>(base);
             self.mac = [
                 w0 as u8,
                 (w0 >> 8) as u8,

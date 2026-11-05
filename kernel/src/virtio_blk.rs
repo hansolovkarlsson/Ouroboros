@@ -268,8 +268,8 @@ impl Device {
     /// first field, always present regardless of negotiated features.
     pub fn capacity_sectors(&self) -> u64 {
         unsafe {
-            let lo = read_reg(self.base, virtio_mmio::REG_CONFIG) as u64;
-            let hi = read_reg(self.base, virtio_mmio::REG_CONFIG + 4) as u64;
+            let lo = virtio_mmio::read_config::<CONFIG_LEN, 0>(self.base) as u64;
+            let hi = virtio_mmio::read_config::<CONFIG_LEN, 4>(self.base) as u64;
             lo | (hi << 32)
         }
     }
