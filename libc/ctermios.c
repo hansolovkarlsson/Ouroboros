@@ -31,7 +31,14 @@
  * `ctermios: spinning`, run two seconds without reading (keys typed then
  * wait in the kernel's queue), and restore the saved settings with
  * TCSAFLUSH, which discards those keys, or TCSADRAIN, which keeps them for
- * the shell; then print `ctermios: flushed` or `ctermios: drained`. */
+ * the shell; then print `ctermios: flushed` or `ctermios: drained`.
+ *
+ * `ctermios nl` writes five lines, each ending a different way, for the
+ * console's ONLCR (the kernel's console::write_bytes): `nl-a` with its `\r`
+ * and `\n` in two writes, `nl-b` with a bare `\n`, `nl-c` with `\r\n` in
+ * one write, `nl-d` by PUTC a byte at a time with a bare `\n`, and `nl-e`
+ * with its `\r` by PUTC between two writes through the console server.
+ * Each must reach the serial line as `nl-X\r\n`, with no `\r\r`. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -77,7 +84,8 @@ static int check(void) {
     t = saved;
     edit_raw(&t);
     /* What is in force after Edit's recipe: the recipe, with OPOST still
-     * set, because cond translates a bare \n whatever the settings say. */
+     * set, because the console translates a bare \n whatever the settings
+     * say. */
     struct termios want = t;
     want.c_oflag |= OPOST | ONLCR;
     result("set", tcsetattr(0, TCSADRAIN, &t) == 0);
@@ -174,6 +182,31 @@ static int spin_then(int action, const char *done) {
     return 0;
 }
 
+static void putc_text(const char *s) {
+    for (; *s; s++) {
+        __os_syscall1(SYS_PUTC, (unsigned char)*s);
+    }
+}
+
+static int newlines(void) {
+    printf("nl-a\r");
+    fflush(stdout);
+    printf("\n");
+    fflush(stdout);
+    printf("nl-b\n");
+    fflush(stdout);
+    printf("nl-c\r\n");
+    fflush(stdout);
+    putc_text("nl-d\n");
+    printf("nl-e");
+    fflush(stdout);
+    putc_text("\r");
+    printf("\n");
+    fflush(stdout);
+    printf("ctermios: nl done\r\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "flush") == 0) {
         return spin_then(TCSAFLUSH, "flushed");
@@ -187,6 +220,9 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "check") == 0) {
         return check();
     }
-    printf("usage: ctermios check|raw|flush|drain\r\n");
+    if (argc > 1 && strcmp(argv[1], "nl") == 0) {
+        return newlines();
+    }
+    printf("usage: ctermios check|raw|flush|drain|nl\r\n");
     return 2;
 }

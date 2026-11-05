@@ -33,12 +33,18 @@ pub enum Console {
 
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        match self {
+        let written = match self {
             Console::Pl011(uart) => uart.write_str(s),
             Console::Uart16550(uart) => uart.write_str(s),
             Console::Virtio(dev) => write_str_virtio(dev, s),
             Console::Framebuffer(fb) => fb.write_str(s),
+        };
+        // The drivers translate this `\n` themselves; what [`AFTER_CR`]
+        // needs is only whether the line now ends in a bare `\r`.
+        if let Some(&last) = s.as_bytes().last() {
+            AFTER_CR.store(last == b'\r', Ordering::Relaxed);
         }
+        written
     }
 }
 
@@ -81,10 +87,9 @@ fn write_str_virtio(dev: &mut virtio_console::Device, s: &str) -> fmt::Result {
 }
 
 impl Console {
-    /// Raw single-byte write, no `\n` -> `\r\n` translation (unlike
-    /// `write_str`) - callers that need a newline send `\r\n` themselves.
-    /// Used for echoing input verbatim, where a translated `\n` would be
-    /// wrong for e.g. a literal byte the line editor is about to erase.
+    /// Raw single-byte write to the driver, no translation: [`write_bytes`]
+    /// is its one caller and does the `\n` -> `\r\n` itself, with
+    /// [`AFTER_CR`], so the carriage return is not doubled.
     fn write_byte(&mut self, byte: u8) {
         match self {
             Console::Pl011(uart) => uart.write_byte(byte),
@@ -111,6 +116,14 @@ impl Console {
 }
 
 static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
+
+/// Whether the last byte sent to the console was a `\r`, kept by every
+/// writer (`write_str` for the kernel's own lines, [`write_bytes`] for
+/// `CON_WRITE` and `PUTC`), so [`write_bytes`] gives a `\n` its carriage
+/// return only when it lacks one, even when the `\r` came in an earlier
+/// write or from another writer. Class E: read and written only inside
+/// [`with_console`], under the console lock.
+static AFTER_CR: AtomicBool = AtomicBool::new(false);
 
 /// The console lock (class E of the multi-core plan's inventory): the
 /// index plus one of the core that holds it, 0 when free, held across one
@@ -260,14 +273,29 @@ pub fn putc(byte: u8) {
     write_bytes(core::slice::from_ref(&byte));
 }
 
-/// Writes a batch of raw bytes under the lock once: `CON_WRITE`'s path,
-/// so another core's line cannot land inside `cond`'s escape sequence and
-/// a batch costs two atomic operations rather than two per byte.
+/// Writes a batch of bytes under the lock once: `CON_WRITE`'s path and
+/// `PUTC`'s, so another core's line cannot land inside `cond`'s escape
+/// sequence and a batch costs two atomic operations rather than two per
+/// byte. A bare `\n` goes out as `\r\n`, a terminal's ONLCR, so a new line
+/// starts at column 0 on a serial line as it does on the screen (cond's
+/// `Fb::newline`, and `FbConsole`'s): a file's lines end in a bare LF, and
+/// `cat` and every filter pass them through untouched, so before 2026-11-05
+/// they stepped down a serial terminal one column further each line. A `\n`
+/// that follows a `\r` is sent as it is, wherever that `\r` came from
+/// ([`AFTER_CR`]), so `\r\n` output goes out byte for byte. Only the
+/// console is translated: files, pipes and the network never pass here.
+/// `sys/termios.h` reports it as OPOST and ONLCR set.
 pub fn write_bytes(bytes: &[u8]) {
     with_console(|console| {
+        let mut after_cr = AFTER_CR.load(Ordering::Relaxed);
         for &b in bytes {
+            if b == b'\n' && !after_cr {
+                console.write_byte(b'\r');
+            }
             console.write_byte(b);
+            after_cr = b == b'\r';
         }
+        AFTER_CR.store(after_cr, Ordering::Relaxed);
     });
 }
 

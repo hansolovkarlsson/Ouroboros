@@ -16,8 +16,7 @@
 //!
 //! **Two backends, chosen at startup from `CON_INFO`:**
 //! - **Byte-stream** (QEMU's UART path): forward text to the kernel's
-//!   console through the gated `CON_WRITE` syscall. Nothing to render;
-//!   the one change made is a bare `\n` sent as `\r\n` (`write_stream`).
+//!   console through the gated `CON_WRITE` syscall. Nothing to render.
 //! - **Framebuffer** (Parallels, QEMU `ramfb`): render text *here* - this
 //!   is the console rendering logic (the 8x8 font, cursor, line wrap,
 //!   scroll decisions, ANSI parsing) moved out of the kernel's
@@ -99,9 +98,7 @@ fn handle(backend: &mut Backend, req: &[u8], reply: &mut [u8]) -> usize {
 // ---------------------------------------------------------------------
 
 enum Backend {
-    /// `after_cr`: the last byte written was `\r`, so a `\n` opening the
-    /// next write already has its carriage return (see [`write_stream`]).
-    ByteStream { after_cr: bool },
+    ByteStream,
     Framebuffer(Fb),
 }
 
@@ -130,13 +127,13 @@ fn detect_backend() -> Backend {
             private: false,
         })
     } else {
-        Backend::ByteStream { after_cr: false }
+        Backend::ByteStream
     }
 }
 
 fn write_text(backend: &mut Backend, bytes: &[u8]) {
     match backend {
-        Backend::ByteStream { after_cr } => write_stream(after_cr, bytes),
+        Backend::ByteStream => con_write_raw(bytes),
         Backend::Framebuffer(fb) => {
             for &c in bytes {
                 fb.put_char(c);
@@ -442,32 +439,8 @@ impl Fb {
     }
 }
 
-/// Byte-stream backend: a bare `\n` goes out as `\r\n`, a terminal's
-/// ONLCR, so a new line starts at column 0 on the serial line as it does
-/// on the framebuffer (`Fb::newline`). Without it a file's own LF-only
-/// lines, which `cat` and every filter pass through untouched, stepped
-/// down the serial terminal one column further each line, while the
-/// programs' own `\r\n` lines looked right. A `\n` that already follows a
-/// `\r`, in this write or at the end of the last one, gets no second one,
-/// so `\r\n` output is sent byte for byte as before. `bytes` is at most
-/// [`DATA_MAX`] (`handle` caps it), so the result fits twice that.
-fn write_stream(after_cr: &mut bool, bytes: &[u8]) {
-    let mut out = [0u8; 2 * DATA_MAX];
-    let mut len = 0;
-    for &b in bytes.iter().take(DATA_MAX) {
-        if b == b'\n' && !*after_cr {
-            out[len] = b'\r';
-            len += 1;
-        }
-        out[len] = b;
-        len += 1;
-        *after_cr = b == b'\r';
-    }
-    con_write_raw(&out[..len]);
-}
-
-/// Push bytes to the kernel console via the gated `CON_WRITE`, chunked at
-/// the kernel's per-buffer cap.
+/// Byte-stream backend: push bytes to the kernel console via the gated
+/// `CON_WRITE`, chunked at the kernel's per-buffer cap.
 fn con_write_raw(bytes: &[u8]) {
     let mut off = 0;
     while off < bytes.len() {

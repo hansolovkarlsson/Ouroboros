@@ -40,8 +40,8 @@ pub const REPORT: u64 = 2;
 /// keystrokes; a non-owner's poll takes nothing, see [`FG`]).
 pub const TRY_READ_CHAR: u64 = 3;
 
-/// Raw single-byte console write, no newline translation. `arg0` is the
-/// byte to write.
+/// Single-byte console write. `arg0` is the byte to write. A bare `\n`
+/// goes out as `\r\n`, as on [`CON_WRITE`]; nothing else is translated.
 pub const PUTC: u64 = 4;
 
 // 5 is a deliberate gap, not an oversight - `shell_input` used to live here;
@@ -579,7 +579,10 @@ pub const GRANT_WRITE: u64 = 2;
 /// syscalls are gated to [`FSD_TASK`] - ordinary tasks reach the console
 /// only through the server (an `ninep_abi::NP_WRITE_FILE` message), while the
 /// kernel's own `console::putc`/`println!` stay the emergency/boot path.
-/// Bytes are written raw, no newline translation (same as [`PUTC`]).
+/// A bare `\n` goes out as `\r\n` (a terminal's ONLCR, since 2026-11-05),
+/// and one that follows a `\r`, in this write or an earlier one, as it is;
+/// nothing else is translated (the kernel's `console::write_bytes`, the
+/// same path as [`PUTC`]).
 /// `len` is bounded by the same per-buffer cap as the sector/staging
 /// buffers.
 pub const CON_WRITE: u64 = 33;

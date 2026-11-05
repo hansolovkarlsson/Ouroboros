@@ -21,10 +21,14 @@
  *   - ICRNL, INLCR, IGNCR: Enter arrives as 13 and nothing is translated.
  *   - IXON, IXOFF, IXANY: there is no flow control.
  *   - OPOST, ONLCR: set, and cannot be cleared. A bare "\n" starts a new line
- *     at column 0, on the serial line (cond sends it as "\r\n") as on the
- *     screen; "\r\n" is sent as it is. Nothing else is translated. Since
+ *     at column 0, on the serial line (the kernel's console sends it as
+ *     "\r\n", for cond and for a program writing to it directly) as on the
+ *     screen; "\r\n" is sent as it is. Nothing else is translated, and
+ *     only the console: files and pipes get the bytes as written. Since
  *     2026-11-05: before, output went out as it is and a file's LF-only
- *     lines stepped down a serial terminal.
+ *     lines stepped down a serial terminal. So a raw program cannot have
+ *     "\n" as a line feed that keeps the column (Unix's OPOST cleared): it
+ *     moves down with an escape sequence instead, as Edit does.
  *   - BRKINT, INPCK, ISTRIP, PARMRK, CSIZE, CS8, PARENB, CREAD, CLOCAL: no
  *     serial line settings reach the hardware.
  *   - VINTR and VQUIT: the keys are fixed at Ctrl+C (3) and Ctrl+\ (28).

@@ -333,7 +333,10 @@ to the kernel's `putc` only if no console server is loaded. `cond` picks
 one of two backends at startup from `con_info`:
 
 - **Byte-stream** (QEMU's UART): forward the text to the kernel's
-  console via the gated `con_write` syscall. Nothing to render.
+  console via the gated `con_write` syscall. Nothing to render. The
+  kernel sends a bare `\n` as `\r\n` there (`console::write_bytes`,
+  for `con_write` and `putc` alike, since 2026-11-05), so a new line
+  starts at column 0 on the serial line as it does on the screen.
 - **Framebuffer** (Parallels, QEMU `ramfb`): render the text *here*:
   the console rendering logic (an 8x8 font, the cursor, line wrap,
   scroll decisions, a small ANSI parser) moved out of the kernel's

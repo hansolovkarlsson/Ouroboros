@@ -25,15 +25,19 @@ One boot:
 3. **Died raw**: another `ctermios raw` ended by Ctrl+\\ while still raw, and
    then `ctermios check` must start with ISIG set: the mode ended with the
    program, by the kernel's reset (the runs before turned cooked themselves).
-4. **New lines on the serial line** (ONLCR, which tcgetattr reports set):
-   `cat /include/sys/termios.h | head 3`, a file whose lines end in a bare LF,
-   must reach the serial line with every `\n` after a `\r`, as cond's
-   byte-stream backend sends it (`write_stream`). Before 2026-11-05 a file's
+4. **New lines on the serial line** (ONLCR, which tcgetattr reports set; the
+   kernel's console::write_bytes): `cat /include/sys/termios.h | head 3`, a
+   file whose lines end in a bare LF, and `ctermios nl`, five lines ending
+   each a different way (a `\r` and its `\n` in two writes, a bare `\n`,
+   `\r\n`, a bare `\n` by PUTC, a `\r` by PUTC between two writes through
+   cond), must reach the serial line with every `\n` after a `\r`, no
+   `\r\r`, and each `nl-X` line as `nl-X\r\n`. Before 2026-11-05 a file's
    lines went out as they are and stepped down a serial terminal one column
    further each line.
 
 QEMU's own trace must hold no fault line. About a minute. Run it whenever
-libc's termios, sys/termios.h, KBD_MODE or cond's byte-stream backend changes.
+libc's termios, sys/termios.h, KBD_MODE or the kernel's console::write_bytes
+changes.
 """
 import importlib.util
 import os
@@ -57,6 +61,12 @@ CHECK_LINES = [
     "initial ok", "set ok", "readback ok", "honest ok", "restore ok", "kernel ok",
     "fd 9 EBADF", "file ENOTTY", "action EINVAL", "null EFAULT",
 ]
+
+
+def newlines_clean(text):
+    """Every `\n` after a `\r`, and no `\r` doubled: what the console's ONLCR
+    sends, whichever path a line came by."""
+    return re.search(r"(?<!\r)\n", text) is None and "\r\r" not in text
 
 
 def main() -> int:
@@ -118,6 +128,11 @@ def main() -> int:
             guest.type_line("cat /include/sys/termios.h | head 3")
             ok = guest.wait_for(r"_SYS_TERMIOS_H[\s\S]*_SYS_TERMIOS_H[\s\S]*" + PROMPT)
             seg["newline"] = guest.transcript()[start:]
+        if ok:
+            start = len(guest.transcript())
+            guest.type_line("ctermios nl")
+            ok = guest.wait_for(r"nl done[\s\S]*" + PROMPT)
+            seg["nl"] = guest.transcript()[start:]
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -141,7 +156,10 @@ def main() -> int:
          "ctermios: initial ok" in seg.get("again", "")),
         ("a file's LF-only lines reach the serial line as CR LF",
          "#define _SYS_TERMIOS_H\r\n" in seg.get("newline", "")
-         and re.search(r"(?<!\r)\n", seg.get("newline", "")) is None),
+         and newlines_clean(seg.get("newline", ""))),
+        ("nl: every line ending reaches the serial line as one CR LF",
+         all(f"nl-{x}\r\n" in seg.get("nl", "") for x in "abcde")
+         and newlines_clean(seg.get("nl", ""))),
         ("no fault lines", faults == 0),
     ]
     failed = 0

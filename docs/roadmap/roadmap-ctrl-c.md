@@ -94,6 +94,9 @@ because nothing in Ouroboros implements it: input is already a byte at a
 time with no echo and no line editing in the kernel (`ICANON`, `ECHO`), Enter
 already arrives as 13 (`ICRNL`), there is no flow control (`IXON`) and no
 output translation (`OPOST`). The note in the header says so, flag by flag.
+*(Since 2026-11-05 there is one output translation: the kernel's console
+sends a bare `\n` as `\r\n`, and `tcgetattr` reports `OPOST` and `ONLCR`
+set; `sys/termios.h` is the authority.)*
 On a descriptor that is not the console, `ENOTTY`, as `ioctl` does. Edit's
 `plat_raw_on` and `plat_raw_off` then work unchanged; the one difference
 from Unix to tell DevTools is that ^\ is never a key.
