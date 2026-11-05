@@ -198,6 +198,9 @@ pub struct Device {
     rx_last_used: u16,
 }
 
+/// The config-space bytes this driver reads from `REG_CONFIG` (the MAC, read as two 32-bit words).
+const CONFIG_LEN: usize = 8;
+
 impl Device {
     /// The first declared virtio-mmio transport holding a net device
     /// (`DEVICE_ID`, 1). Does not touch device state.
@@ -205,7 +208,7 @@ impl Device {
     /// # Safety
     /// As [`virtio_mmio::find_device`]: the kernel's identity map installed.
     pub unsafe fn discover(declared: &virtio_mmio::Transports) -> Result<Self, Error> {
-        let transport = unsafe { virtio_mmio::find_device(declared, DEVICE_ID) }.ok_or(Error::NotFound)?;
+        let transport = unsafe { virtio_mmio::find_device(declared, DEVICE_ID, CONFIG_LEN) }.ok_or(Error::NotFound)?;
         let base = transport.base;
         let version = unsafe { read_reg(base, virtio_mmio::REG_VERSION) };
         if version != 2 {

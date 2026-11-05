@@ -90,15 +90,17 @@ pub struct Transports {
     count: usize,
     /// Declared past [`MAX_TRANSPORTS`], so not kept.
     pub dropped: usize,
-    /// `LNRO0005` devices whose `_CRS` this scan could not read: declared,
-    /// so worth a line in the boot log, but never probed.
+    /// `LNRO0005` `_HID`s this scan could not read a device for: no
+    /// enclosing `Device`, a `_HID` that is not one of its own objects, or
+    /// no `_CRS` buffer it can read. Never probed.
     pub unreadable: usize,
     /// `LNRO0005` devices whose `Name (_STA, ...)` says not present or not
     /// enabled: not probed.
     pub absent: usize,
     /// `LNRO0005` devices with a `_STA` this scan cannot evaluate (a
-    /// method): not probed, since only running it says whether the device
-    /// is there.
+    /// method, or a value that is not a constant), or whose walk ended
+    /// before any `_STA` was seen: not probed, since only an interpreter
+    /// could say whether the device is there.
     pub status_unknown: usize,
 }
 

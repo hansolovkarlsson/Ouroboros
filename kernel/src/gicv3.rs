@@ -328,9 +328,9 @@ const ICC_SGI1R_AFF3_SHIFT: u32 = 48;
 /// `ICC_CTLR_EL1.RSS`: the CPU interface takes a range selector, so an
 /// SGI can reach an Aff0 past 15.
 const ICC_CTLR_RSS: u64 = 1 << 18;
+use crate::gic::GICD_TYPER;
 /// `GICD_TYPER.RSS`: the distributor routes an SGI with a range selector.
 /// Linux requires this one and the CPU interface's before it sets RS.
-const GICD_TYPER: usize = 0x0004;
 const GICD_TYPER_RSS: u32 = 1 << 26;
 
 /// Sends Group 1 SGI `sgi` (0 to 15) to the one core whose affinity is

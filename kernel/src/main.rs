@@ -270,12 +270,12 @@ extern "C" fn kernel_main() -> ! {
             }
             if found.dropped + found.unreadable + found.absent + found.status_unknown > 0 {
                 log::info!(
-                    "Ouroboros kernel: virtio-mmio not probed: {} declared past the {} kept, {} whose _CRS could not be read, {} whose _STA says absent, {} whose _STA is a method",
-                    found.dropped,
-                    amlscan::MAX_TRANSPORTS,
-                    found.unreadable,
+                    "Ouroboros kernel: virtio-mmio declarations not probed: {} whose _STA says absent, {} whose _STA could not be read, {} whose declaration could not be read, {} past the {} kept",
                     found.absent,
-                    found.status_unknown
+                    found.status_unknown,
+                    found.unreadable,
+                    found.dropped,
+                    amlscan::MAX_TRANSPORTS
                 );
             }
             found
@@ -843,14 +843,21 @@ extern "C" fn kernel_main() -> ! {
     // comment. Every virtio-mmio driver below probes only the transports the
     // firmware declares (`virtio`, read before the exit); with none, none of
     // them runs, which is the case on Parallels and the Pi.
-    let held_virtio = if virtio.is_empty() {
+    // Every declaration not probed, whether or not another was kept: the
+    // pre-exit line with these counts reaches only the UEFI console (the
+    // second review of #407).
+    if virtio.absent + virtio.status_unknown + virtio.unreadable + virtio.dropped > 0 {
         console::println!(
-            "Ouroboros kernel: skipping virtio-blk (no virtio-mmio transport declared present on this platform; passed over: {} by _STA, {} with a _CRS not read, {} past the {} kept)",
-            virtio.absent + virtio.status_unknown,
+            "Ouroboros kernel: virtio-mmio declarations not probed: {} whose _STA says absent, {} whose _STA could not be read, {} whose declaration could not be read, {} past the {} kept",
+            virtio.absent,
+            virtio.status_unknown,
             virtio.unreadable,
             virtio.dropped,
             amlscan::MAX_TRANSPORTS
         );
+    }
+    let held_virtio = if virtio.is_empty() {
+        console::println!("Ouroboros kernel: skipping virtio-blk (no virtio-mmio transport declared present on this platform)");
         None
     } else {
         // Said again after the exit, before the first read: the pre-exit
@@ -973,9 +980,8 @@ extern "C" fn kernel_main() -> ! {
             // would be an SGI or PPI (the kick, the timer), one past the
             // distributor's limit a write past its registers (the review of
             // #407). The tick-poll fallback covers everything otherwise.
-            let nic_spi = nic_intid.filter(|&intid| gic::is_implemented_spi(intid));
+            let nic_spi = nic_intid.filter(|&intid| gic::enable_declared_spi(intid));
             if let Some(intid) = nic_spi {
-                gic::enable_interrupt(intid);
                 exceptions::set_net_intid(intid);
             }
             match (nic_intid, nic_spi) {

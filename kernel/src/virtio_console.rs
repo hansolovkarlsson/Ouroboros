@@ -143,6 +143,9 @@ pub struct Device {
     base: u64,
 }
 
+/// The config-space bytes this driver reads from `REG_CONFIG` (none).
+const CONFIG_LEN: usize = 0;
+
 impl Device {
     /// The first declared virtio-mmio transport holding a console device
     /// (`DEVICE_ID`, 3) - see `virtio_mmio::find_device`. Does not touch
@@ -151,7 +154,7 @@ impl Device {
     /// # Safety
     /// As [`virtio_mmio::find_device`]: the kernel's identity map installed.
     pub unsafe fn discover(declared: &virtio_mmio::Transports) -> Result<Self, Error> {
-        let base = unsafe { virtio_mmio::find_device(declared, DEVICE_ID) }.ok_or(Error::NotFound)?.base;
+        let base = unsafe { virtio_mmio::find_device(declared, DEVICE_ID, CONFIG_LEN) }.ok_or(Error::NotFound)?.base;
         let version = unsafe { read_reg(base, virtio_mmio::REG_VERSION) };
         if version != 2 {
             return Err(Error::UnexpectedVersion(version));

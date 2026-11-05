@@ -70,12 +70,6 @@ use core::ptr::{read_volatile, write_volatile};
 
 pub use amlscan::{Transport, Transports};
 
-/// The shortest declared register block used: the registers, then config
-/// space from [`REG_CONFIG`], which every driver here reads within its
-/// first 0x100 bytes.
-const MIN_TRANSPORT_SIZE: u32 = 0x200;
-const _: () = assert!(MIN_TRANSPORT_SIZE as usize >= REG_CONFIG + 0x100);
-
 const MAGIC_VALUE: u64 = 0x74726976; // "virt", little-endian bytes of the ASCII string
 
 // Register byte offsets, modern (non-legacy) interface only - see module
@@ -117,9 +111,11 @@ pub(crate) const STATUS_DRIVER_OK: u32 = 4;
 pub(crate) const STATUS_FEATURES_OK: u32 = 8;
 
 /// The first declared transport holding a device matching `device_id`
-/// (virtio's device id registry: 1 net, 2 block, 3 console, 4 entropy).
-/// Only the transports in `declared` are read: the firmware's list, never
-/// an address of this kernel's own.
+/// (virtio's device id registry: 1 net, 2 block, 3 console, 4 entropy)
+/// whose declared block covers the registers and the `config_len` bytes
+/// of config space the caller's driver reads. Only the transports in
+/// `declared` are read: the firmware's list, never an address of this
+/// kernel's own.
 ///
 /// A declared transport that does not walk as device memory in this
 /// kernel's own tables (`mmu::walks_as_device`, its first and last byte),
@@ -127,13 +123,13 @@ pub(crate) const STATUS_FEATURES_OK: u32 = 8;
 ///
 /// # Safety
 /// The kernel's identity map must be installed (`mmu::install_identity_map`).
-pub unsafe fn find_device(declared: &Transports, device_id: u32) -> Option<Transport> {
+pub unsafe fn find_device(declared: &Transports, device_id: u32, config_len: usize) -> Option<Transport> {
     for t in declared.as_slice() {
-        // The registers lie in the first 0x100 bytes and each device's
-        // config space from `REG_CONFIG` (0x100) on: a block no longer than
-        // QEMU's 0x200 would have its drivers read past what was declared
-        // (the review of #407). Parallels declares 0x4000.
-        if t.size < MIN_TRANSPORT_SIZE {
+        // The registers lie below `REG_CONFIG` (0x100), and the caller's
+        // config space from there: a block too short for both would have
+        // the driver read past what was declared (the reviews of #407).
+        // QEMU declares 0x200, Parallels 0x4000.
+        if (t.size as usize) < REG_CONFIG + config_len {
             continue;
         }
         let Some(last) = t.base.checked_add(u64::from(t.size) - 1) else { continue };
