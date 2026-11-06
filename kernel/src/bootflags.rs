@@ -79,6 +79,12 @@ const WALK_FAULT: &CStr16 = cstr16!("\\WALKFAULT");
 /// `taking` line). A test fault, like `\EARLYFAULT`.
 const SMP_FAULT: &CStr16 = cstr16!("\\SMPFAULT");
 
+/// `\SDDUMP`: print, in hex, each ACPI table that declares an SD host
+/// controller (`sdscan.rs`), so the bytes of its `_CRS` can be read off the
+/// serial log. A reading aid for the SD-card arc's step 0
+/// (`docs/roadmap/roadmap-sd-card.md`), not a switch: nothing is turned off.
+const SD_DUMP: &CStr16 = cstr16!("\\SDDUMP");
+
 /// Which boot flags are set, read once by [`read`].
 #[derive(Clone, Copy, Default)]
 pub struct Flags {
@@ -96,6 +102,8 @@ pub struct Flags {
     pub walk_fault: bool,
     /// [`SMP_FAULT`]
     pub smp_fault: bool,
+    /// [`SD_DUMP`]
+    pub sd_dump: bool,
 }
 
 /// Reads every flag file at the ESP's root, opening the volume once. If the
@@ -127,5 +135,6 @@ pub fn read() -> Flags {
         early_fault: present(EARLY_FAULT),
         walk_fault: present(WALK_FAULT),
         smp_fault: present(SMP_FAULT),
+        sd_dump: present(SD_DUMP),
     }
 }

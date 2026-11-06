@@ -49,10 +49,12 @@ From edk2-platforms, the source of the Pi's UEFI firmware (pftf):
   the kernel is the only writer, and it must never write that file's
   sectors.
 
-And from this tree: the Pi's console is already found through the
-devicetree the firmware hands off (`devicetree.rs`, `dtranges.rs` for the
-bus-to-CPU translation), so the board's devicetree is a discovery source
-that works there today.
+And from this tree: **the Pi publishes no devicetree.** Its console is
+found through ACPI's SPCR, and the devicetree search ends `NoDtb`
+(`screenlog.0`, 2026-11-05: `devicetree console discovery failed (NoDtb)`,
+then `console @ 0xfe201000 (via ACPI SPCR)`). The plan's first draft said
+the devicetree found the console there; it does not, and D1 changed with
+it.
 
 **QEMU can stand in for most of it.** QEMU 11.1's `virt` machine takes
 `-device sdhci-pci -device sd-card,drive=...`: a standard SDHCI controller
@@ -93,24 +95,25 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    disk; a card is a whole disk. Whether `make sdcard` stays, for a card
    with only the boot partition, is D5.
 
-## Decisions (Hans's)
+## Decisions (settled by Hans, 2026-11-05, each as recommended)
 
-- **D1. How the Pi's controller is found.** The devicetree node, which
-  already finds the Pi's console, or ACPI's `BRCME88C`, which is what the
-  firmware calls the source of truth but whose base may sit in a `_CRS`
-  method. **Recommended: the devicetree first**, with step 0 reading both
-  so the choice is made on what the board shows; ACPI added if the
-  devicetree is ever absent there.
+- **D1. How the Pi's controller is found.** The devicetree node, or ACPI's
+  `BRCME88C`, whose base may sit in a `_CRS` method. Recommended and
+  settled: the devicetree first, with step 0 reading both so the choice is
+  made on what the board shows. **The board had already shown it:** the Pi
+  in its ACPI mode publishes no devicetree (above), so the source is ACPI,
+  and `amlscan` learns to read the `_CRS` step 0 dumps. The devicetree stays
+  a second source for a firmware set to publish one.
 - **D2. PIO or DMA first.** PIO is what the firmware does, needs no DMA
   window and has no cache-coherence question (the Pi's PCIe DMA is
   not coherent, risk 8 in `testing-pi4.md`; EMMC2's is not yet read).
   DMA (SDMA or ADMA2) is faster.
-  **Recommended: PIO**, DMA as a follow-up once a measurement says the card
+  **Recommended and settled: PIO**, DMA as a follow-up once a measurement says the card
   is slow enough to matter.
 - **D3. Writing the card's ESP.** Never (the driver refuses a write inside
   the boot partition, so it cannot be spelled), or allowed except for
   `RPI_EFI.fd`. Never costs installing a new kernel from the Pi itself,
-  which nothing does today. **Recommended: never, enforced in the driver
+  which nothing does today. **Recommended and settled: never, enforced in the driver
   by the partition's range,** a rule that can be relaxed later by a
   deliberate change, not by a slip in `fsd`.
 - **D4. The firmware's `SdIsArasan` setting.** If a card comes up with
@@ -118,23 +121,29 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
   declared. Either the plan requires EMMC2 (staging writes the setting, or
   the guide says to set it once in the firmware's menu), or the driver
   also handles Arasan, which needs Arasan's quirks (its capability register
-  reads 0, per `Sdhc.asl`). **Recommended: require EMMC2, the
+  reads 0, per `Sdhc.asl`). **Recommended and settled: require EMMC2, the
   default in `RPi4.dsc`,** and have the kernel say plainly on serial when
   the card is routed elsewhere. Step 0 shows which a card has.
 - **D5. `make sdcard`'s future.** Keep it for a card that boots and leaves
   the root on a stick, or retire it once a card carries the whole system.
-  **Recommended: keep it until step 4 passes on the board,** then decide.
+  **Recommended and settled: keep it until step 4 passes on the board,** then decide.
 
 ## Steps, each with its check
 
 0. **Read the board.** One boot that logs, before the exit, what the
-   devicetree says of `emmc2` (base, the translated CPU address, the
-   interrupt), whether the ACPI tables declare `BRCME88C`, and after the
-   exit a read-only dump of the controller's version, capability and
-   present-state registers. No writes to the controller. Check: the lines
-   appear on serial, and a card with `SdIsArasan` set (if one can be made)
-   shows no EMMC2 device, so the absence is told apart from a parse
-   failure.
+   devicetree says of `emmc2`, which ACPI tables declare `BRCME88C` or
+   `BCM2847`, and the `SdIsArasan` variable; with `\SDDUMP` at the card's
+   root, those tables in hex. No controller register is touched. Check:
+   the lines appear on serial, and a card with `SdIsArasan` set (if one can
+   be made) shows no EMMC2 table, so the absence is told apart from a
+   search that cannot find. **Built 2026-11-05** (`kernel/src/sdscan.rs`,
+   the search `amlscan::hid_string_at` with host tests that two mutations
+   fail; QEMU, which declares neither, logs all three lines and boots on):
+   the Pi boot is owed. The register dump this step first named (version,
+   capabilities, present state) waits for the base: it is read in step 0b,
+   once the dumped `_CRS` is parsed by `amlscan`, host-tested on those
+   bytes, since reading an address the parser has not been shown to find
+   is a guess.
 1. **The driver on QEMU, reading.** `sdhci.rs` on `sdhci-pci`, a
    `make run-sd` that boots the ESP as today and puts `build/disk.img` on
    the SD card, and a `make test-sd` that mounts the root from it and reads

@@ -27,6 +27,7 @@ mod madt;
 mod mmu;
 mod pci;
 mod power;
+mod sdscan;
 mod smp;
 mod supervisor;
 mod syscall;
@@ -535,8 +536,9 @@ extern "C" fn kernel_main() -> ! {
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
     // `\FBCON` (`fb_console_forced`): leave the discovered serial console
     // uninstalled after the exit, so the framebuffer console below takes HDMI.
-    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall, early_fault, walk_fault, smp_fault } =
-        bootflags::read();
+    let flags = bootflags::read();
+    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall, early_fault, walk_fault, smp_fault, .. } =
+        flags;
     if msd_stall {
         usb_msd::inject_stalls();
     }
@@ -581,6 +583,12 @@ extern "C" fn kernel_main() -> ! {
             None
         }
     };
+
+    // What the firmware says of the SD card's controller (sdscan.rs, step 0
+    // of docs/roadmap/roadmap-sd-card.md): read only, no register touched.
+    // After the xHCI step so its lines stay next to that step's.
+    // SAFETY: `dtb` and `rsdp` are the firmware's, found above.
+    unsafe { sdscan::report(dtb, rsdp, &flags) };
 
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use

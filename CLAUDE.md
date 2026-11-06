@@ -407,6 +407,8 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
                      the firmware's own code before the exit, and \WALKFAULT one inside the reporter's own image walk, both for
                      test-early-fault.py
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
+  src/sdscan.rs      what the firmware says of the SD card's controller (SD-card arc step 0): devicetree, ACPI _HID, SdIsArasan; read only;
+                     \SDDUMP prints the declaring ACPI tables in hex
   src/bootdisk.rs    the boot partition: the HardDrive node of the image's own device path, read before the exit (one-disk step 1),
                      and is_boot_disk, which makes the disk booted from the block device (step 3); the matcher itself is parttable's
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack

@@ -270,6 +270,22 @@ pub unsafe fn virtio_mmio_transports(rsdp: Option<*const u8>) -> Result<amlscan:
     // All the tables at once: a device's `_STA` may be defined in another
     // table than the device (the third review of #407).
     let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
+    let count = unsafe { aml_table_slices(rsdp, &mut tables) }?;
+    let mut found = amlscan::Transports::new();
+    amlscan::virtio_mmio(&tables[..count], &mut found);
+    Ok(found)
+}
+
+/// Every AML table the firmware gives, each once and whole (its header
+/// included), into `tables`; returns how many. The one collection
+/// `virtio_mmio_transports` and `sdscan.rs` share.
+///
+/// # Safety
+/// Same as [`find_table`].
+pub(crate) unsafe fn aml_table_slices(
+    rsdp: Option<*const u8>,
+    tables: &mut [&'static [u8]; amlscan::MAX_TABLES],
+) -> Result<usize, DiscoveryError> {
     let mut count = 0;
     for aml in unsafe { aml_tables(rsdp) }? {
         let header = unsafe { ptr::read_unaligned(aml.cast::<SdtHeader>()) };
@@ -293,9 +309,7 @@ pub unsafe fn virtio_mmio_transports(rsdp: Option<*const u8>) -> Result<amlscan:
         tables[count] = unsafe { core::slice::from_raw_parts(aml, len) };
         count += 1;
     }
-    let mut found = amlscan::Transports::new();
-    amlscan::virtio_mmio(&tables[..count], &mut found);
-    Ok(found)
+    Ok(count)
 }
 
 /// The byte offset, within the AML table at `table` (a DSDT or SSDT,

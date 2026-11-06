@@ -687,5 +687,21 @@ fn resources(table: &[u8], at: usize, end: usize) -> Option<Transport> {
     (size != 0).then_some(Transport { base, size, intid })
 }
 
+/// The byte offset of the first `Name (_HID, "<hid>")` in `table`, a
+/// string `_HID` written as NameOp, the name, a string prefix, the string
+/// and its zero. A byte search, not the namespace walk above: it answers
+/// "does this table hold the declaration", for a report (the kernel's
+/// `sdscan.rs`), and says nothing of where the device is or whether its
+/// `_STA` lets it be touched. An empty `hid` is never found.
+pub fn hid_string_at(table: &[u8], hid: &[u8]) -> Option<usize> {
+    if hid.is_empty() {
+        return None;
+    }
+    let len = 6 + hid.len() + 1;
+    table
+        .windows(len)
+        .position(|w| w[..6] == [0x08, b'_', b'H', b'I', b'D', 0x0d] && &w[6..len - 1] == hid && w[len - 1] == 0)
+}
+
 #[cfg(test)]
 mod tests;

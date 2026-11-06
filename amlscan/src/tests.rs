@@ -748,3 +748,35 @@ fn a_value_running_past_its_scope_is_never_recorded() {
     assert!(facts[0].crs.is_none() && !facts[0].crs_bad, "the overrunning _CRS was recorded");
     assert!(seen.uncertain);
 }
+
+/// `hid_string_at`: an SSDT shaped as edk2-platforms' `Emmc.asl` declares
+/// EMMC2, `Device (SDC3)` under `Scope (\_SB)`.
+#[test]
+fn hid_string_found_where_written() {
+    let dev = device(b"SDC3", &hid(b"BRCME88C"));
+    let t = table(&[&[0x10, (1 + 5 + dev.len()) as u8, 0x5c, b'_', b'S', b'B', b'_'], &dev]);
+    let at = hid_string_at(&t, b"BRCME88C").expect("declared");
+    assert_eq!(&t[at..at + 6], &[0x08, b'_', b'H', b'I', b'D', 0x0d]);
+    assert_eq!(at, HEADER_LEN + 7 + 2 + 1 + 4);
+}
+
+#[test]
+fn hid_string_must_end_where_the_id_does() {
+    // A longer string that starts with the id, a shorter id, another id.
+    let t = table(&[&device(b"SDC3", &hid(b"BRCME88CX"))]);
+    assert_eq!(hid_string_at(&t, b"BRCME88C"), None);
+    let t = table(&[&device(b"SDC1", &hid(b"BCM2847"))]);
+    assert_eq!(hid_string_at(&t, b"BRCME88C"), None);
+    assert!(hid_string_at(&t, b"BCM2847").is_some());
+    assert_eq!(hid_string_at(&t, b""), None);
+}
+
+#[test]
+fn hid_string_is_only_a_hid() {
+    // The same string as a `_CID`, or as a bare string, is not a `_HID`.
+    let mut cid = hid(b"BRCME88C");
+    cid[3] = b'C';
+    cid[4] = b'I';
+    let t = table(&[&device(b"SDC3", &cid), b"\x0dBRCME88C\x00"]);
+    assert_eq!(hid_string_at(&t, b"BRCME88C"), None);
+}
