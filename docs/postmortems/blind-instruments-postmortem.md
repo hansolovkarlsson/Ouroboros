@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-11-04. It began
+*A process retrospective, 2026-09-02, extended through 2026-11-05. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2597,4 +2597,37 @@ as coming right after the exit. A second boot with a wider filter showed it
 after `keyboard ready`, where the storage step probes, which is what led to
 the declared GPU. **A filter decides what the evidence says; read the
 unfiltered log around any line the filter makes look adjacent.**
+
+## Three more, from the console's newline and the SD card's step 0 (2026-11-05)
+
+**A probe whose two writes were one.** `ctermios nl` was written to show
+that a `\r` at the end of one write and a `\n` at the start of the next go
+out as `\r\n`, not `\r\r\n`: the carry across writes. It wrote both to
+fd 1 with an `fflush` between them, and passed. libc holds fd 1 in a line
+buffer until a `\n`, `fflush` included, so the two bytes always left in one
+write and the carry was never exercised; the review found it, not a
+mutation, because dropping the carry changed nothing the probe could see.
+Every piece now goes to fd 2, which writes at once, and dropping the carry
+fails exactly the `nl` check. **A test of a boundary must first show the
+boundary is there: the layer below can join what the test splits.**
+
+**A control that ran without its condition.** To show the `sdscan` panic
+was the one the Pi had, the old code was booted on QEMU with a patch that
+gave it a matching table and a NUL-filled ID. It did not panic, and the
+line it printed stopped in the same place, which looked like half a
+reproduction. The boot flag `\SDDUMP` was not set: `make esp` re-stages the
+ESP and had removed it, so the dump never ran. With the flag the old code
+reproduced the Pi's output byte for byte. **Before reading a control's
+result, check it ran under the condition it is the control for.**
+
+**A path only the board could reach.** `sdscan`'s dump runs only when a
+table declares an SD controller, and QEMU's arm `virt` declares none and
+refuses `-acpitable`, so the first run of the dump was on the Pi, and it
+ended the boot: `uefi::println!` panics when the UEFI console refuses a
+string, and the Pi's DSDT's OEM table ID holds bytes it refuses. The `_HID`
+search had host tests and the QEMU boot logged its "none found" lines, so
+everything that could be checked was green. The panic is fixed, and the
+path was then reached on QEMU by a temporary patch before the board saw it
+again. **When no rig reaches a path, the first run is on the hardware: make
+that path's failure cost a line, or find a way to reach it before it ships.**
 

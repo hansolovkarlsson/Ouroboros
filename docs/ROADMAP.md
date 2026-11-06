@@ -35,13 +35,15 @@ This document is the one to update first when direction changes.
 > Its review was answered in #408 (the walk's nesting bounded, nothing
 > present under uncertainty or when a method names `_STA`, field units read
 > as names, config space reachable only through the checked length).
-> **Open from it:** the Pi 4 at this build (Hans, 2026-11-04: first thing
-> on 2026-11-05), whose DSDT declares no virtio-mmio, so it should probe
-> nothing where it read RAM at `0xa000000` before; Parallels declares its
-> NICs as virtio-mmio devices (`_CID "LNRO0005"` at `0x021C0000` up, gated
-> by `NET_`), a possible way to networking there without virtio-PCI,
-> untried; and which mechanism finds Parallels' serial console, not yet
-> read.
+> **The Pi 4 at this build, done 2026-11-05** (the card's kernel
+> `d4067ea7`, `screenlog.0`): `ACPI declares no virtio-mmio
+> transport`, then `skipping virtio-blk (no virtio-mmio transport
+> declared present on this platform)` where it read RAM at `0xa000000`
+> before, the ext2 root mounted, four cores. **Open from it:** Parallels
+> declares its NICs as virtio-mmio devices (`_CID "LNRO0005"` at
+> `0x021C0000` up, gated by `NET_`), a possible way to networking there
+> without virtio-PCI, untried; and which mechanism finds Parallels' serial
+> console, not yet read.
 
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
