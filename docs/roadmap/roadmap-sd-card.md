@@ -229,6 +229,15 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    boot, `disk I/O error`), block addressing always (the SDSC boot, no
    mountable partition). `make test`, `test-early-fault`, `test-el1-drop`,
    `test-usb-hub`, `test-boot-partition` and `test-blank-disk` pass.
+   Its high review (2026-11-06, `d384a536`): a timed-out read now resets the
+   command and data lines; voltage before bus power, 3.3 V checked, 10 ms
+   to settle; the card stays out when the USB stick's init failed, the cell
+   `install_boot_disk` leaves empty on purpose; prog-if 0x00 taken too; one
+   `take_from_firmware` for the xHCI and SD paths. The Pi booted that
+   build with its card and stick: the xHCI taken through the shared path
+   with the same command register as before (`0x0140` to `0x0146`), the
+   stick's ext2 root mounted, a login, no SD line (the Pi has no PCI SD
+   controller), EMMC2 still declared at `0xFE340000`.
 2. **Writing, on QEMU.** CMD24, one sector a write, and the ESP refusal (D3). Check:
    a file written, the VM restarted, the file read back; a write into the
    ESP's range refused with a line; mutations: the refusal removed (the
