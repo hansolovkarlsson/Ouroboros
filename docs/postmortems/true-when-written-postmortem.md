@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-11-04. Five PRs, no new subsystem, and four defects that were all
+through 2026-11-05. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -14,7 +14,8 @@ the suite's own change rewrote, a defect written down without reading
 the code that would have produced it, a guard deleted as doing nothing
 on a premise that held for one of its paths, claims a move left behind,
 and a heuristic that one platform had already falsified and a vendor's
-update falsified loudly.*
+update falsified loudly, and a recommendation taken from records the
+board's newest log had overtaken.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -1237,6 +1238,23 @@ result. **A heuristic is a claim about every platform it has not met; the
 first one that falsifies it quietly is the one to look for, because the
 loud one comes later.** The fix removed the inference: the kernel now
 probes only what the firmware's DSDT declares present.
+
+## A recommendation from a record the morning had overtaken (2026-11-05)
+
+The SD-card plan's first decision recommended finding the Pi's controller
+through its devicetree, "which already finds the Pi's console". That came
+from `dtranges.rs`'s doc, which names the Pi 4's PL011 by its devicetree bus
+address, and from the September records of the Pi's first boots, where the
+console line read `via devicetree`. Both were true when written. By
+2026-11-04 the board, as configured, published no devicetree:
+`testing-pi4.md` recorded `NoDtb` on both of that day's boots, and the
+serial log of the morning the plan was written said `devicetree console
+discovery failed (NoDtb)`, then `via ACPI SPCR`. Hans settled the
+decision as recommended; starting step 0, I read the log and the premise
+was gone. Nothing broke, because step 0 was built to read both sources and
+let the board choose, which is the one thing the recommendation got right.
+**A claim about hardware is about its configuration on the day it was
+read; read the newest log of the board before a summary of an older one.**
 
 ## What actually worked
 
