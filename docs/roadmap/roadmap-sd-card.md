@@ -73,9 +73,11 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    rather than trusting the state the firmware left, so QEMU and the Pi run
    the same code from the same starting point. 3.3 V, default speed
    (25 MHz) first, identification at 400 kHz and never under 200 kHz.
-   Sectors move by PIO through the buffer data port: CMD17 and CMD24 for
-   one block, CMD18 and CMD25 with an auto-CMD12 for several, which is the
-   case Linux's one quirk covers.
+   Sectors move by PIO through the buffer data port, one block at a time:
+   CMD17 to read, CMD24 to write. *(Built 2026-11-06 without multi-block
+   commands: every `BLOCK_READ` and `BLOCK_WRITE` is one sector, so CMD18
+   and CMD25, and the auto-CMD12 Linux's one quirk is about, would be code
+   no caller reaches.)*
 2. **Found, never assumed.** On QEMU by PCI class. On the Pi by the
    devicetree node `brcm,bcm2711-emmc2` through `dtranges.rs`, or the ACPI
    device `BRCME88C` (D1). No fallback address, as for the UART.
@@ -207,7 +209,27 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    under three mutations: the card's address (CMD3's answer) ignored, the
    bus left 1-bit while the controller is set 4-bit, and a multi-block read
    without its CMD12.
-2. **Writing, on QEMU.** CMD24 and CMD25, and the ESP refusal (D3). Check:
+   **Built 2026-11-06** (`kernel/src/sdhci.rs`, `pci::discover_sdhci`,
+   `main.rs`'s `init_sd`, `make test-sd`, `make run-sd`). QEMU's firmware
+   does not boot from an SD card (it falls to its shell), so the rig boots
+   the ESP from `virtio-blk-pci`, which the firmware reads and the kernel
+   cannot, and puts `disk.img` on the card, as the Pi's card and stick are
+   today; the card is installed only when no other disk went in, so no
+   configuration that boots now changes. Two boots: a 128 MiB card, which
+   QEMU makes standard-capacity and byte-addressed, and a sparse 4 GiB one,
+   high-capacity and block-addressed; each mounts the ext2 root from the
+   card and reads `/etc/srcid` back as staged. QEMU's controller is SDHCI
+   2.00 with a 52 MHz base, so the card was identified at 203 kHz and read
+   at 13 MHz, the most a power-of-two divisor gives under 25. Two of the
+   three planned mutations could not fail and were replaced: QEMU models no
+   data lines, so dropping ACMD6 passes (run, and it does: the bus width is
+   the Pi's to show, in step 3), and there is no multi-block read to cut
+   the CMD12 from. The mutations that fail: CMD7 with no RCA (both boots,
+   `CMD7 failed, error status 0x0001`), byte addressing always (the SDHC
+   boot, `disk I/O error`), block addressing always (the SDSC boot, no
+   mountable partition). `make test`, `test-early-fault`, `test-el1-drop`,
+   `test-usb-hub`, `test-boot-partition` and `test-blank-disk` pass.
+2. **Writing, on QEMU.** CMD24, one sector a write, and the ESP refusal (D3). Check:
    a file written, the VM restarted, the file read back; a write into the
    ESP's range refused with a line; mutations: the refusal removed (the
    rig's ESP check fails), a write's completion not waited for.

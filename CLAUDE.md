@@ -207,6 +207,7 @@ make run-image-gpt            # build build/espgpt.img (GPT-wrapped FAT32) and b
 make run-image-exfat          # build build/espexfat.img (exFAT + FAT32 ESP) and boot it
 make disk                     # build/disk.img: one disk, FAT32 ESP as partition 1 and the ext2 root as partition 2
 make run-disk                 # boot build/disk.img on virtio-blk
+make run-sd                   # disk.img on QEMU's sdhci-pci, the ESP booted from virtio-blk-pci: the root from an SD card
 make run-image-ext2           # build build/espext2.img (ext2 + FAT32 ESP) and boot it; needs e2fsprogs
 make parallels-hdd            # wrap build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk
 make sdcard SDCARD=/Volumes/OUROBOROS # stage the Pi 4 / Pi 400 boot card on an already-formatted FAT volume
@@ -224,6 +225,7 @@ make test-fpsimd              # a task's FP/SIMD registers across the kernel
 make test-spawn-owner         # the owner of the kernel's spawn staging
 make test-spawn-size          # the size of a program file spawn accepts
 make test-proc-cpus           # /proc/cpus, the cores that take tasks as a file
+make test-sd                  # an SD card as the root disk: QEMU's sdhci-pci, a standard- and a high-capacity card
 make bootstick BOOTSTICK=/dev/diskN # write disk.img's layout to a whole disk or image file (PI=1 for the Pi 4)
 make test-bootstick           # bootstick against image files
 make test-boot-partition      # the boot partition the kernel names
@@ -361,7 +363,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/acpi.rs        console discovery via RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels) + the shared find_table walk
   src/madt.rs        GIC version/address discovery via the ACPI MADT - where gic.rs's addresses actually come from
   src/power.rs       POWER syscall backend: PSCI SYSTEM_OFF via the FADT-discovered conduit, else halt
-  src/pci.rs         PCI enumeration: serial-console discovery, discover_xhci, log_all_devices
+  src/pci.rs         PCI enumeration: serial-console discovery, discover_xhci, discover_sdhci, log_all_devices
   src/console.rs     global console handle (Pl011|Uart16550|Virtio|Framebuffer), shared with the exception handler
   src/framebuffer.rs GOP discovery: resolution/stride/format + framebuffer base - the console that works on Parallels
   src/font.rs        embedded 8x8 bitmap font, printable ASCII only (cond keeps its own copy)
@@ -397,7 +399,9 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
                      THE AUTHORITY on slot numbers and counts - restating that map elsewhere has drifted before,
                      see docs/postmortems/asking-the-right-question-postmortem.md
   src/virtio_mmio.rs virtio-mmio transport: probes only the transports the firmware's DSDT declares (amlscan), modern register layout
-  src/block.rs       BlockDevice enum (Virtio | UsbMsd) - what fsd's disk layer sits on
+  src/block.rs       BlockDevice enum (Virtio | UsbMsd | Sdhci) - what fsd's disk layer sits on
+  src/sdhci.rs       an SD card on a standard SDHCI, brought up from scratch by the SD spec and read by PIO, one sector a
+                     time, 32-bit register access only; QEMU's sdhci-pci today, the Pi's EMMC2 next (SD-card arc); read-only until step 2
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI over xhci's bulk endpoints, with BOT error recovery
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is
