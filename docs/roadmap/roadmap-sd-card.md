@@ -332,6 +332,16 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    then the card with the stick, which needs a ranking rule this plan has
    not built: an SD card that is the boot disk ahead of a stick that is
    not.
+   **The card alone, read on the Pi 2026-11-06** (build `0f6f471a`, the
+   card restaged by `make bootstick PI=1`, no stick): the card brought up
+   as in step 3, the boot disk with its boot partition at LBA 2048,
+   partition 1's FAT32 boot sector and partition 2's ext2 superblock read
+   (LBA 133120), sectors 0 to 133118 protected, and the card installed as
+   the block device, no other disk being in. fsd mounted the ext2 root off
+   it (`mount` says 244,277,248 sectors, the card's count), named the boot
+   partition on this disk, and the login, `bootid` (boot 2, the counter
+   carried from the old card) and `/proc` worked. No write yet: the
+   file written and read back across a reboot is the next round trip.
 5. **The records.** `testing-pi4.md`'s storage surprise rewritten,
    `gap-analysis.md`'s block-storage row, `make-targets.md` for the new
    rigs, and Pi item 2 on `ROADMAP.md` closed with a pointer here.
