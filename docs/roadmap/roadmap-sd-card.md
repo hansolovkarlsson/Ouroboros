@@ -144,6 +144,37 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    once the dumped `_CRS` is parsed by `amlscan`, host-tested on those
    bytes, since reading an address the parser has not been shown to find
    is a guess.
+   **Read on the Pi 2026-11-05** (build `a8b92f41`, pftf v1.53, a card and
+   the stick; the first try, `bb7141c3`, halted in `sdscan.rs` itself: the
+   DSDT's OEM table ID holds bytes the UEFI console refuses, and
+   `uefi::println!` panics on the refusal, fixed in `a8b92f41` and the Pi's
+   output reproduced on QEMU first). No devicetree. The DSDT (`RPI`, 8,921
+   bytes) declares Arasan, `_HID "BCM2847"`. The SSDT `RPI4EMMC` (631
+   bytes, kept as `amlscan/testdata/pi4-ssdt-rpi4emmc.aml`, its checksum
+   whole) declares EMMC2 as `\_SB.GDV1.SDC3`: `_HID "BRCME88C"`, `_UID 1`,
+   `_CCA 0` (DMA not coherent), `Method (_STA) { Return (0x0F) }`, and
+   `Name (RBUF, ResourceTemplate () { Memory32Fixed (ReadWrite, 0, 0x100);
+   Interrupt (ResourceConsumer, Level, ActiveHigh, Shared) { 158 } })` with
+   `Method (_CRS, 0, Serialized) { CreateDWordField (^RBUF, 4, RBAS);
+   Store (0xFE340000, RBAS); Return (^RBUF) }`. So the registers are 256
+   bytes at `0xFE340000` and the interrupt is INTID 158, level, which
+   agrees with Linux's devicetree. `SdIsArasan` is 0, 4 bytes, vendor
+   `cd7cc258-31db-22e6-9f22-63b0b8eed6b5`: the card is routed to EMMC2, as
+   D4 needs. Its `_DSD`, with `SDMA` 1, gives `sdhci-caps-mask`
+   `0x0000000500080000`.
+
+0b. **Read the controller's address, then its registers.** `amlscan` takes
+   a device by its `_HID` string and reads two method shapes exactly, no
+   more general: a `_STA` that is only `Return (<constant>)`, and a `_CRS`
+   that is only `CreateDWordField (^<buffer>, <offset>, <field>);
+   Store (<constant>, <field>); Return (^<buffer>)` over a `Name`d
+   resource buffer, the base patched in at that offset. Anything else in
+   either method leaves the device not taken, as today. Check: host tests on
+   the kept SSDT give `0xFE340000`, 0x100 and INTID 158, and mutations fail
+   them (the store's offset ignored, a second store in the method
+   accepted, a `_STA` returning 0 taken). Then a Pi boot that, before the
+   exit and read only, logs the controller's host version, capabilities and
+   present state at that address.
 1. **The driver on QEMU, reading.** `sdhci.rs` on `sdhci-pci`, a
    `make run-sd` that boots the ESP as today and puts `build/disk.img` on
    the SD card, and a `make test-sd` that mounts the root from it and reads
