@@ -186,8 +186,20 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    unchecked, a method with arguments taken. `sdscan.rs` logs the declared
    count and, for exactly one, six registers (present state, host control,
    clock control, both capability words, host version), none whose read
-   changes anything. QEMU declares none and boots as before; the Pi boot is
-   owed.
+   changes anything. QEMU declares none and boots as before.
+   **Read on the Pi 2026-11-05** (build `c8bf046a`, to the login, no
+   fault): `EMMC2 declared present: 1`, `0xFE340000`, 0x100, INTID 158, as
+   the host tests had it. Present state `0x1fff0000` (card inserted and
+   stable, write protect off, DAT and CMD lines high, no command in
+   flight); host control `0x00800fc0` (bus power on at 3.3 V, the data
+   width bit clear, so 1-bit as the firmware left it); clock control
+   `0x000e0207` (internal clock stable, SD clock on, divider 2: 25 MHz from
+   the base); capabilities `0x45ee6432` (base clock 100 MHz, timeout clock
+   50 kHz, 2048-byte blocks, 8-bit, ADMA2, SDMA, high speed, 3.3 V and
+   1.8 V, slot type embedded) and `0x0000a525` (SDR50, DDR50); host version
+   `0x10020000`, SDHCI 3.00, vendor 0x10. So, unlike Arasan, whose
+   capability registers read 0 (`Sdhc.asl`), EMMC2's are real: the driver
+   takes its base clock from them. Step 0 is done; step 1 is next.
 1. **The driver on QEMU, reading.** `sdhci.rs` on `sdhci-pci`, a
    `make run-sd` that boots the ESP as today and puts `build/disk.img` on
    the SD card, and a `make test-sd` that mounts the root from it and reads

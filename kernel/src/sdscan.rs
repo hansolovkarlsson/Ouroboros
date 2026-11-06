@@ -214,8 +214,17 @@ unsafe fn report_controller(rsdp: Option<*const u8>) {
     }
     let (present, clock, caps, version) = (v[0], v[2], v[3], v[5]);
     log::info!(
-        "Ouroboros kernel: sd: EMMC2 spec version {} (vendor {:#x}), base clock {} MHz, 3.3V {}, 1.8V {}, card inserted {}, SD clock on {}",
-        (version >> 16) & 0xff,
+        "Ouroboros kernel: sd: EMMC2 SDHCI {} (vendor {:#x}), base clock {} MHz, 3.3V {}, 1.8V {}, card inserted {}, SD clock on {}",
+        // The specification version field (SDHCI 4.20, 2.2.33).
+        match (version >> 16) & 0xff {
+            0 => "1.00",
+            1 => "2.00",
+            2 => "3.00",
+            3 => "4.00",
+            4 => "4.10",
+            5 => "4.20",
+            _ => "(version unknown)",
+        },
         version >> 24,
         (caps >> 8) & 0xff,
         caps & (1 << 24) != 0,
