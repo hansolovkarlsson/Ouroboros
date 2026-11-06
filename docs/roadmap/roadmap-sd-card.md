@@ -259,6 +259,30 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    big-endian fails the read-back on both. A write's end not waited for
    passes: QEMU completes a write at once, so like ACMD6 it is the Pi's to
    show.
+   Its high review (`125647ec`): the table that finds the firmware
+   partition is kept with it, since `partition fat32` on a Pi card would
+   have left `RPI_EFI.fd` whole and the card unbootable. So
+   `parttable::firmware_sectors` protects sector 0 to the partition's end
+   and a GPT's backup copy, and a card that is not blank but whose table
+   lists nothing (a GPT whose two copies fail) is kept whole. The driver
+   checks the card's R1 status from CMD7 on (ACMD6 before the host goes
+   4-bit; not during identification, where an illegal-command bit can be
+   the CMD8 an older card does not know), honours the write-protect switch,
+   waits for both lines before writing the block registers, waits 20 us
+   after each register write at the identification clock as Linux's
+   `sdhci-iproc` does on the BCM2711, and clamps a byte-addressed card to
+   4 GiB. `timer::deadline_us` and `delay_us` replace the driver's own
+   tick arithmetic; `xhci.rs`, `smp.rs` and `syscall.rs` keep theirs for
+   now. `sdscan` runs only under `\SDDUMP`. `make test-sd` now refuses
+   `partition` at sector 0 as well as `format`, checks sectors 0 to the
+   partition's end, and adds a fifth boot, the no-table card; 27 checks.
+   The refusal removed, the table left out of the range, the no-table card
+   left writable and big-endian data each fail their checks. (The
+   no-table control's SDSC boot also hit a firmware stall, before the
+   kernel ran, a data point for the stall study and not a result.)
+   `make test`, `test-usb-hub`, `test-early-fault`, `test-el1-drop` and
+   `test-boot-partition` pass. QEMU cannot show the write delay, the R1
+   checks on a real error, or the power sequence; step 3 is the board.
 3. **The Pi, reading.** Discovery (D1), the clock from the capability
    register's base clock and the firmware's rate, the takeover. A card
    staged by `make bootstick PI=1`, a stick still in a port as the root.

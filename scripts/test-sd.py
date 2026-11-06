@@ -44,7 +44,7 @@ a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
 was never told about (no ACMD6) reads the same as one it was; it completes a
 write at once, so a write whose end is not waited for still lands; and it
 models no clock rate. Those are the Pi's to show (step 3). Run it whenever kernel/src/sdhci.rs, pci::discover_sdhci, main.rs's
-init_sd, parttable::firmware_partition or block.rs changes. About four
+init_sd, parttable::firmware_sectors or block.rs changes. About five
 minutes.
 """
 import importlib.util

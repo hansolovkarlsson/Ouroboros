@@ -401,7 +401,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/virtio_mmio.rs virtio-mmio transport: probes only the transports the firmware's DSDT declares (amlscan), modern register layout
   src/block.rs       BlockDevice enum (Virtio | UsbMsd | Sdhci) - what fsd's disk layer sits on
   src/sdhci.rs       an SD card on a standard SDHCI, brought up from scratch by the SD spec and read by PIO, one sector a
-                     time, 32-bit register access only; QEMU's sdhci-pci today, the Pi's EMMC2 next (SD-card arc); reads and writes, never the firmware partition
+                     time, 32-bit register access only; QEMU's sdhci-pci today, the Pi's EMMC2 next (SD-card arc); reads and writes, never the firmware partition or the table that finds it
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI over xhci's bulk endpoints, with BOT error recovery
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is
@@ -412,7 +412,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
                      test-early-fault.py
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
   src/sdscan.rs      what the firmware says of the SD card's controller (SD-card arc steps 0, 0b): devicetree, ACPI _HID, SdIsArasan,
-                     and the declared EMMC2's registers, read only; \SDDUMP prints the declaring ACPI tables in hex
+                     and the declared EMMC2's registers, read only; runs only under \SDDUMP, which also prints the tables in hex
   src/bootdisk.rs    the boot partition: the HardDrive node of the image's own device path, read before the exit (one-disk step 1),
                      and is_boot_disk, which makes the disk booted from the block device (step 3); the matcher itself is parttable's
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack

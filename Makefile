@@ -2321,7 +2321,9 @@ test-proc-cpus: image
 # reads it, the kernel cannot) and disk.img on QEMU's sdhci-pci, as a
 # standard-capacity card and a 4 GiB high-capacity one, two boots each: the
 # root mounted from the card, a file written and read back across a power
-# off, and a format over the firmware partition refused, its bytes unchanged.
+# off, partition and format refused over the firmware partition and its
+# table, their bytes unchanged; and a fifth boot, a card with no table
+# entries, kept whole.
 test-sd: disk
 	python3 scripts/test-sd.py
 
