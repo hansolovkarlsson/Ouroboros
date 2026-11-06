@@ -327,9 +327,11 @@ def pi_card():
         tree = esp.read("EFI/BOOT/BOOTAA64.EFI") is not None
     checks = [
         ("pi card: taken as ours and as a Pi disk", code == 0 and "ours (fat), a Pi stick" in out),
+        # Each on a run that wrote: a refused card still holds its own files,
+        # so the bytes alone would pass it.
         ("pi card: its RPI_EFI.fd, config.txt and start4.elf carried byte for byte",
-         fd == settings.encode() and config == overlay.encode() and s4 == start4.encode()),
-        ("pi card: the ESP's tree beside them", tree),
+         code == 0 and fd == settings.encode() and config == overlay.encode() and s4 == start4.encode()),
+        ("pi card: the ESP's tree beside them", code == 0 and tree),
     ]
     if not all(good for _, good in checks):
         print(out)

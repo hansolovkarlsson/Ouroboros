@@ -319,6 +319,19 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    by `make bootstick PI=1` gives in step 4.
 4. **The Pi, the card alone.** The card as the block device by the boot
    rule, no stick. Check: this plan's Done when, both halves.
+   **Begun 2026-11-06.** `make bootstick PI=1` refused a Pi card, because
+   the kernel could not read one; since step 3 it does, so `bootstick.py`
+   takes a Pi card as ours (its `/etc` and boot counter carried) and as a
+   Pi disk, its firmware files, `RPI_EFI.fd` with the settings that route
+   the card to EMMC2 (`SdIsArasan` 0), carried whole rather than the
+   pinned release's, which could route it to Arasan (D4). `make
+   test-bootstick` grades it on a card-shaped image: 52 checks, and the
+   firmware not carried or the card refused each fail. The card is then
+   staged by `sudo`'s raw writes, Hans's step on the Mac. Two boots: the
+   card alone (the existing rule installs it, no other disk going in),
+   then the card with the stick, which needs a ranking rule this plan has
+   not built: an SD card that is the boot disk ahead of a stick that is
+   not.
 5. **The records.** `testing-pi4.md`'s storage surprise rewritten,
    `gap-analysis.md`'s block-storage row, `make-targets.md` for the new
    rigs, and Pi item 2 on `ROADMAP.md` closed with a pointer here.

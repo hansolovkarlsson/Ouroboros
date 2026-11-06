@@ -430,8 +430,11 @@ firmware's own files and `config.txt` are carried: a boot flag such as
 If the stick's ESP no longer mounts, the run refuses; `PI=1 FIRMWARE=1`
 rewrites it with the release's firmware, settings reset. `FIRMWARE=1`
 reinstalls the pinned release (settings reset, `config.txt` kept); `PI=0`
-drops the firmware. A card is refused as a target: the kernel cannot read
-it once it runs.
+drops the firmware. A Pi card (one FAT32 volume with `RPI_EFI.fd`, as `make
+sdcard` stages it) is taken as a target since 2026-11-06, when the kernel
+gained an SD card driver (`roadmap-sd-card.md`): its `/etc`, boot counter and
+firmware files, `RPI_EFI.fd` with its settings, are carried as a Pi stick's
+are. It was refused before, since the kernel could not read the card.
 
 *Built 2026-10-14, checked only on image files* (`make test-bootstick`):
 the pinned files on a fresh stick, the settings and `config.txt` carried,

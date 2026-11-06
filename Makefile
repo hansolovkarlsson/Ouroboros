@@ -2089,7 +2089,7 @@ stick:
 # Hans on 2026-10-14). It replaces the whole disk, so scripts/bootstick.py
 # guards it: a whole disk's node, external or removable, not the Mac's own,
 # and empty or ours (a disk it wrote, a `make stick` stick, or a written
-# esp.img); a Pi card is refused. BOOTSTICK may name a disk image file
+# esp.img, or a Pi card, its firmware carried whole). BOOTSTICK may name a disk image file
 # instead, which it attaches with hdiutil and writes the same way, so it can
 # be tried on QEMU first (`make run-bootstick`). A device this user cannot
 # open is read and written through sudo dd.
