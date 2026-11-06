@@ -276,22 +276,6 @@ pub unsafe fn virtio_mmio_transports(rsdp: Option<*const u8>) -> Result<amlscan:
     Ok(found)
 }
 
-/// The EMMC2 controllers the firmware declares present: every `_HID
-/// "BRCME88C"` device, by the walk and rules `virtio_mmio_transports` uses
-/// (`amlscan::declared`), whose `_STA` and `_CRS` may be the two method
-/// shapes the Raspberry Pi 4's firmware writes (`amlscan::MethodShape`).
-/// The Pi declares one, at `0xFE340000`; QEMU and Parallels none.
-///
-/// # Safety
-/// Same as [`find_table`].
-pub unsafe fn emmc2_controllers(rsdp: Option<*const u8>) -> Result<amlscan::Transports, DiscoveryError> {
-    let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
-    let count = unsafe { aml_table_slices(rsdp, &mut tables) }?;
-    let mut found = amlscan::Transports::new();
-    amlscan::declared(&tables[..count], amlscan::EMMC2_HID, &mut found);
-    Ok(found)
-}
-
 /// Every AML table the firmware gives, each once and whole (its header
 /// included), into `tables`; returns how many. The one collection
 /// `virtio_mmio_transports` and `sdscan.rs` share.

@@ -18,7 +18,7 @@
 //!   holding one is printed in hex, so that `_CRS` can be read and the
 //!   driver's parser written and host-tested against the real bytes.
 //! - **The controller itself (step 0b):** when the tables declare exactly
-//!   one EMMC2 present (`acpi::emmc2_controllers`, its `_STA` and `_CRS`
+//!   one EMMC2 present (`amlscan::declared`, its `_STA` and `_CRS`
 //!   read from their methods), six of its registers are read and logged,
 //!   still before the exit and on the firmware's mapping, which its own
 //!   card driver uses: present state, host control, clock control, the two
@@ -50,8 +50,15 @@ const ROUTING_VAR: &CStr16 = cstr16!("SdIsArasan");
 /// them: each, if `Some`, points at its firmware structure, mapped.
 pub unsafe fn report(dtb: Option<*const u8>, rsdp: Option<*const u8>, flags: &bootflags::Flags) {
     unsafe { report_devicetree(dtb) };
-    unsafe { report_acpi(rsdp, flags.sd_dump) };
-    unsafe { report_controller(rsdp) };
+    // The AML tables once, for both reports.
+    let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
+    match unsafe { acpi::aml_table_slices(rsdp, &mut tables) } {
+        Ok(count) => {
+            report_acpi(&tables[..count], flags.sd_dump);
+            unsafe { report_controller(&tables[..count]) };
+        }
+        Err(e) => log::info!("Ouroboros kernel: sd: ACPI tables not read ({e:?})"),
+    }
     report_routing();
 }
 
@@ -87,17 +94,10 @@ unsafe fn report_devicetree(dtb: Option<*const u8>) {
     }
 }
 
-unsafe fn report_acpi(rsdp: Option<*const u8>, dump: bool) {
-    let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
-    let count = match unsafe { acpi::aml_table_slices(rsdp, &mut tables) } {
-        Ok(count) => count,
-        Err(e) => {
-            log::info!("Ouroboros kernel: sd: ACPI tables not read ({e:?})");
-            return;
-        }
-    };
+fn report_acpi(tables: &[&[u8]], dump: bool) {
+    let count = tables.len();
     let mut any = false;
-    for table in &tables[..count] {
+    for table in tables {
         // The header's names as text a console takes: the Pi's DSDT's OEM
         // table ID holds bytes the UEFI console refuses (seen 2026-11-05: the
         // line stopped at the ID, and the dump's first line panicked).
@@ -166,14 +166,12 @@ fn dump_table(signature: &str, oem_table: &str, table: &[u8]) {
     out_line(format_args!("SDDUMP {signature} {oem_table} end"));
 }
 
-unsafe fn report_controller(rsdp: Option<*const u8>) {
-    let found = match unsafe { acpi::emmc2_controllers(rsdp) } {
-        Ok(found) => found,
-        Err(e) => {
-            log::info!("Ouroboros kernel: sd: EMMC2 declarations not read ({e:?})");
-            return;
-        }
-    };
+/// # Safety
+/// The tables are the firmware's, and any EMMC2 they declare present is
+/// mapped by the firmware (its own card driver uses it).
+unsafe fn report_controller(tables: &[&[u8]]) {
+    let mut found = amlscan::Transports::new();
+    amlscan::declared(tables, amlscan::EMMC2_HID, &mut found);
     log::info!(
         "Ouroboros kernel: sd: EMMC2 declared present: {} (unreadable {}, absent {}, status unknown {})",
         found.as_slice().len(),

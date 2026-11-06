@@ -44,16 +44,39 @@ DISK = os.path.join(ROOT, "build", "disk.img")
 STAMP = os.path.join(ESP, "EFI", "ORBS", "SRCID.TXT")
 PROMPT = "# "
 
-CARDS = [
-    # (name, file, size in bytes, the kernel's words for it)
-    ("sdsc", os.path.join(ROOT, "build", "test-sd-sdsc.img"), 128 << 20, "standard capacity, byte-addressed"),
-    ("sdhc", os.path.join(ROOT, "build", "test-sd-sdhc.img"), 4 << 30, "high capacity, block-addressed"),
-]
+# QEMU makes a card of 2 GiB or less standard-capacity (SDSC), a larger one
+# high-capacity (SDHC), and wants every size a power of two.
+SDSC_MAX = 2 << 30
+
+
+def power_of_two_at_least(n):
+    p = 1
+    while p < n:
+        p *= 2
+    return p
+
+
+def cards():
+    """(name, file, size, the kernel's words for it), the sizes from
+    disk.img's: the SDSC card the smallest power of two that holds it (at
+    least 128 MiB), the SDHC card 4 GiB, each checked to hold the image
+    whole, so a grown image is a refusal and not a cut root."""
+    disk = os.path.getsize(DISK)
+    sdsc = max(128 << 20, power_of_two_at_least(disk))
+    sdhc = 4 << 30
+    if sdsc > SDSC_MAX or disk > sdhc:
+        sys.exit(f"test-sd: disk.img is {disk} bytes, too big for a {SDSC_MAX}-byte SDSC card or a {sdhc}-byte SDHC one")
+    return [
+        ("sdsc", os.path.join(ROOT, "build", "test-sd-sdsc.img"), sdsc, "standard capacity, byte-addressed"),
+        ("sdhc", os.path.join(ROOT, "build", "test-sd-sdhc.img"), sdhc, "high capacity, block-addressed"),
+    ]
 
 
 def card_image(path, size):
-    """A copy of disk.img grown to `size`, sparse past the image's end."""
+    """A copy of disk.img grown to `size`, sparse past the image's end;
+    never shrunk (cards() checks the size holds it)."""
     shutil.copyfile(DISK, path)
+    assert os.path.getsize(path) <= size
     with open(path, "r+b") as fh:
         fh.truncate(size)
 
@@ -71,7 +94,7 @@ def boot(name, path):
             "-device", "sd-card,drive=sd0",
         ],
     )
-    cat = ""
+    cat, out, faults, ok = "", "", None, False
     try:
         ok = guest.wait_for("login:", timeout=120)
         ok = ok and guest.run([("", "root"), ("assword", "root")]) and guest.wait_for(PROMPT)
@@ -95,9 +118,13 @@ def main() -> int:
     with open(STAMP) as fh:
         stamp = fh.read()
     checks = []
-    for name, path, size, kind in CARDS:
+    for name, path, size, kind in cards():
         card_image(path, size)
-        ok, out, cat, faults = boot(name, path)
+        try:
+            ok, out, cat, faults = boot(name, path)
+        finally:
+            # The SDHC card is 4 GiB to the filesystem, sparse or not.
+            os.remove(path)
         sent = cat.replace("\r\n", "\n")
         checks += [
             (f"{name}: driven to the end", ok),
@@ -107,7 +134,6 @@ def main() -> int:
             (f"{name}: /etc/srcid read back as the host has it", stamp.strip() != "" and stamp in sent),
             (f"{name}: no fault lines", faults == 0),
         ]
-        os.remove(path)
     failed = 0
     for check, good in checks:
         print(f"{'ok  ' if good else 'FAIL'} {check}")

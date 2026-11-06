@@ -690,8 +690,10 @@ extern "C" fn kernel_main() -> ! {
     console::println!("Ouroboros kernel: running at EL{} after the exit", el2::current_el());
 
     // SAFETY: called after exit_boot_services, with the memory map that
-    // call returned. Up to five regions (`mmu::MAX_EXTRA_DEVICES`): the
-    // console, framebuffer, xHCI BAR, GICD and GICR, all discovered
+    // call returned. Up to five regions (`mmu::MAX_EXTRA_DEVICES`) from six
+    // candidates: the console, framebuffer, xHCI BAR, GICD and GICR, and
+    // last the SD host controller, which is mapped only when a slot is left
+    // (`init_sd` then asks the walker, and says so when it is not), all discovered
     // addresses (madt.rs for the GIC), none assumed to live in the fixed
     // low-1GB device block. `mmu.rs`'s `MAX_EXTRA_L1_TABLES` is sized to
     // match, so each can have its own L1 table past 512GB.
@@ -931,13 +933,14 @@ extern "C" fn kernel_main() -> ! {
     // attaches a few seconds *after* this point (confirmed by the
     // enumeration diagnostics), so this boot-time attempt mostly serves
     // QEMU; the shell's `mount` command covers the late-attach case.
-    install_boot_disk(held_virtio);
+    let usb = install_boot_disk(held_virtio);
 
     // Third disk path, the SD-card arc's step 1: an SD card on a controller
-    // found before the exit, installed only when no other disk went in, so
-    // no configuration that boots today changes. Which wins when the card is
-    // the boot disk is step 3's question, on the Pi.
-    init_sd(sdhci_info);
+    // found before the exit, installed only when no other disk went in and
+    // none was left out on purpose, so no configuration that boots today
+    // changes. Which wins when the card is the boot disk is step 3's
+    // question, on the Pi.
+    init_sd(sdhci_info, usb);
 
     // GIC/timer setup - gated on `gic_info` being `Some` (real MADT
     // discovery, `madt.rs`), not the console-discovery heuristic this used to
@@ -1284,12 +1287,21 @@ fn init_storage(declared: &virtio_mmio::Transports) -> Option<Held> {
 /// Brings up the SD card on the controller [`pci::discover_sdhci`] found, and
 /// installs it for the filesystem server when no disk was installed before
 /// it (`install_boot_disk`); read-only until the SD-card arc's step 2.
-/// Silent when there is no controller, which is every platform but a QEMU
-/// run that attaches one.
-fn init_sd(info: Option<pci::SdhciInfo>) {
+/// Not when the USB stick's init failed (`usb`): `install_boot_disk` leaves
+/// the cell empty then on purpose, since that stick may be the boot disk and
+/// `mount -a` replaces the device only when `fsd` mounted nothing (the
+/// medium review of #287). Silent when there is no controller, which is
+/// every platform but a QEMU run that attaches one.
+fn init_sd(info: Option<pci::SdhciInfo>, usb: syscall::UsbInstall) {
     let Some(info) = info else { return };
     if syscall::block_device_installed() {
         console::println!("Ouroboros kernel: sd: the card is not brought up: another disk is installed");
+        return;
+    }
+    if usb == syscall::UsbInstall::Failed {
+        console::println!(
+            "Ouroboros kernel: sd: the card is not brought up: the USB stick's init failed, and `mount -a` retries the stick"
+        );
         return;
     }
     if !mmu::walks_as_device(info.base) {
@@ -1334,7 +1346,7 @@ struct Held {
 /// after any stick. The `MOUNT` syscall's later rescan, which replaces the
 /// device with a stick attached late, installs whatever stick it finds, and
 /// `BLOCK_BOOT_START` reads its table when asked, so it answers for it too.
-fn install_boot_disk(held: Option<Held>) {
+fn install_boot_disk(held: Option<Held>) -> syscall::UsbInstall {
     // Held back for the stick's answer: a non-boot stick gives way to it.
     let holds_back = matches!(held, Some(Held { blank: false, .. }));
     let outcome = syscall::try_install_usb_block_device(|usb| {
@@ -1353,7 +1365,7 @@ fn install_boot_disk(held: Option<Held>) {
         // it. Only a stick that was read and does not match is refused.
         !matches!((holds_back, matched), (true, Some(bootdisk::Boot::No)))
     });
-    let Some(Held { device, blank }) = held else { return };
+    let Some(Held { device, blank }) = held else { return outcome };
     // The held virtio disk is not the boot disk; it goes in only as the
     // fallback, the order from before step 3, and the line says why no other
     // disk did. Not when the stick's init failed: that stick may be the boot
@@ -1364,7 +1376,7 @@ fn install_boot_disk(held: Option<Held>) {
     // `mount -a` still retries the stick, and left out it could not be
     // prepared for the whole boot (the max review of the blank disk).
     let why = match outcome {
-        syscall::UsbInstall::Installed => return,
+        syscall::UsbInstall::Installed => return outcome,
         syscall::UsbInstall::Refused => "the USB stick is not the boot disk either",
         syscall::UsbInstall::Absent if blank => "blank, and no USB stick is attached",
         syscall::UsbInstall::Absent => "no USB stick is attached",
@@ -1373,11 +1385,12 @@ fn install_boot_disk(held: Option<Held>) {
             console::println!(
                 "Ouroboros kernel: virtio-blk is not the boot disk and the USB stick's init failed - no disk installed, `mount -a` retries the stick"
             );
-            return;
+            return outcome;
         }
     };
     syscall::install_block_device(block::BlockDevice::Virtio(device));
     console::println!("Ouroboros kernel: virtio-blk installed as the fallback: {why}");
+    outcome
 }
 
 /// Brings up the virtio-net driver and hands it to the `NET` cell for the

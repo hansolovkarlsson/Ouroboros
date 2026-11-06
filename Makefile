@@ -1774,11 +1774,13 @@ run-disk: disk
 # disk.img on an SD card behind QEMU's sdhci-pci, the ESP booted from
 # virtio-blk-pci, which the firmware reads and the kernel cannot drive: the
 # root comes from the card (sdhci.rs, the SD-card arc). The card is a copy,
-# padded to 128 MiB because QEMU wants a power of two; it is read-only to the
-# kernel until the arc's step 2. `make test-sd` is the graded form.
+# padded to a power of two (QEMU wants one), at least 128 MiB, never cut;
+# read-only to the kernel until the arc's step 2. `make test-sd` is the graded form.
 run-sd: disk
 	cp $(DISK_IMG) $(BUILD_DIR)/run-sd.img
-	truncate -s 134217728 $(BUILD_DIR)/run-sd.img
+	# The smallest power of two of at least 128 MiB that holds the image,
+	# never smaller than the image (a bare truncate would cut the root off).
+	python3 -c "import os; p='$(BUILD_DIR)/run-sd.img'; n=os.path.getsize(p); os.truncate(p, max(128 << 20, 1 << (n - 1).bit_length()))"
 	qemu-system-aarch64 \
 		-machine virt \
 		-cpu cortex-a72 \

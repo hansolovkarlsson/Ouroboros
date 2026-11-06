@@ -80,7 +80,12 @@ const RESET_DAT: u32 = 1 << 26;
 
 // HOST_CONTROL's word: host control 1, power control, block gap, wakeup.
 const HOST_DATA_4BIT: u32 = 1 << 1;
-const POWER_ON_3V3: u32 = 0x0f << 8;
+/// SD Bus Voltage Select, 3.3 V (power control bits 3:1), written alone
+/// before SD Bus Power (bit 0), as SDHCI orders them.
+const POWER_SELECT_3V3: u32 = 0x0e << 8;
+const POWER_ON: u32 = 0x01 << 8;
+/// Capabilities: the controller supports 3.3 V.
+const CAPS_3V3: u32 = 1 << 24;
 
 // The command register's half-word (the word's upper half).
 const RESP_NONE: u32 = 0x00;
@@ -111,6 +116,8 @@ const SECTOR: usize = 512;
 pub enum Error {
     /// The controller's capabilities name no base clock (Arasan's read 0).
     NoBaseClock,
+    /// The controller does not offer 3.3 V, the one voltage used here.
+    No3V3,
     /// The card-detect line says no card is in the slot.
     NoCard,
     /// The base clock cannot be divided into the identification range.
@@ -136,6 +143,7 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Error::NoBaseClock => write!(f, "the controller names no base clock"),
+            Error::No3V3 => write!(f, "the controller does not offer 3.3 V"),
             Error::NoCard => write!(f, "no card in the slot"),
             Error::ClockRange { base_hz } => write!(f, "a {base_hz} Hz base clock divides into no identification clock"),
             Error::Timeout(what) => write!(f, "timed out waiting for {what}"),
@@ -276,8 +284,7 @@ impl Device {
     /// status cleared, so the next command starts clean.
     fn failed(&self, index: u8, status: u32) -> Error {
         let errors = ((status & INT_ERROR_BITS) >> 16) as u16;
-        let _ = self.reset(RESET_CMD | RESET_DAT);
-        self.write(INT_STATUS, 0xffff_ffff);
+        self.abandon();
         Error::Command { index, errors }
     }
 
@@ -311,6 +318,9 @@ impl Device {
         if base_mhz == 0 {
             return Err(Error::NoBaseClock);
         }
+        if caps & CAPS_3V3 == 0 {
+            return Err(Error::No3V3);
+        }
         let base_hz = base_mhz * 1_000_000;
 
         self.reset(RESET_ALL)?;
@@ -318,8 +328,12 @@ impl Device {
         if present & CARD_INSERTED == 0 {
             return Err(Error::NoCard);
         }
-        // Power at 3.3 V, the only voltage a card is identified at here.
-        self.write(HOST_CONTROL, POWER_ON_3V3);
+        // 3.3 V, the only voltage a card is identified at here: the voltage
+        // first, then bus power, then time for the supply to settle (the
+        // reset just cut it; Linux allows 10 ms).
+        self.write(HOST_CONTROL, POWER_SELECT_3V3);
+        self.write(HOST_CONTROL, POWER_SELECT_3V3 | POWER_ON);
+        Self::pause_ms(10);
         // Every status latched, none signalled: this driver polls.
         self.write(INT_STATUS_ENABLE, 0x03ff_00ff);
         self.write(INT_SIGNAL_ENABLE, 0);
@@ -392,6 +406,24 @@ impl Device {
     /// # Safety
     /// As [`Device::init`], which must have succeeded.
     pub unsafe fn read_sector(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), Error> {
+        let result = self.read_one(sector, buf);
+        if let Err(Error::Timeout(_)) = result {
+            // A wait that ran out left the lines as they were, a command or
+            // a block perhaps still in flight: reset both, so the next read
+            // starts clean rather than waiting on an inhibit nothing will
+            // lift. A controller-reported error was reset in `failed`.
+            self.abandon();
+        }
+        result
+    }
+
+    /// The command and data lines reset and every status cleared.
+    fn abandon(&self) {
+        let _ = self.reset(RESET_CMD | RESET_DAT);
+        self.write(INT_STATUS, 0xffff_ffff);
+    }
+
+    fn read_one(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), Error> {
         if sector >= self.sectors {
             return Err(Error::OutOfRange(sector));
         }

@@ -65,7 +65,16 @@
 //! Return (^<buffer>)`, where `<buffer>` is a `Name` in the same device. A
 //! third pass finds that buffer's definitions in every table; with exactly
 //! one, a Buffer kept whole, a copy is patched and read as a `_CRS` buffer
-//! is. Any other method body is skipped whole, as before.
+//! is. Any other method body is skipped whole, as before. The base this
+//! gives cannot be moved by another method: the `_CRS` stores its constant
+//! into the buffer each time it is evaluated, right before returning it, so
+//! a store by `_INI` or any other method to the same bytes is overwritten.
+//! What another method could change unseen is the rest of the buffer, its
+//! length or interrupt, which is the residual: a method body is not read for
+//! stores into a buffer, as it is read for the bytes `_STA`, because the
+//! Pi's container `GDV1` has a `_CRS` patching a buffer of the same name
+//! (its own `RBUF`), and telling the two apart takes the name resolution
+//! only an interpreter has (the review of step 1, 2026-11-06).
 //!
 //! **What makes the scan uncertain, and what that costs.** Anything the
 //! walk cannot see through means the rest of that scope is unseen, and it

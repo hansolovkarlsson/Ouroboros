@@ -241,6 +241,17 @@ round-trip (including verifying against macOS's own `fsck_exfat`).
 lay down a fresh filesystem; `mount -a` mounts it. These are shell *builtins*
 (they must run when nothing is mounted, see [`manual.md`](../manual.md)).
 
+**The root on an SD card** (the SD-card arc, `kernel/src/sdhci.rs`):
+`make run-sd` puts a copy of `build/disk.img` on an SD card behind QEMU's
+`sdhci-pci` and boots the ESP from `virtio-blk-pci`. The firmware reads that
+disk and the kernel cannot (it drives virtio-mmio only), so the card is the
+only disk the kernel has, and `fsd` mounts the ext2 root from it. QEMU's
+firmware does not boot from an SD card itself. The copy is padded to a power
+of two, which QEMU wants, at least 128 MiB and never smaller than the image;
+a card of 2 GiB or less is standard-capacity. The card is read-only until the
+arc's step 2. `make test-sd` is the graded form, a standard- and a
+high-capacity card.
+
 ---
 
 ## 3. Networking (single machine)
@@ -1160,6 +1171,7 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `run-image-gpt` | FAT32 inside a bootable GPT (GPT discovery) |
 | `run-image-exfat` | exFAT partition + FAT32 ESP (`fsd` mounts exFAT) |
 | `run-image-ext2` | ext2 partition + FAT32 ESP (needs `e2fsprogs`); **+ virtio-rng** |
+| `run-sd` | `disk.img` on an SD card (`sdhci-pci`), the ESP on `virtio-blk-pci`: the root from the card (section 2) |
 | `run-net` | virtio-net + SLIRP + `net.pcap` |
 | `test-async-rmount` | three driven boots against host 9P peers: the parked remote mount (section 4) |
 | `run-image-net` | real FAT32 **and** the NIC |
