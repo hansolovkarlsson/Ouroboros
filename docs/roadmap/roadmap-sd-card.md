@@ -289,6 +289,21 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    Check: the kernel names the card, lists its partitions, and reads its
    ext2 root's superblock; the stick stays the root this round, so a fault
    leaves a working system.
+   **Built 2026-11-06** (`e86fa5a6` and the commit after it): with no SD
+   controller on PCI the kernel takes the one EMMC2 its ACPI tables declare
+   present (`amlscan::declared`, at least 0x100 bytes; two would be a
+   guess, so neither), maps it when a slot is left, and after the exit
+   brings the card up and reads it whatever else is installed: sector 0,
+   whether it is the boot disk, each partition with a FAT32 boot sector or
+   an ext2 root's superblock read, its protected sectors. It is installed
+   only when no other disk was, so the stick stays the root. The first Pi
+   boot uses the card as `make sdcard` stages it, one FAT32 partition, so
+   its boot sector is the data read past the table; the ext2 superblock
+   waits for a card staged by `make bootstick PI=1` (step 4). On QEMU,
+   `make test-sd`'s sixth boot puts `esp.img` on virtio-mmio beside the
+   card: 34 checks, and the superblock read a sector off and the card
+   installed over the other disk each fail. The ACPI path itself only the
+   board runs.
 4. **The Pi, the card alone.** The card as the block device by the boot
    rule, no stick. Check: this plan's Done when, both halves.
 5. **The records.** `testing-pi4.md`'s storage surprise rewritten,

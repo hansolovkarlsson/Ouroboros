@@ -42,8 +42,8 @@ fat32` must be refused at sector 0, and the image must come out whole.
 **A sixth boot**, the card beside a disk the kernel installs first: build/
 esp.img on virtio-mmio, and disk.img's copy on the card. The card must still
 be brought up and read (step 3, where on the Pi the stick stays the root),
-each partition listed, partition 2 named a root with its ext2 superblock
-read, the card named as not the boot disk, and not installed.
+each partition listed, partition 1 with its FAT32 boot sector read and
+partition 2 named a root with its ext2 superblock read, the card named as not the boot disk, and not installed.
 
 No fault line in QEMU's trace on any boot. What it cannot see, each run as
 a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
@@ -260,6 +260,8 @@ def main() -> int:
         ("beside: the card brought up beside the installed disk", "sd: sector 0 read, signature 0x55aa" in out),
         (f"beside: partition 2 (LBA {root_start}) listed as a root, its ext2 superblock read",
          f"sd: MBR partition 2: LBA {root_start}," in out and "a root, its ext2 superblock read" in out),
+        ("beside: partition 1 (LBA 2048) listed with its FAT32 boot sector read",
+         "sd: MBR partition 1: LBA 2048," in out and "a FAT32 boot sector read" in out),
         ("beside: the card named as not the boot disk", "sd: the card is not the boot disk" in out),
         ("beside: the card not installed", "sd: the card is up and read, not installed: another disk is" in out
          and "sd: block device installed" not in out),

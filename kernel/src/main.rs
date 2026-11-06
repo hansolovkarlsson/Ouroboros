@@ -1414,18 +1414,29 @@ fn init_sd(ctl: Option<SdController>, usb: syscall::UsbInstall) {
         let listed = parttable::discover(&mut read, Some(capacity), &mut parts);
         if let Ok(n) = listed {
             for (i, p) in parts[..n].iter().enumerate() {
-                // An ext2 superblock is 1024 bytes in: sector 2, its magic
-                // 0xEF53 at byte 56.
-                let mut sb = [0u8; 512];
-                let ext2 = p.root && read(p.start + 2, &mut sb) && sb[56..58] == [0x53, 0xef];
+                // The first read past the table, of what the partition
+                // holds: an ext2 root's superblock (1024 bytes in, so sector
+                // 2, its magic 0xEF53 at byte 56), or another partition's
+                // FAT32 boot sector (`FAT32   ` at byte 82, the Pi's
+                // firmware partition).
+                let mut b = [0u8; 512];
+                let what = if p.root {
+                    if read(p.start + 2, &mut b) && b[56..58] == [0x53, 0xef] {
+                        ", a root, its ext2 superblock read"
+                    } else {
+                        ", a root, no ext2 superblock read"
+                    }
+                } else if read(p.start, &mut b) && &b[82..90] == b"FAT32   " && b[510..512] == [0x55, 0xaa] {
+                    ", a FAT32 boot sector read"
+                } else {
+                    ""
+                };
                 console::println!(
-                    "Ouroboros kernel: sd: {} partition {}: LBA {}, {} sectors{}{}",
+                    "Ouroboros kernel: sd: {} partition {}: LBA {}, {} sectors{what}",
                     if gpt { "GPT" } else { "MBR" },
                     i + 1,
                     p.start,
                     p.sectors,
-                    if p.root { ", a root" } else { "" },
-                    if ext2 { ", its ext2 superblock read" } else if p.root { ", no ext2 superblock read" } else { "" }
                 );
             }
         }
