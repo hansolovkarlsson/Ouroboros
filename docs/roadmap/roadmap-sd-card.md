@@ -348,6 +348,18 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    first writes on hardware went through ext2 and the PSCI power-off and
    stood; the protected range refused nothing it should have taken. The
    first half of step 4 is done.
+   **The ranking rule, built 2026-11-06** (`cf3d18a6`): `init_sd` brings
+   the card up and reads it before the USB step and hands it back, and a
+   card that is the boot disk is installed there, ahead of any stick and
+   of a virtio disk held back as not the boot disk; any other card goes in
+   after the USB step only when no disk did (`install_sd_fallback`), as in
+   step 3. A virtio disk that is the boot disk still goes in first.
+   `make test-sd`'s seventh boot boots disk.img itself from
+   virtio-blk-pci, so the card's copy matches the firmware's device path,
+   with esp.img on a USB stick: 42 checks, and with the early install
+   switched off the card ahead of the stick, the stick left out, the root
+   on the card's disk and fsd's boot partition each fail. The board's
+   boot with the card and the stick is next.
 5. **The records.** `testing-pi4.md`'s storage surprise rewritten,
    `gap-analysis.md`'s block-storage row, `make-targets.md` for the new
    rigs, and Pi item 2 on `ROADMAP.md` closed with a pointer here.
