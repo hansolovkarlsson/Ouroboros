@@ -1775,7 +1775,8 @@ run-disk: disk
 # virtio-blk-pci, which the firmware reads and the kernel cannot drive: the
 # root comes from the card (sdhci.rs, the SD-card arc). The card is a copy,
 # padded to a power of two (QEMU wants one), at least 128 MiB, never cut;
-# read-only to the kernel until the arc's step 2. `make test-sd` is the graded form.
+# its partition 1 is the firmware's and never written (D3), the root beside it
+# is. `make test-sd` is the graded form.
 run-sd: disk
 	cp $(DISK_IMG) $(BUILD_DIR)/run-sd.img
 	# The smallest power of two of at least 128 MiB that holds the image,
@@ -2315,11 +2316,12 @@ test-spawn-size: image
 test-proc-cpus: image
 	python3 scripts/test-proc-cpus.py
 
-# An SD card as the root disk (scripts/test-sd.py, step 1 of
-# docs/roadmap/roadmap-sd-card.md): two boots, the ESP on virtio-blk-pci (the
-# firmware reads it, the kernel cannot) and disk.img on QEMU's sdhci-pci, as
-# a 128 MiB standard-capacity card and a 4 GiB high-capacity one; each mounts
-# the ext2 root from the card and reads /etc/srcid back as staged.
+# An SD card as the root disk (scripts/test-sd.py, steps 1 and 2 of
+# docs/roadmap/roadmap-sd-card.md): the ESP on virtio-blk-pci (the firmware
+# reads it, the kernel cannot) and disk.img on QEMU's sdhci-pci, as a
+# standard-capacity card and a 4 GiB high-capacity one, two boots each: the
+# root mounted from the card, a file written and read back across a power
+# off, and a format over the firmware partition refused, its bytes unchanged.
 test-sd: disk
 	python3 scripts/test-sd.py
 

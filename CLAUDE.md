@@ -225,7 +225,7 @@ make test-fpsimd              # a task's FP/SIMD registers across the kernel
 make test-spawn-owner         # the owner of the kernel's spawn staging
 make test-spawn-size          # the size of a program file spawn accepts
 make test-proc-cpus           # /proc/cpus, the cores that take tasks as a file
-make test-sd                  # an SD card as the root disk: QEMU's sdhci-pci, a standard- and a high-capacity card
+make test-sd                  # an SD card as the root disk: QEMU's sdhci-pci, two cards, writes across a power off, the firmware partition refused
 make bootstick BOOTSTICK=/dev/diskN # write disk.img's layout to a whole disk or image file (PI=1 for the Pi 4)
 make test-bootstick           # bootstick against image files
 make test-boot-partition      # the boot partition the kernel names
@@ -401,7 +401,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/virtio_mmio.rs virtio-mmio transport: probes only the transports the firmware's DSDT declares (amlscan), modern register layout
   src/block.rs       BlockDevice enum (Virtio | UsbMsd | Sdhci) - what fsd's disk layer sits on
   src/sdhci.rs       an SD card on a standard SDHCI, brought up from scratch by the SD spec and read by PIO, one sector a
-                     time, 32-bit register access only; QEMU's sdhci-pci today, the Pi's EMMC2 next (SD-card arc); read-only until step 2
+                     time, 32-bit register access only; QEMU's sdhci-pci today, the Pi's EMMC2 next (SD-card arc); reads and writes, never the firmware partition
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI over xhci's bulk endpoints, with BOT error recovery
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is

@@ -31,10 +31,11 @@ must be refused, with the kernel's line saying so. After it the host compares
 the card image's firmware-partition sectors with disk.img's: byte for byte
 the same, so the refusal is graded by the bytes, not by a line.
 
-No fault line in QEMU's trace on any boot. What it cannot see: QEMU models no
-data lines, so a 4-bit bus the card was never told about (no ACMD6) reads
-the same as one it was; and no clock rate. Those are the Pi's to show (step
-3). Run it whenever kernel/src/sdhci.rs, pci::discover_sdhci, main.rs's
+No fault line in QEMU's trace on any boot. What it cannot see, each run as
+a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
+was never told about (no ACMD6) reads the same as one it was; it completes a
+write at once, so a write whose end is not waited for still lands; and it
+models no clock rate. Those are the Pi's to show (step 3). Run it whenever kernel/src/sdhci.rs, pci::discover_sdhci, main.rs's
 init_sd, parttable::firmware_partition or block.rs changes. About four
 minutes.
 """

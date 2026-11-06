@@ -248,9 +248,9 @@ disk and the kernel cannot (it drives virtio-mmio only), so the card is the
 only disk the kernel has, and `fsd` mounts the ext2 root from it. QEMU's
 firmware does not boot from an SD card itself. The copy is padded to a power
 of two, which QEMU wants, at least 128 MiB and never smaller than the image;
-a card of 2 GiB or less is standard-capacity. The card is read-only until the
-arc's step 2. `make test-sd` is the graded form, a standard- and a
-high-capacity card.
+a card of 2 GiB or less is standard-capacity. Its partition 1, the ESP, is
+the firmware's and never written (D3); the root beside it is. `make test-sd`
+is the graded form, a standard- and a high-capacity card.
 
 ---
 

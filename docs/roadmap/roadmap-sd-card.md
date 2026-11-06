@@ -242,6 +242,23 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    a file written, the VM restarted, the file read back; a write into the
    ESP's range refused with a line; mutations: the refusal removed (the
    rig's ESP check fails), a write's completion not waited for.
+   **Built 2026-11-06** (`b470a84d`). CMD24 shares the read's address rule.
+   The refused range is fixed at bring-up by `parttable::firmware_partition`
+   (host-tested): the boot partition when the card is the boot disk, which
+   is the Pi's case, else the card's first partition unless it is a root,
+   the whole card when its table cannot be read; a write inside it is
+   refused before the controller is touched, the first one said. Fixed at
+   bring-up so that `partition` rewriting the table cannot move it off
+   `RPI_EFI.fd`'s sectors. `make test-sd` now boots each card twice: the
+   first writes `/sdnote` and powers off, the second reads it back and then
+   runs `unmount`, `partition fat32` (LBA 0, allowed) and `format fat32`,
+   whose first write, at sector 2048, the kernel refuses; the host then
+   finds the 131,071 sectors of partition 1 in the card image byte for byte
+   as in `disk.img`. Twenty checks across the two cards. The refusal
+   removed fails the format and byte checks on both; the data written
+   big-endian fails the read-back on both. A write's end not waited for
+   passes: QEMU completes a write at once, so like ACMD6 it is the Pi's to
+   show.
 3. **The Pi, reading.** Discovery (D1), the clock from the capability
    register's base clock and the firmware's rate, the takeover. A card
    staged by `make bootstick PI=1`, a stick still in a port as the root.

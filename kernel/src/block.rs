@@ -39,7 +39,7 @@ pub enum BlockDevice {
     Virtio(virtio_blk::Device),
     UsbMsd(usb_msd::Device),
     /// An SD card on a standard SD Host Controller (`sdhci.rs`, the SD-card
-    /// arc), read-only until its step 2.
+    /// arc), its firmware partition never written.
     Sdhci(sdhci::Device),
 }
 
