@@ -513,5 +513,21 @@ fn gpt_holds(boot: &BootPartition, read: &mut ReadSector, header: u64, capacity:
     Some(Ok(guid_ok && first == boot.start_lba && ends))
 }
 
+/// The sectors of a card no write may reach: the firmware's partition,
+/// decision D3 of the SD-card arc (`docs/roadmap/roadmap-sd-card.md`). The
+/// Raspberry Pi's firmware keeps its variable store, `RPI_EFI.fd`, as a file
+/// in it, and the kernel never writes it.
+///
+/// `boot` is the boot partition the firmware names (its start and size) when
+/// the card is the disk the system booted from, and wins: that partition is
+/// the firmware's. Otherwise the card's first partition, when it is not a
+/// root, since every card staged for the Pi carries the firmware in its
+/// first partition (FAT32) and a root, if any, beside it. `None` for a card
+/// with no partition, or whose first is a root: nothing is the firmware's
+/// to keep, and `partition` and `format` can prepare a blank card.
+pub fn firmware_partition(partitions: &[Partition], boot: Option<(u64, u64)>) -> Option<(u64, u64)> {
+    boot.or_else(|| partitions.first().filter(|p| !p.root).map(|p| (p.start, p.sectors)))
+}
+
 #[cfg(test)]
 mod tests;

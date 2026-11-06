@@ -1286,7 +1286,10 @@ fn init_storage(declared: &virtio_mmio::Transports) -> Option<Held> {
 
 /// Brings up the SD card on the controller [`pci::discover_sdhci`] found, and
 /// installs it for the filesystem server when no disk was installed before
-/// it (`install_boot_disk`); read-only until the SD-card arc's step 2.
+/// it (`install_boot_disk`), its firmware partition fixed as never written
+/// (D3 of the SD-card arc, `parttable::firmware_partition`): the boot
+/// partition when the card is the boot disk, else its first partition unless
+/// that is a root, the whole card when its table cannot be read.
 /// Not when the USB stick's init failed (`usb`): `install_boot_disk` leaves
 /// the cell empty then on purpose, since that stick may be the boot disk and
 /// `mount -a` replaces the device only when `fsd` mounted nothing (the
@@ -1321,12 +1324,35 @@ fn init_sd(info: Option<pci::SdhciInfo>, usb: syscall::UsbInstall) {
         console::println!("Ouroboros kernel: sd: sector 0 did not read ({e})");
         return;
     }
+    let capacity = device.capacity_sectors();
+    let protected = {
+        // SAFETY: as above.
+        let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
+        let boot = match bootdisk::is_boot_disk(&mut read, capacity) {
+            Some(bootdisk::Boot::Yes) => bootdisk::get().map(|b| (b.start_lba, b.size_blocks)),
+            _ => None,
+        };
+        let mut parts = [parttable::Partition::default(); 8];
+        match parttable::discover(&mut read, Some(capacity), &mut parts) {
+            Ok(n) => parttable::firmware_partition(&parts[..n], boot),
+            // A table that cannot be read leaves nothing safe to write.
+            Err(parttable::Unreadable) => Some((0, capacity)),
+        }
+    };
+    device.protect(protected);
     syscall::install_block_device(block::BlockDevice::Sdhci(device));
     console::println!(
-        "Ouroboros kernel: sd: block device installed for the filesystem server, read-only (sector 0 signature {:#04x}{:02x})",
+        "Ouroboros kernel: sd: block device installed for the filesystem server (sector 0 signature {:#04x}{:02x})",
         sector[510],
         sector[511]
     );
+    match protected {
+        Some((first, count)) => console::println!(
+            "Ouroboros kernel: sd: sectors {first} to {} are the card's firmware partition, never written",
+            first + count.saturating_sub(1)
+        ),
+        None => console::println!("Ouroboros kernel: sd: no firmware partition on the card: every sector writable"),
+    }
 }
 
 /// A virtio disk [`init_storage`] held back rather than installed: not the

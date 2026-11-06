@@ -1,7 +1,14 @@
 //! An SD card on a standard SD Host Controller (SDHCI 2.00 or 3.00), read by
 //! PIO: the SD-card arc's driver (`docs/roadmap/roadmap-sd-card.md`), the
-//! third `block.rs` arm beside `virtio_blk` and `usb_msd`. Step 1 reads; a
-//! write is refused (`Error::ReadOnly`) until step 2.
+//! third `block.rs` arm beside `virtio_blk` and `usb_msd`. It reads (step
+//! 1) and writes (step 2), one sector at a time.
+//!
+//! **The firmware's partition is never written** (decision D3): the Pi's
+//! firmware keeps its variable store, `RPI_EFI.fd`, as a file in it. Its
+//! sectors are fixed when the card is brought up (`Device::protect`, from
+//! `parttable::firmware_partition`), so rewriting the table later cannot move
+//! the refusal off them, and a write inside them is refused here, before the
+//! controller is touched, whatever asked for it.
 //!
 //! **Found, never assumed.** On QEMU the controller is `sdhci-pci`, found by
 //! its PCI class (`pci::discover_sdhci`, class 0x08, subclass 0x05). On the
@@ -28,8 +35,9 @@
 //! 2 GB) is addressed in bytes, a high-capacity one (SDHC, SDXC) in
 //! 512-byte blocks, as ACMD41's CCS bit says; QEMU's `sd-card` makes a card
 //! over 2 GB high-capacity, so `make test-sd` boots one of each. Every read
-//! is one sector (CMD17): `BLOCK_READ` is one sector, so a multi-block read
-//! would be code no caller reaches.
+//! is one sector (CMD17) and so is every write (CMD24): `BLOCK_READ` and
+//! `BLOCK_WRITE` are one sector, so a multi-block command would be code no
+//! caller reaches.
 //!
 //! Polled throughout: no interrupt is signalled (the status-enable bits are
 //! set so the status register latches, the signal-enable bits are clear),
@@ -64,6 +72,7 @@ const CARD_STABLE: u32 = 1 << 17;
 // INT_STATUS bits: the normal half, then the error half.
 const INT_COMMAND_COMPLETE: u32 = 1 << 0;
 const INT_TRANSFER_COMPLETE: u32 = 1 << 1;
+const INT_BUFFER_WRITE_READY: u32 = 1 << 4;
 const INT_BUFFER_READ_READY: u32 = 1 << 5;
 const INT_ERROR: u32 = 1 << 15;
 const INT_ERROR_BITS: u32 = 0xffff_0000;
@@ -135,8 +144,8 @@ pub enum Error {
     UnknownCsd(u8),
     /// A sector past the card's end.
     OutOfRange(u64),
-    /// Writes are not supported yet (SD-card arc step 2).
-    ReadOnly,
+    /// A write inside the firmware's partition, which is never written.
+    Protected(u64),
 }
 
 impl core::fmt::Display for Error {
@@ -152,7 +161,7 @@ impl core::fmt::Display for Error {
             Error::NotReady => write!(f, "the card never reported ready (ACMD41)"),
             Error::UnknownCsd(v) => write!(f, "a CSD of structure version {v}"),
             Error::OutOfRange(s) => write!(f, "sector {s} is past the card's end"),
-            Error::ReadOnly => write!(f, "writing is not supported yet"),
+            Error::Protected(s) => write!(f, "sector {s} is in the card's firmware partition, which is never written"),
         }
     }
 }
@@ -164,6 +173,10 @@ pub struct Device {
     rca: u32,
     high_capacity: bool,
     sectors: u64,
+    /// The firmware's partition, first sector and count: never written.
+    protected: Option<(u64, u64)>,
+    /// Writes refused inside it this boot; the first one is said.
+    refused: u64,
 }
 
 impl Device {
@@ -173,12 +186,30 @@ impl Device {
     /// `base` is a discovered SDHCI register block, at least 0x100 bytes,
     /// mapped as device memory under this kernel's tables.
     pub unsafe fn new(base: u64) -> Self {
-        Device { base: base as usize, rca: 0, high_capacity: false, sectors: 0 }
+        Device { base: base as usize, rca: 0, high_capacity: false, sectors: 0, protected: None, refused: 0 }
     }
 
     /// The card's size in 512-byte sectors, once initialized.
     pub fn capacity_sectors(&self) -> u64 {
         self.sectors
+    }
+
+    /// Fixes the sectors no write may reach, `(first, count)`, for the rest
+    /// of the boot: the firmware's partition as the card's table and the
+    /// boot partition gave it at bring-up (`main.rs`'s `init_sd`). Set
+    /// once, before the card is installed.
+    pub fn protect(&mut self, range: Option<(u64, u64)>) {
+        self.protected = range;
+    }
+
+    /// The command argument for `sector`: bytes on a standard-capacity
+    /// card, blocks on a high-capacity one.
+    fn address(&self, sector: u64) -> Result<u32, Error> {
+        if sector >= self.sectors {
+            return Err(Error::OutOfRange(sector));
+        }
+        let address = if self.high_capacity { sector } else { sector * SECTOR as u64 };
+        u32::try_from(address).map_err(|_| Error::OutOfRange(sector))
     }
 
     fn read(&self, off: usize) -> u32 {
@@ -424,11 +455,7 @@ impl Device {
     }
 
     fn read_one(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), Error> {
-        if sector >= self.sectors {
-            return Err(Error::OutOfRange(sector));
-        }
-        let address = if self.high_capacity { sector } else { sector * SECTOR as u64 };
-        let address = u32::try_from(address).map_err(|_| Error::OutOfRange(sector))?;
+        let address = self.address(sector)?;
         self.write(BLOCK_SIZE_COUNT, (1 << 16) | SECTOR as u32);
         self.command(
             17,
@@ -448,12 +475,52 @@ impl Device {
         self.wait_transfer(17)
     }
 
-    /// Refused until step 2 of the SD-card arc.
+    /// Writes one 512-byte sector: CMD24, then the data port a word at a
+    /// time once the controller says the buffer can take them, then the
+    /// transfer's end, which the controller signals once the card has left
+    /// its busy state. Refused inside the firmware's partition, before
+    /// anything is sent.
     ///
     /// # Safety
     /// As [`Device::read_sector`].
-    pub unsafe fn write_sector(&mut self, _sector: u64, _buf: &[u8; 512]) -> Result<(), Error> {
-        Err(Error::ReadOnly)
+    pub unsafe fn write_sector(&mut self, sector: u64, buf: &[u8; 512]) -> Result<(), Error> {
+        if let Some((first, count)) = self.protected {
+            if sector >= first && sector - first < count {
+                self.refused += 1;
+                if self.refused == 1 {
+                    console::println!(
+                        "Ouroboros kernel: sd: a write to sector {sector} refused: the card's firmware partition ({first}, {count} sectors) is never written"
+                    );
+                }
+                return Err(Error::Protected(sector));
+            }
+        }
+        let result = self.write_one(sector, buf);
+        if let Err(Error::Timeout(_)) = result {
+            self.abandon();
+        }
+        result
+    }
+
+    fn write_one(&mut self, sector: u64, buf: &[u8; 512]) -> Result<(), Error> {
+        let address = self.address(sector)?;
+        self.write(BLOCK_SIZE_COUNT, (1 << 16) | SECTOR as u32);
+        self.command(
+            24,
+            address,
+            RESP_48 | CMD_CRC_CHECK | CMD_INDEX_CHECK | CMD_DATA_PRESENT,
+            XFER_BLOCK_COUNT_ENABLE,
+        )?;
+        let status =
+            self.wait(INT_STATUS, "the write buffer", |v| v & (INT_BUFFER_WRITE_READY | INT_ERROR) != 0)?;
+        if status & INT_ERROR != 0 {
+            return Err(self.failed(24, status));
+        }
+        self.write(INT_STATUS, INT_BUFFER_WRITE_READY);
+        for word in buf.chunks_exact(4) {
+            self.write(BUFFER_DATA, u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
+        }
+        self.wait_transfer(24)
     }
 }
 
