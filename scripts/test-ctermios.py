@@ -9,10 +9,11 @@ mode on the POSIX way, with `tcsetattr` and ISIG cleared, and reads Ctrl+C as
 a key. /bin/CTERMIOS (libc/ctermios.c) uses Edit's own recipe, flag for flag.
 One boot:
 
-1. **`ctermios check`**: the initial settings (ISIG set, VMIN 1, VINTR 3,
-   VQUIT 28), Edit's recipe set with TCSADRAIN and read back, flags the
-   console cannot apply (ECHO, ICANON, ICRNL, OPOST, VTIME 5) accepted and
-   reported off by tcgetattr (it shows what is in force, as POSIX has it), the
+1. **`ctermios check`**: the initial settings (ISIG, OPOST and ONLCR set,
+   VMIN 1, VINTR 3, VQUIT 28), Edit's recipe set with TCSADRAIN and read back
+   with OPOST still set (the console always translates), flags the console
+   cannot apply (ECHO, ICANON, ICRNL, OCRNL, VTIME 5) accepted and reported
+   off by tcgetattr (it shows what is in force, as POSIX has it), the
    saved settings restored with TCSAFLUSH and read back, ISIG following the
    kernel's mode when it is set directly with KBD_MODE, and the errors:
    EBADF on fd 9, ENOTTY on an open file, EINVAL for an unknown action,
@@ -24,12 +25,28 @@ One boot:
 3. **Died raw**: another `ctermios raw` ended by Ctrl+\\ while still raw, and
    then `ctermios check` must start with ISIG set: the mode ended with the
    program, by the kernel's reset (the runs before turned cooked themselves).
+4. **New lines on the serial line** (ONLCR, which tcgetattr reports set; the
+   kernel's console::write_bytes and console::write_out):
+   `cat /include/sys/termios.h | head 3`, a
+   file whose lines end in a bare LF, and `ctermios nl <chunk>`, five lines ending
+   each a different way (a `\r` and its `\n` in two writes, a bare `\n`,
+   `\r\n`, a bare `\n` by PUTC, a `\r` by PUTC between two writes through
+   cond), then two lines of `<chunk>` and `<chunk> - 1` bytes before a bare
+   `\n`, the inserted `\r` just past the kernel's chunk and at its last byte;
+   `<chunk>` is read from console.rs's `const CHUNK` and checked to fit one
+   write (`FS_DATA_MAX`, read from syscall-abi), so the edge follows the
+   kernel's value. All must reach the serial line with every `\n` after a
+   `\r`, no `\r\r`, and each line whole with its `\r\n`. Before 2026-11-05 a file's
+   lines went out as they are and stepped down a serial terminal one column
+   further each line.
 
 QEMU's own trace must hold no fault line. About a minute. Run it whenever
-libc's termios, sys/termios.h or KBD_MODE changes.
+libc's termios, sys/termios.h, KBD_MODE or the kernel's console::write_bytes,
+console::write_out or console::CHUNK changes.
 """
 import importlib.util
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +66,35 @@ CHECK_LINES = [
     "initial ok", "set ok", "readback ok", "honest ok", "restore ok", "kernel ok",
     "fd 9 EBADF", "file ENOTTY", "action EINVAL", "null EFAULT",
 ]
+
+
+def source_constant(path, pattern):
+    """The one integer `pattern` (a regex with one group) finds in the file
+    at `path`, relative to the repository; `None` unless exactly one line
+    matches, so a renamed or duplicated constant fails the rig rather than
+    leaving it on a stale value."""
+    with open(os.path.join(ROOT, path)) as fh:
+        found = re.findall(pattern, fh.read(), re.MULTILINE)
+    return int(found[0]) if len(found) == 1 else None
+
+
+CHUNK = source_constant("kernel/src/console.rs", r"^const CHUNK: usize = (\d+);")
+FS_DATA_MAX = source_constant("syscall-abi/src/lib.rs", r"^pub const FS_DATA_MAX: u64 = (\d+);")
+
+
+def output_of(seg):
+    """A command's own output: past the shell's echo of the typed line, up to
+    the prompt that follows it, so the echo and the prompt cannot pass or
+    fail a check about the command."""
+    first = seg.find("\n")
+    last = seg.rfind(PROMPT)
+    return seg[first + 1:last] if 0 <= first < last else ""
+
+
+def newlines_clean(text):
+    """Every `\n` after a `\r`, and no `\r` doubled: what the console's ONLCR
+    sends, whichever path a line came by."""
+    return re.search(r"(?<!\r)\n", text) is None and "\r\r" not in text
 
 
 def main() -> int:
@@ -105,6 +151,16 @@ def main() -> int:
             guest.type_line("ctermios check")
             ok = guest.wait_for(r"check done[\s\S]*" + PROMPT)
             seg["again"] = guest.transcript()[start:]
+        if ok:
+            start = len(guest.transcript())
+            guest.type_line("cat /include/sys/termios.h | head 3")
+            ok = guest.wait_for(r"_SYS_TERMIOS_H[\s\S]*_SYS_TERMIOS_H[\s\S]*" + PROMPT)
+            seg["newline"] = guest.transcript()[start:]
+        if ok:
+            start = len(guest.transcript())
+            guest.type_line(f"ctermios nl {CHUNK or 0}")
+            ok = guest.wait_for(r"nl done[\s\S]*" + PROMPT)
+            seg["nl"] = guest.transcript()[start:]
         out = guest.transcript()
         faults = guest.aborts()
     finally:
@@ -126,6 +182,18 @@ def main() -> int:
         ("raw: Ctrl+\\ ended it while raw", "Ctrl+\\ - foreground task" in seg.get("died raw", "")),
         ("after a program died raw, the next starts with ISIG set",
          "ctermios: initial ok" in seg.get("again", "")),
+        ("a file's LF-only lines reach the serial line as CR LF",
+         "#define _SYS_TERMIOS_H\r\n" in output_of(seg.get("newline", ""))
+         and newlines_clean(output_of(seg.get("newline", "")))),
+        ("nl: every line ending reaches the serial line as one CR LF",
+         all(f"nl-{x}\r\n" in output_of(seg.get("nl", "")) for x in "abcde")
+         and newlines_clean(output_of(seg.get("nl", "")))),
+        (f"nl: the kernel's chunk ({CHUNK} bytes, console.rs) fits one write ({FS_DATA_MAX}, syscall-abi)",
+         CHUNK is not None and FS_DATA_MAX is not None and 5 <= CHUNK and CHUNK + 1 <= FS_DATA_MAX),
+        ("nl: a \\r inserted just past the kernel's chunk and at its last byte",
+         CHUNK is not None
+         and "nl-f" + "x" * (CHUNK - 4) + "\r\n" in output_of(seg.get("nl", ""))
+         and "nl-g" + "x" * (CHUNK - 5) + "\r\n" in output_of(seg.get("nl", ""))),
         ("no fault lines", faults == 0),
     ]
     failed = 0

@@ -5,10 +5,11 @@
  *
  * `ctermios check` prints one line per question:
  *
- *     ctermios: initial ok             (ISIG set, VMIN 1, VINTR 3, VQUIT 28)
+ *     ctermios: initial ok             (ISIG set, OPOST and ONLCR set, VMIN 1,
+ *                                       VINTR 3, VQUIT 28)
  *     ctermios: set ok                 (Edit's raw recipe, TCSADRAIN)
- *     ctermios: readback ok            (Edit's recipe reads back as set: it
- *                                       clears only flags the console lacks)
+ *     ctermios: readback ok            (Edit's recipe reads back as set, but
+ *                                       for OPOST: the console always has it)
  *     ctermios: honest ok              (flags the console cannot apply are
  *                                       accepted, and tcgetattr says they are off)
  *     ctermios: restore ok             (the saved settings, TCSAFLUSH)
@@ -30,10 +31,25 @@
  * `ctermios: spinning`, run two seconds without reading (keys typed then
  * wait in the kernel's queue), and restore the saved settings with
  * TCSAFLUSH, which discards those keys, or TCSADRAIN, which keeps them for
- * the shell; then print `ctermios: flushed` or `ctermios: drained`. */
+ * the shell; then print `ctermios: flushed` or `ctermios: drained`.
+ *
+ * `ctermios nl <chunk>` writes five lines, each ending a different way, for the
+ * console's ONLCR (the kernel's console::write_bytes): `nl-a` with its `\r`
+ * and `\n` in two writes, `nl-b` with a bare `\n`, `nl-c` with `\r\n` in
+ * one write, `nl-d` by PUTC a byte at a time with a bare `\n`, and `nl-e`
+ * with its `\r` by PUTC between two writes through the console server.
+ * Then `nl-f` and `nl-g`, `<chunk>` and `<chunk> - 1` bytes before a bare
+ * `\n`, where `<chunk>` is the kernel's (console.rs's `CHUNK`, which the rig
+ * reads and passes): the inserted `\r` falls just past the chunk, then at
+ * its last byte (write_out). Each must reach the serial line as
+ * `nl-X...\r\n`, with no `\r\r`. Every
+ * piece is written to fd 2, which goes to the console at once: fd 1 holds
+ * its bytes in libc's line buffer until a `\n`, fflush included, so a `\r`
+ * written there would leave in the same write as its `\n`. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
@@ -71,21 +87,26 @@ static int check(void) {
         printf("ctermios: check done\r\n");
         return 1;
     }
-    result("initial", (saved.c_lflag & ISIG) && saved.c_cc[VMIN] == 1
-                          && saved.c_cc[VINTR] == 3 && saved.c_cc[VQUIT] == 28);
+    result("initial", (saved.c_lflag & ISIG) && (saved.c_oflag & (OPOST | ONLCR)) == (OPOST | ONLCR)
+                          && saved.c_cc[VMIN] == 1 && saved.c_cc[VINTR] == 3 && saved.c_cc[VQUIT] == 28);
     t = saved;
     edit_raw(&t);
+    /* What is in force after Edit's recipe: the recipe, with OPOST still
+     * set, because the console translates a bare \n whatever the settings
+     * say. */
+    struct termios want = t;
+    want.c_oflag |= OPOST | ONLCR;
     result("set", tcsetattr(0, TCSADRAIN, &t) == 0);
-    result("readback", tcgetattr(0, &back) == 0 && same(&back, &t));
+    result("readback", tcgetattr(0, &back) == 0 && same(&back, &want));
     /* Flags the console cannot apply: accepted (POSIX: success when any
      * change was made), and tcgetattr shows what is in force, which is the
      * raw settings above, not these. */
     struct termios odd = t;
     odd.c_iflag |= ICRNL | IXON;
-    odd.c_oflag |= OPOST | ONLCR;
+    odd.c_oflag |= OCRNL;
     odd.c_lflag |= ECHO | ICANON;
     odd.c_cc[VTIME] = 5;
-    result("honest", tcsetattr(0, TCSANOW, &odd) == 0 && tcgetattr(0, &back) == 0 && same(&back, &t));
+    result("honest", tcsetattr(0, TCSANOW, &odd) == 0 && tcgetattr(0, &back) == 0 && same(&back, &want));
     result("restore", tcsetattr(0, TCSAFLUSH, &saved) == 0 && tcgetattr(0, &back) == 0
                           && same(&back, &saved));
     /* ISIG is the kernel's answer, not the copy last set: the mode changed
@@ -169,6 +190,45 @@ static int spin_then(int action, const char *done) {
     return 0;
 }
 
+static void putc_text(const char *s) {
+    for (; *s; s++) {
+        __os_syscall1(SYS_PUTC, (unsigned char)*s);
+    }
+}
+
+/* One console write, now: fd 2 is not buffered (libc/src/file.c's write). */
+static void now(const char *s) {
+    write(2, s, strlen(s));
+}
+
+static int newlines(int chunk) {
+    now("nl-a\r");
+    now("\n");
+    now("nl-b\n");
+    now("nl-c\r\n");
+    putc_text("nl-d\n");
+    now("nl-e");
+    putc_text("\r");
+    now("\n");
+    /* The chunk's two edges, `chunk` and `chunk - 1` bytes before a bare
+     * \n: the first puts the inserted \r just past the kernel's chunk, the
+     * second at its last byte. Each in one write, so it reaches the kernel's
+     * console::write_out whole (libc and cond pass FS_DATA_MAX at a time). */
+    static char line[FS_DATA_MAX];
+    if (chunk < 5 || chunk + 1 > (int)sizeof line) {
+        now("ctermios: nl needs the kernel's chunk size, 5 to 511\r\n");
+        return 2;
+    }
+    for (int n = chunk; n >= chunk - 1; n--) {
+        memset(line, 'x', sizeof line);
+        memcpy(line, n == chunk ? "nl-f" : "nl-g", 4);
+        line[n] = '\n';
+        write(2, line, (size_t)n + 1);
+    }
+    now("ctermios: nl done\r\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "flush") == 0) {
         return spin_then(TCSAFLUSH, "flushed");
@@ -182,6 +242,9 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "check") == 0) {
         return check();
     }
-    printf("usage: ctermios check|raw|flush|drain\r\n");
+    if (argc > 1 && strcmp(argv[1], "nl") == 0) {
+        return newlines(argc > 2 ? atoi(argv[2]) : 0);
+    }
+    printf("usage: ctermios check|raw|flush|drain|nl <chunk>\r\n");
     return 2;
 }

@@ -557,7 +557,7 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 1 | `double` | value | Demo: returns `value * 2` |
 | 2 | `report` | task id | Demo: per-task counter |
 | 3 | `try_read_char` | none | Non-blocking read; `NO_CHAR` if nothing waiting or the caller does not own the keyboard |
-| 4 | `putc` | byte | Raw console byte write |
+| 4 | `putc` | byte | Console byte write (a bare `\n` goes out as `\r\n`) |
 | 5 | *(gap)* | | *Deliberate gap (removed `shell_input`; ABI stability over density)* |
 | 6 | `get_ticks` | none | Preemption tick count since boot |
 | 7–14 | *(gap)* | | *Deliberate gaps: the old `fs_*` syscalls: the filesystem lives in userland now (the fsd server); their contracts survive as the `FSOP_*` request protocol below* |

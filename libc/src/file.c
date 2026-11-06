@@ -1104,13 +1104,15 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
 /* ---- termios --------------------------------------------------------------- */
 
 /* The console as it behaves (sys/termios.h): bytes as typed, one at a time,
- * no echo, no translation, Ctrl+C and Ctrl+\ the interrupt keys. The only
+ * no echo, no input translation, a bare \n sent as \r\n (OPOST and ONLCR,
+ * the kernel's console::write_bytes), Ctrl+C and Ctrl+\ the interrupt keys. The only
  * setting a program can change is ISIG, so this is what tcgetattr reports,
  * with ISIG from the kernel: POSIX has a program confirm with tcgetattr what
  * its tcsetattr took effect, and a stored ECHO read back as set would say
  * echo is on when it is not. */
 static void termios_fixed(struct termios *t) {
     memset(t, 0, sizeof *t);
+    t->c_oflag = OPOST | ONLCR; /* the console sends a bare \n as \r\n, serial and screen alike */
     t->c_cflag = CS8 | CREAD;
     t->c_lflag = ISIG;
     t->c_cc[VINTR] = 3;

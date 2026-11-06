@@ -36,7 +36,7 @@ LIB = "third_party/picolibc-prebuilt/lib/libc.a"
 LIB_PIN = "83f0897ee0a6be792f0d65984d6bb2ae41d47edd3983e42533889d71b07f842e"
 TREES = {
     "third_party/picolibc-prebuilt/include": "c297c48071d13a5d0657a6dc427c1a696861b31c21cc399757386ecffd5419a2",
-    "libc/pico/include": "19440640c0ac66d24f2a71018ff315fbe670b3b349063f2013a9252b5eb0c5a6",
+    "libc/pico/include": "31b5036fbc22cdadea7392016873cb516fb2a227ebbf5491b367cfd944184b94",
 }
 
 

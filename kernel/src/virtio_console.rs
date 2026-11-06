@@ -39,9 +39,10 @@
 //! none negotiated, matching virtio_blk.rs's "no optional features"
 //! discipline. `write`'s per-call virtqueue round-trip is real overhead
 //! compared to a raw UART's direct MMIO byte write - acceptable for a
-//! first cut (correctness over throughput), but `write_byte`-per-typed-
-//! character (see `console.rs`) means every keystroke echo pays a full
-//! round trip, unlike `write_str`'s batched sends.
+//! first cut (correctness over throughput), but a keystroke echo comes as
+//! a one-byte `PUTC` or `CON_WRITE`, so it pays a full round trip of its own,
+//! where a line goes in one or two (`console.rs`'s `Console::write_out`,
+//! which hands this driver `CHUNK` bytes at a time).
 
 use core::cell::UnsafeCell;
 use core::ptr::read_volatile;

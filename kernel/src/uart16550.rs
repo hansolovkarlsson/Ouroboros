@@ -12,7 +12,6 @@
 //! device yet. If characters don't show up when this is actually tested,
 //! stride is the first thing to question.
 
-use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
 
 const STRIDE: usize = 4;
@@ -58,17 +57,5 @@ impl Uart16550 {
             let rbr = (self.base + RBR_OFFSET) as *const u8;
             Some(read_volatile(rbr))
         }
-    }
-}
-
-impl fmt::Write for Uart16550 {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            if byte == b'\n' {
-                self.write_byte(b'\r');
-            }
-            self.write_byte(byte);
-        }
-        Ok(())
     }
 }

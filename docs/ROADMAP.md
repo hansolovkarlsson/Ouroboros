@@ -1431,6 +1431,50 @@ The small open tails those arcs deliberately left:
   failure modes it would prevent. It is a simplification with a security
   argument, not a fix.
 
+- **`OPOST` as a mode a program can clear (asked by Hans, 2026-11-05).**
+  Since `fix/console-onlcr` the console sends a bare `\n` as `\r\n`, on the
+  serial line and on the framebuffer, and `tcgetattr` reports `OPOST | ONLCR`
+  set whatever `tcsetattr` was asked for (`libc/pico/include/sys/termios.h`).
+  That is honest but not Unix: there a program that clears `OPOST` gets `\n`
+  as a pure line feed, the column kept, and a port that relies on it (and
+  does not read the flags back) draws wrongly here. Edit is not such a
+  program: it writes `\r\n` itself and moves the cursor by escape sequences.
+  The work, as proposed:
+  - **The mode is per task, like `KBD_MODE`.** A new syscall sets the
+    calling task's output mode (translate, the default, or raw) and reads it
+    back. It is cleared on death with the slot's other state, a spawned child
+    starts translating, and a task sets only its own. So a program killed in
+    raw output leaves nothing behind, as `KBD_MODE` leaves nothing.
+  - **One stored mode, read by both renderers.** `PUTC` is the writer's own
+    call, so the kernel reads the caller's mode. `CON_WRITE` is cond's call
+    on a program's behalf, so it gains the writer's task id, which cond reads
+    by `SENDER_ID` for the request it is answering; `CON_WRITE` is gated to
+    `CON_TASK`, so the kernel can trust it. `console::write_out` then
+    translates or not by that mode. On the framebuffer cond renders itself,
+    and `Fb::newline` returns to column 0 on every `\n`: cond reads the
+    writer's mode (a query gated to `CON_TASK`) and moves down a row alone
+    when it is raw. The kernel's own lines are always translated, and
+    `AFTER_CR` is kept up to date in either mode.
+  - **termios maps onto it as POSIX does:** translation is on when `OPOST`
+    and `ONLCR` are both set, so clearing either turns it off, and
+    `tcgetattr` reports the kernel's answer, as `ISIG` reports `KBD_MODE`'s.
+    Edit's raw recipe clears `OPOST`, so Edit would then run with
+    translation off. Its output does not change (every line ends `\r\n`
+    already), but DevTools is told by a notice, and the `termios.h` comment
+    changes, so `check-picolibc`'s pin moves with that notice.
+  - **Decisions for Hans,** each with a recommendation: per task (as
+    above) or per console as on Unix, where the setting outlives the program
+    and a `stty sane` is the way back (recommended: per task, for the reason
+    `KBD_MODE` is); the framebuffer too or the serial line only (recommended:
+    both, so a flag means one thing on either backend); `ONLCR` honoured
+    apart from `OPOST` (recommended: yes, POSIX's reading).
+  - **Done when** `ctermios` gains a raw-output case whose bare `\n` reaches
+    the serial line with no `\r` and keeps the column on the framebuffer
+    (`test-cond-vt`), the `nl` lines of `test-ctermios` stay `\r\n`, and
+    three mutations each fail a check: the kernel ignoring the mode, cond
+    ignoring it, and the mode not cleared on death (a raw-output program
+    killed, then an ordinary one, whose `\n` must still be `\r\n`).
+
 ## Testing infrastructure: scripted real-hardware round trips
 
 > **Direction update (2026-08-26): Parallels real-hardware testing is PARKED.**

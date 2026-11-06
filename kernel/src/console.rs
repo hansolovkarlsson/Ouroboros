@@ -32,68 +32,71 @@ pub enum Console {
 }
 
 impl fmt::Write for Console {
+    /// The kernel's own lines, through the same translator as
+    /// [`write_bytes`] ([`Console::write_out`]).
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        match self {
-            Console::Pl011(uart) => uart.write_str(s),
-            Console::Uart16550(uart) => uart.write_str(s),
-            Console::Virtio(dev) => write_str_virtio(dev, s),
-            Console::Framebuffer(fb) => fb.write_str(s),
-        }
+        self.write_out(s.as_bytes());
+        Ok(())
     }
-}
-
-/// `\n` -> `\r\n` translation, same as `Uart`/`Uart16550`'s `write_str`,
-/// but batched through a local buffer and sent as chunked virtqueue
-/// transfers rather than one MMIO write per byte - a raw UART write is
-/// cheap enough per-byte that batching wouldn't matter, but each
-/// `virtio_console::Device::write` call is a full virtqueue round trip
-/// (notify + poll the used ring), so sending a whole log line as one (or
-/// a few) transfers instead of dozens matters here in a way it doesn't
-/// for the other drivers.
-fn write_str_virtio(dev: &mut virtio_console::Device, s: &str) -> fmt::Result {
-    const CHUNK: usize = 256;
-    let mut buf = [0u8; CHUNK];
-    let mut len = 0usize;
-
-    // SAFETY, both `write` calls below: `dev` was only ever constructed
-    // after a successful `init()` - see `main.rs`'s console-discovery
-    // sequence.
-    for byte in s.bytes() {
-        if byte == b'\n' {
-            if len == buf.len() {
-                let _ = unsafe { dev.write(&buf[..len]) };
-                len = 0;
-            }
-            buf[len] = b'\r';
-            len += 1;
-        }
-        if len == buf.len() {
-            let _ = unsafe { dev.write(&buf[..len]) };
-            len = 0;
-        }
-        buf[len] = byte;
-        len += 1;
-    }
-    if len > 0 {
-        let _ = unsafe { dev.write(&buf[..len]) };
-    }
-    Ok(())
 }
 
 impl Console {
-    /// Raw single-byte write, no `\n` -> `\r\n` translation (unlike
-    /// `write_str`) - callers that need a newline send `\r\n` themselves.
-    /// Used for echoing input verbatim, where a translated `\n` would be
-    /// wrong for e.g. a literal byte the line editor is about to erase.
-    fn write_byte(&mut self, byte: u8) {
-        match self {
-            Console::Pl011(uart) => uart.write_byte(byte),
-            Console::Uart16550(uart) => uart.write_byte(byte),
-            // SAFETY: same as write_str_virtio's.
-            Console::Virtio(dev) => {
-                let _ = unsafe { dev.write(&[byte]) };
+    /// Every byte the kernel sends to the console goes through here, its
+    /// own lines (`write_str`) and `CON_WRITE` and `PUTC` ([`write_bytes`])
+    /// alike: the console's one ONLCR. A bare `\n` goes out as `\r\n`, so
+    /// a new line starts at column 0 on a serial line as it does on the
+    /// screen (cond's `Fb::newline`, and `FbConsole`'s); a `\n` that
+    /// follows a `\r` is sent as it is, wherever that `\r` came from
+    /// ([`AFTER_CR`]), so `\r\n` output goes out byte for byte. Nothing
+    /// else is translated. Until 2026-11-05 each driver's `write_str`
+    /// translated the kernel's lines on its own, with no memory of the last
+    /// byte, and program output went out untranslated.
+    ///
+    /// One loop for every driver, translating into a local buffer that goes
+    /// to the driver [`CHUNK`] bytes at a time ([`Console::write_chunk`]),
+    /// so the rule exists once and the boots the rigs run (the PL011)
+    /// exercise the same code as a virtio console.
+    fn write_out(&mut self, bytes: &[u8]) {
+        let mut buf = [0u8; CHUNK];
+        let mut len = 0usize;
+        let mut after_cr = AFTER_CR.load(Ordering::Relaxed);
+        for &b in bytes {
+            if b == b'\n' && !after_cr {
+                self.push(&mut buf, &mut len, b'\r');
             }
-            Console::Framebuffer(fb) => fb.put_char(byte),
+            self.push(&mut buf, &mut len, b);
+            after_cr = b == b'\r';
+        }
+        if len > 0 {
+            self.write_chunk(&buf[..len]);
+        }
+        AFTER_CR.store(after_cr, Ordering::Relaxed);
+    }
+
+    /// `b` into [`Console::write_out`]'s buffer, the full buffer sent first:
+    /// the one place a chunk is cut, which `make test-ctermios`'s edge lines
+    /// cross.
+    fn push(&mut self, buf: &mut [u8; CHUNK], len: &mut usize, b: u8) {
+        if *len == CHUNK {
+            self.write_chunk(&buf[..]);
+            *len = 0;
+        }
+        buf[*len] = b;
+        *len += 1;
+    }
+
+    /// Bytes to the driver, untranslated: [`Console::write_out`] is its one
+    /// caller.
+    fn write_chunk(&mut self, chunk: &[u8]) {
+        match self {
+            Console::Pl011(uart) => chunk.iter().for_each(|&b| uart.write_byte(b)),
+            Console::Uart16550(uart) => chunk.iter().for_each(|&b| uart.write_byte(b)),
+            // SAFETY: `dev` was only ever constructed after a successful
+            // `init()` - see `main.rs`'s console-discovery sequence.
+            Console::Virtio(dev) => {
+                let _ = unsafe { dev.write(chunk) };
+            }
+            Console::Framebuffer(fb) => chunk.iter().for_each(|&b| fb.put_char(b)),
         }
     }
 
@@ -111,6 +114,28 @@ impl Console {
 }
 
 static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
+
+/// The bytes [`Console::write_out`] gathers before handing them to the
+/// driver. For virtio's sake: each `virtio_console::Device::write` is a full
+/// round trip (notify, then poll the used ring), so a line in one or two
+/// transfers matters there in a way it does not for an MMIO UART. Small,
+/// because the buffer is on the writer's stack, and one writer is the early
+/// fault reporter on the firmware's exception stack (`earlyfault.rs`).
+/// `make test-ctermios` reads this line for the length of its edge lines,
+/// so the value can change without the rig going blind to the edge.
+const CHUNK: usize = 64;
+
+/// Whether the last byte sent to the console was a `\r`, kept by
+/// [`Console::write_out`], which every writer goes through, so a `\n` gets
+/// its carriage return only when it lacks one, even when the `\r` came in
+/// an earlier write or from another writer. Class E: read and written
+/// inside [`with_console`], under the console lock, and by the early fault
+/// reporter (`earlyfault.rs`), which writes its own `Console` before the
+/// exit, on one core, before any lock exists, and always halts after, so
+/// no later console reads what it left. After a takeover (`lock`) two
+/// cores can read it at once, the price the lock already pays: at most one
+/// `\r` doubled or missing, on the line that was already interleaved.
+static AFTER_CR: AtomicBool = AtomicBool::new(false);
 
 /// The console lock (class E of the multi-core plan's inventory): the
 /// index plus one of the core that holds it, 0 when free, held across one
@@ -254,21 +279,24 @@ macro_rules! println_force {
 
 pub(crate) use println_force;
 
-/// Writes one raw byte to the global console if one has been installed;
-/// silently does nothing otherwise, same as [`print`].
+/// Writes one byte to the global console if one has been installed (a
+/// bare `\n` as `\r\n`, [`Console::write_out`]); silently does nothing
+/// otherwise, same as [`print`].
 pub fn putc(byte: u8) {
     write_bytes(core::slice::from_ref(&byte));
 }
 
-/// Writes a batch of raw bytes under the lock once: `CON_WRITE`'s path,
-/// so another core's line cannot land inside `cond`'s escape sequence and
-/// a batch costs two atomic operations rather than two per byte.
+/// Writes a batch of bytes under the lock once: `CON_WRITE`'s path and
+/// `PUTC`'s, so another core's line cannot land inside `cond`'s escape
+/// sequence and a batch costs two atomic operations rather than two per
+/// byte. Translated by [`Console::write_out`], the console's one ONLCR: a
+/// file's lines end in a bare LF, and `cat` and every filter pass them
+/// through untouched, so before 2026-11-05 they stepped down a serial
+/// terminal one column further each line. Only the console is translated:
+/// files, pipes and the network never pass here. `sys/termios.h` reports it
+/// as OPOST and ONLCR set.
 pub fn write_bytes(bytes: &[u8]) {
-    with_console(|console| {
-        for &b in bytes {
-            console.write_byte(b);
-        }
-    });
+    with_console(|console| console.write_out(bytes));
 }
 
 /// Non-blocking read of one byte from the global console. `None` if there
