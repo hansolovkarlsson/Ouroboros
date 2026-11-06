@@ -476,17 +476,20 @@ fn boot_start_takes_no_gpt_backup_the_disk_is_not_read_by() {
     assert_eq!(boot_start(&boot, &mut m.reader(), DISK), Err(Unreadable));
 }
 
-/// `firmware_partition`: the boot partition when the card is the boot disk,
-/// else the first partition unless it is a root.
+/// `firmware_sectors`: from sector 0 to the end of the firmware partition
+/// (the boot partition when the card is the boot disk, else the first unless
+/// a root), and a GPT's backup copy.
 #[test]
-fn the_firmware_partition_is_the_boot_one_or_the_first() {
+fn the_firmware_sectors_run_from_zero_to_the_partitions_end() {
     let esp = Partition { start: 2048, sectors: 131072, root: false };
     let root = Partition { start: 133120, sectors: 50000, root: true };
-    assert_eq!(firmware_partition(&[esp, root], None), Some((2048, 131072)));
+    assert_eq!(firmware_sectors(&[esp, root], None, false, 200_000), [(0, 133120), (0, 0)]);
     // The boot partition the firmware named wins, wherever it is.
-    assert_eq!(firmware_partition(&[esp, root], Some((32768, 1000))), Some((32768, 1000)));
-    assert_eq!(firmware_partition(&[], Some((32768, 1000))), Some((32768, 1000)));
+    assert_eq!(firmware_sectors(&[esp, root], Some((32768, 1000)), false, 200_000), [(0, 33768), (0, 0)]);
+    assert_eq!(firmware_sectors(&[], Some((32768, 1000)), false, 200_000), [(0, 33768), (0, 0)]);
+    // A GPT's backup at the end is kept too.
+    assert_eq!(firmware_sectors(&[esp, root], None, true, 200_000), [(0, 133120), (200_000 - 33, 33)]);
     // A root first, or no partition: nothing is the firmware's.
-    assert_eq!(firmware_partition(&[root, esp], None), None);
-    assert_eq!(firmware_partition(&[], None), None);
+    assert_eq!(firmware_sectors(&[root, esp], None, true, 200_000), [(0, 0); 2]);
+    assert_eq!(firmware_sectors(&[], None, false, 200_000), [(0, 0); 2]);
 }

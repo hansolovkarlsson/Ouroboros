@@ -513,21 +513,39 @@ fn gpt_holds(boot: &BootPartition, read: &mut ReadSector, header: u64, capacity:
     Some(Ok(guid_ok && first == boot.start_lba && ends))
 }
 
-/// The sectors of a card no write may reach: the firmware's partition,
-/// decision D3 of the SD-card arc (`docs/roadmap/roadmap-sd-card.md`). The
-/// Raspberry Pi's firmware keeps its variable store, `RPI_EFI.fd`, as a file
-/// in it, and the kernel never writes it.
+/// The sectors of a card no write may reach, as `(first, count)` ranges,
+/// an empty one `(0, 0)`: decision D3 of the SD-card arc
+/// (`docs/roadmap/roadmap-sd-card.md`). The Raspberry Pi's firmware keeps
+/// its variable store, `RPI_EFI.fd`, as a file in its partition, and boots
+/// only while the table that finds that partition is whole, so both are
+/// kept: sector 0 to the partition's end (the MBR, a GPT's primary header
+/// and entries, the gap and the partition), and for a GPT disk its backup
+/// header and entries in the last [`GPT_TABLE_SECTORS`] sectors.
 ///
-/// `boot` is the boot partition the firmware names (its start and size) when
-/// the card is the disk the system booted from, and wins: that partition is
-/// the firmware's. Otherwise the card's first partition, when it is not a
-/// root, since every card staged for the Pi carries the firmware in its
-/// first partition (FAT32) and a root, if any, beside it. `None` for a card
-/// with no partition, or whose first is a root: nothing is the firmware's
-/// to keep, and `partition` and `format` can prepare a blank card.
-pub fn firmware_partition(partitions: &[Partition], boot: Option<(u64, u64)>) -> Option<(u64, u64)> {
-    boot.or_else(|| partitions.first().filter(|p| !p.root).map(|p| (p.start, p.sectors)))
+/// The firmware's partition is `boot`, the boot partition the firmware
+/// names (start and size), when the card is the disk the system booted
+/// from. Otherwise the card's first partition, when it is not a root,
+/// since every card staged for the Pi carries the firmware in its first
+/// partition (FAT32) and a root, if any, beside it. With neither, a card
+/// with no partition or whose first is a root, nothing is protected: a
+/// blank card can be prepared with `partition` and `format`. A card whose
+/// table does not read or does not validate is the caller's to protect
+/// whole (`main.rs`'s `init_sd`).
+pub fn firmware_sectors(partitions: &[Partition], boot: Option<(u64, u64)>, gpt: bool, capacity: u64) -> [(u64, u64); 2] {
+    let Some((start, count)) = boot.or_else(|| partitions.first().filter(|p| !p.root).map(|p| (p.start, p.sectors)))
+    else {
+        return [(0, 0); 2];
+    };
+    let backup = if gpt && capacity > GPT_TABLE_SECTORS {
+        (capacity - GPT_TABLE_SECTORS, GPT_TABLE_SECTORS)
+    } else {
+        (0, 0)
+    };
+    [(0, start.saturating_add(count)), backup]
 }
+
+/// A GPT's header and a 128-entry array: the sectors each copy takes.
+pub const GPT_TABLE_SECTORS: u64 = 33;
 
 #[cfg(test)]
 mod tests;

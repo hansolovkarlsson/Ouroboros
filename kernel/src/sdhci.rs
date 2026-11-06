@@ -4,11 +4,13 @@
 //! 1) and writes (step 2), one sector at a time.
 //!
 //! **The firmware's partition is never written** (decision D3): the Pi's
-//! firmware keeps its variable store, `RPI_EFI.fd`, as a file in it. Its
-//! sectors are fixed when the card is brought up (`Device::protect`, from
-//! `parttable::firmware_partition`), so rewriting the table later cannot move
-//! the refusal off them, and a write inside them is refused here, before the
-//! controller is touched, whatever asked for it.
+//! firmware keeps its variable store, `RPI_EFI.fd`, as a file in it. Nor
+//! is the partition table that finds it: sector 0 to the partition's end,
+//! and a GPT's backup copy at the card's end. The sectors are fixed when the
+//! card is brought up (`Device::protect`, from `parttable::firmware_sectors`),
+//! and a write inside them is refused here, before the controller is
+//! touched, whatever asked for it; since the table is among them, nothing
+//! the kernel does can move the refusal off them on a later boot either.
 //!
 //! **Found, never assumed.** On QEMU the controller is `sdhci-pci`, found by
 //! its PCI class (`pci::discover_sdhci`, class 0x08, subclass 0x05). On the
@@ -68,6 +70,9 @@ const CMD_INHIBIT: u32 = 1 << 0;
 const DAT_INHIBIT: u32 = 1 << 1;
 const CARD_INSERTED: u32 = 1 << 16;
 const CARD_STABLE: u32 = 1 << 17;
+/// The write-protect switch's level: 1 is writable (SDHCI 2.2.9). A card
+/// does not enforce its own lock tab; the host does.
+const WRITE_ENABLED: u32 = 1 << 19;
 
 // INT_STATUS bits: the normal half, then the error half.
 const INT_COMMAND_COMPLETE: u32 = 1 << 0;
@@ -146,6 +151,11 @@ pub enum Error {
     OutOfRange(u64),
     /// A write inside the firmware's partition, which is never written.
     Protected(u64),
+    /// The card's write-protect switch is set.
+    WriteProtected,
+    /// The card's status in a response reports an error: the command and
+    /// the status word's error bits.
+    CardStatus { index: u8, status: u32 },
 }
 
 impl core::fmt::Display for Error {
@@ -162,6 +172,8 @@ impl core::fmt::Display for Error {
             Error::UnknownCsd(v) => write!(f, "a CSD of structure version {v}"),
             Error::OutOfRange(s) => write!(f, "sector {s} is past the card's end"),
             Error::Protected(s) => write!(f, "sector {s} is in the card's firmware partition, which is never written"),
+            Error::WriteProtected => write!(f, "the card's write-protect switch is set"),
+            Error::CardStatus { index, status } => write!(f, "CMD{index}: the card reports status errors {status:#010x}"),
         }
     }
 }
@@ -173,10 +185,14 @@ pub struct Device {
     rca: u32,
     high_capacity: bool,
     sectors: u64,
-    /// The firmware's partition, first sector and count: never written.
-    protected: Option<(u64, u64)>,
+    /// The sectors never written, `(first, count)` each, empty ones
+    /// `(0, 0)`: the firmware partition and the tables that find it.
+    protected: [(u64, u64); 2],
     /// Writes refused inside it this boot; the first one is said.
     refused: u64,
+    /// Whether SDCLK runs at the identification clock: the BCM2711 then
+    /// wants time between register writes (`write`).
+    slow_clock: bool,
 }
 
 impl Device {
@@ -186,7 +202,7 @@ impl Device {
     /// `base` is a discovered SDHCI register block, at least 0x100 bytes,
     /// mapped as device memory under this kernel's tables.
     pub unsafe fn new(base: u64) -> Self {
-        Device { base: base as usize, rca: 0, high_capacity: false, sectors: 0, protected: None, refused: 0 }
+        Device { base: base as usize, rca: 0, high_capacity: false, sectors: 0, protected: [(0, 0); 2], refused: 0, slow_clock: false }
     }
 
     /// The card's size in 512-byte sectors, once initialized.
@@ -194,12 +210,13 @@ impl Device {
         self.sectors
     }
 
-    /// Fixes the sectors no write may reach, `(first, count)`, for the rest
-    /// of the boot: the firmware's partition as the card's table and the
-    /// boot partition gave it at bring-up (`main.rs`'s `init_sd`). Set
-    /// once, before the card is installed.
-    pub fn protect(&mut self, range: Option<(u64, u64)>) {
-        self.protected = range;
+    /// Fixes the sectors no write may reach, `(first, count)` ranges, for
+    /// the rest of the boot: the firmware partition and the tables that find
+    /// it, as the card's table and the boot partition gave them at bring-up
+    /// (`main.rs`'s `init_sd`, `parttable::firmware_sectors`). Set once,
+    /// before the card is installed.
+    pub fn protect(&mut self, ranges: [(u64, u64); 2]) {
+        self.protected = ranges;
     }
 
     /// The command argument for `sector`: bytes on a standard-capacity
@@ -220,12 +237,21 @@ impl Device {
     fn write(&self, off: usize, value: u32) {
         // SAFETY: as `read`.
         unsafe { write_volatile((self.base + off) as *mut u32, value) }
+        // While SDCLK runs at the identification clock, the BCM2711's
+        // controller drops a write that follows another within a few SD
+        // clocks; Linux's sdhci-iproc waits after each write there. 20 us is
+        // four clocks at the slowest clock used, 200 kHz. Before a clock is
+        // set at all (after a reset) the same: `slow_clock` starts true at
+        // bring-up.
+        if self.slow_clock {
+            timer::delay_us(20);
+        }
     }
 
     /// Waits until `done` holds of the register at `off`, for at most
     /// [`WAIT_MS`]; the last value read either way.
     fn wait(&self, off: usize, what: &'static str, done: impl Fn(u32) -> bool) -> Result<u32, Error> {
-        let deadline = timer::now_ticks() + timer::frequency_hz() / 1000 * WAIT_MS;
+        let deadline = timer::deadline_us(WAIT_MS * 1000);
         loop {
             let v = self.read(off);
             if done(v) {
@@ -234,13 +260,6 @@ impl Device {
             if timer::now_ticks() > deadline {
                 return Err(Error::Timeout(what));
             }
-            core::hint::spin_loop();
-        }
-    }
-
-    fn pause_ms(ms: u64) {
-        let deadline = timer::now_ticks() + timer::frequency_hz() / 1000 * ms;
-        while timer::now_ticks() < deadline {
             core::hint::spin_loop();
         }
     }
@@ -329,6 +348,22 @@ impl Device {
         Ok(())
     }
 
+    /// The card's status word in an R1 response, checked for the bits that
+    /// report an error (SD spec 4.10.1: out of range, address, block length,
+    /// erase, write-protect violation, card locked, lock or unlock failed,
+    /// CRC of the previous command, illegal command, card ECC, controller,
+    /// general error, CSD overwrite, write-protect erase skip, AKE sequence).
+    /// Used only once the card is identified (CMD7 on): an illegal-command
+    /// bit then describes this driver's own previous command, where during
+    /// identification it can be the CMD8 an older card does not know.
+    fn card_status(index: u8, response: [u32; 4]) -> Result<(), Error> {
+        const R1_ERRORS: u32 = 0xfff9_8008;
+        match response[0] & R1_ERRORS {
+            0 => Ok(()),
+            status => Err(Error::CardStatus { index, status }),
+        }
+    }
+
     /// An application command: CMD55 with the card's address, then `index`.
     fn app_command(&mut self, index: u8, arg: u32, flags: u32) -> Result<[u32; 4], Error> {
         self.command(55, self.rca << 16, RESP_48 | CMD_CRC_CHECK | CMD_INDEX_CHECK, 0)?;
@@ -354,6 +389,7 @@ impl Device {
         }
         let base_hz = base_mhz * 1_000_000;
 
+        self.slow_clock = true;
         self.reset(RESET_ALL)?;
         let present = self.wait(PRESENT_STATE, "the card-detect line to settle", |v| v & CARD_STABLE != 0)?;
         if present & CARD_INSERTED == 0 {
@@ -364,7 +400,7 @@ impl Device {
         // reset just cut it; Linux allows 10 ms).
         self.write(HOST_CONTROL, POWER_SELECT_3V3);
         self.write(HOST_CONTROL, POWER_SELECT_3V3 | POWER_ON);
-        Self::pause_ms(10);
+        timer::delay_us(10_000);
         // Every status latched, none signalled: this driver polls.
         self.write(INT_STATUS_ENABLE, 0x03ff_00ff);
         self.write(INT_SIGNAL_ENABLE, 0);
@@ -376,7 +412,7 @@ impl Device {
         let word = self.read(CLOCK_CONTROL) & 0xffff;
         self.write(CLOCK_CONTROL, word | TIMEOUT_MAX);
         // The card needs 74 clocks after power before its first command.
-        Self::pause_ms(2);
+        timer::delay_us(2_000);
 
         self.command(0, 0, RESP_NONE, 0)?;
         // CMD8: 2.7-3.6 V and the check pattern 0xAA, echoed by a card of
@@ -390,7 +426,7 @@ impl Device {
         // ACMD41 until the card is out of its busy state, asking for high
         // capacity (HCS) only of a card that answered CMD8.
         let hcs = if v2 { 1 << 30 } else { 0 };
-        let deadline = timer::now_ticks() + timer::frequency_hz() / 1000 * WAIT_MS;
+        let deadline = timer::deadline_us(WAIT_MS * 1000);
         let ocr = loop {
             // R3 carries no CRC and no index.
             let r = self.app_command(41, hcs | 0x00ff_8000, RESP_48)?;
@@ -400,7 +436,7 @@ impl Device {
             if timer::now_ticks() > deadline {
                 return Err(Error::NotReady);
             }
-            Self::pause_ms(10);
+            timer::delay_us(10_000);
         };
         self.high_capacity = ocr & (1 << 30) != 0;
 
@@ -408,25 +444,35 @@ impl Device {
         self.rca = self.command(3, 0, R1, 0)?[0] >> 16;
         let csd = self.command(9, self.rca << 16, RESP_136 | CMD_CRC_CHECK, 0)?;
         self.sectors = csd_sectors(csd)?;
-        self.command(7, self.rca << 16, RESP_48_BUSY | CMD_CRC_CHECK | CMD_INDEX_CHECK, 0)?;
-        // A 4-bit bus: the card first (ACMD6, argument 2), then the host.
-        self.app_command(6, 2, R1)?;
+        let r = self.command(7, self.rca << 16, RESP_48_BUSY | CMD_CRC_CHECK | CMD_INDEX_CHECK, 0)?;
+        Self::card_status(7, r)?;
+        // A 4-bit bus: the card first (ACMD6, argument 2), then the host,
+        // and only once the card has said it took it.
+        let r = self.app_command(6, 2, R1)?;
+        Self::card_status(6, r)?;
         let host = self.read(HOST_CONTROL);
         self.write(HOST_CONTROL, host | HOST_DATA_4BIT);
         if !self.high_capacity {
-            self.command(16, SECTOR as u32, R1, 0)?;
+            let r = self.command(16, SECTOR as u32, R1, 0)?;
+            Self::card_status(16, r)?;
+            // Byte addresses are 32 bits: no sector past 4 GiB is reachable,
+            // whatever the CSD says.
+            self.sectors = self.sectors.min(1 << 23);
         }
+        let write_protected = self.read(PRESENT_STATE) & WRITE_ENABLED == 0;
         let (data, data_hz) = Self::divider(version, base_hz, DATA_HZ);
         self.set_clock(data)?;
+        self.slow_clock = data_hz <= IDENT_HZ;
 
         console::println!(
-            "Ouroboros kernel: sd: SDHCI version field {version}, base clock {base_mhz} MHz; card {} (RCA {:#06x}), {} sectors ({} MiB), identified at {} kHz, reading 4-bit at {} kHz",
+            "Ouroboros kernel: sd: SDHCI version field {version}, base clock {base_mhz} MHz; card {} (RCA {:#06x}), {} sectors ({} MiB), identified at {} kHz, 4-bit at {} kHz{}",
             if self.high_capacity { "high capacity, block-addressed" } else { "standard capacity, byte-addressed" },
             self.rca,
             self.sectors,
             self.sectors / 2048,
             ident_hz / 1000,
-            data_hz / 1000
+            data_hz / 1000,
+            if write_protected { "; its write-protect switch is set, so it is not written" } else { "" }
         );
         Ok(())
     }
@@ -438,11 +484,12 @@ impl Device {
     /// As [`Device::init`], which must have succeeded.
     pub unsafe fn read_sector(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), Error> {
         let result = self.read_one(sector, buf);
-        if let Err(Error::Timeout(_)) = result {
-            // A wait that ran out left the lines as they were, a command or
-            // a block perhaps still in flight: reset both, so the next read
-            // starts clean rather than waiting on an inhibit nothing will
-            // lift. A controller-reported error was reset in `failed`.
+        if let Err(Error::Timeout(_) | Error::CardStatus { .. }) = result {
+            // A wait that ran out, or a card status reporting an error after
+            // the command was taken, left the lines as they were, a block
+            // perhaps still in flight: reset both, so the next command starts
+            // clean rather than waiting on an inhibit nothing will lift. A
+            // controller-reported error was reset in `failed`.
             self.abandon();
         }
         result
@@ -454,15 +501,24 @@ impl Device {
         self.write(INT_STATUS, 0xffff_ffff);
     }
 
+    /// Waits for the command and data lines to be free: the controller
+    /// ignores a block size or count written while a transfer is in flight.
+    fn lines_free(&self) -> Result<(), Error> {
+        self.wait(PRESENT_STATE, "the command and data lines to be free", |v| v & (CMD_INHIBIT | DAT_INHIBIT) == 0)
+            .map(|_| ())
+    }
+
     fn read_one(&mut self, sector: u64, buf: &mut [u8; 512]) -> Result<(), Error> {
         let address = self.address(sector)?;
+        self.lines_free()?;
         self.write(BLOCK_SIZE_COUNT, (1 << 16) | SECTOR as u32);
-        self.command(
+        let r = self.command(
             17,
             address,
             RESP_48 | CMD_CRC_CHECK | CMD_INDEX_CHECK | CMD_DATA_PRESENT,
             XFER_READ | XFER_BLOCK_COUNT_ENABLE,
         )?;
+        Self::card_status(17, r)?;
         let status =
             self.wait(INT_STATUS, "the read buffer", |v| v & (INT_BUFFER_READ_READY | INT_ERROR) != 0)?;
         if status & INT_ERROR != 0 {
@@ -484,19 +540,20 @@ impl Device {
     /// # Safety
     /// As [`Device::read_sector`].
     pub unsafe fn write_sector(&mut self, sector: u64, buf: &[u8; 512]) -> Result<(), Error> {
-        if let Some((first, count)) = self.protected {
+        for (first, count) in self.protected {
             if sector >= first && sector - first < count {
                 self.refused += 1;
                 if self.refused == 1 {
                     console::println!(
-                        "Ouroboros kernel: sd: a write to sector {sector} refused: the card's firmware partition ({first}, {count} sectors) is never written"
+                        "Ouroboros kernel: sd: a write to sector {sector} refused: sectors {first} to {} hold the card's firmware partition or the table that finds it, never written",
+                        first + count - 1
                     );
                 }
                 return Err(Error::Protected(sector));
             }
         }
         let result = self.write_one(sector, buf);
-        if let Err(Error::Timeout(_)) = result {
+        if let Err(Error::Timeout(_) | Error::CardStatus { .. }) = result {
             self.abandon();
         }
         result
@@ -504,13 +561,18 @@ impl Device {
 
     fn write_one(&mut self, sector: u64, buf: &[u8; 512]) -> Result<(), Error> {
         let address = self.address(sector)?;
+        if self.read(PRESENT_STATE) & WRITE_ENABLED == 0 {
+            return Err(Error::WriteProtected);
+        }
+        self.lines_free()?;
         self.write(BLOCK_SIZE_COUNT, (1 << 16) | SECTOR as u32);
-        self.command(
+        let r = self.command(
             24,
             address,
             RESP_48 | CMD_CRC_CHECK | CMD_INDEX_CHECK | CMD_DATA_PRESENT,
             XFER_BLOCK_COUNT_ENABLE,
         )?;
+        Self::card_status(24, r)?;
         let status =
             self.wait(INT_STATUS, "the write buffer", |v| v & (INT_BUFFER_WRITE_READY | INT_ERROR) != 0)?;
         if status & INT_ERROR != 0 {

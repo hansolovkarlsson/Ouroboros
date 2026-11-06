@@ -79,10 +79,12 @@ const WALK_FAULT: &CStr16 = cstr16!("\\WALKFAULT");
 /// `taking` line). A test fault, like `\EARLYFAULT`.
 const SMP_FAULT: &CStr16 = cstr16!("\\SMPFAULT");
 
-/// `\SDDUMP`: print, in hex, each ACPI table that declares an SD host
-/// controller (`sdscan.rs`), so the bytes of its `_CRS` can be read off the
-/// serial log. A reading aid for the SD-card arc's step 0
-/// (`docs/roadmap/roadmap-sd-card.md`), not a switch: nothing is turned off.
+/// `\SDDUMP`: run `sdscan.rs`'s report of the SD card's controller (the
+/// devicetree, the ACPI declarations, the controller's registers, the
+/// firmware's routing variable) and print, in hex, each ACPI table that
+/// declares one, so its `_CRS` can be read off the serial log. A reading aid
+/// for the SD-card arc's step 0 (`docs/roadmap/roadmap-sd-card.md`), not a
+/// switch: nothing is turned off, and without it the report does not run.
 const SD_DUMP: &CStr16 = cstr16!("\\SDDUMP");
 
 /// Which boot flags are set, read once by [`read`].

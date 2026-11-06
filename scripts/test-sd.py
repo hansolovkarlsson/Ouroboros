@@ -25,11 +25,19 @@ exactly as the host's copy of the staged stamp has it, then write a file
 **The second boot** of the same card must read that file back, written by the
 first (step 2's writes, through `sdhci.rs`'s CMD24, out to the image and back
 in through CMD17), and then try `unmount`, `partition fat32` and `format
-fat32`: `partition` writes LBA 0, which is outside the firmware partition,
-and `format` then lays a filesystem over partition 1's old sectors, which
-must be refused, with the kernel's line saying so. After it the host compares
-the card image's firmware-partition sectors with disk.img's: byte for byte
-the same, so the refusal is graded by the bytes, not by a line.
+fat32`. `partition` writes sector 0, the table that finds the firmware
+partition, and `format` lays a filesystem over the card's first partition,
+the firmware's (the card is not the boot disk here): both must be refused,
+the kernel's line saying so at the first. After it the host compares the card
+image's sectors from 0 to the firmware partition's end with disk.img's: byte
+for byte the same, so the refusal is graded by the bytes, not by a line.
+
+**A fifth boot**, a card whose table names nothing: disk.img's copy at the
+SDSC size with its four MBR entries zeroed and its boot signature kept, so
+it is not blank (`parttable::is_blank`) but lists no partition. The kernel
+must keep the whole card, the one case `firmware_sectors` leaves to its
+caller; with no root to mount the shell starts a root session, `partition
+fat32` must be refused at sector 0, and the image must come out whole.
 
 No fault line in QEMU's trace on any boot. What it cannot see, each run as
 a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
@@ -89,14 +97,15 @@ def card_image(path, size):
         fh.truncate(size)
 
 
-def firmware_partition():
-    """disk.img's partition 1, (first sector, count), from its MBR: the
-    sectors the kernel must never write (parttable::firmware_partition, the
-    card not being the boot disk here)."""
+def firmware_sectors():
+    """(0, the end of disk.img's partition 1), from its MBR: the sectors the
+    kernel must never write, the table and the firmware partition
+    (parttable::firmware_sectors, the card not being the boot disk here and
+    its table an MBR)."""
     with open(DISK, "rb") as fh:
         mbr = fh.read(512)
     start, count = struct.unpack_from("<II", mbr, 446 + 8)
-    return start, count
+    return 0, start + count
 
 
 def sectors(path, start, count):
@@ -105,7 +114,7 @@ def sectors(path, start, count):
         return fh.read(count * 512)
 
 
-def boot(name, tag, path, steps):
+def boot(name, tag, path, steps, login=True):
     """One boot with `path` on the SD card, logged in as root, then each
     `(command, pattern)` of `steps` typed and its output up to the next
     prompt kept, then `shutdown`. Returns (driven, transcript, outputs, the
@@ -122,8 +131,18 @@ def boot(name, tag, path, steps):
     )
     outputs, out, faults, ok = [], "", None, False
     try:
-        ok = guest.wait_for("login:", timeout=120)
-        ok = ok and guest.run([("", "root"), ("assword", "root")]) and guest.wait_for(PROMPT)
+        if login:
+            ok = guest.wait_for("login:", timeout=120)
+            ok = ok and guest.run([("", "root"), ("assword", "root")]) and guest.wait_for(PROMPT)
+        else:
+            # No root, so no /etc/passwd: the shell starts a root session,
+            # and netd's start-up lines follow its prompt; typed into them a
+            # line is lost, so after netd's last, a bare Enter for a fresh one.
+            ok = guest.wait_for("starting a root session", timeout=120)
+            ok = ok and guest.wait_for("cannot make remote requests")
+            if ok:
+                guest.type_line("")
+                ok = guest.wait_for(PROMPT)
         for command, pattern in steps:
             if not ok:
                 break
@@ -152,7 +171,7 @@ def main() -> int:
     srcid.require_current(DISK, "test-sd: ")
     with open(STAMP) as fh:
         stamp = fh.read()
-    first, count = firmware_partition()
+    first, count = firmware_sectors()
     kept = sectors(DISK, first, count)
     checks = []
     for name, path, size, kind in cards():
@@ -166,7 +185,7 @@ def main() -> int:
             ok2, out2, got2, faults2 = boot(name, "reread", path, [
                 ("cat /sdnote", NOTE),
                 ("unmount", "unmounted"),
-                ("partition fat32", "partitioned"),
+                ("partition fat32", "partition: "),
                 ("format fat32", "format: "),
             ])
             untouched = sectors(path, first, count) == kept
@@ -174,26 +193,53 @@ def main() -> int:
             # The SDHC card is 4 GiB to the filesystem, sparse or not.
             os.remove(path)
         reread = got2[0] if got2 else ""
+        partitioned = got2[2] if len(got2) > 2 else ""
         formatted = got2[3] if len(got2) > 3 else ""
         checks += [
             (f"{name}: both boots driven to the end and powered off", ok1 and ok2),
             (f"{name}: the kernel names the card ({kind})", "sd: SDHCI version field" in out1 and kind in out1),
             (f"{name}: the card is the block device", "sd: block device installed for the filesystem server" in out1),
-            (f"{name}: its firmware partition named as never written (sectors {first} to {first + count - 1})",
-             f"sd: sectors {first} to {first + count - 1} are the card's firmware partition, never written" in out1),
+            (f"{name}: sectors {first} to {first + count - 1} named as never written",
+             f"sd: sectors {first} to {first + count - 1} hold the card's firmware partition or the table that finds it, never written" in out1),
             (f"{name}: the ext2 root mounted from it", "fsd: ext2 mounted" in out1),
             (f"{name}: /etc/srcid read back as the host has it", stamp.strip() != "" and bool(got1) and stamp in got1[0]),
             (f"{name}: a file written in the first boot reads back in the second", f"\n{NOTE}\n" in reread),
-            (f"{name}: format over the firmware partition refused by the kernel",
-             "sd: a write to sector" in out2 and "is never written" in out2 and "formatted" not in formatted),
-            (f"{name}: the firmware partition's {count} sectors unchanged on the card", untouched),
+            (f"{name}: partition's write to sector 0 refused by the kernel",
+             "sd: a write to sector 0 refused" in out2 and "partitioned" not in partitioned),
+            (f"{name}: format over the firmware partition refused", bool(formatted) and "formatted" not in formatted),
+            (f"{name}: sectors {first} to {first + count - 1} unchanged on the card", untouched),
             (f"{name}: no fault lines", faults1 == 0 and faults2 == 0),
         ]
+    # The fifth boot: a table that lists nothing on a card that is not blank.
+    path = os.path.join(ROOT, "build", "test-sd-notable.img")
+    name, _, size, _ = cards()[0]
+    card_image(path, size)
+    with open(path, "r+b") as fh:
+        fh.seek(446)
+        fh.write(bytes(64))
+    with open(path, "rb") as fh:
+        before = fh.read()
+    try:
+        ok, out, got, faults = boot("notable", "partition", path, [("partition fat32", "partition: ")], login=False)
+        with open(path, "rb") as fh:
+            whole = fh.read() == before
+    finally:
+        os.remove(path)
+    last = size // 512 - 1
+    checks += [
+        ("notable: driven to the end and powered off", ok),
+        (f"notable: the whole card (sectors 0 to {last}) named as never written",
+         f"sd: sectors 0 to {last} hold the card's firmware partition or the table that finds it, never written" in out),
+        ("notable: partition's write to sector 0 refused by the kernel",
+         "sd: a write to sector 0 refused" in out and bool(got) and "partitioned" not in got[0]),
+        ("notable: the card image unchanged", whole),
+        ("notable: no fault lines", faults == 0),
+    ]
     failed = 0
     for check, good in checks:
         print(f"{'ok  ' if good else 'FAIL'} {check}")
         failed += 0 if good else 1
-    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt")
+    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt")
     return 1 if failed else 0
 
 

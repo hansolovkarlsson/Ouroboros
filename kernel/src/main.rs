@@ -609,8 +609,12 @@ extern "C" fn kernel_main() -> ! {
     // What the firmware says of the SD card's controller (sdscan.rs, step 0
     // of docs/roadmap/roadmap-sd-card.md): read only, no register touched.
     // After the xHCI step so its lines stay next to that step's.
-    // SAFETY: `dtb` and `rsdp` are the firmware's, found above.
-    unsafe { sdscan::report(dtb, rsdp, &flags) };
+    // SAFETY: `dtb` and `rsdp` are the firmware's, found above. Only under
+    // `\SDDUMP`: a reading aid whose question step 0 answered (2026-11-05),
+    // not a cost every boot pays.
+    if flags.sd_dump {
+        unsafe { sdscan::report(dtb, rsdp, &flags) };
+    }
 
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
@@ -1286,10 +1290,13 @@ fn init_storage(declared: &virtio_mmio::Transports) -> Option<Held> {
 
 /// Brings up the SD card on the controller [`pci::discover_sdhci`] found, and
 /// installs it for the filesystem server when no disk was installed before
-/// it (`install_boot_disk`), its firmware partition fixed as never written
-/// (D3 of the SD-card arc, `parttable::firmware_partition`): the boot
-/// partition when the card is the boot disk, else its first partition unless
-/// that is a root, the whole card when its table cannot be read.
+/// it (`install_boot_disk`), with its firmware partition and the tables that
+/// find it fixed as never written (D3 of the SD-card arc,
+/// `parttable::firmware_sectors`): the boot partition when the card is the
+/// boot disk, else its first partition unless that is a root. A blank card
+/// keeps nothing, so it can be prepared; one whose table does not read, or
+/// lists no partition without being blank (a GPT whose two copies fail), is
+/// kept whole.
 /// Not when the USB stick's init failed (`usb`): `install_boot_disk` leaves
 /// the cell empty then on purpose, since that stick may be the boot disk and
 /// `mount -a` replaces the device only when `fsd` mounted nothing (the
@@ -1332,11 +1339,15 @@ fn init_sd(info: Option<pci::SdhciInfo>, usb: syscall::UsbInstall) {
             Some(bootdisk::Boot::Yes) => bootdisk::get().map(|b| (b.start_lba, b.size_blocks)),
             _ => None,
         };
+        let gpt = parttable::is_gpt(&mut read) == Some(true);
+        let blank = parttable::is_blank(&mut read) == Some(true);
         let mut parts = [parttable::Partition::default(); 8];
         match parttable::discover(&mut read, Some(capacity), &mut parts) {
-            Ok(n) => parttable::firmware_partition(&parts[..n], boot),
-            // A table that cannot be read leaves nothing safe to write.
-            Err(parttable::Unreadable) => Some((0, capacity)),
+            _ if blank => [(0, 0); 2],
+            Ok(n) if n > 0 || boot.is_some() => parttable::firmware_sectors(&parts[..n], boot, gpt, capacity),
+            // A table that does not read, or lists nothing on a card that is
+            // not blank, leaves nothing safe to write.
+            _ => [(0, capacity), (0, 0)],
         }
     };
     device.protect(protected);
@@ -1346,12 +1357,16 @@ fn init_sd(info: Option<pci::SdhciInfo>, usb: syscall::UsbInstall) {
         sector[510],
         sector[511]
     );
-    match protected {
-        Some((first, count)) => console::println!(
-            "Ouroboros kernel: sd: sectors {first} to {} are the card's firmware partition, never written",
-            first + count.saturating_sub(1)
-        ),
-        None => console::println!("Ouroboros kernel: sd: no firmware partition on the card: every sector writable"),
+    let mut any = false;
+    for (first, count) in protected.into_iter().filter(|&(_, count)| count > 0) {
+        any = true;
+        console::println!(
+            "Ouroboros kernel: sd: sectors {first} to {} hold the card's firmware partition or the table that finds it, never written",
+            first + count - 1
+        );
+    }
+    if !any {
+        console::println!("Ouroboros kernel: sd: no firmware partition on the card: every sector writable");
     }
 }
 

@@ -353,6 +353,8 @@ struct Taken {
     bar: BarAddress,
     command_before: u16,
     command_after: u16,
+    /// Whether the command register was written.
+    wrote: bool,
 }
 
 /// Why [`take_from_firmware`] took nothing.
@@ -374,15 +376,9 @@ enum TakeError {
 /// the command-register write so it lands on a device no firmware driver
 /// manages. The write is one dword (Command and Status; the word-width
 /// write crashed Parallels' firmware), made only when a bit of `want` is
-/// clear, and only when `write` (false under `\XHCINOWR`). `name` heads the
-/// log lines.
-fn take_from_firmware(
-    root_bridge: &mut PciRootBridgeIo,
-    addr: &PciIoAddress,
-    want: u16,
-    write: bool,
-    name: &str,
-) -> Result<Taken, TakeError> {
+/// clear; a `want` of 0 writes nothing. The caller logs what happened from
+/// the returned register values.
+fn take_from_firmware(root_bridge: &mut PciRootBridgeIo, addr: &PciIoAddress, want: u16) -> Result<Taken, TakeError> {
     let refused = |e: uefi::Error| TakeError::Discovery(DiscoveryError::Bar(BarError::Refused(e.status())));
     let pci_io_handle = find_pci_io_handle(root_bridge.segment_nr(), addr)
         .ok_or(TakeError::Discovery(DiscoveryError::Bar(BarError::NoPciIo)))?;
@@ -409,22 +405,16 @@ fn take_from_firmware(
     };
     let command_before = read_command(root_bridge);
     let mut command_after = command_before;
-    if !write {
-        log::warn!("Ouroboros kernel: {name}: PCI command register {command_before:#06x}, write skipped (\\XHCINOWR)");
-    } else if command_before & want != want {
+    let wrote = command_before & want != want;
+    if wrote {
         if let Ok(command_status) = root_bridge.pci().read_one::<u32>(addr.with_register(COMMAND_REGISTER)) {
             let _ = root_bridge
                 .pci()
                 .write_one::<u32>(addr.with_register(COMMAND_REGISTER), command_status | u32::from(want));
         }
         command_after = read_command(root_bridge);
-        log::info!(
-            "Ouroboros kernel: {name}: PCI command register was {command_before:#06x}, wrote+read back {command_after:#06x}"
-        );
-    } else {
-        log::info!("Ouroboros kernel: {name}: PCI command register already {command_before:#06x}, no write needed");
     }
-    Ok(Taken { bar, command_before, command_after })
+    Ok(Taken { bar, command_before, command_after, wrote })
 }
 
 /// Takes one xHCI controller from firmware and resolves its CPU address,
@@ -437,11 +427,20 @@ fn take_xhci(
     addr: &PciIoAddress,
     enable_write: bool,
 ) -> Result<XhciInfo, XhciDiscoveryError> {
-    let taken = take_from_firmware(root_bridge, addr, CMD_MEMORY_SPACE | CMD_BUS_MASTER, enable_write, "xhci")
-        .map_err(|e| match e {
-            TakeError::Unassigned => XhciDiscoveryError::Unassigned,
-            TakeError::Discovery(e) => XhciDiscoveryError::from(e),
-        })?;
+    // `\XHCINOWR` asks for nothing, so nothing is written.
+    let want = if enable_write { CMD_MEMORY_SPACE | CMD_BUS_MASTER } else { 0 };
+    let taken = take_from_firmware(root_bridge, addr, want).map_err(|e| match e {
+        TakeError::Unassigned => XhciDiscoveryError::Unassigned,
+        TakeError::Discovery(e) => XhciDiscoveryError::from(e),
+    })?;
+    let (before, after) = (taken.command_before, taken.command_after);
+    if !enable_write {
+        log::warn!("Ouroboros kernel: xhci: PCI command register {before:#06x}, write skipped (\\XHCINOWR)");
+    } else if taken.wrote {
+        log::info!("Ouroboros kernel: xhci: PCI command register was {before:#06x}, wrote+read back {after:#06x}");
+    } else {
+        log::info!("Ouroboros kernel: xhci: PCI command register already {before:#06x}, no write needed");
+    }
     Ok(XhciInfo {
         base: taken.bar.cpu,
         bus: taken.bar.bus,
@@ -524,7 +523,7 @@ pub fn discover_sdhci() -> Result<SdhciInfo, SdhciDiscoveryError> {
             {
                 continue;
             }
-            match take_from_firmware(&mut root_bridge, addr, CMD_MEMORY_SPACE, true, "sd") {
+            match take_from_firmware(&mut root_bridge, addr, CMD_MEMORY_SPACE) {
                 Ok(t) => {
                     return Ok(SdhciInfo { base: t.bar.cpu, command_before: t.command_before, command_after: t.command_after })
                 }
