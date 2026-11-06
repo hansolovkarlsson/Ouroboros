@@ -58,8 +58,12 @@ booted from, and large enough. And it must be empty or ours:
            volume holding `.ouroboros-stick` or `EFI/ORBS/INIT.CFG`;
   empty    no partition table and nothing in its first MiB, or every volume
            on it empty but for what macOS leaves on a fresh one.
-A Pi card (RPI_EFI.fd on a plain FAT volume) is refused: the kernel cannot
-read the card once it runs, so the Pi's one disk is a stick.
+A Pi card (RPI_EFI.fd on a plain FAT volume, as `make sdcard` stages one) is
+taken as ours and as a Pi disk: its /etc and boot counter carried as from any
+FAT volume of ours, and its firmware files carried whole, RPI_EFI.fd with its
+settings, as a Pi stick's are. Until 2026-11-06 it was refused, because the
+kernel could not read the card once it ran; since the SD-card arc it does
+(`kernel/src/sdhci.rs`), so the card can be the Pi's one disk too.
 
 The Pi's stick (PI=1) is the same disk with the firmware the Pi's boot ROM
 reads from partition 1: the pinned pftf release (scripts/pftf.env, shared
@@ -538,8 +542,8 @@ def classify(disk, debugfs, tmp):
         if kind is None and os.path.isfile(os.path.join(mount, "EFI", "ORBS", "INIT.CFG")):
             kind = "ours"
         if kind == "card":
-            raise Refused(f"{mount} holds RPI_EFI.fd: a Pi card, which the kernel cannot read once it runs; "
-                          f"write the Pi's one disk to a USB stick (PI=1), and stage a card with make sdcard")
+            # A Pi card: ours, and its firmware is carried (old_firmware).
+            kind = "ours"
         if kind is None:
             shown = ", ".join(n for n in names if not LITTER.match(n))[:200]
             raise Refused(f"{mount} ({ident}) is neither empty nor ours, and holds: {shown}; refusing")
@@ -707,13 +711,16 @@ def pftf_zip():
     return path, version.group(1) if version else "?", names
 
 
-def old_firmware(disk, kind, pi_opt, reinstall):
+def old_firmware(disk, kind, source, pi_opt, reinstall):
     """The mount point of the old disk's ESP when it holds the Pi's firmware
-    (a one-disk Pi stick), else None. Mounted read-only if macOS has not.
+    (a one-disk Pi stick, or a Pi card: a FAT volume of ours, `source`,
+    holding RPI_EFI.fd), else None. Mounted read-only if macOS has not.
     An ESP that will not mount cannot say, and its firmware's settings
     cannot be carried, so it is refused unless the answer does not matter:
     PI=0 writes no firmware, and PI=1 FIRMWARE=1 writes the release's. A
     damaged ESP is what a re-stage is for (the review of #294)."""
+    if kind == "fat":
+        return source if os.path.isfile(os.path.join(source, FIRMWARE_MARK)) else None
     if kind != "one-disk":
         return None
     ident = disk.dev[len("/dev/"):] + "s1"
@@ -864,7 +871,7 @@ def write(target):
         check_target(disk, 0)
         with tempfile.TemporaryDirectory() as tmp:
             kind, source, old_record = classify(disk, debugfs, tmp)
-            old_fw = old_firmware(disk, kind, opts["PI"], reinstall)
+            old_fw = old_firmware(disk, kind, source, opts["PI"], reinstall)
             say(f"{disk.dev} is {'empty' if kind == 'empty' else 'ours (' + kind + ')'}"
                 f"{', a Pi stick' if old_fw else ''}")
             # A Pi stick stays one unless PI=0 says otherwise: dropping its

@@ -11,7 +11,7 @@ stick would see them; only `sudo dd` (a device the user cannot open) is not
 reached.
 
 On the host, before any boot, every refusal must leave its disk's bytes as
-they were: a FAT volume holding someone's file, a Pi card, a one-disk layout
+they were: a FAT volume holding someone's file, a one-disk layout
 whose ext2 root lacks /etc/srcid, a disk too small, a partition's node.
 Then one disk attached with mounting allowed, as a real stick is: macOS
 mounts the new ESP as soon as the write gives the disk a table, and the
@@ -19,7 +19,9 @@ write must still read back (a real stick's failed on 2026-11-04), with the
 mount itself checked, since without it the case proves nothing.
 Then the Pi's stick (step 5b), on the host but for one boot: the pinned
 firmware on a fresh one, its settings and config.txt carried by a re-stage,
-FIRMWARE=1 resetting the settings and keeping config.txt, PI=0 dropping it. Then
+FIRMWARE=1 resetting the settings and keeping config.txt, PI=0 dropping it;
+and a Pi card as `make sdcard` stages one (the SD-card arc's step 4, since the
+kernel reads the card), taken as ours with its firmware carried whole. Then
 a fresh file is written, and must hold build/esp.img's ESP and
 build/ext2part.img's root as they are, and a signature of its own.
 
@@ -215,7 +217,6 @@ def refusals():
     cases = [
         ("a FAT volume holding someone's file", fat_volume("foreign", {"IMG_0001.JPG": "photo"}),
          "neither empty nor ours"),
-        ("a Pi card", fat_volume("card", {"RPI_EFI.fd": "fw"}), "a Pi card"),
         ("an ext2 partition 2 without /etc/srcid", foreign_root, "not a disk this wrote"),
         ("a disk too small", blank("small", 32 << 20), "the image needs"),
     ]
@@ -305,6 +306,34 @@ class Esp:
         # Checked: bootstick then writes the image's raw node, which must not
         # happen under a FAT mounted read-write (bootstick.detach's rule).
         bootstick.detach(self.mount)
+
+
+def pi_card():
+    """A Pi card as `make sdcard` stages one, re-staged as the Pi's one disk
+    (the SD-card arc's step 4): one FAT32 volume holding the firmware, its own
+    RPI_EFI.fd (whose settings route the card, SdIsArasan) and config.txt,
+    and the kernel's tree. With PI unset it must be taken as ours and as a Pi
+    disk, and its firmware carried whole onto the new partition 1, not the
+    pinned release's: a fresh RPI_EFI.fd could route the card to Arasan.
+    Until 2026-11-06 a Pi card was refused."""
+    settings, overlay, start4 = "CARD-SETTINGS: SdIsArasan=0", "# the card's overlay\n", "the card's start4"
+    card = fat_volume("card", {
+        "RPI_EFI.fd": settings, "config.txt": overlay, "start4.elf": start4,
+        "EFI/ORBS/INIT.CFG": "x",
+    })
+    code, out = bootstick_run(card)
+    with Esp(card) as esp:
+        fd, config, s4 = esp.read("RPI_EFI.fd"), esp.read("config.txt"), esp.read("start4.elf")
+        tree = esp.read("EFI/BOOT/BOOTAA64.EFI") is not None
+    checks = [
+        ("pi card: taken as ours and as a Pi disk", code == 0 and "ours (fat), a Pi stick" in out),
+        ("pi card: its RPI_EFI.fd, config.txt and start4.elf carried byte for byte",
+         fd == settings.encode() and config == overlay.encode() and s4 == start4.encode()),
+        ("pi card: the ESP's tree beside them", tree),
+    ]
+    if not all(good for _, good in checks):
+        print(out)
+    return checks
 
 
 def pi_stick():
@@ -420,6 +449,7 @@ def main():
     checks = refusals()
     checks += automounted()
     checks += pi_stick()
+    checks += pi_card()
 
     checks += sources()
 
