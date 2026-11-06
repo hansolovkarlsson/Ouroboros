@@ -26,19 +26,23 @@ One boot:
    then `ctermios check` must start with ISIG set: the mode ended with the
    program, by the kernel's reset (the runs before turned cooked themselves).
 4. **New lines on the serial line** (ONLCR, which tcgetattr reports set; the
-   kernel's console::write_bytes): `cat /include/sys/termios.h | head 3`, a
-   file whose lines end in a bare LF, and `ctermios nl`, five lines ending
+   kernel's console::write_bytes and console::write_out):
+   `cat /include/sys/termios.h | head 3`, a
+   file whose lines end in a bare LF, and `ctermios nl <chunk>`, five lines ending
    each a different way (a `\r` and its `\n` in two writes, a bare `\n`,
    `\r\n`, a bare `\n` by PUTC, a `\r` by PUTC between two writes through
-   cond), then two lines of 256 and 255 bytes before a bare `\n` (the
-   kernel's chunk edge), must reach the serial line with every `\n` after a
+   cond), then two lines of `<chunk>` and `<chunk> - 1` bytes before a bare
+   `\n`, the inserted `\r` just past the kernel's chunk and at its last byte;
+   `<chunk>` is read from console.rs's `const CHUNK` and checked to fit one
+   write (`FS_DATA_MAX`, read from syscall-abi), so the edge follows the
+   kernel's value. All must reach the serial line with every `\n` after a
    `\r`, no `\r\r`, and each line whole with its `\r\n`. Before 2026-11-05 a file's
    lines went out as they are and stepped down a serial terminal one column
    further each line.
 
 QEMU's own trace must hold no fault line. About a minute. Run it whenever
-libc's termios, sys/termios.h, KBD_MODE or the kernel's console::write_out
-changes.
+libc's termios, sys/termios.h, KBD_MODE or the kernel's console::write_bytes,
+console::write_out or console::CHUNK changes.
 """
 import importlib.util
 import os
@@ -62,6 +66,20 @@ CHECK_LINES = [
     "initial ok", "set ok", "readback ok", "honest ok", "restore ok", "kernel ok",
     "fd 9 EBADF", "file ENOTTY", "action EINVAL", "null EFAULT",
 ]
+
+
+def source_constant(path, pattern):
+    """The one integer `pattern` (a regex with one group) finds in the file
+    at `path`, relative to the repository; `None` unless exactly one line
+    matches, so a renamed or duplicated constant fails the rig rather than
+    leaving it on a stale value."""
+    with open(os.path.join(ROOT, path)) as fh:
+        found = re.findall(pattern, fh.read(), re.MULTILINE)
+    return int(found[0]) if len(found) == 1 else None
+
+
+CHUNK = source_constant("kernel/src/console.rs", r"^const CHUNK: usize = (\d+);")
+FS_DATA_MAX = source_constant("syscall-abi/src/lib.rs", r"^pub const FS_DATA_MAX: u64 = (\d+);")
 
 
 def output_of(seg):
@@ -140,7 +158,7 @@ def main() -> int:
             seg["newline"] = guest.transcript()[start:]
         if ok:
             start = len(guest.transcript())
-            guest.type_line("ctermios nl")
+            guest.type_line(f"ctermios nl {CHUNK or 0}")
             ok = guest.wait_for(r"nl done[\s\S]*" + PROMPT)
             seg["nl"] = guest.transcript()[start:]
         out = guest.transcript()
@@ -170,9 +188,12 @@ def main() -> int:
         ("nl: every line ending reaches the serial line as one CR LF",
          all(f"nl-{x}\r\n" in output_of(seg.get("nl", "")) for x in "abcde")
          and newlines_clean(output_of(seg.get("nl", "")))),
-        ("nl: a \\r inserted at the kernel's 256-byte chunk edge and past it",
-         "nl-f" + "x" * 252 + "\r\n" in output_of(seg.get("nl", ""))
-         and "nl-g" + "x" * 251 + "\r\n" in output_of(seg.get("nl", ""))),
+        (f"nl: the kernel's chunk ({CHUNK} bytes, console.rs) fits one write ({FS_DATA_MAX}, syscall-abi)",
+         CHUNK is not None and FS_DATA_MAX is not None and 5 <= CHUNK and CHUNK + 1 <= FS_DATA_MAX),
+        ("nl: a \\r inserted just past the kernel's chunk and at its last byte",
+         CHUNK is not None
+         and "nl-f" + "x" * (CHUNK - 4) + "\r\n" in output_of(seg.get("nl", ""))
+         and "nl-g" + "x" * (CHUNK - 5) + "\r\n" in output_of(seg.get("nl", ""))),
         ("no fault lines", faults == 0),
     ]
     failed = 0

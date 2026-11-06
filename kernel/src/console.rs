@@ -52,40 +52,37 @@ impl Console {
     /// translated the kernel's lines on its own, with no memory of the last
     /// byte, and program output went out untranslated.
     ///
-    ///
     /// One loop for every driver, translating into a local buffer that goes
-    /// to the driver a chunk at a time ([`Console::write_chunk`]), so the
-    /// rule exists once and the boots the rigs run (the PL011) exercise the
-    /// same code as a virtio console. The chunk is for virtio's sake: each
-    /// `virtio_console::Device::write` is a full round trip (notify, then
-    /// poll the used ring), so a line in one or a few transfers matters
-    /// there in a way it does not for an MMIO UART.
+    /// to the driver [`CHUNK`] bytes at a time ([`Console::write_chunk`]),
+    /// so the rule exists once and the boots the rigs run (the PL011)
+    /// exercise the same code as a virtio console.
     fn write_out(&mut self, bytes: &[u8]) {
-        const CHUNK: usize = 256;
         let mut buf = [0u8; CHUNK];
         let mut len = 0usize;
         let mut after_cr = AFTER_CR.load(Ordering::Relaxed);
         for &b in bytes {
             if b == b'\n' && !after_cr {
-                if len == CHUNK {
-                    self.write_chunk(&buf[..len]);
-                    len = 0;
-                }
-                buf[len] = b'\r';
-                len += 1;
+                self.push(&mut buf, &mut len, b'\r');
             }
-            if len == CHUNK {
-                self.write_chunk(&buf[..len]);
-                len = 0;
-            }
-            buf[len] = b;
-            len += 1;
+            self.push(&mut buf, &mut len, b);
             after_cr = b == b'\r';
         }
         if len > 0 {
             self.write_chunk(&buf[..len]);
         }
         AFTER_CR.store(after_cr, Ordering::Relaxed);
+    }
+
+    /// `b` into [`Console::write_out`]'s buffer, the full buffer sent first:
+    /// the one place a chunk is cut, which `make test-ctermios`'s edge lines
+    /// cross.
+    fn push(&mut self, buf: &mut [u8; CHUNK], len: &mut usize, b: u8) {
+        if *len == CHUNK {
+            self.write_chunk(&buf[..]);
+            *len = 0;
+        }
+        buf[*len] = b;
+        *len += 1;
     }
 
     /// Bytes to the driver, untranslated: [`Console::write_out`] is its one
@@ -118,17 +115,26 @@ impl Console {
 
 static CONSOLE: SyncCell<Option<Console>> = SyncCell::new(None);
 
+/// The bytes [`Console::write_out`] gathers before handing them to the
+/// driver. For virtio's sake: each `virtio_console::Device::write` is a full
+/// round trip (notify, then poll the used ring), so a line in one or two
+/// transfers matters there in a way it does not for an MMIO UART. Small,
+/// because the buffer is on the writer's stack, and one writer is the early
+/// fault reporter on the firmware's exception stack (`earlyfault.rs`).
+/// `make test-ctermios` reads this line for the length of its edge lines,
+/// so the value can change without the rig going blind to the edge.
+const CHUNK: usize = 64;
+
 /// Whether the last byte sent to the console was a `\r`, kept by
 /// [`Console::write_out`], which every writer goes through, so a `\n` gets
 /// its carriage return only when it lacks one, even when the `\r` came in
 /// an earlier write or from another writer. Class E: read and written
 /// inside [`with_console`], under the console lock, and by the early fault
 /// reporter (`earlyfault.rs`), which writes its own `Console` before the
-/// exit, on one core, before any lock exists. Two cases share the price the
-/// lock already pays: after a takeover (`lock`) two cores can read it at
-/// once, and the early reporter's console hands its last byte to the one
-/// installed after the exit; either costs at most one `\r` doubled or
-/// missing, on the line that was already interleaved or the first line.
+/// exit, on one core, before any lock exists, and always halts after, so
+/// no later console reads what it left. After a takeover (`lock`) two
+/// cores can read it at once, the price the lock already pays: at most one
+/// `\r` doubled or missing, on the line that was already interleaved.
 static AFTER_CR: AtomicBool = AtomicBool::new(false);
 
 /// The console lock (class E of the multi-core plan's inventory): the

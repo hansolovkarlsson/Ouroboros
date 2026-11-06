@@ -33,21 +33,23 @@
  * TCSAFLUSH, which discards those keys, or TCSADRAIN, which keeps them for
  * the shell; then print `ctermios: flushed` or `ctermios: drained`.
  *
- * `ctermios nl` writes five lines, each ending a different way, for the
+ * `ctermios nl <chunk>` writes five lines, each ending a different way, for the
  * console's ONLCR (the kernel's console::write_bytes): `nl-a` with its `\r`
  * and `\n` in two writes, `nl-b` with a bare `\n`, `nl-c` with `\r\n` in
  * one write, `nl-d` by PUTC a byte at a time with a bare `\n`, and `nl-e`
  * with its `\r` by PUTC between two writes through the console server.
- * Then `nl-f` and `nl-g`, 256 and 255 bytes before a bare `\n`, so the
- * inserted `\r` falls at the end of the kernel's 256-byte chunk (write_out)
- * and just past it. Each must reach the serial line as `nl-X...\r\n`, with
- * no `\r\r`. Every
+ * Then `nl-f` and `nl-g`, `<chunk>` and `<chunk> - 1` bytes before a bare
+ * `\n`, where `<chunk>` is the kernel's (console.rs's `CHUNK`, which the rig
+ * reads and passes): the inserted `\r` falls just past the chunk, then at
+ * its last byte (write_out). Each must reach the serial line as
+ * `nl-X...\r\n`, with no `\r\r`. Every
  * piece is written to fd 2, which goes to the console at once: fd 1 holds
  * its bytes in libc's line buffer until a `\n`, fflush included, so a `\r`
  * written there would leave in the same write as its `\n`. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
@@ -199,7 +201,7 @@ static void now(const char *s) {
     write(2, s, strlen(s));
 }
 
-static int newlines(void) {
+static int newlines(int chunk) {
     now("nl-a\r");
     now("\n");
     now("nl-b\n");
@@ -208,11 +210,18 @@ static int newlines(void) {
     now("nl-e");
     putc_text("\r");
     now("\n");
-    /* The chunk's two edges: 256 and 255 bytes, then a bare \n. */
-    static char line[260];
-    for (int n = 256; n >= 255; n--) {
+    /* The chunk's two edges, `chunk` and `chunk - 1` bytes before a bare
+     * \n: the first puts the inserted \r just past the kernel's chunk, the
+     * second at its last byte. Each in one write, so it reaches the kernel's
+     * console::write_out whole (libc and cond pass FS_DATA_MAX at a time). */
+    static char line[FS_DATA_MAX];
+    if (chunk < 5 || chunk + 1 > (int)sizeof line) {
+        now("ctermios: nl needs the kernel's chunk size, 5 to 511\r\n");
+        return 2;
+    }
+    for (int n = chunk; n >= chunk - 1; n--) {
         memset(line, 'x', sizeof line);
-        memcpy(line, n == 256 ? "nl-f" : "nl-g", 4);
+        memcpy(line, n == chunk ? "nl-f" : "nl-g", 4);
         line[n] = '\n';
         write(2, line, (size_t)n + 1);
     }
@@ -234,8 +243,8 @@ int main(int argc, char **argv) {
         return check();
     }
     if (argc > 1 && strcmp(argv[1], "nl") == 0) {
-        return newlines();
+        return newlines(argc > 2 ? atoi(argv[2]) : 0);
     }
-    printf("usage: ctermios check|raw|flush|drain|nl\r\n");
+    printf("usage: ctermios check|raw|flush|drain|nl <chunk>\r\n");
     return 2;
 }
