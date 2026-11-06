@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""An SD card as the root disk: steps 1 and 2 of docs/roadmap/roadmap-sd-card.md.
+"""An SD card as the root disk: steps 1 to 4 of docs/roadmap/roadmap-sd-card.md.
 
     python3 scripts/test-sd.py    (or `make test-sd`, which builds the ESP and disk.img)
 
@@ -8,7 +8,7 @@ the kernel cannot (it drives virtio-mmio only), and puts a copy of
 `build/disk.img` (the ESP and the ext2 root) on an SD card behind QEMU's
 `sdhci-pci`, the only disk the kernel can drive, as the Pi's card and stick
 are today. QEMU's firmware does not boot from an SD card itself. Two cards,
-two boots each, four boots in all:
+two boots each, then three more, seven boots in all:
 
 - **A standard-capacity card**, the image padded to the smallest power of two
   of at least 128 MiB that holds it (QEMU wants a power of two, and makes a
@@ -45,13 +45,23 @@ be brought up and read (step 3, where on the Pi the stick stays the root),
 each partition listed, partition 1 with its FAT32 boot sector read and
 partition 2 named a root with its ext2 superblock read, the card named as not the boot disk, and not installed.
 
+**A seventh boot**, the card as the boot disk beside a USB stick that is
+not (step 4's ranking): disk.img itself booted from virtio-blk-pci (a
+snapshot, never written), so the firmware's device path names its partition
+1, which the card's byte-for-byte copy matches; build/esp.img on a USB stick
+behind QEMU's xHCI. The card must be named the boot disk and installed ahead
+of the stick, the stick found and not installed, `mount` must show the ext2
+root on a disk of the card's size, and fsd must find the boot partition on
+it. Before step 4 the stick went in first, and the card was read and left
+out.
+
 No fault line in QEMU's trace on any boot. What it cannot see, each run as
 a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
 was never told about (no ACMD6) reads the same as one it was; it completes a
 write at once, so a write whose end is not waited for still lands; and it
 models no clock rate. Those are the Pi's to show (step 3). Run it whenever kernel/src/sdhci.rs, pci::discover_sdhci, main.rs's
-init_sd, parttable::firmware_sectors or block.rs changes. About five
-minutes.
+init_sd, install_sd_fallback or the order of the disk paths,
+parttable::firmware_sectors or block.rs changes. About seven minutes.
 """
 import importlib.util
 import os
@@ -120,22 +130,40 @@ def sectors(path, start, count):
         return fh.read(count * 512)
 
 
-def boot(name, tag, path, steps, login=True, virtio=None):
+def boot(name, tag, path, steps, login=True, virtio=None, boot_disk=None, stick=None):
     """One boot with `path` on the SD card, logged in as root, then each
     `(command, pattern)` of `steps` typed and its output up to the next
     prompt kept, then `shutdown`. Returns (driven, transcript, outputs, the
     fault count)."""
     # The ESP on virtio-blk-pci, which the kernel cannot drive; or, with
-    # `virtio`, that image on virtio-mmio, which it can, and installs first.
-    esp = [] if virtio else [
-        "-drive", f"file=fat:rw:{ESP},format=raw,media=disk,if=none,id=esp",
-        "-device", "virtio-blk-pci,drive=esp",
-    ]
+    # `virtio`, that image on virtio-mmio, which it can, and installs first;
+    # or, with `boot_disk`, that whole image on virtio-blk-pci, booted from
+    # and never written (a snapshot), so the firmware's device path names
+    # its partition 1, which a byte-for-byte copy on the card matches.
+    if virtio:
+        esp = []
+    elif boot_disk:
+        esp = [
+            "-drive", f"file={boot_disk},format=raw,if=none,id=esp,snapshot=on",
+            "-device", "virtio-blk-pci,drive=esp",
+        ]
+    else:
+        esp = [
+            "-drive", f"file=fat:rw:{ESP},format=raw,media=disk,if=none,id=esp",
+            "-device", "virtio-blk-pci,drive=esp",
+        ]
+    # With `stick`, that image on a USB stick behind QEMU's xHCI, a snapshot.
+    usb = [
+        "-device", "qemu-xhci,id=xhci0",
+        "-drive", f"file={stick},format=raw,if=none,id=usbstick,snapshot=on",
+        "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
+    ] if stick else []
     guest = drive_qemu.Guest(
         virtio or path, label=f"test-sd ({name} {tag}): ", virtio_disk=bool(virtio),
-        stamp_from=None if virtio else ESP,
+        stamp_from=None if virtio else (boot_disk or ESP),
         extra_args=[
             *esp,
+            *usb,
             "-device", "sdhci-pci",
             "-drive", f"file={path},format=raw,if=none,id=sd0",
             "-device", "sd-card,drive=sd0",
@@ -267,11 +295,34 @@ def main() -> int:
          and "sd: block device installed" not in out),
         ("beside: no fault lines", faults == 0),
     ]
+    # The seventh boot: the card as the boot disk, beside a USB stick that
+    # is not (step 4's ranking). disk.img booted from virtio-blk-pci, its copy
+    # on the card, esp.img on the stick.
+    path = os.path.join(ROOT, "build", "test-sd-ranked.img")
+    card_image(path, cards()[0][2])
+    try:
+        ok, out, got, faults = boot("ranked", "stick", path, [("mount", "mounted at")],
+                                    boot_disk=DISK, stick=os.path.join(ROOT, "build", "esp.img"))
+    finally:
+        os.remove(path)
+    sectors_on_card = cards()[0][2] // 512
+    checks += [
+        ("ranked: driven to the end and powered off", ok),
+        ("ranked: the stick found by the xHCI scan", "USB mass storage - activating after the scan" in out),
+        ("ranked: the card named the boot disk", "sd: the card is the boot disk (its boot partition at LBA 2048)" in out),
+        ("ranked: the card installed ahead of the stick",
+         "sd: block device installed for the filesystem server, the boot disk, ahead of any USB stick" in out),
+        ("ranked: the stick not installed", "usb-msd block device installed" not in out),
+        (f"ranked: the ext2 root mounted from the card ({sectors_on_card} sectors)",
+         bool(got) and f"ext2 mounted at partition LBA {root_start} (disk {sectors_on_card} sectors" in got[0]),
+        ("ranked: fsd finds the boot partition on its disk", "fsd: the boot partition is on this disk, at LBA 2048" in out),
+        ("ranked: no fault lines", faults == 0),
+    ]
     failed = 0
     for check, good in checks:
         print(f"{'ok  ' if good else 'FAIL'} {check}")
         failed += 0 if good else 1
-    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt, build/test-sd-beside-virtio.txt")
+    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt, build/test-sd-beside-virtio.txt, build/test-sd-ranked-stick.txt")
     return 1 if failed else 0
 
 

@@ -936,6 +936,26 @@ extern "C" fn kernel_main() -> ! {
         held
     };
 
+    // Third disk path, the SD-card arc, read before the second: an SD card
+    // on a controller found before the exit (QEMU's on PCI, the Pi's EMMC2
+    // by ACPI), brought up and read whatever else is installed. A card that
+    // is the boot disk goes in ahead of any stick, and of a virtio disk held
+    // back as not the boot disk (step 4: the Pi boots from its card, and a
+    // stick in a port is no longer its root); any other card only when no
+    // other disk went in and none was left out on purpose, after the USB
+    // step. A virtio disk that is the boot disk went in before either.
+    let sd = init_sd(sd_controller);
+    let sd = match sd {
+        Some(card) if card.boot && !syscall::block_device_installed() => {
+            syscall::install_block_device(block::BlockDevice::Sdhci(card.device));
+            console::println!(
+                "Ouroboros kernel: sd: block device installed for the filesystem server, the boot disk, ahead of any USB stick"
+            );
+            None
+        }
+        other => other,
+    };
+
     // Second disk path: USB mass storage over the xHCI driver, if the
     // multi-device scan activated one, and the choice between it and a virtio
     // disk init_storage held back as not the boot disk (one-disk step 3,
@@ -947,14 +967,7 @@ extern "C" fn kernel_main() -> ! {
     // enumeration diagnostics), so this boot-time attempt mostly serves
     // QEMU; the shell's `mount` command covers the late-attach case.
     let usb = install_boot_disk(held_virtio);
-
-    // Third disk path, the SD-card arc: an SD card on a controller found
-    // before the exit (QEMU's on PCI, the Pi's EMMC2 by ACPI), brought up and
-    // read whatever else is installed, and installed only when no other disk
-    // went in and none was left out on purpose, so no configuration that
-    // boots today changes. Which wins when the card is the boot disk and a
-    // stick is attached is step 4's question, on the Pi.
-    init_sd(sd_controller, usb);
+    install_sd_fallback(sd, usb);
 
     // GIC/timer setup - gated on `gic_info` being `Some` (real MADT
     // discovery, `madt.rs`), not the console-discovery heuristic this used to
@@ -1346,8 +1359,9 @@ unsafe fn emmc2_from_acpi(rsdp: Option<*const u8>) -> Option<SdController> {
 }
 
 /// Brings up the SD card on the controller found before the exit, reads
-/// it, and installs it for the filesystem server when no disk was installed
-/// before it (`install_boot_disk`). Its firmware partition and the tables
+/// it, and hands it back with whether it is the boot disk, for `main` to
+/// install ahead of the USB step when it is and [`install_sd_fallback`] to
+/// install after it otherwise. Its firmware partition and the tables
 /// that find it are fixed as never written first (D3 of the SD-card arc,
 /// `parttable::firmware_sectors`): the boot partition when the card is the
 /// boot disk, else its first partition unless that is a root. A blank card
@@ -1357,21 +1371,18 @@ unsafe fn emmc2_from_acpi(rsdp: Option<*const u8>) -> Option<SdController> {
 ///
 /// The card is brought up and read even when it is not installed, so a
 /// board shows what it holds before the card is trusted as the root (step
-/// 3: on the Pi the stick stays the root). Each partition is listed, with
+/// 3: on the Pi the stick stayed the root). Each partition is listed, with
 /// an ext2 root's superblock magic read, the first read past the table.
-/// Not installed when the USB stick's init failed: `install_boot_disk` leaves
-/// the cell empty then on purpose, since that stick may be the boot disk and
-/// `mount -a` replaces the device only when `fsd` mounted nothing (the
-/// medium review of #287). Silent when there is no controller.
-fn init_sd(ctl: Option<SdController>, usb: syscall::UsbInstall) {
-    let Some(ctl) = ctl else { return };
+/// Silent when there is no controller.
+fn init_sd(ctl: Option<SdController>) -> Option<SdCard> {
+    let ctl = ctl?;
     if !mmu::walks_as_device(ctl.base) {
         console::println!(
             "Ouroboros kernel: sd: {:#x} ({}) is not mapped as a device: the card is not brought up",
             ctl.base,
             ctl.source
         );
-        return;
+        return None;
     }
     console::println!("Ouroboros kernel: sd: bringing up the card on the controller at {:#x} ({})", ctl.base, ctl.source);
     // SAFETY: a discovered SDHCI register block, mapped as device memory
@@ -1380,13 +1391,13 @@ fn init_sd(ctl: Option<SdController>, usb: syscall::UsbInstall) {
     let mut device = unsafe { sdhci::Device::new(ctl.base) };
     if let Err(e) = unsafe { device.init() } {
         console::println!("Ouroboros kernel: sd: the card did not come up ({e})");
-        return;
+        return None;
     }
     let mut sector = [0u8; 512];
     // SAFETY: the card is up, and not yet installed.
     if let Err(e) = unsafe { device.read_sector(0, &mut sector) } {
         console::println!("Ouroboros kernel: sd: sector 0 did not read ({e})");
-        return;
+        return None;
     }
     console::println!(
         "Ouroboros kernel: sd: sector 0 read, signature {:#04x}{:02x}",
@@ -1394,7 +1405,7 @@ fn init_sd(ctl: Option<SdController>, usb: syscall::UsbInstall) {
         sector[511]
     );
     let capacity = device.capacity_sectors();
-    let protected = {
+    let (protected, boot) = {
         // SAFETY: as above.
         let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
         let matched = bootdisk::is_boot_disk(&mut read, capacity);
@@ -1440,13 +1451,14 @@ fn init_sd(ctl: Option<SdController>, usb: syscall::UsbInstall) {
                 );
             }
         }
-        match listed {
+        let protected = match listed {
             _ if blank => [(0, 0); 2],
             Ok(n) if n > 0 || boot.is_some() => parttable::firmware_sectors(&parts[..n], boot, gpt, capacity),
             // A table that does not read, or lists nothing on a card that is
             // not blank, leaves nothing safe to write.
             _ => [(0, capacity), (0, 0)],
-        }
+        };
+        (protected, boot.is_some())
     };
     device.protect(protected);
     let mut any = false;
@@ -1460,6 +1472,25 @@ fn init_sd(ctl: Option<SdController>, usb: syscall::UsbInstall) {
     if !any {
         console::println!("Ouroboros kernel: sd: no firmware partition on the card: every sector writable");
     }
+    Some(SdCard { device, boot })
+}
+
+/// A card [`init_sd`] brought up and read, not yet installed.
+struct SdCard {
+    device: sdhci::Device,
+    /// The card holds the boot partition (`bootdisk::is_boot_disk`
+    /// answered yes and the partition is known).
+    boot: bool,
+}
+
+/// A card that was not installed ahead of the USB step: installed now only
+/// when no disk went in, so a card that is not the boot disk gives way to
+/// every other disk, as in step 3. Not when the USB stick's init failed:
+/// `install_boot_disk` leaves the cell empty then on purpose, since that
+/// stick may be the boot disk and `mount -a` replaces the device only when
+/// `fsd` mounted nothing (the medium review of #287).
+fn install_sd_fallback(card: Option<SdCard>, usb: syscall::UsbInstall) {
+    let Some(SdCard { device, .. }) = card else { return };
     if syscall::block_device_installed() {
         console::println!("Ouroboros kernel: sd: the card is up and read, not installed: another disk is");
         return;
@@ -1473,6 +1504,7 @@ fn init_sd(ctl: Option<SdController>, usb: syscall::UsbInstall) {
     syscall::install_block_device(block::BlockDevice::Sdhci(device));
     console::println!("Ouroboros kernel: sd: block device installed for the filesystem server");
 }
+
 
 /// A virtio disk [`init_storage`] held back rather than installed: not the
 /// boot disk, or `blank`, holding no partition table or volume

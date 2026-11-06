@@ -2322,8 +2322,10 @@ test-proc-cpus: image
 # standard-capacity card and a 4 GiB high-capacity one, two boots each: the
 # root mounted from the card, a file written and read back across a power
 # off, partition and format refused over the firmware partition and its
-# table, their bytes unchanged; and a fifth boot, a card with no table
-# entries, kept whole.
+# table, their bytes unchanged; a fifth boot, a card with no table entries,
+# kept whole; a sixth, the card read beside a virtio disk installed first;
+# and a seventh, the card as the boot disk installed ahead of a USB stick
+# that is not.
 test-sd: disk
 	python3 scripts/test-sd.py
 
