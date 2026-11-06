@@ -39,6 +39,12 @@ must keep the whole card, the one case `firmware_sectors` leaves to its
 caller; with no root to mount the shell starts a root session, `partition
 fat32` must be refused at sector 0, and the image must come out whole.
 
+**A sixth boot**, the card beside a disk the kernel installs first: build/
+esp.img on virtio-mmio, and disk.img's copy on the card. The card must still
+be brought up and read (step 3, where on the Pi the stick stays the root),
+each partition listed, partition 2 named a root with its ext2 superblock
+read, the card named as not the boot disk, and not installed.
+
 No fault line in QEMU's trace on any boot. What it cannot see, each run as
 a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
 was never told about (no ACMD6) reads the same as one it was; it completes a
@@ -114,16 +120,22 @@ def sectors(path, start, count):
         return fh.read(count * 512)
 
 
-def boot(name, tag, path, steps, login=True):
+def boot(name, tag, path, steps, login=True, virtio=None):
     """One boot with `path` on the SD card, logged in as root, then each
     `(command, pattern)` of `steps` typed and its output up to the next
     prompt kept, then `shutdown`. Returns (driven, transcript, outputs, the
     fault count)."""
+    # The ESP on virtio-blk-pci, which the kernel cannot drive; or, with
+    # `virtio`, that image on virtio-mmio, which it can, and installs first.
+    esp = [] if virtio else [
+        "-drive", f"file=fat:rw:{ESP},format=raw,media=disk,if=none,id=esp",
+        "-device", "virtio-blk-pci,drive=esp",
+    ]
     guest = drive_qemu.Guest(
-        path, label=f"test-sd ({name} {tag}): ", virtio_disk=False, stamp_from=ESP,
+        virtio or path, label=f"test-sd ({name} {tag}): ", virtio_disk=bool(virtio),
+        stamp_from=None if virtio else ESP,
         extra_args=[
-            "-drive", f"file=fat:rw:{ESP},format=raw,media=disk,if=none,id=esp",
-            "-device", "virtio-blk-pci,drive=esp",
+            *esp,
             "-device", "sdhci-pci",
             "-drive", f"file={path},format=raw,if=none,id=sd0",
             "-device", "sd-card,drive=sd0",
@@ -235,11 +247,29 @@ def main() -> int:
         ("notable: the card image unchanged", whole),
         ("notable: no fault lines", faults == 0),
     ]
+    # The sixth boot: the card read beside a disk installed before it.
+    path = os.path.join(ROOT, "build", "test-sd-beside.img")
+    card_image(path, cards()[0][2])
+    try:
+        ok, out, _, faults = boot("beside", "virtio", path, [], virtio=os.path.join(ROOT, "build", "esp.img"))
+    finally:
+        os.remove(path)
+    root_start = struct.unpack_from("<I", open(DISK, "rb").read(512), 446 + 16 + 8)[0]
+    checks += [
+        ("beside: driven to the end and powered off", ok),
+        ("beside: the card brought up beside the installed disk", "sd: sector 0 read, signature 0x55aa" in out),
+        (f"beside: partition 2 (LBA {root_start}) listed as a root, its ext2 superblock read",
+         f"sd: MBR partition 2: LBA {root_start}," in out and "a root, its ext2 superblock read" in out),
+        ("beside: the card named as not the boot disk", "sd: the card is not the boot disk" in out),
+        ("beside: the card not installed", "sd: the card is up and read, not installed: another disk is" in out
+         and "sd: block device installed" not in out),
+        ("beside: no fault lines", faults == 0),
+    ]
     failed = 0
     for check, good in checks:
         print(f"{'ok  ' if good else 'FAIL'} {check}")
         failed += 0 if good else 1
-    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt")
+    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt, build/test-sd-beside-virtio.txt")
     return 1 if failed else 0
 
 
