@@ -90,8 +90,12 @@ unsafe fn report_acpi(rsdp: Option<*const u8>, dump: bool) {
     };
     let mut any = false;
     for table in &tables[..count] {
-        let signature = core::str::from_utf8(&table[0..4]).unwrap_or("????");
-        let oem_table = core::str::from_utf8(&table[16..24]).unwrap_or("????????");
+        // The header's names as text a console takes: the Pi's DSDT's OEM
+        // table ID holds bytes the UEFI console refuses (seen 2026-11-05: the
+        // line stopped at the ID, and the dump's first line panicked).
+        let (sig_buf, id_buf) = (printable::<4>(&table[0..4]), printable::<8>(&table[16..24]));
+        let signature = core::str::from_utf8(&sig_buf).unwrap_or("????");
+        let oem_table = core::str::from_utf8(&id_buf).unwrap_or("????????");
         let mut declares = false;
         for (hid, what) in HIDS {
             if let Some(at) = amlscan::hid_string_at(table, hid) {
@@ -115,12 +119,33 @@ unsafe fn report_acpi(rsdp: Option<*const u8>, dump: bool) {
     }
 }
 
+/// `bytes` with every byte that is not printable ASCII as `.`, so a table's
+/// header names reach the console whatever the firmware wrote in them.
+fn printable<const N: usize>(bytes: &[u8]) -> [u8; N] {
+    let mut out = [b'.'; N];
+    for (o, &b) in out.iter_mut().zip(bytes) {
+        if b.is_ascii_graphic() || b == b' ' {
+            *o = b;
+        }
+    }
+    out
+}
+
+/// One line on the UEFI console, an error dropped rather than a panic
+/// (`uefi::println!` panics on one): a diagnostic must not end the boot.
+fn out_line(args: core::fmt::Arguments) {
+    uefi::system::with_stdout(|out| {
+        let _ = core::fmt::Write::write_fmt(out, args);
+        let _ = core::fmt::Write::write_str(out, "\r\n");
+    });
+}
+
 /// A table in hex, 16 bytes a line, each line its own and short enough for
 /// an 80-column console (the Pi's serial log wraps the logger's longer
 /// lines), with no logger prefix to wrap it.
 fn dump_table(signature: &str, oem_table: &str, table: &[u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    uefi::println!("SDDUMP {signature} {oem_table} begin {:#x}", table.len());
+    out_line(format_args!("SDDUMP {signature} {oem_table} begin {:#x}", table.len()));
     for (line, chunk) in table.chunks(16).enumerate() {
         let mut text = [b' '; 32];
         for (i, &b) in chunk.iter().enumerate() {
@@ -128,9 +153,9 @@ fn dump_table(signature: &str, oem_table: &str, table: &[u8]) {
             text[2 * i + 1] = HEX[usize::from(b & 0xf)];
         }
         let hex = core::str::from_utf8(&text[..2 * chunk.len()]).unwrap_or("");
-        uefi::println!("SDDUMP {:05x} {hex}", line * 16);
+        out_line(format_args!("SDDUMP {:05x} {hex}", line * 16));
     }
-    uefi::println!("SDDUMP {signature} {oem_table} end");
+    out_line(format_args!("SDDUMP {signature} {oem_table} end"));
 }
 
 fn report_routing() {
