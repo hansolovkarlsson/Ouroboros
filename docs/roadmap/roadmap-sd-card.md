@@ -175,6 +175,19 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    accepted, a `_STA` returning 0 taken). Then a Pi boot that, before the
    exit and read only, logs the controller's host version, capabilities and
    present state at that address.
+   **Built 2026-11-05:** `amlscan::declared` (virtio-mmio now one caller of
+   it) and `MethodShape`; the buffer a patching `_CRS` names is found by a
+   third pass, defined exactly once in its device. On the kept SSDT, and
+   on it beside the kept DSDT as the kernel scans them, EMMC2 comes out
+   `0xFE340000`, 0x100, INTID 158, and the Pi declares no virtio-mmio.
+   Seven mutations each fail a test: the offset ignored, a statement after
+   the Return accepted, the `_STA` constant ignored, a second definition of
+   the buffer ignored, the stored-to field or the returned buffer
+   unchecked, a method with arguments taken. `sdscan.rs` logs the declared
+   count and, for exactly one, six registers (present state, host control,
+   clock control, both capability words, host version), none whose read
+   changes anything. QEMU declares none and boots as before; the Pi boot is
+   owed.
 1. **The driver on QEMU, reading.** `sdhci.rs` on `sdhci-pci`, a
    `make run-sd` that boots the ESP as today and puts `build/disk.img` on
    the SD card, and a `make test-sd` that mounts the root from it and reads

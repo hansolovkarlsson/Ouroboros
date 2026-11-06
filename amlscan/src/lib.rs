@@ -6,7 +6,9 @@
 //! serial console that day, took a synchronous external abort on the first
 //! slot (`docs/testing/testing-parallels.md`, "Parallels 27.1 and the
 //! one-disk stick"). A platform that declares no transport is now never
-//! scanned.
+//! scanned. The same walk finds any device by its `_HID` string
+//! ([`declared`]): the Raspberry Pi 4's SD card controller, EMMC2
+//! ([`EMMC2_HID`]), is the second user (`docs/roadmap/roadmap-sd-card.md`).
 //!
 //! QEMU declares each transport as a `Device` holding `_HID "LNRO0005"` and
 //! a `_CRS` buffer of a `Memory32Fixed` descriptor (the registers) and an
@@ -48,12 +50,22 @@
 //! absolute path (`\`, `^` and multi-segment names included), each `Name`
 //! by its value's encoding, a `Method` skipped whole, each unit of a
 //! `Field`, `IndexField` or `BankField` taken as a name. Pass 1
-//! finds the path of every device given `Name (_HID, "LNRO0005")`; pass 2
+//! finds the path of every device given `Name (_HID, "<the id>")`; pass 2
 //! gathers every `_STA` and `_CRS` defined at those paths, wherever they
 //! are. Bytes inside a value, a method or another device are never read as
 //! a name. Until the reviews of #407 this was a search of one device's
 //! bytes, and each review found a way for it to read an absent device as
 //! present.
+//!
+//! **Two method bodies are read, each in one exact shape** ([`MethodShape`],
+//! since 2026-11-05, as the Pi's firmware writes them): a `_STA` that is
+//! only `Return (<constant>)`, which nothing can store to, so it counts as
+//! a constant `_STA`; and a `_CRS` that is only `CreateDWordField
+//! (^<buffer>, <offset>, <field>); Store (<constant>, <field>);
+//! Return (^<buffer>)`, where `<buffer>` is a `Name` in the same device. A
+//! third pass finds that buffer's definitions in every table; with exactly
+//! one, a Buffer kept whole, a copy is patched and read as a `_CRS` buffer
+//! is. Any other method body is skipped whole, as before.
 //!
 //! **What makes the scan uncertain, and what that costs.** Anything the
 //! walk cannot see through means the rest of that scope is unseen, and it
@@ -72,7 +84,7 @@
 //! Not taken, stated because the answer then is "no transport", which is
 //! the safe one: a `_HID` given as an EISA id, or a device naming `LNRO0005`
 //! only as its `_CID` (Parallels' balloon and NICs); a `_STA`, `_HID` or
-//! `_CRS` defined twice or by a method or an `Alias`; a `_CRS` with no
+//! `_CRS` defined twice, by an `Alias`, or by a method of any other shape; a `_CRS` with no
 //! `Memory32Fixed`, or only 64-bit or address-space descriptors; a `_HID`
 //! named at a path no `Device` defines. Each transport found is still
 //! checked by the kernel against the virtio-mmio magic value before it is
@@ -110,14 +122,14 @@ pub struct Transports {
     count: usize,
     /// Declared past [`MAX_TRANSPORTS`], so not kept.
     pub dropped: usize,
-    /// `LNRO0005` declarations this scan could not read as one device: a
+    /// Declarations of the `_HID` this scan could not read as one device: a
     /// path no `Device` defines, a second `_HID`, or no single `_CRS`
     /// buffer it can read. Never probed.
     pub unreadable: usize,
-    /// `LNRO0005` devices whose `Name (_STA, ...)` says not present or not
+    /// Devices whose constant `_STA` says not present or not
     /// enabled: not probed.
     pub absent: usize,
-    /// `LNRO0005` devices with a `_STA` this scan cannot evaluate (a
+    /// Devices with a `_STA` this scan cannot evaluate (a
     /// method, a value that is not a constant, two definitions), or with no
     /// `_STA` seen in a scan that was uncertain: not probed, since only an
     /// interpreter could say whether the device is there.
@@ -173,7 +185,7 @@ pub const MAX_TABLES: usize = 32;
 /// The deepest name path followed; a deeper one makes the scan uncertain.
 const MAX_DEPTH: usize = 8;
 
-/// The most `LNRO0005` devices tracked; past it they are counted as
+/// The most devices of one `_HID` tracked; past it they are counted as
 /// dropped.
 const MAX_CANDIDATES: usize = 2 * MAX_TRANSPORTS;
 
@@ -183,8 +195,24 @@ const MAX_CANDIDATES: usize = 2 * MAX_TRANSPORTS;
 /// table than the device, by a `Scope` of its path (the third review of
 /// #407).
 pub fn virtio_mmio(tables: &[&[u8]], into: &mut Transports) {
-    // Pass 1: the path of every Device with `Name (_HID, "LNRO0005")`.
-    let mut find = FindHids { paths: [Path::ROOT; MAX_CANDIDATES], count: 0, dropped: 0 };
+    declared(tables, VIRTIO_MMIO_HID, into);
+}
+
+/// The `_HID` the BCM2711's EMMC2 controller is declared by, the one the
+/// Raspberry Pi 4's SD card sits on (edk2-platforms `Emmc.asl`; Linux's
+/// `sdhci-iproc` matches it too).
+pub const EMMC2_HID: &[u8; 8] = b"BRCME88C";
+
+/// Adds to `into` the register block and interrupt of every device the
+/// tables declare present with `Name (_HID, "<hid>")`, by the same rules as
+/// [`virtio_mmio`]: the walk, `_STA` and `_CRS` as the module doc says,
+/// each a `Name` or one of the two method shapes it reads.
+pub fn declared(tables: &[&[u8]], hid: &[u8], into: &mut Transports) {
+    if hid.is_empty() {
+        return;
+    }
+    // Pass 1: the path of every Device with `Name (_HID, "<hid>")`.
+    let mut find = FindHids { hid, paths: [Path::ROOT; MAX_CANDIDATES], count: 0, dropped: 0 };
     let mut seen = Seen::default();
     for t in tables {
         walk_table(t, &mut find, &mut seen);
@@ -196,7 +224,19 @@ pub fn virtio_mmio(tables: &[&[u8]], into: &mut Transports) {
     for t in tables {
         walk_table(t, &mut gather, &mut seen);
     }
-    for f in &facts[..find.count] {
+    // Pass 3: the buffer each patching `_CRS` method names, in any table.
+    let mut targets = [None; MAX_CANDIDATES];
+    for (t, f) in targets.iter_mut().zip(&facts[..find.count]) {
+        *t = f.crs_patch.map(|(seg, _, _)| seg);
+    }
+    let mut bufs = [Buf::default(); MAX_CANDIDATES];
+    if targets.iter().any(Option::is_some) {
+        let mut pass3 = FindBufs { paths: &find.paths[..find.count], targets: &targets[..find.count], bufs: &mut bufs[..find.count] };
+        for t in tables {
+            walk_table(t, &mut pass3, &mut seen);
+        }
+    }
+    for (f, buf) in facts[..find.count].iter().zip(&bufs) {
         if !f.device || f.crs_bad || f.hids != 1 {
             into.unreadable += 1;
             continue;
@@ -211,7 +251,7 @@ pub fn virtio_mmio(tables: &[&[u8]], into: &mut Transports) {
             _ if seen.uncertain => into.status_unknown += 1,
             Sta::Unknown => into.status_unknown += 1,
             Sta::Value(_) if seen.sta_in_a_method => into.status_unknown += 1,
-            Sta::None | Sta::Value(_) => match f.crs {
+            Sta::None | Sta::Value(_) => match f.crs.or_else(|| f.crs_patch.and_then(|p| patched_crs(p, buf))) {
                 Some(t) => into.push(t),
                 None => into.unreadable += 1,
             },
@@ -327,6 +367,80 @@ trait Visit {
     /// A Method, an Alias or anything else that defines `path` with a
     /// value this scan cannot know.
     fn opaque(&mut self, _path: &Path) {}
+    /// A Method of one of the shapes [`method_shape`] reads exactly. By
+    /// default as unknowable as any other method.
+    fn method(&mut self, path: &Path, _shape: &MethodShape) {
+        self.opaque(path);
+    }
+}
+
+/// The two method bodies this scan reads, each in exactly one shape, as
+/// edk2-platforms writes them for the Raspberry Pi 4 (`Emmc.asl`, read off
+/// the board on 2026-11-05):
+///
+/// ```text
+/// 14 09 "_STA" 00 A4 0A 0F               Method (_STA) { Return (0x0F) }
+/// 14 22 "_CRS" 08                        Method (_CRS, 0, Serialized) {
+///   8A 5E "RBUF" 0A 04 "RBAS"              CreateDWordField (^RBUF, 4, RBAS)
+///   70 0C 0000 34FE "RBAS"                 Store (0xFE340000, RBAS)
+///   A4 5E "RBUF"                           Return (^RBUF) }
+/// ```
+///
+/// Anything else in either body, another statement, an argument, a
+/// different field op, leaves the method unknowable, as every other is.
+enum MethodShape {
+    /// `Return (<constant>)`.
+    Sta(u64),
+    /// A buffer at `buffer`, a DWord at byte `offset` of it set to `value`,
+    /// the buffer returned.
+    CrsPatch { buffer: Path, offset: u64, value: u32 },
+}
+
+/// The shape of the method at `path`, its MethodFlags byte at `flags`, its
+/// body ending at `end`; `None` unless it is exactly one of [`MethodShape`]'s.
+/// Names in the body resolve against the method's own path, as AML's do: a
+/// `^` names its device.
+fn method_shape(table: &[u8], path: &Path, flags: usize, end: usize) -> Option<MethodShape> {
+    // No arguments.
+    if *table.get(flags)? & 0x07 != 0 {
+        return None;
+    }
+    let code = flags + 1;
+    match path.split_last()?.1 {
+        [b'_', b'S', b'T', b'A'] => {
+            if *table.get(code)? != 0xa4 {
+                return None;
+            }
+            let (Data::Int(v), next) = data(table, code + 1)? else { return None };
+            (next == end).then_some(MethodShape::Sta(v))
+        }
+        [b'_', b'C', b'R', b'S'] => {
+            // CreateDWordField (SourceBuff, ByteIndex, NameString).
+            if *table.get(code)? != 0x8a {
+                return None;
+            }
+            let (buffer, l1) = name_string(table, code + 1, path)?;
+            let (Data::Int(offset), q) = data(table, code + 1 + l1)? else { return None };
+            let (field, l2) = name_string(table, q, path)?;
+            // Store (<constant>, <that field>).
+            let q = q + l2;
+            if *table.get(q)? != 0x70 {
+                return None;
+            }
+            let (Data::Int(value), q) = data(table, q + 1)? else { return None };
+            let (target, l3) = name_string(table, q, path)?;
+            // Return (<that buffer>), and nothing after it.
+            let q = q + l3;
+            if *table.get(q)? != 0xa4 {
+                return None;
+            }
+            let (returned, l4) = name_string(table, q + 1, path)?;
+            let value = u32::try_from(value).ok()?;
+            (target == field && returned == buffer && q + 1 + l4 == end)
+                .then_some(MethodShape::CrsPatch { buffer, offset, value })
+        }
+        _ => None,
+    }
 }
 
 /// The deepest nesting of scopes followed. A name given from the root
@@ -391,7 +505,10 @@ fn term_list<V: Visit>(table: &[u8], mut p: usize, end: usize, scope: &Path, dep
             (0x14, _) => pkg(p + 1).map(|(pkg_end, body)| {
                 match name_string(table, body, scope) {
                     Some((path, len)) => {
-                        v.opaque(&path);
+                        match method_shape(table, &path, body + len, pkg_end) {
+                            Some(shape) => v.method(&path, &shape),
+                            None => v.opaque(&path),
+                        }
                         // The body, after the name and the MethodFlags byte.
                         let code = table.get(body + len + 1..pkg_end).unwrap_or(&[]);
                         if code.windows(4).any(|w| w == b"_STA") {
@@ -518,19 +635,20 @@ fn field_units<V: Visit>(table: &[u8], mut q: usize, end: usize, scope: &Path, v
     q == end
 }
 
-/// Pass 1: every device path given `_HID "LNRO0005"`.
-struct FindHids {
+/// Pass 1: every device path given `Name (_HID, "<hid>")`.
+struct FindHids<'a> {
+    hid: &'a [u8],
     paths: [Path; MAX_CANDIDATES],
     count: usize,
     dropped: usize,
 }
 
-impl Visit for FindHids {
+impl Visit for FindHids<'_> {
     fn name(&mut self, table: &[u8], path: &Path, value: &Data) {
         let (Some((parent, b"_HID")), Data::Str(a, b)) = (path.split_last().as_ref().map(|(p, s)| (*p, s)), value) else {
             return;
         };
-        if &table[*a..*b] != VIRTIO_MMIO_HID || self.paths[..self.count].contains(&parent) {
+        if &table[*a..*b] != self.hid || self.paths[..self.count].contains(&parent) {
             return;
         }
         if self.count < MAX_CANDIDATES {
@@ -552,6 +670,26 @@ enum Sta {
     Unknown,
 }
 
+/// The longest named buffer kept for a `_CRS` method to patch: the Pi's
+/// is 23 bytes (a `Memory32Fixed`, an Extended Interrupt, the end tag).
+const MAX_BUFFER: usize = 32;
+
+/// The one buffer a patching `_CRS` method names, as pass 3 finds it: how
+/// many things define its path, and its bytes when the one definition is a
+/// `Name` of a Buffer no longer than [`MAX_BUFFER`].
+#[derive(Clone, Copy)]
+struct Buf {
+    defs: u8,
+    len: usize,
+    bytes: [u8; MAX_BUFFER],
+}
+
+impl Default for Buf {
+    fn default() -> Self {
+        Buf { defs: 0, len: 0, bytes: [0; MAX_BUFFER] }
+    }
+}
+
 /// Everything pass 2 found defined at one device path.
 #[derive(Clone, Copy, Default)]
 struct Facts {
@@ -561,6 +699,69 @@ struct Facts {
     crs: Option<Transport>,
     /// A `_CRS` this scan cannot read, or two of them.
     crs_bad: bool,
+    /// A `_CRS` method of the patching shape: the buffer's segment (in the
+    /// device), the byte offset and the value.
+    crs_patch: Option<([u8; 4], usize, u32)>,
+}
+
+/// The `_CRS` a patching method returns: its buffer, copied, the DWord at
+/// its offset set, read as any `_CRS` buffer is. `None` when the buffer is
+/// defined other than once by a `Name` kept whole, or the DWord does not
+/// fit inside it.
+fn patched_crs(patch: ([u8; 4], usize, u32), buf: &Buf) -> Option<Transport> {
+    let (_, offset, value) = patch;
+    if buf.defs != 1 || buf.len == 0 || offset.checked_add(4)? > buf.len {
+        return None;
+    }
+    let mut bytes = buf.bytes;
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    resource_bytes(&bytes[..buf.len])
+}
+
+/// Pass 3: for each device whose `_CRS` is a patching method, every
+/// definition of the buffer it names, in any table.
+struct FindBufs<'a> {
+    paths: &'a [Path],
+    targets: &'a [Option<[u8; 4]>],
+    bufs: &'a mut [Buf],
+}
+
+impl FindBufs<'_> {
+    fn at(&mut self, path: &Path) -> Option<&mut Buf> {
+        let (parent, seg) = path.split_last()?;
+        let i = self.paths.iter().zip(self.targets).position(|(p, t)| *p == parent && *t == Some(seg))?;
+        Some(&mut self.bufs[i])
+    }
+}
+
+impl Visit for FindBufs<'_> {
+    fn device(&mut self, path: &Path) {
+        if let Some(b) = self.at(path) {
+            b.defs = b.defs.saturating_add(1);
+        }
+    }
+
+    fn name(&mut self, table: &[u8], path: &Path, value: &Data) {
+        let Some(b) = self.at(path) else { return };
+        b.defs = b.defs.saturating_add(1);
+        let bytes = match value {
+            Data::Buffer(at) => buffer_bytes(table, *at),
+            _ => None,
+        };
+        match bytes {
+            Some(bytes) if bytes.len() <= MAX_BUFFER => {
+                b.bytes[..bytes.len()].copy_from_slice(bytes);
+                b.len = bytes.len();
+            }
+            _ => b.len = 0,
+        }
+    }
+
+    fn opaque(&mut self, path: &Path) {
+        if let Some(b) = self.at(path) {
+            b.defs = b.defs.saturating_add(1);
+        }
+    }
 }
 
 /// Pass 2: the facts at each path pass 1 found.
@@ -594,8 +795,8 @@ impl Visit for Gather<'_> {
                     _ => Sta::Unknown,
                 }
             }
-            b"_CRS" => match (f.crs.is_some() || f.crs_bad, value) {
-                (false, Data::Buffer(at)) => match resources(table, at + 1, table.len()) {
+            b"_CRS" => match (f.crs.is_some() || f.crs_bad || f.crs_patch.is_some(), value) {
+                (false, Data::Buffer(at)) => match buffer_bytes(table, *at).and_then(resource_bytes) {
                     Some(t) => f.crs = Some(t),
                     None => f.crs_bad = true,
                 },
@@ -605,6 +806,32 @@ impl Visit for Gather<'_> {
                 }
             },
             _ => {}
+        }
+    }
+
+    fn method(&mut self, path: &Path, shape: &MethodShape) {
+        let Some((f, seg)) = self.at(path) else { return };
+        match (&seg, shape) {
+            (b"_STA", MethodShape::Sta(v)) => {
+                f.sta = match f.sta {
+                    Sta::None => Sta::Value(*v),
+                    _ => Sta::Unknown,
+                }
+            }
+            (b"_CRS", MethodShape::CrsPatch { buffer, offset, value }) => {
+                // The buffer must be the device's own, beside the method.
+                let device = path.split_last().map(|(d, _)| d);
+                let own = buffer.split_last().filter(|(d, _)| Some(*d) == device).map(|(_, s)| s);
+                match (f.crs.is_some() || f.crs_bad || f.crs_patch.is_some(), own, usize::try_from(*offset)) {
+                    (false, Some(s), Ok(offset)) => f.crs_patch = Some((s, offset, *value)),
+                    _ => {
+                        f.crs = None;
+                        f.crs_patch = None;
+                        f.crs_bad = true;
+                    }
+                }
+            }
+            _ => self.opaque(path),
         }
     }
 
@@ -637,19 +864,25 @@ fn pkg_length(table: &[u8], at: usize) -> Option<(usize, usize)> {
     Some((value, 1 + follow))
 }
 
-/// The transport a `_CRS` buffer describes, the buffer's PkgLength at
-/// `at`, ending by `end`: its `Memory32Fixed` and the first INTID of its
-/// Extended Interrupt. `None` when it has no `Memory32Fixed`, or when a
-/// length points past the buffer.
-fn resources(table: &[u8], at: usize, end: usize) -> Option<Transport> {
-    let (pkg, pkg_bytes) = pkg_length(table, at)?;
-    let buf_end = at.checked_add(pkg)?.min(end);
-    let mut p = at + pkg_bytes;
+/// The bytes of the Buffer whose BufferOp is at `at`: its BufferSize, cut
+/// at its PkgLength and at the table's end. `None` for a length this scan
+/// cannot read.
+fn buffer_bytes(table: &[u8], at: usize) -> Option<&[u8]> {
+    let (pkg, pkg_bytes) = pkg_length(table, at + 1)?;
+    let buf_end = (at + 1).checked_add(pkg)?.min(table.len());
     // BufferSize: an integer, by the one decoder `Name` values use.
-    let (Data::Int(size), after) = data(table, p)? else { return None };
-    p = after;
+    let (Data::Int(size), p) = data(table, at + 1 + pkg_bytes)? else { return None };
     let size = usize::try_from(size).ok()?;
     let data_end = p.checked_add(size)?.min(buf_end);
+    table.get(p..data_end)
+}
+
+/// The transport a `_CRS` buffer's bytes describe: its `Memory32Fixed` and
+/// the first INTID of its Extended Interrupt. `None` when it has no
+/// `Memory32Fixed`, or when a length points past the buffer.
+fn resource_bytes(table: &[u8]) -> Option<Transport> {
+    let mut p = 0;
+    let data_end = table.len();
     let mut memory = None;
     let mut intid = None;
     while p < data_end {

@@ -407,8 +407,8 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
                      the firmware's own code before the exit, and \WALKFAULT one inside the reporter's own image walk, both for
                      test-early-fault.py
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
-  src/sdscan.rs      what the firmware says of the SD card's controller (SD-card arc step 0): devicetree, ACPI _HID, SdIsArasan; read only;
-                     \SDDUMP prints the declaring ACPI tables in hex
+  src/sdscan.rs      what the firmware says of the SD card's controller (SD-card arc steps 0, 0b): devicetree, ACPI _HID, SdIsArasan,
+                     and the declared EMMC2's registers, read only; \SDDUMP prints the declaring ACPI tables in hex
   src/bootdisk.rs    the boot partition: the HardDrive node of the image's own device path, read before the exit (one-disk step 1),
                      and is_boot_disk, which makes the disk booted from the block device (step 3); the matcher itself is parttable's
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
@@ -461,8 +461,9 @@ regex/               a small POSIX-ERE engine behind grep. An explicit backtrack
 parttable/           partition tables, read: the MBR and GPT parsing (both CRCs, the backup header, checked bounds), the partition list
                      with root types, and the boot-disk matcher, through a read-sector closure; the ONE copy, which the kernel's
                      bootdisk.rs and fsd's partition.rs both call, host-tested in make test
-amlscan/             the virtio-mmio transports an ACPI table declares (_HID "LNRO0005", its _CRS registers and interrupt), by a
-                     bounded byte scan of the AML; the kernel probes no other virtio-mmio address. Host-tested in make test
+amlscan/             the devices an ACPI table declares present by _HID (virtio-mmio's "LNRO0005", the Pi's EMMC2 "BRCME88C"), their _CRS
+                     registers and interrupt, by a bounded walk of the AML that reads two method shapes exactly; the kernel probes no
+                     other virtio-mmio address. Host-tested in make test, on the Pi's own tables too
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses
                      (the shell's line editor, login, ulib::read_line and read_key), so two readers never disagree on what was typed;
                      the kernel uses it too, to keep keys whole in its keyboard queue

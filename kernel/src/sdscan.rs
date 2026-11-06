@@ -17,6 +17,13 @@
 //!   `amlscan` does not evaluate. With the boot flag `\SDDUMP`, each table
 //!   holding one is printed in hex, so that `_CRS` can be read and the
 //!   driver's parser written and host-tested against the real bytes.
+//! - **The controller itself (step 0b):** when the tables declare exactly
+//!   one EMMC2 present (`acpi::emmc2_controllers`, its `_STA` and `_CRS`
+//!   read from their methods), six of its registers are read and logged,
+//!   still before the exit and on the firmware's mapping, which its own
+//!   card driver uses: present state, host control, clock control, the two
+//!   capability words and the host version. Read only, and none whose read
+//!   changes anything: not the buffer data port, not the interrupt status.
 //! - **The firmware's routing setting**, the UEFI variable `SdIsArasan`
 //!   (edk2-platforms `ConfigDxe`): 0 routes the card's pins to EMMC2, 1 to
 //!   Arasan. Found by name among the variables, so its vendor GUID is read
@@ -44,6 +51,7 @@ const ROUTING_VAR: &CStr16 = cstr16!("SdIsArasan");
 pub unsafe fn report(dtb: Option<*const u8>, rsdp: Option<*const u8>, flags: &bootflags::Flags) {
     unsafe { report_devicetree(dtb) };
     unsafe { report_acpi(rsdp, flags.sd_dump) };
+    unsafe { report_controller(rsdp) };
     report_routing();
 }
 
@@ -156,6 +164,65 @@ fn dump_table(signature: &str, oem_table: &str, table: &[u8]) {
         out_line(format_args!("SDDUMP {:05x} {hex}", line * 16));
     }
     out_line(format_args!("SDDUMP {signature} {oem_table} end"));
+}
+
+unsafe fn report_controller(rsdp: Option<*const u8>) {
+    let found = match unsafe { acpi::emmc2_controllers(rsdp) } {
+        Ok(found) => found,
+        Err(e) => {
+            log::info!("Ouroboros kernel: sd: EMMC2 declarations not read ({e:?})");
+            return;
+        }
+    };
+    log::info!(
+        "Ouroboros kernel: sd: EMMC2 declared present: {} (unreadable {}, absent {}, status unknown {})",
+        found.as_slice().len(),
+        found.unreadable,
+        found.absent,
+        found.status_unknown
+    );
+    let [c] = found.as_slice() else { return };
+    log::info!(
+        "Ouroboros kernel: sd: EMMC2 registers {:#x}, {:#x} bytes, INTID {:?}",
+        c.base,
+        c.size,
+        c.intid
+    );
+    // The SDHCI registers read, all within the 0x100 the spec defines.
+    const READ: [(usize, &str); 6] = [
+        (0x24, "present state"),
+        (0x28, "host control"),
+        (0x2c, "clock control"),
+        (0x40, "capabilities"),
+        (0x44, "capabilities 1"),
+        (0xfc, "host version"),
+    ];
+    if c.size < 0x100 {
+        log::info!("Ouroboros kernel: sd: EMMC2's block is shorter than SDHCI's 0x100 bytes: not read");
+        return;
+    }
+    let mut v = [0u32; READ.len()];
+    for (slot, (off, _)) in v.iter_mut().zip(READ) {
+        // SAFETY: inside the register block the firmware declares present
+        // (`_STA` 0x0F), on the firmware's own mapping, which its card driver
+        // has just used to read this kernel; 32-bit and aligned, as the
+        // BCM2711's SDHCI requires; none of these reads has a side effect.
+        *slot = unsafe { core::ptr::read_volatile((c.base as usize + off) as *const u32) };
+    }
+    for ((off, what), val) in READ.iter().zip(v) {
+        log::info!("Ouroboros kernel: sd: EMMC2 +{off:#04x} {what}: {val:#010x}");
+    }
+    let (present, clock, caps, version) = (v[0], v[2], v[3], v[5]);
+    log::info!(
+        "Ouroboros kernel: sd: EMMC2 spec version {} (vendor {:#x}), base clock {} MHz, 3.3V {}, 1.8V {}, card inserted {}, SD clock on {}",
+        (version >> 16) & 0xff,
+        version >> 24,
+        (caps >> 8) & 0xff,
+        caps & (1 << 24) != 0,
+        caps & (1 << 26) != 0,
+        present & (1 << 16) != 0,
+        clock & (1 << 2) != 0
+    );
 }
 
 fn report_routing() {

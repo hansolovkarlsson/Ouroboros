@@ -351,12 +351,14 @@ fn a_childs_status_is_never_the_declaring_devices() {
 #[test]
 fn an_eight_byte_status_method_is_not_a_name() {
     // `Method (_STA) { Return (One) }`: 14 08 _STA 00 A4 01, whose
-    // PkgLength byte is 0x08, NameOp's value.
+    // PkgLength byte is 0x08, NameOp's value. Read as the method it is, a
+    // constant `_STA` since 2026-11-05 (`MethodShape::Sta`): One is present
+    // but not enabled, so absent, not a Name and not a transport.
     let method = [0x14, 0x08, b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x01];
     let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &method, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
     let found = scan(&table(&[&d]));
     assert!(found.is_empty());
-    assert_eq!((found.status_unknown, found.absent), (1, 0));
+    assert_eq!((found.status_unknown, found.absent), (0, 1));
     // The same with a two-byte PkgLength ending in 0x08.
     let method = [0x14, 0x48, 0x08, b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x01];
     let d = device(b"VR00", &[hid(b"LNRO0005").as_slice(), &method, crs(&mem32(0x0a00_0000, 0x200)).as_slice()].concat());
@@ -739,7 +741,7 @@ fn a_value_running_past_its_scope_is_never_recorded() {
     d[2] -= 6;
     let t = table(&[&d, &[0xa3; 6]]);
     let mut seen = Seen::default();
-    let mut find = FindHids { paths: [Path::ROOT; MAX_CANDIDATES], count: 0, dropped: 0 };
+    let mut find = FindHids { hid: VIRTIO_MMIO_HID, paths: [Path::ROOT; MAX_CANDIDATES], count: 0, dropped: 0 };
     walk_table(&t, &mut find, &mut seen);
     assert_eq!(find.count, 1);
     let mut facts = [Facts::default(); MAX_CANDIDATES];
@@ -779,4 +781,180 @@ fn hid_string_is_only_a_hid() {
     cid[4] = b'I';
     let t = table(&[&device(b"SDC3", &cid), b"\x0dBRCME88C\x00"]);
     assert_eq!(hid_string_at(&t, b"BRCME88C"), None);
+}
+
+/// The Raspberry Pi 4's own tables, dumped off the board by the kernel's
+/// `\SDDUMP` on 2026-11-05 (pftf v1.53, `docs/roadmap/roadmap-sd-card.md`
+/// step 0), each with its ACPI checksum whole: the SSDT `RPI4EMMC` that
+/// declares EMMC2, and the DSDT beside it.
+const PI4_SSDT_EMMC: &[u8] = include_bytes!("../testdata/pi4-ssdt-rpi4emmc.aml");
+const PI4_DSDT: &[u8] = include_bytes!("../testdata/pi4-dsdt.aml");
+
+fn emmc2(tables: &[&[u8]]) -> Transports {
+    let mut found = Transports::new();
+    declared(tables, EMMC2_HID, &mut found);
+    found
+}
+
+const PI4_EMMC2: Transport = Transport { base: 0xfe34_0000, size: 0x100, intid: Some(158) };
+
+#[test]
+fn the_pi4_tables_are_the_ones_dumped() {
+    for t in [PI4_SSDT_EMMC, PI4_DSDT] {
+        assert_eq!(u32::from_le_bytes(t[4..8].try_into().unwrap()) as usize, t.len());
+        assert_eq!(t.iter().fold(0u8, |a, &b| a.wrapping_add(b)), 0, "checksum");
+    }
+}
+
+#[test]
+fn the_pi4s_emmc2_is_read_from_its_methods() {
+    // `Method (_STA) { Return (0x0F) }`, and a `_CRS` method storing
+    // 0xFE340000 into `RBUF` at byte 4 (`MethodShape`).
+    let found = emmc2(&[PI4_SSDT_EMMC]);
+    assert_eq!(found.as_slice(), &[PI4_EMMC2]);
+    assert_eq!((found.unreadable, found.absent, found.status_unknown), (0, 0, 0));
+}
+
+#[test]
+fn the_pi4s_emmc2_is_read_beside_its_dsdt() {
+    // As the kernel scans them, every table at once: nothing in the DSDT
+    // makes the walk uncertain or names `_STA` inside a method.
+    let found = emmc2(&[PI4_DSDT, PI4_SSDT_EMMC]);
+    assert_eq!(found.as_slice(), &[PI4_EMMC2]);
+    let mut virtio = Transports::new();
+    virtio_mmio(&[PI4_DSDT, PI4_SSDT_EMMC], &mut virtio);
+    assert!(virtio.is_empty(), "the Pi declares no virtio-mmio");
+}
+
+/// The SSDT with `from` replaced by `to` once, at the only place `from`
+/// occurs inside `SDC3` (the container `GDV1` before it has a `_CRS` of the
+/// same shape), its length kept (the walk does not read the checksum).
+fn pi4_ssdt_with(from: &[u8], to: &[u8]) -> Vec<u8> {
+    assert_eq!(from.len(), to.len());
+    let sdc3 = hid_string_at(PI4_SSDT_EMMC, EMMC2_HID).unwrap();
+    let at: Vec<usize> = (sdc3..PI4_SSDT_EMMC.len() - from.len()).filter(|&i| &PI4_SSDT_EMMC[i..i + from.len()] == from).collect();
+    assert_eq!(at.len(), 1, "the bytes to replace occur once");
+    let mut t = PI4_SSDT_EMMC.to_vec();
+    t[at[0]..at[0] + to.len()].copy_from_slice(to);
+    t
+}
+
+#[test]
+fn a_status_method_returning_zero_is_absent() {
+    let t = pi4_ssdt_with(&[b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x0a, 0x0f], &[b'_', b'S', b'T', b'A', 0x00, 0xa4, 0x0a, 0x00]);
+    let found = emmc2(&[&t]);
+    assert!(found.is_empty());
+    assert_eq!(found.absent, 1);
+}
+
+#[test]
+fn a_status_method_with_an_argument_is_unknown() {
+    let t = pi4_ssdt_with(&[b'_', b'S', b'T', b'A', 0x00, 0xa4], &[b'_', b'S', b'T', b'A', 0x01, 0xa4]);
+    let found = emmc2(&[&t]);
+    assert!(found.is_empty());
+    assert_eq!(found.status_unknown, 1);
+}
+
+#[test]
+fn the_patch_lands_at_its_own_offset() {
+    // CreateDWordField (^RBUF, 8, RBAS): the base is stored over the
+    // length, so the registers read are not EMMC2's.
+    let crs_create = [0x8a, 0x5e, b'R', b'B', b'U', b'F', 0x0a, 0x04, b'R', b'B', b'A', b'S', 0x70];
+    let mut moved = crs_create;
+    moved[7] = 0x08;
+    let found = emmc2(&[&pi4_ssdt_with(&crs_create, &moved)]);
+    assert_ne!(found.as_slice(), &[PI4_EMMC2]);
+    // At 0x15, the DWord would end past the 23-byte buffer.
+    let mut past = crs_create;
+    past[7] = 0x15;
+    let found = emmc2(&[&pi4_ssdt_with(&crs_create, &past)]);
+    assert!(found.is_empty());
+    assert_eq!(found.unreadable, 1);
+}
+
+#[test]
+fn a_crs_method_with_another_statement_is_unreadable() {
+    // The Return replaced by a second Store of the same length: not the
+    // shape, so nothing is taken from it.
+    let ret = [0xa4, 0x5e, b'R', b'B', b'U', b'F', 0x08, b'D', b'S', b'D', b'1'];
+    let store = [0x70, 0x00, b'R', b'B', b'A', b'S', 0x08, b'D', b'S', b'D', b'1'];
+    let found = emmc2(&[&pi4_ssdt_with(&ret, &store)]);
+    assert!(found.is_empty());
+    assert_eq!(found.unreadable, 1);
+}
+
+#[test]
+fn a_crs_method_storing_into_another_field_is_unreadable() {
+    let store = [0x70, 0x0c, 0x00, 0x00, 0x34, 0xfe, b'R', b'B', b'A', b'S'];
+    let other = [0x70, 0x0c, 0x00, 0x00, 0x34, 0xfe, b'R', b'B', b'A', b'T'];
+    let found = emmc2(&[&pi4_ssdt_with(&store, &other)]);
+    assert!(found.is_empty());
+    assert_eq!(found.unreadable, 1);
+}
+
+#[test]
+fn a_crs_method_returning_another_buffer_is_unreadable() {
+    let ret = [0xa4, 0x5e, b'R', b'B', b'U', b'F', 0x08, b'D', b'S', b'D', b'1'];
+    let other = [0xa4, 0x5e, b'R', b'B', b'U', b'G', 0x08, b'D', b'S', b'D', b'1'];
+    let found = emmc2(&[&pi4_ssdt_with(&ret, &other)]);
+    assert!(found.is_empty());
+    assert_eq!(found.unreadable, 1);
+}
+
+#[test]
+fn the_buffer_redefined_elsewhere_is_unreadable() {
+    // A second `RBUF` in the device (an Alias would do the same): which one
+    // the method patches is not knowable here.
+    let dup = [0x08, b'R', b'B', b'U', b'F', 0x11, 0x03, 0x0a, 0x00, 0xa3];
+    let mut t = PI4_SSDT_EMMC.to_vec();
+    // Into SDC3's body, right after its _HID, its PkgLength grown to match.
+    let hid_end = hid_string_at(&t, EMMC2_HID).unwrap() + 15;
+    t.splice(hid_end..hid_end, dup[..9].iter().copied());
+    let dev = (0..t.len()).find(|&i| t[i..].starts_with(&[0x5b, 0x82]) && &t[i + 4..i + 8] == b"SDC3").unwrap();
+    let (len, bytes) = pkg_length(&t, dev + 2).unwrap();
+    assert_eq!(bytes, 2);
+    let len = len + 9;
+    t[dev + 2] = 0x40 | (len & 0x0f) as u8;
+    t[dev + 3] = (len >> 4) as u8;
+    // The enclosing GDV1 and \_SB scopes grow too.
+    for name in [&b"GDV1"[..], &b"\\_SB_"[..]] {
+        let at = (0..t.len()).find(|&i| t[i..].starts_with(name)).unwrap();
+        // Both PkgLengths are two bytes, right before the name.
+        let pkg_at = at - 2;
+        let (l, b) = pkg_length(&t, pkg_at).unwrap();
+        assert_eq!(b, 2);
+        let l = l + 9;
+        t[pkg_at] = 0x40 | (l & 0x0f) as u8;
+        t[pkg_at + 1] = (l >> 4) as u8;
+    }
+    let total = t.len() as u32;
+    t[4..8].copy_from_slice(&total.to_le_bytes());
+    let found = emmc2(&[&t]);
+    assert!(found.is_empty(), "{:?}", found.as_slice());
+    assert_eq!(found.unreadable, 1);
+}
+
+
+/// A device `SDC3` of `_HID "BRCME88C"` with `Name (RBUF, ...)` over the
+/// Pi's resources and a `_CRS` method of the patching shape, `extra` after
+/// its Return.
+fn patching_device(extra: &[u8]) -> Vec<u8> {
+    let rbuf_data = [0x86, 0x09, 0x00, 0x01, 0, 0, 0, 0, 0x00, 0x01, 0x00, 0x00, 0x89, 0x06, 0x00, 0x09, 0x01, 0x9e, 0, 0, 0, 0x79, 0x00];
+    let mut rbuf = std::vec![0x08, b'R', b'B', b'U', b'F', 0x11, (3 + rbuf_data.len()) as u8, 0x0a, rbuf_data.len() as u8];
+    rbuf.extend_from_slice(&rbuf_data);
+    let mut code = std::vec![0x08, 0x8a, 0x5e, b'R', b'B', b'U', b'F', 0x0a, 0x04, b'R', b'B', b'A', b'S'];
+    code.extend_from_slice(&[0x70, 0x0c, 0x00, 0x00, 0x34, 0xfe, b'R', b'B', b'A', b'S', 0xa4, 0x5e, b'R', b'B', b'U', b'F']);
+    code.extend_from_slice(extra);
+    let mut method = std::vec![0x14, (1 + 4 + code.len()) as u8, b'_', b'C', b'R', b'S'];
+    method.extend_from_slice(&code);
+    device(b"SDC3", &[hid(b"BRCME88C").as_slice(), &rbuf, &method].concat())
+}
+
+#[test]
+fn a_patching_crs_method_is_read_exactly() {
+    assert_eq!(emmc2(&[&table(&[&patching_device(&[])])]).as_slice(), &[PI4_EMMC2]);
+    // A Noop after the Return: not the shape.
+    let found = emmc2(&[&table(&[&patching_device(&[0xa3])])]);
+    assert!(found.is_empty());
+    assert_eq!(found.unreadable, 1);
 }
