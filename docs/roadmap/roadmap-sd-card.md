@@ -304,6 +304,19 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    card: 34 checks, and the superblock read a sector off and the card
    installed over the other disk each fail. The ACPI path itself only the
    board runs.
+   **Read on the Pi 2026-11-06** (build `385f6d9d`, the card as `make
+   sdcard` stages it and the stick, first try): `sd: ACPI declares EMMC2 @
+   0xfe340000` before the exit; after it, SDHCI 3.00 with a 100 MHz base, a
+   high-capacity card, RCA `0x0001`, 244,277,248 sectors (119 GiB),
+   identified at 400 kHz (the 10-bit divider at 125), then 4-bit at 25 MHz,
+   so the power sequence, the waits between register writes, ACMD6 and its
+   card status held on the board; sector 0 read (`0x55aa`), the card named
+   the boot disk with its boot partition at LBA 32768 as the firmware's
+   device path says, partition 1's FAT32 boot sector read at 4-bit, the
+   whole card protected (its one partition runs to its last sector), not
+   installed; the stick's ext2 root mounted, four cores, a login, no
+   fault. Step 3 is done but for the ext2 superblock, which a card staged
+   by `make bootstick PI=1` gives in step 4.
 4. **The Pi, the card alone.** The card as the block device by the boot
    rule, no stick. Check: this plan's Done when, both halves.
 5. **The records.** `testing-pi4.md`'s storage surprise rewritten,
