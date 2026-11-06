@@ -27,6 +27,7 @@ mod madt;
 mod mmu;
 mod pci;
 mod power;
+mod sdhci;
 mod sdscan;
 mod smp;
 mod supervisor;
@@ -584,6 +585,27 @@ extern "C" fn kernel_main() -> ! {
         }
     };
 
+    // An SD Host Controller on PCI (QEMU's `sdhci-pci`; the SD-card arc's
+    // step 1): found and taken from firmware here, before the exit, after
+    // every read of the ESP, as the xHCI is. Its card is brought up after
+    // the exit, and installed only when no other disk was (`init_sd`).
+    let sdhci_info = match pci::discover_sdhci() {
+        Ok(info) => {
+            log::info!(
+                "Ouroboros kernel: sd: SD host controller on PCI @ {:#x}, command register {:#06x} -> {:#06x}",
+                info.base,
+                info.command_before,
+                info.command_after
+            );
+            Some(info)
+        }
+        Err(pci::SdhciDiscoveryError::NotFound) => None,
+        Err(e) => {
+            log::warn!("Ouroboros kernel: sd: {e}");
+            None
+        }
+    };
+
     // What the firmware says of the SD card's controller (sdscan.rs, step 0
     // of docs/roadmap/roadmap-sd-card.md): read only, no register touched.
     // After the xHCI step so its lines stay next to that step's.
@@ -705,6 +727,15 @@ extern "C" fn kernel_main() -> ! {
         };
         extra_devices[extra_device_count] = (secondary_base, secondary_size);
         extra_device_count += 1;
+    }
+    // The SD host controller, when there is room: QEMU's PCI window is in
+    // the low 1GB device block, mapped whatever this says, and `init_sd`
+    // asks the walker before the first access in any case.
+    if let Some(info) = sdhci_info {
+        if extra_device_count < mmu::MAX_EXTRA_DEVICES {
+            extra_devices[extra_device_count] = (info.base, 0x1000);
+            extra_device_count += 1;
+        }
     }
     // The boot EL0 regions, one per task slot (auto-sized to NUM_TASKS so
     // raising the slot count needs no edit here): slot 0 the loaded program,
@@ -901,6 +932,12 @@ extern "C" fn kernel_main() -> ! {
     // enumeration diagnostics), so this boot-time attempt mostly serves
     // QEMU; the shell's `mount` command covers the late-attach case.
     install_boot_disk(held_virtio);
+
+    // Third disk path, the SD-card arc's step 1: an SD card on a controller
+    // found before the exit, installed only when no other disk went in, so
+    // no configuration that boots today changes. Which wins when the card is
+    // the boot disk is step 3's question, on the Pi.
+    init_sd(sdhci_info);
 
     // GIC/timer setup - gated on `gic_info` being `Some` (real MADT
     // discovery, `madt.rs`), not the console-discovery heuristic this used to
@@ -1242,6 +1279,42 @@ fn init_storage(declared: &virtio_mmio::Transports) -> Option<Held> {
         );
     }
     None
+}
+
+/// Brings up the SD card on the controller [`pci::discover_sdhci`] found, and
+/// installs it for the filesystem server when no disk was installed before
+/// it (`install_boot_disk`); read-only until the SD-card arc's step 2.
+/// Silent when there is no controller, which is every platform but a QEMU
+/// run that attaches one.
+fn init_sd(info: Option<pci::SdhciInfo>) {
+    let Some(info) = info else { return };
+    if syscall::block_device_installed() {
+        console::println!("Ouroboros kernel: sd: the card is not brought up: another disk is installed");
+        return;
+    }
+    if !mmu::walks_as_device(info.base) {
+        console::println!("Ouroboros kernel: sd: {:#x} is not mapped as a device: the card is not brought up", info.base);
+        return;
+    }
+    // SAFETY: a discovered SDHCI register block, mapped as device memory
+    // (just checked), and nothing else drives it.
+    let mut device = unsafe { sdhci::Device::new(info.base) };
+    if let Err(e) = unsafe { device.init() } {
+        console::println!("Ouroboros kernel: sd: the card did not come up ({e})");
+        return;
+    }
+    let mut sector = [0u8; 512];
+    // SAFETY: the card is up, and not yet installed.
+    if let Err(e) = unsafe { device.read_sector(0, &mut sector) } {
+        console::println!("Ouroboros kernel: sd: sector 0 did not read ({e})");
+        return;
+    }
+    syscall::install_block_device(block::BlockDevice::Sdhci(device));
+    console::println!(
+        "Ouroboros kernel: sd: block device installed for the filesystem server, read-only (sector 0 signature {:#04x}{:02x})",
+        sector[510],
+        sector[511]
+    );
 }
 
 /// A virtio disk [`init_storage`] held back rather than installed: not the

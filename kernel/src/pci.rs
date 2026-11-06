@@ -440,6 +440,110 @@ fn take_xhci(
     })
 }
 
+/// An SD Host Controller found on PCI and taken from firmware
+/// ([`discover_sdhci`]): where its registers decode, and its command
+/// register before and after Memory Space was turned on.
+#[derive(Debug, Clone, Copy)]
+pub struct SdhciInfo {
+    /// The CPU address `sdhci.rs` reads, firmware's host address for BAR0.
+    pub base: u64,
+    pub command_before: u16,
+    pub command_after: u16,
+}
+
+/// Why [`discover_sdhci`] found no controller to hand over.
+#[derive(Debug, Clone, Copy)]
+pub enum SdhciDiscoveryError {
+    NoRootBridge,
+    /// No class 0x08 subclass 0x05 prog-if 0x01 device on any root bridge:
+    /// the expected answer everywhere but a QEMU run that attaches one.
+    NotFound,
+    /// Found one whose BAR0 firmware never assigned.
+    Unassigned,
+    /// Found one whose BAR0 could not be read or resolved.
+    Bar(DiscoveryError),
+}
+
+impl core::fmt::Display for SdhciDiscoveryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SdhciDiscoveryError::NoRootBridge => write!(f, "no PCI root bridge found"),
+            SdhciDiscoveryError::NotFound => write!(f, "no SD host controller on any PCI root bridge"),
+            SdhciDiscoveryError::Unassigned => write!(f, "the SD host controller's BAR0 was never assigned"),
+            SdhciDiscoveryError::Bar(e) => write!(f, "the SD host controller's BAR0: {e:?}"),
+        }
+    }
+}
+
+const PCI_CLASS_BASE_SYSTEM_PERIPHERAL: u8 = 0x08;
+const PCI_SUBCLASS_SD_HOST: u8 = 0x05;
+/// The standard SDHCI register interface, without DMA vendor variants.
+const PCI_PROG_IF_SDHCI_STANDARD: u8 = 0x01;
+
+/// Finds the first standard SD Host Controller on PCI (class 0x08, subclass
+/// 0x05, prog-if 0x01), takes it from firmware and turns on Memory Space,
+/// the SD-card arc's step 1 (`docs/roadmap/roadmap-sd-card.md`). The same
+/// discipline as [`discover_xhci`], whose doc says why each step is there:
+/// the address resolved through a read-only open first, the controller
+/// taken by an exclusive open of its own `PciIo`, and one dword write of
+/// the command register only when the bit is not already set. Bus Master
+/// stays as firmware left it: `sdhci.rs` moves data by PIO, so the
+/// controller is never given DMA. Before `exit_boot_services`.
+pub fn discover_sdhci() -> Result<SdhciInfo, SdhciDiscoveryError> {
+    let handles =
+        uefi::boot::find_handles::<PciRootBridgeIo>().map_err(|_| SdhciDiscoveryError::NoRootBridge)?;
+    for handle in handles {
+        let Some(mut root_bridge) = open_root_bridge(handle) else {
+            continue;
+        };
+        let Ok(tree) = root_bridge.enumerate() else {
+            continue;
+        };
+        for addr in tree.iter() {
+            let Ok(class_reg) = root_bridge.pci().read_one::<u32>(addr.with_register(CLASS_REGISTER)) else {
+                continue;
+            };
+            if (class_reg >> 24) as u8 != PCI_CLASS_BASE_SYSTEM_PERIPHERAL
+                || (class_reg >> 16) as u8 != PCI_SUBCLASS_SD_HOST
+                || (class_reg >> 8) as u8 != PCI_PROG_IF_SDHCI_STANDARD
+            {
+                continue;
+            }
+            return take_sdhci(&mut root_bridge, addr);
+        }
+    }
+    Err(SdhciDiscoveryError::NotFound)
+}
+
+fn take_sdhci(root_bridge: &mut PciRootBridgeIo, addr: &PciIoAddress) -> Result<SdhciInfo, SdhciDiscoveryError> {
+    let bar_err = |e: BarError| SdhciDiscoveryError::Bar(DiscoveryError::Bar(e));
+    let pci_io_handle = find_pci_io_handle(root_bridge.segment_nr(), addr).ok_or(bar_err(BarError::NoPciIo))?;
+    let bus_addr = read_bar0_address(root_bridge, *addr).map_err(SdhciDiscoveryError::Bar)?;
+    if bus_addr == 0 {
+        return Err(SdhciDiscoveryError::Unassigned);
+    }
+    let bar = {
+        let io = open_read_only::<PciIo>(pci_io_handle).map_err(|e| bar_err(BarError::Refused(e.status())))?;
+        bar0_address(&io, bus_addr).map_err(|e| match e {
+            BarError::Unassigned => SdhciDiscoveryError::Unassigned,
+            e => bar_err(e),
+        })?
+    };
+    // Taken: firmware's SD driver, if one bound, stops here.
+    let _taken = uefi::boot::open_protocol_exclusive::<PciIo>(pci_io_handle)
+        .map_err(|e| bar_err(BarError::Refused(e.status())))?;
+    let read_command = |rb: &mut PciRootBridgeIo| {
+        rb.pci().read_one::<u32>(addr.with_register(COMMAND_REGISTER)).ok()
+    };
+    let before = read_command(root_bridge);
+    let command_before = before.map_or(0xffff, |v| (v & 0xffff) as u16);
+    if let Some(v) = before.filter(|v| *v as u16 & CMD_MEMORY_SPACE == 0) {
+        let _ = root_bridge.pci().write_one::<u32>(addr.with_register(COMMAND_REGISTER), v | u32::from(CMD_MEMORY_SPACE));
+    }
+    let command_after = read_command(root_bridge).map_or(0xffff, |v| (v & 0xffff) as u16);
+    Ok(SdhciInfo { base: bar.cpu, command_before, command_after })
+}
+
 /// Diagnostic only, not used for discovery: logs every PCI device's
 /// vendor:device and class:subclass, for cases where none of the three
 /// normal console-discovery mechanisms found anything and it's not

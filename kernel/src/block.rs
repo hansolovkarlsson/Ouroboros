@@ -2,8 +2,8 @@
 //! concrete drivers, the same idiom `console.rs`'s `Console` already
 //! established (an enum, not a trait object: `Box<dyn ...>` would need
 //! the boot-services-backed allocator that's invalid after
-//! `exit_boot_services`, and there are exactly two variants to
-//! dispatch over).
+//! `exit_boot_services`, and there are three variants to dispatch
+//! over: virtio-blk, USB mass storage and, since the SD-card arc, SDHCI).
 //!
 //! Introduced when USB mass storage became the second disk path (see
 //! `docs/CHANGELOG.md`'s "USB mass storage" entry): `fat32.rs` was written
@@ -12,6 +12,7 @@
 //! hardware (which exposes no storage controller virtio or otherwise, only
 //! USB) needed the same filesystem over a different transport.
 
+use crate::sdhci;
 use crate::usb_msd;
 use crate::virtio_blk;
 
@@ -21,6 +22,7 @@ use crate::virtio_blk;
 pub enum Error {
     Virtio(virtio_blk::Error),
     UsbMsd(usb_msd::Error),
+    Sdhci(sdhci::Error),
 }
 
 impl core::fmt::Display for Error {
@@ -28,6 +30,7 @@ impl core::fmt::Display for Error {
         match self {
             Error::Virtio(e) => write!(f, "virtio-blk: {e}"),
             Error::UsbMsd(e) => write!(f, "usb-msd: {e}"),
+            Error::Sdhci(e) => write!(f, "sd: {e}"),
         }
     }
 }
@@ -35,6 +38,9 @@ impl core::fmt::Display for Error {
 pub enum BlockDevice {
     Virtio(virtio_blk::Device),
     UsbMsd(usb_msd::Device),
+    /// An SD card on a standard SD Host Controller (`sdhci.rs`, the SD-card
+    /// arc), read-only until its step 2.
+    Sdhci(sdhci::Device),
 }
 
 impl BlockDevice {
@@ -46,6 +52,7 @@ impl BlockDevice {
         match self {
             BlockDevice::Virtio(d) => unsafe { d.read_sector(sector, buf) }.map_err(Error::Virtio),
             BlockDevice::UsbMsd(d) => unsafe { d.read_sector(sector, buf) }.map_err(Error::UsbMsd),
+            BlockDevice::Sdhci(d) => unsafe { d.read_sector(sector, buf) }.map_err(Error::Sdhci),
         }
     }
 
@@ -55,6 +62,7 @@ impl BlockDevice {
         match self {
             BlockDevice::Virtio(d) => unsafe { d.write_sector(sector, buf) }.map_err(Error::Virtio),
             BlockDevice::UsbMsd(d) => unsafe { d.write_sector(sector, buf) }.map_err(Error::UsbMsd),
+            BlockDevice::Sdhci(d) => unsafe { d.write_sector(sector, buf) }.map_err(Error::Sdhci),
         }
     }
 
@@ -64,6 +72,7 @@ impl BlockDevice {
         match self {
             BlockDevice::Virtio(d) => d.capacity_sectors(),
             BlockDevice::UsbMsd(d) => d.capacity_sectors(),
+            BlockDevice::Sdhci(d) => d.capacity_sectors(),
         }
     }
 }
