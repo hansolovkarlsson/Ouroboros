@@ -754,6 +754,10 @@ not yet checked on this tree are marked (predicted).
       has one but no UEFI path (see "Develop on QEMU first" in
       `testing-pi4.md`). With it, a card and nothing else is a whole system,
       and item 1 applies to the card.
+      **The plan is [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md)**
+      (asked by Hans 2026-11-05, to free the stick's USB port and need one
+      medium per board): the controller's firmware facts read from
+      edk2-platforms, the driver written on QEMU's `sdhci-pci` first.
 - [ ] **3. Booting from a stick, with no card.** Most of it exists: on QEMU
       the kernel already boots from a USB stick behind a hub and mounts that
       same stick as its runtime disk (`test-usb-hub.py --usb-boot`, and
