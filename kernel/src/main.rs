@@ -1423,7 +1423,7 @@ fn init_sd(ctl: Option<SdController>) -> Option<SdCard> {
         sector[511]
     );
     let capacity = device.capacity_sectors();
-    let (protected, boot) = {
+    let (protected, boot_root) = {
         // SAFETY: as above.
         let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
         // Asked again once on a failed read, as every disk path does (D6 of
@@ -1478,24 +1478,37 @@ fn init_sd(ctl: Option<SdController>) -> Option<SdCard> {
                 );
             }
         }
-        let protected = match (listed, backup) {
-            _ if blank => [(0, 0); 2],
-            (Ok(n), Some(backup)) if n > 0 || boot.is_some() => parttable::firmware_sectors(&parts[..n], boot, backup),
+        let (protected, whole) = match (listed, backup) {
+            _ if blank => ([(0, 0); 2], false),
+            (Ok(n), Some(backup)) if n > 0 || boot.is_some() => (parttable::firmware_sectors(&parts[..n], boot, backup), false),
             // A table that does not read, or lists nothing on a card that is
             // not blank, or a GPT backup not found, leaves nothing safe to
             // write.
-            _ => [(0, capacity), (0, 0)],
+            _ => ([(0, capacity), (0, 0)], true),
         };
-        // A root partition past the protected sectors, which fsd can mount
-        // and write: what makes the boot card a whole system. A card as
-        // `make sdcard` stages it holds the firmware's partition alone, and
-        // a root mounted from that would refuse every write while the
-        // stick beside it, the root it was staged with, went unused.
-        let writable_root = listed.is_ok_and(|n| parts[..n].iter().any(|p| p.root && p.start >= protected[0].1));
-        if boot.is_some() && !writable_root {
-            console::println!(
-                "Ouroboros kernel: sd: the card is the boot disk but holds no root partition past its firmware's: any USB stick goes in ahead of it"
-            );
+        // A root fsd would mount from the card, past the protected sectors
+        // and holding a filesystem fsd mounts: what makes the boot card a
+        // whole system. The candidates are fsd's own (`parttable::
+        // root_candidates`, the one rule `vfs::root_order` builds on). A
+        // card as `make sdcard` stages it holds the firmware's partition
+        // alone, and a root mounted from that would refuse every write while
+        // the stick beside it, the root it was staged with, went unused; a
+        // root with no filesystem would leave fsd the same fallback.
+        let (first, count) = protected[0];
+        let firmware_end = first + count;
+        let writable_root = !whole
+            && listed.is_ok_and(|n| {
+                parttable::root_candidates(&parts[..n], boot.map(|(start, _)| start))
+                    .any(|p| p.start >= firmware_end && holds_filesystem(&mut read, p.start))
+            });
+        match (boot, writable_root) {
+            (Some(_), false) if whole => console::println!(
+                "Ouroboros kernel: sd: the card is the boot disk, but kept whole (its table did not read whole): not ranked ahead of another disk"
+            ),
+            (Some(_), false) => console::println!(
+                "Ouroboros kernel: sd: the card is the boot disk but holds no root past its firmware's partition with a filesystem fsd mounts: installed only if no other disk is"
+            ),
+            _ => {}
         }
         (protected, boot.is_some() && writable_root)
     };
@@ -1511,7 +1524,21 @@ fn init_sd(ctl: Option<SdController>) -> Option<SdCard> {
     if !any {
         console::println!("Ouroboros kernel: sd: no firmware partition on the card: every sector writable");
     }
-    Some(SdCard { device, boot_root: boot })
+    Some(SdCard { device, boot_root })
+}
+
+/// Whether the partition at `start` holds a filesystem `fsd` mounts, by the
+/// marks its probes check first: an ext2 superblock's magic (0xEF53, byte 56
+/// of the sector 1024 bytes in), or a boot sector naming FAT32 (byte 82) or
+/// exFAT (byte 3) with the boot signature. A mark, not a mount: fsd's probe
+/// still decides, and a volume past its marks that fsd refuses leaves the
+/// card's root unmounted as it would any disk's.
+fn holds_filesystem(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, start: u64) -> bool {
+    let mut b = [0u8; 512];
+    if read(start + 2, &mut b) && b[56..58] == [0x53, 0xef] {
+        return true;
+    }
+    read(start, &mut b) && b[510..512] == [0x55, 0xaa] && (&b[82..90] == b"FAT32   " || &b[3..11] == b"EXFAT   ")
 }
 
 /// A card [`init_sd`] brought up and read, not yet installed.
@@ -1523,9 +1550,10 @@ struct SdCard {
     boot_root: bool,
 }
 
-/// A card that was not installed ahead of the USB step: installed now only
-/// when no disk went in, so a card that is not the boot disk gives way to
-/// every other disk, as in step 3. Not when the USB stick's init failed:
+/// A card that was not installed ahead of the USB step: not the boot disk,
+/// or the boot disk without a root of its own (`SdCard::boot_root`), or kept
+/// whole. Installed now only when no disk went in, so such a card gives way
+/// to every other disk, as in step 3. Not when the USB stick's init failed:
 /// `install_boot_disk` leaves the cell empty then on purpose, since that
 /// stick may be the boot disk and `mount -a` replaces the device only when
 /// `fsd` mounted nothing (the medium review of #287).

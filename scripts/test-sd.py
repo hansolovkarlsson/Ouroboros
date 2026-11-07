@@ -8,7 +8,7 @@ the kernel cannot (it drives virtio-mmio only), and puts a copy of
 `build/disk.img` (the ESP and the ext2 root) on an SD card behind QEMU's
 `sdhci-pci`, the only disk the kernel can drive, as the Pi's card and stick
 are today. QEMU's firmware does not boot from an SD card itself. Two cards,
-two boots each, then four more, eight boots in all:
+two boots each, then five more, nine boots in all:
 
 - **A standard-capacity card**, the image padded to the smallest power of two
   of at least 128 MiB that holds it (QEMU wants a power of two, and makes a
@@ -62,13 +62,18 @@ partition past its firmware's, every sector of which is refused, so the
 stick must go in and the card be left out, with a line saying why, and
 `mount` must show the ext2 root on the stick's disk.
 
+**A ninth boot**, disk.img booted and its copy on the card with the root's
+ext2 superblock zeroed, build/esp.img on the stick: the card is the boot
+disk and its partition 2 is typed a root, but holds no filesystem fsd
+mounts, so the stick must go in and the card be left out.
+
 No fault line in QEMU's trace on any boot. What it cannot see, each run as
 a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
 was never told about (no ACMD6) reads the same as one it was; it completes a
 write at once, so a write whose end is not waited for still lands; and it
 models no clock rate. Those are the Pi's to show (step 3). Run it whenever kernel/src/sdhci.rs, pci::discover_sdhci, main.rs's
 init_sd, install_sd_fallback or the order of the disk paths,
-parttable::firmware_sectors or block.rs changes. About eight minutes.
+parttable::firmware_sectors or block.rs changes. About nine minutes.
 """
 import importlib.util
 import os
@@ -344,7 +349,7 @@ def main() -> int:
         ("fwonly: driven to the end and powered off", ok),
         ("fwonly: the card named the boot disk", f"sd: the card is the boot disk (its boot partition at LBA {esp_start})" in out),
         ("fwonly: the card said to hold no root of its own",
-         "sd: the card is the boot disk but holds no root partition past its firmware's" in out),
+         "sd: the card is the boot disk but holds no root past its firmware's partition" in out),
         ("fwonly: the stick installed, the card not",
          "usb-msd block device installed" in out and "sd: the card is up and read, not installed: another disk is" in out
          and "sd: block device installed" not in out),
@@ -352,11 +357,39 @@ def main() -> int:
          bool(got) and f"ext2 mounted at partition LBA {root_start} (disk {disk_sectors} sectors" in got[0]),
         ("fwonly: no fault lines", faults == 0),
     ]
+    # The ninth boot: disk.img booted, its copy on the card with the root's
+    # ext2 superblock zeroed, esp.img on the stick. The card is the boot disk
+    # and its partition 2 is typed a root, but holds no filesystem fsd
+    # mounts, so the stick goes in (the review of 0aa8c177: a typed root
+    # alone had ranked the card ahead, and fsd then fell back to the
+    # firmware's partition, every write refused).
+    path = os.path.join(ROOT, "build", "test-sd-nofs.img")
+    card_image(path, cards()[0][2])
+    with open(path, "r+b") as fh:
+        fh.seek((root_start + 2) * 512)
+        fh.write(bytes(512))
+    try:
+        ok, out, got, faults = boot("nofs", "stick", path, [("mount", "mounted at")], boot_disk=DISK, stick=esp_img)
+    finally:
+        os.remove(path)
+    esp_sectors = os.path.getsize(esp_img) // 512
+    checks += [
+        ("nofs: driven to the end and powered off", ok),
+        ("nofs: the card named the boot disk", "sd: the card is the boot disk (its boot partition at LBA 2048)" in out),
+        ("nofs: its root named a root with no ext2 superblock read", "a root, no ext2 superblock read" in out),
+        ("nofs: the card said to hold no root with a filesystem",
+         "sd: the card is the boot disk but holds no root past its firmware's partition" in out),
+        ("nofs: the stick installed, the card not",
+         "usb-msd block device installed" in out and "sd: the card is up and read, not installed: another disk is" in out
+         and "sd: block device installed" not in out),
+        (f"nofs: the root mounted from the stick ({esp_sectors} sectors)", bool(got) and f"(disk {esp_sectors} sectors" in got[0]),
+        ("nofs: no fault lines", faults == 0),
+    ]
     failed = 0
     for check, good in checks:
         print(f"{'ok  ' if good else 'FAIL'} {check}")
         failed += 0 if good else 1
-    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt, build/test-sd-beside-virtio.txt, build/test-sd-ranked-stick.txt, build/test-sd-fwonly-stick.txt")
+    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt, build/test-sd-beside-virtio.txt, build/test-sd-ranked-stick.txt, build/test-sd-fwonly-stick.txt, build/test-sd-nofs-stick.txt")
     return 1 if failed else 0
 
 

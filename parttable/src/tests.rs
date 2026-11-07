@@ -527,3 +527,20 @@ fn the_gpt_backup_is_found_where_the_primary_says() {
     m.fail.push(DISK - 1);
     assert_eq!(gpt_backup_extent(&mut m.reader(), DISK), None);
 }
+
+/// `root_candidates`: typed roots beside the boot partition first and alone;
+/// with none typed, every partition beside it; with the boot partition
+/// unknown and none typed, none.
+#[test]
+fn the_root_candidates_are_fsds() {
+    let p = |start: u64, root: bool| Partition { start, sectors: 100, root };
+    let starts = |parts: &[Partition], boot: Option<u64>| root_candidates(parts, boot).map(|p| p.start).collect::<Vec<_>>();
+    let (esp, data, root) = (p(2048, false), p(4096, false), p(8192, true));
+    assert_eq!(starts(&[esp, data, root], Some(2048)), [8192], "the typed root alone");
+    assert_eq!(starts(&[esp, data, root], None), [8192], "typed, the boot partition unknown");
+    assert_eq!(starts(&[esp, data], Some(2048)), [4096], "untyped, beside the boot partition");
+    assert!(starts(&[esp, data], None).is_empty(), "untyped and the boot partition unknown");
+    assert!(starts(&[esp], Some(2048)).is_empty(), "the boot partition alone");
+    // A typed root that is itself the boot partition is not beside it.
+    assert!(starts(&[p(2048, true)], Some(2048)).is_empty());
+}

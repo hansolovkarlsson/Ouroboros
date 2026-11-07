@@ -2326,8 +2326,9 @@ test-proc-cpus: image
 # table, their bytes unchanged; a fifth boot, a card with no table entries,
 # kept whole; a sixth, the card read beside a virtio disk installed first;
 # a seventh, the card as the boot disk installed ahead of a USB stick that
-# is not; and an eighth, a boot card with no root of its own (as `make
-# sdcard` stages it), which gives way to the stick.
+# is not; an eighth, a boot card with no root of its own (as `make sdcard`
+# stages it), which gives way to the stick; and a ninth, a boot card whose
+# typed root holds no filesystem, which gives way too.
 test-sd: disk
 	python3 scripts/test-sd.py
 

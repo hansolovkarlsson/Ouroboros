@@ -600,25 +600,22 @@ pub fn root_order(
     let mut order = [Candidate::default(); partition::MAX_PARTITIONS];
     let candidate = |p: &partition::Partition| Candidate { part: *p, bound: volume_bound(p, &parts[..count], capacity) };
     let mut n = 0;
-    let beside = |p: &&partition::Partition| Some(p.start) != boot;
-    for p in parts[..count].iter().filter(beside).filter(|p| p.root) {
+    // The candidates are parttable's, the one rule the kernel also ranks an
+    // SD card by (`parttable::root_candidates`).
+    for p in parttable::root_candidates(&parts[..count], boot) {
         order[n] = candidate(p);
         n += 1;
     }
-    let typed = n > 0;
-    if !typed || boot.is_none() {
-        for p in parts[..count].iter().filter(beside).filter(|p| !p.root) {
+    let candidates = n;
+    let typed = parts[..count].iter().any(|p| p.root && Some(p.start) != boot);
+    // With the boot partition unknown, the untyped partitions follow as
+    // fallbacks, after any typed root (all of them, when none is typed).
+    if boot.is_none() {
+        for p in parts[..count].iter().filter(|p| !p.root) {
             order[n] = candidate(p);
             n += 1;
         }
     }
-    let candidates = if typed {
-        parts[..count].iter().filter(beside).filter(|p| p.root).count()
-    } else if boot.is_some() {
-        n
-    } else {
-        0
-    };
     for p in &parts[..count] {
         if Some(p.start) == boot {
             order[n] = candidate(p);

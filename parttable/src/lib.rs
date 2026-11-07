@@ -539,6 +539,22 @@ pub fn firmware_sectors(partitions: &[Partition], boot: Option<(u64, u64)>, back
     [(0, start.saturating_add(count)), backup.unwrap_or((0, 0))]
 }
 
+/// The partitions `fsd` takes as root candidates, in the order it tries
+/// them, with `boot` the boot partition's start when the kernel names one:
+/// the partitions beside the boot one whose type marks them as a root (MBR
+/// 0x83, GPT's AArch64 root GUID) when there is one; with none typed, every
+/// partition beside the boot one, when the boot partition is known; and none
+/// when it is not, every partition then being only a read-only fallback.
+/// `fsd`'s `vfs::root_order` builds its order on this, and the kernel ranks
+/// an SD card by it (`main.rs`'s `init_sd`), so the two cannot disagree on
+/// whether a disk holds a root (the review of `0aa8c177`, which found a
+/// kernel copy of the rule passing over an untyped root).
+pub fn root_candidates(parts: &[Partition], boot: Option<u64>) -> impl Iterator<Item = &Partition> + '_ {
+    let beside = move |p: &&Partition| Some(p.start) != boot;
+    let typed = parts.iter().filter(beside).any(|p| p.root);
+    parts.iter().filter(beside).filter(move |p| if typed { p.root } else { boot.is_some() })
+}
+
 /// Where a GPT disk of `capacity` sectors keeps its backup header and
 /// entries, as `(first, count)`: the header where a valid primary's
 /// AlternateLBA puts it (the firmware follows that field, so a smaller GPT
