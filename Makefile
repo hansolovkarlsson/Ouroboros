@@ -2064,8 +2064,9 @@ sdcard:
 	STICK="$(STICK_MODE)" SDCARD="$(SDCARD)" KEEP_ETC="$(KEEP_ETC)" FIRMWARE="$(FIRMWARE)" EJECT="$(EJECT)" \
 		ESP_DIR="$(ESP_DIR)" CACHE_DIR="$(BUILD_DIR)/cache" ./scripts/sdcard.sh
 
-# Stages the same tree on a USB stick, the Pi's only disk once the kernel
-# runs (the SD slot has no driver after exit_boot_services, testing-pi4.md
+# Stages the same tree on a USB stick, the Pi's root beside a card `make
+# sdcard` staged, whose one partition is the firmware's and never written
+# (a card `make bootstick PI=1` staged needs no stick; testing-pi4.md
 # section 6): what `mount -a` mounts and where /bin, /etc and /man come
 # from. The sdcard target with STICK_MODE=1, so one recipe and one script
 # (scripts/sdcard.sh, STICK=1, whose header lists the differences): the same

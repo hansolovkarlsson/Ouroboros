@@ -735,29 +735,25 @@ not yet checked on this tree are marked (predicted).
       partition (ext2, the one where `fsd` enforces permissions), each
       mountable, `mount` naming which. This is where the `/dev` namespace
       item under "Remaining follow-ups" stops being speculative. **Depends on
-      item 2 for the card** (the kernel cannot read the card at all after
-      the exit); on a stick it can be built and tested now, and on QEMU first
+      item 2 for the card**, done 2026-11-06, so it can be built for the
+      card now; on a stick too, and on QEMU first
       (`make run-image-ext2` already builds a two-partition disk).
-- [ ] **2. The SD card as a runtime disk, so no stick is needed.** A driver
-      for the BCM2711's EMMC2 controller (SDHCI-style, the one the card sits
-      on), as a third `block.rs` arm beside `virtio_blk` and `usb_msd`, taken
-      over at the exit the way the xHCI is. What to settle first, each
-      (predicted) until read in the firmware's tables or sources: where the
-      ACPI tables describe it and whether that agrees with Linux's devicetree
-      (`emmc2` at `0xfe340000` CPU side); whether PIO is enough for a first
-      version, since EMMC2's DMA has its own address limits; and **the
-      firmware keeps its variable store inside `RPI_EFI.fd` on this same
-      card**, so the kernel must not write the card while anything could
-      still write variables through the firmware (today nothing does after
-      the exit; the boot counter uses the variable before it). Not testable on
-      QEMU's `virt` machine (no such controller); QEMU's `raspi4b` machine
-      has one but no UEFI path (see "Develop on QEMU first" in
-      `testing-pi4.md`). With it, a card and nothing else is a whole system,
-      and item 1 applies to the card.
-      **The plan is [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md)**
-      (asked by Hans 2026-11-05, to free the stick's USB port and need one
-      medium per board): the controller's firmware facts read from
-      edk2-platforms, the driver written on QEMU's `sdhci-pci` first.
+- [x] **2. The SD card as a runtime disk, so no stick is needed. DONE
+      2026-11-06, the SD-card arc,
+      [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md)** (asked by Hans
+      2026-11-05, to free the stick's USB port and need one medium per
+      board). `sdhci.rs` is the third `block.rs` arm: QEMU's `sdhci-pci`
+      first, then the Pi's EMMC2, found by its ACPI declaration
+      (`BRCME88C`, `amlscan::declared`), PIO one sector at a time, the
+      firmware's partition and its table never written (`RPI_EFI.fd` lives
+      there). On the board a card staged by `make bootstick PI=1` booted to
+      a login alone, kept a file across a power cycle, and stayed the root
+      with a stick in a port; a card `make sdcard` staged, the firmware's
+      partition alone, still gives way to a stick. Graded on QEMU by `make
+      test-sd` (eight boots). The firmware must route the card to EMMC2
+      (`testing-pi4.md` §5). Not tested on QEMU's `virt` machine for the
+      EMMC2 path itself (no such controller there). No DMA and one sector
+      a command; its speed is not measured yet.
 - [ ] **3. Booting from a stick, with no card.** Most of it exists: on QEMU
       the kernel already boots from a USB stick behind a hub and mounts that
       same stick as its runtime disk (`test-usb-hub.py --usb-boot`, and

@@ -211,7 +211,7 @@ make run-sd                   # disk.img on QEMU's sdhci-pci, the ESP booted fro
 make run-image-ext2           # build build/espext2.img (ext2 + FAT32 ESP) and boot it; needs e2fsprogs
 make parallels-hdd            # wrap build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk
 make sdcard SDCARD=/Volumes/OUROBOROS # stage the Pi 4 / Pi 400 boot card on an already-formatted FAT volume
-make stick STICK=/Volumes/STICK # the Pi's USB stick, its only disk once the kernel runs
+make stick STICK=/Volumes/STICK # the Pi's USB stick, its root beside a card `make sdcard` staged (a bootstick card needs none)
 make test-parallels           # scripted real-hardware round trip via prlctl
 make test-early-fault         # the early fault reporter on QEMU
 make run-el2                  # `run` with the firmware handing off at EL2

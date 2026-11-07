@@ -12,9 +12,11 @@
 #   SDCARD=/Volumes/OUROBOROS EJECT=1 ./scripts/sdcard.sh      # eject when done
 #   STICK=1 SDCARD=/Volumes/STICK ./scripts/sdcard.sh          # a USB stick (make stick)
 #
-# STICK=1 stages a USB stick instead, the Pi's only disk after
-# exit_boot_services (the SD slot has no driver then, testing-pi4.md section
-# 6): fsd mounts it, and /bin, /etc and /man come from it. Differences from
+# STICK=1 stages a USB stick instead, the Pi's root beside a card this
+# staged, whose one partition is the firmware's and never written (a card
+# `make bootstick PI=1` staged carries its own root and needs no stick;
+# testing-pi4.md section 4): fsd mounts it, and /bin, /etc and /man come
+# from it. Differences from
 # a card:
 #   - no firmware, and no EFI tree: the kernel and the boot programs are the
 #     card's, nothing at runtime reads EFI from the disk, and a stick with
@@ -164,9 +166,10 @@ place() {
     case "$1" in
         include)
             # The C headers (step 6 of the C-hosting plan) are read through
-            # fsd, which has no SD driver after the exit, so only the stick
-            # holds them; the card would carry 168 files nothing reads (the
-            # review of #225).
+            # fsd from the root, and beside a stick the root is the stick
+            # (a card this stages is the firmware's partition alone, which
+            # gives way to a stick), so only the stick holds them; the card
+            # would carry 168 files nothing reads (the review of #225).
             [ "$STICK" = 1 ] || return 0 ;;
         etc)
             if [ "$KEEP_ETC" = 1 ] && [ -e "$CARD/etc" ]; then

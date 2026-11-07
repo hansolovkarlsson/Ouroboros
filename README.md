@@ -105,9 +105,10 @@ the firmware.
 selection, the bench rig and serial wiring, the firmware settings that matter,
 an ordered boot-checkpoint list, and the ranked risks. Two caveats up front: the
 Pi's GENET NIC is not virtio, so networking and the cluster are as unreachable
-there as on Parallels; and there is no SD-card driver, so the boot card goes
-invisible after `exit_boot_services` and runtime filesystem tests need a USB
-stick.
+there as on Parallels. The card is the whole system since 2026-11-06, when the
+kernel gained an SD-card driver (`docs/roadmap/roadmap-sd-card.md`): staged by
+`make bootstick BOOTSTICK=/dev/diskN PI=1` it carries the firmware, the ESP and
+the ext2 root, and no USB stick is needed.
 
 ## Layout
 

@@ -8,7 +8,7 @@ only". This is `ROADMAP.md`'s Raspberry Pi item 2, made an arc.*
 Today a Pi 4 needs two pieces of media: the card, which the firmware boots
 the kernel and the boot programs from, and a USB stick, the only disk the
 kernel can read once boot services end (`testing-pi4.md` §6, "The storage
-surprise"). That costs a USB port that a keyboard, a mouse or other
+surprise", since retitled "The storage surprise, and its end"). That costs a USB port that a keyboard, a mouse or other
 equipment wants, and a second medium per board, which does not scale to
 several Pis. The one-disk arc (`roadmap-one-disk.md`) already put the ESP
 and an ext2 root on one disk and taught the kernel to take the disk it
@@ -369,9 +369,35 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    partition on its disk, `cat /card` read back the file written two boots
    before, boot 4, no fault. **Step 4 is done:** the Pi boots and runs
    from its card alone, and a stick in a port no longer takes the root.
+   **The high review of steps 3 and 4** (`62304e02`): `bootstick` had
+   taken any card holding `RPI_EFI.fd`, another OS's too, and now wants
+   `EFI/ORBS/INIT.CFG` beside it; the card's boot-disk question is asked
+   again on a failed read; a GPT card's backup is kept where its headers
+   put it (`parttable::gpt_backup_extent`), and a failed read there keeps
+   the whole card; a card installed first says what it went in ahead of.
+   Declined: one function ranking every disk, a restructure of every disk
+   path, for when a fourth arrives.
+   **Then a gap the review did not name** (`0aa8c177`): a card as `make
+   sdcard` stages it is the boot disk too, so the rule put its firmware
+   partition, every sector refused, ahead of the stick staged as its root.
+   A boot card now goes in ahead only with a root partition past its
+   protected sectors, and says so when it has none; `make test-sd`'s
+   eighth boot is that card beside a stick holding a root, 48 checks, and
+   every boot card ranked ahead fails it. Not booted on the board, whose
+   card has its own root; the card-and-stick boot above holds for it.
 5. **The records.** `testing-pi4.md`'s storage surprise rewritten,
    `gap-analysis.md`'s block-storage row, `make-targets.md` for the new
    rigs, and Pi item 2 on `ROADMAP.md` closed with a pointer here.
+   **Done 2026-11-06:** `testing-pi4.md` §6's "The storage surprise, and
+   its end", §4's new "One disk: the card alone" (staging, which disk is
+   the root, what was observed, a kernel alone copied on), §5's routing
+   setting and the USB stick's section; `gap-analysis.md`'s block-storage
+   row; `ROADMAP.md`'s Pi item 2 closed and item 1's dependency on it;
+   the stick's lines in the Makefile, `sdcard.sh`, `make-targets.md` and
+   `CLAUDE.md`. **The arc is done.** D5, whether `make sdcard` is
+   retired now that a card can carry the whole system, is Hans's to take:
+   it still stages a card that boots beside a stick, and the eighth boot
+   keeps that layout working.
 
 ## Out of scope
 
