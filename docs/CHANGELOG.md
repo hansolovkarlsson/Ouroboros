@@ -1824,6 +1824,23 @@ file, a pipe or the network, so binary data is untouched. `tcgetattr` now
 reports `OPOST | ONLCR`. A Pi boot printed 13 bare `\n` before the fix and
 none after (#410).
 
+**The Pi 4 runs from its SD card alone (2026-11-06).** Until now the Pi's
+card only carried the firmware and the kernel, and the system lived on a
+USB stick. The kernel now drives an SD card on a standard SDHCI controller:
+QEMU's `sdhci-pci`, and the Pi 4's EMMC2, found by its ACPI declaration
+(`BRCME88C`). It reads and writes one sector at a time by PIO, and never
+writes the card's firmware partition or the partition table that finds it,
+so the Pi's `RPI_EFI.fd` and its settings stay intact. `make bootstick
+PI=1` now writes a Pi card as the one disk, firmware partition and ext2
+root, carrying the card's own firmware files whole. A card staged that way
+booted the Pi to a login with no stick, kept a file written on it across a
+power cycle, and stayed the root with a stick in a port. A card that is the
+boot disk goes in ahead of a stick only when it holds a root with a
+filesystem on it, so a card as `make sdcard` stages it, firmware only,
+still gives way to the stick that carries its root. `make run-sd` boots
+QEMU with the root on an SD card, and `make test-sd` grades nine layouts
+(#412).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209

@@ -20,6 +20,50 @@ a **DONE** marker or ~~strikethrough~~ is finished.
 
 ---
 
+## The SD card as the Pi's only disk ✅ DONE (2026-11-06)
+
+Asked by Hans on 2026-11-05 and planned the same day in
+[`roadmap/roadmap-sd-card.md`](roadmap/roadmap-sd-card.md), with five
+decisions he settled as recommended. Steps 0 and 0b read the board that
+evening: the Pi publishes no devicetree, and its SSDT `RPI4EMMC` declares
+EMMC2 (`BRCME88C`, 256 bytes at `0xFE340000`, INTID 158), which `amlscan`
+learned to read. Steps 1 to 5 followed on 2026-11-06: the driver on QEMU,
+writes, the Pi reading its card, the card alone and then ahead of the
+stick, and the records. All of it merged as #412. The days are in
+`work-journal/2026-11-05.md` and `2026-11-06.md`, and the change is
+summarized in [`CHANGELOG.md`](CHANGELOG.md).
+
+**What it came to.** `sdhci.rs` is the third `block.rs` arm. It brings a
+card up by the SD spec on any standard SDHCI, reads with CMD17 and writes
+with CMD24 by PIO, and refuses every write into the firmware partition and
+the table that finds it, fixed at bring-up (`parttable::firmware_sectors`).
+The Pi read its card on the first boot, 4-bit at 25 MHz, then booted from
+the card alone, kept a file across a power cycle, and stayed on the card
+with a stick in a port. What the arc found was mostly about its own
+instruments. Three of the mutations it planned could not fail on QEMU,
+which models no data lines and finishes a write at once. The ranking rule's
+rig tested only the layout the rule was written for, and the kernel's first
+root test was a copy of fsd's rule that already disagreed with it; both are
+in `blind-instruments-postmortem.md`, and `parttable::root_candidates` is
+now the one rule. The item below is moved verbatim from `ROADMAP.md`.
+
+- [x] **2. The SD card as a runtime disk, so no stick is needed. DONE
+      2026-11-06, the SD-card arc,
+      [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md)** (asked by Hans
+      2026-11-05, to free the stick's USB port and need one medium per
+      board). `sdhci.rs` is the third `block.rs` arm: QEMU's `sdhci-pci`
+      first, then the Pi's EMMC2, found by its ACPI declaration
+      (`BRCME88C`, `amlscan::declared`), PIO one sector at a time, the
+      firmware's partition and its table never written (`RPI_EFI.fd` lives
+      there). On the board a card staged by `make bootstick PI=1` booted to
+      a login alone, kept a file across a power cycle, and stayed the root
+      with a stick in a port; a card `make sdcard` staged, the firmware's
+      partition alone, still gives way to a stick. Graded on QEMU by `make
+      test-sd` (nine boots). The firmware must route the card to EMMC2
+      (`testing-pi4.md` §5). Not tested on QEMU's `virt` machine for the
+      EMMC2 path itself (no such controller there). No DMA and one sector
+      a command; its speed is not measured yet.
+
 ## Multi-core ✅ DONE (2026-10-12)
 
 Planned on 2026-10-10 in [`roadmap/roadmap-smp.md`](roadmap/roadmap-smp.md)
