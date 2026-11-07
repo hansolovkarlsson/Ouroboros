@@ -396,6 +396,15 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    fail; `make test-boot-partition` unchanged. Declined: a stick that
    attaches after the boot scan, beside a rootless boot card installed as
    the fallback, which is step 3's rule and `mount -a`'s for every disk.
+   **Read on the Pi 2026-11-07** (build `e89c972e`, `main` after #412 and
+   #413, the card re-staged by `make bootstick PI=1`, no stick): `acf3bc63`'s
+   one root rule on the board, first try. Partition 2 at LBA 133120 was named
+   a root with its ext2 superblock read, the card was installed as the boot
+   disk ahead of any stick, fsd mounted the root (244,277,248 sectors) and
+   found the boot partition on the card, and the login, `bootid` (boot 5)
+   and `/proc/cpus` (4) worked, no fault. Neither a write's end waited for
+   nor an R1 error on a real card has been shown: a healthy card shows
+   neither.
 5. **The records.** `testing-pi4.md`'s storage surprise rewritten,
    `gap-analysis.md`'s block-storage row, `make-targets.md` for the new
    rigs, and Pi item 2 on `ROADMAP.md` closed with a pointer here.
