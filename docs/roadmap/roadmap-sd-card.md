@@ -129,6 +129,31 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
 - **D5. `make sdcard`'s future.** Keep it for a card that boots and leaves
   the root on a stick, or retire it once a card carries the whole system.
   **Recommended and settled: keep it until step 4 passes on the board,** then decide.
+  **Taken by Hans 2026-11-07, after step 4 passed: keep it, demoted.**
+  `make bootstick PI=1` is the way to stage a Pi card, and `testing-pi4.md`
+  section 4 says so first. `make sdcard` stays because it is the one way to
+  re-stage the boot partition alone: it copies `build/esp` onto the card's
+  mounted FAT volume and never writes partition 2, so the files on the
+  root survive a new kernel. That is what updating an existing card to a
+  new Ouroboros release needs, where `make bootstick` keeps only `/etc` and
+  `/Users` of the root. `make stick` stays with it for the two-disk layout,
+  and `make test-sd`'s eighth boot keeps grading that layout. Two limits,
+  recorded rather than fixed: it does not reach the programs in the root's
+  `/bin`, which macOS cannot write, so a new kernel staged this way runs the
+  root's older programs until a `make bootstick`; and it rolls the boot
+  counter back to 1. **Run on the board the same day** (`testing-pi4.md`
+  section 4, "Observed 2026-11-07, the boot partition alone"): the card at
+  `e89c972e` took `d86145cc` from `make sdcard`, and a file written to the
+  root before it read back after, with the login, the cluster identity and
+  the firmware's settings unchanged. `bootid` went from boot 6 to boot 1.
+  The Pi keeps no counter variable (absent on every boot since 2026-10-01),
+  so `EFI/ORBS/BOOTID.TXT` is its only store, and `scripts/sdcard.sh`
+  replaces it with the build's. A counter that starts again can reissue a
+  boot number, which `scripts/bootstick.py` already prevents by keeping
+  the larger of the old and new values. **Owed, a fix:** `make sdcard`
+  keeps the larger value too. Until 2026-11-07 `testing-pi4.md` section 4
+  said the counter's preferred store was the variable and survived in
+  `RPI_EFI.fd`, and the prediction for this run was made from it.
 
 ## Steps, each with its check
 
@@ -417,7 +442,7 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    `CLAUDE.md`. **The arc is done.** D5, whether `make sdcard` is
    retired now that a card can carry the whole system, is Hans's to take:
    it still stages a card that boots beside a stick, and the eighth boot
-   keeps that layout working.
+   keeps that layout working. Taken 2026-11-07: kept and demoted (D5).
 
 ## Out of scope
 
