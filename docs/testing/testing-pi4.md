@@ -515,7 +515,7 @@ and the first one logged.
 | The card | The root |
 |---|---|
 | staged by `make bootstick PI=1`, the boot disk with its own root | the card, ahead of the stick: `... the boot disk, ahead of any USB stick`, then `usb-msd not installed: the SD card is the boot disk` |
-| staged by `make sdcard`, the firmware's partition alone | the stick, as before: `sd: the card is the boot disk but holds no root partition past its firmware's` |
+| staged by `make sdcard`, the firmware's partition alone | the stick, as before: `sd: the card is the boot disk but holds no root past its firmware's partition with a filesystem fsd mounts` |
 | not the boot disk (the board booted from the stick) | the stick; the card is read and left out |
 
 **Observed 2026-11-06** (builds `0f6f471a` to `b6b78bee`, the 128 GB card
@@ -524,6 +524,16 @@ a login with `mount` reading `ext2 mounted at partition LBA 133120 (disk
 244277248 sectors, 119276 MiB)`; a file written to it was read back after
 `shutdown` and a power cycle; and with the old stick in a port the card
 stayed the root and the stick was not installed.
+
+**Observed 2026-11-07** (build `e89c972e`, `main` after #412 and #413, the
+card re-staged by `make bootstick PI=1`, no stick): the first boot of the
+arc's last kernel change, `acf3bc63`, on the board. The card came up as
+before, partition 2 was named `a root, its ext2 superblock read`, and the
+card went in `ahead of any USB stick`; fsd mounted its ext2 root and found
+the boot partition on the same disk, and the login, `bootid` (boot 5, the
+counter carried by the re-stage) and `/proc/cpus` (4) worked, with no
+fault. `/card` from the earlier boots was gone, since a re-stage replaces
+everything on the root but `/etc`.
 
 **A kernel alone can be put on the card from the Mac** without a re-stage,
 when nothing but the kernel changed: copy `build/esp/EFI/BOOT/BOOTAA64.EFI`
