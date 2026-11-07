@@ -750,7 +750,7 @@ not yet checked on this tree are marked (predicted).
       a login alone, kept a file across a power cycle, and stayed the root
       with a stick in a port; a card `make sdcard` staged, the firmware's
       partition alone, still gives way to a stick. Graded on QEMU by `make
-      test-sd` (eight boots). The firmware must route the card to EMMC2
+      test-sd` (nine boots). The firmware must route the card to EMMC2
       (`testing-pi4.md` §5). Not tested on QEMU's `virt` machine for the
       EMMC2 path itself (no such controller there). No DMA and one sector
       a command; its speed is not measured yet.

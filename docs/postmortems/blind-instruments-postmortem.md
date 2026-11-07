@@ -2631,3 +2631,45 @@ path was then reached on QEMU by a temporary patch before the board saw it
 again. **When no rig reaches a path, the first run is on the hardware: make
 that path's failure cost a line, or find a way to reach it before it ships.**
 
+
+## Three more, from the SD card's driver and its ranking rule (2026-11-06)
+
+**Mutations the emulator could not fail.** Step 1's plan named three
+mutations for `make test-sd`, and two of them passed when run. QEMU's
+`sdhci-pci` models no data lines, so a driver that never sends ACMD6 and
+leaves the card 1-bit while the controller is 4-bit reads every sector
+correctly. QEMU also has no multi-block read to take a CMD12 from. In step 2,
+a write whose completion is never waited for passed too, because QEMU
+finishes a write at once. Each was replaced by a mutation the rig does fail
+(CMD7 with no RCA, the wrong address rule either way, the refusal removed),
+and the three it could not see were written into the plan as the board's
+to show. The Pi then ran the card 4-bit at 25 MHz on its first boot. **A
+mutation that passes is a finding about the instrument: write down what
+the rig cannot model, and give that check to the place that can.**
+
+**A rig built beside its rule.** Step 4's ranking rule put a card that is
+the boot disk ahead of a USB stick, and the seventh boot of `make test-sd`
+showed it working: a card holding the whole system, beside a stick. That
+was the layout the rule was written for. The layout `make sdcard` has
+staged since September is also a boot card, but one that holds only the
+firmware partition, every sector of it refused, with its root on the stick.
+The rule ranked that card ahead of its own root. Neither the rig nor the
+high review that had just finished found it; it turned up after the review.
+The eighth boot is that layout, and
+it fails under the old rule. **A rig written with a rule tests the case the
+rule was written for; walk the layouts already in use before calling it
+graded.**
+
+**A copy of a rule that had already drifted.** The fix for that gap asked
+whether the card holds a root of its own, and answered with a test that
+restated fsd's root rule in the kernel. The next review found the copy
+already disagreed with fsd on the day it was written: it took only
+partitions typed as roots, where fsd falls back to an untyped one when none
+is typed, and it took a typed root with no filesystem on it. No boot could
+show either difference, because every card the rig made had a typed root
+with a filesystem. `parttable::root_candidates` is now the one rule, used
+by fsd's `root_order` and by the kernel, and a candidate needs an ext2,
+FAT32 or exFAT mark. The ninth boot zeroes the card root's superblock, and
+with the mark always true its checks fail. **Two copies of a rule agree on
+every input their tests share; the rig needs the input where they
+differ, or there should be one copy.**

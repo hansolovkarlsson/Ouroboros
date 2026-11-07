@@ -1812,6 +1812,18 @@ implements, and config space is reachable only through the length the
 declared block was checked against. QEMU's 32 transports are found as
 before; Parallels and the Pi probe none (#407, #408).
 
+**A program's newline starts a new line on the serial console (2026-11-06).**
+The kernel's UART drivers turned their own `\n` into `\r\n`, but a
+program's output, which reaches the console as bytes through `cond`'s
+`CON_WRITE`, went out bare, so on the Pi's serial line `cat` printed each
+line where the last had ended. The translation now happens once, in the
+kernel's `console::write_out`, for every writer and every console driver,
+with a `\r` at the end of one write and a `\n` at the start of the next
+going out as one `\r\n`. Only the console's two syscalls reach it, never a
+file, a pipe or the network, so binary data is untouched. `tcgetattr` now
+reports `OPOST | ONLCR`. A Pi boot printed 13 bare `\n` before the fix and
+none after (#410).
+
 ## v0.23.0: multi-core, and DevTools's preprocessor and editor run here (2026-10-13)
 
 Seventy-three pull requests over eight days, 2026-10-05 to 2026-10-12, #209
