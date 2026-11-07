@@ -285,6 +285,14 @@ screen -L /dev/tty.usbserial-XXXXXXXX 115200    # CP2102 / FT232
 
 ## 4. Building the card
 
+**Stage a Pi card with `make bootstick BOOTSTICK=/dev/diskN PI=1`** ("One
+disk: the card alone", below): the firmware, the ESP tree and the ext2 root
+on the one card. `make sdcard`, described first here because it came
+first, is kept for two jobs since 2026-11-07 (`roadmap-sd-card.md`, D5):
+re-staging the boot partition alone, which leaves the root's files as they
+are, and the older two-disk layout, a card holding only the firmware's
+partition with the root on a USB stick (`make stick`).
+
 The Pi's boot medium holds two things that do not collide: the firmware at the
 root of the FAT partition, and Ouroboros's ESP tree underneath `EFI/`. The
 firmware boots `RPI_EFI.fd` via `armstub`, which then boots
@@ -540,6 +548,15 @@ when nothing but the kernel changed: copy `build/esp/EFI/BOOT/BOOTAA64.EFI`
 and `build/esp/EFI/ORBS/SRCID.TXT` onto the card's `OUROBOROS` volume and
 eject. A change to a boot program or to anything on the root needs `make
 bootstick` again, which keeps `/etc` but replaces the rest of the root.
+
+**The boot partition alone** is what `make sdcard SDCARD=/Volumes/OUROBOROS`
+is kept for (D5, 2026-11-07): it replaces the kernel, the boot programs and
+the rest of `build/esp` on partition 1 and never writes partition 2, so
+everything on the root survives. It does not reach the root's `/bin`, which
+macOS cannot write, so the root's programs stay at the build they were
+staged from (see "Stage the card and the stick from the same build" above
+for why that matters). Not yet run on a card staged this way; by its rules
+it takes one, since partition 1 holds `RPI_EFI.fd`.
 
 ---
 

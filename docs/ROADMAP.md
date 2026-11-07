@@ -747,9 +747,10 @@ not yet checked on this tree are marked (predicted).
       (`make run-image-ext2` already builds a two-partition disk).
 - [x] **2. The SD card as a runtime disk. DONE 2026-11-06 (#412), moved to
       [`roadmap-completed.md`](roadmap-completed.md)**; the plan is
-      [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md). Its open tails
-      are in the plan (D5, `make sdcard`'s future) and under step 4 there
-      (the write wait and R1 errors only the board can show).
+      [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md). Its open tail
+      is under step 4 there (the write wait and R1 errors only the board
+      can show). D5 was taken 2026-11-07: `make sdcard` is kept, demoted
+      to re-staging the boot partition alone.
 - [ ] **3. Booting from a stick, with no card.** Most of it exists: on QEMU
       the kernel already boots from a USB stick behind a hub and mounts that
       same stick as its runtime disk (`test-usb-hub.py --usb-boot`, and

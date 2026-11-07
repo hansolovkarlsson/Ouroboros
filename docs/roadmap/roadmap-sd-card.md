@@ -129,6 +129,20 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
 - **D5. `make sdcard`'s future.** Keep it for a card that boots and leaves
   the root on a stick, or retire it once a card carries the whole system.
   **Recommended and settled: keep it until step 4 passes on the board,** then decide.
+  **Taken by Hans 2026-11-07, after step 4 passed: keep it, demoted.**
+  `make bootstick PI=1` is the way to stage a Pi card, and `testing-pi4.md`
+  section 4 says so first. `make sdcard` stays because it is the one way to
+  re-stage the boot partition alone: it copies `build/esp` onto the card's
+  mounted FAT volume and never writes partition 2, so the files on the
+  root survive a new kernel. That is what updating an existing card to a
+  new Ouroboros release needs, where `make bootstick` keeps only `/etc` and
+  `/Users` of the root. `make stick` stays with it for the two-disk layout,
+  and `make test-sd`'s eighth boot keeps grading that layout. Two limits,
+  recorded rather than fixed: `make sdcard` has not yet been run on a card
+  `make bootstick PI=1` staged (by its rules it takes one, since the card's
+  partition 1 holds `RPI_EFI.fd`), and it does not reach the programs in the
+  root's `/bin`, which macOS cannot write, so a new kernel staged this way
+  runs the root's older programs until a `make bootstick`.
 
 ## Steps, each with its check
 
@@ -417,7 +431,7 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    `CLAUDE.md`. **The arc is done.** D5, whether `make sdcard` is
    retired now that a card can carry the whole system, is Hans's to take:
    it still stages a card that boots beside a stick, and the eighth boot
-   keeps that layout working.
+   keeps that layout working. Taken 2026-11-07: kept and demoted (D5).
 
 ## Out of scope
 
