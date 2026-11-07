@@ -45,6 +45,13 @@ This document is the one to update first when direction changes.
 > without virtio-PCI, untried; and which mechanism finds Parallels' serial
 > console, not yet read.
 
+> **Released 2026-11-07: v0.24.0, one disk, and the Pi 4 on its SD card
+> alone** (#284 to #414, recorded in [`CHANGELOG.md`](CHANGELOG.md) and
+> [`roadmap-completed.md`](roadmap-completed.md)). Open from the one-disk
+> plan: its step 0 on Parallels and steps 6 and 7 (Pi item 3 below). Next
+> by the roadmap: per-user keys step 5 (item 1) or Pi item 1, more than one
+> partition in use, which the card now unblocks.
+
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
 > and [`roadmap-completed.md`](roadmap-completed.md)). The next direction, set

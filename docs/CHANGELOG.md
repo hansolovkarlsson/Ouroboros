@@ -7,9 +7,31 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## Unreleased
+## v0.24.0: one disk, and the Pi 4 on its SD card alone (2026-11-07)
 
-**Not yet released.** Changes since v0.23.0, drafted as they land.
+A hundred and thirty-one pull requests over twenty-six days, 2026-10-13 to
+2026-11-07, #284 to #414. First the one-disk arc
+([`roadmap/roadmap-one-disk.md`](roadmap/roadmap-one-disk.md)): the kernel
+names the partition it booted from and takes that disk as its block
+device, fsd mounts the root beside the ESP, and `make bootstick` writes
+that layout to a whole stick, which booted the Pi 4 and Parallels 27.1
+on 2026-11-04. Then Edit's and cpp's own sources built by DevTools's
+`cc`, `as` and `ld` as an option beside clang (`CCOMP=devtools`), and
+picolibc built with the flags it asks for. Then the longest
+stretch of the release, three weeks of the storage server made sound:
+FAT32, exFAT and ext2 each kept inside their volume, names outside ASCII
+made names of their own, a write that resumes where the last ended,
+read-only as a property of the mount, `O_CREAT|O_EXCL` and a directory's
+EISDIR at the open, and `NP_READDIR` answering in pages so a long listing
+comes back whole. Then the Parallels 27.1 fault, fixed by probing
+virtio-mmio only where ACPI declares it (the `amlscan` crate), a program's
+newline on the serial console, and the SD-card arc
+([`roadmap/roadmap-sd-card.md`](roadmap/roadmap-sd-card.md)): an SDHCI
+driver on QEMU and the Pi's EMMC2, on which the Pi 4 boots and runs with no
+stick. **No wire flag day**: the cluster's auth is unchanged, a paging
+listing reads an older peer's single page as before, and the new
+`OPEN_EXCL` bit is ignored by an older export, as every unknown bit was.
+The days' records are in `docs/work-journal/`, one file a day.
 
 **The kernel names the partition it booted from (2026-10-13).** Step 1 of
 `docs/roadmap/roadmap-one-disk.md`. Before the exit, `bootdisk.rs` reads the
