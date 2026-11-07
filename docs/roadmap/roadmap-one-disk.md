@@ -24,7 +24,9 @@ a cost:
 - **The Raspberry Pi 4** boots from the SD card (the pftf firmware and the
   ESP) and runs from a USB stick, because the kernel has no SD driver and
   the card is invisible after `exit_boot_services` (`testing-pi4.md`
-  section 6, "The storage surprise"). Card and stick are staged separately
+  section 6, "The storage surprise, and its end"; the SD-card arc,
+  `roadmap-sd-card.md`, ended it on 2026-11-06, when written as true of
+  this arc's start). Card and stick are staged separately
   from the same build, and nothing checks that they match (`ROADMAP.md`,
   "Stage card and stick from the same build").
 - **Parallels** boots from `build/esp.hdd` and runs from a passed-through

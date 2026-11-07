@@ -134,7 +134,7 @@ permission enforcement as missing.
 
 | Capability | Status | Notes |
 |---|---|---|
-| Block storage | ✅ | virtio-blk (QEMU) + USB mass storage / xHCI (Parallels and the Raspberry Pi 4, where a USB stick is the only disk after the exit: the SD card's EMMC2 has no driver). NVMe is not driven. One disk carries the ESP and the root (one-disk arc, 2026-10-13). |
+| Block storage | ✅ | virtio-blk (QEMU) + USB mass storage / xHCI (Parallels, and the Raspberry Pi 4 beside a card staged without a root) + an SD card on SDHCI (QEMU's `sdhci-pci`, and the Pi 4's EMMC2, its only disk since 2026-11-06: `roadmap-sd-card.md`), PIO one sector at a time, the card's firmware partition never written. NVMe is not driven. One disk carries the ESP and the root (one-disk arc, 2026-10-13). |
 | Console / framebuffer | ✅ | GOP framebuffer + UART, owned by `cond`. |
 | USB keyboard (xHCI) | ✅ | From-scratch xHCI + HID; real-hardware confirmed. |
 | USB: hubs / hot-plug / EHCI (USB 2.0) | ◐ | USB 2.0 hubs since 2026-09-27 (for the Raspberry Pi 4/400, where every USB 2.0 device sits behind an on-board hub), checked on QEMU by `make test-usb-hub`, and a full USB session on the Pi 4 since 2026-10-03. No USB 3 hubs, no hot-plug (boot-time scan only), and USB 2.0 sticks on a controller's EHCI companion stay undriven. |

@@ -27,6 +27,8 @@ mod madt;
 mod mmu;
 mod pci;
 mod power;
+mod sdhci;
+mod sdscan;
 mod smp;
 mod supervisor;
 mod syscall;
@@ -535,8 +537,9 @@ extern "C" fn kernel_main() -> ! {
     log::info!("Ouroboros kernel: image @ {:#x}..{:#x}, taking the xHCI controller next", image_range.0, image_range.1);
     // `\FBCON` (`fb_console_forced`): leave the discovered serial console
     // uninstalled after the exit, so the framebuffer console below takes HDMI.
-    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall, early_fault, walk_fault, smp_fault } =
-        bootflags::read();
+    let flags = bootflags::read();
+    let bootflags::Flags { no_xhci, xhci_no_write, fb_console: fb_console_forced, msd_stall, early_fault, walk_fault, smp_fault, .. } =
+        flags;
     if msd_stall {
         usb_msd::inject_stalls();
     }
@@ -581,6 +584,46 @@ extern "C" fn kernel_main() -> ! {
             None
         }
     };
+
+    // An SD Host Controller on PCI (QEMU's `sdhci-pci`; the SD-card arc's
+    // step 1): found and taken from firmware here, before the exit, after
+    // every read of the ESP, as the xHCI is. Its card is brought up after
+    // the exit, and installed only when no other disk was (`init_sd`).
+    let sdhci_info = match pci::discover_sdhci() {
+        Ok(info) => {
+            log::info!(
+                "Ouroboros kernel: sd: SD host controller on PCI @ {:#x}, command register {:#06x} -> {:#06x}",
+                info.base,
+                info.command_before,
+                info.command_after
+            );
+            Some(info)
+        }
+        Err(pci::SdhciDiscoveryError::NotFound) => None,
+        Err(e) => {
+            log::warn!("Ouroboros kernel: sd: {e}");
+            None
+        }
+    };
+    // The controller the card is brought up on after the exit: QEMU's on
+    // PCI, else the Raspberry Pi 4's EMMC2 as its ACPI tables declare it
+    // (SD-card arc step 3, `amlscan::declared`: its `_STA` and `_CRS` are
+    // the two method shapes step 0b read off the board).
+    let sd_controller = match sdhci_info {
+        Some(info) => Some(SdController { base: info.base, source: "PCI" }),
+        // SAFETY: `rsdp` is the firmware's, found above.
+        None => unsafe { emmc2_from_acpi(rsdp) },
+    };
+
+    // What the firmware says of the SD card's controller (sdscan.rs, step 0
+    // of docs/roadmap/roadmap-sd-card.md): read only, no register touched.
+    // After the xHCI step so its lines stay next to that step's.
+    // SAFETY: `dtb` and `rsdp` are the firmware's, found above. Only under
+    // `\SDDUMP`: a reading aid whose question step 0 answered (2026-11-05),
+    // not a cost every boot pays.
+    if flags.sd_dump {
+        unsafe { sdscan::report(dtb, rsdp) };
+    }
 
     // SAFETY: no boot-services protocol references (console, allocator, or
     // otherwise) are held past this call. Nothing below this point may use
@@ -660,8 +703,10 @@ extern "C" fn kernel_main() -> ! {
     console::println!("Ouroboros kernel: running at EL{} after the exit", el2::current_el());
 
     // SAFETY: called after exit_boot_services, with the memory map that
-    // call returned. Up to five regions (`mmu::MAX_EXTRA_DEVICES`): the
-    // console, framebuffer, xHCI BAR, GICD and GICR, all discovered
+    // call returned. Up to five regions (`mmu::MAX_EXTRA_DEVICES`) from six
+    // candidates: the console, framebuffer, xHCI BAR, GICD and GICR, and
+    // last the SD host controller, which is mapped only when a slot is left
+    // (`init_sd` then asks the walker, and says so when it is not), all discovered
     // addresses (madt.rs for the GIC), none assumed to live in the fixed
     // low-1GB device block. `mmu.rs`'s `MAX_EXTRA_L1_TABLES` is sized to
     // match, so each can have its own L1 table past 512GB.
@@ -697,6 +742,15 @@ extern "C" fn kernel_main() -> ! {
         };
         extra_devices[extra_device_count] = (secondary_base, secondary_size);
         extra_device_count += 1;
+    }
+    // The SD host controller, when there is room: QEMU's PCI window is in
+    // the low 1GB device block, mapped whatever this says, and `init_sd`
+    // asks the walker before the first access in any case.
+    if let Some(ctl) = &sd_controller {
+        if extra_device_count < mmu::MAX_EXTRA_DEVICES {
+            extra_devices[extra_device_count] = (ctl.base, 0x1000);
+            extra_device_count += 1;
+        }
     }
     // The boot EL0 regions, one per task slot (auto-sized to NUM_TASKS so
     // raising the slot count needs no edit here): slot 0 the loaded program,
@@ -882,6 +936,35 @@ extern "C" fn kernel_main() -> ! {
         held
     };
 
+    // Third disk path, the SD-card arc, read before the second: an SD card
+    // on a controller found before the exit (QEMU's on PCI, the Pi's EMMC2
+    // by ACPI), brought up and read whatever else is installed. A card that
+    // is the boot disk and holds a root partition beside its firmware's
+    // (`SdCard::boot_root`) goes in ahead of any stick, and of a virtio disk held
+    // back as not the boot disk (step 4: the Pi boots from its card, and a
+    // stick in a port is no longer its root); any other card only when no
+    // other disk went in and none was left out on purpose, after the USB
+    // step. A virtio disk that is the boot disk went in before either.
+    let sd = init_sd(sd_controller);
+    let sd = match sd {
+        Some(card) if card.boot_root && !syscall::block_device_installed() => {
+            syscall::install_block_device(block::BlockDevice::Sdhci(card.device));
+            console::println!(
+                "Ouroboros kernel: sd: block device installed for the filesystem server, the boot disk, ahead of any USB stick"
+            );
+            // What it went in ahead of, each named: install_boot_disk finds
+            // the cell full and returns before either would be said.
+            if held_virtio.is_some() {
+                console::println!("Ouroboros kernel: virtio-blk not installed: the SD card is the boot disk");
+            }
+            if xhci::storage_present() {
+                console::println!("Ouroboros kernel: usb-msd not installed: the SD card is the boot disk");
+            }
+            None
+        }
+        other => other,
+    };
+
     // Second disk path: USB mass storage over the xHCI driver, if the
     // multi-device scan activated one, and the choice between it and a virtio
     // disk init_storage held back as not the boot disk (one-disk step 3,
@@ -892,7 +975,8 @@ extern "C" fn kernel_main() -> ! {
     // attaches a few seconds *after* this point (confirmed by the
     // enumeration diagnostics), so this boot-time attempt mostly serves
     // QEMU; the shell's `mount` command covers the late-attach case.
-    install_boot_disk(held_virtio);
+    let usb = install_boot_disk(held_virtio);
+    install_sd_fallback(sd, usb);
 
     // GIC/timer setup - gated on `gic_info` being `Some` (real MADT
     // discovery, `madt.rs`), not the console-discovery heuristic this used to
@@ -1236,6 +1320,260 @@ fn init_storage(declared: &virtio_mmio::Transports) -> Option<Held> {
     None
 }
 
+/// An SD host controller found before the exit: its registers, and where
+/// it was found.
+struct SdController {
+    base: u64,
+    /// "PCI" (QEMU's `sdhci-pci`) or "ACPI" (the Pi's EMMC2).
+    source: &'static str,
+}
+
+/// The Raspberry Pi 4's EMMC2, when the ACPI tables declare exactly one
+/// present with at least SDHCI's 0x100 bytes of registers; logged either
+/// way when the tables name one, silent when they name none (QEMU,
+/// Parallels). Two would leave which one holds the card a guess, so none is
+/// taken. Before the exit, while the tables are certainly mapped.
+///
+/// # Safety
+/// `rsdp` as `acpi::find_rsdp` returns it.
+unsafe fn emmc2_from_acpi(rsdp: Option<*const u8>) -> Option<SdController> {
+    let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
+    let count = match unsafe { acpi::aml_table_slices(rsdp, &mut tables) } {
+        Ok(count) => count,
+        Err(e) => {
+            log::info!("Ouroboros kernel: sd: ACPI tables not read ({e:?}): no EMMC2 is taken");
+            return None;
+        }
+    };
+    let mut found = amlscan::Transports::new();
+    amlscan::declared(&tables[..count], amlscan::EMMC2_HID, &mut found);
+    let left_out = found.unreadable + found.absent + found.status_unknown + found.dropped;
+    match found.as_slice() {
+        [] if left_out == 0 => None,
+        [c] if c.size >= 0x100 => {
+            log::info!("Ouroboros kernel: sd: ACPI declares EMMC2 @ {:#x}, {:#x} bytes, INTID {:?}", c.base, c.size, c.intid);
+            Some(SdController { base: c.base, source: "ACPI" })
+        }
+        [c] => {
+            log::info!(
+                "Ouroboros kernel: sd: ACPI's EMMC2 @ {:#x} not taken: its {:#x} bytes are fewer than SDHCI's 0x100 registers",
+                c.base,
+                c.size
+            );
+            None
+        }
+        list => {
+            log::info!(
+                "Ouroboros kernel: sd: ACPI's EMMC2 declarations not taken: {} present, {} unreadable, {} absent, {} of unknown status, {} past the list's room",
+                list.len(),
+                found.unreadable,
+                found.absent,
+                found.status_unknown,
+                found.dropped
+            );
+            None
+        }
+    }
+}
+
+/// Brings up the SD card on the controller found before the exit, reads
+/// it, and hands it back with whether it is the boot disk, for `main` to
+/// install ahead of the USB step when it is and [`install_sd_fallback`] to
+/// install after it otherwise. Its firmware partition and the tables
+/// that find it are fixed as never written first (D3 of the SD-card arc,
+/// `parttable::firmware_sectors`): the boot partition when the card is the
+/// boot disk, else its first partition unless that is a root. A blank card
+/// keeps nothing, so it can be prepared; one whose table does not read, or
+/// lists no partition without being blank (a GPT whose two copies fail), is
+/// kept whole.
+///
+/// The card is brought up and read even when it is not installed, so a
+/// board shows what it holds before the card is trusted as the root (step
+/// 3: on the Pi the stick stayed the root). Each partition is listed, with
+/// an ext2 root's superblock magic read, the first read past the table.
+/// Silent when there is no controller.
+fn init_sd(ctl: Option<SdController>) -> Option<SdCard> {
+    let ctl = ctl?;
+    if !mmu::walks_as_device(ctl.base) {
+        console::println!(
+            "Ouroboros kernel: sd: {:#x} ({}) is not mapped as a device: the card is not brought up",
+            ctl.base,
+            ctl.source
+        );
+        return None;
+    }
+    console::println!("Ouroboros kernel: sd: bringing up the card on the controller at {:#x} ({})", ctl.base, ctl.source);
+    // SAFETY: a discovered SDHCI register block, mapped as device memory
+    // (just checked), and nothing else drives it: the firmware's driver
+    // stopped with boot services.
+    let mut device = unsafe { sdhci::Device::new(ctl.base) };
+    if let Err(e) = unsafe { device.init() } {
+        console::println!("Ouroboros kernel: sd: the card did not come up ({e})");
+        return None;
+    }
+    let mut sector = [0u8; 512];
+    // SAFETY: the card is up, and not yet installed.
+    if let Err(e) = unsafe { device.read_sector(0, &mut sector) } {
+        console::println!("Ouroboros kernel: sd: sector 0 did not read ({e})");
+        return None;
+    }
+    console::println!(
+        "Ouroboros kernel: sd: sector 0 read, signature {:#04x}{:02x}",
+        sector[510],
+        sector[511]
+    );
+    let capacity = device.capacity_sectors();
+    let (protected, boot_root) = {
+        // SAFETY: as above.
+        let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
+        // Asked again once on a failed read, as every disk path does (D6 of
+        // the one-disk arc): a card that is the boot disk and missed one
+        // read would otherwise give the root to a stick.
+        let matched = bootdisk::is_boot_disk_retrying(&mut read, capacity, "sd");
+        let boot = bootdisk::partition_if(matched);
+        match (matched, boot) {
+            (_, Some((start, _))) => console::println!("Ouroboros kernel: sd: the card is the boot disk (its boot partition at LBA {start})"),
+            (Some(bootdisk::Boot::Unreadable), _) => console::println!("Ouroboros kernel: sd: whether the card is the boot disk could not be read"),
+            (None, _) => console::println!("Ouroboros kernel: sd: the boot partition is unknown, so not whether the card holds it"),
+            _ => console::println!("Ouroboros kernel: sd: the card is not the boot disk"),
+        }
+        // The backup copy of a GPT, where its headers put it; `None` when a
+        // read it needed failed, which, like a table that does not read,
+        // keeps the whole card (the review of step 4: a failed read had
+        // been taken for "not GPT", and the backup left writable).
+        let backup = match parttable::is_gpt(&mut read) {
+            Some(true) => parttable::gpt_backup_extent(&mut read, capacity).map(Some),
+            Some(false) => Some(None),
+            None => None,
+        };
+        let gpt = matches!(backup, Some(Some(_)));
+        let blank = parttable::is_blank(&mut read) == Some(true);
+        let mut parts = [parttable::Partition::default(); 8];
+        let listed = parttable::discover(&mut read, Some(capacity), &mut parts);
+        if let Ok(n) = listed {
+            for (i, p) in parts[..n].iter().enumerate() {
+                // The first read past the table, of what the partition
+                // holds: an ext2 root's superblock (1024 bytes in, so sector
+                // 2, its magic 0xEF53 at byte 56), or another partition's
+                // FAT32 boot sector (`FAT32   ` at byte 82, the Pi's
+                // firmware partition).
+                let mut b = [0u8; 512];
+                let what = if p.root {
+                    if read(p.start + 2, &mut b) && b[56..58] == [0x53, 0xef] {
+                        ", a root, its ext2 superblock read"
+                    } else {
+                        ", a root, no ext2 superblock read"
+                    }
+                } else if read(p.start, &mut b) && &b[82..90] == b"FAT32   " && b[510..512] == [0x55, 0xaa] {
+                    ", a FAT32 boot sector read"
+                } else {
+                    ""
+                };
+                console::println!(
+                    "Ouroboros kernel: sd: {} partition {}: LBA {}, {} sectors{what}",
+                    if gpt { "GPT" } else { "MBR" },
+                    i + 1,
+                    p.start,
+                    p.sectors,
+                );
+            }
+        }
+        let (protected, whole) = match (listed, backup) {
+            _ if blank => ([(0, 0); 2], false),
+            (Ok(n), Some(backup)) if n > 0 || boot.is_some() => (parttable::firmware_sectors(&parts[..n], boot, backup), false),
+            // A table that does not read, or lists nothing on a card that is
+            // not blank, or a GPT backup not found, leaves nothing safe to
+            // write.
+            _ => ([(0, capacity), (0, 0)], true),
+        };
+        // A root fsd would mount from the card, past the protected sectors
+        // and holding a filesystem fsd mounts: what makes the boot card a
+        // whole system. The candidates are fsd's own (`parttable::
+        // root_candidates`, the one rule `vfs::root_order` builds on). A
+        // card as `make sdcard` stages it holds the firmware's partition
+        // alone, and a root mounted from that would refuse every write while
+        // the stick beside it, the root it was staged with, went unused; a
+        // root with no filesystem would leave fsd the same fallback.
+        let (first, count) = protected[0];
+        let firmware_end = first + count;
+        let writable_root = !whole
+            && listed.is_ok_and(|n| {
+                parttable::root_candidates(&parts[..n], boot.map(|(start, _)| start))
+                    .any(|p| p.start >= firmware_end && holds_filesystem(&mut read, p.start))
+            });
+        match (boot, writable_root) {
+            (Some(_), false) if whole => console::println!(
+                "Ouroboros kernel: sd: the card is the boot disk, but kept whole (its table did not read whole): not ranked ahead of another disk"
+            ),
+            (Some(_), false) => console::println!(
+                "Ouroboros kernel: sd: the card is the boot disk but holds no root past its firmware's partition with a filesystem fsd mounts: installed only if no other disk is"
+            ),
+            _ => {}
+        }
+        (protected, boot.is_some() && writable_root)
+    };
+    device.protect(protected);
+    let mut any = false;
+    for (first, count) in protected.into_iter().filter(|&(_, count)| count > 0) {
+        any = true;
+        console::println!(
+            "Ouroboros kernel: sd: sectors {first} to {} hold the card's firmware partition or the table that finds it, never written",
+            first + count - 1
+        );
+    }
+    if !any {
+        console::println!("Ouroboros kernel: sd: no firmware partition on the card: every sector writable");
+    }
+    Some(SdCard { device, boot_root })
+}
+
+/// Whether the partition at `start` holds a filesystem `fsd` mounts, by the
+/// marks its probes check first: an ext2 superblock's magic (0xEF53, byte 56
+/// of the sector 1024 bytes in), or a boot sector naming FAT32 (byte 82) or
+/// exFAT (byte 3) with the boot signature. A mark, not a mount: fsd's probe
+/// still decides, and a volume past its marks that fsd refuses leaves the
+/// card's root unmounted as it would any disk's.
+fn holds_filesystem(read: &mut dyn FnMut(u64, &mut [u8; 512]) -> bool, start: u64) -> bool {
+    let mut b = [0u8; 512];
+    if read(start + 2, &mut b) && b[56..58] == [0x53, 0xef] {
+        return true;
+    }
+    read(start, &mut b) && b[510..512] == [0x55, 0xaa] && (&b[82..90] == b"FAT32   " || &b[3..11] == b"EXFAT   ")
+}
+
+/// A card [`init_sd`] brought up and read, not yet installed.
+struct SdCard {
+    device: sdhci::Device,
+    /// The card holds the boot partition (`bootdisk::is_boot_disk`
+    /// answered yes and the partition is known) and a root partition past
+    /// its protected sectors: the card that goes in ahead of a USB stick.
+    boot_root: bool,
+}
+
+/// A card that was not installed ahead of the USB step: not the boot disk,
+/// or the boot disk without a root of its own (`SdCard::boot_root`), or kept
+/// whole. Installed now only when no disk went in, so such a card gives way
+/// to every other disk, as in step 3. Not when the USB stick's init failed:
+/// `install_boot_disk` leaves the cell empty then on purpose, since that
+/// stick may be the boot disk and `mount -a` replaces the device only when
+/// `fsd` mounted nothing (the medium review of #287).
+fn install_sd_fallback(card: Option<SdCard>, usb: syscall::UsbInstall) {
+    let Some(SdCard { device, .. }) = card else { return };
+    if syscall::block_device_installed() {
+        console::println!("Ouroboros kernel: sd: the card is up and read, not installed: another disk is");
+        return;
+    }
+    if usb == syscall::UsbInstall::Failed {
+        console::println!(
+            "Ouroboros kernel: sd: the card is up and read, not installed: the USB stick's init failed, and `mount -a` retries the stick"
+        );
+        return;
+    }
+    syscall::install_block_device(block::BlockDevice::Sdhci(device));
+    console::println!("Ouroboros kernel: sd: block device installed for the filesystem server");
+}
+
+
 /// A virtio disk [`init_storage`] held back rather than installed: not the
 /// boot disk, or `blank`, holding no partition table or volume
 /// (`parttable::is_blank`).
@@ -1253,7 +1591,7 @@ struct Held {
 /// after any stick. The `MOUNT` syscall's later rescan, which replaces the
 /// device with a stick attached late, installs whatever stick it finds, and
 /// `BLOCK_BOOT_START` reads its table when asked, so it answers for it too.
-fn install_boot_disk(held: Option<Held>) {
+fn install_boot_disk(held: Option<Held>) -> syscall::UsbInstall {
     // Held back for the stick's answer: a non-boot stick gives way to it.
     let holds_back = matches!(held, Some(Held { blank: false, .. }));
     let outcome = syscall::try_install_usb_block_device(|usb| {
@@ -1272,7 +1610,7 @@ fn install_boot_disk(held: Option<Held>) {
         // it. Only a stick that was read and does not match is refused.
         !matches!((holds_back, matched), (true, Some(bootdisk::Boot::No)))
     });
-    let Some(Held { device, blank }) = held else { return };
+    let Some(Held { device, blank }) = held else { return outcome };
     // The held virtio disk is not the boot disk; it goes in only as the
     // fallback, the order from before step 3, and the line says why no other
     // disk did. Not when the stick's init failed: that stick may be the boot
@@ -1283,7 +1621,7 @@ fn install_boot_disk(held: Option<Held>) {
     // `mount -a` still retries the stick, and left out it could not be
     // prepared for the whole boot (the max review of the blank disk).
     let why = match outcome {
-        syscall::UsbInstall::Installed => return,
+        syscall::UsbInstall::Installed => return outcome,
         syscall::UsbInstall::Refused => "the USB stick is not the boot disk either",
         syscall::UsbInstall::Absent if blank => "blank, and no USB stick is attached",
         syscall::UsbInstall::Absent => "no USB stick is attached",
@@ -1292,11 +1630,12 @@ fn install_boot_disk(held: Option<Held>) {
             console::println!(
                 "Ouroboros kernel: virtio-blk is not the boot disk and the USB stick's init failed - no disk installed, `mount -a` retries the stick"
             );
-            return;
+            return outcome;
         }
     };
     syscall::install_block_device(block::BlockDevice::Virtio(device));
     console::println!("Ouroboros kernel: virtio-blk installed as the fallback: {why}");
+    outcome
 }
 
 /// Brings up the virtio-net driver and hands it to the `NET` cell for the

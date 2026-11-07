@@ -193,8 +193,16 @@ pub(crate) fn is_boot_disk_retrying(
 /// counting in blocks other than 512 bytes cannot be answered wrongly here:
 /// its LBAs would not match the disk's table, and the disk is no boot disk.
 pub(crate) fn start_if(matched: Option<Boot>) -> u64 {
+    partition_if(matched).map_or(0, |(start, _)| start)
+}
+
+/// The boot partition as `(start LBA, size in blocks)` when
+/// [`is_boot_disk`] answered yes, else `None`: what the SD card keeps as
+/// its firmware's partition (`main.rs`'s `init_sd`), and [`start_if`]'s
+/// one source.
+pub(crate) fn partition_if(matched: Option<Boot>) -> Option<(u64, u64)> {
     match (matched, get()) {
-        (Some(Boot::Yes), Some(boot)) => boot.start_lba,
-        _ => 0,
+        (Some(Boot::Yes), Some(boot)) => Some((boot.start_lba, boot.size_blocks)),
+        _ => None,
     }
 }

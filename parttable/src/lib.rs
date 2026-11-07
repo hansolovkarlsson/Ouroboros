@@ -513,5 +513,90 @@ fn gpt_holds(boot: &BootPartition, read: &mut ReadSector, header: u64, capacity:
     Some(Ok(guid_ok && first == boot.start_lba && ends))
 }
 
+/// The sectors of a card no write may reach, as `(first, count)` ranges,
+/// an empty one `(0, 0)`: decision D3 of the SD-card arc
+/// (`docs/roadmap/roadmap-sd-card.md`). The Raspberry Pi's firmware keeps
+/// its variable store, `RPI_EFI.fd`, as a file in its partition, and boots
+/// only while the table that finds that partition is whole, so both are
+/// kept: sector 0 to the partition's end (the MBR, a GPT's primary header
+/// and entries, the gap and the partition), and for a GPT disk `backup`,
+/// its backup header and entries as [`gpt_backup_extent`] finds them.
+///
+/// The firmware's partition is `boot`, the boot partition the firmware
+/// names (start and size), when the card is the disk the system booted
+/// from. Otherwise the card's first partition, when it is not a root,
+/// since every card staged for the Pi carries the firmware in its first
+/// partition (FAT32) and a root, if any, beside it. With neither, a card
+/// with no partition or whose first is a root, nothing is protected: a
+/// blank card can be prepared with `partition` and `format`. A card whose
+/// table does not read or does not validate is the caller's to protect
+/// whole (`main.rs`'s `init_sd`).
+pub fn firmware_sectors(partitions: &[Partition], boot: Option<(u64, u64)>, backup: Option<(u64, u64)>) -> [(u64, u64); 2] {
+    let Some((start, count)) = boot.or_else(|| partitions.first().filter(|p| !p.root).map(|p| (p.start, p.sectors)))
+    else {
+        return [(0, 0); 2];
+    };
+    [(0, start.saturating_add(count)), backup.unwrap_or((0, 0))]
+}
+
+/// The partitions `fsd` takes as root candidates, in the order it tries
+/// them, with `boot` the boot partition's start when the kernel names one:
+/// the partitions beside the boot one whose type marks them as a root (MBR
+/// 0x83, GPT's AArch64 root GUID) when there is one; with none typed, every
+/// partition beside the boot one, when the boot partition is known; and none
+/// when it is not, every partition then being only a read-only fallback.
+/// `fsd`'s `vfs::root_order` builds its order on this, and the kernel ranks
+/// an SD card by it (`main.rs`'s `init_sd`), so the two cannot disagree on
+/// whether a disk holds a root (the review of `0aa8c177`, which found a
+/// kernel copy of the rule passing over an untyped root).
+pub fn root_candidates(parts: &[Partition], boot: Option<u64>) -> impl Iterator<Item = &Partition> + '_ {
+    let beside = move |p: &&Partition| Some(p.start) != boot;
+    let typed = parts.iter().filter(beside).any(|p| p.root);
+    parts.iter().filter(beside).filter(move |p| if typed { p.root } else { boot.is_some() })
+}
+
+/// Where a GPT disk of `capacity` sectors keeps its backup header and
+/// entries, as `(first, count)`: the header where a valid primary's
+/// AlternateLBA puts it (the firmware follows that field, so a smaller GPT
+/// image written to a bigger card keeps its backup inside the image, not at
+/// the card's end), else at the last sector; its entries from that header's
+/// own array LBA when it holds one within [`MAX_GPT_ARRAY_SECTORS`] below it,
+/// else the [`GPT_TABLE_SECTORS`] ending at the header, the usual 128 entries
+/// of 128 bytes. `None` when a read it needed failed: the caller cannot tell
+/// what to keep and keeps the whole card. The review of step 4 found the
+/// last 33 sectors assumed.
+pub fn gpt_backup_extent(read: &mut ReadSector, capacity: u64) -> Option<(u64, u64)> {
+    let mut header = [0u8; SECTOR];
+    let mut at = gpt_backup(capacity)?;
+    match read_gpt(read, GPT_PRIMARY, Some(capacity), &mut |_, _| {}) {
+        GptCopy::Unreadable => return None,
+        GptCopy::Valid => {
+            if !read(GPT_PRIMARY, &mut header) {
+                return None;
+            }
+            let alternate = le(&header[32..40]);
+            if alternate > GPT_PRIMARY && alternate < capacity {
+                at = alternate;
+            }
+        }
+        GptCopy::Invalid => {}
+    }
+    if !read(at, &mut header) {
+        return None;
+    }
+    let array = le(&header[72..80]);
+    let first = if &header[0..8] == b"EFI PART" && array < at && at - array <= MAX_GPT_ARRAY_SECTORS {
+        array
+    } else {
+        at.saturating_sub(GPT_TABLE_SECTORS - 1).max(GPT_PRIMARY + 1)
+    };
+    Some((first, at - first + 1))
+}
+
+/// A GPT copy's header and entries as the UEFI specification lays out the
+/// usual 128 entries of 128 bytes: 32 sectors of entries and the header,
+/// [`gpt_backup_extent`]'s answer when the backup header names no array.
+pub const GPT_TABLE_SECTORS: u64 = 33;
+
 #[cfg(test)]
 mod tests;

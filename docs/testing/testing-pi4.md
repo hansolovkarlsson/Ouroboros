@@ -352,9 +352,12 @@ UEFI variable, which lives in `RPI_EFI.fd` and so survives.
 
 ### The USB stick
 
-The card stops being readable once the kernel runs (see "The storage
-surprise" in §6), so the stick is the only disk the system has: `mount -a`
-mounts it, and `/bin`, `/etc` and `/man` come from it.
+A card as `make sdcard` stages it holds only its FAT32 partition, the
+firmware's, which the kernel reads and never writes (see "The storage
+surprise, and its end" in §6), so the stick beside it is the root: `mount
+-a` mounts it, and `/bin`, `/etc` and `/man` come from it. A card staged by
+`make bootstick PI=1` carries its own root and needs no stick ("One disk:
+the card alone", below).
 
 ```sh
 make stick STICK=/Volumes/<stick>          # KEEP_ETC=0 re-stages its /etc, EJECT=1 ejects
@@ -430,8 +433,13 @@ firmware's own files and `config.txt` are carried: a boot flag such as
 If the stick's ESP no longer mounts, the run refuses; `PI=1 FIRMWARE=1`
 rewrites it with the release's firmware, settings reset. `FIRMWARE=1`
 reinstalls the pinned release (settings reset, `config.txt` kept); `PI=0`
-drops the firmware. A card is refused as a target: the kernel cannot read
-it once it runs.
+drops the firmware. A Pi card (one FAT32 volume with `RPI_EFI.fd`, as `make
+sdcard` stages it) is taken as a target since 2026-11-06, when the kernel
+gained an SD card driver (`roadmap-sd-card.md`): its `/etc`, boot counter and
+firmware files, `RPI_EFI.fd` with its settings, are carried as a Pi stick's
+are. It was refused before, since the kernel could not read the card. A
+card holding `RPI_EFI.fd` but no `EFI/ORBS/INIT.CFG`, one staged for another
+OS, is still refused (the review of step 4).
 
 *Built 2026-10-14, checked only on image files* (`make test-bootstick`):
 the pinned files on a fresh stick, the settings and `config.txt` carried,
@@ -479,6 +487,50 @@ SPCR is not known. When the serial line goes quiet at the exit, check
 HDMI. The first time on the Pi, set §5's settings in the firmware
 menu, since a fresh stick's `RPI_EFI.fd` is the release's.
 
+### One disk: the card alone
+
+Since the SD-card arc (`docs/roadmap/roadmap-sd-card.md`, 2026-11-06) the
+kernel drives the card after the exit, so the card can be the whole system
+and the USB ports stay free for a keyboard and the rest. Stage it as a Pi
+stick is staged, on the card's whole disk:
+
+```sh
+diskutil list                                  # the card's N, CHECK IT (the built-in reader is "internal" but removable)
+make bootstick BOOTSTICK=/dev/diskN PI=1 EJECT=1
+```
+
+The card then holds the firmware and the ESP tree as partition 1 and the
+ext2 root as partition 2. A card `make sdcard` staged is taken as ours
+(above), and its `/etc`, boot counter and firmware files, `RPI_EFI.fd` with
+the §5 settings, are carried. On the Pi the kernel finds the card's
+controller, EMMC2, in the ACPI tables, brings the card up (400 kHz, then
+4-bit at 25 MHz), names it the boot disk, and installs it: `sd: block device
+installed for the filesystem server`. Sector 0 to the end of partition 1,
+the firmware's partition and the table that finds it, are never written
+(`sd: sectors 0 to 133118 ... never written`); a write there is refused
+and the first one logged.
+
+**Which disk is the root**, when a stick is in a port as well:
+
+| The card | The root |
+|---|---|
+| staged by `make bootstick PI=1`, the boot disk with its own root | the card, ahead of the stick: `... the boot disk, ahead of any USB stick`, then `usb-msd not installed: the SD card is the boot disk` |
+| staged by `make sdcard`, the firmware's partition alone | the stick, as before: `sd: the card is the boot disk but holds no root partition past its firmware's` |
+| not the boot disk (the board booted from the stick) | the stick; the card is read and left out |
+
+**Observed 2026-11-06** (builds `0f6f471a` to `b6b78bee`, the 128 GB card
+in the board's slot, `roadmap-sd-card.md` step 4): the card alone booted to
+a login with `mount` reading `ext2 mounted at partition LBA 133120 (disk
+244277248 sectors, 119276 MiB)`; a file written to it was read back after
+`shutdown` and a power cycle; and with the old stick in a port the card
+stayed the root and the stick was not installed.
+
+**A kernel alone can be put on the card from the Mac** without a re-stage,
+when nothing but the kernel changed: copy `build/esp/EFI/BOOT/BOOTAA64.EFI`
+and `build/esp/EFI/ORBS/SRCID.TXT` onto the card's `OUROBOROS` volume and
+eject. A change to a boot program or to anything on the root needs `make
+bootstick` again, which keeps `/etc` but replaces the rest of the root.
+
 ---
 
 ## 5. Firmware settings to check before the first boot
@@ -501,6 +553,18 @@ then PCI, in that order (confirmed: `main.rs:100`, `devicetree.rs`, `acpi.rs`,
 the first boot. It is the most informative setting, because the
 `console @ {base:#x} (via {source})` log line then tells you which mechanism
 actually won on this platform. Once that is known, pin it deliberately.
+
+**The SD card on EMMC2.** The firmware routes the card's pins to one of two
+controllers, EMMC2 or the older Arasan, by its setting `SdIsArasan` (in the
+same `Advanced Configuration` pages). The kernel drives EMMC2 only, so set
+it to EMMC2. The sources disagree on a fresh `RPI_EFI.fd`'s value (`RPi4.dsc`
+gives EMMC2, the setup form marks Arasan as its default;
+`roadmap-sd-card.md`, "What is known"), so check it once per firmware; the
+2026-11-06 card read `SdIsArasan` 0 (`sdscan.rs` under `SDDUMP` reads the
+variable and says which). With Arasan
+selected the ACPI tables declare no EMMC2, the kernel logs nothing for the
+card, and a stick is the only disk. `make bootstick` carries a card's
+`RPI_EFI.fd` whole on a re-stage, so the setting survives it.
 
 ---
 
@@ -627,24 +691,27 @@ localises the failure without any guessing.
    `boot identity:` line. **No entropy means no forward secrecy for any session
    this node takes part in**, so that number decides a property of the cluster.
 
-### The storage surprise, stated plainly
+### The storage surprise, and its end
 
-**Ouroboros has no SD-card driver, and will not acquire one by booting from an
-SD card.** `loader.rs` reads every userland binary through UEFI's filesystem
-protocol during the boot-services window (confirmed: `loader.rs`'s module doc,
-"there is no runtime disk driver yet"), and `block.rs` dispatches over exactly
-two runtime drivers, `virtio_blk` and `usb_msd` (confirmed: `block.rs`). The Pi
-has neither on its SD slot.
+**Until 2026-11-06 Ouroboros had no SD-card driver.** `loader.rs` reads
+every userland binary through UEFI's filesystem protocol during the
+boot-services window, and `block.rs` dispatched over exactly two runtime
+drivers, `virtio_blk` and `usb_msd`. So the card booted the kernel and the
+boot programs and then became invisible the moment `exit_boot_services`
+ran; every runtime filesystem test (`ls`, `cat`, `write`, `mount`, `erase
+disk`, `partition`, `format`) needed a **USB 3 stick in a blue port**,
+staged with `make stick` (§4).
 
-So: the card boots the kernel and the boot programs, and then becomes
-invisible the moment `exit_boot_services` runs. The `/bin` and `/man` copies on
-it are unreachable from then on: running a program goes through `fsd`
-(`spawn_stage` in the shell reports `NO_FS` without a disk), so with no stick
-the shell has its builtins and nothing else. Every runtime filesystem test:
-`ls`, `cat`, `write`, `mount`, `erase disk`, `partition`, `format`, needs the
-**USB 3 stick in a blue port**, as on Parallels, staged with `make stick`
-(§4) so that `/bin` is there to run. This is not a Pi limitation; it is the
-same architecture that made USB-MSD necessary there in the first place.
+**Since the SD-card arc** (`docs/roadmap/roadmap-sd-card.md`) `block.rs`
+has a third arm, `sdhci.rs`: the card on EMMC2, found by the ACPI tables
+(`_HID "BRCME88C"` at `0xfe340000`), brought up from scratch by the SD
+specification and read and written by PIO, one sector at a time. It needs
+the firmware to route the card to EMMC2 (`SdIsArasan` 0; §5); with Arasan selected EMMC2 does not reach the card and the
+tables do not declare it. The firmware's partition and the table that
+finds it are never written, since the firmware keeps its variable store,
+`RPI_EFI.fd`, as a file there. A card staged by `make bootstick PI=1` is the
+whole system, and a stick is needed only beside a card `make sdcard`
+staged ("One disk: the card alone", §4, has which disk is the root).
 
 ### Bisecting a hang with boot flag files
 
@@ -659,6 +726,7 @@ flag when it is set.
 | `NOXHCI` | xHCI discovery and bring-up: no USB at all | the hang is inside `pci::discover_xhci` |
 | `XHCINOWR` | only the PCI command-register write in discovery (the takeover from firmware still happens), and the bring-up after the exit | the hang is the write or the bring-up after the exit, not the takeover; `NOXHCI` cannot split those two either, so a boot that reaches the shell under both flags leaves both open |
 | `FBCON` | installing the SPCR serial console after the exit; the kernel's framebuffer console is installed instead, right after `exceptions::install()`, on the firmware's page tables | (not a bisection) every post-exit line, the MMU switch and the kernel's own `EXCEPTION …` report included, appears on HDMI, so the last one shows where the boot stops |
+| `SDDUMP` | nothing: a reading aid for the SD-card arc's step 0 (`roadmap-sd-card.md`). With it `sdscan.rs` reports, before the exit, what the firmware says of the SD controller (the devicetree, the ACPI declarations, EMMC2's registers, `SdIsArasan`) and prints, in hex, each ACPI table that declares one, as lines starting `SDDUMP`; without it the report does not run (since 2026-11-06, the review of step 2: its question was answered) | (not a bisection) the report and dump are on serial, between the xHCI line and `exiting boot services` |
 
 One flag per bisection boot; `FBCON` combines with either of the others.
 They exist for the first Pi 400 boots (2026-09-28), which all ended on HDMI

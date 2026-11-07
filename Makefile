@@ -461,7 +461,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin openprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin ccreat-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-disk-handle check-doc-pointers check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename test-mv-into test-fat-link test-mount-gate test-probe-ioerr test-blank-disk test-volume-bound test-ext2-blocks test-long-set test-disk-gate fsd-disk-gate-bin test-valid-length test-exfat-names test-fat32-names test-fat-extflags test-mv-undo test-dir-scan test-free-chain test-alloc-batch test-batch-refused clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin openprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin ccreat-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk run-sd images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-disk-handle check-doc-pointers check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-sd test-boot-partition test-bootstick test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-crename test-mv-into test-fat-link test-mount-gate test-probe-ioerr test-blank-disk test-volume-bound test-ext2-blocks test-long-set test-disk-gate fsd-disk-gate-bin test-valid-length test-exfat-names test-fat32-names test-fat-extflags test-mv-undo test-dir-scan test-free-chain test-alloc-batch test-batch-refused clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -1771,6 +1771,31 @@ run-disk: disk
 		-global virtio-mmio.force-legacy=false \
 		-nographic
 
+# disk.img on an SD card behind QEMU's sdhci-pci, the ESP booted from
+# virtio-blk-pci, which the firmware reads and the kernel cannot drive: the
+# root comes from the card (sdhci.rs, the SD-card arc). The card is a copy,
+# padded to a power of two (QEMU wants one), at least 128 MiB, never cut;
+# its partition 1 is the firmware's and never written (D3), the root beside it
+# is. `make test-sd` is the graded form.
+run-sd: disk
+	cp $(DISK_IMG) $(BUILD_DIR)/run-sd.img
+	# The smallest power of two of at least 128 MiB that holds the image,
+	# never smaller than the image (a bare truncate would cut the root off).
+	python3 -c "import os; p='$(BUILD_DIR)/run-sd.img'; n=os.path.getsize(p); os.truncate(p, max(128 << 20, 1 << (n - 1).bit_length()))"
+	qemu-system-aarch64 \
+		-machine virt \
+		-cpu cortex-a72 \
+		-m 512M \
+		-bios $(OVMF) \
+		-drive file=fat:rw:$(ESP_DIR),format=raw,media=disk,if=none,id=esp \
+		-device virtio-blk-pci,drive=esp \
+		-device sdhci-pci \
+		-drive file=$(BUILD_DIR)/run-sd.img,format=raw,if=none,id=sd0 \
+		-device sd-card,drive=sd0 \
+		-device virtio-rng-device \
+		-global virtio-mmio.force-legacy=false \
+		-nographic
+
 # Boot the combined disk: UEFI boots BOOTAA64 from the FAT32 ESP (partition 2),
 # then fsd mounts the ext2 partition (partition 1) read-only - so `ls`/`cat`/
 # pipelines read from ext2 (their /bin binaries live there too).
@@ -2039,8 +2064,9 @@ sdcard:
 	STICK="$(STICK_MODE)" SDCARD="$(SDCARD)" KEEP_ETC="$(KEEP_ETC)" FIRMWARE="$(FIRMWARE)" EJECT="$(EJECT)" \
 		ESP_DIR="$(ESP_DIR)" CACHE_DIR="$(BUILD_DIR)/cache" ./scripts/sdcard.sh
 
-# Stages the same tree on a USB stick, the Pi's only disk once the kernel
-# runs (the SD slot has no driver after exit_boot_services, testing-pi4.md
+# Stages the same tree on a USB stick, the Pi's root beside a card `make
+# sdcard` staged, whose one partition is the firmware's and never written
+# (a card `make bootstick PI=1` staged needs no stick; testing-pi4.md
 # section 6): what `mount -a` mounts and where /bin, /etc and /man come
 # from. The sdcard target with STICK_MODE=1, so one recipe and one script
 # (scripts/sdcard.sh, STICK=1, whose header lists the differences): the same
@@ -2064,7 +2090,7 @@ stick:
 # Hans on 2026-10-14). It replaces the whole disk, so scripts/bootstick.py
 # guards it: a whole disk's node, external or removable, not the Mac's own,
 # and empty or ours (a disk it wrote, a `make stick` stick, or a written
-# esp.img); a Pi card is refused. BOOTSTICK may name a disk image file
+# esp.img, or a Pi card, its firmware carried whole). BOOTSTICK may name a disk image file
 # instead, which it attaches with hdiutil and writes the same way, so it can
 # be tried on QEMU first (`make run-bootstick`). A device this user cannot
 # open is read and written through sudo dd.
@@ -2290,6 +2316,21 @@ test-spawn-size: image
 # a half. Run it whenever fsd's proc.rs or CORE_INFO changes.
 test-proc-cpus: image
 	python3 scripts/test-proc-cpus.py
+
+# An SD card as the root disk (scripts/test-sd.py, steps 1 and 2 of
+# docs/roadmap/roadmap-sd-card.md): the ESP on virtio-blk-pci (the firmware
+# reads it, the kernel cannot) and disk.img on QEMU's sdhci-pci, as a
+# standard-capacity card and a 4 GiB high-capacity one, two boots each: the
+# root mounted from the card, a file written and read back across a power
+# off, partition and format refused over the firmware partition and its
+# table, their bytes unchanged; a fifth boot, a card with no table entries,
+# kept whole; a sixth, the card read beside a virtio disk installed first;
+# a seventh, the card as the boot disk installed ahead of a USB stick that
+# is not; an eighth, a boot card with no root of its own (as `make sdcard`
+# stages it), which gives way to the stick; and a ninth, a boot card whose
+# typed root holds no filesystem, which gives way too.
+test-sd: disk
+	python3 scripts/test-sd.py
 
 # The boot partition the kernel names from its own device path
 # (scripts/test-boot-partition.py, step 1 of docs/roadmap/roadmap-one-disk.md):

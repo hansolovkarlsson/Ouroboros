@@ -61,6 +61,23 @@ pub(crate) fn now_ticks() -> u64 {
     ticks
 }
 
+/// The counter value `us` microseconds from now: a deadline for a busy-poll
+/// bounded by elapsed time ([`now_ticks`]'s doc says why that, and not an
+/// iteration count). Rounded up, so a wait is never shorter than asked, and
+/// at least one tick past now.
+pub(crate) fn deadline_us(us: u64) -> u64 {
+    let ticks = (frequency_hz() * us).div_ceil(1_000_000).max(1);
+    now_ticks() + ticks
+}
+
+/// Spins until `us` microseconds have passed ([`deadline_us`]).
+pub(crate) fn delay_us(us: u64) {
+    let until = deadline_us(us);
+    while now_ticks() < until {
+        core::hint::spin_loop();
+    }
+}
+
 /// Microseconds since boot from the free-running counter, computed
 /// overflow-safe (a naive `now_ticks() * 1_000_000` overflows a u64 in a few
 /// days at 62.5 MHz): whole seconds plus the sub-second remainder. The one

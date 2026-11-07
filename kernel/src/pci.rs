@@ -347,97 +347,198 @@ pub fn discover_xhci(enable_write: bool) -> Result<XhciInfo, XhciDiscoveryError>
     Err(last_error)
 }
 
+/// A controller taken from firmware by [`take_from_firmware`]: where its BAR
+/// decodes, and its command register before and after.
+struct Taken {
+    bar: BarAddress,
+    command_before: u16,
+    command_after: u16,
+    /// Whether the command register was written.
+    wrote: bool,
+}
+
+/// Why [`take_from_firmware`] took nothing.
+enum TakeError {
+    /// BAR0 reads back as `0`: firmware never assigned it.
+    Unassigned,
+    /// The BAR could not be read, resolved or the controller taken.
+    Discovery(DiscoveryError),
+}
+
+/// Takes the controller at `addr` from firmware and resolves its CPU
+/// address: the one sequence [`discover_xhci`] and [`discover_sdhci`] share,
+/// whose doc on `discover_xhci` says why each step is there. The address is
+/// resolved FIRST, through a read-only open that leaves firmware's driver
+/// running, so a controller whose address does not check out is never
+/// taken. Then an exclusive open of ITS OWN `PciIo` stops firmware's driver
+/// on it alone (an exclusive open of the whole root bridge is refused when
+/// any driver on the bus will not stop, see `open_root_bridge`), held over
+/// the command-register write so it lands on a device no firmware driver
+/// manages. The write is one dword (Command and Status; the word-width
+/// write crashed Parallels' firmware), made only when a bit of `want` is
+/// clear; a `want` of 0 writes nothing. The caller logs what happened from
+/// the returned register values.
+fn take_from_firmware(root_bridge: &mut PciRootBridgeIo, addr: &PciIoAddress, want: u16) -> Result<Taken, TakeError> {
+    let refused = |e: uefi::Error| TakeError::Discovery(DiscoveryError::Bar(BarError::Refused(e.status())));
+    let pci_io_handle = find_pci_io_handle(root_bridge.segment_nr(), addr)
+        .ok_or(TakeError::Discovery(DiscoveryError::Bar(BarError::NoPciIo)))?;
+    let bus_addr = read_bar0_address(root_bridge, *addr).map_err(TakeError::Discovery)?;
+    // Checked on the raw BAR, before firmware's translation can turn an
+    // unassigned 0 into a plausible CPU address.
+    if bus_addr == 0 {
+        return Err(TakeError::Unassigned);
+    }
+    let bar = {
+        let io = open_read_only::<PciIo>(pci_io_handle).map_err(refused)?;
+        bar0_address(&io, bus_addr).map_err(|e| match e {
+            BarError::Unassigned => TakeError::Unassigned,
+            e => TakeError::Discovery(DiscoveryError::Bar(e)),
+        })?
+    };
+    let _taken = uefi::boot::open_protocol_exclusive::<PciIo>(pci_io_handle).map_err(refused)?;
+    let read_command = |rb: &mut PciRootBridgeIo| {
+        rb.pci()
+            .read_one::<u32>(addr.with_register(COMMAND_REGISTER))
+            .map(|v| (v & 0xffff) as u16)
+            // A sentinel distinct from any real command value: the read failed.
+            .unwrap_or(0xffff)
+    };
+    let command_before = read_command(root_bridge);
+    let mut command_after = command_before;
+    let wrote = command_before & want != want;
+    if wrote {
+        if let Ok(command_status) = root_bridge.pci().read_one::<u32>(addr.with_register(COMMAND_REGISTER)) {
+            let _ = root_bridge
+                .pci()
+                .write_one::<u32>(addr.with_register(COMMAND_REGISTER), command_status | u32::from(want));
+        }
+        command_after = read_command(root_bridge);
+    }
+    Ok(Taken { bar, command_before, command_after, wrote })
+}
+
 /// Takes one xHCI controller from firmware and resolves its CPU address,
-/// for [`discover_xhci`]. Taking it stops firmware's USB stack on that
-/// controller, so nothing may read the boot disk afterwards: see
-/// `discover_xhci`'s placement in `main.rs`.
+/// for [`discover_xhci`], by [`take_from_firmware`] with Memory Space and
+/// Bus Master. Taking it stops firmware's USB stack on that controller, so
+/// nothing may read the boot disk afterwards: see `discover_xhci`'s
+/// placement in `main.rs`.
 fn take_xhci(
     root_bridge: &mut PciRootBridgeIo,
     addr: &PciIoAddress,
     enable_write: bool,
 ) -> Result<XhciInfo, XhciDiscoveryError> {
-    // Resolve the address FIRST, through a read-only open that leaves
-    // firmware's driver running. Only a controller whose address checks out
-    // is taken: taking one stops firmware's USB stack on it, and enabling
-    // it turns on DMA, so a controller that then failed the check would be
-    // left live with no driver and, on a USB-booted machine, the boot disk
-    // gone for nothing.
-    let pci_io_handle =
-        find_pci_io_handle(root_bridge.segment_nr(), addr).ok_or(XhciDiscoveryError::Bar(BarError::NoPciIo))?;
-    let bus_addr = read_bar0_address(root_bridge, *addr).map_err(XhciDiscoveryError::from)?;
-    // Checked on the raw BAR, before firmware's translation can turn an
-    // unassigned 0 into a plausible CPU address.
-    if bus_addr == 0 {
-        return Err(XhciDiscoveryError::Unassigned);
-    }
-    let bar = {
-        let io = open_read_only::<PciIo>(pci_io_handle)
-            .map_err(|e| XhciDiscoveryError::Bar(BarError::Refused(e.status())))?;
-        bar0_address(&io, bus_addr).map_err(|e| match e {
-            BarError::Unassigned => XhciDiscoveryError::Unassigned,
-            e => XhciDiscoveryError::Bar(e),
-        })?
-    };
-
-    // Now take it: an exclusive open of ITS OWN PciIo stops firmware's xHCI
-    // driver (and the USB devices under it) and nothing else. This used to
-    // be an exclusive open of the whole root bridge, which firmware refuses
-    // (ACCESS_DENIED) when any driver anywhere on the bus will not stop -
-    // see `open_root_bridge`. Held until this function returns, like the
-    // root-bridge open it replaces, so the Command-register write below
-    // lands on a device no firmware driver is managing.
-    let _taken = uefi::boot::open_protocol_exclusive::<PciIo>(pci_io_handle)
-        .map_err(|e| XhciDiscoveryError::Bar(BarError::Refused(e.status())))?;
-
-    // Enable Memory Space + Bus Master if not already set - see
-    // `discover_xhci`'s doc comment for why this write exists at
-    // all (real Parallels hardware directly confirmed a
-    // Synchronous External Abort reading an otherwise-correctly-
-    // assigned BAR with Memory Space still disabled - not a
-    // hypothetical), why it's now a dword (u32) write rather than
-    // the word (u16) write that crashed firmware outright, and
-    // why it's conditional (skip the write entirely if the bits
-    // already read as set, minimizing how often this even runs).
-    let command_before = root_bridge
-        .pci()
-        .read_one::<u32>(addr.with_register(COMMAND_REGISTER))
-        .map(|v| (v & 0xffff) as u16)
-        .unwrap_or(0xffff); // sentinel distinct from any real 16-bit command value's low byte pattern - read itself failed
-
-    let mut command_after = command_before;
+    // `\XHCINOWR` asks for nothing, so nothing is written.
+    let want = if enable_write { CMD_MEMORY_SPACE | CMD_BUS_MASTER } else { 0 };
+    let taken = take_from_firmware(root_bridge, addr, want).map_err(|e| match e {
+        TakeError::Unassigned => XhciDiscoveryError::Unassigned,
+        TakeError::Discovery(e) => XhciDiscoveryError::from(e),
+    })?;
+    let (before, after) = (taken.command_before, taken.command_after);
     if !enable_write {
-        log::warn!(
-            "Ouroboros kernel: xhci: PCI command register {command_before:#06x}, write skipped (\\XHCINOWR)"
-        );
-    } else if command_before & (CMD_MEMORY_SPACE | CMD_BUS_MASTER) != (CMD_MEMORY_SPACE | CMD_BUS_MASTER) {
-        if let Ok(command_status) = root_bridge
-            .pci()
-            .read_one::<u32>(addr.with_register(COMMAND_REGISTER))
-        {
-            let new_command_status = command_status | (CMD_MEMORY_SPACE | CMD_BUS_MASTER) as u32;
-            let _ = root_bridge
-                .pci()
-                .write_one::<u32>(addr.with_register(COMMAND_REGISTER), new_command_status);
-        }
-        command_after = root_bridge
-            .pci()
-            .read_one::<u32>(addr.with_register(COMMAND_REGISTER))
-            .map(|v| (v & 0xffff) as u16)
-            .unwrap_or(0xffff);
-        log::info!(
-            "Ouroboros kernel: xhci: PCI command register was {command_before:#06x}, wrote+read back {command_after:#06x}"
-        );
+        log::warn!("Ouroboros kernel: xhci: PCI command register {before:#06x}, write skipped (\\XHCINOWR)");
+    } else if taken.wrote {
+        log::info!("Ouroboros kernel: xhci: PCI command register was {before:#06x}, wrote+read back {after:#06x}");
     } else {
-        log::info!("Ouroboros kernel: xhci: PCI command register already {command_before:#06x}, no write needed");
+        log::info!("Ouroboros kernel: xhci: PCI command register already {before:#06x}, no write needed");
     }
-
     Ok(XhciInfo {
-        base: bar.cpu,
-        bus: bar.bus,
-        translation: bar.translation,
-        command_before,
-        command_after,
+        base: taken.bar.cpu,
+        bus: taken.bar.bus,
+        translation: taken.bar.translation,
+        command_before: taken.command_before,
+        command_after: taken.command_after,
     })
+}
+
+/// An SD Host Controller found on PCI and taken from firmware
+/// ([`discover_sdhci`]): where its registers decode, and its command
+/// register before and after Memory Space was turned on.
+#[derive(Debug, Clone, Copy)]
+pub struct SdhciInfo {
+    /// The CPU address `sdhci.rs` reads, firmware's host address for BAR0.
+    pub base: u64,
+    pub command_before: u16,
+    pub command_after: u16,
+}
+
+/// Why [`discover_sdhci`] found no controller to hand over.
+#[derive(Debug, Clone, Copy)]
+pub enum SdhciDiscoveryError {
+    NoRootBridge,
+    /// No class 0x08 subclass 0x05 prog-if 0x01 device on any root bridge:
+    /// the expected answer everywhere but a QEMU run that attaches one.
+    NotFound,
+    /// Found one whose BAR0 firmware never assigned.
+    Unassigned,
+    /// Found one whose BAR0 could not be read or resolved.
+    Bar(DiscoveryError),
+}
+
+impl core::fmt::Display for SdhciDiscoveryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SdhciDiscoveryError::NoRootBridge => write!(f, "no PCI root bridge found"),
+            SdhciDiscoveryError::NotFound => write!(f, "no SD host controller on any PCI root bridge"),
+            SdhciDiscoveryError::Unassigned => write!(f, "the SD host controller's BAR0 was never assigned"),
+            SdhciDiscoveryError::Bar(e) => write!(f, "the SD host controller's BAR0: {e:?}"),
+        }
+    }
+}
+
+const PCI_CLASS_BASE_SYSTEM_PERIPHERAL: u8 = 0x08;
+const PCI_SUBCLASS_SD_HOST: u8 = 0x05;
+/// The standard SDHCI register interface, without DMA (0x00) or with it
+/// (0x01); 0x02 is a vendor's own interface, which `sdhci.rs` does not
+/// know. A PIO driver drives either standard one.
+const PCI_PROG_IF_SDHCI_NO_DMA: u8 = 0x00;
+const PCI_PROG_IF_SDHCI_DMA: u8 = 0x01;
+
+/// Finds the first standard SD Host Controller on PCI (class 0x08, subclass
+/// 0x05, prog-if 0x00 or 0x01) that can be taken, takes it from firmware
+/// and turns on Memory Space ([`take_from_firmware`], the sequence the
+/// xHCI's is), the SD-card arc's step 1 (`docs/roadmap/roadmap-sd-card.md`).
+/// Bus Master stays as firmware left it: `sdhci.rs` moves data by PIO, so
+/// the controller is never given DMA. One that cannot be taken is skipped,
+/// as `discover_xhci` skips, and the last failure is what the caller sees
+/// if none can. Before `exit_boot_services`.
+pub fn discover_sdhci() -> Result<SdhciInfo, SdhciDiscoveryError> {
+    let handles =
+        uefi::boot::find_handles::<PciRootBridgeIo>().map_err(|_| SdhciDiscoveryError::NoRootBridge)?;
+    let mut last_error = SdhciDiscoveryError::NotFound;
+    for handle in handles {
+        let Some(mut root_bridge) = open_root_bridge(handle) else {
+            continue;
+        };
+        let Ok(tree) = root_bridge.enumerate() else {
+            continue;
+        };
+        for addr in tree.iter() {
+            let Ok(class_reg) = root_bridge.pci().read_one::<u32>(addr.with_register(CLASS_REGISTER)) else {
+                continue;
+            };
+            let prog_if = (class_reg >> 8) as u8;
+            if (class_reg >> 24) as u8 != PCI_CLASS_BASE_SYSTEM_PERIPHERAL
+                || (class_reg >> 16) as u8 != PCI_SUBCLASS_SD_HOST
+                || !matches!(prog_if, PCI_PROG_IF_SDHCI_NO_DMA | PCI_PROG_IF_SDHCI_DMA)
+            {
+                continue;
+            }
+            match take_from_firmware(&mut root_bridge, addr, CMD_MEMORY_SPACE) {
+                Ok(t) => {
+                    return Ok(SdhciInfo { base: t.bar.cpu, command_before: t.command_before, command_after: t.command_after })
+                }
+                Err(e) => {
+                    let e = match e {
+                        TakeError::Unassigned => SdhciDiscoveryError::Unassigned,
+                        TakeError::Discovery(e) => SdhciDiscoveryError::Bar(e),
+                    };
+                    log::warn!("Ouroboros kernel: pci: skipping the SD host controller at {addr:?}: {e}");
+                    last_error = e;
+                }
+            }
+        }
+    }
+    Err(last_error)
 }
 
 /// Diagnostic only, not used for discovery: logs every PCI device's

@@ -207,10 +207,11 @@ make run-image-gpt            # build build/espgpt.img (GPT-wrapped FAT32) and b
 make run-image-exfat          # build build/espexfat.img (exFAT + FAT32 ESP) and boot it
 make disk                     # build/disk.img: one disk, FAT32 ESP as partition 1 and the ext2 root as partition 2
 make run-disk                 # boot build/disk.img on virtio-blk
+make run-sd                   # disk.img on QEMU's sdhci-pci, the ESP booted from virtio-blk-pci: the root from an SD card
 make run-image-ext2           # build build/espext2.img (ext2 + FAT32 ESP) and boot it; needs e2fsprogs
 make parallels-hdd            # wrap build/esp.img into build/esp.hdd, a Parallels-native virtual hard disk
 make sdcard SDCARD=/Volumes/OUROBOROS # stage the Pi 4 / Pi 400 boot card on an already-formatted FAT volume
-make stick STICK=/Volumes/STICK # the Pi's USB stick, its only disk once the kernel runs
+make stick STICK=/Volumes/STICK # the Pi's USB stick, its root beside a card `make sdcard` staged (a bootstick card needs none)
 make test-parallels           # scripted real-hardware round trip via prlctl
 make test-early-fault         # the early fault reporter on QEMU
 make run-el2                  # `run` with the firmware handing off at EL2
@@ -224,6 +225,7 @@ make test-fpsimd              # a task's FP/SIMD registers across the kernel
 make test-spawn-owner         # the owner of the kernel's spawn staging
 make test-spawn-size          # the size of a program file spawn accepts
 make test-proc-cpus           # /proc/cpus, the cores that take tasks as a file
+make test-sd                  # an SD card as the root disk: QEMU's sdhci-pci, two cards, writes across a power off, the firmware partition refused
 make bootstick BOOTSTICK=/dev/diskN # write disk.img's layout to a whole disk or image file (PI=1 for the Pi 4)
 make test-bootstick           # bootstick against image files
 make test-boot-partition      # the boot partition the kernel names
@@ -339,7 +341,8 @@ docs/                every document is annotated in full in `docs/README.md` - r
                      (the Pi hands off at EL2; the kernel assumes EL1), roadmap-c-hosting.md (a C program as a Unix command)
                      roadmap-ctrl-c.md (Ctrl-C as a key for a raw program, with Ctrl+\ as the way out)
                      roadmap-smp.md (multi-core: the end of the single-core argument, the arc from 2026-10-12)
-                     and roadmap-one-disk.md (one disk for boot and root: the ESP first, the root beside it, the arc after multi-core)
+                     roadmap-one-disk.md (one disk for boot and root: the ESP first, the root beside it, the arc after multi-core)
+                     and roadmap-sd-card.md (the SD card as the Pi's only disk: an SDHCI driver, QEMU first, then EMMC2)
   work-journal/      chronological dev-log, one file per day plus an index README - a lighter companion to CHANGELOG.md
   testing/           testing-qemu.md (every `make run-*` target, the test images, the 9P host peers, the two-node
                      cluster rig), testing-parallels.md and testing-pi4.md (the real-hardware guides, sharing one
@@ -360,7 +363,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/acpi.rs        console discovery via RSDP -> XSDT -> SPCR (works on QEMU, dead end on Parallels) + the shared find_table walk
   src/madt.rs        GIC version/address discovery via the ACPI MADT - where gic.rs's addresses actually come from
   src/power.rs       POWER syscall backend: PSCI SYSTEM_OFF via the FADT-discovered conduit, else halt
-  src/pci.rs         PCI enumeration: serial-console discovery, discover_xhci, log_all_devices
+  src/pci.rs         PCI enumeration: serial-console discovery, discover_xhci, discover_sdhci, log_all_devices
   src/console.rs     global console handle (Pl011|Uart16550|Virtio|Framebuffer), shared with the exception handler
   src/framebuffer.rs GOP discovery: resolution/stride/format + framebuffer base - the console that works on Parallels
   src/font.rs        embedded 8x8 bitmap font, printable ASCII only (cond keeps its own copy)
@@ -396,7 +399,9 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
                      THE AUTHORITY on slot numbers and counts - restating that map elsewhere has drifted before,
                      see docs/postmortems/asking-the-right-question-postmortem.md
   src/virtio_mmio.rs virtio-mmio transport: probes only the transports the firmware's DSDT declares (amlscan), modern register layout
-  src/block.rs       BlockDevice enum (Virtio | UsbMsd) - what fsd's disk layer sits on
+  src/block.rs       BlockDevice enum (Virtio | UsbMsd | Sdhci) - what fsd's disk layer sits on
+  src/sdhci.rs       an SD card on a standard SDHCI, brought up from scratch by the SD spec and read by PIO, one sector a
+                     time, 32-bit register access only; QEMU's sdhci-pci and the Pi's EMMC2 (SD-card arc; the Pi's only disk since step 4); reads and writes, never the firmware partition or the table that finds it
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI over xhci's bulk endpoints, with BOT error recovery
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is
@@ -406,6 +411,8 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
                      the firmware's own code before the exit, and \WALKFAULT one inside the reporter's own image walk, both for
                      test-early-fault.py
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
+  src/sdscan.rs      what the firmware says of the SD card's controller (SD-card arc steps 0, 0b): devicetree, ACPI _HID, SdIsArasan,
+                     and the declared EMMC2's registers, read only; runs only under \SDDUMP, which also prints the tables in hex
   src/bootdisk.rs    the boot partition: the HardDrive node of the image's own device path, read before the exit (one-disk step 1),
                      and is_boot_disk, which makes the disk booted from the block device (step 3); the matcher itself is parttable's
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
@@ -458,8 +465,9 @@ regex/               a small POSIX-ERE engine behind grep. An explicit backtrack
 parttable/           partition tables, read: the MBR and GPT parsing (both CRCs, the backup header, checked bounds), the partition list
                      with root types, and the boot-disk matcher, through a read-sector closure; the ONE copy, which the kernel's
                      bootdisk.rs and fsd's partition.rs both call, host-tested in make test
-amlscan/             the virtio-mmio transports an ACPI table declares (_HID "LNRO0005", its _CRS registers and interrupt), by a
-                     bounded byte scan of the AML; the kernel probes no other virtio-mmio address. Host-tested in make test
+amlscan/             the devices an ACPI table declares present by _HID (virtio-mmio's "LNRO0005", the Pi's EMMC2 "BRCME88C"), their _CRS
+                     registers and interrupt, by a bounded walk of the AML that reads two method shapes exactly; the kernel probes no
+                     other virtio-mmio address. Host-tested in make test, on the Pi's own tables too
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses
                      (the shell's line editor, login, ulib::read_line and read_key), so two readers never disagree on what was typed;
                      the kernel uses it too, to keep keys whole in its keyboard queue
