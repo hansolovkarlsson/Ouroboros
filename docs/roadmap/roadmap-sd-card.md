@@ -140,8 +140,8 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
   and `make test-sd`'s eighth boot keeps grading that layout. Two limits,
   recorded rather than fixed: it does not reach the programs in the root's
   `/bin`, which macOS cannot write, so a new kernel staged this way runs the
-  root's older programs until a `make bootstick`; and it rolls the boot
-  counter back to 1. **Run on the board the same day** (`testing-pi4.md`
+  root's older programs until a `make bootstick`; and it rolled the boot
+  counter back to 1, fixed the same day (below). **Run on the board the same day** (`testing-pi4.md`
   section 4, "Observed 2026-11-07, the boot partition alone"): the card at
   `e89c972e` took `d86145cc` from `make sdcard`, and a file written to the
   root before it read back after, with the login, the cluster identity and
@@ -150,8 +150,16 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
   so `EFI/ORBS/BOOTID.TXT` is its only store, and `scripts/sdcard.sh`
   replaces it with the build's. A counter that starts again can reissue a
   boot number, which `scripts/bootstick.py` already prevents by keeping
-  the larger of the old and new values. **Owed, a fix:** `make sdcard`
-  keeps the larger value too. Until 2026-11-07 `testing-pi4.md` section 4
+  the larger of the old and new values. **Fixed the same day:**
+  `scripts/sdcard.sh` keeps the larger value too, settled in the new
+  `EFI/ORBS` copy before the swap, an interrupted run's `EFI/ORBS.sdnew`
+  put back in place first (the second review of #417: it had been deleted
+  while it was the card's only copy), through `scripts/bootcounter.py`, the one
+  host-side copy of the kernel's record rule, which `bootstick.py` now
+  imports (the review of #417 found the first, shell-written copy taking a
+  newline and twenty digits as a record). `make test-sdcard` grades it on an
+  image file (the card's 6 must survive a build's 0, which fails on the old
+  script). Not yet seen on the board. Until 2026-11-07 `testing-pi4.md` section 4
   said the counter's preferred store was the variable and survived in
   `RPI_EFI.fd`, and the prediction for this run was made from it.
 

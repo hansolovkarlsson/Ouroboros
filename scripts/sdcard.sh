@@ -40,10 +40,12 @@
 #
 # The firmware is installed only when the card has none (or FIRMWARE=1). The
 # pftf firmware has no NVRAM: its settings (the 3 GB limit, ACPI/devicetree
-# mode, testing-pi4.md section 5) and every UEFI variable, the boot counter's
-# included, are stored INSIDE RPI_EFI.fd on the card (edk2-platforms'
+# mode, testing-pi4.md section 5) and every UEFI variable are stored INSIDE
+# RPI_EFI.fd on the card (edk2-platforms'
 # Platform/RaspberryPi/RPi4/Readme.md, "NVRAM"; the pftf zip's own readme does
-# not say). Overwriting it on every update would silently reset them. A
+# not say). Overwriting it on every update would silently reset them. (The
+# boot counter is not among them on the Pi: its variable reads absent on every
+# boot, so EFI/ORBS/BOOTID.TXT is its only store; see bootcounter.py.) A
 # reinstall also keeps an existing config.txt, since that is where Risk 3's
 # UART overlay is set by hand.
 #
@@ -59,6 +61,8 @@
 #          introduced; KEEP_ETC=0 re-stages.
 #   Users  the home directories: only the ones missing are created, never
 #          replaced, since they hold what was made on the Pi.
+# And one file inside EFI/ORBS: BOOTID.TXT, the boot counter, keeps the larger
+# of the card's value and the build's (scripts/bootcounter.py, in place()).
 # Anything else on the card (the firmware's files, a user's own) is untouched.
 set -eu
 
@@ -204,8 +208,29 @@ place() {
     esac
     # Copy first, then swap, so a failed copy (a full card, a pulled reader)
     # leaves the old entry, EFI/BOOT's loader included, in place.
+    #
+    # A run cut off between the swap's rm and mv leaves the entry only as
+    # $1.sdnew, and whole, since the rm comes after the copy finished. That
+    # swap is finished first, so the old entry is back where it belongs
+    # before anything is removed: the leftover is never deleted while it is
+    # the card's only copy (the second review of #417: it once was, and a
+    # failure after that lost the boot counter it held).
+    if [ ! -e "$CARD/$1" ] && [ -e "$CARD/$1.sdnew" ]; then
+        mv "$CARD/$1.sdnew" "$CARD/$1"
+        echo "$ME: $1 restored from $1.sdnew, an earlier run cut off mid-swap"
+    fi
     rm -rf "${CARD:?}/$1.sdnew"
     cp -R -X "$ESP_DIR/$1" "$CARD/$1.sdnew"
+    # EFI/ORBS holds the boot counter, BOOTID.TXT, which on the Pi is the
+    # counter's only store, and the build's record is always 0: copied as it
+    # is, it would start the count again and let a boot hand out a number an
+    # earlier one had. So the new copy takes the larger of its own value and
+    # the card's before the swap (scripts/bootcounter.py, the one host-side
+    # copy of the kernel's record rule, which bootstick.py shares).
+    if [ "$1" = EFI/ORBS ]; then
+        python3 "$(dirname "$0")/bootcounter.py" carry "$CARD/$1.sdnew/BOOTID.TXT" \
+            "$CARD/$1/BOOTID.TXT"
+    fi
     rm -rf "${CARD:?}/$1"
     mv "$CARD/$1.sdnew" "$CARD/$1"
 }
