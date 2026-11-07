@@ -358,8 +358,17 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    virtio-blk-pci, so the card's copy matches the firmware's device path,
    with esp.img on a USB stick: 42 checks, and with the early install
    switched off the card ahead of the stick, the stick left out, the root
-   on the card's disk and fsd's boot partition each fail. The board's
-   boot with the card and the stick is next.
+   on the card's disk and fsd's boot partition each fail.
+   **The card and the stick, read on the Pi 2026-11-06** (build
+   `b6b78bee`, its `BOOTAA64.EFI` and stamp copied onto the card's boot
+   partition, nothing else on the card changed, the old stick in a
+   port): the xHCI scan activated the stick on port 3, the card came up,
+   was named the boot disk (LBA 2048) and installed ahead of it, and no
+   `usb-msd block device installed` line followed; fsd mounted the ext2
+   root from the card (`mount`: 244,277,248 sectors) and found the boot
+   partition on its disk, `cat /card` read back the file written two boots
+   before, boot 4, no fault. **Step 4 is done:** the Pi boots and runs
+   from its card alone, and a stick in a port no longer takes the root.
 5. **The records.** `testing-pi4.md`'s storage surprise rewritten,
    `gap-analysis.md`'s block-storage row, `make-targets.md` for the new
    rigs, and Pi item 2 on `ROADMAP.md` closed with a pointer here.
