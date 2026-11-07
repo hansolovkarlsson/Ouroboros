@@ -16,7 +16,10 @@ copy took a newline and twenty digits as a record).
         is written into NEW when it is above NEW's, or NEW is no record;
         an OLD that exists and is no record is named. On the Pi the file is
         the counter's only store, so a staged record below the old one would
-        let a boot hand out a number an earlier boot had.
+        let a boot hand out a number an earlier boot had. A NEW that is no
+        record, with no OLD value to replace it, is refused (exit 1): the
+        kernel leaves such a file as it is, so the count would never be
+        kept, and the build that staged it is broken.
     python3 scripts/bootcounter.py --self-test
 """
 import os
@@ -50,9 +53,14 @@ def read(path):
         return f.read(RECORD_LEN + 1)
 
 
+class Refused(Exception):
+    pass
+
+
 def carry(new, olds, say=print):
     """Raise the record at `new` to the largest value among `olds`, if that is
-    larger. Returns the value written, or None if `new` was left as it was."""
+    larger. Returns the value written, or None if `new` was left as it was.
+    Raises Refused when `new` is no record and no old value replaces it."""
     best = None
     for old in olds:
         if not os.path.exists(old):
@@ -62,12 +70,13 @@ def carry(new, olds, say=print):
             say(f"the card's boot counter ({old}) is not a counter record; not carried")
             continue
         best = v if best is None else max(best, v)
+    current = value(read(new)) if os.path.exists(new) else None
     if best is None:
+        if current is None:
+            raise Refused(f"the build's boot counter ({new}) is not a counter record")
         return None
-    if os.path.exists(new):
-        current = value(read(new))
-        if current is not None and current >= best:
-            return None
+    if current is not None and current >= best:
+        return None
     with open(new, "wb") as f:
         f.write(record(best))
     say(f"boot counter kept at {best} (the card's)")
@@ -83,7 +92,9 @@ def self_test():
     ok("a byte after the record is no counter", value(b"00000000000000000042\n\n") is None)
     ok("a newline before twenty digits is no counter", value(b"\n00000000000000000006") is None)
     ok("no newline at the end is no counter", value(b"000000000000000000420") is None)
-    ok("a non-ASCII digit is no counter", value("0000000000000000004٢\n".encode()) is None)
+    # 21 bytes, so only the digit rule can refuse it (the second review of
+    # #417: a two-byte Arabic-Indic digit made 22, and the length refused it).
+    ok("a non-digit is no counter", value(b"0000000000000000004x\n") is None)
     ok("u64::MAX reads", value(b"18446744073709551615\n") == U64_MAX)
     ok("u64::MAX + 1 is no counter", value(b"18446744073709551616\n") is None)
     ok("twenty nines is no counter", value(b"99999999999999999999\n") is None)
@@ -124,6 +135,14 @@ def self_test():
         ok("a bad new takes the old", carry(new, [put("a", record(6))], say) == 6 and read(new) == record(6))
         new = put("new", record(0))
         ok("a missing old is skipped", carry(new, [os.path.join(d, "none")], say) is None)
+        for name, bad in (("a bad new with no old is refused", b"garbage"),
+                          ("a missing new with no old is refused", None)):
+            new = put("new", bad)
+            try:
+                carry(new, [os.path.join(d, "none")], say)
+                ok(name, False)
+            except Refused:
+                ok(name, True)
 
     for name, passed in results:
         print(f"  {'ok  ' if passed else 'FAIL'} {name}")
@@ -136,7 +155,11 @@ def main(argv):
     if argv == ["--self-test"]:
         return self_test()
     if len(argv) >= 3 and argv[0] == "carry":
-        carry(argv[1], argv[2:], say=lambda s: print(f"sdcard: {s}"))
+        try:
+            carry(argv[1], argv[2:], say=lambda s: print(f"sdcard: {s}"))
+        except Refused as e:
+            print(f"sdcard: {e}; refusing to stage it", file=sys.stderr)
+            return 1
         return 0
     print(__doc__, file=sys.stderr)
     return 2

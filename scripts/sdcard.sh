@@ -209,25 +209,27 @@ place() {
     # Copy first, then swap, so a failed copy (a full card, a pulled reader)
     # leaves the old entry, EFI/BOOT's loader included, in place.
     #
+    # A run cut off between the swap's rm and mv leaves the entry only as
+    # $1.sdnew, and whole, since the rm comes after the copy finished. That
+    # swap is finished first, so the old entry is back where it belongs
+    # before anything is removed: the leftover is never deleted while it is
+    # the card's only copy (the second review of #417: it once was, and a
+    # failure after that lost the boot counter it held).
+    if [ ! -e "$CARD/$1" ] && [ -e "$CARD/$1.sdnew" ]; then
+        mv "$CARD/$1.sdnew" "$CARD/$1"
+        echo "$ME: $1 restored from $1.sdnew, an earlier run cut off mid-swap"
+    fi
+    rm -rf "${CARD:?}/$1.sdnew"
+    cp -R -X "$ESP_DIR/$1" "$CARD/$1.sdnew"
     # EFI/ORBS holds the boot counter, BOOTID.TXT, which on the Pi is the
     # counter's only store, and the build's record is always 0: copied as it
     # is, it would start the count again and let a boot hand out a number an
     # earlier one had. So the new copy takes the larger of its own value and
     # the card's before the swap (scripts/bootcounter.py, the one host-side
-    # copy of the kernel's record rule, which bootstick.py shares). A run cut
-    # off between the swap's rm and mv leaves the carried record only in
-    # EFI/ORBS.sdnew, so that one is read too, before it is removed.
-    LEFT=
-    if [ "$1" = EFI/ORBS ] && [ -f "$CARD/$1.sdnew/BOOTID.TXT" ]; then
-        LEFT=$(mktemp "${TMPDIR:-/tmp}/sdcard-bootid.XXXXXX")
-        cp "$CARD/$1.sdnew/BOOTID.TXT" "$LEFT"
-    fi
-    rm -rf "${CARD:?}/$1.sdnew"
-    cp -R -X "$ESP_DIR/$1" "$CARD/$1.sdnew"
+    # copy of the kernel's record rule, which bootstick.py shares).
     if [ "$1" = EFI/ORBS ]; then
         python3 "$(dirname "$0")/bootcounter.py" carry "$CARD/$1.sdnew/BOOTID.TXT" \
-            "$CARD/$1/BOOTID.TXT" ${LEFT:+"$LEFT"}
-        [ -z "$LEFT" ] || rm -f "$LEFT"
+            "$CARD/$1/BOOTID.TXT"
     fi
     rm -rf "${CARD:?}/$1"
     mv "$CARD/$1.sdnew" "$CARD/$1"

@@ -1073,10 +1073,9 @@ def self_test():
         results.append(("a quote in a name is refused", False))
     except Refused:
         results.append(("a quote in a name is refused", True))
-    results.append(("a counter record reads", bootid_value(b"00000000000000000042\n") == 42))
-    results.append(("anything else is no counter", bootid_value(b"42\n") is None and bootid_value(None) is None))
-    results.append(("a record with a byte after it is no counter",
-                    bootid_value(b"00000000000000000042\n\n") is None))
+    # The record rule is bootcounter.py's and graded by its own --self-test;
+    # this only holds bootstick to that one copy (the second review of #417).
+    results.append(("the counter rule is bootcounter's", bootid_value is bootcounter.value))
 
     # A FAT32 volume of one cluster per directory: the boot counter found by
     # its path, and a path that is not there not found.

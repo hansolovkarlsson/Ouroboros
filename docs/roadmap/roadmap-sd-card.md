@@ -152,8 +152,9 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
   boot number, which `scripts/bootstick.py` already prevents by keeping
   the larger of the old and new values. **Fixed the same day:**
   `scripts/sdcard.sh` keeps the larger value too, settled in the new
-  `EFI/ORBS` copy before the swap and read from an interrupted run's
-  `EFI/ORBS.sdnew` as well, through `scripts/bootcounter.py`, the one
+  `EFI/ORBS` copy before the swap, an interrupted run's `EFI/ORBS.sdnew`
+  put back in place first (the second review of #417: it had been deleted
+  while it was the card's only copy), through `scripts/bootcounter.py`, the one
   host-side copy of the kernel's record rule, which `bootstick.py` now
   imports (the review of #417 found the first, shell-written copy taking a
   newline and twenty digits as a record). `make test-sdcard` grades it on an
