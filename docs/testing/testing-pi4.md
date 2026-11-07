@@ -328,10 +328,13 @@ reports, so that one was tripped through a `diskutil` shim that reports it.
 fetches and checks it for `make sdcard` and `make bootstick` (below) alike; the zip is
 cached in `build/cache/` and checked on every use. It is unzipped onto a card
 only when the card has no `RPI_EFI.fd`, because this firmware has no NVRAM: the
-§5 settings and every UEFI variable, the boot counter's included, are stored
+§5 settings and every UEFI variable are stored
 inside `RPI_EFI.fd` itself (edk2-platforms' `Platform/RaspberryPi/RPi4/Readme.md`,
 "NVRAM"; the readme in the pftf zip does not say). Rewriting it on each update
-would silently reset them. `FIRMWARE=1` reinstalls it deliberately, and even
+would silently reset them. (The boot counter is not among them on this
+board: its variable has read absent on every Pi boot since the first serial
+one, 2026-10-01, §6, so the counter lives in `EFI/ORBS/BOOTID.TXT` alone.)
+`FIRMWARE=1` reinstalls it deliberately, and even
 then keeps an existing `config.txt`, since Risk 3's UART overlay is set there
 by hand. The
 firmware's files keep the names they ship with; the readme is explicit that
@@ -354,9 +357,14 @@ them are state rather than build output:
 Each is copied beside the old one and swapped in afterwards, so a copy that
 fails (a full card, a pulled reader) leaves the old `EFI/BOOT` bootable.
 Anything else on the card, the firmware's files or a file of your own at the
-root, is left alone. Re-staging `EFI/ORBS/BOOTID.TXT` rolls the boot counter's
-file store back, as every image does; the counter's preferred store is the
-UEFI variable, which lives in `RPI_EFI.fd` and so survives.
+root, is left alone. Re-staging `EFI/ORBS/BOOTID.TXT` rolls the boot counter back
+to 1, since on the Pi that file is the counter's only store (the variable
+reads absent, §6), and a counter that starts again can hand out a boot
+number it handed out before. `make bootstick` keeps the larger of the old
+and new values for that reason; `make sdcard` does not yet (2026-11-07,
+`roadmap-sd-card.md` D5). Until 2026-11-07 this paragraph said the UEFI
+variable was the counter's preferred store and survived in `RPI_EFI.fd`,
+which the board had contradicted since its first serial boot.
 
 ### The USB stick
 
@@ -555,8 +563,18 @@ the rest of `build/esp` on partition 1 and never writes partition 2, so
 everything on the root survives. It does not reach the root's `/bin`, which
 macOS cannot write, so the root's programs stay at the build they were
 staged from (see "Stage the card and the stick from the same build" above
-for why that matters). Not yet run on a card staged this way; by its rules
-it takes one, since partition 1 holds `RPI_EFI.fd`.
+for why that matters), and it rolls the boot counter back to 1 (above).
+
+**Observed 2026-11-07, the boot partition alone** (the card at `e89c972e`,
+staged by `make bootstick PI=1`; `make sdcard` from `d86145cc`, a
+docs-only change, so both builds hold the same programs). Before: `write
+/keep`, a line appended, `shutdown` at boot 6. After the re-stage, no
+stick: the build line read `d86145cc`, the card came up and was installed
+as before (partition 2 a root, sectors 0 to 133118 protected), fsd mounted
+the ext2 root, the login and the cluster identity were unchanged, and
+`cat keep` read the line back. `RPI_EFI.fd`'s settings survived, since the
+card was still routed to EMMC2. `bootid` read `boot 1`, `variable no, file
+yes`: the counter rolled back.
 
 ---
 

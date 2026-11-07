@@ -138,11 +138,22 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
   new Ouroboros release needs, where `make bootstick` keeps only `/etc` and
   `/Users` of the root. `make stick` stays with it for the two-disk layout,
   and `make test-sd`'s eighth boot keeps grading that layout. Two limits,
-  recorded rather than fixed: `make sdcard` has not yet been run on a card
-  `make bootstick PI=1` staged (by its rules it takes one, since the card's
-  partition 1 holds `RPI_EFI.fd`), and it does not reach the programs in the
-  root's `/bin`, which macOS cannot write, so a new kernel staged this way
-  runs the root's older programs until a `make bootstick`.
+  recorded rather than fixed: it does not reach the programs in the root's
+  `/bin`, which macOS cannot write, so a new kernel staged this way runs the
+  root's older programs until a `make bootstick`; and it rolls the boot
+  counter back to 1. **Run on the board the same day** (`testing-pi4.md`
+  section 4, "Observed 2026-11-07, the boot partition alone"): the card at
+  `e89c972e` took `d86145cc` from `make sdcard`, and a file written to the
+  root before it read back after, with the login, the cluster identity and
+  the firmware's settings unchanged. `bootid` went from boot 6 to boot 1.
+  The Pi keeps no counter variable (absent on every boot since 2026-10-01),
+  so `EFI/ORBS/BOOTID.TXT` is its only store, and `scripts/sdcard.sh`
+  replaces it with the build's. A counter that starts again can reissue a
+  boot number, which `scripts/bootstick.py` already prevents by keeping
+  the larger of the old and new values. **Owed, a fix:** `make sdcard`
+  keeps the larger value too. Until 2026-11-07 `testing-pi4.md` section 4
+  said the counter's preferred store was the variable and survived in
+  `RPI_EFI.fd`, and the prediction for this run was made from it.
 
 ## Steps, each with its check
 
