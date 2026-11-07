@@ -385,6 +385,17 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    eighth boot is that card beside a stick holding a root, 48 checks, and
    every boot card ranked ahead fails it. Not booted on the board, whose
    card has its own root; the card-and-stick boot above holds for it.
+   **Its high review** (`acf3bc63`): the kernel's root test was a second
+   copy of fsd's rule and already disagreed with it (typed roots only,
+   where fsd takes an untyped partition when none is typed), and took a
+   typed root with no filesystem as a root. `parttable::root_candidates`
+   is now the one rule, `vfs::root_order` built on it and the card ranked
+   by it, a candidate counting only with an ext2, FAT32 or exFAT mark;
+   `make test-sd`'s ninth boot zeroes the card root's superblock, 55
+   checks, and with the filesystem mark always true its ranking checks
+   fail; `make test-boot-partition` unchanged. Declined: a stick that
+   attaches after the boot scan, beside a rootless boot card installed as
+   the fallback, which is step 3's rule and `mount -a`'s for every disk.
 5. **The records.** `testing-pi4.md`'s storage surprise rewritten,
    `gap-analysis.md`'s block-storage row, `make-targets.md` for the new
    rigs, and Pi item 2 on `ROADMAP.md` closed with a pointer here.
