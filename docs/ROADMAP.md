@@ -738,22 +738,11 @@ not yet checked on this tree are marked (predicted).
       item 2 for the card**, done 2026-11-06, so it can be built for the
       card now; on a stick too, and on QEMU first
       (`make run-image-ext2` already builds a two-partition disk).
-- [x] **2. The SD card as a runtime disk, so no stick is needed. DONE
-      2026-11-06, the SD-card arc,
-      [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md)** (asked by Hans
-      2026-11-05, to free the stick's USB port and need one medium per
-      board). `sdhci.rs` is the third `block.rs` arm: QEMU's `sdhci-pci`
-      first, then the Pi's EMMC2, found by its ACPI declaration
-      (`BRCME88C`, `amlscan::declared`), PIO one sector at a time, the
-      firmware's partition and its table never written (`RPI_EFI.fd` lives
-      there). On the board a card staged by `make bootstick PI=1` booted to
-      a login alone, kept a file across a power cycle, and stayed the root
-      with a stick in a port; a card `make sdcard` staged, the firmware's
-      partition alone, still gives way to a stick. Graded on QEMU by `make
-      test-sd` (nine boots). The firmware must route the card to EMMC2
-      (`testing-pi4.md` §5). Not tested on QEMU's `virt` machine for the
-      EMMC2 path itself (no such controller there). No DMA and one sector
-      a command; its speed is not measured yet.
+- [x] **2. The SD card as a runtime disk. DONE 2026-11-06 (#412), moved to
+      [`roadmap-completed.md`](roadmap-completed.md)**; the plan is
+      [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md). Its open tails
+      are in the plan (D5, `make sdcard`'s future) and under step 4 there
+      (the write wait and R1 errors only the board can show).
 - [ ] **3. Booting from a stick, with no card.** Most of it exists: on QEMU
       the kernel already boots from a USB stick behind a hub and mounts that
       same stick as its runtime disk (`test-usb-hub.py --usb-boot`, and
@@ -864,6 +853,11 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
   started through PSCI, each at EL1 with its own stack, GIC interface,
   timer and idle loop; one kernel lock; programs placed on the secondaries;
   the SGI kick; both hardware targets booted.
+- **The SD card as the Pi's only disk** (2026-11-05 → 2026-11-06): an
+  SDHCI driver, PIO one sector at a time, on QEMU's `sdhci-pci` and the
+  Pi 4's EMMC2 found in ACPI; the card's firmware partition and its table
+  never written; a card that is the boot disk and holds a root ranked
+  ahead of any USB stick.
 - **Users, permissions & account management** (2026-08-28 → 2026-08-30): a
   kernel-owned identity per task, a login gate, `fsd` permission enforcement
   with ancestor-`x` traversal, `/etc/shadow`, supplementary groups, the
