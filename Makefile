@@ -2364,8 +2364,9 @@ test-bootstick: disk
 # `make sdcard`'s boot counter against a FAT32 image file
 # (scripts/test-sdcard.py): a Pi card's EFI/ORBS/BOOTID.TXT keeps the larger
 # of the card's value and the build's across a re-stage, since on the Pi it is
-# the counter's only store. Four runs, no boot, under a minute - run it
-# whenever scripts/sdcard.sh, the counter's record or where esp stages it changes.
+# the counter's only store. Nine runs, no boot, under a minute - run it
+# whenever scripts/sdcard.sh, scripts/bootcounter.py, the counter's record or
+# where esp stages it changes.
 test-sdcard: esp
 	python3 scripts/test-sdcard.py
 
@@ -3035,6 +3036,7 @@ test:
 	@echo "== disk signatures (scripts/disksig.py)"
 	@python3 scripts/disksig.py --self-test || exit 1
 	@python3 scripts/bootstick.py --self-test || exit 1
+	@python3 scripts/bootcounter.py --self-test || exit 1
 	@echo "== xHCI barriers in the kernel image"
 	@$(MAKE) --no-print-directory check-xhci-barriers || exit 1
 	@# The multi-core plan (docs/roadmap/roadmap-smp.md) names every static in

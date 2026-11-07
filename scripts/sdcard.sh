@@ -40,10 +40,12 @@
 #
 # The firmware is installed only when the card has none (or FIRMWARE=1). The
 # pftf firmware has no NVRAM: its settings (the 3 GB limit, ACPI/devicetree
-# mode, testing-pi4.md section 5) and every UEFI variable, the boot counter's
-# included, are stored INSIDE RPI_EFI.fd on the card (edk2-platforms'
+# mode, testing-pi4.md section 5) and every UEFI variable are stored INSIDE
+# RPI_EFI.fd on the card (edk2-platforms'
 # Platform/RaspberryPi/RPi4/Readme.md, "NVRAM"; the pftf zip's own readme does
-# not say). Overwriting it on every update would silently reset them. A
+# not say). Overwriting it on every update would silently reset them. (The
+# boot counter is not among them on the Pi: its variable reads absent on every
+# boot, so EFI/ORBS/BOOTID.TXT is its only store; see bootcounter.py.) A
 # reinstall also keeps an existing config.txt, since that is where Risk 3's
 # UART overlay is set by hand.
 #
@@ -60,7 +62,7 @@
 #   Users  the home directories: only the ones missing are created, never
 #          replaced, since they hold what was made on the Pi.
 # And one file inside EFI/ORBS: BOOTID.TXT, the boot counter, keeps the larger
-# of the card's value and the build's (carry_bootid below).
+# of the card's value and the build's (scripts/bootcounter.py, in place()).
 # Anything else on the card (the firmware's files, a user's own) is untouched.
 set -eu
 
@@ -162,32 +164,6 @@ fi
 
 # --- Ouroboros on top. ------------------------------------------------------
 
-# The boot counter, EFI/ORBS/BOOTID.TXT: 20 decimal digits and a newline
-# (kernel/src/bootid.rs). On the Pi it is the counter's only store, since the
-# firmware keeps no variable for it (testing-pi4.md section 4), so the build's
-# record, always 0, would start the count again and let a boot hand out a
-# number it handed out before. $1 is the card's record, $2 the build's copy
-# about to replace it; the larger value is left in $2, as scripts/bootstick.py
-# does. A card record that is not one is not carried, and the run says so.
-bootid_value() {
-    [ -f "$1" ] && [ "$(wc -c < "$1" | tr -d ' ')" = 21 ] || return 1
-    LC_ALL=C grep -qx '[0-9]\{20\}' "$1" || return 1
-    head -c 20 "$1"
-}
-carry_bootid() {
-    [ -e "$1" ] || return 0
-    if ! old=$(bootid_value "$1"); then
-        echo "$ME: the card's boot counter ($1) is not a counter record; the build's is staged"
-        return 0
-    fi
-    new=$(bootid_value "$2") || new=
-    # Equal-width digit strings: the larger sorts last.
-    if [ -z "$new" ] || [ "$(printf '%s\n%s\n' "$old" "$new" | LC_ALL=C sort | tail -n 1)" = "$old" ]; then
-        printf '%s\n' "$old" > "$2"
-        echo "$ME: boot counter kept at $old (the card's)"
-    fi
-}
-
 # One owned entry: $1 is its path relative to the ESP root.
 place() {
     [ -n "$1" ] || die "internal: empty entry name"
@@ -232,12 +208,26 @@ place() {
     esac
     # Copy first, then swap, so a failed copy (a full card, a pulled reader)
     # leaves the old entry, EFI/BOOT's loader included, in place.
+    #
+    # EFI/ORBS holds the boot counter, BOOTID.TXT, which on the Pi is the
+    # counter's only store, and the build's record is always 0: copied as it
+    # is, it would start the count again and let a boot hand out a number an
+    # earlier one had. So the new copy takes the larger of its own value and
+    # the card's before the swap (scripts/bootcounter.py, the one host-side
+    # copy of the kernel's record rule, which bootstick.py shares). A run cut
+    # off between the swap's rm and mv leaves the carried record only in
+    # EFI/ORBS.sdnew, so that one is read too, before it is removed.
+    LEFT=
+    if [ "$1" = EFI/ORBS ] && [ -f "$CARD/$1.sdnew/BOOTID.TXT" ]; then
+        LEFT=$(mktemp "${TMPDIR:-/tmp}/sdcard-bootid.XXXXXX")
+        cp "$CARD/$1.sdnew/BOOTID.TXT" "$LEFT"
+    fi
     rm -rf "${CARD:?}/$1.sdnew"
     cp -R -X "$ESP_DIR/$1" "$CARD/$1.sdnew"
-    # The counter is settled in the new copy before the swap, so the card
-    # never holds the build's record, not even between the two.
     if [ "$1" = EFI/ORBS ]; then
-        carry_bootid "$CARD/$1/BOOTID.TXT" "$CARD/$1.sdnew/BOOTID.TXT"
+        python3 "$(dirname "$0")/bootcounter.py" carry "$CARD/$1.sdnew/BOOTID.TXT" \
+            "$CARD/$1/BOOTID.TXT" ${LEFT:+"$LEFT"}
+        [ -z "$LEFT" ] || rm -f "$LEFT"
     fi
     rm -rf "${CARD:?}/$1"
     mv "$CARD/$1.sdnew" "$CARD/$1"

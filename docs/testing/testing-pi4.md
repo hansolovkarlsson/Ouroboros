@@ -357,14 +357,17 @@ them are state rather than build output:
 Each is copied beside the old one and swapped in afterwards, so a copy that
 fails (a full card, a pulled reader) leaves the old `EFI/BOOT` bootable.
 Anything else on the card, the firmware's files or a file of your own at the
-root, is left alone. Re-staging `EFI/ORBS/BOOTID.TXT` rolls the boot counter back
-to 1, since on the Pi that file is the counter's only store (the variable
-reads absent, §6), and a counter that starts again can hand out a boot
-number it handed out before. `make bootstick` keeps the larger of the old
-and new values for that reason, and so does `make sdcard` since 2026-11-07
-(`roadmap-sd-card.md` D5, graded by `make test-sdcard`). Until 2026-11-07 this paragraph said the UEFI
-variable was the counter's preferred store and survived in `RPI_EFI.fd`,
-which the board had contradicted since its first serial boot.
+root, is left alone. One file inside `EFI/ORBS` is state too: the boot
+counter, `BOOTID.TXT`. On the Pi that file is the counter's only store (the
+variable reads absent, §6), and the build stages it at 0, so copying it as
+built would start the count again and let a boot hand out a number it
+handed out before. `make sdcard` keeps the larger of the card's value and
+the build's, as `make bootstick` does, since 2026-11-07 (`roadmap-sd-card.md`
+D5, graded by `make test-sdcard`; the record rule is `scripts/bootcounter.py`,
+which both share). Before that a re-stage rolled the counter back to 1. Until
+2026-11-07 this paragraph also said the UEFI variable was the counter's
+preferred store and survived in `RPI_EFI.fd`, which the board had
+contradicted since its first serial boot.
 
 ### The USB stick
 
@@ -485,9 +488,9 @@ disk. Re-stage the card at the stick's build first. A card at
 stick's ESP as `/`, writable, with the FAT32 permissions warning. Re-staged
 at `c1aaa0dd`, the kernel named the card's partition 1 (`VenHw(...)/HD(1,
 MBR,0x00000000,0x8000,...)`) its boot partition, installed the stick, and
-`mount` read `ext2 mounted at partition LBA 133120`. `make sdcard` rolls
-the card's boot counter back to 1, as above; a stick re-staged by
-`bootstick` keeps its own.
+`mount` read `ext2 mounted at partition LBA 133120`. `make sdcard` rolled
+the card's boot counter back to 1 then; both it and `bootstick` keep the
+counter since 2026-11-07 (above).
 
 **The console depended on the display (observed once each, cause not
 separated).** The stick's firmware was the pinned release with its

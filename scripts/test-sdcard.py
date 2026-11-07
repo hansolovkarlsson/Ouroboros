@@ -16,20 +16,35 @@ One image is made with hdiutil (FAT32 on an MBR disk) and attached, so the
 volume sits under /Volumes as a card in a reader does and passes the
 script's own guards. A file named RPI_EFI.fd at its root makes it a Pi card
 the script takes as its own; the script keeps an existing RPI_EFI.fd, so no
-firmware is fetched. Four runs, the card's EFI/ORBS set before each:
+firmware is fetched. Nine runs, the card's EFI tree set before each:
 
   card-larger   the card at 6, the build at 0: 6 is kept, and the script
                 says so. Without the carry the card reads 0 (the board's
                 rollback), so this is the case that fails on the old script.
   build-larger  the card at 6, an ESP tree staged at 9: 9, so the carry
                 never lowers a count.
-  not-a-record  the card's file is "6" and a newline, not 20 digits: the
-                build's 0, and the script names the record it refused.
-  no-counter    no EFI/ORBS on the card: the build's 0, and no line.
+  equal         the card at 0, the build at 0: 0, and no line, since
+                nothing was carried.
+  short         the card's file is "6" and a newline: the build's 0, and
+                the run names the record it refused.
+  shifted       a newline then twenty digits, 21 bytes: no record by the
+                kernel's rule, so the build's 0, named (the review of #417:
+                the first shell check took it).
+  past-u64      twenty nines, a value the kernel's u64 cannot hold: the
+                build's 0, named, not a record the Pi would refuse.
+  no-counter    no EFI on the card: the build's 0, and no line.
+  interrupted   no EFI/ORBS but an EFI/ORBS.sdnew holding 6, as a run cut
+                off between the swap's rm and mv leaves the card: 6, read
+                from the leftover before it is removed.
+  bad-build     the card at 6, an ESP tree whose counter is no record: 6.
+
+The record rule itself is bootcounter.py's, whose --self-test (run by make
+test) covers it without a card; these runs show sdcard.sh calling it at the
+right moment with the right files.
 
 Each run must also have replaced the rest of EFI/ORBS (SRCID.TXT is the
 build's, byte for byte), so the carry is not mistaken for a copy that never
-happened, and must leave RPI_EFI.fd as it was.
+happened, leave no EFI/ORBS.sdnew behind, and leave RPI_EFI.fd as it was.
 
 macOS only (hdiutil, diskutil). Under a minute; run it whenever
 scripts/sdcard.sh, the counter's record format (kernel/src/bootid.rs) or
@@ -85,19 +100,26 @@ def stage(esp_dir, card):
     return p.returncode, p.stdout + p.stderr
 
 
-def set_card(card, counter):
-    orbs = os.path.join(card, "EFI", "ORBS")
+def set_card(card, counter, where="ORBS"):
+    """The card's EFI tree: nothing, or one BOOTID.TXT holding `counter`
+    in EFI/ORBS, or in EFI/ORBS.sdnew as an interrupted run leaves it."""
     shutil.rmtree(os.path.join(card, "EFI"), ignore_errors=True)
     if counter is not None:
-        os.makedirs(orbs)
-        with open(os.path.join(orbs, "BOOTID.TXT"), "wb") as f:
+        d = os.path.join(card, "EFI", where)
+        os.makedirs(d)
+        with open(os.path.join(d, "BOOTID.TXT"), "wb") as f:
             f.write(counter)
     subprocess.run(["sync"], check=True)
 
 
 def read(path):
-    with open(path, "rb") as f:
-        return f.read()
+    """A file's bytes, or None if it is not there: a run that stopped partway
+    leaves files missing, and that is a failed check, not a crash."""
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
 
 
 def main():
@@ -119,6 +141,10 @@ def main():
     shutil.copytree(ESP_DIR, esp9, symlinks=True)
     with open(os.path.join(esp9, "EFI", "ORBS", "BOOTID.TXT"), "wb") as f:
         f.write(record(9))
+    espbad = os.path.join(WORK, "espbad")
+    shutil.copytree(ESP_DIR, espbad, symlinks=True)
+    with open(os.path.join(espbad, "EFI", "ORBS", "BOOTID.TXT"), "wb") as f:
+        f.write(b"no record at all\n")
 
     subprocess.run(["hdiutil", "create", "-quiet", "-size", "64m", "-fs", "MS-DOS FAT32",
                     "-volname", VOLNAME, "-layout", "MBRSPUD", IMG], check=True)
@@ -126,15 +152,22 @@ def main():
     try:
         with open(os.path.join(card, "RPI_EFI.fd"), "wb") as f:
             f.write(FIRMWARE)
+        kept6 = "boot counter kept at 6 (the card's)"
+        refused = "is not a counter record"
         cases = [
-            ("card-larger", ESP_DIR, record(6), record(6), "boot counter kept at 00000000000000000006"),
-            ("build-larger", esp9, record(6), record(9), None),
-            ("not-a-record", ESP_DIR, b"6\n", record(0), "is not a counter record"),
-            ("no-counter", ESP_DIR, None, record(0), None),
+            ("card-larger", ESP_DIR, record(6), "ORBS", record(6), kept6),
+            ("build-larger", esp9, record(6), "ORBS", record(9), None),
+            ("equal", ESP_DIR, record(0), "ORBS", record(0), None),
+            ("short", ESP_DIR, b"6\n", "ORBS", record(0), refused),
+            ("shifted", ESP_DIR, b"\n" + b"0" * 19 + b"6", "ORBS", record(0), refused),
+            ("past-u64", ESP_DIR, b"9" * 20 + b"\n", "ORBS", record(0), refused),
+            ("no-counter", ESP_DIR, None, "ORBS", record(0), None),
+            ("interrupted", ESP_DIR, record(6), "ORBS.sdnew", record(6), kept6),
+            ("bad-build", espbad, record(6), "ORBS", record(6), kept6),
         ]
-        for name, esp, before, want, line in cases:
+        for name, esp, before, where, want, line in cases:
             print(f"{name}:")
-            set_card(card, before)
+            set_card(card, before, where)
             rc, out = stage(esp, card)
             check(f"{name}: sdcard.sh exits 0", rc == 0, out.strip()[-400:])
             got_path = os.path.join(card, "EFI", "ORBS", "BOOTID.TXT")
@@ -147,6 +180,7 @@ def main():
                 check(f"{name}: no counter line", "boot counter" not in out, out.strip()[-400:])
             check(f"{name}: SRCID.TXT is the build's",
                   read(os.path.join(card, "EFI", "ORBS", "SRCID.TXT")) == read(srcid))
+            check(f"{name}: no EFI/ORBS.sdnew left", not os.path.exists(os.path.join(card, "EFI", "ORBS.sdnew")))
             check(f"{name}: RPI_EFI.fd kept", read(os.path.join(card, "RPI_EFI.fd")) == FIRMWARE)
     finally:
         subprocess.run(["hdiutil", "detach", "-quiet", "-force", dev])

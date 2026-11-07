@@ -100,6 +100,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+import bootcounter  # noqa: E402
 import disksig  # noqa: E402
 import mbrdisk  # noqa: E402
 
@@ -133,7 +134,6 @@ SIG_FILE = "etc/disksig"
 LITTER = re.compile(r"^(\._.*|\.DS_Store|\.Spotlight-V100|\.fseventsd|\.Trashes|\.TemporaryItems|"
                     r"\.VolumeIcon\.icns|\.metadata_never_index|\.apdisk|System Volume Information)$")
 BOOTID_PATH = ("EFI", "ORBS", "BOOTID.TXT")
-BOOTID_RECORD = re.compile(rb"\d{20}\n")
 
 
 class Refused(Exception):
@@ -329,12 +329,9 @@ def fat32_find(read, path):
     return None
 
 
-def bootid_value(record):
-    """The counter in a boot counter record, or None if it is not one."""
-    # fullmatch: `$` matches before a final newline too, so a 22-byte record
-    # passed and was written into the 21-byte slot, shifting the ESP after
-    # it (the second review of #293).
-    return int(record[:20]) if record and BOOTID_RECORD.fullmatch(record) else None
+# The counter in a boot counter record, or None if it is not one: the one
+# host-side copy of the kernel's rule, shared with scripts/sdcard.sh.
+bootid_value = bootcounter.value
 
 
 # --- The disk. ---------------------------------------------------------------
