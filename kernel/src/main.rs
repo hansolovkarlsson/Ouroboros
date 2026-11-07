@@ -939,14 +939,15 @@ extern "C" fn kernel_main() -> ! {
     // Third disk path, the SD-card arc, read before the second: an SD card
     // on a controller found before the exit (QEMU's on PCI, the Pi's EMMC2
     // by ACPI), brought up and read whatever else is installed. A card that
-    // is the boot disk goes in ahead of any stick, and of a virtio disk held
+    // is the boot disk and holds a root partition beside its firmware's
+    // (`SdCard::boot_root`) goes in ahead of any stick, and of a virtio disk held
     // back as not the boot disk (step 4: the Pi boots from its card, and a
     // stick in a port is no longer its root); any other card only when no
     // other disk went in and none was left out on purpose, after the USB
     // step. A virtio disk that is the boot disk went in before either.
     let sd = init_sd(sd_controller);
     let sd = match sd {
-        Some(card) if card.boot && !syscall::block_device_installed() => {
+        Some(card) if card.boot_root && !syscall::block_device_installed() => {
             syscall::install_block_device(block::BlockDevice::Sdhci(card.device));
             console::println!(
                 "Ouroboros kernel: sd: block device installed for the filesystem server, the boot disk, ahead of any USB stick"
@@ -1485,7 +1486,18 @@ fn init_sd(ctl: Option<SdController>) -> Option<SdCard> {
             // write.
             _ => [(0, capacity), (0, 0)],
         };
-        (protected, boot.is_some())
+        // A root partition past the protected sectors, which fsd can mount
+        // and write: what makes the boot card a whole system. A card as
+        // `make sdcard` stages it holds the firmware's partition alone, and
+        // a root mounted from that would refuse every write while the
+        // stick beside it, the root it was staged with, went unused.
+        let writable_root = listed.is_ok_and(|n| parts[..n].iter().any(|p| p.root && p.start >= protected[0].1));
+        if boot.is_some() && !writable_root {
+            console::println!(
+                "Ouroboros kernel: sd: the card is the boot disk but holds no root partition past its firmware's: any USB stick goes in ahead of it"
+            );
+        }
+        (protected, boot.is_some() && writable_root)
     };
     device.protect(protected);
     let mut any = false;
@@ -1499,15 +1511,16 @@ fn init_sd(ctl: Option<SdController>) -> Option<SdCard> {
     if !any {
         console::println!("Ouroboros kernel: sd: no firmware partition on the card: every sector writable");
     }
-    Some(SdCard { device, boot })
+    Some(SdCard { device, boot_root: boot })
 }
 
 /// A card [`init_sd`] brought up and read, not yet installed.
 struct SdCard {
     device: sdhci::Device,
     /// The card holds the boot partition (`bootdisk::is_boot_disk`
-    /// answered yes and the partition is known).
-    boot: bool,
+    /// answered yes and the partition is known) and a root partition past
+    /// its protected sectors: the card that goes in ahead of a USB stick.
+    boot_root: bool,
 }
 
 /// A card that was not installed ahead of the USB step: installed now only

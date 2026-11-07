@@ -2324,8 +2324,9 @@ test-proc-cpus: image
 # off, partition and format refused over the firmware partition and its
 # table, their bytes unchanged; a fifth boot, a card with no table entries,
 # kept whole; a sixth, the card read beside a virtio disk installed first;
-# and a seventh, the card as the boot disk installed ahead of a USB stick
-# that is not.
+# a seventh, the card as the boot disk installed ahead of a USB stick that
+# is not; and an eighth, a boot card with no root of its own (as `make
+# sdcard` stages it), which gives way to the stick.
 test-sd: disk
 	python3 scripts/test-sd.py
 

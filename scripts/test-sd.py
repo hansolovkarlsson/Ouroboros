@@ -8,7 +8,7 @@ the kernel cannot (it drives virtio-mmio only), and puts a copy of
 `build/disk.img` (the ESP and the ext2 root) on an SD card behind QEMU's
 `sdhci-pci`, the only disk the kernel can drive, as the Pi's card and stick
 are today. QEMU's firmware does not boot from an SD card itself. Two cards,
-two boots each, then three more, seven boots in all:
+two boots each, then four more, eight boots in all:
 
 - **A standard-capacity card**, the image padded to the smallest power of two
   of at least 128 MiB that holds it (QEMU wants a power of two, and makes a
@@ -55,13 +55,20 @@ root on a disk of the card's size, and fsd must find the boot partition on
 it. Before step 4 the stick went in first, and the card was read and left
 out.
 
+**An eighth boot**, the card as `make sdcard` stages it beside a stick
+holding a root: build/esp.img booted from virtio-blk-pci and its copy on the
+card, disk.img on the stick. The card is the boot disk but holds no root
+partition past its firmware's, every sector of which is refused, so the
+stick must go in and the card be left out, with a line saying why, and
+`mount` must show the ext2 root on the stick's disk.
+
 No fault line in QEMU's trace on any boot. What it cannot see, each run as
 a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
 was never told about (no ACMD6) reads the same as one it was; it completes a
 write at once, so a write whose end is not waited for still lands; and it
 models no clock rate. Those are the Pi's to show (step 3). Run it whenever kernel/src/sdhci.rs, pci::discover_sdhci, main.rs's
 init_sd, install_sd_fallback or the order of the disk paths,
-parttable::firmware_sectors or block.rs changes. About seven minutes.
+parttable::firmware_sectors or block.rs changes. About eight minutes.
 """
 import importlib.util
 import os
@@ -104,10 +111,10 @@ def cards():
     ]
 
 
-def card_image(path, size):
-    """A copy of disk.img grown to `size`, sparse past the image's end;
-    never shrunk (cards() checks the size holds it)."""
-    shutil.copyfile(DISK, path)
+def card_image(path, size, source=DISK):
+    """A copy of `source` (disk.img) grown to `size`, sparse past the
+    image's end; never shrunk (cards() checks the size holds it)."""
+    shutil.copyfile(source, path)
     assert os.path.getsize(path) <= size
     with open(path, "r+b") as fh:
         fh.truncate(size)
@@ -319,11 +326,37 @@ def main() -> int:
         ("ranked: fsd finds the boot partition on its disk", "fsd: the boot partition is on this disk, at LBA 2048" in out),
         ("ranked: no fault lines", faults == 0),
     ]
+    # The eighth boot: the card as `make sdcard` stages it, the firmware's
+    # partition alone, booted from, beside a stick holding a root. The card
+    # is the boot disk but has no root of its own past its protected
+    # sectors, so the stick goes in, as on the Pi before step 4.
+    esp_img = os.path.join(ROOT, "build", "esp.img")
+    path = os.path.join(ROOT, "build", "test-sd-fwonly.img")
+    card_image(path, cards()[0][2], source=esp_img)
+    try:
+        ok, out, got, faults = boot("fwonly", "stick", path, [("mount", "mounted at")],
+                                    boot_disk=esp_img, stick=DISK)
+    finally:
+        os.remove(path)
+    esp_start = struct.unpack_from("<I", open(esp_img, "rb").read(512), 446 + 8)[0]
+    disk_sectors = os.path.getsize(DISK) // 512
+    checks += [
+        ("fwonly: driven to the end and powered off", ok),
+        ("fwonly: the card named the boot disk", f"sd: the card is the boot disk (its boot partition at LBA {esp_start})" in out),
+        ("fwonly: the card said to hold no root of its own",
+         "sd: the card is the boot disk but holds no root partition past its firmware's" in out),
+        ("fwonly: the stick installed, the card not",
+         "usb-msd block device installed" in out and "sd: the card is up and read, not installed: another disk is" in out
+         and "sd: block device installed" not in out),
+        (f"fwonly: the ext2 root mounted from the stick ({disk_sectors} sectors)",
+         bool(got) and f"ext2 mounted at partition LBA {root_start} (disk {disk_sectors} sectors" in got[0]),
+        ("fwonly: no fault lines", faults == 0),
+    ]
     failed = 0
     for check, good in checks:
         print(f"{'ok  ' if good else 'FAIL'} {check}")
         failed += 0 if good else 1
-    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt, build/test-sd-beside-virtio.txt, build/test-sd-ranked-stick.txt")
+    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt, build/test-sd-beside-virtio.txt, build/test-sd-ranked-stick.txt, build/test-sd-fwonly-stick.txt")
     return 1 if failed else 0
 
 
