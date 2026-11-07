@@ -751,10 +751,11 @@ not yet checked on this tree are marked (predicted).
       is under step 4 there (the write wait and R1 errors only the board
       can show). D5 was taken 2026-11-07: `make sdcard` is kept, demoted
       to re-staging the boot partition alone, and run on the board the
-      same day, the root's files kept. **Owed from that run (fix):** it
-      rolls the boot counter back to 1, since `EFI/ORBS/BOOTID.TXT` is the
-      Pi's only counter store; `scripts/sdcard.sh` should keep the larger
-      of the old and new values, as `bootstick.py` does (D5 in the plan).
+      same day, the root's files kept. That run rolled the boot counter back
+      to 1, since `EFI/ORBS/BOOTID.TXT` is the Pi's only counter store;
+      fixed the same day, `scripts/sdcard.sh` keeping the larger of the old
+      and new values as `bootstick.py` does (`make test-sdcard`; not yet
+      seen on the board).
 - [ ] **3. Booting from a stick, with no card.** Most of it exists: on QEMU
       the kernel already boots from a USB stick behind a hub and mounts that
       same stick as its runtime disk (`test-usb-hub.py --usb-boot`, and

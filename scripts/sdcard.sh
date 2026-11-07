@@ -59,6 +59,8 @@
 #          introduced; KEEP_ETC=0 re-stages.
 #   Users  the home directories: only the ones missing are created, never
 #          replaced, since they hold what was made on the Pi.
+# And one file inside EFI/ORBS: BOOTID.TXT, the boot counter, keeps the larger
+# of the card's value and the build's (carry_bootid below).
 # Anything else on the card (the firmware's files, a user's own) is untouched.
 set -eu
 
@@ -160,6 +162,32 @@ fi
 
 # --- Ouroboros on top. ------------------------------------------------------
 
+# The boot counter, EFI/ORBS/BOOTID.TXT: 20 decimal digits and a newline
+# (kernel/src/bootid.rs). On the Pi it is the counter's only store, since the
+# firmware keeps no variable for it (testing-pi4.md section 4), so the build's
+# record, always 0, would start the count again and let a boot hand out a
+# number it handed out before. $1 is the card's record, $2 the build's copy
+# about to replace it; the larger value is left in $2, as scripts/bootstick.py
+# does. A card record that is not one is not carried, and the run says so.
+bootid_value() {
+    [ -f "$1" ] && [ "$(wc -c < "$1" | tr -d ' ')" = 21 ] || return 1
+    LC_ALL=C grep -qx '[0-9]\{20\}' "$1" || return 1
+    head -c 20 "$1"
+}
+carry_bootid() {
+    [ -e "$1" ] || return 0
+    if ! old=$(bootid_value "$1"); then
+        echo "$ME: the card's boot counter ($1) is not a counter record; the build's is staged"
+        return 0
+    fi
+    new=$(bootid_value "$2") || new=
+    # Equal-width digit strings: the larger sorts last.
+    if [ -z "$new" ] || [ "$(printf '%s\n%s\n' "$old" "$new" | LC_ALL=C sort | tail -n 1)" = "$old" ]; then
+        printf '%s\n' "$old" > "$2"
+        echo "$ME: boot counter kept at $old (the card's)"
+    fi
+}
+
 # One owned entry: $1 is its path relative to the ESP root.
 place() {
     [ -n "$1" ] || die "internal: empty entry name"
@@ -206,6 +234,11 @@ place() {
     # leaves the old entry, EFI/BOOT's loader included, in place.
     rm -rf "${CARD:?}/$1.sdnew"
     cp -R -X "$ESP_DIR/$1" "$CARD/$1.sdnew"
+    # The counter is settled in the new copy before the swap, so the card
+    # never holds the build's record, not even between the two.
+    if [ "$1" = EFI/ORBS ]; then
+        carry_bootid "$CARD/$1/BOOTID.TXT" "$CARD/$1.sdnew/BOOTID.TXT"
+    fi
     rm -rf "${CARD:?}/$1"
     mv "$CARD/$1.sdnew" "$CARD/$1"
 }

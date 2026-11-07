@@ -228,6 +228,7 @@ make test-proc-cpus           # /proc/cpus, the cores that take tasks as a file
 make test-sd                  # an SD card as the root disk: QEMU's sdhci-pci, two cards, writes across a power off, the firmware partition refused
 make bootstick BOOTSTICK=/dev/diskN # write disk.img's layout to a whole disk or image file (PI=1 for the Pi 4)
 make test-bootstick           # bootstick against image files
+make test-sdcard              # make sdcard keeps a card's boot counter, against an image file
 make test-boot-partition      # the boot partition the kernel names
 make test-cond-vt             # cond's escape sequences on the framebuffer
 make test-nav-keys            # the navigation and function keys on QEMU's USB keyboard

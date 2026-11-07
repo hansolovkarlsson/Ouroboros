@@ -361,8 +361,8 @@ root, is left alone. Re-staging `EFI/ORBS/BOOTID.TXT` rolls the boot counter bac
 to 1, since on the Pi that file is the counter's only store (the variable
 reads absent, §6), and a counter that starts again can hand out a boot
 number it handed out before. `make bootstick` keeps the larger of the old
-and new values for that reason; `make sdcard` does not yet (2026-11-07,
-`roadmap-sd-card.md` D5). Until 2026-11-07 this paragraph said the UEFI
+and new values for that reason, and so does `make sdcard` since 2026-11-07
+(`roadmap-sd-card.md` D5, graded by `make test-sdcard`). Until 2026-11-07 this paragraph said the UEFI
 variable was the counter's preferred store and survived in `RPI_EFI.fd`,
 which the board had contradicted since its first serial boot.
 
@@ -563,7 +563,8 @@ the rest of `build/esp` on partition 1 and never writes partition 2, so
 everything on the root survives. It does not reach the root's `/bin`, which
 macOS cannot write, so the root's programs stay at the build they were
 staged from (see "Stage the card and the stick from the same build" above
-for why that matters), and it rolls the boot counter back to 1 (above).
+for why that matters). It keeps the card's boot counter since
+2026-11-07 (above); the run below was made before that fix.
 
 **Observed 2026-11-07, the boot partition alone** (the card at `e89c972e`,
 staged by `make bootstick PI=1`; `make sdcard` from `d86145cc`, a
