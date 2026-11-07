@@ -6,7 +6,7 @@
 //! **The firmware's partition is never written** (decision D3): the Pi's
 //! firmware keeps its variable store, `RPI_EFI.fd`, as a file in it. Nor
 //! is the partition table that finds it: sector 0 to the partition's end,
-//! and a GPT's backup copy at the card's end. The sectors are fixed when the
+//! and a GPT's backup copy where its headers put it. The sectors are fixed when the
 //! card is brought up (`Device::protect`, from `parttable::firmware_sectors`),
 //! and a write inside them is refused here, before the controller is
 //! touched, whatever asked for it; since the table is among them, nothing
@@ -14,8 +14,9 @@
 //!
 //! **Found, never assumed.** On QEMU the controller is `sdhci-pci`, found by
 //! its PCI class (`pci::discover_sdhci`, class 0x08, subclass 0x05). On the
-//! Raspberry Pi 4 it will be EMMC2 at the address its ACPI methods give
-//! (`amlscan::declared`, read in step 0b), which step 3 wires in.
+//! Raspberry Pi 4 it is EMMC2 at the address its ACPI methods give
+//! (`amlscan::declared`, `main.rs`'s `emmc2_from_acpi`, since step 3), and
+//! the Pi boots and runs from the card alone since step 4.
 //!
 //! **The card is brought up from scratch**, by the SD Physical Layer
 //! Simplified Specification, rather than from whatever the firmware left:

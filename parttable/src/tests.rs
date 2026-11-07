@@ -478,18 +478,52 @@ fn boot_start_takes_no_gpt_backup_the_disk_is_not_read_by() {
 
 /// `firmware_sectors`: from sector 0 to the end of the firmware partition
 /// (the boot partition when the card is the boot disk, else the first unless
-/// a root), and a GPT's backup copy.
+/// a root), and a GPT's backup copy where it was found.
 #[test]
 fn the_firmware_sectors_run_from_zero_to_the_partitions_end() {
     let esp = Partition { start: 2048, sectors: 131072, root: false };
     let root = Partition { start: 133120, sectors: 50000, root: true };
-    assert_eq!(firmware_sectors(&[esp, root], None, false, 200_000), [(0, 133120), (0, 0)]);
+    assert_eq!(firmware_sectors(&[esp, root], None, None), [(0, 133120), (0, 0)]);
     // The boot partition the firmware named wins, wherever it is.
-    assert_eq!(firmware_sectors(&[esp, root], Some((32768, 1000)), false, 200_000), [(0, 33768), (0, 0)]);
-    assert_eq!(firmware_sectors(&[], Some((32768, 1000)), false, 200_000), [(0, 33768), (0, 0)]);
-    // A GPT's backup at the end is kept too.
-    assert_eq!(firmware_sectors(&[esp, root], None, true, 200_000), [(0, 133120), (200_000 - 33, 33)]);
+    assert_eq!(firmware_sectors(&[esp, root], Some((32768, 1000)), None), [(0, 33768), (0, 0)]);
+    assert_eq!(firmware_sectors(&[], Some((32768, 1000)), None), [(0, 33768), (0, 0)]);
+    // A GPT's backup is kept too.
+    assert_eq!(firmware_sectors(&[esp, root], None, Some((199_967, 33))), [(0, 133120), (199_967, 33)]);
     // A root first, or no partition: nothing is the firmware's.
-    assert_eq!(firmware_sectors(&[root, esp], None, true, 200_000), [(0, 0); 2]);
-    assert_eq!(firmware_sectors(&[], None, false, 200_000), [(0, 0); 2]);
+    assert_eq!(firmware_sectors(&[root, esp], None, Some((199_967, 33))), [(0, 0); 2]);
+    assert_eq!(firmware_sectors(&[], None, None), [(0, 0); 2]);
+}
+
+/// `gpt_backup_extent`: the backup where a valid primary's AlternateLBA puts
+/// it, its entries from its own header, the last sector when the primary
+/// does not say, and `None` on a failed read.
+#[test]
+fn the_gpt_backup_is_found_where_the_primary_says() {
+    let part = [(ESP_GUID, UNIQUE, 34, 133)];
+    // gpt_disk's copies name no AlternateLBA: the last sector, its array the
+    // 32 sectors below it.
+    let m = Mem::gpt_disk(&part);
+    assert_eq!(gpt_backup_extent(&mut m.reader(), DISK), Some((DISK - 33, 33)));
+    // A smaller image written to the disk: its backup at 2047, named by the
+    // primary, with an array of 8 sectors (32 entries) just below it.
+    let mut m = Mem::new();
+    m.mbr(&[(PROTECTIVE, 1, 2047)], 0);
+    m.gpt(1, 2, &part);
+    m.sectors[1][32..40].copy_from_slice(&2047u64.to_le_bytes());
+    Mem::seal(&mut m.sectors[1]);
+    m.gpt(2047, 2039, &part);
+    m.sectors[2047][80..84].copy_from_slice(&32u32.to_le_bytes());
+    Mem::seal(&mut m.sectors[2047]);
+    assert_eq!(gpt_backup_extent(&mut m.reader(), DISK), Some((2039, 9)));
+    // The same with the primary's CRC broken: its AlternateLBA is not
+    // trusted, and the last sector, holding nothing, keeps 33.
+    m.sectors[1][20] ^= 1;
+    assert_eq!(gpt_backup_extent(&mut m.reader(), DISK), Some((DISK - 33, 33)));
+    // A failed read of the primary or the backup header: unknown.
+    let mut m = Mem::gpt_disk(&part);
+    m.fail.push(1);
+    assert_eq!(gpt_backup_extent(&mut m.reader(), DISK), None);
+    let mut m = Mem::gpt_disk(&part);
+    m.fail.push(DISK - 1);
+    assert_eq!(gpt_backup_extent(&mut m.reader(), DISK), None);
 }

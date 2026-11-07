@@ -14,9 +14,15 @@
 //!   `Name (_HID, "BCM2847")` (the Arasan controller, `Sdhc.asl`). Found by
 //!   a byte search, which is enough for a report and is not a declaration:
 //!   the device's registers are set inside a `_CRS` method there, which
-//!   `amlscan` does not evaluate. With the boot flag `\SDDUMP`, each table
-//!   holding one is printed in hex, so that `_CRS` can be read and the
-//!   driver's parser written and host-tested against the real bytes.
+//!   `amlscan` reads in that one shape (`MethodShape::CrsPatch`, written
+//!   from these dumps; the declaration is the step-0b line below). Each
+//!   table holding one is printed in hex, so that `_CRS` can be read and the
+//!   driver's parser host-tested against the real bytes.
+//!
+//! The whole report runs only under the boot flag `\SDDUMP` (`main.rs`):
+//! a reading aid whose question step 0 answered, not a cost every boot
+//! pays. It walks the tables itself rather than taking the driver's answer
+//! (`main.rs`'s `emmc2_from_acpi`), so the two are two observers.
 //! - **The controller itself (step 0b):** when the tables declare exactly
 //!   one EMMC2 present (`amlscan::declared`, its `_STA` and `_CRS`
 //!   read from their methods), six of its registers are read and logged,
@@ -30,7 +36,6 @@
 //!   off the board rather than copied from a header.
 
 use crate::acpi;
-use crate::bootflags;
 use fdt::Fdt;
 use uefi::{cstr16, CStr16};
 
@@ -41,20 +46,20 @@ const HIDS: [(&[u8], &str); 2] = [(b"BRCME88C", "EMMC2"), (b"BCM2847", "Arasan")
 const ROUTING_VAR: &CStr16 = cstr16!("SdIsArasan");
 
 /// Logs what the devicetree, the ACPI tables and the firmware's variables
-/// say of the SD controller; with `flags.sd_dump`, prints each ACPI table
-/// that declares one. Before `exit_boot_services` only (the UEFI console,
+/// say of the SD controller, and prints each ACPI table that declares one.
+/// Called only under `\SDDUMP`. Before `exit_boot_services` only (the UEFI console,
 /// runtime variables and the tables' mapping are all relied on).
 ///
 /// # Safety
 /// `dtb` and `rsdp` as `devicetree::find_dtb` and `acpi::find_rsdp` return
 /// them: each, if `Some`, points at its firmware structure, mapped.
-pub unsafe fn report(dtb: Option<*const u8>, rsdp: Option<*const u8>, flags: &bootflags::Flags) {
+pub unsafe fn report(dtb: Option<*const u8>, rsdp: Option<*const u8>) {
     unsafe { report_devicetree(dtb) };
     // The AML tables once, for both reports.
     let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
     match unsafe { acpi::aml_table_slices(rsdp, &mut tables) } {
         Ok(count) => {
-            report_acpi(&tables[..count], flags.sd_dump);
+            report_acpi(&tables[..count]);
             unsafe { report_controller(&tables[..count]) };
         }
         Err(e) => log::info!("Ouroboros kernel: sd: ACPI tables not read ({e:?})"),
@@ -94,7 +99,7 @@ unsafe fn report_devicetree(dtb: Option<*const u8>) {
     }
 }
 
-fn report_acpi(tables: &[&[u8]], dump: bool) {
+fn report_acpi(tables: &[&[u8]]) {
     let count = tables.len();
     let mut any = false;
     for table in tables {
@@ -116,14 +121,12 @@ fn report_acpi(tables: &[&[u8]], dump: bool) {
                 );
             }
         }
-        if declares && dump {
+        if declares {
             dump_table(signature, oem_table, table);
         }
     }
     if !any {
         log::info!("Ouroboros kernel: sd: no ACPI table ({count} read) names an SD controller's _HID");
-    } else if !dump {
-        log::info!("Ouroboros kernel: sd: touch SDDUMP at the ESP's root to print those tables");
     }
 }
 

@@ -401,7 +401,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/virtio_mmio.rs virtio-mmio transport: probes only the transports the firmware's DSDT declares (amlscan), modern register layout
   src/block.rs       BlockDevice enum (Virtio | UsbMsd | Sdhci) - what fsd's disk layer sits on
   src/sdhci.rs       an SD card on a standard SDHCI, brought up from scratch by the SD spec and read by PIO, one sector a
-                     time, 32-bit register access only; QEMU's sdhci-pci today, the Pi's EMMC2 next (SD-card arc); reads and writes, never the firmware partition or the table that finds it
+                     time, 32-bit register access only; QEMU's sdhci-pci and the Pi's EMMC2 (SD-card arc; the Pi's only disk since step 4); reads and writes, never the firmware partition or the table that finds it
   src/usb_msd.rs     USB mass storage: Bulk-Only Transport + SCSI over xhci's bulk endpoints, with BOT error recovery
   src/virtio_blk.rs  virtio-blk: feature negotiation, one virtqueue, polling sector read/write
   src/virtio_console.rs  transmit-only virtio-console - works on QEMU, NOT what Parallels' serial port is

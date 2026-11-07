@@ -315,7 +315,8 @@ def pi_card():
     and the kernel's tree. With PI unset it must be taken as ours and as a Pi
     disk, and its firmware carried whole onto the new partition 1, not the
     pinned release's: a fresh RPI_EFI.fd could route the card to Arasan.
-    Until 2026-11-06 a Pi card was refused."""
+    A Pi card without EFI/ORBS/INIT.CFG, staged for another OS, must still
+    be refused. Until 2026-11-06 every Pi card was refused."""
     settings, overlay, start4 = "CARD-SETTINGS: SdIsArasan=0", "# the card's overlay\n", "the card's start4"
     card = fat_volume("card", {
         "RPI_EFI.fd": settings, "config.txt": overlay, "start4.elf": start4,
@@ -325,7 +326,20 @@ def pi_card():
     with Esp(card) as esp:
         fd, config, s4 = esp.read("RPI_EFI.fd"), esp.read("config.txt"), esp.read("start4.elf")
         tree = esp.read("EFI/BOOT/BOOTAA64.EFI") is not None
+    # A Pi card staged for another OS: the firmware and that OS's files, no
+    # EFI/ORBS/INIT.CFG. Refused and left as it was (the review of step 4).
+    foreign = fat_volume("foreign", {
+        "RPI_EFI.fd": settings, "config.txt": overlay, "start4.elf": start4,
+        "EFI/BOOT/BOOTAA64.EFI": "another os",
+    })
+    with open(foreign, "rb") as fh:
+        before = fh.read()
+    fcode, fout = bootstick_run(foreign)
+    with open(foreign, "rb") as fh:
+        after = fh.read()
     checks = [
+        ("pi card: one staged for another OS refused, its image unchanged",
+         fcode != 0 and "not one `make sdcard` staged" in fout and before == after),
         ("pi card: taken as ours and as a Pi disk", code == 0 and "ours (fat), a Pi stick" in out),
         # Each on a run that wrote: a refused card still holds its own files,
         # so the bytes alone would pass it.
@@ -334,6 +348,7 @@ def pi_card():
         ("pi card: the ESP's tree beside them", code == 0 and tree),
     ]
     if not all(good for _, good in checks):
+        print(fout)
         print(out)
     return checks
 

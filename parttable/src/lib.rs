@@ -519,8 +519,8 @@ fn gpt_holds(boot: &BootPartition, read: &mut ReadSector, header: u64, capacity:
 /// its variable store, `RPI_EFI.fd`, as a file in its partition, and boots
 /// only while the table that finds that partition is whole, so both are
 /// kept: sector 0 to the partition's end (the MBR, a GPT's primary header
-/// and entries, the gap and the partition), and for a GPT disk its backup
-/// header and entries in the last [`GPT_TABLE_SECTORS`] sectors.
+/// and entries, the gap and the partition), and for a GPT disk `backup`,
+/// its backup header and entries as [`gpt_backup_extent`] finds them.
 ///
 /// The firmware's partition is `boot`, the boot partition the firmware
 /// names (start and size), when the card is the disk the system booted
@@ -531,20 +531,55 @@ fn gpt_holds(boot: &BootPartition, read: &mut ReadSector, header: u64, capacity:
 /// blank card can be prepared with `partition` and `format`. A card whose
 /// table does not read or does not validate is the caller's to protect
 /// whole (`main.rs`'s `init_sd`).
-pub fn firmware_sectors(partitions: &[Partition], boot: Option<(u64, u64)>, gpt: bool, capacity: u64) -> [(u64, u64); 2] {
+pub fn firmware_sectors(partitions: &[Partition], boot: Option<(u64, u64)>, backup: Option<(u64, u64)>) -> [(u64, u64); 2] {
     let Some((start, count)) = boot.or_else(|| partitions.first().filter(|p| !p.root).map(|p| (p.start, p.sectors)))
     else {
         return [(0, 0); 2];
     };
-    let backup = if gpt && capacity > GPT_TABLE_SECTORS {
-        (capacity - GPT_TABLE_SECTORS, GPT_TABLE_SECTORS)
-    } else {
-        (0, 0)
-    };
-    [(0, start.saturating_add(count)), backup]
+    [(0, start.saturating_add(count)), backup.unwrap_or((0, 0))]
 }
 
-/// A GPT's header and a 128-entry array: the sectors each copy takes.
+/// Where a GPT disk of `capacity` sectors keeps its backup header and
+/// entries, as `(first, count)`: the header where a valid primary's
+/// AlternateLBA puts it (the firmware follows that field, so a smaller GPT
+/// image written to a bigger card keeps its backup inside the image, not at
+/// the card's end), else at the last sector; its entries from that header's
+/// own array LBA when it holds one within [`MAX_GPT_ARRAY_SECTORS`] below it,
+/// else the [`GPT_TABLE_SECTORS`] ending at the header, the usual 128 entries
+/// of 128 bytes. `None` when a read it needed failed: the caller cannot tell
+/// what to keep and keeps the whole card. The review of step 4 found the
+/// last 33 sectors assumed.
+pub fn gpt_backup_extent(read: &mut ReadSector, capacity: u64) -> Option<(u64, u64)> {
+    let mut header = [0u8; SECTOR];
+    let mut at = gpt_backup(capacity)?;
+    match read_gpt(read, GPT_PRIMARY, Some(capacity), &mut |_, _| {}) {
+        GptCopy::Unreadable => return None,
+        GptCopy::Valid => {
+            if !read(GPT_PRIMARY, &mut header) {
+                return None;
+            }
+            let alternate = le(&header[32..40]);
+            if alternate > GPT_PRIMARY && alternate < capacity {
+                at = alternate;
+            }
+        }
+        GptCopy::Invalid => {}
+    }
+    if !read(at, &mut header) {
+        return None;
+    }
+    let array = le(&header[72..80]);
+    let first = if &header[0..8] == b"EFI PART" && array < at && at - array <= MAX_GPT_ARRAY_SECTORS {
+        array
+    } else {
+        at.saturating_sub(GPT_TABLE_SECTORS - 1).max(GPT_PRIMARY + 1)
+    };
+    Some((first, at - first + 1))
+}
+
+/// A GPT copy's header and entries as the UEFI specification lays out the
+/// usual 128 entries of 128 bytes: 32 sectors of entries and the header,
+/// [`gpt_backup_extent`]'s answer when the backup header names no array.
 pub const GPT_TABLE_SECTORS: u64 = 33;
 
 #[cfg(test)]

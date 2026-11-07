@@ -542,7 +542,13 @@ def classify(disk, debugfs, tmp):
         if kind is None and os.path.isfile(os.path.join(mount, "EFI", "ORBS", "INIT.CFG")):
             kind = "ours"
         if kind == "card":
-            # A Pi card: ours, and its firmware is carried (old_firmware).
+            # A Pi card is ours only as `make sdcard` stages one, the kernel's
+            # tree beside the firmware; its firmware is then carried
+            # (old_firmware). RPI_EFI.fd alone says only that some OS boots
+            # the Pi from it: a card made for another is refused.
+            if not os.path.isfile(os.path.join(mount, "EFI", "ORBS", "INIT.CFG")):
+                raise Refused(f"{mount} ({ident}) is a Pi firmware card without EFI/ORBS/INIT.CFG: "
+                              "not one `make sdcard` staged; refusing")
             kind = "ours"
         if kind is None:
             shown = ", ".join(n for n in names if not LITTER.match(n))[:200]

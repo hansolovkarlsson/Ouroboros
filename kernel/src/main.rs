@@ -622,7 +622,7 @@ extern "C" fn kernel_main() -> ! {
     // `\SDDUMP`: a reading aid whose question step 0 answered (2026-11-05),
     // not a cost every boot pays.
     if flags.sd_dump {
-        unsafe { sdscan::report(dtb, rsdp, &flags) };
+        unsafe { sdscan::report(dtb, rsdp) };
     }
 
     // SAFETY: no boot-services protocol references (console, allocator, or
@@ -951,6 +951,14 @@ extern "C" fn kernel_main() -> ! {
             console::println!(
                 "Ouroboros kernel: sd: block device installed for the filesystem server, the boot disk, ahead of any USB stick"
             );
+            // What it went in ahead of, each named: install_boot_disk finds
+            // the cell full and returns before either would be said.
+            if held_virtio.is_some() {
+                console::println!("Ouroboros kernel: virtio-blk not installed: the SD card is the boot disk");
+            }
+            if xhci::storage_present() {
+                console::println!("Ouroboros kernel: usb-msd not installed: the SD card is the boot disk");
+            }
             None
         }
         other => other,
@@ -1345,13 +1353,22 @@ unsafe fn emmc2_from_acpi(rsdp: Option<*const u8>) -> Option<SdController> {
             log::info!("Ouroboros kernel: sd: ACPI declares EMMC2 @ {:#x}, {:#x} bytes, INTID {:?}", c.base, c.size, c.intid);
             Some(SdController { base: c.base, source: "ACPI" })
         }
+        [c] => {
+            log::info!(
+                "Ouroboros kernel: sd: ACPI's EMMC2 @ {:#x} not taken: its {:#x} bytes are fewer than SDHCI's 0x100 registers",
+                c.base,
+                c.size
+            );
+            None
+        }
         list => {
             log::info!(
-                "Ouroboros kernel: sd: ACPI's EMMC2 declarations not taken: {} present, {} unreadable, {} absent, {} of unknown status",
+                "Ouroboros kernel: sd: ACPI's EMMC2 declarations not taken: {} present, {} unreadable, {} absent, {} of unknown status, {} past the list's room",
                 list.len(),
                 found.unreadable,
                 found.absent,
-                found.status_unknown
+                found.status_unknown,
+                found.dropped
             );
             None
         }
@@ -1408,18 +1425,27 @@ fn init_sd(ctl: Option<SdController>) -> Option<SdCard> {
     let (protected, boot) = {
         // SAFETY: as above.
         let mut read = |lba: u64, buf: &mut [u8; 512]| unsafe { device.read_sector(lba, buf) }.is_ok();
-        let matched = bootdisk::is_boot_disk(&mut read, capacity);
-        let boot = match matched {
-            Some(bootdisk::Boot::Yes) => bootdisk::get().map(|b| (b.start_lba, b.size_blocks)),
-            _ => None,
-        };
+        // Asked again once on a failed read, as every disk path does (D6 of
+        // the one-disk arc): a card that is the boot disk and missed one
+        // read would otherwise give the root to a stick.
+        let matched = bootdisk::is_boot_disk_retrying(&mut read, capacity, "sd");
+        let boot = bootdisk::partition_if(matched);
         match (matched, boot) {
             (_, Some((start, _))) => console::println!("Ouroboros kernel: sd: the card is the boot disk (its boot partition at LBA {start})"),
             (Some(bootdisk::Boot::Unreadable), _) => console::println!("Ouroboros kernel: sd: whether the card is the boot disk could not be read"),
             (None, _) => console::println!("Ouroboros kernel: sd: the boot partition is unknown, so not whether the card holds it"),
             _ => console::println!("Ouroboros kernel: sd: the card is not the boot disk"),
         }
-        let gpt = parttable::is_gpt(&mut read) == Some(true);
+        // The backup copy of a GPT, where its headers put it; `None` when a
+        // read it needed failed, which, like a table that does not read,
+        // keeps the whole card (the review of step 4: a failed read had
+        // been taken for "not GPT", and the backup left writable).
+        let backup = match parttable::is_gpt(&mut read) {
+            Some(true) => parttable::gpt_backup_extent(&mut read, capacity).map(Some),
+            Some(false) => Some(None),
+            None => None,
+        };
+        let gpt = matches!(backup, Some(Some(_)));
         let blank = parttable::is_blank(&mut read) == Some(true);
         let mut parts = [parttable::Partition::default(); 8];
         let listed = parttable::discover(&mut read, Some(capacity), &mut parts);
@@ -1451,11 +1477,12 @@ fn init_sd(ctl: Option<SdController>) -> Option<SdCard> {
                 );
             }
         }
-        let protected = match listed {
+        let protected = match (listed, backup) {
             _ if blank => [(0, 0); 2],
-            Ok(n) if n > 0 || boot.is_some() => parttable::firmware_sectors(&parts[..n], boot, gpt, capacity),
+            (Ok(n), Some(backup)) if n > 0 || boot.is_some() => parttable::firmware_sectors(&parts[..n], boot, backup),
             // A table that does not read, or lists nothing on a card that is
-            // not blank, leaves nothing safe to write.
+            // not blank, or a GPT backup not found, leaves nothing safe to
+            // write.
             _ => [(0, capacity), (0, 0)],
         };
         (protected, boot.is_some())
