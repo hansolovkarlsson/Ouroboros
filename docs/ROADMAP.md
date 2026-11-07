@@ -754,8 +754,9 @@ not yet checked on this tree are marked (predicted).
       same day, the root's files kept. That run rolled the boot counter back
       to 1, since `EFI/ORBS/BOOTID.TXT` is the Pi's only counter store;
       fixed the same day, `scripts/sdcard.sh` keeping the larger of the old
-      and new values as `bootstick.py` does (`make test-sdcard`; not yet
-      seen on the board).
+      and new values as `bootstick.py` does (`make test-sdcard`, #417),
+      and seen on the board the same day: a re-stage from `56946121`
+      took boot 1 to boot 2.
 - [ ] **3. Booting from a stick, with no card.** Most of it exists: on QEMU
       the kernel already boots from a USB stick behind a hub and mounts that
       same stick as its runtime disk (`test-usb-hub.py --usb-boot`, and
