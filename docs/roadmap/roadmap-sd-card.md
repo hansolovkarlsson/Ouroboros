@@ -159,7 +159,10 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
   imports (the review of #417 found the first, shell-written copy taking a
   newline and twenty digits as a record). `make test-sdcard` grades it on an
   image file (the card's 6 must survive a build's 0, which fails on the old
-  script). Not yet seen on the board. Until 2026-11-07 `testing-pi4.md` section 4
+  script). Seen on the board the same day: `make sdcard` from `56946121`
+  (#417's merge) on the card at boot 1, and the next boot read boot 2,
+  `file yes`, the root's files still there (`testing-pi4.md` section 4).
+  Until 2026-11-07 `testing-pi4.md` section 4
   said the counter's preferred store was the variable and survived in
   `RPI_EFI.fd`, and the prediction for this run was made from it.
 

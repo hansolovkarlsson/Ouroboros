@@ -580,6 +580,15 @@ the ext2 root, the login and the cluster identity were unchanged, and
 card was still routed to EMMC2. `bootid` read `boot 1`, `variable no, file
 yes`: the counter rolled back.
 
+**Observed 2026-11-07, the counter kept** (#417, the fix for the rollback
+above). `make sdcard` from `56946121`, #417's merge, on the same card after
+the boot 1 above, no stick. The build line read `56946121`, the kernel logged
+`boot identity: boot 2; from before this boot: variable absent, file present`,
+and `bootid` read `boot 2`, `variable no, file yes`: the count went on from
+the card's value instead of starting again at the build's 0. fsd mounted the
+ext2 root, `ls /` still listed `keep`, `Users` and `etc`, the cluster
+identity was unchanged, and the log held no fault line.
+
 ---
 
 ## 5. Firmware settings to check before the first boot
