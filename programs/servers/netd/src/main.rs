@@ -548,8 +548,13 @@ fn load_auth() -> Auth {
                 log_dec(n as u64);
                 log(b" bytes\r\n");
             }
-            Registry::Read(_, false) => log(b"netd: WARNING /etc/cluster/users is larger than netd can read (1024 bytes);\r\n      every claim of a non-root user will be REFUSED\r\n"),
-            Registry::Unreadable => log(b"netd: WARNING could not read /etc/cluster/users now; a claim of a non-root user is refused while that lasts\r\n"),
+            Registry::Read(_, false) => {
+                log(b"netd: WARNING /etc/cluster/users is larger than netd can read (");
+                log_dec(USERS_MAX as u64);
+                log(b" bytes);\r\n      it is read as broken, so a claim needing it is REFUSED\r\n");
+            }
+            Registry::Transient => log(b"netd: /etc/cluster/users not readable yet; it is read again at each claim\r\n"),
+            Registry::Unreadable => log(b"netd: WARNING could not read /etc/cluster/users; it is read as broken, so a claim needing it is REFUSED\r\n"),
         }
     }
     // REPORTED PER DIRECTION: they have different preconditions, and a machine
@@ -1665,23 +1670,15 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
     pending.len = 0;
     pending.cursor = 0;
     pending.owner = owner;
-    match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, call, &who, &np[..hdr + clen], remotes) {
-        Ok(()) => {
-            // DECISION 7'S ANCHOR. A run's reply is an unsigned stream, so
-            // `expect_key` verifies nothing on it; it holds instead the key of
-            // the `authorized` line for the address dialled, the machine whose
-            // `/host` callbacks claiming `who` this export accepts while the
-            // run is in flight (`run_in_flight`). No line, no anchor: zeros,
-            // which `run_in_flight` reads as none.
-            if let Some(peer) = clusterkeys::find_by_ip(auth.authorized(), &ip) {
-                if let Some(pk) = remotes.iter_mut().flatten().filter_map(|r| r.parked.as_mut())
-                    .find(|pk| pk.verb == ninep_abi::NP_RUN && pk.caller == owner && pk.call == call)
-                {
-                    pk.expect_key = peer.key;
-                }
-            }
-            None
-        }
+    // DECISION 7'S ANCHOR. A run's reply is an unsigned stream, so
+    // `expect_key` verifies nothing on it; it holds instead the key of the
+    // `authorized` line for the address dialled, the machine whose `/host`
+    // callbacks claiming `who` this export accepts while the run is in flight
+    // (`run_in_flight`). No line, no anchor: zeros, which `run_in_flight`
+    // reads as none.
+    let anchor = clusterkeys::find_by_ip(auth.authorized(), &ip).map_or([0u8; clusterkeys::KEY_LEN], |peer| peer.key);
+    match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, call, &who, &np[..hdr + clen], anchor, remotes) {
+        Ok(()) => None,
         Err(msg) => fail(out, msg),
     }
 }
@@ -1691,7 +1688,7 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
 /// already refused a machine that cannot sign. `Err` is the text to answer the
 /// caller with.
 #[allow(clippy::too_many_arguments)]
-fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], np: &[u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), &'static [u8]> {
+fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], np: &[u8], anchor: [u8; clusterkeys::KEY_LEN], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), &'static [u8]> {
     let Some(slot) = remotes.iter().position(|r| r.is_none()) else {
         return Err(b"cpu: no free connection for the run (try again)\r\n");
     };
@@ -1711,7 +1708,7 @@ fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // `service_remotes` both of those things; no extra field is needed.
     // `since: 0` for the reason `park_rmount` gives: the clock starts at the
     // first send, never at the park.
-    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: [0; clusterkeys::KEY_LEN], since: 0, who: *who, verb, opening: false, raw });
+    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: anchor, since: 0, who: *who, verb, opening: false, raw });
     Ok(())
 }
 
@@ -3975,8 +3972,13 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // and recover the bare NP message. A failure (an unauthorized key, a bad
     // signature, or an unconfigured export) is refused before any verb runs -
     // fail-closed. `authenticate` returns the NP message slice on success.
+    // EVERY signed format, by the one function that names them: this gate
+    // tested AUTHNP03's magic alone, so an AUTHNP05 frame on a node with peers
+    // and no identity was authenticated, admitted and DISPATCHED (a `cpu` run
+    // spawned, a write landed) before the unsignable reply was refused (review
+    // of user-keys step 7).
     let signed_request = request.len() >= ninep_abi::NP_NET_LEN_PREFIX + 8
-        && read_u64(request, ninep_abi::NP_NET_LEN_PREFIX) == ninep_abi::NP_AUTH_MAGIC_SIGNED;
+        && ninep_abi::request_sig_domain(read_u64(request, ninep_abi::NP_NET_LEN_PREFIX)).is_some();
     // A machine with no identity cannot sign a reply, and a signed request must
     // not be answered unauthenticated. Refusing is the honest outcome: an export
     // that cannot prove who it is has nothing to serve with.
@@ -4485,10 +4487,17 @@ fn np_offset(request: &[u8]) -> Option<usize> {
     if request.len() >= p + 8 && read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_SIGNED {
         Some(p + ninep_abi::NP_AUTH_HDR_SIGNED)
     } else if request.len() >= p + 8 && read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_USER {
-        // Past the credential block, by the same reader `authenticate` uses;
-        // an unreadable block has no verb either.
-        let c = ninep_abi::credentialed(request).ok()?;
-        Some(c.message.as_ptr() as usize - request.as_ptr() as usize)
+        // Past the credential block by its OWN `clen`, not by `credentialed`:
+        // that reader refuses an unknown kind or a wrong length, which are
+        // exactly the requests refused `Refused::Credential`, and a `cpu`
+        // caller must get that refusal as text. Only a peek for the reply's
+        // shape; nothing is dispatched on it. A block whose header or bytes
+        // run past the request has no verb.
+        let at = p + ninep_abi::NP_AUTH_CRED_OFF;
+        let hdr = request.get(at..at + ninep_abi::NP_CRED_HDR_LEN)?;
+        let clen = u16::from_le_bytes([hdr[2], hdr[3]]) as usize;
+        let off = at + ninep_abi::NP_CRED_HDR_LEN + clen;
+        (off <= request.len()).then_some(off)
     } else {
         // NOT a guess. With the MAC'd format gone there is one header layout,
         // and a frame that is not it has no verb at any offset we know - so this
@@ -4789,6 +4798,7 @@ fn deny_claim(c: &mut TcpConn, request: &[u8], cause: Refused, auth: &Auth, nonc
             Refused::Registry => {
                 b"cpu: this host's /etc/cluster/users cannot be read for that user (a broken line, or not read whole)\r\n"
             }
+            Refused::RegistryUnreadable => b"cpu: this host cannot read its /etc/cluster/users right now (try again)\r\n",
         };
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
@@ -4798,7 +4808,7 @@ fn deny_claim(c: &mut TcpConn, request: &[u8], cause: Refused, auth: &Auth, nonc
         // filesystem", which is true AND worth retrying. A missing database is
         // not worth retrying, and a real stranger is neither.
         let status = match cause {
-            Refused::Scan(LineScan::Unreadable) => syscall_abi::NO_FS,
+            Refused::Scan(LineScan::Unreadable) | Refused::RegistryUnreadable => syscall_abi::NO_FS,
             Refused::Scan(LineScan::NoDatabase) => syscall_abi::FS_ERR_NOT_FOUND,
             Refused::Scan(LineScan::NotFound | LineScan::Found)
             | Refused::RootSquash
@@ -6863,6 +6873,11 @@ enum Refused {
     /// The registry's line for the user is broken, two lines disagree, or the
     /// registry was not read whole: never read as "unregistered".
     Registry,
+    /// The registry could not be read just now (no disk mounted yet, `fsd`
+    /// restarting): refused, and answered `NO_FS`, as an unreadable
+    /// `/etc/passwd` is, because a retry may succeed and "authentication
+    /// failed" would send the operator to the keys.
+    RegistryUnreadable,
 }
 
 /// The run a claim was served under by rule 2 (Decision 7): the parked
@@ -6902,16 +6917,22 @@ fn admit(auth: &Auth, a: &Authenticated, runs: &[Option<RemoteConn>; MAX_REMOTE]
         _ => false,
     };
     if p.uid == 0 || p.gid == 0 {
-        // The flag first, so a flagged peer's root claim costs no read.
-        return if a.peer_root || attested(registry_lookup(name)) { Ok((p, None)) } else { Err(Refused::RootSquash) };
+        // The flag first, then the registry only when there is a credential
+        // to check against it: an uncredentialed claim from an unflagged peer
+        // is refused without a read. A registry that cannot be read leaves
+        // root unattested, which is the squash.
+        let by_credential = matches!(a.cred, Cred::UserSig(_))
+            && matches!(registry_lookup(name), Some(look) if attested(look));
+        return if a.peer_root || by_credential { Ok((p, None)) } else { Err(Refused::RootSquash) };
     }
     if let Some(run) = run_in_flight(runs, &a.caller_key, &a.name) {
         return Ok((p, Some(run)));
     }
     match registry_lookup(name) {
-        clusterkeys::UserLookup::Broken => Err(Refused::Registry),
-        clusterkeys::UserLookup::Unregistered => Ok((p, None)),
-        look @ clusterkeys::UserLookup::Registered(_) => match a.cred {
+        None => Err(Refused::RegistryUnreadable),
+        Some(clusterkeys::UserLookup::Broken) => Err(Refused::Registry),
+        Some(clusterkeys::UserLookup::Unregistered) => Ok((p, None)),
+        Some(look @ clusterkeys::UserLookup::Registered(_)) => match a.cred {
             Cred::None => Err(Refused::NoCredential),
             _ if attested(look) => Ok((p, None)),
             _ => Err(Refused::BadCredential),
@@ -6924,13 +6945,16 @@ fn admit(auth: &Auth, a: &Authenticated, runs: &[Option<RemoteConn>; MAX_REMOTE]
 /// registers nobody; a file that cannot be read, or is past `USERS_MAX`, is
 /// broken for every name, never "unregistered". Its own frame, so the read
 /// buffer is transient and below `admit` alone.
+/// `None` when it cannot be read just now (a transient failure), for the
+/// caller to answer `NO_FS`; any other failure is broken for every name.
 #[inline(never)]
-fn registry_lookup(name: &[u8]) -> clusterkeys::UserLookup {
+fn registry_lookup(name: &[u8]) -> Option<clusterkeys::UserLookup> {
     let mut buf = [0u8; USERS_MAX + 1];
     match read_registry(&mut buf) {
-        Registry::Absent => clusterkeys::UserLookup::Unregistered,
-        Registry::Read(n, whole) => clusterkeys::lookup_user(&buf[..n], name, whole),
-        Registry::Unreadable => clusterkeys::UserLookup::Broken,
+        Registry::Absent => Some(clusterkeys::UserLookup::Unregistered),
+        Registry::Read(n, whole) => Some(clusterkeys::lookup_user(&buf[..n], name, whole)),
+        Registry::Transient => None,
+        Registry::Unreadable => Some(clusterkeys::UserLookup::Broken),
     }
 }
 
@@ -6940,29 +6964,36 @@ enum Registry {
     Absent,
     /// `n` bytes read, and whether that is the whole file.
     Read(usize, bool),
+    /// A failure a retry may clear (`transient_fs_failure`, the classifier
+    /// `load_auth` retries on).
+    Transient,
     /// Any other failure. Not knowing is not "nobody registered".
     Unreadable,
 }
 
-/// Read `/etc/cluster/users` into `buf` (`USERS_MAX + 1` bytes). WHOLE only
-/// when the read stopped short of the buffer AND a read at that offset
-/// answers 0: fsd may deliver fewer bytes than asked without being at the
-/// end (`read_file_chunk`), and a probe that fails is not knowing.
+/// Read `/etc/cluster/users` into `buf` (`USERS_MAX + 1` bytes), read on
+/// until a read answers 0 or the buffer is full, since fsd may deliver fewer
+/// bytes than asked without being at the end (`read_file_chunk`). WHOLE only
+/// when a read answered 0 within `USERS_MAX`: a full buffer means a byte past
+/// the cut. A failure part way is a failure, never a short file.
 fn read_registry(buf: &mut [u8; USERS_MAX + 1]) -> Registry {
-    let r = read_file_chunk(As::FirstParty, USERS_PATH, 0, 0, buf);
-    if r == syscall_abi::FS_ERR_NOT_FOUND {
-        return Registry::Absent;
+    let mut n = 0usize;
+    loop {
+        let r = read_file_chunk(As::FirstParty, USERS_PATH, 0, n as u64, &mut buf[n..]);
+        if r == syscall_abi::FS_ERR_NOT_FOUND && n == 0 {
+            return Registry::Absent;
+        }
+        if r >= syscall_abi::FS_ERR_MIN {
+            return if transient_fs_failure(r) { Registry::Transient } else { Registry::Unreadable };
+        }
+        if r == 0 {
+            return Registry::Read(n, true);
+        }
+        n = (n + r as usize).min(buf.len());
+        if n == buf.len() {
+            return Registry::Read(USERS_MAX, false);
+        }
     }
-    if r >= syscall_abi::FS_ERR_MIN {
-        return Registry::Unreadable;
-    }
-    let n = (r as usize).min(USERS_MAX);
-    if r as usize > USERS_MAX {
-        return Registry::Read(n, false);
-    }
-    let mut probe = [0u8; 1];
-    let more = read_file_chunk(As::FirstParty, USERS_PATH, 0, n as u64, &mut probe);
-    Registry::Read(n, more == 0)
 }
 
 /// Whether `sig` is `key`'s kind-1 signature over this request:

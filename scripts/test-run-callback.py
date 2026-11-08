@@ -46,7 +46,6 @@ import socket
 import struct
 import sys
 import threading
-import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -125,9 +124,33 @@ def stat_on(s):
         return None, f"{type(e).__name__}: {e}"
 
 
-def stand_in(port, during, after, ready):
+# Every check the rig records on a full run. A thread that died, or a phase
+# that never ran, records fewer, and that is a failure: a rig that counts only
+# the FAILs it saw passes when its checks never ran.
+EXPECTED = 15
+
+
+def stand_in(port, during, ready):
     """Accept ONE run on `port`, call `during(claimed)` while holding it open,
-    answer it and close (the run ends on the guest), then call `after()`."""
+    then answer it and close, which ends the run on the guest. Any exception
+    is a recorded failure, never a silently dead thread."""
+    try:
+        _stand_in(port, during, ready)
+    except Exception as e:  # noqa: BLE001  recorded as the failure it is
+        check(f"the stand-in on {port}", False, f"{type(e).__name__}: {e}")
+
+
+def _recv_exact(conn, n):
+    got = b""
+    while len(got) < n:
+        b = conn.recv(n - len(got))
+        if not b:
+            raise RuntimeError(f"the run's frame ended at {len(got)} of {n} bytes")
+        got += b
+    return got
+
+
+def _stand_in(port, during, ready):
     ls = socket.socket()
     ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     ls.bind(("127.0.0.1", port))
@@ -143,24 +166,13 @@ def stand_in(port, during, after, ready):
         ls.close()
     with conn:
         conn.settimeout(15)
-        head = conn.recv(4)
-        (n,) = struct.unpack("<I", head)
-        body = b""
-        while len(body) < n:
-            got = conn.recv(n - len(body))
-            if not got:
-                break
-            body += got
+        (n,) = struct.unpack("<I", _recv_exact(conn, 4))
+        body = _recv_exact(conn, n)
         # AUTHNP03: [magic:8][nonce:16][name:32]...; the guest's client sends no
         # credential until step 8.
         claimed = body[8 + c.NP_NONCE_LEN:8 + c.NP_NONCE_LEN + c.NP_NAME_LEN].split(b"\0", 1)[0]
         during(claimed)
         conn.sendall(b"stand-in: run answered\r\n")
-    # The guest has to see the FIN and free the run's slot before the after
-    # checks mean anything; its prompt coming back is the main thread's sign,
-    # this is the floor.
-    time.sleep(3)
-    after()
 
 
 def user_run():
@@ -259,11 +271,15 @@ def main():
                 break
             for port, addr, (during, after) in runs:
                 ready = threading.Event()
-                t = threading.Thread(target=stand_in, args=(port, during, after, ready), daemon=True)
+                t = threading.Thread(target=stand_in, args=(port, during, ready), daemon=True)
                 t.start()
                 ready.wait(10)
                 cpu(g, f"{addr}:{port}", prompt, f"{user} to {addr}")
                 t.join(timeout=90)
+                # AFTER the guest's prompt is back, not after a fixed wait:
+                # `cpu` returns only once netd has answered its caller on the
+                # stand-in's FIN, which is where the run's park is freed.
+                after()
             if user == "root":
                 registry_checks(g, prompt)
             g.run([("", "exit")])
@@ -277,6 +293,8 @@ def main():
         with open(os.path.join(ROOT, "build", "run-callback.txt"), "w") as f:
             f.write(transcript)
         os.unlink(image)
+    if len(results) != EXPECTED:
+        check("every check ran", False, f"{len(results)} recorded, {EXPECTED} expected")
     failed = results.count(False)
     print(f"test-run-callback: {failed} of {len(results)} check(s) failed", flush=True)
     return failed
