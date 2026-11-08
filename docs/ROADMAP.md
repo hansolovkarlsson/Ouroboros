@@ -53,7 +53,7 @@ This document is the one to update first when direction changes.
 > partition in use, which on 2026-11-07 turned out to be mostly there
 > already (`mount <n> <path>`, seen on the card). Its last part, a mount
 > visible to `mount` and to `ls` of its parent, was built on QEMU the same
-> day (`make test-mount-points`); the board run is what is left of it.
+> day (`make test-mount-points`) and seen on the Pi's card on 2026-11-08.
 
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
@@ -739,8 +739,7 @@ the rest of this roadmap; the dependencies between them are stated. Claims
 not yet checked on this tree are marked (predicted).
 
 - [x] **1. More than one partition in use, on the card or a stick.
-      DONE on QEMU 2026-11-07 (`feat/mount-listing`); seen on the board:
-      not yet.** Until 2026-11-07 this item said `fsd` "mounts only the
+      DONE on QEMU 2026-11-07 (#422), seen on the board 2026-11-08.** Until 2026-11-07 this item said `fsd` "mounts only the
       first one that probes", which was false when it was written on
       2026-10-03: `mount <n> <path>` has mounted a disk's `n`-th partition
       beside `/` since 2026-08-25 (`b2159609`, cluster Phase 0 multi-mount,
@@ -774,10 +773,20 @@ not yet checked on this tree are marked (predicted).
         image and rig to grow the directories and could not mount on a
         read-only root.
       Still open from it:
-      - [ ] **The board**: `mount 0 /mnt/boot`, then bare `mount` and `ls
-            /mnt` on the Pi's card, after a `make bootstick` (the shell and
-            `/bin/ls` are both new, and `make sdcard` does not reach the
-            root's `/bin`, D5).
+      - [x] **The board**, 2026-11-08, on `af89de6b` (the branch tip,
+            clean): after `mount 0 /mnt/boot`, bare `mount` printed the
+            ext2 root `on /` and `FAT32 mounted at partition LBA 2048 on
+            /mnt/boot`, `ls mnt` printed `boot/`, and `cd mnt` worked.
+            `write test something` in `/mnt` was refused, as it should be,
+            since `/mnt` is a name in the namespace and not a directory on
+            the root; from `/` the same command made `test`.
+      - [ ] **The refusal's message**: that `write` in `/mnt` said `write:
+            no such file or directory`, which is true of the disk but reads
+            as if `/mnt` were missing, right after `ls` listed it. Hans, on
+            the board: the message could be more informative. Something
+            like "/mnt holds only mount points" when the parent of the path
+            being made has a mount below it and the server has no such
+            directory (`MountPoints::below` already answers that).
       - [ ] **C programs**: `libc/src/file.c`'s `stat` of a mounts' parent
             is still `ENOENT`. `nsresolve` would export the same walk;
             wanted when a C program first walks a tree across a mount.
